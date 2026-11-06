@@ -5,6 +5,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use kumochi_protocol::constants::CLAUDE_QUESTIONS_ENV;
 use kumochi_protocol::message::{
     AuditFailed, ClaudeCodeView, ClaudeVersion, ConnectionOp, ConnectionsView, ControlToShell,
     ThreadId, Unsupported,
@@ -13,12 +14,13 @@ use tokio::sync::mpsc;
 
 use super::{Brain, Full, Link};
 use crate::bridge::LaunchId;
+use crate::connections::model::budget::Budget;
 use crate::context::{self, Origin};
 use crate::coordinator::StoreOp;
 use crate::engines::claude_code::install::FindError;
 use crate::engines::claude_code::lane::{Done, Failure, Lane, Outcome, Work};
 use crate::engines::claude_code::launch::{
-    self, Attempt, Clock, LaunchSnapshot, Note, Report, WARM,
+    self, Attempt, ClaudeQuestion, Clock, LaunchSnapshot, Note, Refresh, Report, WARM,
 };
 use crate::engines::claude_code::policy;
 use crate::engines::claude_code::supervisor::{
@@ -68,6 +70,8 @@ pub(crate) struct Claude {
     /// What attempts tell the core.
     notes: (mpsc::UnboundedSender<Note>, mpsc::UnboundedReceiver<Note>),
     clock: Clock,
+    /// The questions seeds may still take.
+    budget: Arc<Budget>,
 }
 
 /// One admitted launch, as the core tracks it.
@@ -126,6 +130,7 @@ impl Claude {
             warm: None,
             notes: mpsc::unbounded_channel(),
             clock: Clock::default(),
+            budget: Arc::new(Budget::from_var(CLAUDE_QUESTIONS_ENV)),
         }
     }
 
@@ -426,6 +431,7 @@ impl Claude {
     pub(crate) fn warm(&mut self, snapshot: LaunchSnapshot) -> Result<LaunchId, LaunchRefused> {
         if let Some(warm) = &self.warm
             && *warm.snapshot() == snapshot
+            && self.current(&snapshot)
         {
             return Ok(warm.id());
         }
@@ -438,8 +444,8 @@ impl Claude {
         Ok(id)
     }
 
-    /// The question's attempt: the warm one if its snapshot is equal and it hasn't expired, else
-    /// a fresh one. The warm attempt goes either way.
+    /// The question's engine: the warm attempt if its snapshot is equal and it hasn't expired,
+    /// else a fresh one. The warm attempt goes either way.
     ///
     /// # Errors
     /// As [`warm`](Self::warm).
@@ -447,11 +453,15 @@ impl Claude {
         not(test),
         expect(dead_code, reason = "C5b-2's engine selection is the first caller")
     )]
-    pub(crate) fn take(&mut self, snapshot: &LaunchSnapshot) -> Result<Attempt, LaunchRefused> {
+    pub(crate) fn take(
+        &mut self,
+        snapshot: &LaunchSnapshot,
+    ) -> Result<ClaudeQuestion, LaunchRefused> {
         let now = self.clock.now();
-        Ok(match self.warm.take() {
+        let attempt = match self.warm.take() {
             Some(warm)
                 if warm.snapshot() == snapshot
+                    && self.current(snapshot)
                     && warm.expires().is_some_and(|expires| now < expires) =>
             {
                 warm
@@ -462,7 +472,19 @@ impl Claude {
                 }
                 self.attempt(snapshot.clone(), None)?
             }
-        })
+        };
+        Ok(ClaudeQuestion::new(
+            attempt,
+            Arc::clone(&self.budget),
+            self.notes.0.clone(),
+            self.clock.clone(),
+        ))
+    }
+
+    /// True while `snapshot` is the Ready view's version at this generation.
+    fn current(&self, snapshot: &LaunchSnapshot) -> bool {
+        matches!(self.view, ClaudeCodeView::Ready { version, .. } if version == snapshot.version)
+            && snapshot.account == self.generation
     }
 
     /// Admits a launch for `snapshot` with its one report due.
@@ -471,8 +493,7 @@ impl Claude {
         snapshot: LaunchSnapshot,
         expires: Option<Instant>,
     ) -> Result<Attempt, LaunchRefused> {
-        let current = matches!(self.view, ClaudeCodeView::Ready { version, .. } if version == snapshot.version);
-        if !current || snapshot.account != self.generation {
+        if !self.current(&snapshot) {
             return Err(LaunchRefused::NotReady);
         }
         let reviewed = policy::reviewed(snapshot.version).map_err(|_| LaunchRefused::NotReady)?;
@@ -508,6 +529,30 @@ impl Claude {
         });
     }
 
+    /// One of the attempts' notes; true when the view may have changed.
+    fn note(&mut self, note: Note) -> bool {
+        self.prune();
+        match note {
+            Note::Ended { id, outcome } => self.ended(id, outcome),
+            Note::Analytics { id, on } => {
+                let current = self.launches.iter().any(|held| {
+                    held.id == id && !held.replaced && held.generation == self.generation
+                });
+                match &mut self.view {
+                    ClaudeCodeView::Ready { analytics_on, .. } if current => {
+                        *analytics_on = on;
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            Note::Refresh(refresh) => {
+                self.refresh(refresh);
+                false
+            }
+        }
+    }
+
     /// An attempt's one report: an audit failure quarantines its version, and a sign-out shows.
     fn ended(&mut self, id: LaunchId, outcome: launch::Outcome) -> bool {
         let generation = self.generation;
@@ -535,6 +580,20 @@ impl Claude {
             }
             _ => false,
         }
+    }
+
+    /// A fresh attempt for a round whose warm one expired; one it can't deliver is dropped,
+    /// which revokes it.
+    fn refresh(
+        &mut self,
+        Refresh {
+            old,
+            snapshot,
+            reply,
+        }: Refresh,
+    ) {
+        self.replaced(old);
+        reply.send(self.attempt(snapshot, None)).ok();
     }
 
     /// Revokes every launch; each one's teardown runs on the lane before its next call.
@@ -589,10 +648,7 @@ impl Claude {
     pub(crate) fn wake(&mut self, wake: Wake) -> bool {
         match wake {
             Wake::Lane(done) => self.done(done),
-            Wake::Note(Note::Ended { id, outcome }) => {
-                self.prune();
-                self.ended(id, outcome)
-            }
+            Wake::Note(note) => self.note(note),
             Wake::Expired => {
                 let now = self.clock.now();
                 if let Some(warm) = self

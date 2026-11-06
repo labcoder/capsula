@@ -1,19 +1,27 @@
-//! C5b-1b1 through the core, on the lane's fake in `replay` mode: the warm slot, `take` and
-//! each attempt's one report. Every positive fixture is synthetic (§8); no network, no account
-//! and no credential store.
+//! C5b-1b through the core, on the lane's fake in `replay` mode: the warm slot, `take`, the
+//! round, and each attempt's one report. Every positive fixture is synthetic (§8); no network, no
+//! account and no credential store.
 
 use std::fs;
+use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::constants::CLAUDE_CODE_QUARANTINE;
+use kumochi_protocol::message::{ErrorKey, RunId};
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use super::tests::READY;
 use super::*;
-use crate::engines::claude_code::lane::tests::{Base, host, soon};
+use crate::coordinator::{Input, LeaseId, SendKey};
+use crate::engines::claude_code::lane::tests::{Base, V, host, soon};
 use crate::engines::claude_code::supervisor::tests::{WAIT, until};
+use crate::engines::{
+    self, Answer, Asks, Engine, EngineFailure, Finish, RunRequest, SendGate, SendLease, TurnEvent,
+};
 
 const FACTS: &str = include_str!("../../../fixtures/claude-code/facts.jsonl");
 const TEXT: &str = include_str!("../../../fixtures/claude-code/text.jsonl");
@@ -26,6 +34,7 @@ fn lines(text: &str) -> Vec<Value> {
 }
 
 /// What the fake answers each stdin line with, by kind.
+#[derive(Clone)]
 struct Script {
     initialize: Vec<String>,
     mcp_status: Vec<String>,
@@ -55,17 +64,58 @@ fn synthetic_signed_in() -> Script {
 }
 
 impl Script {
-    /// Written as the base's script.
-    fn write(&self, base: &Base) {
-        let user: Vec<String> = self.user.iter().map(Value::to_string).collect();
+    /// The control answers wait until the base holds `name`.
+    fn held_until(mut self, name: &str) -> Self {
+        self.mcp_status.insert(0, format!("!wait {name}"));
+        self
+    }
+
+    fn initialize(mut self, edit: impl FnOnce(&mut Value)) -> Self {
+        let mut line: Value = serde_json::from_str(&self.initialize[0]).expect("json");
+        edit(&mut line["response"]["response"]);
+        self.initialize[0] = line.to_string();
+        self
+    }
+
+    fn init(mut self, edit: impl FnOnce(&mut Value)) -> Self {
+        edit(&mut self.user[0]);
+        self
+    }
+
+    /// The seed's answer waits until the base holds `name`; edit init before this.
+    fn held_at_user(mut self, name: &str) -> Self {
+        self.user.insert(0, Value::String(format!("!wait {name}")));
+        self
+    }
+
+    /// Written as the base's script, or as the Nth question's.
+    fn write(&self, base: &Base, question: Option<usize>) {
+        let user: Vec<String> = self
+            .user
+            .iter()
+            .map(|line| {
+                line.as_str()
+                    .map_or_else(|| line.to_string(), str::to_owned)
+            })
+            .collect();
         let text = format!(
             "@initialize\n{}\n@mcp_status\n{}\n@user\n{}\n",
             self.initialize.join("\n"),
             self.mcp_status.join("\n"),
             user.join("\n")
         );
-        fs::write(base.0.join("replay"), text).expect("the script");
+        let name = question.map_or_else(|| "replay".to_owned(), |n| format!("replay.{n}"));
+        fs::write(base.0.join(name), text).expect("the script");
     }
+}
+
+/// The recorded answer's events, read from the fixture.
+fn deltas() -> Vec<TurnEvent> {
+    lines(TEXT)
+        .iter()
+        .filter_map(|line| line["event"]["delta"]["text"].as_str())
+        .map(|text| TurnEvent::TextDelta(text.to_owned()))
+        .collect()
 }
 
 /// A connection Ready on the fake, with a clock the test sets.
@@ -74,12 +124,15 @@ struct Rig {
     claude: Claude,
     t0: Instant,
     now: Arc<Mutex<Instant>>,
+    /// Every report the core heard, in order.
+    ended: Vec<(LaunchId, launch::Outcome)>,
+    refreshes: usize,
 }
 
 impl Rig {
     async fn new(name: &str, script: &Script) -> Self {
         let base = Base::new(name);
-        script.write(&base);
+        script.write(&base, None);
         let (host, _switches) = host(&base, "replay");
         let mut claude = Claude::start(Lane::start(host).expect("lane"), SIGN_IN);
         let t0 = Instant::now();
@@ -93,6 +146,8 @@ impl Rig {
             claude,
             t0,
             now,
+            ended: Vec::new(),
+            refreshes: 0,
         };
         rig.settle().await;
         assert_eq!(rig.claude.view(), READY);
@@ -114,15 +169,60 @@ impl Rig {
         (held.id, Arc::clone(&held.control))
     }
 
+    fn wake(&mut self, wake: Wake) {
+        match &wake {
+            Wake::Note(Note::Ended { id, outcome }) => self.ended.push((*id, *outcome)),
+            Wake::Note(Note::Refresh(_)) => self.refreshes += 1,
+            _ => {}
+        }
+        self.claude.wake(wake);
+    }
+
     async fn settle(&mut self) {
         timeout(Duration::from_secs(30), async {
             while self.claude.out.is_some() {
                 let wake = self.claude.next().await;
-                self.claude.wake(wake);
+                self.wake(wake);
             }
         })
         .await
         .expect("discovery settles");
+    }
+
+    /// Runs `work` while the core takes what wakes it.
+    async fn drive<T>(&mut self, work: impl Future<Output = T>) -> T {
+        timeout(Duration::from_secs(30), async {
+            tokio::pin!(work);
+            loop {
+                let wake = tokio::select! {
+                    out = &mut work => return out,
+                    wake = self.claude.next() => wake,
+                };
+                self.wake(wake);
+            }
+        })
+        .await
+        .expect("in time")
+    }
+
+    /// Takes what wakes the core until `id` reported, then whatever is queued.
+    async fn reported(&mut self, id: LaunchId) -> Vec<launch::Outcome> {
+        timeout(Duration::from_secs(30), async {
+            while !self.ended.iter().any(|(ended, _)| *ended == id) {
+                let wake = self.claude.next().await;
+                self.wake(wake);
+            }
+        })
+        .await
+        .expect("reported");
+        while let Ok(note) = self.claude.notes.1.try_recv() {
+            self.wake(Wake::Note(note));
+        }
+        self.ended
+            .iter()
+            .filter(|(ended, _)| *ended == id)
+            .map(|(_, outcome)| *outcome)
+            .collect()
     }
 
     fn stdin(&self) -> Vec<String> {
@@ -142,9 +242,113 @@ impl Rig {
         names
     }
 
+    fn go(&self, name: &str) {
+        fs::write(self.base.0.join(name), b"").expect("go");
+    }
+
     async fn close(mut self) {
         assert!(self.claude.close(soon()).await);
     }
+}
+
+/// One round of a taken question, as the coordinator would run it.
+struct Played {
+    key: SendKey,
+    asks: Asks,
+    inputs_tx: mpsc::UnboundedSender<Input>,
+    inputs: mpsc::UnboundedReceiver<Input>,
+    events: mpsc::Receiver<TurnEvent>,
+    round: JoinHandle<()>,
+}
+
+fn play(question: &ClaudeQuestion) -> Played {
+    let request = RunRequest::for_tests(RunId(1), ThreadId(1), "Be brief.");
+    let key = request.key;
+    let asks = Asks::default();
+    let (inputs_tx, inputs) = mpsc::unbounded_channel();
+    let (events_tx, events) = mpsc::channel(64);
+    let gate = SendGate::new(key, Arc::clone(&asks), inputs_tx.clone());
+    let round = tokio::spawn(question.start(request, events_tx, gate));
+    Played {
+        key,
+        asks,
+        inputs_tx,
+        inputs,
+        events,
+        round,
+    }
+}
+
+impl Played {
+    /// A grant for its ask.
+    fn lease(&self) -> Answer {
+        Answer::Grant(SendLease::new(
+            LeaseId {
+                key: self.key,
+                send: 1,
+            },
+            self.inputs_tx.clone(),
+        ))
+    }
+
+    /// The round's ask, answered with `answer`; the hold it asked for.
+    async fn asked(&mut self, answer: Answer) -> Duration {
+        let Some(Input::SendReady { key, hold }) = self.inputs.recv().await else {
+            panic!("an ask");
+        };
+        assert_eq!(key, self.key);
+        engines::answer(&self.asks, self.key, answer);
+        hold.expect("a held send")
+    }
+
+    /// Every event until the round ends.
+    async fn events(&mut self) -> Vec<TurnEvent> {
+        let mut events = Vec::new();
+        while let Some(event) = self.events.recv().await {
+            events.push(event);
+        }
+        events
+    }
+}
+
+fn claude_failed(key: ErrorKey) -> TurnEvent {
+    TurnEvent::Finished(Finish::Failed(EngineFailure::Claude(key.into())))
+}
+
+/// The answer's text, then its usage, then Completed.
+fn answered(events: &[TurnEvent]) {
+    let [
+        text @ ..,
+        TurnEvent::Usage(_),
+        TurnEvent::Finished(Finish::Completed),
+    ] = events
+    else {
+        panic!("{events:?}");
+    };
+    assert_eq!(text, deltas());
+}
+
+#[tokio::test]
+async fn a_taken_question_is_audited_seeded_and_answered_with_one_report() {
+    let mut rig = Rig::new("question-answered", &synthetic_signed_in()).await;
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let (id, _) = rig.last();
+    let mut played = play(&question);
+    let lease = played.lease();
+    let hold = rig.drive(played.asked(lease)).await;
+    assert!(
+        hold > Duration::from_secs(160) && hold <= Duration::from_secs(165),
+        "the launch's deadline plus SETTLE: {hold:?}"
+    );
+    answered(&rig.drive(played.events()).await);
+    assert_eq!(rig.stdin(), ["1 initialize", "1 mcp_status", "1 user"]);
+    assert_eq!(rig.reported(id).await, [launch::Outcome::Clean]);
+    assert_eq!(
+        rig.claude.view(),
+        READY,
+        "init's analytics_disabled is true"
+    );
+    rig.close().await;
 }
 
 /// T2.
@@ -152,16 +356,19 @@ impl Rig {
 async fn a_warm_launch_writes_only_its_two_control_lines() {
     let mut rig = Rig::new("question-warm", &synthetic_signed_in()).await;
     rig.claude.warm(rig.snapshot()).expect("warm");
-    until("audited", || rig.stdin().len() == 2).await;
+    let mut warm = rig.claude.warm.take().expect("the warm attempt");
+    let ready = timeout(WAIT, warm.warmed()).await.expect("in time");
+    assert!(ready.is_ok(), "the audit before input passed");
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(rig.stdin(), ["1 initialize", "1 mcp_status"]);
+    drop(ready);
+    drop(warm);
     rig.close().await;
 }
 
 type Change = fn(&mut LaunchSnapshot);
 
-/// T3's take half: any change to the snapshot, or a find queued behind the warm launch, takes a
-/// fresh attempt and ends the warm one.
+/// T3.
 #[tokio::test]
 async fn any_change_to_the_snapshot_replaces_the_warm_launch() {
     let mut rig = Rig::new("question-replaced", &synthetic_signed_in()).await;
@@ -174,20 +381,32 @@ async fn any_change_to_the_snapshot_replaces_the_warm_launch() {
     for (what, change) in changes {
         let snapshot = rig.snapshot();
         let warm = rig.claude.warm(snapshot.clone()).expect("warm");
-        let (_, warm_control) = rig.last();
         let mut other = snapshot;
         change(&mut other);
-        let attempt = rig.claude.take(&other).expect("taken");
-        assert_ne!(rig.last().0, warm, "{what}");
-        until("the warm launch's teardown", || warm_control.is_ended()).await;
-        drop(attempt);
+        let question = rig.claude.take(&other).expect("taken");
+        let (taken, _) = rig.last();
+        assert_ne!(taken, warm, "{what}");
+        let mut played = play(&question);
+        let lease = played.lease();
+        rig.drive(played.asked(lease)).await;
+        answered(&rig.drive(played.events()).await);
     }
+    // A find queues behind the live warm launch on the lane, so it's taken before it settles.
     let warm = rig.claude.warm(rig.snapshot()).expect("warm");
     rig.claude.op(ConnectionOp::FindClaudeCode);
-    let attempt = rig.claude.take(&rig.snapshot()).expect("taken");
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
     assert_ne!(rig.last().0, warm, "account");
-    drop(attempt);
+    let mut played = play(&question);
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    answered(&rig.drive(played.events()).await);
     rig.settle().await;
+    let users = rig
+        .stdin()
+        .iter()
+        .filter(|line| line.ends_with(" user"))
+        .count();
+    assert_eq!(users, 5);
     rig.close().await;
 }
 
@@ -211,14 +430,121 @@ async fn a_replaced_warm_attempts_late_failure_changes_nothing() {
         })
         .expect("open");
     let wake = timeout(WAIT, rig.claude.next()).await.expect("the note");
-    rig.claude.wake(wake);
+    rig.wake(wake);
     assert_eq!(rig.claude.view(), READY);
     rig.settle().await;
     assert_eq!(rig.markers(), Vec::<String>::new());
     rig.close().await;
 }
 
-/// T5's take half: warm expiry by the injected clock.
+/// T4b: taken while it audits, its audit failure quarantines and fails the run.
+#[tokio::test]
+async fn a_failure_while_a_taken_attempt_audits_quarantines_and_fails_the_run() {
+    let script = synthetic_signed_in().held_until("go");
+    let mut script = script;
+    let mut mcp: Value = serde_json::from_str(&script.mcp_status[1]).expect("json");
+    mcp["response"]["response"]["mcpServers"][0]["tools"] = json!([{"name": "ping"}]);
+    script.mcp_status[1] = mcp.to_string();
+    let mut rig = Rig::new("question-taken-fails", &script).await;
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let (id, _) = rig.last();
+    let mut played = play(&question);
+    until("auditing", || rig.stdin().len() == 2).await;
+    rig.go("go");
+    assert_eq!(
+        rig.drive(played.events()).await,
+        [claude_failed(ErrorKey::ClaudeCodeAuditFailed)]
+    );
+    assert_eq!(
+        rig.reported(id).await,
+        [launch::Outcome::Audit(AuditFailed::Tools)]
+    );
+    assert_eq!(
+        rig.claude.view(),
+        ClaudeCodeView::AuditFailed(AuditFailed::Tools)
+    );
+    rig.settle().await;
+    assert_eq!(rig.markers(), ["claude-code.quarantine-2.1.306"]);
+    assert_eq!(rig.stdin(), ["1 initialize", "1 mcp_status"]);
+    rig.close().await;
+}
+
+/// T8 and T4b's sign-out: nothing is seeded, the run fails signed out and so does the view.
+#[tokio::test]
+async fn a_signed_out_launch_fails_the_run_signed_out_before_any_user_line() {
+    let script = synthetic_signed_in().initialize(|body| {
+        body["account"] = json!({"tokenSource": "none", "apiProvider": "firstParty"});
+    });
+    let mut rig = Rig::new("question-signed-out", &script).await;
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let (id, _) = rig.last();
+    let mut played = play(&question);
+    assert_eq!(
+        rig.drive(played.events()).await,
+        [claude_failed(ErrorKey::ClaudeCodeSignedOut)]
+    );
+    assert_eq!(rig.reported(id).await, [launch::Outcome::SignedOut]);
+    assert_eq!(rig.claude.view(), ClaudeCodeView::SignedOut { version: V });
+    assert!(rig.stdin().iter().all(|line| !line.ends_with(" user")));
+    rig.close().await;
+}
+
+/// T4c.
+#[tokio::test]
+async fn a_round_cancelled_while_its_attempt_audits_ends_the_audit_and_the_launch() {
+    let mut rig = Rig::new(
+        "question-cancelled",
+        &synthetic_signed_in().held_until("go"),
+    )
+    .await;
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let (id, control) = rig.last();
+    let played = play(&question);
+    drop(question);
+    until("auditing", || rig.stdin().len() == 2).await;
+    played.round.abort();
+    assert!(played.round.await.is_err(), "cancelled");
+    rig.go("go");
+    assert_eq!(rig.reported(id).await, [launch::Outcome::Clean]);
+    until("the launch's teardown", || control.is_ended()).await;
+    assert_eq!(rig.stdin(), ["1 initialize", "1 mcp_status"]);
+    rig.close().await;
+}
+
+/// T4d, revision 4's schedule: the audit before input passes and hands its report on, the
+/// launch's end reaches the core first, then the post-seed audit's failure does. The core still
+/// quarantines, and hears exactly one report for the attempt.
+#[tokio::test]
+async fn a_late_post_seed_failure_still_quarantines_with_one_report() {
+    let script = synthetic_signed_in().init(|init| init["tools"] = json!(["mcp__kumochi__ping"]));
+    let mut rig = Rig::new("question-late-failure", &script).await;
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let (id, control) = rig.last();
+    let mut played = play(&question);
+    let lease = played.lease();
+    timeout(WAIT, played.asked(lease)).await.expect("asked");
+    assert_eq!(
+        timeout(WAIT, played.events()).await.expect("ended"),
+        [claude_failed(ErrorKey::ClaudeCodeAuditFailed)]
+    );
+    until("the launch's teardown", || control.is_ended()).await;
+    let reports = rig.reported(id).await;
+    assert_eq!(
+        rig.claude.view(),
+        ClaudeCodeView::AuditFailed(AuditFailed::Tools),
+        "the report was matched"
+    );
+    assert_eq!(
+        reports,
+        [launch::Outcome::Audit(AuditFailed::Tools)],
+        "exactly one report"
+    );
+    rig.settle().await;
+    assert_eq!(rig.markers(), ["claude-code.quarantine-2.1.306"]);
+    rig.close().await;
+}
+
+/// T5: warm expiry by the injected clock, at take and again at bind.
 #[tokio::test]
 async fn a_warm_launch_is_reused_only_before_its_expiry() {
     let mut rig = Rig::new("question-expiry", &synthetic_signed_in()).await;
@@ -230,9 +556,9 @@ async fn a_warm_launch_is_reused_only_before_its_expiry() {
         rig.at(Duration::ZERO);
         let warm = rig.claude.warm(rig.snapshot()).expect("warm");
         rig.at(after);
-        let attempt = rig.claude.take(&rig.snapshot()).expect("taken");
+        let question = rig.claude.take(&rig.snapshot()).expect("taken");
         assert_eq!(rig.last().0 == warm, reused, "{after:?}");
-        drop(attempt);
+        drop(question);
         let controls: Vec<_> = rig
             .claude
             .launches
@@ -255,14 +581,42 @@ async fn an_untaken_warm_launch_ends_at_its_expiry() {
     let (_, warm) = rig.last();
     rig.at(Duration::from_millis(29_999));
     if let Ok(wake) = timeout(Duration::from_millis(500), rig.claude.next()).await {
-        rig.claude.wake(wake);
+        rig.wake(wake);
     }
     assert!(rig.claude.warm.is_some(), "kept before its expiry");
     rig.at(Duration::from_secs(30));
     let wake = timeout(WAIT, rig.claude.next()).await.expect("its expiry");
-    rig.claude.wake(wake);
+    rig.wake(wake);
     assert!(rig.claude.warm.is_none());
     until("the warm launch's teardown", || warm.is_ended()).await;
+    rig.close().await;
+}
+
+/// T5's late Ready: taken at 29.9 s, ready at 30.1 s, so it's replaced at bind through one
+/// refresh, and the run is seeded on the second launch only.
+#[tokio::test]
+async fn a_warm_launch_ready_after_its_expiry_is_replaced_at_bind() {
+    let mut rig = Rig::new("question-late-ready", &synthetic_signed_in()).await;
+    synthetic_signed_in()
+        .held_until("go")
+        .write(&rig.base, Some(1));
+    let warm = rig.claude.warm(rig.snapshot()).expect("warm");
+    let (_, first) = rig.last();
+    rig.at(Duration::from_millis(29_900));
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    assert_eq!(rig.last().0, warm, "handed off before its expiry");
+    let mut played = play(&question);
+    until("auditing", || rig.stdin().len() == 2).await;
+    rig.at(Duration::from_millis(30_100));
+    rig.go("go");
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    answered(&rig.drive(played.events()).await);
+    assert_eq!(rig.refreshes, 1);
+    let stdin = rig.stdin();
+    assert!(stdin.contains(&"2 user".to_owned()), "{stdin:?}");
+    assert!(!stdin.contains(&"1 user".to_owned()), "{stdin:?}");
+    until("the first launch's teardown", || first.is_ended()).await;
     rig.close().await;
 }
 
@@ -274,7 +628,277 @@ async fn a_repeated_warm_never_extends_the_window() {
     rig.at(Duration::from_secs(20));
     assert_eq!(rig.claude.warm(rig.snapshot()), Ok(warm));
     rig.at(Duration::from_secs(30));
-    let _attempt = rig.claude.take(&rig.snapshot()).expect("taken");
+    let _question = rig.claude.take(&rig.snapshot()).expect("taken");
     assert_ne!(rig.last().0, warm);
+    rig.close().await;
+}
+
+/// T5c: the round is cancelled while its refresh waits; the fresh attempt the core can't
+/// deliver is revoked and ends with nothing seeded.
+#[tokio::test]
+async fn a_refresh_nobody_waits_for_is_revoked() {
+    let mut rig = Rig::new("question-refresh-cancelled", &synthetic_signed_in()).await;
+    synthetic_signed_in()
+        .held_until("go")
+        .write(&rig.base, Some(1));
+    rig.claude.warm(rig.snapshot()).expect("warm");
+    let (_, first) = rig.last();
+    rig.at(Duration::from_millis(29_900));
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let played = play(&question);
+    until("auditing", || rig.stdin().len() == 2).await;
+    rig.at(Duration::from_millis(30_100));
+    rig.go("go");
+    until("the expired launch's teardown", || first.is_ended()).await;
+    played.round.abort();
+    assert!(played.round.await.is_err(), "cancelled");
+    while rig.refreshes == 0 {
+        let wake = timeout(WAIT, rig.claude.next()).await.expect("the refresh");
+        rig.wake(wake);
+    }
+    let (_, fresh) = rig.last();
+    until("the fresh launch's teardown", || fresh.is_ended()).await;
+    assert!(rig.stdin().iter().all(|line| !line.ends_with(" user")));
+    rig.close().await;
+}
+
+/// T6.
+#[tokio::test]
+async fn with_no_question_left_the_lease_goes_back_unused_and_nothing_is_seeded() {
+    let mut rig = Rig::new("question-budget", &synthetic_signed_in()).await;
+    rig.claude.budget = Arc::new(Budget::limited(Some(0)));
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let mut played = play(&question);
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    assert_eq!(
+        rig.drive(played.events()).await,
+        [claude_failed(ErrorKey::ClaudeCodeBudget)]
+    );
+    let lease = LeaseId {
+        key: played.key,
+        send: 1,
+    };
+    assert_eq!(
+        played.inputs.try_recv().ok(),
+        Some(Input::SendSettled { lease }),
+        "settled before the round ended"
+    );
+    assert!(rig.stdin().iter().all(|line| !line.ends_with(" user")));
+    rig.close().await;
+}
+
+/// T6b.
+#[tokio::test]
+async fn a_rebuild_spends_no_question() {
+    let mut rig = Rig::new("question-rebuild", &synthetic_signed_in()).await;
+    rig.claude.budget = Arc::new(Budget::limited(Some(1)));
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let mut played = play(&question);
+    rig.drive(played.asked(Answer::Rebuild)).await;
+    assert_eq!(rig.drive(played.events()).await, []);
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let mut played = play(&question);
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    answered(&rig.drive(played.events()).await);
+    rig.close().await;
+}
+
+/// T7.
+#[tokio::test]
+async fn an_init_with_an_extra_plugin_quarantines_the_version() {
+    let script = synthetic_signed_in().init(|init| {
+        init["plugins"]
+            .as_array_mut()
+            .expect("plugins")
+            .push(json!({"name": "extra", "path": "builtin"}));
+    });
+    let mut rig = Rig::new("question-plugin", &script).await;
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let (id, _) = rig.last();
+    let mut played = play(&question);
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    assert_eq!(
+        rig.drive(played.events()).await,
+        [claude_failed(ErrorKey::ClaudeCodeAuditFailed)]
+    );
+    assert_eq!(
+        rig.reported(id).await,
+        [launch::Outcome::Audit(AuditFailed::Plugins)]
+    );
+    rig.settle().await;
+    assert_eq!(rig.markers(), ["claude-code.quarantine-2.1.306"]);
+    rig.close().await;
+}
+
+/// T7b: a later init that differs fails the question, and a valid one after it changes nothing.
+#[tokio::test]
+async fn a_second_different_init_fails_the_question() {
+    let mut script = synthetic_signed_in();
+    let first = script.user[0].clone();
+    let mut different = first.clone();
+    different["analytics_disabled"] = json!(false);
+    script.user.insert(1, different);
+    script.user.insert(2, first);
+    let mut rig = Rig::new("question-second-init", &script).await;
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let (id, _) = rig.last();
+    let mut played = play(&question);
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    assert_eq!(
+        rig.drive(played.events()).await,
+        [claude_failed(ErrorKey::ClaudeCodeAuditFailed)]
+    );
+    assert_eq!(
+        rig.reported(id).await,
+        [launch::Outcome::Audit(AuditFailed::Malformed)]
+    );
+    assert_eq!(
+        rig.claude.view(),
+        ClaudeCodeView::AuditFailed(AuditFailed::Malformed)
+    );
+    rig.close().await;
+}
+
+/// T16: initialize's and init's `analytics_disabled`, init's replacing initialize's when present.
+#[tokio::test]
+async fn analytics_shows_inits_value_else_initializes() {
+    let rows = [
+        (Some(true), None, false),
+        (Some(false), None, true),
+        (None, Some(false), true),
+        (Some(true), Some(false), true),
+        (Some(false), Some(true), false),
+        (None, None, false),
+    ];
+    let mut rig = Rig::new("question-analytics", &synthetic_signed_in()).await;
+    for (n, (initialize, init, on)) in rows.into_iter().enumerate() {
+        let set = |value: &mut Value, to: Option<bool>| match to {
+            Some(to) => value["analytics_disabled"] = json!(to),
+            None => {
+                value
+                    .as_object_mut()
+                    .expect("an object")
+                    .remove("analytics_disabled");
+            }
+        };
+        synthetic_signed_in()
+            .initialize(|body| set(body, initialize))
+            .init(|line| set(line, init))
+            .write(&rig.base, Some(n + 1));
+        let question = rig.claude.take(&rig.snapshot()).expect("taken");
+        let (id, _) = rig.last();
+        let mut played = play(&question);
+        let lease = played.lease();
+        rig.drive(played.asked(lease)).await;
+        answered(&rig.drive(played.events()).await);
+        assert_eq!(rig.reported(id).await, [launch::Outcome::Clean]);
+        assert_eq!(
+            rig.claude.view(),
+            ClaudeCodeView::Ready {
+                version: V,
+                analytics_on: on
+            },
+            "{initialize:?} {init:?}"
+        );
+    }
+    rig.claude
+        .notes
+        .0
+        .send(Note::Analytics {
+            id: LaunchId(7),
+            on: false,
+        })
+        .expect("open");
+    let wake = timeout(WAIT, rig.claude.next()).await.expect("the note");
+    rig.wake(wake);
+    assert_eq!(
+        rig.claude.view(),
+        ClaudeCodeView::Ready {
+            version: V,
+            analytics_on: false
+        },
+        "the last row's"
+    );
+    rig.close().await;
+}
+
+/// A snapshot cached before a find is stale after it: neither a repeat `warm` nor `take` reuses
+/// the warm launch, and each revokes it.
+#[tokio::test]
+async fn a_snapshot_cached_before_a_find_reuses_no_warm_launch() {
+    let mut rig = Rig::new("question-stale-snapshot", &synthetic_signed_in()).await;
+    let cached = rig.snapshot();
+    rig.claude.warm(cached.clone()).expect("warm");
+    let (_, warm) = rig.last();
+    rig.claude.op(ConnectionOp::FindClaudeCode);
+    assert_eq!(
+        rig.claude.take(&cached).err(),
+        Some(LaunchRefused::NotReady)
+    );
+    until("the warm launch's teardown", || warm.is_ended()).await;
+    rig.settle().await;
+    let cached = rig.snapshot();
+    rig.claude.warm(cached.clone()).expect("warm");
+    let (_, warm) = rig.last();
+    rig.claude.op(ConnectionOp::FindClaudeCode);
+    assert_eq!(rig.claude.warm(cached), Err(LaunchRefused::NotReady));
+    until("the warm launch's teardown", || warm.is_ended()).await;
+    rig.settle().await;
+    rig.close().await;
+}
+
+#[test]
+fn a_snapshots_debug_shows_no_model_or_effort_text() {
+    let marker = "zq-marker-7";
+    let snapshot = LaunchSnapshot {
+        thread: ThreadId(1),
+        model: marker.to_owned(),
+        effort: Some(marker.to_owned()),
+        account: 3,
+        origin: Origin::Kumo,
+        version: V,
+    };
+    let text = format!("{snapshot:?}");
+    assert!(!text.contains(marker), "{text}");
+    let bytes = format!("{:?}", marker.as_bytes());
+    assert!(!text.contains(bytes.trim_matches(['[', ']'])), "{text}");
+    assert_eq!(
+        text,
+        "LaunchSnapshot { thread: ThreadId(1), model_bytes: 11, effort_bytes: Some(11), account: 3, origin: Kumo, version: ClaudeVersion { major: 2, minor: 1, patch: 306 } }"
+    );
+}
+
+/// T1 through the round: the gate the listener admits a `tools/call` by stays shut while the
+/// attempt audits, at the ask (bound, not seeded) and after the seed until init's audit, and opens
+/// after it, while the answer is held. The listener's text for each state is asserted by
+/// `bridge::listener::tests::a_call_needs_a_bound_run_and_a_passed_gate_and_a_failure_stays`.
+#[tokio::test]
+async fn the_gate_opens_only_after_inits_audit() {
+    let mut script = synthetic_signed_in().held_until("go");
+    script
+        .user
+        .insert(1, Value::String("!wait answer".to_owned()));
+    let script = script.held_at_user("init");
+    let mut rig = Rig::new("question-gate", &script).await;
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let (_, control) = rig.last();
+    let mut played = play(&question);
+    until("auditing", || rig.stdin().len() == 2).await;
+    assert!(!control.may_call(), "auditing");
+    rig.go("go");
+    let ask = rig.drive(played.inputs.recv()).await;
+    assert!(matches!(ask, Some(Input::SendReady { .. })), "an ask");
+    assert!(!control.may_call(), "bound, not seeded");
+    engines::answer(&played.asks, played.key, played.lease());
+    until("seeded", || rig.stdin().iter().any(|line| line == "1 user")).await;
+    assert!(!control.may_call(), "seeded, before init's audit");
+    rig.go("init");
+    until("init's audit", || control.may_call()).await;
+    rig.go("answer");
+    answered(&rig.drive(played.events()).await);
     rig.close().await;
 }

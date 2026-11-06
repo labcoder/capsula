@@ -292,6 +292,12 @@ impl Control {
         self.ended.load(Ordering::Acquire)
     }
 
+    /// Whether the listener would admit a call by the gate.
+    #[cfg(test)]
+    pub(crate) fn may_call(&self) -> bool {
+        self.gate.may_call()
+    }
+
     /// The instant a chunk is admitted, or false once revoked.
     fn admit(&self) -> bool {
         self.state

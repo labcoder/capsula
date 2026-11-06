@@ -150,10 +150,6 @@ pub(crate) struct Done {
 /// What the lane's queue holds.
 enum Queued {
     Call(u64, Work),
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "C5b's engine queues the first question")
-    )]
     Launch(Box<Start>),
 }
 
@@ -253,10 +249,6 @@ impl Lane {
 
     /// Queues a question without waiting, behind the calls already queued; false when the lane
     /// is full or closed.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "C5b's engine queues the first question")
-    )]
     pub(crate) fn launch(&self, start: Start) -> bool {
         self.jobs
             .as_ref()

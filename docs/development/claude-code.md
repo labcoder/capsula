@@ -366,50 +366,72 @@ marker. Each `Version` find lists the markers under the account lock before it t
 Until the marker write succeeds, the refusal held in memory covers every version, and each find
 retries the write. A crash before the first successful write loses it.
 
-## A question's launch
+## A question
 
-`engines/claude_code/launch.rs` admits one launch for a question and audits it before input.
-`runtime/claude.rs` owns the attempts. Nothing in production starts one yet: C5b-2's engine
-selection is the first caller of `Claude::warm` and `Claude::take`, and C5b-1b2 adds the round
-that asks the question on a taken attempt.
+`engines/claude_code/launch.rs` runs one question on one launch. `runtime/claude.rs` owns the
+attempts. Nothing in production asks a question yet: C5b-2's engine selection is the first caller of
+`Claude::warm` and `Claude::take`.
 
 - **The snapshot.** A `LaunchSnapshot` fixes the thread, model, effort, Claude Code's connection
   generation, the origin (and so the frozen tools, `context::tools(origin)`) and the version.
-  `Claude::snapshot` makes one only while the view is `Ready`. A launch for a stale snapshot is
-  refused as `NotReady`.
+  `Claude::snapshot` makes one only while the view is `Ready`. A snapshot is current only while
+  the view is `Ready` at its version and its generation is Claude Code's current one; `warm`,
+  `take` and every reuse of the warm attempt check that first. A stale snapshot is refused as
+  `NotReady`, and an equal warm attempt is revoked rather than reused for it. Its `Debug` shows
+  the model and effort by length only.
 - **The warm slot.** `warm(snapshot)` admits a launch before the question is asked. Its audit task
   runs the audit before input straight away. A repeat for an equal snapshot keeps the slot and its
   expiry, and another snapshot replaces it. The slot expires `WARM` (30 s) after it's filled. The
   core's own wait then revokes it, so an unused launch never holds the lane, which runs one launch
   at a time.
-- **Taking.** `take(snapshot)` hands over the warm `Attempt` if its snapshot is equal and the
-  clock is before its expiry. Otherwise it drops the warm attempt and admits a fresh one with no
-  expiry.
+- **Taking.** `take(snapshot)` hands over the warm attempt if its snapshot is equal and current,
+  and the clock is before its expiry, whether or not its audit has finished. Otherwise it drops
+  the warm attempt and admits a fresh one with no expiry.
+  It returns a `ClaudeQuestion`, an `Engine` whose one round owns the attempt; a second start
+  fails at once.
 - **The audit task.** It writes the two control lines and reads stdout through the launch's one
   `LineFramer` until the audit before input decides, within `AUDIT` (3 s) of the control lines
   and before the launch's deadline. A pass hands the pipes, the writer, the framer, the mapper and
   the attempt's `Report` over through `ready`. The framer keeps any bytes after the last control
   answer, so nothing is read twice. Dropping the attempt aborts the task.
+- **The round.** In order, it:
+  1. waits for `ready`;
+  2. rechecks the warm expiry. A warm attempt that's ready only after its expiry is dropped, and
+     one `Refresh` asks the core for a fresh attempt;
+  3. binds the run;
+  4. asks with `ask_held` for the launch's deadline plus `SETTLE` (a `Rebuild` writes nothing
+     and spends no question);
+  5. reserves one question from `KUMOCHI_CLAUDE_QUESTIONS` (debug builds only; out means
+     `ClaudeCodeBudget` and the lease goes back unused);
+  6. moves the lease into the launch, and seeds within `QUESTION` (120 s) of the bind.
+
+  Then every init goes through the one `PostSeedAudit`. The gate passes only after the first one
+  matches; a text, end or control line before it is `Malformed`, and a later init that differs
+  fails the question. Text is forwarded, and at the end the round closes stdin, then sends
+  `Usage` and `Finished`.
 - **One report per attempt.** `take` and `warm` make each attempt's one `Report`. The audit
-  task reports its own failures; if nobody reports, the guard's drop sends `Clean`. The core keeps
-  an attempt's entry until both its teardown has ended and its report has arrived, so the order the
+  task reports its own failures, and on a pass the `Report` moves into the round, which reports
+  the post-seed failures. If nobody reports, the guard's drop sends `Clean`. The core keeps an
+  attempt's entry until both its teardown has ended and its report has arrived, so the order the
   two reach the core doesn't matter. An audit failure quarantines its version, and a sign-out shows
   `SignedOut`. A report from an attempt that was replaced, or from an older generation, changes
-  nothing.
-
-`seed.rs` builds the one `stream-json` user line a round will write. Block one holds the
-instructions and the frozen tools, so two questions on one thread share it byte for byte; each
-item after it is one quoted text block, and another connection's native items are dropped.
+  nothing. A seeded launch's `analytics_disabled`, init's value over initialize's, sets
+  `analytics_on` only while the view is `Ready` at the attempt's generation.
 
 ```mermaid
 sequenceDiagram
     participant Core as Claude (core)
     participant Audit as audit task
+    participant Round as ClaudeQuestion round
     participant Child as claude -p
     Core->>Audit: warm or take admits a launch
     Audit->>Child: initialize, mcp_status
     Child-->>Audit: control answers
-    Audit-->>Core: a failure's one Report, or ready for the round
+    Audit-->>Round: ready (pipes, framer, Report)
+    Round->>Round: expiry recheck, bind, ask_held, reserve
+    Round->>Child: the seed
+    Child-->>Round: init, text, result
+    Round-->>Core: Analytics, then the one Report
 ```
 
 ## The audit
