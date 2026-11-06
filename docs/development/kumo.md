@@ -210,7 +210,7 @@ Tests cover four disjoint spans in order and a fifth refused, spans that bridge 
 
 ## The carry
 
-Past the snap the pull is a carry: the body follows the pointer anywhere in the work area, and Presence (`presence/carry.rs`) looks for an app to drop it on.
+Past the snap the pull is a carry: the body follows the pointer within the pull area, and Presence (`presence/carry.rs`) looks for an app to drop it on.
 
 - **The candidate** is read once per pull frame, and only when the pointer has moved: `host_at` under the pointer, then `perch::caption::target_of`. `perch::target::Targeting` says when that's a new candidate, and Presence then drops the old watch before arming `watch_host` on the new one, so at most one is live. A watch that can't be armed ends that generation. `HostChanged` from the channel goes to `Targeting`, and a stale generation changes nothing. Presence keeps a watch only for the generation `Targeting` still watches.
 - **The drop label** sits under the carried body while a candidate is watched: "Drop on" and the app's window title, made once per candidate in `locales/en/`. The title is screen text: it's drawn, never logged and never sent to the brain, and `Carry` has no `Debug`. It clears at every ending.
