@@ -1,5 +1,12 @@
 # Engines: what each request sends
 
+Stored native rounds may contain a tagged `recall` result. `store::rounds` preserves its
+typed selectors instead of turning them into reference JSON text. The context builder
+dereferences them in its current snapshot and includes every live quoted task in the
+build's source set. Like other native results, recall replays only when the current
+connection matches the round's native items. This backend alone offers no new schemas;
+model activation and asynchronous completion fencing are a separate layer.
+
 A model request is built from the store, never from what the shell sent. `context/` builds it as
 typed data (`ModelRequest`), and the engine gets only that request. PR 13a serialises it into the
 Responses body, with `store: false` and `stream: true`, and PR 11's transport sends it on the
