@@ -152,6 +152,13 @@ fn each_observed_account_shape_gets_its_verdict() {
             json!({"tokenSource": 7, "subscriptionType": "max", "apiProvider": "firstParty"}),
             Err(AuditFailed::Malformed),
         ),
+    ];
+    expect_verdicts(shapes);
+}
+
+#[test]
+fn null_or_mistyped_account_fields_get_their_verdicts() {
+    let shapes = [
         (
             "a null source beside a subscription",
             json!({"tokenSource": null, "subscriptionType": "max", "apiProvider": "firstParty"}),
@@ -193,6 +200,12 @@ fn each_observed_account_shape_gets_its_verdict() {
             Err(AuditFailed::KeySource),
         ),
     ];
+    expect_verdicts(shapes);
+}
+
+fn expect_verdicts(
+    shapes: impl IntoIterator<Item = (&'static str, Value, Result<Progress, AuditFailed>)>,
+) {
     for (case, account, verdict) in shapes {
         let response = control(0, |line| line["response"]["response"]["account"] = account);
         assert_eq!(audit().control(&response), verdict, "{case}");
