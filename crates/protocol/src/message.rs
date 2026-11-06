@@ -572,6 +572,9 @@ pub enum ControlToShell {
         /// The task, or Kumo's thread.
         thread: ThreadId,
     },
+    /// Each voice part's state: once per connection after `Account` and before `Scenes`, then on
+    /// each change.
+    Voice(VoiceView),
 }
 
 /// Shell to brain, on the data pipe.
