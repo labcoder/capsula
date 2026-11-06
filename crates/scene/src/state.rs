@@ -2,6 +2,7 @@
 mod binding;
 pub(crate) mod metrics;
 pub(crate) mod object;
+mod part;
 mod retire;
 mod three;
 pub(crate) mod work;
@@ -19,6 +20,7 @@ use crate::{
 };
 pub use binding::{BindingError, SceneBinding, SceneRead};
 use object::Object;
+pub use part::Part;
 use retire::{map_bytes, records_bytes, retire_undo};
 use serde::{Deserialize, Serialize};
 use std::{

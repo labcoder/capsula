@@ -13,9 +13,8 @@ use std::path::Path;
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, TransactionBehavior, params};
 
 use super::marker::SignOutMarker;
-use super::records::MAX_RECORD_BYTES;
 use crate::platform::SessionLock;
-use crate::platform::credential::{CHUNK_SIZE, CredentialStoreError};
+use crate::platform::credential::CredentialStoreError;
 use io::Verified;
 
 /// The authority's file in the data folder; not the history store, so no purge touches it.
@@ -138,13 +137,15 @@ impl Generation {
 
     /// The generation's name segment: 32 lowercase hex digits.
     pub(crate) fn hex(self) -> String {
-        use std::fmt::Write as _;
-        self.0
-            .iter()
-            .fold(String::with_capacity(32), |mut hex, byte| {
-                write!(hex, "{byte:02x}").expect("writing into a String cannot fail");
-                hex
-            })
+        kumochi_protocol::constants::generation_hex(&self.0)
+    }
+
+    pub(crate) fn stage_id(self) -> kumochi_protocol::message::KeyStageId {
+        kumochi_protocol::message::KeyStageId(self.0)
+    }
+
+    pub(crate) fn from_stage_id(id: kumochi_protocol::message::KeyStageId) -> Self {
+        Self(id.0)
     }
 }
 
@@ -165,11 +166,10 @@ impl Layout {
     /// # Errors
     /// Refuses a value over the record bound.
     pub(crate) fn for_len(bytes: usize) -> Result<Self, AuthorityError> {
-        if bytes > MAX_RECORD_BYTES {
-            return Err(AuthorityError::Bounds);
-        }
+        let layout = kumochi_protocol::constants::CredentialLayout::new(bytes)
+            .ok_or(AuthorityError::Bounds)?;
         Ok(Self {
-            chunks: bytes.div_ceil(CHUNK_SIZE).max(1),
+            chunks: layout.chunks(),
             bytes,
         })
     }
@@ -184,11 +184,9 @@ impl Layout {
 
     /// The exact length chunk `index` holds: full chunks, then whatever completes the value.
     pub(crate) fn chunk_len(self, index: usize) -> usize {
-        if index + 1 < self.chunks {
-            CHUNK_SIZE
-        } else {
-            self.bytes - CHUNK_SIZE * (self.chunks - 1)
-        }
+        kumochi_protocol::constants::CredentialLayout::new(self.bytes)
+            .expect("an authority layout is bounded")
+            .chunk_len(index)
     }
 
     fn from_sql(chunks: Option<i64>, bytes: Option<i64>) -> Result<Self, AuthorityError> {
