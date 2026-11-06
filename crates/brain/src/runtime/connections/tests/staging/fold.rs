@@ -2,6 +2,69 @@ use super::*;
 use kumochi_protocol::message::{ControlToBrain, KeyRejection};
 use tokio::io::AsyncWriteExt as _;
 
+#[tokio::test]
+async fn remove_during_begin_never_forwards_the_discarded_plan_or_leaves_staged_names() {
+    let scratch = Scratch::new("stage-remove-requested");
+    let (mut account, store, _) = keyed(&scratch).await;
+    assert_eq!(
+        account.stage_op(
+            1,
+            ConnectionOp::BeginAnthropicKeyStage {
+                request: 41,
+                len: 16
+            }
+        ),
+        vec![]
+    );
+    account.connection_event(ConnectionEvent::Op(ConnectionOp::RemoveAnthropicKey));
+    let planned = next(&mut account).await;
+    assert!(matches!(
+        planned,
+        Event::Connection(ConnectionEvent::StagePlan {
+            request: 41,
+            result: Ok(KeyStagePlan { len: 16, .. }),
+            ..
+        })
+    ));
+    let removed = next(&mut account).await;
+    assert!(matches!(
+        removed,
+        Event::Connection(ConnectionEvent::Loaded {
+            result: Ok(None),
+            ..
+        })
+    ));
+    assert_eq!(
+        store
+            .names()
+            .into_iter()
+            .filter(|name| name.starts_with("key-test/gen/anthropic/"))
+            .collect::<Vec<_>>(),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        account.handle(planned),
+        vec![],
+        "Remove must not forward a discarded plan"
+    );
+    account.handle(removed);
+    assert_eq!(account.connections.stage_request, None);
+    assert_eq!(account.connections.stage_admission, None);
+    assert_eq!(account.connections.view.anthropic, KeyView::Missing);
+    assert!(account.connections.key.is_none());
+    assert_eq!(
+        store
+            .names()
+            .into_iter()
+            .filter(|name| name.starts_with("key-test/gen/anthropic/"))
+            .collect::<Vec<_>>(),
+        Vec::<String>::new()
+    );
+    account
+        .close(tokio::time::Instant::now(), tokio::time::Instant::now())
+        .await;
+}
+
 async fn adopt_and_check_cleanup(account: &mut Accounts, store: &FakeStore, plan: KeyStagePlan) {
     assert_eq!(
         account.stage_op(1, ConnectionOp::AnthropicKeyStaged { plan: plan.id }),

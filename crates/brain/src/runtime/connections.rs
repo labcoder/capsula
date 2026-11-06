@@ -299,6 +299,7 @@ impl Accounts {
 
     pub(super) fn load_key(&mut self, op: KeyOp) {
         if matches!(op, KeyOp::Remove) {
+            self.connections.stage_request = None;
             self.connections.stage_admission = None;
         }
         let generation = self.connections.advance();
