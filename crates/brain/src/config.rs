@@ -26,11 +26,6 @@ const SHOW_IN_TASKBAR: &str = "show_in_taskbar";
 const VOICE: &str = "voice";
 const TALK_BACK: &str = "talk_back";
 const STT_UNLOAD: &str = "stt_unload";
-const STT_UNLOADS: [(SttUnload, &str); 3] = [
-    (SttUnload::Kept, "kept"),
-    (SttUnload::After15Min, "15m"),
-    (SttUnload::After1Hour, "1h"),
-];
 
 /// Why a settings change was refused.
 #[derive(Debug, thiserror::Error)]
@@ -208,10 +203,11 @@ impl Config {
                 voice_mut(&mut table).insert(TALK_BACK.to_owned(), Value::Boolean(on));
             }
             SettingsOp::SetSttUnload(unload) => {
-                let (_, name) = STT_UNLOADS
-                    .into_iter()
-                    .find(|(each, _)| *each == unload)
-                    .expect("every unload policy has a name");
+                let name = match unload {
+                    SttUnload::Kept => "kept",
+                    SttUnload::After15Min => "15m",
+                    SttUnload::After1Hour => "1h",
+                };
                 voice_mut(&mut table).insert(STT_UNLOAD.to_owned(), Value::String(name.to_owned()));
             }
             SettingsOp::InstallVoice(_)
@@ -326,12 +322,12 @@ fn view_of(table: &Table, main_thread: ThreadId) -> SettingsView {
     };
     let stt_unload = match voice.and_then(|voice| voice.get(STT_UNLOAD)) {
         None => SttUnload::Kept,
-        Some(value) => STT_UNLOADS
-            .into_iter()
-            .find(|(_, name)| value.as_str() == Some(*name))
-            .map(|(unload, _)| unload)
-            .or_else(|| invalid(STT_UNLOAD))
-            .unwrap_or_default(),
+        Some(value) => match value.as_str() {
+            Some("kept") => SttUnload::Kept,
+            Some("15m") => SttUnload::After15Min,
+            Some("1h") => SttUnload::After1Hour,
+            _ => invalid(STT_UNLOAD).unwrap_or_default(),
+        },
     };
     SettingsView {
         assistant_name,

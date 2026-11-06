@@ -164,7 +164,7 @@ pub enum SettingsOp {
     /// When an idle speech-input model is unloaded.
     SetSttUnload(SttUnload),
     /// Download, check and load a voice part. Refused with `VoiceUnavailable` until the
-    /// installer lands (slice 7, PR 8b).
+    /// installer lands.
     InstallVoice(VoicePart),
     /// Unload and delete a voice part. Refused like `InstallVoice` until then.
     RemoveVoice(VoicePart),

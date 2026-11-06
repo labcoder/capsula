@@ -90,6 +90,42 @@ fn bad_voice_values_read_as_the_defaults_and_outlive_writes_to_other_keys() {
 }
 
 #[test]
+fn only_the_three_exact_unload_names_are_read() {
+    for bad in ["", "15M", " 1h", "1h ", "Kept", "2h"] {
+        let scratch = Scratch::new("config-voice-names");
+        let dir = dir(&scratch);
+        let path = dir.join(CONFIG_FILE);
+        std::fs::write(&path, format!("[voice]\nstt_unload = {bad:?}\n")).expect("seeded");
+        let mut config = Config::load(Some(dir), ThreadId(1));
+        assert_eq!(config.view().stt_unload, SttUnload::Kept, "{bad:?}");
+        apply(&mut config, SettingsOp::SetTaskbar(true));
+        assert_eq!(saved(&path)["voice"]["stt_unload"].as_str(), Some(bad));
+    }
+}
+
+#[test]
+fn an_empty_voice_table_reads_as_the_defaults_and_takes_a_setting() {
+    let scratch = Scratch::new("config-voice-empty");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    std::fs::write(&path, "[voice]\n").expect("seeded");
+    let mut config = Config::load(Some(dir.clone()), ThreadId(1));
+    assert!(!config.view().talk_back);
+    assert_eq!(config.view().stt_unload, SttUnload::Kept);
+    apply(&mut config, SettingsOp::FinishOnboarding);
+    assert_eq!(
+        saved(&path)["voice"].as_table().map(toml::Table::len),
+        Some(0)
+    );
+    apply(&mut config, SettingsOp::SetSttUnload(SttUnload::After15Min));
+    assert_eq!(saved(&path)["voice"]["stt_unload"].as_str(), Some("15m"));
+    assert_eq!(
+        Config::load(Some(dir), ThreadId(1)).view().stt_unload,
+        SttUnload::After15Min
+    );
+}
+
+#[test]
 fn a_voice_key_that_isnt_a_table_reads_as_the_defaults_until_a_voice_setting_replaces_it() {
     for seeded in ["voice = 3\n", "[voice]\ntalk_back = 1\nstt_unload = 15\n"] {
         let scratch = Scratch::new("config-voice-shape");

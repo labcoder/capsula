@@ -30,10 +30,10 @@ nothing downloads them.
 
 `brain::voice::download::Downloader` installs one part from the pinned manifest. Its caller
 supplies the models folder under `platform::data_dir`. Construction makes no request, and
-startup never resumes anything automatically; the install task and UI arrive in PR 8. PR 8a
-added the wire types (`InstallVoice`, `RemoveVoice`, `CancelVoiceInstall`, `VoiceView`,
-`PartState` and the `Voice*` error keys) and the saved talk-back and unload settings; the
-installer ops are refused until PR 8b (see [settings](settings.md#config-keys)).
+startup never resumes anything automatically; the install task and UI arrive in PR 8. The wire
+types (`InstallVoice`, `RemoveVoice`, `CancelVoiceInstall`, `VoiceView`, `PartState` and the
+`Voice*` error keys) and the saved talk-back and unload settings are in place; the installer ops
+are refused until the installer lands (see [settings](settings.md#config-keys)).
 
 The separate HTTPS client uses the OS trust roots, no proxy, credentials, cookies, Referer or
 compression, and `Accept-Encoding: identity`. The first URL and up to five redirects must use

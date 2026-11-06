@@ -77,7 +77,7 @@ pub struct Cursor {
 }
 
 /// Each voice part's state, as the brain's installer reports it. Nothing sends it until the
-/// installer lands (slice 7, PR 8b).
+/// installer lands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VoiceView {
     /// Speech to text.

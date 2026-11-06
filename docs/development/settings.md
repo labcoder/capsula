@@ -192,11 +192,13 @@ than growing the window with the text. The existing Settings content region owns
 `SettingsView` is their only wire home. A bad value, or a `voice` key that isn't a table, reads
 as the default and stays on disk until the user sets that key. Setting one where `voice` isn't
 a table replaces it with a table. Every other key in the table survives each write, including
-`installed` and `removing`, which the voice installer (slice 7, PR 8b) will own.
+`installed` and `removing`, which the voice installer will own.
 
 `InstallVoice`, `RemoveVoice` and `CancelVoiceInstall` already travel, but this build refuses
 them until the installer lands: each is staged in queue order like any change, then refused with
-`Error(VoiceUnavailable)` and its one `Settings` answer, with nothing written. `VoiceView` and
+`Error(VoiceUnavailable)` and its one `Settings` answer, with nothing written. The refusal comes
+after the config read, so while `config.toml` is unreadable they're answered `ConfigUnreadable`
+like every other change. `VoiceView` and
 `PartState` exist in `crates/protocol`, and nothing sends them yet.
 
 `default_model` is the model a thread with no choice runs on. Only the brain sets it today, with
