@@ -422,6 +422,19 @@ fn a_loss_during_the_activate_reloads_once_it_commits() {
 }
 
 #[test]
+fn a_loss_during_the_activate_does_not_reload_after_quit() {
+    let mut installer = fresh();
+    installer.install(SpokenReplies);
+    installer.fetched(SpokenReplies, 3, Ok(()));
+    installer.reported(SpokenReplies, report(3, LoadEvent::Loaded));
+    installer.reported(SpokenReplies, report(3, LoadEvent::Lost));
+    assert_eq!(installer.quit(), []);
+    assert_eq!(installer.activated(SpokenReplies, 3, Ok(())), []);
+    assert_eq!(installer.view().spoken_replies, failed(ErrorKey::VoiceLoad));
+    assert!(!installer.ready(SpokenReplies));
+}
+
+#[test]
 fn a_second_install_waits_for_the_first_fetch() {
     let mut installer = fresh();
     assert_eq!(installer.install(SpeechInput), [fetch(SpeechInput, 3)]);

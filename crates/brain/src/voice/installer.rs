@@ -385,7 +385,7 @@ impl Installer {
         }
     }
 
-    /// A current loss: one automatic reload, then a load failure.
+    /// A current loss: one automatic reload, then a load failure. Nothing reloads once quitting.
     fn lost(&mut self, part: VoicePart) {
         let token = self.token();
         let entry = &mut self.parts[index(part)];
@@ -394,7 +394,7 @@ impl Installer {
             _ => None,
         };
         entry.token = token;
-        if entry.retry_left == 0 {
+        if self.quitting || entry.retry_left == 0 {
             entry.phase = Phase::Failed(ErrorKey::VoiceLoad);
             return;
         }

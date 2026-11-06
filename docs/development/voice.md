@@ -283,7 +283,8 @@ files kept, so the next install resumes. A cancelled load's late success is drop
 nothing, because the handle already freed it. A commit in flight isn't cancelled. An install
 during a removal's `RemoveDone` write starts once that write commits. Installs keep going while
 no shell is connected. Quit tells the running fetch to stop and starts no other, so an install
-still waiting never downloads; a commit already queued still lands.
+still waiting never downloads; a commit already queued still lands. A model lost after Quit
+fails instead of reloading.
 
 ```mermaid
 stateDiagram-v2
