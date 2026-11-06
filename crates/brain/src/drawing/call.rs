@@ -134,6 +134,20 @@ struct NamedStep {
 }
 
 impl Drawing {
+    pub(super) fn rejected_call(
+        &mut self,
+        thread: ThreadId,
+        run: RunId,
+        id: &CallId,
+        error: CallError,
+        out: &mut Output,
+    ) -> Result<(), Stale> {
+        if let Some(at) = self.call_at(thread, run, id, out)? {
+            self.fail(at, error, out);
+        }
+        Ok(())
+    }
+
     /// A complete-only call: nothing runs unless the whole envelope is well formed, then its
     /// records take the streamed path in order.
     pub(super) fn complete_call(

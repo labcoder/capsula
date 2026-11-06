@@ -17,7 +17,7 @@ struct FocusArgs {
 
 fn prepare(args: &[u8]) -> Result<Prepared, ToolError> {
     let (focus, hash) = parse::<FocusArgs>("focus", args)?;
-    Ok(Prepared {
+    Ok(Prepared::Local {
         hash,
         write: LocalWrite::Focus(ThreadId(focus.task)),
         output: ToolOutput::Text(ANSWER.to_owned()),

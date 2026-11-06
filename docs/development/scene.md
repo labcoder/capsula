@@ -1491,6 +1491,12 @@ resynchronization, and trailing non-whitespace after the envelope fails. Earlier
 records may already have been emitted, so callers retain their committed prefix.
 Tokenizer and closed-record Debug formatting never prints buffered bytes.
 
+`parse_draw_record` adds the tool's closed 2D ingress to `parse_record`: it uses the
+shared runtime 3D refusal predicate and rejects a present `set[].info`, even null.
+The general scene decoder remains capable of reading stored 3D records. Complete
+draw-tool calls preflight every record before sending any of them to admission;
+the tokenizer's general streamed-prefix behavior above is unchanged.
+
 ### Tokenizer measurement method
 
 The ignored `measure_tokenizer` test uses a 512 KiB drawing with 21 typed-valid

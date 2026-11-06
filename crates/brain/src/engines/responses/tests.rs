@@ -77,6 +77,7 @@ fn the_body_is_the_request_as_data() {
             "name": "draw",
             "description": "Draws on the overlay.",
             "parameters": { "type": "object" },
+            "strict": false,
         }],
         "reasoning": { "effort": "xhigh" },
         "include": ["reasoning.encrypted_content"],
@@ -84,6 +85,27 @@ fn the_body_is_the_request_as_data() {
         "stream": true,
     });
     assert_eq!(body(&request("Be brief.", input)), Ok(expected));
+}
+
+#[test]
+fn the_offered_draw_schema_is_serialized_non_strict_without_changing_other_tools() {
+    let mut request = request("", Vec::new());
+    request.tools = crate::context::tools(crate::context::Origin::Kumo);
+    request.tools.push(ToolSchema {
+        name: "focus",
+        description: "focus",
+        parameters: json!({"type":"object"}),
+    });
+    let bytes =
+        serde_json::to_vec(&body(&request).expect("bounded actual draw schema")).expect("JSON");
+    let sent: Value = serde_json::from_slice(&bytes).expect("request body");
+    assert_eq!(sent["tools"][0]["name"], json!("draw"));
+    assert_eq!(sent["tools"][0]["strict"], json!(false));
+    assert_eq!(
+        sent["tools"][0]["parameters"]["additionalProperties"],
+        json!(false)
+    );
+    assert_eq!(sent["tools"][1].get("strict"), None);
 }
 
 #[test]

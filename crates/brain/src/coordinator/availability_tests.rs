@@ -336,10 +336,10 @@ fn a_draw_the_request_didnt_offer_commits_nothing() {
             items: Vec::new(),
             calls: vec![(
                 super::call(),
-                crate::dispatch::ToolOutput::Error(crate::dispatch::ToolError::Unknown)
+                crate::dispatch::ToolOutput::Error(crate::dispatch::ToolError::NotHere)
             )],
         }))]),
-        "it gets the one unknown-tool result"
+        "the registered but unoffered tool gets one refusal"
     );
 
     let mut core = typed(Some(ready(7, &["m"])));
@@ -350,10 +350,20 @@ fn a_draw_the_request_didnt_offer_commits_nothing() {
     let step = core
         .handle(super::engine(R, delta("head")))
         .expect("current");
-    assert!(
-        step.iter()
-            .any(|effect| matches!(effect, Effect::Store(StoreOp::CommitStep { .. }))),
-        "an offered draw streams its steps"
+    assert_eq!(step, Vec::new(), "production draw deltas execute nothing");
+    core.handle(super::engine(R, TurnEvent::ToolCallReady {
+        call: super::call(), args: r#"{"records":[{"begin":{"v":1,"scene":"diagram","surface":"overlay","alt":"diagram"}},{"step":{"id":"s1"}},{"end":{}}]}"#.to_owned(),
+    })).expect("complete arguments");
+    let effects = core
+        .handle(super::engine(R, TurnEvent::Finished(Finish::Completed)))
+        .expect("round completed");
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| matches!(effect, Effect::Store(StoreOp::Drawing { .. })))
+            .count(),
+        1,
+        "the offered complete call reaches the scene reducer"
     );
 }
 

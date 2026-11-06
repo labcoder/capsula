@@ -1,5 +1,5 @@
 //! `cargo xtask live <check>`: the real dev brain, on the developer's own dev account, driven over
-//! its real pipes by slice 2's gate client. The checks are `signin` and `claude-signin`.
+//! its real pipes by slice 2's gate client. `account` only reads the non-secret account view.
 //!
 //! The brain serves only the `kumochi.exe` beside it, so, as in the slice 2 gate, an outer xtask
 //! builds the brain, copies it and itself (as `kumochi.exe`) into `target/live/<time>/bin`, and
@@ -46,6 +46,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
     };
     match entry(build, &args.collect::<Vec<_>>())? {
         Entry::Prepare(check) => prepare(check),
+        Entry::Inner(Check::Account) => signin::harness(signin::inspect),
         Entry::Inner(Check::SignIn) => signin::inner(),
         Entry::Inner(Check::Claude(ask)) => claude_signin::inner(ask),
     }
@@ -66,12 +67,14 @@ enum Entry {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Check {
+    Account,
     SignIn,
     Claude(Ask),
 }
 
 impl Check {
-    const ALL: [Self; 3] = [
+    const ALL: [Self; 4] = [
+        Self::Account,
         Self::SignIn,
         Self::Claude(Ask::SignIn),
         Self::Claude(Ask::Disconnect),
@@ -80,6 +83,7 @@ impl Check {
     /// The arguments after `live` that name it.
     fn args(self) -> &'static [&'static str] {
         match self {
+            Self::Account => &["account"],
             Self::SignIn => &["signin"],
             Self::Claude(Ask::SignIn) => &["claude-signin"],
             Self::Claude(Ask::Disconnect) => &["claude-signin", "--disconnect"],
@@ -106,7 +110,7 @@ fn entry(build: Build, args: &[String]) -> Result<Entry> {
                 .map(String::as_str)
                 .eq(check.args().iter().copied())
         })
-        .context("usage: cargo xtask live signin | claude-signin [--disconnect]")?;
+        .context("usage: cargo xtask live account | signin | claude-signin [--disconnect]")?;
     Ok(if inner {
         Entry::Inner(check)
     } else {
@@ -460,6 +464,7 @@ mod tests {
         let release = "run it from a debug xtask (`cargo xtask live signin`): a release one uses \
                        the installed product's pipe and credential names";
         for list in [
+            &["account"][..],
             &["signin"][..],
             &["signin", "--inner"],
             &["claude-signin", "--disconnect", "--inner"],
@@ -469,6 +474,8 @@ mod tests {
         }
         let claude = Check::Claude;
         for (list, want) in [
+            (&["account"][..], Entry::Prepare(Check::Account)),
+            (&["account", "--inner"], Entry::Inner(Check::Account)),
             (&["signin"][..], Entry::Prepare(Check::SignIn)),
             (&["signin", "--inner"], Entry::Inner(Check::SignIn)),
             (&["claude-signin"], Entry::Prepare(claude(Ask::SignIn))),
@@ -501,7 +508,7 @@ mod tests {
             let error = entry(Build::Debug, &args(list)).expect_err("refused");
             assert_eq!(
                 format!("{error:#}"),
-                "usage: cargo xtask live signin | claude-signin [--disconnect]"
+                "usage: cargo xtask live account | signin | claude-signin [--disconnect]"
             );
         }
     }

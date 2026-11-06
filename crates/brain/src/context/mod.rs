@@ -233,11 +233,11 @@ pub(crate) struct ToolSchema {
 }
 
 /// The tools a run with `origin` is offered.
-/// shortcut: none yet; slice 4's B10 adds the draw tool's schema and 14a the history tools for Kumo.
 pub(crate) fn tools(origin: Origin) -> Vec<ToolSchema> {
-    match origin {
-        Origin::Kumo | Origin::Task(_) => Vec::new(),
-    }
+    crate::dispatch::schemas(origin, crate::dispatch::Route::Model)
+        .into_iter()
+        .filter(|tool| tool.name == "draw")
+        .collect()
 }
 
 /// A built request, as data: PR 13a serialises it, with `store:false` and `stream:true`.

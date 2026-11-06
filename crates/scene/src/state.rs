@@ -68,21 +68,37 @@ pub enum StopOutcome {
 
 /// Refuses 3D views, solids and tracks at an ingress whose displays cannot prepare them yet.
 /// # Errors
-/// Returns `Unsupported` at the first 3D `put`.
+/// Returns `Unsupported` at the first 3D operation, key or solid-only change.
 // shortcut: the brain calls this until views prepare (slice 5 PR 6); remove it with that call.
 pub fn refuse_three_dimensional(step: &Step) -> Result<(), StepError> {
-    let index = step.put.iter().position(|op| match op {
-        crate::Op::View3d(_) | crate::Op::Solid(_) => true,
-        crate::Op::Anim(anim) => matches!(anim.track, Track::Pos3 | Track::Rot3),
-        _ => false,
-    });
-    index.map_or(Ok(()), |index| {
-        Err(StepError::in_step(
-            &step.id,
-            FieldPath::default().field("put").index(index),
-            ErrorCode::Unsupported,
-        ))
-    })
+    for (index, op) in step.put.iter().enumerate() {
+        let path = FieldPath::default().field("put").index(index);
+        let path = match op {
+            crate::Op::View3d(_) | crate::Op::Solid(_) => Some(path),
+            crate::Op::Anim(anim) if matches!(anim.track, Track::Pos3 | Track::Rot3) => {
+                Some(path.field("track"))
+            }
+            crate::Op::Anim(anim) => anim
+                .keys
+                .iter()
+                .position(|(_, value)| matches!(value, crate::record::KeyValue::V3(_)))
+                .map(|key| path.field("keys").index(key)),
+            _ => None,
+        };
+        if let Some(path) = path {
+            return Err(StepError::in_step(&step.id, path, ErrorCode::Unsupported));
+        }
+    }
+    for (index, change) in step.set.iter().enumerate() {
+        if change.info.is_some() {
+            return Err(StepError::in_step(
+                &step.id,
+                FieldPath::default().field("set").index(index).field("info"),
+                ErrorCode::Unsupported,
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn serialize_step<S: serde::Serializer>(step: &Step, serializer: S) -> Result<S::Ok, S::Error> {

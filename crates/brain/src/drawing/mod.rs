@@ -42,6 +42,17 @@ const MAX_QUEUED_JOBS: usize = call::MAX_CALLS_PER_RUN * (call::MAX_CALL_RECORDS
 /// Something for the drawing system to act on.
 #[derive(Clone, PartialEq)]
 pub enum Input {
+    /// A complete call whose preflight failed, charged without admitting a scene record.
+    Rejected {
+        /// The resolved thread.
+        thread: ThreadId,
+        /// The owning run.
+        run: RunId,
+        /// The host's internal call id.
+        call: CallId,
+        /// The first preflight failure.
+        error: CallError,
+    },
     /// A complete-only call: its whole arguments, checked as one envelope before anything runs.
     Call {
         /// The thread.
@@ -333,6 +344,14 @@ impl Drawing {
     pub fn handle(&mut self, input: Input) -> Result<Output, Stale> {
         let mut out = Output::default();
         match input {
+            Input::Rejected {
+                thread,
+                run,
+                call,
+                error,
+            } => {
+                self.rejected_call(thread, run, &call, error, &mut out)?;
+            }
             Input::Call {
                 thread,
                 run,
@@ -602,6 +621,7 @@ impl Drawing {
 impl fmt::Debug for Input {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::Rejected { .. } => "Rejected",
             Self::Call { .. } => "Call",
             Self::Record { .. } => "Record",
             Self::CallFinished { .. } => "CallFinished",
