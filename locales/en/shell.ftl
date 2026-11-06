@@ -25,6 +25,8 @@ position-bottom-center = Bottom center
 position-bottom-right = Bottom right
 dock-error = Check settings
 dock-brain-error = Needs attention
+carry-perch-on = Drop on { $app }
+carry-perch-untitled = Drop on this app
 
 # Turns
 

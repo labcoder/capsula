@@ -33,6 +33,8 @@ pub(crate) enum Text {
     BottomRight,
     DockError,
     DockBrainError,
+    PerchOn,
+    PerchUntitled,
 
     // Turns
     TurnBusy,
@@ -187,6 +189,8 @@ impl Text {
         BottomRight,
         DockError,
         DockBrainError,
+        PerchOn,
+        PerchUntitled,
 
         // Turns
         TurnBusy,
@@ -343,6 +347,8 @@ impl Text {
             Self::BottomRight => "position-bottom-right",
             Self::DockError => "dock-error",
             Self::DockBrainError => "dock-brain-error",
+            Self::PerchOn => "carry-perch-on",
+            Self::PerchUntitled => "carry-perch-untitled",
 
             // Turns
             Self::TurnBusy => "turn-busy",
@@ -520,6 +526,13 @@ impl Strings {
             self.get(Text::DeleteThreadBody),
             self.format("thread-delete-kumo", Some(&args))
         )
+    }
+
+    /// The drop label under a carried Kumo: `app` is the window's title, which is screen text.
+    pub(crate) fn perch_on(&self, app: &str) -> String {
+        let mut args = FluentArgs::new();
+        args.set("app", app);
+        self.format(Text::PerchOn.id(), Some(&args))
     }
 
     pub(crate) fn back_to_kumo(&self, assistant: &str) -> String {
