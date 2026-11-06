@@ -74,6 +74,100 @@ fn retry_failure(thread: u64) -> Vec<LinkEvent> {
     ]
 }
 
+fn click_recovery(
+    window: gpui_kit::AnyWindowHandle,
+    selector: &'static str,
+    cx: &mut TestAppContext,
+) {
+    cx.run_until_parked();
+    {
+        let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+        let bounds = frame.debug_bounds(selector).expect("recovery control");
+        frame.simulate_click(bounds.center(), gpui_kit::Modifiers::default());
+    }
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn recovery_buttons_follow_live_drafts_and_dispatch_then_dismiss_the_named_failure(
+    cx: &mut TestAppContext,
+) {
+    let (owner, data, control) = ready(cx);
+    let window = owner.update(cx, |owner, _| {
+        assert!(owner.runs.select_thread(Some(ThreadId(9))));
+        owner.text.as_ref().expect("typing fixture").window
+    });
+    draft(&owner, "button retry", cx);
+    owner.update(cx, |owner, cx| owner.submit(cx).expect("original turn"));
+    assert_eq!(
+        data.try_recv().expect("original turn"),
+        DataToBrain::TextSubmit {
+            turn: 1,
+            screen: ScreenChoice::None,
+            thread: Some(ThreadId(9)),
+            text: "button retry".into(),
+        }
+    );
+    receive(&owner, retry_failure(9), cx);
+    cx.run_until_parked();
+    {
+        let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+        assert!(frame.debug_bounds("chat-recovery-action-0").is_some());
+        assert!(frame.debug_bounds("chat-recovery-action-1").is_none());
+    }
+    draft(&owner, "newer draft", cx);
+    click_recovery(window, "chat-recovery-action-0", cx);
+    assert!(data.is_empty());
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.runs.retry_ready(RunId(1)));
+    });
+    draft(&owner, "", cx);
+    click_recovery(window, "chat-recovery-action-0", cx);
+    assert_eq!(
+        data.try_recv().expect("button retry"),
+        DataToBrain::TextSubmit {
+            turn: 2,
+            screen: ScreenChoice::None,
+            thread: Some(ThreadId(9)),
+            text: "button retry".into(),
+        }
+    );
+    receive(
+        &owner,
+        vec![LinkEvent::RunState {
+            run: RunId(2),
+            thread: ThreadId(9),
+            phase: Phase::Failed,
+            error: Some(
+                UserError::new(ErrorKey::AccountOffline, Vec::new(), vec![Action::Retry])
+                    .expect("bounded error"),
+            ),
+        }],
+        cx,
+    );
+    draft(&owner, "keep this dismissed draft", cx);
+    click_recovery(window, "chat-recovery-dismiss", cx);
+    owner.read_with(cx, |owner, cx| {
+        assert_eq!(owner.chat_notice.shown(), None);
+        assert_eq!(owner.runs.kept(), Vec::<usize>::new());
+        assert_eq!(
+            owner
+                .text
+                .as_ref()
+                .expect("typing fixture")
+                .input
+                .read(cx)
+                .value()
+                .as_ref(),
+            "keep this dismissed draft"
+        );
+    });
+    let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+    assert!(frame.debug_bounds("chat-recovery").is_none());
+    assert!(data.is_empty());
+    assert!(control.is_empty());
+}
+
 #[gpui::test]
 fn retry_dispatches_the_exact_named_turn_once_including_new_adoption(cx: &mut TestAppContext) {
     for selected in [Some(ThreadId(9)), None] {
@@ -194,6 +288,27 @@ fn retry_rechecks_owner_declared_action_and_draft_then_consumes_a_refusal(cx: &m
 #[gpui::test]
 fn account_actions_use_the_shared_admission_and_never_resubmit_a_turn(cx: &mut TestAppContext) {
     let (owner, data, control) = ready(cx);
+    let window = owner.read_with(cx, |owner, _| {
+        owner.text.as_ref().expect("typing fixture").window
+    });
+    receive(
+        &owner,
+        vec![
+            LinkEvent::Account {
+                generation: 1,
+                view: AccountView::Busy,
+            },
+            LinkEvent::Error {
+                generation: 1,
+                error: UserError::new(ErrorKey::SignInNeeded, Vec::new(), vec![Action::SignIn])
+                    .expect("bounded error"),
+            },
+        ],
+        cx,
+    );
+    click_recovery(window, "chat-recovery-action-0", cx);
+    assert!(control.is_empty());
+    assert!(data.is_empty());
     receive(
         &owner,
         vec![
@@ -211,14 +326,8 @@ fn account_actions_use_the_shared_admission_and_never_resubmit_a_turn(cx: &mut T
         ],
         cx,
     );
-    owner.update(cx, |owner, cx| {
-        owner
-            .recover(Source::Account, Action::SignIn, cx)
-            .expect("sign in");
-        owner
-            .recover(Source::Account, Action::SignIn, cx)
-            .expect("already waiting");
-    });
+    click_recovery(window, "chat-recovery-action-0", cx);
+    click_recovery(window, "chat-recovery-action-0", cx);
     assert_eq!(
         control.try_recv().expect("sign-in intent"),
         ControlToBrain::AccountOp(AccountOp::SignIn)
@@ -240,11 +349,7 @@ fn account_actions_use_the_shared_admission_and_never_resubmit_a_turn(cx: &mut T
         ],
         cx,
     );
-    owner.update(cx, |owner, cx| {
-        owner
-            .recover(Source::Account, Action::Retry, cx)
-            .expect("account retry");
-    });
+    click_recovery(window, "chat-recovery-action-0", cx);
     assert_eq!(
         control.try_recv().expect("account retry intent"),
         ControlToBrain::AccountOp(AccountOp::Retry)
@@ -283,6 +388,8 @@ fn settings_retry_rechecks_its_captured_field_and_waits_for_the_matching_answer(
         default_model: None,
         dock_position: DockPosition::TopCenter,
         show_in_taskbar: false,
+        talk_back: false,
+        stt_unload: kumochi_protocol::message::SttUnload::Kept,
     };
     owner.update(cx, |owner, cx| {
         owner.settings.update(cx, |state, _| {
@@ -307,6 +414,9 @@ fn settings_retry_rechecks_its_captured_field_and_waits_for_the_matching_answer(
         cx,
     );
     let source = Source::Settings(Some(Field::Assistant));
+    let window = owner.read_with(cx, |owner, _| {
+        owner.text.as_ref().expect("typing fixture").window
+    });
     owner.update(cx, |owner, cx| {
         assert!(matches!(
             owner.chat_notice.shown().map(|notice| notice.source),
@@ -319,9 +429,12 @@ fn settings_retry_rechecks_its_captured_field_and_waits_for_the_matching_answer(
             .recover(source, Action::Retry, cx)
             .expect("saving field waits");
     });
+    click_recovery(window, "chat-recovery-action-0", cx);
     assert!(control.is_empty());
+    draft(&owner, "keep this chat draft", cx);
+    cx.run_until_parked();
     owner.update(cx, |owner, cx| {
-        owner.settings.update(cx, |state, _| {
+        owner.settings.update(cx, |state, cx| {
             let completion = state
                 .set_view(saved, Update::Answer)
                 .expect("matching answer");
@@ -329,16 +442,12 @@ fn settings_retry_rechecks_its_captured_field_and_waits_for_the_matching_answer(
             assert_eq!(completion.field, Field::Assistant);
             state.change(Field::Assistant, "Cirrus");
             state.change(Field::User, "keep this settings draft");
+            cx.notify();
         });
     });
-    draft(&owner, "keep this chat draft", cx);
-    owner.update(cx, |owner, cx| {
-        owner
-            .recover(source, Action::Retry, cx)
-            .expect("field retry");
-        owner
-            .recover(source, Action::Retry, cx)
-            .expect("retry waits for its answer");
+    click_recovery(window, "chat-recovery-action-0", cx);
+    click_recovery(window, "chat-recovery-action-0", cx);
+    owner.read_with(cx, |owner, cx| {
         assert_eq!(
             owner.settings.read(cx).value(Field::User),
             "keep this settings draft"

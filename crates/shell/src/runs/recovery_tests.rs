@@ -142,8 +142,9 @@ fn explicit_retry_uses_its_captured_thread_and_is_consumed_even_when_refused() {
 #[test]
 fn retry_content_is_dropped_on_each_ownership_change_and_dismissal() {
     use kumochi_protocol::message::Action;
-    for end in 0..7 {
+    for end in 0..9 {
         let mut runs = ready();
+        assert!(runs.select_thread(Some(ThreadId(1))));
         submit(&mut runs, MARKER);
         runs.apply_run_state(
             RunId(1),
@@ -174,6 +175,11 @@ fn retry_content_is_dropped_on_each_ownership_change_and_dismissal() {
                 runs.confirm_delete(ThreadId(1));
             }
             6 => runs.dismiss_retry(),
+            7 => assert_eq!(
+                runs.submit(" ", |_| panic!("blank attempt")),
+                Err(Refused::Blank)
+            ),
+            8 => runs.back_to_kumo(),
             _ => unreachable!("fixture cases"),
         }
         assert_eq!(runs.kept(), Vec::<usize>::new(), "case {end}");

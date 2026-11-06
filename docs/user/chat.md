@@ -26,8 +26,8 @@ account operation to finish; sign-in stays blocked while earlier sessions still 
 Submitting the restored message is a new turn, so the earlier stored user turn can remain
 in the task history.
 
-Accounts currently controls ChatGPT; it doesn't sign in to Claude Code or replace an
-Anthropic API key. A later-round failure after answering starts doesn't automatically put
+Accounts also shows Claude Code's connection controls; it doesn't replace an Anthropic
+API key. A later-round failure after answering starts doesn't automatically put
 the original message back into the composer.
 
 An error can offer recovery controls beside the input. **Retry** on a failed message sends

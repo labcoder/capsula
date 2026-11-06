@@ -118,6 +118,7 @@ impl TextView {
                 let owner = self.owner.clone();
                 if route == Some(Route::Usage) {
                     return Link::new(("chat-recovery", ix))
+                        .debug_selector(move || format!("chat-recovery-action-{ix}"))
                         .href(MANAGE_USAGE_URL)
                         .text_color(cx.theme().link)
                         .underline()
@@ -141,6 +142,7 @@ impl TextView {
                     Action::ManageUsage => Text::AccountManageUsage,
                 };
                 Button::new(("chat-recovery", ix))
+                    .debug_selector(move || format!("chat-recovery-action-{ix}"))
                     .label(strings.get(label))
                     .disabled(!enabled)
                     .on_click(move |_, _, cx| {
@@ -169,6 +171,7 @@ impl TextView {
                         .children(actions)
                         .child(
                             Button::new("chat-recovery-dismiss")
+                                .debug_selector(|| "chat-recovery-dismiss".into())
                                 .ghost()
                                 .label(strings.get(Text::DismissNotice))
                                 .on_click(move |_, _, cx| {
