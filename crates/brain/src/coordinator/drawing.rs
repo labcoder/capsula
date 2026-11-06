@@ -3,7 +3,7 @@
 use kumochi_protocol::message::{DataToShell, RunId, SceneId, StepRef, ThreadId};
 
 use super::{Coordinator, Effect, Stale, StoreOp, speech};
-use crate::drawing::{Drawing, Input, Output};
+use crate::drawing::{CallError, Drawing, Input, Output};
 
 const MAX_RESULTS: usize = 64;
 
@@ -177,6 +177,16 @@ impl Coordinator {
                 .and_then(|run| run.draw_calls.iter().find(|(call, _)| *call == end.call))
                 .map(|(_, key)| key.clone());
             if let Some(key) = key {
+                if let Some(error) = &end.error {
+                    let (kind, code) = match error {
+                        CallError::Step(error) => ("Step", Some(error.code)),
+                        CallError::Token(_) => ("Token", None),
+                        CallError::Store => ("Store", None),
+                        CallError::Exhausted => ("Exhausted", None),
+                        CallError::Failed => ("Failed", None),
+                    };
+                    tracing::warn!(kind, ?code, "draw call rejected");
+                }
                 if matches!(end.error, Some(crate::drawing::CallError::Store)) {
                     self.call_failed(&key, effects)
                         .expect("the associated drawing run is current");

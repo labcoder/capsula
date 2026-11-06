@@ -260,3 +260,18 @@ its arguments, so the two can't drift, and the schema is closed with `additional
 `Caller`, `LedgerKey`, `CommitCall`, `ToolOutput`, `LocalWrite` and `Ledger` print kinds, runs,
 lengths and counts only: never arguments, outputs, call ids, keys or launches. A failed write logs a
 fixed line.
+
+Responses failures log only the closed failure kind, numeric HTTP status, classified provider
+code and parameter, and the host-owned numeric request key. Drawing rejection logs only its
+closed error kind and optional scene error code; provider prose and draw payloads stay out.
+An offline loopback replay exercises valid draw/completion, invalid draw/repair, provider 400
+and provider 429 with a three-request budget and checks that planted content never reaches logs.
+
+`cargo xtask live draw-schema` is a separately authorized live check, not part of tests. It uses
+the ordinary debug brain build and an isolated temporary task, submits one fixed screen-free
+turn with a three-request process budget, and reports counts and closed terminal metadata only.
+The reported request upper bound is submitted turns times three, not a measured request count.
+A positive draw result still drains both terminal metadata and `RunEnd`; failure metadata stays
+failed if a later terminal arrives. Missing fences stop at the deadline, and task deletion waits
+for a durable `ThreadDeleted::Removed` acknowledgment. The shared reader forwards settings for
+readiness, while the live observer avoids retaining received payloads in its diagnostic history.

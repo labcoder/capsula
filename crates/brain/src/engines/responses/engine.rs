@@ -135,7 +135,10 @@ impl<C: Connect> Shared<C> {
         events: &mpsc::Sender<TurnEvent>,
         gate: SendGate,
     ) -> Option<Finish> {
-        let failed = |failure| Some(Finish::Failed(EngineFailure::Stream(failure)));
+        let failed = |failure| {
+            tracing::warn!(?failure, owner = ?request.key, "responses failed before stream");
+            Some(Finish::Failed(EngineFailure::Stream(failure)))
+        };
         let Ok(value) = body(&request.request) else {
             return failed(Failure::Request);
         };
@@ -162,6 +165,20 @@ impl<C: Connect> Shared<C> {
             events,
         };
         let read = stream(&self.client, &body, &bearer.token, ask, &self.budget, out).await;
+        match read {
+            Err(Failure::Provider(error)) => tracing::warn!(
+                failure = "Provider",
+                http_status = error.status,
+                provider_code = ?error.code,
+                provider_param = ?error.param,
+                owner = ?request.key,
+                "responses attempt failed"
+            ),
+            Err(failure) => {
+                tracing::warn!(?failure, owner = ?request.key, "responses attempt failed")
+            }
+            Ok(()) => {}
+        }
         if let Err(failure) = read
             && failure.user_error().key() == ErrorKey::AccountRefused
         {

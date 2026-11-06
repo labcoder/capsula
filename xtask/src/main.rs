@@ -58,6 +58,8 @@ tasks:
                     baseline uses that directory and closes its own shell window
                     panel opens the current shell's panel before settling, without input
                     the current shell must paint no dock frame from the settle to Quit
+  live draw-schema  submit one screen-free draw turn with a three-request budget;
+                    requires explicit live authorization; prints only closed metadata
   live account      print only the dev brain's non-secret account state; never signs in
                     or sends a model request; refuses while any product process runs
   live signin       sign the dev brain in to its account: the brain opens the browser,

@@ -10,6 +10,7 @@
 )]
 
 mod claude_signin;
+mod draw_gate;
 mod signin;
 
 use std::fs;
@@ -47,6 +48,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
     match entry(build, &args.collect::<Vec<_>>())? {
         Entry::Prepare(check) => prepare(check),
         Entry::Inner(Check::Account) => signin::harness(signin::inspect),
+        Entry::Inner(Check::DrawGate) => draw_gate::inner(),
         Entry::Inner(Check::SignIn) => signin::inner(),
         Entry::Inner(Check::Claude(ask)) => claude_signin::inner(ask),
     }
@@ -67,13 +69,15 @@ enum Entry {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Check {
+    DrawGate,
     Account,
     SignIn,
     Claude(Ask),
 }
 
 impl Check {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
+        Self::DrawGate,
         Self::Account,
         Self::SignIn,
         Self::Claude(Ask::SignIn),
@@ -83,6 +87,7 @@ impl Check {
     /// The arguments after `live` that name it.
     fn args(self) -> &'static [&'static str] {
         match self {
+            Self::DrawGate => &["draw-schema"],
             Self::Account => &["account"],
             Self::SignIn => &["signin"],
             Self::Claude(Ask::SignIn) => &["claude-signin"],

@@ -151,7 +151,7 @@ impl Client {
         self.shared.write_control(message)
     }
 
-    pub(super) fn data(&self, message: &DataToBrain) -> Result<Instant> {
+    pub(crate) fn data(&self, message: &DataToBrain) -> Result<Instant> {
         self.shared.write_data(message)
     }
 
@@ -227,6 +227,15 @@ impl Client {
         }
     }
 
+    pub(crate) fn observe_unrecorded<T>(
+        &mut self,
+        limit: Duration,
+        pick: impl FnMut(&Seen) -> Option<T>,
+    ) -> Result<T> {
+        self.log.clear();
+        observe_unrecorded(&self.frames, limit, pick)
+    }
+
     /// The last frames taken, by kind, run and size; never their text.
     fn tail(&self) -> String {
         let start = self.log.len().saturating_sub(6);
@@ -278,6 +287,33 @@ impl Client {
     pub(super) fn quit(self) -> Result<()> {
         self.control(&ControlToBrain::Quitting)?;
         Ok(())
+    }
+}
+
+fn observe_unrecorded<T>(
+    frames: &Receiver<Seen>,
+    limit: Duration,
+    mut pick: impl FnMut(&Seen) -> Option<T>,
+) -> Result<T> {
+    let end = Instant::now() + limit;
+    loop {
+        if Instant::now() >= end {
+            bail!("live observation timed out");
+        }
+        let seen = frames
+            .recv_timeout(end.saturating_duration_since(Instant::now()))
+            .map_err(|error| match error {
+                RecvTimeoutError::Timeout => anyhow::anyhow!("live observation timed out"),
+                RecvTimeoutError::Disconnected => {
+                    anyhow::anyhow!("live observation channel disconnected")
+                }
+            })?;
+        if matches!(seen.frame, Frame::Closed) {
+            bail!("live pipe closed");
+        }
+        if let Some(value) = pick(&seen) {
+            return Ok(value);
+        }
     }
 }
 
@@ -369,8 +405,6 @@ fn control_reader(shared: Arc<Shared>, frames: Sender<Seen>) -> impl FnOnce() + 
                         continue;
                     }
                 }
-                // The slice 2 gate checks runs and deletes, not settings.
-                Ok(Some((ControlToShell::Settings { .. }, _))) => continue,
                 Ok(Some((message, _))) => Frame::Control(message),
                 Ok(None) | Err(_) => Frame::Closed,
             };
@@ -422,4 +456,55 @@ fn read<T: DeserializeOwned>(pipe: &PipeClient, which: Pipe) -> Result<Option<(T
         frame::decode(&payload)?,
         u32::try_from(HEADER_LEN + len)?,
     )))
+}
+
+#[cfg(test)]
+mod unrecorded_tests {
+    use super::*;
+
+    #[test]
+    fn a_queued_frame_cannot_extend_the_deadline() {
+        let (send, receive) = std::sync::mpsc::channel();
+        send.send(Seen {
+            at: Instant::now(),
+            frame: Frame::Closed,
+        })
+        .expect("queue fixture");
+        let result = observe_unrecorded(&receive, Duration::ZERO, |_| Some(()));
+        assert_eq!(
+            result.expect_err("deadline wins").to_string(),
+            "live observation timed out"
+        );
+    }
+
+    #[test]
+    fn pipe_close_and_channel_eof_end_observation() {
+        let (send, receive) = std::sync::mpsc::channel();
+        send.send(Seen {
+            at: Instant::now(),
+            frame: Frame::Closed,
+        })
+        .expect("queue fixture");
+        let result = observe_unrecorded(&receive, Duration::from_secs(1), |_| Some(()));
+        assert_eq!(
+            result.expect_err("closed wins").to_string(),
+            "live pipe closed"
+        );
+        drop(send);
+        let result = observe_unrecorded(&receive, Duration::from_secs(1), |_| Some(()));
+        assert_eq!(
+            result.expect_err("EOF ends").to_string(),
+            "live observation channel disconnected"
+        );
+    }
+
+    #[test]
+    fn an_open_channel_with_no_frames_times_out() {
+        let (_send, receive) = std::sync::mpsc::channel();
+        let result = observe_unrecorded(&receive, Duration::from_millis(1), |_| Some(()));
+        assert_eq!(
+            result.expect_err("deadline ends").to_string(),
+            "live observation timed out"
+        );
+    }
 }

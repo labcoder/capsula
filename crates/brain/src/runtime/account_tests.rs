@@ -38,6 +38,9 @@ use crate::runtime::account::{Access, Accounts, Event, HttpFactory, Net, exchang
 use crate::tap::Tap;
 use crate::test_support::{self, Captured, Scratch};
 
+#[path = "b10_replay_tests.rs"]
+mod b10_replay;
+
 const SIGNED_OUT: AccountView = AccountView::SignedOut {
     revocation_unconfirmed: false,
 };

@@ -9410,6 +9410,7 @@ dependencies = [
  "anyhow",
  "keyring",
  "kumochi-protocol",
+ "kumochi-scene",
  "rusqlite",
  "serde",
  "windows 0.62.2",
