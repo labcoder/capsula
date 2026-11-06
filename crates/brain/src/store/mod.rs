@@ -574,8 +574,9 @@ impl Store {
     }
 
     /// Deletion's first transaction: from here the thread is hidden, can't be sent as context,
-    /// and takes no new work. Returns its new generation; anything stamped with an older one is
-    /// stale. Call [`Store::finish_delete`] once its producers are stopped.
+    /// and takes no new work, and a task leaves an untitled note in Kumo's conversation, so its
+    /// title still leaves the files with it. Returns its new generation; anything stamped with an
+    /// older one is stale. Call [`Store::finish_delete`] once its producers are stopped.
     ///
     /// # Errors
     /// Fails with [`StoreError::NoThread`] when the thread isn't live.
@@ -584,16 +585,23 @@ impl Store {
         // An explicit transaction, so an error raised at commit reaches the caller; an
         // autocommit statement read through query_row would drop it.
         let tx = self.conn.transaction()?;
-        let generation = tx
+        let (generation, kind): (i64, String) = tx
             .query_row(
                 "UPDATE threads SET state = 'deleting',
                  deletion_generation = deletion_generation + 1
-                 WHERE id = ?1 AND state = 'live' RETURNING deletion_generation",
+                 WHERE id = ?1 AND state = 'live' RETURNING deletion_generation, kind",
                 params![thread],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?
             .ok_or(StoreError::NoThread)?;
+        if kind == "thread" {
+            tx.execute(
+                "INSERT INTO events (thread, run, kind, created_ms)
+                 SELECT id, NULL, 'task_deleted', ?1 FROM threads WHERE kind = 'main'",
+                params![now_ms()],
+            )?;
+        }
         tx.commit()?;
         Ok(Generation(generation))
     }
