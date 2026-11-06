@@ -6,12 +6,14 @@
 use super::{
     Transform,
     camera::{Camera, Light},
+    frame,
     mesh::{MeshScratch, build_local, narrowed},
     size::{MeshError, triangles},
 };
 use crate::{
     Handle, Op, WireId,
     layout::heap,
+    limits::MAX_SOLIDS,
     record::{Color, Solid, Token, View3d},
     theme::Theme,
 };
@@ -152,7 +154,11 @@ pub struct PreparedSolid {
     pub source: Arc<Op>,
     /// Index of the attachment parent in [`ViewGeometry::solids`].
     pub parent: Option<u16>,
-    /// Own position, rotation and scale; poses compose these parent-first.
+    /// Settled `pos3` offset: the final key of the latest track, zero without one.
+    pub pos3: [f32; 3],
+    /// Settled `rot3` offset in degrees, likewise.
+    pub rot3: [f32; 3],
+    /// Own position, rotation and scale with the settled offsets; poses compose these parent-first.
     pub local: Transform,
     /// Composed rest transform.
     pub rest: Transform,
@@ -164,6 +170,12 @@ pub struct PreparedSolid {
     pub rgb: [u8; 3],
     /// Authored opacity, 1 when omitted.
     pub opacity: f32,
+}
+impl PreparedSolid {
+    /// Its own transform at the sampled offsets `pos3` and `rot3`, composed as `local` is.
+    pub(crate) fn posed(&self, pos3: [f32; 3], rot3: [f32; 3]) -> Transform {
+        local(record(&self.source), pos3, rot3)
+    }
 }
 impl fmt::Debug for PreparedSolid {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -228,28 +240,70 @@ impl ViewGeometry {
         bytes
     }
 
-    /// The same view with `colors` applied to its solids, sharing every mesh and source.
+    /// The same view with `colors` and settled track `ends` applied, sharing every mesh and
+    /// source: an offset recomposes rests but never rebuilds a local mesh.
     #[must_use]
-    pub(crate) fn recolored(&self, colors: &HashMap<&WireId, Color>, theme: &Theme) -> Self {
+    pub(crate) fn restyled(
+        &self,
+        colors: &HashMap<&WireId, Color>,
+        ends: &HashMap<&WireId, Ends>,
+        theme: &Theme,
+    ) -> Self {
+        let mut solids: Vec<PreparedSolid> = Vec::with_capacity(self.solids.len());
+        for solid in &*self.solids {
+            let end = ends.get(&solid.id).copied().unwrap_or_default();
+            let (pos3, rot3) = (
+                end.pos3.unwrap_or(solid.pos3),
+                end.rot3.unwrap_or(solid.rot3),
+            );
+            let local = local(record(&solid.source), pos3, rot3);
+            let color = colors.get(&solid.id).copied().or(solid.color);
+            solids.push(PreparedSolid {
+                pos3,
+                rot3,
+                local,
+                rest: solid
+                    .parent
+                    .map_or(local, |p| local.then(&solids[usize::from(p)].rest)),
+                color,
+                rgb: resolved(color, theme),
+                ..solid.clone()
+            });
+        }
         Self {
             handle: self.handle,
             source: Arc::clone(&self.source),
-            camera: self.camera,
+            camera: camera(self.record(), &solids),
             light: self.light,
-            solids: self
-                .solids
-                .iter()
-                .map(|solid| {
-                    let color = colors.get(&solid.id).copied().or(solid.color);
-                    PreparedSolid {
-                        color,
-                        rgb: resolved(color, theme),
-                        ..solid.clone()
-                    }
-                })
-                .collect(),
+            solids: solids.into_boxed_slice(),
             failed: self.failed,
         }
+    }
+
+    /// The built solids posed by `poses`, in attach order, borrowed into caller storage with no
+    /// allocation; empty when the view failed or `poses` doesn't match its solids.
+    pub fn solids_at<'a, 'b>(
+        &'a self,
+        poses: &[Transform],
+        out: &'b mut [frame::Solid<'a>; MAX_SOLIDS],
+    ) -> &'b [frame::Solid<'a>] {
+        if self.failed || poses.len() != self.solids.len() || poses.len() > MAX_SOLIDS {
+            return &out[..0];
+        }
+        for ((slot, solid), pose) in out.iter_mut().zip(&*self.solids).zip(poses) {
+            let Mesh::Built(mesh) = &solid.mesh else {
+                return &out[..0];
+            };
+            *slot = frame::Solid {
+                vertices: &mesh.vertices,
+                triangles: &mesh.triangles,
+                faces: &mesh.faces,
+                pose: *pose,
+                rgb: solid.rgb,
+                opacity: solid.opacity,
+            };
+        }
+        &out[..poses.len()]
     }
 
     /// The same view without the solids a cut dropped, sharing every mesh.
@@ -271,6 +325,8 @@ impl ViewGeometry {
                     handle: solid.handle,
                     source: Arc::clone(&solid.source),
                     parent,
+                    pos3: solid.pos3,
+                    rot3: solid.rot3,
                     local: solid.local,
                     rest: solid.rest,
                     mesh: solid.mesh.clone(),
@@ -301,8 +357,35 @@ impl ViewGeometry {
     }
 }
 
+/// A step's settled 3D track ends for one solid: each track's final key.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct Ends {
+    pub(crate) pos3: Option<[f32; 3]>,
+    pub(crate) rot3: Option<[f32; 3]>,
+}
+
+fn record(source: &Op) -> &Solid {
+    match source {
+        Op::Solid(solid) => solid,
+        _ => unreachable!("prepared solids hold solid records"),
+    }
+}
+
+/// A solid's own transform with track offsets added to its authored position and rotation: the
+/// one composition rest and every sampled pose share, so a settled pose equals its rest bit for bit.
+pub(crate) fn local(record: &Solid, pos3: [f32; 3], rot3: [f32; 3]) -> Transform {
+    let get = |v: Option<[crate::Finite; 3]>| v.map_or([0.0; 3], |v| v.map(crate::Finite::get));
+    let (pos, rot) = (get(record.pos), get(record.rot));
+    Transform::local(
+        std::array::from_fn(|i| pos[i] + pos3[i]),
+        std::array::from_fn(|i| rot[i] + rot3[i]),
+        record.scale.map_or(1.0, crate::record::Size::get),
+    )
+}
+
 /// Builds every solid whose record changed since `before` and shares the rest. A solid keeps
-/// its colour from `colors`, this step's sets, else from `before` while its record is unchanged.
+/// its colour from `colors`, this step's sets, else from `before` while its record is unchanged,
+/// and its settled offsets from `ends`, else from `before` while its handle is unchanged.
 ///
 /// A solid that fails at rest keeps that failure while its record is unchanged, and the view
 /// is published empty. Only cancellation and an exhausted output fail the call.
@@ -312,6 +395,7 @@ pub(crate) fn tessellate_view(
     input: &ViewInput,
     before: Option<&ViewGeometry>,
     colors: &HashMap<&WireId, Color>,
+    ends: &HashMap<&WireId, Ends>,
     theme: &Theme,
     cancel: &AtomicBool,
     scratch: &mut MeshScratch,
@@ -321,12 +405,12 @@ pub(crate) fn tessellate_view(
     let mut solids: Vec<PreparedSolid> = Vec::with_capacity(input.solids.len());
     for solid in &*input.solids {
         let record = solid.record();
-        let get = |v: Option<[crate::Finite; 3]>| v.map_or([0.0; 3], |v| v.map(crate::Finite::get));
-        let local = Transform::local(
-            get(record.pos),
-            get(record.rot),
-            record.scale.map_or(1.0, crate::record::Size::get),
-        );
+        let held = before
+            .and_then(|old| old.solids.iter().find(|old| old.handle == solid.handle))
+            .map_or(([0.0; 3], [0.0; 3]), |old| (old.pos3, old.rot3));
+        let end = ends.get(&record.id).copied().unwrap_or_default();
+        let (pos3, rot3) = (end.pos3.unwrap_or(held.0), end.rot3.unwrap_or(held.1));
+        let local = local(record, pos3, rot3);
         let rest = solid
             .parent
             .map_or(local, |p| local.then(&solids[usize::from(p)].rest));
@@ -346,6 +430,8 @@ pub(crate) fn tessellate_view(
             handle: solid.handle,
             source: Arc::clone(&solid.source),
             parent: solid.parent,
+            pos3,
+            rot3,
             local,
             rest,
             mesh,
@@ -496,6 +582,7 @@ mod tests {
                 &input,
                 None,
                 &HashMap::new(),
+                &HashMap::new(),
                 &theme,
                 &AtomicBool::new(true),
                 &mut scratch
@@ -507,6 +594,7 @@ mod tests {
             &input,
             None,
             &HashMap::new(),
+            &HashMap::new(),
             &theme,
             &AtomicBool::new(false),
             &mut scratch,
@@ -516,7 +604,7 @@ mod tests {
     }
 
     #[test]
-    fn a_colour_only_step_admits_no_view_input() {
+    fn colour_and_track_only_steps_admit_no_view_input() {
         let Ok(Record::Begin(header)) =
             parse_record(br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":""}}"#)
         else {
@@ -543,6 +631,13 @@ mod tests {
         assert!(
             shaded.preparation.views.is_empty(),
             "preparation reshades from the step; admission composes nothing"
+        );
+        let moved = commit(
+            br#"{"step":{"id":"c","put":[{"anim":{"target":"s","track":"pos3","keys":[[0,[0,0,0]],[100,[1,0,0]]]}}]}}"#,
+        );
+        assert!(
+            moved.preparation.views.is_empty(),
+            "preparation restyles a track-only step; admission composes no input"
         );
     }
 

@@ -8,10 +8,14 @@ use crate::{
     Begin, ErrorCode, GlobalBudget, Handle, Op, SceneEvent, SceneState, WireId,
     display::{DisplayList, Item, PaintWork, Prim, TextMeasure},
     geom::{Affine, Rect, Vec2},
-    record::{Anchor, Change, Color, Enter, Track},
+    record::{Anchor, Change, Color, Enter, KeyValue, Track},
     state::{object, work},
     theme::Theme,
-    three::{mesh::MeshScratch, size::MeshError, view::tessellate_view},
+    three::{
+        mesh::MeshScratch,
+        size::MeshError,
+        view::{Ends, tessellate_view},
+    },
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -353,6 +357,22 @@ pub fn prepare(
         .filter(|change| is_three(&change.target))
         .filter_map(|change| change.color.map(|color| (&change.target, color)))
         .collect();
+    // A 3D track's final key settles into its solid's rest, so a cut or recovery lands there.
+    let mut ends: HashMap<&WireId, Ends> = HashMap::new();
+    for op in &*ticket.run.put {
+        if let Op::Anim(anim) = op
+            && is_three(&anim.target)
+            && let KeyValue::V3(value) = crate::motion::final_key(anim)
+        {
+            let value = Some(value.map(crate::Finite::get));
+            let end = ends.entry(&anim.target).or_default();
+            match anim.track {
+                Track::Pos3 => end.pos3 = value,
+                Track::Rot3 => end.rot3 = value,
+                _ => {}
+            }
+        }
+    }
     let mut views = Vec::with_capacity(ticket.views.len());
     let mut scratch = None;
     for update in &ticket.views {
@@ -365,6 +385,7 @@ pub fn prepare(
             input,
             before.views.get(&update.id).map(|view| &**view),
             &colors,
+            &ends,
             &theme,
             cancel,
             scratch.get_or_insert_with(MeshScratch::new),
@@ -381,19 +402,19 @@ pub fn prepare(
         });
     }
     let scratch_bytes = scratch.as_ref().map_or(0, MeshScratch::bytes);
-    if !colors.is_empty() {
-        // A colour-only view keeps its inputs, so it reshades the predecessor's geometry.
+    if !colors.is_empty() || !ends.is_empty() {
+        // A colour- or track-only view keeps its inputs, so it restyles the predecessor's geometry.
         for (id, old) in &before.views {
             if ticket.views.iter().any(|update| update.id == *id)
                 || !old
                     .solids
                     .iter()
-                    .any(|solid| colors.contains_key(&solid.id))
+                    .any(|solid| colors.contains_key(&solid.id) || ends.contains_key(&solid.id))
             {
                 continue;
             }
             build.check_cancel()?;
-            let geometry = Arc::new(old.recolored(&colors, &theme));
+            let geometry = Arc::new(old.restyled(&colors, &ends, &theme));
             after.views.insert(id.clone(), Arc::clone(&geometry));
             views.push(PreparedView {
                 view: old.handle,

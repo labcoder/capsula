@@ -14,6 +14,7 @@ use crate::test_support::Scratch;
 
 mod anthropic;
 mod bounds;
+mod github;
 mod inventory;
 mod marker;
 mod staging;

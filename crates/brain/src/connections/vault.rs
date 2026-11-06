@@ -18,6 +18,7 @@ use super::records::{Account, MAX_RECORD_BYTES, Record, RevocationList};
 use crate::platform::credential::{CredentialStore, SecretBytes};
 use crate::platform::{self, SessionLock};
 
+mod github;
 pub(crate) mod staging;
 
 /// Removed generations one sweep pass visits [guess]; the rest wait for the next pass.
@@ -558,7 +559,7 @@ impl Write for JsonBuffer {
     }
 }
 
-fn encode<T: Serialize>(value: &T, limit: usize) -> Result<SecretBytes, VaultError> {
+pub(super) fn encode<T: Serialize>(value: &T, limit: usize) -> Result<SecretBytes, VaultError> {
     let mut buffer = JsonBuffer {
         bytes: Zeroizing::new(Vec::with_capacity(limit)),
         limit,
@@ -567,7 +568,10 @@ fn encode<T: Serialize>(value: &T, limit: usize) -> Result<SecretBytes, VaultErr
     Ok(Secret::new(buffer.bytes))
 }
 
-fn decode<T: DeserializeOwned>(bytes: &SecretBytes, limit: usize) -> Result<T, VaultError> {
+pub(super) fn decode<T: DeserializeOwned>(
+    bytes: &SecretBytes,
+    limit: usize,
+) -> Result<T, VaultError> {
     if bytes.expose().len() > limit {
         return Err(VaultError::Bounds);
     }

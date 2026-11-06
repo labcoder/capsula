@@ -1,6 +1,8 @@
 //! The background job slot: a task's title job after a run ends `Done`, fenced by new runs,
 //! deletes and sign-out, and keyed so an old job's answers never touch a new one.
 
+use std::time::Duration;
+
 use kumochi_protocol::message::{ControlToShell, EventId, Phase, RunId, ThreadId, ThreadTitle};
 
 use super::{R, T, admit, engine, fresh, request, run_end, state};
@@ -114,6 +116,7 @@ fn start_job(key: JobKey, run: RunId) -> Effect {
 fn ready(key: JobKey) -> Input {
     Input::SendReady {
         key: SendKey::Job(key),
+        hold: None,
     }
 }
 
@@ -726,4 +729,32 @@ fn a_title_output_never_becomes_a_summary_or_the_reverse() {
         Ok(Vec::new()),
         "a title request whose answer is unusable failed, so no compaction follows it"
     );
+}
+
+/// H-h, a job's send: the default, under the cap, exactly at it, and over it.
+#[test]
+fn a_held_job_send_arms_its_hold_capped_at_165_seconds() {
+    for (hold, seconds) in [
+        (None, 15),
+        (Some(20), 20),
+        (Some(165), 165),
+        (Some(166), 165),
+    ] {
+        let mut core = reading();
+        core.handle(job_built(key(2), &[T])).expect("current");
+        assert_eq!(
+            core.handle(Input::SendReady {
+                key: SendKey::Job(key(2)),
+                hold: hold.map(Duration::from_secs),
+            }),
+            Ok(vec![
+                Effect::Grant(lease(key(2), 1)),
+                Effect::ArmSendDeadline {
+                    lease: lease(key(2), 1),
+                    after: Duration::from_secs(seconds),
+                },
+            ]),
+            "{hold:?}"
+        );
+    }
 }
