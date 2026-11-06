@@ -166,3 +166,60 @@ fn source_byte_limit_remains_a_decoder_check() {
         .expect_err("8194 source bytes exceed the decoder limit");
     assert_eq!(error.code, kumochi_scene::ErrorCode::TooLong);
 }
+
+#[test]
+fn handwritten_forms_agree_on_near_misses_with_the_typed_decoder() {
+    let validator = jsonschema::validator_for(&draw_schema()).expect("local drawing schema");
+    for (kind, value, accepted) in [
+        ("Start", json!("now"), true),
+        ("Start", json!("noww"), false),
+        ("Start", json!({"after":"s","ms":60000}), true),
+        ("Start", json!({"after":"s","ms":60001}), false),
+        ("Start", json!({"after":"s","ms":0,"extra":0}), false),
+        ("Anchor", json!([20000, -20000]), true),
+        ("Anchor", json!([20001, 0]), false),
+        ("Anchor", json!({"ref":"n"}), true),
+        ("Anchor", json!({"ref":"n","extra":0}), false),
+        ("Color", json!("#aBc123"), true),
+        ("Color", json!("#aBc12"), false),
+        ("Color", json!("#gg0000"), false),
+        ("Color", json!({"Rgb":0}), false),
+        ("Cell", json!(""), true),
+        ("Cell", json!(true), true),
+        ("Cell", Value::Null, false),
+        ("Cell", json!([]), false),
+        ("Point", json!(1), true),
+        ("Point", json!([1, 2]), true),
+        ("Point", json!([1]), false),
+        ("Point", json!([1, 2, 3]), false),
+        ("KeyValue", json!([20000, -20000]), true),
+        ("KeyValue", json!([20001, 0]), false),
+        ("KeyValue", json!([0, 0, 0, 0]), false),
+        ("KeyValue", json!({"color":"blue"}), false),
+    ] {
+        let step = match kind {
+            "Start" => json!({"id":"s","start":value}),
+            "Anchor" => json!({"id":"s","put":[{"line":{"id":"n","from":value,"to":[0,0]}}]}),
+            "Color" => {
+                json!({"id":"s","put":[{"text":{"id":"n","at":[0,0],"text":"","color":value}}]})
+            }
+            "Cell" => json!({"id":"s","put":[{"row":{"id":"n","cells":[value]}}]}),
+            "Point" => json!({"id":"s","put":[{"series":{"id":"n","data":[value]}}]}),
+            "KeyValue" => {
+                json!({"id":"s","put":[{"anim":{"target":"n","track":"x","keys":[[0,value]]}}]})
+            }
+            _ => unreachable!("closed fixture kinds"),
+        };
+        let record = json!({"step":step});
+        assert_eq!(
+            validator.is_valid(&json!({"records":[record]})),
+            accepted,
+            "{kind} schema"
+        );
+        assert_eq!(
+            parse_record(&serde_json::to_vec(&record).expect("fixture")).is_ok(),
+            accepted,
+            "{kind} decoder"
+        );
+    }
+}
