@@ -111,7 +111,9 @@ impl Presence {
             frames.borrow_mut().shown = true;
         } else if !sample.visible && shown {
             frames.borrow_mut().shown = false;
-            hide(overlay.window, cx)?;
+            // Repaint the empty frames first, so a failed hide leaves nothing on screen.
+            overlay.drawing.update(cx, |_, cx| cx.notify());
+            return hide(overlay.window, cx);
         } else if !sample.changed {
             return Ok(());
         }
@@ -157,7 +159,7 @@ pub(super) fn show(window: AnyWindowHandle, cx: &mut App) -> Result<(), OpenErro
     Ok(())
 }
 
-fn hide(window: AnyWindowHandle, cx: &mut App) -> Result<(), OpenError> {
+pub(super) fn hide(window: AnyWindowHandle, cx: &mut App) -> Result<(), OpenError> {
     window
         .update(cx, |_, window, _| platform::hide_presence_window(window))
         .map_err(|error| OpenError::Gpui(error.into()))??;
@@ -172,16 +174,34 @@ enum Piece {
 }
 
 /// Paints one item's primitives in window logical pixels, which are primary-display logical
-/// pixels, with its transform, opacity, color, reveal and dash phase. Its geometry builds in
-/// full first, so a primitive that fails paints none of the item.
+/// pixels, with its transform, opacity, color, reveal and dash phase.
 pub(super) fn paint_item(
     item: &FrameItem,
     prims: &[Prim],
     window: &mut Window,
     cx: &mut App,
 ) -> Result<(), BuildError> {
-    if item.opacity <= 0.0 {
-        return Ok(());
+    let pieces = pieces(item, prims)?;
+    for (prim, piece) in prims.iter().zip(pieces) {
+        match piece {
+            Piece::Quad(quad) => window.paint_quad(quad),
+            Piece::Paths(paths) => {
+                for (path, paint) in paths {
+                    window.paint_path(path, color(paint, item.color, item.opacity));
+                }
+            }
+            Piece::Text => paint_text(item, prim, window, cx)?,
+        }
+    }
+    Ok(())
+}
+
+/// Every primitive of an item, built in full before any of it paints, so a primitive that fails
+/// paints none of the item. None while it can't show: opacity not finite and positive, or a
+/// non-finite draw, which would otherwise take the fully drawn branches.
+fn pieces(item: &FrameItem, prims: &[Prim]) -> Result<Vec<Piece>, BuildError> {
+    if !item.opacity.is_finite() || item.opacity <= 0.0 || !item.draw.is_finite() {
+        return Ok(Vec::new());
     }
     let ink = |paint| color(paint, item.color, item.opacity);
     let mut pieces = Vec::with_capacity(prims.len());
@@ -213,18 +233,7 @@ pub(super) fn paint_item(
             )?),
         });
     }
-    for (prim, piece) in prims.iter().zip(pieces) {
-        match piece {
-            Piece::Quad(quad) => window.paint_quad(quad),
-            Piece::Paths(paths) => {
-                for (path, paint) in paths {
-                    window.paint_path(path, ink(paint));
-                }
-            }
-            Piece::Text => paint_text(item, prim, window, cx)?,
-        }
-    }
-    Ok(())
+    Ok(pieces)
 }
 
 /// A rect's native quad while its transform keeps it axis-aligned and upright and it is fully

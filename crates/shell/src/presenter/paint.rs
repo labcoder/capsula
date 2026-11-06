@@ -98,6 +98,7 @@ impl Frames {
             slot.sampled = None;
             slot.painted.set(None);
             slot.acknowledged = None;
+            // `failed` stays set: a paint failure is terminal and paint_failed clears the scene.
         }
     }
 

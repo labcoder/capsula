@@ -17,7 +17,7 @@ use kumochi_protocol::message::{DataToShell, SceneId};
 use kumochi_scene::{
     DetachedCandidate, GlobalBudget, SceneRead, StepError,
     deferred::Deferred,
-    display::TextMeasure,
+    display::{PaintWork, TextMeasure},
     layout::{self, PrepareError, PrepareInput, PreparedStep, SceneRecovery, SurfaceGeometry},
     theme::Theme,
 };
@@ -101,9 +101,13 @@ impl PrepareJob {
     /// Prepares on the calling worker thread until done or cancelled.
     pub(crate) fn run(self, measure: &mut dyn TextMeasure) -> Completion {
         let cancel = self.cancel;
-        let mut result = self
-            .input
-            .map(|input| layout::prepare(input, measure, &cancel));
+        let mut result = self.input.map(|input| {
+            layout::prepare(
+                input.with_paint_cap(Some(PaintWork::LIMITS)),
+                measure,
+                &cancel,
+            )
+        });
         let full_after = result
             .as_ref()
             .map_or(0, |prepared| prepared.after.resident_bytes());
@@ -199,8 +203,14 @@ impl RecoveryJob {
                 .iter()
                 .map(|source| (&source.header.begin, source.log.as_slice()))
                 .collect();
-            let (results, budget) =
-                layout::recover_all(&batch, self.surface, &self.theme, measure, &self.cancel);
+            let (results, budget) = layout::recover_all(
+                &batch,
+                self.surface,
+                &self.theme,
+                measure,
+                &self.cancel,
+                Some(PaintWork::LIMITS),
+            );
             global = budget;
             sources
                 .iter()
