@@ -141,6 +141,55 @@ and encoding errors expose only a fixed numeric code, never pixels or foreign er
 These entry points have no production caller yet; scheduling, staged replies and generation
 checks are not connected. Nothing here exports images or captures another frame.
 
+## Regional OCR
+
+`screen/ocr.rs` accepts only `SanitizedFrame`. Sanitizing records the exact clipped physical
+rectangles it painted at that generation; these, not a later independent mask list, filter OCR
+words. `OcrRegion` comes from the focus crop's `CaptureTransform` or a readable completed
+`ElementTree` window belonging to that capture. Regions clip to the captured display; empty
+intersections are refused. There is no display source or fallback, but a maximized window is
+valid even when its bounds equal the display.
+
+The portable trigger uses fewer than 20 nonempty named elements [guess], or the exact native
+class `Chrome_RenderWidgetHostHWND` of the **focused element's HWND**, not the top-level window.
+A6 supplies that metadata and integrates the operation; A5 adds no UIA reads or production
+request/reply route. OCR remains disconnected from the worker and exports no content.
+
+One bounded channel (capacity one) feeds a dedicated OS thread. Only that thread creates its
+MTA apartment, English WinRT OCR engine, BGRA8 bitmap and recognition operation; no native object
+crosses threads. Regional rows retain the capture's BGRA order without a channel swap.
+Missing English or a native failure returns fixed `Unavailable`, never foreign
+error text. macOS has no adapter yet. The only pixel copy is the selected sanitized region.
+Before allocating a native bitmap, oversized regions scale aspect-preservingly to
+`OcrEngine::MaxImageDimension`, without enlargement. Small text can be lost at that scale;
+tiling is deferred until integration measurements or a user's misses justify it.
+
+Pending masks are refused before recognition. Results retain capture, generation and mask
+completeness, including `Partial` and `Unknown`; neither claims full protection. Native floating
+word bounds scale back to the region, round outward, clip, and translate to desktop physical
+coordinates before any mask intersection. Any intersecting word is removed **before** caps of
+2,000 words and 32,768 UTF-8 bytes [guesses]. Byte truncation preserves scalar boundaries and is
+reported explicitly. After completion the caller re-locks the shared `MaskSink`; changed capture
+or generation (or poison) discards all words and returns content-free `Superseded`. A6 must still
+admit only current generations when publishing.
+
+Admission, response and final mask-lock waits observe cancellation, channel EOF and the same
+absolute deadline. Pixel copying checks between rows; native operation polling and word extraction
+observe the shared stop flag and deadline. An aborted caller retires that recognizer, so a late
+reply cannot revive it. A native failure also stays failed for that recognizer's lifetime.
+Drop does not join or forcibly kill the native thread; native cancellation
+is cooperative and a hung call remains contained by the killable screen worker. A6 owns worker
+retirement. All carriers have content-redacted Debug, and errors contain fixed kinds only.
+
+Offline fixtures use synthetic pixels and fake engines, including a blocked engine with a newly
+published mask. They cover trigger boundaries, region provenance/clipping, maximized windows,
+one pixel over the engine maximum, outward inverse geometry, mask filtering before both caps,
+Unicode bounds, completeness, supersession, every caller wait's cancellation/EOF/deadline, closed
+engine channels, fixed unavailability, and sentinel-safe diagnostics. They never read real windows,
+capture the desktop or run native OCR. An ignored, manually named Windows smoke test checks
+that the real recognizer accepts a blank synthetic BGRA bitmap and returns zero words.
+It never runs in CI. Real-region recognition and timing need a separately scheduled check.
+
 ## Deadline evidence on Rez
 
 CI uses the injected-clock deadline fixture, not a scheduler-speed assertion. Build the integration
