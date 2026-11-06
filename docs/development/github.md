@@ -36,7 +36,7 @@ The transport collects at most 4 KiB for device replies, 64 KiB for `/user`, and
 issues: a future preflight must fail without sending if the page exceeds it, and
 a post-send lookup must remain Unknown. Never raise this cap or omit malformed
 rows to make a lookup appear complete. The API layer applies these caps again to
-injected `Http` responses; the issue layer must also bound both match pages together.
+injected `Http` responses; the issue layer also bounds both match pages together.
 
 `ResponseMeta` retains only parsed Date, Retry-After and rate-window numbers.
 Duplicate, oversized, malformed and overflowing headers become absent, not zero.
@@ -46,7 +46,7 @@ reading diagnostic bodies. Body failures after headers never become Connect.
 Per-request deadlines include the response body: 15 seconds for device, user,
 installation-page and repository-page calls, 30 seconds for create and issue-page calls.
 
-Create-outcome classification and two-page exact matching belong to a later
+Create-outcome classification and two-page exact matching belong to the
 `github/issues.rs` layer. The account layer owns polling, account
 generations and repository aggregation, including a total installation traversal
 bound; a two-page limit on each list alone does not bound that traversal.
@@ -89,5 +89,36 @@ An unusable but present Retry-After still makes 403 RateLimited, without inventi
 retry advice. API refusals cap usable Retry-After advice to one hour (3,600 seconds).
 Timeout, transport loss, redirects, malformed success and unexpected non-4xx
 statuses remain uncertain. Hand-written Debug never prints credentials, user
-codes, logins, repository names or provider text. Issue posting and matching are
-a later `github/issues.rs` layer and add no caller here.
+codes, logins, repository names or provider text. These layers add no runtime caller.
+
+## Single-attempt issue creation and exact matching
+
+`connections/github/issues.rs` borrows checked `IssueTitle` and `IssueBody` through
+`IssueContent`. Only that content can construct the private-field `IssuePayload`
+used by the public create endpoint. Serialization writes just title and body into
+a zeroizing buffer; arbitrary bytes and additional issue fields have no constructor.
+`create_issue` makes one HTTP call under a 30-second outer deadline, with no retry.
+Created requires a 201, a positive issue number and the exact canonical URL built
+from the requested repository and number. Malformed or oversized 201 replies,
+foreign URLs, unexpected non-4xx statuses and post-dispatch transport failures
+are Uncertain. Pre-dispatch refusals and Connect are definite Network failures.
+Known 4xx responses use the shared closed reason table and retain only numeric
+status and parsed metadata, with usable retry advice capped at one hour.
+`rate_reset_s` stays uncapped as absolute timestamp data; this layer derives no wait from it.
+
+`list_matches` makes at most two GETs under one shared 30-second deadline. It
+compares remote title/body exactly, without applying local authoring normalization
+or bounds. A null body compares as empty; any `pull_request` field, even null,
+excludes that row. Missing, mistyped, duplicate or malformed known fields, invalid
+timestamps, duplicate issue numbers and pages over 100 rows fail the whole lookup.
+Returned candidates contain only checked numbers, locally built URLs and creation
+seconds, plus unchanged page-one metadata. A full second page is incomplete even
+when every row was filtered out; no Link or third page is followed.
+
+Parser-entry caps enforce 1 MiB even for injected clients. A large remote page
+therefore fails the lookup that runs before a create, so nothing is sent, or
+leaves the lookup after a send Unknown; callers must require completeness.
+Dropping either API future drops its active request future. No task survives
+cancellation. The action coordinator owns consent, durable admission, pre-send
+exclusions, generation checks and placement; this layer never resends or
+substitutes the local clock for missing server evidence.

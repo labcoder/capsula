@@ -3,6 +3,8 @@
 use rusqlite::{OptionalExtension as _, params};
 
 use super::{Store, StoreError, now_ms, sql_id};
+use kumochi_protocol::message::ThreadId;
+
 use crate::dispatch::{CommitCall, Committed, LocalWrite, ToolError};
 
 impl Store {
@@ -14,10 +16,34 @@ impl Store {
     /// [`StoreError::Call`], with no SQLite text, when SQLite fails, the key is already
     /// recorded, or the output is over the column's cap; nothing is written.
     pub(crate) fn commit_call(&mut self, call: &CommitCall) -> Result<Committed, StoreError> {
+        if let LocalWrite::CreateTask { thread, .. } = &call.write {
+            self.reserve(*thread)?;
+        }
         self.record_call(call).map_err(|error| match error {
             StoreError::Sql(_) => StoreError::Call,
             other => other,
         })
+    }
+
+    /// Raises the thread high-water to `thread` in its own commit, so the id is issued before its
+    /// task exists and is never reused, even if the task never commits.
+    ///
+    /// # Errors
+    /// [`StoreError::StaleId`] when `thread` isn't above the high-water; [`StoreError::Call`]
+    /// when SQLite fails.
+    pub(super) fn reserve(&mut self, thread: ThreadId) -> Result<(), StoreError> {
+        let id = sql_id(thread.0, StoreError::StaleId)?;
+        let reserved = self
+            .conn
+            .execute(
+                "UPDATE sqlite_sequence SET seq = ?1 WHERE name = 'threads' AND seq < ?1",
+                params![id],
+            )
+            .map_err(|_| StoreError::Call)?;
+        if reserved == 0 {
+            return Err(StoreError::StaleId);
+        }
+        Ok(())
     }
 
     fn record_call(&mut self, call: &CommitCall) -> Result<Committed, StoreError> {
@@ -40,6 +66,18 @@ impl Store {
                 if live.is_none() {
                     return Ok(Committed::Refused(ToolError::NoTask));
                 }
+            }
+            LocalWrite::CreateTask {
+                thread: task,
+                title,
+                ..
+            } => {
+                let now = now_ms();
+                tx.execute(
+                    "INSERT INTO threads (id, title, title_source, created_ms, updated_ms)
+                     VALUES (?1, ?2, 'model', ?3, ?3)",
+                    params![sql_id(task.0, StoreError::StaleId)?, title.as_str(), now],
+                )?;
             }
             #[cfg(test)]
             LocalWrite::Title(title) => {
