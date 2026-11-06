@@ -74,8 +74,9 @@ Source's UTF-8 byte ceiling, reference ordering, header equality, composed
 scale and scene/global budgets remain runtime checks. A schema-valid drawing
 is not necessarily admissible. Optional fields and defaults remain optional.
 
-This export alone does not offer a tool or execute a drawing. The brain's draw
-adapter must enforce the same 2D restrictions before admitting a complete call.
+The brain advertises this schema through its draw tool. Its complete-call adapter
+enforces the same 2D restrictions before admitting any scene record; the drawing
+reducer remains authoritative for semantic and resource admission.
 
 ### 3D records
 

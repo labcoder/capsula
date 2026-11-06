@@ -408,8 +408,7 @@ struct Tool {
     prepare: fn(&[u8]) -> Result<Prepared, ToolError>,
 }
 
-/// Every tool. shortcut: none is offered to a model yet (`context::tools` is empty), until the
-/// staged producers are enabled (OSC-116); 14b and B10 add theirs.
+/// Tools admitted by reach and route; `context::tools` advertises draw to model runs.
 const TOOLS: &[Tool] = &[
     draw::DRAW,
     create_task::CREATE_TASK,
