@@ -474,7 +474,10 @@ impl Settings {
 }
 
 fn settings_error(key: ErrorKey) -> bool {
-    matches!(key, ErrorKey::SettingsRefused | ErrorKey::ConfigUnreadable)
+    matches!(
+        key,
+        ErrorKey::SettingsRefused | ErrorKey::ConfigUnreadable | ErrorKey::VoiceUnavailable
+    )
 }
 
 #[cfg(test)]

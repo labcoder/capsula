@@ -616,3 +616,67 @@ async fn a_rename_reaches_the_next_run_and_never_a_running_ones_rebuild() {
         "the next run takes the rename"
     );
 }
+
+/// Start-up recovery's config writes, read back from the file.
+fn removing_on_disk(path: &std::path::Path) -> toml::Value {
+    let saved: toml::Table = std::fs::read_to_string(path)
+        .expect("readable")
+        .parse()
+        .expect("parses");
+    saved["voice"]["removing"].clone()
+}
+
+fn seeded(scratch: &Scratch, removing: &str) -> std::path::PathBuf {
+    std::fs::create_dir_all(scratch.dir()).expect("scratch folder");
+    let path = scratch.dir().join(CONFIG_FILE);
+    std::fs::write(
+        &path,
+        format!("[voice]\ninstalled = [\"speech-input\"]\nremoving = {removing}\n"),
+    )
+    .expect("seeded");
+    path
+}
+
+#[tokio::test]
+async fn start_up_deletes_each_removed_part_then_finishes_its_removal() {
+    let scratch = Scratch::new("voice-removals");
+    let path = seeded(
+        &scratch,
+        "[\"speech-input\", \"later-part\", \"spoken-replies\"]",
+    );
+    let models = scratch.dir().join("models");
+    let spoken = models.join(VoicePart::SpokenReplies.dir());
+    std::fs::create_dir_all(spoken.join("voices")).expect("a part left mid-delete");
+    std::fs::write(spoken.join("voices").join("juniper.bin"), [1, 2, 3]).expect("a model file");
+    let mut brain = test_support::brain(&scratch, "");
+    brain.finish_removals(&models);
+    brain.drain_settings().await;
+    assert!(!spoken.exists(), "the folder is deleted");
+    assert_eq!(
+        removing_on_disk(&path),
+        toml::Value::Array(vec!["later-part".into()]),
+        "a folder already gone counts as deleted, and an unknown name stays"
+    );
+    assert_eq!(brain.config.removing(), []);
+    assert!(models.exists(), "only the parts' folders go");
+}
+
+#[tokio::test]
+async fn a_part_that_cant_be_deleted_stays_listed_for_the_next_start() {
+    let scratch = Scratch::new("voice-removal-stuck");
+    let path = seeded(&scratch, "[\"speech-input\"]");
+    let models = scratch.dir().join("models");
+    std::fs::create_dir_all(&models).expect("models folder");
+    // A file where the part's folder should be can't be deleted as a folder.
+    let stuck = models.join(VoicePart::SpeechInput.dir());
+    std::fs::write(&stuck, [1]).expect("a stuck part");
+    let mut brain = test_support::brain(&scratch, "");
+    brain.finish_removals(&models);
+    brain.drain_settings().await;
+    assert!(stuck.is_file());
+    assert_eq!(
+        removing_on_disk(&path),
+        toml::Value::Array(vec!["speech-input".into()])
+    );
+    assert_eq!(brain.config.removing(), [VoicePart::SpeechInput]);
+}

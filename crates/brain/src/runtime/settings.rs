@@ -3,7 +3,11 @@
 //! connection: it's still written while no shell is connected and during Quit, and a later
 //! connection only hears the settled settings, never an answer meant for another shell.
 
+use std::io;
+use std::path::Path;
+
 use kumochi_protocol::message::{ControlToShell, ErrorKey, SettingsOp};
+use kumochi_protocol::voice::VoicePart;
 use tokio::task::{JoinError, JoinHandle};
 
 use super::{Brain, Full, Link};
@@ -13,10 +17,18 @@ use crate::config::{ConfigError, Pending};
 /// the settled settings.
 pub(super) const BRAIN: u64 = 0;
 
+/// A change to `config.toml`: the user's, or one the brain makes for voice.
+#[derive(Debug)]
+pub(super) enum Change {
+    User(SettingsOp),
+    /// A part's folder is gone, so its removal is finished.
+    RemoveDone(VoicePart),
+}
+
 /// A settings change waiting its turn, with the connection that sent it.
 #[derive(Debug)]
 pub(super) struct Queued {
-    pub(super) op: SettingsOp,
+    pub(super) change: Change,
     pub(super) epoch: u64,
 }
 
@@ -99,10 +111,14 @@ impl Brain {
         mut link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
         while self.config_write.is_none() {
-            let Some(Queued { op, epoch }) = self.settings_ops.pop_front() else {
+            let Some(Queued { change, epoch }) = self.settings_ops.pop_front() else {
                 break;
             };
-            match self.config.stage(op) {
+            let staged = match change {
+                Change::User(op) => self.config.stage(op),
+                Change::RemoveDone(part) => self.config.stage_remove_done(part),
+            };
+            match staged {
                 Ok(pending) => {
                     #[cfg(test)]
                     let gate = self.config_gate.take();
@@ -152,6 +168,28 @@ impl Brain {
         };
         self.settled(epoch, outcome, link.as_deref_mut())?;
         self.pump_settings(link)
+    }
+
+    /// Finishes each removal that a crash or a failed delete left: the part's folder under
+    /// `models` is deleted, and then its `RemoveDone` is queued. A folder that's already gone counts
+    /// as deleted. A part whose folder can't be deleted stays listed, so the next start tries again.
+    /// Blocking is fine: it runs at start-up, before anything is served.
+    pub(crate) fn finish_removals(&mut self, models: &Path) {
+        for part in self.config.removing() {
+            match std::fs::remove_dir_all(models.join(part.dir())) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!(?part, kind = ?error.kind(), "a removed voice part wasn't deleted");
+                    continue;
+                }
+            }
+            self.settings_ops.push_back(Queued {
+                change: Change::RemoveDone(part),
+                epoch: BRAIN,
+            });
+        }
+        self.pump_settings_offline();
     }
 
     /// Advances settings with no shell to tell.
