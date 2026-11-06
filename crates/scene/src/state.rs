@@ -75,6 +75,26 @@ pub enum StopOutcome {
     Cleared,
 }
 
+/// Refuses 3D views, solids and tracks at an ingress whose displays cannot prepare them yet.
+/// # Errors
+/// Returns `Unsupported` at the first 3D `put`.
+// shortcut: the brain's inline world check is over the coordinator's budget; PR 7's admission
+// lane runs it off the coordinator and removes this call.
+pub fn refuse_three_dimensional(step: &Step) -> Result<(), StepError> {
+    let index = step.put.iter().position(|op| match op {
+        crate::Op::View3d(_) | crate::Op::Solid(_) => true,
+        crate::Op::Anim(anim) => matches!(anim.track, Track::Pos3 | Track::Rot3),
+        _ => false,
+    });
+    index.map_or(Ok(()), |index| {
+        Err(StepError::in_step(
+            &step.id,
+            FieldPath::default().field("put").index(index),
+            ErrorCode::Unsupported,
+        ))
+    })
+}
+
 fn serialize_step<S: serde::Serializer>(step: &Step, serializer: S) -> Result<S::Ok, S::Error> {
     step.serialize(serializer)
 }

@@ -464,6 +464,7 @@ impl Drawing {
                 return Ok(());
             }
         }
+        kumochi_scene::refuse_three_dimensional(&step)?;
         let admission = match (existing, &self.calls[at].scene) {
             (Some(scene), _) => {
                 let at = self

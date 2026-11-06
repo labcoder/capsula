@@ -72,7 +72,7 @@ fn rejected(state: &SceneState, global: &GlobalBudget, json: &str, code: ErrorCo
 }
 
 #[test]
-fn two_d_tracks_refuse_3d_keys() {
+fn the_ingress_gate_refuses_3d_ops_and_2d_tracks_refuse_3d_keys() {
     let mut state = scene();
     let mut global = GlobalBudget::default();
     commit(&mut state, &mut global, &text("first", "t"));
@@ -82,6 +82,28 @@ fn two_d_tracks_refuse_3d_keys() {
         global.usage(),
         global.generation(),
         state.recovery_log().len(),
+    );
+    for op in [
+        r#"{"view3d":{"id":"v"}}"#,
+        r#"{"solid":{"id":"s","in":"missing","shape":"box"}}"#,
+        r#"{"anim":{"target":"missing","track":"pos3","keys":[[0,[0,0,0]]]}}"#,
+        r#"{"anim":{"target":"t","track":"pos3","keys":[[0,[0,0]]]}}"#,
+        r#"{"anim":{"target":"t","track":"rot3","keys":[[0,[0,0,0]]]}}"#,
+        r#"{"anim":{"target":"t","track":"rot3","keys":[[0,1]]}}"#,
+    ] {
+        let input = format!(
+            r#"{{"id":"retry","put":[{{"text":{{"id":"new","text":"","at":[0,0]}}}},{op}]}}"#
+        );
+        let error = kumochi_scene::refuse_three_dimensional(&step(&input))
+            .expect_err("3D waits for prepared views");
+        assert_eq!(
+            (error.code, error.path.as_str()),
+            (ErrorCode::Unsupported, "put[1]")
+        );
+    }
+    assert_eq!(
+        kumochi_scene::refuse_three_dimensional(&step(&text("plain", "u"))),
+        Ok(())
     );
     for track in ["x", "pos", "opacity"] {
         let input = format!(

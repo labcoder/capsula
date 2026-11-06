@@ -58,8 +58,11 @@ Screen/capture anchors are absent, not ignored.
 
 ### 3D records
 
-Scene admission validates and charges the following records (see 3D admission). `pos3` and `rot3`
-use three-component keys; existing tracks retain their existing key types.
+Scene admission validates and charges the following records (see 3D admission). Until the brain
+can run the world check off its coordinator, its one drawing ingress calls
+`refuse_three_dimensional`, which refuses the first `view3d`, `solid`, `pos3` track or `rot3`
+track as `Unsupported` at `put[i]` (`shortcut:`, removed by slice 5 PR 7's admission lane).
+`pos3` and `rot3` use three-component keys; existing tracks retain their existing key types.
 
 | Record | Fields and decode bounds |
 |---|---|
@@ -188,7 +191,8 @@ the solid, so a replacement cannot hide an earlier envelope before it retires.
 **World check.** `admit_checked`, the brain's drawing ingress, also tessellates each view a
 step puts or removes in, or moves with a `pos3` or `rot3` track, at its candidate rest with the
 shell's own `tessellate_view`. Plain `admit` (recovery replay) and the shell mirror's detached
-admission skip it: they only see steps the brain already checked. Each solid's
+admission skip it: they only see steps the brain already checked. Its cost is over the
+coordinator's 1 ms budget at the caps, so it stays behind the gate until PR 7's lane runs it. Each solid's
 settled offsets (`SolidWork::end`, the latest track's final key) compose into its rest, so a
 face that collapses only under a parent's scale or only at a track's end is refused as
 `Degenerate` at the solid's `put[i]`, or the first 3D track's, before commit: no counter moves and
