@@ -90,6 +90,28 @@ fn bad_voice_values_read_as_the_defaults_and_outlive_writes_to_other_keys() {
 }
 
 #[test]
+fn installed_names_known_parts_and_a_removal_wins() {
+    for (voice, expected) in [
+        (
+            "installed = [\"spoken-replies\", \"later-part\", \"speech-input\"]\nremoving = [\"speech-input\"]",
+            vec![VoicePart::SpokenReplies],
+        ),
+        (
+            "installed = [\"spoken-replies\", \"speech-input\"]",
+            vec![VoicePart::SpeechInput, VoicePart::SpokenReplies],
+        ),
+        ("removing = [\"speech-input\"]", vec![]),
+        ("installed = \"speech-input\"", vec![]),
+    ] {
+        let scratch = Scratch::new("config-installed");
+        let dir = dir(&scratch);
+        std::fs::write(dir.join(CONFIG_FILE), format!("[voice]\n{voice}\n")).expect("seeded");
+        let config = Config::load(Some(dir), ThreadId(1));
+        assert_eq!(config.installed(), expected, "{voice}");
+    }
+}
+
+#[test]
 fn removing_names_known_parts_by_their_folder_names_only() {
     for (list, expected) in [
         (

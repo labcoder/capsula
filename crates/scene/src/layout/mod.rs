@@ -156,6 +156,7 @@ pub struct PreparedStep {
     /// compiled record and private facts. Allocations shared with the predecessor are not
     /// counted again.
     pub resident_bytes: usize,
+    retained_bytes: usize,
     /// Temporary mesh scratch the worker allocated, never published or retained.
     pub scratch_bytes: usize,
     ticket: Preparation,
@@ -174,6 +175,11 @@ impl PreparedStep {
             return Err(PrepareError::Stale);
         }
         Ok(())
+    }
+    /// Requested bytes of the full `after` layout as prepared, geometry included, computed once
+    /// on the preparing thread: its charge as a rest, and what a view of it may hold last.
+    pub fn retained_bytes(&self) -> usize {
+        self.retained_bytes
     }
     /// Original committed input, exactly as the model sent it.
     pub fn step(&self) -> &crate::Step {

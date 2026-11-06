@@ -122,3 +122,62 @@ Dropping either API future drops its active request future. No task survives
 cancellation. The action coordinator owns consent, durable admission, pre-send
 exclusions, generation checks and placement; this layer never resends or
 substitutes the local clock for missing server evidence.
+
+## Device sign-in machine
+
+The sans-I/O device machine owns one attempt and one connection generation.
+It emits work rather than starting requests, timers, browser launches or
+credential jobs. The runtime adapter must supply completions with their original
+generation stamp, which identifies both an attempt and its connection. A changed
+stamp, expired deadline or terminal state
+makes a late completion inert. Sign out advances the shared generation before
+emitting cancellation and serialized removal, so token consumers can fence
+their final dispatch. The adapter must preserve queued saves when their result
+receiver closes, and drain removal behind them. Cancel or expiry during a save also
+queues removal, because that write may already have passed its fence check.
+
+The first poll waits the code reply's interval. Each pending reply schedules
+another wait; slow_down increases the interval by five seconds, takes the larger
+of that and the reply's interval, and caps it at 900 seconds. The attempt ends
+at its expiry even when a poll or identity read is outstanding. The API accepts
+device error bodies on 200 and RFC 8628's 400; only 200 can yield a bearer.
+The optional reply interval must be an integer from 1 to 900; null, duplicates
+and out-of-range values refuse the whole reply, including a token reply.
+Unknown codes and malformed replies end the attempt. Expiring token shapes
+remain unsupported. No retry wait is derived from REST rate metadata.
+
+The approving identity is read before saving. Only a successful save produces
+Connected. Startup checks a loaded bearer with the same user endpoint; a 401
+drops it and shows NeedsSignIn. Cleanup outcomes remain signed out, including
+a failed durable removal. A clean SignedOut view has no cleanup warning. Connect
+is also permitted after a refused physical delete, because durable removal has
+already fenced the old credential; Running and NotDurable still block it.
+Repository defaults are displayed and accepted only by exact membership in the
+fetched list, preserving GitHub's spelling.
+
+The verification page is the protocol's VERIFICATION_URI constant. The API
+checks the reply against it; neither the view nor a brain effect carries a
+provider-supplied URL. The machine and protocol are separate from the runtime
+credential adapter and the connection UI. The connection UI's Open GitHub action
+and browser-opening behavior belong to the shell layer, not this machine.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Loading
+    Loading --> SignedOut: no usable record
+    Loading --> Verifying: saved account
+    SignedOut --> Requesting: Connect when clean or Refused
+    NeedsSignIn --> Requesting: Connect
+    Requesting --> Awaiting: checked challenge
+    Awaiting --> Verifying: token
+    Verifying --> Saving: approving identity
+    Verifying --> Connected: saved account checked or offline
+    Verifying --> NeedsSignIn: saved bearer refused
+    Saving --> Connected: saved
+    Connected --> NeedsSignIn: current-generation 401
+    Requesting --> SignedOut: Cancel or failure
+    Awaiting --> SignedOut: Cancel, expiry or failure
+    Verifying --> SignedOut: expiry or failed sign-in
+    Saving --> SignedOut: failure or Cancel, then cleanup
+    Connected --> SignedOut: Sign out, then cleanup
+```

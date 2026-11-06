@@ -51,6 +51,8 @@ mod settings;
 mod speech;
 #[path = "thread_op_tests.rs"]
 mod thread_ops;
+#[path = "voice_tests.rs"]
+mod voice;
 
 #[test]
 fn staged_hold_controls_do_not_admit_or_change_a_run() {

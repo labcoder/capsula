@@ -30,6 +30,10 @@ carry-perch-untitled = Drop on this app
 
 # Turns
 
+chat-live-cut = Earlier streamed text isn't shown here.
+chat-empty = Start a conversation.
+chat-loading = Loading messages…
+chat-history-failed = Couldn't load messages. Try again.
 turn-busy = Still answering earlier messages. Try again in a moment.
 turn-offline = Not sent: the background process isn't connected.
 turn-too-long = That message is too long to send.

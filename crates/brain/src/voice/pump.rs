@@ -49,6 +49,11 @@ impl Pump {
         }
     }
 
+    /// The TTS handle the pump reads, for loads and unloads.
+    pub(crate) fn tts(&self) -> &TtsHandle {
+        &self.tts
+    }
+
     /// Hands TTS one segment of `run` at the output `rate`, ending any Speak still held.
     pub(crate) fn speak(&mut self, run: RunId, segment: SegmentId, rate: u32, text: String) {
         self.serve(run);
