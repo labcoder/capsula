@@ -4,6 +4,7 @@ use std::time::Instant;
 use kumochi_protocol::frame;
 
 use super::capture::{Capturer, Failure, Open, Screen};
+use super::elements::OpenElements;
 use super::supervisor::Screen as ScreenKind;
 use super::wire::{ReplyBody, RequestBody};
 use crate::supervise::{Kind as _, read_request, write_message};
@@ -16,7 +17,13 @@ use crate::supervise::{Kind as _, read_request, write_message};
 /// # Panics
 /// Debug builds panic when the explicit panic fixture is selected.
 pub fn serve() -> Result<(), frame::FrameError> {
-    serve_on(&mut io::stdin().lock(), &mut io::stdout().lock(), open)
+    serve_on(
+        &mut io::stdin().lock(),
+        &mut io::stdout().lock(),
+        open,
+        open_elements,
+        &Instant::now,
+    )
 }
 
 /// Answers requests until `input` ends, a capture must retire the worker, or framing breaks.
@@ -31,6 +38,8 @@ fn serve_on(
     input: &mut impl io::Read,
     output: &mut impl io::Write,
     open: Open,
+    open_elements: OpenElements,
+    now: &dyn Fn() -> Instant,
 ) -> Result<(), frame::FrameError> {
     let mut screen = Screen::default();
     #[cfg(debug_assertions)]
@@ -49,7 +58,7 @@ fn serve_on(
         return Ok(());
     }
     while let Some((id, body)) = read_request::<RequestBody>(input, ScreenKind::MAX_REQUEST)? {
-        let received = Instant::now();
+        let received = now();
         #[cfg(debug_assertions)]
         {
             if let RequestBody::Fault(requested) = body {
@@ -72,23 +81,36 @@ fn serve_on(
                 }
             }
         }
-        let (reply, retire) = match body {
-            RequestBody::Ping => (ReplyBody::Pong, false),
+        let result = match body {
+            RequestBody::Ping => Ok((ReplyBody::Pong, false)),
             RequestBody::Capture {
                 ticket,
                 display,
                 exclude,
-            } => match screen.capture(&ticket, &display, exclude, received, &Instant::now, open) {
-                Ok(meta) => (ReplyBody::Captured(meta), false),
-                Err(Failure::Refused(refusal)) => (ReplyBody::Refused(refusal), false),
-                Err(Failure::Fault(code)) => (ReplyBody::Fault(code), false),
-                Err(Failure::Retire(code)) => {
-                    tracing::error!(code, "screen capture didn't stop; retiring the worker");
-                    (ReplyBody::Fault(code), true)
-                }
-            },
+            } => screen
+                .capture(
+                    &ticket,
+                    &display,
+                    exclude,
+                    received,
+                    now,
+                    (open, open_elements),
+                )
+                .map(|meta| (ReplyBody::Captured(meta), false)),
+            RequestBody::Elements { capture, target } => screen
+                .elements(capture, target, now)
+                .map(|walked| (ReplyBody::Elements(walked.tree), walked.retire)),
             #[cfg(debug_assertions)]
             RequestBody::Fault(_) => continue,
+        };
+        let (reply, retire) = match result {
+            Ok(reply) => reply,
+            Err(Failure::Refused(refusal)) => (ReplyBody::Refused(refusal), false),
+            Err(Failure::Fault(code)) => (ReplyBody::Fault(code), false),
+            Err(Failure::Retire(code)) => {
+                tracing::error!(code, "screen operation requires worker retirement");
+                (ReplyBody::Fault(code), true)
+            }
         };
         write_message(output, id, &reply, ScreenKind::MAX_REPLY)?;
         if retire {
@@ -113,6 +135,11 @@ fn open() -> Result<Box<dyn Capturer>, i32> {
 /// `E_NOTIMPL`, as the Windows adapter reports an unsupported capture.
 #[cfg(not(windows))]
 const NO_CAPTURER: i32 = 0x8000_4001_u32.cast_signed();
+
+// shortcut: A3b opens UI Automation on Windows; other platforms follow later.
+fn open_elements() -> Result<Box<dyn super::elements::ElementReader>, i32> {
+    Err(0x8000_4001_u32.cast_signed())
+}
 
 #[cfg(test)]
 mod tests;
