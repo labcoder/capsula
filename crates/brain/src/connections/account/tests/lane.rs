@@ -71,10 +71,10 @@ fn cancel_during_a_dispatched_save_lets_the_save_win() {
 }
 
 /// Every mutation of a returning sign-in's commit refused in turn. The token it replaces is listed
-/// first: refused up to that list's flip, nothing is listed; past it the token stays listed, and
-/// its revocation pass starts, whatever the account save does. Up to the account's flip the set is
-/// held and Retry saves it with no second request, entry or pass; after it, it's committed, with
-/// leftovers or a pending flag at worst.
+/// first: refused up to that list's commit, nothing is listed; past it the token stays listed, and
+/// its revocation pass starts, whatever the account save does. Up to the account's commit the set
+/// is held and Retry saves it with no second request, entry or pass; after it, it's committed,
+/// with old names left to sweep at worst.
 #[test]
 fn a_commit_refused_at_each_mutation_is_held_or_committed_by_the_flip() {
     let seed = |vault: &mut Vault<FakeStore>| {
@@ -91,26 +91,19 @@ fn a_commit_refused_at_each_mutation_is_held_or_committed_by_the_flip() {
     dry.store.arm(usize::MAX, Fault::Refuse);
     dry.release();
     let trace = dry.store.0.lock().expect("fake lock").mutations.clone();
-    let set = |record: &str| {
-        let name = format!("{}/{record}", dry.service);
+    let last_set = |record: &str| {
+        let prefix = dry.generations(record);
         trace
             .iter()
-            .position(|m| matches!(m, Mutation::Set(set) if *set == name))
+            .rposition(|m| matches!(m, Mutation::Set(set) if set.starts_with(&prefix)))
             .expect(record)
     };
-    let (sweep, listed, flip) = (set("signout"), set("revoke"), set("chatgpt"));
+    let (listed, flip) = (last_set("revoke"), last_set("chatgpt"));
+    assert!(listed < flip, "listed before the account changes");
     assert!(
-        sweep < listed && listed < flip,
-        "listed before the account changes"
+        flip + 1 < trace.len(),
+        "the old account's names are swept after the commit"
     );
-    let signout = format!("{}/signout", dry.service);
-    let flag = flip
-        + trace[flip..]
-            .iter()
-            .position(
-                |m| matches!(m, Mutation::Set(name) | Mutation::Delete(name) if *name == signout),
-            )
-            .expect("the pending flag's release");
     let old = [(
         "client-saved".to_owned(),
         "refresh-old".to_owned(),
@@ -139,19 +132,13 @@ fn a_commit_refused_at_each_mutation_is_held_or_committed_by_the_flip() {
                 h.view(),
                 &signed_in(PlanState::Enabled, Some(AccountRecovery::Retry))
             );
-            let flags: &[_] = if at > sweep {
+            let flags: &[_] = if at > listed {
                 &["sweep", "request_pending"]
             } else {
                 &["request_pending"]
             };
             assert_eq!(h.marker(), marker(flags), "at {at}: the lane stays held");
             h.op(AccountOp::Retry);
-        } else if at == flag {
-            assert_eq!(
-                h.marker(),
-                marker(&["sweep", "request_pending"]),
-                "conservative at worst"
-            );
         } else {
             leftovers += 1;
         }
@@ -160,9 +147,7 @@ fn a_commit_refused_at_each_mutation_is_held_or_committed_by_the_flip() {
         assert_eq!(h.sent.len(), 1, "no second token request at {at}");
         assert_eq!(h.revocations(), old, "listed once at {at}");
         assert_eq!(h.revoking.len(), 1, "one pass at {at}");
-        if at != flag {
-            assert_eq!(h.marker(), marker(&["sweep"]), "at {at}");
-        }
+        assert_eq!(h.marker(), marker(&["sweep"]), "at {at}");
     }
     assert!(
         leftovers > 0,
@@ -277,8 +262,9 @@ fn a_refused_pending_flag_sends_no_request() {
     // The registration's save runs first; the pending flag is the next job.
     h.hold = true;
     h.release();
-    h.store.arm(0, Fault::Refuse);
+    h.refuse_commits();
     h.release();
+    h.allow_commits();
     assert!(h.sent.is_empty());
     assert_eq!(
         h.errors,
