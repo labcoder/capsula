@@ -142,6 +142,9 @@ pub(super) fn degenerate(
             changed.entry(view).or_insert(None);
         }
     }
+    if changed.is_empty() {
+        return None;
+    }
     let mut scratch = MeshScratch::new();
     for (id, input) in changed {
         let input = input.map_or_else(|| Arc::new(view_input(id, &after[id], after)), Arc::clone);

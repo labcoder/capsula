@@ -14,6 +14,9 @@ use kumochi_scene::{
 };
 use std::sync::atomic::AtomicBool;
 
+#[path = "support/allocation.rs"]
+mod allocation;
+
 fn header() -> kumochi_scene::Begin {
     let source = br#"{"begin":{"v":1,"scene":"scene","surface":"overlay","alt":""}}"#;
     let Ok(Record::Begin(header)) = parse_record(source) else {
@@ -1057,4 +1060,21 @@ fn a_solid_degenerate_only_in_the_world_refuses_before_commit() {
         2,
         "the next step admits under the refused id"
     );
+}
+
+#[test]
+fn checked_admission_builds_mesh_scratch_only_for_a_view_it_checks() {
+    // MeshScratch's largest buffer: 512 path points x 48 curved segments of [u32; 4] keys.
+    const KEYS: usize = 512 * 48 * 16;
+    let global = GlobalBudget::default();
+    let text = r#"{"id":"flat","put":[{"text":{"id":"t","text":"","at":[0,0]}}]}"#;
+    let (admission, freed) =
+        allocation::releases_of_size(KEYS, || scene().admit_checked(&step(text), &global));
+    assert!(matches!(admission, Ok(Admission::New(_))), "a 2D step admits");
+    assert_eq!(freed, 0, "a step with no view to check builds no scratch");
+    let solid = put("solid", &[view("v"), cube("c", "")]);
+    let (admission, freed) =
+        allocation::releases_of_size(KEYS, || scene().admit_checked(&step(&solid), &global));
+    assert!(matches!(admission, Ok(Admission::New(_))), "a 3D step admits");
+    assert_eq!(freed, 1, "calibration: checking one view builds one scratch");
 }
