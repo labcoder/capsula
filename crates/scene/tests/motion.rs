@@ -1275,6 +1275,29 @@ fn tracked() -> (SceneState, GlobalBudget, SceneView) {
     );
     (scene, budget, view)
 }
+
+#[test]
+fn a_staged_activation_debug_keeps_content_private() {
+    let marker = "staged-private-content";
+    let (mut scene, mut budget, view) = fresh();
+    let next = prepared(
+        &mut scene,
+        &mut budget,
+        view.layout(),
+        json!({"id":"private","say":marker,"put":[
+            {"text":{"id":"label","at":[12,34],"text":marker}}
+        ]}),
+    );
+    let stage = view.prepare_activation(&next, 0, 800).expect("stage");
+    let output = format!("{stage:?}");
+    assert!(!output.contains(marker));
+    assert!(!output.contains(&format!("{:?}", marker.as_bytes())));
+    assert_eq!(
+        output,
+        "PreparedActivation { view: SceneView { activated: 1, objects: 1, tracks: 0, .. }, superseded: 0 }"
+    );
+}
+
 fn pose(view: &SceneView, now: u64) -> (Affine, Option<Paint>) {
     let drawn = item(view, now, "s").expect("emitted");
     (drawn.transform, drawn.color)
