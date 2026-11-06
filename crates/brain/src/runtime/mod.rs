@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
-    Content, ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, Deleted,
+    ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, Deleted,
     MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, SceneId, SpeechPcm, ThreadId,
     Transcript,
 };
@@ -784,7 +784,7 @@ impl Brain {
                 }
                 Some(input) = self.inputs.recv() => input,
                 Some(input) = pages.recv() => input,
-                Some((turn, thread, text)) = turns.recv(), if take_turns => Input::Turn { turn, thread, text },
+                Some(input) = turns.recv(), if take_turns => input,
                 Some(input) = self.engine_events.recv(), if take_engine => input,
                 () = room.notified(), if !take_engine => continue,
                 () = sleep_until(self.retry_at) => {
@@ -1155,8 +1155,18 @@ fn descriptor(state: &SceneState) -> SceneDescriptor {
     }
 }
 
-/// A typed turn: the thread to continue, or `None` for a new one, and the text.
-type Turn = (u32, Option<ThreadId>, Content);
+/// A typed turn or an ask about a part, in the order the shell sent them: each is numbered and
+/// answered once.
+type Turn = Input;
+
+/// Queues a turn without waiting for the core; a shell that outruns the queue is broken.
+fn take(turns: &mpsc::Sender<Turn>, turn: Turn) -> Option<Ended> {
+    match turns.try_send(turn) {
+        Ok(()) => None,
+        Err(TrySendError::Full(_)) => Some(Ended::Broken("turns sent faster than taken")),
+        Err(TrySendError::Closed(_)) => Some(Ended::Lost),
+    }
+}
 
 /// Reads the data pipe. Credit is applied here, so it never waits behind turns the core
 /// isn't taking yet.
@@ -1204,11 +1214,27 @@ async fn read_data(
             // Never waits for the core, so credit behind a turn is always read.
             Ok(Some(DataToBrain::TextSubmit {
                 turn, thread, text, ..
-            })) => match turns.try_send((turn, thread, text)) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => return Ended::Broken("turns sent faster than taken"),
-                Err(TrySendError::Closed(_)) => return Ended::Lost,
-            },
+            })) => {
+                if let Some(ended) = take(turns, Input::Turn { turn, thread, text }) {
+                    return ended;
+                }
+            }
+            Ok(Some(DataToBrain::AskAbout {
+                turn,
+                scene,
+                element,
+            })) => {
+                if let Some(ended) = take(
+                    turns,
+                    Input::Ask {
+                        turn,
+                        scene,
+                        element,
+                    },
+                ) {
+                    return ended;
+                }
+            }
             Ok(None) => return Ended::Lost,
             Err(error) => {
                 tracing::warn!(%error, "data pipe failed");

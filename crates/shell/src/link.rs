@@ -488,7 +488,10 @@ impl LinkHandle {
         }
         self.shared
             .outbox(session, |outbox| {
-                let turn = matches!(message, DataToBrain::TextSubmit { .. });
+                let turn = matches!(
+                    message,
+                    DataToBrain::TextSubmit { .. } | DataToBrain::AskAbout { .. }
+                );
                 if turn && outbox.submits.load(Ordering::SeqCst) == u32::MAX {
                     outbox.pipe.abort();
                     return false;

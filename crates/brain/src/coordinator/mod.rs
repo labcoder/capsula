@@ -10,6 +10,7 @@
 //! which turns an engine round's events into text frames, steps and the run's end, is in `run`.
 
 mod admission;
+mod ask;
 mod availability;
 mod calls;
 mod delete;
@@ -101,6 +102,15 @@ pub enum Input {
         thread: Option<ThreadId>,
         /// What the user typed.
         text: Content,
+    },
+    /// The user clicked a labelled 3D part: a turn about it, in its drawing's thread.
+    Ask {
+        /// The ask's connection-local number, shared with typed turns.
+        turn: u32,
+        /// The visible scene.
+        scene: SceneId,
+        /// The solid's host identity.
+        element: kumochi_scene::Handle,
     },
     /// The shell stopped `run` locally; `revealed` are the steps that stayed on screen.
     Stop {
@@ -740,6 +750,11 @@ impl Coordinator {
             }
             Input::PageRead { reply, .. } => return Ok(vec![Effect::Data(reply)]),
             Input::Turn { turn, thread, text } => self.typed(turn, thread, text, &mut effects),
+            Input::Ask {
+                turn,
+                scene,
+                element,
+            } => self.asked(turn, scene, element, &mut effects),
             Input::Stop { run, .. } if run < self.session_start => return Err(Stale),
             Input::Stop { run, revealed } if self.current_run() != Some(run) => {
                 self.late_stop(run, revealed, &mut effects)?;
@@ -992,7 +1007,7 @@ impl Coordinator {
         thread: Option<ThreadId>,
         text: Content,
         effects: &mut Vec<Effect>,
-    ) {
+    ) -> RunId {
         self.cancel_job(effects);
         if let Some(current) = self.current.take() {
             let replaced = RunEnd::Interrupted(Interruption::Replaced);
@@ -1055,7 +1070,11 @@ impl Coordinator {
             run,
             after: WALL_CLOCK,
         });
-        // The turn is kept, but nothing answers it.
+        run
+    }
+
+    /// Fails the run `turn` just started while nothing can answer it; the turn is kept.
+    fn unanswered(&mut self, run: RunId, effects: &mut Vec<Effect>) {
         if let Availability::Unavailable(reason) = &self.availability {
             let reason = reason.clone();
             self.fail_with(run, Failure::Engine, reason, effects)
