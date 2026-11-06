@@ -49,4 +49,5 @@ Kumochi looks for an installed Claude Code when it starts. To stop that, add thi
 enabled = false
 ```
 
-Turning it off doesn't sign Claude Code out or delete anything.
+Turning it off doesn't start a sign-out or deletion. If a previous Disconnect is still waiting
+to delete Kumochi's Claude Code folder, Kumochi still tries to finish that cleanup at startup.

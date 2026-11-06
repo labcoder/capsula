@@ -151,10 +151,7 @@ impl AccountState {
                         })
                     );
                 match result {
-                    SaveResult::Committed { leftovers } => {
-                        if leftovers {
-                            tracing::warn!("old registration chunks remain until the next save");
-                        }
+                    SaveResult::Committed => {
                         self.loaded.account = Some(account);
                         if registering
                             && let Some(live) = &mut self.live
@@ -212,10 +209,7 @@ impl AccountState {
                     return;
                 }
                 match result {
-                    SaveResult::Committed { leftovers } => {
-                        if leftovers {
-                            tracing::warn!("old revocation chunks remain until the next sweep");
-                        }
+                    SaveResult::Committed => {
                         self.loaded.exchanges = exchanges(&entries);
                         self.lane = Lane::Free;
                         // An entry was added: revoke it now (design §2).
@@ -290,10 +284,7 @@ impl AccountState {
         };
         let attempt = *attempt;
         match result {
-            SaveResult::Committed { leftovers } => {
-                if leftovers {
-                    tracing::warn!("old account chunks remain until the next save");
-                }
+            SaveResult::Committed => {
                 let plan = account.expose().plan_enabled;
                 self.loaded.account = Some(account.clone());
                 self.lane = Lane::Free;

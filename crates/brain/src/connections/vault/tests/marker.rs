@@ -57,10 +57,12 @@ fn a_new_sign_in_commit_clears_only_the_old_notice_and_empty_state_is_deleted() 
     vault
         .update_marker(MarkerUpdate::SignInCommitted)
         .expect("new sign-in clears old notice");
-    assert!(
-        !store.names().contains(&format!("{service}/signout")),
-        "an empty marker is deleted, not stored"
+    assert_eq!(
+        vault.marker().expect("marker"),
+        SignOutMarker::default(),
+        "nothing is left to mark"
     );
+    assert_only_current(&vault, &store);
 }
 
 #[test]
@@ -70,45 +72,36 @@ fn marker_layout_is_compact_versioned_and_unknown_values_fail_closed() {
     vault
         .update_marker(MarkerUpdate::Promote(Disposition::Keep))
         .expect("promote");
-    let target = format!("{service}/signout");
-    let expected = br#"{"v":1,"sign_out":{"disposition":"Keep","phase":"Revoking"},"sweep":true,"request_pending":false,"outcome_unknown":false,"notice":true}"#;
-    let bytes = store.get(&target).expect("marker read").expect("exists");
-    assert_eq!(
-        bytes.expose().as_slice(),
-        expected,
-        "approved compact JSON layout"
-    );
-    assert!(bytes.expose().len() < 200, "single bounded credential");
+    let expected = r#"{"v":1,"sign_out":{"disposition":"Keep","phase":"Revoking"},"sweep":true,"request_pending":false,"outcome_unknown":false,"notice":true}"#;
+    let conn = raw(&path);
+    let stored: String = conn
+        .query_row("SELECT marker FROM control WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .expect("marker row");
+    assert_eq!(stored, expected, "approved compact JSON layout");
+    assert!(store.names().is_empty(), "the marker is never a credential");
     for invalid in [
-        String::from_utf8(expected.to_vec())
-            .expect("ASCII fixture")
-            .replace("\"v\":1", "\"v\":2"),
-        String::from_utf8(expected.to_vec())
-            .expect("ASCII fixture")
-            .replace(
-                "\"sign_out\":{\"disposition\":\"Keep\",\"phase\":\"Revoking\"},",
-                "",
-            ),
-        String::from_utf8(expected.to_vec())
-            .expect("ASCII fixture")
-            .replace("\"v\":1", "\"v\":1,\"extra\":true"),
-        String::from_utf8(expected.to_vec())
-            .expect("ASCII fixture")
-            .replace("\"phase\":\"Revoking\"", "\"phase\":\"Unknown\""),
-        String::from_utf8(expected.to_vec())
-            .expect("ASCII fixture")
-            .replace("\"disposition\":\"Keep\"", "\"disposition\":\"Unknown\""),
-        String::from_utf8(expected.to_vec())
-            .expect("ASCII fixture")
-            .replace(
-                "\"phase\":\"Revoking\"",
-                "\"phase\":\"Revoking\",\"extra\":true",
-            ),
+        expected.replace("\"v\":1", "\"v\":2"),
+        expected.replace(
+            "\"sign_out\":{\"disposition\":\"Keep\",\"phase\":\"Revoking\"},",
+            "",
+        ),
+        expected.replace("\"v\":1", "\"v\":1,\"extra\":true"),
+        expected.replace("\"phase\":\"Revoking\"", "\"phase\":\"Unknown\""),
+        expected.replace("\"disposition\":\"Keep\"", "\"disposition\":\"Unknown\""),
+        expected.replace(
+            "\"phase\":\"Revoking\"",
+            "\"phase\":\"Revoking\",\"extra\":true",
+        ),
+        expected.replace(
+            "\"notice\":true",
+            &format!("\"notice\":true{}", " ".repeat(200)),
+        ),
         "{}".to_owned(),
         "not json".to_owned(),
     ] {
-        store
-            .set(&target, &Secret::new(Zeroizing::new(invalid.into_bytes())))
+        conn.execute("UPDATE control SET marker = ?1 WHERE id = 1", [&invalid])
             .expect("malformed fixture");
         let marker = vault.marker().expect("unreadable marker fails closed");
         assert!(
@@ -187,49 +180,60 @@ fn sweep_completion_preserves_every_unrelated_fact_and_a_promotion() {
     );
 }
 
+/// The sweep flag commits with the revocation record: a refused or interrupted write sets neither.
 #[test]
-fn a_refused_or_interrupted_sweep_marker_never_writes_a_revocation_record() {
-    for fault in [Fault::Refuse, Fault::CrashAfter] {
+fn a_refused_or_interrupted_revocation_save_sets_no_sweep_marker() {
+    for fault in [Some(Fault::Refuse), Some(Fault::CrashAfter), None] {
         let (_scratch, path, service, store) = setup("marker-before-data");
         let mut vault = open(&store, &service, &path);
-        store.arm(0, fault);
+        match fault {
+            Some(fault) => store.arm(0, fault),
+            None => refuse_commits(&path),
+        }
         let outcome =
             panic::catch_unwind(AssertUnwindSafe(|| vault.save_revocations(&list("one"))));
         match fault {
-            Fault::Refuse => {
+            Some(Fault::Refuse) => assert!(
+                matches!(
+                    outcome.expect("refusal returns"),
+                    SaveResult::NotCommitted(VaultError::Store(CredentialStoreError::Write(5)))
+                ),
+                "a refused write is a failed save"
+            ),
+            Some(Fault::CrashAfter) => assert!(outcome.is_err(), "crash after the first chunk"),
+            None => {
                 assert!(
                     matches!(
                         outcome.expect("refusal returns"),
-                        SaveResult::NotCommitted(VaultError::Store(CredentialStoreError::Write(5)))
+                        SaveResult::NotCommitted(VaultError::Authority)
                     ),
-                    "marker refusal is a failed save"
+                    "a refused commit is a failed save"
                 );
-                assert!(
-                    store.names().is_empty(),
-                    "nothing was written before a refused marker"
-                );
-            }
-            Fault::CrashAfter => {
-                assert!(outcome.is_err(), "crash after marker commit");
-                assert_eq!(
-                    store.names(),
-                    vec![format!("{service}/signout")],
-                    "only the token-free marker committed"
-                );
+                allow_commits(&path);
             }
         }
-        assert_record_absent(&store, &service, "revoke");
+        assert!(
+            !is_current(&vault, Kind::Revocations),
+            "no record committed"
+        );
+        assert_eq!(vault.marker().expect("marker"), SignOutMarker::default());
         drop(vault);
         let mut restarted = open(&store, &service, &path);
+        assert!(store.names().is_empty(), "the reopen swept every orphan");
         committed(restarted.save_revocations(&list("one")));
+        assert!(
+            restarted.marker().expect("marker").sweep,
+            "the flag came with it"
+        );
         committed(restarted.save_revocations(&Secret::new(RevocationList::default())));
         gone(restarted.delete_revocations());
         restarted
             .update_marker(MarkerUpdate::FinishSweep)
-            .expect("all 129 revoke names checked absent");
-        assert!(
-            store.names().is_empty(),
-            "retry leaves no token data or empty marker"
+            .expect("the record is removed");
+        assert!(store.names().is_empty(), "retry leaves no token data");
+        assert_eq!(
+            restarted.marker().expect("marker"),
+            SignOutMarker::default()
         );
     }
 }
@@ -287,16 +291,10 @@ fn sweep_only_allows_account_load_but_promotion_fences_without_deleting_it() {
         "a pending sign-out exposes no usable tokens"
     );
     assert!(
-        store.names().contains(&format!("{service}/chatgpt")),
+        is_current(&vault, Kind::Account),
         "the stored record still exists behind the fence"
     );
-    assert!(
-        store
-            .names()
-            .iter()
-            .any(|name| name.starts_with(&format!("{service}/chatgpt/"))),
-        "tokens were not silently deleted"
-    );
+    assert_only_current(&vault, &store);
 }
 
 #[test]
@@ -331,13 +329,13 @@ fn checkpoint_folds_uncertainty_once_and_a_refusal_prevents_deletion() {
             .update_marker(MarkerUpdate::Promote(Disposition::Erase))
             .expect("promote");
         let names = store.names();
-        store.arm(0, Fault::Refuse);
+        refuse_commits(&path);
         assert!(
             matches!(
                 vault.update_marker(MarkerUpdate::Checkpoint {
                     list_empty_on_disk: list_empty
                 }),
-                Err(VaultError::Store(CredentialStoreError::Write(5)))
+                Err(VaultError::Authority)
             ),
             "refused checkpoint is reported"
         );
@@ -352,6 +350,7 @@ fn checkpoint_folds_uncertainty_once_and_a_refusal_prevents_deletion() {
             ),
             "no delete starts before a durable checkpoint"
         );
+        allow_commits(&path);
         assert_eq!(
             store.names(),
             names,
@@ -392,14 +391,15 @@ fn a_refused_promotion_preserves_the_sweep_marker_and_every_token_name() {
     committed(vault.save_account(&account("old")));
     committed(vault.save_revocations(&list("one")));
     let names = store.names();
-    store.arm(0, Fault::Refuse);
+    refuse_commits(&path);
     assert!(
         matches!(
             vault.update_marker(MarkerUpdate::Promote(Disposition::Erase)),
-            Err(VaultError::Store(CredentialStoreError::Write(5)))
+            Err(VaultError::Authority)
         ),
         "refused promotion retains its exact error"
     );
+    allow_commits(&path);
     let marker = vault.marker().expect("persisted marker");
     assert!(
         marker.sign_out.is_none()
@@ -424,111 +424,75 @@ fn a_refused_promotion_preserves_the_sweep_marker_and_every_token_name() {
 }
 
 #[test]
-fn refusal_and_crash_at_finish_preserve_the_checkpointed_outcome() {
+fn a_refused_finish_preserves_the_checkpointed_outcome_and_a_retry_finishes() {
     for (confirmed, expected_notice) in [(false, true), (true, false)] {
-        for fault in [Fault::Refuse, Fault::CrashAfter] {
-            let (_scratch, path, service, store) = setup("marker-final-fault");
-            let mut vault = open(&store, &service, &path);
-            committed(vault.save_account(&account("old")));
-            committed(vault.save_revocations(&list("one")));
-            vault
-                .update_marker(MarkerUpdate::Promote(Disposition::Erase))
-                .expect("promotion");
-            if confirmed {
-                committed(vault.save_revocations(&Secret::new(RevocationList::default())));
-            }
-            let decided = vault
-                .update_marker(MarkerUpdate::Checkpoint {
-                    list_empty_on_disk: confirmed,
-                })
-                .expect("checkpoint");
-            gone(vault.delete_account());
-            gone(vault.delete_revocations());
-            assert!(
-                vault.marker().expect("marker after deletion") == decided,
-                "deletion never changes the decided outcome"
-            );
-            assert_record_absent(&store, &service, "chatgpt");
-            assert_record_absent(&store, &service, "revoke");
-            drop(vault);
-            let mut vault = open(&store, &service, &path);
-            assert!(
-                vault.marker().expect("post-delete restart") == decided,
-                "R4-H1 warning survives a crash before Finish"
-            );
-            store.arm(0, fault);
-            let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
-                vault.update_marker(MarkerUpdate::FinishSignOut)
-            }));
-            drop(vault);
-            let mut restarted = open(&store, &service, &path);
-            match fault {
-                Fault::Refuse => {
-                    let result = outcome.expect("refusal returns");
-                    if confirmed {
-                        assert!(
-                            matches!(
-                                result,
-                                Err(VaultError::Store(CredentialStoreError::Delete(5)))
-                            ),
-                            "refused marker deletion is reported"
-                        );
-                    } else {
-                        assert!(
-                            matches!(
-                                result,
-                                Err(VaultError::Store(CredentialStoreError::Write(5)))
-                            ),
-                            "refused notice write is reported"
-                        );
-                    }
-                    assert!(
-                        restarted.marker().expect("refused finish marker") == decided,
-                        "refused finish remains Deleting"
-                    );
-                    restarted
-                        .update_marker(MarkerUpdate::FinishSignOut)
-                        .expect("retry final write");
-                }
-                Fault::CrashAfter => {
-                    assert!(outcome.is_err(), "crash after final mutation");
-                    assert!(
-                        restarted
-                            .marker()
-                            .expect("committed finish marker")
-                            .sign_out
-                            .is_none(),
-                        "final write was already durable"
-                    );
-                }
-            }
-            let marker = restarted.marker().expect("finished marker");
-            assert!(
-                marker.sign_out.is_none()
-                    && !marker.sweep
-                    && !marker.request_pending
-                    && !marker.outcome_unknown,
-                "only the decided notice can remain"
-            );
-            assert_eq!(marker.notice, expected_notice);
-            let expected_names = if confirmed {
-                Vec::new()
-            } else {
-                vec![format!("{service}/signout")]
-            };
-            assert_eq!(
-                store.names(),
-                expected_names,
-                "no token-bearing names survive"
-            );
+        let (_scratch, path, service, store) = setup("marker-final-fault");
+        let mut vault = open(&store, &service, &path);
+        committed(vault.save_account(&account("old")));
+        committed(vault.save_revocations(&list("one")));
+        vault
+            .update_marker(MarkerUpdate::Promote(Disposition::Erase))
+            .expect("promotion");
+        if confirmed {
+            committed(vault.save_revocations(&Secret::new(RevocationList::default())));
         }
+        let decided = vault
+            .update_marker(MarkerUpdate::Checkpoint {
+                list_empty_on_disk: confirmed,
+            })
+            .expect("checkpoint");
+        gone(vault.delete_account());
+        gone(vault.delete_revocations());
+        assert!(
+            vault.marker().expect("marker after deletion") == decided,
+            "deletion never changes the decided outcome"
+        );
+        assert!(!is_current(&vault, Kind::Account) && !is_current(&vault, Kind::Revocations));
+        drop(vault);
+        let mut vault = open(&store, &service, &path);
+        assert!(
+            vault.marker().expect("post-delete restart") == decided,
+            "R4-H1 warning survives a crash before Finish"
+        );
+        refuse_commits(&path);
+        assert!(
+            matches!(
+                vault.update_marker(MarkerUpdate::FinishSignOut),
+                Err(VaultError::Authority)
+            ),
+            "a refused finish is reported"
+        );
+        allow_commits(&path);
+        drop(vault);
+        let mut restarted = open(&store, &service, &path);
+        assert!(
+            restarted.marker().expect("refused finish marker") == decided,
+            "a refused finish remains Deleting"
+        );
+        restarted
+            .update_marker(MarkerUpdate::FinishSignOut)
+            .expect("retry final write");
+        let marker = restarted.marker().expect("finished marker");
+        assert!(
+            marker.sign_out.is_none()
+                && !marker.sweep
+                && !marker.request_pending
+                && !marker.outcome_unknown,
+            "only the decided notice can remain"
+        );
+        assert_eq!(marker.notice, expected_notice);
+        assert!(store.names().is_empty(), "no token-bearing names survive");
     }
 }
 
+/// Absence is the authority's: a name it doesn't hold current never blocks the finish, and
+/// the finish reads no credential.
 #[test]
-fn finish_requires_by_name_absence_even_without_a_manifest_and_propagates_read_refusal() {
+fn finish_needs_every_record_removed_and_reads_no_name() {
     let (_scratch, path, service, store) = setup("marker-absence-check");
     let mut vault = open(&store, &service, &path);
+    committed(vault.save_revocations(&list("one")));
+    let names = store.names();
     vault
         .update_marker(MarkerUpdate::Promote(Disposition::Erase))
         .expect("promote");
@@ -537,45 +501,25 @@ fn finish_requires_by_name_absence_even_without_a_manifest_and_propagates_read_r
             list_empty_on_disk: false,
         })
         .expect("checkpoint");
-    let orphan = format!("{service}/revoke/1/63");
-    store
-        .set(
-            &orphan,
-            &Secret::new(Zeroizing::new(b"orphan-test-token".to_vec())),
-        )
-        .expect("orphan without manifest");
     assert!(
         matches!(
             vault.update_marker(MarkerUpdate::FinishSignOut),
             Err(VaultError::NotGone)
         ),
-        "a missing manifest is not proof of absence"
+        "a current record keeps the deletion pending"
     );
-    assert!(
-        vault.marker().expect("marker") == decided,
-        "orphan keeps the deletion pending"
-    );
+    assert_eq!(vault.marker().expect("marker"), decided);
+    store.0.lock().expect("fake lock").refusing = true;
     gone(vault.delete_revocations());
-    store.0.lock().expect("fake lock").denied_read = Some(orphan);
-    assert!(
-        matches!(
-            vault.update_marker(MarkerUpdate::FinishSignOut),
-            Err(VaultError::Store(CredentialStoreError::Read(5)))
-        ),
-        "a refused absence check is not success"
-    );
-    assert!(
-        vault.marker().expect("marker") == decided,
-        "read refusal retains the checkpoint"
-    );
-    store.0.lock().expect("fake lock").denied_read = None;
+    store.0.lock().expect("fake lock").refusing = false;
+    assert_eq!(store.names(), names, "the refused deletes left every name");
+    store.0.lock().expect("fake lock").denied_read = Some(names[0].clone());
     vault
         .update_marker(MarkerUpdate::FinishSignOut)
-        .expect("all names checked absent");
-    assert_eq!(
-        store.names(),
-        vec![format!("{service}/signout")],
-        "only token-free warning remains"
+        .expect("the removal committed, whatever the store still holds");
+    assert!(
+        vault.marker().expect("marker").notice,
+        "only the warning remains"
     );
 }
 
@@ -606,7 +550,7 @@ fn keep_rewrite_requires_the_checkpoint_and_removes_email_plan_and_every_token_n
         .expect("read during Deleting")
         .expect("account still present");
     committed(vault.save_account(&registration(&fenced)));
-    assert_only_active_slot(&vault, &store, Chunked::Account);
+    assert_only_current(&vault, &store);
     gone(vault.delete_revocations());
     vault
         .update_marker(MarkerUpdate::FinishSignOut)
@@ -619,8 +563,10 @@ fn keep_rewrite_requires_the_checkpoint_and_removes_email_plan_and_every_token_n
         actual.expose() == registration(&original).expose(),
         "only client and subject survive Keep"
     );
-    assert!(
-        !store.names().contains(&format!("{service}/signout")),
-        "confirmed finish deletes its marker"
+    assert_eq!(
+        vault.marker().expect("marker"),
+        SignOutMarker::default(),
+        "a confirmed finish leaves no marker"
     );
+    assert_only_current(&vault, &store);
 }

@@ -2,10 +2,6 @@
 
 pub mod account;
 pub mod anthropic;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "OSC-233 PR 2 moves the vault onto the authority")
-)]
 pub(crate) mod authority;
 pub mod catalog;
 pub mod clock;

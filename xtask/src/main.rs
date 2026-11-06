@@ -61,6 +61,11 @@ tasks:
   live signin       sign the dev brain in to its account: the brain opens the browser,
                     and only the account's state is printed; refuses while any
                     product process runs; needs the owner at the desk
+  live claude-signin [--disconnect]
+                    sign the dev brain's Claude Code in: its own sign-in runs in a
+                    console the owner answers; --disconnect signs it out and deletes
+                    Kumochi's folder for it; only the view's state is printed; refuses
+                    while any product process runs; needs the owner at the desk
   slice2-gate       the slice 2 gate: the real dev brain with fixture scripts, driven
                     over its real pipes by a scripted client; no input; refuses while
                     any product process runs
