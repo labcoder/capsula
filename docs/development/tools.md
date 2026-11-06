@@ -81,6 +81,11 @@ ceiling. Its description comes from `crates/brain/prompts/draw.md`. Responses se
 `strict: false` specifically for this tool: optional scene fields remain optional.
 Fenced Mermaid text is not a tool call; diagrams use the Mermaid scene operation.
 
+The serialized parameter schema was 30,704 UTF-8 bytes in the accepted live gate
+at `bc2dfaa` (2026-11-06). A test holds export growth below 32 KiB; exceeding it
+requires reviewing the request overhead. That is a review budget, not a provider
+limit, the history reread bound or the 16 KiB tool-argument ceiling.
+
 Before admission, the dispatcher tokenizes the entire envelope, decodes every record
 and rejects 3D views, solids, 3D tracks, three-component keys and any solid-only
 `set[].info` field, including null. The first typed failure returns its code, sanitized

@@ -10,6 +10,17 @@ fn valid(record: &Value) -> bool {
 }
 
 #[test]
+fn draw_schema_stays_within_its_reviewed_growth_budget() {
+    let bytes = serde_json::to_vec(&draw_schema())
+        .expect("serialized schema")
+        .len();
+    assert!(
+        bytes <= 32 * 1024,
+        "draw schema grew past its 32 KiB review budget: {bytes}"
+    );
+}
+
+#[test]
 fn every_two_dimensional_operation_and_mixed_form_fits_the_schema() {
     let operations = [
         json!({"line": {"id": "l", "from": [1, 2], "to": {"ref": "n"}, "color": "#01a2ff"}}),
