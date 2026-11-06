@@ -15,7 +15,7 @@ pub enum ErrorKey {
     SettingsRefused,
     /// The settings file exists but can't be read, so changes are refused until it's fixed.
     ConfigUnreadable,
-    /// The sign-in attempt passed its five minutes.
+    /// The sign-in attempt passed its provider's time limit.
     SignInTimedOut,
     /// The sign-in couldn't be completed or checked.
     SignInFailed,

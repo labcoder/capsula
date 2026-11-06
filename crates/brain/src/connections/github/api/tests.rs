@@ -1188,3 +1188,47 @@ async fn device_errors_accept_only_200_or_400_and_tokens_require_200() {
         );
     }
 }
+
+#[tokio::test]
+async fn interval_duplicates_and_bad_intervals_on_other_token_shapes_fail_closed() {
+    for status in [200, 400] {
+        let body = br#"{"error":"slow_down","interval":5,"interval":10}"#.to_vec();
+        let http = Script::new(Ok(response(status, body, ResponseMeta::default())));
+        assert_eq!(
+            poll_device_token(&http, "client", &code())
+                .await
+                .unwrap_err(),
+            ApiError::Response
+        );
+        let http = Script::new(Ok(response(
+            status,
+            br#"{"error":"authorization_pending","interval":0}"#.to_vec(),
+            ResponseMeta::default(),
+        )));
+        assert_eq!(
+            poll_device_token(&http, "client", &code())
+                .await
+                .unwrap_err(),
+            ApiError::Response
+        );
+    }
+    let mut body = bearer();
+    body["interval"] = json!(901);
+    assert_eq!(
+        poll_device_token(&Script::json(&body), "client", &code())
+            .await
+            .unwrap_err(),
+        ApiError::Response
+    );
+    let http = Script::new(Ok(response(
+        400,
+        br#"{"error":"slow_down","refresh_token":"ghr_fake"}"#.to_vec(),
+        ResponseMeta::default(),
+    )));
+    assert_eq!(
+        poll_device_token(&http, "client", &code())
+            .await
+            .unwrap_err(),
+        ApiError::RefreshUnsupported
+    );
+}

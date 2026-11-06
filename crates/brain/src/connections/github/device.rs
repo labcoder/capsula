@@ -24,11 +24,9 @@ use tokio::time::Instant;
 #[cfg(test)]
 mod tests;
 
-/// Identifies the attempt and connection that admitted work.
+/// Identifies the admission epoch for both an attempt and its connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Stamp {
-    /// Single-use sign-in identity.
-    pub attempt: u64,
     /// Monotonic local credential-use fence.
     pub generation: u64,
 }
@@ -183,7 +181,6 @@ impl fmt::Debug for Effect {
 
 struct Attempt {
     challenge: DeviceCode,
-    deadline: Instant,
     next_poll: Instant,
     polling: bool,
 }
@@ -227,10 +224,7 @@ impl Machine {
     pub fn new(default: Option<RepoName>) -> Self {
         Self {
             state: State::Loading,
-            stamp: Stamp {
-                attempt: 0,
-                generation: 0,
-            },
+            stamp: Stamp { generation: 0 },
             fence: Arc::new(AtomicU64::new(0)),
             deadline: None,
             repos: Bounded::default(),
@@ -259,8 +253,13 @@ impl Machine {
             }
             State::Awaiting(a) => GitHubView::AwaitingUser {
                 user_code: a.challenge.user_code.clone(),
-                expires_in_s: u16::try_from(a.deadline.saturating_duration_since(now).as_secs())
-                    .unwrap_or(900),
+                expires_in_s: u16::try_from(
+                    self.deadline
+                        .unwrap_or(now)
+                        .saturating_duration_since(now)
+                        .as_secs(),
+                )
+                .unwrap_or(900),
             },
             State::Connected(account) => GitHubView::Connected {
                 login: account.user.login.clone(),
@@ -279,11 +278,6 @@ impl Machine {
     }
 
     fn advance(&mut self) {
-        self.stamp.attempt = self
-            .stamp
-            .attempt
-            .checked_add(1)
-            .expect("attempt counter exhausted");
         self.stamp.generation = self
             .stamp
             .generation
@@ -315,7 +309,7 @@ impl Machine {
     /// Apply one event at the caller's clock. Ended attempts cannot be revived by completions.
     ///
     /// # Panics
-    /// If a process exhausts its 64-bit attempt or generation counter.
+    /// If a process exhausts its 64-bit generation counter.
     #[expect(
         clippy::too_many_lines,
         reason = "one ordered transition table keeps state ownership together"
@@ -342,7 +336,10 @@ impl Machine {
                 self.cancel(&mut effects);
             }
             Input::Op(GitHubOp::Connect)
-                if matches!(self.state, State::SignedOut(None) | State::NeedsSignIn(_)) =>
+                if matches!(
+                    self.state,
+                    State::SignedOut(None | Some(Cleanup::Refused)) | State::NeedsSignIn(_)
+                ) =>
             {
                 self.advance();
                 self.state = State::Requesting;
@@ -393,7 +390,6 @@ impl Machine {
                         self.deadline = Some(deadline);
                         self.state = State::Awaiting(Attempt {
                             challenge,
-                            deadline,
                             next_poll,
                             polling: false,
                         });
@@ -412,7 +408,7 @@ impl Machine {
                         stamp: self.stamp,
                         code: a.challenge.code.clone(),
                     });
-                    effects.push(Effect::Wake(a.deadline));
+                    effects.extend(self.deadline.map(Effect::Wake));
                 }
             }
             Input::Poll { stamp, result }
@@ -440,7 +436,10 @@ impl Machine {
                             a.polling = false;
                             a.next_poll =
                                 now + Duration::from_secs(u64::from(a.challenge.interval_s));
-                            effects.push(Effect::Wake(a.next_poll.min(a.deadline)));
+                            effects.extend(
+                                self.deadline
+                                    .map(|deadline| Effect::Wake(a.next_poll.min(deadline))),
+                            );
                         }
                     }
                     Ok(TokenReply::Error { code, .. }) => self.fail(token_key(code), &mut effects),

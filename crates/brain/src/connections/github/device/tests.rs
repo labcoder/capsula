@@ -89,7 +89,7 @@ fn error(effects: &[Effect]) -> ErrorKey {
 }
 
 #[tokio::test(start_paused = true)]
-async fn slow_down_uses_both_intervals_and_never_exceeds_900() {
+async fn slow_down_uses_both_intervals() {
     let mut m = empty();
     let stamp = begin(&mut m, 5, 900);
     let second = m.on(Input::Op(GitHubOp::Connect), Instant::now());
@@ -118,36 +118,41 @@ async fn slow_down_uses_both_intervals_and_never_exceeds_900() {
             matches!(effects[0], Effect::Wake(at) if at == Instant::now() + Duration::from_secs(next))
         );
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_interval_at_the_deadline_expires_without_polling() {
     let mut m = empty();
-    let stamp = begin(&mut m, 900, 900);
+    begin(&mut m, 900, 900);
     let now = Instant::now();
-    // The minimum interval equals the deadline, so no poll can actually be sent.
     assert_eq!(polls(&m.on(Input::Tick, now + Duration::from_secs(899))), 0);
     assert_eq!(
         error(&m.on(Input::Tick, now + Duration::from_mins(15))),
         ErrorKey::SignInTimedOut
     );
-    // Exercise the saturation in an admitted in-flight response independently of expiry.
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_interval_cap_is_a_defensive_invariant() {
     let mut m = empty();
-    let stamp2 = begin(&mut m, 900, 900);
+    let stamp = begin(&mut m, 900, 900);
     if let State::Awaiting(a) = &mut m.state {
         a.polling = true;
     }
     m.on(
         Input::Poll {
-            stamp: stamp2,
+            stamp,
             result: Ok(TokenReply::Error {
                 code: TokenError::SlowDown,
                 interval_s: None,
             }),
         },
-        now,
+        Instant::now(),
     );
     let State::Awaiting(a) = &m.state else {
         panic!("awaiting")
     };
     assert_eq!(a.challenge.interval_s, 900);
-    assert_eq!(stamp.generation, 1);
 }
 
 #[tokio::test(start_paused = true)]
@@ -459,10 +464,7 @@ async fn startup_401_drops_the_bearer_and_save_refusal_stays_final() {
 
 #[test]
 fn outermost_carriers_and_attempt_do_not_print_secrets_or_byte_lists() {
-    let stamp = Stamp {
-        attempt: 1,
-        generation: 1,
-    };
+    let stamp = Stamp { generation: 1 };
     let input = Input::Poll {
         stamp,
         result: Ok(TokenReply::Token(bearer())),
@@ -477,14 +479,12 @@ fn outermost_carriers_and_attempt_do_not_print_secrets_or_byte_lists() {
     let now = Instant::now();
     let attempt = Attempt {
         challenge: challenge(1, 900),
-        deadline: now,
         next_poll: now,
         polling: false,
     };
     let text = format!("{input:?} {effect:?} {attempt:?}");
     assert!(!text.contains("sentinel"));
     assert!(!text.contains("115, 101, 110, 116, 105, 110, 101, 108"));
-    assert!(format!("{:?}", "sentinel").contains("sentinel"));
 }
 
 #[tokio::test(start_paused = true)]
@@ -625,4 +625,370 @@ async fn startup_non_401_failure_keeps_the_saved_account_with_an_empty_refreshab
             matches!(effects[0], Effect::RefreshRepos { generation } if generation == m.stamp().generation)
         );
     }
+}
+
+fn finish_attempt(m: &mut Machine) {
+    m.on(Input::Op(GitHubOp::SignOut), Instant::now());
+    m.on(
+        Input::Removed {
+            generation: m.stamp().generation,
+            result: Removed::Clean,
+        },
+        Instant::now(),
+    );
+}
+fn polling(m: &mut Machine) -> Stamp {
+    let stamp = begin(m, 1, 900);
+    m.on(Input::Tick, Instant::now() + Duration::from_secs(1));
+    stamp
+}
+fn verifying(m: &mut Machine) -> Stamp {
+    let stamp = polling(m);
+    m.on(
+        Input::Poll {
+            stamp,
+            result: Ok(TokenReply::Token(bearer())),
+        },
+        Instant::now(),
+    );
+    stamp
+}
+fn stale(m: &mut Machine, input: Input) {
+    let before = m.view(Instant::now());
+    let effects = m.on(input, Instant::now());
+    assert_eq!(
+        effects.len(),
+        1,
+        "stale completion must emit only the unchanged view"
+    );
+    assert_eq!(m.view(Instant::now()), before);
+}
+
+#[tokio::test(start_paused = true)]
+async fn sign_out_always_emits_cancel_then_current_generation_remove_then_view() {
+    for stage in 0..8 {
+        let mut m = empty();
+        match stage {
+            1 => {
+                m.on(Input::Op(GitHubOp::Connect), Instant::now());
+            }
+            2 => {
+                begin(&mut m, 1, 900);
+            }
+            3 => {
+                verifying(&mut m);
+            }
+            4 => {
+                saving(&mut m);
+            }
+            5 => connected(&mut m),
+            6 => {
+                connected(&mut m);
+                m.on(
+                    Input::Unauthorized {
+                        generation: m.stamp().generation,
+                    },
+                    Instant::now(),
+                );
+            }
+            7 => m = Machine::new(None),
+            _ => {}
+        }
+        let old = m.stamp().generation;
+        let effects = m.on(Input::Op(GitHubOp::SignOut), Instant::now());
+        assert_eq!(m.fence().load(Ordering::Acquire), old + 1);
+        assert!(
+            matches!(effects.as_slice(), [
+            Effect::CancelAll,
+            Effect::Remove { generation },
+            Effect::View(GitHubView::SignedOut { cleanup: Some(Cleanup::Running) }),
+        ] if *generation == old + 1),
+            "stage {stage}: {effects:?}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn stale_code_cannot_enter_a_new_requesting_attempt() {
+    let mut m = empty();
+    m.on(Input::Op(GitHubOp::Connect), Instant::now());
+    let old = m.stamp();
+    finish_attempt(&mut m);
+    m.on(Input::Op(GitHubOp::Connect), Instant::now());
+    stale(
+        &mut m,
+        Input::Code {
+            stamp: old,
+            result: Ok(challenge(1, 900)),
+        },
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn stale_poll_cannot_supply_a_token_to_a_new_poll() {
+    let mut m = empty();
+    let old = polling(&mut m);
+    finish_attempt(&mut m);
+    polling(&mut m);
+    stale(
+        &mut m,
+        Input::Poll {
+            stamp: old,
+            result: Ok(TokenReply::Token(bearer())),
+        },
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn stale_user_cannot_save_another_attempts_identity() {
+    let mut m = empty();
+    let old = verifying(&mut m);
+    finish_attempt(&mut m);
+    verifying(&mut m);
+    stale(
+        &mut m,
+        Input::User {
+            stamp: old,
+            result: Ok(user()),
+        },
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn stale_saved_cannot_publish_a_new_unsaved_account() {
+    let mut m = empty();
+    let old = saving(&mut m);
+    finish_attempt(&mut m);
+    saving(&mut m);
+    stale(
+        &mut m,
+        Input::Saved {
+            stamp: old,
+            saved: true,
+        },
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn stale_loaded_cannot_supply_an_account_to_a_new_load_epoch() {
+    let mut m = Machine::new(None);
+    let old = m.stamp();
+    finish_attempt(&mut m);
+    m.state = State::Loading;
+    stale(
+        &mut m,
+        Input::Loaded {
+            stamp: old,
+            result: Ok(Some(Account {
+                token: bearer(),
+                user: user(),
+            })),
+        },
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn stale_unauthorized_cannot_demote_a_new_connection() {
+    let mut m = empty();
+    connected(&mut m);
+    let old = m.stamp().generation;
+    finish_attempt(&mut m);
+    connected(&mut m);
+    stale(&mut m, Input::Unauthorized { generation: old });
+}
+
+#[tokio::test(start_paused = true)]
+async fn stale_repositories_cannot_replace_a_new_connections_list() {
+    let mut m = empty();
+    connected(&mut m);
+    let old = m.stamp().generation;
+    finish_attempt(&mut m);
+    connected(&mut m);
+    stale(
+        &mut m,
+        Input::Repos {
+            generation: old,
+            names: Bounded::new(vec![RepoName::new("old/repo").unwrap()]).unwrap(),
+            truncated: true,
+        },
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn stale_removal_cannot_clear_a_new_sign_outs_cleanup() {
+    let mut m = empty();
+    m.on(Input::Op(GitHubOp::SignOut), Instant::now());
+    let old = m.stamp().generation;
+    m.on(Input::Op(GitHubOp::SignOut), Instant::now());
+    stale(
+        &mut m,
+        Input::Removed {
+            generation: old,
+            result: Removed::Clean,
+        },
+    );
+}
+
+fn assert_no_marker(text: &str) {
+    assert!(!text.contains("sentinel"), "{text}");
+    assert!(
+        !text.contains("115, 101, 110, 116, 105, 110, 101, 108"),
+        "{text}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn account_machine_removed_and_stamp_formats_do_not_expose_markers() {
+    let account = Account {
+        token: bearer(),
+        user: user(),
+    };
+    assert_no_marker(&format!("{account:?}"));
+    let mut m = empty();
+    let stamp = polling(&mut m);
+    assert_no_marker(&format!("{m:?}"));
+    m.on(
+        Input::Poll {
+            stamp,
+            result: Ok(TokenReply::Token(bearer())),
+        },
+        Instant::now(),
+    );
+    assert_no_marker(&format!("{m:?}"));
+    m.on(
+        Input::User {
+            stamp,
+            result: Ok(user()),
+        },
+        Instant::now(),
+    );
+    assert_no_marker(&format!("{m:?}"));
+    m.on(Input::Saved { stamp, saved: true }, Instant::now());
+    assert_no_marker(&format!("{m:?}"));
+    let stamp = Stamp {
+        generation: u64::from_le_bytes(*b"sentinel"),
+    };
+    assert_no_marker(&format!("{stamp:?}"));
+    for removed in [Removed::Clean, Removed::Refused, Removed::NotDurable] {
+        assert_no_marker(&format!("{removed:?}"));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn startup_success_refreshes_without_saving_the_already_durable_account() {
+    let mut m = Machine::new(None);
+    let stamp = m.stamp();
+    m.on(
+        Input::Loaded {
+            stamp,
+            result: Ok(Some(Account {
+                token: bearer(),
+                user: user(),
+            })),
+        },
+        Instant::now(),
+    );
+    let effects = m.on(
+        Input::User {
+            stamp,
+            result: Ok(user()),
+        },
+        Instant::now(),
+    );
+    assert!(matches!(effects.as_slice(), [
+        Effect::RefreshRepos { generation },
+        Effect::View(GitHubView::Connected { .. })
+    ] if *generation == stamp.generation + 1));
+    assert_eq!(
+        m.view(Instant::now()),
+        GitHubView::Connected {
+            login: user().login,
+            repos: Bounded::default(),
+            truncated: false,
+            default: None
+        }
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_challenge_view_has_the_exact_user_code_and_remaining_seconds() {
+    let mut m = empty();
+    begin(&mut m, 5, 900);
+    assert_eq!(
+        m.view(Instant::now()),
+        GitHubView::AwaitingUser {
+            user_code: UserCode::new("ABCD-EFGH").unwrap(),
+            expires_in_s: 900
+        }
+    );
+    tokio::time::advance(Duration::from_secs(100)).await;
+    assert_eq!(
+        m.view(Instant::now()),
+        GitHubView::AwaitingUser {
+            user_code: UserCode::new("ABCD-EFGH").unwrap(),
+            expires_in_s: 800
+        }
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn cleanup_running_and_not_durable_block_connect_but_refused_allows_it() {
+    for result in [Removed::Clean, Removed::Refused] {
+        let mut m = empty();
+        m.on(Input::Op(GitHubOp::SignOut), Instant::now());
+        m.on(
+            Input::Removed {
+                generation: m.stamp().generation,
+                result,
+            },
+            Instant::now(),
+        );
+        let old = m.stamp();
+        let effects = m.on(Input::Op(GitHubOp::Connect), Instant::now());
+        assert!(
+            matches!(effects.as_slice(), [Effect::RequestCode { stamp }, Effect::View(GitHubView::Requesting)] if stamp.generation == old.generation + 1)
+        );
+    }
+    for cleanup in [Cleanup::Running, Cleanup::NotDurable] {
+        let mut m = empty();
+        m.state = State::SignedOut(Some(cleanup));
+        stale(&mut m, Input::Op(GitHubOp::Connect));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn needs_sign_in_can_connect_but_cancel_does_not_sign_a_connected_account_out() {
+    let mut m = empty();
+    connected(&mut m);
+    stale(&mut m, Input::Op(GitHubOp::CancelConnect));
+    m.on(
+        Input::Unauthorized {
+            generation: m.stamp().generation,
+        },
+        Instant::now(),
+    );
+    let effects = m.on(Input::Op(GitHubOp::Connect), Instant::now());
+    assert!(matches!(
+        effects.as_slice(),
+        [
+            Effect::RequestCode { .. },
+            Effect::View(GitHubView::Requesting)
+        ]
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn expiry_during_user_verification_rejects_a_late_identity() {
+    let mut m = empty();
+    let stamp = verifying(&mut m);
+    tokio::time::advance(Duration::from_mins(15)).await;
+    let effects = m.on(Input::Tick, Instant::now());
+    assert_eq!(error(&effects), ErrorKey::SignInTimedOut);
+    stale(
+        &mut m,
+        Input::User {
+            stamp,
+            result: Ok(user()),
+        },
+    );
 }
