@@ -725,3 +725,81 @@ fn the_complete_draw_cap_is_sixteen_kib_and_one_over_stays_refused() {
         )
     );
 }
+
+#[test]
+fn sixty_six_records_complete_and_the_sixty_seventh_keeps_the_durable_prefix() {
+    for extra in [false, true] {
+        let scratch = Scratch::new("draw-record-bound");
+        let mut store = store(&scratch);
+        let mut core = offered(vec![T]);
+        let mut records =
+            vec![json!({"begin":{"v":1,"scene":"bounded","surface":"overlay","alt":"bounded"}})];
+        for index in 0..64 {
+            records.push(json!({"step":{"id":format!("s{index}")}}));
+        }
+        records.push(json!({"end":{}}));
+        if extra {
+            records.push(json!({"end":{}}));
+        }
+        assert_eq!(records.len(), if extra { 67 } else { 66 });
+        let bytes = serde_json::to_vec(&json!({"records":records})).expect("fixture");
+        let (dispatch, mut effects) = call(&mut core, "bounded", &bytes);
+        assert_eq!(dispatch, Dispatch::Committing);
+        let mut steps = 0;
+        let mut ends = Vec::new();
+        loop {
+            for effect in &effects {
+                match effect {
+                    Effect::Data(DataToShell::SceneStepCommit { .. }) => steps += 1,
+                    Effect::Data(DataToShell::SceneEnd { complete, .. }) => ends.push(*complete),
+                    _ => {}
+                }
+            }
+            if pending(&effects).is_none() {
+                break;
+            }
+            effects = write(&mut core, &mut store, &effects);
+        }
+        assert_eq!(steps, 64);
+        assert_eq!(ends, [!extra]);
+        assert_eq!(
+            store.drawing_scenes().expect("durable scene").scenes[0]
+                .log
+                .len(),
+            64
+        );
+        let result = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Store(StoreOp::CommitCall(result)) => Some(result),
+                _ => None,
+            })
+            .expect("result waits for durable acknowledgement");
+        let ids = (0..64)
+            .map(|index| format!("s{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let expected = ToolOutput::Text(format!(
+            "drawn: [{ids}]{}",
+            if extra {
+                "; stopped: drawing.BudgetSpent"
+            } else {
+                ""
+            }
+        ));
+        assert_eq!(result.output, expected);
+        assert!(core.current.as_ref().expect("run").answered.is_empty());
+        let outcome = store.commit_call(result).expect("durable result");
+        assert_eq!(outcome, Committed::Done);
+        core.handle(Input::CallCommitted {
+            key: result.key.clone(),
+            outcome,
+            then: None,
+        })
+        .expect("ack");
+        assert_eq!(
+            call(&mut core, "bounded", &bytes),
+            (Dispatch::Answered(expected), Vec::new())
+        );
+    }
+}
