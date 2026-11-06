@@ -40,6 +40,8 @@ pub(crate) struct Object {
     pub parent: Option<WireId>,
     /// Exact-size, so clones keep the capacity attribution counts.
     pub references: Box<[WireId]>,
+    /// A 3D object's record, cloned once at its put and shared by every later version.
+    pub three: Option<std::sync::Arc<Op>>,
 }
 
 pub(crate) struct Visual<'a> {
@@ -195,6 +197,10 @@ pub(super) fn object(
         kind: v.kind,
         parent: v.parent.cloned(),
         references: reference_ids(op).into_boxed_slice(),
+        three: v
+            .kind
+            .three_dimensional()
+            .then(|| std::sync::Arc::new(op.clone())),
     })
 }
 
@@ -636,6 +642,7 @@ mod tests {
                         kind: Kind::Solid,
                         parent: None,
                         references: Box::default(),
+                        three: None,
                     },
                 )]);
                 let result = validate_anim(anim, 0, &step, &objects, &HashSet::new());

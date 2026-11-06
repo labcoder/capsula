@@ -1,9 +1,13 @@
 //! Tool calls from a run: resolved against the current run, handed to the dispatcher, and
 //! answered on their write's acknowledgement (docs/development/tools.md).
 
+use kumochi_protocol::message::{ControlToShell, ThreadId};
+
 use super::admission::origin;
-use super::{Coordinator, Effect, Stale, StoreOp};
-use crate::dispatch::{self, Caller, Dispatch, LedgerKey, RunCtx, Step, ToolError, ToolOutput};
+use super::{Coordinator, Effect, Run, Stale, StoreOp};
+use crate::dispatch::{
+    self, Caller, Dispatch, LedgerKey, LocalWrite, RunCtx, Step, Then, ToolError, ToolOutput,
+};
 use crate::engines::ToolName;
 use crate::store::Failure;
 
@@ -27,7 +31,9 @@ impl Coordinator {
         if self.deleting_thread(thread) {
             return ended;
         }
-        let reach = origin(thread, self.main_thread);
+        let main = self.main_thread;
+        let fresh = ThreadId(self.last_thread.0 + 1);
+        let reach = origin(thread, main);
         let Ok(run) = self.current(caller.run()) else {
             return ended;
         };
@@ -46,6 +52,8 @@ impl Coordinator {
         }
         let mut ctx = RunCtx {
             thread,
+            main,
+            fresh,
             reach,
             offered: build.offered(),
             mcp: run.mcp,
@@ -55,6 +63,10 @@ impl Coordinator {
             Step::Answer(output) => Dispatch::Answered(output),
             Step::Join => Dispatch::Joined,
             Step::Commit(call) => {
+                // Advanced at dispatch: a candidate whose reserve never commits was never seen.
+                if let LocalWrite::CreateTask { thread, .. } = &call.write {
+                    self.last_thread = *thread;
+                }
                 effects.push(Effect::Store(StoreOp::CommitCall(call)));
                 Dispatch::Committing
             }
@@ -63,29 +75,53 @@ impl Coordinator {
 
     /// A call's write committed. Its callers are answered only while their run is current and,
     /// for MCP, its launch is still the authorized one; a model call answers its round's call,
-    /// and the round is stored once every call has its answer.
+    /// and the round is stored once every call has its answer. Its follow-up runs once, with
+    /// the first acknowledgement, and only while the run is current.
     pub(super) fn call_committed(
         &mut self,
         key: &LedgerKey,
+        then: Option<Then>,
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
         let run = self.current(key.run)?;
-        let answers = run.ledger.committed(key);
-        let authorized = |caller: &Caller| match caller {
-            Caller::Model { .. } => true,
-            Caller::Mcp { launch, .. } => run.mcp == Some(*launch),
-        };
-        // A model call answers its round's call once, so the round stores one result per call;
-        // any other answer waits in `answered`, which no round reads.
-        for (caller, output) in answers.into_iter().filter(|(caller, _)| authorized(caller)) {
-            let taken = match &caller {
-                Caller::Model { call, .. } => run.tools.answer(call, output.clone()),
-                Caller::Mcp { .. } => false,
-            };
-            if !taken {
-                run.answered.push((caller, output));
+        if let Some(answers) = run.ledger.committed(key) {
+            deliver(run, answers);
+            if let Some(
+                Then::Focus(thread)
+                | Then::Created {
+                    thread,
+                    focus: true,
+                },
+            ) = then
+            {
+                effects.push(Effect::Control(ControlToShell::Focus {
+                    run: key.run,
+                    thread,
+                }));
             }
         }
+        if !run.tools.dispatched() {
+            return Ok(());
+        }
+        self.store_round(key.run, effects)
+    }
+
+    /// The store refused a call's write on its own check: every caller waiting on it is
+    /// answered with the error, the key stays refused, and the run goes on.
+    pub(super) fn call_refused(
+        &mut self,
+        key: &LedgerKey,
+        error: ToolError,
+        effects: &mut Vec<Effect>,
+    ) -> Result<(), Stale> {
+        let run = self.current(key.run)?;
+        let answers = run
+            .ledger
+            .refused(key, error)
+            .into_iter()
+            .map(|caller| (caller, ToolOutput::Error(error)))
+            .collect();
+        deliver(run, answers);
         if !run.tools.dispatched() {
             return Ok(());
         }
@@ -100,5 +136,21 @@ impl Coordinator {
     ) -> Result<(), Stale> {
         self.current(key.run)?.ledger.failed(key);
         self.fail(key.run, Failure::Store, effects)
+    }
+}
+
+/// Answers settled callers. A model call answers its round's call once, so the round stores one
+/// result per call; any other answer waits in `answered`, which no round reads. An MCP caller
+/// whose launch is no longer the authorized one gets nothing.
+fn deliver(run: &mut Run, answers: Vec<(Caller, ToolOutput)>) {
+    for (caller, output) in answers {
+        let taken = match &caller {
+            Caller::Model { call, .. } => run.tools.answer(call, output.clone()),
+            Caller::Mcp { launch, .. } if run.mcp == Some(*launch) => false,
+            Caller::Mcp { .. } => continue,
+        };
+        if !taken {
+            run.answered.push((caller, output));
+        }
     }
 }

@@ -67,6 +67,9 @@ pub(crate) fn host_at([x, y]: [i32; 2]) -> Option<HostFacts> {
         let window = next?;
         // SAFETY: `window` came from the z-order walk; a stale one only fails the call.
         next = unsafe { GetWindow(window, GW_HWNDNEXT) }.ok();
+        if !bounds(window).is_some_and(|rect| contains(rect, x, y)) {
+            continue;
+        }
         let Some(frame) = frame(window).filter(|_| eligible(window)) else {
             continue;
         };
@@ -200,6 +203,15 @@ fn captioned(style: WINDOW_STYLE) -> bool {
     style.0 & WS_CAPTION.0 == WS_CAPTION.0
 }
 
+/// The window rectangle, which holds the DWM frame: one cheap read rules out most windows
+/// before the DWM and style reads.
+fn bounds(window: HWND) -> Option<PhysicalRect> {
+    let mut raw = RECT::default();
+    // SAFETY: `raw` outlives the call; a stale handle only fails it.
+    unsafe { GetWindowRect(window, &raw mut raw) }.ok()?;
+    Some(physical(raw))
+}
+
 fn frame(window: HWND) -> Option<PhysicalRect> {
     let mut frame = RECT::default();
     attribute(window, DWMWA_EXTENDED_FRAME_BOUNDS, &mut frame).ok()?;
@@ -277,7 +289,10 @@ const WATCHES: usize = 2;
 
 /// Where a hook's callback sends: the host it's for, its generation and the channel.
 struct Route {
+    /// Still installed; a removed hook is reset to the default handle.
     hooks: [HWINEVENTHOOK; EVENTS.len()],
+    /// False once dropped or rolled back: what's left only waits to be unhooked.
+    live: bool,
     window: HWND,
     w: WatchGen,
     events: Sender<PresenceEvent>,
@@ -297,17 +312,25 @@ pub(crate) struct HostWatch {
     _thread: PhantomData<Rc<()>>,
 }
 
-/// Arms a watch on `id`. Fails closed, with nothing left installed, when any hook can't be
-/// set or two watches are already alive.
+/// Arms a watch on `id`. Fails closed when any hook can't be set or two watches are already
+/// alive. A hook that wouldn't come off keeps its slot until a later call removes it.
 pub(crate) fn watch_host(
     id: HostId,
     w: WatchGen,
     events: Sender<PresenceEvent>,
 ) -> Result<HostWatch, PresenceError> {
     let slot = ROUTES
-        .with_borrow(|routes| routes.iter().position(Option::is_none))
+        .with_borrow_mut(|routes| {
+            for slot in routes.iter_mut() {
+                teardown(slot, |route| {
+                    !route.live && unhook_all(&mut route.hooks, unhook)
+                });
+            }
+            routes.iter().position(Option::is_none)
+        })
         .ok_or(PresenceError::HostWatch)?;
-    let hooks = install(
+    let window = HWND(std::ptr::with_exposed_provenance_mut(id.window));
+    let (live, hooks) = match install(
         |index| {
             let (event, _) = EVENTS[index];
             // SAFETY: `on_event` is a plain function that outlives the hook; out of context,
@@ -326,17 +349,24 @@ pub(crate) fn watch_host(
             (!hook.is_invalid()).then_some(hook)
         },
         unhook,
-    )
-    .ok_or(PresenceError::HostWatch)?;
-    let window = HWND(std::ptr::with_exposed_provenance_mut(id.window));
-    ROUTES.with_borrow_mut(|routes| {
-        routes[slot] = Some(Route {
-            hooks,
-            window,
-            w,
-            events,
+    ) {
+        Ok(hooks) => (true, hooks),
+        Err(left) => (false, left),
+    };
+    if live || hooks.iter().any(|hook| !hook.is_invalid()) {
+        ROUTES.with_borrow_mut(|routes| {
+            routes[slot] = Some(Route {
+                hooks,
+                live,
+                window,
+                w,
+                events,
+            });
         });
-    });
+    }
+    if !live {
+        return Err(PresenceError::HostWatch);
+    }
     Ok(HostWatch {
         slot,
         _thread: PhantomData,
@@ -347,43 +377,59 @@ impl Drop for HostWatch {
     fn drop(&mut self) {
         ROUTES.with_borrow_mut(|routes| {
             teardown(&mut routes[self.slot], |route| {
-                route.hooks.into_iter().for_each(unhook);
+                route.live = false;
+                unhook_all(&mut route.hooks, unhook)
             });
         });
     }
 }
 
-/// Removes one hook `watch_host` installed. A failure leaves nothing to do but say so.
-fn unhook(hook: HWINEVENTHOOK) {
-    // SAFETY: `hook` was installed by `watch_host` and is removed once.
-    if !unsafe { UnhookWinEvent(hook) }.as_bool() {
+/// Removes one hook `watch_host` installed, and says whether it's gone.
+fn unhook(hook: HWINEVENTHOOK) -> bool {
+    // SAFETY: `hook` was installed by `watch_host` and is still owned by its route.
+    let removed = unsafe { UnhookWinEvent(hook) }.as_bool();
+    if !removed {
         tracing::warn!("UnhookWinEvent failed");
     }
+    removed
 }
 
 /// Installs one hook per event in order. If one fails, the ones before it are removed in
-/// reverse and nothing is returned, so a watch is never half installed.
-fn install<H: Copy + Default, const N: usize>(
+/// reverse and `Err` holds any that wouldn't come off, so none is ever forgotten.
+fn install<H: Copy + Default + PartialEq, const N: usize>(
     mut add: impl FnMut(usize) -> Option<H>,
-    mut remove: impl FnMut(H),
-) -> Option<[H; N]> {
+    remove: impl FnMut(H) -> bool,
+) -> Result<[H; N], [H; N]> {
     let mut hooks = [H::default(); N];
     for index in 0..N {
         let Some(hook) = add(index) else {
-            hooks[..index].iter().rev().for_each(|hook| remove(*hook));
-            return None;
+            unhook_all(&mut hooks[..index], remove);
+            return Err(hooks);
         };
         hooks[index] = hook;
     }
-    Some(hooks)
+    Ok(hooks)
 }
 
-/// Unhooks a route before its slot is cleared, so a hook never outlives what its callback reads.
-fn teardown<R>(slot: &mut Option<R>, unhook: impl FnOnce(&R)) {
-    if let Some(route) = slot.as_ref() {
-        unhook(route);
+/// Removes every hook still held, last first, keeping the ones that failed. True once none is left.
+fn unhook_all<H: Copy + Default + PartialEq>(
+    hooks: &mut [H],
+    mut remove: impl FnMut(H) -> bool,
+) -> bool {
+    for hook in hooks.iter_mut().rev() {
+        if *hook != H::default() && remove(*hook) {
+            *hook = H::default();
+        }
     }
-    *slot = None;
+    hooks.iter().all(|hook| *hook == H::default())
+}
+
+/// Clears a route only once `unhook` confirms its hooks are gone, so a hook never outlives
+/// what its callback reads; otherwise the slot stays taken.
+fn teardown<R>(slot: &mut Option<R>, unhook: impl FnOnce(&mut R) -> bool) {
+    if slot.as_mut().is_none_or(unhook) {
+        *slot = None;
+    }
 }
 
 unsafe extern "system" fn on_event(
@@ -408,7 +454,7 @@ unsafe extern "system" fn on_event(
         let route = routes
             .iter()
             .flatten()
-            .find(|route| route.hooks.contains(&hook));
+            .find(|route| route.live && route.hooks.contains(&hook));
         if let Some(route) = route.filter(|route| route.window == window) {
             send(
                 &route.events,
@@ -431,7 +477,7 @@ mod tests {
         WS_CAPTION, WS_DLGFRAME, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW, WS_POPUP,
     };
 
-    use super::{captioned, install, metrics, teardown};
+    use super::{captioned, install, metrics, teardown, unhook_all};
 
     #[test]
     fn only_the_whole_caption_style_counts_as_a_caption() {
@@ -497,31 +543,62 @@ mod tests {
     #[test]
     fn a_failed_hook_removes_the_ones_before_it_in_reverse() {
         let log = RefCell::new(Vec::new());
-        let hooks: Option<[u32; 5]> = install(
+        let hooks: Result<[u32; 5], _> = install(
             |index| {
                 log.borrow_mut().push(format!("add {index}"));
                 (index != 2).then_some(10 + u32::try_from(index).unwrap())
             },
-            |hook| log.borrow_mut().push(format!("remove {hook}")),
+            |hook| {
+                log.borrow_mut().push(format!("remove {hook}"));
+                true
+            },
         );
-        assert_eq!(hooks, None);
+        assert_eq!(hooks, Err([0; 5]));
         assert_eq!(
             *log.borrow(),
             ["add 0", "add 1", "add 2", "remove 11", "remove 10"]
         );
-        let all: Option<[u32; 3]> = install(
-            |index| Some(u32::try_from(index).unwrap()),
+        let all: Result<[u32; 3], _> = install(
+            |index| Some(u32::try_from(index).unwrap() + 1),
             |_| panic!("nothing fails"),
         );
-        assert_eq!(all, Some([0, 1, 2]));
+        assert_eq!(all, Ok([1, 2, 3]));
+    }
+
+    #[test]
+    fn a_hook_that_wont_come_off_stays_owned_until_it_does() {
+        let hooks: Result<[u32; 5], _> = install(
+            |index| (index != 3).then_some(10 + u32::try_from(index).unwrap()),
+            |hook| hook != 11,
+        );
+        assert_eq!(hooks, Err([0, 11, 0, 0, 0]), "the rollback keeps 11");
+        let mut left = [11, 12];
+        assert!(!unhook_all(&mut left, |hook| hook != 11));
+        assert_eq!(left, [11, 0]);
+        let mut tries = Vec::new();
+        assert!(unhook_all(&mut left, |hook| {
+            tries.push(hook);
+            true
+        }));
+        assert_eq!(
+            (left, tries),
+            ([0, 0], vec![11]),
+            "a retry removes only what's left"
+        );
     }
 
     #[test]
     fn a_route_is_unhooked_before_its_slot_clears() {
         let mut slot = Some(7);
         let mut seen = None;
-        teardown(&mut slot, |route| seen = Some(*route));
+        teardown(&mut slot, |route| {
+            seen = Some(*route);
+            true
+        });
         assert_eq!((seen, slot), (Some(7), None));
         teardown(&mut slot, |_| panic!("an empty slot has nothing to unhook"));
+        let mut stuck = Some(8);
+        teardown(&mut stuck, |_| false);
+        assert_eq!(stuck, Some(8), "a failed unhook keeps the slot taken");
     }
 }

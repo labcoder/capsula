@@ -6,9 +6,10 @@ run may reach, and records it in the run's ledger. The coordinator owns the ledg
 call only after the store has acknowledged the call's write.
 
 Slice 3's 13b-2 tool loop and slice 8's C4b-2 MCP listener hand calls to
-`Coordinator::tool_call`. No production tool exists yet: 15 adds `create_task` and `focus`, and
-slice 4's B10 adds `draw`'s ledger entry. Until then the test tools
-in `dispatch/tests.rs` exercise the path.
+`Coordinator::tool_call`. The production tools are `create_task` and `focus`. No tool is offered
+to a model yet, because `context::tools` is empty until the staged producers are enabled
+(OSC-116); slice 4's B10 adds `draw`'s ledger entry. The test tools in `dispatch/tests.rs`
+exercise the rest of the path.
 
 ## Who made a call
 
@@ -40,6 +41,7 @@ flowchart TD
     G -- no --> E6[TooLarge / Invalid, recorded]
     G -- yes --> H[CommitCall: the write and the ledger row,<br/>one transaction]
     H --> I[CallCommitted: answer every waiting caller]
+    H --> K[Refused by the write's own check: answer every<br/>waiting caller with the error, run goes on]
 ```
 
 - **The run.** The coordinator resolves the caller's run first. A call queued by a run that was
@@ -64,6 +66,55 @@ flowchart TD
   `StoreOp::CommitCall` and is answered only on `Input::CallCommitted`. A duplicate while it runs
   joins it. A failed write fails the run as `failed(store)`. An acknowledgement for a run that ended
   confirms storage only. One for a launch no longer authorized answers nobody.
+- **Outcomes.** The store settles a write as `Committed::Done`, `Refused(error)` or `Failed`.
+  `Refused` means the write's own check failed and nothing was written: the key turns refused,
+  every caller waiting on it gets the error, and the run goes on. A later acknowledgement for that
+  key changes nothing.
+- **Follow-ups.** A write can carry a `Then`, which comes back with its acknowledgement. The
+  coordinator runs it once, only on `Done` for a key that was still running, and only while the run
+  is current, so a stopped run's or a repeated acknowledgement's follow-up never runs.
+
+## `create_task`
+
+`create_task { title, focus }` is Kumo-only and model-only. It creates one empty live task with
+title source `model`, and starts no run. Its description and Kumo's instructions say Kumo creates a
+task only when the user explicitly asks for a separate task or conversation (OSC-117). The title
+follows the rename rules, and anything else is `Invalid`.
+
+- **The id.** The coordinator hands the call the next id, one above every id it has issued, and
+  advances its counter at dispatch, so the next ordinary new task takes the one after it.
+- **Reserve, then create.** The store first raises the threads high-water in
+  `sqlite_sequence` to that id, in its own commit. Only then is the id a reservation: issued and
+  never reused, even if the task never lands. Then the task row and the ledger row commit in one
+  transaction. If the run's thread is gone (`Failed`) or the store fails, nothing of the task is
+  written and the run fails, but the reservation stays burned. A candidate that never reached
+  the reserve commit was never named to anyone, so reusing it after a restart is fine.
+- **After the commit.** `ThreadsChanged` goes to the shell even when the run has ended, because
+  the task exists. While the run is current, the model reads `Created task <id>.`, and with
+  `focus` the shell gets `Focus` for the new task under the same fences as `focus`.
+- **Content.** `LocalWrite::CreateTask` and everything that carries it print the title as its
+  length only.
+
+## `focus`
+
+`focus { task }` moves the user's typed input to a task, or back to Kumo. Kumo's runs may name any
+task; a task's run may name only Kumo, and anything else is `NotHere` (a named task's own run
+waits for OSC-116). Its write checks, in the call's transaction, that the target is a live thread,
+and is refused with `NoTask` otherwise. Once it commits, the coordinator sends
+`ControlToShell::Focus { run, thread }`.
+
+The shell applies it, as an explicit switch, only when all of these hold:
+
+- it came over the current connection;
+- `run` is the newest run the shell named, past the Esc and delete fence;
+- `run` answered a turn the user typed, under the turn number that is still the last one this
+  connection sent, at the selection that is still current.
+
+So a manual switch, a later turn (even one the brain refused), Esc, a reconnect or a new brain
+each make a pending `Focus` stale. The turn number is taken at send and kept with the submission,
+so with several turns pending only the run answering the last can move the input. The turn
+numbering restarts with each connection. The run fence is kept across a reconnect to the same
+brain and starts over only for a new incarnation.
 
 ## A round's calls
 

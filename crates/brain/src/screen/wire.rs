@@ -74,6 +74,7 @@ pub struct TicketWire {
     generation: u64,
     nonce: [u8; 16],
     ttl_ms: u32,
+    shell_pid: u32,
 }
 
 impl TicketWire {
@@ -92,11 +93,20 @@ impl TicketWire {
             generation,
             nonce,
             ttl_ms,
+            shell_pid: 0,
         }
     }
 
     pub(super) fn capture(&self) -> CaptureId {
         self.capture
+    }
+
+    pub(super) fn for_shell(mut self, pid: u32) -> Self {
+        self.shell_pid = pid;
+        self
+    }
+    pub(super) fn shell_pid(&self) -> u32 {
+        self.shell_pid
     }
 
     pub(super) fn generation(&self) -> u64 {

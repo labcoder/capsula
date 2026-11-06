@@ -82,6 +82,43 @@ fn system_aware_host_at_150_percent_on_a_negative_monitor_rounds_up() {
 }
 
 #[test]
+fn only_a_point_in_the_caption_and_outside_its_buttons_is_a_drop() {
+    let facts = crate::platform::host::HostFacts {
+        id: crate::platform::host::HostId {
+            window: 1,
+            process: 2,
+            thread: 3,
+        },
+        caption: fallback(
+            [96, 144],
+            rect(-1800, 100, -600, 1000),
+            rect(-1789, 100, -611, 989),
+            rect(-2560, 0, 0, 1392),
+            [31, 36],
+        ),
+        label: crate::platform::host::Label::new(&[]),
+    };
+    let caption = |point| super::drop_target(&facts, point).map(|target| target.caption.rect);
+    let inside = rect(-1789, 100, -773, 147);
+    assert_eq!(
+        caption([-1000, 120]),
+        Some(inside),
+        "the caption's interior"
+    );
+    assert_eq!(caption([-1789, 100]), Some(inside), "its top-left corner");
+    assert_eq!(caption([-774, 146]), Some(inside), "its last pixel");
+    assert_eq!(caption([-1000, 500]), None, "the client area");
+    assert_eq!(
+        caption([-773, 120]),
+        None,
+        "the right edge, where the buttons start"
+    );
+    assert_eq!(caption([-1000, 147]), None, "the bottom edge");
+    assert_eq!(caption([-700, 120]), None, "a caption button");
+    assert_eq!(caption([-1790, 120]), None, "left of the frame");
+}
+
+#[test]
 fn system_aware_host_at_100_percent_keeps_its_own_metrics() {
     let facts = fallback(
         [96, 96],

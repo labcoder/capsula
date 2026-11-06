@@ -1,5 +1,5 @@
-//! Password rectangles one capture must never show: the element walk adds them as it reads (A3),
-//! and sanitizing blacks them out before any pixel consumer (A4).
+//! Password rectangles one capture must never show: the element walk adds them as it reads,
+//! and sanitizing blacks them out before any pixel consumer.
 
 use std::sync::{Arc, Mutex};
 
@@ -26,9 +26,9 @@ pub enum Unavailable {
 pub(crate) enum Completeness {
     /// No walk has finished for this capture.
     Pending,
-    /// The walk read the whole window and published every password field.
+    /// Password-mask discovery finished without gaps, even if element text was cut.
     Complete,
-    /// The walk was cut, so fields past the cut may be unmasked.
+    /// Password-mask discovery was incomplete, so some password fields may remain unmasked.
     Partial,
     /// The masks are unknown.
     Unknown(Unavailable),
