@@ -3,7 +3,6 @@
 //! connection: it's still written while no shell is connected and during Quit, and a later
 //! connection only hears the settled settings, never an answer meant for another shell.
 
-use std::io;
 use std::path::Path;
 
 use kumochi_protocol::message::{ControlToShell, ErrorKey, SettingsOp};
@@ -12,6 +11,7 @@ use tokio::task::{JoinError, JoinHandle};
 
 use super::{Brain, Full, Link};
 use crate::config::{ConfigError, Pending};
+use crate::platform::{self, Untrusted};
 
 /// The epoch of a change the brain makes itself. Connections count from 1, so a shell hears only
 /// the settled settings.
@@ -171,18 +171,22 @@ impl Brain {
     }
 
     /// Finishes each removal that a crash or a failed delete left: the part's folder under
-    /// `models` is deleted, and then its `RemoveDone` is queued. A folder that's already gone counts
-    /// as deleted. A part whose folder can't be deleted stays listed, so the next start tries again.
-    /// Blocking is fine: it runs at start-up, before anything is served.
+    /// `models` is deleted, and then its `RemoveDone` is queued. Every folder from the volume root
+    /// down to `models` is held while the part's folder is deleted through handles that never
+    /// follow a reparse point, so a junction on the way, or a folder someone else could change,
+    /// deletes nothing. A folder that's already gone counts as deleted. A part whose folder can't
+    /// be deleted stays listed, so the next start tries again. Blocking is fine: it runs at
+    /// start-up, before anything is served.
     pub(crate) fn finish_removals(&mut self, models: &Path) {
         for part in self.config.removing() {
-            match std::fs::remove_dir_all(models.join(part.dir())) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    tracing::warn!(?part, kind = ?error.kind(), "a removed voice part wasn't deleted");
-                    continue;
-                }
+            let deleted = match platform::hold_chain(models) {
+                Ok(_held) => platform::remove_tree(&models.join(part.dir())),
+                Err(Untrusted::Missing) => Ok(()),
+                Err(error) => Err(error),
+            };
+            if let Err(error) = deleted {
+                tracing::warn!(?part, ?error, "a removed voice part wasn't deleted");
+                continue;
             }
             self.settings_ops.push_back(Queued {
                 change: Change::RemoveDone(part),

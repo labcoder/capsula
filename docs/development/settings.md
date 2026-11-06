@@ -197,7 +197,10 @@ names, `speech-input` and `spoken-replies`.
 
 `removing` names a removal that hasn't finished. At start-up, before anything is served, the
 brain deletes each listed part's folder under `%LOCALAPPDATA%\<product>\models` and then queues a
-write that takes the part out of `removing`, under epoch 0 like the default model. A folder
+write that takes the part out of `removing`, under epoch 0 like the default model. Every
+folder from the drive's root down to `models` stays open while the part is deleted, and the
+deletion never follows a reparse point: a junction or link on the way, or a folder another
+account could change, deletes nothing and leaves the part listed. A folder
 that's already gone counts as deleted. A folder that can't be deleted stays listed, so the next
 start tries again. An unknown name is never deleted, and stays in the list.
 
