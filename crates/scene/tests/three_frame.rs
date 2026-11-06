@@ -13,8 +13,9 @@ use kumochi_scene::{
     three::{
         Transform,
         camera::{Camera, Light},
-        frame::{Face, FrameError, Solid, frame},
+        frame::{FrameError, Solid, frame},
         raster::{BandScratch, FrameScratch, Quality, Target, raster},
+        view::FaceRange,
     },
 };
 use std::sync::atomic::AtomicBool;
@@ -43,10 +44,32 @@ fn light() -> Light {
 fn identity() -> Transform {
     Transform::local([0.0; 3], [0.0; 3], 1.0)
 }
-fn solid<'a>(vertices: &'a [Vec3], faces: &'a [Face<'a>]) -> Solid<'a> {
+/// A source face as these fixtures write it: its anchors and its own triangles.
+struct Face<'a> {
+    anchors: [u32; 3],
+    triangles: &'a [[u32; 3]],
+}
+/// Packs fixture faces into one solid's shared triangle array and face ranges, as a prepared mesh
+/// stores them; the few fixture bytes are leaked so the solid stays `Copy`.
+fn solid(vertices: &[Vec3], faces: &[Face<'_>]) -> Solid<'static> {
+    let mut triangles = Vec::new();
+    let mut ranges = Vec::new();
+    for face in faces {
+        ranges.push(FaceRange {
+            anchors: face.anchors,
+            start: triangles.len() as u32,
+            len: face.triangles.len() as u32,
+        });
+        triangles.extend_from_slice(face.triangles);
+    }
+    let vertices: Vec<[f64; 3]> = vertices
+        .iter()
+        .map(|v| [v.x, v.y, v.z].map(f64::from))
+        .collect();
     Solid {
-        vertices,
-        faces,
+        vertices: Vec::leak(vertices),
+        triangles: Vec::leak(triangles),
+        faces: Vec::leak(ranges),
         pose: identity(),
         rgb: [200, 100, 50],
         opacity: 1.0,
@@ -857,14 +880,13 @@ fn vector(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 fn world_triangles(solids: &[Solid<'_>]) -> Vec<([[f64; 3]; 3], u8)> {
     let mut triangles = Vec::new();
     for (i, s) in solids.iter().enumerate() {
-        for f in s.faces {
-            for t in f.triangles {
-                let p = t.map(|j| {
-                    let v = s.pose.point(s.vertices[j as usize]).expect("valid fixture");
-                    [v.x, v.y, v.z].map(f64::from)
-                });
-                triangles.push((p, (i + 1) as u8));
-            }
+        for t in s.triangles {
+            let p = t.map(|j| {
+                s.pose
+                    .apply(s.vertices[j as usize])
+                    .map(|c| f64::from(c as f32))
+            });
+            triangles.push((p, (i + 1) as u8));
         }
     }
     triangles
