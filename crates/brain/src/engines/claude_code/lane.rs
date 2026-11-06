@@ -13,7 +13,7 @@ use std::sync::{Arc, mpsc as std_mpsc};
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::constants::{
-    CLAUDE_CODE_DELETING, CLAUDE_CODE_DIR, CLAUDE_CODE_LOCK, ENGINE_DIR,
+    CLAUDE_CODE_DELETING, CLAUDE_CODE_DIR, CLAUDE_CODE_LOCK, CLAUDE_CODE_QUARANTINE, ENGINE_DIR,
 };
 use kumochi_protocol::message::{ClaudeVersion, PolicyFailed, Unsupported};
 use tokio::sync::{mpsc, oneshot};
@@ -75,8 +75,11 @@ pub(crate) struct Host {
 /// A call the core asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Work {
-    /// Find the install and read its version.
+    /// Find the install and read its version. A version a quarantine marker names is refused,
+    /// and markers that name other versions are cleared.
     Version,
+    /// Write the quarantine marker for a version whose audit failed, then do a `Version`.
+    Quarantine(ClaudeVersion),
     /// Ask the version found last whether it's signed in.
     Status,
     /// Claude Code's own sign-in, for up to [`LOGIN_DEADLINE`].
@@ -130,6 +133,11 @@ pub(crate) enum Failure {
     /// `--version` failed or printed no version.
     Version,
     Status(StatusFailure),
+    /// A quarantine marker couldn't be written, listed, trusted or cleared: every version is
+    /// refused.
+    Quarantine,
+    /// A quarantine marker names the version found.
+    Quarantined(ClaudeVersion),
 }
 
 /// A call's result, for the generation it was admitted under.
@@ -311,6 +319,20 @@ impl Worker {
             deadline: DEADLINE,
         };
         match work {
+            Work::Quarantine(version) => {
+                self.found = None;
+                let _base =
+                    platform::hold_chain(&self.host.base).map_err(|_| Failure::Quarantine)?;
+                self.hold()?;
+                platform::mark(
+                    &self
+                        .host
+                        .base
+                        .join(format!("{CLAUDE_CODE_QUARANTINE}{version}")),
+                )
+                .map_err(|_| Failure::Quarantine)?;
+                self.run(generation, Work::Version)
+            }
             Work::Version => {
                 self.found = None;
                 self.settle()?;
@@ -326,6 +348,7 @@ impl Worker {
                     .then(|| install::parse_version(&stdout))
                     .flatten()
                     .ok_or(Failure::Version)?;
+                self.quarantined(version)?;
                 policy::reviewed(version).map_err(Failure::Unsupported)?;
                 self.found = Some((program, version));
                 Ok(Outcome::Version(version))
@@ -405,6 +428,41 @@ impl Worker {
         let (program, version) = self.found()?;
         let folders = self.preflight(Some(policy_of(version)?))?;
         Ok(Ready { program, folders })
+    }
+
+    /// Refuses `version` while a marker names it; otherwise clears the markers, which all name
+    /// other versions. A name with the prefix that isn't a marker for a version refuses every
+    /// version, and nothing is cleared.
+    fn quarantined(&self, version: ClaudeVersion) -> Result<(), Failure> {
+        let _base = platform::hold_chain(&self.host.base).map_err(|_| Failure::Quarantine)?;
+        let mut others = Vec::new();
+        for entry in std::fs::read_dir(&self.host.base).map_err(|_| Failure::Quarantine)? {
+            let entry = entry.map_err(|_| Failure::Quarantine)?;
+            let name = entry.file_name();
+            if !name.to_string_lossy().starts_with(CLAUDE_CODE_QUARANTINE) {
+                continue;
+            }
+            // Only the exact form Display writes, so no two names mean one version.
+            let named = name
+                .to_str()
+                .and_then(|name| name.strip_prefix(CLAUDE_CODE_QUARANTINE))
+                .and_then(|suffix| {
+                    let named: ClaudeVersion = suffix.parse().ok()?;
+                    (named.to_string() == suffix).then_some(named)
+                })
+                .ok_or(Failure::Quarantine)?;
+            let marker = platform::marker(&entry.path())
+                .ok()
+                .flatten()
+                .ok_or(Failure::Quarantine)?;
+            if named == version {
+                return Err(Failure::Quarantined(version));
+            }
+            others.push(marker);
+        }
+        others
+            .into_iter()
+            .try_for_each(|marker| platform::unmark(marker).map_err(|_| Failure::Quarantine))
     }
 
     fn found(&self) -> Result<(Program, ClaudeVersion), Failure> {

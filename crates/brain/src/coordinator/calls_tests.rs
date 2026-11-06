@@ -81,8 +81,11 @@ fn kumo_rendered_b() -> Coordinator {
     core.handle(rendering(build_key(1), Origin::Kumo, vec![KUMO, B]))
         .expect("admitted");
     let send = SendKey::Build(build_key(1));
-    core.handle(Input::SendReady { key: send })
-        .expect("granted");
+    core.handle(Input::SendReady {
+        key: send,
+        hold: None,
+    })
+    .expect("granted");
     core.handle(Input::SendSettled {
         lease: LeaseId { key: send, send: 1 },
     })

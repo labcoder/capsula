@@ -42,7 +42,7 @@ pub use availability::{Availability, Ready};
 pub use inline::{CompactBuilt, CompactContext};
 pub(crate) use job::JobAsk;
 pub use job::{JobBuilt, JobKey, JobKind, JobOutput, ReadJob};
-pub use lease::{LeaseId, SEND_DEADLINE, SendKey};
+pub use lease::{LeaseId, MAX_HOLD, SEND_DEADLINE, SendKey};
 pub use speech::{DRAIN_STALL, QUIET_TIMEOUT, Synthesized};
 pub use store_op::{StoreOp, SummaryText};
 pub use tools::{MAX_CALLS, MAX_ROUNDS, RoundItems};
@@ -123,6 +123,9 @@ pub enum Input {
     SendReady {
         /// The build or job.
         key: SendKey,
+        /// How long its lease may go unsettled, for a send that can go out again until a process
+        /// tree ends; capped at `MAX_HOLD`. `None` is `SEND_DEADLINE`.
+        hold: Option<Duration>,
     },
     /// An inline compaction's read finished.
     CompactBuilt(CompactBuilt),
@@ -765,10 +768,12 @@ impl Coordinator {
             Input::ContextBuilt(built) => self.context_built(built, &mut effects)?,
             Input::SendReady {
                 key: SendKey::Build(key),
-            } => self.send_ready(key, &mut effects),
+                hold,
+            } => self.send_ready(key, hold, &mut effects),
             Input::SendReady {
                 key: SendKey::Job(key),
-            } => self.job_ready(key, &mut effects),
+                hold,
+            } => self.job_ready(key, hold, &mut effects),
             Input::CompactBuilt(built) => self.compact_built(built, &mut effects)?,
             Input::JobBuilt(built) => self.job_built(built, &mut effects)?,
             Input::JobDone { key, output } => self.job_done(key, output, &mut effects)?,

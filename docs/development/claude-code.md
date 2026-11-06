@@ -268,20 +268,36 @@ kind of item in the lane's queue, so it shares the lane's lock, checks and stuck
 one at a time. Nothing in production starts one yet; C5b's engine is the first caller.
 
 - **Admission.** `Claude::launch` admits only while the view is `Ready`, `SIGN_IN` is
-  `FileWithDacl`, the lane finds and isn't cleaning, and the lifetime is at most `MAX_LAUNCH`
-  (150 s). The deadline is fixed there. A full lane queue (`LANE_QUEUE`, 4) is `Busy`; the core
-  only ever `try_send`s.
+  `FileWithDacl`, the lane finds and isn't cleaning, no version is quarantined, and the lifetime
+  is at most `MAX_LAUNCH` (150 s). The id, the deadline, the binding and the gate are fixed
+  there, and `Launch` reads them (`id()`, `deadline()`, `binding()`, `gate()`), so the core
+  knows them before the lane's turn. An id that can't be drawn is `Identity`, and a full lane
+  queue (`LANE_QUEUE`, 4) is `Busy`; nothing is queued then, and the core only ever `try_send`s.
 - **The lease.** The run holds a `RunLease`; revoking or dropping it ends the launch. One atomic
   word decides stdin: the pump admits each chunk by compare-exchange `Open → Writing` before its
   write, and `revoke()` swaps `Open → Revoked` (`Idle`: no write admitted after that instant,
   none in flight) or `Writing → RevokedWriting` (`WriteInFlight`: that one write settles before
   the folder is deleted). `revoke()` fails the gate and wakes stdin, and never waits.
 - **Pipes.** stdin and stdout are bounded channels of `PIPE_QUEUE` (4) chunks. stdout's chunks
-  are at most `CHUNK` (64 KiB). stdin is bounded by chunk count only, not bytes: a round can queue
-  four chunks of any size. A byte budget at the enqueue boundary, retained capacity included, is
-  C5b's to enforce. stdout never parks in a blocking send: on a full channel it retries every
+  are at most `CHUNK` (64 KiB). stdout never parks in a blocking send: on a full channel it retries every
   `POLL`, and once the round lets go it drops what it reads until EOF. stderr is drained and
   dropped.
+- **The stdin writer.** The round writes stdin only through the launch's one `StdinWriter`
+  (`Pipes::writer()` gives it once). The two control lines share `MAX_CONTROL` (4 KiB). The one
+  seed is checked whole against `MAX_SEED` (16 MiB, the encoded line and its newline) before its
+  first chunk, and asking for it uses it up, refused or not. Each chunk is at most `CHUNK`: the
+  writer reserves a slot under the deadline, then sends a copy of the borrowed slice, so at most
+  256 KiB of payload waits in the queue (the seed itself, the pump's buffer and the OS pipe come
+  on top). A wait for room ends with `Deadline`, or `Revoked` once the revoked launch's pump
+  lets go.
+- **The held send.** The round moves its seed's `SendLease` into the launch (`hold_send`) before
+  the first seed chunk, and asks for it with `SendGate::ask_held`, whose deadline is the launch's
+  lifetime plus `SETTLE` (15 s [guess]). Claude Code sends the user message again on each native
+  turn while any of its processes lives, so the lease covers the whole job, not just the write.
+  Stopping seals the slot first, and the worker drops the lease, which settles it, only at
+  Settled. A `Stuck` teardown abandons it unsettled (`SendLease::abandon` sends nothing), so its
+  deletes stay held until the coordinator's deadline fails them closed, whatever happens to the
+  lane afterwards. A lease offered to a revoked or stopping launch is handed back unused.
 - **Who revokes.** Stop or Esc (the lease drops with the round), a finished run, Disconnect
   (before its logout), a settled view that isn't `Ready` (`Finding` and rounds in progress never
   revoke), deleting the launch's thread, and closing the lane.
@@ -319,6 +335,24 @@ delete doesn't fail the call.
 - shortcut: a locked leftover is retried only before each lane call and at brain start, not on a
   timer, so it can stay for an idle session; add a timer if that turns out to matter.
 
+### Quarantined versions
+
+A version whose audit failed is never seeded again. `Claude::audit_failed(version, reason)`
+refuses every launch at once and shows `AuditFailed(reason)`; then the lane writes the empty
+marker `claude-code.quarantine-<version>` (`CLAUDE_CODE_QUARANTINE`) beside Kumochi's Claude
+Code folder, outside what Disconnect deletes, with the same marker checks as the Disconnect
+marker. Each `Version` find lists the markers under the account lock before it trusts a version:
+
+- a marker naming the found version refuses it (`AuditFailed`), so Disconnect, a sign-in and a
+  restart all keep it;
+- markers naming only other versions are cleared, so a different Claude Code ends the
+  quarantine; that's the only way it ends;
+- a name with the prefix that isn't exactly a version's marker, or a listing that fails, refuses
+  every version (`AuditFailed(Malformed)`), clears nothing and shows nothing of the name.
+
+Until the marker write succeeds, the refusal held in memory covers every version, and each find
+retries the write. A crash before the first successful write loses it.
+
 ## The audit
 
 `engines/claude_code/audit.rs` judges what C6's mapper parsed, in two parts, and returns an
@@ -353,7 +387,8 @@ sequenceDiagram
 - **After the seed:** `system:init` must show the version, exactly the frozen tool set, the one
   server, exactly the reviewed plugins each at `builtin`, no skills or slash commands, the reviewed
   agents and an `apiKeySource` of `none`. A later init must equal the first. `analytics_disabled`
-  is recorded and shown, never judged.
+  is recorded and shown, never judged; so is initialize's, which `PreInputAudit::analytics()`
+  gives once initialize passed.
 - **The gate** starts pending. Failure is terminal, so a pass that races a failure loses. A tool
   already admitted isn't undone; a call still waiting for admission is refused.
 - **The stated limit:** the seed can reach the chosen model before init is checked, but no tool

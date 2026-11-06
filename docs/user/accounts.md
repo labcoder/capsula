@@ -51,3 +51,10 @@ enabled = false
 
 Turning it off doesn't start a sign-out or deletion. If a previous Disconnect is still waiting
 to delete Kumochi's Claude Code folder, Kumochi still tries to finish that cleanup at startup.
+
+## When Claude Code fails Kumochi's check
+
+Before Kumochi sends Claude Code anything of yours, it checks how that Claude Code is set up. If
+the check fails, Kumochi stops using that version of Claude Code and remembers it, even after
+Disconnect, signing in again or a restart. Installing a different version of Claude Code clears
+it.

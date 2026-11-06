@@ -5,7 +5,8 @@
 use std::sync::Arc;
 
 use kumochi_protocol::message::{
-    ClaudeCodeView, ConnectionOp, ConnectionsView, ControlToShell, ThreadId, Unsupported,
+    AuditFailed, ClaudeCodeView, ClaudeVersion, ConnectionOp, ConnectionsView, ControlToShell,
+    ThreadId, Unsupported,
 };
 
 use super::{Brain, Full, Link};
@@ -50,6 +51,18 @@ pub(crate) struct Claude {
     cleaning: bool,
     /// The launches admitted, by thread, until each one's teardown is over.
     launches: Vec<(ThreadId, Arc<Control>)>,
+    /// The version whose audit failed in this brain, until a different version is found once
+    /// its marker is written.
+    quarantine: Option<Quarantine>,
+}
+
+/// A version this brain saw fail its audit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Quarantine {
+    version: ClaudeVersion,
+    reason: AuditFailed,
+    /// Its marker was written.
+    durable: bool,
 }
 
 impl Default for Claude {
@@ -71,6 +84,7 @@ impl Claude {
             again: false,
             cleaning: false,
             launches: Vec::new(),
+            quarantine: None,
         }
     }
 
@@ -133,8 +147,37 @@ impl Claude {
         self.begin(match (self.finds, self.cleaning) {
             (false, _) => Work::Cleanup,
             (true, true) => Work::Disconnect { logout: false },
-            (true, false) => Work::Version,
+            (true, false) => match self.quarantine {
+                Some(Quarantine {
+                    version,
+                    durable: false,
+                    ..
+                }) => Work::Quarantine(version),
+                _ => Work::Version,
+            },
         });
+    }
+
+    /// Refuses `version` from now on for `reason`: every launch ends, and the lane writes its
+    /// marker, which survives Disconnect and restarts. Until that write succeeds, every version
+    /// stays refused. The first failure's reason stays.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "C5b-1b's question is the first caller")
+    )]
+    pub(crate) fn audit_failed(&mut self, version: ClaudeVersion, reason: AuditFailed) {
+        if self.quarantine.is_none_or(|held| held.version != version) {
+            self.quarantine = Some(Quarantine {
+                version,
+                reason,
+                durable: false,
+            });
+        }
+        self.revoke_all();
+        if let Some(held) = self.quarantine {
+            self.view = ClaudeCodeView::AuditFailed(held.reason);
+        }
+        self.find();
     }
 
     /// One of Claude Code's ops; every one is answered with the view.
@@ -179,11 +222,32 @@ impl Claude {
         if generation != self.generation || self.out.is_none() {
             return false;
         }
+        if let Some(held) = &mut self.quarantine
+            && self.out == Some(Work::Quarantine(held.version))
+            && !matches!(
+                result,
+                Err(Failure::Quarantine | Failure::Refused | Failure::Busy)
+            )
+        {
+            held.durable = true;
+        }
+        // A version found past the quarantine check: the lane cleared every other's marker.
+        if let Ok(Outcome::Version(found))
+        | Err(Failure::Unsupported(Unsupported::Unreviewed(found))) = result
+            && self
+                .quarantine
+                .is_some_and(|held| held.durable && held.version != found)
+        {
+            self.quarantine = None;
+        }
         match result {
             Ok(Outcome::Version(_) | Outcome::LoginEnded) => {
                 if self.submit(Work::Status) {
                     return false;
                 }
+            }
+            Ok(Outcome::Status { .. }) if let Some(held) = self.quarantine => {
+                self.view = ClaudeCodeView::AuditFailed(held.reason);
             }
             Ok(Outcome::Status { version, signed_in }) => {
                 self.view = match (signed_in, self.sign_in) {
@@ -206,7 +270,19 @@ impl Claude {
                     self.view = ClaudeCodeView::TurnedOff;
                 }
             }
-            Err(failure) => self.view = failed(failure),
+            Err(Failure::Quarantined(version)) => {
+                self.view = ClaudeCodeView::AuditFailed(
+                    self.quarantine
+                        .filter(|held| held.version == version)
+                        .map_or(AuditFailed::Version, |held| held.reason),
+                );
+            }
+            Err(failure) => {
+                self.view = match self.quarantine {
+                    Some(held) if !held.durable => ClaudeCodeView::AuditFailed(held.reason),
+                    _ => failed(failure),
+                };
+            }
         }
         self.out = None;
         if std::mem::take(&mut self.again) {
@@ -223,7 +299,8 @@ impl Claude {
     ///
     /// # Errors
     /// [`LaunchRefused::NotReady`] unless Claude Code is Ready under the decided sign-in store,
-    /// on, and no Disconnect is pending; [`LaunchRefused::Lifetime`] over [`MAX_LAUNCH`];
+    /// on, no Disconnect is pending and no version's audit failed; [`LaunchRefused::Lifetime`]
+    /// over [`MAX_LAUNCH`]; [`LaunchRefused::Identity`] when no launch id can be drawn;
     /// [`LaunchRefused::Busy`] when the lane's queue is full. Nothing is queued then.
     #[cfg_attr(
         not(test),
@@ -234,7 +311,8 @@ impl Claude {
         let ready = matches!(self.view, ClaudeCodeView::Ready { .. })
             && self.sign_in == SignInStore::FileWithDacl
             && self.finds
-            && !self.cleaning;
+            && !self.cleaning
+            && self.quarantine.is_none();
         let lane = self
             .lane
             .as_ref()
@@ -244,7 +322,7 @@ impl Claude {
             return Err(LaunchRefused::Lifetime);
         }
         let thread = question.thread;
-        let (start, launch) = supervisor::admit(question);
+        let (start, launch) = supervisor::admit(question)?;
         let control = start.control();
         if !lane.launch(start) {
             return Err(LaunchRefused::Busy);
@@ -296,8 +374,6 @@ impl Claude {
 
 /// The view a failure leaves.
 fn failed(failure: Failure) -> ClaudeCodeView {
-    use kumochi_protocol::message::AuditFailed;
-
     match failure {
         // The lane is stuck or closing: whatever showed before can't be acted on any more.
         Failure::Refused => ClaudeCodeView::Unavailable,
@@ -308,7 +384,10 @@ fn failed(failure: Failure) -> ClaudeCodeView {
         Failure::Unsupported(unsupported) => ClaudeCodeView::Unsupported(unsupported),
         Failure::Policy(policy) => ClaudeCodeView::PolicyFailed(policy),
         Failure::Deadline => ClaudeCodeView::AuditFailed(AuditFailed::Deadline),
-        Failure::Version => ClaudeCodeView::AuditFailed(AuditFailed::Version),
+        Failure::Version | Failure::Quarantined(_) => {
+            ClaudeCodeView::AuditFailed(AuditFailed::Version)
+        }
+        Failure::Quarantine => ClaudeCodeView::AuditFailed(AuditFailed::Malformed),
         Failure::Folders
         | Failure::Spawn
         | Failure::TooLong
@@ -359,5 +438,7 @@ impl Brain {
     }
 }
 
+#[cfg(test)]
+mod quarantine_tests;
 #[cfg(test)]
 pub(super) mod tests;

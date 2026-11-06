@@ -182,6 +182,10 @@ pub const CLAUDE_CODE_LOCK: &str = "claude-code.lock";
 /// The marker a Disconnect writes, beside [`CLAUDE_CODE_DIR`], before it signs out; while it
 /// stands, the folder is deleted before any `claude` starts.
 pub const CLAUDE_CODE_DELETING: &str = "claude-code.deleting";
+/// The prefix of the empty marker, beside [`CLAUDE_CODE_DIR`], that names a Claude Code version
+/// whose audit failed, as in `claude-code.quarantine-2.1.306`. Disconnect never deletes it; only
+/// finding a different version does.
+pub const CLAUDE_CODE_QUARANTINE: &str = "claude-code.quarantine-";
 /// The folder for each Claude Code launch's owned folders, in the [`DATA_DIR`] folder under
 /// `%LOCALAPPDATA%`.
 pub const ENGINE_DIR: &str = "engine";

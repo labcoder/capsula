@@ -11,8 +11,8 @@ use std::fmt;
 use std::fs::File;
 use std::io::{self, PipeReader, PipeWriter, Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, mpsc as std_mpsc};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, mpsc as std_mpsc};
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::constants::{CLAUDE_CODE_DIR, ENGINE_DIR, MCP_SERVER_NAME};
@@ -26,6 +26,7 @@ use super::policy::{self, EntryPoint, OwnedFolders};
 use crate::bridge::LaunchId;
 use crate::bridge::listener::{Binding, LaunchContext, Listener};
 use crate::context::ToolSchema;
+use crate::engines::SendLease;
 use crate::platform::{self, Job, Stdio};
 
 /// The longest a launch may live, from admission [guess, not measured: C5b's 30 s warm window
@@ -33,8 +34,16 @@ use crate::platform::{self, Job, Stdio};
 pub(crate) const MAX_LAUNCH: Duration = Duration::from_secs(150);
 /// stdin and stdout chunks in flight each way.
 pub(crate) const PIPE_QUEUE: usize = 4;
-/// The most one stdout chunk holds.
+/// The most one stdout chunk holds, and the most one stdin chunk does.
 pub(crate) const CHUNK: usize = 64 * 1024;
+/// The seed's cap, in encoded bytes: the whole JSON line and its newline (the providers' request
+/// cap).
+pub(crate) const MAX_SEED: usize = 16 * 1024 * 1024;
+/// Both control lines together.
+pub(crate) const MAX_CONTROL: usize = 4 * 1024;
+/// How long a launch's teardown gets, past its deadline, to confirm its job empty before its held
+/// send fails closed [guess: C5a's configured waits add up to about 12 s].
+pub(crate) const SETTLE: Duration = Duration::from_secs(15);
 
 /// stdin may admit a write.
 const OPEN: u8 = 0;
@@ -84,10 +93,122 @@ impl fmt::Debug for Input {
     }
 }
 
-/// The round's ends of a live launch's pipes.
+/// The round's ends of a live launch's pipes. stdin goes only through the one [`StdinWriter`].
 pub(crate) struct Pipes {
-    pub(crate) stdin: mpsc::Sender<Input>,
+    stdin: Option<mpsc::Sender<Input>>,
+    control: Arc<Control>,
     pub(crate) stdout: mpsc::Receiver<Vec<u8>>,
+}
+
+impl Pipes {
+    /// The launch's one stdin writer; `None` once it's been taken.
+    pub(crate) fn writer(&mut self) -> Option<StdinWriter> {
+        Some(StdinWriter {
+            sender: self.stdin.take()?,
+            control: Arc::clone(&self.control),
+        })
+    }
+
+    /// The raw channel, for the supervisor's own tests of the pumps.
+    #[cfg(test)]
+    pub(crate) fn raw(&self) -> &mpsc::Sender<Input> {
+        self.stdin.as_ref().expect("the writer wasn't taken")
+    }
+}
+
+/// Why stdin took nothing more.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StdinRefused {
+    /// Over [`MAX_SEED`] or [`MAX_CONTROL`]; nothing of it was queued.
+    TooLarge,
+    /// The launch's one seed was asked for already.
+    Second,
+    /// The launch was revoked, or its stdin pump is gone.
+    Revoked,
+    /// The deadline passed while it waited for room.
+    Deadline,
+}
+
+/// Writes a launch's stdin: the control lines, then one seed, each checked whole against its cap
+/// before anything is queued, and queued in chunks of at most [`CHUNK`]. The queue holds
+/// [`PIPE_QUEUE`] chunks, so at most 256 KiB of payload waits there; the seed itself, the pump's
+/// buffer and the OS pipe come on top.
+pub(crate) struct StdinWriter {
+    sender: mpsc::Sender<Input>,
+    control: Arc<Control>,
+}
+
+impl StdinWriter {
+    /// One control line.
+    ///
+    /// # Errors
+    /// [`StdinRefused::TooLarge`] once the control lines pass [`MAX_CONTROL`]; otherwise as
+    /// [`seed`](Self::seed) does while it queues.
+    pub(crate) async fn control(
+        &mut self,
+        line: &[u8],
+        until: Instant,
+    ) -> Result<(), StdinRefused> {
+        let total = self.control.control_bytes.load(Ordering::Acquire) + line.len();
+        if total > MAX_CONTROL {
+            return Err(StdinRefused::TooLarge);
+        }
+        self.control.control_bytes.store(total, Ordering::Release);
+        for chunk in line.chunks(CHUNK) {
+            self.enqueue(chunk, until).await?;
+        }
+        Ok(())
+    }
+
+    /// The launch's one seed. Asking uses it up, refused or not.
+    ///
+    /// # Errors
+    /// [`StdinRefused::Second`] after the first ask, [`StdinRefused::TooLarge`] over
+    /// [`MAX_SEED`], [`StdinRefused::Revoked`] once the launch is revoked, and
+    /// [`StdinRefused::Deadline`] when `until` passes while it waits for room. Chunks queued
+    /// before a revocation or the deadline stay queued; the revoked launch never runs them.
+    pub(crate) async fn seed(&mut self, seed: &[u8], until: Instant) -> Result<(), StdinRefused> {
+        if self.control.seeded.swap(true, Ordering::AcqRel) {
+            return Err(StdinRefused::Second);
+        }
+        if seed.len() > MAX_SEED {
+            return Err(StdinRefused::TooLarge);
+        }
+        for chunk in seed.chunks(CHUNK) {
+            self.enqueue(chunk, until).await?;
+        }
+        Ok(())
+    }
+
+    /// Closes stdin once what's queued is written, if there's room to say so; teardown ends the
+    /// child either way.
+    pub(crate) fn end(self) {
+        self.sender.try_send(Input::End).ok();
+    }
+
+    /// Takes room, then queues `bytes` as a chunk whose capacity is its length.
+    async fn enqueue(&self, bytes: &[u8], until: Instant) -> Result<(), StdinRefused> {
+        if self.control.is_revoked() {
+            return Err(StdinRefused::Revoked);
+        }
+        let permit = match tokio::time::timeout_at(until.into(), self.sender.reserve()).await {
+            Err(_) => return Err(StdinRefused::Deadline),
+            Ok(Err(_)) => return Err(StdinRefused::Revoked),
+            Ok(Ok(permit)) => permit,
+        };
+        if self.control.is_revoked() {
+            return Err(StdinRefused::Revoked);
+        }
+        permit.send(Input::Chunk(bytes.to_vec()));
+        Ok(())
+    }
+}
+
+/// The granted send a launch holds until its job is confirmed empty.
+enum SendSlot {
+    Open(Option<SendLease>),
+    /// Its teardown began: nothing more is taken.
+    Sealed,
 }
 
 /// One launch's shared state: the lease, the core, the worker and the stdin pump hold it.
@@ -101,9 +222,37 @@ pub(crate) struct Control {
     gate: AuditGate,
     /// The stdin channel, for the revocation's [`Input::Wake`].
     wake: mpsc::Sender<Input>,
+    /// The send this launch's seed went out under, until its job is confirmed empty.
+    send: Mutex<SendSlot>,
+    /// The one seed was asked for.
+    seeded: AtomicBool,
+    /// The control lines' bytes so far.
+    control_bytes: AtomicUsize,
 }
 
 impl Control {
+    /// Takes `lease` until the job is confirmed empty, or gives it back when the launch is
+    /// revoked, its teardown began, or it holds one already.
+    fn hold_send(&self, lease: SendLease) -> Result<(), SendLease> {
+        let mut slot = self.send.lock().unwrap_or_else(PoisonError::into_inner);
+        match &mut *slot {
+            SendSlot::Open(held @ None) if !self.is_revoked() => {
+                *held = Some(lease);
+                Ok(())
+            }
+            _ => Err(lease),
+        }
+    }
+
+    /// Seals the slot and takes what it held.
+    fn seal_send(&self) -> Option<SendLease> {
+        let mut slot = self.send.lock().unwrap_or_else(PoisonError::into_inner);
+        match std::mem::replace(&mut *slot, SendSlot::Sealed) {
+            SendSlot::Open(held) => held,
+            SendSlot::Sealed => None,
+        }
+    }
+
     /// Fails the gate and admits no more stdin. A chunk admitted before is in flight, and the
     /// teardown waits for it. Never blocks.
     fn revoke(&self) -> Revoked {
@@ -213,6 +362,8 @@ pub(crate) enum LaunchRefused {
     Lifetime,
     /// The lane's queue is full.
     Busy,
+    /// No launch id could be drawn.
+    Identity,
 }
 
 /// Why a queued launch never ran.
@@ -243,6 +394,9 @@ pub(crate) enum Teardown {
 
 /// A launch admitted by the core, queued or running.
 pub(crate) struct Launch {
+    id: LaunchId,
+    deadline: Instant,
+    binding: Binding,
     lease: RunLease,
     started: Option<oneshot::Receiver<Result<Pipes, LaunchFailed>>>,
     ended: oneshot::Receiver<Teardown>,
@@ -255,6 +409,36 @@ pub(crate) struct Launch {
 impl Launch {
     pub(crate) fn lease(&self) -> &RunLease {
         &self.lease
+    }
+
+    /// Drawn at admission.
+    pub(crate) fn id(&self) -> LaunchId {
+        self.id
+    }
+
+    /// The absolute deadline fixed at admission.
+    pub(crate) fn deadline(&self) -> Instant {
+        self.deadline
+    }
+
+    /// The run the listener admits calls for, set once.
+    pub(crate) fn binding(&self) -> &Binding {
+        &self.binding
+    }
+
+    /// Whether the listener admits a call.
+    pub(crate) fn gate(&self) -> &AuditGate {
+        &self.lease.0.gate
+    }
+
+    /// Moves the seed's granted send into the launch: it settles only once the launch's job is
+    /// confirmed empty and its pumps ended, and never when they weren't.
+    ///
+    /// # Errors
+    /// Gives `lease` back, unused, when the launch is revoked, its teardown began or it holds a
+    /// send already; nothing may be queued under it then.
+    pub(crate) fn hold_send(&self, lease: SendLease) -> Result<(), SendLease> {
+        self.lease.0.hold_send(lease)
     }
 
     /// The pipes once it runs, or why it never did; `None` after the first answer.
@@ -279,6 +463,7 @@ impl Launch {
 
 /// A launch as the lane's queue holds it.
 pub(crate) struct Start {
+    id: LaunchId,
     question: Question,
     /// Fixed at admission; waiting in the queue never extends it.
     deadline: Instant,
@@ -313,14 +498,22 @@ impl Start {
     /// Answers a launch that never starts: nothing was made, so its teardown is done.
     pub(super) fn refuse(self, why: LaunchFailed) {
         self.control.revoke();
+        // Nothing ran, so nothing was sent under it.
+        drop(self.control.seal_send());
         self.started.send(Err(why)).ok();
         self.control.ended.store(true, Ordering::Release);
         self.ended.send(Teardown::Done).ok();
     }
 }
 
-/// A launch for `question`, its deadline fixed now, and the lane's half of it.
-pub(crate) fn admit(question: Question) -> (Start, Launch) {
+/// A launch for `question`, its id drawn and its deadline fixed now, and the lane's half of it.
+///
+/// # Errors
+/// [`LaunchRefused::Identity`] when no id can be drawn.
+pub(crate) fn admit(question: Question) -> Result<(Start, Launch), LaunchRefused> {
+    let mut id = [0; 16];
+    getrandom::fill(&mut id).map_err(|_| LaunchRefused::Identity)?;
+    let id = LaunchId(u128::from_le_bytes(id));
     let deadline = Instant::now() + question.lifetime;
     let (round_stdin, stdin) = mpsc::channel(PIPE_QUEUE);
     let control = Arc::new(Control {
@@ -329,14 +522,19 @@ pub(crate) fn admit(question: Question) -> (Start, Launch) {
         ended: AtomicBool::new(false),
         gate: AuditGate::new(),
         wake: round_stdin.clone(),
+        send: Mutex::new(SendSlot::Open(None)),
+        seeded: AtomicBool::new(false),
+        control_bytes: AtomicUsize::new(0),
     });
     let (started_tx, started) = oneshot::channel();
     let (ended_tx, ended) = oneshot::channel();
+    let binding = Binding::default();
     let start = Start {
+        id,
         question,
         deadline,
         control: Arc::clone(&control),
-        binding: Binding::default(),
+        binding: binding.clone(),
         stdin,
         round_stdin,
         started: started_tx,
@@ -345,11 +543,14 @@ pub(crate) fn admit(question: Question) -> (Start, Launch) {
         hooks: tests::Hooks::default(),
     };
     let launch = Launch {
+        id,
+        deadline,
+        binding,
         lease: RunLease(control),
         started: Some(started),
         ended,
     };
-    (start, launch)
+    Ok((start, launch))
 }
 
 /// What the lane checked before a launch's own folder: the install and Kumochi's folders.
@@ -366,6 +567,7 @@ pub(super) fn run(
     closing: &AtomicBool,
 ) -> Teardown {
     let Start {
+        id,
         question,
         deadline,
         control,
@@ -390,6 +592,7 @@ pub(super) fn run(
     };
     let begun = ready.map_err(LaunchFailed::Lane).and_then(|ready| {
         let parts = Parts {
+            id,
             question,
             deadline,
             control: &control,
@@ -423,6 +626,7 @@ pub(super) fn run(
 
 /// What `begin` takes from the launch.
 struct Parts<'a> {
+    id: LaunchId,
     question: Question,
     deadline: Instant,
     control: &'a Arc<Control>,
@@ -442,6 +646,7 @@ fn begin(
     host: &Host,
 ) -> Result<(Pipes, platform::Helper), LaunchFailed> {
     let Parts {
+        id,
         question,
         deadline,
         control,
@@ -451,9 +656,6 @@ fn begin(
         #[cfg(test)]
         hooks,
     } = parts;
-    let mut id = [0; 16];
-    getrandom::fill(&mut id).map_err(|_| LaunchFailed::Spawn)?;
-    let id = LaunchId(u128::from_le_bytes(id));
     #[cfg(test)]
     if let Some(sent) = &hooks.id {
         sent.send(id).ok();
@@ -525,6 +727,7 @@ fn begin(
                 admit: hooks.admit,
                 write: hooks.write,
                 writes: hooks.writes,
+                entries: hooks.entries,
             },
             report: hooks.pumps,
             fails: hooks.spawn_fails,
@@ -532,7 +735,8 @@ fn begin(
     )?;
     Ok((
         Pipes {
-            stdin: round_stdin,
+            stdin: Some(round_stdin),
+            control: Arc::clone(control),
             stdout,
         },
         spawned.process,
@@ -679,11 +883,29 @@ struct Running {
 }
 
 impl Running {
-    /// Fails the gate and closes stdin, aborts the listener and waits up to [`PIPE_GRACE`] for its
-    /// task to end, ends the job and confirms it empty, waits for the pumps, and only then
-    /// deletes the folder. Anything not confirmed ended never falls through to the deletion.
-    fn stop(self, host: &Host) -> Teardown {
+    /// Fails the gate and closes stdin, seals the held send, aborts the listener and waits up to
+    /// [`PIPE_GRACE`] for its task to end, ends the job and confirms it empty, waits for the pumps,
+    /// and only then settles the send and deletes the folder. Anything not confirmed ended never
+    /// falls through to either: its send is abandoned unsettled, so its sources stay held until
+    /// its deadline fails it closed.
+    fn stop(mut self, host: &Host) -> Teardown {
         self.control.revoke();
+        let send = self.control.seal_send();
+        if !self.confirm(host) {
+            send.map(SendLease::abandon);
+            return Teardown::Stuck;
+        }
+        // Nothing the launch started can send any more.
+        drop(send);
+        drop(self.held);
+        match self.dir.as_deref().map(platform::remove_tree) {
+            None | Some(Ok(())) => Teardown::Done,
+            Some(Err(_)) => Teardown::FolderLeft,
+        }
+    }
+
+    /// Whether the listener's task, the job and every pump are confirmed ended.
+    fn confirm(&mut self, host: &Host) -> bool {
         // A runtime that's gone dropped the task already, which also counts as ended.
         let served = self.listener.as_ref().is_none_or(|(serve, gone)| {
             serve.abort();
@@ -693,12 +915,12 @@ impl Running {
             )
         });
         #[cfg(test)]
-        tests::pause(self.terminate);
+        tests::pause(self.terminate.take());
         if let Some(job) = &self.job
             && (host.terminate)(job).is_err()
         {
             tracing::warn!("a claude launch's processes didn't end; Claude Code stays closed");
-            return Teardown::Stuck;
+            return false;
         }
         // stdout keeps what the child wrote last until the round stops taking it or the grace
         // runs out.
@@ -706,19 +928,15 @@ impl Running {
             self.control.released.store(true, Ordering::Release);
             if !ended(&self.pumps) {
                 tracing::warn!("a claude launch's pipe didn't end; Claude Code stays closed");
-                return Teardown::Stuck;
+                return false;
             }
         }
         // A task still running may hold the launch's pipe name.
         if !served {
             tracing::warn!("a claude launch's listener didn't end; Claude Code stays closed");
-            return Teardown::Stuck;
+            return false;
         }
-        drop(self.held);
-        match self.dir.as_deref().map(platform::remove_tree) {
-            None | Some(Ok(())) => Teardown::Done,
-            Some(Err(_)) => Teardown::FolderLeft,
-        }
+        true
     }
 }
 
@@ -767,12 +985,17 @@ fn write_input(
         mut admit,
         mut write,
         writes,
+        entries,
     } = hooks;
     while let Some(Input::Chunk(bytes)) = input.blocking_recv() {
         #[cfg(test)]
         tests::pause(admit.take());
         if !control.admit() {
             return;
+        }
+        #[cfg(test)]
+        if let Some(entries) = &entries {
+            entries.send(bytes.len()).ok();
         }
         #[cfg(test)]
         tests::pause(write.take());
@@ -837,5 +1060,7 @@ fn mcp_json(brain_exe: &Path, id: LaunchId) -> Option<Vec<u8>> {
     Some(config.to_string().into_bytes())
 }
 
+#[cfg(test)]
+mod stdin_tests;
 #[cfg(test)]
 pub(crate) mod tests;

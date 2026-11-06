@@ -44,7 +44,7 @@ pub(crate) const V: ClaudeVersion = ClaudeVersion {
 /// The fake, from `platform::FAKE_CLAUDE`: `args` is its mode, then the entry point's arguments.
 ///
 /// Modes: `out` and `in` (signed out or in), `hang`, `version:N` (`--version` prints exactly N
-/// bytes), `status:N` (the status JSON padded to N bytes), `stderr:N` (N bytes of stderr first),
+/// bytes), `other` (`--version` prints an unreviewed 2.1.307), `status:N` (the status JSON padded to N bytes), `stderr:N` (N bytes of stderr first),
 /// `exit:N` (status exits N), `linger:PATH` (leaves a grandchild holding PATH and stdout),
 /// `loginhang` (`auth login` never ends) and `logoutfail` (`auth logout` exits 3). A question
 /// (`-p`) runs as [`question`] says. Whatever the
@@ -84,6 +84,7 @@ pub(crate) fn fake(args: Vec<OsString>) -> i32 {
         let line = match kind {
             "version" if size() == 0 => String::new(),
             "version" => format!("2.1.306{}", " ".repeat(size() - 7)),
+            "other" => "2.1.307 (Claude Code)\n".to_owned(),
             _ => "2.1.306 (Claude Code)\n".to_owned(),
         };
         stdout.write_all(line.as_bytes()).expect("stdout");

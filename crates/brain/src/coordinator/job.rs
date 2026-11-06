@@ -11,6 +11,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::time::Duration;
 
 use kumochi_protocol::message::{EventId, RunId, ThreadId, ThreadTitle};
 
@@ -246,7 +247,12 @@ impl Coordinator {
     /// The job's request is about to send. It's granted only for the job in the slot, with
     /// nothing it read touched by a delete; otherwise its body is dropped unsent and the job ends.
     /// A job in the slot always runs under the signed-in account: an account change empties it.
-    pub(super) fn job_ready(&mut self, key: JobKey, effects: &mut Vec<Effect>) {
+    pub(super) fn job_ready(
+        &mut self,
+        key: JobKey,
+        hold: Option<Duration>,
+        effects: &mut Vec<Effect>,
+    ) {
         let sources = self
             .job
             .as_ref()
@@ -257,7 +263,7 @@ impl Coordinator {
             });
         match sources {
             Some(sources) if !self.transport_failed => {
-                self.grant(SendKey::Job(key), sources, effects);
+                self.grant(SendKey::Job(key), sources, hold, effects);
             }
             _ => {
                 effects.push(Effect::Rebuild(SendKey::Job(key)));
