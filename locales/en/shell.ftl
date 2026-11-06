@@ -30,6 +30,8 @@ carry-perch-untitled = Drop on this app
 
 # Turns
 
+recovery-sign-in = Sign in
+dismiss-notice = Dismiss
 chat-live-cut = Earlier streamed text isn't shown here.
 chat-empty = Start a conversation.
 chat-loading = Loading messages…

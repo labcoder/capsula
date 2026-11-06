@@ -19,6 +19,8 @@ use crate::test_support::Scratch;
 
 const TIME: &str = "Tuesday 4 November 2026, 09:30";
 
+mod recall_results;
+
 struct World {
     store: Store,
     scratch: Scratch,

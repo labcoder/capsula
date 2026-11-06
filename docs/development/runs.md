@@ -35,6 +35,31 @@ Esc, a new submit attempt, a target change, disconnect, a new brain incarnation,
 deletion, success or interruption discard the recovery content. Duplicate terminal states
 cannot offer it again. Recovery carriers redact their text in Debug output.
 
+Otherwise, a named failure declaring Retry can transfer its submitted snapshot to one
+run-owned recovery slot. Automatic restore and this transfer are exclusive: a draft already
+returned to the input has no second retained copy. `Runs::retry` takes the matching slot
+before checking its captured revision, thread and the current draft, or attempting delivery.
+Refusal consumes it too. New's named run establishes the stored thread before capture can
+be retried; Retry never submits another unbound New turn. Dismissal also drops the slot.
+
+`chat_notice.rs` retains the typed error and its run, account or settings-field owner.
+Presence pushes that notice into the composer. Its render reads Settings, so GPUI tracks
+that dependency and invalidates the window on settings-only enabled-state changes without
+an explicit Settings observer. Input observation notifies the composer only when draft
+emptiness changes; typing within a nonempty draft and caret blinking emit no extra composer
+notification. Input still invalidates its window; this does not cache the window's render tree.
+The recovery dispatcher rechecks the owner and declared action,
+then uses the existing run, account or settings admission. An account Retry cannot resend
+run text. Public usage links use the existing URL, and settings routes select their exact
+tab without toggling a visible settings window closed.
+Retry and Dismiss return focus to the retained composer so typing and its Escape
+handling continue after the recovery control disappears.
+
+Renewal warnings coalesce within the connection lifetime. A named run promotes a general
+warning to run ownership; later duplicates cannot demote or resurrect a dismissed incident.
+The Accounts diagnostic remains independent. Authoritative account recovery, an accepted
+new turn or a connection reset starts the next incident. No timer correlates the frames.
+
 Answering is ordered before a later Failed on the control pipe. It suppresses automatic
 restoration even if text on the data pipe is delayed: authentication can fail on a later
 model round after earlier output. Thinking alone does not prove no model or tool ran.

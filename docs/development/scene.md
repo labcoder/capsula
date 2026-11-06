@@ -56,6 +56,27 @@ within ±20,000. Chart data uses finite f64 values instead of coordinate-bounded
 numbers. Composed transforms and domain-specific ranges are admission checks.
 Screen/capture anchors are absent, not ignored.
 
+### The 2D tool contract
+
+`draw_schema()` exports the JSON Schema for a closed `records` envelope from
+the scene types. This schema describes the 2D tool surface, not every record
+the internal format can decode: `view3d`, `solid`, `pos3`, `rot3`, three-component
+animation keys and `set[].info` are excluded. The general JSON and postcard
+decoders keep their existing 3D forms and enum positions.
+The tool contract is not a schema for arbitrary stored scene JSON, which can
+include null 3D-only fields even when a particular step changes only 2D data.
+
+The custom JSON forms for colours, anchors, start dependencies, cells, chart
+points and animation keys have explicit schemas. Their agreement with the
+typed decoder is checked with fixtures and an independent schema validator;
+generation alone does not prove that hand-written schemas cannot drift.
+Source's UTF-8 byte ceiling, reference ordering, header equality, composed
+scale and scene/global budgets remain runtime checks. A schema-valid drawing
+is not necessarily admissible. Optional fields and defaults remain optional.
+
+This export alone does not offer a tool or execute a drawing. The brain's draw
+adapter must enforce the same 2D restrictions before admitting a complete call.
+
 ### 3D records
 
 Scene admission validates and charges the following records (see 3D admission). Until the brain

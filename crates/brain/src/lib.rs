@@ -13,9 +13,11 @@ pub mod dispatch;
 pub mod drawing;
 pub mod engines;
 pub mod ipc;
+pub mod issues;
 mod jobs;
 pub mod logging;
 pub mod platform;
+mod recall;
 mod relaunch;
 mod runtime;
 pub mod screen;
@@ -129,6 +131,8 @@ pub async fn run() -> Result<(), BrainError> {
         finished_deletions = recovered.finished_deletions,
         purge_pending = recovered.purge_pending,
         failed_deletions = recovered.failed_deletions,
+        failed_sends = recovered.failed_sends,
+        unknown_sends = recovered.unknown_sends,
         "store recovered"
     );
     // Recovery created it if it was missing, so its id is below the high water.

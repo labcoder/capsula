@@ -64,6 +64,7 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             settings: cx.new(|_| Settings::default()),
             threads: cx.new(|_| Threads::default()),
             chat: cx.new(|_| Threads::chat()),
+            chat_notice: crate::chat_notice::ChatNotice::default(),
             events,
             events_in,
             carry: super::carry::Carry::default(),
@@ -98,7 +99,11 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             refusal: None,
         });
         presence.update(cx, |this, cx| {
-            this.text = Some(TextPanel::detached(this.chat.clone(), cx));
+            this.text = Some(TextPanel::detached(
+                this.chat.clone(),
+                this.settings.clone(),
+                cx,
+            ));
         });
         presence
     })

@@ -111,7 +111,7 @@ pub(crate) fn fake(args: Vec<OsString>) -> i32 {
         }
         _ => {}
     }
-    let signed_in = kind == "in" || token.exists();
+    let signed_in = kind == "in" || kind == "replay" || token.exists();
     let method = if signed_in { "claude.ai" } else { "none" };
     let mut json = format!(
         r#"{{"loggedIn":{signed_in},"authMethod":"{method}","apiProvider":"firstParty","configDirectory":{}}}"#,
@@ -140,9 +140,11 @@ fn base_dir() -> PathBuf {
 }
 
 /// A question: `echo` copies stdin to stdout and logs each read's length to `echo.log`,
-/// `deaf` never reads stdin, `flood` writes stdout until it can't, and any other mode exits.
+/// `deaf` never reads stdin, `flood` writes stdout until it can't, `replay` answers as
+/// [`replay`] says, and any other mode exits.
 fn question(kind: &str) -> i32 {
     match kind {
+        "replay" => replay(),
         "echo" => {
             let mut buffer = vec![0; 64 * 1024];
             let mut stdin = std::io::stdin();
@@ -176,6 +178,62 @@ fn question(kind: &str) -> i32 {
         _ => {}
     }
     0
+}
+
+/// Answers each stdin line from a script, after logging `N kind` to `stdin.log`, where N counts
+/// this question among the base's questions from 1 and the kind is `initialize`, `mcp_status` or
+/// `user`. The script is the base's `replay.N`, else its `replay`. Its section for a kind starts
+/// at `@<kind>`; in it, `!wait NAME` waits until the base holds NAME, and every other line goes
+/// to stdout. It exits at stdin's end.
+fn replay() {
+    let base = base_dir();
+    let ordinal = fs::read_to_string(base.join("starts.log"))
+        .expect("this start is recorded")
+        .lines()
+        .filter(|start| start.starts_with("-p "))
+        .count();
+    let script = fs::read_to_string(base.join(format!("replay.{ordinal}")))
+        .or_else(|_| fs::read_to_string(base.join("replay")))
+        .expect("a script");
+    let mut stdout = std::io::stdout();
+    for line in std::io::stdin().lines() {
+        let Ok(line) = line else {
+            return;
+        };
+        let value: serde_json::Value = serde_json::from_str(&line).expect("a json line");
+        let kind = value["request"]["subtype"]
+            .as_str()
+            .or(value["type"].as_str())
+            .unwrap_or("other")
+            .to_owned();
+        let mut log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(base.join("stdin.log"))
+            .expect("the base folder is writable");
+        writeln!(log, "{ordinal} {kind}").expect("log");
+        let header = format!("@{kind}");
+        let section = script
+            .lines()
+            .skip_while(|line| *line != header)
+            .skip(1)
+            .take_while(|line| !line.starts_with('@'));
+        for out in section {
+            if let Some(name) = out.strip_prefix("!wait ") {
+                while !base.join(name).exists() {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                continue;
+            }
+            let written = stdout
+                .write_all(out.as_bytes())
+                .and_then(|()| stdout.write_all(b"\n"))
+                .and_then(|()| stdout.flush());
+            if written.is_err() {
+                return;
+            }
+        }
+    }
 }
 
 fn record(args: &[String]) {

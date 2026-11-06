@@ -18,7 +18,7 @@ pub use three::{
 };
 
 /// One externally tagged scene record.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Record {
     /// Opens a call for a scene.
@@ -51,7 +51,7 @@ impl From<Version> for u32 {
     }
 }
 /// Surface vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Surface {
     /// Overlay.
@@ -60,7 +60,7 @@ pub enum Surface {
     Inline,
 }
 /// Begin record fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Begin {
     /// v.
@@ -77,11 +77,11 @@ pub struct Begin {
     pub alt: Text,
 }
 /// A strict empty call terminator.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct End {}
 /// Step record fields.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Step {
     /// id.
@@ -111,7 +111,7 @@ impl fmt::Debug for Step {
     }
 }
 /// An externally tagged scene operation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Op {
     /// Line operation.
@@ -147,12 +147,14 @@ pub enum Op {
     /// Mermaid operation.
     Mermaid(Mermaid),
     /// 3D viewport operation.
+    #[schemars(skip)]
     View3d(View3d),
     /// 3D solid operation.
+    #[schemars(skip)]
     Solid(Solid),
 }
 /// Enter vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Enter {
     /// None.
@@ -171,7 +173,7 @@ pub enum Enter {
     Fly,
 }
 /// Head vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Head {
     /// None.
@@ -184,7 +186,7 @@ pub enum Head {
     Both,
 }
 /// `ShapeKind` vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShapeKind {
     /// Rect.
@@ -197,7 +199,9 @@ pub enum ShapeKind {
     Polygon,
 }
 /// Align vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Align {
     /// Left.
@@ -209,7 +213,9 @@ pub enum Align {
     Right,
 }
 /// Side vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum Side {
     #[default]
@@ -233,7 +239,9 @@ pub enum Side {
     BottomRight,
 }
 /// `HighlightStyle` vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum HighlightStyle {
     #[default]
@@ -249,7 +257,9 @@ pub enum HighlightStyle {
     Marker,
 }
 /// Direction vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
     #[default]
@@ -259,7 +269,9 @@ pub enum Direction {
     Down,
 }
 /// `NodeShape` vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeShape {
     #[default]
@@ -279,7 +291,9 @@ pub enum NodeShape {
     Note,
 }
 /// `ChartKind` vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ChartKind {
     #[default]
@@ -295,7 +309,9 @@ pub enum ChartKind {
     Pie,
 }
 /// `AxisScale` vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum AxisScale {
     #[default]
@@ -305,7 +321,7 @@ pub enum AxisScale {
     Log,
 }
 /// Track vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Track {
     /// X.
@@ -325,12 +341,16 @@ pub enum Track {
     /// Color.
     Color,
     /// 3D position.
+    #[schemars(skip)]
     Pos3,
     /// 3D rotation.
+    #[schemars(skip)]
     Rot3,
 }
 /// Ease vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Ease {
     /// Linear.
@@ -347,7 +367,7 @@ pub enum Ease {
     Spring,
 }
 /// Change record fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Change {
     /// target.
@@ -365,10 +385,11 @@ pub struct Change {
     /// emphasis.
     pub emphasis: Option<bool>,
     /// Descriptive text of a solid.
+    #[schemars(skip)]
     pub info: Option<Text>,
 }
 /// Line record fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Line {
     /// id.
@@ -406,7 +427,7 @@ pub struct Line {
     pub bend: Option<Finite>,
 }
 /// `PathOp` record fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PathOp {
     /// id.
@@ -441,7 +462,7 @@ pub struct PathOp {
     pub dash: bool,
 }
 /// Shape record fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Shape {
     /// id.
@@ -488,7 +509,7 @@ pub struct Shape {
     pub label: Option<Text>,
 }
 /// `TextOp` record fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TextOp {
     /// id.
@@ -524,7 +545,7 @@ pub struct TextOp {
     pub max_width: Option<Finite>,
 }
 /// Callout record fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Callout {
     /// id.
@@ -556,7 +577,7 @@ pub struct Callout {
     pub max_width: Option<Finite>,
 }
 /// Highlight record fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Highlight {
     /// id.
@@ -585,7 +606,7 @@ pub struct Highlight {
     pub pad: Option<Finite>,
 }
 /// Diagram record fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Diagram {
     /// id.
@@ -612,7 +633,7 @@ pub struct Diagram {
     pub dir: Option<Direction>,
 }
 /// Node record fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Node {
     /// id.
@@ -641,7 +662,7 @@ pub struct Node {
     pub shape: NodeShape,
 }
 /// Edge record fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Edge {
     /// id.
@@ -674,7 +695,7 @@ pub struct Edge {
     pub flow: Option<Ms>,
 }
 /// Table record fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Table {
     /// id.
@@ -706,7 +727,7 @@ pub struct Table {
     pub title: Option<Text>,
 }
 /// Row record fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Row {
     /// id.
@@ -733,7 +754,7 @@ pub struct Row {
     pub emphasis: bool,
 }
 /// Axis record fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Axis {
     /// label.
@@ -760,7 +781,7 @@ impl Default for Axis {
     }
 }
 /// Chart record fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Chart {
     /// id.
@@ -802,7 +823,7 @@ pub struct Chart {
     pub stacked: bool,
 }
 /// Series record fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Series {
     /// id.
@@ -829,7 +850,7 @@ pub struct Series {
     pub data: Bounded<Point, MAX_SERIES_POINTS>,
 }
 /// Anim record fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Anim {
     /// target.
@@ -853,7 +874,7 @@ pub struct Anim {
     pub at_word: Option<u16>,
 }
 /// Mermaid record fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Mermaid {
     /// parent.

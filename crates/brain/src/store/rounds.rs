@@ -99,6 +99,11 @@ pub(super) fn result(body: &str) -> Result<Body, StoreError> {
         Value::String(text) => text.clone(),
         tagged => match ToolOutput::from_stored(&tagged.to_string()) {
             Some(ToolOutput::Text(text)) => text,
+            Some(ToolOutput::Recall(_)) => {
+                let selection =
+                    crate::recall::Selection::decode_round(body).ok_or(StoreError::RoundRecord)?;
+                return Ok(Body::Recall { call, selection });
+            }
             // shortcut: history replays as its references' JSON, not the re-read ranges, until
             // the first history tool (PR 15) builds them into native rounds.
             Some(other) => other.stored(),
