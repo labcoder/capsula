@@ -281,7 +281,12 @@ impl Presenter {
             let views = self.scenes.iter().map(|(id, scene)| (*id, &scene.view));
             let sampled = self.frames.borrow_mut().sample(views, now_ms);
             match sampled {
-                Ok(sample) => return (sample, out.finish()),
+                Ok(sample) => {
+                    for scene in self.scenes.values_mut() {
+                        scene.sampled_ms = Some(now_ms);
+                    }
+                    return (sample, out.finish());
+                }
                 Err(id) => {
                     self.release(id);
                     self.forget(id, &mut out);

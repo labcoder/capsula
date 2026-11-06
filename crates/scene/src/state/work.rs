@@ -86,6 +86,8 @@ pub(crate) struct SolidWork {
     pub scale: f64,
     /// Largest local vertex distance from the solid's own origin.
     pub reach: f64,
+    /// The settled `pos3` and `rot3` offsets: the final keys of the latest tracks on them.
+    pub end: [Option<[f32; 3]>; 2],
 }
 
 #[derive(Debug, Clone)]
@@ -242,6 +244,7 @@ fn solid_work(
         }),
         scale: r.scale.map_or(1.0, |s| f64::from(s.get())),
         reach: three::size::reach(r).map_err(sized)?,
+        end: [None; 2],
     });
     Ok(())
 }
@@ -600,6 +603,12 @@ pub(super) fn changes(
                 keep(&mut original, &mut held, &anim.target, object);
             }
             let value = motion(anim, index, step)?;
+            if let (Some(solid), crate::record::KeyValue::V3(end)) =
+                (object.work.solid.as_mut(), crate::motion::final_key(anim))
+            {
+                let slot = usize::from(anim.track == crate::record::Track::Rot3);
+                solid.end[slot] = Some(end.map(Finite::get));
+            }
             if owners
                 .insert((anim.target.clone(), property(anim.track)), value)
                 .is_some()

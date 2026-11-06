@@ -49,11 +49,12 @@ impl Spin {
 }
 
 /// The scene's view as activated: its geometry, each solid's `pos3`/`rot3` owner (an index into
-/// the view's tracks) in `geometry.solids` order, and its spin.
+/// the view's tracks) in `geometry.solids` order, its spin, and the yaw a Stop carried into it.
 pub(super) struct ViewMotion {
     pub(super) geometry: Arc<ViewGeometry>,
     pub(super) owners: Box<[[Option<usize>; 2]]>,
     pub(super) spin: Option<Spin>,
+    pub(super) yaw: f64,
 }
 impl ViewMotion {
     /// A view with no owners. A view keeps the spin of the view it continues, and a newly put
@@ -63,8 +64,9 @@ impl ViewMotion {
         previous: Option<&Self>,
         now: Option<u64>,
     ) -> Self {
-        let spin = match (previous, now) {
-            (Some(previous), _) if previous.geometry.handle == geometry.handle => previous.spin,
+        let same = previous.filter(|previous| previous.geometry.handle == geometry.handle);
+        let spin = match (same, now) {
+            (Some(previous), _) => previous.spin,
             (_, Some(now)) => match &*geometry.source {
                 Op::View3d(view) => view.spin.map(|spin| Spin {
                     degrees_per_s: f64::from(spin.get()),
@@ -79,6 +81,7 @@ impl ViewMotion {
             geometry: Arc::clone(geometry),
             owners: vec![[None; 2]; geometry.solids.len()].into_boxed_slice(),
             spin,
+            yaw: same.map_or(0.0, |previous| previous.yaw),
         }
     }
     /// Requested bytes of the owner array; the geometry belongs to the layout.
@@ -113,10 +116,15 @@ impl ViewMotion {
                 .map_or(local, |parent| local.then(&out.poses[usize::from(parent)]));
             out.poses.push(pose);
         }
-        out.camera = self.geometry.camera.map(|camera| {
-            self.spin
-                .map_or(camera, |spin| camera.yawed(spin.degrees(now, deadline)))
-        });
+        out.camera = self
+            .geometry
+            .camera
+            .map(|camera| camera.yawed(self.degrees(now, deadline)));
+    }
+
+    /// The yaw added to the authored camera at `now`: the carried yaw plus the spin's turn.
+    pub(super) fn degrees(&self, now: u64, deadline: u64) -> f64 {
+        self.yaw + self.spin.map_or(0.0, |spin| spin.degrees(now, deadline))
     }
 }
 

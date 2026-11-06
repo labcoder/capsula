@@ -470,9 +470,9 @@ impl Drawing {
                 let at = self
                     .live(scene)
                     .ok_or_else(|| in_step(&step, ErrorCode::SceneCleared))?;
-                self.scenes[at].state.admit(&step, &self.global)?
+                self.scenes[at].state.admit_checked(&step, &self.global)?
             }
-            (None, Bound::New(state)) => state.admit(&step, &self.global)?,
+            (None, Bound::New(state)) => state.admit_checked(&step, &self.global)?,
             (None, _) => return Err(in_step(&step, ErrorCode::BeforeBegin)),
         };
         let Admission::New(admitted) = admission else {
