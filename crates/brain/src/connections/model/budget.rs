@@ -15,10 +15,16 @@ impl Budget {
     /// The cap the live-budget variable sets in a debug build; none in a release build.
     #[must_use]
     pub fn from_env() -> Self {
+        Self::from_var(LIVE_BUDGET_ENV)
+    }
+
+    /// The cap `var` sets in a debug build; none in a release build.
+    #[must_use]
+    pub fn from_var(var: &str) -> Self {
         if !cfg!(debug_assertions) {
             return Self::default();
         }
-        Self::limited(limit(std::env::var(LIVE_BUDGET_ENV).ok().as_deref()))
+        Self::limited(limit(std::env::var(var).ok().as_deref()))
     }
 
     /// At most `limit` requests, or any number.

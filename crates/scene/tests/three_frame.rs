@@ -645,6 +645,37 @@ fn admitted_counts_capacity_sizes_invalid_indices_and_empty_frames() {
             Err(FrameError::Invalid)
         );
     }
+    for (start, len) in [(2, 0), (0, 2), (1, 1), (u32::MAX, 1), (1, u32::MAX)] {
+        assert_eq!(
+            frame(&[s], &camera(), &light(), [8, 8], &mut out, &cancel),
+            Ok(())
+        );
+        assert_eq!(out.len(), 1);
+        let mut malformed = s;
+        malformed.faces = Vec::leak(vec![FaceRange {
+            anchors: [0, 1, 2],
+            start,
+            len,
+        }]);
+        assert_eq!(
+            frame(&[malformed], &camera(), &light(), [8, 8], &mut out, &cancel),
+            Err(FrameError::Invalid),
+            "range {start}+{len} over 1 triangle"
+        );
+        assert_eq!(out.len(), 0, "range {start}+{len} clears the output");
+    }
+    let mut empty = s;
+    empty.faces = Vec::leak(vec![FaceRange {
+        anchors: [0, 1, 2],
+        start: 1,
+        len: 0,
+    }]);
+    assert_eq!(
+        frame(&[empty], &camera(), &light(), [8, 8], &mut out, &cancel),
+        Ok(()),
+        "an empty range at the end is in bounds"
+    );
+    assert_eq!(out.len(), 0);
     assert_eq!(
         frame(&[], &camera(), &light(), [8, 8], &mut out, &cancel),
         Ok(())

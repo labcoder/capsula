@@ -243,6 +243,14 @@ impl Machine {
         Arc::clone(&self.fence)
     }
 
+    /// The verified connected user, without its bearer: `Some` only while Connected.
+    pub fn user(&self) -> Option<&GitHubUser> {
+        match &self.state {
+            State::Connected(account) => Some(&account.user),
+            _ => None,
+        }
+    }
+
     /// A projection with no bearer, device credential or provider URL.
     pub fn view(&self, now: Instant) -> GitHubView {
         match &self.state {

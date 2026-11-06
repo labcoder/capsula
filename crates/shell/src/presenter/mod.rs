@@ -453,6 +453,7 @@ impl Presenter {
             scene.halt();
             scene.skipping = true;
             scene.cut = Cut::Outstanding;
+            scene.stopped_ms = scene.sampled_ms;
             cuts.push(SceneCut {
                 scene: *id,
                 cut: scene.cut_now(),
@@ -657,6 +658,7 @@ impl Presenter {
             // allows one new cut, and only the shell can send it.
             if fenced && applied {
                 scene.cut = Cut::Outstanding;
+                scene.stopped_ms = scene.sampled_ms;
                 out.effects
                     .push(Effect::Control(ControlToBrain::StepFailed {
                         run,
@@ -703,13 +705,13 @@ impl Presenter {
             .map_err(|_| Broken::Cut)?;
         scene.cut = Cut::Applied;
         scene.skipping = false;
-        // B5 installs only at-rest views, so this unlogged cut leaves the view and frame current.
-        // shortcut: halt keeps live motion; before B6d's production activation, restrict this to
-        // at-rest views without delayed owners or settle motion first, with position-track and
-        // delayed-owner tests.
+        let stopped = scene.stopped_ms.take();
+        // An unlogged cut of a view at rest when its Stop started leaves the view and frame
+        // current; a moving, delayed or spinning view takes the cut path to its end values.
         if outcome == StopOutcome::Kept
             && scene.state.view().recovery_log().len() == logged
             && scene.view.activated() == scene.state.view().activated()
+            && stopped.is_some_and(|at| scene.view.at_rest(at))
         {
             return Ok(());
         }
@@ -718,7 +720,10 @@ impl Presenter {
             StopOutcome::Cleared => None,
         };
         if let Some(rest) = rest {
-            let view = SceneView::new(&rest, scene.state.view().activated());
+            let mut view = SceneView::new(&rest, scene.state.view().activated());
+            if let Some(at) = stopped {
+                view.carry_spin(&scene.view, at);
+            }
             let old = (
                 std::mem::replace(&mut scene.rest, rest),
                 std::mem::replace(&mut scene.view, view),
@@ -899,6 +904,7 @@ impl Presenter {
             return;
         }
         scene.cut = Cut::Outstanding;
+        scene.stopped_ms = scene.sampled_ms;
         out.effects
             .push(Effect::Control(ControlToBrain::StepFailed {
                 run,

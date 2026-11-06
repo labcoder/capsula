@@ -2,14 +2,14 @@
 //! only, and a fresh approval revision with every stage that offers a decision.
 
 use kumochi_protocol::message::{
-    ApprovalRev, DraftId, GitHubLogin, IssueBody, IssueRefused, IssueTitle, RepoName, StateVersion,
-    ThreadId,
+    ApprovalRev, ContentHash, Decision, DraftId, FailReason, GitHubLogin, IssueBody, IssueRefused,
+    IssueTitle, RepoName, StateVersion, ThreadId,
 };
 use rusqlite::{Connection, OptionalExtension as _, Row, Transaction, params};
 
 use super::{Store, StoreError, now_ms, sql_id};
-use crate::connections::github::api::GitHubUser;
-use crate::issues::{Action, Answer, Stage};
+use crate::connections::github::{api::GitHubUser, issues::CreateOutcome};
+use crate::issues::{Action, Answer, Live, Lookup, Mark, Stage};
 
 impl Store {
     /// Stores a new draft in a live thread, with its first approval revision.
@@ -74,7 +74,101 @@ impl Store {
         body: &IssueBody,
         repo: Option<&RepoName>,
     ) -> Result<Answer, StoreError> {
-        self.change(draft, |action| action.edit(title, body, repo))
+        self.change(draft, |action| Some(action.edit(title, body, repo)))
+    }
+
+    /// Applies the user's decision, checked against `live` (docs/development/issues.md#consent).
+    ///
+    /// # Errors
+    /// [`StoreError::Issue`] when the write fails, with nothing written.
+    pub fn consent(
+        &mut self,
+        draft: DraftId,
+        hash: &ContentHash,
+        approval: ApprovalRev,
+        decision: Decision,
+        live: &Live<'_>,
+    ) -> Result<Answer, StoreError> {
+        self.change(draft, |action| {
+            Some(action.consent(hash, approval, decision, live))
+        })
+    }
+
+    /// Binds the account, and the repository where none is chosen, to every Draft and Failed
+    /// action in every live thread. Returns the actions it changed; none is filed.
+    ///
+    /// # Errors
+    /// [`StoreError::Issue`] when a read or write fails, with nothing written.
+    pub fn bind_drafts(
+        &mut self,
+        account: Option<&GitHubUser>,
+        repo: Option<&RepoName>,
+    ) -> Result<Vec<Action>, StoreError> {
+        self.action_tx(|tx| {
+            let ids: Vec<i64> = tx
+                .prepare("SELECT id FROM actions ORDER BY id")?
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
+            let mut changed = Vec::new();
+            for id in ids {
+                if let Answer::Changed(action) =
+                    change_row(tx, id, |action| Some(action.bind(account, repo)))?
+                {
+                    changed.push(action);
+                }
+            }
+            Ok(changed)
+        })
+    }
+
+    /// Ends the Preflight dispatched at `at`, the version of the answer that entered it.
+    ///
+    /// # Errors
+    /// [`StoreError::Issue`] when the write fails, with nothing written.
+    pub fn preflighted(
+        &mut self,
+        draft: DraftId,
+        at: StateVersion,
+        result: Result<Mark, FailReason>,
+    ) -> Result<Answer, StoreError> {
+        self.change(draft, |action| Some(action.preflighted(at, result)))
+    }
+
+    /// Records the create dispatched at `at`, the version of the answer that entered Posting.
+    ///
+    /// # Errors
+    /// [`StoreError::Issue`] when the write fails or the uncertain count is exhausted, with
+    /// nothing written.
+    pub fn posted(
+        &mut self,
+        draft: DraftId,
+        at: StateVersion,
+        outcome: &CreateOutcome,
+    ) -> Result<Answer, StoreError> {
+        self.change(draft, |action| action.posted(at, outcome))
+    }
+
+    /// Ends a send dispatched at `at` that the runtime gave up on. Whichever of this and the
+    /// send's own completion commits first wins.
+    ///
+    /// # Errors
+    /// [`StoreError::Issue`] when the write fails or the uncertain count is exhausted, with
+    /// nothing written.
+    pub fn interrupted(&mut self, draft: DraftId, at: StateVersion) -> Result<Answer, StoreError> {
+        self.change(draft, |action| action.interrupted(at))
+    }
+
+    /// Applies a lookup run while the action's `uncertain` count was `episode`.
+    ///
+    /// # Errors
+    /// [`StoreError::Issue`] when the write fails, with nothing written.
+    pub fn looked_up(
+        &mut self,
+        draft: DraftId,
+        episode: u32,
+        lookup: Lookup,
+    ) -> Result<Answer, StoreError> {
+        self.change(draft, |action| Some(action.looked_up(episode, lookup)))
     }
 
     /// Dismisses an action that isn't sending or settled.
@@ -82,7 +176,7 @@ impl Store {
     /// # Errors
     /// [`StoreError::Issue`] when the write fails, with nothing written.
     pub fn discard_draft(&mut self, draft: DraftId) -> Result<Answer, StoreError> {
-        self.change(draft, Action::discard)
+        self.change(draft, |action| Some(action.discard()))
     }
 
     /// Ends the sends a crash cut short in live threads, as [`Stage::interrupted`] says, reading
@@ -93,7 +187,7 @@ impl Store {
                 .prepare(
                     "SELECT a.id, a.stage, a.uncertain FROM actions a
                      JOIN threads t ON t.id = a.thread AND t.state = 'live'
-                     WHERE json_extract(a.stage, '$.kind') IN ('preflight', 'posting')",
+                     WHERE json_extract(a.stage, '$.kind') IN ('preflight', 'posting') ORDER BY a.id",
                 )?
                 .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
                 .collect::<Result<_, _>>()?;
@@ -108,39 +202,16 @@ impl Store {
         })
     }
 
-    /// Applies one transition to the row reloaded in its own transaction, and writes only a
-    /// change.
+    /// Applies one transition to the row reloaded in its own transaction.
     fn change(
         &mut self,
         draft: DraftId,
-        apply: impl FnOnce(&mut Action) -> Result<(), IssueRefused>,
+        apply: impl FnOnce(&mut Action) -> Option<Result<(), IssueRefused>>,
     ) -> Result<Answer, StoreError> {
         let Ok(id) = i64::try_from(draft.0) else {
             return Ok(Answer::Gone);
         };
-        self.action_tx(|tx| {
-            let Some(before) = load(tx, id)? else {
-                return Ok(Answer::Gone);
-            };
-            let mut after = before.clone();
-            if let Err(why) = apply(&mut after) {
-                return Ok(Answer::Refused(why, before));
-            }
-            if after == before {
-                return Ok(Answer::Unchanged(before));
-            }
-            tx.execute(
-                "UPDATE actions SET repo = ?2, title = ?3, body = ?4 WHERE id = ?1",
-                params![
-                    id,
-                    after.repo.as_ref().map(RepoName::as_str),
-                    after.title.as_str(),
-                    after.body.as_str()
-                ],
-            )?;
-            commit_stage(tx, id, &after.stage, after.uncertain)?;
-            Ok(Answer::Changed(load(tx, id)?.ok_or(StoreError::Issue)?))
-        })
+        self.action_tx(|tx| change_row(tx, id, apply))
     }
 
     /// Runs `op` in one transaction, committed only when it succeeds.
@@ -161,6 +232,48 @@ fn quiet(error: impl Into<StoreError>) -> StoreError {
         StoreError::Sql(_) => StoreError::Issue,
         other => other,
     }
+}
+
+/// Applies a transition to the live row `id` and writes only a change. A refusal that used up the
+/// current revision is written with a fresh one; `None` from `apply` fails the op.
+fn change_row(
+    tx: &Connection,
+    id: i64,
+    apply: impl FnOnce(&mut Action) -> Option<Result<(), IssueRefused>>,
+) -> Result<Answer, StoreError> {
+    let Some(before) = load(tx, id)? else {
+        return Ok(Answer::Gone);
+    };
+    let mut after = before.clone();
+    let refused = apply(&mut after).ok_or(StoreError::Issue)?.err();
+    if after == before {
+        return Ok(match refused {
+            Some(why) => Answer::Refused(why, before),
+            None => Answer::Unchanged(before),
+        });
+    }
+    tx.execute(
+        "UPDATE actions SET repo = ?2, account_id = ?3, account_login = ?4, title = ?5, body = ?6,
+         consumed = ?7 WHERE id = ?1",
+        params![
+            id,
+            after.repo.as_ref().map(RepoName::as_str),
+            after.account.as_ref().map(|user| user.id.to_string()),
+            after.account.as_ref().map(|user| user.login.as_str()),
+            after.title.as_str(),
+            after.body.as_str(),
+            after
+                .consumed
+                .map(|rev| sql_id(rev.0, StoreError::Issue))
+                .transpose()?
+        ],
+    )?;
+    commit_stage(tx, id, &after.stage, after.uncertain)?;
+    let action = load(tx, id)?.ok_or(StoreError::Issue)?;
+    Ok(match refused {
+        Some(why) => Answer::Refused(why, action),
+        None => Answer::Changed(action),
+    })
 }
 
 /// Moves a row to `stage`, raising its version, with a fresh approval where the stage offers a
@@ -213,7 +326,8 @@ fn load(conn: &Connection, id: i64) -> Result<Option<Action>, StoreError> {
     .transpose()
 }
 
-/// A row as an action; reads recheck the account id, since SQLite doesn't recheck stored rows.
+/// A row as an action. Reads recheck the account and the stage's binding, since SQLite doesn't
+/// recheck stored rows, so every action that loads can render.
 fn decode(row: &Row<'_>) -> Result<Action, StoreError> {
     let bad = |_| StoreError::Issue;
     let positive = |column| -> Result<u64, StoreError> {
@@ -237,9 +351,10 @@ fn decode(row: &Row<'_>) -> Result<Action, StoreError> {
                 .ok_or(StoreError::Issue)?,
             login: GitHubLogin::try_from(login).map_err(bad)?,
         }),
-        _ => None,
+        (None, None) => None,
+        _ => return Err(StoreError::Issue),
     };
-    Ok(Action {
+    let action = Action {
         draft: DraftId(positive(0)?),
         thread: ThreadId(positive(1)?),
         version: StateVersion(positive(2)?),
@@ -255,5 +370,16 @@ fn decode(row: &Row<'_>) -> Result<Action, StoreError> {
         approval: revision(9)?,
         consumed: revision(10)?,
         uncertain: row.get(11)?,
-    })
+    };
+    let bound = action.repo.is_some() && action.account.is_some();
+    if bound
+        || matches!(
+            action.stage,
+            Stage::Draft | Stage::Failed { .. } | Stage::Discarded
+        )
+    {
+        Ok(action)
+    } else {
+        Err(StoreError::Issue)
+    }
 }

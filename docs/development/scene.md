@@ -79,11 +79,11 @@ adapter must enforce the same 2D restrictions before admitting a complete call.
 
 ### 3D records
 
-Scene admission validates and charges the following records (see 3D admission). Until shell
-views can prepare them, the brain's one drawing ingress calls `refuse_three_dimensional`, which
-refuses the first `view3d`, `solid`, `pos3` track or `rot3` track as `Unsupported` at `put[i]`
-(`shortcut:`, removed in slice 5 PR 6). `pos3` and `rot3`
-use three-component keys; existing tracks retain their existing key types.
+Scene admission validates and charges the following records (see 3D admission). Until the brain
+can run the world check off its coordinator, its one drawing ingress calls
+`refuse_three_dimensional`, which refuses the first `view3d`, `solid`, `pos3` track or `rot3`
+track as `Unsupported` at `put[i]` (`shortcut:`, removed by slice 5 PR 7's admission lane).
+`pos3` and `rot3` use three-component keys; existing tracks retain their existing key types.
 
 | Record | Fields and decode bounds |
 |---|---|
@@ -181,8 +181,7 @@ the same revision and a lower slot) in the same view; attachment counts toward d
 removal that would orphan an attached solid fails with `Orphans`. Only solids own `info`,
 `pos3` and `rot3`; a view owns no `color`; 2D tracks and `ref` anchors to 3D objects are
 refused. Admission sizes each solid with `three::size::triangles` and `three::size::reach`
-(the farthest local vertex from the solid's origin) and never tessellates: that runs off
-the admission path. Outline checks do run here, and they grow with the square of the point
+(the farthest local vertex from the solid's origin). Outline checks do run here, and they grow with the square of the point
 count, so an extrude outline holds at most 64 points (`MAX_EXTRUDE_POINTS`); draw a smoother
 profile with a lathe, or split a detailed shape into several extrudes. A step holds at most
 2,304 outline points in all (36 full outlines), so the outline checks of one step stay under
@@ -209,6 +208,16 @@ cancellation, so a parent at x = 15,000 with a child at local x = −15,000 is r
 overshoot endpoint `b + (b − a) × SPRING_OVERSHOOT` (and `a + (a − b) × SPRING_OVERSHOOT`
 with `yoyo`), where the first pair starts at rest. It is taken over every charged version of
 the solid, so a replacement cannot hide an earlier envelope before it retires.
+
+**World check.** `admit_checked`, the brain's drawing ingress, also tessellates each view a
+step puts or removes in, or moves with a `pos3` or `rot3` track, at its candidate rest with the
+shell's own `tessellate_view`. Plain `admit` (recovery replay) and the shell mirror's detached
+admission skip it: they only see steps the brain already checked. Its cost is over the
+coordinator's 1 ms budget at the caps, so it stays behind the gate until PR 7's lane runs it. Each solid's
+settled offsets (`SolidWork::end`, the latest track's final key) compose into its rest, so a
+face that collapses only under a parent's scale or only at a track's end is refused as
+`Degenerate` at the solid's `put[i]`, or the first 3D track's, before commit: no counter moves and
+nothing is stored. The shell's typed `Failed` stays as the rendering safety net.
 Rotation preserves lengths and adds nothing. Non-finite compositions fail with
 `TransformOverflow`, the bound with `OutOfRange`.
 
@@ -766,13 +775,13 @@ after releasing the borrow. Replacement invalidates old observations; removal/di
 retires frame ownership with its scene and hides an empty overlay. Resting B5 views request no
 animation frames. B5 neither activates live steps nor emits StepShown; B6 consumes that seam.
 
-For B5's at-rest views, a kept cut that changes nothing, because its Stop adds no log entry and
-keeps the activated bound, isn't a replacement. The presenter keeps that scene's rest, view and
-frame, so their paint observation stays current and the next sample reports no change. Every
-other kept cut rebuilds the rest and view and starts a new frame epoch. `halt()` keeps live motion:
-before B6 activates presenter views, this fast path must require an at-rest view with no delayed
-owners, or Stop must settle motion first. Position-track and delayed-owner tests must cover this;
-`moving(now) == false` alone cannot rule out a track that starts later.
+A kept cut that changes nothing, because its Stop adds no log entry and keeps the activated bound,
+isn't a replacement when the view was `at_rest` at the Stop: the presenter keeps that scene's
+rest, view and frame, so the next sample reports no change. The Stop latches the scene time of the
+view's last sample (`stopped_ms`) when it sends the cut, and the acknowledgement uses that value,
+never its own arrival. With no sample yet, or a moving, delayed or spinning view, the cut rebuilds
+the rest and view (a new frame epoch) at the tracks' end values, and `carry_spin` keeps the yaw
+the latched sample showed as a still angle when the cut view is the same view.
 
 ### 3D preparation
 
@@ -819,9 +828,8 @@ and the consumed view inputs leave no buffer behind.
 `PreparedSolid::{pos3, rot3}` and composes `local` from `pos + pos3`, `rot + rot3` and `scale`, so a
 cut view and recovery land at the end values. A rebuilt view carries these offsets by handle; a
 track-only step emits no `ViewInput` and `restyled` recomposes rests and the camera from the
-predecessor, sharing every mesh and source. World checks stay at build time (`shortcut:` a final
-offset that collapses a face isn't refused yet; the precommit check lands before the gate lifts).
-The brain's gate still refuses 3D steps.
+predecessor, sharing every mesh and source. Admission's world check has already refused a final
+offset that collapses a face.
 
 ### Motion and the host clock
 
@@ -1096,7 +1104,7 @@ hold) − start) / 1000`, with saturating subtraction. `hold_spin` (a drag) stop
 - `animating(now)`: the 2D predicate or `view_motion`. `next_wake` adds the spin's stop.
 - `at_rest(now)`: before the deadline, no track ends after `now`, no object's timing still runs or
   flows, and no spin is still to stop. A delayed owner keeps it false. The presenter's kept-cut fast
-  path starts using it when 3D admission opens.
+  path requires it at the Stop's latched sample.
 
 ### Inputs, publication and cuts
 

@@ -271,6 +271,10 @@ pub const SCREEN_FAULT_ENV: &str = "KUMOCHI_SCREEN_FAULT";
 /// A value that isn't a count allows none.
 pub const LIVE_BUDGET_ENV: &str = "KUMOCHI_LIVE_BUDGET";
 
+/// Dev builds only: the most Claude Code questions the brain may seed. A value that isn't a
+/// count allows none.
+pub const CLAUDE_QUESTIONS_ENV: &str = "KUMOCHI_CLAUDE_QUESTIONS";
+
 /// Dev builds only: the brain's one-shot catalog provenance capture, which
 /// `cargo xtask live catalog-provenance` runs. A brain built without it exits 10.
 pub const CATALOG_PROVENANCE_ARG: &str = "--catalog-provenance";

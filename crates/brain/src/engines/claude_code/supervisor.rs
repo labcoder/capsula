@@ -192,9 +192,9 @@ impl StdinWriter {
             return Err(StdinRefused::Revoked);
         }
         let permit = match tokio::time::timeout_at(until.into(), self.sender.reserve()).await {
-            Err(_) => return Err(StdinRefused::Deadline),
             Ok(Err(_)) => return Err(StdinRefused::Revoked),
-            Ok(Ok(permit)) => permit,
+            Ok(Ok(permit)) if Instant::now() < until => permit,
+            Err(_) | Ok(Ok(_)) => return Err(StdinRefused::Deadline),
         };
         if self.control.is_revoked() {
             return Err(StdinRefused::Revoked);
@@ -284,12 +284,18 @@ impl Control {
         revoked
     }
 
-    fn is_revoked(&self) -> bool {
+    pub(crate) fn is_revoked(&self) -> bool {
         self.state.load(Ordering::Acquire) >= REVOKED
     }
 
     pub(crate) fn is_ended(&self) -> bool {
         self.ended.load(Ordering::Acquire)
+    }
+
+    /// Whether the listener would admit a call by the gate.
+    #[cfg(test)]
+    pub(crate) fn may_call(&self) -> bool {
+        self.gate.may_call()
     }
 
     /// The instant a chunk is admitted, or false once revoked.
