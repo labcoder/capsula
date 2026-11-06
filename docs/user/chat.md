@@ -26,6 +26,19 @@ account operation to finish; sign-in stays blocked while earlier sessions still 
 Submitting the restored message is a new turn, so the earlier stored user turn can remain
 in the task history.
 
-Accounts currently controls ChatGPT; it doesn't sign in to Claude Code or replace an
-Anthropic API key. A later-round failure after answering starts doesn't automatically put
+Accounts also shows Claude Code's connection controls; it doesn't replace an Anthropic
+API key. A later-round failure after answering starts doesn't automatically put
 the original message back into the composer.
+
+An error can offer recovery controls beside the input. **Retry** on a failed message sends
+that message as a new turn in its original task, including a task created by **New task**.
+It requires an empty draft and the same selected task; even whitespace keeps the draft
+untouched. The attempt is single-use, including when it can't be sent. Changing tasks,
+stopping, clearing, dismissing the notice or losing the connection discards its saved copy.
+Retry can repeat earlier work, including tool effects; it doesn't resume the failed turn.
+
+Account and settings errors use their own recovery instead of resending a message.
+**Settings…** opens the appropriate tab without closing an already-open settings window;
+**Manage usage** opens ChatGPT's public usage page. **Dismiss** hides the notice. A matching
+renewal warning appears once per incident, even if its account and failed-message reports
+arrive separately.
