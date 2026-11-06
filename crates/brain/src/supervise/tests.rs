@@ -28,7 +28,7 @@ fn frames(id: u64, message: &impl Serialize, max: usize) -> Vec<Frame> {
     frames
 }
 
-type Reply = oneshot::Receiver<Result<String, WorkerLost>>;
+type Reply = oneshot::Receiver<Result<(String, Generation), WorkerLost>>;
 
 fn pending(id: u64) -> (BTreeMap<u64, Pending<Test>>, Reply) {
     let (answer, receive) = oneshot::channel();
@@ -57,18 +57,24 @@ fn identities_completion_trailing_and_gaps() {
     let (mut requests, mut receive) = pending(1);
     let mut other = pong();
     other.id = 2;
-    assert_eq!(accept(&mut requests, other), Err(WorkerLost));
-    assert_eq!(accept(&mut requests, pong()), Ok(()));
-    assert_eq!(receive.try_recv(), Ok(Ok("pong".to_owned())));
+    assert_eq!(accept(&mut requests, other, Generation(3)), Err(WorkerLost));
+    assert_eq!(accept(&mut requests, pong(), Generation(3)), Ok(()));
     assert_eq!(
-        accept(&mut requests, pong()),
+        receive.try_recv(),
+        Ok(Ok(("pong".to_owned(), Generation(3))))
+    );
+    assert_eq!(
+        accept(&mut requests, pong(), Generation(3)),
         Err(WorkerLost),
         "after the last"
     );
     let (mut requests, _) = pending(1);
     let mut trailing = pong();
     trailing.body.push(0);
-    assert_eq!(accept(&mut requests, trailing), Err(WorkerLost));
+    assert_eq!(
+        accept(&mut requests, trailing, Generation(0)),
+        Err(WorkerLost)
+    );
     let (mut requests, _) = pending(1);
     let first = Frame {
         id: 1,
@@ -76,14 +82,14 @@ fn identities_completion_trailing_and_gaps() {
         last: false,
         body: vec![0],
     };
-    assert_eq!(accept(&mut requests, first), Ok(()));
+    assert_eq!(accept(&mut requests, first, Generation(0)), Ok(()));
     let gap = Frame {
         id: 1,
         chunk: 2,
         last: true,
         body: vec![0],
     };
-    assert_eq!(accept(&mut requests, gap), Err(WorkerLost));
+    assert_eq!(accept(&mut requests, gap, Generation(0)), Err(WorkerLost));
 }
 
 #[test]
@@ -101,9 +107,9 @@ fn a_long_message_is_chunked_under_the_pipe_cap_and_reassembled() {
     assert!(encoded.len() <= Pipe::Data.max_payload() + frame::HEADER_LEN);
     let (mut requests, mut receive) = pending(7);
     for chunk in chunks {
-        assert_eq!(accept(&mut requests, chunk), Ok(()));
+        assert_eq!(accept(&mut requests, chunk, Generation(0)), Ok(()));
     }
-    assert_eq!(receive.try_recv(), Ok(Ok(long)));
+    assert_eq!(receive.try_recv(), Ok(Ok((long, Generation(0)))));
 }
 
 #[test]
@@ -196,11 +202,11 @@ async fn request_queue_accepts_sixteen_and_refuses_seventeen() {
     for _ in 0..16 {
         complete::<Test>(
             receive.try_recv().expect("accepted request").answer,
-            Ok("pong".to_owned()),
+            Ok(("pong".to_owned(), Generation(1))),
         );
     }
     for request in requests {
-        assert_eq!(request.await, Ok("pong".to_owned()));
+        assert_eq!(request.await, Ok(("pong".to_owned(), Generation(1))));
     }
 }
 

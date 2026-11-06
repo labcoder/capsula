@@ -19,6 +19,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
 use crate::coordinator::{Input, StoreOp};
+use crate::dispatch::Committed;
 use crate::store::{
     Cancel, Copied, Deletion, EventKind, NewEvent, Side, Store, StoreError, Swap, cleared_body,
 };
@@ -597,18 +598,19 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
         }
         StoreOp::CommitCall(call) => {
             purger.op_arriving();
-            let committed = store
+            let outcome = store
                 .reconnect()
                 .and_then(|()| store.commit_call(&call))
                 .unwrap_or_else(|_| {
                     tracing::warn!("a tool call wasn't stored");
-                    false
+                    Committed::Failed
                 });
             answer(
                 acks,
                 Input::CallCommitted {
                     key: call.key,
-                    committed,
+                    outcome,
+                    then: call.then,
                 },
             );
             purger.op_arrived(store);

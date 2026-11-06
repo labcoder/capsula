@@ -1,12 +1,53 @@
 //! Every voice bound at its limit and one past it, the largest frames, and redaction.
 
 use super::{
-    Cursor, MAX_HOLD_CHUNKS, MAX_TRANSCRIPT_BYTES, MicPcm, OutputGeneration, SegmentId, SpeechPcm,
-    Transcript, VoiceBound, check_rate,
+    Cursor, MAX_HOLD_CHUNKS, MAX_TRANSCRIPT_BYTES, MicPcm, OutputGeneration, PartState, SegmentId,
+    SpeechPcm, Transcript, VoiceBound, VoiceView, check_rate,
 };
 use crate::frame::{self, FrameError, HEADER_LEN, Pipe};
+use crate::message::ErrorKey;
 use crate::message::{ControlToBrain, DataToBrain, DataToShell, GestureId, RunId};
 use crate::tap::{Direction, Record};
+use crate::voice::VoicePart;
+
+#[test]
+fn voice_parts_and_part_states_round_trip() {
+    for part in VoicePart::ALL {
+        let bytes = postcard::to_allocvec(&part).expect("encodes");
+        assert_eq!(postcard::from_bytes::<VoicePart>(&bytes), Ok(part));
+    }
+    assert!(postcard::from_bytes::<VoicePart>(&[2]).is_err());
+    let states = [
+        PartState::NotInstalled,
+        PartState::Verifying,
+        PartState::Downloading {
+            done: 0,
+            total: u64::MAX,
+        },
+        PartState::Loading,
+        PartState::Ready,
+        PartState::Unloaded,
+        PartState::Failed {
+            key: ErrorKey::VoiceCorrupt,
+            installed: false,
+        },
+        PartState::Failed {
+            key: ErrorKey::VoiceLoad,
+            installed: true,
+        },
+    ];
+    for speech_input in states {
+        for spoken_replies in states {
+            let view = VoiceView {
+                speech_input,
+                spoken_replies,
+            };
+            let bytes = postcard::to_allocvec(&view).expect("encodes");
+            assert_eq!(postcard::from_bytes::<VoiceView>(&bytes), Ok(view));
+        }
+    }
+    assert!(postcard::from_bytes::<PartState>(&[7]).is_err());
+}
 
 fn mic(rate: u32, len: usize, seq: u32) -> MicPcm {
     MicPcm {

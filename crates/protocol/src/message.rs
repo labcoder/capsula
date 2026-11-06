@@ -49,7 +49,7 @@ pub use scenes::{
 };
 pub use settings::{
     AssistantName, DockPosition, MAX_NAME_CHARS, MaxFrameRate, NameError, NotACap, SettingsOp,
-    SettingsView, UserName,
+    SettingsView, SttUnload, UserName,
 };
 pub use threads::{
     Effort, LISTED_MODELS_CALL_TOOLS, MAX_MODEL_NAME_CHARS, MAX_MODELS, MAX_SLUG_BYTES,
@@ -59,8 +59,8 @@ pub use threads::{
 pub use voice::{
     Cursor, MAX_AHEAD_SEGMENTS, MAX_HOLD_CHUNKS, MAX_MIC_SAMPLES, MAX_RATE, MAX_SAY_BYTES,
     MAX_SEGMENT_SECONDS, MAX_SEGMENTS_PER_RUN, MAX_SPEECH_SAMPLES, MAX_TRANSCRIPT_BYTES,
-    MAX_UNPLAYED_SECONDS, MIN_RATE, MicPcm, OutputGeneration, PROGRESS_INTERVAL_MS, SegmentId,
-    SpeechPcm, StepRef, Transcript, VoiceBound, check_rate,
+    MAX_UNPLAYED_SECONDS, MIN_RATE, MicPcm, OutputGeneration, PROGRESS_INTERVAL_MS, PartState,
+    SegmentId, SpeechPcm, StepRef, Transcript, VoiceBound, VoiceView, check_rate,
 };
 
 /// The most rows one page carries [guess].
@@ -562,6 +562,15 @@ pub enum ControlToShell {
         /// A live row matched and the write committed.
         applied: bool,
     },
+    /// `run` asked to move the user's typed input to `thread`, sent once its tool call
+    /// committed. The shell applies it only while `run` is its newest named run, not stopped,
+    /// typed at the selection still current, with no turn sent after it.
+    Focus {
+        /// The run whose tool asked.
+        run: RunId,
+        /// The task, or Kumo's thread.
+        thread: ThreadId,
+    },
 }
 
 /// Shell to brain, on the data pipe.
@@ -810,6 +819,21 @@ mod tests {
                 brain_build: "b".to_owned()
             })),
             [1, 1, b'b']
+        );
+    }
+
+    /// Variants are appended, so an added one never renumbers the tags before it.
+    #[test]
+    fn control_variants_keep_their_tags_and_focus_is_last() {
+        let encode = |message: &ControlToShell| postcard::to_allocvec(message).expect("encodes");
+        assert_eq!(encode(&ControlToShell::Ping), [3]);
+        assert_eq!(encode(&ControlToShell::ThreadsChanged), [12]);
+        assert_eq!(
+            encode(&ControlToShell::Focus {
+                run: RunId(1),
+                thread: ThreadId(2)
+            }),
+            [21, 1, 2]
         );
     }
 

@@ -1152,6 +1152,7 @@ fn finished_tracks_frame_the_same_live_and_after_a_cut() {
         &Arc::new(Theme::default()),
         &mut Measure,
         &AtomicBool::new(false),
+        None,
     )
     .expect("replay the original steps and cut");
     let replayed = SceneView::new(&layout, state.activated());
@@ -1451,6 +1452,7 @@ fn removed_recovered_and_cut_prefixes_hold_no_more_than_their_charges() {
             &theme,
             &mut Measure,
             &AtomicBool::new(false),
+            None,
         )
         .expect("recovery");
         layout

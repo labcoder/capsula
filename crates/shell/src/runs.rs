@@ -95,6 +95,8 @@ impl fmt::Debug for Applied {
 struct Submitted {
     /// The selection it was typed at.
     revision: u64,
+    /// The number it was sent under on this connection.
+    turn: u32,
     /// The thread it continues; a New target's is the one its run names.
     thread: Option<ThreadId>,
     /// What was typed, until nothing may put it back.
@@ -105,6 +107,7 @@ impl fmt::Debug for Submitted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Submitted")
             .field("revision", &self.revision)
+            .field("turn", &self.turn)
             .field("thread", &self.thread)
             .field("text_len", &self.text.as_ref().map(|text| text.len()))
             .finish()
@@ -116,6 +119,8 @@ impl fmt::Debug for Submitted {
 struct Live {
     run: RunId,
     thread: ThreadId,
+    /// The turn number and selection of the submission it answered, when it answered one.
+    typed: Option<(u32, u64)>,
     state_ended: bool,
     data_ended: bool,
 }
@@ -272,7 +277,7 @@ impl Runs {
         }
     }
 
-    fn capture(&self, text: &str) -> Result<(DataToBrain, u64), Refused> {
+    fn capture(&self, text: &str) -> Result<(DataToBrain, u32, u64), Refused> {
         if !self.connected || self.main.is_none() {
             return Err(Refused::Offline);
         }
@@ -284,13 +289,15 @@ impl Runs {
         {
             return Err(Refused::Busy);
         }
+        let turn = self.turns_sent.checked_add(1).ok_or(Refused::Busy)?;
         Ok((
             DataToBrain::TextSubmit {
-                turn: self.turns_sent.checked_add(1).ok_or(Refused::Busy)?,
+                turn,
                 screen: kumochi_protocol::message::ScreenChoice::None,
                 thread: self.thread(),
                 text: text.into(),
             },
+            turn,
             self.revision,
         ))
     }
@@ -375,20 +382,34 @@ impl Runs {
         if text.len() > Pipe::Data.max_payload() - SUBMIT_OVERHEAD {
             return Err(Refused::TooLong);
         }
-        let (turn, revision) = self.capture(text)?;
+        let (message, turn, revision) = self.capture(text)?;
         if self.submitted.len() + 1 >= MAX_PENDING_TURNS {
             return Err(Refused::Busy);
         }
-        if !send(turn) {
+        if !send(message) {
             return Err(Refused::Offline);
         }
         self.submitted.push_back(Submitted {
             revision,
+            turn,
             thread: self.thread(),
             text: Some(text.into()),
         });
-        self.turns_sent += 1;
+        self.turns_sent = turn;
         Ok(())
+    }
+
+    /// A run's `Focus`. It moves the target, as an explicit switch does, only while `run` is
+    /// the newest named run and not stopped, answers a turn typed at the current selection, and
+    /// no turn was sent after that one on this connection, even one the brain then refused.
+    pub(crate) fn focus(&mut self, run: RunId, thread: ThreadId) -> bool {
+        let current = self.connected
+            && run > self.fence
+            && run == self.answered
+            && self.live.is_some_and(|live| {
+                live.run == run && live.typed == Some((self.turns_sent, self.revision))
+            });
+        current && self.select_thread(Some(thread))
     }
 
     /// The brain this connection reached. A new one can reuse the run id of a turn the last
@@ -574,7 +595,9 @@ impl Runs {
             if deleted {
                 self.fence = self.fence.max(run);
             }
+            let mut typed = None;
             if let Some(mut submitted) = self.submitted.pop_front() {
+                typed = Some((submitted.turn, submitted.revision));
                 if submitted.revision == self.revision && self.target == Target::New && !deleted {
                     self.target = if Some(thread) == self.main {
                         Target::Kumo
@@ -599,6 +622,7 @@ impl Runs {
                 self.live = Some(Live {
                     run,
                     thread,
+                    typed,
                     state_ended: false,
                     data_ended: false,
                 });
@@ -776,6 +800,9 @@ fn keep_end(text: &mut String, max: usize) {
 
 #[cfg(test)]
 mod delete_tests;
+
+#[cfg(test)]
+mod focus_tests;
 
 #[cfg(test)]
 mod recovery_tests;

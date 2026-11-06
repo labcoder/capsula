@@ -196,6 +196,22 @@ than growing the window with the text. The existing Settings content region owns
 | `default_model` | a table: `model` (a model slug) and `effort` (`Low` to `Max`), or absent | absent until a catalog is read |
 | `dock_position` | `top_left`, `top_center`, `top_right`, `middle_left`, `center`, `middle_right`, `bottom_left`, `bottom_center` or `bottom_right` | `top_center` |
 | `show_in_taskbar` | boolean | `false` |
+| `[voice] talk_back` | boolean | `false` |
+| `[voice] stt_unload` | `kept`, `15m` or `1h` | `kept` |
+
+**Voice settings** live in a `[voice]` table. `SetTalkBack` and `SetSttUnload` save
+`talk_back` and `stt_unload` through the same queue and atomic save as every other change, and
+`SettingsView` is their only wire home. A bad value, or a `voice` key that isn't a table, reads
+as the default and stays on disk until the user sets that key. Setting one where `voice` isn't
+a table replaces it with a table. Every other key in the table survives each write, including
+`installed` and `removing`, which the voice installer will own.
+
+`InstallVoice`, `RemoveVoice` and `CancelVoiceInstall` already travel, but this build refuses
+them until the installer lands: each is staged in queue order like any change, then refused with
+`Error(VoiceUnavailable)` and its one `Settings` answer, with nothing written. The refusal comes
+after the config read, so while `config.toml` is unreadable they're answered `ConfigUnreadable`
+like every other change. `VoiceView` and
+`PartState` exist in `crates/protocol`, and nothing sends them yet.
 
 `default_model` is the model a thread with no choice runs on. Only the brain sets it today, with
 `SettingsOp::SetDefaultModel` under epoch 0, which no connection has, so a shell hears only the
