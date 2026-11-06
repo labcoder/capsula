@@ -6,6 +6,9 @@
 /// The name people see.
 pub const DISPLAY_NAME: &str = "Kumochi";
 
+/// The fixed product identity sent to configured HTTP providers.
+pub const HTTP_USER_AGENT: &str = "Kumochi";
+
 /// The assistant's name until the user picks their own.
 pub const DEFAULT_ASSISTANT_NAME: &str = "Kumo";
 

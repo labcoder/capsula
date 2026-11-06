@@ -45,6 +45,7 @@ impl Http for Held {
         Ok(Response {
             status: 200,
             request_id: None,
+            meta: crate::connections::http_client::ResponseMeta::default(),
             body: Secret::new(Zeroizing::new(br#"{"data":[],"has_more":false}"#.to_vec())),
         })
     }
@@ -57,6 +58,7 @@ impl Http for EmptyCatalog {
         std::future::ready(Ok(Response {
             status: 200,
             request_id: None,
+            meta: crate::connections::http_client::ResponseMeta::default(),
             body: Secret::new(Zeroizing::new(br#"{"data":[],"has_more":false}"#.to_vec())),
         }))
     }
@@ -240,6 +242,7 @@ impl Http for CountedCatalog {
         std::future::ready(Ok(Response {
             status: 200,
             request_id: None,
+            meta: crate::connections::http_client::ResponseMeta::default(),
             body: Secret::new(Zeroizing::new(br#"{"data":[],"has_more":false}"#.to_vec())),
         }))
     }

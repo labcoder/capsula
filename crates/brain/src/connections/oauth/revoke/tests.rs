@@ -51,7 +51,11 @@ impl Http for Scripted {
             .map(|(key, value)| ((*key).to_owned(), value.expose().to_string()))
             .collect();
         self.requests.lock().expect("requests").push((
-            request.endpoint.url().to_owned(),
+            request
+                .endpoint
+                .url()
+                .expect("checked endpoint")
+                .into_owned(),
             fields,
             Instant::now(),
         ));
@@ -69,6 +73,7 @@ fn status(code: u16, body: &[u8]) -> Reply {
     Reply::Now(Ok(Response {
         status: code,
         request_id: None,
+        meta: crate::connections::http_client::ResponseMeta::default(),
         body: Secret::new(Zeroizing::new(body.to_vec())),
     }))
 }

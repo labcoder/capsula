@@ -719,6 +719,7 @@ fn response(status: u16, body: impl Into<Vec<u8>>) -> Result<Response, HttpError
     Ok(Response {
         status,
         request_id: None,
+        meta: crate::connections::http_client::ResponseMeta::default(),
         body: Secret::new(Zeroizing::new(body.into())),
     })
 }
