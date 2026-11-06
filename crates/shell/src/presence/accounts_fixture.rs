@@ -27,6 +27,9 @@ pub(crate) enum Appearance {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum State {
     GeneralError,
+    ClaudeReview,
+    ClaudeSigning,
+    ClaudeReady,
     Waiting,
     Offline,
     SignedOut,
@@ -52,6 +55,9 @@ pub(crate) enum State {
 impl State {
     pub(super) fn parse(value: &str) -> Option<Self> {
         Some(match value {
+            "claude-review" => Self::ClaudeReview,
+            "claude-signing" => Self::ClaudeSigning,
+            "claude-ready" => Self::ClaudeReady,
             "general-error" => Self::GeneralError,
             "waiting" => Self::Waiting,
             "offline" => Self::Offline,
@@ -75,6 +81,30 @@ impl State {
             "backlog" => Self::Backlog,
             _ => return None,
         })
+    }
+
+    fn claude_fixture(self, model: &mut Settings) {
+        if matches!(
+            self,
+            Self::ClaudeReview | Self::ClaudeSigning | Self::ClaudeReady
+        ) {
+            use kumochi_protocol::message::{ClaudeCodeView, ClaudeVersion};
+            let version = ClaudeVersion {
+                major: 2,
+                minor: 1,
+                patch: 306,
+            };
+            let view = match self {
+                Self::ClaudeSigning => ClaudeCodeView::SigningIn,
+                Self::ClaudeReady => ClaudeCodeView::Ready {
+                    version,
+                    analytics_on: true,
+                },
+                _ => ClaudeCodeView::SignedOut { version },
+            };
+            model.claude.receive(Some(1), 1, view);
+            model.claude.open_connect();
+        }
     }
 
     fn model(self) -> Settings {
@@ -170,6 +200,7 @@ impl State {
                 .accounts
                 .error(&UserError::new(key, Vec::new(), vec![action]).expect("fixed error"));
         }
+        self.claude_fixture(&mut model);
         model
     }
 }

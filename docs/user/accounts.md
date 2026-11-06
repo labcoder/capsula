@@ -51,3 +51,23 @@ enabled = false
 
 Turning it off doesn't start a sign-out or deletion. If a previous Disconnect is still waiting
 to delete Kumochi's Claude Code folder, Kumochi still tries to finish that cleanup at startup.
+## Claude Code
+
+Settings → Accounts shows Claude Code beside ChatGPT. Looking for Claude Code means discovery
+is still running; Connect becomes available only after an installation is found and signed out.
+Look again retries discovery. A version, policy or launch-audit problem is shown with its reason.
+
+Before you connect, Kumochi shows this notice: your Team or Enterprise organization's
+server-managed Claude Code settings apply to Kumochi's questions too. Kumochi can't see those
+settings. Personal plans have no organization-managed settings.
+
+Connect opens Claude Code's own window. If it asks how to sign in, choose **Claude account with
+subscription**, not the Anthropic Console API option. If your browser doesn't open, open the
+link shown in that window yourself, sign in and authorize access. Copy the code from the page,
+paste it into the Claude Code window, and press Enter. This paste-code fallback is the expected
+path for now (OSC-244); Kumochi never reads or relays the link or code.
+
+Sign-in stops after five minutes. Cancel stops it sooner; if a sign-in was already saved, Cancel
+does not sign it out. Disconnect asks for confirmation, signs Claude Code out of Kumochi, and
+removes Kumochi's Claude Code folder. If cleanup is pending, retry Disconnect. Your other apps'
+sign-ins are not changed. When Claude Code reports its analytics as on, the row says so.

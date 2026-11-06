@@ -109,6 +109,8 @@ pub fn validate_anthropic_key(text: &str) -> Result<&str, KeyRejection> {
 pub enum ClaudeCodeView {
     /// `[claude_code] enabled = false`.
     TurnedOff,
+    /// An admitted discovery round is checking the install and sign-in.
+    Finding,
     /// No install was found.
     NotFound,
     /// An install was found that Kumochi won't use.

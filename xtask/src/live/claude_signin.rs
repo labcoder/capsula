@@ -45,16 +45,13 @@ pub(super) enum Ask {
 
 fn drive(wire: &mut impl Wire, out: &mut impl Write, ask: Ask) -> Result<()> {
     let first = answer(wire, "first Connections view")?;
-    // Until discovery's first answer the view is the placeholder `NotFound`; past the deadline,
-    // that's the answer.
-    let found = leave(
-        wire,
-        first,
-        ClaudeCodeView::NotFound,
-        FIND,
-        "finding Claude Code",
-    )?
-    .unwrap_or(ClaudeCodeView::NotFound);
+    let waiting = if first == ClaudeCodeView::Finding {
+        first
+    } else {
+        ClaudeCodeView::NotFound
+    };
+    let found = leave(wire, first, waiting, FIND, "finding Claude Code")?
+        .unwrap_or(ClaudeCodeView::NotFound);
     writeln!(out, "claude code: {}", state(found))?;
     match ask {
         Ask::SignIn => sign_in(wire, out, found),
@@ -213,6 +210,7 @@ fn send(wire: &mut impl Wire, op: ConnectionOp) -> Result<()> {
 fn state(view: ClaudeCodeView) -> String {
     match view {
         ClaudeCodeView::TurnedOff => "turned off".to_owned(),
+        ClaudeCodeView::Finding => "finding".to_owned(),
         ClaudeCodeView::NotFound => "not found".to_owned(),
         ClaudeCodeView::Unsupported(why) => {
             let why = match why {
@@ -446,6 +444,25 @@ mod tests {
         );
         assert_eq!(error, None);
         assert_eq!(brain.sent, [QUIT]);
+        assert!(quit_sent);
+    }
+
+    #[test]
+    fn the_authoritative_finding_state_settles_before_connect() {
+        let mut brain = fixture(vec![
+            Step::View(ClaudeCodeView::Finding),
+            Step::View(ClaudeCodeView::Finding),
+            Step::View(signed_out()),
+            Step::View(ClaudeCodeView::SigningIn),
+            Step::View(ready()),
+        ]);
+        let (out, error, quit_sent) = run(&mut brain, Ask::SignIn);
+        assert_eq!(
+            out,
+            format!("claude code: signed out\n{WAITING}claude code: ready\n")
+        );
+        assert_eq!(error, None);
+        assert_eq!(brain.sent, [CONNECT, QUIT]);
         assert!(quit_sent);
     }
 

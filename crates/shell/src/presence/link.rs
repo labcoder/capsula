@@ -92,6 +92,14 @@ impl Presence {
                     self.sync_deletes(cx);
                 }
                 LinkEvent::ThreadsChanged => self.threads_changed(cx),
+                LinkEvent::Connections { generation, view } => {
+                    let current = self.session.as_ref().map(crate::link::Session::generation);
+                    self.settings.update(cx, |state, cx| {
+                        if state.claude.receive(current, generation, view.claude_code) {
+                            cx.notify();
+                        }
+                    });
+                }
                 LinkEvent::Account { generation, view } => {
                     self.account_changed(generation, view, cx);
                 }
@@ -374,6 +382,7 @@ impl Presence {
             self.scene_deadline = None;
             self.settings.update(cx, |state, cx| {
                 state.accounts.disconnected();
+                state.claude.disconnected();
                 state.disconnected();
                 cx.notify();
             });

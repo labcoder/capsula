@@ -232,7 +232,11 @@ stateDiagram-v2
 ```
 
 - **Connect** runs `auth login` in a console the user answers, in its own job, for up to 5 minutes,
-  then a Status. A second Connect while one runs is ignored. **Cancel** and **Disconnect** start a
+  then a Status. The Accounts screen shows the managed-policy notice and manual paste-code guidance
+  before the command is admitted. Discovery publishes `Finding` only after a Version round is
+  admitted and never replaces `Ready`; a missing lane stays `NotFound`. The shell disables Connect
+  during Finding, and the brain independently refuses it while work is outstanding.
+  A second Connect while one runs is ignored. **Cancel** and **Disconnect** start a
   new generation; the running call sees it at its next 20 ms poll, its job is terminated within the
   bounds above, and its late result is dropped. Cancel only stops the sign-in: if Claude Code had
   already saved one, the Status after it shows Ready, and only Disconnect signs out. A second
