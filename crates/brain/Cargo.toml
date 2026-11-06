@@ -34,6 +34,7 @@ serde_json = "1"
 sha2 = "0.11"
 subtle = "2"
 thiserror.workspace = true
+time = { version = "0.3.55", features = ["parsing", "formatting"] }
 tokio = { version = "1", features = ["rt", "net", "io-util", "time", "macros", "sync"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 toml = { version = "1.1", default-features = false, features = ["std", "serde", "parse", "display"] }
