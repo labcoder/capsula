@@ -3,9 +3,13 @@
 //!
 //! A supervisor is one tokio task that owns its worker process, the pending requests, the request
 //! ids and the loss history. Two std threads per worker own the pipe ends. A loss fails everything
-//! pending, broadcasts its [`Generation`], gives the process two seconds to show it exited and
-//! broadcasts that [`Exit`], then respawns, backing off after the second loss in a minute. A
-//! request gets one reply, or a bounded stream of them ending in the kind's terminal reply.
+//! pending, gives the process two seconds to show it exited, broadcasts that [`Exit`] and then its
+//! [`Generation`], and respawns, backing off after the second loss in a minute. The loss is the one
+//! recovery boundary: requests during confirmation fail; outside crash backoff, requests after
+//! the loss reach the next worker. An exit
+//! that isn't seen is fatal: nothing respawns and every handle refuses with
+//! [`WorkerLost::ExitUnconfirmed`]. A request gets one reply, or a bounded stream of them ending in
+//! the kind's terminal reply.
 
 mod wire;
 
@@ -17,6 +21,7 @@ mod tests;
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc as blocking};
 use std::time::Duration;
 
@@ -63,9 +68,15 @@ pub(crate) trait Kind: 'static {
     }
 }
 
-/// The worker died, broke its protocol or missed a deadline; everything it held is gone.
+/// Why a request got no reply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WorkerLost;
+pub enum WorkerLost {
+    /// The worker died, broke its protocol or missed a deadline, or the request came while a lost
+    /// one was being replaced. Outside crash backoff, work after its loss reaches the next worker.
+    Lost,
+    /// A lost worker wasn't seen to exit, so nothing replaces it and every request is refused.
+    ExitUnconfirmed,
+}
 
 /// One worker process of a supervisor: the first is 0 and each respawn the next. A reply and a
 /// loss name theirs, so a loss can be matched to the work it ended.
@@ -82,19 +93,35 @@ pub(crate) struct Exit {
     pub(crate) confirmed: bool,
 }
 
+/// What a supervisor tells every handle.
+#[derive(Clone)]
+struct Notices {
+    losses: broadcast::Sender<Generation>,
+    exits: broadcast::Sender<Exit>,
+    /// Set when an exit goes unconfirmed, before its loss is broadcast; never cleared.
+    fatal: Arc<AtomicBool>,
+}
+
+/// The failure a request sees when its supervisor gives no answer.
+fn failure(fatal: &AtomicBool) -> WorkerLost {
+    if fatal.load(Ordering::Acquire) {
+        WorkerLost::ExitUnconfirmed
+    } else {
+        WorkerLost::Lost
+    }
+}
+
 /// Requests and loss notifications; dropping the last handle stops the worker.
 pub(crate) struct Handle<K: Kind> {
     commands: mpsc::Sender<Command<K>>,
-    losses: broadcast::Sender<Generation>,
-    exits: broadcast::Sender<Exit>,
+    notices: Notices,
 }
 
 impl<K: Kind> Clone for Handle<K> {
     fn clone(&self) -> Self {
         Self {
             commands: self.commands.clone(),
-            losses: self.losses.clone(),
-            exits: self.exits.clone(),
+            notices: self.notices.clone(),
         }
     }
 }
@@ -137,7 +164,7 @@ impl<K: Kind> Destination<K> {
     fn deliver(&mut self, reply: K::Reply, generation: Generation) -> Result<bool, WorkerLost> {
         let terminal = K::is_terminal(&reply);
         if matches!(self, Self::Single(_)) && !terminal {
-            return Err(WorkerLost);
+            return Err(WorkerLost::Lost);
         }
         match std::mem::replace(self, Self::Discard) {
             Self::Single(answer) => complete::<K>(answer, Ok((reply, generation))),
@@ -156,7 +183,7 @@ impl<K: Kind> Destination<K> {
     /// A stream's reader sees its sender close as the loss.
     fn fail(self) {
         if let Self::Single(answer) = self {
-            complete::<K>(answer, Err(WorkerLost));
+            complete::<K>(answer, Err(WorkerLost::Lost));
         }
     }
 }
@@ -165,26 +192,34 @@ impl<K: Kind> Handle<K> {
     fn new(commands: mpsc::Sender<Command<K>>) -> Self {
         Self {
             commands,
-            losses: broadcast::channel(QUEUE).0,
-            exits: broadcast::channel(QUEUE).0,
+            notices: Notices {
+                losses: broadcast::channel(QUEUE).0,
+                exits: broadcast::channel(QUEUE).0,
+                fatal: Arc::default(),
+            },
         }
     }
 
-    /// Subscribes before issuing work. Each lost generation's exit is reported once, after its
-    /// loss and before its respawn.
+    /// Subscribes before issuing work. Each lost generation's exit is reported once, just before
+    /// its loss.
     #[cfg_attr(not(test), expect(dead_code, reason = "A6b2's release waits on it"))]
     pub(crate) fn exits(&self) -> broadcast::Receiver<Exit> {
-        self.exits.subscribe()
+        self.notices.exits.subscribe()
     }
 
     /// Submits one request, answered by `until` or not at all. `until` is absolute: it covers
-    /// queueing, a respawn in progress and every chunk. A full queue or backoff fails fast. The
-    /// reply comes with the generation of the worker that sent it.
+    /// queueing, a respawn in progress and every chunk. A full queue, backoff or exit confirmation
+    /// fails fast, and an unconfirmed exit refuses for good. The reply comes with the generation
+    /// of the worker that sent it.
     pub(crate) async fn request(
         &self,
         body: K::Request,
         until: Instant,
     ) -> Result<(K::Reply, Generation), WorkerLost> {
+        let lost = || failure(&self.notices.fatal);
+        if lost() == WorkerLost::ExitUnconfirmed {
+            return Err(WorkerLost::ExitUnconfirmed);
+        }
         let (answer, reply) = oneshot::channel();
         self.commands
             .try_send(Command {
@@ -192,11 +227,11 @@ impl<K: Kind> Handle<K> {
                 until,
                 answer: Destination::Single(answer),
             })
-            .map_err(|_| WorkerLost)?;
+            .map_err(|_| lost())?;
         tokio::time::timeout_at(until, reply)
             .await
-            .map_err(|_| WorkerLost)?
-            .unwrap_or(Err(WorkerLost))
+            .map_err(|_| lost())?
+            .unwrap_or_else(|_| Err(lost()))
     }
 
     /// Submits one streamed request under the same absolute `until`, which no reply extends.
@@ -213,6 +248,10 @@ impl<K: Kind> Handle<K> {
         body: K::Request,
         until: Instant,
     ) -> Result<ReplyStream<K>, WorkerLost> {
+        let fatal = Arc::clone(&self.notices.fatal);
+        if failure(&fatal) == WorkerLost::ExitUnconfirmed {
+            return Err(WorkerLost::ExitUnconfirmed);
+        }
         let (stages, replies) = mpsc::channel(STREAM_QUEUE);
         self.commands
             .try_send(Command {
@@ -220,18 +259,19 @@ impl<K: Kind> Handle<K> {
                 until,
                 answer: Destination::Stream(stages),
             })
-            .map_err(|_| WorkerLost)?;
+            .map_err(|_| failure(&fatal))?;
         Ok(ReplyStream {
             replies,
             until,
             done: false,
+            fatal,
         })
     }
 
     /// Subscribes before issuing work, so a lost generation can't be missed. Each loss names the
     /// generation that ended, after every request it held has been answered.
     pub(crate) fn lost(&self) -> broadcast::Receiver<Generation> {
-        self.losses.subscribe()
+        self.notices.losses.subscribe()
     }
 }
 
@@ -241,6 +281,7 @@ pub(crate) struct ReplyStream<K: Kind> {
     replies: mpsc::Receiver<(K::Reply, Generation)>,
     until: Instant,
     done: bool,
+    fatal: Arc<AtomicBool>,
 }
 
 impl<K: Kind> ReplyStream<K> {
@@ -259,7 +300,7 @@ impl<K: Kind> ReplyStream<K> {
             .ok()
             .flatten();
         self.done = next.as_ref().is_none_or(|(reply, _)| K::is_terminal(reply));
-        Some(next.ok_or(WorkerLost))
+        Some(next.ok_or_else(|| failure(&self.fatal)))
     }
 }
 
@@ -282,11 +323,10 @@ pub(crate) fn start<K: Kind>(exe: PathBuf, jobs: Arc<Job>) -> io::Result<Handle<
     let (commands, receive) = mpsc::channel(QUEUE);
     let handle = Handle::new(commands);
     drop(tokio::spawn(run(
-        exe,
-        jobs,
+        move || Worker::<K>::spawn(&exe, &jobs),
         worker,
         receive,
-        (handle.losses.clone(), handle.exits.clone()),
+        handle.notices.clone(),
     )));
     Ok(handle)
 }
@@ -382,31 +422,32 @@ fn terminate<K: Kind>(process: Option<&Helper>) {
     }
 }
 
-/// Waits off the runtime thread for `exited`, given [`EXIT_CONFIRMATION`], then reports
-/// `generation`'s [`Exit`]. Commands that arrive meanwhile fail at once rather than wait. `None`
-/// once every handle is gone.
+/// Waits off the runtime thread for `exited`, given [`EXIT_CONFIRMATION`], failing commands that
+/// arrive meanwhile, then broadcasts `generation`'s [`Exit`] and then its loss. An unconfirmed exit
+/// is made fatal first, so whoever the loss wakes is refused. Returns whether the exit was seen.
 async fn confirm_exit<K: Kind>(
     exited: impl FnOnce(Duration) -> bool + Send + 'static,
     generation: Generation,
     commands: &mut mpsc::Receiver<Command<K>>,
-    exits: &broadcast::Sender<Exit>,
-) -> Option<()> {
+    notices: &Notices,
+) -> bool {
     let mut waiting = tokio::task::spawn_blocking(move || exited(EXIT_CONFIRMATION));
     let confirmed = loop {
         tokio::select! {
             biased;
             exited = &mut waiting => break exited.unwrap_or(false),
-            command = commands.recv() => command?.answer.fail(),
+            Some(command) = commands.recv() => command.answer.fail(),
         }
     };
-    // Every handle is gone, so a respawn would only land in a closing job.
-    if commands.is_closed() {
-        return None;
-    }
     if !confirmed {
-        tracing::error!(kind = K::NAME, "worker exit unconfirmed");
+        notices.fatal.store(true, Ordering::Release);
+        tracing::error!(
+            kind = K::NAME,
+            "worker exit unconfirmed, so it is not replaced"
+        );
     }
-    if exits
+    if notices
+        .exits
         .send(Exit {
             generation,
             confirmed,
@@ -415,7 +456,10 @@ async fn confirm_exit<K: Kind>(
     {
         tracing::debug!(kind = K::NAME, "worker exit without watchers");
     }
-    Some(())
+    if notices.losses.send(generation).is_err() {
+        tracing::debug!(kind = K::NAME, "worker lost without watchers");
+    }
+    confirmed
 }
 
 /// Why a worker generation ended; content-free, for the log only.
@@ -471,13 +515,16 @@ fn accept<K: Kind>(
     generation: Generation,
 ) -> Result<(), WorkerLost> {
     let id = reply.id;
-    let item = pending.get_mut(&id).ok_or(WorkerLost)?;
-    item.bytes = item.bytes.checked_sub(reply.body.len()).ok_or(WorkerLost)?;
+    let item = pending.get_mut(&id).ok_or(WorkerLost::Lost)?;
+    item.bytes = item
+        .bytes
+        .checked_sub(reply.body.len())
+        .ok_or(WorkerLost::Lost)?;
     let Some(bytes) = item.assembly.push(reply)? else {
         return Ok(());
     };
-    item.messages = item.messages.checked_sub(1).ok_or(WorkerLost)?;
-    let body = frame::decode::<K::Reply>(&bytes).map_err(|_| WorkerLost)?;
+    item.messages = item.messages.checked_sub(1).ok_or(WorkerLost::Lost)?;
+    let body = frame::decode::<K::Reply>(&bytes).map_err(|_| WorkerLost::Lost)?;
     if item.answer.deliver(body, generation)? {
         pending.remove(&id);
     }
@@ -543,11 +590,10 @@ async fn serve<K: Kind>(
 }
 
 async fn run<K: Kind>(
-    exe: PathBuf,
-    jobs: Arc<Job>,
+    spawn: impl Fn() -> io::Result<Worker<K>> + Clone + Send + 'static,
     mut worker: Worker<K>,
     mut commands: mpsc::Receiver<Command<K>>,
-    (losses, exits): (broadcast::Sender<Generation>, broadcast::Sender<Exit>),
+    notices: Notices,
 ) {
     let mut generation = Generation(0);
     let mut history = VecDeque::new();
@@ -571,16 +617,13 @@ async fn run<K: Kind>(
         while let Ok(command) = commands.try_recv() {
             command.answer.fail();
         }
-        if losses.send(generation).is_err() {
-            tracing::debug!(kind = K::NAME, "worker lost without watchers");
-        }
         let exited = move |timeout| {
             process.is_some_and(|process| matches!(process.exits_within(timeout), Ok(true)))
         };
-        if confirm_exit(exited, generation, &mut commands, &exits)
-            .await
-            .is_none()
-        {
+        let confirmed = confirm_exit(exited, generation, &mut commands, &notices).await;
+        // A worker that may still run is never joined by another. With every handle gone, a
+        // respawn would only land in a closing job.
+        if !confirmed || commands.is_closed() {
             return;
         }
         loop {
@@ -596,9 +639,7 @@ async fn run<K: Kind>(
                     },
                 }
             }
-            let path = exe.clone();
-            let job = Arc::clone(&jobs);
-            match tokio::task::spawn_blocking(move || Worker::<K>::spawn(&path, &job)).await {
+            match tokio::task::spawn_blocking(spawn.clone()).await {
                 Ok(Ok(next)) => {
                     tracing::warn!(
                         kind = K::NAME,

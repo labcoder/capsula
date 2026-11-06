@@ -48,12 +48,16 @@ worker yet; the screen kind sends its Drop control with the capture streams that
 A hostile worker can make the brain hold up to 16 × 12 MiB of streamed replies for one deadline.
 
 Each request has one 1.5 s absolute deadline [guess], including queue time; fixtures can inject it.
-A loss fails all pending operations, requests worker termination, then broadcasts its `Generation`: the
-first worker is 0 and each respawn the next, and every reply names the generation that sent it.
-`WorkerLost` alone is not confirmation that the native process exited. The supervisor then waits
+A loss fails all pending operations and requests worker termination. The supervisor then waits
 off the async thread, up to 2 s [guess], for the process to exit, and broadcasts
-`Exit { generation, confirmed }` once per lost generation, after its loss and before any respawn.
-Requests during that wait fail fast. An unconfirmed exit is logged and the worker still respawns.
+`Exit { generation, confirmed }` and then the loss's `Generation`: the first worker is 0 and each
+respawn the next, and every reply names the generation that sent it. `WorkerLost` alone is not
+confirmation that the native process exited. The loss broadcast is the one recovery boundary:
+requests that arrive while the exit is confirmed fail fast with `WorkerLost`, and a request made
+after the loss reaches the next worker without a retry. An exit that isn't seen in 2 s is fatal.
+The supervisor marks every handle refused before it broadcasts that loss, starts no worker beside
+one that may still run, and ends; every request from then on, queued ones included, gets
+`ExitUnconfirmed` (`ScreenError::ExitUnconfirmed`, `SpeechError::ExitUnconfirmed`).
 The first
 two losses respawn immediately; a third within 60 s waits 0.2 s, then 1 s and 5 s for later losses
 [guess]. Requests during backoff fail fast. During an in-flight respawn, requests wait for the new

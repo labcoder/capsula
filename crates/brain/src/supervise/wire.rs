@@ -44,9 +44,9 @@ impl Assembly {
             || chunk.body.is_empty()
             || chunk.body.len() > self.max - self.bytes.len()
         {
-            return Err(WorkerLost);
+            return Err(WorkerLost::Lost);
         }
-        self.next = self.next.checked_add(1).ok_or(WorkerLost)?;
+        self.next = self.next.checked_add(1).ok_or(WorkerLost::Lost)?;
         self.bytes.extend(chunk.body);
         if !chunk.last {
             return Ok(None);

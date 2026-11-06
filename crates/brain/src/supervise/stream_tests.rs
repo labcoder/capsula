@@ -146,12 +146,15 @@ async fn a_single_request_refuses_an_intermediate_reply() {
         fake.reply(id, "stage 1").await;
     };
     let (reply, ()) = tokio::join!(fake.handle.request(vec![], far()), worker);
-    assert_eq!(reply, Err(WorkerLost));
+    assert_eq!(reply, Err(WorkerLost::Lost));
     assert_eq!(
         fake.served.await.expect("served"),
         Some(LossReason::Malformed)
     );
-    assert_eq!(fake.handle.request(vec![2], far()).await, Err(WorkerLost));
+    assert_eq!(
+        fake.handle.request(vec![2], far()).await,
+        Err(WorkerLost::Lost)
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -194,7 +197,11 @@ async fn a_stream_that_falls_behind_ends_without_losing_the_worker() {
             Some(Ok(stage(&format!("stage {number}"))))
         );
     }
-    assert_eq!(stream.next().await, Some(Err(WorkerLost)), "the fifth");
+    assert_eq!(
+        stream.next().await,
+        Some(Err(WorkerLost::Lost)),
+        "the fifth"
+    );
     assert_eq!(stream.next().await, None);
     let worker = async {
         assert_eq!(fake.request().await, (2, vec![2]));
@@ -217,7 +224,7 @@ fn sixteen_messages_fit_and_a_seventeenth_loses_the_worker() {
     for _ in 0..16 {
         assert_eq!(push(&mut pending, "stage"), Ok(()));
     }
-    assert_eq!(push(&mut pending, "done"), Err(WorkerLost));
+    assert_eq!(push(&mut pending, "done"), Err(WorkerLost::Lost));
 }
 
 #[test]
@@ -239,7 +246,7 @@ fn twelve_mib_fit_across_messages_and_one_more_chunk_is_refused_unfinished() {
         last: false,
         body: vec![0],
     };
-    assert_eq!(accept(&mut pending, partial, SERVED), Err(WorkerLost));
+    assert_eq!(accept(&mut pending, partial, SERVED), Err(WorkerLost::Lost));
 }
 
 #[test]
@@ -265,7 +272,7 @@ async fn a_stream_keeps_its_absolute_deadline_through_its_stages() {
         .handle
         .request_stream(vec![9], Instant::now())
         .expect("queued");
-    assert_eq!(late.next().await, Some(Err(WorkerLost)));
+    assert_eq!(late.next().await, Some(Err(WorkerLost::Lost)));
     let mut stream = fake
         .handle
         .request_stream(vec![1], Instant::now() + Duration::from_millis(1500))
@@ -288,7 +295,7 @@ async fn a_stream_keeps_its_absolute_deadline_through_its_stages() {
         fake.served.await.expect("served"),
         Some(LossReason::Deadline)
     );
-    assert_eq!(stream.next().await, Some(Err(WorkerLost)));
+    assert_eq!(stream.next().await, Some(Err(WorkerLost::Lost)));
     assert_eq!(stream.next().await, None);
 }
 
@@ -300,7 +307,7 @@ async fn an_unanswered_stream_ends_at_its_deadline() {
     let mut stream = handle
         .request_stream(vec![], started + Duration::from_millis(1500))
         .expect("queued");
-    assert_eq!(stream.next().await, Some(Err(WorkerLost)));
+    assert_eq!(stream.next().await, Some(Err(WorkerLost::Lost)));
     assert_eq!(started.elapsed(), Duration::from_millis(1500));
     assert_eq!(stream.next().await, None);
 }
@@ -321,7 +328,7 @@ async fn a_lost_worker_ends_its_stream_after_the_stages_already_delivered() {
     fake.reads.send(None).await.expect("serving");
     assert_eq!(fake.served.await.expect("served"), Some(LossReason::Ended));
     assert_eq!(stream.next().await, Some(Ok(stage("stage 1"))));
-    assert_eq!(stream.next().await, Some(Err(WorkerLost)));
+    assert_eq!(stream.next().await, Some(Err(WorkerLost::Lost)));
     assert_eq!(stream.next().await, None);
 }
 
@@ -336,7 +343,7 @@ async fn an_unwritable_stream_loses_the_worker() {
     drop(written);
     let mut stream = handle.request_stream(vec![1], far()).expect("queued");
     assert_eq!(served.await.expect("served"), Some(LossReason::Unwritable));
-    assert_eq!(stream.next().await, Some(Err(WorkerLost)));
+    assert_eq!(stream.next().await, Some(Err(WorkerLost::Lost)));
 }
 
 #[test]
