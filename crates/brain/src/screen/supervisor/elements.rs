@@ -89,7 +89,7 @@ async fn elements_accept_only_the_requested_capture_and_map_refusals() {
             };
             assert_eq!(capture, CaptureId(7));
             assert_eq!(target, ElementTarget::Foreground);
-            assert_eq!(send.send(reply), Ok(()));
+            assert_eq!(send.send(reply.map(|reply| (reply, Generation(0)))), Ok(()));
         };
         let (actual, ()) = tokio::join!(request, answer);
         assert_eq!(actual, expected);

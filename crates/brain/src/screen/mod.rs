@@ -16,7 +16,7 @@ mod supervisor;
 mod wire;
 mod worker;
 
-pub use crate::supervise::WorkerLost;
+pub use crate::supervise::{Generation, WorkerLost};
 pub(crate) use capture::{Acquired, Capturer, Failure};
 pub use elements::{Availability, Cut, Element, ElementId, ElementTarget, ElementTree};
 pub(crate) use frame::{RawFrame, display_edges};

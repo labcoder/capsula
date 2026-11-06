@@ -13,4 +13,4 @@ pub use wire::{MAX_PCM_BYTES, MAX_RATE, MAX_SECONDS, MIN_RATE, SpeechError};
 pub use worker::serve;
 
 pub use crate::platform::sherpa::NativeError;
-pub use crate::supervise::WorkerLost;
+pub use crate::supervise::{Generation, WorkerLost};

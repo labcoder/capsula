@@ -32,7 +32,9 @@ worker can therefore make the brain hold up to 16 × 4 MiB of partial replies, p
 256 KiB frames, for at most one deadline.
 
 Each request has one 1.5 s absolute deadline [guess], including queue time; fixtures can inject it.
-A loss terminates the worker, fails all pending operations and broadcasts `WorkerLost`. The first
+A loss terminates the worker, fails all pending operations, then broadcasts its `Generation`: the
+first worker is 0 and each respawn the next, and every reply names the generation that sent it.
+The first
 two losses respawn immediately; a third within 60 s waits 0.2 s, then 1 s and 5 s for later losses
 [guess]. Requests during backoff fail fast. During an in-flight respawn, requests wait for the new
 worker under their original absolute deadline; a failed spawn immediately fails its queued callers.
