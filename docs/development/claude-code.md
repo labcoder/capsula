@@ -385,7 +385,8 @@ attempts. Nothing in production asks a question yet: C5b-2's engine selection is
   core's own wait then revokes it, so an unused launch never holds the lane, which runs one launch
   at a time.
 - **Taking.** `take(snapshot)` hands over the warm attempt if its snapshot is equal and current,
-  and the clock is before its expiry, whether or not its audit has finished. Otherwise it drops
+  its launch is neither revoked nor torn down, and the clock is before its expiry, whether or not
+  its audit has finished. A repeat `warm` keeps the slot on the same terms. Otherwise it drops
   the warm attempt and admits a fresh one with no expiry.
   It returns a `ClaudeQuestion`, an `Engine` whose one round owns the attempt; a second start
   fails at once.

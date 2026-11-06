@@ -432,6 +432,7 @@ impl Claude {
         if let Some(warm) = &self.warm
             && *warm.snapshot() == snapshot
             && self.current(&snapshot)
+            && self.live(warm.id())
         {
             return Ok(warm.id());
         }
@@ -462,6 +463,7 @@ impl Claude {
             Some(warm)
                 if warm.snapshot() == snapshot
                     && self.current(snapshot)
+                    && self.live(warm.id())
                     && warm.expires().is_some_and(|expires| now < expires) =>
             {
                 warm
@@ -485,6 +487,13 @@ impl Claude {
     fn current(&self, snapshot: &LaunchSnapshot) -> bool {
         matches!(self.view, ClaudeCodeView::Ready { version, .. } if version == snapshot.version)
             && snapshot.account == self.generation
+    }
+
+    /// True while launch `id` is neither revoked nor torn down.
+    fn live(&self, id: LaunchId) -> bool {
+        self.launches
+            .iter()
+            .any(|held| held.id == id && !held.control.is_revoked() && !held.control.is_ended())
     }
 
     /// Admits a launch for `snapshot` with its one report due.

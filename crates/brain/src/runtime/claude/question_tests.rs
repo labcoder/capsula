@@ -1072,3 +1072,29 @@ async fn a_post_seed_failure_reported_after_a_find_still_quarantines() {
     assert_eq!(rig.markers(), ["claude-code.quarantine-2.1.306"]);
     rig.close().await;
 }
+
+/// A warm launch that's revoked, or whose teardown is over, isn't reused: the question gets a
+/// fresh launch and is answered.
+#[tokio::test]
+async fn a_dead_warm_launch_is_not_reused() {
+    let mut rig = Rig::new("question-dead-warm", &synthetic_signed_in()).await;
+    for ended in [false, true] {
+        let warm = rig.claude.warm(rig.snapshot()).expect("warm");
+        let (_, control) = rig.last();
+        control.withdraw();
+        if ended {
+            until("the warm launch's teardown", || control.is_ended()).await;
+        }
+        assert_ne!(
+            rig.claude.warm(rig.snapshot()),
+            Ok(warm),
+            "a repeat, ended: {ended}"
+        );
+        let question = rig.claude.take(&rig.snapshot()).expect("taken");
+        let mut played = play(&question);
+        let lease = played.lease();
+        rig.drive(played.asked(lease)).await;
+        answered(&rig.drive(played.events()).await);
+    }
+    rig.close().await;
+}

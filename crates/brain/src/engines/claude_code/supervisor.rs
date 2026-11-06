@@ -284,7 +284,7 @@ impl Control {
         revoked
     }
 
-    fn is_revoked(&self) -> bool {
+    pub(crate) fn is_revoked(&self) -> bool {
         self.state.load(Ordering::Acquire) >= REVOKED
     }
 
