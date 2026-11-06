@@ -48,6 +48,9 @@ mod admission;
 #[path = "paint_tests.rs"]
 mod paint_work;
 
+#[path = "stop_tests.rs"]
+mod stop;
+
 #[test]
 #[ignore = "manual quiet-Rez v1 mirror admission timing, not a CI latency assertion"]
 #[expect(

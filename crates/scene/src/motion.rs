@@ -896,6 +896,17 @@ impl SceneView {
                     .is_some_and(|spin| spin.stop(deadline) > now))
     }
 
+    /// The Stop cut path: keeps the yaw `from` showed at scene time `now` (the sample a Stop
+    /// latched), as a still angle, when this view continues the same view; a replacement view
+    /// keeps its authored camera.
+    pub fn carry_spin(&mut self, from: &SceneView, now: u64) {
+        if let (Some(view), Some(old)) = (self.view.as_mut(), from.view.as_ref())
+            && view.geometry.handle == old.geometry.handle
+        {
+            view.yaw = old.degrees(now, from.deadline);
+        }
+    }
+
     /// Stops the spin at its angle at `now`, as a drag does; later holds change nothing.
     pub fn hold_spin(&mut self, now: u64) {
         if let Some(spin) = self.view.as_mut().and_then(|view| view.spin.as_mut()) {

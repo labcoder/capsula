@@ -1013,3 +1013,46 @@ fn measure_admit() {
         );
     }
 }
+
+#[test]
+fn a_solid_degenerate_only_in_the_world_refuses_before_commit() {
+    let (mut state, mut global) = (scene(), GlobalBudget::default());
+    let pair = |pos: &str| {
+        [
+            view("v"),
+            cube("p", &format!(r#","pos":{pos},"scale":0.001"#)),
+            cube("c", r#","attach":"p","scale":0.001"#),
+        ]
+    };
+    assert_eq!(
+        refused(&state, &global, &put("far", &pair("[1000,0,0]"))),
+        at(ErrorCode::Degenerate, "put[2]"),
+        "the child collapses only under its parent's scale"
+    );
+    commit(&mut state, &mut global, &put("near", &pair("[0,0,0]")));
+    assert_eq!(
+        refused(
+            &state,
+            &global,
+            &format!(
+                r#"{{"id":"moved","put":[{}]}}"#,
+                track("p", "pos3", [1000.0, 0.0, 0.0], "linear")
+            )
+        ),
+        at(ErrorCode::Degenerate, "put[0]"),
+        "the child collapses only at the track's final offset"
+    );
+    commit(
+        &mut state,
+        &mut global,
+        &format!(
+            r#"{{"id":"moved","put":[{}]}}"#,
+            track("p", "pos3", [0.5, 0.0, 0.0], "linear")
+        ),
+    );
+    assert_eq!(
+        state.revision(),
+        2,
+        "the next step admits under the refused id"
+    );
+}

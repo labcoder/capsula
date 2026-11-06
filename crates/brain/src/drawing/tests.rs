@@ -1071,14 +1071,57 @@ fn a_fifth_scene_evicts_the_oldest_even_when_its_first_step_is_rejected() {
 }
 
 #[test]
-fn three_dimensional_steps_wait_for_prepared_views() {
+fn a_three_dimensional_step_admits_and_commits() {
     let mut drawing = Drawing::default();
     let mut store = Store::default();
-    let view = r#"{"id":"a","put":[{"view3d":{"id":"v"}}]}"#.to_owned();
+    let view = r#"{"id":"a","put":[{"view3d":{"id":"v"}},{"solid":{"in":"v","id":"s","shape":"box","size":[1,1,1]}}]}"#.to_owned();
     let out = store.run(&mut drawing, call(1, "c1", args("s1", &[view])));
-    assert_eq!(error(&out.calls[0]), ErrorCode::Unsupported);
+    assert_eq!(
+        trace(&out),
+        [
+            "lookup",
+            "write step 1",
+            "begin 1",
+            "step 1#0",
+            "end 1 true"
+        ]
+    );
+    assert_eq!(
+        (
+            drawing.global.usage().scenes,
+            drawing.global.usage().solids,
+            drawing.global.usage().triangles
+        ),
+        (1, 1, 12)
+    );
+}
+
+#[test]
+fn a_solid_degenerate_only_in_the_world_is_refused_before_any_write() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    let far = r#"{"id":"a","put":[{"view3d":{"id":"v"}},
+        {"solid":{"in":"v","id":"p","shape":"box","size":[2,2,2],"pos":[1000,0,0],"scale":0.001}},
+        {"solid":{"in":"v","id":"c","shape":"box","size":[2,2,2],"attach":"p","scale":0.001}}]}"#
+        .to_owned();
+    let out = store.run(&mut drawing, call(1, "c1", args("s1", &[far])));
+    assert_eq!(trace(&out), ["lookup"], "nothing is written");
+    assert_eq!(error(&out.calls[0]), ErrorCode::Degenerate);
     assert!(drawing.scenes.is_empty());
     assert_eq!(drawing.global.usage().scenes, 0);
+    let near = r#"{"id":"a","put":[{"view3d":{"id":"v"}}]}"#.to_owned();
+    let out = store.run(&mut drawing, call(1, "c2", args("s1", &[near])));
+    assert_eq!(
+        trace(&out),
+        [
+            "lookup",
+            "write step 1",
+            "begin 1",
+            "step 1#0",
+            "end 1 true"
+        ],
+        "the name stays free for the next call"
+    );
 }
 
 #[test]

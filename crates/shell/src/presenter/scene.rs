@@ -40,6 +40,11 @@ pub(super) struct Scene {
     /// A consumption refused while this scene's admission was out, served before its next one.
     pub(super) pending_consumption: Option<u32>,
     pub(super) cut: Cut,
+    /// The scene time of this view's last sample, which a Stop latches.
+    pub(super) sampled_ms: Option<u64>,
+    /// The sample a sent cut latched when it started; its acknowledgement settles at this time,
+    /// however many samples arrive before it.
+    pub(super) stopped_ms: Option<u64>,
     /// A commit went unprepared, so nothing prepares again until a cut resets the layout.
     pub(super) skipping: bool,
 }
@@ -136,6 +141,8 @@ impl Scene {
             ready: VecDeque::new(),
             pending_consumption: None,
             cut,
+            sampled_ms: None,
+            stopped_ms: None,
             skipping: false,
         }
     }

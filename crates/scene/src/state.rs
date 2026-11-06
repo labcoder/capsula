@@ -68,25 +68,6 @@ pub enum StopOutcome {
     Cleared,
 }
 
-/// Refuses 3D views, solids and tracks at an ingress whose displays cannot prepare them yet.
-/// # Errors
-/// Returns `Unsupported` at the first 3D `put`.
-// shortcut: the brain calls this until views prepare (slice 5 PR 6); remove it with that call.
-pub fn refuse_three_dimensional(step: &Step) -> Result<(), StepError> {
-    let index = step.put.iter().position(|op| match op {
-        crate::Op::View3d(_) | crate::Op::Solid(_) => true,
-        crate::Op::Anim(anim) => matches!(anim.track, Track::Pos3 | Track::Rot3),
-        _ => false,
-    });
-    index.map_or(Ok(()), |index| {
-        Err(StepError::in_step(
-            &step.id,
-            FieldPath::default().field("put").index(index),
-            ErrorCode::Unsupported,
-        ))
-    })
-}
-
 fn serialize_step<S: serde::Serializer>(step: &Step, serializer: S) -> Result<S::Ok, S::Error> {
     step.serialize(serializer)
 }
@@ -615,6 +596,18 @@ impl SceneState {
             .sum::<usize>();
         retire::attribute(&mut after, owned);
         let views = three::view_updates(step, &self.objects, &after);
+        if let Some(handle) = three::degenerate(step, &views, &after) {
+            let mut path = FieldPath::default().field("put");
+            let slot = (handle.revision() == revision).then(|| handle.slot()).or_else(|| {
+                step.put.iter().position(|op| {
+                    matches!(op, crate::Op::Anim(anim) if matches!(anim.track, Track::Pos3 | Track::Rot3))
+                })
+            });
+            if let Some(slot) = slot {
+                path = path.index(slot);
+            }
+            return Err(fail(path, ErrorCode::Degenerate));
+        }
         let removed_bytes = records_bytes(&removed);
         let mut removed = Deferred::new(removed, removed_bytes);
         for object in after

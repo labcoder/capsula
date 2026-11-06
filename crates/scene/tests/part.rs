@@ -232,9 +232,6 @@ fn a_parts_debug_prints_lengths_never_its_text() {
         assert!(!shown.contains(sentinel), "{shown}");
         let bytes = format!("{:?}", sentinel.as_bytes());
         let bytes = bytes.trim_matches(['[', ']']);
-        assert!(
-            !format!("{:?}", shown.as_bytes()).contains(bytes),
-            "{shown}"
-        );
+        assert!(!shown.contains(bytes), "{shown}");
     }
 }

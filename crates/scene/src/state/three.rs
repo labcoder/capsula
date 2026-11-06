@@ -7,11 +7,17 @@ use super::object::{Kind, Object};
 use crate::{
     ErrorCode, Handle, Op, Step, WireId,
     limits::MAX_COORD,
-    three::view::{SolidInput, ViewInput, ViewUpdate},
+    record::Track,
+    theme::Theme,
+    three::{
+        mesh::MeshScratch,
+        size::MeshError,
+        view::{Ends, Mesh, SolidInput, ViewInput, ViewUpdate, tessellate_view},
+    },
 };
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::{Arc, atomic::AtomicBool},
 };
 
 #[derive(Clone, Copy)]
@@ -114,6 +120,60 @@ pub(super) fn view_updates(
             id,
         })
         .collect()
+}
+
+/// Builds each view this step changes or reposes at its candidate rest with the shell's own
+/// tessellation, and names the first solid whose world mesh fails there, so a step the shell
+/// would prepare empty is refused before commit.
+pub(super) fn degenerate(
+    step: &Step,
+    views: &[ViewUpdate],
+    after: &BTreeMap<WireId, Object>,
+) -> Option<Handle> {
+    let mut changed: BTreeMap<&WireId, Option<&Arc<ViewInput>>> = views
+        .iter()
+        .filter_map(|update| update.input.as_ref().map(|input| (&update.id, Some(input))))
+        .collect();
+    for op in &*step.put {
+        if let Op::Anim(anim) = op
+            && matches!(anim.track, Track::Pos3 | Track::Rot3)
+            && let Some(view) = after.get(&anim.target).and_then(|o| o.parent.as_ref())
+        {
+            changed.entry(view).or_insert(None);
+        }
+    }
+    let mut scratch = MeshScratch::new();
+    for (id, input) in changed {
+        let input = input.map_or_else(|| Arc::new(view_input(id, &after[id], after)), Arc::clone);
+        let ends: HashMap<&WireId, Ends> = after
+            .iter()
+            .filter(|(_, object)| object.parent.as_ref() == Some(id))
+            .filter_map(|(id, object)| {
+                let [pos3, rot3] = object.work.solid?.end;
+                Some((id, Ends { pos3, rot3 }))
+            })
+            .collect();
+        let built = tessellate_view(
+            &input,
+            None,
+            &HashMap::new(),
+            &ends,
+            &Theme::default(),
+            &AtomicBool::new(false),
+            &mut scratch,
+        );
+        let Ok(geometry) = built else {
+            return Some(input.handle);
+        };
+        if let Some(solid) = geometry
+            .solids
+            .iter()
+            .find(|solid| matches!(solid.mesh, Mesh::Failed(MeshError::Degenerate(_))))
+        {
+            return Some(solid.handle);
+        }
+    }
+    None
 }
 
 fn view_input(id: &WireId, view: &Object, after: &BTreeMap<WireId, Object>) -> ViewInput {
