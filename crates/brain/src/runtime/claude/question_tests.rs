@@ -805,24 +805,6 @@ async fn analytics_shows_inits_value_else_initializes() {
             "{initialize:?} {init:?}"
         );
     }
-    rig.claude
-        .notes
-        .0
-        .send(Note::Analytics {
-            id: LaunchId(7),
-            on: false,
-        })
-        .expect("open");
-    let wake = timeout(WAIT, rig.claude.next()).await.expect("the note");
-    rig.wake(wake);
-    assert_eq!(
-        rig.claude.view(),
-        ClaudeCodeView::Ready {
-            version: V,
-            analytics_on: false
-        },
-        "the last row's"
-    );
     rig.close().await;
 }
 
@@ -900,5 +882,83 @@ async fn the_gate_opens_only_after_inits_audit() {
     until("init's audit", || control.may_call()).await;
     rig.go("answer");
     answered(&rig.drive(played.events()).await);
+    rig.close().await;
+}
+
+/// A model other than the snapshot's, so a second attempt is admitted beside the first.
+fn other(snapshot: LaunchSnapshot) -> LaunchSnapshot {
+    LaunchSnapshot {
+        model: "claude-other".to_owned(),
+        ..snapshot
+    }
+}
+
+/// T16's stale half: an admitted attempt's Analytics note changes nothing unless the view is
+/// Ready at the attempt's generation. Each case sends the opposite of the shown value, or `true`
+/// where nothing is shown.
+#[tokio::test]
+async fn analytics_from_a_stale_or_unready_attempt_changes_nothing() {
+    let script = synthetic_signed_in().held_until("go");
+    let analytics = |rig: &mut Rig, id, on| {
+        rig.claude.wake(Wake::Note(Note::Analytics { id, on }));
+        rig.claude.view()
+    };
+
+    let mut rig = Rig::new("question-analytics-newer", &script).await;
+    let old = rig.claude.warm(rig.snapshot()).expect("warm");
+    rig.claude.op(ConnectionOp::FindClaudeCode);
+    let ClaudeCodeView::Ready { analytics_on, .. } = rig.claude.view() else {
+        panic!("Ready while the find is out");
+    };
+    assert_eq!(
+        analytics(&mut rig, old, !analytics_on),
+        ClaudeCodeView::Ready {
+            version: V,
+            analytics_on
+        },
+        "a newer generation"
+    );
+    rig.close().await;
+
+    let mut rig = Rig::new("question-analytics-signed-out", &script).await;
+    let taken = rig.claude.take(&rig.snapshot()).expect("taken");
+    let (signed_out, _) = rig.last();
+    let warm = rig.claude.warm(other(rig.snapshot())).expect("warm");
+    rig.claude.wake(Wake::Note(Note::Ended {
+        id: signed_out,
+        outcome: launch::Outcome::SignedOut,
+    }));
+    assert_eq!(
+        analytics(&mut rig, warm, true),
+        ClaudeCodeView::SignedOut { version: V },
+        "signed out at its generation"
+    );
+    drop(taken);
+    rig.close().await;
+
+    let mut rig = Rig::new("question-analytics-audit-failed", &script).await;
+    let taken = rig.claude.take(&rig.snapshot()).expect("taken");
+    let (failed, _) = rig.last();
+    let warm = rig.claude.warm(other(rig.snapshot())).expect("warm");
+    rig.claude.wake(Wake::Note(Note::Ended {
+        id: failed,
+        outcome: launch::Outcome::Audit(AuditFailed::Tools),
+    }));
+    assert_eq!(
+        analytics(&mut rig, warm, true),
+        ClaudeCodeView::AuditFailed(AuditFailed::Tools),
+        "after an audit failure"
+    );
+    drop(taken);
+    rig.close().await;
+
+    let mut rig = Rig::new("question-analytics-disconnect", &script).await;
+    let warm = rig.claude.warm(rig.snapshot()).expect("warm");
+    rig.claude.op(ConnectionOp::DisconnectClaudeCode);
+    assert_eq!(
+        analytics(&mut rig, warm, true),
+        ClaudeCodeView::CleanupPending,
+        "after a Disconnect"
+    );
     rig.close().await;
 }
