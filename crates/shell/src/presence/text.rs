@@ -481,7 +481,6 @@ impl TextView {
         let messages = cx.new(|cx| Messages::new(model.clone(), owner.clone(), window, cx));
         let watch = vec![
             cx.observe(&model, |_, _, cx| cx.notify()),
-            cx.observe(&settings, |_, _, cx| cx.notify()),
             cx.observe(&input, |view, input, cx| {
                 let empty = input.read(cx).value().is_empty();
                 if view.draft_empty != empty {

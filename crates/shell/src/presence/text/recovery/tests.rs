@@ -169,6 +169,95 @@ fn recovery_buttons_follow_live_drafts_and_dispatch_then_dismiss_the_named_failu
 }
 
 #[gpui::test]
+fn settings_only_waiting_changes_disable_and_reenable_the_retained_run_retry(
+    cx: &mut TestAppContext,
+) {
+    let (owner, data, control) = ready(cx);
+    draft(&owner, "settings-only retry", cx);
+    owner.update(cx, |owner, cx| owner.submit(cx).expect("original turn"));
+    assert_eq!(
+        data.try_recv().expect("original turn"),
+        DataToBrain::TextSubmit {
+            turn: 1,
+            screen: ScreenChoice::None,
+            thread: Some(ThreadId(1)),
+            text: "settings-only retry".into(),
+        }
+    );
+    receive(&owner, retry_failure(1), cx);
+    cx.run_until_parked();
+    let (window, settings) = owner.read_with(cx, |owner, _| {
+        (
+            owner.text.as_ref().expect("typing fixture").window,
+            owner.settings.clone(),
+        )
+    });
+    settings.update(cx, |settings, cx| {
+        settings.accounts.waiting = Some(AccountOp::SignIn);
+        cx.notify();
+    });
+    click_recovery(window, "chat-recovery-action-0", cx);
+    assert!(data.is_empty());
+    assert!(control.is_empty());
+    owner.read_with(cx, |owner, _| assert!(owner.runs.retry_ready(RunId(1))));
+    settings.update(cx, |settings, cx| {
+        settings.accounts.waiting = None;
+        cx.notify();
+    });
+    click_recovery(window, "chat-recovery-action-0", cx);
+    assert_eq!(
+        data.try_recv().expect("reenabled retry"),
+        DataToBrain::TextSubmit {
+            turn: 2,
+            screen: ScreenChoice::None,
+            thread: Some(ThreadId(1)),
+            text: "settings-only retry".into(),
+        }
+    );
+    assert!(data.is_empty());
+    assert!(control.is_empty());
+}
+
+#[gpui::test]
+fn settings_only_waiting_clear_reenables_sign_in_without_a_conversation_update(
+    cx: &mut TestAppContext,
+) {
+    let (owner, data, control) = ready(cx);
+    let (window, settings) = owner.update(cx, |owner, cx| {
+        owner.settings.update(cx, |settings, cx| {
+            settings.accounts.view = Some(AccountView::SignedOut {
+                revocation_unconfirmed: false,
+            });
+            settings.accounts.waiting = Some(AccountOp::SignIn);
+            cx.notify();
+        });
+        owner.chat_notice.present(
+            UserError::new(ErrorKey::SignInNeeded, Vec::new(), vec![Action::SignIn])
+                .expect("bounded sign-in recovery"),
+            Source::Account,
+        );
+        owner.refresh_conversation(cx);
+        (
+            owner.text.as_ref().expect("typing fixture").window,
+            owner.settings.clone(),
+        )
+    });
+    click_recovery(window, "chat-recovery-action-0", cx);
+    assert!(control.is_empty());
+    settings.update(cx, |settings, cx| {
+        settings.accounts.waiting = None;
+        cx.notify();
+    });
+    click_recovery(window, "chat-recovery-action-0", cx);
+    assert_eq!(
+        control.try_recv().expect("reenabled sign-in"),
+        ControlToBrain::AccountOp(AccountOp::SignIn)
+    );
+    assert!(control.is_empty());
+    assert!(data.is_empty());
+}
+
+#[gpui::test]
 fn typing_and_caret_notifications_redraw_recovery_only_when_draft_emptiness_changes(
     cx: &mut TestAppContext,
 ) {
