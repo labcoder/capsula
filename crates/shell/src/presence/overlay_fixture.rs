@@ -38,6 +38,7 @@ pub(super) enum Mode {
     Rest,
     Animated,
     Capped,
+    Hide,
 }
 
 /// A rounded bordered card with a label, a rounded rect the fixture turns, a translucent
@@ -64,7 +65,7 @@ pub(super) fn resting(
     };
     let step = match mode {
         Mode::Capped => crate::presenter::tests::cap_measurements::drawing(0, 40),
-        Mode::Dry | Mode::Rest | Mode::Animated => {
+        Mode::Dry | Mode::Rest | Mode::Animated | Mode::Hide => {
             let Ok(Record::Step(step)) = parse_record(STEP.as_bytes()) else {
                 panic!("a step record");
             };
@@ -207,10 +208,10 @@ impl Render for Probe {
 )]
 fn run(mode: Mode) {
     let animated = matches!(mode, Mode::Animated | Mode::Capped);
-    let lifetime = if matches!(mode, Mode::Dry) {
-        Duration::from_secs(5)
-    } else {
-        LIFETIME
+    let lifetime = match mode {
+        Mode::Dry => Duration::from_secs(5),
+        Mode::Hide => Duration::from_secs(7),
+        Mode::Rest | Mode::Animated | Mode::Capped => LIFETIME,
     };
     let timeout = std::thread::spawn(|| {
         std::thread::sleep(Duration::from_secs(120));
@@ -225,6 +226,7 @@ fn run(mode: Mode) {
         failures: 0,
     }));
     let shared = Rc::clone(&picture);
+    let cleared = Rc::clone(&picture);
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
@@ -273,6 +275,22 @@ fn run(mode: Mode) {
                 .expect("click-through fixture");
             overlay::show(window, cx).expect("show the fixture without activation");
             probe.update(cx, |_, cx| cx.notify());
+            if matches!(mode, Mode::Hide) {
+                let repaint = probe.clone();
+                cx.spawn(async move |cx| {
+                    cx.background_executor().timer(Duration::from_secs(2)).await;
+                    println!("overlay_capture phase=shown");
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                    cleared.borrow_mut().items.clear();
+                    cx.update(|cx| repaint.update(cx, |_, cx| cx.notify()));
+                    cx.background_executor().timer(Duration::from_millis(500)).await;
+                    println!("overlay_capture phase=empty");
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                    cx.update(|cx| overlay::hide(window, cx)).expect("the fixture hides");
+                    println!("overlay_capture phase=hidden");
+                })
+                .detach();
+            }
             if animated {
                 cx.spawn(async move |cx| {
                     cx.background_executor()
@@ -388,6 +406,12 @@ fn the_capped_painter_fixture_reuses_the_full_native_preparation_workload() {
 #[ignore = "manual input-free five-second native item-painter dry run; numbers do not count"]
 fn smoke_primary_overlay() {
     run(Mode::Dry);
+}
+
+#[test]
+#[ignore = "manual input-free seven-second capture: star, ring, empty repaint, then hide"]
+fn capture_fill_rules_then_hide() {
+    run(Mode::Hide);
 }
 
 #[test]

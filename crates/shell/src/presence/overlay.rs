@@ -159,7 +159,7 @@ pub(super) fn show(window: AnyWindowHandle, cx: &mut App) -> Result<(), OpenErro
     Ok(())
 }
 
-fn hide(window: AnyWindowHandle, cx: &mut App) -> Result<(), OpenError> {
+pub(super) fn hide(window: AnyWindowHandle, cx: &mut App) -> Result<(), OpenError> {
     window
         .update(cx, |_, window, _| platform::hide_presence_window(window))
         .map_err(|error| OpenError::Gpui(error.into()))??;
