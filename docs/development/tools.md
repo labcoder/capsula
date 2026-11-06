@@ -112,8 +112,9 @@ The shell applies it, as an explicit switch, only when all of these hold:
 
 So a manual switch, a later turn (even one the brain refused), Esc, a reconnect or a new brain
 each make a pending `Focus` stale. The turn number is taken at send and kept with the submission,
-so with several turns pending only the run answering the last can move the input. The numbering
-restarts with each connection, together with the fence.
+so with several turns pending only the run answering the last can move the input. The turn
+numbering restarts with each connection. The run fence is kept across a reconnect to the same
+brain and starts over only for a new incarnation.
 
 ## A round's calls
 

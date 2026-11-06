@@ -512,15 +512,6 @@ pub enum ControlToShell {
     /// The brain changed a listed thread on its own, such as a task's title, so the shell reads
     /// its list again. It carries nothing.
     ThreadsChanged,
-    /// `run` asked to move the user's typed input to `thread`, sent once its tool call
-    /// committed. The shell applies it only while `run` is its newest named run, not stopped,
-    /// typed at the selection still current, with no turn sent after it.
-    Focus {
-        /// The run whose tool asked.
-        run: RunId,
-        /// The task, or Kumo's thread.
-        thread: ThreadId,
-    },
     /// Capture finished; the shell may release the input's exclusion lease.
     CaptureDone {
         /// The input whose capture completed.
@@ -570,6 +561,15 @@ pub enum ControlToShell {
         choice: ModelChoice,
         /// A live row matched and the write committed.
         applied: bool,
+    },
+    /// `run` asked to move the user's typed input to `thread`, sent once its tool call
+    /// committed. The shell applies it only while `run` is its newest named run, not stopped,
+    /// typed at the selection still current, with no turn sent after it.
+    Focus {
+        /// The run whose tool asked.
+        run: RunId,
+        /// The task, or Kumo's thread.
+        thread: ThreadId,
     },
 }
 
@@ -819,6 +819,21 @@ mod tests {
                 brain_build: "b".to_owned()
             })),
             [1, 1, b'b']
+        );
+    }
+
+    /// Variants are appended, so an added one never renumbers the tags before it.
+    #[test]
+    fn control_variants_keep_their_tags_and_focus_is_last() {
+        let encode = |message: &ControlToShell| postcard::to_allocvec(message).expect("encodes");
+        assert_eq!(encode(&ControlToShell::Ping), [3]);
+        assert_eq!(encode(&ControlToShell::ThreadsChanged), [12]);
+        assert_eq!(
+            encode(&ControlToShell::Focus {
+                run: RunId(1),
+                thread: ThreadId(2)
+            }),
+            [21, 1, 2]
         );
     }
 
