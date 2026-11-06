@@ -1,4 +1,4 @@
-use kumochi_protocol::message::{RunId, SegmentId, ThreadId};
+use kumochi_protocol::message::{Deleted, RunId, SegmentId, ThreadId};
 use rusqlite::Connection;
 
 use super::{RunEnd, Store, schema};
@@ -56,7 +56,11 @@ fn a_v5_store_reopens_at_v6_with_its_runs_unknown() {
     schema::migrate_to(&mut conn, 5).expect("V5");
     conn.execute_batch(
         "INSERT INTO threads (id, title, created_ms, updated_ms) VALUES (5, 'kept', 1, 1);
-         INSERT INTO runs (id, thread, state, started_ms, ended_ms) VALUES (7, 5, 'done', 1, 2);",
+         INSERT INTO runs (id, thread, state, started_ms, ended_ms) VALUES (7, 5, 'done', 1, 2);
+         INSERT INTO events (id, thread, run, kind, text, created_ms)
+             VALUES (9, 5, 7, 'user', 'findable words', 3);
+         INSERT INTO tool_calls (run, thread, route, call, tool, hash, result, created_ms)
+             VALUES (7, 5, 'model', 'c1', 'draw', zeroblob(32), '{}', 4);",
     )
     .expect("V5 rows");
     drop(conn);
@@ -72,6 +76,65 @@ fn a_v5_store_reopens_at_v6_with_its_runs_unknown() {
         .query_row("SELECT state FROM runs WHERE id = 7", [], |row| row.get(0))
         .expect("kept run");
     assert_eq!(state, "done");
+    let event: (i64, i64, String, String, i64) = store
+        .conn
+        .query_row(
+            "SELECT thread, run, kind, text, created_ms FROM events WHERE id = 9",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .expect("kept event");
+    assert_eq!(event, (5, 7, "user".into(), "findable words".into(), 3));
+    let hits: Vec<i64> = store
+        .conn
+        .prepare("SELECT rowid FROM events_fts WHERE events_fts MATCH 'findable'")
+        .expect("query")
+        .query_map([], |row| row.get(0))
+        .expect("hits")
+        .collect::<Result<_, _>>()
+        .expect("rowids");
+    assert_eq!(hits, [9], "the index still finds it");
+    type Call = (i64, i64, String, String, String, Vec<u8>, String, i64);
+    let call: Call = store
+        .conn
+        .query_row(
+            "SELECT run, thread, route, call, tool, hash, result, created_ms FROM tool_calls",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
+        )
+        .expect("kept call");
+    assert_eq!(
+        call,
+        (
+            7,
+            5,
+            "model".into(),
+            "c1".into(),
+            "draw".into(),
+            vec![0; 32],
+            "{}".into(),
+            4
+        )
+    );
 }
 
 #[test]
@@ -184,6 +247,12 @@ fn an_active_missing_or_deleted_run_is_left_alone() {
     let before = runs(&store);
     store.heard(RunId(999), heard(0, 1, 1)).expect("no error");
     assert_eq!(runs(&store), before, "no row is made for a missing run");
+
+    let (thread, deleted) = run(&mut store);
+    assert_eq!(store.delete(thread).outcome, Deleted::Removed);
+    let before = runs(&store);
+    store.heard(deleted, heard(0, 1, 1)).expect("no error");
+    assert_eq!(runs(&store), before, "a deleted run isn't made again");
 }
 
 #[test]

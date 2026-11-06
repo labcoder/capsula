@@ -448,7 +448,17 @@ fn a_shell_lost_while_waiting_for_quiet_lets_the_run_go_untold() {
     })
     .expect("current");
     assert_eq!(core.handle(Input::RunStored { run: R }), Ok(Vec::new()));
-    assert_eq!(core.handle(Input::ShellLost), Ok(Vec::new()));
+    core.handle(Input::SpeechProgress {
+        run: R,
+        segment: SEG,
+        sample: 40,
+    })
+    .expect("current");
+    assert_eq!(
+        core.handle(Input::ShellLost),
+        Ok(vec![heard(40, 0)]),
+        "the point played before the loss is kept, though nobody is told"
+    );
     assert_eq!(core.ending_runs(), 0);
 }
 
