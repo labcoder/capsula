@@ -7,7 +7,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::constants::CLAUDE_CODE_QUARANTINE;
+use kumochi_protocol::constants::{CLAUDE_CODE_QUARANTINE, MCP_SERVER_NAME};
 use kumochi_protocol::message::{ErrorKey, RunId};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -42,9 +42,10 @@ struct Script {
 }
 
 /// P0's recordings made synthetic and signed in (§8). The edits: Kumochi's request ids; 2.1.306's
-/// signed-in `account` shape with made-up values; the launch's frozen tool set, empty for both
-/// origins, in `mcp_status` and in init; and init's `apiKeySource` set to `none`.
+/// signed-in `account` shape with made-up values; the launch's frozen Kumo tool set in
+/// `mcp_status` and init; and init's `apiKeySource` set to `none`.
 fn synthetic_signed_in() -> Script {
+    let tools = context::tools(Origin::Kumo);
     let facts = lines(FACTS);
     let mut initialize = facts[0].clone();
     initialize["response"]["request_id"] = json!("k-initialize");
@@ -52,9 +53,13 @@ fn synthetic_signed_in() -> Script {
         json!({"subscriptionType": "max", "apiProvider": "firstParty"});
     let mut mcp = facts[1].clone();
     mcp["response"]["request_id"] = json!("k-mcp-status");
-    mcp["response"]["response"]["mcpServers"][0]["tools"] = json!([]);
+    mcp["response"]["response"]["mcpServers"][0]["tools"] =
+        tools.iter().map(|tool| json!({"name":tool.name})).collect();
     let mut user = lines(TEXT);
-    user[0]["tools"] = json!([]);
+    user[0]["tools"] = tools
+        .iter()
+        .map(|tool| json!(format!("mcp__{MCP_SERVER_NAME}__{}", tool.name)))
+        .collect();
     user[0]["apiKeySource"] = json!("none");
     Script {
         initialize: vec![initialize.to_string()],
