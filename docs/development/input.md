@@ -462,11 +462,44 @@ Actual Alt-Tab into owner applications remains manual or unmeasured.
 
 `hover-gate <path-session.txt>` runs the hover phase alone, with the same transcript, evidence
 directory, fixture, guards and PresentMon bounds as `gate-session`. Only the opener differs.
-Nobody presses Ready. Once a second, sending nothing else, the task asks the fixture to arm
-itself (`ARM_IDLE`). The fixture's handler is the only idle check: on its own thread it reads
-`GetLastInputInfo`, and until Rez has had no input for ten minutes it declines. Then it takes
-the foreground (allowed once the foreground lock timeout has passed), focuses its EDIT,
-registers the physical-input and session guards, and publishes Ready with no feel verdicts. From there the unchanged quiet second opens injection,
-and the first input the harness didn't send stops the run. A physical Ready press during this
-task is refused: the task opens only on idle. `gate-session` keeps its Ready press, and no
-other task arms on idle.
+Nobody presses Ready. The runner waits until `GetLastInputInfo` shows ten minutes away.
+The fixture checks again during its single-use prepare; input between the runner's check and
+prepare aborts the run rather than retrying. A successful prepare grants one mouse-only
+activation admission and registers the native foreign-input guard before any injected event.
+The ordinary keyboard gate remains closed.
+
+The exact stdout line `activation_native_guard=armed` is flushed after native preparation
+and before the first mouse event. This is the outside watchdog's handoff contract: only that
+line transfers owner-input monitoring to the native tagged-input guard, before our own click
+changes the last-input tick.
+
+The runner temporarily raises only the fixture above other windows, without activating it.
+It chooses a harmless point inside the fixture EDIT and checks both the exact window and its
+process with `WindowFromPoint` immediately before moving the pointer and again before clicking.
+A stale snapshot, wrong point, foreign capture/menu or interrupted admission stops the run.
+Only tagged mouse input is allowed at this stage: no Alt-key trick, `AttachThreadInput`, or
+message/input to another app is used. Finalization restores the fixture's prior topmost state.
+If that request fails or cannot arrive, the run refuses and closes its owned fixture instead.
+
+The native fixture must acknowledge the tagged click and be the exact foreground window with
+its EDIT focused before publishing Ready. The click changes the last-input tick, so only its
+acknowledged completion may establish the quiet-second stamp; foreign input never resets an
+admission into validity. The unchanged quiet second then opens normal keyboard injection.
+Foreign input, a lock, deadline or ownership mismatch ends the idle activation permanently.
+Pointer restoration still skips destinations outside the owned windows.
+
+```mermaid
+stateDiagram-v2
+    Waiting --> Activating: ten minutes away and guarded desktop
+    Activating --> Quiet: owned click receipt and exact foreground
+    Activating --> Aborted: input, ownership or deadline failure
+    Quiet --> Open: guarded quiet second
+    Quiet --> Aborted: foreign input or guard failure
+    Open --> Aborted: foreign input or guard failure
+```
+
+Refusal diagnostics include the foreground PID and executable basename and whether the input
+desktop is `Default`. Unavailable queries are reported as absent values, not treated as safe.
+No window title, full executable path or desktop name is logged. A physical Ready press during
+this task is refused. `gate-session` keeps its existing physical Ready path and feel verdicts;
+this separate admission never opens its keyboard gate early.

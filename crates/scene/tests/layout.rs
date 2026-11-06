@@ -405,6 +405,7 @@ fn glided_detachment_prunes_both_groups_and_parentless_updates_emit_no_glide() {
         &Arc::new(Theme::default()),
         &mut Measure::default(),
         &AtomicBool::new(false),
+        None,
     )
     .expect("replay");
     assert_eq!(replayed.items(), next.after.items());
@@ -667,6 +668,7 @@ fn recovery_skips_failed_dropped_preparations_and_restores_removed_targets() {
         &Arc::new(Theme::default()),
         &mut replay_measure,
         &AtomicBool::new(false),
+        None,
     )
     .expect("failed step is not prepared again");
     assert_eq!(restored.usage(), scene.usage());
@@ -713,6 +715,7 @@ fn detached_fast_nodes_absorb_the_ancestors_resting_transform() {
         &Arc::new(Theme::default()),
         &mut Measure::default(),
         &AtomicBool::new(false),
+        None,
     )
     .expect("detached replay");
     assert_eq!(recovered.items(), live.items());
@@ -776,6 +779,7 @@ fn kept_recovery_failures_report_the_revision_and_layout_checks_full_envelopes()
         &Arc::new(Theme::default()),
         &mut Measure::default(),
         &AtomicBool::new(false),
+        None,
     )
     .expect_err("kept failure must be reported");
     assert_eq!(error.revision, 2);
@@ -958,6 +962,7 @@ fn detached_edges_can_be_updated_without_resurrecting_their_endpoints() {
         &Arc::new(Theme::default()),
         &mut Measure::default(),
         &AtomicBool::new(false),
+        None,
     )
     .expect("updated detached replay");
     assert_eq!(recovered.items(), next.after.items());
@@ -1194,6 +1199,7 @@ fn empty_recovery_does_not_charge_a_scene_before_its_first_commit() {
         &Arc::new(Theme::default()),
         &mut Measure::default(),
         &AtomicBool::new(false),
+        None,
     )
     .expect("empty recovery");
     assert_eq!(scene.usage(), kumochi_scene::budget::Usage::default());
@@ -1416,6 +1422,7 @@ fn row_cell_updates_and_detached_replay_keep_the_prepared_column_geometry() {
         &Arc::new(Theme::default()),
         &mut Measure::default(),
         &AtomicBool::new(false),
+        None,
     )
     .expect("detached replay");
     assert_eq!(replayed.items(), next.after.items());
@@ -1803,6 +1810,7 @@ fn detached_series_updates_keep_the_frozen_scale_and_absorbed_transform() {
         &Arc::new(Theme::default()),
         &mut Measure::default(),
         &AtomicBool::new(false),
+        None,
     )
     .expect("recovery");
     assert_eq!(
@@ -2643,6 +2651,7 @@ fn batch_recovery_keeps_input_order_and_charges_only_what_it_returns() {
         &Arc::new(Theme::default()),
         &mut Measure::default(),
         &AtomicBool::new(false),
+        None,
     );
     let counts: Vec<_> = results
         .iter()
@@ -2755,6 +2764,7 @@ fn retained_bytes_match_step_charges_and_recovery() {
         &Arc::new(Theme::default()),
         &mut Measure::default(),
         &AtomicBool::new(false),
+        None,
     )
     .expect("recovery");
     assert_eq!(
@@ -2954,4 +2964,99 @@ fn a_replaced_item_is_recounted_and_an_unchanged_one_keeps_its_count() {
         three,
         "the earlier layout keeps its own counts"
     );
+}
+
+/// A convex polygon of `count` points on a circle: no crossings, so it charges its points.
+fn convex(id: &str, count: u32) -> Value {
+    let points: Vec<[f64; 2]> = (0..count)
+        .map(|index| {
+            let angle = std::f64::consts::TAU * f64::from(index) / f64::from(count);
+            [1_000.0 + 900.0 * angle.cos(), 1_000.0 + 900.0 * angle.sin()]
+        })
+        .collect();
+    json!({"shape":{"id":id,"kind":"polygon","points":points,"fill":"blue"}})
+}
+
+fn fill_scene(put: &[Value]) -> (SceneState, kumochi_scene::Committed) {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let commit = committed(&mut scene, &mut budget, json!({"id":"fills","put":put}));
+    (scene, commit)
+}
+
+#[test]
+fn bounded_preparation_refuses_once_the_scene_s_own_work_passes_the_cap() {
+    let cap = Some(kumochi_scene::display::PaintWork::LIMITS);
+    for (put, bounded) in [
+        (vec![convex("a", 512)], Some(512)),
+        (vec![convex("a", 300), convex("b", 212)], Some(512)),
+        (vec![convex("a", 300), convex("b", 213)], None),
+    ] {
+        let (scene, commit) = fill_scene(&put);
+        let before = LayoutState::new(&scene);
+        let input = PrepareInput::new(
+            commit.preparation,
+            before,
+            SurfaceGeometry::default(),
+            Arc::new(Theme::default()),
+        )
+        .map_err(|(error, _)| error)
+        .expect("the first step follows the empty layout")
+        .with_paint_cap(cap);
+        let prepared = prepare(input, &mut Measure::default(), &AtomicBool::new(false));
+        match bounded {
+            Some(fill) => assert_eq!(
+                prepared
+                    .expect("within the cap")
+                    .after
+                    .paint_work()
+                    .fill_vertices,
+                fill
+            ),
+            None => assert!(matches!(prepared, Err(PrepareError::OverResidency))),
+        }
+    }
+    let (scene, commit) = fill_scene(&[convex("a", 300), convex("b", 213)]);
+    let exact = picture(
+        &scene,
+        commit,
+        &LayoutState::new(&scene),
+        &mut Measure::default(),
+    )
+    .expect("unbounded preparation stays exact");
+    assert_eq!(exact.after.paint_work().fill_vertices, 513);
+}
+
+#[test]
+fn bounded_recovery_refuses_a_scene_over_the_cap() {
+    let (scene, _) = fill_scene(&[convex("a", 300), convex("b", 213)]);
+    let log = scene.recovery_log();
+    for (cap, refused) in [
+        (Some(kumochi_scene::display::PaintWork::LIMITS), true),
+        (None, false),
+    ] {
+        let (results, _) = recover_all(
+            &[(&header(), log)],
+            SurfaceGeometry::default(),
+            &Arc::new(Theme::default()),
+            &mut Measure::default(),
+            &AtomicBool::new(false),
+            cap,
+        );
+        let [result] = results.as_slice() else {
+            panic!("one result per scene");
+        };
+        if refused {
+            assert!(matches!(
+                result,
+                Err(kumochi_scene::layout::RecoveryError {
+                    revision: 1,
+                    error: PrepareError::OverResidency,
+                })
+            ));
+        } else {
+            let (_, layout) = result.as_ref().expect("unbounded recovery stays exact");
+            assert_eq!(layout.paint_work().fill_vertices, 513);
+        }
+    }
 }
