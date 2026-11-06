@@ -496,7 +496,7 @@ fn fill(
                     band.color[at] = solid;
                     band.ids[at] = poly.solid;
                 } else {
-                    // shortcut: interpenetrating translucent solids may blend in the wrong order, until OSC-218 orders them.
+                    // shortcut: interpenetrating translucent solids may blend in the wrong order, until OSC-242 orders them.
                     band.color[at] = over(band.color[at], poly.rgb, poly.alpha);
                     if poly.picks {
                         band.ids[at] = poly.solid;

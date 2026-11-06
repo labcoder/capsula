@@ -18,7 +18,11 @@ fn server_name() -> io::Result<ServerName<'static>> {
 }
 
 /// Only connectors for the Anthropic route implement this marker.
-pub trait AnthropicConnect: Connect {}
+pub trait AnthropicConnect: Connect + sealed::Sealed {}
+
+pub(super) mod sealed {
+    pub trait Sealed {}
+}
 
 /// TLS to the fixed Anthropic host, using OS roots and HTTP/1.1 without early data.
 pub struct AnthropicTls(TlsConnector);
@@ -52,6 +56,7 @@ impl Connect for AnthropicTls {
     }
 }
 
+impl sealed::Sealed for AnthropicTls {}
 impl AnthropicConnect for AnthropicTls {}
 
 #[cfg(test)]

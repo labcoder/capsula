@@ -82,11 +82,13 @@ pub enum ErrorKey {
     /// The provider never confirmed a sign-in renewal that may have gone through, so the session
     /// can't go on safely; the saved registration signs in again.
     RenewalUnconfirmed,
+    /// The Anthropic answer reached the app's token or context limit.
+    AnthropicAnswerLimit,
 }
 
 impl ErrorKey {
     /// Every key, for the shell's catalog test.
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 36] = [
         Self::SettingsRefused,
         Self::ConfigUnreadable,
         Self::SignInTimedOut,
@@ -122,6 +124,7 @@ impl ErrorKey {
         Self::ClaudeCodeBudget,
         Self::ClaudeCodeCleanupPending,
         Self::RenewalUnconfirmed,
+        Self::AnthropicAnswerLimit,
     ];
 }
 

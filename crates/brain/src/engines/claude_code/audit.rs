@@ -13,15 +13,13 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::policy::Reviewed;
-use super::stream::{ControlResponse, InitFacts};
+use super::stream::{ControlBody, ControlResponse, Field, InitFacts};
 
 /// What a reviewed version reports when nothing but Kumochi's server is configured.
 #[derive(Debug)]
 pub(crate) struct AuditSchema {
     /// Exactly these agents, in any order.
     pub(crate) agents: &'static [&'static str],
-    /// `account.tokenSource` values that are a sign-in Kumochi accepts.
-    pub(crate) token_sources: &'static [&'static str],
     /// Exactly these plugins, each with path `builtin`.
     pub(crate) plugins: &'static [&'static str],
     /// `apiKeySource` values Kumochi accepts.
@@ -32,6 +30,11 @@ pub(crate) const INITIALIZE_ID: &str = "k-initialize";
 pub(crate) const MCP_STATUS_ID: &str = "k-mcp-status";
 /// `account.tokenSource` when Claude Code isn't signed in (P0, signed out).
 const SIGNED_OUT: &str = "none";
+/// `account.tokenSource` naming the stored Claude.ai sign-in; 2.1.306 omits it when that's the
+/// only source.
+const STORED_SIGN_IN: &str = "claude.ai";
+/// `account.apiProvider` when questions go to Anthropic, not a third-party provider.
+const FIRST_PARTY: &str = "firstParty";
 
 /// The two `control_request` lines C5b writes to stdin right after spawn, before anything else.
 pub(crate) fn control_requests() -> [&'static [u8]; 2] {
@@ -106,7 +109,7 @@ impl PreInputAudit {
                 self.initialize = true;
             }
             MCP_STATUS_ID if !self.mcp => {
-                self.mcp_passes(&response.response)?;
+                self.mcp_passes(&response.response.rest)?;
                 self.mcp = true;
             }
             _ => return Err(AuditFailed::Malformed),
@@ -119,8 +122,8 @@ impl PreInputAudit {
     }
 
     /// `Ok(false)` when every check passed but Claude Code is signed out.
-    fn initialize_passes(&self, body: &Value) -> Result<bool, AuditFailed> {
-        let body = Initialize::deserialize(body).map_err(|_| AuditFailed::Malformed)?;
+    fn initialize_passes(&self, whole: &ControlBody) -> Result<bool, AuditFailed> {
+        let body = Initialize::deserialize(&whole.rest).map_err(|_| AuditFailed::Malformed)?;
         let schema = &self.reviewed.audit;
         if body.claude_code_version.parse() != Ok(self.reviewed.version) {
             return Err(AuditFailed::Version);
@@ -132,14 +135,32 @@ impl PreInputAudit {
         if !exactly(agents, schema.agents.iter().copied()) {
             return Err(AuditFailed::Agents);
         }
-        let token = body.account.token_source.as_str();
-        if token == SIGNED_OUT {
-            return Ok(false);
-        }
-        if !schema.token_sources.contains(&token) {
+        let account = whole.account.as_ref().ok_or(AuditFailed::Malformed)?;
+        let Field::Text(provider) = &account.api_provider else {
+            return Err(AuditFailed::Malformed);
+        };
+        let token = match &account.token_source {
+            Field::Absent => None,
+            Field::Text(token) => Some(token.as_str()),
+            Field::Null | Field::Other => return Err(AuditFailed::Malformed),
+        };
+        let subscribed = match account.subscription_type {
+            Field::Absent => false,
+            Field::Text(_) => true,
+            Field::Null | Field::Other => return Err(AuditFailed::Malformed),
+        };
+        if provider != FIRST_PARTY {
             return Err(AuditFailed::TokenSource);
         }
-        Ok(true)
+        // Present at all, null included: a key source Kumochi didn't set.
+        if account.api_key_source != Field::Absent {
+            return Err(AuditFailed::KeySource);
+        }
+        match (token, subscribed) {
+            (Some(SIGNED_OUT), false) => Ok(false),
+            (None | Some(STORED_SIGN_IN), true) => Ok(true),
+            _ => Err(AuditFailed::TokenSource),
+        }
     }
 
     fn mcp_passes(&self, body: &Value) -> Result<(), AuditFailed> {
@@ -258,13 +279,6 @@ struct Initialize {
     claude_code_version: String,
     commands: Vec<Value>,
     agents: Vec<Named>,
-    account: Account,
-}
-
-#[derive(Deserialize)]
-struct Account {
-    #[serde(rename = "tokenSource")]
-    token_source: String,
 }
 
 #[derive(Deserialize)]
