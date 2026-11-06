@@ -47,7 +47,7 @@ fn activate(
 fn box_at(name: &str, pos: [f64; 3]) -> Value {
     json!({"solid":{"in":"v","id":name,"shape":"box","size":[1,1,1],"pos":pos}})
 }
-fn pos3(target: &str, delay: u32, keys: Value) -> Value {
+fn pos3(target: &str, delay: u32, keys: &Value) -> Value {
     json!({"anim":{"target":target,"track":"pos3","ease":"linear","delay":delay,"keys":keys}})
 }
 fn geometry(view: &SceneView) -> &ViewGeometry {
@@ -80,8 +80,8 @@ fn yaw(view: &SceneView, now: u64) -> f64 {
 
 #[test]
 fn a_delayed_pos3_holds_its_first_key_then_runs_to_its_last_beside_any_other_track() {
-    let delayed = pos3("a", 1000, json!([[0, [0, 0, 0]], [1000, [10, 0, 0]]]));
-    let other = pos3("b", 0, json!([[0, [0, 0, 0]], [2000, [4, 0, 0]]]));
+    let delayed = pos3("a", 1000, &json!([[0, [0, 0, 0]], [1000, [10, 0, 0]]]));
+    let other = pos3("b", 0, &json!([[0, [0, 0, 0]], [2000, [4, 0, 0]]]));
     for put in [
         vec![
             json!({"view3d":{"id":"v"}}),
@@ -92,8 +92,8 @@ fn a_delayed_pos3_holds_its_first_key_then_runs_to_its_last_beside_any_other_tra
             json!({"view3d":{"id":"v"}}),
             box_at("a", [0.0; 3]),
             box_at("b", [0.0, 3.0, 0.0]),
-            delayed.clone(),
-            other.clone(),
+            delayed,
+            other,
         ],
     ] {
         let beside = put.len() == 5;
@@ -174,7 +174,7 @@ fn a_finished_pos3_settles_into_rest_through_a_cut_view_and_without_a_rebuild() 
         &mut budget,
         &mut view,
         &mut frame,
-        json!({"id":"b","put":[pos3("s", 0, json!([[0, [0, 0, 0]], [100, [10, 0, 0]]]))]}),
+        json!({"id":"b","put":[pos3("s", 0, &json!([[0, [0, 0, 0]], [100, [10, 0, 0]]]))]}),
         0,
     );
     let solid = &geometry(&view).solids[0];
@@ -204,7 +204,7 @@ fn a_finished_pos3_settles_into_rest_through_a_cut_view_and_without_a_rebuild() 
         &mut view,
         &mut frame,
         json!({"id":"a","put":[{"view3d":{"id":"v"}}, box_at("s", [1.0, 0.0, 0.0]),
-            pos3("s", 0, json!([[0, [0, 0, 0]], [100, [10, 0, 0]]]))]}),
+            pos3("s", 0, &json!([[0, [0, 0, 0]], [100, [10, 0, 0]]]))]}),
         0,
     );
     let rested = SceneView::new(view.layout(), scene.activated());
@@ -226,7 +226,7 @@ fn removing_a_preceding_solid_leaves_a_running_track_on_its_own_solid() {
         &mut frame,
         json!({"id":"a","put":[{"view3d":{"id":"v"}}, box_at("first", [0.0, 5.0, 0.0]),
             box_at("tracked", [0.0; 3]),
-            pos3("tracked", 0, json!([[0, [0, 0, 0]], [10000, [10, 0, 0]]]))]}),
+            pos3("tracked", 0, &json!([[0, [0, 0, 0]], [10000, [10, 0, 0]]]))]}),
         0,
     );
     activate(
@@ -326,13 +326,13 @@ fn chains(view: &str) -> Value {
     {
         let name = format!("{view}{chain}_{depth}");
         let mut solid = json!({"in":view,"id":name,"shape":"box","size":[0.5,0.5,0.5],
-            "pos":[if depth == 0 { 0 } else { 1 }, if depth == 0 { 2 * chain } else { 0 }, 0]});
+            "pos":[i32::from(depth != 0), if depth == 0 { 2 * chain } else { 0 }, 0]});
         if depth > 0 {
             solid["attach"] = json!(format!("{view}{chain}_{}", depth - 1));
         }
         put.push(json!({ "solid": solid }));
         match depth {
-            0 => put.push(pos3(&name, 0, json!([[0, [0, 0, 0]], [50000, [5, 0, 0]]]))),
+            0 => put.push(pos3(&name, 0, &json!([[0, [0, 0, 0]], [50000, [5, 0, 0]]]))),
             8 => put.push(json!({"anim":{"target":name,"track":"rot3",
                 "keys":[[0,[0,0,0]],[50000,[0,90,0]]]}})),
             _ => {}
@@ -341,6 +341,10 @@ fn chains(view: &str) -> Value {
     json!({"id":format!("chains_{view}"),"put":put})
 }
 /// The steady-state sampler: the view's frame, its posed solids and the 3D frame stage.
+#[expect(
+    clippy::large_stack_arrays,
+    reason = "the caller-owned 160-solid array a raster job keeps on its stack"
+)]
 fn sample(view: &SceneView, now: u64, frame: &mut Frame, out: &mut FrameScratch) -> usize {
     view.frame(now, frame).expect("bound frame");
     let Some(sampled) = frame.views().first() else {

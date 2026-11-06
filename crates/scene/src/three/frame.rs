@@ -436,6 +436,12 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::large_stack_arrays,
+        clippy::as_conversions,
+        clippy::float_cmp,
+        reason = "the caller-owned 160-solid array design-6 §7 puts on the stack; u32 mesh indices; exact rest literals"
+    )]
     fn frame_world_points_are_the_rest_points_preparation_narrowed() {
         let six = r#"{"solid":{"in":"v","id":"p0","shape":"box","size":[1,1,1],"pos":[10,10.000000953674316,0],"scale":0.5}},
             {"solid":{"in":"v","id":"p1","shape":"box","size":[1,1,1],"attach":"p0","pos":[0.00000095367431640625,0.00000095367431640625,0],"scale":0.001}},
