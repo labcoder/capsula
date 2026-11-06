@@ -78,9 +78,6 @@ impl Messages {
         if self.live.as_ref() != answer {
             self.live = answer.cloned();
             self.sync(cx);
-            if self.live_row.is_some() {
-                self.list.remeasure_items(self.count - 1..self.count);
-            }
         }
     }
 
@@ -502,6 +499,117 @@ mod tests {
         window
             .update(cx, |_, _, _| {})
             .expect("window remains open");
+    }
+
+    #[gpui::test]
+    fn offscreen_live_updates_keep_the_history_anchor_and_remeasure_on_return(
+        cx: &mut TestAppContext,
+    ) {
+        let (model, view, window) = open(cx);
+        model.update(cx, |state, cx| {
+            state.events = (1..=50).rev().map(event).collect();
+            cx.notify();
+        });
+        let mut answer = Shown {
+            run: RunId(7),
+            thread: Some(ThreadId(1)),
+            text: "Short live answer.".into(),
+            cut: false,
+            done: false,
+        };
+        view.update(cx, |view, cx| view.live(Some(&answer), cx));
+        cx.run_until_parked();
+        let before = {
+            let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+            frame
+                .debug_bounds("message-live-7")
+                .expect("initial live row")
+                .size
+                .height
+        };
+        view.update(cx, |view, cx| {
+            view.list.scroll_to(ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.0),
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let anchor = view.update(cx, |view, _| view.list.logical_scroll_top());
+        answer.text = "A growing answer while the user reads earlier history. ".repeat(200);
+        view.update(cx, |view, cx| view.live(Some(&answer), cx));
+        cx.run_until_parked();
+        {
+            let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+            assert!(frame.debug_bounds("message-live-7").is_none());
+        }
+        view.update(cx, |view, cx| {
+            let after = view.list.logical_scroll_top();
+            assert_eq!(after.item_ix, anchor.item_ix);
+            assert_eq!(after.offset_in_item, anchor.offset_in_item);
+            view.list.scroll_to_end();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let bounds = {
+            let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+            frame
+                .debug_bounds("message-live-7")
+                .expect("updated live row")
+        };
+        assert!(bounds.size.height > before);
+        view.update(cx, |view, _| {
+            assert!((bounds.bottom() - view.list.viewport_bounds().bottom()).abs() < px(1.0));
+        });
+    }
+
+    #[gpui::test]
+    fn font_changes_preserve_the_reading_position_inside_a_long_answer(cx: &mut TestAppContext) {
+        let (_, view, window) = open(cx);
+        let answer = Shown {
+            run: RunId(7),
+            thread: Some(ThreadId(1)),
+            text: "A long answer with wrapping words. ".repeat(500),
+            cut: false,
+            done: false,
+        };
+        view.update(cx, |view, cx| view.live(Some(&answer), cx));
+        cx.run_until_parked();
+        let height = {
+            let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+            frame
+                .debug_bounds("message-live-7")
+                .expect("long row")
+                .size
+                .height
+        };
+        view.update(cx, |view, cx| {
+            assert!(height > view.list.viewport_bounds().size.height * 3.0);
+            view.list.scroll_to(ListOffset {
+                item_ix: 0,
+                offset_in_item: height * 0.4,
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            gpui_kit::component::Theme::update(cx, |theme| theme.font_size = px(24.0));
+        });
+        cx.run_until_parked();
+        let resized_height = {
+            let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+            frame
+                .debug_bounds("message-live-7")
+                .expect("resized row")
+                .size
+                .height
+        };
+        assert!(resized_height > height);
+        view.update(cx, |view, _| {
+            let offset = view.list.logical_scroll_top();
+            assert_eq!(offset.item_ix, 0);
+            assert!((offset.offset_in_item - resized_height * 0.4).abs() < px(1.0));
+        });
     }
 
     #[gpui::test]
