@@ -319,7 +319,9 @@ and nothing calls them yet.
   hide, cloak and destroy), filtered to the host's process and thread. They deliver
   `PresenceEvent::HostChanged { w, change }` on the UI thread's message loop. If any hook fails,
   the ones before it are removed in reverse order. Dropping the watch unhooks every hook before
-  its route is cleared.
+  its route is cleared. A hook that `UnhookWinEvent` refuses stays in its route, marked no
+  longer live so its callback sends nothing, and keeps that slot taken; the next `watch_host`
+  retries it, and the slot frees only once every hook is gone.
 - `presence::perch::caption` applies §10.4's caption rules. When the reported title bar and
   buttons agree, the caption is the bar left of the leftmost exclusion. Otherwise it's the
   standard band, scaled from host units by `monitor_dpi / layout_dpi` and rounded up, cut to the
