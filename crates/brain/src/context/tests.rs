@@ -1535,3 +1535,176 @@ fn a_result_of_exactly_65_kib_is_read() {
         "a result with no native call isn't replayed"
     );
 }
+
+/// Each deletion note as a request renders it, oldest first. The time is read back from the row,
+/// so the test pins placement and wording, not the clock.
+fn rendered_notes(world: &World) -> Vec<InputItem> {
+    let conn = world.store.conn_for_tests();
+    let mut statement = conn
+        .prepare(
+            "SELECT strftime('%Y-%m-%d %H:%M', created_ms / 1000, 'unixepoch', 'localtime')
+             FROM events WHERE kind = 'task_deleted' ORDER BY id",
+        )
+        .expect("prepared");
+    statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("rows")
+        .map(|when| {
+            let when = when.expect("time");
+            assert_eq!(when.len(), "2026-11-06 01:23".len(), "minutes, local");
+            message(
+                Role::Developer,
+                &format!("Note: a task was deleted at {when}."),
+            )
+        })
+        .collect()
+}
+
+impl World {
+    /// Starts a Kumo run with its ask and leaves it active.
+    fn start(&mut self, ask: &str) -> RunId {
+        let (_, high) = self.store.high_water().expect("ids");
+        let run = RunId(high.0 + 1);
+        self.store
+            .begin_turn(self.main, None, run, ask)
+            .expect("turn");
+        run
+    }
+
+    fn reply(&mut self, run: RunId, reply: &str) {
+        let events = [NewEvent {
+            kind: EventKind::AssistantText,
+            text: Some(reply),
+            body: None,
+        }];
+        self.store
+            .end_run(self.main, run, &events, RunEnd::Done)
+            .expect("ended");
+    }
+}
+
+#[test]
+fn a_deletion_note_follows_the_run_it_interrupted_and_precedes_the_current_one() {
+    let mut world = world("ctx-notes");
+    let main = world.main;
+    let (b, _) = world.run(None, "task b", None);
+    let (c, _) = world.run(None, "task c", None);
+    world.run(Some(main), "ask one", Some("reply one"));
+    let two = world.start("ask two");
+    world.store.begin_delete(b).expect("b hidden");
+    world.reply(two, "reply two");
+    let three = world.start("ask three");
+    world.store.begin_delete(c).expect("c hidden");
+    let notes = rendered_notes(&world);
+    assert_eq!(notes.len(), 2);
+    let run = snapshot(Origin::Kumo, None);
+    let built = world
+        .build(&run, (main, three), Supplied::default(), BOUND)
+        .expect("built");
+    assert_eq!(
+        built.request.input,
+        [
+            message(Role::User, "ask one"),
+            message(Role::Assistant, "reply one"),
+            message(Role::User, "ask two"),
+            message(Role::Assistant, "reply two"),
+            notes[0].clone(),
+            notes[1].clone(),
+            message(Role::User, &format!("ask three\n\nLocal time: {TIME}")),
+        ],
+        "no run is split, and a note made mid-turn waits before it"
+    );
+    assert_eq!(built.sources, [main]);
+
+    let reopened = Store::open(&world.scratch.db()).expect("reopened");
+    drop(std::mem::replace(&mut world.store, reopened));
+    let recovered = world.store.recover().expect("recovered");
+    assert_eq!(recovered.finished_deletions, 2);
+    assert_eq!(rendered_notes(&world), notes, "one note per delete, kept");
+    let four = world.start("ask four");
+    let built = world
+        .build(&run, (main, four), Supplied::default(), BOUND)
+        .expect("built");
+    assert_eq!(
+        built.request.input,
+        [
+            message(Role::User, "ask one"),
+            message(Role::Assistant, "reply one"),
+            message(Role::User, "ask two"),
+            message(Role::Assistant, "reply two"),
+            notes[0].clone(),
+            message(Role::User, "ask three"),
+            notes[1].clone(),
+            message(Role::User, &format!("ask four\n\nLocal time: {TIME}")),
+        ],
+        "once its run ended, the second note follows it"
+    );
+}
+
+#[test]
+fn a_summary_covers_the_notes_through_its_cutoff_and_a_later_note_still_renders() {
+    let mut world = world("ctx-note-summary");
+    let main = world.main;
+    let (b, _) = world.run(None, "task b", None);
+    world.run(Some(main), "ask one", Some("reply one"));
+    world.store.begin_delete(b).expect("hidden");
+    let (_, current) = world.run(Some(main), "ask two", None);
+    let events = world.events(main);
+    let note = rendered_notes(&world).remove(0);
+    let run = snapshot(Origin::Kumo, None);
+    let through = |last: EventId| Supplied {
+        summary: Some(Summary {
+            first: events[0],
+            last,
+            text: "earlier".to_owned(),
+        }),
+        items: Vec::new(),
+    };
+    let summarized = |last: EventId| {
+        message(
+            Role::Developer,
+            &format!("Summary of events {}–{}:\nearlier", events[0].0, last.0),
+        )
+    };
+    let ask = message(Role::User, &format!("ask two\n\nLocal time: {TIME}"));
+    let below = world
+        .build(&run, (main, current), through(events[1]), BOUND)
+        .expect("built");
+    assert_eq!(
+        below.request.input,
+        [summarized(events[1]), note, ask.clone()]
+    );
+    let covered = world
+        .build(&run, (main, current), through(events[2]), BOUND)
+        .expect("built");
+    assert_eq!(covered.request.input, [summarized(events[2]), ask]);
+}
+
+#[test]
+fn compaction_summarizes_a_note_inside_its_range_and_leaves_a_later_one() {
+    let mut world = world("compact-notes");
+    let main = world.main;
+    let (b, _) = world.run(None, "task b", None);
+    let (c, _) = world.run(None, "task c", None);
+    let one = world.start("ask one");
+    world.store.begin_delete(b).expect("b hidden");
+    world.reply(one, "reply one");
+    world.store.begin_delete(c).expect("c hidden");
+    world.runs(main, 8, 4);
+    let notes = rendered_notes(&world);
+    let found = world
+        .compact(&snapshot(Origin::Kumo, None), main, 1)
+        .expect("due");
+    let events = world.events(main);
+    assert_eq!(found.covers, (events[0], events[2]), "the oldest run only");
+    assert_eq!(
+        found.built.request.input,
+        [
+            message(Role::User, "ask one"),
+            message(Role::Assistant, "reply one"),
+            notes[0].clone(),
+            message(Role::Developer, WRITE_NOW),
+        ],
+        "the note inside the run follows it, and the later one waits"
+    );
+}

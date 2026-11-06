@@ -614,3 +614,36 @@ fn text_past_the_budget_is_capped_in_bytes_and_keeps_its_nuls() {
     assert_eq!(rows[0].text, "x\0y");
     assert!(!rows[0].cut);
 }
+
+#[test]
+fn kumos_page_shows_a_deleted_tasks_note_beside_its_messages() {
+    let scratch = Scratch::new("pages-note");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    store.recover().expect("recovered");
+    let main = store.main_thread().expect("main");
+    let doomed = add(&mut store, "doomed", "doomed ask");
+    let (_, run) = store.high_water().expect("ids");
+    let run = RunId(run.0 + 1);
+    store.begin_turn(main, None, run, "hello").expect("turn");
+    let reply = [NewEvent {
+        kind: EventKind::AssistantText,
+        text: Some("hi"),
+        body: None,
+    }];
+    store.end_run(main, run, &reply, RunEnd::Done).expect("end");
+    store.begin_delete(doomed).expect("hidden");
+    let (rows, before) = store.pages().events_page(main, None, 50).expect("page");
+    let rows: Vec<_> = rows
+        .iter()
+        .map(|row| (row.run, row.kind.clone(), row.text.as_str()))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (None, PageEventKind::TaskDeleted, ""),
+            (Some(run), PageEventKind::AssistantText, "hi"),
+            (Some(run), PageEventKind::User, "hello"),
+        ]
+    );
+    assert_eq!(before, None);
+}
