@@ -6,6 +6,9 @@
 //! replaces the file with a clean copy, so no copy of the deleted text survives in page gaps or
 //! FTS index keys (architecture v1 §6.4).
 
+mod actions;
+#[cfg(test)]
+mod actions_tests;
 mod calls;
 #[cfg(test)]
 mod calls_tests;
@@ -16,6 +19,7 @@ mod heard;
 mod heard_tests;
 mod pages;
 mod purge;
+pub(crate) mod recall;
 mod rounds;
 mod scenes;
 mod schema;
@@ -92,6 +96,10 @@ pub enum StoreError {
     /// A tool call's write failed; no database or call content is exposed.
     #[error("can't store the tool call")]
     Call,
+
+    /// An issue action's write, read or recovery failed; no database or issue content is exposed.
+    #[error("can't store or recover the issue action")]
+    Issue,
 
     /// A swap's reopen failed, or the store's thread ended, so the file is closed to reads.
     #[error("the store's file isn't open")]
@@ -267,6 +275,10 @@ pub struct Recovered {
     pub purge_pending: bool,
     /// Deletions that failed again; their threads stay hidden and the next start retries them.
     pub failed_deletions: usize,
+    /// Issue sends cut short before anything was sent, now `Failed`.
+    pub failed_sends: usize,
+    /// Issue sends cut short after one may have been sent, now `Unknown`.
+    pub unknown_sends: usize,
 }
 
 /// The open store. Not `Sync`: one thread owns it.
@@ -391,6 +403,7 @@ impl Store {
              AND thread IN (SELECT id FROM threads WHERE state = 'live')",
             params![now_ms()],
         )?;
+        (recovered.failed_sends, recovered.unknown_sends) = self.recover_sends()?;
         self.create_main()?;
         recovered.purge_pending = self.purge_pending;
         Ok(recovered)
@@ -637,6 +650,7 @@ impl Store {
         tx.execute("DELETE FROM tool_calls WHERE thread = ?1", params![thread])?;
         tx.execute("DELETE FROM runs WHERE thread = ?1", params![thread])?;
         tx.execute("DELETE FROM summaries WHERE thread = ?1", params![thread])?;
+        tx.execute("DELETE FROM actions WHERE thread = ?1", params![thread])?;
         tx.execute("DELETE FROM threads WHERE id = ?1", params![thread])?;
         tx.execute("INSERT OR IGNORE INTO purge_pending (id) VALUES (1)", [])?;
         tx.commit()?;

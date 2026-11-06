@@ -188,6 +188,7 @@ pub(crate) enum ToolOutput {
     Text(String),
     /// A history tool's result: references, re-read at every build, never the text.
     History(Vec<HistoryRef>),
+    Recall(crate::recall::Selection),
     /// The call ran nothing.
     Error(ToolError),
 }
@@ -202,6 +203,7 @@ impl ToolOutput {
     pub(crate) fn json(&self) -> Value {
         match self {
             Self::Text(text) => json!({ "text": text }),
+            Self::Recall(selection) => json!({ "recall": selection }),
             Self::History(refs) => json!({
                 "history": refs
                     .iter()
@@ -218,6 +220,7 @@ impl ToolOutput {
         let object = value.as_object().filter(|object| object.len() == 1)?;
         let (tag, body) = object.iter().next()?;
         match tag.as_str() {
+            "recall" => crate::recall::Selection::decode(stored).map(Self::Recall),
             "text" => Some(Self::Text(body.as_str()?.to_owned())),
             "error" => ToolError::from_text(body.as_str()?).map(Self::Error),
             "history" => body
@@ -243,6 +246,7 @@ impl fmt::Debug for ToolOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Text(text) => f.debug_struct("Text").field("bytes", &text.len()).finish(),
+            Self::Recall(selection) => f.debug_tuple("Recall").field(selection).finish(),
             Self::History(refs) => f
                 .debug_struct("History")
                 .field("refs", &refs.len())

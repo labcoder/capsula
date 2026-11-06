@@ -116,6 +116,10 @@ pub(crate) enum Body {
         call: CallId,
         output: String,
     },
+    Recall {
+        call: CallId,
+        selection: crate::recall::Selection,
+    },
 }
 
 impl fmt::Debug for Body {
@@ -138,6 +142,11 @@ impl fmt::Debug for Body {
                 .debug_struct("Result")
                 .field("call", call)
                 .field("output_bytes", &output.len())
+                .finish(),
+            Self::Recall { call, selection } => f
+                .debug_struct("Recall")
+                .field("call", call)
+                .field("selection", selection)
                 .finish(),
         }
     }

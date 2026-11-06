@@ -15,6 +15,7 @@ fn handle() -> LinkHandle {
         retry,
         done,
         recording: None,
+        control_recording: None,
     }
 }
 

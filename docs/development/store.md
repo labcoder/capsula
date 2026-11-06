@@ -26,6 +26,8 @@ brain opens it. The code is `crates/brain/src/store/`.
 | `purge_pending` | One row while a deletion's purge is owed, written in its second transaction and cleared only after the purge finishes |
 | `summaries` | Compaction's summaries: thread, `first_event`, `last_event`, `text`, the nullable `model` (none for the fixture), `created_ms`. Derived, so no full-text index: search finds the raw events, which stay. Inserted only while the thread is live in the deletion generation the summary was read in, so a delete during compaction stores nothing; the builder reads the newest. A deleted task's summaries go in the deletion's second transaction, and the purge clears their leftover copies like the events'. Version 4 |
 | `tool_calls` | The tool-call ledger ([tools](tools.md)): one row per committed call, keyed by run, `route` (`model`, or `mcp:` and the launch id) and the caller's id, with the tool, a SHA-256 of the parsed arguments and the tagged result, capped at 65,536 bytes (not characters). Written in the same transaction as the call's own write, and only while the run's thread is live. A history result holds references, never text, and nothing here is indexed. A deleted task's rows go in the deletion's second transaction. Version 5 |
+| `actions` | Issue actions ([issues](issues.md)): thread, `version`, the `stage` as JSON tagged by `kind`, the bound `repo`, `account_id` (canonical decimal text) and `account_login`, the exact `title` and `body`, the offered `approval`, the last `consumed` revision, `uncertain` and `created_ms`. `AUTOINCREMENT`, so a draft id is never issued twice. A deleted thread's actions go in the deletion's second transaction. Version 7 |
+| `approval_mark` | One row: the highest approval revision ever issued. Deletion and purges never touch it, so no revision is issued twice. Version 7 |
 
 The coordinator issues thread and run ids itself, above `high_water()` (the highest ids in
 `sqlite_sequence`, deleted ones included), and the store refuses any id that isn't new. A whole
@@ -34,7 +36,7 @@ user turn (a new thread when there is one, the run, and the user's text) is one 
 its own, so the id is issued before its task exists; a purge's copy keeps `sqlite_sequence`, so
 a reservation with no row behind it outlives a purge and a restart ([tools](tools.md)).
 
-Later slices add assets, sends, actions and cleanup jobs, each as a
+Later slices add assets, sends and cleanup jobs, each as a
 new migration. Migrations are numbered by `PRAGMA user_version`, run forward only, one
 transaction each, and a brain refuses a file whose version is newer than it knows.
 
@@ -371,11 +373,13 @@ The brain opens the store and runs the recovery scan before it serves any shell:
   again is logged by id, stays hidden, and is retried at the next start, so it can't stop the brain;
 - runs still `active` in live threads become `failed` with reason `crash`, keeping what they
   committed;
+- issue sends cut short in live threads end: a Preflight that sent nothing fails, and one that
+  may have sent becomes Unknown ([issues](issues.md#recovery));
 - an owed purge is reported, and the store thread runs it once no run is active;
 - the main thread is created if it's missing, before the high-water ids are read.
 
 The "store recovered" log line carries only counts and flags: crashed runs, finished and failed
-deletions, and whether the purge is still owed.
+deletions, failed and unknown issue sends, and whether the purge is still owed.
 
 shortcut: two sessions of the same user run two brains on one store, and the second's recovery
 fails the first's live runs. That needs Windows Server or multi-session Windows, so a

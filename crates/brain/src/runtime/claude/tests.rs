@@ -31,8 +31,8 @@ pub(in crate::runtime) const READY: ClaudeCodeView = ClaudeCodeView::Ready {
 async fn settle(claude: &mut Claude) {
     timeout(Duration::from_secs(30), async {
         while claude.out.is_some() {
-            let done = claude.next().await;
-            claude.done(done);
+            let wake = claude.next().await;
+            claude.wake(wake);
         }
     })
     .await
@@ -79,10 +79,10 @@ async fn finding_preserves_ready_and_blocks_connect_until_discovery_settles() {
     assert_eq!(claude.out, Some(Work::Version));
     claude.op(ConnectionOp::FindClaudeCode);
     let done = claude.next().await;
-    assert!(!claude.done(done));
+    assert!(!claude.wake(done));
     assert_eq!(claude.view(), ClaudeCodeView::Finding);
     let done = claude.next().await;
-    assert!(claude.done(done));
+    assert!(claude.wake(done));
     assert_eq!(claude.view(), ClaudeCodeView::Finding);
     settle(&mut claude).await;
     assert_eq!(claude.view(), ClaudeCodeView::SignedOut { version: V });
@@ -233,7 +233,7 @@ fn release(brain: &mut Brain) {
             signed_in: true,
         }),
     };
-    brain.claude_done(done, None).expect("no link");
+    brain.claude_done(Wake::Lane(done), None).expect("no link");
 }
 
 const BOTH_READY: ControlToShell = ControlToShell::Connections(ConnectionsView {
@@ -602,7 +602,7 @@ mod launches {
     }
 
     fn control_of(claude: &Claude, at: usize) -> Arc<supervisor::Control> {
-        Arc::clone(&claude.launches[at].1)
+        Arc::clone(&claude.launches[at].control)
     }
 
     /// S11.

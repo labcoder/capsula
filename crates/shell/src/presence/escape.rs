@@ -57,6 +57,7 @@ impl Presence {
                 }
             }
             Escape::Dismiss => {
+                self.runs.dismiss_retry();
                 if panel == EscapePanel::Settings {
                     if !self.dismiss_account_confirmation(cx) {
                         self.dismiss_settings(cx)?;

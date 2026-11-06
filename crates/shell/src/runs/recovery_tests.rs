@@ -89,6 +89,167 @@ fn reconnect_after_answering_never_restores_an_already_started_turn() {
 }
 
 #[test]
+fn explicit_retry_uses_its_captured_thread_and_is_consumed_even_when_refused() {
+    use kumochi_protocol::message::{Action, DataToBrain};
+    let mut runs = ready();
+    assert!(runs.select_thread(Some(ThreadId(9))));
+    submit(&mut runs, "retry café");
+    let error =
+        UserError::new(ErrorKey::AccountOffline, Vec::new(), vec![Action::Retry]).expect("bounded");
+    runs.apply_run_state(RunId(1), ThreadId(9), Phase::Failed, Some(error.clone()));
+    assert!(runs.retry_ready(RunId(1)));
+    assert_eq!(
+        runs.retry(RunId(99), "", |_| panic!("wrong run owner")),
+        Err(Refused::Busy)
+    );
+    assert!(runs.retry_ready(RunId(1)));
+    let mut sent = Vec::new();
+    assert_eq!(
+        runs.retry(RunId(1), "", |message| {
+            sent.push(message);
+            true
+        }),
+        Ok(())
+    );
+    assert_eq!(
+        sent,
+        [DataToBrain::TextSubmit {
+            turn: 2,
+            screen: kumochi_protocol::message::ScreenChoice::None,
+            thread: Some(ThreadId(9)),
+            text: "retry café".into()
+        }]
+    );
+    assert_eq!(
+        runs.retry(RunId(1), "", |_| panic!("single use")),
+        Err(Refused::Busy)
+    );
+    runs.apply_run_state(RunId(2), ThreadId(9), Phase::Failed, Some(error.clone()));
+    assert_eq!(
+        runs.retry(RunId(2), "new draft", |_| panic!("draft preserved")),
+        Err(Refused::Busy)
+    );
+    assert!(!runs.retry_ready(RunId(2)));
+    submit(&mut runs, "delivery fails");
+    runs.apply_run_state(RunId(3), ThreadId(9), Phase::Failed, Some(error));
+    assert_eq!(runs.retry(RunId(3), "", |_| false), Err(Refused::Offline));
+    assert_eq!(
+        runs.retry(RunId(3), "", |_| panic!("refused attempt consumed it")),
+        Err(Refused::Busy)
+    );
+}
+
+#[test]
+fn retry_content_is_dropped_on_each_ownership_change_and_dismissal() {
+    use kumochi_protocol::message::Action;
+    for end in 0..9 {
+        let mut runs = ready();
+        assert!(runs.select_thread(Some(ThreadId(1))));
+        submit(&mut runs, MARKER);
+        runs.apply_run_state(
+            RunId(1),
+            ThreadId(1),
+            Phase::Failed,
+            Some(
+                UserError::new(ErrorKey::AccountOffline, Vec::new(), vec![Action::Retry])
+                    .expect("bounded"),
+            ),
+        );
+        assert_eq!(runs.kept(), [MARKER.len()]);
+        let debug = format!("{runs:?}");
+        assert!(!debug.contains(MARKER));
+        assert!(!debug.contains(&format!("{:?}", MARKER.as_bytes())));
+        match end {
+            0 => {
+                runs.select_thread(Some(ThreadId(2)));
+            }
+            1 => {
+                runs.stop();
+            }
+            2 => {
+                runs.clear();
+            }
+            3 => runs.disconnected(),
+            4 => runs.met(Incarnation(2)),
+            5 => {
+                runs.confirm_delete(ThreadId(1));
+            }
+            6 => runs.dismiss_retry(),
+            7 => assert_eq!(
+                runs.submit(" ", |_| panic!("blank attempt")),
+                Err(Refused::Blank)
+            ),
+            8 => runs.back_to_kumo(),
+            _ => unreachable!("fixture cases"),
+        }
+        assert_eq!(runs.kept(), Vec::<usize>::new(), "case {end}");
+        assert_eq!(
+            runs.retry(RunId(1), "", |_| panic!("stale ownership")),
+            Err(Refused::Busy)
+        );
+    }
+}
+
+#[test]
+fn retry_rechecks_the_captured_main_thread_after_a_settings_change() {
+    use kumochi_protocol::message::{Action, DataToBrain};
+    let mut runs = ready();
+    submit(&mut runs, "belongs to the old main");
+    runs.apply_run_state(
+        RunId(1),
+        ThreadId(1),
+        Phase::Failed,
+        Some(
+            UserError::new(ErrorKey::AccountOffline, Vec::new(), vec![Action::Retry])
+                .expect("bounded error"),
+        ),
+    );
+    runs.settings(ThreadId(2));
+    assert!(!runs.retry_ready(RunId(1)));
+    let mut sent: Vec<DataToBrain> = Vec::new();
+    assert_eq!(
+        runs.retry(RunId(1), "", |message| {
+            sent.push(message);
+            true
+        }),
+        Err(Refused::Busy)
+    );
+    assert_eq!(sent, []);
+    assert_eq!(runs.kept(), Vec::<usize>::new());
+    assert_eq!(
+        runs.retry(RunId(1), "", |_| panic!("consumed stale main")),
+        Err(Refused::Busy)
+    );
+}
+
+#[test]
+fn a_stale_selection_revision_cannot_dispatch_retained_retry_text() {
+    use kumochi_protocol::message::Action;
+    let mut runs = ready();
+    submit(&mut runs, "belongs to the earlier selection");
+    runs.apply_run_state(
+        RunId(1),
+        ThreadId(1),
+        Phase::Failed,
+        Some(
+            UserError::new(ErrorKey::AccountOffline, Vec::new(), vec![Action::Retry])
+                .expect("bounded error"),
+        ),
+    );
+    runs.revision += 1;
+    assert!(!runs.retry_ready(RunId(1)));
+    assert_eq!(
+        runs.retry(RunId(1), "", |_| panic!("stale selection sent")),
+        Err(Refused::Busy)
+    );
+    assert_eq!(runs.kept(), Vec::<usize>::new());
+    assert_eq!(
+        runs.retry(RunId(1), "", |_| panic!("consumed stale selection")),
+        Err(Refused::Busy)
+    );
+}
+
+#[test]
 fn a_new_target_restores_into_the_thread_its_run_names() {
     let mut runs = ready();
     assert!(runs.select_thread(None));

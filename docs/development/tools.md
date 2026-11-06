@@ -11,6 +11,46 @@ Model requests offer only `draw`, in both the main conversation and tasks; this 
 enable the other staged producers. The test tools in `dispatch/tests.rs` exercise the
 rest of the path.
 
+## Staged history reads
+
+The recall backend is staged; this change offers no new model or MCP tools. The next layer
+wires its asynchronous reads, cancellation, completion fence and model-schema allowlist.
+It must not enable schemas before those fences exist.
+
+`recall::Query` describes word-OR event search, an inclusive event range, or task metadata.
+`Snapshot::select_recall` checks the frozen origin independently of dispatch: Kumo reaches
+live tasks, while a task reaches only itself and cannot list tasks. SQL excludes the main
+conversation, deleting tasks and non-conversation events. Search quotes each word instead of
+executing user FTS syntax, ranks with bm25 and breaks ties by descending event ID. Queries
+are limited to 1,024 UTF-8 bytes and 32 words; control characters and tokenless words fail.
+
+The stored `recall` output contains selectors, not task titles, snippets or source text:
+
+- Search keeps at most ten task/event references, its query once, and whether an eleventh
+  match existed. Replay runs a snippet query for those exact events, never a new search.
+  Each snippet is capped at 4,096 encoded JSON-string bytes, not merely FTS's token count.
+- A range keeps its actual shown endpoints, a final cut-prefix byte length and the next
+  entirely unshown event's actual ID. It shows at most twenty events. Its JSON text payload
+  is capped at 32 KiB, including escaping and range metadata but excluding refreshed titles.
+  A first oversized event is cut on a UTF-8 boundary. Its tail cannot be paged with this API;
+  the output says so, and continuation advances beyond it. Replay cannot grow the prefix or
+  rediscover continuation after append or rename.
+- Task metadata keeps at most one hundred selected task IDs. It rereads titles, persisted
+  activity, latest outcome and last-use time. Equal shown titles are flagged. A truncated
+  list cannot establish that a title is unique outside its shown entries; select by ID or
+  ask for clarification. There is no paging or archive option.
+
+Native result replay dereferences these selectors inside the same snapshot as the rest of
+the request, as quoted function output. Every rendered title or text adds its task to the
+build's sources; deleted sources render removed, and forged out-of-reach or mismatched
+event-owner references expose neither title nor text. SQLite failures are converted to fixed
+errors at both selection and replay, before diagnostics can carry query or source text.
+
+The per-result limits do not promise that sixteen full results fit the current-run budget.
+Schema activation must prove that saturation terminates the run as Budget, rather than
+silently dropping results or reporting a store failure. The staged synchronous backend is
+not itself a coordinator or page-reader scheduling interface.
+
 ## Who made a call
 
 | Type | What it holds |

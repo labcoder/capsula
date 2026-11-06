@@ -1,5 +1,6 @@
-//! The quarantine store (Q1–Q6): a version whose audit failed stays refused across Disconnect
-//! and restarts, until a different version is found. On the lane's fake, in a scratch base.
+//! The quarantine store (Q1–Q6): a version whose audit failed stays refused across Disconnect,
+//! restarts and every other version found, because no find clears a marker. On the lane's fake, in
+//! a scratch base.
 
 use std::fs;
 use std::path::PathBuf;
@@ -62,8 +63,8 @@ impl Found {
     async fn settle(&mut self) -> ClaudeCodeView {
         tokio::time::timeout(Duration::from_secs(30), async {
             while self.claude.out.is_some() {
-                let done = self.claude.next().await;
-                self.claude.done(done);
+                let wake = self.claude.next().await;
+                self.claude.wake(wake);
             }
         })
         .await
