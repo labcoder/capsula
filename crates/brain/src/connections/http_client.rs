@@ -180,6 +180,8 @@ pub struct ResponseMeta {
     pub date_s: Option<u64>,
     /// Retry delay in seconds, using a valid Date for HTTP-date values.
     pub retry_after_s: Option<u64>,
+    /// Whether any Retry-After header arrived, even when its advice was unusable.
+    pub retry_after_present: bool,
     /// Remaining requests in the current rate window.
     pub rate_remaining: Option<u64>,
     /// Rate-window reset as nonnegative Unix seconds.
@@ -200,6 +202,7 @@ impl ResponseMeta {
         Self {
             date_s,
             retry_after_s,
+            retry_after_present: headers.contains_key("retry-after"),
             rate_remaining: single("x-ratelimit-remaining", 20).and_then(decimal),
             rate_reset_s: single("x-ratelimit-reset", 20).and_then(decimal),
         }

@@ -56,3 +56,35 @@ Public contracts pinned for this policy:
 [device flow](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app#using-the-device-flow-to-generate-a-user-access-token),
 [repository issues](https://docs.github.com/en/rest/issues/issues?apiVersion=2026-03-10),
 and [user installations and repositories](https://docs.github.com/en/rest/apps/installations?apiVersion=2026-03-10).
+
+## P2b1: typed device and account reads
+
+`connections/github/api.rs` provides five stateless calls: request a device code,
+poll once for a token, read the user, and read one installation or repository page.
+Each injected `Http` future has an outer 15-second Tokio deadline. Dropping the
+API future drops the request future; no task or retry survives its caller.
+P3 owns polling intervals, attempt generations, persistence and sign-out.
+
+Parser-entry caps repeat the transport limits even for scripted clients: 4 KiB
+for device/token responses, 64 KiB for the user, and 1 MiB for repository pages.
+Known duplicate fields, invalid identifiers, missing or mistyped required values,
+and pages over 100 rows fail closed; unknown fields are ignored. These calls do
+not follow Link headers or aggregate across pages or installations.
+
+Device replies must name the fixed verification page, contain a checked user
+code, and have positive lifetimes and intervals no greater than 900 seconds.
+Only a missing interval defaults to five seconds; null and malformed values fail.
+Token replies return a checked `ghu_` bearer or a closed device-flow refusal.
+Refresh credentials are parsed only as bounded zeroizing strings and then refused
+as `RefreshUnsupported`. Expiry fields without a refresh token are refused too,
+so an expiring sign-in cannot silently become a non-expiring one.
+
+`ApiError` retains only closed kinds, numeric status and parsed metadata. Its
+shared definite-reason classification treats pre-dispatch/connect refusals as
+Network and known 4xx responses as definite; throttled 403 and 429 are RateLimited.
+An unusable but present Retry-After still makes 403 RateLimited, without inventing
+retry advice. API refusals cap usable Retry-After advice to one hour (3,600 seconds).
+Timeout, transport loss, redirects, malformed success and unexpected non-4xx
+statuses remain uncertain. Hand-written Debug never prints credentials, user
+codes, logins, repository names or provider text. Issue posting and matching are
+a later `github/issues.rs` layer and add no caller here.
