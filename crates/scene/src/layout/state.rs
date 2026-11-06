@@ -496,6 +496,7 @@ mod tests {
             &Arc::new(Theme::default()),
             &mut Measure,
             &AtomicBool::new(false),
+            None,
         )
         .expect("recover");
         assert_eq!(rest.objects.len(), 4);

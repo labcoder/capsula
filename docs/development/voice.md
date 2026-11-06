@@ -30,7 +30,10 @@ nothing downloads them.
 
 `brain::voice::download::Downloader` installs one part from the pinned manifest. Its caller
 supplies the models folder under `platform::data_dir`. Construction makes no request, and
-startup never resumes anything automatically; the install task and UI arrive in PR 8.
+startup never resumes anything automatically; the install task and UI arrive in PR 8. The wire
+types (`InstallVoice`, `RemoveVoice`, `CancelVoiceInstall`, `VoiceView`, `PartState` and the
+`Voice*` error keys) and the saved talk-back and unload settings are in place; the installer ops
+are refused until the installer lands (see [settings](settings.md#config-keys)).
 
 The separate HTTPS client uses the OS trust roots, no proxy, credentials, cookies, Referer or
 compression, and `Accept-Encoding: identity`. The first URL and up to five redirects must use
@@ -47,7 +50,10 @@ and atomically moved into place.
 Cancellation, a short body, transport failure, 429, 5xx or a 30-second idle timeout keep the
 partial for the next explicit attempt. Size and hash failures delete it. Cancellation also
 interrupts prefix hashing. Connecting is bounded to 30 seconds; there is no total download
-deadline. Byte progress is coalesced to at most four updates a second. Tests use only injected
+deadline. Progress carries a phase: `Verifying` while bytes already on disk are hashed, and
+`Downloading` from the first request. A phase change is sent at once; byte counts within a phase
+are coalesced to at most four updates a second, so a part that's already whole never shows
+`Downloading`. Tests use only injected
 loopback TLS fixtures; the ignored `measure_download_head` requires explicit permission.
 
 ## Spoken replies
@@ -66,7 +72,9 @@ flowchart LR
 ```
 
 - **Load:** one load at a time from `models\spoken-replies`, CPU and Q8 weights, seed 42, then a
-  short warm-up. A failed load leaves voice output unloaded; nothing retries on its own.
+  short warm-up. A failed load leaves voice output unloaded; nothing retries on its own. Loads
+  and unloads carry an ask and are reported the way speech input's are (see
+  [Load asks](#load-asks)).
 - **A Speak during a load** waits for it, as the one waiting request: it's spoken if the load
   succeeds and gets `NotLoaded` if the load fails. Unload rejects it, and a cancel makes it stale.
   A stale waiting Speak is replaced unanswered by the next one, so a cancel never leaves TTS busy;
@@ -81,7 +89,7 @@ flowchart LR
   Dropping the receiver has the same effect. Each Speak has its own channel: on cancel the caller
   drops that receiver, so no old-generation event reaches the next Speak.
 - **Unload and shutdown** are state, not queued commands, so a full queue can't hold them up.
-  Unload also cancels and rejects a waiting Speak with `NotLoaded`. Load and warm-up can't be
+  An unload of the wanted ask also cancels and rejects a waiting Speak with `NotLoaded`. Load and warm-up can't be
   interrupted inside Phonon; unload and shutdown take effect when they return.
 - **Threads:** xn runs its operators on its own process-wide pool. Voice sizes it to 8 with
   `xn::threadpool::start_pool_with` and checks the width before any inference. It never calls
@@ -276,15 +284,40 @@ flowchart LR
   model is unloaded. A decode whose caller has gone is skipped. `Decode` and `SttResult` print no
   samples and no transcript text.
 - **Load:** the worker's `Load`. A failed load leaves speech input unloaded until the next
-  `load`. A new models folder reloads, and a decode left waiting is served by the new model.
-- **A lost worker:** the running decode is answered `Failed(WorkerLost)`, a waiting one
-  `NotLoaded`, and speech input stays unloaded unless a `load` or `reload` was asked for after the
-  lost load started; a failure's cleanup never undoes a newer ask. `load` of the models already
-  served coalesces, so the coordinator answers `SpeechHandle::lost` with `reload`, which always
-  reaches the worker. Retrying a model that keeps failing is the coordinator's bounded policy;
-  nothing here retries on its own.
+  `load`. A newer ask reloads after the running decode, and a decode left waiting is served by
+  the new model.
+- **A lost worker:** the `voice-stt` thread has its own subscription to `SpeechHandle::lost`, and a
+  small task wakes it on each loss, so an idle loss ends serving too. A load's reply names the
+  worker generation that holds the model, and each loss names the generation that died. Only that
+  generation's loss is the load's, even one that comes before serving starts. An older worker's
+  loss can arrive after a newer load, because the supervisor answers before it broadcasts, so it's
+  skipped and the newer model keeps serving and is unloaded as usual. The running decode is answered
+  `Failed(WorkerLost)`, a waiting one `NotLoaded`, and the ask is reported `Lost`. Speech input
+  stays unloaded unless a newer ask came after the lost load started; a failure's cleanup never
+  undoes a newer ask. Retrying is the installer's bounded policy; nothing here retries on its own.
 - **Shutdown:** dropping the handle lets the request in flight finish, unloads and ends the
   thread; nothing waits for it.
+
+### Load asks
+
+Both owners, speech input's and spoken replies', take `load(models, ask)` and `unload(ask)`, where
+the ask is the caller's own counter, and send one `LoadReport { ask, event }` per outcome:
+
+| Event | When |
+|---|---|
+| `Loaded` | the load (with its warm-up) finished and the ask is still the wanted one |
+| `Discarded` | the load finished after its unload or a newer ask; sent once the model is freed in the owner thread |
+| `Failed` | the load failed |
+| `Unloaded` | the ask's model is freed, or the owner never had that ask |
+| `Lost` | speech input only: the worker went while the ask was loading or loaded |
+
+When a load finishes, every command sent meanwhile is already in the shared state, so the owner
+keeps the model only if its ask is still wanted. `unload(ask)` clears only that ask and frees only
+its model: an unload for any other ask is reported `Unloaded` and changes nothing. An ask stays
+the owner's until its model has dropped, so no report says an ask is quiet while its model is
+still being freed, and an ask unloaded while an older model drops never starts loading. Reports
+go out under the state lock, so an unload's own report can't overtake the owner's. Every
+ask that starts loading ends in one of `Discarded`, `Failed`, `Unloaded` or `Lost`.
 
 ### The FFI owner
 

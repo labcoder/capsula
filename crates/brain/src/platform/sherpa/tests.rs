@@ -1222,9 +1222,10 @@ fn measure_parakeet() {
     let handle = {
         let _context = tasks.enter();
         let speech = SpeechSupervisor::start(worker, job).expect("speech worker");
-        SttHandle::spawn(tasks.clone(), speech, natives).expect("owner")
+        let (reports, _received) = crate::voice::Reports::new();
+        SttHandle::spawn(tasks.clone(), speech, natives, reports).expect("owner")
     };
-    handle.load(models);
+    handle.load(models, 1);
     let ask = |rate: u32, samples: Vec<i16>| {
         let (reply, answer) = tokio::sync::oneshot::channel();
         handle
