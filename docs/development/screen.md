@@ -156,8 +156,9 @@ A6 supplies that metadata and integrates the operation; A5 adds no UIA reads or 
 request/reply route. OCR remains disconnected from the worker and exports no content.
 
 One bounded channel (capacity one) feeds a dedicated OS thread. Only that thread creates its
-MTA apartment, English WinRT OCR engine, bitmap and recognition operation; no native object
-crosses threads. Missing English or a native failure returns fixed `Unavailable`, never foreign
+MTA apartment, English WinRT OCR engine, BGRA8 bitmap and recognition operation; no native object
+crosses threads. Regional rows retain the capture's BGRA order without a channel swap.
+Missing English or a native failure returns fixed `Unavailable`, never foreign
 error text. macOS has no adapter yet. The only pixel copy is the selected sanitized region.
 Before allocating a native bitmap, oversized regions scale aspect-preservingly to
 `OcrEngine::MaxImageDimension`, without enlargement. Small text can be lost at that scale;
@@ -185,7 +186,9 @@ published mask. They cover trigger boundaries, region provenance/clipping, maxim
 one pixel over the engine maximum, outward inverse geometry, mask filtering before both caps,
 Unicode bounds, completeness, supersession, every caller wait's cancellation/EOF/deadline, closed
 engine channels, fixed unavailability, and sentinel-safe diagnostics. They never read real windows,
-capture the desktop or run native OCR; native behavior and timing need a separately scheduled check.
+capture the desktop or run native OCR. An ignored, manually named Windows smoke test checks
+that the real recognizer accepts a blank synthetic BGRA bitmap and returns zero words.
+It never runs in CI. Real-region recognition and timing need a separately scheduled check.
 
 ## Deadline evidence on Rez
 

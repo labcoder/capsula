@@ -197,7 +197,6 @@ impl std::fmt::Debug for TextRecognizer {
 }
 impl TextRecognizer {
     #[cfg(windows)]
-    #[cfg_attr(test, expect(dead_code, reason = "tests open only fake engines"))]
     pub(crate) fn new() -> Result<Self, Failure> {
         Self::start(crate::platform::open_ocr)
     }

@@ -87,6 +87,23 @@ fn run(words: Vec<NativeWord>, set: &MaskSink, region: PhysicalRect, max: u32) -
 }
 
 #[test]
+#[cfg(windows)]
+#[ignore = "manual native OCR smoke; synthetic blank pixels only, never in CI"]
+fn native_blank_bgra_bitmap_has_no_words() {
+    let mut raw = frame(rect([0, 0], [64, 64]));
+    let set = masks(Completeness::Complete);
+    let clean = sanitize(&mut raw, &set.lock().unwrap()).unwrap();
+    let region = OcrRegion::window(&clean, &tree(clean.image().0.display)).unwrap();
+    let mut recognizer = TextRecognizer::new().expect("native English OCR opens");
+    let (_end, ended) = mpsc::channel();
+    let output = recognizer
+        .recognize(&clean, region, &set, &ended, until())
+        .expect("native English OCR accepts a blank BGRA bitmap");
+    assert_eq!(output.words.len(), 0);
+    assert!(!output.truncated);
+}
+
+#[test]
 fn trigger_uses_threshold_and_exact_focused_native_class() {
     assert!(should_recognize(19, "Other"));
     assert!(!should_recognize(20, "Other"));
