@@ -371,10 +371,10 @@ fn the_verified_handle_refuses_writers() {
 /// A fresh scratch folder in the local application data folder, removed on drop. The temp
 /// folder won't do: on Rez it grants other accounts write access, which the checks refuse, and
 /// on CI it's spelled with 8.3 short names.
-struct TrustedScratch(PathBuf);
+pub(crate) struct TrustedScratch(pub(crate) PathBuf);
 
 impl TrustedScratch {
-    fn new(name: &str) -> Self {
+    pub(crate) fn new(name: &str) -> Self {
         let dir = local_app_data().expect("local app data").join(format!(
             "{}-test-{}-{name}",
             kumochi_protocol::constants::OBJECT_PREFIX,

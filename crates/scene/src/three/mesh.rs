@@ -5,6 +5,7 @@ use super::{
     size::{MeshError, Retained, area_cutoff, orient, radius, triangles},
 };
 use crate::{
+    geom::Vec3,
     limits::{MAX_CURVED_SEGMENTS, MAX_PATH_POINTS},
     record::{Geometry, Segments, Solid},
 };
@@ -40,6 +41,14 @@ impl Default for MeshScratch {
     }
 }
 impl MeshScratch {
+    /// Bytes the reserved buffers hold.
+    pub fn bytes(&self) -> usize {
+        size_of_val(&*self.keys)
+            + size_of_val(&*self.tangents)
+            + size_of_val(&*self.frames)
+            + size_of_val(&*self.vertices)
+            + size_of_val(&*self.faces)
+    }
     /// Reserves all buffers once at the decoded shape and subdivision limits.
     pub fn new() -> Self {
         Self {
@@ -50,6 +59,27 @@ impl MeshScratch {
             faces: vec![[0; 3]; 1280].into_boxed_slice(),
         }
     }
+}
+
+/// Narrows a triangle to world f32 and refuses it when the narrowed points have zero area: the one
+/// check the world build and the prepared mesh share, so both accept exactly the same triangles.
+pub(super) fn narrowed(world: &Transform, v: [Point; 3]) -> Result<[Vec3; 3], MeshError> {
+    let world = [
+        world.point64(v[0])?,
+        world.point64(v[1])?,
+        world.point64(v[2])?,
+    ];
+    let p = world.map(|p| [f64::from(p.x), f64::from(p.y), f64::from(p.z)]);
+    let normal = cross(subtract(p[1], p[0]), subtract(p[2], p[0]));
+    if dot(normal, normal).to_bits() == 0 {
+        return Err(MeshError::Degenerate("pos"));
+    }
+    Ok(world)
+}
+
+/// Bit-for-bit equality: a construction fact, not a tolerance.
+fn same(a: Point, b: Point) -> bool {
+    a.map(f64::to_bits) == b.map(f64::to_bits)
 }
 
 fn subtract(a: Point, b: Point) -> Point {
@@ -146,9 +176,27 @@ fn sift(keys: &mut [[u32; 4]], mut root: usize, cancel: &AtomicBool) -> Result<(
     Ok(())
 }
 
+/// Where checked triangles go: world f32 triangles, or the unscaled local f64 points that
+/// produced them, with one group per source face.
+enum Sink<'a> {
+    World(&'a mut Vec<Triangle>),
+    Local {
+        triangles: &'a mut Vec<[Point; 3]>,
+        groups: &'a mut Vec<u8>,
+    },
+}
+impl Sink<'_> {
+    fn spare(&self) -> usize {
+        match self {
+            Self::World(out) => out.capacity() - out.len(),
+            Self::Local { triangles, .. } => triangles.capacity() - triangles.len(),
+        }
+    }
+}
+
 struct Emitter<'a> {
     world: &'a Transform,
-    out: &'a mut Vec<Triangle>,
+    sink: Sink<'a>,
     cancel: &'a AtomicBool,
     part: u16,
     cutoff: f64,
@@ -164,6 +212,21 @@ enum Face {
 
 impl Emitter<'_> {
     fn triangle(&mut self, v: [Point; 3], face: Face) -> Result<(), MeshError> {
+        let before = self.built.written;
+        self.emit(v, face)?;
+        self.group(before);
+        Ok(())
+    }
+    fn group(&mut self, before: u32) {
+        if let Sink::Local { groups, .. } = &mut self.sink
+            && self.built.written > before
+        {
+            groups.push(
+                u8::try_from(self.built.written - before).expect("a source face emits at most two"),
+            );
+        }
+    }
+    fn emit(&mut self, v: [Point; 3], face: Face) -> Result<(), MeshError> {
         poll(self.cancel)?;
         let normal = cross(subtract(v[1], v[0]), subtract(v[2], v[0]));
         if dot(normal, normal) < 4.0 * self.cutoff * self.cutoff {
@@ -176,23 +239,23 @@ impl Emitter<'_> {
             }
             return Err(MeshError::Degenerate(self.field));
         }
-        let v = [
-            self.world.point64(v[0])?,
-            self.world.point64(v[1])?,
-            self.world.point64(v[2])?,
-        ];
-        let p = v.map(|p| [f64::from(p.x), f64::from(p.y), f64::from(p.z)]);
-        let normal = cross(subtract(p[1], p[0]), subtract(p[2], p[0]));
-        if dot(normal, normal).to_bits() == 0 {
-            return Err(MeshError::Degenerate("pos"));
+        let world = narrowed(self.world, v)?;
+        match &mut self.sink {
+            Sink::World(out) => out.push(Triangle {
+                v: world,
+                part: self.part,
+            }),
+            Sink::Local { triangles, .. } => triangles.push(v),
         }
-        self.out.push(Triangle { v, part: self.part });
         self.built.written += 1;
         Ok(())
     }
     fn quad(&mut self, v: [Point; 4], face: Face) -> Result<(), MeshError> {
-        self.triangle([v[0], v[1], v[2]], face)?;
-        self.triangle([v[0], v[2], v[3]], face)
+        let before = self.built.written;
+        self.emit([v[0], v[1], v[2]], face)?;
+        self.emit([v[0], v[2], v[3]], face)?;
+        self.group(before);
+        Ok(())
     }
 }
 
@@ -204,15 +267,50 @@ impl Emitter<'_> {
 /// # Errors
 /// Rejects invalid geometry, insufficient spare capacity, cancellation, sub-cutoff source faces,
 /// non-finite world vertices, collapsed world faces or distinct local vertices that narrow together.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one dispatch keeps each shape's canonical vertex expression beside its topology"
-)]
 pub fn build(
     solid: &Solid,
     world: &Transform,
     part: u16,
     out: &mut Vec<Triangle>,
+    cancel: &AtomicBool,
+    scratch: &mut MeshScratch,
+) -> Result<Built, MeshError> {
+    emit(solid, world, Sink::World(out), part, cancel, scratch)
+}
+
+/// Like [`build`], with every check at the complete rest transform `rest`, but appends each
+/// triangle as the solid's own unscaled f64 points, which `rest` places exactly where [`build`]
+/// checked them, and one entry per source face to `groups`: how many of the appended triangles
+/// that face emitted. On failure, truncate both to their saved lengths.
+/// # Errors
+/// As [`build`].
+pub fn build_local(
+    solid: &Solid,
+    rest: &Transform,
+    triangles: &mut Vec<[[f64; 3]; 3]>,
+    groups: &mut Vec<u8>,
+    cancel: &AtomicBool,
+    scratch: &mut MeshScratch,
+) -> Result<Built, MeshError> {
+    emit(
+        solid,
+        rest,
+        Sink::Local { triangles, groups },
+        0,
+        cancel,
+        scratch,
+    )
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one dispatch keeps each shape's canonical vertex expression beside its topology"
+)]
+fn emit(
+    solid: &Solid,
+    world: &Transform,
+    sink: Sink<'_>,
+    part: u16,
     cancel: &AtomicBool,
     scratch: &mut MeshScratch,
 ) -> Result<Built, MeshError> {
@@ -225,7 +323,7 @@ pub fn build(
     } = scratch;
     poll(cancel)?;
     let candidates = triangles(solid)?;
-    if out.capacity() - out.len() < usize::try_from(candidates).map_err(|_| MeshError::Full)? {
+    if sink.spare() < usize::try_from(candidates).map_err(|_| MeshError::Full)? {
         return Err(MeshError::Full);
     }
     let shape = solid.geometry()?;
@@ -240,7 +338,7 @@ pub fn build(
     };
     let mut emit = Emitter {
         world,
-        out,
+        sink,
         cancel,
         part,
         cutoff: area_cutoff(eps),
@@ -261,6 +359,7 @@ pub fn build(
                 [0, 1, 5, 4],
                 [2, 6, 7, 3],
             ] {
+                // A box face is an axis-aligned rectangle.
                 emit.quad(face.map(point), Face::Surface)?;
             }
         }
@@ -275,6 +374,7 @@ pub fn build(
             check_vertices(n * n, &point, world, cancel, keys)?;
             for i in 0..n {
                 for j in 0..n {
+                    // Both rings are circles about one axis, so the band is a mirror-symmetric trapezoid.
                     emit.quad(quad_indices(i, (i + 1) % n, j, n).map(point), Face::Surface)?;
                 }
             }
@@ -300,6 +400,7 @@ pub fn build(
                     };
                     let mut corners = quad_indices(i, i + 1, j, n);
                     corners[1..].reverse();
+                    // Both rings are circles about one axis, so the band is a mirror-symmetric trapezoid.
                     emit.quad(corners.map(point), face)?;
                 }
             }
@@ -350,6 +451,7 @@ fn revolved(
         if top == 0.0 {
             emit.triangle([point(i), point(n), point((i + 1) % n)], Face::Surface)?;
         } else {
+            // Both rings are circles about one axis, so the side is a mirror-symmetric trapezoid.
             emit.quad(
                 [i, n + i, n + (i + 1) % n, (i + 1) % n].map(point),
                 Face::Surface,
@@ -390,6 +492,7 @@ fn extrude(
     for i in 0..n {
         let a = usize::from(indices[i]);
         let b = usize::from(indices[(i + 1) % n]);
+        // A side joins one outline edge to its copy translated along z: a rectangle.
         emit.quad([a, b, b + n, a + n].map(point), Face::Surface)?;
     }
     let mut len = n;
@@ -457,7 +560,11 @@ fn tube(
         } else {
             let a = unit(subtract(points.point(i), points.point(i - 1)))?;
             let b = unit(subtract(points.point(i + 1), points.point(i)))?;
-            unit(std::array::from_fn(|d| a[d] + b[d]))?
+            if same(a, b) {
+                a
+            } else {
+                unit(std::array::from_fn(|d| a[d] + b[d]))?
+            }
         };
     }
     let tangent = tangents[0];
@@ -468,7 +575,8 @@ fn tube(
     axis[least] = 1.0;
     let mut normal = unit(cross(tangent, axis))?;
     for i in 0..points.len {
-        if i > 0 {
+        // An unchanged tangent keeps the frame bit for bit, so a straight run's rings are translations.
+        if i > 0 && !same(tangents[i - 1], tangents[i]) {
             let a = tangents[i - 1];
             let b = tangents[i];
             let cosine = dot(a, b);
@@ -492,8 +600,16 @@ fn tube(
     };
     check_vertices(points.len * n, &point, emit.world, emit.cancel, keys)?;
     for i in 0..points.len - 1 {
+        // Only rings that are translations of each other bound planar bands; a bend's are split.
+        let planar = same(frames[i][0], frames[i + 1][0]) && same(frames[i][1], frames[i + 1][1]);
         for j in 0..n {
-            emit.quad(quad_indices(i, i + 1, j, n).map(point), Face::Surface)?;
+            let v = quad_indices(i, i + 1, j, n).map(point);
+            if planar {
+                emit.quad(v, Face::Surface)?;
+            } else {
+                emit.triangle([v[0], v[1], v[2]], Face::Surface)?;
+                emit.triangle([v[0], v[2], v[3]], Face::Surface)?;
+            }
         }
     }
     let end = (points.len - 1) * n;
@@ -608,7 +724,7 @@ mod tests {
             let mut out = Vec::with_capacity(2);
             let mut emit = Emitter {
                 world: &world,
-                out: &mut out,
+                sink: Sink::World(&mut out),
                 cancel: &cancel,
                 part: 1,
                 cutoff: 0.125,
@@ -626,7 +742,7 @@ mod tests {
         let mut out = Vec::with_capacity(2);
         let mut emit = Emitter {
             world: &world,
-            out: &mut out,
+            sink: Sink::World(&mut out),
             cancel: &cancel,
             part: 1,
             cutoff: 1e-12,
@@ -647,6 +763,6 @@ mod tests {
                 dropped: 0
             }
         );
-        assert_eq!(emit.out.len(), 1);
+        assert!(matches!(&emit.sink, Sink::World(out) if out.len() == 1));
     }
 }
