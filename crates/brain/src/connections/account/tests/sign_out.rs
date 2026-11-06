@@ -8,12 +8,12 @@
 
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
+use std::rc::Rc;
 
 use super::*;
 use crate::connections::http_client::HttpError;
 use crate::connections::marker::{Disposition, MarkerUpdate};
 use crate::connections::records::RevocationList;
-use crate::platform::credential::CredentialStore as _;
 
 const NOTICE_ONLY: &str = r#"{"v":1,"sign_out":null,"sweep":false,"request_pending":false,"outcome_unknown":false,"notice":true}"#;
 
@@ -90,26 +90,24 @@ fn tokens(run: &[Secret<Revocable>]) -> Vec<(String, Origin)> {
 }
 
 fn names(h: &Harness) -> Vec<String> {
-    let prefix = format!("{}/", h.service);
-    h.store
+    let mut names: Vec<String> = h
+        .store
         .names()
         .iter()
-        .map(|name| name.strip_prefix(&prefix).expect("own service").to_owned())
-        .collect()
+        .map(|name| shape(&h.service, name))
+        .collect();
+    names.sort();
+    names
 }
 
-/// What a finished sign-out leaves: the host, the registration Keep retains, and the notice.
-fn left(keep: bool, notice: bool) -> Vec<&'static str> {
-    let mut names = if keep {
-        vec!["chatgpt", "chatgpt/1/0"]
+/// What a finished sign-out leaves: the host, and the registration Keep retains. Each is one
+/// chunk of its current generation.
+fn left(keep: bool) -> Vec<&'static str> {
+    if keep {
+        vec!["chatgpt/0", "host/0"]
     } else {
-        Vec::new()
-    };
-    names.push("host");
-    if notice {
-        names.push("signout");
+        vec!["host/0"]
     }
-    names
 }
 
 /// Answers each revocation run after the first `answered` until the sign-out ends or a step is
@@ -148,34 +146,77 @@ fn finish(h: &mut Harness, confirm: bool, mut answered: usize) {
     panic!("the sign-out never finished");
 }
 
-/// A store `seed` prepares through a vault and, for damage, by raw name.
-fn prepared(seed: impl FnOnce(&mut Vault<FakeStore>, &dyn Fn(&str, &[u8]))) -> (FakeStore, String) {
-    let scratch = Scratch::new("sign-out-seed");
+/// A store and the authority beside it, as a seed or a run left them.
+struct Seeded {
+    store: FakeStore,
+    service: String,
+    scratch: Rc<Scratch>,
+}
+
+impl Seeded {
+    fn authority(&self) -> std::path::PathBuf {
+        self.scratch.db().with_file_name(authority::FILE)
+    }
+}
+
+/// A store `seed` prepares through a vault and, for damage, by record: `damage("chatgpt")`
+/// garbles the current account's first chunk, keeping its length.
+fn prepared(seed: impl FnOnce(&mut Vault<FakeStore>, &dyn Fn(&str))) -> Seeded {
+    let scratch = Rc::new(Scratch::new("sign-out-seed"));
     let service = format!("test-account-{:016x}", getrandom::u64().expect("random"));
     let store = FakeStore::default();
+    let path = scratch.db().with_file_name(authority::FILE);
     let mut vault = Vault::with_service(
         store.clone(),
         &service,
         &scratch.db().with_file_name("seed.lock"),
     )
     .expect("seed vault");
-    let raw = |name: &str, bytes: &[u8]| {
-        let target = format!("{service}/{name}");
-        if bytes.is_empty() {
-            store.delete(&target).expect("raw delete");
-        } else {
-            let bytes = Secret::new(Zeroizing::new(bytes.to_vec()));
-            store.set(&target, &bytes).expect("raw write");
-        }
+    let damage = |record: &str| {
+        let name = current_chunk(&path, &service, record);
+        let length = store
+            .get(&name)
+            .expect("fake read")
+            .expect("the chunk")
+            .expose()
+            .len();
+        let mut planted = store.snapshot();
+        planted.insert(
+            name.clone(),
+            Secret::new(Zeroizing::new(vec![b'{'; length])),
+        );
+        store.rollback(&planted, &[name]);
     };
-    seed(&mut vault, &raw);
+    seed(&mut vault, &damage);
     drop(vault);
-    (store, service)
+    Seeded {
+        store,
+        service,
+        scratch,
+    }
+}
+
+/// A copy of `seeded`, store and authority both, for one run to change.
+fn fork(seeded: &Seeded) -> Seeded {
+    let scratch = Rc::new(Scratch::new("sign-out"));
+    let to = scratch.db().with_file_name(authority::FILE);
+    std::fs::create_dir_all(to.parent().expect("scratch folder")).expect("scratch folder");
+    let from = seeded.authority();
+    std::fs::copy(&from, &to).expect("copy authority");
+    let log = |path: &Path| path.with_file_name(format!("{}-wal", authority::FILE));
+    if log(&from).exists() {
+        std::fs::copy(log(&from), log(&to)).expect("copy authority log");
+    }
+    Seeded {
+        store: seeded.store.fork(),
+        service: seeded.service.clone(),
+        scratch,
+    }
 }
 
 /// A signed-in account and its host, and with `erase`, a promoted Erase sign-out a crash
 /// interrupted right after promotion.
-fn store(erase: bool) -> (FakeStore, String) {
+fn store(erase: bool) -> Seeded {
     prepared(|vault, _| {
         account_only(vault);
         vault.host_id().expect("host");
@@ -187,16 +228,16 @@ fn store(erase: bool) -> (FakeStore, String) {
     })
 }
 
-fn boot(store: &FakeStore, service: &str) -> Harness {
+fn boot(seeded: &Seeded) -> Harness {
     Harness::boot(
-        Scratch::new("sign-out"),
-        service.to_owned(),
-        store.clone(),
+        Rc::clone(&seeded.scratch),
+        seeded.service.clone(),
+        seeded.store.clone(),
         Wall::new(),
     )
 }
 
-/// The store at a fault, before any recovery.
+/// The store and authority at a fault, before any recovery.
 struct Boundary {
     marker: Option<String>,
     names: Vec<String>,
@@ -204,8 +245,16 @@ struct Boundary {
     tokens: Vec<String>,
 }
 
-fn boundary(store: &FakeStore, service: &str, lock: &Path) -> Boundary {
-    let reader = Vault::with_service(store.clone(), service, lock).expect("reader");
+/// Reads `run` as it is; the tokens come from a copy, since opening a vault sweeps.
+fn boundary(run: &Seeded) -> Boundary {
+    let (names, marker) = (run.store.names(), persisted_marker(&run.authority()));
+    let copy = fork(run);
+    let reader = Vault::with_service(
+        copy.store.clone(),
+        &copy.service,
+        &copy.scratch.db().with_file_name("reader.lock"),
+    )
+    .expect("reader");
     let account = reader
         .load_for_sign_out()
         .or_else(|_| reader.load_account())
@@ -228,73 +277,85 @@ fn boundary(store: &FakeStore, service: &str, lock: &Path) -> Boundary {
                 .map(|e| e.refresh_token.to_string()),
         );
     }
-    let state = store.0.lock().expect("fake lock");
-    let prefix = format!("{service}/");
     Boundary {
-        marker: state
-            .values
-            .get(&format!("{prefix}signout"))
-            .map(|bytes| String::from_utf8(bytes.expose().to_vec()).expect("JSON")),
-        names: state
-            .values
-            .keys()
-            .map(|name| name.strip_prefix(&prefix).expect("own service").to_owned())
-            .collect(),
+        marker,
+        names,
         tokens,
     }
 }
 
-/// The names a clean run's first mutations leave on top of `seed`.
-fn replay(seed: &[String], prefix: &str, log: &[Mutation]) -> Vec<String> {
-    let mut names: std::collections::BTreeSet<String> = seed.iter().cloned().collect();
-    for mutation in log {
-        match mutation {
-            Mutation::Set(name) => names.insert(name.strip_prefix(prefix).expect("own").to_owned()),
-            Mutation::Delete(name) => names.remove(name.strip_prefix(prefix).expect("own")),
-        };
-    }
-    names.into_iter().collect()
+/// A generation name without its random id, `chatgpt/0`, so two runs' names compare.
+fn shape(service: &str, name: &str) -> String {
+    let rest = name
+        .strip_prefix(&format!("{service}/gen/"))
+        .expect("a generation name");
+    let mut parts = rest.split('/');
+    let kind = parts.next().expect("a kind");
+    let index = parts.nth(1).expect("an index");
+    format!("{kind}/{index}")
 }
 
-/// A whole sign-out, live Keep or resumed Erase, with `fault` at mutation `at`. The store is captured
-/// at the fault: after the crash, or when the refusal stops the sign-out (or it ends). Then a
-/// crash restarts the brain and a refusal is retried. Whether it crashed comes back too.
+/// The names, by shape, that a clean run's first mutations leave on top of `seed`.
+fn replay(service: &str, seed: &[String], log: &[Mutation]) -> Vec<String> {
+    let mut names: std::collections::BTreeSet<&String> = seed.iter().collect();
+    for mutation in log {
+        match mutation {
+            Mutation::Set(name) => names.insert(name),
+            Mutation::Delete(name) => names.remove(name),
+        };
+    }
+    let mut shapes: Vec<String> = names.into_iter().map(|name| shape(service, name)).collect();
+    shapes.sort();
+    shapes
+}
+
+/// A whole sign-out, live Keep or resumed Erase, with `fault` at mutation `at`, on a copy of
+/// `seeded`. The state is captured at the fault: after the crash, or when the refusal stops the
+/// sign-out (or it ends). Then a crash restarts the brain and a refusal is retried. Whether it
+/// crashed comes back too. With `notes`, each mutation notes the marker it ran under.
 fn faulted(
-    seeded: &(FakeStore, String),
-    lock: &Path,
+    seeded: &Seeded,
     erase: bool,
     at: usize,
     fault: Fault,
+    notes: bool,
 ) -> (Harness, Boundary, bool) {
-    let (store, service) = (seeded.0.fork(), seeded.1.clone());
+    let run = fork(seeded);
+    let arm = || {
+        run.store.arm(at, fault);
+        if notes {
+            run.store.0.lock().expect("fake lock").note_markers =
+                Some((run.authority(), Vec::new()));
+        }
+    };
     let mut first = None;
     let crashed = panic::catch_unwind(AssertUnwindSafe(|| {
         if erase {
-            store.arm(at, fault);
+            arm();
         }
-        let h = first.insert(boot(&store, &service));
+        let h = first.insert(boot(&run));
         if !erase {
-            store.arm(at, fault);
+            arm();
             h.op(AccountOp::SignOut);
         }
         answer(h, true, 0);
     }))
     .is_err();
-    let at_fault = boundary(&store, &service, lock);
+    let at_fault = boundary(&run);
     if let Some(mut h) = first.filter(|_| !crashed) {
         let answered = h.revoking.len();
         finish(&mut h, true, answered);
         return (h, at_fault, false);
     }
-    let mut h = boot(&store, &service);
+    let mut h = boot(&run);
     finish(&mut h, true, 0);
     (h, at_fault, true)
 }
 
-/// OSC-117 and CAPS-138 M2: a crash after, or a refusal of, any one of the store mutations a
-/// whole sign-out makes. At the fault, before recovery, the marker holds the phase and notice its
-/// position allows, a crash leaves exactly the clean run's names so far, and until the checkpoint
-/// the account record is whole and still holds its token. Afterwards the next start or Retry
+/// OSC-117, CAPS-138 M2 and OSC-233: a crash after, or a refusal of, any one of the store
+/// mutations a whole sign-out makes. At the fault, before recovery, the marker is the one that
+/// mutation ran under, a crash leaves exactly the clean run's names so far, and while Revoking the
+/// account record is whole and still holds its token. Afterwards the next start or Retry
 /// finishes: the outcome is decided once, every token name goes, and a restart after the
 /// checkpoint only deletes and finishes.
 #[test]
@@ -303,88 +364,77 @@ fn faulted(
     reason = "one matrix, with its boundary and final assertions side by side"
 )]
 fn a_crash_or_refusal_at_every_mutation_still_ends_signed_out() {
-    let reader = Scratch::new("sign-out-boundary");
-    let lock = reader.db().with_file_name("reader.lock");
     for erase in [false, true] {
         let seeded = store(erase);
-        let prefix = format!("{}/", seeded.1);
-        let seed: Vec<String> = seeded
-            .0
-            .names()
-            .iter()
-            .map(|name| name.strip_prefix(&prefix).expect("own service").to_owned())
-            .collect();
-        let account_names: Vec<&String> =
-            seed.iter().filter(|n| n.starts_with("chatgpt")).collect();
-        assert_eq!(account_names, ["chatgpt", "chatgpt/0/0"]);
-        let (dry, _, _) = faulted(&seeded, &lock, erase, usize::MAX, Fault::Refuse);
-        let mutations = dry.store.0.lock().expect("fake lock").mutations.clone();
-        let (list, marker) = (format!("{prefix}revoke"), format!("{prefix}signout"));
+        let seed = seeded.store.names();
+        let account = format!("{}/gen/chatgpt/", seeded.service);
+        let account_names: Vec<&String> = seed.iter().filter(|n| n.starts_with(&account)).collect();
+        assert_eq!(account_names.len(), 1, "one account chunk");
+        let (dry, _, _) = faulted(&seeded, erase, usize::MAX, Fault::Refuse, true);
+        let (mutations, notes) = {
+            let state = dry.store.0.lock().expect("fake lock");
+            let notes = state.note_markers.as_ref().expect("notes").1.clone();
+            (state.mutations.clone(), notes)
+        };
+        assert_eq!(notes.len(), mutations.len());
+        let list = format!("{}/gen/revoke/", seeded.service);
         let flips: Vec<usize> = (0..mutations.len())
-            .filter(|&at| matches!(&mutations[at], Mutation::Set(name) if *name == list))
+            .filter(|&at| matches!(&mutations[at], Mutation::Set(name) if name.starts_with(&list)))
             .collect();
         // Prepare's adoption, then the checkpoint's rewrite without the confirmed entry.
         assert_eq!(flips.len(), 2, "{mutations:?}");
         let rewrite = flips[0] + 1..=flips[1];
-        let checkpoint = (flips[1]..mutations.len())
-            .find(|&at| matches!(&mutations[at], Mutation::Set(name) if *name == marker))
-            .expect("the checkpoint write");
-        let finished = mutations.len() - 1;
-        assert!(
-            matches!(&mutations[finished], Mutation::Delete(name) if *name == marker),
-            "Finish deletes the marker last"
-        );
-        // Keep's registration save under Delete: a refusal of its old-slot cleanup after the
-        // flip is a commit with leftovers, which Delete's by-name sweep then removes.
-        let cleanup = (!erase).then(|| {
-            let flip = (checkpoint..finished)
-                .find(|&at| matches!(&mutations[at], Mutation::Set(name) if *name == format!("{prefix}chatgpt")))
-                .expect("the registration's flip");
-            assert!(
-                matches!(&mutations[flip + 1], Mutation::Delete(name) if *name == format!("{prefix}chatgpt/0/0")),
-                "{:?}",
-                mutations[flip + 1]
-            );
-            flip + 1
-        });
         let disposition = if erase { "Erase" } else { "Keep" };
-        let revoking = pending(disposition, "Revoking", false, false, true);
-        let deleting = pending(disposition, "Deleting", false, false, false);
+        let revoking = pending(disposition, "Revoking", false, false, true).expect("a marker");
+        let deleting = pending(disposition, "Deleting", false, false, false).expect("a marker");
+        let checkpoint = notes
+            .iter()
+            .position(|note| *note == deleting)
+            .expect("the checkpoint");
+        assert!(
+            checkpoint > flips[1],
+            "the checkpoint follows the list's rewrite"
+        );
+        assert!(
+            notes[..checkpoint].iter().all(|note| *note == revoking)
+                && notes[checkpoint..].iter().all(|note| *note == deleting),
+            "every mutation runs under Revoking, then Deleting: {notes:?}"
+        );
         for at in 0..mutations.len() {
             for fault in [Fault::CrashAfter, Fault::Refuse] {
-                let (h, at_fault, crashed) = faulted(&seeded, &lock, erase, at, fault);
+                let (h, at_fault, crashed) = faulted(&seeded, erase, at, fault, false);
                 let context = format!("erase {erase}, mutation {at}, {fault:?}");
                 assert_eq!(crashed, matches!(fault, Fault::CrashAfter), "{context}");
-                // A refusal in the checkpoint's own list rewrite, or of that cleanup, doesn't stop
-                // the sign-out.
-                let ran_on =
-                    !crashed && ((flips[0] + 1..checkpoint).contains(&at) || cleanup == Some(at));
+                // A refused delete only leaves its names for the next sweep, and a refusal in the
+                // checkpoint's own list rewrite doesn't stop the sign-out.
+                let ran_on = !crashed
+                    && (matches!(mutations[at], Mutation::Delete(_)) || rewrite.contains(&at));
                 // A refused rewrite leaves the confirmed entry listed, so the checkpoint can't
                 // claim confirmation.
                 let notice = ran_on && rewrite.contains(&at);
                 let expected = if ran_on {
                     notice.then(|| NOTICE_ONLY.to_owned())
-                } else if !crashed && !erase && at == 0 {
-                    None
-                } else if at < checkpoint || (!crashed && at == checkpoint) {
-                    revoking.clone()
-                } else if at < finished || !crashed {
-                    deleting.clone()
                 } else {
-                    None
+                    Some(notes[at].clone())
                 };
                 assert_eq!(
                     at_fault.marker, expected,
                     "{context}: the marker at the fault"
                 );
                 if crashed {
+                    let mut names: Vec<String> = at_fault
+                        .names
+                        .iter()
+                        .map(|name| shape(&seeded.service, name))
+                        .collect();
+                    names.sort();
                     assert_eq!(
-                        at_fault.names,
-                        replay(&seed, &prefix, &mutations[..=at]),
+                        names,
+                        replay(&seeded.service, &seed, &mutations[..=at]),
                         "{context}: the names at the crash"
                     );
                 }
-                if !ran_on && at <= checkpoint {
+                if !ran_on && notes[at] == revoking {
                     assert!(
                         account_names
                             .iter()
@@ -402,7 +452,16 @@ fn a_crash_or_refusal_at_every_mutation_still_ends_signed_out() {
                     notice.then(|| NOTICE_ONLY.to_owned()),
                     "{context}"
                 );
-                assert_eq!(names(&h), left(!erase, notice), "{context}");
+                // A refused delete's name waits for the next start's sweep.
+                let lingering = match &mutations[at] {
+                    Mutation::Delete(name) if ran_on => Some(shape(&seeded.service, name)),
+                    _ => None,
+                };
+                let mut expected: Vec<String> =
+                    left(!erase).into_iter().map(str::to_owned).collect();
+                expected.extend(lingering.clone());
+                expected.sort();
+                assert_eq!(names(&h), expected, "{context}");
                 if !erase {
                     assert_eq!(h.account(), Some(registration()), "{context}");
                 }
@@ -413,7 +472,7 @@ fn a_crash_or_refusal_at_every_mutation_still_ends_signed_out() {
                         "{context}: the adopted token is listed once"
                     );
                 }
-                if crashed && at >= checkpoint {
+                if crashed && notes[at] == deleting {
                     assert!(h.revoking.is_empty(), "{context}: Deleting revokes nothing");
                     assert!(
                         h.markers.iter().flatten().all(|m| !m.contains("Revoking")),
@@ -421,6 +480,14 @@ fn a_crash_or_refusal_at_every_mutation_still_ends_signed_out() {
                     );
                 }
                 assert!(h.sent.is_empty(), "{context}");
+                if lingering.is_some() {
+                    let h = h.restart();
+                    assert_eq!(
+                        names(&h),
+                        left(!erase),
+                        "{context}: the next start swept it"
+                    );
+                }
             }
         }
     }
@@ -475,7 +542,7 @@ fn signing_out_revokes_the_account_token_then_keeps_only_the_registration() {
         ]
     );
     assert_eq!(h.account(), Some(registration()));
-    assert_eq!(names(&h), left(true, false));
+    assert_eq!(names(&h), left(true));
     // The kept registration's client serves the next sign-in, with nothing registered anew.
     h.op(AccountOp::SignIn);
     h.callback("client-saved");
@@ -498,7 +565,7 @@ fn an_unconfirmed_revocation_is_decided_once_and_its_notice_outlives_a_restart()
             Some(NOTICE_ONLY.to_owned()),
         ]
     );
-    assert_eq!(names(&h), left(true, true));
+    assert_eq!(names(&h), left(true));
     let h = h.restart();
     assert_eq!(h.views, [signed_out_with(true)]);
 }
@@ -507,8 +574,8 @@ fn an_unconfirmed_revocation_is_decided_once_and_its_notice_outlives_a_restart()
 #[test]
 fn a_resumed_erase_removes_the_whole_account_record() {
     for confirm in [true, false] {
-        let (store, service) = store(true);
-        let mut h = boot(&store, &service);
+        let seeded = store(true);
+        let mut h = boot(&seeded);
         assert_eq!(h.views, [signing_out(Cleanup::Running, true)]);
         finish(&mut h, confirm, 0);
         assert_eq!(h.view(), &signed_out_with(!confirm), "{confirm}");
@@ -521,7 +588,7 @@ fn a_resumed_erase_removes_the_whole_account_record() {
             ],
             "{confirm}"
         );
-        assert_eq!(names(&h), left(false, !confirm), "{confirm}");
+        assert_eq!(names(&h), left(false), "{confirm}");
         assert_eq!(h.account(), None, "{confirm}");
     }
 }
@@ -547,48 +614,47 @@ fn a_crash_between_delete_and_finish_keeps_the_decided_warning() {
         [signing_out(Cleanup::Running, true), signed_out_with(true)]
     );
     assert!(h.revoking.is_empty());
-    assert_eq!(names(&h), left(true, true));
+    assert_eq!(names(&h), left(true));
 }
 
-/// CAPS-130: Delete follows the marker even when a record's manifest is gone, deleting its chunks
-/// by name, up to the last one, for Keep and Erase; Keep retains only a live registration's slot.
+/// OSC-233: Delete and Finish follow the authority alone. Deletes that report success but leave
+/// their names, as Credential Manager's did, never hold the sign-out, and the next start sweeps
+/// them; Keep retains only the registration.
 #[test]
-fn delete_removes_chunks_whose_manifest_is_gone() {
+fn delete_and_finish_never_wait_for_the_store_to_forget() {
     for disposition in [Disposition::Keep, Disposition::Erase] {
-        for gone in ["chatgpt", "revoke", "registration"] {
-            let context = format!("{disposition:?} {gone}");
-            let (store, service) = prepared(|vault, raw| {
-                account_and_listed(vault);
-                vault
-                    .update_marker(MarkerUpdate::Promote(disposition))
-                    .expect("promoted");
-                vault
-                    .update_marker(MarkerUpdate::Checkpoint {
-                        list_empty_on_disk: false,
-                    })
-                    .expect("checkpoint");
-                if gone == "registration" {
-                    // An earlier Delete rewrote the registration into slot 1, then crashed.
-                    if disposition == Disposition::Keep {
-                        committed(&vault.save_account(&Secret::new(registration())));
-                    }
-                    raw("chatgpt/0/63", b"orphaned-token");
-                    raw("chatgpt/1/63", b"orphaned-token");
-                } else {
-                    raw(gone, b"");
-                    raw(&format!("{gone}/1/63"), b"orphaned-token");
-                }
-            });
-            let h = boot(&store, &service);
-            assert_eq!(
-                h.views,
-                [signing_out(Cleanup::Running, true), signed_out_with(true)],
-                "{context}"
-            );
-            let kept = disposition == Disposition::Keep && gone != "chatgpt";
-            assert_eq!(names(&h), left(kept, true), "{context}");
-            assert!(h.revoking.is_empty() && h.sent.is_empty(), "{context}");
-        }
+        let context = format!("{disposition:?}");
+        let seeded = prepared(|vault, _| {
+            account_and_listed(vault);
+            vault
+                .update_marker(MarkerUpdate::Promote(disposition))
+                .expect("promoted");
+            vault
+                .update_marker(MarkerUpdate::Checkpoint {
+                    list_empty_on_disk: false,
+                })
+                .expect("checkpoint");
+        });
+        seeded.store.0.lock().expect("fake lock").sticky_deletes = usize::MAX;
+        let h = boot(&seeded);
+        assert_eq!(
+            h.views,
+            [signing_out(Cleanup::Running, true), signed_out_with(true)],
+            "{context}"
+        );
+        assert!(h.revoking.is_empty() && h.sent.is_empty(), "{context}");
+        assert!(
+            h.holds("revoke"),
+            "{context}: the list's names outlived their delete"
+        );
+        h.store.0.lock().expect("fake lock").sticky_deletes = 0;
+        let h = h.restart();
+        assert_eq!(h.views, [signed_out_with(true)], "{context}");
+        assert_eq!(
+            names(&h),
+            left(disposition == Disposition::Keep),
+            "{context}"
+        );
     }
 }
 
@@ -597,14 +663,14 @@ fn delete_removes_chunks_whose_manifest_is_gone() {
 #[test]
 fn an_unreadable_record_makes_the_sign_out_unconfirmed() {
     for broken in ["revoke", "chatgpt"] {
-        let (store, service) = prepared(|vault, raw| {
+        let seeded = prepared(|vault, damage| {
             account_and_listed(vault);
             vault
                 .update_marker(MarkerUpdate::Promote(Disposition::Keep))
                 .expect("promoted");
-            raw(broken, b"{");
+            damage(broken);
         });
-        let mut h = boot(&store, &service);
+        let mut h = boot(&seeded);
         assert_eq!(
             h.markers,
             [
@@ -625,7 +691,7 @@ fn an_unreadable_record_makes_the_sign_out_unconfirmed() {
         );
         finish(&mut h, true, 0);
         assert_eq!(h.view(), &signed_out_with(true), "{broken}");
-        assert_eq!(names(&h), left(broken == "revoke", true), "{broken}");
+        assert_eq!(names(&h), left(broken == "revoke"), "{broken}");
     }
 }
 
@@ -634,7 +700,7 @@ fn an_unreadable_record_makes_the_sign_out_unconfirmed() {
 fn a_refused_promotion_is_not_durable_until_retry_writes_it() {
     for restart in [true, false] {
         let mut h = Harness::seeded("sign-out-not-durable", account_only);
-        h.store.0.lock().expect("fake lock").refusing = true;
+        h.refuse_commits();
         h.op(AccountOp::SignOut);
         assert_eq!(h.view(), &signing_out(Cleanup::NotDurable, true));
         assert_eq!(
@@ -644,7 +710,7 @@ fn a_refused_promotion_is_not_durable_until_retry_writes_it() {
         assert_eq!(h.marker(), None);
         h.op(AccountOp::SignIn);
         assert!(h.listening.is_empty(), "use stays fenced");
-        h.store.0.lock().expect("fake lock").refusing = false;
+        h.allow_commits();
         if restart {
             let h = h.restart();
             assert_eq!(h.views, [signed_in(PlanState::Enabled, None)]);
@@ -706,8 +772,7 @@ fn a_sign_out_during_a_dispatched_save_fences_at_once_and_revokes_the_saved_set(
         expected.extend([signing_out(Cleanup::Running, false), signed_out()]);
         assert_eq!(h.views[shown..], expected, "{context}");
         assert!(h.errors.is_empty(), "{context}");
-        // The save flipped the account to slot 1, so Keep's registration is back in slot 0.
-        assert_eq!(names(&h), ["chatgpt", "chatgpt/0/0", "host"], "{context}");
+        assert_eq!(names(&h), left(true), "{context}");
         assert_eq!(h.account(), Some(registration()), "{context}");
     }
 }
@@ -743,7 +808,7 @@ fn a_sign_out_during_a_sent_exchange_waits_and_owns_its_outcome() {
         finish(&mut h, true, 0);
         assert_eq!(h.view(), &signed_out_with(ambiguous), "{ambiguous}");
         assert_eq!(h.sent.len(), 1, "no other code is sent");
-        assert_eq!(names(&h), left(true, ambiguous), "{ambiguous}");
+        assert_eq!(names(&h), left(true), "{ambiguous}");
     }
 }
 
@@ -815,7 +880,7 @@ fn a_sign_out_during_a_revocation_pass_waits_for_it() {
     );
     finish(&mut h, true, 1);
     assert_eq!(h.view(), &signed_out());
-    assert_eq!(names(&h), left(true, false));
+    assert_eq!(names(&h), left(true));
 }
 
 /// The held-sweep fixture: a pass's relist dispatched before the promotion runs first, and the
@@ -840,31 +905,34 @@ fn a_sweep_dispatched_before_the_promotion_runs_first() {
     );
     finish(&mut h, true, 1);
     assert_eq!(h.view(), &signed_out());
-    assert_eq!(names(&h), left(true, false));
+    assert_eq!(names(&h), left(true));
 }
 
 /// An unreadable marker fails closed: an Erase sign-out with its uncertainty already set.
 #[test]
 fn an_unreadable_marker_erases_and_warns() {
     let h = Harness::seeded("sign-out-unreadable-marker", account_only);
-    h.store
-        .set(
-            &format!("{}/signout", h.service),
-            &Secret::new(Zeroizing::new(br#"{"v":2}"#.to_vec())),
-        )
-        .expect("unreadable marker");
+    h.plant_marker(r#"{"v":2}"#);
     let mut h = h.restart();
     finish(&mut h, true, 0);
     assert_eq!(h.view(), &signed_out_with(true));
-    assert_eq!(names(&h), left(false, true));
+    assert_eq!(names(&h), left(false));
 }
 
+/// Refuses reads of the current `record`, or of the marker for `signout`, until `allow_reads`.
 fn deny_read(h: &Harness, record: &str) {
-    h.store.0.lock().expect("fake lock").denied_read = Some(format!("{}/{record}", h.service));
+    if record == "signout" {
+        h.hide_marker();
+    } else {
+        h.store.0.lock().expect("fake lock").denied_read = Some(h.current_chunk(record));
+    }
 }
 
 fn allow_reads(h: &Harness) {
     h.store.0.lock().expect("fake lock").denied_read = None;
+    if h.marker().as_deref() == Some(UNREADABLE) {
+        h.restore_marker();
+    }
 }
 
 /// H1 (r2): Prepare's refused read of either record is a refused step, not damaged data. Nothing is
@@ -901,7 +969,7 @@ fn a_refused_read_in_prepare_is_retried_and_loses_no_revocation() {
         );
         finish(&mut h, true, 1);
         assert_eq!(h.view(), &signed_out(), "{record}");
-        assert_eq!(names(&h), left(true, false), "{record}");
+        assert_eq!(names(&h), left(true), "{record}");
     }
 }
 
@@ -920,20 +988,13 @@ fn a_refused_account_read_during_delete_keeps_the_registration() {
     assert_eq!(h.view(), &signing_out(Cleanup::Refused, false));
     assert_eq!(
         names(&h),
-        [
-            "chatgpt",
-            "chatgpt/0/0",
-            "host",
-            "revoke",
-            "revoke/1/0",
-            "signout"
-        ],
+        ["chatgpt/0", "host/0", "revoke/0"],
         "nothing is deleted, the account included"
     );
     allow_reads(&h);
     h.op(AccountOp::Retry);
     assert_eq!(h.view(), &signed_out());
-    assert_eq!(names(&h), left(true, false));
+    assert_eq!(names(&h), left(true));
     assert_eq!(h.account(), Some(registration()));
 }
 
@@ -943,7 +1004,7 @@ fn a_refused_account_read_during_delete_keeps_the_registration() {
 #[test]
 fn a_refused_marker_read_at_startup_waits_for_the_real_marker() {
     for phase in ["absent", "Revoking", "Deleting"] {
-        let (store, service) = prepared(|vault, _| {
+        let seeded = prepared(|vault, _| {
             account_only(vault);
             vault.host_id().expect("host");
             if phase != "absent" {
@@ -959,8 +1020,8 @@ fn a_refused_marker_read_at_startup_waits_for_the_real_marker() {
                     .expect("checkpoint");
             }
         });
-        store.0.lock().expect("fake lock").denied_read = Some(format!("{service}/signout"));
-        let mut h = boot(&store, &service);
+        hide_marker(&seeded.authority());
+        let mut h = boot(&seeded);
         assert_eq!(h.views, [signing_out(Cleanup::Refused, true)], "{phase}");
         let (names_before, marker_before) = (names(&h), h.marker());
         for op in [
@@ -992,13 +1053,13 @@ fn a_refused_marker_read_at_startup_waits_for_the_real_marker() {
                 );
                 finish(&mut h, true, 0);
                 assert_eq!(h.view(), &signed_out());
-                assert_eq!(names(&h), left(true, false));
+                assert_eq!(names(&h), left(true));
             }
             _ => {
                 assert_eq!(h.view(), &signed_out_with(true));
                 assert!(h.revoking.is_empty(), "Deleting sends no revocation");
                 assert!(h.markers.iter().flatten().all(|m| !m.contains("Revoking")));
-                assert_eq!(names(&h), left(true, true));
+                assert_eq!(names(&h), left(true));
             }
         }
     }
@@ -1011,22 +1072,13 @@ fn a_refused_checkpoint_deletes_nothing_before_retry() {
     let mut h = Harness::seeded("sign-out-refused-checkpoint", account_only);
     h.op(AccountOp::SignOut);
     let before = names(&h);
-    assert_eq!(
-        before,
-        [
-            "chatgpt",
-            "chatgpt/0/0",
-            "host",
-            "revoke",
-            "revoke/0/0",
-            "signout"
-        ]
-    );
-    h.store.0.lock().expect("fake lock").refusing = true;
+    assert_eq!(before, ["chatgpt/0", "host/0", "revoke/0"]);
+    h.refuse_commits();
     h.feed(Input::Revoked(h.revoking[0].clone()));
     assert_eq!(h.view(), &signing_out(Cleanup::Refused, true));
     assert_eq!(h.marker(), pending("Keep", "Revoking", false, false, true));
     assert_eq!(names(&h), before, "nothing is deleted");
+    h.allow_commits();
     assert_eq!(
         h.revocations(),
         [(
@@ -1037,12 +1089,11 @@ fn a_refused_checkpoint_deletes_nothing_before_retry() {
         )],
         "the refused rewrite left the entry listed"
     );
-    h.store.0.lock().expect("fake lock").refusing = false;
     h.op(AccountOp::Retry);
     assert_eq!(h.revoking.len(), 2, "Revoke runs again");
     finish(&mut h, true, 1);
     assert_eq!(h.view(), &signed_out());
-    assert_eq!(names(&h), left(true, false));
+    assert_eq!(names(&h), left(true));
 }
 
 /// CAPS-138 M2: a refused Finish leaves the decided notice in a Deleting marker, and a restart
@@ -1058,20 +1109,18 @@ fn a_refused_finish_keeps_the_decided_notice_across_a_restart() {
         h.release();
         h
     };
-    let mut dry = held();
-    dry.store.arm(usize::MAX, Fault::Refuse);
-    dry.release();
-    let finish_write = dry.store.0.lock().expect("fake lock").mutations.len() - 1;
     let mut h = held();
-    h.store.arm(finish_write, Fault::Refuse);
+    // Delete writes no marker, so Finish's is the job's first.
+    h.refuse_marker_writes(0);
     h.release();
     assert_eq!(h.view(), &signing_out(Cleanup::Refused, true));
     assert_eq!(h.marker(), pending("Keep", "Deleting", false, false, true));
     assert_eq!(
         names(&h),
-        ["chatgpt", "chatgpt/1/0", "host", "signout"],
+        left(true),
         "Delete finished; only its marker write was refused"
     );
+    h.allow_marker_writes();
     let h = h.restart();
     assert_eq!(
         h.views,
@@ -1079,7 +1128,7 @@ fn a_refused_finish_keeps_the_decided_notice_across_a_restart() {
     );
     assert!(h.revoking.is_empty());
     assert_eq!(h.marker(), Some(NOTICE_ONLY.to_owned()));
-    assert_eq!(names(&h), left(true, true));
+    assert_eq!(names(&h), left(true));
 }
 
 /// CAPS-130 87-H2: with no revocation list and a damaged account, the uncertainty Prepare persists
@@ -1088,15 +1137,15 @@ fn a_refused_finish_keeps_the_decided_notice_across_a_restart() {
 #[test]
 fn a_damaged_account_with_no_list_still_reaches_delete() {
     for disposition in [Disposition::Keep, Disposition::Erase] {
-        let (store, service) = prepared(|vault, raw| {
+        let seeded = prepared(|vault, damage| {
             account_only(vault);
             vault.host_id().expect("host");
             vault
                 .update_marker(MarkerUpdate::Promote(disposition))
                 .expect("promoted");
-            raw("chatgpt", b"{");
+            damage("chatgpt");
         });
-        let h = boot(&store, &service);
+        let h = boot(&seeded);
         assert_eq!(
             h.views,
             [signing_out(Cleanup::Running, true), signed_out_with(true)],
@@ -1104,7 +1153,7 @@ fn a_damaged_account_with_no_list_still_reaches_delete() {
         );
         assert!(h.revoking.is_empty(), "{disposition:?}: nothing was listed");
         assert_eq!(h.marker(), Some(NOTICE_ONLY.to_owned()), "{disposition:?}");
-        assert_eq!(names(&h), left(false, true), "{disposition:?}");
+        assert_eq!(names(&h), left(false), "{disposition:?}");
     }
 }
 
@@ -1158,12 +1207,17 @@ fn a_sign_in_before_the_final_load_waits_for_the_kept_registration() {
 #[test]
 fn a_load_dispatched_before_the_sign_out_leaves_it_fenced() {
     for refused_marker in [false, true] {
-        let (store, service) = prepared(|vault, _| {
+        let seeded = prepared(|vault, _| {
             account_only(vault);
             vault.host_id().expect("host");
+            committed(&vault.save_revocations(&Secret::new(RevocationList::default())));
         });
-        store.0.lock().expect("fake lock").denied_read = Some(format!("{service}/revoke"));
-        let mut h = boot(&store, &service);
+        seeded.store.0.lock().expect("fake lock").denied_read = Some(current_chunk(
+            &seeded.authority(),
+            &seeded.service,
+            "revoke",
+        ));
+        let mut h = boot(&seeded);
         assert_eq!(
             h.views,
             [signed_in(PlanState::Enabled, None)],
@@ -1202,7 +1256,7 @@ fn a_load_dispatched_before_the_sign_out_leaves_it_fenced() {
             [("refresh-old".to_owned(), Origin::Account)],
             "{refused_marker}: the saved token is revoked"
         );
-        assert_eq!(names(&h), left(true, false), "{refused_marker}");
+        assert_eq!(names(&h), left(true), "{refused_marker}");
     }
 }
 

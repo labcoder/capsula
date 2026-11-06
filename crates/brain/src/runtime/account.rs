@@ -591,6 +591,9 @@ fn spawn<S: CredentialStore + 'static>(
         .name("credentials".to_owned())
         .spawn(move || {
             let mut loaded = Some(loaded);
+            // shortcut: a native credential call that never returns holds every later job and
+            // shutdown's release; order and generations keep removal safe, and only a worker
+            // that can abandon a call would bound the wait.
             for job in queued {
                 let job = match job {
                     Work::Account(job) => job,

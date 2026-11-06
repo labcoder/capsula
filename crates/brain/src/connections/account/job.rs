@@ -286,7 +286,7 @@ impl<S: CredentialStore> Worker<S> {
                     }
                 };
                 let result = vault.save_revocations(&Secret::new(list.clone()));
-                if finish && matches!(result, SaveResult::Committed { .. }) {
+                if finish && matches!(result, SaveResult::Committed) {
                     finish_request(vault);
                 }
                 Done::Listed {
@@ -407,7 +407,7 @@ fn rotate<S: CredentialStore>(
     finish: bool,
 ) -> SaveResult {
     let result = vault.save_account(account);
-    if finish && matches!(result, SaveResult::Committed { .. }) {
+    if finish && matches!(result, SaveResult::Committed) {
         finish_request(vault);
     }
     result
@@ -432,7 +432,7 @@ fn commit<S: CredentialStore>(
     };
     let result = vault.save_account(account);
     let mut notice_cleared = false;
-    if matches!(result, SaveResult::Committed { .. }) {
+    if matches!(result, SaveResult::Committed) {
         finish_request(vault);
         match vault.update_marker(MarkerUpdate::SignInCommitted) {
             Ok(_) => notice_cleared = true,
@@ -500,7 +500,7 @@ fn own_replaced<S: CredentialStore>(
                 entries: entries.clone(),
             });
             match vault.save_revocations(&list) {
-                SaveResult::Committed { .. } => {
+                SaveResult::Committed => {
                     return Ok(Some(entries.into_iter().map(Secret::new).collect()));
                 }
                 // Refused before anything was written, and every retry would be.
@@ -571,7 +571,7 @@ fn prepare<S: CredentialStore>(
             match vault.save_revocations(&Secret::new(RevocationList {
                 entries: entries.clone(),
             })) {
-                SaveResult::Committed { .. } => {}
+                SaveResult::Committed => {}
                 SaveResult::NotCommitted(VaultError::Bounds) => {
                     vault.update_marker(MarkerUpdate::UnknownOutcome)?;
                 }

@@ -1,13 +1,24 @@
 use super::*;
 use crate::connections::anthropic::{KeyError, KeyOp};
-use kumochi_protocol::constants::{ANTHROPIC_KEY_ACCOUNT, ANTHROPIC_STAGING_ACCOUNT};
+use kumochi_protocol::constants::{anthropic_key_target, anthropic_staging_target};
 use kumochi_protocol::message::KeyRejection;
 
 const KEY: &str = "sk-ant-api-fake-sentinel-never-real";
 
+fn bytes(value: &[u8]) -> SecretBytes {
+    Secret::new(Zeroizing::new(value.to_vec()))
+}
+
+fn loaded(vault: &mut Vault<FakeStore>) -> Option<String> {
+    vault
+        .anthropic(KeyOp::Load)
+        .expect("key read")
+        .map(|key| key.expose().as_str().to_owned())
+}
+
 #[test]
-fn adoption_uses_keyring_names_and_cleans_staging_on_all_outcomes() {
-    for (label, bytes, expected) in [
+fn the_current_key_loads_and_each_bad_key_is_rejected_exactly() {
+    for (label, value, expected) in [
         ("valid", KEY.as_bytes(), None),
         (
             "subscription",
@@ -22,170 +33,129 @@ fn adoption_uses_keyring_names_and_cleans_staging_on_all_outcomes() {
         ("utf8", b"\xff".as_slice(), Some(KeyRejection::Format)),
     ] {
         let (_scratch, path, service, store) = setup(label);
-        let staged = format!("{ANTHROPIC_STAGING_ACCOUNT}.{service}");
-        let active = format!("{ANTHROPIC_KEY_ACCOUNT}.{service}");
-        store
-            .set(&staged, &Secret::new(Zeroizing::new(bytes.to_vec())))
-            .expect("stage fake");
         let mut vault = open(&store, &service, &path);
+        vault.save_anthropic_key(value).expect("current key");
         let result = vault.anthropic(KeyOp::Load);
         match expected {
-            None => assert_eq!(
-                result.expect("adopted").expect("key").expose().as_str(),
-                KEY
-            ),
+            None => assert_eq!(result.expect("loaded").expect("key").expose().as_str(), KEY),
             Some(expected) => assert!(
                 matches!(result, Err(KeyError::Rejected(reason)) if reason == expected),
                 "exact rejection"
             ),
         }
-        assert_eq!(store.get(&staged).expect("read fake"), None);
-        assert_eq!(
-            store.names(),
-            if expected.is_none() {
-                vec![active]
-            } else {
-                vec![]
-            }
+        assert!(
+            is_current(&vault, Kind::AnthropicKey),
+            "a load never removes"
         );
     }
 }
 
+/// PR 2 reads no legacy name, and adopting a staged paste waits for C7.
 #[test]
-fn missing_or_unreadable_staging_is_cleaned_and_never_adopted() {
-    let (_scratch, path, service, store) = setup("staging-read");
-    let staged = format!("{ANTHROPIC_STAGING_ACCOUNT}.{service}");
+fn legacy_names_are_never_read_and_a_staged_paste_is_refused_untouched() {
+    let (_scratch, path, service, store) = setup("key-legacy");
+    let active = anthropic_key_target(&service);
+    let staged = anthropic_staging_target(&service);
+    store
+        .set(&active, &bytes(KEY.as_bytes()))
+        .expect("legacy key");
+    store
+        .set(&staged, &bytes(KEY.as_bytes()))
+        .expect("legacy paste");
     let mut vault = open(&store, &service, &path);
     assert_eq!(
+        loaded(&mut vault),
+        None,
+        "a legacy name is not the current key"
+    );
+    assert!(
+        matches!(
+            vault.anthropic(KeyOp::Adopt),
+            Err(KeyError::Vault(VaultError::Fenced))
+        ),
+        "adoption is refused"
+    );
+    let mut expected = vec![active, staged];
+    expected.sort();
+    assert_eq!(
+        store.names(),
+        expected,
+        "both legacy names are left as they were"
+    );
+    assert!(!is_current(&vault, Kind::AnthropicKey));
+}
+
+#[test]
+fn removal_commits_its_fence_even_while_every_delete_is_refused() {
+    let (_scratch, path, service, store) = setup("key-remove-refused");
+    let mut vault = open(&store, &service, &path);
+    vault
+        .save_anthropic_key(KEY.as_bytes())
+        .expect("current key");
+    let names = store.names();
+    store.0.lock().expect("fake lock").refusing = true;
+    assert_eq!(
         vault
-            .anthropic(KeyOp::Adopt)
-            .expect("missing paste loads saved state")
+            .anthropic(KeyOp::Remove)
+            .expect("the fence commits")
             .map(|_| ()),
         None
     );
-    store
-        .set(
-            &staged,
-            &Secret::new(Zeroizing::new(KEY.as_bytes().to_vec())),
-        )
-        .expect("fake paste");
-    store.0.lock().expect("fake lock").denied_read = Some(staged.clone());
-    assert!(
-        matches!(vault.anthropic(KeyOp::Adopt), Err(KeyError::Vault(_))),
-        "failed read not adopted"
-    );
-    store.0.lock().expect("fake lock").denied_read = None;
-    assert_eq!(store.get(&staged).expect("fake read"), None);
-    assert_eq!(store.names(), Vec::<String>::new());
-}
-
-#[test]
-fn adoption_retries_read_misses_then_falls_back_to_the_saved_key() {
-    for (misses, expected) in [(1, KEY), (3, KEY), (4, "sk-ant-api-old-fake-value")] {
-        let (_scratch, path, service, store) = setup("staging-miss");
-        let staged = format!("{ANTHROPIC_STAGING_ACCOUNT}.{service}");
-        let active = format!("{ANTHROPIC_KEY_ACCOUNT}.{service}");
-        store
-            .set(
-                &active,
-                &Secret::new(Zeroizing::new(b"sk-ant-api-old-fake-value".to_vec())),
-            )
-            .expect("old fake");
-        store
-            .set(
-                &staged,
-                &Secret::new(Zeroizing::new(KEY.as_bytes().to_vec())),
-            )
-            .expect("stage fake");
-        let mut vault = open(&store, &service, &path);
-        store.0.lock().expect("fake lock").missed_reads = misses;
-        let adopted = vault
-            .anthropic(KeyOp::Adopt)
-            .expect("adopt or load saved state")
-            .expect("saved key");
-        assert_eq!(adopted.expose().as_str(), expected);
-        assert_eq!(store.get(&staged).expect("stage deleted"), None);
-        assert_eq!(
-            store
-                .get(&active)
-                .expect("active key")
-                .expect("saved")
-                .expose()
-                .as_slice(),
-            expected.as_bytes()
-        );
-    }
-}
-
-#[test]
-fn adoption_failures_preserve_the_old_key_and_report_cleanup_failure() {
-    let (_scratch, path, service, store) = setup("staging-write");
-    let staged = format!("{ANTHROPIC_STAGING_ACCOUNT}.{service}");
-    let active = format!("{ANTHROPIC_KEY_ACCOUNT}.{service}");
-    let old = Secret::new(Zeroizing::new(b"sk-ant-api-old-fake-value".to_vec()));
-    store.set(&active, &old).expect("old fake");
-    store
-        .set(
-            &staged,
-            &Secret::new(Zeroizing::new(KEY.as_bytes().to_vec())),
-        )
-        .expect("fake paste");
-    let mut vault = open(&store, &service, &path);
-    store.arm(0, Fault::Refuse);
-    assert!(
-        matches!(vault.anthropic(KeyOp::Adopt), Err(KeyError::Vault(_))),
-        "write refused"
-    );
-    assert_eq!(store.get(&active).expect("old fake"), Some(old));
-    assert_eq!(store.get(&staged).expect("staging gone"), None);
-    store
-        .set(
-            &staged,
-            &Secret::new(Zeroizing::new(KEY.as_bytes().to_vec())),
-        )
-        .expect("fake paste");
-    store.arm(1, Fault::Refuse);
-    assert!(
-        matches!(vault.anthropic(KeyOp::Adopt), Err(KeyError::Vault(_))),
-        "cleanup refusal is not success"
-    );
+    assert_eq!(store.names(), names, "every delete was refused");
     assert_eq!(
-        store.get(&staged).expect("staged retained"),
-        Some(Secret::new(Zeroizing::new(KEY.as_bytes().to_vec())))
+        loaded(&mut vault),
+        None,
+        "the removed key is never read again"
     );
+    store.0.lock().expect("fake lock").refusing = false;
+    drop(vault);
+    let mut vault = open(&store, &service, &path);
+    assert!(store.names().is_empty(), "the next open swept the names");
+    assert_eq!(loaded(&mut vault), None);
+}
+
+/// A failure stays failed: a refused removal commit keeps the key, and only a retry removes it.
+#[test]
+fn a_refused_removal_commit_keeps_the_key_until_a_retry_commits() {
+    let (_scratch, path, service, store) = setup("key-remove-commit");
+    let mut vault = open(&store, &service, &path);
+    vault
+        .save_anthropic_key(KEY.as_bytes())
+        .expect("current key");
+    refuse_commits(&path);
+    assert!(
+        matches!(
+            vault.anthropic(KeyOp::Remove),
+            Err(KeyError::Vault(VaultError::Authority))
+        ),
+        "a refused commit is not a removal"
+    );
+    allow_commits(&path);
+    assert_eq!(loaded(&mut vault).as_deref(), Some(KEY));
+    assert_eq!(
+        vault.anthropic(KeyOp::Remove).expect("retry").map(|_| ()),
+        None
+    );
+    assert_eq!(loaded(&mut vault), None);
+    assert!(store.names().is_empty(), "the retry swept the names");
 }
 
 #[test]
-fn removal_attempts_both_names_and_never_claims_partial_success() {
-    for failing in [0, 1] {
-        let (_scratch, path, service, store) = setup("key-remove");
-        let staged = format!("{ANTHROPIC_STAGING_ACCOUNT}.{service}");
-        let active = format!("{ANTHROPIC_KEY_ACCOUNT}.{service}");
-        for target in [&active, &staged] {
-            store
-                .set(
-                    target,
-                    &Secret::new(Zeroizing::new(KEY.as_bytes().to_vec())),
-                )
-                .expect("fake key");
-        }
-        let mut vault = open(&store, &service, &path);
-        store.arm(failing, Fault::Refuse);
-        assert!(
-            matches!(vault.anthropic(KeyOp::Remove), Err(KeyError::Vault(_))),
-            "partial delete refused"
-        );
-        assert_eq!(
-            store.names(),
-            vec![if failing == 0 { active } else { staged }]
-        );
-        assert_eq!(
-            vault
-                .anthropic(KeyOp::Remove)
-                .expect("retry deletes")
-                .map(|_| ()),
-            None
-        );
-        assert_eq!(store.names(), Vec::<String>::new());
-    }
+fn a_missed_read_of_the_current_key_is_unsettled_never_missing() {
+    let (_scratch, path, service, store) = setup("key-missed");
+    let mut vault = open(&store, &service, &path);
+    vault
+        .save_anthropic_key(KEY.as_bytes())
+        .expect("current key");
+    store.0.lock().expect("fake lock").missed_reads = 1;
+    assert!(
+        matches!(
+            vault.anthropic(KeyOp::Load),
+            Err(KeyError::Vault(VaultError::Store(
+                CredentialStoreError::Unsettled
+            )))
+        ),
+        "a miss is an error, not a missing key"
+    );
+    assert_eq!(loaded(&mut vault).as_deref(), Some(KEY));
 }

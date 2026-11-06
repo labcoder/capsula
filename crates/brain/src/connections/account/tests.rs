@@ -2,6 +2,7 @@
 //! synchronously, so every durable write's marker is observed, and faults land on exact
 //! mutations. Exchange results are fed in as data: nothing touches a network.
 
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -12,14 +13,17 @@ use kumochi_protocol::message::{AccountRecovery, Action, Cleanup, ErrorKey, User
 use zeroize::Zeroizing;
 
 use super::*;
+use crate::connections::authority;
 use crate::connections::clock::{Clock, FixedClock};
 use crate::connections::error::VaultError;
+use crate::connections::marker::{Disposition, MarkerUpdate};
 use crate::connections::records::{
     MAX_ENTRY_BYTES, MAX_REFRESH_BYTES, MAX_TOKEN_BYTES, Origin, Revocable,
 };
 use crate::connections::vault::fake::{FakeStore, Fault, Mutation};
 use crate::connections::vault::{SaveResult, Vault};
 use crate::platform::SessionLock;
+use crate::platform::credential::CredentialStore as _;
 use crate::test_support::{Captured, Scratch};
 
 mod lane;
@@ -31,6 +35,98 @@ mod sweep;
 const NOW: u64 = 1_800_000_000;
 const EMAIL: &str = "person@example.invalid";
 const PLAN: &str = "openid offline_access chatgpt.tokens.use.direct";
+const UNREADABLE: &str = "unreadable";
+const EMPTY_MARKER: &str = r#"{"v":1,"sign_out":null,"sweep":false,"request_pending":false,"outcome_unknown":false,"notice":false}"#;
+/// Every table and statement an authority commit writes through.
+const REFUSED: [(&str, &str); 4] = [
+    ("heads", "UPDATE"),
+    ("control", "UPDATE"),
+    ("generations", "UPDATE"),
+    ("generations", "INSERT"),
+];
+
+/// The authority at `path` refuses these writes at once, as a failing disk would.
+fn refuse(path: &std::path::Path, writes: &[(&str, &str)]) {
+    let conn = rusqlite::Connection::open(path).expect("raw authority connection");
+    for (index, (table, operation)) in writes.iter().enumerate() {
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER refuse_{index} BEFORE {operation} ON {table} \
+             BEGIN SELECT RAISE(ABORT, 'refused'); END;"
+        ))
+        .expect("refusal trigger");
+    }
+}
+
+fn allow(path: &std::path::Path, writes: &[(&str, &str)]) {
+    let conn = rusqlite::Connection::open(path).expect("raw authority connection");
+    for index in 0..writes.len() {
+        conn.execute_batch(&format!("DROP TRIGGER refuse_{index};"))
+            .expect("drop refusal trigger");
+    }
+}
+
+/// The marker's exact JSON in the authority at `path`; the empty marker, or no authority yet,
+/// reads as none, as it did when an empty marker was deleted. A marker that can't be read is
+/// [`UNREADABLE`].
+fn persisted_marker(path: &std::path::Path) -> Option<String> {
+    if !path.exists() {
+        return None;
+    }
+    let json = rusqlite::Connection::open(path)
+        .and_then(|conn| {
+            conn.query_row("SELECT marker FROM control WHERE id = 1", [], |row| {
+                row.get::<_, String>(0)
+            })
+        })
+        .unwrap_or_else(|_| UNREADABLE.to_owned());
+    (json != EMPTY_MARKER).then_some(json)
+}
+
+fn hide_marker(path: &std::path::Path) {
+    rusqlite::Connection::open(path)
+        .expect("raw authority connection")
+        .execute_batch("ALTER TABLE control RENAME COLUMN marker TO marker_hidden;")
+        .expect("hide the marker");
+}
+
+/// The name of the current generation's first chunk of `record`, in the authority at `path`.
+fn current_chunk(path: &std::path::Path, service: &str, record: &str) -> String {
+    let generation: String = rusqlite::Connection::open(path)
+        .expect("raw authority connection")
+        .query_row(
+            "SELECT lower(hex(generation)) FROM generations WHERE kind = ?1 AND state = 'active'",
+            [record],
+            |row| row.get(0),
+        )
+        .expect("a current generation");
+    format!("{service}/gen/{record}/{generation}/0")
+}
+
+/// From the `nth` marker write on, counting from 0, every marker write is refused until
+/// allowed, whether alone or in a record's commit. Opening the authority writes no marker.
+fn refuse_marker_writes(path: &std::path::Path, nth: usize) {
+    rusqlite::Connection::open(path)
+        .expect("raw authority connection")
+        .execute_batch(&format!(
+            "CREATE TABLE refused_after (n INTEGER NOT NULL);
+             INSERT INTO refused_after VALUES ({nth});
+             CREATE TRIGGER refuse_marker BEFORE UPDATE OF marker ON control
+             WHEN (SELECT n FROM refused_after) = 0
+             BEGIN SELECT RAISE(ABORT, 'refused'); END;
+             CREATE TRIGGER count_marker AFTER UPDATE OF marker ON control
+             BEGIN UPDATE refused_after SET n = n - 1; END;"
+        ))
+        .expect("marker refusal");
+}
+
+fn allow_marker_writes(path: &std::path::Path) {
+    rusqlite::Connection::open(path)
+        .expect("raw authority connection")
+        .execute_batch(
+            "DROP TRIGGER refuse_marker; DROP TRIGGER count_marker; DROP TABLE refused_after;",
+        )
+        .expect("drop marker refusal");
+}
 
 /// The marker's exact JSON with no sign-out pending and the named flags set.
 #[expect(
@@ -154,10 +250,7 @@ impl Clock for Wall {
 }
 
 fn committed(result: &SaveResult) {
-    assert!(
-        matches!(result, SaveResult::Committed { leftovers: false }),
-        "{result:?}"
-    );
+    assert!(matches!(result, SaveResult::Committed), "{result:?}");
 }
 
 /// The machine, the vault worker it drives, and everything it told the runtime.
@@ -166,7 +259,7 @@ struct Harness {
     worker: Worker<FakeStore>,
     store: FakeStore,
     service: String,
-    scratch: Scratch,
+    scratch: Rc<Scratch>,
     wall: Wall,
     views: Vec<AccountView>,
     errors: Vec<UserError>,
@@ -203,10 +296,10 @@ impl Harness {
         let store = FakeStore::default();
         let seeding = scratch.db().with_file_name("seed.lock");
         seed(&mut Vault::with_service(store.clone(), &service, &seeding).expect("seed vault"));
-        Self::boot(scratch, service, store, Wall::new())
+        Self::boot(Rc::new(scratch), service, store, Wall::new())
     }
 
-    fn boot(scratch: Scratch, service: String, store: FakeStore, wall: Wall) -> Self {
+    fn boot(scratch: Rc<Scratch>, service: String, store: FakeStore, wall: Wall) -> Self {
         let lock = scratch.db().with_file_name(SESSION_LOCK);
         let (opener, name) = (store.clone(), service.clone());
         let worker = Worker::new(
@@ -345,10 +438,74 @@ impl Harness {
         self.run(job);
     }
 
+    /// The authority's file, as another process would see it.
+    fn authority(&self) -> rusqlite::Connection {
+        rusqlite::Connection::open(self.authority_path()).expect("raw authority connection")
+    }
+
+    /// The persisted marker's exact JSON; the empty marker, or no authority yet, reads as none,
+    /// as it did when an empty marker was deleted.
     fn marker(&self) -> Option<String> {
-        let state = self.store.0.lock().expect("fake lock");
-        let bytes = state.values.get(&format!("{}/signout", self.service))?;
-        Some(String::from_utf8(bytes.expose().to_vec()).expect("JSON"))
+        persisted_marker(&self.authority_path())
+    }
+
+    /// Writes this exact marker JSON, as a damaged or older file would hold it.
+    fn plant_marker(&self, json: &str) {
+        self.authority()
+            .execute("UPDATE control SET marker = ?1 WHERE id = 1", [json])
+            .expect("planted marker");
+    }
+
+    /// Every authority commit fails at once, as a failing disk would, until allowed.
+    fn refuse_commits(&self) {
+        refuse(&self.authority_path(), &REFUSED);
+    }
+
+    fn allow_commits(&self) {
+        allow(&self.authority_path(), &REFUSED);
+    }
+
+    fn refuse_marker_writes(&self, nth: usize) {
+        refuse_marker_writes(&self.authority_path(), nth);
+    }
+
+    fn allow_marker_writes(&self) {
+        allow_marker_writes(&self.authority_path());
+    }
+
+    /// The name of the current generation's first chunk of `record`.
+    fn current_chunk(&self, record: &str) -> String {
+        current_chunk(&self.authority_path(), &self.service, record)
+    }
+
+    /// Every marker read and write fails, as a database that can't be read would, until
+    /// restored; opening still works.
+    fn hide_marker(&self) {
+        hide_marker(&self.authority_path());
+    }
+
+    fn restore_marker(&self) {
+        self.authority()
+            .execute_batch("ALTER TABLE control RENAME COLUMN marker_hidden TO marker;")
+            .expect("restore the marker");
+    }
+
+    /// Whether any generation of `record` still has a name in the store.
+    fn holds(&self, record: &str) -> bool {
+        let prefix = self.generations(record);
+        self.store
+            .names()
+            .iter()
+            .any(|name| name.starts_with(&prefix))
+    }
+
+    fn authority_path(&self) -> std::path::PathBuf {
+        self.scratch.db().with_file_name(authority::FILE)
+    }
+
+    /// The exact name prefix of every generation of one record.
+    fn generations(&self, record: &str) -> String {
+        format!("{}/gen/{record}/", self.service)
     }
 
     fn callback(&mut self, client: &str) {
@@ -974,67 +1131,67 @@ fn a_replacement_saves_its_own_registration_after_a_replaced_one_lands() {
 #[test]
 fn the_notice_is_reported_cleared_only_when_its_marker_write_lands() {
     const NOTICE: &str = r#"{"v":1,"sign_out":null,"sweep":false,"request_pending":false,"outcome_unknown":false,"notice":true}"#;
-    let commit = |refuse_last: bool| {
-        let scratch = Scratch::new("account-notice");
-        let service = format!("test-account-{:016x}", getrandom::u64().expect("random"));
-        let store = FakeStore::default();
-        store.0.lock().expect("fake lock").values.insert(
-            format!("{service}/signout"),
-            Secret::new(Zeroizing::new(NOTICE.as_bytes().to_vec())),
-        );
-        let worker = |store: FakeStore, lock: std::path::PathBuf| {
-            let name = service.clone();
-            let mut worker = Worker::new(
-                Box::new(move || Vault::with_service(store.clone(), &name, &lock)),
-                Arc::new(FixedClock(NOW)),
-            );
-            assert!(matches!(
-                worker.run(Job::Load { patient: false }),
-                Done::Loaded(Ok(_))
-            ));
-            worker
-        };
-        let account = saved_account("subject-1", "refresh-new");
-        let dry = store.fork();
-        let mut rehearsal = worker(dry.clone(), scratch.db().with_file_name("dry.lock"));
-        dry.arm(usize::MAX, Fault::Refuse);
-        rehearsal.run(Job::Commit(account.clone()));
-        let last = dry.0.lock().expect("fake lock").mutations.len() - 1;
-        let mut real = worker(store.clone(), scratch.db().with_file_name(SESSION_LOCK));
-        store.arm(if refuse_last { last } else { usize::MAX }, Fault::Refuse);
+    let commit = |refuse_marker: bool| {
+        let h = Harness::seeded("account-notice", |vault| {
+            vault
+                .update_marker(MarkerUpdate::Promote(Disposition::Erase))
+                .expect("promote");
+            vault
+                .update_marker(MarkerUpdate::Checkpoint {
+                    list_empty_on_disk: false,
+                })
+                .expect("checkpoint");
+            vault
+                .update_marker(MarkerUpdate::FinishSignOut)
+                .expect("notice-only state");
+        });
+        assert_eq!(h.marker().as_deref(), Some(NOTICE));
+        let path = h.authority_path();
+        let Harness { mut worker, .. } = h;
+        if refuse_marker {
+            refuse_marker_writes(&path, 0);
+        }
         let Done::Committed {
             result,
             notice_cleared,
             ..
-        } = real.run(Job::Commit(account))
+        } = worker.run(Job::Commit(saved_account("subject-1", "refresh-new")))
         else {
             panic!("a commit answers with Committed");
         };
         committed(&result);
-        let state = store.0.lock().expect("fake lock");
-        let marker = state
-            .values
-            .get(&format!("{service}/signout"))
-            .map(|bytes| String::from_utf8(bytes.expose().to_vec()).expect("JSON"));
+        let marker: String = rusqlite::Connection::open(&path)
+            .expect("raw authority")
+            .query_row("SELECT marker FROM control WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("marker row");
         (notice_cleared, marker)
     };
-    assert_eq!(commit(false), (true, None));
-    assert_eq!(commit(true), (false, Some(NOTICE.to_owned())));
+    assert_eq!(commit(false), (true, EMPTY_MARKER.to_owned()));
+    assert_eq!(commit(true), (false, NOTICE.to_owned()));
 }
 
 #[test]
 fn an_unreadable_host_refuses_sign_in_without_replacing_it() {
     let h = Harness::seeded("account-host", |vault| {
+        vault.host_id().expect("host");
         committed(&vault.save_account(&saved_account("subject-1", "refresh-old")));
     });
-    let host = format!("{}/host", h.service);
-    let damaged = Secret::new(Zeroizing::new(b"\"not-a-host\"".to_vec()));
-    h.store
-        .0
-        .lock()
-        .expect("fake lock")
-        .values
-        .insert(host.clone(), damaged.clone());
+    let host = h.generations("host");
+    let names: Vec<_> = h
+        .store
+        .names()
+        .into_iter()
+        .filter(|name| name.starts_with(&host))
+        .collect();
+    assert_eq!(names.len(), 1, "one host chunk");
+    let damaged = Secret::new(Zeroizing::new(
+        format!("\"{}\"", "x".repeat(45)).into_bytes(),
+    ));
+    let mut planted = h.store.snapshot();
+    planted.insert(names[0].clone(), damaged.clone());
+    h.store.rollback(&planted, &names);
     let mut h = h.restart();
     assert_eq!(
         h.view(),
@@ -1051,9 +1208,18 @@ fn an_unreadable_host_refuses_sign_in_without_replacing_it() {
         )]
     );
     h.op(AccountOp::Retry);
-    let state = h.store.0.lock().expect("fake lock");
+    let hosts: Vec<_> = h
+        .store
+        .names()
+        .into_iter()
+        .filter(|name| name.starts_with(&host))
+        .collect();
+    assert_eq!(hosts, names, "no new host was made");
     assert_eq!(
-        state.values.get(&host).map(|v| v.expose().to_vec()),
+        h.store
+            .get(&names[0])
+            .expect("fake read")
+            .map(|v| v.expose().to_vec()),
         Some(damaged.expose().to_vec())
     );
 }
@@ -1063,10 +1229,7 @@ fn a_pending_sign_out_fences_the_account_and_starts_nothing() {
     let h = Harness::seeded("account-fenced", |vault| {
         committed(&vault.save_account(&saved_account("subject-1", "refresh-old")));
     });
-    h.store.0.lock().expect("fake lock").values.insert(
-        format!("{}/signout", h.service),
-        Secret::new(Zeroizing::new(br#"{"v":2}"#.to_vec())),
-    );
+    h.plant_marker(r#"{"v":2}"#);
     let mut h = h.restart();
     let fenced = AccountView::SigningOut {
         cleanup: Cleanup::Running,
@@ -1124,7 +1287,7 @@ fn a_lasting_busy_lock_is_retried_on_each_op() {
     let lock = scratch.db().with_file_name(SESSION_LOCK);
     let held = SessionLock::try_acquire(&lock).expect("lock");
     let mut h = Harness::boot(
-        scratch,
+        Rc::new(scratch),
         "test-account-busy".to_owned(),
         FakeStore::default(),
         Wall::new(),
