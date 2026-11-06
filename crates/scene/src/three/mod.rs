@@ -6,6 +6,7 @@ pub mod mesh;
 pub mod pick;
 pub mod raster;
 pub mod size;
+pub mod view;
 
 use crate::geom::Vec3;
 
@@ -70,6 +71,14 @@ impl Transform {
             row[3] += outer[3];
         }
         Self(result)
+    }
+
+    /// Transforms a point in f64 without narrowing, as the frame stage does: the value
+    /// [`Self::point`] narrows, bit for bit.
+    #[must_use]
+    pub fn apply(&self, point: [f64; 3]) -> [f64; 3] {
+        self.0
+            .map(|row| row[0] * point[0] + row[1] * point[1] + row[2] * point[2] + row[3])
     }
 
     /// Transforms a point and checks that narrowing to world-space f32 remains finite.

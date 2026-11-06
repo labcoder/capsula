@@ -10,6 +10,7 @@
 mod allocation;
 
 mod accounts;
+mod claude_accounts;
 mod confirmation;
 mod credential;
 mod drawing;

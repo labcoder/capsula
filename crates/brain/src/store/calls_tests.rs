@@ -1,10 +1,11 @@
 //! The ledger's one write: atomic with the call's own write, live threads only, and purged.
 
-use kumochi_protocol::message::{Deleted, RunId, ThreadId};
-use rusqlite::{Connection, params};
+use kumochi_protocol::message::{Deleted, RunId, ThreadId, ThreadTitle};
+use rusqlite::{Connection, OptionalExtension as _, params};
 
 use super::{Store, StoreError};
 use crate::dispatch::{CommitCall, Committed, LedgerKey, LocalWrite, Route, ToolError, ToolOutput};
+use crate::store::RunEnd;
 use crate::test_support::Scratch;
 
 fn opened(scratch: &Scratch) -> Store {
@@ -222,4 +223,126 @@ fn a_focus_commits_only_while_its_target_is_live() {
         )]
     );
     assert_eq!(title(&store.conn, thread), "Before");
+}
+
+fn creating(thread: ThreadId, run: RunId, call: &str, task: ThreadId) -> CommitCall {
+    let mut create = renaming(thread, run, call);
+    create.write = LocalWrite::CreateTask {
+        thread: task,
+        title: ThreadTitle::new("Trip plan").expect("valid"),
+        focus: false,
+    };
+    create
+}
+
+/// `id`'s title, title source, kind and state, if it has a row.
+fn task_row(conn: &Connection, id: ThreadId) -> Option<(String, String, String, String)> {
+    conn.query_row(
+        "SELECT title, title_source, kind, state FROM threads WHERE id = ?1",
+        params![i64::try_from(id.0).expect("small")],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )
+    .optional()
+    .expect("read")
+}
+
+fn reopened(scratch: &Scratch) -> (Store, ThreadId) {
+    let store = opened(scratch);
+    let (high, _) = store.high_water().expect("high water");
+    (store, high)
+}
+
+#[test]
+fn a_created_task_commits_with_its_row_and_a_repeated_key_burns_its_fresh_id() {
+    let scratch = Scratch::new("calls-create");
+    let mut store = opened(&scratch);
+    let (thread, run) = task(&mut store);
+    let first = ThreadId(thread.0 + 1);
+    assert_eq!(
+        store
+            .commit_call(&creating(thread, run, "c1", first))
+            .expect("recorded"),
+        Committed::Done
+    );
+    let row = |title: &str| {
+        Some((
+            title.to_owned(),
+            "model".to_owned(),
+            "thread".to_owned(),
+            "live".to_owned(),
+        ))
+    };
+    assert_eq!(task_row(&store.conn, first), row("Trip plan"));
+    let fresh = ThreadId(first.0 + 1);
+    let error = store
+        .commit_call(&creating(thread, run, "c1", fresh))
+        .expect_err("the key is recorded already");
+    assert!(matches!(error, StoreError::Call), "{error:?}");
+    assert_eq!(task_row(&store.conn, fresh), None);
+    assert_eq!(rows(&store.conn).len(), 1);
+    drop(store);
+    let (store, high) = reopened(&scratch);
+    assert_eq!(high, fresh, "the second reservation stays burned");
+    assert_eq!(task_row(&store.conn, first), row("Trip plan"));
+}
+
+#[test]
+fn a_reservation_whose_task_never_commits_stays_issued() {
+    let scratch = Scratch::new("calls-reserve");
+    let mut store = opened(&scratch);
+    let (thread, run) = task(&mut store);
+    let error = store
+        .commit_call(&creating(thread, run, "c0", thread))
+        .expect_err("not above the high-water");
+    assert!(matches!(error, StoreError::StaleId), "{error:?}");
+    store.begin_delete(thread).expect("hidden");
+    let reserved = ThreadId(thread.0 + 1);
+    assert_eq!(
+        store
+            .commit_call(&creating(thread, run, "c1", reserved))
+            .expect("no error"),
+        Committed::Failed
+    );
+    assert_eq!(task_row(&store.conn, reserved), None);
+    drop(store);
+    let (mut store, high) = reopened(&scratch);
+    assert_eq!(high, reserved);
+    let (_, last_run) = store.high_water().expect("high water");
+    let next_run = RunId(last_run.0 + 1);
+    assert!(matches!(
+        store.begin_turn(reserved, Some("Again"), next_run, "ask"),
+        Err(StoreError::StaleId)
+    ));
+    store
+        .begin_turn(ThreadId(reserved.0 + 1), Some("Again"), next_run, "ask")
+        .expect("the next id is free");
+}
+
+#[test]
+fn a_reservation_with_no_row_behind_it_survives_a_purge_and_a_reopen() {
+    let scratch = Scratch::new("calls-reserve-purge");
+    let mut store = opened(&scratch);
+    let (thread, run) = task(&mut store);
+    store
+        .end_run(thread, run, &[], RunEnd::Done)
+        .expect("ended");
+    assert_eq!(store.delete(thread).outcome, Deleted::Removed);
+    let (high, _) = store.high_water().expect("high water");
+    let reserved = ThreadId(high.0 + 2);
+    store.reserve(reserved).expect("reserved");
+    let max: i64 = store
+        .conn
+        .query_row("SELECT max(id) FROM threads", [], |row| row.get(0))
+        .expect("max");
+    assert!(u64::try_from(max).expect("positive") < reserved.0);
+    assert_eq!(super::tests::purge(&mut store), crate::store::Swap::Done);
+    drop(store);
+    let (mut store, high) = reopened(&scratch);
+    assert_eq!(high, reserved);
+    let (_, last_run) = store.high_water().expect("high water");
+    let next = ThreadId(high.0 + 1);
+    store
+        .begin_turn(next, Some("After"), RunId(last_run.0 + 1), "ask")
+        .expect("allocated");
+    assert!(next.0 > reserved.0);
 }

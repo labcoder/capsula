@@ -6,9 +6,9 @@ run may reach, and records it in the run's ledger. The coordinator owns the ledg
 call only after the store has acknowledged the call's write.
 
 Slice 3's 13b-2 tool loop and slice 8's C4b-2 MCP listener hand calls to
-`Coordinator::tool_call`. The one production tool is `focus` (15a). No tool is offered to a model
-yet, because `context::tools` is empty until the staged producers are enabled (OSC-116); 15b adds
-`create_task`, and slice 4's B10 adds `draw`'s ledger entry. The test tools in `dispatch/tests.rs`
+`Coordinator::tool_call`. The production tools are `create_task` and `focus`. No tool is offered
+to a model yet, because `context::tools` is empty until the staged producers are enabled
+(OSC-116); slice 4's B10 adds `draw`'s ledger entry. The test tools in `dispatch/tests.rs`
 exercise the rest of the path.
 
 ## Who made a call
@@ -73,6 +73,27 @@ flowchart TD
 - **Follow-ups.** A write can carry a `Then`, which comes back with its acknowledgement. The
   coordinator runs it once, only on `Done` for a key that was still running, and only while the run
   is current, so a stopped run's or a repeated acknowledgement's follow-up never runs.
+
+## `create_task`
+
+`create_task { title, focus }` is Kumo-only and model-only. It creates one empty live task with
+title source `model`, and starts no run. Its description and Kumo's instructions say Kumo creates a
+task only when the user explicitly asks for a separate task or conversation (OSC-117). The title
+follows the rename rules, and anything else is `Invalid`.
+
+- **The id.** The coordinator hands the call the next id, one above every id it has issued, and
+  advances its counter at dispatch, so the next ordinary new task takes the one after it.
+- **Reserve, then create.** The store first raises the threads high-water in
+  `sqlite_sequence` to that id, in its own commit. Only then is the id a reservation: issued and
+  never reused, even if the task never lands. Then the task row and the ledger row commit in one
+  transaction. If the run's thread is gone (`Failed`) or the store fails, nothing of the task is
+  written and the run fails, but the reservation stays burned. A candidate that never reached
+  the reserve commit was never named to anyone, so reusing it after a restart is fine.
+- **After the commit.** `ThreadsChanged` goes to the shell even when the run has ended, because
+  the task exists. While the run is current, the model reads `Created task <id>.`, and with
+  `focus` the shell gets `Focus` for the new task under the same fences as `focus`.
+- **Content.** `LocalWrite::CreateTask` and everything that carries it print the title as its
+  length only.
 
 ## `focus`
 

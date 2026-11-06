@@ -122,6 +122,7 @@ impl DockIntent {
 #[derive(Default)]
 pub(crate) struct Settings {
     pub(crate) accounts: crate::accounts::Accounts,
+    pub(crate) claude: crate::claude_accounts::ClaudeAccounts,
     pub(crate) native_taskbar_notice: Option<Text>,
     view: Option<SettingsView>,
     notice: Option<UserError>,
@@ -474,7 +475,10 @@ impl Settings {
 }
 
 fn settings_error(key: ErrorKey) -> bool {
-    matches!(key, ErrorKey::SettingsRefused | ErrorKey::ConfigUnreadable)
+    matches!(
+        key,
+        ErrorKey::SettingsRefused | ErrorKey::ConfigUnreadable | ErrorKey::VoiceUnavailable
+    )
 }
 
 #[cfg(test)]

@@ -19,9 +19,9 @@ use kumochi_protocol::BUILD_ID;
 use kumochi_protocol::constants::BRAIN_EXE;
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
-    AccountView, ControlToBrain, ControlToShell, DataToBrain, DataToShell, Deleted, Hello,
-    Incarnation, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase, RunId, SceneDescriptor,
-    SceneDescriptorV1, SettingsView, ThreadId, UserError,
+    AccountView, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain, DataToShell,
+    Deleted, Hello, Incarnation, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase, RunId,
+    SceneDescriptor, SceneDescriptorV1, SettingsView, ThreadId, UserError,
 };
 
 use kumochi_scene::deferred::Deferred;
@@ -79,6 +79,10 @@ pub(crate) enum LinkEvent {
     Account {
         generation: u64,
         view: AccountView,
+    },
+    Connections {
+        generation: u64,
+        view: ConnectionsView,
     },
     /// A run's phase changed, from the control pipe.
     RunState {
@@ -954,13 +958,19 @@ fn watch(
                     return;
                 }
             }
-            // shortcut: B3a releases the exclusion lease on Capture*; nothing holds one yet. The
-            // brain sends no connections view until C2; the Connect screen reads it. Slice 7's
-            // PR 6 stops playback on SpeechRevoked; nothing plays yet.
+            Ok(Some(ControlToShell::Connections(view))) => {
+                if events
+                    .send_blocking(LinkEvent::Connections { generation, view })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            // shortcut: B3a releases the exclusion lease on Capture*; nothing holds one yet.
+            // Slice 7's PR 6 stops playback on SpeechRevoked; nothing plays yet.
             Ok(Some(
                 ControlToShell::CaptureDone { .. }
                 | ControlToShell::CaptureFailed { .. }
-                | ControlToShell::Connections(_)
                 | ControlToShell::GitHub(_)
                 | ControlToShell::ActionState { .. }
                 | ControlToShell::IssueRefused { .. }

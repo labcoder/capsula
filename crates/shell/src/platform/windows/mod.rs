@@ -3,7 +3,6 @@
 mod credential;
 mod folders;
 mod hit_mask;
-#[expect(dead_code, reason = "C2b-2's carry is the first caller")]
 mod host;
 mod keyboard;
 mod observer;
@@ -19,6 +18,7 @@ pub(crate) use credential::WindowsKeyStageWriter;
 pub(crate) use credential::assert_offline_native_header;
 pub(crate) use folders::data_dir;
 pub(crate) use hit_mask::MaskUpdate;
+pub(crate) use host::{HostWatch, host_at, watch_host};
 pub(crate) use keyboard::{Deliver, EscapeHotkey, EventTime};
 pub(crate) use observer::{
     ProxyHandle, ProxyNote, client_origin, performance_frequency, window_handle,

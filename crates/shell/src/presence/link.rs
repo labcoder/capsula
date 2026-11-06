@@ -5,7 +5,8 @@ use crate::drawing::{Broken, Chunk, Effect};
 use crate::link::{Batch, LinkEvent, LinkState};
 use crate::settings::Update;
 use kumochi_protocol::message::{
-    AccountView, ControlToBrain, DataToShell, Phase, RunId, SettingsView, ThreadId, UserError,
+    AccountView, ConnectionsView, ControlToBrain, DataToShell, Phase, RunId, SettingsView,
+    ThreadId, UserError,
 };
 use kumochi_scene::deferred::Deferred;
 use std::time::Instant;
@@ -92,6 +93,9 @@ impl Presence {
                     self.sync_deletes(cx);
                 }
                 LinkEvent::ThreadsChanged => self.threads_changed(cx),
+                LinkEvent::Connections { generation, view } => {
+                    self.connections_changed(generation, view, cx);
+                }
                 LinkEvent::Focus {
                     generation,
                     run,
@@ -186,6 +190,20 @@ impl Presence {
         let current = self.session.as_ref().map(crate::link::Session::generation);
         self.settings.update(cx, |state, cx| {
             if state.accounts.receive(current, generation, view) {
+                cx.notify();
+            }
+        });
+    }
+
+    fn connections_changed(
+        &self,
+        generation: u64,
+        view: ConnectionsView,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let current = self.session.as_ref().map(crate::link::Session::generation);
+        self.settings.update(cx, |state, cx| {
+            if state.claude.receive(current, generation, view.claude_code) {
                 cx.notify();
             }
         });
@@ -394,6 +412,7 @@ impl Presence {
             self.scene_deadline = None;
             self.settings.update(cx, |state, cx| {
                 state.accounts.disconnected();
+                state.claude.disconnected();
                 state.disconnected();
                 cx.notify();
             });
