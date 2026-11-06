@@ -179,7 +179,9 @@ sequenceDiagram
   also makes no folder, but the walk runs after missing standard folders are made, so they stay. When another brain
   holds the lock, or this one doesn't hold the vault's, the view is `InUse`.
 - **Signed in.** `auth status --json` must exit 0 or 1 and name exactly Kumochi's `config` folder
-  as `configDirectory`, byte for byte; anything else fails closed.
+  as `configDirectory`, byte for byte; anything else fails closed. Signed in counts only with
+  `authMethod` `claude.ai` and `apiProvider` `firstParty`: a key, a token or another provider
+  is `Malformed`.
 - **One job per process,** nested in the brain job. A call ends only when its root has exited, its
   job is terminated and confirmed empty, and both pipes have ended. If the job can't be confirmed
   empty the lane is stuck: it refuses everything, never lets the lock go, and shows `Unavailable`.
@@ -269,9 +271,14 @@ sequenceDiagram
     Note over B: tools/call is admitted only while the gate is Passed
 ```
 
-- **Before stdin:** the version; no commands; exactly the reviewed agents; then
-  `account.tokenSource`. `"none"` means signed out: the launch is torn down before stdin and the run
-  fails with `ClaudeCodeSignedOut`, not an audit failure. Any other value must be reviewed. Then
+- **Before stdin:** the version; no commands; exactly the reviewed agents; then `account`, by
+  shape, first failure wins. An `apiProvider` other than `firstParty` is `TokenSource` (a
+  third-party provider). Any `apiKeySource` is `KeySource` (a key from the environment, settings
+  or a helper overrides the sign-in). `tokenSource` `"none"` with no `subscriptionType` is signed
+  out: the launch is torn down before stdin and the run fails with `ClaudeCodeSignedOut`, not an
+  audit failure. A `subscriptionType` with no `tokenSource`, or with exactly `"claude.ai"`, is
+  the stored sign-in (2.1.306 sends no `tokenSource` for it). Anything else is `TokenSource`.
+  `email` and `organization` are never read. Then
   exactly one server, `kumochi`, `connected`, whose tools are exactly the launch's frozen set. An
   error response, an unknown or repeated id, or a body of the wrong shape is `Malformed`.
 - **After the seed:** `system:init` must show the version, exactly the frozen tool set, the one
@@ -282,8 +289,6 @@ sequenceDiagram
   already admitted isn't undone; a call still waiting for admission is refused.
 - **The stated limit:** the seed can reach the chosen model before init is checked, but no tool
   runs before the check.
-- **Signed-in sources aren't recorded yet,** so 2.1.306's row accepts no `tokenSource` but `none`
-  (signed out). The signed-in probe, on the first real sign-in, adds the value.
 
 The brain's side of the pipe, and the launch that writes `mcp.json`, come with C4b and C5a.
 On macOS the pipe would be a Unix socket in the owned folder (unverified).

@@ -41,9 +41,6 @@ pub(crate) static REVIEWED_CLAUDE_CODE: &[Reviewed] = &[Reviewed {
             "Plan",
             "statusline-setup",
         ],
-        // shortcut: no signed-in value is recorded yet, so every signed-in launch fails
-        // `TokenSource`; the signed-in probe adds 2.1.306's value here on the first real sign-in.
-        token_sources: &[],
         plugins: &["cc-plugin-agents-md", "cc-plugin-plugin-authoring"],
         api_key_sources: &["none"],
     },

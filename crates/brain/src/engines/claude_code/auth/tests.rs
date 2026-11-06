@@ -7,11 +7,39 @@ fn config() -> PathBuf {
 }
 
 fn status(logged_in: &str, dir: &str) -> Vec<u8> {
+    let method = if logged_in == "true" {
+        "claude.ai"
+    } else {
+        "none"
+    };
+    signed_in_by(logged_in, method, "firstParty", dir)
+}
+
+fn signed_in_by(logged_in: &str, method: &str, provider: &str, dir: &str) -> Vec<u8> {
     format!(
-        r#"{{"loggedIn":{logged_in},"authMethod":"none","apiProvider":"firstParty","configDirectory":{}}}"#,
+        r#"{{"loggedIn":{logged_in},"authMethod":"{method}","apiProvider":"{provider}","configDirectory":{}}}"#,
         serde_json::to_string(dir).expect("a string")
     )
     .into_bytes()
+}
+
+#[test]
+fn signed_in_counts_only_as_a_claude_ai_sign_in_to_anthropic() {
+    let dir = config().to_str().expect("text").to_owned();
+    // 2.1.306's answers on Rez (handoffs/CAPS-158/signin-followups.md), and two crossings.
+    for (method, provider) in [
+        ("api_key", "firstParty"),
+        ("oauth_token", "firstParty"),
+        ("third_party", "bedrock"),
+        ("claude.ai", "bedrock"),
+        ("none", "firstParty"),
+    ] {
+        assert_eq!(
+            parse_status(&signed_in_by("true", method, provider, &dir), 0, &config()),
+            Err(StatusFailure::Malformed),
+            "{method} {provider}"
+        );
+    }
 }
 
 #[test]

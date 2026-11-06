@@ -1,40 +1,13 @@
 use std::collections::BTreeSet;
 
-use kumochi_protocol::message::ClaudeVersion;
 use serde_json::{Value, json};
 
-use super::super::policy::{LaunchPolicy, REVIEWED_CLAUDE_CODE, Reviewed, ServerManaged, TurnCap};
+use super::super::policy::{REVIEWED_CLAUDE_CODE, Reviewed};
 use super::super::stream::{LineFramer, Mapped, StreamMapper};
 use super::*;
 
 const FACTS: &[u8] = include_bytes!("../../../../fixtures/claude-code/facts.jsonl");
 const TURNS: &[u8] = include_bytes!("../../../../fixtures/claude-code/turns.jsonl");
-const SIGNED_IN: &str = "test-sign-in";
-
-/// 2.1.306's row with a signed-in token source, which the real row doesn't have yet.
-static SIGNED_IN_ROW: Reviewed = Reviewed {
-    version: ClaudeVersion {
-        major: 2,
-        minor: 1,
-        patch: 306,
-    },
-    policy: LaunchPolicy {
-        turn_cap: TurnCap::Verified,
-        server_managed: ServerManaged::Disclosed,
-    },
-    audit: AuditSchema {
-        agents: &[
-            "claude",
-            "Explore",
-            "general-purpose",
-            "Plan",
-            "statusline-setup",
-        ],
-        token_sources: &[SIGNED_IN],
-        plugins: &["cc-plugin-agents-md", "cc-plugin-plugin-authoring"],
-        api_key_sources: &["none"],
-    },
-};
 
 fn tools() -> BTreeSet<String> {
     ["mcp__kumochi__ping".to_owned()].into()
@@ -73,29 +46,18 @@ fn control(which: usize, edit: impl FnOnce(&mut Value)) -> ControlResponse {
     }
 }
 
+/// 2.1.306's signed-in `account` (handoffs/CAPS-158/signin-followups.md), with made-up values.
 fn signed_in(line: &mut Value) {
-    line["response"]["response"]["account"]["tokenSource"] = json!(SIGNED_IN);
+    line["response"]["response"]["account"] = json!({
+        "email": "someone@example.com",
+        "organization": "Example",
+        "subscriptionType": "max",
+        "apiProvider": "firstParty",
+    });
 }
 
 fn audit() -> PreInputAudit {
-    PreInputAudit::new(&SIGNED_IN_ROW, tools())
-}
-
-#[test]
-fn the_test_row_matches_the_reviewed_row_but_for_its_sign_in() {
-    let real = &REVIEWED_CLAUDE_CODE[0];
-    assert_eq!(real.version, SIGNED_IN_ROW.version);
-    assert_eq!(real.policy, SIGNED_IN_ROW.policy);
-    assert_eq!(real.audit.agents, SIGNED_IN_ROW.audit.agents);
-    assert_eq!(real.audit.plugins, SIGNED_IN_ROW.audit.plugins);
-    assert_eq!(
-        real.audit.api_key_sources,
-        SIGNED_IN_ROW.audit.api_key_sources
-    );
-    assert!(
-        real.audit.token_sources.is_empty(),
-        "no signed-in value is recorded yet"
-    );
+    PreInputAudit::new(&REVIEWED_CLAUDE_CODE[0], tools())
 }
 
 #[test]
@@ -115,13 +77,86 @@ fn a_signed_out_launch_is_signed_out_not_an_audit_failure() {
         Ok(Progress::SignedOut),
         "P0's recording is signed out"
     );
-    let mut real = PreInputAudit::new(&REVIEWED_CLAUDE_CODE[0], tools());
-    assert_eq!(real.control(&control(0, |_| {})), Ok(Progress::SignedOut));
-    assert_eq!(
-        PreInputAudit::new(&REVIEWED_CLAUDE_CODE[0], tools()).control(&control(0, signed_in)),
-        Err(AuditFailed::TokenSource),
-        "the real row accepts no sign-in until the signed-in probe records one"
-    );
+}
+
+#[test]
+fn each_observed_account_shape_gets_its_verdict() {
+    let shapes = [
+        (
+            "the stored sign-in, named",
+            json!({"tokenSource": "claude.ai", "subscriptionType": "max", "apiProvider": "firstParty"}),
+            Ok(Progress::Waiting),
+        ),
+        (
+            "signed out",
+            json!({"tokenSource": "none", "apiProvider": "firstParty"}),
+            Ok(Progress::SignedOut),
+        ),
+        (
+            "a key over the sign-in",
+            json!({"tokenSource": "claude.ai", "apiKeySource": "ANTHROPIC_API_KEY", "apiProvider": "firstParty"}),
+            Err(AuditFailed::KeySource),
+        ),
+        (
+            "a key while signed out",
+            json!({"tokenSource": "none", "apiKeySource": "ANTHROPIC_API_KEY", "apiProvider": "firstParty"}),
+            Err(AuditFailed::KeySource),
+        ),
+        (
+            "a key beside a subscription",
+            json!({"subscriptionType": "max", "apiKeySource": "apiKeyHelper", "apiProvider": "firstParty"}),
+            Err(AuditFailed::KeySource),
+        ),
+        (
+            "bedrock",
+            json!({"apiProvider": "bedrock"}),
+            Err(AuditFailed::TokenSource),
+        ),
+        (
+            "another provider beside a subscription",
+            json!({"subscriptionType": "max", "apiProvider": "vertex"}),
+            Err(AuditFailed::TokenSource),
+        ),
+        (
+            "an auth token",
+            json!({"tokenSource": "ANTHROPIC_AUTH_TOKEN", "apiProvider": "firstParty"}),
+            Err(AuditFailed::TokenSource),
+        ),
+        (
+            "another source beside a subscription",
+            json!({"tokenSource": "CLAUDE_CODE_OAUTH_TOKEN", "subscriptionType": "max", "apiProvider": "firstParty"}),
+            Err(AuditFailed::TokenSource),
+        ),
+        (
+            "signed out beside a subscription",
+            json!({"tokenSource": "none", "subscriptionType": "max", "apiProvider": "firstParty"}),
+            Err(AuditFailed::TokenSource),
+        ),
+        (
+            "no source and no subscription",
+            json!({"apiProvider": "firstParty"}),
+            Err(AuditFailed::TokenSource),
+        ),
+        (
+            "no provider",
+            json!({"subscriptionType": "max"}),
+            Err(AuditFailed::Malformed),
+        ),
+        (
+            "a mistyped provider",
+            json!({"subscriptionType": "max", "apiProvider": 7}),
+            Err(AuditFailed::Malformed),
+        ),
+        (
+            "a mistyped source",
+            json!({"tokenSource": 7, "subscriptionType": "max", "apiProvider": "firstParty"}),
+            Err(AuditFailed::Malformed),
+        ),
+    ];
+    for (case, account, verdict) in shapes {
+        let response = control(0, |line| line["response"]["response"]["account"] = account);
+        assert_eq!(audit().control(&response), verdict, "{case}");
+    }
 }
 
 fn initialize_fails(edit: impl FnOnce(&mut Value)) -> Result<Progress, AuditFailed> {
@@ -390,7 +425,7 @@ fn init(edit: impl FnOnce(&mut Value)) -> InitFacts {
 }
 
 fn post() -> PostSeedAudit {
-    PostSeedAudit::new(&SIGNED_IN_ROW, tools())
+    PostSeedAudit::new(&REVIEWED_CLAUDE_CODE[0], tools())
 }
 
 #[test]
@@ -598,14 +633,17 @@ fn a_refusal_stands_against_every_later_response() {
             Ok(Progress::SignedOut),
         ),
         (
-            "no reviewed sign-in",
+            "a key over the sign-in",
             real,
-            control(0, signed_in),
-            Err(AuditFailed::TokenSource),
+            control(0, |line| {
+                line["response"]["response"]["account"]["apiKeySource"] =
+                    json!("ANTHROPIC_API_KEY");
+            }),
+            Err(AuditFailed::KeySource),
         ),
         (
             "another version",
-            &SIGNED_IN_ROW,
+            &REVIEWED_CLAUDE_CODE[0],
             control(0, |line| {
                 signed_in(line);
                 line["response"]["response"]["claude_code_version"] = json!("2.1.307");
@@ -614,13 +652,13 @@ fn a_refusal_stands_against_every_later_response() {
         ),
         (
             "an error response",
-            &SIGNED_IN_ROW,
+            &REVIEWED_CLAUDE_CODE[0],
             control(0, |line| line["response"]["subtype"] = json!("error")),
             Err(AuditFailed::Malformed),
         ),
         (
             "a failed server",
-            &SIGNED_IN_ROW,
+            &REVIEWED_CLAUDE_CODE[0],
             control(1, |line| {
                 line["response"]["response"]["mcpServers"][0]["status"] = json!("failed");
             }),
@@ -654,13 +692,13 @@ fn the_callers_tool_set_is_what_both_audits_expect() {
         BTreeSet::new(),
         ["mcp__kumochi__see".to_owned()].into(),
     ] {
-        let mut before = PreInputAudit::new(&SIGNED_IN_ROW, expected.clone());
+        let mut before = PreInputAudit::new(&REVIEWED_CLAUDE_CODE[0], expected.clone());
         assert_eq!(
             before.control(&control(1, |_| {})),
             Err(AuditFailed::Tools),
             "{expected:?}"
         );
-        let mut after = PostSeedAudit::new(&SIGNED_IN_ROW, expected.clone());
+        let mut after = PostSeedAudit::new(&REVIEWED_CLAUDE_CODE[0], expected.clone());
         assert_eq!(
             after.init(init(|_| {})),
             Err(AuditFailed::Tools),

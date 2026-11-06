@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use kumochi_protocol::constants::MCP_SERVER_NAME;
 use kumochi_protocol::message::AuditFailed;
 use serde::Deserialize;
+use serde::de::IgnoredAny;
 use serde_json::Value;
 
 use super::policy::Reviewed;
@@ -20,8 +21,6 @@ use super::stream::{ControlResponse, InitFacts};
 pub(crate) struct AuditSchema {
     /// Exactly these agents, in any order.
     pub(crate) agents: &'static [&'static str],
-    /// `account.tokenSource` values that are a sign-in Kumochi accepts.
-    pub(crate) token_sources: &'static [&'static str],
     /// Exactly these plugins, each with path `builtin`.
     pub(crate) plugins: &'static [&'static str],
     /// `apiKeySource` values Kumochi accepts.
@@ -32,6 +31,11 @@ pub(crate) const INITIALIZE_ID: &str = "k-initialize";
 pub(crate) const MCP_STATUS_ID: &str = "k-mcp-status";
 /// `account.tokenSource` when Claude Code isn't signed in (P0, signed out).
 const SIGNED_OUT: &str = "none";
+/// `account.tokenSource` naming the stored Claude.ai sign-in; 2.1.306 omits it when that's the
+/// only source.
+const STORED_SIGN_IN: &str = "claude.ai";
+/// `account.apiProvider` when questions go to Anthropic, not a third-party provider.
+const FIRST_PARTY: &str = "firstParty";
 
 /// The two `control_request` lines C5b writes to stdin right after spawn, before anything else.
 pub(crate) fn control_requests() -> [&'static [u8]; 2] {
@@ -132,14 +136,21 @@ impl PreInputAudit {
         if !exactly(agents, schema.agents.iter().copied()) {
             return Err(AuditFailed::Agents);
         }
-        let token = body.account.token_source.as_str();
-        if token == SIGNED_OUT {
-            return Ok(false);
-        }
-        if !schema.token_sources.contains(&token) {
+        let account = body.account;
+        if account.api_provider != FIRST_PARTY {
             return Err(AuditFailed::TokenSource);
         }
-        Ok(true)
+        if account.api_key_source.is_some() {
+            return Err(AuditFailed::KeySource);
+        }
+        match (
+            account.token_source.as_deref(),
+            account.subscription_type.is_some(),
+        ) {
+            (Some(SIGNED_OUT), false) => Ok(false),
+            (None | Some(STORED_SIGN_IN), true) => Ok(true),
+            _ => Err(AuditFailed::TokenSource),
+        }
     }
 
     fn mcp_passes(&self, body: &Value) -> Result<(), AuditFailed> {
@@ -261,10 +272,15 @@ struct Initialize {
     account: Account,
 }
 
+/// Only what the audit judges: email and organization are never read, and a key source or
+/// subscription is judged by presence alone.
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Account {
-    #[serde(rename = "tokenSource")]
-    token_source: String,
+    api_provider: String,
+    token_source: Option<String>,
+    api_key_source: Option<IgnoredAny>,
+    subscription_type: Option<IgnoredAny>,
 }
 
 #[derive(Deserialize)]
