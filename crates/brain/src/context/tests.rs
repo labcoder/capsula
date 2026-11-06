@@ -1681,6 +1681,52 @@ fn a_summary_covers_the_notes_through_its_cutoff_and_a_later_note_still_renders(
 }
 
 #[test]
+fn the_newest_32_notes_are_kept_and_charged_to_the_bound() {
+    let mut world = world("ctx-note-bound");
+    let main = world.main;
+    let tasks: Vec<_> = (0..33).map(|_| world.run(None, "task", None).0).collect();
+    world.run(Some(main), "ask one", Some("reply one"));
+    world.store.begin_delete(tasks[0]).expect("oldest hidden");
+    world.run(Some(main), "ask two", None);
+    for &task in &tasks[1..] {
+        world.store.begin_delete(task).expect("hidden");
+    }
+    let (_, current) = world.run(Some(main), "ask three", None);
+    let notes = rendered_notes(&world);
+    assert_eq!(notes.len(), 33);
+    let ask = message(Role::User, &format!("ask three\n\nLocal time: {TIME}"));
+    let newest: Vec<_> = std::iter::once(message(Role::User, "ask two"))
+        .chain(notes[1..].iter().cloned())
+        .chain([ask])
+        .collect();
+    let mut all = vec![
+        message(Role::User, "ask one"),
+        message(Role::Assistant, "reply one"),
+    ];
+    all.extend(newest.iter().cloned());
+    let run = snapshot(Origin::Kumo, None);
+    let wide = world
+        .build(&run, (main, current), Supplied::default(), BOUND)
+        .expect("built");
+    assert_eq!(
+        wide.request.input, all,
+        "the oldest note is past the 32 kept"
+    );
+    let size = request_bytes(&wide.request);
+    let exact = world
+        .build(&run, (main, current), Supplied::default(), size)
+        .expect("fits exactly");
+    assert_eq!(exact.request.input, all);
+    let under = world
+        .build(&run, (main, current), Supplied::default(), size - 1)
+        .expect("built");
+    assert_eq!(
+        under.request.input, newest,
+        "one byte short drops the oldest run, and the notes count"
+    );
+}
+
+#[test]
 fn compaction_summarizes_a_note_inside_its_range_and_leaves_a_later_one() {
     let mut world = world("compact-notes");
     let main = world.main;
