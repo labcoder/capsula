@@ -326,6 +326,48 @@ fn a_spin_turns_at_its_rate_for_fifteen_seconds_and_holds_its_angle() {
     assert_eq!(yaw(&still, 5000), 30.0, "a cut view installs no spin");
 }
 
+#[test]
+fn a_cut_view_carries_the_latched_yaw_only_into_the_same_view() {
+    let (mut scene, mut budget, mut old) = fresh();
+    let mut frame = Frame::new();
+    let spinning = json!({"id":"a","put":[{"view3d":{"id":"v","spin":30}}, box_at("s", [0.0; 3])]});
+    activate(&mut scene, &mut budget, &mut old, &mut frame, spinning, 0);
+    let mut same = SceneView::new(old.layout(), scene.activated());
+    same.carry_spin(&old, 2000);
+    for now in [0, 2000, 9000] {
+        assert_eq!(yaw(&same, now), 90.0, "carried and still at {now}");
+    }
+    assert!(same.at_rest(0));
+    scene.retire(0, &mut budget).expect("the spinning step");
+    let mut next = SceneView::new(old.layout(), scene.activated());
+    for (index, replacement, now) in [
+        (1, json!({"id":"b","remove":["s", "v"]}), 1000),
+        (
+            2,
+            json!({"id":"c","put":[{"view3d":{"id":"w"}},
+                {"solid":{"in":"w","id":"t","shape":"box","size":[1,1,1]}}]}),
+            1500,
+        ),
+    ] {
+        activate(
+            &mut scene,
+            &mut budget,
+            &mut next,
+            &mut frame,
+            replacement,
+            now,
+        );
+        scene.retire(index, &mut budget).expect("an activated step");
+    }
+    let mut cut = SceneView::new(next.layout(), scene.activated());
+    cut.carry_spin(&old, 2000);
+    assert_eq!(
+        yaw(&cut, 2000),
+        30.0,
+        "a replacement view keeps its authored yaw"
+    );
+}
+
 /// 160 boxes in attach chains of fifteen under the view: depth 16, the cap. Each chain's root
 /// moves and its middle box turns, so every pose composes through a running owner.
 fn chains(view: &str) -> Value {

@@ -1,32 +1,36 @@
 //! Issue actions' rows: the schema's checks, create, read, edit and discard, recovery of cut-short
 //! sends, hidden and deleted threads, purges, and what Debug prints.
 
+use std::num::NonZeroU64;
 use std::path::Path;
 
 use kumochi_protocol::message::{
-    ActionState, ApprovalRev, Deleted, DraftId, FailReason, GitHubLogin, IssueBody, IssueRefused,
-    IssueTitle, LookupResult, RepoName, RunId, StateVersion, ThreadId,
+    ActionState, ApprovalRev, ContentHash, Decision, Deleted, DraftId, FailReason, GitHubLogin,
+    IssueBody, IssueRefused, IssueTitle, IssueUrl, LookupResult, RepoName, RunId, StateVersion,
+    ThreadId,
 };
 use rusqlite::{Connection, ErrorCode, params};
 
 use super::tests::{purge, raw_bytes};
 use super::{Recovered, RunEnd, Store, StoreError, Swap, schema};
 use crate::connections::github::api::GitHubUser;
-use crate::issues::{Action, Answer, Mark, Stage};
+use crate::connections::github::issues::CreateOutcome;
+use crate::connections::http_client::ResponseMeta;
+use crate::issues::{Action, Answer, Live, Lookup, Mark, Stage};
 use crate::test_support::Scratch;
 
-const A: &str = r#"{"at_s":100,"presend":[3]}"#;
-const B: &str = r#"{"at_s":200,"presend":[3,9]}"#;
-const C: &str = r#"{"at_s":300,"presend":[]}"#;
+pub(super) const A: &str = r#"{"at_s":100,"presend":[3]}"#;
+pub(super) const B: &str = r#"{"at_s":200,"presend":[3,9]}"#;
+pub(super) const C: &str = r#"{"at_s":300,"presend":[]}"#;
 
-fn opened(scratch: &Scratch) -> Store {
+pub(super) fn opened(scratch: &Scratch) -> Store {
     let mut store = Store::open(&scratch.db()).expect("store");
     store.recover().expect("recover");
     store
 }
 
 /// A new live thread whose only run has ended.
-fn thread(store: &mut Store) -> ThreadId {
+pub(super) fn thread(store: &mut Store) -> ThreadId {
     let (thread, run) = store.high_water().expect("high water");
     let (thread, run) = (ThreadId(thread.0 + 1), RunId(run.0 + 1));
     store
@@ -38,34 +42,45 @@ fn thread(store: &mut Store) -> ThreadId {
     thread
 }
 
-fn user(id: u64) -> GitHubUser {
+pub(super) fn user(id: u64) -> GitHubUser {
     GitHubUser {
         id,
         login: GitHubLogin::new("octo").expect("login"),
     }
 }
 
-fn repo() -> RepoName {
+pub(super) fn repo() -> RepoName {
     RepoName::new("octo/repo").expect("repo")
 }
 
-fn title(text: &str) -> IssueTitle {
+pub(super) fn title(text: &str) -> IssueTitle {
     IssueTitle::new(text).expect("title")
 }
 
-fn body(text: &str) -> IssueBody {
+pub(super) fn body(text: &str) -> IssueBody {
     IssueBody::new(text).expect("body")
 }
 
-fn mark(json: &str) -> Mark {
+pub(super) fn mark(json: &str) -> Mark {
     serde_json::from_str(json).expect("mark")
+}
+
+pub(super) fn issue(number: u64) -> NonZeroU64 {
+    NonZeroU64::new(number).expect("an issue number")
+}
+
+pub(super) fn uncertain() -> CreateOutcome {
+    CreateOutcome::Uncertain {
+        status: None,
+        meta: ResponseMeta::default(),
+    }
 }
 
 fn sql(id: u64) -> i64 {
     i64::try_from(id).expect("small")
 }
 
-fn draft(store: &mut Store, thread: ThreadId) -> Action {
+pub(super) fn draft(store: &mut Store, thread: ThreadId) -> Action {
     store
         .create_draft(
             thread,
@@ -77,16 +92,16 @@ fn draft(store: &mut Store, thread: ThreadId) -> Action {
         .expect("draft")
 }
 
-fn posting(mark: &str) -> String {
+pub(super) fn posting(mark: &str) -> String {
     format!(r#"{{"kind":"posting","mark":{mark},"unresolved":null}}"#)
 }
 
-fn unknown(lookup: &str) -> String {
+pub(super) fn unknown(lookup: &str) -> String {
     format!(r#"{{"kind":"unknown","mark":{A},"lookup":{lookup}}}"#)
 }
 
 /// Puts a row in a stage that only a send reaches; no product API before admission can.
-fn seed(store: &Store, draft: DraftId, stage: &str, uncertain: u32) {
+pub(super) fn seed(store: &Store, draft: DraftId, stage: &str, uncertain: u32) {
     store
         .conn
         .execute(
@@ -97,7 +112,7 @@ fn seed(store: &Store, draft: DraftId, stage: &str, uncertain: u32) {
 }
 
 /// Every column of every row, and the approval mark, to show what an op left alone.
-fn snapshot(conn: &Connection) -> (Vec<String>, i64) {
+pub(super) fn snapshot(conn: &Connection) -> (Vec<String>, i64) {
     let rows = conn
         .prepare(
             "SELECT json_array(id, thread, version, stage, repo, account_id, account_login, title,
@@ -372,9 +387,24 @@ fn hidden_threads_take_no_action_input_and_nothing_comes_back() {
     let live = thread(&mut store);
     let kept = draft(&mut store, live);
     let hidden = thread(&mut store);
-    let ids = [0, 1, 2].map(|_| draft(&mut store, hidden).draft);
+    let unbound = store
+        .create_draft(hidden, &title("T"), &body("B"), None, None)
+        .expect("draft");
+    let drafts = [0, 1, 2].map(|_| draft(&mut store, hidden).draft);
+    let ids = [unbound.draft, drafts[0], drafts[1], drafts[2]];
     seed(&store, ids[1], &posting(A), 0);
     seed(&store, ids[2], &unknown(r#""Pending""#), 1);
+    seed(
+        &store,
+        ids[3],
+        r#"{"kind":"preflight","unresolved":null}"#,
+        0,
+    );
+    let (seven, listed) = (user(7), [repo()]);
+    let live = Live {
+        account: Some(&seven),
+        repos: &listed,
+    };
     store.begin_delete(hidden).expect("hidden");
     store
         .conn
@@ -393,7 +423,23 @@ fn hidden_threads_take_no_action_input_and_nothing_comes_back() {
             let edited = store.edit_draft(id, &title("E"), &body("E"), None);
             assert!(matches!(edited, Ok(Answer::Gone)));
             assert!(matches!(store.discard_draft(id), Ok(Answer::Gone)));
+            let at = StateVersion(1);
+            let answers = [
+                store.consent(id, &unbound.hash(), ApprovalRev(2), Decision::File, &live),
+                store.preflighted(id, at, Ok(mark(A))),
+                store.posted(id, at, &uncertain()),
+                store.interrupted(id, at),
+                store.looked_up(id, 1, Lookup::Placed(issue(7))),
+            ];
+            assert!(
+                answers
+                    .iter()
+                    .all(|answer| matches!(answer, Ok(Answer::Gone))),
+                "{answers:?}"
+            );
         }
+        let bound = store.bind_drafts(Some(&seven), Some(&repo()));
+        assert_eq!(bound.expect("bind"), []);
     };
     refused(&mut store);
     let stuck = Recovered {
@@ -441,6 +487,26 @@ fn revisions_and_draft_ids_are_never_reused_after_deletion_and_purge() {
         (fresh.draft, fresh.approval),
         (DraftId(3), Some(ApprovalRev(4)))
     );
+    let (seven, listed) = (user(7), [repo()]);
+    let live = Live {
+        account: Some(&seven),
+        repos: &listed,
+    };
+    let gone = store.consent(second, &fresh.hash(), ApprovalRev(3), Decision::File, &live);
+    assert!(matches!(gone, Ok(Answer::Gone)), "{gone:?}");
+    let before = snapshot(&store.conn);
+    let reused = store.consent(
+        fresh.draft,
+        &fresh.hash(),
+        ApprovalRev(3),
+        Decision::File,
+        &live,
+    );
+    assert!(
+        matches!(reused, Ok(Answer::Refused(IssueRefused::StaleApproval, _))),
+        "{reused:?}"
+    );
+    assert_eq!(snapshot(&store.conn), before);
 }
 
 #[test]
@@ -524,6 +590,56 @@ fn a_failure_after_the_mint_rolls_the_mint_back() {
     assert_eq!(
         create(&mut store).expect("draft").approval,
         Some(ApprovalRev(5))
+    );
+    let cut = draft(&mut store, thread).draft;
+    seed(&store, cut, &posting(A), 0);
+    store
+        .conn
+        .execute_batch(
+            "CREATE TEMP TRIGGER after_mint BEFORE UPDATE ON actions
+             WHEN (SELECT last FROM approval_mark) = 7 BEGIN SELECT RAISE(ABORT, 'trap'); END;",
+        )
+        .expect("trap");
+    let current = store.action(editable).expect("read").expect("live");
+    let disconnected = Live {
+        account: None,
+        repos: &[],
+    };
+    let refuse = |store: &mut Store| {
+        store.consent(
+            editable,
+            &current.hash(),
+            ApprovalRev(3),
+            Decision::File,
+            &disconnected,
+        )
+    };
+    let before = snapshot(&store.conn);
+    let interrupted = store.interrupted(cut, StateVersion(1));
+    assert!(
+        matches!(interrupted, Err(StoreError::Issue)),
+        "{interrupted:?}"
+    );
+    assert!(matches!(refuse(&mut store), Err(StoreError::Issue)));
+    assert_eq!(
+        snapshot(&store.conn),
+        before,
+        "a used-up revision rolls back with its mint"
+    );
+    store
+        .conn
+        .execute_batch("DROP TRIGGER temp.after_mint;")
+        .expect("untrapped");
+    let Ok(Answer::Changed(interrupted)) = store.interrupted(cut, StateVersion(1)) else {
+        panic!("interrupted");
+    };
+    assert_eq!(interrupted.approval, Some(ApprovalRev(7)));
+    let Ok(Answer::Refused(IssueRefused::NotConnected, refused)) = refuse(&mut store) else {
+        panic!("refused");
+    };
+    assert_eq!(
+        (refused.consumed, refused.approval),
+        (Some(ApprovalRev(3)), Some(ApprovalRev(8)))
     );
 }
 
@@ -616,11 +732,182 @@ fn account_ids_keep_every_u64_and_refuse_noncanonical_text() {
             "{text}"
         );
     }
+    for half in [
+        "UPDATE actions SET account_id = '7', account_login = NULL WHERE id = 1",
+        "UPDATE actions SET account_id = NULL, account_login = 'octo' WHERE id = 1",
+    ] {
+        store
+            .conn
+            .pragma_update(None, "ignore_check_constraints", true)
+            .expect("checks off");
+        store
+            .conn
+            .execute(half, [])
+            .expect("planted past the check");
+        store
+            .conn
+            .pragma_update(None, "ignore_check_constraints", false)
+            .expect("checks on");
+        assert!(
+            matches!(store.action(DraftId(1)), Err(StoreError::Issue)),
+            "{half}"
+        );
+    }
     for text in ["0", "007", "+5", "1e3", "", "123456789012345678901"] {
         assert!(constraint(&set(text)), "{text}");
     }
     set("18446744073709551616").expect("twenty digits pass the check");
     assert!(matches!(store.action(DraftId(1)), Err(StoreError::Issue)));
+}
+
+#[test]
+fn every_action_that_loads_can_render() {
+    let scratch = Scratch::new("actions-bound");
+    let mut store = opened(&scratch);
+    let thread = thread(&mut store);
+    let (owner, name) = ("o".repeat(39), "r".repeat(100));
+    let longest = RepoName::new(&format!("{owner}/{name}")).expect("the longest repository");
+    let widest = store
+        .create_draft(
+            thread,
+            &title("T"),
+            &body("B"),
+            Some(&longest),
+            Some(&user(7)),
+        )
+        .expect("draft")
+        .draft;
+    seed(
+        &store,
+        widest,
+        r#"{"kind":"filed","number":18446744073709551615,"confirmed":true}"#,
+        0,
+    );
+    let url = format!("https://github.com/{owner}/{name}/issues/18446744073709551615");
+    assert_eq!(
+        store.action(widest).expect("read").expect("live").state(),
+        ActionState::Filed {
+            number: u64::MAX,
+            url: IssueUrl::new(&url).expect("a checked URL"),
+            confirmed_by_user: true
+        }
+    );
+    let unbound = [
+        (
+            r#"{"kind":"filed","number":7,"confirmed":false}"#.to_owned(),
+            "repo = NULL",
+        ),
+        (posting(A), "account_id = NULL, account_login = NULL"),
+    ];
+    let mut planted = Vec::new();
+    store
+        .conn
+        .pragma_update(None, "ignore_check_constraints", true)
+        .expect("checks off");
+    for (stage, unbind) in &unbound {
+        let id = draft(&mut store, thread).draft;
+        seed(&store, id, stage, 0);
+        store
+            .conn
+            .execute(
+                &format!("UPDATE actions SET {unbind} WHERE id = ?1"),
+                [sql(id.0)],
+            )
+            .expect("planted past the check");
+        planted.push(id);
+    }
+    store
+        .conn
+        .pragma_update(None, "ignore_check_constraints", false)
+        .expect("checks on");
+    for (id, (stage, _)) in planted.into_iter().zip(&unbound) {
+        assert!(
+            matches!(store.action(id), Err(StoreError::Issue)),
+            "{stage}"
+        );
+    }
+}
+
+#[test]
+fn recovery_reads_only_stages_and_rolls_back_whole_on_a_corrupt_one() {
+    let scratch = Scratch::new("actions-corrupt");
+    let mut store = opened(&scratch);
+    let thread = thread(&mut store);
+    let stages = [
+        (r#"{"kind":"preflight","unresolved":null}"#.to_owned(), 0),
+        (posting(A), 0),
+        (r#"{"kind":"draft"}"#.to_owned(), 0),
+        (
+            r#"{"kind":"filed","number":7,"confirmed":false}"#.to_owned(),
+            0,
+        ),
+        (r#"{"kind":"failed","reason":"Network"}"#.to_owned(), 0),
+        (unknown(r#""Pending""#), 1),
+        (r#"{"kind":"discarded"}"#.to_owned(), 1),
+        (
+            r#"{"kind":"posting","mark":{"at_s":0,"presend":[]},"unresolved":null}"#.to_owned(),
+            0,
+        ),
+    ];
+    let ids: Vec<DraftId> = stages
+        .iter()
+        .map(|(stage, uncertain)| {
+            let id = draft(&mut store, thread).draft;
+            seed(&store, id, stage, *uncertain);
+            id
+        })
+        .collect();
+    store
+        .conn
+        .execute_batch(&format!(
+            "UPDATE actions SET consumed = 1;
+             UPDATE actions SET title = 'T' || char(7), body = 'B' || char(7) WHERE id = {};",
+            ids[0].0
+        ))
+        .expect("planted");
+    drop(store);
+    let mut store = Store::open(&scratch.db()).expect("opening reads no action");
+    let before = snapshot(&store.conn);
+    for attempt in 0..2 {
+        let recovered = store.recover();
+        assert!(
+            matches!(recovered, Err(StoreError::Issue)),
+            "{attempt}: {recovered:?}"
+        );
+        assert_eq!(snapshot(&store.conn), before, "the whole batch rolled back");
+    }
+    seed(&store, ids[7], &posting(B), 0);
+    let recovered = store.recover().expect("recover");
+    assert_eq!((recovered.failed_sends, recovered.unknown_sends), (1, 2));
+    let stored: Vec<(String, Option<i64>)> = store
+        .conn
+        .prepare("SELECT stage, consumed FROM actions ORDER BY id")
+        .expect("query")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("rows")
+        .collect::<Result<_, _>>()
+        .expect("read");
+    let unknown_b = format!(r#"{{"kind":"unknown","mark":{B},"lookup":"Pending"}}"#);
+    assert_eq!(
+        [&stored[0], &stored[1], &stored[7]],
+        [
+            &(
+                r#"{"kind":"failed","reason":"Interrupted"}"#.to_owned(),
+                Some(1)
+            ),
+            &(unknown(r#""Pending""#), Some(1)),
+            &(unknown_b, Some(1)),
+        ]
+    );
+    assert_eq!(
+        snapshot(&store.conn).0[2..7],
+        before.0[2..7],
+        "settled rows stay"
+    );
+    assert!(
+        matches!(store.action(ids[0]), Err(StoreError::Issue)),
+        "recovery never read the content that fails to load"
+    );
 }
 
 #[test]
@@ -638,6 +925,18 @@ fn counters_fail_closed_at_their_limits() {
     let created = store.create_draft(thread, &title("N"), &body("N"), None, None);
     assert!(matches!(created, Err(StoreError::Issue)));
     assert!(matches!(edit(&mut store), Err(StoreError::Issue)));
+    let disconnected = Live {
+        account: None,
+        repos: &[],
+    };
+    let refused = store.consent(
+        editable,
+        &ContentHash([0; 32]),
+        ApprovalRev(1),
+        Decision::File,
+        &disconnected,
+    );
+    assert!(matches!(refused, Err(StoreError::Issue)), "{refused:?}");
     assert_eq!(snapshot(&store.conn), before, "no revision repeats");
     store
         .conn
@@ -652,6 +951,13 @@ fn counters_fail_closed_at_their_limits() {
     let sending = draft(&mut store, thread).draft;
     seed(&store, sending, &posting(A), u32::MAX);
     let before = snapshot(&store.conn);
+    let posted = store.posted(sending, StateVersion(1), &uncertain());
+    assert!(matches!(posted, Err(StoreError::Issue)), "{posted:?}");
+    let interrupted = store.interrupted(sending, StateVersion(1));
+    assert!(
+        matches!(interrupted, Err(StoreError::Issue)),
+        "{interrupted:?}"
+    );
     assert!(matches!(store.recover(), Err(StoreError::Issue)));
     assert_eq!(snapshot(&store.conn), before, "the count holds");
 }
@@ -717,7 +1023,7 @@ fn issue_actions_print_no_content() {
         login: GitHubLogin::new("sentinel").expect("login"),
     };
     let planted = RepoName::new("sentinel/sentinel").expect("repo");
-    let id = store
+    let created = store
         .create_draft(
             thread,
             &title("Title sentinel"),
@@ -725,8 +1031,33 @@ fn issue_actions_print_no_content() {
             Some(&planted),
             Some(&account),
         )
-        .expect("draft")
-        .draft;
+        .expect("draft");
+    let id = created.draft;
+    let repos = [planted.clone()];
+    let live = Live {
+        account: Some(&account),
+        repos: &repos,
+    };
+    let mut answers = Vec::new();
+    let mut step = |answer: Result<Answer, StoreError>| {
+        let answer = answer.expect("an answer");
+        let (Answer::Changed(action) | Answer::Refused(_, action)) = &answer else {
+            panic!("{answer:?}");
+        };
+        let action = action.clone();
+        answers.push(answer);
+        action
+    };
+    let file = Decision::File;
+    let preflight = step(store.consent(id, &created.hash(), ApprovalRev(1), file, &live));
+    let posting = step(store.preflighted(id, preflight.version, Ok(mark(A))));
+    step(store.posted(id, posting.version, &uncertain()));
+    let unplaced = step(store.looked_up(id, 1, Lookup::Unplaced(issue(7))));
+    let offered = unplaced.approval.expect("offered");
+    let confirm = Decision::ThisIsTheIssue;
+    let refused = step(store.consent(id, &ContentHash([0; 32]), offered, confirm, &live));
+    let offered = refused.approval.expect("offered");
+    step(store.consent(id, &refused.hash(), offered, confirm, &live));
     let url = r#"{"Unplaced":{"number":7,"url":"https://github.com/sentinel/sentinel/issues/7"}}"#;
     seed(&store, id, &unknown(url), 1);
     let unplaced = store.action(id).expect("read").expect("live");
@@ -737,18 +1068,22 @@ fn issue_actions_print_no_content() {
         1,
     );
     let filed = store.action(id).expect("read").expect("live");
-    assert_eq!(format!("{:?}", unplaced.stage), "Unknown(Unplaced(7))");
+    let shown = format!("{:?}", unplaced.stage);
     let printed = [
         format!("{:?}", Answer::Changed(unplaced.clone())),
         format!("{:?}", Answer::Unchanged(unplaced)),
         format!("{:?}", Answer::Refused(IssueRefused::NotAllowedNow, filed)),
         format!("{:?} {}", StoreError::Issue, StoreError::Issue),
+        format!("{live:?}"),
     ];
-    for text in printed {
+    let flow = answers.iter().map(|answer| format!("{answer:?}"));
+    assert_eq!(flow.len(), 6);
+    for text in printed.into_iter().chain(flow) {
         assert!(!text.contains("sentinel"), "{text}");
         assert!(
             !text.contains("115, 101, 110, 116, 105, 110, 101, 108"),
             "{text}"
         );
     }
+    assert_eq!(shown, "Unknown(Unplaced(7))");
 }

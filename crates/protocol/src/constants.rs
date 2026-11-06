@@ -271,6 +271,10 @@ pub const SCREEN_FAULT_ENV: &str = "KUMOCHI_SCREEN_FAULT";
 /// A value that isn't a count allows none.
 pub const LIVE_BUDGET_ENV: &str = "KUMOCHI_LIVE_BUDGET";
 
+/// Dev builds only: the most Claude Code questions the brain may seed. A value that isn't a
+/// count allows none.
+pub const CLAUDE_QUESTIONS_ENV: &str = "KUMOCHI_CLAUDE_QUESTIONS";
+
 /// Dev builds only: the uncovered backlog, in estimated tokens, at which a thread compacts after
 /// a run, lowered for the live check. A value that isn't a count keeps the default.
 pub const COMPACT_AT_ENV: &str = "KUMOCHI_COMPACT_AT";

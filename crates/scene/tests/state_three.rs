@@ -14,6 +14,13 @@ use kumochi_scene::{
 };
 use std::sync::atomic::AtomicBool;
 
+#[path = "support/allocation.rs"]
+#[expect(
+    dead_code,
+    reason = "the shared counting allocator has helpers this file doesn't use"
+)]
+mod allocation;
+
 fn header() -> kumochi_scene::Begin {
     let source = br#"{"begin":{"v":1,"scene":"scene","surface":"overlay","alt":""}}"#;
     let Ok(Record::Begin(header)) = parse_record(source) else {
@@ -74,7 +81,9 @@ fn refused(state: &SceneState, global: &GlobalBudget, json: &str) -> (ErrorCode,
         global.usage(),
         global.generation(),
     );
-    let error = state.admit(&step(json), global).expect_err("refused step");
+    let error = state
+        .admit_checked(&step(json), global)
+        .expect_err("refused step");
     assert_eq!(
         before,
         (
@@ -1012,4 +1021,73 @@ fn measure_admit() {
             samples[100], samples[197], samples[199]
         );
     }
+}
+
+#[test]
+fn a_solid_degenerate_only_in_the_world_refuses_before_commit() {
+    let (mut state, mut global) = (scene(), GlobalBudget::default());
+    let pair = |pos: &str| {
+        [
+            view("v"),
+            cube("p", &format!(r#","pos":{pos},"scale":0.001"#)),
+            cube("c", r#","attach":"p","scale":0.001"#),
+        ]
+    };
+    assert_eq!(
+        refused(&state, &global, &put("far", &pair("[1000,0,0]"))),
+        at(ErrorCode::Degenerate, "put[2]"),
+        "the child collapses only under its parent's scale"
+    );
+    commit(&mut state, &mut global, &put("near", &pair("[0,0,0]")));
+    assert_eq!(
+        refused(
+            &state,
+            &global,
+            &format!(
+                r#"{{"id":"moved","put":[{}]}}"#,
+                track("p", "pos3", [1000.0, 0.0, 0.0], "linear")
+            )
+        ),
+        at(ErrorCode::Degenerate, "put[0]"),
+        "the child collapses only at the track's final offset"
+    );
+    commit(
+        &mut state,
+        &mut global,
+        &format!(
+            r#"{{"id":"moved","put":[{}]}}"#,
+            track("p", "pos3", [0.5, 0.0, 0.0], "linear")
+        ),
+    );
+    assert_eq!(
+        state.revision(),
+        2,
+        "the next step admits under the refused id"
+    );
+}
+
+#[test]
+fn checked_admission_builds_mesh_scratch_only_for_a_view_it_checks() {
+    // MeshScratch's largest buffer: 512 path points x 48 curved segments of [u32; 4] keys.
+    const KEYS: usize = 512 * 48 * 16;
+    let global = GlobalBudget::default();
+    let text = r#"{"id":"flat","put":[{"text":{"id":"t","text":"","at":[0,0]}}]}"#;
+    let (admission, freed) =
+        allocation::releases_of_size(KEYS, || scene().admit_checked(&step(text), &global));
+    assert!(
+        matches!(admission, Ok(Admission::New(_))),
+        "a 2D step admits"
+    );
+    assert_eq!(freed, 0, "a step with no view to check builds no scratch");
+    let solid = put("solid", &[view("v"), cube("c", "")]);
+    let (admission, freed) =
+        allocation::releases_of_size(KEYS, || scene().admit_checked(&step(&solid), &global));
+    assert!(
+        matches!(admission, Ok(Admission::New(_))),
+        "a 3D step admits"
+    );
+    assert_eq!(
+        freed, 1,
+        "calibration: checking one view builds one scratch"
+    );
 }

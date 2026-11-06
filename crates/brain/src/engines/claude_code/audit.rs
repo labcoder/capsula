@@ -85,10 +85,6 @@ impl PreInputAudit {
 
     /// initialize's `analytics_disabled` once initialize passed: shown, never judged. `None`
     /// before that, and when it's absent or not a bool.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "C5b-1b's audit task is the first caller")
-    )]
     pub(crate) fn analytics(&self) -> Option<bool> {
         self.analytics
     }
