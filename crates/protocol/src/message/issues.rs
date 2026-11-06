@@ -226,7 +226,7 @@ pub enum ActionState {
     Unknown {
         /// The current lookup outcome, including any candidate.
         lookup: LookupResult,
-        /// This attempt followed a File anyway decision.
+        /// More than one attempt may have created an issue.
         maybe_duplicate: bool,
     },
     /// Dismissed, preserving any uncertainty about a remote issue.
@@ -236,7 +236,8 @@ pub enum ActionState {
     },
 }
 
-/// A refusal leaves the stored action and its presentation state unchanged.
+/// A refusal never changes the stored stage, content or binding; refusing the current approval
+/// uses it up and offers a fresh one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IssueRefused {
     /// The approval isn't current.

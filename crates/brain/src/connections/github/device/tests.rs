@@ -992,3 +992,60 @@ async fn expiry_during_user_verification_rejects_a_late_identity() {
         },
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn the_connected_user_is_only_a_verified_connection() {
+    let mut m = empty();
+    assert_eq!(m.user(), None, "signed out");
+    let stamp = verifying(&mut m);
+    assert_eq!(m.user(), None, "verifying");
+    m.on(
+        Input::User {
+            stamp,
+            result: Ok(user()),
+        },
+        Instant::now(),
+    );
+    assert_eq!(m.user(), None, "saving");
+    m.on(Input::Saved { stamp, saved: true }, Instant::now());
+    assert_eq!(m.user(), Some(&user()));
+    m.on(Input::Op(GitHubOp::SignOut), Instant::now());
+    assert_eq!(m.user(), None, "signed out again");
+
+    let namesake = GitHubUser {
+        id: 8,
+        login: GitHubLogin::new("sentinel").unwrap(),
+    };
+    let mut m = Machine::new(None);
+    let stamp = m.stamp();
+    m.on(
+        Input::Loaded {
+            stamp,
+            result: Ok(Some(Account {
+                token: bearer(),
+                user: user(),
+            })),
+        },
+        Instant::now(),
+    );
+    assert_eq!(m.user(), None, "a loaded account isn't verified yet");
+    m.on(
+        Input::User {
+            stamp,
+            result: Ok(namesake.clone()),
+        },
+        Instant::now(),
+    );
+    assert_eq!(
+        m.user(),
+        Some(&namesake),
+        "the verified id, not the loaded one"
+    );
+    m.on(
+        Input::Unauthorized {
+            generation: m.stamp().generation,
+        },
+        Instant::now(),
+    );
+    assert_eq!(m.user(), None, "needs sign-in");
+}

@@ -189,12 +189,14 @@ impl SceneRead {
     /// The ordinary admission errors, and `DuplicateStepConflict` for a known step id, since a
     /// mirror never receives retransmissions.
     pub fn admit_detached(&self, step: &Step) -> Result<DetachedCandidate, StepError> {
-        self.state.admit_local(step, None)?.ok_or_else(|| {
-            StepError::in_step(
-                &step.id,
-                FieldPath::default().field("id"),
-                ErrorCode::DuplicateStepConflict,
-            )
-        })
+        self.state
+            .admit_local(step, None, super::WorldCheck::Skip)?
+            .ok_or_else(|| {
+                StepError::in_step(
+                    &step.id,
+                    FieldPath::default().field("id"),
+                    ErrorCode::DuplicateStepConflict,
+                )
+            })
     }
 }
