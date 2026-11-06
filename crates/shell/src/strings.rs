@@ -152,6 +152,12 @@ pub(crate) enum Text {
 macro_rules! catalog {
     ($($key:ident),* $(,)?) => {
         const ALL: [Self; [$(stringify!($key)),*].len()] = [$(Self::$key),*];
+
+        const fn listed(self) -> bool {
+            match self {
+                $(Self::$key)|* => true,
+            }
+        }
     };
 }
 
@@ -641,6 +647,7 @@ mod tests {
     fn every_text_is_in_the_catalog() {
         let strings = Strings::english();
         for text in Text::ALL {
+            assert!(text.listed());
             assert!(
                 strings
                     .bundle
