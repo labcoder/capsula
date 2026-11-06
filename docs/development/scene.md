@@ -185,8 +185,10 @@ overshoot endpoint `b + (b − a) × SPRING_OVERSHOOT` (and `a + (a − b) × SP
 with `yoyo`), where the first pair starts at rest. It is taken over every charged version of
 the solid, so a replacement cannot hide an earlier envelope before it retires.
 
-**World check.** A step that puts or removes in a view, or carries a `pos3` or `rot3` track,
-tessellates that view at its candidate rest with the shell's own `tessellate_view`. Each solid's
+**World check.** `admit_checked`, the brain's drawing ingress, also tessellates each view a
+step puts or removes in, or moves with a `pos3` or `rot3` track, at its candidate rest with the
+shell's own `tessellate_view`. Plain `admit` (recovery replay) and the shell mirror's detached
+admission skip it: they only see steps the brain already checked. Each solid's
 settled offsets (`SolidWork::end`, the latest track's final key) compose into its rest, so a
 face that collapses only under a parent's scale or only at a track's end is refused as
 `Degenerate` at the solid's `put[i]`, or the first 3D track's, before commit: no counter moves and

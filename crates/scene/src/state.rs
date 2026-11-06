@@ -59,6 +59,13 @@ pub enum SceneEvent {
     Stop(StopCut),
 }
 
+/// Whether admission also runs the precommit world check, which tessellates changed views.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorldCheck {
+    Skip,
+    Run,
+}
+
 /// Whether a Stop retains a scene or clears it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopOutcome {
@@ -394,8 +401,29 @@ impl SceneState {
     /// # Errors
     /// Rejects invalid identities, references, ownership, values or a cleared scene.
     pub fn admit(&self, step: &Step, global: &GlobalBudget) -> Result<Admission, StepError> {
+        self.admit_with(step, global, WorldCheck::Skip)
+    }
+
+    /// `admit` as the brain's drawing ingress runs it: every view the step changes or reposes is
+    /// also tessellated at its candidate rest, so a world-degenerate solid refuses `Degenerate`.
+    /// # Errors
+    /// As `admit`, and `Degenerate` for a solid whose world mesh fails.
+    pub fn admit_checked(
+        &self,
+        step: &Step,
+        global: &GlobalBudget,
+    ) -> Result<Admission, StepError> {
+        self.admit_with(step, global, WorldCheck::Run)
+    }
+
+    fn admit_with(
+        &self,
+        step: &Step,
+        global: &GlobalBudget,
+        world: WorldCheck,
+    ) -> Result<Admission, StepError> {
         self.check_context(global)?;
-        Ok(match self.admit_local(step, Some(global))? {
+        Ok(match self.admit_local(step, Some(global), world)? {
             Some(local) => Admission::New(Admitted {
                 global: Arc::clone(&global.identity),
                 generation: global.generation(),
@@ -411,6 +439,7 @@ impl SceneState {
         &self,
         step: &Step,
         global: Option<&GlobalBudget>,
+        world: WorldCheck,
     ) -> Result<Option<DetachedCandidate>, StepError> {
         let fail = |path, code| StepError::in_step(&step.id, path, code);
         if self.cleared {
@@ -490,7 +519,7 @@ impl SceneState {
         let bytes = heap::compiled_bytes(&original, &expansion.run)
             + heap::extras_bytes(std::iter::empty(), [&expansion.extras]);
         let expansion = Deferred::new(expansion, bytes);
-        self.candidate(&original, &expansion, global)
+        self.candidate(&original, &expansion, global, world)
             .map(Some)
             .map_err(|error| expansion.blame(error))
     }
@@ -503,6 +532,7 @@ impl SceneState {
         original: &Arc<Step>,
         expansion: &Expansion,
         global: Option<&GlobalBudget>,
+        world: WorldCheck,
     ) -> Result<DetachedCandidate, StepError> {
         let step = &*expansion.run;
         let fail = |path, code| StepError::in_step(&step.id, path, code);
@@ -596,7 +626,9 @@ impl SceneState {
             .sum::<usize>();
         retire::attribute(&mut after, owned);
         let views = three::view_updates(step, &self.objects, &after);
-        if let Some(handle) = three::degenerate(step, &views, &after) {
+        if world == WorldCheck::Run
+            && let Some(handle) = three::degenerate(step, &views, &after)
+        {
             let mut path = FieldPath::default().field("put");
             let slot = (handle.revision() == revision).then(|| handle.slot()).or_else(|| {
                 step.put.iter().position(|op| {

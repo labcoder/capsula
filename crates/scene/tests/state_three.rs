@@ -74,7 +74,9 @@ fn refused(state: &SceneState, global: &GlobalBudget, json: &str) -> (ErrorCode,
         global.usage(),
         global.generation(),
     );
-    let error = state.admit(&step(json), global).expect_err("refused step");
+    let error = state
+        .admit_checked(&step(json), global)
+        .expect_err("refused step");
     assert_eq!(
         before,
         (
