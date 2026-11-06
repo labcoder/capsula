@@ -1,5 +1,6 @@
 //! The approved session's guarded, tagged native input. Nothing is injectable until the owner's
-//! physical Ready and one quiet second open the lease.
+//! physical Ready, or the idle opener's one guarded fixture click, and one quiet second open the
+//! lease.
 
 use std::cell::Cell;
 use std::thread::sleep;
@@ -21,9 +22,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::w;
 
+use super::activation::{Activation, Owner};
 use super::fixture::{
-    ABORT, ARM_IDLE, ARMED_INPUT, COVER, ESC_HELD, ESCAPE_LEASE, FEEL, INTERRUPTED, OPEN,
-    OPEN_GATE, READY, REARM, UNCOVER,
+    ABORT, ARMED_INPUT, COVER, ESC_HELD, ESCAPE_LEASE, FEEL, INTERRUPTED, OPEN, OPEN_GATE, READY,
+    REARM, UNCOVER,
 };
 use super::gate::{Feel, Gate, Lease, Quiet};
 use super::guard::{self, StopMetadata};
@@ -33,8 +35,10 @@ use super::{
     request, size,
 };
 
+mod idle_activation;
+
 /// How old a destination snapshot may be when its input is sent.
-const FRESH: Duration = Duration::from_millis(20);
+pub(super) const FRESH: Duration = Duration::from_millis(20);
 
 /// Who must own the pixel under a pointer input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +75,7 @@ pub(crate) struct Session {
     /// When the bound product's input must end, so its cleanup fits its lifetime.
     product_end: Option<Instant>,
     edit: HWND,
+    activation: Activation,
     lease: Cell<Lease>,
     first_stop: Cell<Option<StopMetadata>>,
     end: Instant,
@@ -107,6 +112,7 @@ impl Session {
             panel: None,
             product_end: None,
             edit,
+            activation: Activation::new(owner(fixture.hwnd), owner(edit)),
             lease: Cell::new(Lease::new(fixture.pid)),
             first_stop: Cell::new(None),
             end,
@@ -164,6 +170,10 @@ impl Session {
 
     pub(crate) fn edit_point(&self) -> Result<POINT> {
         self.guard()?;
+        self.edit_center()
+    }
+
+    fn edit_center(&self) -> Result<POINT> {
         let rect = Window {
             hwnd: self.edit,
             pid: self.fixture.pid,
@@ -286,40 +296,21 @@ impl Session {
         self.or_abort(armed.map_err(anyhow::Error::from).and(feel))
     }
 
-    /// Waits, sending nothing, until Rez has had no input for `away`, then has the fixture arm
-    /// itself as Ready would; the quiet second that follows is unchanged.
-    pub(crate) fn await_idle(&self, deadline: Instant, away: Duration) -> Result<()> {
-        ensure!(
-            self.gate() == Gate::Waiting,
-            "the session was already armed"
-        );
-        let result = (|| {
-            loop {
-                ensure!(
-                    Instant::now() < deadline.min(self.end),
-                    "no idle window before the deadline"
-                );
-                ensure!(
-                    property(self.fixture.hwnd, ABORT) == 0,
-                    "fixture guard aborted before the idle arm"
-                );
-                ensure!(
-                    property(self.fixture.hwnd, READY) == 0,
-                    "Ready was pressed; this task opens only on idle"
-                );
-                let away_ms = WPARAM(usize::try_from(away.as_millis())?);
-                match request(self.fixture, ARM_IDLE, away_ms, LPARAM(0))? {
-                    1 => break,
-                    2 => sleep(Duration::from_secs(1)),
-                    3 => bail!("the fixture could not take the foreground"),
-                    _ => bail!("the fixture refused the idle arm"),
-                }
-            }
-            u32::try_from(property(self.fixture.hwnd, ARMED_INPUT)).map_err(anyhow::Error::from)
-        })();
+    /// Waits, sending nothing, until Rez has had no input for `away`, then makes the fixture
+    /// foreground with its one guarded, tagged EDIT click. The quiet second follows as after
+    /// Ready, except that any input before it opens is terminal.
+    pub(crate) fn await_idle(&mut self, deadline: Instant, away: Duration) -> Result<()> {
+        let result = self
+            .activate(deadline.min(self.end), away)
+            .with_context(|| {
+                format!(
+                    "fixture activation refused; {}",
+                    super::foreground_refusal()
+                )
+            });
         let armed = self.or_abort(result)?;
         let mut lease = self.lease.get();
-        lease.ready(armed, Instant::now());
+        lease.activated(armed, Instant::now());
         self.lease.set(lease);
         Ok(())
     }
@@ -398,7 +389,7 @@ impl Session {
             let mut cursor = POINT::default();
             // SAFETY: cursor is a writable output; nothing moves.
             unsafe { GetCursorPos(&raw mut cursor) }?;
-            self.original_cursor = Some(cursor);
+            self.original_cursor.get_or_insert(cursor);
             Ok(true)
         })();
         self.or_abort(result)
@@ -917,6 +908,13 @@ fn hover_cover(
         };
         (inside(center) && inside(leave)).then_some((cover, [center, leave]))
     })
+}
+
+fn owner(window: HWND) -> Owner {
+    Owner {
+        window: window.0.addr(),
+        pid: pid(window),
+    }
 }
 
 fn mouse_input(flags: MOUSE_EVENT_FLAGS, dx: i32, dy: i32) -> INPUT {
