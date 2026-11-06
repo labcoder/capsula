@@ -11,6 +11,60 @@ fn bytes(value: &[u8]) -> SecretBytes {
 const VALID: &[u8] = br#"{"token":"ghu_fake_test_only_token","login":"octocat","id":7}"#;
 
 #[test]
+fn a_fresh_vault_loads_no_github_account() {
+    let (_scratch, path, service, store) = setup("github-empty");
+    let mut vault = open(&store, &service, &path);
+    assert!(matches!(
+        vault.github(Job::Load {
+            stamp: Stamp { generation: 1 }
+        }),
+        Reply::Loaded {
+            stamp: Stamp { generation: 1 },
+            result: Ok(None)
+        }
+    ));
+}
+
+#[test]
+fn a_refused_github_removal_stays_visible_after_restart_until_cleanup_succeeds() {
+    let (_scratch, path, service, store) = setup("github-restart-refused");
+    let mut vault = open(&store, &service, &path);
+    vault.write(Kind::GitHub, &bytes(VALID), None).unwrap();
+    store.0.lock().unwrap().refusing = true;
+    assert!(matches!(
+        vault.github(Job::Remove { generation: 1 }),
+        Reply::Removed {
+            generation: 1,
+            result: Removed::Refused
+        }
+    ));
+    drop(vault);
+    let mut vault = open(&store, &service, &path);
+    assert_eq!(vault.authority.current(Kind::GitHub).unwrap().active, None);
+    assert!(matches!(
+        vault.github(Job::Load {
+            stamp: Stamp { generation: 2 }
+        }),
+        Reply::Loaded {
+            stamp: Stamp { generation: 2 },
+            result: Err(LoadError::Cleanup(Removed::Refused))
+        }
+    ));
+    assert_eq!(store.names().len(), 1);
+    store.0.lock().unwrap().refusing = false;
+    assert!(matches!(
+        vault.github(Job::Load {
+            stamp: Stamp { generation: 3 }
+        }),
+        Reply::Loaded {
+            stamp: Stamp { generation: 3 },
+            result: Ok(None)
+        }
+    ));
+    assert_eq!(store.names(), Vec::<String>::new());
+}
+
+#[test]
 fn cleanup_retries_in_the_same_process_and_requires_a_later_open_to_sweep() {
     let (_scratch, path, service, store) = setup("github-retry");
     let mut vault = open(&store, &service, &path);
