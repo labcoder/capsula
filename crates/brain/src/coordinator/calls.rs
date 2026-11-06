@@ -1,12 +1,12 @@
 //! Tool calls from a run: resolved against the current run, handed to the dispatcher, and
 //! answered on their write's acknowledgement (docs/development/tools.md).
 
-use kumochi_protocol::message::ControlToShell;
+use kumochi_protocol::message::{ControlToShell, ThreadId};
 
 use super::admission::origin;
 use super::{Coordinator, Effect, Run, Stale, StoreOp};
 use crate::dispatch::{
-    self, Caller, Dispatch, LedgerKey, RunCtx, Step, Then, ToolError, ToolOutput,
+    self, Caller, Dispatch, LedgerKey, LocalWrite, RunCtx, Step, Then, ToolError, ToolOutput,
 };
 use crate::engines::ToolName;
 use crate::store::Failure;
@@ -32,6 +32,7 @@ impl Coordinator {
             return ended;
         }
         let main = self.main_thread;
+        let fresh = ThreadId(self.last_thread.0 + 1);
         let reach = origin(thread, main);
         let Ok(run) = self.current(caller.run()) else {
             return ended;
@@ -52,6 +53,7 @@ impl Coordinator {
         let mut ctx = RunCtx {
             thread,
             main,
+            fresh,
             reach,
             offered: build.offered(),
             mcp: run.mcp,
@@ -61,6 +63,10 @@ impl Coordinator {
             Step::Answer(output) => Dispatch::Answered(output),
             Step::Join => Dispatch::Joined,
             Step::Commit(call) => {
+                // Advanced at dispatch: a candidate whose reserve never commits was never seen.
+                if let LocalWrite::CreateTask { thread, .. } = &call.write {
+                    self.last_thread = *thread;
+                }
                 effects.push(Effect::Store(StoreOp::CommitCall(call)));
                 Dispatch::Committing
             }
@@ -80,7 +86,14 @@ impl Coordinator {
         let run = self.current(key.run)?;
         if let Some(answers) = run.ledger.committed(key) {
             deliver(run, answers);
-            if let Some(Then::Focus(thread)) = then {
+            if let Some(
+                Then::Focus(thread)
+                | Then::Created {
+                    thread,
+                    focus: true,
+                },
+            ) = then
+            {
                 effects.push(Effect::Control(ControlToShell::Focus {
                     run: key.run,
                     thread,

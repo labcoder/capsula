@@ -51,7 +51,7 @@ thread-delete-cancel = Cancel
 thread-deleting = Deleting…
 thread-delete-failed = Couldn't delete the task. It's still here; try again.
 thread-deletes-full = Wait for the other deletes to finish.
-thread-delete-kumo = { $assistant } keeps a note that a task was deleted, but not its name.
+thread-delete-kumo = { $assistant } keeps a note that a task was deleted. Anything already in { $assistant }'s conversation stays, including names it used.
 thread-deleted = You deleted a task.
 
 action-back-to-kumo = Back to { $assistant }
