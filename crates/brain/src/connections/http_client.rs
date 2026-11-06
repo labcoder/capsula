@@ -369,14 +369,6 @@ impl Client {
         endpoint: &GitHubEndpoint,
         url: &str,
     ) -> Result<reqwest::RequestBuilder, HttpError> {
-        let deadline = if matches!(
-            endpoint,
-            GitHubEndpoint::CreateIssue { .. } | GitHubEndpoint::Issues { .. }
-        ) {
-            30
-        } else {
-            15
-        };
         let request = match endpoint {
             GitHubEndpoint::DeviceCode { client_id } => {
                 self.0.post(url).form(&[("client_id", client_id.as_str())])
@@ -407,7 +399,7 @@ impl Client {
             reqwest::header::USER_AGENT,
             kumochi_protocol::constants::HTTP_USER_AGENT,
         )
-        .timeout(Duration::from_secs(deadline));
+        .timeout(endpoint.deadline());
         if matches!(
             endpoint,
             GitHubEndpoint::DeviceCode { .. } | GitHubEndpoint::AccessToken { .. }

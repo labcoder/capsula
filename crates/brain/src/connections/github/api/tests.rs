@@ -122,6 +122,13 @@ async fn invoke(http: &impl Http, call: Call) -> Result<(), ApiError> {
             .map(|_| ()),
     }
 }
+fn cap(call: Call) -> usize {
+    match call {
+        Call::Device | Call::Token => 4096,
+        Call::User => 65_536,
+        _ => 1_048_576,
+    }
+}
 
 #[tokio::test]
 async fn each_call_builds_its_checked_endpoint_and_returns_exact_values() {
@@ -180,10 +187,11 @@ async fn page_calls_keep_the_requested_page_and_do_not_aggregate() {
         let requests = http.requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].fields.len(), 0);
-        assert_eq!(
-            requests[0].endpoint.url().unwrap().as_ref(),
-            "https://api.github.com/user/installations?per_page=100&page=2"
-        );
+        let Endpoint::GitHub(GitHubEndpoint::Installations { token, page }) = &requests[0].endpoint
+        else {
+            panic!("typed installations endpoint")
+        };
+        assert_eq!((token.expose().as_str(), page.0), ("ghu_fake", 2));
     }
     let http = Script::json(&valid(Call::Repositories));
     let reply = repositories(&http, &token(), 42, Page::new(2).unwrap())
@@ -197,9 +205,17 @@ async fn page_calls_keep_the_requested_page_and_do_not_aggregate() {
     let requests = http.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].fields.len(), 0);
+    let Endpoint::GitHub(GitHubEndpoint::Repositories {
+        token,
+        installation,
+        page,
+    }) = &requests[0].endpoint
+    else {
+        panic!("typed repositories endpoint")
+    };
     assert_eq!(
-        requests[0].endpoint.url().unwrap().as_ref(),
-        "https://api.github.com/user/installations/42/repositories?per_page=100&page=2"
+        (token.expose().as_str(), *installation, page.0),
+        ("ghu_fake", 42, 2)
     );
 }
 
@@ -230,11 +246,7 @@ async fn local_input_refusals_never_dispatch() {
 #[tokio::test]
 async fn every_parser_enforces_its_entry_byte_cap_with_scripted_http() {
     for call in CALLS {
-        let cap = match call {
-            Call::Device | Call::Token => 4096,
-            Call::User => 65_536,
-            _ => 1_048_576,
-        };
+        let cap = cap(call);
         for length in [cap, cap + 1] {
             let mut body = serde_json::to_vec(&valid(call)).unwrap();
             body.resize(length, b' ');
@@ -261,6 +273,13 @@ async fn every_parser_refuses_empty_truncated_and_mistyped_roots_but_ignores_ext
         assert_eq!(
             invoke(&Script::bytes(vec![0xff]), call).await,
             Err(ApiError::Response)
+        );
+        let mut trailing = serde_json::to_vec(&valid(call)).unwrap();
+        trailing.push(b'x');
+        assert_eq!(
+            invoke(&Script::bytes(trailing), call).await,
+            Err(ApiError::Response),
+            "{call:?}"
         );
         let mut extra = valid(call);
         extra["unknown"] = json!({"message":SENTINEL,"ignored":[1,2,3]});
@@ -646,7 +665,7 @@ async fn list_pages_accept_empty_and_exactly_one_hundred_rows_but_not_one_over()
 }
 
 #[tokio::test]
-async fn list_totals_reject_negative_and_fractional_numbers() {
+async fn list_totals_reject_negative_fractional_and_overflowing_numbers() {
     for call in [Call::Installations, Call::Repositories] {
         for bad in [json!(-1), json!(1.5)] {
             let mut value = valid(call);
@@ -656,6 +675,14 @@ async fn list_totals_reject_negative_and_fractional_numbers() {
                 Err(ApiError::Response)
             );
         }
+        let overflow = serde_json::to_string(&valid(call))
+            .unwrap()
+            .replace("\"total_count\":1", "\"total_count\":18446744073709551616");
+        assert_eq!(
+            invoke(&Script::bytes(overflow.into_bytes()), call).await,
+            Err(ApiError::Response),
+            "{call:?}"
+        );
     }
 }
 
@@ -852,6 +879,14 @@ async fn all_calls_preserve_closed_transport_errors_and_refused_status_metadata(
                 "{call:?}"
             );
         }
+        for status in [403, 429] {
+            let http = Script::new(Ok(response(status, vec![b' '; cap(call) + 1], meta)));
+            assert_eq!(
+                invoke(&http, call).await,
+                Err(ApiError::Refused { status, meta }),
+                "an oversized {status} body stays definite for {call:?}"
+            );
+        }
     }
 }
 
@@ -888,21 +923,17 @@ async fn retry_advice_is_capped_at_one_hour_and_unusable_advice_stays_absent() {
         assert_eq!(error, ApiError::Refused { status: 403, meta });
         assert_eq!(error.definite_reason(), Some(FailReason::RateLimited));
     }
-    for meta in [
-        ResponseMeta {
-            retry_after_s: Some(0),
-            ..ResponseMeta::default()
-        },
-        ResponseMeta {
-            rate_remaining: Some(0),
-            ..ResponseMeta::default()
-        },
-    ] {
-        assert_eq!(
-            ApiError::Refused { status: 403, meta }.definite_reason(),
-            Some(FailReason::RateLimited)
-        );
-    }
+    assert_eq!(
+        ApiError::Refused {
+            status: 403,
+            meta: ResponseMeta {
+                rate_remaining: Some(0),
+                ..ResponseMeta::default()
+            }
+        }
+        .definite_reason(),
+        Some(FailReason::RateLimited)
+    );
     assert_eq!(
         ApiError::Refused {
             status: 403,

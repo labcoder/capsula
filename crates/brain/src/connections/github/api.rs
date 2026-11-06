@@ -1,6 +1,6 @@
 //! Bounded, transient GitHub calls; no account state, retry loop or background request lives here.
 
-use std::{fmt, num::NonZeroU64, time::Duration};
+use std::{fmt, num::NonZeroU64};
 
 use kumochi_protocol::{
     Secret,
@@ -56,10 +56,7 @@ impl ApiError {
             ) => Some(FailReason::Network),
             Self::Refused { status, meta } => match status {
                 401 => Some(FailReason::NotConnected),
-                403 if meta.retry_after_present
-                    || meta.retry_after_s.is_some()
-                    || meta.rate_remaining == Some(0) =>
-                {
+                403 if meta.retry_after_present || meta.rate_remaining == Some(0) => {
                     Some(FailReason::RateLimited)
                 }
                 403 => Some(FailReason::PermissionDenied),
@@ -157,7 +154,7 @@ pub struct GitHubUser {
     pub login: GitHubLogin,
 }
 
-/// One bounded installation page; P3 owns total traversal limits.
+/// One bounded installation page; the account layer owns total traversal limits.
 pub struct InstallationPage {
     /// Positive installation identifiers, at most 100.
     pub installations: Vec<u64>,
@@ -165,7 +162,7 @@ pub struct InstallationPage {
     pub total_count: u64,
 }
 
-/// One bounded repository page; P3 owns aggregation.
+/// One bounded repository page; the account layer owns aggregation.
 pub struct RepositoryPage {
     /// Checked names, at most 100.
     pub repositories: Vec<RepoName>,
@@ -280,11 +277,10 @@ struct RepositoriesWire {
 pub(super) async fn execute(
     http: &impl Http,
     endpoint: GitHubEndpoint,
-    seconds: u64,
 ) -> Result<Response, HttpError> {
     endpoint.url()?;
     tokio::time::timeout(
-        Duration::from_secs(seconds),
+        endpoint.deadline(),
         http.execute(Request {
             endpoint: Endpoint::GitHub(endpoint),
             fields: Vec::new(),
@@ -314,6 +310,16 @@ pub(super) fn parse<T: DeserializeOwned>(
     serde_json::from_slice(response.body.expose()).map_err(|_| ApiError::Response)
 }
 
+/// One call, parsed under the same byte cap and deadline the transport uses for it.
+pub(super) async fn fetch<T: DeserializeOwned>(
+    http: &impl Http,
+    endpoint: GitHubEndpoint,
+    status: u16,
+) -> Result<T, ApiError> {
+    let cap = endpoint.body_limit();
+    parse(&execute(http, endpoint).await?, status, cap)
+}
+
 /// Request a challenge without looking up or persisting a credential.
 ///
 /// # Errors
@@ -322,15 +328,14 @@ pub async fn request_device_code(
     http: &impl Http,
     client_id: &str,
 ) -> Result<DeviceCode, ApiError> {
-    let response = execute(
+    let raw: DeviceWire = fetch(
         http,
         GitHubEndpoint::DeviceCode {
             client_id: ClientId::new(client_id)?,
         },
-        15,
+        200,
     )
     .await?;
-    let raw: DeviceWire = parse(&response, 200, 4096)?;
     if raw.verification_uri != VERIFICATION_URI
         || !(1..=900).contains(&raw.expires_in)
         || !(1..=900).contains(&raw.interval)
@@ -354,16 +359,15 @@ pub async fn poll_device_token(
     client_id: &str,
     code: &Secret<DeviceCodeValue>,
 ) -> Result<TokenReply, ApiError> {
-    let response = execute(
+    let raw: TokenWire = fetch(
         http,
         GitHubEndpoint::AccessToken {
             client_id: ClientId::new(client_id)?,
             code: code.clone(),
         },
-        15,
+        200,
     )
     .await?;
-    let raw: TokenWire = parse(&response, 200, 4096)?;
     if raw.refresh_token.is_some()
         || raw.expires_in.is_some()
         || raw.refresh_token_expires_in.is_some()
@@ -386,18 +390,14 @@ pub async fn poll_device_token(
 /// # Errors
 /// Refuses non-200, malformed, oversized or failed replies.
 pub async fn user(http: &impl Http, token: &Secret<GitHubToken>) -> Result<GitHubUser, ApiError> {
-    let raw: UserWire = parse(
-        &execute(
-            http,
-            GitHubEndpoint::User {
-                token: token.clone(),
-            },
-            15,
-        )
-        .await?,
+    let raw: UserWire = fetch(
+        http,
+        GitHubEndpoint::User {
+            token: token.clone(),
+        },
         200,
-        65_536,
-    )?;
+    )
+    .await?;
     Ok(GitHubUser {
         id: raw.id.get(),
         login: raw.login,
@@ -413,19 +413,15 @@ pub async fn installations(
     token: &Secret<GitHubToken>,
     page: Page,
 ) -> Result<InstallationPage, ApiError> {
-    let raw: InstallationsWire = parse(
-        &execute(
-            http,
-            GitHubEndpoint::Installations {
-                token: token.clone(),
-                page,
-            },
-            15,
-        )
-        .await?,
+    let raw: InstallationsWire = fetch(
+        http,
+        GitHubEndpoint::Installations {
+            token: token.clone(),
+            page,
+        },
         200,
-        1_048_576,
-    )?;
+    )
+    .await?;
     if raw.installations.len() > 100 {
         return Err(ApiError::Response);
     }
@@ -445,20 +441,16 @@ pub async fn repositories(
     installation: u64,
     page: Page,
 ) -> Result<RepositoryPage, ApiError> {
-    let raw: RepositoriesWire = parse(
-        &execute(
-            http,
-            GitHubEndpoint::Repositories {
-                token: token.clone(),
-                installation,
-                page,
-            },
-            15,
-        )
-        .await?,
+    let raw: RepositoriesWire = fetch(
+        http,
+        GitHubEndpoint::Repositories {
+            token: token.clone(),
+            installation,
+            page,
+        },
         200,
-        1_048_576,
-    )?;
+    )
+    .await?;
     if raw.repositories.len() > 100 {
         return Err(ApiError::Response);
     }
