@@ -41,6 +41,8 @@ pub enum Budget {
     Views,
     /// Triangles in a view with a 3D track.
     MovingTriangles,
+    /// Extrude outline points in one step.
+    OutlinePoints,
 }
 
 /// A stable diagnostic code; never contains drawing content.
