@@ -234,10 +234,46 @@ impl PaintWork {
     }
     /// Whether this work fits the global paint budgets and every build fits one tessellation.
     pub fn within_limits(self) -> bool {
-        self.dash_pieces <= MAX_GLOBAL_DASH_PIECES
-            && self.fill_vertices <= MAX_GLOBAL_FILL_VERTICES
-            && self.outline_points <= MAX_GLOBAL_OUTLINE_POINTS
-            && self.fits_builds()
+        self.fits(Self::LIMITS)
+    }
+    /// The global paint budgets and the single-build limits, as one cap.
+    pub const LIMITS: Self = Self {
+        dash_pieces: MAX_GLOBAL_DASH_PIECES,
+        fill_vertices: MAX_GLOBAL_FILL_VERTICES,
+        largest_fill: FILL_VERTEX_LIMIT,
+        outline_points: MAX_GLOBAL_OUTLINE_POINTS,
+        largest_outline: OUTLINE_POINT_LIMIT,
+    };
+    /// Whether every component is at most `cap`'s.
+    pub(crate) fn fits(self, cap: Self) -> bool {
+        self.dash_pieces <= cap.dash_pieces
+            && self.fill_vertices <= cap.fill_vertices
+            && self.largest_fill <= cap.largest_fill
+            && self.outline_points <= cap.outline_points
+            && self.largest_outline <= cap.largest_outline
+    }
+    /// The work of `primitives` on top of `spent`, or `None` once the sum doesn't fit `cap`.
+    /// Each fill counts crossings only up to the room left in `cap`, so work that can never
+    /// fit stops after at most `cap.fill_vertices` counted fill points.
+    pub(crate) fn within(primitives: &[Prim], spent: Self, cap: Self) -> Option<Self> {
+        primitives
+            .iter()
+            .try_fold(Self::default(), |sum, primitive| {
+                let work = match primitive {
+                    Prim::Fill { points, .. } => {
+                        let room = cap.fill_vertices.checked_sub(
+                            spent
+                                .fill_vertices
+                                .saturating_add(sum.fill_vertices)
+                                .saturating_add(points.len()),
+                        )?;
+                        Self::fills(points.len() + crossings(points, room))
+                    }
+                    other => Self::of(std::slice::from_ref(other)),
+                };
+                let sum = sum + work;
+                (spent + sum).fits(cap).then_some(sum)
+            })
     }
 }
 /// Both charges together: sums saturate and the largest single builds take the larger.
@@ -816,6 +852,92 @@ mod tests {
         ] {
             assert!(at.within_limits(), "exactly at the limit fits");
             assert!(!over.within_limits(), "one over is refused");
+        }
+    }
+
+    #[test]
+    fn within_stops_counting_once_a_bounded_scene_passes_its_cap() {
+        let spent = |fill_vertices| PaintWork {
+            fill_vertices,
+            ..PaintWork::default()
+        };
+        let exact = |fill_vertices, largest_fill| PaintWork {
+            fill_vertices,
+            largest_fill,
+            ..PaintWork::default()
+        };
+        let fill = |corners: &[[f32; 2]]| Prim::Fill {
+            points: points(corners),
+            color: paint(),
+        };
+        let square = fill(&[[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]);
+        let bowtie = fill(&[[0.0, 0.0], [10.0, 10.0], [10.0, 0.0], [0.0, 10.0]]);
+        let within = |prims: &[Prim], fill_vertices| {
+            PaintWork::within(prims, spent(fill_vertices), PaintWork::LIMITS)
+        };
+        assert_eq!(
+            within(std::slice::from_ref(&bowtie), 507),
+            Some(exact(5, 5)),
+            "4 points and 1 crossing reach 512 exactly"
+        );
+        assert_eq!(
+            within(std::slice::from_ref(&bowtie), 508),
+            None,
+            "the crossing is one over"
+        );
+        assert_eq!(
+            within(std::slice::from_ref(&square), 508),
+            Some(exact(4, 4))
+        );
+        assert_eq!(
+            within(std::slice::from_ref(&square), 509),
+            None,
+            "the points alone are one over"
+        );
+        assert_eq!(
+            within(&[square.clone(), bowtie.clone()], 503),
+            Some(exact(9, 5)),
+            "fills in one item share the room left"
+        );
+        assert_eq!(within(&[square, bowtie], 504), None);
+    }
+
+    #[test]
+    fn within_checks_accumulated_dash_and_outline_work_componentwise() {
+        let dash = |length| Prim::Line {
+            points: points(&[[0.0, 0.0], [length, 0.0]]),
+            color: paint(),
+            width: 1.0,
+            closed: false,
+            dashed: true,
+        };
+        for (squares, radius, length, outlines, dashes, new_outline, accepted) in [
+            (99, 0.0625, 2_100.0, 512, 512, 17, true),
+            (99, 0.0625, 2_110.0, 512, 513, 17, false),
+            (100, 0.015_625, 2_100.0, 513, 512, 13, false),
+        ] {
+            let mut previous = vec![rect(100.0, 0.0, None, Some((paint(), 2.0))); squares];
+            previous.push(dash(2_980.0));
+            let spent = PaintWork::of(&previous);
+            let next = [
+                dash(length),
+                rect(100.0, radius, None, Some((paint(), 2.0))),
+            ];
+            let work = PaintWork::of(&next);
+            let total = spent + work;
+            assert_eq!(
+                (total.dash_pieces, total.outline_points),
+                (dashes, outlines)
+            );
+            assert_eq!(
+                PaintWork::within(&next, spent, PaintWork::LIMITS),
+                accepted.then_some(PaintWork {
+                    dash_pieces: 212,
+                    outline_points: new_outline,
+                    largest_outline: new_outline,
+                    ..PaintWork::default()
+                })
+            );
         }
     }
 }

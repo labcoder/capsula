@@ -1,6 +1,6 @@
 //! Queue attribution and retirement of semantic state and undo storage.
 
-use super::{Candidate, SceneEvent, SceneState, StoredStep, object::Object, work};
+use super::{Candidate, Preparation, SceneEvent, SceneState, StoredStep, object::Object, work};
 use crate::{Handle, WireId, deferred::Deferred, layout::heap, record::Point};
 use std::collections::BTreeMap;
 
@@ -14,6 +14,14 @@ impl Candidate {
             + self.history_bytes
             + self.created.capacity() * size_of::<(WireId, Handle)>()
             + heap::btree::<Handle, f32>(self.path_scales.len())
+    }
+}
+
+impl Preparation {
+    /// Cached bytes this ticket retains: its source, compiled input and sizing facts, not the
+    /// rest of its scene. Shared allocations count once per ticket for queue attribution.
+    pub fn attributed_bytes(&self) -> usize {
+        self.retained_bytes
     }
 }
 

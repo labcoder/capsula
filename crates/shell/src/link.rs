@@ -112,6 +112,12 @@ pub(crate) enum LinkEvent {
     TurnRefused,
     /// The brain changed a listed thread, from the control pipe.
     ThreadsChanged,
+    /// A run asked to move the typed input, from connection `generation`'s control pipe.
+    Focus {
+        generation: u64,
+        run: RunId,
+        thread: ThreadId,
+    },
     /// Something the user should be told, from the control pipe.
     Error {
         generation: u64,
@@ -767,6 +773,7 @@ fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
             | ControlToShell::NoVisual { .. }
             | ControlToShell::Account(_)
             | ControlToShell::ThreadsChanged
+            | ControlToShell::Focus { .. }
             | ControlToShell::CaptureDone { .. }
             | ControlToShell::CaptureFailed { .. }
             | ControlToShell::ThreadModelSet { .. }
@@ -902,6 +909,16 @@ fn watch(
             }
             Ok(Some(ControlToShell::ThreadsChanged)) => {
                 if events.send_blocking(LinkEvent::ThreadsChanged).is_err() {
+                    return;
+                }
+            }
+            Ok(Some(ControlToShell::Focus { run, thread })) => {
+                let focus = LinkEvent::Focus {
+                    generation,
+                    run,
+                    thread,
+                };
+                if events.send_blocking(focus).is_err() {
                     return;
                 }
             }

@@ -40,7 +40,7 @@ new task hadn't been confirmed as stored when that process restarted, input retu
 To delete the open task, choose **Delete** and confirm. It stays in the list, marked
 Deleting…, until it's removed. If it was your input target, input immediately returns to Kumo;
 deleting a task you were only reading doesn't change the target. The copy on disk is
-scrubbed shortly after. Kumochi can't remove issues you already filed on GitHub, or what your
+scrubbed shortly after. Kumo keeps a note that a task was deleted, but not its name. Kumochi can't remove issues you already filed on GitHub, or what your
 model provider keeps under its own terms. If deleting fails, the task stays and you can try
 again; input doesn't automatically switch back to it.
 

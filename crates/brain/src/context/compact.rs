@@ -10,8 +10,8 @@ use kumochi_protocol::message::{EventId, ThreadId, ThreadKind};
 use super::bound::{escaped, fixed_bytes, item_bytes};
 use super::build::{fill, render};
 use super::{
-    Body, BuildError, Built, InputItem, Item, ModelRequest, Origin, RAW_RUNS, Role, RunSnapshot,
-    Summary, summary_item,
+    Body, BuildError, Built, InputItem, Item, MAX_NOTES, ModelRequest, Origin, RAW_RUNS, Role,
+    RunSnapshot, Summary, note_item, summary_item,
 };
 use crate::store::Generation;
 use crate::store::context::{Snapshot, Speaker};
@@ -66,6 +66,10 @@ pub(crate) fn compaction(
     }
     let (said, unread) = snapshot.span(thread, after, newest.last, SUMMARY_INPUT)?;
     let mut said = said.into_iter().peekable();
+    let mut notes = snapshot
+        .notes(thread, after, MAX_NOTES)?
+        .into_iter()
+        .peekable();
 
     let instructions = instructions(run);
     let prior = previous.as_ref().map(so_far);
@@ -97,8 +101,18 @@ pub(crate) fn compaction(
                 },
             });
         }
+        // Deletion notes go at the run's edges, as a request places them, so the summary covers
+        // every note through its last event.
         let mut reached = BTreeSet::new();
-        let rendered = render(snapshot, run, &items, None, &mut reached)?;
+        let mut rendered: Vec<InputItem> =
+            std::iter::from_fn(|| notes.next_if(|note| note.id < uncovered.first))
+                .map(|note| note_item(&note))
+                .collect();
+        rendered.extend(render(snapshot, run, &items, None, &mut reached)?);
+        rendered.extend(
+            std::iter::from_fn(|| notes.next_if(|note| note.id <= uncovered.last))
+                .map(|note| note_item(&note)),
+        );
         let bytes = rendered.iter().map(item_bytes).sum::<usize>();
         if total + bytes > SUMMARY_INPUT {
             break;
