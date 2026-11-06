@@ -1,6 +1,7 @@
 //! Voice at run time through the core loop: start-up loads, installs, the view on each connection
 //! and on each change, and whether runs speak.
 
+use std::cell::RefCell;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -15,13 +16,14 @@ use kumochi_protocol::message::{
 };
 use kumochi_protocol::voice::VoicePart;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Notify, mpsc, watch};
 
 use super::{Brain, Ended, Shell, duplex};
 use crate::coordinator::Input;
 use crate::platform::sherpa::tests::TrustedScratch;
-use crate::runtime::Seen;
+use crate::runtime::data::DataQueue;
 use crate::runtime::settings::Gate;
+use crate::runtime::{Link, Seen, window};
 use crate::tap::Tap;
 use crate::test_support::{self, Scratch};
 use crate::voice::download::{DownloadError, Fetch, FetchPhase, Progress};
@@ -607,6 +609,58 @@ async fn a_report_that_came_before_a_connection_is_in_its_opening_view() {
 
 fn install() -> ControlToBrain {
     ControlToBrain::Settings(SettingsOp::InstallVoice(VoicePart::SpokenReplies))
+}
+
+/// Pumps the queued settings changes to a shell whose control queue is already full.
+fn pump_full(brain: &mut Brain) {
+    let (out, _unread) = mpsc::channel(1);
+    out.try_send(Vec::new()).expect("room for one");
+    let queue = RefCell::new(DataQueue::new(window()));
+    let (ready, mut tap) = (Notify::new(), Tap::from_env());
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    assert!(brain.pump_settings(Some(&mut link)).is_err(), "full");
+}
+
+#[tokio::test]
+async fn an_install_whose_answer_finds_the_queue_full_still_fetches() {
+    let scratch = Scratch::new("voice-install-full");
+    let (fetch, _results) = held_fetch();
+    let (mut brain, _release, _) = attached_with(&scratch, "", 0, Arc::<HeldFetch>::clone(&fetch));
+    let mut tap = Tap::from_env();
+    brain.control_offline(install(), 0, &mut tap);
+    pump_full(&mut brain);
+    tokio::time::timeout(super::PATIENCE, fetch.started.notified())
+        .await
+        .expect("the fetch starts");
+    brain.close().await;
+    assert_eq!(fetch.begun.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_cancel_whose_answer_finds_the_queue_full_still_cancels() {
+    let scratch = Scratch::new("voice-cancel-full");
+    let (fetch, _results) = held_fetch();
+    let (mut brain, _release, _) = attached_with(&scratch, "", 0, Arc::<HeldFetch>::clone(&fetch));
+    let mut tap = Tap::from_env();
+    brain.control_offline(install(), 0, &mut tap);
+    brain.pump_settings_offline();
+    tokio::time::timeout(super::PATIENCE, fetch.started.notified())
+        .await
+        .expect("the fetch starts");
+    brain.control_offline(
+        ControlToBrain::Settings(SettingsOp::CancelVoiceInstall),
+        0,
+        &mut tap,
+    );
+    pump_full(&mut brain);
+    tokio::time::timeout(super::PATIENCE, async {
+        while fetch.cancelled.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the fetch is cancelled before quit");
+    brain.close().await;
 }
 
 #[tokio::test]

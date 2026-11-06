@@ -130,17 +130,28 @@ impl Brain {
                 break;
             };
             let (staged, voice) = match change {
+                // Popped, so it applies even when its answer can't be sent; no Voice frame
+                // goes ahead of a missing answer.
                 Change::User(SettingsOp::InstallVoice(part)) if self.voice.is_some() => {
-                    self.settled(epoch, Outcome::Accepted, link.as_deref_mut())?;
-                    self.voice_op(|installer| installer.install(part), link.as_deref_mut())?;
+                    let answered = self.settled(epoch, Outcome::Accepted, link.as_deref_mut());
+                    let link = if answered.is_ok() {
+                        link.as_deref_mut()
+                    } else {
+                        None
+                    };
+                    self.voice_op(|installer| installer.install(part), link)?;
+                    answered?;
                     continue;
                 }
                 Change::User(SettingsOp::CancelVoiceInstall) if self.voice.is_some() => {
-                    self.settled(epoch, Outcome::Accepted, link.as_deref_mut())?;
-                    self.voice_op(
-                        crate::voice::installer::Installer::cancel,
-                        link.as_deref_mut(),
-                    )?;
+                    let answered = self.settled(epoch, Outcome::Accepted, link.as_deref_mut());
+                    let link = if answered.is_ok() {
+                        link.as_deref_mut()
+                    } else {
+                        None
+                    };
+                    self.voice_op(crate::voice::installer::Installer::cancel, link)?;
+                    answered?;
                     continue;
                 }
                 Change::User(op) => (self.config.stage(op), None),
