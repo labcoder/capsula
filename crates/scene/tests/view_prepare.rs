@@ -949,19 +949,17 @@ fn named(pairs: &[(&str, [u8; 3])]) -> Vec<(String, [u8; 3])> {
         .collect()
 }
 
-/// The full charge of a fresh scene that puts the same solids with the same colours.
-fn fresh(put: &Value) -> usize {
-    let (mut scene, mut budget) = scene();
-    opening(&mut scene, &mut budget, json!({"id":"a","put":put}))
-        .after
-        .resident_bytes()
-}
-
 #[test]
 fn a_colour_survives_retire_stop_recovery_removal_and_rebuild() {
     let (grey, dark) = ([0x88, 0x88, 0x88], [0x44, 0x44, 0x44]);
     let (red, blue, green) = ([0xff, 0, 0], [0, 0, 0xff], [0, 0xff, 0]);
     let u = |color: &str| cube("u", &json!({"pos":[4,0,0],"color":color}));
+    // Measured at c1ec74c: a scene holding only the view charges 738 bytes, and each cube adds
+    // 1,083: its mesh (520) and source (298) by the allocator oracle, then its object, slot and id.
+    // 738 + 1,083: the view and one cube.
+    let one_cube = 1_821;
+    // 738 + 2 * 1,083: the view and two cubes; colour is inline, so a recolour keeps it.
+    let two_cubes = 2_904;
     let (mut scene, mut budget) = scene();
     let first = opening(
         &mut scene,
@@ -969,6 +967,7 @@ fn a_colour_survives_retire_stop_recovery_removal_and_rebuild() {
         json!({"id":"a","put":[view(), cube("s", &json!({"color":"#888888"})), u("#444444")]}),
     );
     assert_eq!(rgbs(&first.after), named(&[("s", grey), ("u", dark)]));
+    assert_eq!(first.after.resident_bytes(), two_cubes);
     let shaded = next(
         &mut scene,
         &mut budget,
@@ -978,13 +977,8 @@ fn a_colour_survives_retire_stop_recovery_removal_and_rebuild() {
     scene.retire(1, &mut budget).expect("retire the recolour");
     drop(first);
     let reds = named(&[("s", red), ("u", dark)]);
-    let red_charge = fresh(&json!([
-        view(),
-        cube("s", &json!({"color":"#ff0000"})),
-        u("#444444")
-    ]));
     assert_eq!(rgbs(&shaded.after), reds);
-    assert_eq!(shaded.after.resident_bytes(), red_charge);
+    assert_eq!(shaded.after.resident_bytes(), two_cubes);
 
     let blued = next(
         &mut scene,
@@ -993,6 +987,7 @@ fn a_colour_survives_retire_stop_recovery_removal_and_rebuild() {
         json!({"id":"c","set":[{"target":"s","color":"#0000ff"}]}),
     );
     assert_eq!(rgbs(&blued.after), named(&[("s", blue), ("u", dark)]));
+    assert_eq!(blued.after.resident_bytes(), two_cubes);
     let held = geometry(&shaded.after);
     let revealed = vec![held.handle, held.solids[0].handle, held.solids[1].handle];
     scene
@@ -1007,7 +1002,7 @@ fn a_colour_survives_retire_stop_recovery_removal_and_rebuild() {
     drop(blued);
     let tip = shaded.after.cut(&scene).expect("cut");
     assert_eq!(rgbs(&tip), reds, "the stopped blue never activated");
-    assert_eq!(tip.resident_bytes(), red_charge);
+    assert_eq!(tip.resident_bytes(), two_cubes);
 
     let (_, recovered) = recover(
         header(),
@@ -1019,7 +1014,7 @@ fn a_colour_survives_retire_stop_recovery_removal_and_rebuild() {
     )
     .expect("recovery");
     assert_eq!(rgbs(&recovered), reds);
-    assert_eq!(recovered.resident_bytes(), red_charge);
+    assert_eq!(recovered.resident_bytes(), two_cubes);
 
     let removed = next(
         &mut scene,
@@ -1028,10 +1023,7 @@ fn a_colour_survives_retire_stop_recovery_removal_and_rebuild() {
         json!({"id":"d","remove":["u"]}),
     );
     assert_eq!(rgbs(&removed.after), named(&[("s", red)]));
-    assert_eq!(
-        removed.after.resident_bytes(),
-        fresh(&json!([view(), cube("s", &json!({"color":"#ff0000"}))]))
-    );
+    assert_eq!(removed.after.resident_bytes(), one_cube);
 
     let rebuilt = next(
         &mut scene,
@@ -1040,12 +1032,5 @@ fn a_colour_survives_retire_stop_recovery_removal_and_rebuild() {
         json!({"id":"e","set":[{"target":"s","color":"#00ff00"}],"put":[cube("w", &json!({"pos":[8,0,0],"color":"#444444"}))]}),
     );
     assert_eq!(rgbs(&rebuilt.after), named(&[("s", green), ("w", dark)]));
-    assert_eq!(
-        rebuilt.after.resident_bytes(),
-        fresh(&json!([
-            view(),
-            cube("s", &json!({"color":"#00ff00"})),
-            cube("w", &json!({"pos":[8,0,0],"color":"#444444"}))
-        ]))
-    );
+    assert_eq!(rebuilt.after.resident_bytes(), two_cubes);
 }
