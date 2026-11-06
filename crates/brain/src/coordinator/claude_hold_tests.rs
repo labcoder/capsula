@@ -1,6 +1,7 @@
 //! H-a to H-i: a Claude Code launch holds its seed's send lease until its job is confirmed
 //! empty, through the real coordinator, `SendGate` and `SendLease`, on the lane's fake.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::message::{ControlToShell, Deleted, ThreadId};
@@ -49,7 +50,7 @@ impl Granted {
         });
         let (inputs_tx, mut inputs) = mpsc::unbounded_channel();
         let asks = Asks::default();
-        let gate = SendGate::new(key, asks.clone(), inputs_tx.clone());
+        let gate = SendGate::new(key, Arc::clone(&asks), inputs_tx.clone());
         let hold = MAX_LAUNCH + SETTLE;
         let asked = tokio::spawn(async move { gate.ask_held(hold).await });
         let ready = timeout(WAIT, inputs.recv())

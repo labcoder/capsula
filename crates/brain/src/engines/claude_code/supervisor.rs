@@ -149,11 +149,11 @@ impl StdinWriter {
         line: &[u8],
         until: Instant,
     ) -> Result<(), StdinRefused> {
-        let total = self.control.control_bytes.load(Ordering::Acquire) + line.len();
+        let total = self.control.line_bytes.load(Ordering::Acquire) + line.len();
         if total > MAX_CONTROL {
             return Err(StdinRefused::TooLarge);
         }
-        self.control.control_bytes.store(total, Ordering::Release);
+        self.control.line_bytes.store(total, Ordering::Release);
         for chunk in line.chunks(CHUNK) {
             self.enqueue(chunk, until).await?;
         }
@@ -227,7 +227,7 @@ pub(crate) struct Control {
     /// The one seed was asked for.
     seeded: AtomicBool,
     /// The control lines' bytes so far.
-    control_bytes: AtomicUsize,
+    line_bytes: AtomicUsize,
 }
 
 impl Control {
@@ -524,7 +524,7 @@ pub(crate) fn admit(question: Question) -> Result<(Start, Launch), LaunchRefused
         wake: round_stdin.clone(),
         send: Mutex::new(SendSlot::Open(None)),
         seeded: AtomicBool::new(false),
-        control_bytes: AtomicUsize::new(0),
+        line_bytes: AtomicUsize::new(0),
     });
     let (started_tx, started) = oneshot::channel();
     let (ended_tx, ended) = oneshot::channel();
@@ -892,7 +892,9 @@ impl Running {
         self.control.revoke();
         let send = self.control.seal_send();
         if !self.confirm(host) {
-            send.map(SendLease::abandon);
+            if let Some(send) = send {
+                send.abandon();
+            }
             return Teardown::Stuck;
         }
         // Nothing the launch started can send any more.

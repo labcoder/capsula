@@ -107,7 +107,7 @@ async fn control_lines_have_their_own_cap_and_the_seed_goes_in_chunks() {
         writer.control(b"c", far()).await,
         Err(StdinRefused::TooLarge)
     );
-    writer.seed(&[b's'; 65_537], far()).await.expect("queued");
+    writer.seed(&vec![b's'; 65_537], far()).await.expect("queued");
     let mut seen = Vec::new();
     while seen.len() < 4 {
         seen.push(entered.recv_timeout(WAIT).expect("admitted"));

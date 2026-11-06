@@ -387,8 +387,8 @@ fn failed(failure: Failure) -> ClaudeCodeView {
         Failure::Version | Failure::Quarantined(_) => {
             ClaudeCodeView::AuditFailed(AuditFailed::Version)
         }
-        Failure::Quarantine => ClaudeCodeView::AuditFailed(AuditFailed::Malformed),
-        Failure::Folders
+        Failure::Quarantine
+        | Failure::Folders
         | Failure::Spawn
         | Failure::TooLong
         | Failure::Pipe
