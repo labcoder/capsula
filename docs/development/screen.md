@@ -52,12 +52,14 @@ A loss fails all pending operations and requests worker termination. The supervi
 off the async thread, up to 2 s [guess], for the process to exit, and broadcasts
 `Exit { generation, confirmed }` and then the loss's `Generation`: the first worker is 0 and each
 respawn the next, and every reply names the generation that sent it. `WorkerLost` alone is not
-confirmation that the native process exited. The loss broadcast is the one recovery boundary:
-requests that arrive while the exit is confirmed fail fast with `WorkerLost`, and a request made
-after the loss reaches the next worker without a retry. An exit that isn't seen in 2 s is fatal.
-The supervisor marks every handle refused before it broadcasts that loss, starts no worker beside
-one that may still run, and ends; every request from then on, queued ones included, gets
-`ExitUnconfirmed` (`ScreenError::ExitUnconfirmed`, `SpeechError::ExitUnconfirmed`).
+confirmation that the native process exited. The loss broadcast is the one recovery boundary.
+Requests that arrive while the exit is confirmed wait in the queue under their absolute deadlines,
+as during a respawn, so a caller that retries at once after a failed request isn't refused; the
+replacement serves them after the loss. Outside crash backoff, a request made after the loss also
+reaches the next worker without a retry. An exit that isn't seen in 2 s is fatal. The supervisor
+marks every handle refused before it broadcasts that loss, starts no worker beside one that may
+still run, and ends; held requests and every request from then on get `ExitUnconfirmed`
+(`ScreenError::ExitUnconfirmed`, `SpeechError::ExitUnconfirmed`).
 The first
 two losses respawn immediately; a third within 60 s waits 0.2 s, then 1 s and 5 s for later losses
 [guess]. Requests during backoff fail fast. During an in-flight respawn, requests wait for the new

@@ -5,9 +5,9 @@
 //! ids and the loss history. Two std threads per worker own the pipe ends. A loss fails everything
 //! pending, gives the process two seconds to show it exited, broadcasts that [`Exit`] and then its
 //! [`Generation`], and respawns, backing off after the second loss in a minute. The loss is the one
-//! recovery boundary: requests during confirmation fail; outside crash backoff, requests after
-//! the loss reach the next worker. An exit
-//! that isn't seen is fatal: nothing respawns and every handle refuses with
+//! recovery boundary: requests that arrive during the exit wait are held, as during a respawn, and
+//! outside crash backoff they and requests after the loss reach the next worker. An exit that
+//! isn't seen is fatal: nothing respawns and every handle, held requests included, is refused with
 //! [`WorkerLost::ExitUnconfirmed`]. A request gets one reply, or a bounded stream of them ending in
 //! the kind's terminal reply.
 
@@ -208,9 +208,9 @@ impl<K: Kind> Handle<K> {
     }
 
     /// Submits one request, answered by `until` or not at all. `until` is absolute: it covers
-    /// queueing, a respawn in progress and every chunk. A full queue, backoff or exit confirmation
-    /// fails fast, and an unconfirmed exit refuses for good. The reply comes with the generation
-    /// of the worker that sent it.
+    /// queueing, an exit confirmation or respawn in progress and every chunk. A full queue or
+    /// backoff fails fast, and an unconfirmed exit refuses for good. The reply comes with the
+    /// generation of the worker that sent it.
     pub(crate) async fn request(
         &self,
         body: K::Request,
@@ -357,7 +357,7 @@ pub(crate) fn detached<K: Kind>() -> (Handle<K>, Played<K>) {
 
 struct Worker<K: Kind> {
     /// Taken for exit confirmation once the worker is lost.
-    process: Option<Helper>,
+    process: Option<Box<dyn Process>>,
     writes: blocking::SyncSender<(u64, K::Request)>,
     reads: mpsc::Receiver<Option<Frame>>,
 }
@@ -368,7 +368,7 @@ impl<K: Kind> Worker<K> {
         let (writes, requests) = blocking::sync_channel::<(u64, K::Request)>(QUEUE);
         let (replies, reads) = mpsc::channel(QUEUE);
         let worker = Self {
-            process: Some(process),
+            process: Some(Box::new(process)),
             writes,
             reads,
         };
@@ -407,13 +407,29 @@ impl<K: Kind> Worker<K> {
 
 impl<K: Kind> Drop for Worker<K> {
     fn drop(&mut self) {
-        terminate::<K>(self.process.as_ref());
+        terminate::<K>(self.process.as_deref());
+    }
+}
+
+/// A worker's process, as its supervisor ends it.
+trait Process: Send {
+    fn terminate(&self) -> io::Result<()>;
+    fn exits_within(&self, timeout: Duration) -> io::Result<bool>;
+}
+
+impl Process for Helper {
+    fn terminate(&self) -> io::Result<()> {
+        Helper::terminate(self)
+    }
+
+    fn exits_within(&self, timeout: Duration) -> io::Result<bool> {
+        Helper::exits_within(self, timeout)
     }
 }
 
 /// Asks the OS to end the worker's process; only an exit wait shows it ended.
-fn terminate<K: Kind>(process: Option<&Helper>) {
-    if let Some(Err(error)) = process.map(Helper::terminate) {
+fn terminate<K: Kind>(process: Option<&dyn Process>) {
+    if let Some(Err(error)) = process.map(Process::terminate) {
         tracing::error!(
             kind = K::NAME,
             code = error.raw_os_error(),
@@ -422,23 +438,18 @@ fn terminate<K: Kind>(process: Option<&Helper>) {
     }
 }
 
-/// Waits off the runtime thread for `exited`, given [`EXIT_CONFIRMATION`], failing commands that
-/// arrive meanwhile, then broadcasts `generation`'s [`Exit`] and then its loss. An unconfirmed exit
-/// is made fatal first, so whoever the loss wakes is refused. Returns whether the exit was seen.
+/// Waits off the runtime thread for `exited`, given [`EXIT_CONFIRMATION`], while commands that
+/// arrive wait in the queue as they do during a respawn. Then broadcasts `generation`'s [`Exit`]
+/// and then its loss. An unconfirmed exit is made fatal first, so whoever the loss wakes, and
+/// every held command, is refused. Returns whether the exit was seen.
 async fn confirm_exit<K: Kind>(
     exited: impl FnOnce(Duration) -> bool + Send + 'static,
     generation: Generation,
-    commands: &mut mpsc::Receiver<Command<K>>,
     notices: &Notices,
 ) -> bool {
-    let mut waiting = tokio::task::spawn_blocking(move || exited(EXIT_CONFIRMATION));
-    let confirmed = loop {
-        tokio::select! {
-            biased;
-            exited = &mut waiting => break exited.unwrap_or(false),
-            Some(command) = commands.recv() => command.answer.fail(),
-        }
-    };
+    let confirmed = tokio::task::spawn_blocking(move || exited(EXIT_CONFIRMATION))
+        .await
+        .unwrap_or(false);
     if !confirmed {
         notices.fatal.store(true, Ordering::Release);
         tracing::error!(
@@ -613,14 +624,14 @@ async fn run<K: Kind>(
         tracing::warn!(kind = K::NAME, ?reason, "worker lost");
         let process = worker.process.take();
         drop(worker);
-        terminate::<K>(process.as_ref());
+        terminate::<K>(process.as_deref());
         while let Ok(command) = commands.try_recv() {
             command.answer.fail();
         }
         let exited = move |timeout| {
             process.is_some_and(|process| matches!(process.exits_within(timeout), Ok(true)))
         };
-        let confirmed = confirm_exit(exited, generation, &mut commands, &notices).await;
+        let confirmed = confirm_exit::<K>(exited, generation, &notices).await;
         // A worker that may still run is never joined by another. With every handle gone, a
         // respawn would only land in a closing job.
         if !confirmed || commands.is_closed() {
