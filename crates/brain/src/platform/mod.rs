@@ -2,6 +2,9 @@
 
 pub mod credential;
 
+#[cfg(all(windows, feature = "test-support"))]
+pub use windows::{WindowProbe, WindowSample, WindowSession};
+
 mod connected_shell;
 mod session_lock;
 mod trust_roots;

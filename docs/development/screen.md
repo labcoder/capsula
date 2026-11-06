@@ -190,7 +190,14 @@ geometry, excluded roots and password/descendant sentinels. Reader fixtures use 
 clocks, but never read real windows or measure platform calls. There is no cancel operation yet;
 worker authority and late/hung-thread handling are described below.
 
-The ignored owner-run UIA smoke/timing check uses an outside-repo harness. It reports only
+The ignored owner-run UIA smoke/timing checks require explicit `UIA_TEST_HWND` and
+`UIA_TEST_PID` values; they never select the foreground or launch an application. An
+outside-repo wrapper owns the fixture or newly launched Settings process and its cleanup.
+The `test-support` feature exposes `WindowSession` and `WindowProbe` for a release worker
+that measures the actual bounded reader, serializes the complete tree in memory and discards it.
+Cold samples use separate worker processes and UIA objects; warm samples retain one process
+and discard its first walk. The first check gap includes lazy UIA setup; a walk with no checks
+reports its entire duration as both the longest unchecked gap and the tail. The harness reports only
 structural counts and timings: text and mask reads, navigation-call count, deadline-check count,
 the longest interval between deadline checks, and the tail interval from the last check to
 completion. It never reports window names, element text, rectangles or captured content.
@@ -198,8 +205,9 @@ The first walk is timed separately through the bounded reader, including lazy UI
 the second walk uses the same initialized source. Initialization remains lazy until measurement
 justifies changing it. A COM guard balances initialization even if later setup fails or unwinds.
 The source's root pid is the native window owner's pid, matching foreground pinning, not the UIA
-provider process, which can differ for hosted UWP content. A second ignored check opens Settings
-and verifies that contract; both live checks belong only to an owner-away measuring turn.
+provider process, which can differ for hosted UWP content. The second ignored check verifies
+that contract for the explicitly supplied Settings root. Live checks belong only to an
+owner-approved session; short unlocked dry runs do not qualify as timing measurements.
 
 ## Capture-scoped element operation
 

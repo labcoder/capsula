@@ -346,3 +346,6 @@ impl ElementSource for Automation {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(feature = "test-support")]
+pub(super) mod measurement;

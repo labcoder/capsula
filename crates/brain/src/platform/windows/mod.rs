@@ -3,6 +3,8 @@
 mod capture;
 mod credential;
 mod elements;
+#[cfg(feature = "test-support")]
+pub use elements::measurement::{WindowProbe, WindowSample, WindowSession};
 #[cfg(test)]
 pub(crate) mod fake_claude;
 mod fault;

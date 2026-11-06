@@ -21,7 +21,7 @@ mod worker;
 
 pub use crate::supervise::WorkerLost;
 pub(crate) use capture::{Acquired, Capturer, Failure};
-#[cfg(all(test, windows))]
+#[cfg(all(windows, any(test, feature = "test-support")))]
 pub(crate) use elements::WalkJob;
 pub use elements::{Availability, Cut, Element, ElementId, ElementTarget, ElementTree};
 #[cfg(windows)]
@@ -30,7 +30,7 @@ pub(crate) use elements::{
     excluded_image,
 };
 pub(crate) use frame::{RawFrame, display_edges};
-#[cfg(all(test, windows))]
+#[cfg(all(windows, any(test, feature = "test-support")))]
 pub(crate) use mask::MaskSet;
 pub use mask::Unavailable;
 #[cfg(windows)]

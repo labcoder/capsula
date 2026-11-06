@@ -412,51 +412,30 @@ fn selected_window_walks(top: &TopWindow) -> Availability {
     availability
 }
 
+fn explicit_test_window() -> TopWindow {
+    let window = std::env::var("UIA_TEST_HWND")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .expect("UIA_TEST_HWND must name an explicit owned fixture");
+    let pid = std::env::var("UIA_TEST_PID")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .expect("UIA_TEST_PID must name the explicit fixture owner");
+    let handle = HWND(std::ptr::without_provenance_mut(window));
+    snapshot(handle, Some(pid)).expect("the explicit fixture must be a visible owned root")
+}
+
 #[test]
-#[ignore = "owner-selected real foreground window; run only under the measuring lock"]
+#[ignore = "explicit owned window in UIA_TEST_HWND and UIA_TEST_PID; never foreground"]
 fn real_window_walk_smoke() {
-    let top = foreground().expect("select the fixture window before running");
+    let top = explicit_test_window();
     assert_eq!(selected_window_walks(&top), Availability::Read);
 }
 
 #[test]
-#[ignore = "opens Settings; owner away and assigned measuring turn only"]
+#[ignore = "explicit newly launched Settings window; the external wrapper owns launch and cleanup"]
 fn real_uwp_window_owner_pid_smoke() {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the Settings launch holds platform::spawn_lock"
-    )]
-    let status = {
-        let _spawn = crate::platform::spawn_lock();
-        std::process::Command::new("cmd.exe")
-            .args(["/c", "start", "", "ms-settings:"])
-            .status()
-            .map_err(|error| error.raw_os_error().unwrap_or(-1))
-            .expect("Settings opens")
-    };
-    assert!(status.success());
-    let until = Instant::now() + Duration::from_secs(5);
-    let top = loop {
-        if let Some(top) = foreground() {
-            // SAFETY: only query access is requested for this observed native owner pid.
-            let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, top.pid) };
-            if !raw.is_null() {
-                // SAFETY: the successful query handle is owned and closed exactly once.
-                let process = unsafe { OwnedHandle::from_raw_handle(raw) };
-                let image = super::super::pipe::process_image(process.as_handle())
-                    .map_err(io_error)
-                    .unwrap();
-                if image
-                    .file_name()
-                    .is_some_and(|name| name.eq_ignore_ascii_case("SystemSettings.exe"))
-                {
-                    break top;
-                }
-            }
-        }
-        assert!(Instant::now() < until, "Settings did not become foreground");
-        std::thread::sleep(Duration::from_millis(20));
-    };
+    let top = explicit_test_window();
     let shell = Arc::new(AtomicU32::new(0));
     let mut source = Automation::new(shell)
         .map_err(|error| error.code().0)
