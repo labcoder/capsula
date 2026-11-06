@@ -398,12 +398,14 @@ attempts. Nothing in production asks a question yet: C5b-2's engine selection is
   1. waits for `ready`;
   2. rechecks the warm expiry. A warm attempt that's ready only after its expiry is dropped, and
      one `Refresh` asks the core for a fresh attempt;
-  3. binds the run;
+  3. binds the run, which fixes the question's deadline: `QUESTION` (120 s) from the bind, or
+     the launch's deadline if that's sooner. The ask, the seed and the read all end at it, and
+     at it the launch is revoked and the attempt reports `Deadline`;
   4. asks with `ask_held` for the launch's deadline plus `SETTLE` (a `Rebuild` writes nothing
      and spends no question);
   5. reserves one question from `KUMOCHI_CLAUDE_QUESTIONS` (debug builds only; out means
      `ClaudeCodeBudget` and the lease goes back unused);
-  6. moves the lease into the launch, and seeds within `QUESTION` (120 s) of the bind.
+  6. moves the lease into the launch, and seeds.
 
   Then every init goes through the one `PostSeedAudit`. The gate passes only after the first one
   matches; a text, end or control line before it is `Malformed`, and a later init that differs

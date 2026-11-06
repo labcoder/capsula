@@ -962,3 +962,52 @@ async fn analytics_from_a_stale_or_unready_attempt_changes_nothing() {
     );
     rig.close().await;
 }
+
+/// Sets the clock so a bind now fixes a question deadline `left` from now.
+fn deadline_in(rig: &Rig, left: Duration) {
+    *rig.now.lock().unwrap_or_else(PoisonError::into_inner) = Instant::now()
+        .checked_sub(launch::QUESTION - left)
+        .expect("the machine has been up for two minutes");
+}
+
+/// A Grant after the question's deadline, which bind fixed: nothing is seeded, the lease goes
+/// back unused and the attempt reports `Deadline` once.
+#[tokio::test]
+async fn a_grant_after_the_question_deadline_seeds_nothing() {
+    let mut rig = Rig::new("question-late-grant", &synthetic_signed_in()).await;
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let (id, _) = rig.last();
+    deadline_in(&rig, Duration::from_millis(300));
+    let mut played = play(&question);
+    let ask = rig.drive(played.inputs.recv()).await;
+    assert!(matches!(ask, Some(Input::SendReady { .. })), "an ask");
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    engines::answer(&played.asks, played.key, played.lease());
+    assert_eq!(
+        rig.drive(played.events()).await,
+        [TurnEvent::Finished(Finish::Failed(EngineFailure::Provider))]
+    );
+    assert_eq!(rig.reported(id).await, [launch::Outcome::Deadline]);
+    assert!(rig.stdin().iter().all(|line| !line.ends_with(" user")));
+    rig.close().await;
+}
+
+/// An ask nobody answers ends at the question's deadline: nothing is seeded and the attempt
+/// reports `Deadline` once.
+#[tokio::test]
+async fn an_unanswered_ask_ends_at_the_question_deadline() {
+    let mut rig = Rig::new("question-unanswered", &synthetic_signed_in()).await;
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let (id, _) = rig.last();
+    deadline_in(&rig, Duration::from_millis(300));
+    let mut played = play(&question);
+    let ask = rig.drive(played.inputs.recv()).await;
+    assert!(matches!(ask, Some(Input::SendReady { .. })), "an ask");
+    assert_eq!(
+        rig.drive(played.events()).await,
+        [TurnEvent::Finished(Finish::Failed(EngineFailure::Provider))]
+    );
+    assert_eq!(rig.reported(id).await, [launch::Outcome::Deadline]);
+    assert!(rig.stdin().iter().all(|line| !line.ends_with(" user")));
+    rig.close().await;
+}

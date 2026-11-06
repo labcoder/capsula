@@ -442,10 +442,16 @@ impl Question<'_> {
             report.report(Outcome::Launch);
             return Some(Finish::Failed(EngineFailure::Provider));
         }
+        let until = launch.deadline().min(self.clock.now() + QUESTION);
         let hold = (launch.deadline() + SETTLE).saturating_duration_since(Instant::now());
-        let lease = match self.gate.ask_held(hold).await {
-            Answer::Grant(lease) => lease,
-            Answer::Rebuild => return None,
+        let lease = match tokio::time::timeout_at(until.into(), self.gate.ask_held(hold)).await {
+            Ok(Answer::Grant(lease)) => lease,
+            Ok(Answer::Rebuild) => return None,
+            Err(_) => {
+                launch.lease().revoke();
+                report.report(Outcome::Deadline);
+                return Some(failed(Outcome::Deadline));
+            }
         };
         if !self.budget.reserve() {
             drop(lease);
@@ -456,7 +462,6 @@ impl Question<'_> {
             report.report(Outcome::Launch);
             return Some(Finish::Failed(EngineFailure::Provider));
         }
-        let until = launch.deadline().min(Instant::now() + QUESTION);
         let seed = seed::encode(&request.request, &context::tools(attempt.snapshot.origin));
         if writer.seed(&seed, until).await.is_err() {
             report.report(Outcome::Launch);
