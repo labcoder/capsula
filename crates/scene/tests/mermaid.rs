@@ -184,6 +184,7 @@ fn approved_gates_prepare_and_recover_from_original_source() {
             &Arc::new(Theme::default()),
             &mut Measure,
             &AtomicBool::new(false),
+            None,
         )
         .expect("original graph recovery");
         assert_eq!(replayed.step(0), Some(&step));
@@ -549,6 +550,7 @@ fn group_labels_and_edge_heads_survive_set_cut_and_recovery() {
         &Arc::new(Theme::default()),
         &mut Measure,
         &AtomicBool::new(false),
+        None,
     )
     .expect("cut graph recovery");
     assert_eq!(bounds(&detached, "A"), expected_a);
@@ -868,6 +870,7 @@ fn generated_names_do_not_alias_plain_ids_or_other_mermaid_blocks() {
         &Arc::new(Theme::default()),
         &mut Measure,
         &AtomicBool::new(false),
+        None,
     )
     .expect("collision-free replay");
     assert_eq!(recovered.items(), prepared.after.items());

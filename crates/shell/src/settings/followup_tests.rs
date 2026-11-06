@@ -12,6 +12,8 @@ fn view(assistant: &str, user: Option<&str>) -> SettingsView {
         default_model: None,
         dock_position: kumochi_protocol::message::DockPosition::TopCenter,
         show_in_taskbar: false,
+        talk_back: false,
+        stt_unload: kumochi_protocol::message::SttUnload::Kept,
     }
 }
 

@@ -29,9 +29,12 @@ impl Engine for Silence {
 /// A brain playing `script` with spoken replies on, speaking through `Silence`.
 fn spoken(scratch: &Scratch, script: &str) -> Brain {
     let mut brain = test_support::brain(scratch, script);
-    let tts = TtsHandle::spawn_with(tokio::runtime::Handle::current(), |_: &Path| Ok(Silence))
-        .expect("the owner thread starts");
-    tts.load("models".into());
+    let (reports, _) = crate::voice::Reports::new();
+    let tts = TtsHandle::spawn_with(tokio::runtime::Handle::current(), reports, |_: &Path| {
+        Ok(Silence)
+    })
+    .expect("the owner thread starts");
+    tts.load("models".into(), 1);
     brain.pump = Some(Pump::new(tts));
     brain.offline(Input::SpokenReplies { loaded: true });
     brain.offline(Input::AudioOutput {

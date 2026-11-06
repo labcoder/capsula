@@ -690,7 +690,11 @@ overlaps as weak. There is no union pass or extra paint charge for isolation.
 A fill over `FILL_VERTEX_LIMIT` (21,845, a third of the u16 index space) or a rect outline over
 `OUTLINE_POINT_LIMIT` (5,460) can't be one tessellation build, so preparation fails with
 `OverResidency`. `PaintWork::within_limits` also checks the global dash, fill-vertex and
-outline budgets, which are measured on Rez.
+outline budgets, which are measured on Rez. Solid strokes carry no paint charge because
+construction bounds every generated line: a flattened path has at most 4,096 segments and
+every other line at most 513 points including a closed outline's repeated first point, so
+the longest run, closed, costs 4 × 4,098 + 4 = 16,396 of a build's 21,845 vertices.
+The painter still refuses a longer run loudly.
 
 The global limits are 512 dash pieces, 512 fill vertices and 512 outline points, shared
 across all visible scenes and reserved ready/rest states. Four radius-8 filled and bordered
@@ -698,7 +702,12 @@ boxes cost 436 fill and outline points, leaving room for labels and dashed conne
 labels remain subject to the existing text and object limits. A drawing beyond the limits
 fails explicitly through the scene's residency failure or recovery clear, without simplifying
 its geometry. Before counting crossings, preparation refuses any one generated fill with
-more than 512 points, which cannot fit even without a crossing.
+more than 512 points, which cannot fit even without a crossing. Given a paint cap
+(`PrepareInput::with_paint_cap`, and the `paint_cap` of `recover` and `recover_all`; the
+shell's worker and recovery pass `PaintWork::LIMITS`), it also keeps a running total of the
+scene's own paint work and refuses with `OverResidency` once that passes the cap, which no
+admission could accept. Each fill then counts crossings only up to the fill budget left, so a
+refused scene costs at most about 512²/2 crossing tests. Without a cap the charge stays exact.
 
 D1's Rez admission target at the cap is p95 ≤1 ms and p99 ≤1.1 ms, with the sampled maximum
 reported separately; clear, cut and eviction retain their ≤2 ms target, global clear included.
@@ -711,6 +720,10 @@ The shell's `presence::paint_paths` builds bounded prim-space geometry, then tra
 finished triangles. `presence::overlay` paints every sampled scene in stable scene/item order,
 using native quads for upright complete rectangles and paths for rotated or revealed geometry.
 Labels use the preparation font and stay upright at their transformed anchors (OSC-217).
+Fills use the nonzero rule, as SVG and Canvas do, so a self-crossing polygon such as a
+pentagram fills its centre; a border ring fills its two nested outlines even-odd, so the inner
+one is its hole. Content past the primary display's edges is clipped by the overlay window,
+never moved, scaled or fitted; the only bound is |coordinate| ≤ 20,000 after composition.
 Geometry builds before any of its item's primitives paint; a geometry or label failure clears
 the scene instead of silently skipping it. The overlay is transparent and click-through, covers
 only the primary display from logical origin, and holds Esc only while shown.
@@ -1121,6 +1134,16 @@ call. Attributions are owner estimates, not heap measurements, and nested values
 aren't counted again. The queue has no byte bound and sits outside the 64 MiB
 presenter cap: it is metered, not limited, which is a known shortcut.
 
+Admission caches each preparation ticket's own source, compiled record and sizing-fact
+attribution on the worker. The UI reads that cache, not the whole semantic scene's size.
+A dispatched preparation input adds only its preceding layout's cached full charge.
+Halting meters each queue's buffer and its protected payloads. Releasing a scene meters
+its rest/view/frame separately from the binding's semantic owner; disconnecting queues
+both inside one container, so that outer attribution includes the semantic owner once.
+Shared allocations remain conservatively counted per holder; this is not deduplicated
+physical memory. An isolated queue-meter test checks halt, release and disconnect without
+other tests adding to the process-wide counters.
+
 **Known limits before v1.** The historical unbounded maximal-content probe, measured on
 Rez with real font shaping across four scenes and 256 prepared prefixes, charged
 200,009,012 B; that history does not fit the presenter allowance. The presenter instead
@@ -1132,7 +1155,7 @@ not RSS or a font-cache ceiling. Inputs and outputs held by up to eight workers 
 the presenter allowance, as does the dropper queue; returned consumption owners do not.
 v1 still needs admission at most 1 ms, clear/cut/eviction/timeout tails
 at most 2 ms, and concurrent worker/dropper churn measurements with throttling if the
-backlog grows. Queue attribution must be corrected before relying on its churn meter.
+backlog grows. Final churn measurements must use the payload-specific queue attribution above.
 
 Activation retires the tracks it drops with the outgoing nodes: settled tracks, color tracks
 a `set` recolors, and candidates a newer owner supersedes. Admission keeps its object-map

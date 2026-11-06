@@ -892,3 +892,23 @@ fn crossing_geometry_is_placed_not_retriangulated() {
         "the exact bounds of the transformed vertices"
     );
 }
+
+#[test]
+fn a_pentagram_fills_its_centre_nonzero() {
+    let star = Prim::Fill {
+        points: (0..5_u8)
+            .map(|i| {
+                let angle = TAU * f32::from(i * 2 % 5) / 5.0;
+                Vec2::new(angle.cos(), angle.sin()) * 10.0
+            })
+            .collect(),
+        color: ink(),
+    };
+    let path = border_path(&star, Affine::default());
+    assert!(
+        covers(&path, Vec2::new(0.0, 0.0)),
+        "the centre pentagon winds twice, so nonzero fills it"
+    );
+    assert!(covers(&path, Vec2::new(8.0, 0.0)), "a tip winds once");
+    assert!(!covers(&path, Vec2::new(9.0, 9.0)), "outside the star");
+}
