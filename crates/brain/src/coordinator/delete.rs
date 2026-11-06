@@ -94,21 +94,30 @@ impl Coordinator {
         text: Content,
         effects: &mut Vec<Effect>,
     ) {
-        let Some(read) = self.turns_read.checked_add(1) else {
-            effects.push(Effect::Broken("more turns than a connection counts"));
+        if !self.count(effects) {
             return;
-        };
-        self.turns_read = read;
+        }
         if self.admits(thread) && !text.trim().is_empty() {
-            self.turn(turn, thread, text, effects);
+            let run = self.turn(turn, thread, text, effects);
+            self.unanswered(run, effects);
         } else {
             let refused = ControlToShell::TurnRefused { turn, thread };
             effects.push(Effect::Control(refused));
         }
     }
 
+    /// Counts a turn or an ask on this connection; `false` once the count would overflow.
+    pub(super) fn count(&mut self, effects: &mut Vec<Effect>) -> bool {
+        let Some(read) = self.turns_read.checked_add(1) else {
+            effects.push(Effect::Broken("more turns than a connection counts"));
+            return false;
+        };
+        self.turns_read = read;
+        true
+    }
+
     /// Classifies the turn just counted. Fences the turn has passed retire after.
-    fn admits(&mut self, thread: Option<ThreadId>) -> bool {
+    pub(super) fn admits(&mut self, thread: Option<ThreadId>) -> bool {
         let read = self.turns_read;
         let refused = thread.is_some_and(|thread| {
             self.deleting.iter().any(|entry| entry.thread == thread)

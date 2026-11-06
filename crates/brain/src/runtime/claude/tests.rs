@@ -567,3 +567,180 @@ async fn a_stuck_lane_shows_unavailable_never_signing_in_or_ready() {
         assert!(!claude.close(soon()).await, "close can't confirm it");
     }
 }
+
+/// Question launches through the core: who may launch, the core's bounds, and the revocations.
+mod launches {
+    use std::time::Duration;
+
+    use kumochi_protocol::message::ThreadId;
+
+    use super::*;
+    use crate::coordinator::{Effect, StoreOp};
+    use crate::engines::claude_code::supervisor::tests::{
+        end, failed, pipes, question, questions, until,
+    };
+    use crate::engines::claude_code::supervisor::{
+        LaunchFailed, LaunchRefused, MAX_LAUNCH, Question, Teardown,
+    };
+
+    fn on(thread: u64) -> Question {
+        Question {
+            thread: ThreadId(thread),
+            ..question(Duration::from_secs(20))
+        }
+    }
+
+    /// Ready on the fake in `mode`: found signed out, then signed in through Connect.
+    async fn ready(base: &Base, mode: &str) -> Claude {
+        let (host, _switches) = host(base, mode);
+        let mut claude = Claude::start(Lane::start(host).expect("lane"), SIGN_IN);
+        settle(&mut claude).await;
+        claude.op(ConnectionOp::ConnectClaudeCode);
+        settle(&mut claude).await;
+        assert_eq!(claude.view(), READY);
+        claude
+    }
+
+    fn control_of(claude: &Claude, at: usize) -> Arc<supervisor::Control> {
+        Arc::clone(&claude.launches[at].1)
+    }
+
+    /// S11.
+    #[tokio::test]
+    async fn launches_need_ready_and_the_decided_store() {
+        let base = Base::new("launch-signed-out");
+        let (signed_out, _switches) = host(&base, "deaf");
+        let mut claude = Claude::start(Lane::start(signed_out).expect("lane"), SIGN_IN);
+        settle(&mut claude).await;
+        assert_eq!(claude.view(), ClaudeCodeView::SignedOut { version: V });
+        assert_eq!(claude.launch(on(1)).err(), Some(LaunchRefused::NotReady));
+        assert!(claude.close(soon()).await);
+
+        let undecided_base = Base::new("launch-undecided");
+        let (undecided, _switches) = host(&undecided_base, "deaf");
+        let lane = Lane::start(undecided).expect("lane");
+        let mut claude = Claude::new(Some(lane), SignInStore::Undecided, READY);
+        assert_eq!(claude.launch(on(1)).err(), Some(LaunchRefused::NotReady));
+        claude.sign_in = SIGN_IN;
+        claude.finds = false;
+        assert_eq!(claude.launch(on(1)).err(), Some(LaunchRefused::NotReady));
+        claude.finds = true;
+        claude.cleaning = true;
+        assert_eq!(claude.launch(on(1)).err(), Some(LaunchRefused::NotReady));
+        assert!(claude.close(soon()).await);
+        assert_eq!(questions(&undecided_base), 0);
+
+        assert_eq!(
+            Claude::default().launch(on(1)).err(),
+            Some(LaunchRefused::NotReady),
+            "no lane"
+        );
+    }
+
+    /// The core's bounds: the lifetime and the lane's room. Nothing refused is queued.
+    #[tokio::test]
+    async fn the_core_admits_launches_by_lifetime_and_room() {
+        let base = Base::new("launch-core-bounds");
+        let mut claude = ready(&base, "deaf").await;
+        let over = Question {
+            lifetime: MAX_LAUNCH + Duration::from_millis(1),
+            ..on(1)
+        };
+        assert_eq!(claude.launch(over).err(), Some(LaunchRefused::Lifetime));
+        let longest = Question {
+            lifetime: MAX_LAUNCH,
+            ..on(1)
+        };
+        let mut first = claude.launch(longest).expect("admitted");
+        let _pipes = pipes(&mut first).await;
+        until("the first runs", || questions(&base) == 1).await;
+        let mut waiting = Vec::new();
+        for _ in 0..LANE_QUEUE {
+            waiting.push(claude.launch(on(1)).expect("queued"));
+        }
+        assert_eq!(claude.launch(on(1)).err(), Some(LaunchRefused::Busy));
+        assert_eq!(claude.launches.len(), 1 + LANE_QUEUE);
+        drop(waiting);
+        assert_eq!(end(first).await, Teardown::Done);
+        assert!(claude.close(soon()).await);
+        assert_eq!(questions(&base), 1);
+    }
+
+    /// S9.
+    #[tokio::test]
+    async fn disconnect_revokes_before_its_logout() {
+        let base = Base::new("launch-disconnect");
+        let mut claude = ready(&base, "deaf").await;
+        let mut launch = claude.launch(on(1)).expect("admitted");
+        let control = control_of(&claude, 0);
+        let _pipes = pipes(&mut launch).await;
+        until("it runs", || questions(&base) == 1).await;
+        claude.op(ConnectionOp::DisconnectClaudeCode);
+        until("the Disconnect ended the launch", || control.is_ended()).await;
+        settle(&mut claude).await;
+        let calls = base.calls();
+        let question = calls.iter().position(|call| call.starts_with("-p "));
+        let logout = calls.iter().position(|call| call == "auth logout");
+        assert!(question < logout, "{calls:?}");
+        assert_eq!(end(launch).await, Teardown::Done);
+        assert!(claude.close(soon()).await);
+    }
+
+    /// S10: deleting a thread revokes its launches and no other.
+    #[tokio::test]
+    async fn deleting_a_thread_revokes_only_its_launch() {
+        let scratch = Scratch::new("claude-delete-launch");
+        let mut brain = test_support::brain(&scratch, "");
+        let base = Base::new("launch-delete");
+        brain.attach_claude(ready(&base, "deaf").await);
+        let mut kept = brain.claude.launch(on(1)).expect("admitted");
+        let kept_control = control_of(&brain.claude, 0);
+        let mut deleted = brain.claude.launch(on(2)).expect("queued");
+        let _pipes = pipes(&mut kept).await;
+        until("it runs", || questions(&base) == 1).await;
+        let delete = |thread| {
+            vec![Effect::Store(StoreOp::Delete {
+                thread: ThreadId(thread),
+            })]
+        };
+        assert!(brain.apply(delete(2), None).is_ok());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!kept_control.is_ended(), "the other thread's launch lives");
+        assert!(brain.apply(delete(1), None).is_ok());
+        until("its own deletion ends it", || kept_control.is_ended()).await;
+        assert_eq!(failed(&mut deleted).await, LaunchFailed::Revoked);
+        assert_eq!(end(kept).await, Teardown::Done);
+        assert!(brain.claude.close(soon()).await);
+        assert_eq!(questions(&base), 1);
+    }
+
+    /// S21: finding again and a round still in progress leave a launch alone; a settled view
+    /// that isn't Ready ends it.
+    #[tokio::test]
+    async fn finding_and_rounds_in_progress_never_revoke() {
+        let base = Base::new("launch-finding");
+        let mut claude = ready(&base, "deaf").await;
+        let mut launch = claude.launch(on(1)).expect("admitted");
+        let control = control_of(&claude, 0);
+        let _pipes = pipes(&mut launch).await;
+        claude.op(ConnectionOp::FindClaudeCode);
+        let generation = claude.generation;
+        assert!(!claude.done(Done {
+            generation,
+            result: Ok(Outcome::Version(V)),
+        }));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!control.is_ended(), "a Version and a Status in progress");
+        assert_eq!(claude.view(), READY);
+        assert!(claude.done(Done {
+            generation,
+            result: Ok(Outcome::Status {
+                version: V,
+                signed_in: false,
+            }),
+        }));
+        until("signed out ends it", || control.is_ended()).await;
+        assert_eq!(end(launch).await, Teardown::Done);
+        assert!(claude.close(soon()).await);
+    }
+}

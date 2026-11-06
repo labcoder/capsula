@@ -206,7 +206,8 @@ as the default and stays on disk until the user sets that key. Setting one where
 a table replaces it with a table. Every other key in the table survives each write, including
 `installed` and `removing`, which the voice installer owns. Both list parts by their folder
 names, `speech-input` and `spoken-replies`. A part in both counts as removing. Start-up loads each
-installed part (see [voice](voice.md#the-installer)).
+installed part, and an install adds its part to `installed` under epoch 0 once it has loaded (see
+[voice](voice.md#the-installer)).
 
 `removing` names a removal that hasn't finished. At start-up, before anything is served, the
 brain deletes each listed part's folder under `%LOCALAPPDATA%\<product>\models` and then queues a
@@ -217,11 +218,12 @@ account could change, deletes nothing and leaves the part listed. A folder
 that's already gone counts as deleted. A folder that can't be deleted stays listed, so the next
 start tries again. An unknown name is never deleted, and stays in the list.
 
-`InstallVoice`, `RemoveVoice` and `CancelVoiceInstall` already travel, but this build refuses
-them until the installer lands: each is staged in queue order like any change, then refused with
-`Error(VoiceUnavailable)` and its one `Settings` answer, with nothing written. The refusal comes
-after the config read, so while `config.toml` is unreadable they're answered `ConfigUnreadable`
-like every other change.
+`InstallVoice` and `CancelVoiceInstall` are answered accepted when they reach the front of the
+queue, with nothing written by the op itself (see [voice](voice.md#install-and-cancel)). This
+build still refuses `RemoveVoice`, and both of the others when there's no models folder: each is
+staged in queue order like any change, then refused with `Error(VoiceUnavailable)` and its one
+`Settings` answer, with nothing written. The refusal comes after the config read, so while
+`config.toml` is unreadable they're answered `ConfigUnreadable` like every other change.
 
 `default_model` is the model a thread with no choice runs on. Only the brain sets it today, with
 `SettingsOp::SetDefaultModel` under epoch 0, which no connection has, so a shell hears only the

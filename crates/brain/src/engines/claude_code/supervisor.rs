@@ -1,0 +1,841 @@
+//! Claude Code's question launches, run by the lane's worker from their turn to their teardown.
+//! A launch is one `claude -p` in its own run job, with its own folder and bridge pipe. A
+//! [`RunLease`] holds it, and revoking or dropping the lease ends it. Teardown happens on the
+//! lane's thread, never inside an engine future, and it ends the job before it deletes anything.
+//! A folder a stopped brain left behind is swept under the lane's lock before anything starts.
+//! macOS counterpart: unverified, behind `platform`.
+
+use std::collections::BTreeSet;
+use std::ffi::OsString;
+use std::fmt;
+use std::fs::File;
+use std::io::{self, PipeReader, PipeWriter, Read as _, Write as _};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, mpsc as std_mpsc};
+use std::time::{Duration, Instant};
+
+use kumochi_protocol::constants::{CLAUDE_CODE_DIR, ENGINE_DIR, MCP_SERVER_NAME};
+use kumochi_protocol::message::ThreadId;
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{mpsc, oneshot};
+
+use super::audit::AuditGate;
+use super::lane::{Failure, Folders, Host, PIPE_GRACE, POLL, Program};
+use super::policy::{self, EntryPoint, OwnedFolders};
+use crate::bridge::LaunchId;
+use crate::bridge::listener::{Binding, LaunchContext, Listener};
+use crate::context::ToolSchema;
+use crate::platform::{self, Job, Stdio};
+
+/// The longest a launch may live, from admission [guess, not measured: C5b's 30 s warm window
+/// plus the 120 s question].
+pub(crate) const MAX_LAUNCH: Duration = Duration::from_secs(150);
+/// stdin and stdout chunks in flight each way.
+pub(crate) const PIPE_QUEUE: usize = 4;
+/// The most one stdout chunk holds.
+pub(crate) const CHUNK: usize = 64 * 1024;
+
+/// stdin may admit a write.
+const OPEN: u8 = 0;
+/// A write was admitted and hasn't returned.
+const WRITING: u8 = 1;
+/// Revoked: nothing more is admitted.
+const REVOKED: u8 = 2;
+/// Revoked while an admitted write hadn't returned.
+const REVOKED_WRITING: u8 = 3;
+
+/// What C5b's snapshot fixes for one launch. Nothing in it is user content.
+pub(crate) struct Question {
+    /// The thread whose deletion revokes it.
+    pub(crate) thread: ThreadId,
+    pub(crate) model: String,
+    pub(crate) effort: Option<String>,
+    /// The tools frozen with the launch.
+    pub(crate) tools: Vec<ToolSchema>,
+    /// How long it may live from admission; at most [`MAX_LAUNCH`].
+    pub(crate) lifetime: Duration,
+}
+
+/// What the round sends on stdin.
+pub(crate) enum Input {
+    Chunk(Vec<u8>),
+    /// Closes stdin, so the child reads its end.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "C5b's engine ends the first question")
+    )]
+    End,
+    /// The revocation's: the pump stops waiting for chunks.
+    Wake,
+}
+
+/// Kinds and lengths only: a chunk is the user's question.
+impl fmt::Debug for Input {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Chunk(bytes) => f
+                .debug_struct("Chunk")
+                .field("bytes", &bytes.len())
+                .finish(),
+            Self::End => f.write_str("End"),
+            Self::Wake => f.write_str("Wake"),
+        }
+    }
+}
+
+/// The round's ends of a live launch's pipes.
+pub(crate) struct Pipes {
+    pub(crate) stdin: mpsc::Sender<Input>,
+    pub(crate) stdout: mpsc::Receiver<Vec<u8>>,
+}
+
+/// One launch's shared state: the lease, the core, the worker and the stdin pump hold it.
+pub(crate) struct Control {
+    /// Write admission and revocation, linearized: every change is one compare-exchange.
+    state: AtomicU8,
+    /// The round wants no more stdout, so the stdout pump drops what it reads.
+    released: AtomicBool,
+    /// Its teardown is over, whatever it came to.
+    ended: AtomicBool,
+    gate: AuditGate,
+    /// The stdin channel, for the revocation's [`Input::Wake`].
+    wake: mpsc::Sender<Input>,
+}
+
+impl Control {
+    /// Fails the gate and admits no more stdin. A chunk admitted before is in flight, and the
+    /// teardown waits for it. Never blocks.
+    fn revoke(&self) -> Revoked {
+        self.gate.fail();
+        let mut state = self.state.load(Ordering::Acquire);
+        let revoked = loop {
+            let (next, revoked) = match state {
+                OPEN => (REVOKED, Revoked::Idle),
+                WRITING => (REVOKED_WRITING, Revoked::WriteInFlight),
+                _ => return Revoked::Already,
+            };
+            match self
+                .state
+                .compare_exchange_weak(state, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => break revoked,
+                Err(now) => state = now,
+            }
+        };
+        // A full channel means the pump has chunks to take, and each one's admission fails now.
+        self.wake.try_send(Input::Wake).ok();
+        revoked
+    }
+
+    /// The round is done with the launch: revoked, and its stdout dropped from now on.
+    pub(crate) fn withdraw(&self) -> Revoked {
+        let revoked = self.revoke();
+        self.released.store(true, Ordering::Release);
+        revoked
+    }
+
+    fn is_revoked(&self) -> bool {
+        self.state.load(Ordering::Acquire) >= REVOKED
+    }
+
+    pub(crate) fn is_ended(&self) -> bool {
+        self.ended.load(Ordering::Acquire)
+    }
+
+    /// The instant a chunk is admitted, or false once revoked.
+    fn admit(&self) -> bool {
+        self.state
+            .compare_exchange(OPEN, WRITING, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// The admitted write returned; false when it was revoked meanwhile.
+    fn written(&self) -> bool {
+        if self
+            .state
+            .compare_exchange(WRITING, OPEN, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return true;
+        }
+        self.state.store(REVOKED, Ordering::Release);
+        false
+    }
+}
+
+/// The state and flags only.
+impl fmt::Debug for Control {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Control")
+            .field("state", &self.state.load(Ordering::Relaxed))
+            .field("ended", &self.is_ended())
+            .finish_non_exhaustive()
+    }
+}
+
+/// The run's hold on a launch; dropping it revokes the launch.
+pub(crate) struct RunLease(Arc<Control>);
+
+impl RunLease {
+    /// Revokes the launch at once, linearized with stdin's write admission: after `Idle` no
+    /// write is admitted and none is in flight; after `WriteInFlight` one admitted write may
+    /// still reach the child, and the teardown waits for it. Never blocks.
+    pub(crate) fn revoke(&self) -> Revoked {
+        self.0.withdraw()
+    }
+}
+
+impl Drop for RunLease {
+    fn drop(&mut self) {
+        self.revoke();
+    }
+}
+
+/// What a revocation found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Revoked {
+    /// No write in flight, and none admitted from now on.
+    Idle,
+    /// A write admitted before it hadn't returned.
+    WriteInFlight,
+    /// It was revoked already.
+    Already,
+}
+
+/// Why a launch wasn't queued.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LaunchRefused {
+    /// Claude Code isn't ready, or sign-in isn't decided, or it's off, or a Disconnect is
+    /// pending.
+    NotReady,
+    /// Its lifetime is over [`MAX_LAUNCH`].
+    Lifetime,
+    /// The lane's queue is full.
+    Busy,
+}
+
+/// Why a queued launch never ran.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LaunchFailed {
+    /// Revoked before its turn.
+    Revoked,
+    /// Its deadline passed before its turn.
+    Expired,
+    /// The lane refused it, as it would a Status call.
+    Lane(Failure),
+    /// It couldn't be started.
+    Spawn,
+    /// Its bridge pipe couldn't be created.
+    Listener,
+}
+
+/// How a launch ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Teardown {
+    /// Its job was confirmed empty, its pumps ended and its folder is gone.
+    Done,
+    /// As `Done`, but the folder is left for the next sweep.
+    FolderLeft,
+    /// Its processes or pumps weren't confirmed ended: the lane is stuck and the folder kept.
+    Stuck,
+}
+
+/// A launch admitted by the core, queued or running.
+pub(crate) struct Launch {
+    lease: RunLease,
+    started: Option<oneshot::Receiver<Result<Pipes, LaunchFailed>>>,
+    ended: oneshot::Receiver<Teardown>,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "C5b's engine binds and seeds the first launch")
+)]
+impl Launch {
+    pub(crate) fn lease(&self) -> &RunLease {
+        &self.lease
+    }
+
+    /// The pipes once it runs, or why it never did; `None` after the first answer.
+    pub(crate) async fn started(&mut self) -> Option<Result<Pipes, LaunchFailed>> {
+        let started = self.started.take()?;
+        // A lane gone before the launch's turn refused it.
+        Some(
+            started
+                .await
+                .unwrap_or(Err(LaunchFailed::Lane(Failure::Refused))),
+        )
+    }
+
+    /// Revokes the launch and waits for its teardown.
+    pub(crate) async fn end(self) -> Teardown {
+        let Self { lease, ended, .. } = self;
+        drop(lease);
+        // A worker that dropped it without an answer can't have confirmed anything.
+        ended.await.unwrap_or(Teardown::Stuck)
+    }
+}
+
+/// A launch as the lane's queue holds it.
+pub(crate) struct Start {
+    question: Question,
+    /// Fixed at admission; waiting in the queue never extends it.
+    deadline: Instant,
+    control: Arc<Control>,
+    binding: Binding,
+    stdin: mpsc::Receiver<Input>,
+    round_stdin: mpsc::Sender<Input>,
+    started: oneshot::Sender<Result<Pipes, LaunchFailed>>,
+    ended: oneshot::Sender<Teardown>,
+    #[cfg(test)]
+    pub(crate) hooks: tests::Hooks,
+}
+
+impl Start {
+    pub(crate) fn control(&self) -> Arc<Control> {
+        Arc::clone(&self.control)
+    }
+
+    /// Whether it may start now.
+    pub(super) fn due(&self, closing: &AtomicBool) -> Result<(), LaunchFailed> {
+        if self.control.is_revoked() {
+            Err(LaunchFailed::Revoked)
+        } else if closing.load(Ordering::Acquire) {
+            Err(LaunchFailed::Lane(Failure::Refused))
+        } else if Instant::now() >= self.deadline {
+            Err(LaunchFailed::Expired)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Answers a launch that never starts: nothing was made, so its teardown is done.
+    pub(super) fn refuse(self, why: LaunchFailed) {
+        self.control.revoke();
+        self.started.send(Err(why)).ok();
+        self.control.ended.store(true, Ordering::Release);
+        self.ended.send(Teardown::Done).ok();
+    }
+}
+
+/// A launch for `question`, its deadline fixed now, and the lane's half of it.
+pub(crate) fn admit(question: Question) -> (Start, Launch) {
+    let deadline = Instant::now() + question.lifetime;
+    let (round_stdin, stdin) = mpsc::channel(PIPE_QUEUE);
+    let control = Arc::new(Control {
+        state: AtomicU8::new(OPEN),
+        released: AtomicBool::new(false),
+        ended: AtomicBool::new(false),
+        gate: AuditGate::new(),
+        wake: round_stdin.clone(),
+    });
+    let (started_tx, started) = oneshot::channel();
+    let (ended_tx, ended) = oneshot::channel();
+    let start = Start {
+        question,
+        deadline,
+        control: Arc::clone(&control),
+        binding: Binding::default(),
+        stdin,
+        round_stdin,
+        started: started_tx,
+        ended: ended_tx,
+        #[cfg(test)]
+        hooks: tests::Hooks::default(),
+    };
+    let launch = Launch {
+        lease: RunLease(control),
+        started: Some(started),
+        ended,
+    };
+    (start, launch)
+}
+
+/// What the lane checked before a launch's own folder: the install and Kumochi's folders.
+pub(super) struct Ready {
+    pub(super) program: Program,
+    pub(super) folders: Folders,
+}
+
+/// Runs `start` from its turn to its teardown, on the lane's thread.
+pub(super) fn run(
+    start: Start,
+    ready: Result<Ready, Failure>,
+    host: &Host,
+    closing: &AtomicBool,
+) -> Teardown {
+    let Start {
+        question,
+        deadline,
+        control,
+        binding,
+        stdin,
+        round_stdin,
+        started,
+        ended,
+        #[cfg(test)]
+        mut hooks,
+    } = start;
+    let mut running = Running {
+        control: Arc::clone(&control),
+        parents: Vec::new(),
+        held: Vec::new(),
+        dir: None,
+        listener: None,
+        job: None,
+        pumps: Vec::new(),
+        #[cfg(test)]
+        terminate: hooks.terminate.take(),
+    };
+    let begun = ready.map_err(LaunchFailed::Lane).and_then(|ready| {
+        let parts = Parts {
+            question,
+            deadline,
+            control: &control,
+            binding,
+            stdin,
+            round_stdin,
+            #[cfg(test)]
+            hooks,
+        };
+        begin(&mut running, ready, parts, host)
+    });
+    match begun {
+        Err(failure) => {
+            started.send(Err(failure)).ok();
+        }
+        Ok((pipes, process)) => {
+            // A round that's gone revoked the launch as it went.
+            started.send(Ok(pipes)).ok();
+            while !control.is_revoked()
+                && !closing.load(Ordering::Acquire)
+                && Instant::now() < deadline
+                && matches!(process.exits_within(POLL), Ok(false))
+            {}
+        }
+    }
+    let teardown = running.stop(host);
+    control.ended.store(true, Ordering::Release);
+    ended.send(teardown).ok();
+    teardown
+}
+
+/// What `begin` takes from the launch.
+struct Parts<'a> {
+    question: Question,
+    deadline: Instant,
+    control: &'a Arc<Control>,
+    binding: Binding,
+    stdin: mpsc::Receiver<Input>,
+    round_stdin: mpsc::Sender<Input>,
+    #[cfg(test)]
+    hooks: tests::Hooks,
+}
+
+/// Makes the launch's folder, its bridge pipe and job, then starts it and its pumps. Everything
+/// made goes into `running` as it's made, so a failure part way stops what exists, in order.
+fn begin(
+    running: &mut Running,
+    ready: Ready,
+    parts: Parts<'_>,
+    host: &Host,
+) -> Result<(Pipes, platform::Helper), LaunchFailed> {
+    let Parts {
+        question,
+        deadline,
+        control,
+        binding,
+        stdin,
+        round_stdin,
+        #[cfg(test)]
+        hooks,
+    } = parts;
+    let mut id = [0; 16];
+    getrandom::fill(&mut id).map_err(|_| LaunchFailed::Spawn)?;
+    let id = LaunchId(u128::from_le_bytes(id));
+    #[cfg(test)]
+    if let Some(sent) = &hooks.id {
+        sent.send(id).ok();
+    }
+    let Ready { program, folders } = ready;
+    running.parents = folders.held;
+    let (work, tmp) = make_folder(running, host, id)?;
+    #[cfg(test)]
+    tests::pause(hooks.folder);
+    // The pipe registers with the runtime that serves it.
+    let listener = {
+        let _runtime = host.runtime.enter();
+        Listener::create(id).map_err(|_| LaunchFailed::Listener)?
+    };
+    let mcp_config = work.join("mcp.json");
+    let config = mcp_json(&host.brain_exe, id).ok_or(LaunchFailed::Spawn)?;
+    std::fs::write(&mcp_config, config).map_err(|_| LaunchFailed::Lane(Failure::Folders))?;
+    let job = Arc::new(Job::new().map_err(|_| LaunchFailed::Spawn)?);
+    running.job = Some(Arc::clone(&job));
+    let allowed: BTreeSet<String> = question
+        .tools
+        .iter()
+        .map(|tool| format!("mcp__{MCP_SERVER_NAME}__{}", tool.name))
+        .collect();
+    let paths = OwnedFolders {
+        work: work.clone(),
+        tmp,
+        ..folders.paths
+    };
+    let system = platform::system_env().map_err(|_| LaunchFailed::Spawn)?;
+    let data = policy::launch_data(
+        &paths,
+        &system,
+        &EntryPoint::Question {
+            mcp_config: &mcp_config,
+            allowed_tools: &allowed,
+            model: &question.model,
+            effort: question.effort.as_deref(),
+        },
+    );
+    let args: Vec<OsString> = program.prefix.iter().cloned().chain(data.args).collect();
+    // Served before the start, so the bridge finds it.
+    let context = Context {
+        job: Arc::clone(&job),
+        brain_exe: host.brain_exe.clone(),
+        deadline,
+        tools: question.tools,
+        gate: control.gate.clone(),
+        binding,
+    };
+    running.listener = Some(serve(listener, context, &host.runtime));
+    let mut spawned = platform::spawn(&platform::Launch {
+        exe: &program.exe,
+        args: &args,
+        cwd: &work,
+        env: &data.env,
+        stdio: Stdio::Piped,
+        jobs: &[&host.brain_job, &job],
+    })
+    .map_err(|_| LaunchFailed::Spawn)?;
+    let stdout = pumps(
+        running,
+        &mut spawned,
+        stdin,
+        control,
+        #[cfg(test)]
+        tests::Pumps {
+            stdin: tests::Stdin {
+                admit: hooks.admit,
+                write: hooks.write,
+                writes: hooks.writes,
+            },
+            report: hooks.pumps,
+            fails: hooks.spawn_fails,
+        },
+    )?;
+    Ok((
+        Pipes {
+            stdin: round_stdin,
+            stdout,
+        },
+        spawned.process,
+    ))
+}
+
+/// Starts the three pumps on the child's pipes, each into `running` as it starts; the round's
+/// stdout.
+fn pumps(
+    running: &mut Running,
+    spawned: &mut platform::Spawned,
+    stdin: mpsc::Receiver<Input>,
+    control: &Arc<Control>,
+    #[cfg(test)] hooks: tests::Pumps,
+) -> Result<mpsc::Receiver<Vec<u8>>, LaunchFailed> {
+    let (Some(child_stdin), Some(child_stdout), Some(child_stderr)) = (
+        spawned.stdin.take(),
+        spawned.stdout.take(),
+        spawned.stderr.take(),
+    ) else {
+        return Err(LaunchFailed::Spawn);
+    };
+    let (output, stdout) = mpsc::channel(PIPE_QUEUE);
+    let writer = Arc::clone(control);
+    let reader = Arc::clone(control);
+    #[cfg(test)]
+    let tests::Pumps {
+        stdin: stdin_hooks,
+        report,
+        fails,
+    } = hooks;
+    running.pumps.push(
+        pump(
+            "claude-code-stdin",
+            move || {
+                write_input(
+                    child_stdin,
+                    stdin,
+                    &writer,
+                    #[cfg(test)]
+                    stdin_hooks,
+                );
+            },
+            #[cfg(test)]
+            (report.clone(), fails),
+        )
+        .map_err(|_| LaunchFailed::Spawn)?,
+    );
+    running.pumps.push(
+        pump(
+            "claude-code-stdout",
+            move || read_output(child_stdout, &output, &reader),
+            #[cfg(test)]
+            (report.clone(), fails),
+        )
+        .map_err(|_| LaunchFailed::Spawn)?,
+    );
+    running.pumps.push(
+        pump(
+            "claude-code-stderr",
+            move || {
+                let mut stderr = child_stderr;
+                // Read and dropped: nothing Claude Code prints there is kept.
+                io::copy(&mut stderr, &mut io::sink()).ok();
+            },
+            #[cfg(test)]
+            (report, fails),
+        )
+        .map_err(|_| LaunchFailed::Spawn)?,
+    );
+    Ok(stdout)
+}
+
+/// The engine folder, held with Kumochi's, and the launch's own owner-only folder in it with
+/// its `work` and `tmp` folders, held apart so the teardown can let them go.
+fn make_folder(
+    running: &mut Running,
+    host: &Host,
+    id: LaunchId,
+) -> Result<(PathBuf, PathBuf), LaunchFailed> {
+    let folder = |path: &Path| {
+        platform::owner_only_dir(path).map_err(|_| LaunchFailed::Lane(Failure::Folders))
+    };
+    let engine = host.base.join(CLAUDE_CODE_DIR).join(ENGINE_DIR);
+    running.parents.push(folder(&engine)?);
+    let dir = engine.join(id.hex());
+    let work = dir.join("work");
+    let tmp = dir.join("tmp");
+    // Named before it's made, so a failure part way still deletes whatever was.
+    running.dir = Some(dir.clone());
+    for path in [&dir, &work, &tmp] {
+        running.held.push(folder(path)?);
+    }
+    Ok((work, tmp))
+}
+
+/// What the listener's task owns.
+struct Context {
+    job: Arc<Job>,
+    brain_exe: PathBuf,
+    deadline: Instant,
+    tools: Vec<ToolSchema>,
+    gate: AuditGate,
+    binding: Binding,
+}
+
+/// Serves `listener` on `runtime` until its session ends or it's aborted; the receiver hears
+/// the task end, however it ends.
+fn serve(
+    listener: Listener,
+    context: Context,
+    runtime: &tokio::runtime::Handle,
+) -> (tokio::task::AbortHandle, std_mpsc::Receiver<()>) {
+    let (served, gone) = std_mpsc::channel::<()>();
+    let task = runtime.spawn(async move {
+        let _served = served;
+        listener
+            .serve(LaunchContext {
+                job: &context.job,
+                brain_exe: &context.brain_exe,
+                deadline: context.deadline.into(),
+                tools: &context.tools,
+                gate: context.gate,
+                binding: context.binding,
+            })
+            .await;
+    });
+    (task.abort_handle(), gone)
+}
+
+/// Everything a launch has made so far, which its teardown ends in order.
+struct Running {
+    control: Arc<Control>,
+    /// Kumochi's folders and the engine folder: held through the deletion.
+    parents: Vec<File>,
+    /// The launch folder's own handles; they'd stop its deletion.
+    held: Vec<File>,
+    dir: Option<PathBuf>,
+    listener: Option<(tokio::task::AbortHandle, std_mpsc::Receiver<()>)>,
+    job: Option<Arc<Job>>,
+    pumps: Vec<std_mpsc::Receiver<()>>,
+    #[cfg(test)]
+    terminate: Option<tests::Pause>,
+}
+
+impl Running {
+    /// Fails the gate and closes stdin, aborts the listener and waits up to [`PIPE_GRACE`] for its
+    /// task to end, ends the job and confirms it empty, waits for the pumps, and only then
+    /// deletes the folder. Anything not confirmed ended never falls through to the deletion.
+    fn stop(self, host: &Host) -> Teardown {
+        self.control.revoke();
+        // A runtime that's gone dropped the task already, which also counts as ended.
+        let served = self.listener.as_ref().is_none_or(|(serve, gone)| {
+            serve.abort();
+            !matches!(
+                gone.recv_timeout(PIPE_GRACE),
+                Err(std_mpsc::RecvTimeoutError::Timeout)
+            )
+        });
+        #[cfg(test)]
+        tests::pause(self.terminate);
+        if let Some(job) = &self.job
+            && (host.terminate)(job).is_err()
+        {
+            tracing::warn!("a claude launch's processes didn't end; Claude Code stays closed");
+            return Teardown::Stuck;
+        }
+        // stdout keeps what the child wrote last until the round stops taking it or the grace
+        // runs out.
+        if !ended(&self.pumps) {
+            self.control.released.store(true, Ordering::Release);
+            if !ended(&self.pumps) {
+                tracing::warn!("a claude launch's pipe didn't end; Claude Code stays closed");
+                return Teardown::Stuck;
+            }
+        }
+        // A task still running may hold the launch's pipe name.
+        if !served {
+            tracing::warn!("a claude launch's listener didn't end; Claude Code stays closed");
+            return Teardown::Stuck;
+        }
+        drop(self.held);
+        match self.dir.as_deref().map(platform::remove_tree) {
+            None | Some(Ok(())) => Teardown::Done,
+            Some(Err(_)) => Teardown::FolderLeft,
+        }
+    }
+}
+
+/// Whether every pump ended, each given up to [`PIPE_GRACE`].
+fn ended(pumps: &[std_mpsc::Receiver<()>]) -> bool {
+    pumps.iter().all(|pump| {
+        matches!(
+            pump.recv_timeout(PIPE_GRACE),
+            Err(std_mpsc::RecvTimeoutError::Disconnected) | Ok(())
+        )
+    })
+}
+
+/// Runs `work` on its own thread; the receiver hears it end, however it ends.
+fn pump(
+    name: &'static str,
+    work: impl FnOnce() + Send + 'static,
+    #[cfg(test)] (report, fails): (Option<std_mpsc::Sender<&'static str>>, Option<&'static str>),
+) -> io::Result<std_mpsc::Receiver<()>> {
+    #[cfg(test)]
+    if fails == Some(name) {
+        return Err(io::Error::other("a pump thread that can't start"));
+    }
+    let (signal, ended) = std_mpsc::channel::<()>();
+    #[cfg(test)]
+    let signal = tests::Ending::new(signal, name, report);
+    let _thread = std::thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(move || {
+            let _signal = signal;
+            work();
+        })?;
+    Ok(ended)
+}
+
+/// stdin: each chunk is admitted, then written. `End`, `Wake`, a refused admission or a failed
+/// write closes the pipe.
+fn write_input(
+    mut pipe: PipeWriter,
+    mut input: mpsc::Receiver<Input>,
+    control: &Control,
+    #[cfg(test)] hooks: tests::Stdin,
+) {
+    #[cfg(test)]
+    let tests::Stdin {
+        mut admit,
+        mut write,
+        writes,
+    } = hooks;
+    while let Some(Input::Chunk(bytes)) = input.blocking_recv() {
+        #[cfg(test)]
+        tests::pause(admit.take());
+        if !control.admit() {
+            return;
+        }
+        #[cfg(test)]
+        tests::pause(write.take());
+        let wrote = pipe.write_all(&bytes);
+        #[cfg(test)]
+        if let (Some(writes), Ok(())) = (&writes, &wrote) {
+            writes.send(bytes.len()).ok();
+        }
+        if !control.written() || wrote.is_err() {
+            return;
+        }
+    }
+}
+
+/// stdout, in chunks of at most [`CHUNK`], until its end. A full channel is retried every
+/// [`POLL`], never waited on, and once the round has let go what's read is dropped.
+fn read_output(mut pipe: PipeReader, output: &mpsc::Sender<Vec<u8>>, control: &Control) {
+    let mut buffer = vec![0; CHUNK];
+    let mut wanted = true;
+    loop {
+        let read = match pipe.read(&mut buffer) {
+            Ok(0) => return,
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return,
+        };
+        if !wanted {
+            continue;
+        }
+        let mut chunk = buffer[..read].to_vec();
+        loop {
+            if control.released.load(Ordering::Acquire) {
+                wanted = false;
+                break;
+            }
+            match output.try_send(chunk) {
+                Ok(()) => break,
+                Err(TrySendError::Closed(_)) => {
+                    wanted = false;
+                    break;
+                }
+                Err(TrySendError::Full(back)) => {
+                    chunk = back;
+                    std::thread::sleep(POLL);
+                }
+            }
+        }
+    }
+}
+
+/// The launch's `mcp.json`: the bridge is the brain's executable with the launch's id, and
+/// nothing else. `None` for an executable path that isn't text.
+fn mcp_json(brain_exe: &Path, id: LaunchId) -> Option<Vec<u8>> {
+    let config = serde_json::json!({
+        "mcpServers": {
+            MCP_SERVER_NAME: {
+                "command": brain_exe.to_str()?,
+                "args": [crate::MCP_BRIDGE, id.hex()],
+            },
+        },
+    });
+    Some(config.to_string().into_bytes())
+}
+
+#[cfg(test)]
+pub(crate) mod tests;

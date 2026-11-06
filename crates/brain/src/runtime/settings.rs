@@ -17,10 +17,18 @@ use crate::platform::{self, Untrusted};
 /// the settled settings.
 pub(super) const BRAIN: u64 = 0;
 
-/// A change to `config.toml`: the user's, or one the brain makes for voice.
+/// A change to `config.toml`: the user's, or one the voice installer makes.
 #[derive(Debug)]
 pub(super) enum Change {
     User(SettingsOp),
+    Voice(VoiceWrite),
+}
+
+/// A write the voice installer makes; its result goes back to the installer.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum VoiceWrite {
+    /// Adds a part to `installed`, for the install with this token.
+    Activate { part: VoicePart, token: u64 },
     /// A part's folder is gone, so its removal is finished.
     RemoveDone(VoicePart),
 }
@@ -36,6 +44,7 @@ pub(super) struct Queued {
 #[derive(Debug)]
 pub(super) struct Write {
     epoch: u64,
+    voice: Option<VoiceWrite>,
     handle: JoinHandle<(Pending, Result<(), ConfigError>)>,
 }
 
@@ -53,11 +62,17 @@ pub(crate) enum Gate {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Outcome {
     Applied,
+    /// Taken with no write, so the settings didn't change.
+    Accepted,
     Refused(ErrorKey),
 }
 
-/// How a write ended, and the connection whose change it was.
-pub(super) type Written = (u64, Result<(Pending, Result<(), ConfigError>), JoinError>);
+/// How a write ended, the connection whose change it was, and the installer's write it was.
+pub(super) type Written = (
+    u64,
+    Option<VoiceWrite>,
+    Result<(Pending, Result<(), ConfigError>), JoinError>,
+);
 
 impl Brain {
     /// Holds the next settings write before it touches the file, until the returned sender
@@ -114,9 +129,38 @@ impl Brain {
             let Some(Queued { change, epoch }) = self.settings_ops.pop_front() else {
                 break;
             };
-            let staged = match change {
-                Change::User(op) => self.config.stage(op),
-                Change::RemoveDone(part) => self.config.stage_remove_done(part),
+            let (staged, voice) = match change {
+                // Popped, so it applies even when its answer can't be sent; no Voice frame
+                // goes ahead of a missing answer.
+                Change::User(SettingsOp::InstallVoice(part)) if self.voice.is_some() => {
+                    let answered = self.settled(epoch, Outcome::Accepted, link.as_deref_mut());
+                    let link = if answered.is_ok() {
+                        link.as_deref_mut()
+                    } else {
+                        None
+                    };
+                    self.voice_op(|installer| installer.install(part), link)?;
+                    answered?;
+                    continue;
+                }
+                Change::User(SettingsOp::CancelVoiceInstall) if self.voice.is_some() => {
+                    let answered = self.settled(epoch, Outcome::Accepted, link.as_deref_mut());
+                    let link = if answered.is_ok() {
+                        link.as_deref_mut()
+                    } else {
+                        None
+                    };
+                    self.voice_op(crate::voice::installer::Installer::cancel, link)?;
+                    answered?;
+                    continue;
+                }
+                Change::User(op) => (self.config.stage(op), None),
+                Change::Voice(write @ VoiceWrite::Activate { part, .. }) => {
+                    (self.config.stage_activate(part), Some(write))
+                }
+                Change::Voice(write @ VoiceWrite::RemoveDone(part)) => {
+                    (self.config.stage_remove_done(part), Some(write))
+                }
             };
             match staged {
                 Ok(pending) => {
@@ -128,10 +172,17 @@ impl Brain {
                         let written = pending.write();
                         (pending, written)
                     });
-                    self.config_write = Some(Write { epoch, handle });
+                    self.config_write = Some(Write {
+                        epoch,
+                        voice,
+                        handle,
+                    });
                 }
                 Err(error) => {
                     tracing::warn!(%error, "settings change refused");
+                    if let Some(write) = voice {
+                        self.voice_written(write, Err(error.key()), link.as_deref_mut())?;
+                    }
                     self.settled(epoch, Outcome::Refused(error.key()), link.as_deref_mut())?;
                 }
             }
@@ -142,7 +193,7 @@ impl Brain {
     /// The write in flight finished: its change becomes the settings only if it's on disk.
     pub(super) fn settings_done(
         &mut self,
-        (epoch, written): Written,
+        (epoch, voice, written): Written,
         mut link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
         let outcome = match written {
@@ -167,6 +218,13 @@ impl Brain {
                 Outcome::Refused(ErrorKey::SettingsRefused)
             }
         };
+        if let Some(write) = voice {
+            let result = match outcome {
+                Outcome::Refused(key) => Err(key),
+                Outcome::Applied | Outcome::Accepted => Ok(()),
+            };
+            self.voice_written(write, result, link.as_deref_mut())?;
+        }
         self.settled(epoch, outcome, link.as_deref_mut())?;
         self.pump_settings(link)
     }
@@ -192,7 +250,7 @@ impl Brain {
                 continue;
             }
             self.settings_ops.push_back(Queued {
-                change: Change::RemoveDone(part),
+                change: Change::Voice(VoiceWrite::RemoveDone(part)),
                 epoch: BRAIN,
             });
         }
@@ -245,11 +303,16 @@ fn held(gate: Option<std::sync::mpsc::Receiver<Gate>>) {
 
 /// The settings write in flight, once it ends; never while there's none.
 pub(super) async fn written(write: &mut Option<Write>) -> Written {
-    let Some(Write { epoch, handle }) = write.as_mut() else {
+    let Some(Write {
+        epoch,
+        voice,
+        handle,
+    }) = write.as_mut()
+    else {
         return std::future::pending().await;
     };
-    let epoch = *epoch;
+    let (epoch, voice) = (*epoch, *voice);
     let done = handle.await;
     *write = None;
-    (epoch, done)
+    (epoch, voice, done)
 }
