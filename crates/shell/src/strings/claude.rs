@@ -121,7 +121,7 @@ mod tests {
             );
         }
         for (view, text) in [
-            (None, "Waiting for the brain…"),
+            (None, "Waiting for Claude Code status…"),
             (
                 Some(ClaudeCodeView::TurnedOff),
                 "Claude Code is turned off in config.",
@@ -130,7 +130,7 @@ mod tests {
             (Some(ClaudeCodeView::SigningIn), "Signing in…"),
             (
                 Some(ClaudeCodeView::CleanupPending),
-                "Cleanup is pending. Retry Disconnect to finish removing Kumochi’s Claude Code folder.",
+                "Cleanup is pending. Choose Look again to retry removing Kumochi’s Claude Code folder.",
             ),
             (
                 Some(ClaudeCodeView::InUse),

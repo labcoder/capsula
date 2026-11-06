@@ -30,6 +30,7 @@ pub(crate) enum State {
     ClaudeReview,
     ClaudeSigning,
     ClaudeReady,
+    ClaudeCleanup,
     Waiting,
     Offline,
     SignedOut,
@@ -58,6 +59,7 @@ impl State {
             "claude-review" => Self::ClaudeReview,
             "claude-signing" => Self::ClaudeSigning,
             "claude-ready" => Self::ClaudeReady,
+            "claude-cleanup" => Self::ClaudeCleanup,
             "general-error" => Self::GeneralError,
             "waiting" => Self::Waiting,
             "offline" => Self::Offline,
@@ -86,7 +88,7 @@ impl State {
     fn claude_fixture(self, model: &mut Settings) {
         if matches!(
             self,
-            Self::ClaudeReview | Self::ClaudeSigning | Self::ClaudeReady
+            Self::ClaudeReview | Self::ClaudeSigning | Self::ClaudeReady | Self::ClaudeCleanup
         ) {
             use kumochi_protocol::message::{ClaudeCodeView, ClaudeVersion};
             let version = ClaudeVersion {
@@ -96,6 +98,7 @@ impl State {
             };
             let view = match self {
                 Self::ClaudeSigning => ClaudeCodeView::SigningIn,
+                Self::ClaudeCleanup => ClaudeCodeView::CleanupPending,
                 Self::ClaudeReady => ClaudeCodeView::Ready {
                     version,
                     analytics_on: true,

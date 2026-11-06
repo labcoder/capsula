@@ -52,13 +52,11 @@ impl ClaudeAccounts {
                 self.connect_screen
             }
             (Some(ClaudeCodeView::SigningIn), ConnectionOp::CancelClaudeSignIn)
-            | (
-                Some(ClaudeCodeView::Ready { .. } | ClaudeCodeView::CleanupPending),
-                ConnectionOp::DisconnectClaudeCode,
-            )
+            | (Some(ClaudeCodeView::Ready { .. }), ConnectionOp::DisconnectClaudeCode)
             | (
                 Some(
-                    ClaudeCodeView::NotFound
+                    ClaudeCodeView::CleanupPending
+                    | ClaudeCodeView::NotFound
                     | ClaudeCodeView::SignedOut { .. }
                     | ClaudeCodeView::Unsupported(_)
                     | ClaudeCodeView::AuditFailed(_)
@@ -144,7 +142,7 @@ mod tests {
             ),
             (
                 ClaudeCodeView::CleanupPending,
-                vec![ConnectionOp::DisconnectClaudeCode],
+                vec![ConnectionOp::FindClaudeCode],
             ),
             (ClaudeCodeView::TurnedOff, vec![]),
             (ClaudeCodeView::Unavailable, vec![]),

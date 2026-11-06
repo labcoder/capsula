@@ -99,10 +99,7 @@ impl SettingsView {
                 cx,
             ));
         }
-        if matches!(
-            state.view,
-            Some(ClaudeCodeView::Ready { .. } | ClaudeCodeView::CleanupPending)
-        ) {
+        if matches!(state.view, Some(ClaudeCodeView::Ready { .. })) {
             actions = actions.child(
                 Button::new("claude-disconnect")
                     .outline()

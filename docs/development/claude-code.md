@@ -220,13 +220,21 @@ sequenceDiagram
 
 ```mermaid
 stateDiagram-v2
+    SignedOut --> Finding: Look again, Version admitted
+    Finding --> SignedOut: Version and Status finish, signed out
+    Finding --> Ready: Version and Status finish, signed in
+    Finding --> NotFound: install not found
+    Finding --> Unsupported: unsupported install or version
+    Finding --> PolicyFailed: policy refused
+    Finding --> AuditFailed: discovery failed
+    Finding --> Unavailable: work cannot finish
     SignedOut --> SigningIn: Connect
     SigningIn --> SignedOut: Cancel, then Status
     SigningIn --> Ready: login ends, or Cancel after it saved a sign-in, then Status
     Ready --> CleanupPending: Disconnect
     SigningIn --> CleanupPending: Disconnect
     CleanupPending --> SignedOut: folder and marker gone, then Version and Status
-    CleanupPending --> CleanupPending: a file is locked, or a reparse point or open folder is inside
+    CleanupPending --> CleanupPending: Look again retries, but cleanup still cannot finish
     SigningIn --> Unavailable: a call's processes can't be confirmed ended
     Ready --> Unavailable: a call's processes can't be confirmed ended
 ```

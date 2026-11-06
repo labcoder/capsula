@@ -932,9 +932,8 @@ fn watch(
                     return;
                 }
             }
-            // shortcut: B3a releases the exclusion lease on Capture*; nothing holds one yet. The
-            // Slice 7's
-            // PR 6 stops playback on SpeechRevoked; nothing plays yet.
+            // shortcut: B3a releases the exclusion lease on Capture*; nothing holds one yet.
+            // Slice 7's PR 6 stops playback on SpeechRevoked; nothing plays yet.
             Ok(Some(
                 ControlToShell::CaptureDone { .. }
                 | ControlToShell::CaptureFailed { .. }
