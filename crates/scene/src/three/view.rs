@@ -604,7 +604,7 @@ mod tests {
     }
 
     #[test]
-    fn a_colour_only_step_admits_no_view_input() {
+    fn colour_and_track_only_steps_admit_no_view_input() {
         let Ok(Record::Begin(header)) =
             parse_record(br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":""}}"#)
         else {
@@ -631,6 +631,13 @@ mod tests {
         assert!(
             shaded.preparation.views.is_empty(),
             "preparation reshades from the step; admission composes nothing"
+        );
+        let moved = commit(
+            br#"{"step":{"id":"c","put":[{"anim":{"target":"s","track":"pos3","keys":[[0,[0,0,0]],[100,[1,0,0]]]}}]}}"#,
+        );
+        assert!(
+            moved.preparation.views.is_empty(),
+            "preparation restyles a track-only step; admission composes no input"
         );
     }
 

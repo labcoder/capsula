@@ -169,14 +169,19 @@ fn a_finished_pos3_settles_into_rest_through_a_cut_view_and_without_a_rebuild() 
     let Mesh::Built(mesh) = geometry(&view).solids[0].mesh.clone() else {
         panic!("built mesh");
     };
-    activate(
+    let track_only = prepared(
         &mut scene,
         &mut budget,
-        &mut view,
-        &mut frame,
+        view.layout(),
         json!({"id":"b","put":[pos3("s", 0, &json!([[0, [0, 0, 0]], [100, [10, 0, 0]]]))]}),
-        0,
     );
+    assert_eq!(
+        (track_only.scratch_bytes, track_only.views.len()),
+        (0, 1),
+        "a track-only step restyles its view and builds no mesh"
+    );
+    view.activate(track_only, 0, 0, &mut frame)
+        .expect("fresh activation");
     let solid = &geometry(&view).solids[0];
     assert!(Arc::ptr_eq(&solid.source, &before));
     assert!(
