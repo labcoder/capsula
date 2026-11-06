@@ -38,6 +38,13 @@ impl std::fmt::Debug for Transform {
 }
 
 impl Transform {
+    /// The identity: no rotation, unit scale, no translation.
+    pub const IDENTITY: Self = Self([
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+    ]);
+
     /// Rotates about x, then y, then z in degrees, scales uniformly, then translates.
     pub fn local(pos: [f32; 3], rot_degrees: [f32; 3], scale: f32) -> Self {
         let [(sx, cx), (sy, cy), (sz, cz)] =
@@ -93,7 +100,7 @@ impl Transform {
         clippy::cast_possible_truncation,
         reason = "world coordinates deliberately narrow to f32 and are checked immediately"
     )]
-    fn point64(&self, point: [f64; 3]) -> Result<Vec3, size::MeshError> {
+    pub(crate) fn point64(&self, point: [f64; 3]) -> Result<Vec3, size::MeshError> {
         let [x, y, z] = self.0.map(|row| {
             let value = (row[0] * point[0] + row[1] * point[1] + row[2] * point[2] + row[3]) as f32;
             if value == 0.0 { 0.0 } else { value }

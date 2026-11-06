@@ -147,7 +147,7 @@ impl LayoutState {
         &self.views
     }
     /// Whether `id` names a prepared 3D view or solid.
-    pub(super) fn is_three(&self, id: &WireId) -> Option<Handle> {
+    pub(crate) fn is_three(&self, id: &WireId) -> Option<Handle> {
         self.views.iter().find_map(|(view, geometry)| {
             if view == id {
                 return Some(geometry.handle);
