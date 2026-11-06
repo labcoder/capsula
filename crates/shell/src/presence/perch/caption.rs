@@ -87,6 +87,16 @@ pub(crate) fn target_of(facts: &HostFacts) -> Option<WindowTarget> {
     })
 }
 
+/// The perch target `facts` describe when `point` is a drop on it: inside its half-open
+/// caption, which already ends left of every caption-button exclusion. A frame hit alone
+/// isn't a drop.
+pub(crate) fn drop_target(facts: &HostFacts, [x, y]: [i32; 2]) -> Option<WindowTarget> {
+    target_of(facts).filter(|target| {
+        let caption = target.caption.rect;
+        (caption.left..caption.right).contains(&x) && (caption.top..caption.bottom).contains(&y)
+    })
+}
+
 /// §10.4's caption geometry. When the title bar and buttons agree, the caption is the reported
 /// bar left of the leftmost exclusion. Otherwise it's the standard band, scaled from host units
 /// at `monitor_dpi / layout_dpi` rounding up, from `bounds`' top for a captioned host and from

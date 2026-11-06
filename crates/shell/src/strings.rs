@@ -66,6 +66,7 @@ pub(crate) enum Text {
     RenameOneLine,
     TaskFallback,
     PerchOn,
+    PerchUntitled,
     Settings,
     OpenSettings,
     CloseSettings,
@@ -139,7 +140,7 @@ pub(crate) enum Text {
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 125] = [
+    const ALL: [Self; 126] = [
         Self::Connecting,
         Self::Connected,
         Self::Reconnecting,
@@ -196,6 +197,7 @@ impl Text {
         Self::RenameOneLine,
         Self::TaskFallback,
         Self::PerchOn,
+        Self::PerchUntitled,
         Self::Settings,
         Self::OpenSettings,
         Self::CloseSettings,
@@ -392,6 +394,7 @@ impl Text {
             Self::RenameOneLine => "rename-one-line",
             Self::TaskFallback => "task-fallback",
             Self::PerchOn => "carry-perch-on",
+            Self::PerchUntitled => "carry-perch-untitled",
             Self::Settings => "settings-title",
             Self::OpenSettings => "action-settings",
             Self::CloseSettings => "settings-close",

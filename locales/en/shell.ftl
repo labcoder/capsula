@@ -63,6 +63,7 @@ rename-name-too-long = Use 24 characters or fewer.
 rename-one-line = Use one line without control characters.
 task-fallback = a task
 carry-perch-on = Drop on { $app }
+carry-perch-untitled = Drop on this app
 task-focus = You're in: { $task }
 
 settings-title = Settings

@@ -201,7 +201,7 @@ pub(crate) mod tests {
         process: 2,
         thread: 3,
     };
-    const OTHER: HostId = HostId {
+    pub(crate) const OTHER: HostId = HostId {
         window: 9,
         process: 2,
         thread: 3,
