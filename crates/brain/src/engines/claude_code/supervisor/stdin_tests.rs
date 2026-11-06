@@ -133,7 +133,8 @@ async fn control_lines_have_their_own_cap_and_the_seed_goes_in_chunks() {
 
 /// A deaf child: the writer waits for room and sees each end of its wait. Dropped while it
 /// waits it queues nothing more, its deadline gives `Deadline`, and a revocation gives
-/// `Revoked` once the pump lets go.
+/// `Revoked` once the pump lets go. A control wait that ends any of these ways charges none of
+/// the control allowance, so a whole-allowance control is still taken after each.
 #[tokio::test]
 async fn a_full_stdin_wait_ends_on_drop_deadline_and_revocation() {
     let base = Base::new("stdin-full");
@@ -155,12 +156,19 @@ async fn a_full_stdin_wait_ends_on_drop_deadline_and_revocation() {
     );
     assert!(write.reached_within(WAIT), "the first chunk was admitted");
     assert_eq!(writer.seed(b"x", far()).await, Err(StdinRefused::Second));
+    let whole = [b'c'; MAX_CONTROL];
     let soon = Instant::now() + Duration::from_millis(300);
     assert_eq!(
-        writer.control(b"c", soon).await,
+        writer.control(&whole, soon).await,
         Err(StdinRefused::Deadline)
     );
-    let waiting = tokio::spawn(async move { writer.control(b"c", far()).await });
+    assert!(
+        timeout(Duration::from_millis(300), writer.control(&whole, far()))
+            .await
+            .is_err(),
+        "dropped while it waits"
+    );
+    let waiting = tokio::spawn(async move { writer.control(&whole, far()).await });
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(launch.lease().revoke(), Revoked::WriteInFlight);
     write.release();

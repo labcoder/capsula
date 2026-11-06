@@ -153,10 +153,10 @@ impl StdinWriter {
         if total > MAX_CONTROL {
             return Err(StdinRefused::TooLarge);
         }
+        // One chunk, since MAX_CONTROL < CHUNK: charged only once it's queued, so a wait that
+        // ends or is dropped first leaves the allowance as it was.
+        self.enqueue(line, until).await?;
         self.control.line_bytes.store(total, Ordering::Release);
-        for chunk in line.chunks(CHUNK) {
-            self.enqueue(chunk, until).await?;
-        }
         Ok(())
     }
 
