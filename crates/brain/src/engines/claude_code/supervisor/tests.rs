@@ -26,14 +26,25 @@ use crate::platform::{self, FAKE_CLAUDE, Job, Stdio};
 /// What a test sets on a launch before it's queued.
 #[derive(Default)]
 pub(crate) struct Hooks {
+    /// Where the stdin pump waits, with its first chunk taken and not yet admitted.
+    pub(crate) admit: Option<Pause>,
     /// Where the stdin pump waits, between its first admission and its write.
     pub(crate) write: Option<Pause>,
+    /// Hears the length of each chunk written to the child's stdin.
+    pub(crate) writes: Option<std_mpsc::Sender<usize>>,
     /// Where the start waits, once the launch's folder is made and before its listener.
     pub(crate) folder: Option<Pause>,
     /// Hears the launch's id once it's drawn.
     pub(crate) id: Option<std_mpsc::Sender<LaunchId>>,
     /// Hears each pump's name as its thread ends.
     pub(crate) pumps: Option<std_mpsc::Sender<&'static str>>,
+}
+
+/// The stdin pump's share of [`Hooks`].
+pub(super) struct Stdin {
+    pub(super) admit: Option<Pause>,
+    pub(super) write: Option<Pause>,
+    pub(super) writes: Option<std_mpsc::Sender<usize>>,
 }
 
 /// The launch's side of a barrier.
@@ -291,9 +302,13 @@ fn a_launch_deadline_is_fixed_at_admission() {
 #[test]
 fn mcp_json_names_the_bridge_and_nothing_else() {
     let config = mcp_json(Path::new(r"C:\Kumochi\kumochid.exe"), LaunchId(0xab)).expect("text");
+    // Compared as JSON: the workspace build turns on serde_json's preserve_order, so key order varies.
     assert_eq!(
-        String::from_utf8(config).expect("UTF-8"),
-        r#"{"mcpServers":{"kumochi":{"args":["--mcp-bridge","000000000000000000000000000000ab"],"command":"C:\\Kumochi\\kumochid.exe"}}}"#
+        serde_json::from_slice::<serde_json::Value>(&config).expect("JSON"),
+        serde_json::json!({"mcpServers": {"kumochi": {
+            "command": r"C:\Kumochi\kumochid.exe",
+            "args": ["--mcp-bridge", "000000000000000000000000000000ab"],
+        }}}),
     );
 }
 
@@ -436,14 +451,35 @@ async fn finished_reaches_the_brain_before_teardown() {
     .await;
 }
 
-/// S4: chunks queued behind an admitted write never reach the child once it's revoked.
+/// S4: a chunk taken but not yet admitted when the launch is revoked is never written, and chunks
+/// queued behind an admitted write never are either. Writes are heard at the pipe, since the
+/// teardown may end the child before it reads what was written.
 #[tokio::test]
 async fn no_chunk_admitted_after_revoke_reaches_the_child() {
     let base = Base::new("launch-admission");
     let lane = found(&base, "echo").await;
     let (mut start, mut launch) = admit(question(Duration::from_secs(20)));
+    let (taken, at_admission) = barrier();
+    let (writes, written) = std_mpsc::channel();
+    start.hooks.admit = Some(taken);
+    start.hooks.writes = Some(writes);
+    queue(&lane, start);
+    let first = pipes(&mut launch).await;
+    first
+        .stdin
+        .try_send(Input::Chunk(vec![b'a'; 10]))
+        .expect("room");
+    assert!(at_admission.reached_within(WAIT), "the chunk was taken");
+    assert_eq!(launch.lease().revoke(), Revoked::Idle);
+    at_admission.release();
+    assert_eq!(end(launch).await, Teardown::Done);
+    assert_eq!(written.try_iter().collect::<Vec<_>>(), Vec::<usize>::new());
+
+    let (mut start, mut launch) = admit(question(Duration::from_secs(20)));
     let (paused, barrier) = barrier();
+    let (writes, written) = std_mpsc::channel();
     start.hooks.write = Some(paused);
+    start.hooks.writes = Some(writes);
     queue(&lane, start);
     let pipes = pipes(&mut launch).await;
     pipes
@@ -461,9 +497,9 @@ async fn no_chunk_admitted_after_revoke_reaches_the_child() {
     barrier.release();
     assert_eq!(end(launch).await, Teardown::Done);
     assert_eq!(
-        echoed(&base),
+        written.try_iter().collect::<Vec<_>>(),
         [10],
-        "only the admitted chunk reached the child"
+        "only the admitted chunk was written"
     );
 }
 

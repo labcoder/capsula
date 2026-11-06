@@ -520,7 +520,14 @@ fn begin(
         stdin,
         control,
         #[cfg(test)]
-        (hooks.write, hooks.pumps),
+        (
+            tests::Stdin {
+                admit: hooks.admit,
+                write: hooks.write,
+                writes: hooks.writes,
+            },
+            hooks.pumps,
+        ),
     )?;
     Ok((
         Pipes {
@@ -537,7 +544,7 @@ fn pumps(
     spawned: &mut platform::Spawned,
     stdin: mpsc::Receiver<Input>,
     control: &Arc<Control>,
-    #[cfg(test)] hooks: (Option<tests::Pause>, Option<std_mpsc::Sender<&'static str>>),
+    #[cfg(test)] hooks: (tests::Stdin, Option<std_mpsc::Sender<&'static str>>),
 ) -> Result<mpsc::Receiver<Vec<u8>>, LaunchFailed> {
     let (Some(child_stdin), Some(child_stdout), Some(child_stderr)) = (
         spawned.stdin.take(),
@@ -550,7 +557,7 @@ fn pumps(
     let writer = Arc::clone(control);
     let reader = Arc::clone(control);
     #[cfg(test)]
-    let (write_pause, report) = hooks;
+    let (stdin_hooks, report) = hooks;
     running.pumps = vec![
         pump(
             "claude-code-stdin",
@@ -560,7 +567,7 @@ fn pumps(
                     stdin,
                     &writer,
                     #[cfg(test)]
-                    write_pause,
+                    stdin_hooks,
                 );
             },
             #[cfg(test)]
@@ -726,17 +733,27 @@ fn write_input(
     mut pipe: PipeWriter,
     mut input: mpsc::Receiver<Input>,
     control: &Control,
-    #[cfg(test)] pause: Option<tests::Pause>,
+    #[cfg(test)] hooks: tests::Stdin,
 ) {
     #[cfg(test)]
-    let mut pause = pause;
+    let tests::Stdin {
+        mut admit,
+        mut write,
+        writes,
+    } = hooks;
     while let Some(Input::Chunk(bytes)) = input.blocking_recv() {
+        #[cfg(test)]
+        tests::pause(admit.take());
         if !control.admit() {
             return;
         }
         #[cfg(test)]
-        tests::pause(pause.take());
+        tests::pause(write.take());
         let wrote = pipe.write_all(&bytes);
+        #[cfg(test)]
+        if let (Some(writes), Ok(())) = (&writes, &wrote) {
+            writes.send(bytes.len()).ok();
+        }
         if !control.written() || wrote.is_err() {
             return;
         }
