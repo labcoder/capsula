@@ -26,6 +26,10 @@ fn system() -> Vec<(OsString, OsString)> {
     .to_vec()
 }
 
+fn browser() -> OsString {
+    r"C:\Windows\explorer.exe".into()
+}
+
 fn strings(values: &[OsString]) -> Vec<&str> {
     values
         .iter()
@@ -108,7 +112,7 @@ fn each_entry_point_gets_exactly_its_arguments() {
         "--model",
         "sonnet",
     ];
-    let args = |entry| launch_data(&folders(), &system(), &entry).args;
+    let args = |entry| launch_data(&folders(), &system(), &browser(), &entry).args;
     assert_eq!(strings(&args(question(None))), head);
     assert_eq!(
         strings(&args(question(Some("high")))),
@@ -126,6 +130,7 @@ fn each_entry_point_gets_exactly_its_arguments() {
     let bare = launch_data(
         &folders(),
         &system(),
+        &browser(),
         &EntryPoint::Question {
             mcp_config: &mcp,
             allowed_tools: &none,
@@ -140,8 +145,8 @@ fn each_entry_point_gets_exactly_its_arguments() {
 }
 
 #[test]
-fn every_entry_point_gets_the_same_exact_environment() {
-    let expected: Vec<(&str, &str)> = vec![
+fn every_entry_point_gets_the_same_exact_environment_and_only_login_a_browser() {
+    let shared: Vec<(&str, &str)> = vec![
         ("CLAUDE_CONFIG_DIR", r"C:\k\claude-code\config"),
         ("USERPROFILE", r"C:\k\claude-code\profile"),
         ("HOME", r"C:\k\claude-code\profile"),
@@ -174,7 +179,7 @@ fn every_entry_point_gets_the_same_exact_environment() {
             effort: None,
         },
     ] {
-        let env = launch_data(&folders(), &system(), &entry).env;
+        let env = launch_data(&folders(), &system(), &browser(), &entry).env;
         let env: Vec<(&str, &str)> = env
             .iter()
             .map(|(name, value)| {
@@ -184,8 +189,23 @@ fn every_entry_point_gets_the_same_exact_environment() {
                 )
             })
             .collect();
+        let mut expected = shared.clone();
+        if matches!(entry, EntryPoint::Login) {
+            expected.push(("BROWSER", r"C:\Windows\explorer.exe"));
+        }
         assert_eq!(env, expected, "{entry:?}");
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn logins_browser_is_explorer_in_the_windows_folder_the_os_gives() {
+    let system = crate::platform::system_env().expect("system folders");
+    let browser = crate::platform::login_browser().expect("the Windows folder");
+    let mut expected = system[0].1.clone();
+    expected.push(r"\explorer.exe");
+    assert_eq!(browser, expected);
+    assert!(PathBuf::from(&browser).is_file(), "explorer.exe exists");
 }
 
 #[cfg(windows)]
@@ -230,6 +250,7 @@ fn the_system_values_come_from_the_os_and_no_parent_path_entry_reaches_the_child
     let data = launch_data(
         &folders(),
         &system,
+        &browser(),
         &EntryPoint::Question {
             mcp_config: &mcp,
             allowed_tools: &tools,
@@ -298,6 +319,7 @@ fn launch_data_debug_prints_counts_only() {
     let data = launch_data(
         &folders(),
         &system(),
+        &browser(),
         &EntryPoint::Question {
             mcp_config: &mcp,
             allowed_tools: &tools,
