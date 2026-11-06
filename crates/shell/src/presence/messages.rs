@@ -5,10 +5,11 @@ use gpui_kit::component::{ActiveTheme as _, ThemeStyled as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement, KeyBinding,
-    ListAlignment, ListState as MessageList, ParentElement as _, Pixels, Render, Styled as _,
-    Subscription, WeakEntity, Window, div, list, px,
+    ListAlignment, ListState as MessageList, ParentElement as _, Pixels, Render, SharedString,
+    Styled as _, Subscription, WeakEntity, Window, div, list, px,
 };
-use kumochi_protocol::message::{EventId, PageEventKind, RunId, ThreadId};
+use kumochi_protocol::message::{PageEventKind, RunId, ThreadId};
+use std::rc::Rc;
 
 use super::Presence;
 use crate::runs::Shown;
@@ -22,13 +23,34 @@ pub(super) struct Messages {
     list: MessageList,
     focus: FocusHandle,
     shown_thread: Option<ThreadId>,
-    newest: Option<EventId>,
+    rows: Rc<[Row]>,
+    ids: Vec<(&'static str, u64)>,
     count: usize,
     rem: Pixels,
     live: Option<Shown>,
+    preview: Option<Row>,
     live_row: Option<RunId>,
     proven: Option<RunId>,
     _watch: Subscription,
+}
+
+#[derive(Clone)]
+struct Row {
+    id: (&'static str, u64),
+    run: Option<RunId>,
+    assistant: bool,
+    label: Option<SharedString>,
+    text: SharedString,
+    cut: Option<SharedString>,
+}
+
+impl std::fmt::Debug for Row {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Row")
+            .field("id", &self.id)
+            .field("text_len", &self.text.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Messages {
@@ -48,7 +70,8 @@ impl Messages {
         let state = model.read(cx);
         let count = state.events.len();
         let shown_thread = state.open;
-        let newest = state.events.first().map(|event| event.id);
+        let rows = stored_rows(state, cx);
+        let ids = rows.iter().map(|row| row.id).collect();
         let messages = MessageList::new(count, ListAlignment::Bottom, px(0.0));
         messages.set_scroll_handler({
             let model = model.clone();
@@ -58,16 +81,21 @@ impl Messages {
                 }
             }
         });
-        let watch = cx.observe(&model, |view, _, cx| view.sync(cx));
+        let watch = cx.observe(&model, |view, model, cx| {
+            view.rows = stored_rows(model.read(cx), cx);
+            view.sync(cx);
+        });
         Self {
             model,
             list: messages,
             focus: cx.focus_handle().tab_stop(true),
             shown_thread,
-            newest,
+            rows,
+            ids,
             count,
             rem: window.rem_size(),
             live: None,
+            preview: None,
             live_row: None,
             proven: None,
             _watch: watch,
@@ -93,20 +121,51 @@ impl Messages {
                     && !live.text.is_empty()
             })
             .map(|live| live.run);
-        let count = state.events.len() + usize::from(live.is_some());
-        let newest = state.events.first().map(|event| event.id);
-        if self.shown_thread == state.open
-            && self.newest == newest
-            && self.proven == state.proven
-            && self.live_row == live
-            && count >= self.count
-        {
-            self.list.splice(0..0, count - self.count);
+        self.preview = self
+            .live
+            .as_ref()
+            .filter(|answer| Some(answer.run) == live)
+            .map(|answer| {
+                row(
+                    ("live", answer.run.0),
+                    Some(answer.run),
+                    PageEventKind::AssistantText,
+                    &answer.text,
+                    answer.cut.then_some(Text::ChatLiveCut),
+                    state,
+                    cx,
+                )
+            });
+        let ids: Vec<_> = self
+            .rows
+            .iter()
+            .chain(self.preview.iter())
+            .map(|row| row.id)
+            .collect();
+        let count = ids.len();
+        if self.shown_thread == state.open {
+            let prefix = self
+                .ids
+                .iter()
+                .zip(&ids)
+                .take_while(|(old, new)| old == new)
+                .count();
+            let suffix = self.ids[prefix..]
+                .iter()
+                .rev()
+                .zip(ids[prefix..].iter().rev())
+                .take_while(|(old, new)| old == new)
+                .count();
+            self.list
+                .splice(prefix..self.ids.len() - suffix, count - prefix - suffix);
+            if self.live_row != live || self.proven != state.proven {
+                self.list.remeasure_items(0..count);
+            }
         } else {
             self.list.reset(count);
         }
         self.shown_thread = state.open;
-        self.newest = newest;
+        self.ids = ids;
         self.count = count;
         self.live_row = live;
         self.proven = state.proven;
@@ -134,24 +193,26 @@ impl Render for Messages {
             self.rem = window.rem_size();
             self.list.remeasure();
         }
-        let model = self.model.clone();
-        let live = self.live.clone();
+        let rows = Rc::clone(&self.rows);
+        let live = self.preview.clone();
         let live_row = self.live_row;
         let messages = list(self.list.clone(), move |ix, _, cx| {
-            let state = model.read(cx);
-            message(
-                ix,
-                state,
-                live.as_ref().filter(|live| Some(live.run) == live_row),
-                cx,
-            )
+            let row = if ix == rows.len() {
+                live.as_ref()
+            } else {
+                rows.get(ix)
+            };
+            row.filter(|row| {
+                !row.assistant || row.run.is_none() || row.run != live_row || row.id.0 == "live"
+            })
+            .map_or_else(|| div().into_any_element(), |row| message(row, cx))
         })
         .size_full();
         div()
             .id("thread-messages")
             .debug_selector(|| "chat-message-region".into())
             .relative()
-            .mx_1()
+            .ml_1()
             .my_1()
             .flex_1()
             .min_h_0()
@@ -183,34 +244,34 @@ impl Render for Messages {
     }
 }
 
-fn message(ix: usize, state: &Threads, live: Option<&Shown>, cx: &App) -> gpui_kit::AnyElement {
-    let (id, kind, text, cut) = if ix == state.events.len() {
-        let Some(live) = live else {
-            return div().into_any_element();
-        };
-        (
-            ("live", live.run.0),
-            PageEventKind::AssistantText,
-            live.text.clone(),
-            live.cut,
-        )
-    } else {
-        let Some(event) = state.events.iter().rev().nth(ix) else {
-            return div().into_any_element();
-        };
-        if event.kind == PageEventKind::AssistantText
-            && event.run.is_some()
-            && event.run == live.map(|live| live.run)
-        {
-            return div().into_any_element();
-        }
-        (
-            ("event", event.id.0),
-            event.kind,
-            event.text.clone(),
-            event.cut,
-        )
-    };
+fn stored_rows(state: &Threads, cx: &App) -> Rc<[Row]> {
+    state
+        .events
+        .iter()
+        .rev()
+        .map(|event| {
+            row(
+                ("event", event.id.0),
+                event.run,
+                event.kind,
+                &event.text,
+                event.cut.then_some(Text::ThreadCut),
+                state,
+                cx,
+            )
+        })
+        .collect()
+}
+
+fn row(
+    id: (&'static str, u64),
+    run: Option<RunId>,
+    kind: PageEventKind,
+    text: &str,
+    cut: Option<Text>,
+    state: &Threads,
+    cx: &App,
+) -> Row {
     let strings = cx.global::<Strings>();
     let label = match kind {
         PageEventKind::User => Some(strings.get(Text::ThreadUser)),
@@ -222,10 +283,22 @@ fn message(ix: usize, state: &Threads, live: Option<&Shown>, cx: &App) -> gpui_k
         PageEventKind::Issue { .. } => None,
     };
     let text = if label.is_some() {
-        text
+        text.to_owned()
     } else {
-        strings.issue_draft(&text)
+        strings.issue_draft(text)
     };
+    Row {
+        id,
+        run,
+        assistant: kind == PageEventKind::AssistantText,
+        label: label.map(Into::into),
+        text: text.into(),
+        cut: cut.map(|text| strings.get(text).into()),
+    }
+}
+
+fn message(row: &Row, cx: &App) -> gpui_kit::AnyElement {
+    let id = row.id;
     div()
         .id(id)
         .debug_selector(move || format!("message-{}-{}", id.0, id.1))
@@ -234,22 +307,18 @@ fn message(ix: usize, state: &Threads, live: Option<&Shown>, cx: &App) -> gpui_k
         .px_2()
         .border_b_1()
         .border_color(cx.theme().border)
-        .children(label.map(|label| {
+        .children(row.label.clone().map(|label| {
             div()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
                 .child(label)
         }))
-        .child(div().text_sm().child(text))
-        .children(cut.then(|| {
+        .child(div().text_sm().child(row.text.clone()))
+        .children(row.cut.clone().map(|notice| {
             div()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
-                .child(cx.global::<Strings>().get(if id.0 == "live" {
-                    Text::ChatLiveCut
-                } else {
-                    Text::ThreadCut
-                }))
+                .child(notice)
         }))
         .into_any_element()
 }
@@ -261,7 +330,7 @@ mod tests {
         AppContext as _, Bounds, ListOffset, TestAppContext, WindowBounds, WindowOptions, point,
         size,
     };
-    use kumochi_protocol::message::{PageEvent, RunId};
+    use kumochi_protocol::message::{EventId, PageEvent, RunId};
 
     fn event(id: u64) -> PageEvent {
         PageEvent {
@@ -313,6 +382,102 @@ mod tests {
             .expect("window");
             (model, view.expect("messages"), window)
         })
+    }
+
+    #[gpui::test]
+    fn cached_row_updates_keep_exact_text_and_redact_the_snapshot(cx: &mut TestAppContext) {
+        let (model, view, _) = open(cx);
+        let sentinel = "private-row-sentinel-83c2";
+        model.update(cx, |state, cx| {
+            let mut stored = event(1);
+            stored.text = sentinel.into();
+            state.events = vec![stored];
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, _| {
+            assert_eq!(view.rows[0].text.as_ref(), sentinel);
+            let debug = format!("{:?}", view.rows);
+            assert!(!debug.contains(sentinel));
+            assert!(!debug.contains(&format!("{:?}", sentinel.as_bytes())));
+        });
+        model.update(cx, |state, cx| {
+            state.events[0].text = "A repaired row with the same event id".into();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, cx| {
+            assert_eq!(
+                view.rows[0].text.as_ref(),
+                "A repaired row with the same event id"
+            );
+            view.live(
+                Some(&Shown {
+                    run: RunId(7),
+                    thread: Some(ThreadId(1)),
+                    text: sentinel.into(),
+                    cut: true,
+                    done: false,
+                }),
+                cx,
+            );
+            assert_eq!(
+                view.preview.as_ref().and_then(|row| row.cut.as_deref()),
+                Some("Earlier streamed text isn't shown here.")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn live_insertion_and_stored_proof_preserve_a_reader_above_the_tail(cx: &mut TestAppContext) {
+        let (model, view, _) = open(cx);
+        model.update(cx, |state, cx| {
+            state.events = (1..=50).rev().map(event).collect();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, cx| {
+            view.list.scroll_to(ListOffset {
+                item_ix: 10,
+                offset_in_item: px(0.0),
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let anchor = view.update(cx, |view, _| view.list.logical_scroll_top());
+        view.update(cx, |view, cx| {
+            view.live(
+                Some(&Shown {
+                    run: RunId(7),
+                    thread: Some(ThreadId(1)),
+                    text: "A new live answer".into(),
+                    cut: false,
+                    done: false,
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, _| {
+            let actual = view.list.logical_scroll_top();
+            assert_eq!(actual.item_ix, anchor.item_ix);
+            assert_eq!(actual.offset_in_item, anchor.offset_in_item);
+        });
+        model.update(cx, |state, cx| {
+            let mut stored = event(51);
+            stored.run = Some(RunId(7));
+            state.events.insert(0, stored);
+            state.proven = Some(RunId(7));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, _| {
+            let actual = view.list.logical_scroll_top();
+            assert_eq!(actual.item_ix, anchor.item_ix);
+            assert_eq!(actual.offset_in_item, anchor.offset_in_item);
+            assert_eq!(view.live_row, None);
+            assert_eq!(view.list.item_count(), 51);
+        });
     }
 
     #[gpui::test]
@@ -666,7 +831,7 @@ mod tests {
         view.update(cx, |view, _| {
             assert_eq!(view.list.item_count(), 0);
             assert_eq!(view.shown_thread, Some(ThreadId(2)));
-            assert_eq!(view.newest, None);
+            assert_eq!(view.ids, []);
         });
     }
 }

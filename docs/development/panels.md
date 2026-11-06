@@ -126,6 +126,11 @@ runs remain provisional until superseded or disconnected, because their control 
 precede storage. Selection and connection changes clear the proof. Font changes invalidate
 the list's measured heights, including the live row.
 
+Opening chat stamps a completed run before issuing its first history request. Stored
+rows and the live preview are formatted into shared-string snapshots when their state
+changes, not while drawing each frame. Stable row identities splice changed ranges without
+resetting an older reader's scroll anchor when a live row appears or stored proof lands.
+
 The list highlight follows changes to `Threads.open`, including Back to Kumo and hide/reopen.
 Unrelated model notifications preserve a row highlighted with the arrow keys, so Enter still
 opens that row. Page updates remap the highlight by row id. Confirming a targeted task's delete

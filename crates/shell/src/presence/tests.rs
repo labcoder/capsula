@@ -157,6 +157,161 @@ fn a_hidden_window_takes_its_requested_size() {
 /// What a `RunEnd` frame's size grants back [any nonzero size].
 const RUN_END_BYTES: u32 = 24;
 
+fn answer_history(
+    owner: &gpui_kit::Entity<Presence>,
+    requests: &async_channel::Receiver<kumochi_protocol::message::DataToBrain>,
+    events: &[kumochi_protocol::message::PageEvent],
+    cx: &mut TestAppContext,
+) {
+    use kumochi_protocol::message::{DataToBrain, PageOf};
+    let mut pages = 0;
+    let replies = std::iter::from_fn(|| requests.try_recv().ok())
+        .map(|request| {
+            let DataToBrain::PageRequest { request, page } = request else {
+                panic!("only history requests are sent");
+            };
+            let message = match page {
+                PageOf::Threads { .. } => DataToShell::ThreadList {
+                    request,
+                    threads: Vec::new(),
+                    next: None,
+                },
+                PageOf::Events { thread, before } => {
+                    assert_eq!(thread, ThreadId(1));
+                    assert_eq!(before, None);
+                    pages += 1;
+                    DataToShell::Page {
+                        request,
+                        thread,
+                        events: events.to_vec(),
+                        before: None,
+                    }
+                }
+            };
+            LinkEvent::Data {
+                generation: 1,
+                message,
+                bytes: 17,
+            }
+        })
+        .collect();
+    assert_eq!(pages, 1);
+    owner.update(cx, |owner, cx| {
+        owner
+            .link_events(Batch::Plain(replies), cx)
+            .expect("history replies");
+    });
+}
+
+#[gpui::test]
+fn a_completed_visible_turn_and_its_reopened_first_page_both_replace_the_preview(
+    cx: &mut TestAppContext,
+) {
+    use kumochi_protocol::message::{EventId, PageEvent, PageEventKind};
+    let owner = test_fixture::presence(cx);
+    let (requests, window) = owner.update(cx, |owner, cx| {
+        let (link, requests) = crate::link::LinkHandle::recording();
+        owner.link = link;
+        owner.session = Some(Session::detached(1, Incarnation(1)));
+        owner.runs.met(Incarnation(1));
+        owner.runs.connected(1);
+        owner.runs.settings(ThreadId(1));
+        owner
+            .runs
+            .submit("a submitted turn", |_| true)
+            .expect("submitted");
+        owner.chat.update(cx, |chat, cx| {
+            chat.connected();
+            chat.show_for(Some(ThreadId(1)));
+            cx.notify();
+        });
+        let text = owner.text.as_mut().expect("typing fixture");
+        text.typing.open();
+        let window = text.window;
+        owner.request_pages(cx);
+        (requests, window)
+    });
+    answer_history(&owner, &requests, &[], cx);
+    owner.update(cx, |owner, cx| {
+        owner
+            .link_events(
+                Batch::Plain(vec![
+                    LinkEvent::RunState {
+                        run: RunId(1),
+                        thread: ThreadId(1),
+                        phase: Phase::Answering,
+                        error: None,
+                    },
+                    LinkEvent::Data {
+                        generation: 1,
+                        message: DataToShell::AssistantText {
+                            run: RunId(1),
+                            delta: "joined live answer".into(),
+                        },
+                        bytes: 23,
+                    },
+                ]),
+                cx,
+            )
+            .expect("answering and text");
+    });
+    answer_history(&owner, &requests, &[], cx);
+    owner.update(cx, |owner, cx| {
+        owner
+            .link_events(
+                Batch::Plain(vec![
+                    LinkEvent::RunState {
+                        run: RunId(1),
+                        thread: ThreadId(1),
+                        phase: Phase::Done,
+                        error: None,
+                    },
+                    LinkEvent::Data {
+                        generation: 1,
+                        message: DataToShell::RunEnd { run: RunId(1) },
+                        bytes: RUN_END_BYTES,
+                    },
+                ]),
+                cx,
+            )
+            .expect("Done and RunEnd");
+    });
+    let stored = [2, 1].map(|id| PageEvent {
+        id: EventId(id),
+        run: Some(RunId(1)),
+        kind: PageEventKind::AssistantText,
+        text: format!("distinct stored section {id}"),
+        cut: false,
+    });
+    answer_history(&owner, &requests, &stored, cx);
+    cx.run_until_parked();
+    stored_answer_is_visible(&owner, window, cx);
+    owner.update(cx, |owner, cx| {
+        owner
+            .dismiss_text(cx)
+            .expect("hide without a native window");
+        assert_eq!(owner.chat.read(cx).proven, None);
+        owner.open_text(cx).expect("reopen without native input");
+    });
+    answer_history(&owner, &requests, &stored, cx);
+    cx.run_until_parked();
+    stored_answer_is_visible(&owner, window, cx);
+}
+
+fn stored_answer_is_visible(
+    owner: &gpui_kit::Entity<Presence>,
+    window: gpui_kit::AnyWindowHandle,
+    cx: &mut TestAppContext,
+) {
+    owner.read_with(cx, |owner, cx| {
+        assert_eq!(owner.chat.read(cx).proven, Some(RunId(1)));
+    });
+    let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+    assert!(frame.debug_bounds("message-live-1").is_none());
+    assert!(frame.debug_bounds("message-event-1").is_some());
+    assert!(frame.debug_bounds("message-event-2").is_some());
+}
+
 /// A reconnect failure as the first state naming `run`, then the run's last data frame, as the
 /// link delivers them in one batch.
 fn reconnect_failure(run: u32) -> Batch {

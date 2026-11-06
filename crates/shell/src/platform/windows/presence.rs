@@ -619,6 +619,10 @@ pub(crate) fn place_presence_window(
     window: &mut Window,
     bounds: [i32; 4],
 ) -> Result<(), PresenceError> {
+    #[cfg(test)]
+    if HasWindowHandle::window_handle(window).is_err() {
+        return Ok(());
+    }
     Ok(place(hwnd_of(window)?, bounds)?)
 }
 
@@ -627,6 +631,10 @@ pub(crate) fn place_presence_window(
 /// # Errors
 /// Fails when the window has no Win32 handle or Windows refuses.
 pub(crate) fn hide_presence_window(window: &mut Window) -> Result<(), PresenceError> {
+    #[cfg(test)]
+    if HasWindowHandle::window_handle(window).is_err() {
+        return Ok(());
+    }
     Ok(hide(hwnd_of(window)?)?)
 }
 
@@ -699,6 +707,10 @@ fn focus_input() -> INPUT {
 pub(crate) fn activate_presence_window(
     window: &Window,
 ) -> Result<Option<Foreground>, PresenceError> {
+    #[cfg(test)]
+    if HasWindowHandle::window_handle(window).is_err() {
+        return Ok(None);
+    }
     let hwnd = hwnd_of(window)?;
     // SAFETY: reads the foreground handle without taking ownership.
     let previous = unsafe { GetForegroundWindow() };

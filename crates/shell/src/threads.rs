@@ -47,7 +47,7 @@ pub(crate) struct Threads {
     pub(crate) rows: Vec<ThreadRow>,
     pub(crate) next: Option<ThreadCursor>,
     pub(crate) open: Option<ThreadId>,
-    /// Newest first; the view reverses their indices rather than copying their text.
+    /// Newest first; stored event ids remain distinct, even within one run.
     pub(crate) events: Vec<PageEvent>,
     pub(crate) before: Option<EventId>,
     pub(crate) listed: bool,

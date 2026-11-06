@@ -165,7 +165,6 @@ impl Presence {
                 format_args!("input draft nonempty={nonempty} preserved={preserved}"),
             );
         }
-        self.request_pages(cx);
         self.runs_changed(cx)
     }
 

@@ -10,8 +10,9 @@ opens the separate browser without changing where your next message goes. A task
 offers **Back to Kumo**. Tab or click into the message region to use Page Up and Page Down;
 scrolling to its top or choosing **Older messages** loads earlier messages. A read failure keeps
 the messages and offers Retry.
-Long streamed answers show a trailing preview with a cut notice until stored history replaces
-it; separate stored answer sections remain separate.
+Long streamed answers show a trailing preview with a cut notice. After a successful turn,
+a fresh history read replaces it with the separate stored answer sections. A failed or
+stopped turn keeps its preview until another answer replaces it or the connection changes.
 
 If a named run fails before answering because its connection needs sign-in again, Kumochi puts the submitted
 message back into the empty input. It never overwrites a newer draft, switches you back to

@@ -373,6 +373,8 @@ pub(crate) struct LinkHandle {
     retry: Sender<()>,
     /// Closes when the link thread ends.
     done: Receiver<()>,
+    #[cfg(test)]
+    recording: Option<Sender<DataToBrain>>,
 }
 
 impl LinkHandle {
@@ -470,6 +472,10 @@ impl LinkHandle {
     /// [`LinkHandle::send_control`]. A turn is counted once queued; one past the count ends the
     /// connection instead.
     pub(crate) fn send_data(&self, session: &Session, message: DataToBrain) -> bool {
+        #[cfg(test)]
+        if let Some(recording) = &self.recording {
+            return recording.try_send(message).is_ok();
+        }
         self.shared
             .outbox(session, |outbox| {
                 let turn = matches!(message, DataToBrain::TextSubmit { .. });
@@ -497,7 +503,15 @@ impl LinkHandle {
             shared: Arc::new(Shared::default()),
             retry,
             done,
+            recording: None,
         }
+    }
+
+    pub(crate) fn recording() -> (Self, Receiver<DataToBrain>) {
+        let (recording, requests) = async_channel::unbounded();
+        let mut link = Self::detached();
+        link.recording = Some(recording);
+        (link, requests)
     }
 }
 
@@ -561,6 +575,8 @@ fn start(link: Link, events: Sender<LinkEvent>) -> (LinkHandle, LinkStart) {
         shared: Arc::clone(&link.shared),
         retry,
         done,
+        #[cfg(test)]
+        recording: None,
     };
     let start = LinkStart {
         link,
