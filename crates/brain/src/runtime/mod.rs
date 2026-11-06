@@ -975,6 +975,7 @@ impl Brain {
         for effect in effects {
             match effect {
                 Effect::Store(mut op) => {
+                    self.claude.deleting(&op);
                     self.seed_op(&mut op);
                     #[cfg(test)]
                     self.observer.send(Seen::StoreOpQueued(op.clone())).ok();

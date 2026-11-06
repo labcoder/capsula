@@ -2,7 +2,7 @@
 //! job, under this brain's Claude Code lock, after the launch policy's checks; a job admitted
 //! under an older generation does nothing, and a newer generation ends the call running. While a
 //! Disconnect's marker stands, the folder is deleted before anything starts, or nothing does.
-//! C5a adds questions to this lane.
+//! Questions run here too, one at a time like every other call ([`supervisor`](super::supervisor)).
 
 use std::ffi::OsString;
 use std::fs::File;
@@ -12,13 +12,16 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc as std_mpsc};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::constants::{CLAUDE_CODE_DELETING, CLAUDE_CODE_DIR, CLAUDE_CODE_LOCK};
+use kumochi_protocol::constants::{
+    CLAUDE_CODE_DELETING, CLAUDE_CODE_DIR, CLAUDE_CODE_LOCK, ENGINE_DIR,
+};
 use kumochi_protocol::message::{ClaudeVersion, PolicyFailed, Unsupported};
 use tokio::sync::{mpsc, oneshot};
 
 use super::auth::{self, StatusFailure};
 use super::install::{self, FindError};
 use super::policy::{self, EntryPoint, LaunchPolicy, OwnedFolders};
+use super::supervisor::{self, Ready, Start, Teardown};
 use crate::platform::{self, Job, Launch, ManagedPresence, Presence, SessionLock, Stdio};
 
 /// Jobs the lane holds before it refuses more; the core keeps one discovery out at a time.
@@ -35,9 +38,9 @@ pub(crate) const DEADLINE: Duration = Duration::from_secs(10);
 /// How long Claude Code's own sign-in may hold the lane.
 pub(crate) const LOGIN_DEADLINE: Duration = Duration::from_mins(5);
 /// How often a running call looks at its deadline and at closing.
-const POLL: Duration = Duration::from_millis(20);
+pub(super) const POLL: Duration = Duration::from_millis(20);
 /// How long the pipes get to end once the call's job is empty.
-const PIPE_GRACE: Duration = Duration::from_secs(1);
+pub(super) const PIPE_GRACE: Duration = Duration::from_secs(1);
 
 /// What the lane starts. `prefix` comes before the entry point's own arguments; only the tests'
 /// fake has one.
@@ -63,6 +66,10 @@ pub(crate) struct Host {
     pub(crate) console: Stdio,
     /// Ends a call's job and confirms it empty: the brain's is [`Job::terminate`].
     pub(crate) terminate: fn(&Job) -> io::Result<()>,
+    /// The brain's executable, which a question's `mcp.json` starts as its bridge.
+    pub(crate) brain_exe: PathBuf,
+    /// Where a question's bridge pipe is served.
+    pub(crate) runtime: tokio::runtime::Handle,
 }
 
 /// A call the core asks for.
@@ -132,9 +139,19 @@ pub(crate) struct Done {
     pub(crate) result: Result<Outcome, Failure>,
 }
 
+/// What the lane's queue holds.
+enum Queued {
+    Call(u64, Work),
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "C5b's engine queues the first question")
+    )]
+    Launch(Box<Start>),
+}
+
 /// The lane's handle on the core loop.
 pub(crate) struct Lane {
-    jobs: Option<std_mpsc::SyncSender<(u64, Work)>>,
+    jobs: Option<std_mpsc::SyncSender<Queued>>,
     current: Arc<AtomicU64>,
     closing: Arc<AtomicBool>,
     done: mpsc::UnboundedReceiver<Done>,
@@ -163,10 +180,17 @@ impl Lane {
         std::thread::Builder::new()
             .name("claude-code".to_owned())
             .spawn(move || {
-                for (generation, work) in queued {
+                for item in &queued {
                     if worker.closing.load(Ordering::Acquire) {
                         break;
                     }
+                    let (generation, work) = match item {
+                        Queued::Call(generation, work) => (generation, work),
+                        Queued::Launch(start) => {
+                            worker.launch(*start);
+                            continue;
+                        }
+                    };
                     // The fence, before anything happens.
                     if generation != worker.current.load(Ordering::Acquire) {
                         continue;
@@ -179,6 +203,12 @@ impl Lane {
                     }
                     if done_tx.send(Done { generation, result }).is_err() {
                         break;
+                    }
+                }
+                // Queued questions never start once the lane closes.
+                for item in queued.try_iter() {
+                    if let Queued::Launch(start) = item {
+                        start.refuse(supervisor::LaunchFailed::Lane(Failure::Refused));
                     }
                 }
                 let emptied = !worker.stuck;
@@ -207,7 +237,19 @@ impl Lane {
     pub(crate) fn submit(&self, generation: u64, work: Work) -> bool {
         self.jobs
             .as_ref()
-            .is_some_and(|jobs| jobs.try_send((generation, work)).is_ok())
+            .is_some_and(|jobs| jobs.try_send(Queued::Call(generation, work)).is_ok())
+    }
+
+    /// Queues a question without waiting, behind the calls already queued; false when the lane
+    /// is full or closed.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "C5b's engine queues the first question")
+    )]
+    pub(crate) fn launch(&self, start: Start) -> bool {
+        self.jobs
+            .as_ref()
+            .is_some_and(|jobs| jobs.try_send(Queued::Launch(Box::new(start))).is_ok())
     }
 
     /// The next result; never ready once the lane has closed.
@@ -252,9 +294,9 @@ struct Worker {
 }
 
 /// The owned folders and the handles that keep their names from being rebound.
-struct Folders {
-    paths: OwnedFolders,
-    _held: Vec<File>,
+pub(super) struct Folders {
+    pub(super) paths: OwnedFolders,
+    pub(super) held: Vec<File>,
 }
 
 impl Worker {
@@ -340,24 +382,66 @@ impl Worker {
         }
     }
 
+    /// Runs one question from its turn to its teardown, unless it's revoked, expired or the lane
+    /// is closing as it comes up. A teardown that couldn't confirm its processes ended leaves the
+    /// lane stuck.
+    fn launch(&mut self, start: Start) {
+        if let Err(refused) = start.due(&self.closing) {
+            start.refuse(refused);
+            return;
+        }
+        let ready = self.ready();
+        if supervisor::run(start, ready, &self.host, &self.closing) == Teardown::Stuck {
+            self.stuck = true;
+        }
+    }
+
+    /// What a question needs before its own folder: everything a Status call needs.
+    fn ready(&mut self) -> Result<Ready, Failure> {
+        self.settle()?;
+        let (program, version) = self.found()?;
+        let folders = self.preflight(Some(policy_of(version)?))?;
+        Ok(Ready { program, folders })
+    }
+
     fn found(&self) -> Result<(Program, ClaudeVersion), Failure> {
         self.found.clone().ok_or(Failure::Find(FindError::NotFound))
     }
 
-    /// Deletes Kumochi's folder and then the marker, when a Disconnect left one; until both are
-    /// gone, nothing else starts.
+    /// Under this brain's lock, deletes Kumochi's folder and then the marker when a Disconnect
+    /// left one, and until both are gone nothing else starts; otherwise sweeps what launches a
+    /// stopped brain left. The lock comes first, so no other brain's live launch is touched.
     fn settle(&mut self) -> Result<(), Failure> {
         let _held = platform::hold_chain(&self.host.base).map_err(|_| Failure::Folders)?;
+        self.hold()?;
         // Something at the marker's name that isn't a valid marker asks for no deletion.
         let Some(marker) = platform::marker(&self.host.base.join(CLAUDE_CODE_DELETING))
             .map_err(|_| Failure::Cleanup)?
         else {
+            self.sweep();
             return Ok(());
         };
-        self.hold()?;
         platform::remove_tree(&self.host.base.join(CLAUDE_CODE_DIR))
             .map_err(|_| Failure::Cleanup)?;
         platform::unmark(marker).map_err(|_| Failure::Cleanup)
+    }
+
+    /// Deletes every launch folder: only this lane runs launches, one at a time and never during
+    /// a call, so each one here is left over. A missing or untrusted engine folder is left alone,
+    /// and one that won't go yet stays for the next call.
+    fn sweep(&self) {
+        let engine = self.host.base.join(CLAUDE_CODE_DIR).join(ENGINE_DIR);
+        let Ok(_chain) = platform::hold_chain(&engine) else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(&engine) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if platform::remove_tree(&entry.path()).is_err() {
+                tracing::debug!("a launch folder stays for the next sweep");
+            }
+        }
     }
 
     /// The lane open and not stuck, and this brain's lock, taken on first use only while this
@@ -504,7 +588,7 @@ fn owned_folders(base: &Path) -> Result<Folders, platform::Untrusted> {
     }
     // shortcut: the whole folder is walked before every start; cache it if starts get slow.
     platform::private_tree(&root)?;
-    Ok(Folders { paths, _held: held })
+    Ok(Folders { paths, held })
 }
 
 /// A pipe read to its end: the first `cap` bytes, whether there were more, and whether a read
