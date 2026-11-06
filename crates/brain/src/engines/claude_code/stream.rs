@@ -7,6 +7,7 @@
 
 use std::fmt;
 
+use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
@@ -107,7 +108,110 @@ pub(crate) struct ControlResponse {
     pub request_id: String,
     /// The body, absent on an error.
     #[serde(default)]
-    pub response: Value,
+    pub response: ControlBody,
+}
+
+/// A control response's body. `account` is read straight into [`Account`] as the line is parsed,
+/// so its email and organization are never held; every other field is kept as sent.
+#[derive(Default, PartialEq)]
+pub(crate) struct ControlBody {
+    /// `initialize`'s `account`; `None` when the body has none.
+    pub account: Option<Account>,
+    /// Every other field, as an object.
+    pub rest: Value,
+}
+
+/// `initialize`'s `account`, by the fields the audit judges; the rest are skipped unread.
+#[derive(Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Account {
+    #[serde(default)]
+    pub api_provider: Field,
+    #[serde(default)]
+    pub token_source: Field,
+    #[serde(default)]
+    pub api_key_source: Field,
+    #[serde(default)]
+    pub subscription_type: Field,
+}
+
+/// One `account` field as sent, so the audit can tell absent from null and a string from another
+/// type.
+#[derive(Default, PartialEq)]
+pub(crate) enum Field {
+    #[default]
+    Absent,
+    Null,
+    Text(String),
+    Other,
+}
+
+impl<'de> Deserialize<'de> for Field {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match Value::deserialize(deserializer)? {
+            Value::Null => Self::Null,
+            Value::String(text) => Self::Text(text),
+            _ => Self::Other,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for ControlBody {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(BodyVisitor)
+    }
+}
+
+/// An [`Account`] that must be a JSON object: serde's derive alone also takes an array.
+struct AccountObject(Account);
+
+impl<'de> Deserialize<'de> for AccountObject {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(AccountVisitor).map(Self)
+    }
+}
+
+struct AccountVisitor;
+
+impl<'de> Visitor<'de> for AccountVisitor {
+    type Value = Account;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("an account object")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Account, A::Error> {
+        Account::deserialize(de::value::MapAccessDeserializer::new(map))
+    }
+}
+
+struct BodyVisitor;
+
+impl<'de> Visitor<'de> for BodyVisitor {
+    type Value = ControlBody;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a control response body")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<ControlBody, A::Error> {
+        let mut account = None;
+        let mut rest = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if key == "account" {
+                if account.is_some() {
+                    return Err(de::Error::duplicate_field("account"));
+                }
+                account = Some(map.next_value::<AccountObject>()?.0);
+            } else {
+                rest.insert(key, map.next_value()?);
+            }
+        }
+        Ok(ControlBody {
+            account,
+            rest: Value::Object(rest),
+        })
+    }
 }
 
 /// `system:init`'s audited fields; nothing here is judged until the audit.
@@ -188,8 +292,31 @@ impl fmt::Debug for ControlResponse {
         f.debug_struct("ControlResponse")
             .field("subtype", &Len(&self.subtype))
             .field("request_id", &Len(&self.request_id))
-            .field("response", &Shape(&self.response))
+            .field("account", &self.response.account)
+            .field("response", &Shape(&self.response.rest))
             .finish()
+    }
+}
+
+impl fmt::Debug for Account {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Account")
+            .field("api_provider", &self.api_provider)
+            .field("token_source", &self.token_source)
+            .field("api_key_source", &self.api_key_source)
+            .field("subscription_type", &self.subscription_type)
+            .finish()
+    }
+}
+
+impl fmt::Debug for Field {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Absent => f.write_str("absent"),
+            Self::Null => f.write_str("null"),
+            Self::Text(text) => write!(f, "text(len={})", text.len()),
+            Self::Other => f.write_str("other"),
+        }
     }
 }
 

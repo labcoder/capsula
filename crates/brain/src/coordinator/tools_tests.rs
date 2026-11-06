@@ -227,6 +227,29 @@ fn a_round_with_calls_is_stored_with_their_results_then_the_next_round_is_built(
 }
 
 #[test]
+fn anthropic_unoffered_name_gets_the_shared_unknown_tool_result() {
+    use crate::connections::anthropic::sse_map::Reader;
+    use crate::engines::anthropic::Mapper;
+    let wire = concat!(
+        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{}}}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"unoffered\",\"input\":{}}}\n\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n"
+    );
+    let mut mapper = Mapper::default();
+    let read = Reader::default().feed(wire.as_bytes(), &mut |event| mapper.event(event));
+    let finish = mapper.finish(read);
+    assert_eq!(finish, Some(Finish::Completed));
+    let mut core = started();
+    play(&mut core, mapper.take());
+    assert_eq!(
+        core.handle(completed()),
+        Ok(vec![round_items(1, None, Vec::new(), vec![id(1)])])
+    );
+}
+
+#[test]
 fn a_last_round_with_items_is_stored_before_done() {
     let mut core = started();
     core.handle(engine(R, TurnEvent::TextDelta("bye".to_owned())))
