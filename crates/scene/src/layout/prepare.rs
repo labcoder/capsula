@@ -459,6 +459,7 @@ pub fn prepare(
         display: DisplayList { items },
         removed,
         glides,
+        retained_bytes: after.resident_bytes(),
         views,
         after,
         resident_bytes,

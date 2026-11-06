@@ -16,9 +16,11 @@
 //!   job, scene, cut and layout base. A step has 250 ms from when its predecessor was ready and
 //!   the window had room, waiting for a worker slot included; the watchdog fails it then, whether
 //!   or not its worker has answered. A step the window holds back is untimed.
-//! - Only the oldest prepared step is consumed, and its layout becomes the rest. Before B6 nothing
-//!   consumes in production, so a cut or failure names the activated bound: the recovered resting
-//!   layout, or zero.
+//! - Only the oldest prepared step is consumed. One transaction stages its activated view against
+//!   the current one, checks the whole post-transition charge, then retires it semantically and
+//!   installs its layout as the rest with that view in a new frame epoch; a refusal changes
+//!   nothing. Until B6d nothing consumes in production, so a cut or failure names the activated
+//!   bound: the recovered resting layout, or zero.
 //! - A scene with a cut outstanding prepares nothing until the brain acknowledges the cut, and a
 //!   scene gets at most one cut between commits.
 //! - Scene frames, jobs, answers and scenes are held in [`Deferred`] from the moment the
@@ -124,7 +126,7 @@ pub(crate) enum Effect {
     /// A consumption refused as busy can be retried now, before this scene admits again.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "B6's activation owner is the production caller")
+        expect(dead_code, reason = "B6d's activation owner is the production caller")
     )]
     ConsumptionReady { scene: SceneId, index: u32 },
 }
@@ -702,8 +704,9 @@ impl Presenter {
         scene.cut = Cut::Applied;
         scene.skipping = false;
         // B5 installs only at-rest views, so this unlogged cut leaves the view and frame current.
-        // shortcut: halt keeps live motion; before B6 activation, restrict this to at-rest views
-        // without delayed owners or settle motion first, with position-track and delayed-owner tests.
+        // shortcut: halt keeps live motion; before B6d's production activation, restrict this to
+        // at-rest views without delayed owners or settle motion first, with position-track and
+        // delayed-owner tests.
         if outcome == StopOutcome::Kept
             && scene.state.view().recovery_log().len() == logged
             && scene.view.activated() == scene.state.view().activated()

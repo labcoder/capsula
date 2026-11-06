@@ -105,8 +105,9 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
                                 .step
                                 .index;
                             let start = Instant::now();
-                            let consumed =
-                                mirror.consume_ready(id, head, now).expect("the head fits");
+                            let consumed = mirror
+                                .consume_ready(id, head, now, 0, 0)
+                                .expect("the head fits");
                             let job = only_job(consumed.effects.expect("the successor dispatch"));
                             drop(consumed.step);
                             let elapsed = start.elapsed().as_nanos();
@@ -273,7 +274,7 @@ fn consume_timed(presenter: &mut super::Presenter, scene: SceneId, now: Instant)
         .index;
     let start = Instant::now();
     let consumed = presenter
-        .consume_ready(scene, index, now)
+        .consume_ready(scene, index, now, 0, 0)
         .expect("the head fits");
     let effects = consumed.effects.expect("a current scene");
     let empty = effects.is_empty();
@@ -478,7 +479,7 @@ fn measure_native_eight_window_residency() {
                     for (offset, previous) in active.iter_mut().enumerate() {
                         let id = SceneId(200 + u64::try_from(offset).expect("four scenes"));
                         let done = presenter
-                            .consume_ready(id, expected, now)
+                            .consume_ready(id, expected, now, 0, 0)
                             .expect("the next native head fits with the prior owner held");
                         assert_eq!(done.step.step().index, expected);
                         let scene = presenter.scenes.get_mut(&id).expect("the consumed scene");

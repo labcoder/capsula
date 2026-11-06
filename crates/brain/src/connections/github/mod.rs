@@ -1,6 +1,7 @@
-//! Closed GitHub destinations and checked transient credentials; no account state lives here.
+//! Checked GitHub destinations, transient credentials and the sans-I/O device machine.
 
 pub mod api;
+pub mod device;
 pub mod issues;
 
 use std::fmt;

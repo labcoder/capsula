@@ -12,7 +12,7 @@ use std::io::{self, Read, Write};
 use crate::frame::{FrameError, HEADER_LEN, Pipe, decode, encode};
 use crate::message::{
     AccountOp, ConnectionOp, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain,
-    DataToShell,
+    DataToShell, VoiceView,
 };
 
 /// The start of every recording, with the format's version.
@@ -135,6 +135,7 @@ impl Tapped for ControlToShell {
             Self::ActionState { .. } => "ActionState",
             Self::IssueRefused { .. } => "IssueRefused",
             Self::ThreadModelSet { .. } => "ThreadModelSet",
+            Self::Voice(_) => "Voice",
         }
     }
 
@@ -166,6 +167,11 @@ impl Tapped for ControlToShell {
                 | Self::Connections(ConnectionsView {
                     anthropic: _,
                     claude_code: _
+                })
+                // Part states, error keys and byte counts only.
+                | Self::Voice(VoiceView {
+                    speech_input: _,
+                    spoken_replies: _
                 })
         )
     }

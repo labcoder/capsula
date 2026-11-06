@@ -12,6 +12,7 @@ use scene_support::{Measure, id, new_scene, prepared};
 use kumochi_scene::{
     Admission, Frame, FrameItem, GlobalBudget, Handle, Record, SceneState, SceneView, StopCut,
     Text,
+    display::Paint,
     geom::Affine,
     layout::{
         LayoutState, PrepareError, PrepareInput, PreparedStep, SurfaceGeometry, prepare, recover,
@@ -1256,6 +1257,163 @@ fn a_glide_starts_where_the_group_was_and_survives_unrelated_steps() {
         transform(&rest, 1675, "a"),
         "the replacement reaches its new target"
     );
+}
+
+/// A rectangle with a live x track and a color track held until 2,000 ms, activated at 0.
+fn tracked() -> (SceneState, GlobalBudget, SceneView) {
+    let (mut scene, mut budget, mut view) = fresh();
+    activate(
+        &mut scene,
+        &mut budget,
+        &mut view,
+        json!({"id":"tracks","put":[rect("s"),
+            {"anim":{"target":"s","track":"x","ease":"linear","keys":[[0,0],[1000,100]]}},
+            {"anim":{"target":"s","track":"color","ease":"linear","delay":2000,
+                "keys":[[0,"red"],[500,"blue"]]}}
+        ]}),
+        0,
+    );
+    (scene, budget, view)
+}
+
+#[test]
+fn a_staged_activation_debug_keeps_content_private() {
+    let marker = "staged-private-content";
+    let (mut scene, mut budget, view) = fresh();
+    let next = prepared(
+        &mut scene,
+        &mut budget,
+        view.layout(),
+        json!({"id":"private","say":marker,"put":[
+            {"text":{"id":"label","at":[12,34],"text":marker}}
+        ]}),
+    );
+    let stage = view.prepare_activation(&next, 0, 800).expect("stage");
+    let output = format!("{stage:?}");
+    assert!(!output.contains(marker));
+    assert!(!output.contains(&format!("{:?}", marker.as_bytes())));
+    assert_eq!(
+        output,
+        "PreparedActivation { view: SceneView { activated: 1, objects: 1, tracks: 0, .. }, superseded: 0 }"
+    );
+}
+
+fn pose(view: &SceneView, now: u64) -> (Affine, Option<Paint>) {
+    let drawn = item(view, now, "s").expect("emitted");
+    (drawn.transform, drawn.color)
+}
+
+#[test]
+fn refused_and_discarded_stages_keep_live_and_delayed_tracks() {
+    let (mut scene, mut budget, view) = tracked();
+    let times = [500, 1999, 2250, 2500];
+    let before = times.map(|now| pose(&view, now));
+    assert_eq!(before[0].0, Affine([1.0, 0.0, 0.0, 1.0, 50.0, 0.0]));
+    assert_ne!(before[1].1, before[2].1, "the hold ends at 2,000 ms");
+    assert_ne!(before[2].1, before[3].1, "and the track moves on");
+    let (mut other, mut other_budget, other_view) = fresh();
+    let foreign = prepared(
+        &mut other,
+        &mut other_budget,
+        other_view.layout(),
+        json!({"id":"elsewhere","put":[rect("o")]}),
+    );
+    assert!(
+        matches!(
+            view.prepare_activation(&foreign, 600, 800),
+            Err(PrepareError::Stale)
+        ),
+        "a step prepared on another layout is stale"
+    );
+    let next = prepared(
+        &mut scene,
+        &mut budget,
+        view.layout(),
+        json!({"id":"unrelated","put":[rect("z")]}),
+    );
+    drop(view.prepare_activation(&next, 600, 800).expect("stage"));
+    assert_eq!(times.map(|now| pose(&view, now)), before);
+    assert_eq!((view.activated(), view.next_wake(600)), (1, Some(1000)));
+}
+
+#[test]
+fn an_installed_stage_carries_the_live_and_delayed_tracks_it_does_not_replace() {
+    let (mut scene, mut budget, mut view) = tracked();
+    let times = [1999, 2250, 2500];
+    let delayed = times.map(|now| pose(&view, now).1);
+    let next = prepared(
+        &mut scene,
+        &mut budget,
+        view.layout(),
+        json!({"id":"unrelated","put":[rect("z")]}),
+    );
+    let staged = view.prepare_activation(&next, 250, 800).expect("stage");
+    drop(next);
+    view.install(staged, &mut Frame::new()).expect("fresh");
+    assert_eq!(view.activated(), 2);
+    assert_eq!(
+        transform(&view, 500, "s"),
+        Affine([1.0, 0.0, 0.0, 1.0, 50.0, 0.0]),
+        "the running x track keeps its own clock"
+    );
+    assert_eq!(
+        times.map(|now| pose(&view, now).1),
+        delayed,
+        "the delayed color carries through its hold"
+    );
+    assert_eq!(view.next_wake(250), Some(1000));
+}
+
+#[test]
+fn a_stage_installs_only_into_the_view_generation_it_was_staged_from() {
+    let (mut scene, mut budget, mut view) = tracked();
+    let next = prepared(
+        &mut scene,
+        &mut budget,
+        view.layout(),
+        json!({"id":"unrelated","put":[rect("z")]}),
+    );
+    let (mut other, mut other_budget, mut other_view) = fresh();
+    activate(
+        &mut other,
+        &mut other_budget,
+        &mut other_view,
+        json!({"id":"elsewhere","put":[rect("o")]}),
+        0,
+    );
+    let mut other_frame = sample(&other_view, 0);
+    let foreign = view.prepare_activation(&next, 250, 800).expect("stage");
+    let refused = other_view.install(foreign, &mut other_frame);
+    assert!(matches!(refused, Err(PrepareError::Stale)));
+    assert_eq!(other_view.activated(), 1);
+    assert_eq!(
+        other_frame.items().len(),
+        1,
+        "the other view's frame is not cleared"
+    );
+
+    let current = view.prepare_activation(&next, 250, 800).expect("stage");
+    let late = view.prepare_activation(&next, 300, 800).expect("stage");
+    view.install(current, &mut Frame::new()).expect("fresh");
+    activate(
+        &mut scene,
+        &mut budget,
+        &mut view,
+        json!({"id":"later","put":[rect("w")]}),
+        400,
+    );
+    let mut frame = sample(&view, 500);
+    let before = (frame.items().len(), pose(&view, 500));
+    let refused = view.install(late, &mut frame);
+    assert!(matches!(refused, Err(PrepareError::Stale)));
+    assert_eq!(
+        view.activated(),
+        3,
+        "a stage from before the advance cannot rewind it"
+    );
+    assert_eq!((frame.items().len(), pose(&view, 500)), before);
+    assert_eq!(before.0, 3, "s, z and w stay in the bound frame");
+    view.frame(500, &mut frame).expect("the frame stays bound");
 }
 
 #[test]

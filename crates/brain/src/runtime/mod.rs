@@ -15,6 +15,7 @@ mod settings;
 mod store_thread;
 #[cfg(test)]
 mod tests;
+mod voice;
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -170,8 +171,10 @@ pub(crate) struct Brain {
     /// When each granted send's deadline passes, in no order.
     send_deadlines: Vec<(LeaseId, Instant)>,
     deadline: Option<(RunId, Instant)>,
-    /// The one reader of TTS; none until spoken replies are installed (slice 7's PR 8).
+    /// The one reader of TTS; none when TTS couldn't start.
     pump: Option<Pump>,
+    /// The voice parts; none when there's no data folder for them.
+    voice: Option<voice::Voice>,
     /// The current run's drain stall timer: its run, epoch and deadline.
     drain: Option<(RunId, u32, Instant)>,
     /// When each revoked run's wait for the shell to go quiet ends.
@@ -298,6 +301,7 @@ impl Brain {
             send_deadlines: Vec::new(),
             deadline: None,
             pump: None,
+            voice: None,
             drain: None,
             quiet: Vec::new(),
             retry_at: None,
@@ -791,6 +795,12 @@ impl Brain {
                 }
                 () = sleep_until(send_due) => self.send_deadline_passed(),
                 (run, event) = next_tts(&mut self.pump), if take_engine => tts_input(run, event),
+                (part, report) = voice::next(&mut self.voice) => {
+                    if self.voice_reported(part, report, Some(&mut link)).is_err() {
+                        return Ended::Lost;
+                    }
+                    continue;
+                }
                 () = sleep_until(self.drain.map(|(_, _, at)| at)) => {
                     let (run, epoch, _) = self.drain.take().expect("the drain timer fired");
                     Input::DrainTimeout { run, epoch }
@@ -848,6 +858,7 @@ impl Brain {
         let connected = self.account.connections.connected();
         link.control(&self.composed(&connected))
             .map_err(|Full| Ended::Lost)?;
+        self.voice_opened(link).map_err(|Full| Ended::Lost)?;
         if let Some(models) = self.account.connections.models_unsent() {
             link.data(&models).map_err(|Full| Ended::Lost)?;
         }

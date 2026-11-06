@@ -1,8 +1,9 @@
 # The GPUI Windows patch
 
 Kumochi carries GPUI's Windows backend, `gpui-pre-windows` 0.3.10, in `vendor/gpui-pre-windows/`
-with two changes: an idle window no longer wakes on every vblank, and a window opened hidden
-takes its requested size at once. `[patch.crates-io]` in
+with three changes: an idle window no longer wakes on every vblank, a window opened hidden
+takes its requested size at once, and a single fast successful vsync wait doesn't skip a frame.
+`[patch.crates-io]` in
 `Cargo.toml` points the crate at the vendored copy, and `cargo xtask check-vendor` (run by CI)
 fails unless Cargo resolves the crate to that directory at the vendored version. Upstream tracking: zed-industries/zed#66221.
 The core crate, `gpui-pre`, is not vendored.
@@ -19,7 +20,7 @@ doing nothing; a minimized window does it too.
 ## What the patch does
 
 The scheduling lives in one new file, `src/vsync/frame_demand.rs`, kept free of Win32 so its unit
-tests run in CI (`cargo test -p gpui-pre-windows --lib frame_demand`). Each window has a
+tests run in CI (`cargo test -p gpui-pre-windows --lib vsync`). Each window has a
 `FrameRequest`, a "wants a frame" flag plus an input-sustain deadline. The vsync thread waits on
 `FRAME_DEMAND` and invalidates only the windows whose request is set, so a settled app repaints
 nothing.
@@ -64,6 +65,40 @@ Two `#[cfg(any(test, feature = "test-support"))]` items (`window.rs`, `directx_r
 narrowed to the feature alone, so the crate's own tests build without GPUI's test support.
 Each modified file says so in its first line, as Apache-2.0 4(b) asks; the license text is
 `vendor/gpui-pre-windows/LICENSE-APACHE` and `THIRD-PARTY-NOTICES.md` lists the crate.
+
+## Fast successful vsync waits
+
+`DwmFlush` can succeed in less than 1 ms during normal operation, including the first call after
+the vsync thread becomes non-idle. Sleeping a full refresh after every such return delays the
+requested frame. `VSyncProvider` now allows the first fast success without sleeping and reports
+`NativeCallback`. A second consecutive fast success, and each subsequent one, sleeps one refresh
+and reports `LocalSchedule`, so a sleeping or unplugged monitor still cannot spin. A successful
+wait of at least 1 ms resets that history. A failed wait always sleeps and resets it too. The
+previous fast wait counts only if the next wait starts less than two refresh intervals after
+it ended, so isolated one-frame updates don't retain fast-wait history across idle gaps.
+The history belongs to the vsync thread and introduces no per-frame allocation or lock.
+
+Fake wait durations and sleep observation cover the first fast success, repeated successes,
+the exact 1 ms boundary, normal waits, failures and recovery. Fake timestamps cover the
+two-interval freshness boundary and a long idle gap, with recent fast returns still backing
+off. CI's `vsync` test filter runs these alongside the existing frame-demand tests.
+
+On Rez at 144 Hz and 100% scale, two interleaved idle samples per side (30 one-second
+intervals after 30 seconds of warmup) compared the credential-free fixture with main's
+backend against the repeated-fast fix. Calibrated one-core CPU median/p95 was
+0.0606%/0.0865% before and 0.0600%/0.0806% after; no idle CPU regression was observed.
+Neither side painted the dock during its idle samples. Wakeups were not collected.
+These idle CPU measurements predate the idle-gap expiry above.
+
+The control's 100-chord WM_INPUT-to-Present p50/p95/p99/max was
+4.1620/7.8556/8.2558/8.2986 ms, with four chords over one refresh plus 1 ms (7.944 ms).
+The corrected run on `0503854`, including idle-gap expiry, measured
+4.6268/7.3910/7.8217/7.9703 ms, with one chord over that bar: 99 of 100 were within it.
+The valid earlier control was retained; only the fix side was rerun, after at least 660 s
+of measured idle, using the credential-free fixture at the same display settings.
+The median rose, and the old 7 ms bar still fails: 13 misses after against 11 before.
+This single pair does not establish statistical significance. The measurements below
+describe only the original demand-driven patch.
 
 ## Measured
 
@@ -122,11 +157,12 @@ and `show` only decides whether to order it front.
    `window.rs`, `vsync.rs`, `direct_manipulation.rs`, `directx_renderer.rs`) and adds
    `vsync/frame_demand.rs`; the hidden-window sizing is the `SW_HIDE` placement in
    `WindowsWindow::new`'s `else` branch; `directx_renderer.rs` and `window.rs` carry the `test-support`
-   cfg narrowing that lets CI run `frame_demand`'s tests. Check that `begin_vsync_thread`, `draw_window`, `schedule_frame` and
+   cfg narrowing that lets CI run the `vsync` tests. Preserve the repeated-fast-wait fallback
+   and its deterministic timing tests in `vsync.rs`. Check that `begin_vsync_thread`, `draw_window`, `schedule_frame` and
    `on_input` still have the shapes the patch assumes, and that the core still calls
    `schedule_frame` after updates and still has its input-rate sustain.
 5. `cargo build --locked`, `cargo xtask check-vendor`, `cargo test --workspace`, and
-   `cargo test -p gpui-pre-windows --locked --lib frame_demand`.
+   `cargo test -p gpui-pre-windows --locked --lib vsync`.
 6. Run the hidden-window test above.
 7. Re-measure `cargo xtask bench idle` (and `bench stretch` once the pull brings it back in C2a)
    against the previous build, and

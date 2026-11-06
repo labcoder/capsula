@@ -452,7 +452,7 @@ impl WindowsPlatform {
         std::thread::Builder::new()
             .name("VSyncProvider".to_owned())
             .spawn(move || {
-                let vsync_provider = VSyncProvider::new();
+                let mut vsync_provider = VSyncProvider::new();
                 loop {
                     let frame = match FRAME_DEMAND.wait(&stop, IDLE_DEVICE_CHECK) {
                         Wake::Stop => break,
