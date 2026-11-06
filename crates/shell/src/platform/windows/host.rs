@@ -67,6 +67,9 @@ pub(crate) fn host_at([x, y]: [i32; 2]) -> Option<HostFacts> {
         let window = next?;
         // SAFETY: `window` came from the z-order walk; a stale one only fails the call.
         next = unsafe { GetWindow(window, GW_HWNDNEXT) }.ok();
+        if !bounds(window).is_some_and(|rect| contains(rect, x, y)) {
+            continue;
+        }
         let Some(frame) = frame(window).filter(|_| eligible(window)) else {
             continue;
         };
@@ -198,6 +201,15 @@ fn metrics(style: WINDOW_STYLE, ex_style: WINDOW_EX_STYLE, layout_dpi: u32) -> O
 /// caption.
 fn captioned(style: WINDOW_STYLE) -> bool {
     style.0 & WS_CAPTION.0 == WS_CAPTION.0
+}
+
+/// The window rectangle, which holds the DWM frame: one cheap read rules out most windows
+/// before the DWM and style reads.
+fn bounds(window: HWND) -> Option<PhysicalRect> {
+    let mut raw = RECT::default();
+    // SAFETY: `raw` outlives the call; a stale handle only fails it.
+    unsafe { GetWindowRect(window, &raw mut raw) }.ok()?;
+    Some(physical(raw))
 }
 
 fn frame(window: HWND) -> Option<PhysicalRect> {
