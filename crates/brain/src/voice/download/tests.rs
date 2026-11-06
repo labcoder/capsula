@@ -211,7 +211,11 @@ fn seed(path: &Path, bytes: &[u8]) {
 
 async fn fetch(downloader: &Downloader) -> (Result<(), DownloadError>, Progress) {
     let (_cancel, receiver) = watch::channel(false);
-    let (progress, _) = watch::channel(Progress { done: 0, total: 0 });
+    let (progress, _) = watch::channel(Progress {
+        phase: FetchPhase::Verifying,
+        done: 0,
+        total: 0,
+    });
     let result = downloader
         .fetch_files(&[&MODEL], &progress, &receiver)
         .await;
@@ -275,7 +279,11 @@ async fn sizes_exact_over_short_empty_and_missing_length() {
             );
             assert_eq!(
                 progress,
-                Progress { done: 6, total: 6 },
+                Progress {
+                    phase: FetchPhase::Downloading,
+                    done: 6,
+                    total: 6
+                },
                 "terminal progress"
             );
         } else {
@@ -313,7 +321,14 @@ async fn truncated_response_resumes_with_exact_headers() {
     );
     assert_eq!(
         fetch(&downloader).await,
-        (Ok(()), Progress { done: 6, total: 6 }),
+        (
+            Ok(()),
+            Progress {
+                phase: FetchPhase::Downloading,
+                done: 6,
+                total: 6
+            }
+        ),
         "resumed"
     );
     assert_eq!(
@@ -420,7 +435,14 @@ async fn existing_files_crash_partials_and_exclusive_lock() {
     seed(&final_path(&downloader), b"abcdef");
     assert_eq!(
         fetch(&downloader).await,
-        (Ok(()), Progress { done: 6, total: 6 }),
+        (
+            Ok(()),
+            Progress {
+                phase: FetchPhase::Verifying,
+                done: 6,
+                total: 6
+            }
+        ),
         "verified final skipped"
     );
     assert_eq!(
@@ -483,7 +505,11 @@ async fn corrupt_final_is_removed_before_request_and_hash_failures_delete_partia
     let (_scratch, downloader) = server.downloader();
     seed(&final_path(&downloader), b"xxxxxx");
     let (cancel, receiver) = watch::channel(false);
-    let (progress, _) = watch::channel(Progress { done: 0, total: 0 });
+    let (progress, _) = watch::channel(Progress {
+        phase: FetchPhase::Verifying,
+        done: 0,
+        total: 0,
+    });
     let future = downloader.fetch_files(&[&MODEL], &progress, &receiver);
     tokio::pin!(future);
     tokio::select! { result = &mut future => panic!("unexpected finish: {result:?}"), request = server.requests.recv() => { request.expect("valid voice fixture"); } }
@@ -583,7 +609,11 @@ async fn part_space_and_progress_are_aggregated_before_the_first_request() {
         ..MODEL
     };
     let (_cancel, receiver) = watch::channel(false);
-    let (progress, _) = watch::channel(Progress { done: 0, total: 0 });
+    let (progress, _) = watch::channel(Progress {
+        phase: FetchPhase::Verifying,
+        done: 0,
+        total: 0,
+    });
     downloader.space = Some(13);
     assert_eq!(
         downloader
@@ -608,6 +638,7 @@ async fn part_space_and_progress_are_aggregated_before_the_first_request() {
     assert_eq!(
         *progress.borrow(),
         Progress {
+            phase: FetchPhase::Downloading,
             done: 12,
             total: 12
         },
@@ -858,7 +889,11 @@ async fn cancel_mid_file_keeps_prefix_and_next_fetch_resumes() {
     ]);
     let (_scratch, downloader) = server.downloader();
     let (cancel, receiver) = watch::channel(false);
-    let (progress, _) = watch::channel(Progress { done: 0, total: 0 });
+    let (progress, _) = watch::channel(Progress {
+        phase: FetchPhase::Verifying,
+        done: 0,
+        total: 0,
+    });
     let future = downloader.fetch_files(&[&MODEL], &progress, &receiver);
     tokio::pin!(future);
     let partial = part_path(&downloader);
@@ -927,7 +962,11 @@ async fn stalled_body_times_out_at_exactly_thirty_seconds() {
     let server = Server::start(vec![Reply::stalled()]);
     let (_scratch, downloader) = server.downloader();
     let (_cancel, receiver) = watch::channel(false);
-    let (progress, _) = watch::channel(Progress { done: 0, total: 0 });
+    let (progress, _) = watch::channel(Progress {
+        phase: FetchPhase::Verifying,
+        done: 0,
+        total: 0,
+    });
     let future = downloader.fetch_files(&[&MODEL], &progress, &receiver);
     tokio::pin!(future);
     let partial = part_path(&downloader);
@@ -963,16 +1002,28 @@ async fn stalled_body_times_out_at_exactly_thirty_seconds() {
 
 #[tokio::test(start_paused = true)]
 async fn progress_is_coalesced_to_four_updates_per_second() {
-    let (sender, mut receiver) = watch::channel(Progress { done: 0, total: 6 });
+    let (sender, mut receiver) = watch::channel(Progress {
+        phase: FetchPhase::Verifying,
+        done: 0,
+        total: 6,
+    });
     let mut reporter = Reporter {
         sender: &sender,
         last: Instant::now(),
-        value: Progress { done: 0, total: 6 },
+        value: Progress {
+            phase: FetchPhase::Verifying,
+            done: 0,
+            total: 6,
+        },
     };
     reporter.update(1);
     assert_eq!(
         *receiver.borrow_and_update(),
-        Progress { done: 0, total: 6 },
+        Progress {
+            phase: FetchPhase::Verifying,
+            done: 0,
+            total: 6
+        },
         "initial bytes coalesced"
     );
     time::advance(Duration::from_millis(249)).await;
@@ -985,14 +1036,22 @@ async fn progress_is_coalesced_to_four_updates_per_second() {
     reporter.update(3);
     assert_eq!(
         *receiver.borrow_and_update(),
-        Progress { done: 3, total: 6 },
+        Progress {
+            phase: FetchPhase::Verifying,
+            done: 3,
+            total: 6
+        },
         "exactly 250 ms"
     );
     reporter.update(6);
     reporter.finish().await;
     assert_eq!(
         *receiver.borrow_and_update(),
-        Progress { done: 6, total: 6 },
+        Progress {
+            phase: FetchPhase::Verifying,
+            done: 6,
+            total: 6
+        },
         "terminal progress"
     );
     assert_eq!(
@@ -1044,7 +1103,11 @@ async fn cancelled_public_fetch_sends_nothing_and_preserves_partial() {
     let (_scratch, downloader) = server.downloader();
     seed(&part_path(&downloader), b"abc");
     let (_cancel, receiver) = watch::channel(true);
-    let (progress, _) = watch::channel(Progress { done: 0, total: 0 });
+    let (progress, _) = watch::channel(Progress {
+        phase: FetchPhase::Verifying,
+        done: 0,
+        total: 0,
+    });
     let future = downloader.fetch(VoicePart::SpeechInput, &progress, &receiver);
     assert_eq!(
         send_future(future).await,
@@ -1078,7 +1141,11 @@ async fn connection_and_tls_handshake_have_a_thirty_second_deadline() {
         hosts: vec!["127.0.0.1".into()],
     };
     let (_cancel, receiver) = watch::channel(false);
-    let (progress, _) = watch::channel(Progress { done: 0, total: 0 });
+    let (progress, _) = watch::channel(Progress {
+        phase: FetchPhase::Verifying,
+        done: 0,
+        total: 0,
+    });
     let future = downloader.fetch_files(&[&MODEL], &progress, &receiver);
     tokio::pin!(future);
     let _socket = tokio::select! {
@@ -1151,4 +1218,54 @@ async fn measure_download_head() {
         assert_eq!(response.status(), reqwest::StatusCode::OK, "HEAD succeeded");
         tracing::info!(host = response.url().host_str(), "voice HEAD destination");
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_phase_change_is_sent_at_once_and_bytes_stay_throttled() {
+    let (sender, mut receiver) = watch::channel(Progress {
+        phase: FetchPhase::Verifying,
+        done: 0,
+        total: 6,
+    });
+    let mut reporter = Reporter {
+        sender: &sender,
+        last: Instant::now(),
+        value: Progress {
+            phase: FetchPhase::Verifying,
+            done: 0,
+            total: 6,
+        },
+    };
+    reporter.phase(FetchPhase::Verifying);
+    assert!(
+        !receiver.has_changed().expect("valid voice fixture"),
+        "the same phase sends nothing"
+    );
+    time::advance(Duration::from_millis(10)).await;
+    reporter.phase(FetchPhase::Downloading);
+    assert_eq!(
+        *receiver.borrow_and_update(),
+        Progress {
+            phase: FetchPhase::Downloading,
+            done: 0,
+            total: 6
+        },
+        "within 250 ms of the last send"
+    );
+    time::advance(Duration::from_millis(249)).await;
+    reporter.update(2);
+    assert!(
+        !receiver.has_changed().expect("valid voice fixture"),
+        "bytes wait 250 ms from the phase change"
+    );
+    time::advance(Duration::from_millis(1)).await;
+    reporter.update(3);
+    assert_eq!(
+        *receiver.borrow_and_update(),
+        Progress {
+            phase: FetchPhase::Downloading,
+            done: 3,
+            total: 6
+        }
+    );
 }

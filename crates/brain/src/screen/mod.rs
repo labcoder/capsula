@@ -19,7 +19,7 @@ mod supervisor;
 mod wire;
 mod worker;
 
-pub use crate::supervise::WorkerLost;
+pub use crate::supervise::{Generation, WorkerLost};
 pub(crate) use capture::{Acquired, Capturer, Failure};
 #[cfg(all(windows, any(test, feature = "test-support")))]
 pub(crate) use elements::WalkJob;

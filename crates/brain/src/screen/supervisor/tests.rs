@@ -66,7 +66,12 @@ async fn capture_accepts_only_its_own_frame_and_passes_refusals_through() {
                     ..
                 }
             ));
-            assert!(answer.send(reply).is_ok(), "the capture is waiting");
+            assert!(
+                answer
+                    .send(reply.map(|reply| (reply, Generation(0))))
+                    .is_ok(),
+                "the capture is waiting"
+            );
         };
         let (result, ()) = tokio::join!(capture, answer);
         assert_eq!(result, expected);

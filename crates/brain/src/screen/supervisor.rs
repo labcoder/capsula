@@ -13,7 +13,7 @@ use super::wire::{
     RequestBody, ScreenError, TicketWire,
 };
 use crate::platform::Job;
-use crate::supervise::{self, Handle, Kind, WorkerLost};
+use crate::supervise::{self, Generation, Handle, Kind, WorkerLost};
 
 /// Absolute request budget, including queueing (guess).
 pub const REQUEST_DEADLINE: Duration = Duration::from_millis(1500);
@@ -65,8 +65,8 @@ impl ScreenHandle {
             .request(body, Instant::now() + self.deadline)
             .await
         {
-            Ok(ReplyBody::Fault(code)) => Err(ScreenError::Fault(code)),
-            Ok(reply) => Ok(reply),
+            Ok((ReplyBody::Fault(code), _)) => Err(ScreenError::Fault(code)),
+            Ok((reply, _)) => Ok(reply),
             Err(WorkerLost) => Err(ScreenError::WorkerLost),
         }
     }
@@ -119,7 +119,7 @@ impl ScreenHandle {
     }
 
     /// Subscribes before issuing work, so a lost watch generation cannot be missed.
-    pub fn lost(&self) -> broadcast::Receiver<WorkerLost> {
+    pub fn lost(&self) -> broadcast::Receiver<Generation> {
         self.inner.lost()
     }
 }

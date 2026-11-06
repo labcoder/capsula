@@ -197,8 +197,8 @@ pub(super) fn paint_item(
 }
 
 /// Every primitive of an item, built in full before any of it paints, so a primitive that fails
-/// paints none of the item. None while it can't show: opacity not finite and positive, or a
-/// non-finite draw, which would otherwise take the fully drawn branches.
+/// paints none of the item. Returns an empty Vec while it can't show: opacity not finite and
+/// positive, or a non-finite draw, which would otherwise take the fully drawn branches.
 fn pieces(item: &FrameItem, prims: &[Prim]) -> Result<Vec<Piece>, BuildError> {
     if !item.opacity.is_finite() || item.opacity <= 0.0 || !item.draw.is_finite() {
         return Ok(Vec::new());
