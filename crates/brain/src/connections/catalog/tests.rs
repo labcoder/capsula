@@ -29,7 +29,11 @@ impl Http for Once {
             _ => None,
         };
         self.sent.lock().expect("log").push((
-            request.endpoint.url().to_owned(),
+            request
+                .endpoint
+                .url()
+                .expect("checked endpoint")
+                .into_owned(),
             bearer,
             request.fields.len(),
         ));
@@ -48,6 +52,7 @@ fn answering(status: u16, body: &str) -> Once {
         reply: Mutex::new(Some(Ok(Response {
             status,
             request_id: None,
+            meta: crate::connections::http_client::ResponseMeta::default(),
             body: Secret::new(Zeroizing::new(body.as_bytes().to_vec())),
         }))),
         sent: Mutex::new(Vec::new()),
