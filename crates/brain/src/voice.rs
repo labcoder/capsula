@@ -2,13 +2,7 @@
 //! replies.
 
 pub(crate) mod download;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "slice 7's PR 8 starts one when spoken replies are installed"
-    )
-)]
+pub(crate) mod installer;
 pub(crate) mod pump;
 pub(crate) mod reply;
 pub(crate) mod resample;

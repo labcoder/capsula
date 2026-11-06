@@ -148,6 +148,7 @@ impl Brain {
         let outcome = match written {
             Ok((pending, Ok(()))) => {
                 self.config.commit(pending);
+                self.spoken_replies();
                 #[cfg(test)]
                 self.observer.send(super::Seen::SettingsCommitted).ok();
                 Outcome::Applied
@@ -176,8 +177,9 @@ impl Brain {
     /// follow a reparse point, so a junction on the way, or a folder someone else could change,
     /// deletes nothing. A folder that's already gone counts as deleted. A part whose folder can't
     /// be deleted stays listed, so the next start tries again. Blocking is fine: it runs at
-    /// start-up, before anything is served.
-    pub(crate) fn finish_removals(&mut self, models: &Path) {
+    /// start-up, before anything is served. Returns the parts left listed.
+    pub(crate) fn finish_removals(&mut self, models: &Path) -> Vec<VoicePart> {
+        let mut stuck = Vec::new();
         for part in self.config.removing() {
             let deleted = match platform::hold_chain(models) {
                 Ok(_held) => platform::remove_tree(&models.join(part.dir())),
@@ -186,6 +188,7 @@ impl Brain {
             };
             if let Err(error) = deleted {
                 tracing::warn!(?part, ?error, "a removed voice part wasn't deleted");
+                stuck.push(part);
                 continue;
             }
             self.settings_ops.push_back(Queued {
@@ -194,6 +197,7 @@ impl Brain {
             });
         }
         self.pump_settings_offline();
+        stuck
     }
 
     /// Advances settings with no shell to tell.

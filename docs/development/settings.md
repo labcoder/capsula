@@ -192,8 +192,9 @@ than growing the window with the text. The existing Settings content region owns
 `SettingsView` is their only wire home. A bad value, or a `voice` key that isn't a table, reads
 as the default and stays on disk until the user sets that key. Setting one where `voice` isn't
 a table replaces it with a table. Every other key in the table survives each write, including
-`installed` and `removing`, which the voice installer will own. Both list parts by their folder
-names, `speech-input` and `spoken-replies`.
+`installed` and `removing`, which the voice installer owns. Both list parts by their folder
+names, `speech-input` and `spoken-replies`. A part in both counts as removing. Start-up loads each
+installed part (see [voice](voice.md#the-installer)).
 
 `removing` names a removal that hasn't finished. At start-up, before anything is served, the
 brain deletes each listed part's folder under `%LOCALAPPDATA%\<product>\models` and then queues a
@@ -208,8 +209,7 @@ start tries again. An unknown name is never deleted, and stays in the list.
 them until the installer lands: each is staged in queue order like any change, then refused with
 `Error(VoiceUnavailable)` and its one `Settings` answer, with nothing written. The refusal comes
 after the config read, so while `config.toml` is unreadable they're answered `ConfigUnreadable`
-like every other change. `VoiceView` and
-`PartState` exist in `crates/protocol`, and nothing sends them yet.
+like every other change.
 
 `default_model` is the model a thread with no choice runs on. Only the brain sets it today, with
 `SettingsOp::SetDefaultModel` under epoch 0, which no connection has, so a shell hears only the

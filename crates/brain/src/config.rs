@@ -27,6 +27,7 @@ const SHOW_IN_TASKBAR: &str = "show_in_taskbar";
 const VOICE: &str = "voice";
 const TALK_BACK: &str = "talk_back";
 const STT_UNLOAD: &str = "stt_unload";
+const INSTALLED: &str = "installed";
 const REMOVING: &str = "removing";
 
 /// Why a settings change was refused.
@@ -218,13 +219,25 @@ impl Config {
     /// The parts `[voice] removing` names, by their folder names: a removal that hasn't
     /// finished. A name this build doesn't know names nothing.
     pub(crate) fn removing(&self) -> Vec<VoicePart> {
+        self.listed(REMOVING)
+    }
+
+    /// The parts `[voice] installed` names and `removing` doesn't: a removal wins.
+    pub(crate) fn installed(&self) -> Vec<VoicePart> {
+        let removing = self.removing();
+        let mut installed = self.listed(INSTALLED);
+        installed.retain(|part| !removing.contains(part));
+        installed
+    }
+
+    fn listed(&self, key: &str) -> Vec<VoicePart> {
         let names = self
             .table
             .as_ref()
             .ok()
             .and_then(|table| table.get(VOICE))
             .and_then(Value::as_table)
-            .and_then(|voice| voice.get(REMOVING))
+            .and_then(|voice| voice.get(key))
             .and_then(Value::as_array);
         VoicePart::ALL
             .into_iter()

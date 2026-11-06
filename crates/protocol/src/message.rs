@@ -562,6 +562,9 @@ pub enum ControlToShell {
         /// A live row matched and the write committed.
         applied: bool,
     },
+    /// Each voice part's state: once per connection after `Account` and before `Scenes`, then on
+    /// each change.
+    Voice(VoiceView),
 }
 
 /// Shell to brain, on the data pipe.
