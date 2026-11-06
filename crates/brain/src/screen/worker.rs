@@ -136,7 +136,13 @@ fn open() -> Result<Box<dyn Capturer>, i32> {
 #[cfg(not(windows))]
 const NO_CAPTURER: i32 = 0x8000_4001_u32.cast_signed();
 
-// shortcut: A3b opens UI Automation on Windows; other platforms follow later.
+#[cfg(windows)]
+fn open_elements() -> Result<Box<dyn super::elements::ElementReader>, i32> {
+    crate::platform::screen_elements()
+}
+
+// shortcut: macOS will open its accessibility source here.
+#[cfg(not(windows))]
 fn open_elements() -> Result<Box<dyn super::elements::ElementReader>, i32> {
     Err(0x8000_4001_u32.cast_signed())
 }

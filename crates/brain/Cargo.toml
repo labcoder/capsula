@@ -59,6 +59,9 @@ windows = { version = "0.62", features = [
     "Win32_System_WinRT_Direct3D11",
     "Win32_System_WinRT_Graphics_Capture",
     "Win32_UI_HiDpi",
+    "Win32_UI_Accessibility",
+    "Win32_System_Com",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
@@ -87,7 +90,8 @@ windows-sys = { version = "0.61", features = [
 workspace = true
 
 [features]
-# Lets another crate's tests drive a coordinator with no store behind it.
+# Lets another crate's tests drive a coordinator with no store behind it, and lets an
+# outside harness time the UIA reader on a window it owns (platform::WindowSession).
 test-support = []
 
 [dev-dependencies]

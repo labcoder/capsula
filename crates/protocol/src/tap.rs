@@ -124,6 +124,7 @@ impl Tapped for ControlToShell {
             Self::NoVisual { .. } => "NoVisual",
             Self::Account(_) => "Account",
             Self::ThreadsChanged => "ThreadsChanged",
+            Self::Focus { .. } => "Focus",
             Self::CaptureDone { .. } => "CaptureDone",
             Self::CaptureFailed { .. } => "CaptureFailed",
             Self::Connections(_) => "Connections",
@@ -160,6 +161,7 @@ impl Tapped for ControlToShell {
                 | Self::TurnRefused { thread: _, turn: _ }
                 | Self::Error(_)
                 | Self::ThreadsChanged
+                | Self::Focus { run: _, thread: _ }
                 // Versions, states and content-free reasons only.
                 | Self::Connections(ConnectionsView {
                     anthropic: _,
