@@ -5,7 +5,8 @@ use crate::drawing::{Broken, Chunk, Effect};
 use crate::link::{Batch, LinkEvent, LinkState};
 use crate::settings::Update;
 use kumochi_protocol::message::{
-    AccountView, ControlToBrain, DataToShell, Phase, RunId, SettingsView, ThreadId, UserError,
+    AccountView, ConnectionsView, ControlToBrain, DataToShell, Phase, RunId, SettingsView,
+    ThreadId, UserError,
 };
 use kumochi_scene::deferred::Deferred;
 use std::time::Instant;
@@ -93,12 +94,7 @@ impl Presence {
                 }
                 LinkEvent::ThreadsChanged => self.threads_changed(cx),
                 LinkEvent::Connections { generation, view } => {
-                    let current = self.session.as_ref().map(crate::link::Session::generation);
-                    self.settings.update(cx, |state, cx| {
-                        if state.claude.receive(current, generation, view.claude_code) {
-                            cx.notify();
-                        }
-                    });
+                    self.connections_changed(generation, view, cx);
                 }
                 LinkEvent::Focus {
                     generation,
@@ -192,6 +188,20 @@ impl Presence {
         let current = self.session.as_ref().map(crate::link::Session::generation);
         self.settings.update(cx, |state, cx| {
             if state.accounts.receive(current, generation, view) {
+                cx.notify();
+            }
+        });
+    }
+
+    fn connections_changed(
+        &self,
+        generation: u64,
+        view: ConnectionsView,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let current = self.session.as_ref().map(crate::link::Session::generation);
+        self.settings.update(cx, |state, cx| {
+            if state.claude.receive(current, generation, view.claude_code) {
                 cx.notify();
             }
         });
