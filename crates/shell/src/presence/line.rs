@@ -587,7 +587,10 @@ impl Render for Dock {
                 .h(logical(quad.height, scale))
                 .object_fit(ObjectFit::Fill)
         });
-        let body = self.pull.as_ref().and_then(|picture| picture.images[2].as_ref());
+        let body = self
+            .pull
+            .as_ref()
+            .and_then(|picture| picture.images[2].as_ref());
         let label = self.label.clone().zip(body).map(|(text, (quad, _))| {
             div()
                 .absolute()

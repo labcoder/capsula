@@ -486,7 +486,11 @@ impl Presence {
     }
 
     /// One event from the presence channel.
-    fn on_event(&mut self, event: PresenceEvent, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+    fn on_event(
+        &mut self,
+        event: PresenceEvent,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
         match event {
             PresenceEvent::ShowStatus => self.set_panel(PanelVisibility::Visible, cx)?,
             // Hover opens the peek; a press does nothing until C2a's pull starts there.
@@ -496,9 +500,7 @@ impl Presence {
                 self.pointer_moved(entered_qpc, cx)?;
             }
             PresenceEvent::Position(index) => {
-                if let Some(position) =
-                    kumochi_protocol::message::DockPosition::ALL.get(index)
-                {
+                if let Some(position) = kumochi_protocol::message::DockPosition::ALL.get(index) {
                     self.pick_dock_position(*position, cx)?;
                 }
             }
