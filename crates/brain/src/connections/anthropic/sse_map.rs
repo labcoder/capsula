@@ -101,9 +101,13 @@ impl Reader {
                             Some("tool_use") => StopReason::ToolUse,
                             Some("stop_sequence") => StopReason::StopSequence,
                             Some("max_tokens" | "model_context_window_exceeded") => {
-                                return Err(Failure::Truncated);
+                                on_event(&event);
+                                return Err(Failure::Exhausted);
                             }
-                            Some("refusal") => return Err(Failure::Refused),
+                            Some("refusal") => {
+                                on_event(&event);
+                                return Err(Failure::Refused);
+                            }
                             _ => return Err(Failure::Protocol),
                         });
                     }

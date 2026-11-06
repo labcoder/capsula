@@ -106,8 +106,9 @@ pub(crate) fn fake(args: Vec<OsString>) -> i32 {
         _ => {}
     }
     let signed_in = kind == "in" || token.exists();
+    let method = if signed_in { "claude.ai" } else { "none" };
     let mut json = format!(
-        r#"{{"loggedIn":{signed_in},"authMethod":"none","configDirectory":{}}}"#,
+        r#"{{"loggedIn":{signed_in},"authMethod":"{method}","apiProvider":"firstParty","configDirectory":{}}}"#,
         serde_json::to_string(&config).expect("a string")
     );
     if kind == "status" {

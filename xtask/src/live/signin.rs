@@ -14,13 +14,13 @@ use super::{Brain, with_cleanup};
 use crate::slice2::client::{Client, Frame};
 
 /// How long the brain gets to send a view it owes: the first, or an op's answer.
-const VIEW: Duration = Duration::from_secs(10);
+pub(super) const VIEW: Duration = Duration::from_secs(10);
 /// How long the sign-in may take to settle: the brain ends its attempt at 5 minutes, plus room for
 /// the exchange's 15 s deadlines and the save. One deadline, however many views arrive.
 const SIGNIN: Duration = Duration::from_secs(330);
 
 /// The pipe as the driver sees it: the real client, or a test's frames.
-trait Wire {
+pub(super) trait Wire {
     fn send(&mut self, message: &ControlToBrain) -> Result<()>;
     fn until<T>(&mut self, limit: Duration, pick: impl FnMut(&Frame) -> Option<T>) -> Result<T>;
 }
@@ -41,18 +41,29 @@ impl Wire for Client {
 
 /// The copied harness: starts the brain with no model budget, signs in, and quits it.
 pub(super) fn inner() -> Result<()> {
+    harness(drive)
+}
+
+/// Starts the brain with no model budget, runs `drive` over its pipe, and quits it.
+pub(super) fn harness(
+    drive: impl FnOnce(&mut Client, &mut io::StdoutLock<'static>) -> Result<()>,
+) -> Result<()> {
     let brain = Brain::start(0)?;
-    let (signed_in, quit_sent) = session(Client::connect(), &mut io::stdout().lock());
+    let (driven, quit_sent) = session(Client::connect(), &mut io::stdout().lock(), drive);
     let cleanup = if quit_sent {
         brain.quit()
     } else {
         brain.stop()
     };
-    with_cleanup(signed_in, cleanup)
+    with_cleanup(driven, cleanup)
 }
 
-/// Drives one sign-in over `connected`, then sends `Quitting`; says whether it was sent.
-fn session(connected: Result<impl Wire>, out: &mut impl Write) -> (Result<()>, bool) {
+/// Runs `drive` over `connected`, then sends `Quitting`; says whether it was sent.
+pub(super) fn session<W: Wire, O: Write>(
+    connected: Result<W>,
+    out: &mut O,
+    drive: impl FnOnce(&mut W, &mut O) -> Result<()>,
+) -> (Result<()>, bool) {
     let Ok(mut wire) = connected else {
         return (Err(anyhow!("the brain didn't accept the client")), false);
     };
@@ -206,7 +217,7 @@ mod tests {
         ThreadId, ThreadKind, ThreadRow, UserName,
     };
 
-    use super::{SIGNIN, VIEW, Wire, session, state};
+    use super::{SIGNIN, VIEW, Wire, drive, session, state};
     use crate::slice2::client::Frame;
 
     /// Every planted value starts with this, so one search finds any of them.
@@ -337,7 +348,7 @@ mod tests {
     /// it or otherwise.
     fn run(fixture: &mut Fixture) -> (String, Option<String>, bool) {
         let mut out = Vec::new();
-        let (result, quit_sent) = session(Ok(&mut *fixture), &mut out);
+        let (result, quit_sent) = session(Ok(&mut *fixture), &mut out, drive);
         let out = String::from_utf8(out).expect("utf-8");
         let printed = result.as_ref().err().map(|error| format!("{error:?}"));
         let error = result.err().map(|error| format!("{error:#}"));
@@ -590,6 +601,7 @@ mod tests {
         let (result, quit_sent) = session(
             Err::<&mut Fixture, _>(anyhow!("no capability: {TOKEN}")),
             &mut out,
+            drive,
         );
         assert!(out.is_empty());
         assert!(!quit_sent);

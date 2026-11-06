@@ -148,12 +148,13 @@ A redundant collinear outline vertex is accepted. Profiles and paths need two
 retained points; a lathe needs a retained off-axis point. A tube turn with unit
 tangent dot product strictly below `−1 + REL` is refused. These failures are typed
 `MeshError::Degenerate` at `points` or `path`; shape validation errors keep their
-original typed field and code. `ErrorCode::Degenerate` is appended for the later
-admission boundary, which alone will convert these errors into sanitized paths.
+original typed field and code. Scene admission converts these errors into
+`ErrorCode::Degenerate` at sanitized paths.
 
 ### 3D admission
 
-A `view3d` is a root object and at most one lives in a scene, a pending removal included.
+A `view3d` is a root object and at most one lives in a scene, a pending removal included;
+its `box`, like a 2D box, needs a positive width and height.
 A `solid` names its view with `in`, and `attach` names an earlier solid (lower revision, or
 the same revision and a lower slot) in the same view; attachment counts toward depth 16 and a
 removal that would orphan an attached solid fails with `Orphans`. Only solids own `info`,
@@ -162,7 +163,9 @@ refused. Admission sizes each solid with `three::size::triangles` and `three::si
 (the farthest local vertex from the solid's origin) and never tessellates: that runs off
 the admission path. Outline checks do run here, and they grow with the square of the point
 count, so an extrude outline holds at most 64 points (`MAX_EXTRUDE_POINTS`); draw a smoother
-profile with a lathe, or split a detailed shape into several extrudes.
+profile with a lathe, or split a detailed shape into several extrudes. A step holds at most
+2,304 outline points in all (36 full outlines), so the outline checks of one step stay under
+1 ms on Rez; 42 full outlines reached 1 ms p99 there.
 
 | Budget | Limit | Error |
 |---|---|---|
@@ -170,17 +173,21 @@ profile with a lathe, or split a detailed shape into several extrudes.
 | Solids | 160 per scene | `OverBudget(Solids)` |
 | Triangles | 24,000 per scene and across visible scenes | `OverBudget(Triangles)` |
 | Moving view | 6,000 triangles in a view with any `pos3` or `rot3` track | `OverBudget(MovingTriangles)` |
+| Outline points | 2,304 extrude outline points per step (36 full outlines) | `OverBudget(OutlinePoints)` |
 
-Like 2D charges, these recompute from the after, pending and changed versions, so a removed
-solid releases its triangles only at retirement and a refusal moves no counter.
+Like 2D charges, the scene charges (solids, triangles and the moving view) recompute from the
+after, pending and changed versions, so a removed solid releases its triangles only at
+retirement and a refusal moves no counter. The outline budget is not a retained charge: it
+counts only the extrude outlines in the step being admitted.
 
 **Coordinate bound.** 3D admission refuses a solid unless the sum of its chain's translation
 lengths, plus its scaled reach, is at most 20,000. Each link adds its `pos` length and its
 `pos3` envelope, both multiplied by the ancestors' composed scale; summing lengths ignores
 cancellation, so a parent at x = 15,000 with a child at local x = −15,000 is refused. The
-`pos3` envelope is the largest key length plus, for `spring`, the overshoot
-`|b − a| × SPRING_OVERSHOOT` per key pair (both directions with `yoyo`), taken over every
-charged version of the solid, so a delayed replacement cannot hide an earlier envelope.
+`pos3` envelope is the largest length of any key and, for `spring`, of each key pair's
+overshoot endpoint `b + (b − a) × SPRING_OVERSHOOT` (and `a + (a − b) × SPRING_OVERSHOOT`
+with `yoyo`), where the first pair starts at rest. It is taken over every charged version of
+the solid, so a replacement cannot hide an earlier envelope before it retires.
 Rotation preserves lengths and adds nothing. Non-finite compositions fail with
 `TransformOverflow`, the bound with `OutOfRange`.
 
@@ -248,7 +255,7 @@ flowchart LR
   blended source-over in premultiplied 8-bit as `(s·α + d·(255 − α) + 127) / 255`. They never
   write depth or split. One at authored opacity 0.5 or more writes its solid id, so the id is
   the last qualifying layer in that order, not necessarily the nearest surface. Interpenetrating
-  translucent solids can blend in the wrong order (`shortcut:`, OSC-218).
+  translucent solids can blend in the wrong order (`shortcut:`, OSC-242).
 - **Samples.** Motion frames take one sample at the texel centre; rest frames take four on a
   rotated grid at (−1/8, −3/8), (3/8, −1/8), (−3/8, 1/8) and (1/8, 3/8) from the centre and
   box-resolve them. A texel's id is the most frequent sample id, background included, with ties
@@ -342,7 +349,7 @@ Ids already encode raster coverage and opacity: an opaque unlabelled solid block
 below authored opacity 0.5 passes, and 0.5 blocks. Near-clipped geometry has no id. Rest chooses
 the most frequent of four sample ids, background included, with ties won by the lowest first
 sample index. Translucent ids follow the last qualifying polygon in the approximate painted
-centroid order, **not necessarily the nearest geometric surface** (OSC-218). A pick within one
+centroid order, **not necessarily the nearest geometric surface** (OSC-242). A pick within one
 **internal texel** of an edge, mapped separately through both frozen axis ratios and including
 bilinear filtering, can differ from an exact ray. This is not a one-display-pixel tolerance.
 The scaled pointer/oracle fixtures reuse the frame's independent f64 ray oracle and omit only
@@ -714,6 +721,14 @@ defers any failure back to Presenter
 after releasing the borrow. Replacement invalidates old observations; removal/disconnect
 retires frame ownership with its scene and hides an empty overlay. Resting B5 views request no
 animation frames. B5 neither activates live steps nor emits StepShown; B6 consumes that seam.
+
+For B5's at-rest views, a kept cut that changes nothing, because its Stop adds no log entry and
+keeps the activated bound, isn't a replacement. The presenter keeps that scene's rest, view and
+frame, so their paint observation stays current and the next sample reports no change. Every
+other kept cut rebuilds the rest and view and starts a new frame epoch. `halt()` keeps live motion:
+before B6 activates presenter views, this fast path must require an at-rest view with no delayed
+owners, or Stop must settle motion first. Position-track and delayed-owner tests must cover this;
+`moving(now) == false` alone cannot rule out a track that starts later.
 
 ### Motion and the host clock
 

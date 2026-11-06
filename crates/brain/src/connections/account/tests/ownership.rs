@@ -2,6 +2,8 @@
 //! sign-in's Commit owns the token it replaces, keeping a slot for its own set, and reports what
 //! it listed; sign-out's Prepare owns a token the list can't hold through the marker.
 
+use std::rc::Rc;
+
 use super::*;
 use crate::connections::marker::MarkerUpdate;
 use crate::connections::records::{MAX_ID_BYTES, RevocationList};
@@ -71,16 +73,29 @@ fn mutations(h: &Harness) -> Vec<Mutation> {
     h.store.0.lock().expect("fake lock").mutations.clone()
 }
 
-/// Where the `nth` write to `record` is in `trace`.
+/// Where the `nth` save of `record` writes its last chunk in `trace`: refused there, it
+/// never commits.
 fn write_to(h: &Harness, trace: &[Mutation], record: &str, nth: usize) -> usize {
-    let name = format!("{}/{record}", h.service);
-    trace
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| matches!(m, Mutation::Set(set) if *set == name))
-        .nth(nth)
-        .expect(record)
-        .0
+    let prefix = h.generations(record);
+    let generation = |name: &str| name[prefix.len()..].split('/').next().map(str::to_owned);
+    let mut seen: Vec<String> = Vec::new();
+    let mut last = None;
+    for (index, mutation) in trace.iter().enumerate() {
+        let Mutation::Set(name) = mutation else {
+            continue;
+        };
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        let generation = generation(name).expect(record);
+        if !seen.contains(&generation) {
+            seen.push(generation.clone());
+        }
+        if seen.len() == nth + 1 && seen[nth] == generation {
+            last = Some(index);
+        }
+    }
+    last.expect(record)
 }
 
 /// A run's tokens and origins, in the order they were sent.
@@ -212,8 +227,6 @@ fn an_unfit_replaced_token_is_marked_unknown_before_the_commit() {
     h.callback("client-saved");
     h.store.arm(usize::MAX, Fault::Refuse);
     h.reply(received(Some("refresh-new"), "subject-1", PLAN));
-    let trace = mutations(&h);
-    assert!(write_to(&h, &trace, "signout", 0) < write_to(&h, &trace, "chatgpt", 0));
     assert!(h.revocations().is_empty());
     assert_eq!(h.marker(), marker(&["outcome_unknown"]));
     assert_eq!(h.refresh_token().as_deref(), Some("refresh-new"));
@@ -226,16 +239,12 @@ fn an_unfit_replaced_token_is_marked_unknown_before_the_commit() {
 /// stays and the sign-in is held; Retry writes the marker and commits.
 #[test]
 fn a_refused_unknown_write_keeps_the_old_account_until_retry() {
-    let mut dry = Harness::seeded("ownership-unknown-trace", seed(&quotes(), Vec::new()));
-    until_commit(&mut dry);
-    dry.store.arm(usize::MAX, Fault::Refuse);
-    dry.release();
-    let marker_write = write_to(&dry, &mutations(&dry), "signout", 0);
     let mut h = Harness::seeded("ownership-unknown", seed(&quotes(), Vec::new()));
     until_commit(&mut h);
     let before = h.marker();
-    h.store.arm(marker_write, Fault::Refuse);
+    h.refuse_marker_writes(0);
     h.release();
+    h.allow_marker_writes();
     assert_eq!(
         h.errors,
         [user_error(
@@ -293,7 +302,7 @@ fn an_oversized_successor_is_unknown_and_leaves_the_predecessor() {
         });
         let generation = h.refreshes.last().expect("a refresh sent").0;
         if refused {
-            h.store.arm(0, Fault::Refuse);
+            h.refuse_marker_writes(0);
         }
         h.feed(Input::Refreshed {
             generation,
@@ -302,6 +311,9 @@ fn an_oversized_successor_is_unknown_and_leaves_the_predecessor() {
             }),
             now: Some(NOW),
         });
+        if refused {
+            h.allow_marker_writes();
+        }
         let flags: &[_] = if refused {
             &["request_pending"]
         } else {
@@ -342,13 +354,15 @@ fn a_refused_startup_fold_still_signs_out_unconfirmed() {
         .update_marker(MarkerUpdate::RequestStarted)
         .expect("pending flag");
     drop(vault);
-    store.arm(0, Fault::Refuse);
-    let mut h = Harness::boot(scratch, service, store, Wall::new());
+    let path = scratch.db().with_file_name(authority::FILE);
+    refuse_marker_writes(&path, 0);
+    let mut h = Harness::boot(Rc::new(scratch), service, store, Wall::new());
     assert_eq!(
         h.marker(),
         marker(&["request_pending"]),
         "the fold was refused"
     );
+    allow_marker_writes(&path);
     h.op(AccountOp::SignOut);
     finish(&mut h, true, 0);
     assert_eq!(h.view(), &unconfirmed());
@@ -638,8 +652,7 @@ fn an_adopted_token_the_full_list_cant_hold_is_unknown_and_still_revoked() {
     assert_eq!(h.marker(), revoking(true));
     assert_eq!(h.revocations(), list, "the list stays as it was");
     assert_eq!(tokens(h.revoking.last().expect("a run")), crowded_run());
-    let account = format!("{}/chatgpt", h.service);
-    assert!(h.store.names().contains(&account), "kept until the delete");
+    assert!(h.holds("chatgpt"), "kept until the delete");
     let answered = h.revoking.len() - 1;
     finish(&mut h, false, answered);
     assert_eq!(h.view(), &unconfirmed());
@@ -653,13 +666,10 @@ fn an_adopted_token_the_full_list_cant_hold_is_unknown_and_still_revoked() {
 /// A restart that can write it finishes the sign-out, unconfirmed.
 #[test]
 fn a_refused_fallback_marker_refuses_cleanup_until_a_restart_can_write_it() {
-    let mut dry = booted("ownership-crowded-trace", seed(&quotes(), crowded()));
-    dry.store.arm(usize::MAX, Fault::Refuse);
-    dry.op(AccountOp::SignOut);
-    let unknown = write_to(&dry, &mutations(&dry), "signout", 1);
     let mut h = booted("ownership-crowded-refused", seed(&quotes(), crowded()));
     let list = h.revocations();
-    h.store.arm(unknown, Fault::Refuse);
+    // The promotion is the sign-out's first marker write; the unknown write is its second.
+    h.refuse_marker_writes(1);
     h.op(AccountOp::SignOut);
     assert_eq!(
         h.view(),
@@ -671,8 +681,8 @@ fn a_refused_fallback_marker_refuses_cleanup_until_a_restart_can_write_it() {
     assert_eq!(h.revoking.len(), 1, "only the startup pass");
     assert_eq!(h.marker(), revoking(false));
     assert_eq!(h.revocations(), list);
-    let account = format!("{}/chatgpt", h.service);
-    assert!(h.store.names().contains(&account));
+    assert!(h.holds("chatgpt"));
+    h.allow_marker_writes();
     let mut h = h.restart();
     finish(&mut h, false, 0);
     assert_eq!(h.view(), &unconfirmed());

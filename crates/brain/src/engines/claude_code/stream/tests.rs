@@ -167,6 +167,67 @@ fn analytics_disabled_is_kept_as_reported_and_never_fails_init() {
     assert_eq!(init(r#","analytics_disabled":null"#), None);
 }
 
+/// One initialize answer whose `account` is `account`, raw.
+fn initialize_line(account: &str) -> String {
+    format!(
+        r#"{{"type":"control_response","response":{{"subtype":"success","request_id":"k-initialize","response":{{"claude_code_version":"2.1.306","account":{account}}}}}}}"#
+    )
+}
+
+#[test]
+fn the_initialize_account_keeps_no_email_or_organization() {
+    let email = "sentinel-k7q@example.invalid";
+    let organization = "Sentinel Org K7Q";
+    let line = initialize_line(&format!(
+        r#"{{"email":"{email}","organization":"{organization}","subscriptionType":"max","apiProvider":"firstParty"}}"#
+    ));
+    let mapped = StreamMapper::default().line(line.as_bytes()).expect("maps");
+    let Mapped::Control(response) = &mapped else {
+        panic!("a control response");
+    };
+    assert_eq!(
+        response.response.account,
+        Some(Account {
+            api_provider: Field::Text("firstParty".to_owned()),
+            subscription_type: Field::Text("max".to_owned()),
+            ..Account::default()
+        })
+    );
+    assert_eq!(
+        response.response.rest,
+        json!({"claude_code_version": "2.1.306"})
+    );
+    let printed = format!("{mapped:?}");
+    for marker in [email, organization] {
+        assert!(!printed.contains(marker), "{marker} in Debug");
+        assert!(
+            !printed
+                .as_bytes()
+                .windows(marker.len())
+                .any(|window| window == marker.as_bytes()),
+            "{marker} in Debug's bytes"
+        );
+    }
+}
+
+#[test]
+fn an_account_that_isnt_one_object_is_mistyped() {
+    for account in [r#""someone""#, "[]", "7"] {
+        assert_eq!(
+            StreamMapper::default().line(initialize_line(account).as_bytes()),
+            Err(ClaudeStreamFailure::Mistyped),
+            "{account}"
+        );
+    }
+    let twice =
+        initialize_line(r#"{"apiProvider":"firstParty"},"account":{"apiProvider":"firstParty"}"#);
+    assert_eq!(
+        StreamMapper::default().line(twice.as_bytes()),
+        Err(ClaudeStreamFailure::Mistyped),
+        "two accounts"
+    );
+}
+
 #[test]
 fn control_responses_before_input_come_back_in_order() {
     let (out, _) = map(&[FACTS]);
@@ -178,14 +239,19 @@ fn control_responses_before_input_come_back_in_order() {
         (init.subtype.as_str(), init.request_id.as_str()),
         ("success", "p0-init")
     );
-    let body = &init.response;
+    assert_eq!(
+        init.response.account,
+        Some(Account {
+            api_provider: Field::Text("firstParty".to_owned()),
+            token_source: Field::Text("none".to_owned()),
+            ..Account::default()
+        })
+    );
+    let body = &init.response.rest;
+    assert_eq!(body["account"], Value::Null, "account isn't kept as sent");
     assert_eq!(body["claude_code_version"], "2.1.306");
     assert_eq!(body["analytics_disabled"], true);
     assert_eq!(body["commands"], json!([]));
-    assert_eq!(
-        body["account"],
-        json!({"tokenSource": "none", "apiProvider": "firstParty"})
-    );
     let agents: Vec<&Value> = body["agents"]
         .as_array()
         .expect("agents")
@@ -209,8 +275,9 @@ fn control_responses_before_input_come_back_in_order() {
         (mcp.subtype.as_str(), mcp.request_id.as_str()),
         ("success", "p0-mcp")
     );
+    assert_eq!(mcp.response.account, None);
     assert_eq!(
-        mcp.response,
+        mcp.response.rest,
         json!({"mcpServers": [{
             "name": "kumochi",
             "status": "connected",
@@ -252,7 +319,7 @@ fn debug_shows_shapes_and_counts_never_stream_content() {
     );
     assert_eq!(
         format!("{control:?}"),
-        "Control(ControlResponse { subtype: len=11, request_id: len=11, response: object(len=1) })"
+        "Control(ControlResponse { subtype: len=11, request_id: len=11, account: None, response: object(len=1) })"
     );
     assert_eq!(
         format!("{init:?}"),

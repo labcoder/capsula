@@ -1,74 +1,44 @@
-//! Locked, synchronous account records with a single-credential commit boundary.
+//! Locked, synchronous account records. The credential authority decides which write-once
+//! generation of each record is current; Credential Manager only holds the bytes (OSC-233).
 
 use std::fmt;
 use std::io::{self, Write};
 use std::path::Path;
 
 use kumochi_protocol::Secret;
-use kumochi_protocol::constants::{ACCOUNT_CHUNKED_RECORDS, CREDENTIAL_SERVICE, account_target};
+use kumochi_protocol::constants::{CREDENTIAL_SERVICE, account_targets, anthropic_staging_target};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+use super::authority::{self, Authority, Kind, io as generation};
 use super::error::VaultError;
 use super::marker::{Disposition, MarkerUpdate, Phase, SignOutMarker};
 use super::records::{Account, MAX_RECORD_BYTES, Record, RevocationList};
-use crate::platform::credential::{
-    CHUNK_SIZE, CredentialStore, MAX_CHUNKS, SecretBytes, delete_chunks, get_chunks, set_chunks,
-};
+use crate::platform::credential::{CredentialStore, SecretBytes};
 use crate::platform::{self, SessionLock};
-use lane_store::LaneStore;
 
-/// A save's durable outcome, separate from cleanup after its manifest commit.
+/// Removed generations one sweep pass visits [guess]; the rest wait for the next pass.
+const SWEEP: usize = 16;
+
+/// A save's durable outcome.
 #[derive(Debug)]
 #[must_use]
 pub enum SaveResult {
-    /// The new record is active; failed old-slot cleanup requires another sweep.
-    Committed {
-        /// Some old chunks could not be deleted.
-        leftovers: bool,
-    },
-    /// The manifest never changed; the caller still owns the unsaved value.
+    /// The new record is the current generation.
+    Committed,
+    /// Nothing changed; the caller still owns the unsaved value.
     NotCommitted(VaultError),
 }
 
-/// Whether every name of a chunked record was deleted and checked absent.
+/// Whether a record's removal committed.
 #[derive(Debug)]
 #[must_use]
 pub enum DeleteResult {
-    /// All 129 names are absent, not merely an absent manifest.
+    /// The record is removed for good; its names are swept in the background.
     Gone,
-    /// A delete or by-name check failed; retry must not claim success yet.
+    /// Nothing was removed; retry must not claim success yet.
     Refused(VaultError),
-}
-
-#[derive(Debug, Clone, Copy)]
-enum Chunked {
-    Account,
-    Revoke,
-}
-
-impl Chunked {
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Account => ACCOUNT_CHUNKED_RECORDS[0],
-            Self::Revoke => ACCOUNT_CHUNKED_RECORDS[1],
-        }
-    }
-
-    const fn index(self) -> usize {
-        match self {
-            Self::Account => 0,
-            Self::Revoke => 1,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Manifest {
-    slot: usize,
-    chunks: usize,
 }
 
 /// Owns the session lock while its store is accessible, including during blocking work.
@@ -76,9 +46,9 @@ struct Manifest {
 /// Move the vault into blocking work, rather than dropping its guard when an async waiter ends.
 #[must_use = "the vault must retain its session lock until all blocking work ends"]
 pub struct Vault<S: CredentialStore> {
-    store: LaneStore<S>,
+    authority: Authority,
+    store: S,
     service: String,
-    clean: [[bool; 2]; 2],
     _session: SessionLock,
 }
 
@@ -95,44 +65,19 @@ impl<S: CredentialStore> Vault<S> {
     ) -> Result<Option<Secret<super::anthropic::key::AnthropicKey>>, super::anthropic::KeyError>
     {
         use super::anthropic::{KeyError, KeyOp, key::AnthropicKey};
-        use kumochi_protocol::constants::{anthropic_key_target, anthropic_staging_target};
-        let active = anthropic_key_target(&self.service);
-        let staged = anthropic_staging_target(&self.service);
-        if matches!(op, KeyOp::Remove) {
-            let first = self.store.delete(&active);
-            let second = self.store.delete(&staged);
-            first.and(second).map_err(VaultError::from)?;
-            return Ok(None);
+        match op {
+            KeyOp::Remove => {
+                self.remove(&[Kind::AnthropicKey], None)?;
+                Ok(None)
+            }
+            // shortcut: a staged paste isn't adopted until C7 stages it through the authority.
+            KeyOp::Adopt => Err(KeyError::Vault(VaultError::Fenced)),
+            KeyOp::Load => self
+                .read_bytes(Kind::AnthropicKey)?
+                .map(AnthropicKey::parse)
+                .transpose()
+                .map_err(KeyError::Rejected),
         }
-        let read = if matches!(op, KeyOp::Adopt) {
-            self.store.get_recent(&staged)
-        } else {
-            self.store.get(&staged)
-        };
-        let adopting = !matches!(read, Ok(None));
-        if adopting {
-            let result = (|| {
-                let bytes = read.map_err(VaultError::from)?.ok_or(VaultError::from(
-                    crate::platform::credential::CredentialStoreError::Unsettled,
-                ))?;
-                let key = AnthropicKey::parse(bytes).map_err(KeyError::Rejected)?;
-                let bytes = Secret::new(Zeroizing::new(key.expose().as_str().as_bytes().to_vec()));
-                self.store.set(&active, &bytes).map_err(VaultError::from)?;
-                Ok(Some(key))
-            })();
-            let cleanup = self.store.delete(&staged).map_err(VaultError::from);
-            cleanup?;
-            return result;
-        }
-        if matches!(op, KeyOp::Adopt) {
-            self.store.delete(&staged).map_err(VaultError::from)?;
-        }
-        self.store
-            .get(&active)
-            .map_err(VaultError::from)?
-            .map(AnthropicKey::parse)
-            .transpose()
-            .map_err(KeyError::Rejected)
     }
 
     /// Takes account-session ownership without reading any credential yet.
@@ -144,23 +89,29 @@ impl<S: CredentialStore> Vault<S> {
         Self::with_service(store, CREDENTIAL_SERVICE, &path)
     }
 
+    /// Takes the lock at `path`, then opens the authority beside it and sweeps once, legacy
+    /// names included.
     pub(crate) fn with_service(store: S, service: &str, path: &Path) -> Result<Self, VaultError> {
         let session = SessionLock::try_acquire(path)?;
-        Ok(Self {
-            store: LaneStore::new(store),
+        let authority = Authority::open(&path.with_file_name(authority::FILE), &session)?;
+        let mut vault = Self {
+            authority,
+            store,
             service: service.to_owned(),
-            clean: [[false; 2]; 2],
             _session: session,
-        })
+        };
+        vault.sweep_legacy();
+        vault.sweep();
+        Ok(vault)
     }
 
-    /// Reads or creates the machine-local random `UUIDv4` host identifier.
+    /// Reads or creates the machine-local random `UUIDv4` host identifier. A current host whose
+    /// bytes don't read back is an error, never replaced.
     ///
     /// # Errors
     /// Reports unreadable data, unavailable randomness or any refused credential operation.
     pub fn host_id(&mut self) -> Result<Secret<Zeroizing<String>>, VaultError> {
-        let target = self.target("host");
-        if let Some(bytes) = self.store.get(&target)? {
+        if let Some(bytes) = self.read_bytes(Kind::Host)? {
             let host: Zeroizing<String> = decode(&bytes, 128)?;
             if !valid_host(&host) {
                 return Err(VaultError::Unreadable);
@@ -180,7 +131,7 @@ impl<S: CredentialStore> Vault<S> {
             }
             write!(&mut *host, "{byte:02x}").expect("writing into a String cannot fail");
         }
-        self.store.set(&target, &encode(&host, 128)?)?;
+        self.write(Kind::Host, &encode(&host, 128)?, None)?;
         Ok(Secret::new(host))
     }
 
@@ -192,7 +143,7 @@ impl<S: CredentialStore> Vault<S> {
         if self.marker()?.sign_out.is_some() {
             return Ok(None);
         }
-        self.load(Chunked::Account)
+        self.read(Kind::Account)
     }
 
     /// Reads the fenced account only for sign-out preparation and registration-only deletion.
@@ -205,10 +156,10 @@ impl<S: CredentialStore> Vault<S> {
         if self.marker()?.sign_out.is_none() {
             return Err(VaultError::Fenced);
         }
-        self.load(Chunked::Account)
+        self.read(Kind::Account)
     }
 
-    /// Replaces the account through its inactive slot and atomic manifest.
+    /// Replaces the account with a fresh generation.
     pub fn save_account(&mut self, account: &Secret<Account>) -> SaveResult {
         let result = (|| {
             account.expose().validate()?;
@@ -224,7 +175,7 @@ impl<S: CredentialStore> Vault<S> {
                     return Err(VaultError::Fenced);
                 }
             }
-            self.save(Chunked::Account, &bytes)
+            self.write(Kind::Account, &bytes, None)
         })();
         saved(result)
     }
@@ -234,23 +185,23 @@ impl<S: CredentialStore> Vault<S> {
     /// # Errors
     /// Reports refused reads and malformed, incomplete or oversized revocation records.
     pub fn load_revocations(&self) -> Result<Option<Secret<RevocationList>>, VaultError> {
-        self.load(Chunked::Revoke)
+        self.read(Kind::Revocations)
     }
 
-    /// Persists sweep state first, then commits the independent revocation record.
+    /// Commits the revocation record and the sweep flag together.
     pub fn save_revocations(&mut self, list: &Secret<RevocationList>) -> SaveResult {
         let result = (|| {
             list.expose().validate()?;
             let bytes = encode(list.expose(), MAX_RECORD_BYTES)?;
-            if self
-                .marker()?
+            let marker = self.marker()?;
+            if marker
                 .sign_out
                 .is_some_and(|sign_out| sign_out.phase == Phase::Deleting)
             {
                 return Err(VaultError::Fenced);
             }
-            self.update_marker(MarkerUpdate::BeginSweep)?;
-            self.save(Chunked::Revoke, &bytes)
+            let next = marker.merge(MarkerUpdate::BeginSweep)?;
+            self.write(Kind::Revocations, &bytes, (next != marker).then_some(next))
         })();
         saved(result)
     }
@@ -258,15 +209,9 @@ impl<S: CredentialStore> Vault<S> {
     /// Reads token-free control state; malformed or unknown layouts fail closed.
     ///
     /// # Errors
-    /// Reports an OS read refusal. Absent state is empty, not a stored default marker.
+    /// Reports an unavailable or damaged authority; a missing marker is never the default.
     pub fn marker(&self) -> Result<SignOutMarker, VaultError> {
-        let Some(bytes) = self.store.get(&self.target("signout"))? else {
-            return Ok(SignOutMarker::default());
-        };
-        Ok(match decode::<SignOutMarker>(&bytes, 200) {
-            Ok(marker) if marker.valid() => marker,
-            _ => SignOutMarker::fail_closed(),
-        })
+        Ok(self.authority.marker()?)
     }
 
     /// Merges a change into the current persisted marker under the held session lock.
@@ -275,14 +220,14 @@ impl<S: CredentialStore> Vault<S> {
     /// Its decision is immutable once the persisted phase is Deleting.
     ///
     /// # Errors
-    /// Reports incompatible phases, refused marker writes/deletes, or incomplete by-name checks.
+    /// Reports incompatible phases, a refused commit, or a record that's still current.
     pub fn update_marker(&mut self, update: MarkerUpdate) -> Result<SignOutMarker, VaultError> {
         let current = self.marker()?;
         match update {
             MarkerUpdate::SignInCommitted => {
                 if current.sign_out.is_some()
                     || self
-                        .load::<Account>(Chunked::Account)?
+                        .read::<Account>(Kind::Account)?
                         .is_none_or(|account| account.expose().tokens.is_none())
                 {
                     return Err(VaultError::Fenced);
@@ -300,7 +245,7 @@ impl<S: CredentialStore> Vault<S> {
                     }
                     None => {
                         if self
-                            .load::<Account>(Chunked::Account)?
+                            .read::<Account>(Kind::Account)?
                             .is_some_and(|account| account.expose().tokens.is_some())
                         {
                             return Err(VaultError::Fenced);
@@ -310,25 +255,19 @@ impl<S: CredentialStore> Vault<S> {
                 }
             }
             MarkerUpdate::FinishSweep if current.sign_out.is_none() => {
-                self.assert_absent(Chunked::Revoke, None)?;
+                self.assert_removed(Kind::Revocations)?;
             }
             MarkerUpdate::FinishSignOut => self.assert_sign_out_clean(current)?,
             _ => {}
         }
         let next = current.merge(update)?;
-        if next == current {
-            return Ok(next);
-        }
-        if next == SignOutMarker::default() {
-            self.store.delete(&self.target("signout"))?;
-        } else {
-            self.store
-                .set(&self.target("signout"), &encode(&next, 200)?)?;
+        if next != current {
+            self.authority.set_marker(next)?;
         }
         Ok(next)
     }
 
-    /// Removes both account slots and its manifest only after a persisted deletion checkpoint.
+    /// Removes the account only after a persisted deletion checkpoint.
     pub fn delete_account(&mut self) -> DeleteResult {
         let result = (|| {
             let marker = self.marker()?;
@@ -338,12 +277,12 @@ impl<S: CredentialStore> Vault<S> {
             {
                 return Err(VaultError::Fenced);
             }
-            self.erase(Chunked::Account)
+            self.remove(&[Kind::Account], None)
         })();
         deleted(result)
     }
 
-    /// Removes all revocation names while retaining the independent sweep/sign-out marker.
+    /// Removes the revocation record while retaining the independent sweep/sign-out marker.
     /// Outside sign-out, the saved list must be empty, or malformed with persisted uncertainty.
     pub fn delete_revocations(&mut self) -> DeleteResult {
         let result = (|| {
@@ -365,14 +304,13 @@ impl<S: CredentialStore> Vault<S> {
                     Err(error) => return Err(error),
                 }
             }
-            self.erase(Chunked::Revoke)
+            self.remove(&[Kind::Revocations], None)
         })();
         deleted(result)
     }
 
-    /// Deletes both records after the checkpoint, driven by the marker alone: a record's names
-    /// go whether or not its manifest survives. Keep retains a readable registration's live slot
-    /// and nothing else; with no readable registration, the record is erased.
+    /// Removes both records after the checkpoint, driven by the marker alone. Keep retains a
+    /// readable registration, rewritten without tokens; with none, the account is removed too.
     pub fn delete_for_sign_out(&mut self) -> DeleteResult {
         let result = (|| {
             let sign_out = self
@@ -380,19 +318,20 @@ impl<S: CredentialStore> Vault<S> {
                 .sign_out
                 .filter(|sign_out| sign_out.phase == Phase::Deleting)
                 .ok_or(VaultError::Fenced)?;
-            if sign_out.disposition == Disposition::Erase || !self.keep_registration()? {
-                self.erase(Chunked::Account)?;
+            if sign_out.disposition == Disposition::Keep && self.keep_registration()? {
+                self.remove(&[Kind::Revocations], None)
+            } else {
+                self.remove(&[Kind::Account, Kind::Revocations], None)
             }
-            self.erase(Chunked::Revoke)
         })();
         deleted(result)
     }
 
-    /// Rewrites the account to its registration, then deletes every other name of the record.
-    /// False when there's no registration or its data is damaged, so the caller erases instead.
+    /// Rewrites the account to its registration. False when there's no registration or its data
+    /// is damaged, so the caller removes it instead.
     fn keep_registration(&mut self) -> Result<bool, VaultError> {
         // A refused read is retried, never taken as a reason to erase the registration.
-        let Some(account) = self.load::<Account>(Chunked::Account).or_else(|error| {
+        let Some(account) = self.read::<Account>(Kind::Account).or_else(|error| {
             if error.is_damage() {
                 Ok(None)
             } else {
@@ -411,119 +350,68 @@ impl<S: CredentialStore> Vault<S> {
             tokens: None,
         };
         if *account != registration {
-            self.save(Chunked::Account, &encode(&registration, MAX_RECORD_BYTES)?)?;
+            self.write(
+                Kind::Account,
+                &encode(&registration, MAX_RECORD_BYTES)?,
+                None,
+            )?;
         }
-        let live = self
-            .manifest(Chunked::Account)?
-            .ok_or(VaultError::Unreadable)?;
-        let name = Chunked::Account.name();
-        delete_chunks(
-            &self.store,
-            &self.target(&format!("{name}/{}", 1 - live.slot)),
-            MAX_CHUNKS,
-        )?;
-        for index in live.chunks..MAX_CHUNKS {
-            self.store
-                .delete(&self.target(&format!("{name}/{}/{index}", live.slot)))?;
-        }
-        self.assert_absent(Chunked::Account, Some(live))?;
         Ok(true)
     }
 
-    fn target(&self, entry: &str) -> String {
-        account_target(&self.service, entry)
+    /// Stores a key as the current one, as a paste staged through the authority will (C7).
+    #[cfg(test)]
+    pub(crate) fn save_anthropic_key(&mut self, key: &[u8]) -> Result<(), VaultError> {
+        self.write(
+            Kind::AnthropicKey,
+            &Secret::new(Zeroizing::new(key.to_vec())),
+            None,
+        )
     }
 
-    fn manifest(&self, record: Chunked) -> Result<Option<Manifest>, VaultError> {
-        let Some(bytes) = self.store.get(&self.target(record.name()))? else {
+    fn read_bytes(&self, kind: Kind) -> Result<Option<SecretBytes>, VaultError> {
+        let Some(active) = self.authority.current(kind)?.active else {
             return Ok(None);
         };
-        let manifest: Manifest = decode(&bytes, 200)?;
-        if manifest.slot > 1
-            || !(1..=MAX_RECORD_BYTES.div_ceil(CHUNK_SIZE)).contains(&manifest.chunks)
-        {
-            return Err(VaultError::Unreadable);
-        }
-        Ok(Some(manifest))
+        Ok(Some(generation::read(&self.store, &self.service, &active)?))
     }
 
-    fn load<T: Record + DeserializeOwned>(
+    fn read<T: Record + DeserializeOwned>(
         &self,
-        record: Chunked,
+        kind: Kind,
     ) -> Result<Option<Secret<T>>, VaultError> {
-        let Some(manifest) = self.manifest(record)? else {
+        let Some(bytes) = self.read_bytes(kind)? else {
             return Ok(None);
         };
-        let bytes = get_chunks(
-            &self.store,
-            &self.target(&format!("{}/{}", record.name(), manifest.slot)),
-            manifest.chunks,
-        )?;
         let value: T = decode(&bytes, MAX_RECORD_BYTES)?;
         value.validate()?;
         Ok(Some(Secret::new(value)))
     }
 
-    fn save(&mut self, record: Chunked, bytes: &SecretBytes) -> Result<bool, VaultError> {
-        let old = self.manifest(record)?;
-        let slot = old.map_or(0, |manifest| 1 - manifest.slot);
-        let base = self.target(&format!("{}/{slot}", record.name()));
-        if !self.clean[record.index()][slot] {
-            delete_chunks(&self.store, &base, MAX_CHUNKS)?;
-        }
-        self.clean[record.index()][slot] = false;
-        let chunks = set_chunks(&self.store, &base, bytes)?;
-        self.store.set(
-            &self.target(record.name()),
-            &encode(&Manifest { slot, chunks }, 200)?,
-        )?;
-        let mut leftovers = false;
-        if let Some(old) = old {
-            let base = self.target(&format!("{}/{}", record.name(), old.slot));
-            let clean = delete_chunks(&self.store, &base, old.chunks).is_ok();
-            self.clean[record.index()][old.slot] = clean;
-            leftovers = !clean;
-        }
-        Ok(leftovers)
-    }
-
-    fn erase(&mut self, record: Chunked) -> Result<(), VaultError> {
-        self.clean[record.index()] = [false; 2];
-        // The manifest goes first, so no interruption leaves it naming a deleted chunk.
-        self.store.delete(&self.target(record.name()))?;
-        let mut result = Ok(());
-        for slot in 0..2 {
-            let deleted = delete_chunks(
-                &self.store,
-                &self.target(&format!("{}/{slot}", record.name())),
-                MAX_CHUNKS,
-            )
-            .map_err(VaultError::from);
-            result = result.and(deleted);
-        }
-        result?;
-        self.assert_absent(record, None)?;
-        self.clean[record.index()] = [true; 2];
+    /// Writes a fresh generation and makes it current, with `marker` in the same commit.
+    fn write(
+        &mut self,
+        kind: Kind,
+        bytes: &SecretBytes,
+        marker: Option<SignOutMarker>,
+    ) -> Result<(), VaultError> {
+        let revision = self.authority.current(kind)?.revision;
+        let plan = self.authority.begin(kind, revision, bytes.expose().len())?;
+        let verified = generation::write(&self.store, &self.service, plan, bytes)?;
+        self.authority.activate(verified, marker)?;
+        self.sweep();
         Ok(())
     }
 
-    fn assert_absent(&self, record: Chunked, keep: Option<Manifest>) -> Result<(), VaultError> {
-        if keep.is_none() && self.store.get(&self.target(record.name()))?.is_some() {
+    fn remove(&mut self, kinds: &[Kind], marker: Option<SignOutMarker>) -> Result<(), VaultError> {
+        self.authority.remove(kinds, marker)?;
+        self.sweep();
+        Ok(())
+    }
+
+    fn assert_removed(&self, kind: Kind) -> Result<(), VaultError> {
+        if self.authority.current(kind)?.active.is_some() {
             return Err(VaultError::NotGone);
-        }
-        for slot in 0..2 {
-            for index in 0..MAX_CHUNKS {
-                if keep.is_some_and(|keep| keep.slot == slot && index < keep.chunks) {
-                    continue;
-                }
-                if self
-                    .store
-                    .get(&self.target(&format!("{}/{slot}/{index}", record.name())))?
-                    .is_some()
-                {
-                    return Err(VaultError::NotGone);
-                }
-            }
         }
         Ok(())
     }
@@ -533,26 +421,78 @@ impl<S: CredentialStore> Vault<S> {
         if sign_out.phase != Phase::Deleting {
             return Err(VaultError::Fenced);
         }
-        self.assert_absent(Chunked::Revoke, None)?;
-        let keep = match sign_out.disposition {
-            Disposition::Erase => None,
-            Disposition::Keep => {
-                if let Some(account) = self.load::<Account>(Chunked::Account)? {
-                    let account = account.expose();
-                    if account.tokens.is_some() || account.email.is_some() || account.plan_enabled {
-                        return Err(VaultError::Fenced);
-                    }
+        self.assert_removed(Kind::Revocations)?;
+        match sign_out.disposition {
+            Disposition::Erase => self.assert_removed(Kind::Account),
+            Disposition::Keep => match self.read::<Account>(Kind::Account)? {
+                Some(account)
+                    if account.expose().tokens.is_some()
+                        || account.expose().email.is_some()
+                        || account.expose().plan_enabled =>
+                {
+                    Err(VaultError::Fenced)
                 }
-                self.manifest(Chunked::Account)?
+                _ => Ok(()),
+            },
+        }
+    }
+
+    /// Deletes the 262 names earlier builds wrote, never reading one, until a clean pass in any
+    /// open after the first one ends it; a refused delete waits for the next open. The shell
+    /// still stages pastes at its legacy name, so every open deletes that one.
+    fn sweep_legacy(&mut self) {
+        match self.authority.legacy_owed() {
+            Ok(true) => {}
+            Ok(false) => {
+                // shortcut: the shell stages pastes at the legacy name until C7 stages them
+                // through the authority; C7 ends this delete.
+                if self
+                    .store
+                    .delete(&anthropic_staging_target(&self.service))
+                    .is_err()
+                {
+                    tracing::warn!("a staged key paste wasn't deleted");
+                }
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "earlier credential names weren't checked for cleanup");
+                return;
+            }
+        }
+        let refused = account_targets(&self.service)
+            .filter(|name| self.store.delete(name).is_err())
+            .count();
+        if refused > 0 {
+            tracing::warn!(refused, "earlier credential names weren't all deleted");
+        }
+        if let Err(error) = self.authority.legacy_deleted(refused) {
+            tracing::warn!(%error, "an earlier credential cleanup wasn't recorded");
+        }
+    }
+
+    /// One bounded pass over removed generations' names. A failure stays owed to a later pass,
+    /// and nothing the store returns changes which generation is current.
+    fn sweep(&mut self) {
+        let batch = match self.authority.retired(SWEEP) {
+            Ok(batch) => batch,
+            Err(error) => {
+                tracing::warn!(%error, "removed credentials weren't listed for cleanup");
+                return;
             }
         };
-        self.assert_absent(Chunked::Account, keep)
+        for retired in &batch {
+            let observed = generation::sweep(&self.store, &self.service, retired);
+            if let Err(error) = self.authority.observed(retired, observed) {
+                tracing::warn!(%error, "a credential cleanup wasn't recorded");
+            }
+        }
     }
 }
 
-fn saved(result: Result<bool, VaultError>) -> SaveResult {
+fn saved(result: Result<(), VaultError>) -> SaveResult {
     match result {
-        Ok(leftovers) => SaveResult::Committed { leftovers },
+        Ok(()) => SaveResult::Committed,
         Err(error) => SaveResult::NotCommitted(error),
     }
 }
@@ -624,6 +564,5 @@ fn valid_host(host: &str) -> bool {
 
 #[cfg(test)]
 pub(crate) mod fake;
-mod lane_store;
 #[cfg(test)]
 mod tests;

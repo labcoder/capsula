@@ -403,7 +403,7 @@ mod tests {
 
     #[test]
     fn compiled_records_charge_owned_fields_but_not_a_shared_log_record() {
-        let Record::Step(record) = parse_record(br#"{"step":{"id":"s","say":"say","put":[{"shape":{"id":"p","kind":"rect","box":[0,0,1,1]}}],"set":[{"target":"p","text":"tt","label":"lll","cells":["cc",1],"data":[1,2]}],"remove":["zz"],"start":{"after":"before","ms":0}}}"#).expect("typed record") else { panic!("step"); };
+        let Record::Step(record) = parse_record(br#"{"step":{"id":"s","say":"say","put":[{"shape":{"id":"p","kind":"rect","box":[0,0,1,1]}}],"set":[{"target":"p","text":"tt","label":"lll","info":"\u00e9\u00bd\u4e2d","cells":["cc",1],"data":[1,2]}],"remove":["zz"],"start":{"after":"before","ms":0}}}"#).expect("typed record") else { panic!("step"); };
         let original = Arc::new(record);
         assert_eq!(compiled_bytes(&original, &original), 0);
         let (copied, _, [allocated, released]) =
@@ -418,7 +418,7 @@ mod tests {
                 + size_of::<WireId>()
                 + 2 * size_of::<Cell>()
                 + 2 * size_of::<Point>()
-                + 21
+                + 28
         );
     }
 

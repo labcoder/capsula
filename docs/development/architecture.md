@@ -149,7 +149,7 @@ flowchart LR
 **3D** uses a CPU depth-buffered raster; the planned shell host paints its BGRA image because
 GPUI on Windows has no depth buffer for element content. Opaque solids write per-sample depth;
 translucent polygons follow in centroid order without writing depth, which can blend intersecting
-translucent geometry in the wrong order (OSC-218). Rest frames supersample edges. The scene frame
+translucent geometry in the wrong order (OSC-242). Rest frames supersample edges. The scene frame
 stage transforms indexed source geometry at the sampled, attachment-composed pose, culls back
 faces, clips near and guard planes in f64, projects, snaps and shades into reserved raster scratch.
 Every source face shares one reciprocal-depth plane across its triangles. Camera defaults target
@@ -236,7 +236,7 @@ It runs with an allowlisted environment, telemetry opt-outs, and a working folde
 
 - Kumochi itself sends no telemetry. Nothing leaves the machine except calls to the accounts you set up.
 - Claude Code is your own program. Kumochi asks it to switch telemetry off, shows what it reports, and runs it either way.
-- Secrets live only in Windows Credential Manager, never in logs, arguments or files.
+- Secrets live only in Windows Credential Manager, never in logs, arguments or files. The one exception: Claude Code's own credential file may exist only inside Kumochi's Claude Code folder, readable by the user and SYSTEM only. Kumochi never reads, copies or relays its contents, and Disconnect removes it (logout, then delete).
 - Prompts, transcripts and screenshots are never logged.
 
 ## Where to read next

@@ -406,13 +406,28 @@ fn measure_clear_cut_and_eviction_at_the_global_object_cap() {
             cuts.iter().map(|cut| cut.cut.revealed.len()).sum::<usize>(),
             1500
         );
+        let mut scenes = [(0, 0, 0); 4];
         let start = Instant::now();
-        for cut in cuts.iter().cloned() {
-            let effects =
-                super::acknowledge(&mut presenter, cut.scene, 1, cut.cut, now).expect("kept cut");
-            assert!(controls(&effects).is_empty());
+        let mut mark = start;
+        for (cut, scene) in cuts.iter().zip(&mut scenes) {
+            let owned = cut.clone();
+            let cloned = Instant::now();
+            let id = owned.scene;
+            assert!(
+                controls(
+                    &super::acknowledge(&mut presenter, id, 1, owned.cut, now).expect("kept cut")
+                )
+                .is_empty()
+            );
+            let acked = Instant::now();
+            *scene = (
+                id.0,
+                (cloned - mark).as_nanos(),
+                (acked - cloned).as_nanos(),
+            );
+            mark = acked;
         }
-        let cut_ns = start.elapsed().as_nanos();
+        let cut_ns = (mark - start).as_nanos();
         assert_eq!(presenter.global.usage().objects, 1500);
 
         let (mut presenter, now) = disposal_fixture();
@@ -426,15 +441,21 @@ fn measure_clear_cut_and_eviction_at_the_global_object_cap() {
         assert_eq!(presenter.global.usage().objects, 0);
         assert_eq!(presenter.residency(), 0);
         if iteration >= 8 {
-            rows.push((clear_ns, stop_ns, cut_ns, eviction_ns));
+            rows.push((clear_ns, stop_ns, cut_ns, eviction_ns, scenes));
         }
     }
     println!(
-        "cap_disposal objects=1500 scenes=4 warmups=8 samples=128; UI reduction and deferred transfer, not destructor completion or IPC latency"
+        "cap_disposal objects=1500 scenes=4 warmups=8 samples=128; UI reduction and deferred transfer, not destructor completion or IPC latency; cut_apply_all_ns spans every scene's owned cut clone and acknowledgement, cap_cut_scene_sample splits each scene's"
     );
-    for (clear_ns, stop_ns, cut_ns, eviction_ns) in rows {
+    for (sample, (clear_ns, stop_ns, cut_ns, eviction_ns, scenes)) in rows.into_iter().enumerate() {
         println!(
             "cap_disposal_sample clear_ns={clear_ns} stop_ns={stop_ns} cut_apply_all_ns={cut_ns} eviction_ns={eviction_ns}"
         );
+        for (scene, clone_ns, ack_ns) in scenes {
+            println!(
+                "cap_cut_scene_sample sample={sample} scene={scene} clone_ns={clone_ns} ack_ns={ack_ns} scene_ns={}",
+                clone_ns + ack_ns
+            );
+        }
     }
 }

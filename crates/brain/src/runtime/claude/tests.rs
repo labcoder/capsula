@@ -18,7 +18,6 @@ use crate::engines::claude_code::lane::tests::{
     Base, V, host, host_finding, locked, marked, soon, started,
 };
 use crate::platform::Job;
-use crate::platform::credential::CredentialStore;
 use crate::runtime::account::{Accounts, Net};
 use crate::runtime::connections::ConnectionEvent;
 use crate::test_support::{self, Scratch};
@@ -53,11 +52,11 @@ async fn found(name: &str, mode: &str, sign_in: SignInStore) -> ClaudeCodeView {
 #[tokio::test]
 async fn a_found_install_shows_by_its_sign_in_and_the_store() {
     assert_eq!(
-        found("view-undecided", "out", SIGN_IN).await,
+        found("view-undecided", "out", SignInStore::Undecided).await,
         ClaudeCodeView::Unsupported(Unsupported::SignInStore)
     );
     assert_eq!(
-        found("view-file", "out", SignInStore::FileWithDacl).await,
+        found("view-shipped", "out", SIGN_IN).await,
         ClaudeCodeView::SignedOut { version: V }
     );
     assert_eq!(found("view-in", "in", SIGN_IN).await, READY);
@@ -84,8 +83,7 @@ async fn finds_asked_for_while_one_runs_coalesce_into_one_more() {
 }
 
 #[tokio::test]
-async fn under_the_shipped_gate_connect_has_no_effect() {
-    assert_eq!(SIGN_IN, SignInStore::Undecided, "the gate under test ships");
+async fn under_the_undecided_gate_connect_has_no_effect() {
     let scratch = Scratch::new("claude-connect");
     let mut brain = test_support::brain(&scratch, "");
     let base = Base::new("connect");
@@ -99,7 +97,11 @@ async fn under_the_shipped_gate_connect_has_no_effect() {
         }),
     );
     let lane = Lane::start(host).expect("lane");
-    brain.attach_claude(Claude::new(Some(lane), SIGN_IN, ClaudeCodeView::NotFound));
+    brain.attach_claude(Claude::new(
+        Some(lane),
+        SignInStore::Undecided,
+        ClaudeCodeView::NotFound,
+    ));
     let before = brain.connections_frame();
     for op in [
         ConnectionOp::ConnectClaudeCode,
@@ -138,16 +140,14 @@ impl Http for EmptyCatalog {
     }
 }
 
-/// A brain whose Anthropic key is staged, so `AnthropicKeyStaged` takes it to Ready.
-pub(in crate::runtime) fn brain_with_a_staged_key(scratch: &Scratch) -> Brain {
+/// A brain with a saved Anthropic key, so `CheckAnthropicKey` takes it to Ready.
+pub(in crate::runtime) fn brain_with_a_saved_key(scratch: &Scratch) -> Brain {
     let store = FakeStore::default();
-    store
-        .set(
-            "anthropic-key-staged.key-test",
-            &Secret::new(Zeroizing::new(b"sk-ant-api-fake-staged-value".to_vec())),
-        )
-        .expect("fake paste");
     let lock = scratch.db().with_file_name("key-test.lock");
+    Vault::with_service(store.clone(), "key-test", &lock)
+        .expect("seed vault")
+        .save_anthropic_key(b"sk-ant-api-fake-saved-value")
+        .expect("saved key");
     let worker = Worker::new(
         Box::new(move || Vault::with_service(store.clone(), "key-test", &lock)),
         Arc::new(FixedClock(0)),
@@ -167,7 +167,7 @@ pub(in crate::runtime) fn brain_with_a_staged_key(scratch: &Scratch) -> Brain {
 async fn key_ready(brain: &mut Brain) -> Vec<ControlToShell> {
     brain
         .account
-        .connection_event(ConnectionEvent::Op(ConnectionOp::AnthropicKeyStaged));
+        .connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey));
     timeout(Duration::from_secs(10), async {
         loop {
             let event = brain.account.next().await;
@@ -208,7 +208,7 @@ const BOTH_READY: ControlToShell = ControlToShell::Connections(ConnectionsView {
 #[tokio::test]
 async fn claudes_frame_carries_the_key_that_moved_while_its_status_was_out() {
     let scratch = Scratch::new("claude-compose-key-first");
-    let mut brain = brain_with_a_staged_key(&scratch);
+    let mut brain = brain_with_a_saved_key(&scratch);
     brain.attach_claude(status_out());
     key_ready(&mut brain).await;
     release(&mut brain);
@@ -218,7 +218,7 @@ async fn claudes_frame_carries_the_key_that_moved_while_its_status_was_out() {
 #[tokio::test]
 async fn the_keys_frame_carries_claude_codes_view() {
     let scratch = Scratch::new("claude-compose-claude-first");
-    let mut brain = brain_with_a_staged_key(&scratch);
+    let mut brain = brain_with_a_saved_key(&scratch);
     brain.attach_claude(status_out());
     release(&mut brain);
     let frames = key_ready(&mut brain).await;

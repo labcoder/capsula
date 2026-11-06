@@ -48,6 +48,17 @@ impl Setup {
         Connection::open(self.path()).expect("raw connection")
     }
 
+    /// How many generations are Removed and not yet Swept.
+    fn removed(&self) -> i64 {
+        self.raw()
+            .query_row(
+                "SELECT count(*) FROM generations WHERE state = 'removed'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count")
+    }
+
     fn save(&self, authority: &mut Authority, kind: Kind, secret: &SecretBytes) -> ActiveRef {
         let revision = authority.current(kind).expect("head").revision;
         let plan = authority
@@ -235,7 +246,7 @@ fn begin_and_activate_compare_and_swap_the_head() {
         authority.current(Kind::Host).expect("other head").revision,
         0
     );
-    let retired = authority.retired(None, 16).expect("retired");
+    let retired = authority.retired(16).expect("retired");
     assert!(
         retired
             .iter()
@@ -279,7 +290,7 @@ fn a_candidate_from_before_a_restart_never_activates() {
         Some(old)
     );
     assert_eq!(
-        authority.retired(None, 16).expect("retired").len(),
+        authority.retired(16).expect("retired").len(),
         1,
         "the candidate is owed a sweep"
     );
@@ -294,7 +305,7 @@ fn a_removal_stays_final_when_the_store_serves_the_deleted_value_again() {
     authority
         .remove(&[Kind::AnthropicKey], None)
         .expect("remove");
-    let retired = authority.retired(None, 16).expect("retired");
+    let retired = authority.retired(16).expect("retired");
     assert_eq!(
         io::sweep(&setup.store, SERVICE, &retired[0]),
         Observed::Absent
@@ -465,15 +476,15 @@ fn a_removed_generation_is_swept_only_after_a_clean_read_in_a_later_open() {
     let active = setup.save(&mut authority, Kind::Host, &secret(1, 45));
     let before = setup.store.snapshot();
     authority.remove(&[Kind::Host], None).expect("remove");
-    let retired = authority.retired(None, 16).expect("retired")[0];
+    let retired = authority.retired(16).expect("retired")[0];
     assert_eq!(io::sweep(&setup.store, SERVICE, &retired), Observed::Absent);
     authority
         .observed(&retired, Observed::Absent)
         .expect("observed");
-    assert_eq!(
-        authority.retired(None, 16).expect("still owed").len(),
-        1,
-        "same open isn't enough"
+    assert_eq!(setup.removed(), 1, "same open isn't enough");
+    assert!(
+        authority.retired(16).expect("retired").is_empty(),
+        "this open has swept it"
     );
     drop(authority);
     let mut authority = setup.open();
@@ -492,7 +503,7 @@ fn a_removed_generation_is_swept_only_after_a_clean_read_in_a_later_open() {
         .observed(&retired, Observed::Absent)
         .expect("observed");
     assert_eq!(
-        authority.retired(None, 16).expect("retired").len(),
+        setup.removed(),
         1,
         "the resurrection reset the clock to this open"
     );
@@ -502,10 +513,7 @@ fn a_removed_generation_is_swept_only_after_a_clean_read_in_a_later_open() {
     authority
         .observed(&retired, Observed::Absent)
         .expect("observed");
-    assert!(
-        authority.retired(None, 16).expect("retired").is_empty(),
-        "now Swept"
-    );
+    assert_eq!(setup.removed(), 0, "now Swept");
     assert!(matches!(
         authority.observed(&retired, Observed::Absent),
         Err(AuthorityError::Conflict)
@@ -519,8 +527,8 @@ fn one_sweep_pass_is_bounded_however_many_generations_retired() {
     for round in 0..20 {
         setup.save(&mut authority, Kind::Account, &secret(round, 10));
     }
-    assert_eq!(authority.retired(None, 100).expect("all").len(), 19);
-    assert_eq!(authority.retired(None, 16).expect("one pass").len(), 16);
+    assert_eq!(authority.retired(100).expect("all").len(), 19);
+    assert_eq!(authority.retired(16).expect("one pass").len(), 16);
 }
 
 #[test]
@@ -531,15 +539,19 @@ fn a_bounded_sweep_reaches_every_retired_generation() {
     for round in 0..33 {
         active = Some(setup.save(&mut authority, Kind::Account, &secret(round, 10)));
     }
-    let first = authority.retired(None, 16).expect("first pass");
+    let first = authority.retired(16).expect("first pass");
     for retired in &first {
         assert_eq!(io::sweep(&setup.store, SERVICE, retired), Observed::Absent);
         authority
             .observed(retired, Observed::Absent)
             .expect("observed");
     }
-    let second = authority.retired(first.last(), 16).expect("second pass");
+    let second = authority.retired(16).expect("second pass");
     assert_eq!((first.len(), second.len()), (16, 16));
+    assert!(
+        second.iter().all(|retired| !first.contains(retired)),
+        "the second pass moves past the first"
+    );
     for retired in &second {
         assert_eq!(io::sweep(&setup.store, SERVICE, retired), Observed::Absent);
         authority
@@ -552,17 +564,44 @@ fn a_bounded_sweep_reaches_every_retired_generation() {
         "every retired generation's names were visited"
     );
     assert!(
-        authority
-            .retired(second.last(), 16)
-            .expect("end")
-            .is_empty(),
-        "the round ends"
+        authority.retired(16).expect("end").is_empty(),
+        "this open has visited them all"
     );
+    drop(authority);
+    let authority = setup.open();
     assert_eq!(
-        authority.retired(None, 16).expect("next round"),
+        authority.retired(16).expect("next open"),
         first,
-        "a new round revisits what is still owed"
+        "the next open revisits what is still owed"
     );
+}
+
+/// CAPS-176 233-2-M1: 16 generations whose deletes are always refused can't hold back a 17th
+/// across opens that each run a single pass.
+#[test]
+fn refused_sweeps_never_starve_a_later_generation_across_opens() {
+    let setup = Setup::new("auth-sweep-fair");
+    let mut authority = setup.open();
+    for round in 0..18 {
+        setup.save(&mut authority, Kind::Account, &secret(round, 10));
+    }
+    let owed = authority.retired(100).expect("every retired generation");
+    assert_eq!(owed.len(), 17);
+    setup.store.0.lock().expect("fake lock").refusing = true;
+    for retired in &authority.retired(16).expect("first open's pass") {
+        let observed = io::sweep(&setup.store, SERVICE, retired);
+        assert_eq!(observed, Observed::Remains);
+        authority.observed(retired, observed).expect("observed");
+    }
+    drop(authority);
+    let authority = setup.open();
+    let next = authority.retired(16).expect("second open's pass");
+    assert_eq!(next.len(), 16);
+    assert_eq!(
+        next[0], owed[16],
+        "the never-attempted generation comes first"
+    );
+    assert_eq!(next[1..], owed[..15], "then the longest waiting");
 }
 
 #[test]
@@ -603,12 +642,87 @@ fn missing_or_invalid_rows_and_newer_files_are_refused() {
     ));
     setup
         .raw()
-        .execute_batch("PRAGMA user_version = 2")
+        .execute_batch("PRAGMA user_version = 3")
         .expect("newer");
     assert!(matches!(
         Authority::open(&setup.path(), &setup.lock),
         Err(AuthorityError::NewerSchema)
     ));
+}
+
+/// A version 1 file gains the legacy cleanup's columns, still owed, and keeps its rows exactly.
+#[test]
+fn a_version_one_file_is_migrated_with_the_legacy_cleanup_owed() {
+    let setup = Setup::new("auth-migrate");
+    let mut authority = setup.open();
+    let value = secret(7, 45);
+    let saved = setup.save(&mut authority, Kind::Host, &value);
+    authority
+        .set_marker(SignOutMarker::fail_closed())
+        .expect("a nondefault marker");
+    drop(authority);
+    setup
+        .raw()
+        .execute_batch(
+            "ALTER TABLE control DROP COLUMN legacy_done;
+             ALTER TABLE control DROP COLUMN legacy_deleted_in;
+             PRAGMA user_version = 1;",
+        )
+        .expect("a version 1 file");
+    let authority = setup.open();
+    assert!(authority.legacy_owed().expect("owed"));
+    assert_eq!(
+        authority.current(Kind::Host).expect("head").active,
+        Some(saved)
+    );
+    let read = io::read(&setup.store, SERVICE, &saved).expect("read");
+    assert!(
+        read.expose() == value.expose(),
+        "the saved bytes read back exactly"
+    );
+    assert_eq!(
+        authority.marker().expect("marker"),
+        SignOutMarker::fail_closed()
+    );
+    let version: i64 = setup
+        .raw()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("version");
+    assert_eq!(version, 2);
+}
+
+/// The legacy cleanup ends only after a clean pass in any open after the first pass's open.
+#[test]
+fn the_legacy_cleanup_ends_after_a_clean_pass_in_a_later_open() {
+    let setup = Setup::new("auth-legacy");
+    let mut authority = setup.open();
+    assert!(authority.legacy_owed().expect("owed"));
+    authority.legacy_deleted(0).expect("first clean pass");
+    assert!(authority.legacy_owed().expect("one open isn't enough"));
+    drop(authority);
+    let mut authority = setup.open();
+    authority.legacy_deleted(1).expect("a refused pass");
+    assert!(authority.legacy_owed().expect("a refusal never ends it"));
+    drop(authority);
+    let mut authority = setup.open();
+    authority.legacy_deleted(0).expect("a later clean pass");
+    assert!(!authority.legacy_owed().expect("done"));
+    drop(authority);
+    assert!(!setup.open().legacy_owed().expect("done for good"));
+}
+
+/// A second pass in the same open never ends the cleanup; the next open's clean pass does.
+#[test]
+fn two_clean_passes_in_one_open_leave_the_legacy_cleanup_owed() {
+    let setup = Setup::new("auth-legacy-same-open");
+    let mut authority = setup.open();
+    authority.legacy_deleted(0).expect("first clean pass");
+    authority.legacy_deleted(0).expect("second clean pass");
+    assert!(authority.legacy_owed().expect("the same open isn't later"));
+    drop(authority);
+    let mut authority = setup.open();
+    authority.legacy_deleted(0).expect("a later clean pass");
+    assert!(!authority.legacy_owed().expect("done"));
 }
 
 #[test]
@@ -669,10 +783,7 @@ fn debug_output_names_no_generation_or_value() {
     assert!(!shown.contains(&hex), "no generation in Debug");
     let verified = io::write(&setup.store, SERVICE, plan, &secret(b'S', 4)).expect("write");
     let active = authority.activate(verified, None).expect("activate");
-    let shown = format!(
-        "{active:?} {:?}",
-        authority.retired(None, 16).expect("retired")
-    );
+    let shown = format!("{active:?} {:?}", authority.retired(16).expect("retired"));
     assert!(
         !shown.contains(&hex) && !shown.contains("SSSS"),
         "no secret or generation"

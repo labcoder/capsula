@@ -21,11 +21,11 @@ use io::Verified;
 /// The authority's file in the data folder; not the history store, so no purge touches it.
 pub(crate) const FILE: &str = "credentials.db";
 /// The newest schema this build knows; a newer file is refused, never downgraded.
-const VERSION: i64 = 1;
+const VERSION: i64 = 2;
 /// The sign-out marker's JSON bound, as the vault had it.
 const MARKER_BYTES: usize = 200;
 
-/// Version 1. `bytes` is bounded by `MAX_RECORD_BYTES`; Swept rows keep only their identity.
+/// Version 2. `bytes` is bounded by `MAX_RECORD_BYTES`; Swept rows keep only their identity.
 const SCHEMA: &str = "
 CREATE TABLE heads (
     kind TEXT PRIMARY KEY CHECK (kind IN ('host', 'chatgpt', 'revoke', 'anthropic')),
@@ -48,8 +48,16 @@ CREATE INDEX removed ON generations (state) WHERE state = 'removed';
 CREATE TABLE control (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     lifetime INTEGER NOT NULL CHECK (lifetime >= 0),
-    marker TEXT NOT NULL
+    marker TEXT NOT NULL,
+    legacy_deleted_in INTEGER,
+    legacy_done INTEGER NOT NULL DEFAULT 0 CHECK (legacy_done IN (0, 1))
 ) STRICT;
+";
+/// Version 1 to 2: the legacy cleanup's progress.
+const LEGACY: &str = "
+ALTER TABLE control ADD COLUMN legacy_deleted_in INTEGER;
+ALTER TABLE control ADD COLUMN legacy_done INTEGER NOT NULL DEFAULT 0 CHECK (legacy_done IN (0, 1));
+PRAGMA user_version = 2;
 ";
 
 /// Why the authority refused; no name, generation or secret is carried.
@@ -241,8 +249,6 @@ pub(crate) struct Retired {
     kind: Kind,
     generation: Generation,
     layout: Layout,
-    /// Its place in the backlog, so the next pass starts after it.
-    row: i64,
 }
 
 /// The open authority, held by the credential worker under its session lock.
@@ -287,8 +293,9 @@ impl Authority {
                     "INSERT INTO control (id, lifetime, marker) VALUES (1, 0, ?1)",
                     [marker_json(SignOutMarker::default())?],
                 )?;
-                tx.execute_batch("PRAGMA user_version = 1")?;
+                tx.execute_batch("PRAGMA user_version = 2")?;
             }
+            1 => tx.execute_batch(LEGACY)?,
             VERSION => {}
             newer if newer > VERSION => return Err(AuthorityError::NewerSchema),
             _ => return Err(AuthorityError::Corrupt),
@@ -453,39 +460,67 @@ impl Authority {
         write_marker(&self.conn, marker)
     }
 
-    /// The oldest Removed generations after `after`, at most `limit`, so a sweep pass is bounded
-    /// however many were ever made and still reaches the newest. An empty list ends a round; the
-    /// next round starts from `None` and revisits what remained. A cursor is for this open only.
+    /// Whether the names earlier builds wrote still need deleting.
+    ///
+    /// # Errors
+    /// Fails on a SQLite failure or a missing control row.
+    pub(crate) fn legacy_owed(&self) -> Result<bool, AuthorityError> {
+        let done: i64 = self
+            .conn
+            .query_row("SELECT legacy_done FROM control WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .optional()?
+            .ok_or(AuthorityError::Corrupt)?;
+        Ok(done == 0)
+    }
+
+    /// Records this open's legacy pass and how many of its deletes were refused. A clean pass
+    /// in any open after the first pass's open ends the cleanup, as a clean sweep in a later
+    /// open ends a generation's; a second pass in the same open never does.
+    ///
+    /// # Errors
+    /// Fails on a SQLite failure.
+    pub(crate) fn legacy_deleted(&mut self, refused: usize) -> Result<(), AuthorityError> {
+        self.conn.execute(
+            "UPDATE control SET legacy_done = (?1 = 0 AND legacy_deleted_in IS NOT NULL
+             AND legacy_deleted_in < ?2), legacy_deleted_in = ?2 WHERE id = 1",
+            params![
+                i64::try_from(refused).map_err(|_| AuthorityError::Bounds)?,
+                self.lifetime
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// At most `limit` Removed generations this open hasn't swept yet, so a pass is bounded
+    /// however many were ever made and the next pass reaches the ones after. One that fails or
+    /// comes back waits for the next open. Never-attempted ones come first, then the longest
+    /// waiting, so failures that never clear can't hold back the rest across opens.
     ///
     /// # Errors
     /// Fails on a SQLite failure or an invalid row.
-    pub(crate) fn retired(
-        &self,
-        after: Option<&Retired>,
-        limit: usize,
-    ) -> Result<Vec<Retired>, AuthorityError> {
+    pub(crate) fn retired(&self, limit: usize) -> Result<Vec<Retired>, AuthorityError> {
         let limit = i64::try_from(limit).map_err(|_| AuthorityError::Bounds)?;
         let mut statement = self.conn.prepare(
-            "SELECT generation, kind, chunks, bytes, rowid FROM generations
-             WHERE state = 'removed' AND rowid > ?1 ORDER BY rowid LIMIT ?2",
+            "SELECT generation, kind, chunks, bytes FROM generations
+             WHERE state = 'removed' AND (deleted_in IS NULL OR deleted_in < ?1)
+             ORDER BY deleted_in IS NOT NULL, deleted_in, rowid LIMIT ?2",
         )?;
-        let rows =
-            statement.query_map(params![after.map_or(0, |after| after.row), limit], |row| {
-                Ok((
-                    row.get::<_, Vec<u8>>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            })?;
+        let rows = statement.query_map(params![self.lifetime, limit], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })?;
         rows.map(|row| {
-            let (generation, kind, chunks, bytes, row) = row?;
+            let (generation, kind, chunks, bytes) = row?;
             Ok(Retired {
                 kind: Kind::parse(&kind)?,
                 generation: Generation::from_sql(&generation)?,
                 layout: Layout::from_sql(chunks, bytes)?,
-                row,
             })
         })
         .collect()

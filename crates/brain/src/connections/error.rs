@@ -3,6 +3,7 @@
 
 use std::io;
 
+use super::authority::AuthorityError;
 use crate::platform::SessionLockError;
 use crate::platform::credential::CredentialStoreError;
 
@@ -36,6 +37,24 @@ pub enum VaultError {
     /// The host identifier could not be generated.
     #[error("account host randomness is unavailable")]
     Random(#[from] getrandom::Error),
+    /// The credential authority is unavailable or refused a transition.
+    #[error("account authority is unavailable")]
+    Authority,
+}
+
+impl From<AuthorityError> for VaultError {
+    fn from(error: AuthorityError) -> Self {
+        match error {
+            AuthorityError::Store(error) => Self::Store(error),
+            AuthorityError::Unsettled => Self::Store(CredentialStoreError::Unsettled),
+            AuthorityError::Bounds => Self::Bounds,
+            AuthorityError::Corrupt => Self::Unreadable,
+            AuthorityError::Random(error) => Self::Random(error),
+            AuthorityError::Unavailable(_)
+            | AuthorityError::NewerSchema
+            | AuthorityError::Conflict => Self::Authority,
+        }
+    }
 }
 
 impl VaultError {
@@ -45,14 +64,7 @@ impl VaultError {
     pub fn is_damage(&self) -> bool {
         matches!(
             self,
-            Self::Unreadable
-                | Self::Bounds
-                | Self::Store(
-                    CredentialStoreError::MissingChunk
-                        | CredentialStoreError::InvalidChunkLength
-                        | CredentialStoreError::InvalidChunkCount
-                        | CredentialStoreError::InvalidBlob,
-                )
+            Self::Unreadable | Self::Bounds | Self::Store(CredentialStoreError::InvalidBlob)
         )
     }
 }

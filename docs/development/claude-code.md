@@ -127,7 +127,15 @@ version: its launch policy and the facts its audit expects. Any other version is
   `DISABLE_ERROR_REPORTING`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`,
   `CLAUDE_CODE_SKIP_PROMPT_HISTORY` and `CLAUDE_CODE_DISABLE_AUTO_MEMORY`. `SystemRoot`,
   `SystemDrive` and `PATH` come from the OS (`platform::system_env`): `PATH` is the system folder
-  then the Windows folder, never the brain's own `PATH`, and there's no `PATHEXT`.
+  then the Windows folder, never the brain's own `PATH`, and there's no `PATHEXT`. `auth login`
+  alone also gets `BROWSER`, the Windows folder's `explorer.exe` (`platform::login_browser`):
+  Claude Code's own opener (`rundll32 url,OpenURL`) would start the browser with this
+  environment and its owned folders; on Rez no browser came up. A second explorer is meant to pass
+  the URL to the running shell, which opens the default browser in the user's own environment, so
+  the localhost callback completes with no pasted code. Shown so far: with `BROWSER` set, `auth
+  login` takes the listener branch and calls `BROWSER` once with one argument. Unverified until the
+  live sign-in: that explorer.exe opens the browser, that the callback completes without a code,
+  and what a Windows folder path with spaces does.
 - **Ownership.** C3 returns owned `LaunchData`; C2 and C5a keep it alive and borrow it into
   `platform::Launch` with the exe, the `work` folder, the stdio and the jobs. C3 starts nothing.
 - **Before any launch,** `may_launch` refuses with `PolicyFailed::ManagedPolicy` when an endpoint
@@ -179,7 +187,9 @@ sequenceDiagram
   also makes no folder, but the walk runs after missing standard folders are made, so they stay. When another brain
   holds the lock, or this one doesn't hold the vault's, the view is `InUse`.
 - **Signed in.** `auth status --json` must exit 0 or 1 and name exactly Kumochi's `config` folder
-  as `configDirectory`, byte for byte; anything else fails closed.
+  as `configDirectory`, byte for byte; anything else fails closed. Signed in counts only with
+  `authMethod` `claude.ai` and `apiProvider` `firstParty`: a key, a token, another provider or a
+  missing field is `Malformed`. Signed out, neither field is judged.
 - **One job per process,** nested in the brain job. A call ends only when its root has exited, its
   job is terminated and confirmed empty, and both pipes have ended. If the job can't be confirmed
   empty the lane is stuck: it refuses everything, never lets the lock go, and shows `Unavailable`.
@@ -197,11 +207,12 @@ sequenceDiagram
 - **Close.** `Brain::quit` and `Brain::close` close the lane before the accounts: no more work, the
   running call's processes end, queued jobs are dropped, and the lock goes only once every job was
   confirmed empty.
-- **The sign-in store isn't decided** (owner call 1), so `SIGN_IN` ships `Undecided`: Connect,
-  Cancel and Disconnect do nothing, and a signed-out install shows `Unsupported(SignInStore)`.
-  Everything under "Signing in and out" below is built and tested against the fake, and stays
-  dormant until the owner picks `FileWithDacl`. Under `Undecided`, a sign-in found in the owned
-  folder is shown but must never be used: C5a's question path checks the store, not only Ready.
+- **The sign-in store** is option a (owner call 1, 2026-11-05), so `SIGN_IN` ships
+  `FileWithDacl`. It's the one exception to keeping secrets only in Credential Manager: Claude Code's own credential file may exist only inside Kumochi's Claude Code folder, readable by the user and SYSTEM only. Kumochi never reads, copies or relays its contents. It opens handles only to check the file's metadata and permissions, and to delete it. Disconnect removes it (logout, then delete).
+  Connect, Cancel and Disconnect work as "Signing in and out" below describes. `Undecided`, the
+  off position, stays for tests: Connect, Cancel and Disconnect do nothing, a signed-out install
+  shows `Unsupported(SignInStore)`, and a sign-in found in the owned folder is shown but never
+  used, because C5a's question path checks the store, not only Ready.
 - **One view.** The key's half of `ConnectionsView` belongs to the account worker and Claude Code's
   half to `runtime/claude.rs`; every Connections frame is put together from both when it's sent.
 
@@ -268,9 +279,17 @@ sequenceDiagram
     Note over B: tools/call is admitted only while the gate is Passed
 ```
 
-- **Before stdin:** the version; no commands; exactly the reviewed agents; then
-  `account.tokenSource`. `"none"` means signed out: the launch is torn down before stdin and the run
-  fails with `ClaudeCodeSignedOut`, not an audit failure. Any other value must be reviewed. Then
+- **Before stdin:** the version; no commands; exactly the reviewed agents; then `account`, by
+  shape, first failure wins. The stream parser reads `account` straight into its four judged
+  fields as the line is parsed, so `email` and `organization` are never held. A missing account,
+  an `apiProvider` that isn't a string, or a `tokenSource` or `subscriptionType` that is present
+  but not a string (null included) is `Malformed`. An `apiProvider` other than `firstParty` is
+  `TokenSource` (a third-party provider). An `apiKeySource` that is present at all, null included,
+  is `KeySource` (a key from the environment, settings or a helper overrides the sign-in). `tokenSource` `"none"` with no `subscriptionType` is signed
+  out: the launch is torn down before stdin and the run fails with `ClaudeCodeSignedOut`, not an
+  audit failure. A `subscriptionType` with no `tokenSource`, or with exactly `"claude.ai"`, is
+  the stored sign-in (2.1.306 sends no `tokenSource` for it). Anything else is `TokenSource`.
+  Then
   exactly one server, `kumochi`, `connected`, whose tools are exactly the launch's frozen set. An
   error response, an unknown or repeated id, or a body of the wrong shape is `Malformed`.
 - **After the seed:** `system:init` must show the version, exactly the frozen tool set, the one
@@ -281,8 +300,6 @@ sequenceDiagram
   already admitted isn't undone; a call still waiting for admission is refused.
 - **The stated limit:** the seed can reach the chosen model before init is checked, but no tool
   runs before the check.
-- **Signed-in sources aren't recorded yet,** so 2.1.306's row accepts no `tokenSource` but `none`
-  (signed out). The signed-in probe, after owner call 1, adds the value.
 
 The brain's side of the pipe, and the launch that writes `mcp.json`, come with C4b and C5a.
 On macOS the pipe would be a Unix socket in the owned folder (unverified).
