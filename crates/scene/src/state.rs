@@ -78,7 +78,7 @@ pub fn refuse_three_dimensional(step: &Step) -> Result<(), StepError> {
         let path = match op {
             crate::Op::View3d(_) | crate::Op::Solid(_) => Some(path),
             crate::Op::Anim(anim) if matches!(anim.track, Track::Pos3 | Track::Rot3) => {
-                Some(path.field("track"))
+                Some(path)
             }
             crate::Op::Anim(anim) => anim
                 .keys

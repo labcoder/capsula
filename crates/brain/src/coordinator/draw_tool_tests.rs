@@ -237,7 +237,7 @@ fn every_third_step_preflight_failure_has_zero_durable_scene_writes() {
     }
 }
 
-fn preflight_failure(third: Value, code: &str) {
+fn preflight_failure(third: Value, expected_error: &str) {
     let scratch = Scratch::new("draw-tool-preflight");
     let mut store = store(&scratch);
     let mut core = offered(vec![T]);
@@ -259,7 +259,7 @@ fn preflight_failure(third: Value, code: &str) {
         panic!("typed refusal, not bare Invalid");
     };
     assert!(text.starts_with("drawn: []; stopped: step s3: "));
-    assert!(text.ends_with(code));
+    assert!(text.ends_with(expected_error));
     let expected = ToolOutput::Text(text.clone());
     assert_eq!(
         call(&mut core, "bad", &args(None)).0,
