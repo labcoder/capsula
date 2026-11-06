@@ -522,6 +522,19 @@ fn a_lagged_loss_queue_still_skips_old_workers_losses() {
     assert_eq!(harness.reports(1), [report(1, LoadEvent::Lost)]);
 }
 
+/// An overflow that keeps the served worker's own loss still reports it lost, and one that keeps
+/// only older workers' losses doesn't.
+#[test]
+fn a_lagged_read_finds_the_served_workers_loss_and_skips_older_ones() {
+    let (sender, mut kept_own) = broadcast::channel(2);
+    let mut only_older = sender.subscribe();
+    for dead in 0..4 {
+        sender.send(Generation(dead)).expect("subscribed");
+    }
+    assert!(super::lost(&mut kept_own, Generation(3)));
+    assert!(!super::lost(&mut only_older, Generation(4)));
+}
+
 #[test]
 fn a_decode_before_any_load_is_not_loaded() {
     let harness = Harness::new();

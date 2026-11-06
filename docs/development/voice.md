@@ -30,10 +30,9 @@ nothing downloads them.
 
 `brain::voice::download::Downloader` installs one part from the pinned manifest. Its caller
 supplies the models folder under `platform::data_dir`. Construction makes no request, and
-startup never resumes anything automatically; the install task and UI arrive in PR 8. The wire
-types (`InstallVoice`, `RemoveVoice`, `CancelVoiceInstall`, `VoiceView`, `PartState` and the
-`Voice*` error keys) and the saved talk-back and unload settings are in place; the installer ops
-are refused until the installer lands (see [settings](settings.md#config-keys)).
+startup never resumes anything automatically. `InstallVoice`, `RemoveVoice` and
+`CancelVoiceInstall` are still refused (see [settings](settings.md#config-keys)); what start-up
+does with parts already installed is in [The installer](#the-installer).
 
 The separate HTTPS client uses the OS trust roots, no proxy, credentials, cookies, Referer or
 compression, and `Accept-Encoding: identity`. The first URL and up to five redirects must use
@@ -183,8 +182,9 @@ flowchart LR
 ### A spoken run
 
 A run speaks when spoken replies are loaded and the connection has sent `AudioOutput` when the run
-is admitted. Otherwise it gets no reply, and its text and steps run as before. Until slice 7's
-PR 8 installs voice, nothing loads spoken replies, so no run speaks yet.
+is admitted. Otherwise it gets no reply, and its text and steps run as before. Spoken replies
+count as loaded while the part is `Ready` and talk-back is on; the brain tells the coordinator
+each time that changes, including when a `SetTalkBack` commits.
 
 ```mermaid
 sequenceDiagram
@@ -211,6 +211,46 @@ sequenceDiagram
   [runs.md](runs.md#draining-a-spoken-run).
 - **A device change** (a new `AudioOutput` generation) revokes the current run's speech. The run
   goes on as text and ends `done` once the shell's `SpeechStopped` comes back.
+
+## The installer
+
+`brain::voice::installer::Installer` holds one entry per part: what `config.toml` says about it
+(absent, installed, or a removal whose folder couldn't be deleted), its phase, and how many
+automatic reloads it has left. It does no I/O. Each method returns the load the runtime starts,
+and every load uses a fresh ask from one counter, which the handles' reports carry back. A
+report for any other ask than the part's current one changes nothing.
+
+At brain start, with no network, after unfinished removals:
+
+1. The speech worker's supervisor with its `SttHandle`, and the `TtsHandle`, start. One that
+   can't start leaves its part `Failed { VoiceLoad }` for the session; it never shows `Loading`.
+   Spoken replies' handle goes into the pump, the one reader of TTS.
+2. Each part listed in `installed` gets a size check of every manifest file. A part that passes
+   loads; one that fails is `Failed { VoiceCorrupt, installed: true }` and doesn't load.
+   shortcut: a corrupt file of the right size still loads until an install re-hashes it.
+3. A removal whose folder couldn't be deleted is `Failed { VoiceStorage, installed: false }`.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Loading: installed, sizes match
+  [*] --> Failed: corrupt, no handle, or delete failed
+  [*] --> NotInstalled
+  Loading --> Ready: Loaded
+  Loading --> Failed: Failed, Discarded or Unloaded
+  Loading --> Loading: Lost, first time
+  Ready --> Loading: Lost, first time
+  Ready --> Failed: Lost again
+  Loading --> Failed: Lost again
+```
+
+A loss of the current model, whether idle or during a decode, starts one automatic reload with a
+new ask; a second loss in the session is `Failed { VoiceLoad }`. A late report for an older ask,
+such as a loss from a worker the reload replaced, is dropped. `installed` in every `Failed` comes
+from one place: the part is durably installed.
+
+The brain sends `ControlToShell::Voice` with both parts' `PartState` once per connection, after
+`Account` and before `Scenes`, and again on each change. Reports that came while no shell was
+connected are applied first, so the view is current. The shell doesn't show it yet.
 
 ## Provenance
 

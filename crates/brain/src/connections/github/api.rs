@@ -4,7 +4,7 @@ use std::{fmt, num::NonZeroU64};
 
 use kumochi_protocol::{
     Secret,
-    message::{FailReason, GitHubLogin, RepoName, UserCode},
+    message::{FailReason, GitHubLogin, RepoName, UserCode, VERIFICATION_URI},
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use zeroize::Zeroizing;
@@ -14,9 +14,6 @@ use crate::connections::http_client::{Endpoint, Http, HttpError, Request, Respon
 
 #[cfg(test)]
 mod tests;
-
-/// The only page where the user enters a device challenge.
-pub const VERIFICATION_URI: &str = "https://github.com/login/device";
 
 /// Local ceiling for retry advice, not an automatic retry schedule.
 pub const MAX_RETRY_AFTER_S: u64 = 3600;
@@ -143,7 +140,12 @@ pub enum TokenReply {
     /// A non-expiring, checked GitHub App user bearer.
     Token(Secret<GitHubToken>),
     /// A closed polling refusal.
-    Error(TokenError),
+    Error {
+        /// Closed device-flow refusal.
+        code: TokenError,
+        /// A validated interval supplied by the provider.
+        interval_s: Option<u16>,
+    },
 }
 
 /// The authenticated account, without provider profile text.
@@ -179,7 +181,11 @@ impl fmt::Debug for TokenReply {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Token(_) => f.write_str("TokenReply::Token"),
-            Self::Error(kind) => f.debug_tuple("TokenReply::Error").field(kind).finish(),
+            Self::Error { code, interval_s } => f
+                .debug_struct("TokenReply::Error")
+                .field("code", code)
+                .field("interval_s", interval_s)
+                .finish(),
         }
     }
 }
@@ -232,6 +238,8 @@ fn default_interval() -> u16 {
 
 #[derive(Deserialize)]
 struct TokenWire {
+    #[serde(default, deserialize_with = "present")]
+    interval: Option<u16>,
     #[serde(default, deserialize_with = "present")]
     access_token: Option<WireSecret>,
     #[serde(default, deserialize_with = "present")]
@@ -359,15 +367,20 @@ pub async fn poll_device_token(
     client_id: &str,
     code: &Secret<DeviceCodeValue>,
 ) -> Result<TokenReply, ApiError> {
-    let raw: TokenWire = fetch(
-        http,
-        GitHubEndpoint::AccessToken {
-            client_id: ClientId::new(client_id)?,
-            code: code.clone(),
-        },
-        200,
-    )
-    .await?;
+    let endpoint = GitHubEndpoint::AccessToken {
+        client_id: ClientId::new(client_id)?,
+        code: code.clone(),
+    };
+    let cap = endpoint.body_limit();
+    let response = execute(http, endpoint).await?;
+    let expected = if response.status == 400 { 400 } else { 200 };
+    let raw: TokenWire = parse(&response, expected, cap)?;
+    if raw
+        .interval
+        .is_some_and(|interval| !(1..=900).contains(&interval))
+    {
+        return Err(ApiError::Response);
+    }
     if raw.refresh_token.is_some()
         || raw.expires_in.is_some()
         || raw.refresh_token_expires_in.is_some()
@@ -375,12 +388,17 @@ pub async fn poll_device_token(
         return Err(ApiError::RefreshUnsupported);
     }
     match (raw.access_token, raw.error) {
-        (Some(token), None) if raw.token_type.as_deref() == Some("bearer") => {
+        (Some(token), None)
+            if response.status == 200 && raw.token_type.as_deref() == Some("bearer") =>
+        {
             Ok(TokenReply::Token(Secret::new(
                 GitHubToken::new(token.0).map_err(|_| ApiError::Response)?,
             )))
         }
-        (None, Some(error)) => Ok(TokenReply::Error(error)),
+        (None, Some(code)) => Ok(TokenReply::Error {
+            code,
+            interval_s: raw.interval,
+        }),
         _ => Err(ApiError::Response),
     }
 }

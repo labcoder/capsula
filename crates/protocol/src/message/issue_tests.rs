@@ -433,3 +433,30 @@ fn issue_page_debug_omits_its_title() {
         "PageEvent { id: EventId(1), run: None, kind: Issue { draft: DraftId(2) }, cut: false, .. }"
     );
 }
+
+#[test]
+fn github_signed_out_cleanup_has_exact_optional_wire_forms() {
+    for (cleanup, bytes) in [
+        (None, vec![0, 0]),
+        (Some(Cleanup::Running), vec![0, 1, 0]),
+        (Some(Cleanup::Refused), vec![0, 1, 1]),
+        (Some(Cleanup::NotDurable), vec![0, 1, 2]),
+    ] {
+        let view = GitHubView::SignedOut { cleanup };
+        assert_eq!(postcard::to_stdvec(&view).expect("encode"), bytes);
+        assert_eq!(
+            postcard::from_bytes::<GitHubView>(&bytes).expect("decode"),
+            view
+        );
+        let json = serde_json::to_value(&view).expect("json");
+        assert_eq!(
+            serde_json::from_value::<GitHubView>(json).expect("json decode"),
+            view
+        );
+    }
+    assert_eq!(
+        serde_json::from_str::<GitHubView>(r#"{"SignedOut":{}}"#)
+            .expect("missing optional cleanup"),
+        GitHubView::SignedOut { cleanup: None }
+    );
+}

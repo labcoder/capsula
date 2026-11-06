@@ -106,6 +106,7 @@ fn discarded_values_are_destroyed_and_metered_on_the_dropper() {
     rejected_inserts_and_motion_growth_stay_attributed();
     frozen_series_data_stays_attributed();
     activation_retires_settled_recolored_and_superseded_tracks();
+    a_discarded_stage_frees_nothing_on_the_ui_thread();
 }
 
 fn drain() {
@@ -489,6 +490,38 @@ fn activation_retires_settled_recolored_and_superseded_tracks() {
         retrack_frees(2),
         "the UI thread frees only activation scratch, never the 48 rejected key boxes, which differ by 600 bytes each"
     );
+}
+
+/// A refused host transition drops its staged activation: 256 compiled tracks, the candidate
+/// nodes and the layout copy.
+fn a_discarded_stage_frees_nothing_on_the_ui_thread() {
+    let (mut scene, mut budget, first) = populated();
+    let view = SceneView::new(&first.after, 1);
+    drop(first);
+    let tracks: Vec<_> = (0..256)
+        .map(
+            |i| json!({"anim":{"target":format!("s{i}"),"track":"opacity","keys":[[0,0],[100,1]]}}),
+        )
+        .collect();
+    let next = prepared(
+        &mut scene,
+        &mut budget,
+        view.layout(),
+        json!({"id":"tracks","put":tracks}),
+    );
+    let staged = view.prepare_activation(&next, 0, 0).expect("stage");
+    let layout_bytes = next.retained_bytes();
+    drain();
+    let (release, released) = mpsc::channel();
+    drop(Deferred::new(Gate(released), 0));
+    let ((), _, [_, released]) = allocation::usage(|| drop(staged));
+    assert_eq!(released, 0, "the whole stage goes to the dropper");
+    assert!(
+        deferred::pending().bytes >= layout_bytes,
+        "the queued stage attributes its whole shared layout, not only the candidate view"
+    );
+    release.send(()).expect("the dropper gate waits");
+    drain();
 }
 
 fn dropped_rows() -> (SceneState, GlobalBudget, StopCut) {

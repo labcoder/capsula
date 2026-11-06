@@ -36,6 +36,7 @@ pub use error::{
 };
 pub use github::{
     GitHubLogin, GitHubOp, GitHubView, IssueValueError, MAX_GITHUB_REPOS, RepoName, UserCode,
+    VERIFICATION_URI,
 };
 pub use issues::{
     ActionState, ApprovalRev, ContentHash, Decision, DraftId, FailReason, IssueBody, IssueCard,
@@ -571,6 +572,9 @@ pub enum ControlToShell {
         /// The task, or Kumo's thread.
         thread: ThreadId,
     },
+    /// Each voice part's state: once per connection after `Account` and before `Scenes`, then on
+    /// each change.
+    Voice(VoiceView),
 }
 
 /// Shell to brain, on the data pipe.

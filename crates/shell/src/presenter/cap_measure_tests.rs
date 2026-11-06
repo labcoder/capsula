@@ -252,7 +252,9 @@ fn window_residency(measure: &mut dyn TextMeasure) -> usize {
     for index in 0..64 {
         for (offset, prior) in previous.iter_mut().enumerate() {
             let id = SceneId(100 + u64::try_from(offset).expect("four scenes"));
-            let consumed = presenter.consume_ready(id, index, now).expect("ready head");
+            let consumed = presenter
+                .consume_ready(id, index, now, 0, 0)
+                .expect("ready head");
             assert_eq!(consumed.step.step().index, index);
             presenter.frames.borrow_mut().replaced(id);
             let scene = presenter.scenes.get_mut(&id).expect("scene");
