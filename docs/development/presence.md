@@ -300,8 +300,8 @@ it the steps it lets through.
 
 ## Perch hosts
 
-The perch (C2b) drops Kumo on another app's title bar. C2b-1 adds the reads and the geometry,
-and nothing calls them yet.
+The perch (C2b) drops Kumo on another app's title bar. C2b-1 adds the reads and the geometry.
+C2b-2's carry calls them; kumo.md, "The carry", says how.
 
 - `platform::host` holds the plain data: `PhysicalRect`, `HostId`, `WatchGen`, `HostChange`,
   the raw caption `Facts` and `Label`. A `Label` is another app's window title, so it's screen

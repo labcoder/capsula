@@ -63,6 +63,11 @@ impl Targeting {
         self.armed = None;
     }
 
+    /// Whether `drag` is the carry candidates count for.
+    pub(crate) fn carries(&self, drag: Generation) -> bool {
+        self.drag == Some(drag)
+    }
+
     /// The window under the pointer in `drag` is `target`. Returns the window and generation
     /// to watch when it's a new candidate; the old watch, if any, is dropped either way.
     pub(crate) fn candidate(
@@ -180,7 +185,7 @@ impl Targeting {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{Check, Drop, Targeting};
     use crate::platform::host::{HostChange, HostId, Label, PhysicalRect, WatchGen};
     use crate::presence::drag::Generation;
@@ -191,7 +196,7 @@ mod tests {
         body: 56,
         card: [200, 120],
     };
-    const HOST: HostId = HostId {
+    pub(crate) const HOST: HostId = HostId {
         window: 1,
         process: 2,
         thread: 3,
@@ -212,7 +217,7 @@ mod tests {
     }
 
     /// An 800 × 600 host at 100 %, `dx` right of x = 100, on a 1920 × 1040 work area.
-    fn host(id: HostId, dx: i32) -> WindowTarget {
+    pub(crate) fn host(id: HostId, dx: i32) -> WindowTarget {
         let mut exclusions = Exclusions::default();
         exclusions.rects[0] = Some((rect(792 + dx, 200, 900 + dx, 231), Source::Inferred));
         WindowTarget {
@@ -262,7 +267,7 @@ mod tests {
         above: true,
     };
 
-    fn drag(n: u64) -> Generation {
+    pub(crate) fn drag(n: u64) -> Generation {
         Generation::new(n)
     }
 

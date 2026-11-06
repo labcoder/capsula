@@ -3,6 +3,7 @@
 
 #[cfg(debug_assertions)]
 mod accounts_fixture;
+mod carry;
 mod deletes;
 pub(crate) mod diagnostics;
 pub(crate) mod drag;
@@ -106,6 +107,10 @@ struct Presence {
     threads: Entity<Threads>,
     chat: Entity<Threads>,
     events: Sender<PresenceEvent>,
+    /// The channel's receiving end, for a drop's drains.
+    events_in: Receiver<PresenceEvent>,
+    /// The carry after the snap and its drop target.
+    carry: carry::Carry,
     link: LinkHandle,
     /// The connection the UI last applied `Connected` for, until its next state.
     session: Option<Session>,
@@ -480,6 +485,60 @@ impl Presence {
         Ok(())
     }
 
+    /// One event from the presence channel.
+    fn on_event(&mut self, event: PresenceEvent, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        match event {
+            PresenceEvent::ShowStatus => self.set_panel(PanelVisibility::Visible, cx)?,
+            // Hover opens the peek; a press does nothing until C2a's pull starts there.
+            PresenceEvent::DockPressed { .. } => {}
+            PresenceEvent::HostChanged { .. } => self.carry_event(&event, cx),
+            PresenceEvent::PointerChanged { entered_qpc } => {
+                self.pointer_moved(entered_qpc, cx)?;
+            }
+            PresenceEvent::Position(index) => {
+                if let Some(position) =
+                    kumochi_protocol::message::DockPosition::ALL.get(index)
+                {
+                    self.pick_dock_position(*position, cx)?;
+                }
+            }
+            PresenceEvent::Retry => {
+                if self.state == LinkState::Failed {
+                    self.link.retry();
+                }
+            }
+            PresenceEvent::DismissPanel if self.threads_open() => {
+                self.dismiss_threads(cx)?;
+            }
+            PresenceEvent::DismissPanel if self.text_open() => self.dismiss_text(cx)?,
+            PresenceEvent::DismissPanel => self.set_panel(PanelVisibility::Hidden, cx)?,
+            PresenceEvent::Escape => self.escape(cx)?,
+            PresenceEvent::Quit => self.quit(cx),
+            PresenceEvent::Repaint => self.dock.update(cx, |_, cx| cx.notify()),
+            event @ (PresenceEvent::CaptureLost { .. } | PresenceEvent::Reconcile) => {
+                let effects = match event {
+                    PresenceEvent::CaptureLost { seq, released } => self
+                        .presenter
+                        .input
+                        .selection_event(drag::Event::CaptureLost { seq, released }),
+                    _ => self.presenter.input.reconcile(),
+                };
+                let selection = self.selection_ending(effects, cx);
+                if self.presenter.input.selection().is_some()
+                    && matches!(event, PresenceEvent::CaptureLost { .. })
+                    && input(Input::reconcile_after_release)
+                {
+                    let events = self.events.clone();
+                    cx.defer(move |_| send(&events, PresenceEvent::Reconcile));
+                }
+                // Kumo's drag must hear every capture loss, even when restoring failed.
+                kumo_view::bridge(&self.kumo, event, cx);
+                selection?;
+            }
+        }
+        Ok(())
+    }
+
     fn quit(&mut self, cx: &mut Context<'_, Self>) {
         if !self.link.begin_quit() {
             return;
@@ -836,6 +895,7 @@ pub(crate) fn open(
         std::sync::Arc::new(kumochi_scene::theme::Theme::default()),
     );
     presenter.input = input;
+    let events_in = event_changes.clone();
     let owner = cx.new(|cx| {
         listen(states, event_changes, cx);
         Presence {
@@ -852,6 +912,8 @@ pub(crate) fn open(
             threads: cx.new(|_| Threads::default()),
             chat: cx.new(|_| Threads::chat()),
             events,
+            events_in,
+            carry: carry::Carry::default(),
             link,
             session: None,
             state: LinkState::Connecting,
@@ -937,58 +999,7 @@ fn listen(
 ) {
     cx.spawn(async move |this, cx| {
         while let Ok(event) = event_changes.recv().await {
-            let result = this.update(cx, |this: &mut Presence, cx| {
-                match event {
-                    PresenceEvent::ShowStatus => this.set_panel(PanelVisibility::Visible, cx)?,
-                    // Hover opens the peek; a press does nothing until C2a's pull starts there.
-                    // shortcut: no host watch is armed until C2b-2's carry, which handles these.
-                    PresenceEvent::DockPressed { .. } | PresenceEvent::HostChanged { .. } => {}
-                    PresenceEvent::PointerChanged { entered_qpc } => {
-                        this.pointer_moved(entered_qpc, cx)?;
-                    }
-                    PresenceEvent::Position(index) => {
-                        if let Some(position) =
-                            kumochi_protocol::message::DockPosition::ALL.get(index)
-                        {
-                            this.pick_dock_position(*position, cx)?;
-                        }
-                    }
-                    PresenceEvent::Retry => {
-                        if this.state == LinkState::Failed {
-                            this.link.retry();
-                        }
-                    }
-                    PresenceEvent::DismissPanel if this.threads_open() => {
-                        this.dismiss_threads(cx)?;
-                    }
-                    PresenceEvent::DismissPanel if this.text_open() => this.dismiss_text(cx)?,
-                    PresenceEvent::DismissPanel => this.set_panel(PanelVisibility::Hidden, cx)?,
-                    PresenceEvent::Escape => this.escape(cx)?,
-                    PresenceEvent::Quit => this.quit(cx),
-                    PresenceEvent::Repaint => this.dock.update(cx, |_, cx| cx.notify()),
-                    event @ (PresenceEvent::CaptureLost { .. } | PresenceEvent::Reconcile) => {
-                        let effects = match event {
-                            PresenceEvent::CaptureLost { seq, released } => this
-                                .presenter
-                                .input
-                                .selection_event(drag::Event::CaptureLost { seq, released }),
-                            _ => this.presenter.input.reconcile(),
-                        };
-                        let selection = this.selection_ending(effects, cx);
-                        if this.presenter.input.selection().is_some()
-                            && matches!(event, PresenceEvent::CaptureLost { .. })
-                            && input(Input::reconcile_after_release)
-                        {
-                            let events = this.events.clone();
-                            cx.defer(move |_| send(&events, PresenceEvent::Reconcile));
-                        }
-                        // Kumo's drag must hear every capture loss, even when restoring failed.
-                        kumo_view::bridge(&this.kumo, event, cx);
-                        selection?;
-                    }
-                }
-                Ok::<_, OpenError>(())
-            });
+            let result = this.update(cx, |this: &mut Presence, cx| this.on_event(event, cx));
             match result {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => tracing::error!(%error, "presence update failed"),

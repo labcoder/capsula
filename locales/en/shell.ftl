@@ -62,6 +62,7 @@ rename-task-too-long = Use 80 characters or fewer.
 rename-name-too-long = Use 24 characters or fewer.
 rename-one-line = Use one line without control characters.
 task-fallback = a task
+carry-perch-on = Drop on { $app }
 task-focus = You're in: { $task }
 
 settings-title = Settings

@@ -5,3 +5,9 @@
 mod caption;
 mod place;
 mod target;
+
+pub(super) use caption::{WindowTarget, target_of};
+pub(super) use place::{Extents, Placement};
+pub(super) use target::{Check, Drop, Targeting};
+#[cfg(test)]
+pub(super) use target::tests as target_fixtures;

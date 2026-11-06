@@ -65,6 +65,7 @@ pub(crate) enum Text {
     RenameNameTooLong,
     RenameOneLine,
     TaskFallback,
+    PerchOn,
     Settings,
     OpenSettings,
     CloseSettings,
@@ -138,7 +139,7 @@ pub(crate) enum Text {
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 124] = [
+    const ALL: [Self; 125] = [
         Self::Connecting,
         Self::Connected,
         Self::Reconnecting,
@@ -194,6 +195,7 @@ impl Text {
         Self::RenameNameTooLong,
         Self::RenameOneLine,
         Self::TaskFallback,
+        Self::PerchOn,
         Self::Settings,
         Self::OpenSettings,
         Self::CloseSettings,
@@ -389,6 +391,7 @@ impl Text {
             Self::RenameNameTooLong => "rename-name-too-long",
             Self::RenameOneLine => "rename-one-line",
             Self::TaskFallback => "task-fallback",
+            Self::PerchOn => "carry-perch-on",
             Self::Settings => "settings-title",
             Self::OpenSettings => "action-settings",
             Self::CloseSettings => "settings-close",
@@ -460,6 +463,13 @@ impl Strings {
         let mut args = FluentArgs::new();
         args.set("title", title);
         self.format("thread-issue-draft", Some(&args))
+    }
+
+    /// The drop label under a carried Kumo: `app` is the window's title, which is screen text.
+    pub(crate) fn perch_on(&self, app: &str) -> String {
+        let mut args = FluentArgs::new();
+        args.set("app", app);
+        self.format(Text::PerchOn.id(), Some(&args))
     }
 
     pub(crate) fn back_to_kumo(&self, assistant: &str) -> String {

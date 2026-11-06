@@ -208,6 +208,17 @@ While a pull exists, the dock draws Kumo and the peek's slot is empty (`presence
 
 Tests cover four disjoint spans in order and a fifth refused, spans that bridge a gap merging, spans outside the rows dropped, the largest area, a reduced-motion frame whose body is inside the pull area with every owned pixel within its quad and a snap pixel, a full-motion frame drawing the neck under the body without growing its scratch, a return that settles on the dock's frames while the peek is hidden, an accepted picture holding back the next mask until it's drawn, a failed reclaim emptying the pull's area when the proxy won't hide, a body whose first upload failed staying in the peek, a resting body that stays out of the peek until the dock lets go of it and then rests once, a resting pull that gives the line the dock only after a frame without the body, a position chosen after a grab and before any pull frame that touches no surface and can't close the dock until then, one chosen once the pull holds the mask that changes nothing until then and, with its overlay shrink refused, leaves the band under the line on screen, a shown peek that shades nothing while the dock draws the body, and letting go of a three-image picture without growing the retired list.
 
+## The carry
+
+Past the snap the pull is a carry: the body follows the pointer anywhere in the work area, and Presence (`presence/carry.rs`) looks for an app to drop it on.
+
+- **The candidate** is read once per pull frame, and only when the pointer has moved: `host_at` under the pointer, then `perch::caption::target_of`. `perch::target::Targeting` says when that's a new candidate, and Presence then drops the old watch before arming `watch_host` on the new one, so at most one is live. A watch that can't be armed ends that generation. `HostChanged` from the channel goes to `Targeting`, and a stale generation changes nothing. Presence keeps a watch only for the generation `Targeting` still watches.
+- **The drop label** sits under the carried body while a candidate is watched: "Drop on" and the app's window title, made once per candidate in `locales/en/`. The title is screen text: it's drawn, never logged and never sent to the brain, and `Carry` has no `Debug`. It clears at every ending.
+- **The drop.** On `Released` after the snap, `decide` runs §10.4's sequence once: the first check against a fresh read under the release point, a drain of the presence channel, the second check, which places the perch, a second drain, and `publish`. Each drain handles every queued event through its usual handler, and an Esc or a Quit in it ends the drop. shortcut: a published placement still returns Kumo to the line until C2b-3's perch takes it, so every ending creates nothing.
+- **Endings.** Every end of the drag, and Quit, ends the carry: `Targeting` forgets the drag, the watch unhooks and the label clears.
+
+Tests drive `decide` with a host gone in the first drain and in the final one, a stale generation in the final drain, and an Esc and a Quit in each drain. Each mutation fails one: skipping either drain, publishing before the final drain, and ignoring the Esc or the Quit.
+
 ## The native bridge
 
 A pull needs to tell its own button's release from capture being taken away, and GPUI reports only the release. So the presence windows' subclass (`platform/windows/presence.rs`) adds what Windows knows, through `platform/input.rs`'s `Input`, which is plain state with no operating-system calls, so macOS's event handling can make the same calls later.
