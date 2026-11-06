@@ -17,7 +17,7 @@ use super::wire::{CaptureId, ElementTarget, Exclusion, FrameMeta, Refusal, Ticke
 pub(crate) enum Failure {
     /// An expected refusal, such as expiry or a changed display.
     Refused(Refusal),
-    /// A numeric platform code.
+    /// A content-free numeric fault code.
     Fault(i32),
     /// The platform state can't safely be reused, so the worker must exit after answering.
     Retire(i32),
@@ -80,6 +80,9 @@ impl TicketBook {
 
 /// The interval in which screen text still describes a newly arrived frame (guess).
 const WALK_WINDOW: Duration = Duration::from_millis(250);
+
+const MISSING_ELEMENT_READER: i32 = -1;
+const MISSING_FRAME_META: i32 = -2;
 
 struct Held {
     capture: CaptureId,
@@ -145,7 +148,10 @@ impl Screen {
             .get_or_insert_with(open.1)
             .as_mut()
             .ok()
-            .and_then(|reader| reader.foreground());
+            .and_then(|reader| {
+                reader.set_shell_pid(ticket.shell_pid());
+                reader.foreground()
+            });
         let acquired = capturer.capture_into(display, exclude, expires, &mut self.frame)?;
         if acquired.arrived >= expires || now() >= expires {
             self.frame.invalidate();
@@ -199,7 +205,11 @@ impl Screen {
         if start >= expires {
             return Err(Refusal::Expired.into());
         }
-        let reader = match self.reader.as_mut().ok_or(Failure::Fault(0))? {
+        let reader = match self
+            .reader
+            .as_mut()
+            .ok_or(Failure::Fault(MISSING_ELEMENT_READER))?
+        {
             Ok(reader) => reader,
             Err(code) => {
                 if !super::elements::finish_unavailable(
@@ -211,7 +221,11 @@ impl Screen {
                 return Err(Failure::Fault(*code));
             }
         };
-        let display = self.frame.meta().ok_or(Failure::Fault(0))?.display;
+        let display = self
+            .frame
+            .meta()
+            .ok_or(Failure::Fault(MISSING_FRAME_META))?
+            .display;
         let target = match target {
             ElementTarget::Foreground => held
                 .foreground

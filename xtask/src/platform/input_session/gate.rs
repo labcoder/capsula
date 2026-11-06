@@ -146,6 +146,8 @@ pub(crate) struct Lease {
     fixture: u32,
     product: Option<u32>,
     gate: Gate,
+    /// Armed by the idle opener's own click, so any spoiled quiet second is terminal.
+    idle: bool,
 }
 
 impl Lease {
@@ -154,6 +156,7 @@ impl Lease {
             fixture,
             product: None,
             gate: Gate::Waiting,
+            idle: false,
         }
     }
 
@@ -183,6 +186,12 @@ impl Lease {
         };
     }
 
+    /// The idle opener's click armed the fixture at `input`; unlike Ready, it never rearms.
+    pub(crate) fn activated(&mut self, input: u32, now: Instant) {
+        self.idle = true;
+        self.ready(input, now);
+    }
+
     /// Steps the quiet second; guard failures and post-open input always abort permanently.
     pub(crate) fn observe(&mut self, quiet: Quiet, now: Instant) {
         if quiet.aborted || (self.gate == Gate::Open && quiet.interrupted) {
@@ -193,7 +202,11 @@ impl Lease {
             return;
         };
         self.gate = if quiet.interrupted || !quiet.settled || quiet.last_input != input {
-            Gate::Waiting
+            if self.idle {
+                Gate::Aborted
+            } else {
+                Gate::Waiting
+            }
         } else if now.duration_since(since) >= QUIET {
             Gate::Open
         } else {
@@ -410,6 +423,47 @@ mod tests {
             assert!(!lease.injectable());
             lease.observe(CALM, start + QUIET * 3);
             assert!(lease.injectable());
+        }
+    }
+
+    #[test]
+    fn an_idle_activation_opens_only_after_its_quiet_second_and_never_rearms() {
+        let start = Instant::now();
+        let mut lease = Lease::new(10);
+        lease.activated(7, start);
+        assert_eq!(
+            lease.gate(),
+            Gate::Quiet {
+                since: start,
+                input: 7
+            }
+        );
+        lease.observe(CALM, start + Duration::from_millis(999));
+        assert!(!lease.injectable(), "one millisecond short");
+        lease.observe(CALM, start + QUIET);
+        assert!(lease.injectable());
+        for spoiled in [
+            Quiet {
+                last_input: 8,
+                ..CALM
+            },
+            Quiet {
+                settled: false,
+                ..CALM
+            },
+            Quiet {
+                interrupted: true,
+                ..CALM
+            },
+        ] {
+            let mut lease = Lease::new(10);
+            lease.activated(7, start);
+            lease.observe(spoiled, start + Duration::from_millis(500));
+            assert_eq!(lease.gate(), Gate::Aborted, "{spoiled:?}");
+            lease.ready(7, start + QUIET);
+            lease.activated(7, start + QUIET);
+            lease.observe(CALM, start + QUIET * 3);
+            assert_eq!(lease.gate(), Gate::Aborted, "{spoiled:?}: no new arm");
         }
     }
 

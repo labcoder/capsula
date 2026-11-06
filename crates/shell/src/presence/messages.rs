@@ -280,12 +280,12 @@ fn row(
             |settings| settings.assistant_name.as_str(),
         ))),
         PageEventKind::SceneStep => Some(strings.get(Text::ThreadStep)),
-        PageEventKind::Issue { .. } => None,
+        PageEventKind::Issue { .. } | PageEventKind::TaskDeleted => None,
     };
-    let text = if label.is_some() {
-        text.to_owned()
-    } else {
-        strings.issue_draft(text)
+    let text = match kind {
+        PageEventKind::Issue { .. } => strings.issue_draft(text),
+        PageEventKind::TaskDeleted => strings.get(Text::ThreadDeleted),
+        _ => text.to_owned(),
     };
     Row {
         id,

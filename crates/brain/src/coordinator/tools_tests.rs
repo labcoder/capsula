@@ -138,7 +138,8 @@ fn commits(core: &mut Coordinator) -> Input {
     };
     Input::CallCommitted {
         key: call.key.clone(),
-        committed: true,
+        outcome: crate::dispatch::Committed::Done,
+        then: None,
     }
 }
 
@@ -545,7 +546,8 @@ fn a_round_with_two_committing_calls_is_stored_once_after_both_writes_in_call_or
     };
     let ack = |key: &crate::dispatch::LedgerKey| Input::CallCommitted {
         key: key.clone(),
-        committed: true,
+        outcome: crate::dispatch::Committed::Done,
+        then: None,
     };
     let (first, second) = (ack(&first.key), ack(&second.key));
     assert_eq!(
@@ -576,6 +578,43 @@ fn a_round_with_two_committing_calls_is_stored_once_after_both_writes_in_call_or
         )]),
         "one record in call order, and the joined answer adds no result"
     );
+}
+
+#[test]
+fn a_refused_focus_completes_its_round_and_the_run_goes_on() {
+    let mut core = probing(&[T]);
+    play(
+        &mut core,
+        [
+            TurnEvent::ToolCallStarted {
+                call: id(1),
+                name: ToolName::Focus,
+            },
+            TurnEvent::ToolCallReady {
+                call: id(1),
+                args: r#"{"task":1}"#.to_owned(),
+            },
+        ],
+    );
+    let effects = core.handle(completed()).expect("current");
+    let [Effect::Store(StoreOp::CommitCall(call))] = effects.as_slice() else {
+        panic!("one write, not {effects:?}");
+    };
+    let refused = Input::CallCommitted {
+        key: call.key.clone(),
+        outcome: crate::dispatch::Committed::Refused(ToolError::NoTask),
+        then: call.then,
+    };
+    assert_eq!(
+        core.handle(refused),
+        Ok(vec![answered(
+            1,
+            None,
+            vec![(id(1), ToolOutput::Error(ToolError::NoTask))]
+        )]),
+        "the refusal is the call's one result, and no Focus is sent"
+    );
+    next(&mut core, 1);
 }
 
 #[test]

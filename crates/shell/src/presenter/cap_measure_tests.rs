@@ -1,11 +1,14 @@
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use kumochi_scene::{
     Step,
     display::{MeasureError, TextMeasure, TextStyle},
 };
 
-use super::{LIVE, Shaper, begin, commit, controls, live, only_job, step};
+use super::{LIVE, Shaper, begin, commit, controls, failed, live, only_job, step};
 
 pub(crate) fn drawing(iteration: usize, extra_labels: usize) -> Step {
     let source = format!(
@@ -212,6 +215,8 @@ fn window_residency(measure: &mut dyn TextMeasure) -> usize {
             {
                 initial.clone()
             } else {
+                // Colour-only steps keep every ready state's paint work equal, so this pins
+                // residency; ready_states_reserve_componentwise_maxima_* pins the maximum.
                 let target = if offset == 0 { "box0" } else { "line0" };
                 let color = if index % 2 == 0 { "red" } else { "blue" };
                 step(&format!(
@@ -458,4 +463,163 @@ fn measure_clear_cut_and_eviction_at_the_global_object_cap() {
             );
         }
     }
+}
+
+/// A closed comb of 512 points, p(2k) = (k, 0) and p(2k + 1) = (256 + k, 256): every edge's box
+/// overlaps every other's, so the crossing sweep tests all 130,816 pairs, and only the closing
+/// edge crosses, 254 + 255 = 509 times, far below the count's cap.
+fn comb() -> Vec<[u16; 2]> {
+    (0..256).flat_map(|k| [[k, 0], [256 + k, 256]]).collect()
+}
+
+fn comb_step(count: usize) -> String {
+    let points = comb()
+        .iter()
+        .map(|[x, y]| format!("[{x},{y}]"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let put: Vec<_> = (0..count)
+        .map(|index| {
+            format!(
+                r#"{{"shape":{{"id":"comb{index}","kind":"polygon","points":[{points}],"fill":"blue"}}}}"#
+            )
+        })
+        .collect();
+    format!(r#"{{"step":{{"id":"combs","put":[{}]}}}}"#, put.join(","))
+}
+
+#[test]
+#[ignore = "manual quiet-Rez headless worst-case fill crossing cost of one preparation"]
+fn measure_worst_case_fill_crossings() {
+    use kumochi_protocol::message::SceneFailure;
+    use kumochi_scene::{
+        display::{Paint, PaintWork, Prim},
+        geom::Vec2,
+        limits::{MAX_GLOBAL_PATH_SEGMENTS, MAX_RECORD_BYTES},
+        record::Rgb,
+    };
+
+    let _timeout = std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(120));
+        std::process::exit(124);
+    });
+    let per_record = (1..=MAX_RECORD_BYTES)
+        .take_while(|count| comb_step(*count).len() <= MAX_RECORD_BYTES)
+        .last()
+        .expect("one comb fits a record");
+    let points: Arc<[Vec2]> = comb()
+        .iter()
+        .map(|[x, y]| Vec2::new(f32::from(*x), f32::from(*y)))
+        .collect();
+    let fill = Prim::Fill {
+        points,
+        color: Paint::from(Rgb::try_from(0x003b_82f6).expect("RGB")),
+    };
+    assert_eq!(
+        PaintWork::of(std::slice::from_ref(&fill)).largest_fill,
+        512 + 509
+    );
+    let cases = [
+        ("meta1", vec![fill.clone(); 1]),
+        ("meta_record", vec![fill.clone(); per_record]),
+        ("meta_bound", vec![fill; MAX_GLOBAL_PATH_SEGMENTS / 512]),
+    ];
+    let mut rows = Vec::new();
+    for trial in 0..41_usize {
+        for slot in 0..4 {
+            let case = (trial + slot) % 4;
+            if let Some((name, primitives)) = cases.get(case) {
+                let start = Instant::now();
+                let work = std::hint::black_box(PaintWork::of(std::hint::black_box(primitives)));
+                rows.push((*name, primitives.len(), trial, start.elapsed().as_nanos()));
+                assert_eq!(work.largest_fill, 512 + 509);
+                continue;
+            }
+            let (mut presenter, now) = live();
+            begin(&mut presenter, LIVE, now);
+            let source = step(&comb_step(per_record));
+            let job = only_job(commit(&mut presenter, LIVE, 0, source, now).expect("admit"));
+            let start = Instant::now();
+            let done = job.run(&mut Shaper);
+            rows.push((
+                "prepare_record",
+                per_record,
+                trial,
+                start.elapsed().as_nanos(),
+            ));
+            let effects = presenter.completed(done, now).expect("a refused answer");
+            assert_eq!(
+                controls(&effects),
+                [&failed(LIVE, 0, SceneFailure::Residency)]
+            );
+        }
+    }
+    println!(
+        "f3_crossings method=interleaved_rotating trials=41 comb_points=512 comb_crossings=509 per_record={per_record} bound={}; metadata cases time PaintWork::of only, prepare_record times job.run without admission or acceptance; content-free",
+        MAX_GLOBAL_PATH_SEGMENTS / 512
+    );
+    for (case, fills, trial, nanos) in rows {
+        println!("f3_crossings_sample case={case} fills={fills} trial={trial} nanos={nanos}");
+    }
+}
+
+fn convex(id: &str, count: u32) -> String {
+    let points: Vec<_> = (0..count)
+        .map(|index| {
+            let angle = std::f64::consts::TAU * f64::from(index) / f64::from(count);
+            format!(
+                "[{:.3},{:.3}]",
+                1_000.0 + 900.0 * angle.cos(),
+                1_000.0 + 900.0 * angle.sin()
+            )
+        })
+        .collect();
+    format!(
+        r#"{{"shape":{{"id":"{id}","kind":"polygon","points":[{}],"fill":"blue"}}}}"#,
+        points.join(",")
+    )
+}
+
+#[test]
+fn the_worker_prepares_under_the_d1_cap() {
+    use kumochi_scene::layout::PrepareError;
+
+    let (mut presenter, now) = live();
+    begin(&mut presenter, LIVE, now);
+    let source = step(&format!(
+        r#"{{"step":{{"id":"fills","put":[{},{}]}}}}"#,
+        convex("a", 300),
+        convex("b", 213)
+    ));
+    let job = only_job(commit(&mut presenter, LIVE, 0, source, now).expect("admit"));
+    let super::Completion::Prepared { result, .. } = job.run(&mut Shaper) else {
+        panic!("a preparation");
+    };
+    assert!(matches!(&*result, Err(PrepareError::OverResidency)));
+}
+
+#[test]
+fn the_worker_recovers_under_the_d1_cap() {
+    use kumochi_scene::layout::{PrepareError, RecoveryError};
+
+    let source = step(&format!(
+        r#"{{"step":{{"id":"fills","put":[{},{}]}}}}"#,
+        convex("a", 300),
+        convex("b", 213)
+    ));
+    let (_presenter, _, job) = super::recovering(vec![(LIVE, source)]);
+    let super::Completion::Recovered { scenes, .. } = job.run(&mut Shaper) else {
+        panic!("a recovery");
+    };
+    assert_eq!(scenes.len(), 1);
+    assert!(
+        matches!(
+            scenes[0].1,
+            Err(RecoveryError {
+                revision: 1,
+                error: PrepareError::OverResidency
+            })
+        ),
+        "recovery must refuse revision one with OverResidency"
+    );
 }

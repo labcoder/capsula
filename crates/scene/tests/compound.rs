@@ -706,6 +706,7 @@ fn dropping_a_cluster_ancestor_preserves_world_bounds_and_recovery() {
         &Arc::new(Theme::default()),
         &mut Measure,
         &AtomicBool::new(false),
+        None,
     )
     .expect("recovered cluster");
     assert_eq!(detached.items().len(), 4);
@@ -898,6 +899,7 @@ fn recover_at_the_caps() {
                 &theme,
                 &mut Measure,
                 &cancel,
+                None,
             );
             let elapsed = start.elapsed().as_secs_f64() * 1e3;
             assert_eq!(global.usage().objects, objects);

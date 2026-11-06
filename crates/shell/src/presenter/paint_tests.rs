@@ -1,5 +1,5 @@
 use kumochi_protocol::message::{ControlToBrain, DataToShell, SceneFailure, SceneId};
-use kumochi_scene::{Step, limits::MAX_GLOBAL_DASH_PIECES};
+use kumochi_scene::{Step, layout::PrepareError, limits::MAX_GLOBAL_DASH_PIECES};
 
 use super::{
     Completion, LIVE, RUN, Shaper, acknowledge, begin, commit, controls, failed, live, only_job,
@@ -98,8 +98,15 @@ fn anchored_prepared_work_fits_at_the_limit_and_fails_one_over() {
         let Completion::Prepared { result, .. } = &done else {
             panic!("a prepared answer");
         };
-        let prepared = result.as_ref().expect("valid anchored geometry");
-        assert_eq!(prepared.after.paint_work().dash_pieces, limit + over);
+        if over == 0 {
+            let prepared = result.as_ref().expect("valid anchored geometry");
+            assert_eq!(prepared.after.paint_work().dash_pieces, limit);
+        } else {
+            assert!(
+                matches!(&**result, Err(PrepareError::OverResidency)),
+                "the worker refuses work over the D1 cap"
+            );
+        }
         let effects = presenter.completed(done, now).expect("current answer");
         if over == 0 {
             assert!(controls(&effects).is_empty());

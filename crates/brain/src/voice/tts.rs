@@ -1,6 +1,10 @@
 //! Spoken replies: one owner thread, `voice-tts`, turns text into PCM with Phonon at 24 kHz,
 //! frame by frame, resamples it to the output's rate, and stops promptly when the generation
 //! moves.
+//!
+//! Loads and unloads are asked for with an ask, and the thread reports each ask's outcome
+//! (`LoadReport`) the same way speech input does: a load that finishes after its unload or a
+//! newer ask is freed here and reported `Discarded`, and `unload` only touches its own ask.
 
 mod phonon;
 #[cfg(test)]
@@ -16,6 +20,7 @@ use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio::sync::watch;
 
 use super::resample::Resampler;
+use super::{LoadEvent, Reports};
 use kumochi_protocol::message::MAX_SEGMENT_SECONDS;
 
 pub(crate) const SAMPLE_RATE: u32 = 24_000;
@@ -96,13 +101,11 @@ pub(crate) trait Engine {
     fn stream(&self, text: &str) -> Result<Self::Stream, TtsError>;
 }
 
-enum Want {
-    Unloaded,
-    Loaded(PathBuf),
-}
-
 struct State {
-    want: Want,
+    /// The models folder wanted, with the ask that wants it.
+    want: Option<(PathBuf, u64)>,
+    /// The ask the owner is loading or holding a model for.
+    current: Option<u64>,
     waiting: Option<Speak>,
     shutdown: bool,
 }
@@ -128,20 +131,23 @@ impl Control {
 pub(crate) struct TtsHandle {
     control: Arc<Control>,
     generation: watch::Sender<u32>,
+    reports: Reports,
 }
 
 impl TtsHandle {
-    pub(crate) fn spawn(runtime: Handle) -> io::Result<Self> {
-        Self::spawn_with(runtime, phonon::Phonon::load)
+    pub(crate) fn spawn(runtime: Handle, reports: Reports) -> io::Result<Self> {
+        Self::spawn_with(runtime, reports, phonon::Phonon::load)
     }
 
     pub(crate) fn spawn_with<E: Engine>(
         runtime: Handle,
+        reports: Reports,
         load: impl FnMut(&Path) -> Result<E, TtsError> + Send + 'static,
     ) -> io::Result<Self> {
         let control = Arc::new(Control {
             state: Mutex::new(State {
-                want: Want::Unloaded,
+                want: None,
+                current: None,
                 waiting: None,
                 shutdown: false,
             }),
@@ -152,6 +158,7 @@ impl TtsHandle {
             control: Arc::clone(&control),
             generation: watcher,
             runtime,
+            reports: reports.clone(),
         };
         std::thread::Builder::new()
             .name("voice-tts".into())
@@ -159,6 +166,7 @@ impl TtsHandle {
         Ok(Self {
             control,
             generation,
+            reports,
         })
     }
 
@@ -172,17 +180,30 @@ impl TtsHandle {
         self.generation()
     }
 
-    pub(crate) fn load(&self, dir: PathBuf) {
-        self.control.update(|state| state.want = Want::Loaded(dir));
+    /// Loads `dir` for `ask`, replacing any earlier ask once the owner gets to it.
+    pub(crate) fn load(&self, dir: PathBuf, ask: u64) {
+        self.control.update(|state| state.want = Some((dir, ask)));
     }
 
-    /// Never waits on a channel: it rejects the waiting Speak, cancels and wakes the owner.
-    /// Taking the Speak before the cancel keeps the owner from dropping it as stale unanswered.
-    pub(crate) fn unload(&self) {
-        let waiting = self.control.update(|state| {
-            state.want = Want::Unloaded;
-            state.waiting.take()
+    /// Unloads `ask` only, never a newer ask; an ask the owner doesn't have is reported
+    /// `Unloaded` at once. Never waits on a channel: for its own ask it rejects the waiting
+    /// Speak, cancels and wakes the owner. Taking the Speak before the cancel keeps the owner
+    /// from dropping it as stale unanswered.
+    pub(crate) fn unload(&self, ask: u64) {
+        let mine = self.control.update(|state| {
+            // Sent under the lock, so the owner's own report for `ask` can't come before it.
+            if state.current != Some(ask) {
+                self.reports.send(ask, LoadEvent::Unloaded);
+            }
+            if !wants(state, ask) {
+                return None;
+            }
+            state.want = None;
+            Some(state.waiting.take())
         });
+        let Some(waiting) = mine else {
+            return;
+        };
         self.cancel();
         if let Some(speak) = waiting {
             speak.fail(TtsError::NotLoaded);
@@ -214,10 +235,17 @@ impl Drop for TtsHandle {
     }
 }
 
+fn wants(state: &State, ask: u64) -> bool {
+    state
+        .want
+        .as_ref()
+        .is_some_and(|(_, wanted)| *wanted == ask)
+}
+
 enum Next {
     Exit,
     Unload,
-    Load(PathBuf),
+    Load(PathBuf, u64),
     Speak(Speak),
 }
 
@@ -225,25 +253,52 @@ struct Owner {
     control: Arc<Control>,
     generation: watch::Receiver<u32>,
     runtime: Handle,
+    reports: Reports,
 }
 
 impl Owner {
     fn run<E: Engine>(mut self, mut load: impl FnMut(&Path) -> Result<E, TtsError>) {
-        let mut engine: Option<(PathBuf, E)> = None;
+        let mut engine: Option<(u64, E)> = None;
         loop {
-            match self.next(engine.as_ref().map(|(dir, _)| dir.as_path())) {
+            match self.next(engine.as_ref().map(|(ask, _)| *ask)) {
                 Next::Exit => return,
-                Next::Unload => engine = None,
-                Next::Load(dir) => {
-                    engine = None;
-                    match load(&dir) {
-                        Ok(loaded) => engine = Some((dir, loaded)),
-                        Err(error) => {
-                            tracing::warn!(?error, "spoken replies failed to load");
+                Next::Unload => {
+                    self.free(&mut engine, None);
+                }
+                Next::Load(dir, ask) => {
+                    if !self.free(&mut engine, Some(ask)) {
+                        continue;
+                    }
+                    let loaded = load(&dir);
+                    if let Err(error) = &loaded {
+                        tracing::warn!(?error, "spoken replies failed to load");
+                    }
+                    // Every command sent during the load is in the state now; only the newest
+                    // ask keeps its model.
+                    let kept = loaded.is_ok()
+                        && self.control.update(|state| {
+                            let wanted = wants(state, ask);
+                            if wanted {
+                                self.reports.send(ask, LoadEvent::Loaded);
+                            }
+                            wanted
+                        });
+                    match loaded {
+                        Ok(loaded) if kept => engine = Some((ask, loaded)),
+                        rejected => {
+                            let event = match rejected {
+                                Ok(_) => LoadEvent::Discarded,
+                                Err(_) => LoadEvent::Failed,
+                            };
+                            // The model drops while its ask is still current, so nothing
+                            // reports it quiet before it's gone.
+                            drop(rejected);
                             self.control.update(|state| {
-                                if matches!(&state.want, Want::Loaded(wanted) if *wanted == dir) {
-                                    state.want = Want::Unloaded;
+                                state.current = None;
+                                if event == LoadEvent::Failed && wants(state, ask) {
+                                    state.want = None;
                                 }
+                                self.reports.send(ask, event);
                             });
                         }
                     }
@@ -256,16 +311,35 @@ impl Owner {
         }
     }
 
-    fn next(&self, loaded: Option<&Path>) -> Next {
+    /// Drops the model in this thread, then reports its ask unloaded. `next` becomes current
+    /// only if it's still wanted, since an unload during the drop already answered it absent;
+    /// returns whether it did.
+    fn free<E>(&self, engine: &mut Option<(u64, E)>, next: Option<u64>) -> bool {
+        let Some((ask, loaded)) = engine.take() else {
+            return true;
+        };
+        drop(loaded);
+        self.control.update(|state| {
+            state.current = next.filter(|next| wants(state, *next));
+            self.reports.send(ask, LoadEvent::Unloaded);
+            next.is_none() || state.current.is_some()
+        })
+    }
+
+    fn next(&self, loaded: Option<u64>) -> Next {
         let mut state = self.control.lock();
         loop {
             if state.shutdown {
                 return Next::Exit;
             }
-            match (&state.want, loaded) {
-                (Want::Unloaded, Some(_)) => return Next::Unload,
-                (Want::Loaded(dir), loaded) if loaded != Some(dir.as_path()) => {
-                    return Next::Load(dir.clone());
+            match (state.want.clone(), loaded) {
+                (None, Some(_)) => return Next::Unload,
+                (Some((dir, ask)), loaded) if loaded != Some(ask) => {
+                    // A held model's ask stays current until it's freed.
+                    if loaded.is_none() {
+                        state.current = Some(ask);
+                    }
+                    return Next::Load(dir, ask);
                 }
                 _ => {}
             }
