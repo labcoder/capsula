@@ -64,6 +64,8 @@ pub(crate) struct PreInputAudit {
     tools: BTreeSet<String>,
     initialize: bool,
     mcp: bool,
+    /// initialize's `analytics_disabled`, once initialize passed.
+    analytics: Option<bool>,
     /// `SignedOut` or a failure, once given.
     refused: Option<Result<Progress, AuditFailed>>,
 }
@@ -76,8 +78,19 @@ impl PreInputAudit {
             tools,
             initialize: false,
             mcp: false,
+            analytics: None,
             refused: None,
         }
+    }
+
+    /// initialize's `analytics_disabled` once initialize passed: shown, never judged. `None`
+    /// before that, and when it's absent or not a bool.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "C5b-1b's audit task is the first caller")
+    )]
+    pub(crate) fn analytics(&self) -> Option<bool> {
+        self.analytics
     }
 
     /// Judges one control response. A refusal is final: every later response gets it again.
@@ -107,6 +120,7 @@ impl PreInputAudit {
                     return Ok(Progress::SignedOut);
                 }
                 self.initialize = true;
+                self.analytics = response.response.rest["analytics_disabled"].as_bool();
             }
             MCP_STATUS_ID if !self.mcp => {
                 self.mcp_passes(&response.response.rest)?;

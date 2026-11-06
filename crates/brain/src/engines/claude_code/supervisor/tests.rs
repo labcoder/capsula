@@ -32,6 +32,8 @@ pub(crate) struct Hooks {
     pub(crate) write: Option<Pause>,
     /// Hears the length of each chunk written to the child's stdin.
     pub(crate) writes: Option<std_mpsc::Sender<usize>>,
+    /// Hears the length of each chunk admitted, before its write starts.
+    pub(crate) entries: Option<std_mpsc::Sender<usize>>,
     /// Where the start waits, once the launch's folder is made and before its listener.
     pub(crate) folder: Option<Pause>,
     /// Hears the launch's id once it's drawn.
@@ -56,6 +58,7 @@ pub(super) struct Stdin {
     pub(super) admit: Option<Pause>,
     pub(super) write: Option<Pause>,
     pub(super) writes: Option<std_mpsc::Sender<usize>>,
+    pub(super) entries: Option<std_mpsc::Sender<usize>>,
 }
 
 /// The launch's side of a barrier.
@@ -71,16 +74,16 @@ pub(crate) struct Barrier {
 }
 
 impl Barrier {
-    fn reached_within(&self, wait: Duration) -> bool {
+    pub(crate) fn reached_within(&self, wait: Duration) -> bool {
         self.reached.recv_timeout(wait).is_ok()
     }
 
-    fn release(&self) {
+    pub(crate) fn release(&self) {
         self.release.send(()).ok();
     }
 }
 
-fn barrier() -> (Pause, Barrier) {
+pub(crate) fn barrier() -> (Pause, Barrier) {
     let (reached, reached_rx) = std_mpsc::channel();
     let (release_tx, release) = std_mpsc::channel();
     (
@@ -140,7 +143,7 @@ pub(crate) fn question(lifetime: Duration) -> Question {
 }
 
 /// A lane on the fake in `mode` that has found the install.
-async fn found(base: &Base, mode: &str) -> Lane {
+pub(crate) async fn found(base: &Base, mode: &str) -> Lane {
     found_with(base, mode, |_| {}).await
 }
 
@@ -158,7 +161,7 @@ async fn found_with(
     lane
 }
 
-async fn version(lane: &mut Lane) -> Result<Outcome, Failure> {
+pub(crate) async fn version(lane: &mut Lane) -> Result<Outcome, Failure> {
     assert!(lane.submit(0, Work::Version), "admitted");
     timeout(WAIT, lane.next())
         .await
@@ -166,7 +169,7 @@ async fn version(lane: &mut Lane) -> Result<Outcome, Failure> {
         .result
 }
 
-fn queue(lane: &Lane, start: Start) {
+pub(crate) fn queue(lane: &Lane, start: Start) {
     assert!(lane.launch(start), "queued");
 }
 
@@ -219,7 +222,7 @@ fn tree(base: &Base) -> Vec<(PathBuf, u64)> {
 }
 
 /// The launch folders under the engine folder.
-fn launch_dirs(base: &Base) -> Vec<String> {
+pub(crate) fn launch_dirs(base: &Base) -> Vec<String> {
     fs::read_dir(engine_dir(base))
         .map(|entries| {
             entries
@@ -238,7 +241,7 @@ pub(crate) fn questions(base: &Base) -> usize {
 }
 
 /// The lengths the echo fake read, in order.
-fn echoed(base: &Base) -> Vec<usize> {
+pub(crate) fn echoed(base: &Base) -> Vec<usize> {
     fs::read_to_string(base.0.join("echo.log"))
         .map(|log| {
             log.lines()
@@ -303,7 +306,7 @@ fn the_bounds_hold() {
 #[test]
 fn a_launch_deadline_is_fixed_at_admission() {
     let before = Instant::now();
-    let (start, _launch) = admit(question(Duration::from_secs(150)));
+    let (start, _launch) = admit(question(Duration::from_secs(150))).expect("a launch id");
     let after = Instant::now();
     assert!(start.deadline >= before + Duration::from_secs(150));
     assert!(start.deadline <= after + Duration::from_secs(150));
@@ -336,7 +339,7 @@ fn input_debug_shows_no_chunk_bytes() {
 /// S3.
 #[test]
 fn revocation_fails_the_gate_at_once() {
-    let (start, launch) = admit(question(Duration::from_secs(20)));
+    let (start, launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
     start.control.gate.pass();
     assert!(start.control.gate.may_call());
     assert_eq!(launch.lease().revoke(), Revoked::Idle);
@@ -386,7 +389,7 @@ async fn dropping_the_cancel_tears_the_launch_down() {
         jobs: &[&brain_job],
     })
     .expect("a sibling in the brain job");
-    let (start, launch) = admit(question(Duration::from_secs(20)));
+    let (start, launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
     queue(&lane, start);
     let engine = Holding(Mutex::new(Some(launch)));
     let (inputs, _received) = mpsc::channel(8);
@@ -436,7 +439,7 @@ async fn finished_reaches_the_brain_before_teardown() {
 
     let base = Base::new("launch-finished");
     let lane = found_with(&base, "deaf", |host| host.terminate = slow_terminate).await;
-    let (start, launch) = admit(question(Duration::from_secs(20)));
+    let (start, launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
     queue(&lane, start);
     let engine = Answering(Mutex::new(Some(launch)));
     let (inputs, mut received) = mpsc::channel(8);
@@ -469,7 +472,7 @@ async fn finished_reaches_the_brain_before_teardown() {
 async fn no_chunk_admitted_after_revoke_reaches_the_child() {
     let base = Base::new("launch-admission");
     let lane = found(&base, "echo").await;
-    let (mut start, mut launch) = admit(question(Duration::from_secs(20)));
+    let (mut start, mut launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
     let (taken, at_admission) = barrier();
     let (writes, written) = std_mpsc::channel();
     start.hooks.admit = Some(taken);
@@ -477,7 +480,7 @@ async fn no_chunk_admitted_after_revoke_reaches_the_child() {
     queue(&lane, start);
     let first = pipes(&mut launch).await;
     first
-        .stdin
+        .raw()
         .try_send(Input::Chunk(vec![b'a'; 10]))
         .expect("room");
     assert!(at_admission.reached_within(WAIT), "the chunk was taken");
@@ -486,7 +489,7 @@ async fn no_chunk_admitted_after_revoke_reaches_the_child() {
     assert_eq!(end(launch).await, Teardown::Done);
     assert_eq!(written.try_iter().collect::<Vec<_>>(), Vec::<usize>::new());
 
-    let (mut start, mut launch) = admit(question(Duration::from_secs(20)));
+    let (mut start, mut launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
     let (held, termination) = barrier();
     let (paused, barrier) = barrier();
     let (writes, written) = std_mpsc::channel();
@@ -496,13 +499,13 @@ async fn no_chunk_admitted_after_revoke_reaches_the_child() {
     queue(&lane, start);
     let pipes = pipes(&mut launch).await;
     pipes
-        .stdin
+        .raw()
         .try_send(Input::Chunk(vec![b'a'; 10]))
         .expect("room");
     assert!(barrier.reached_within(WAIT), "the first chunk was admitted");
     for _ in 0..PIPE_QUEUE {
         pipes
-            .stdin
+            .raw()
             .try_send(Input::Chunk(vec![b'b'; 20]))
             .expect("room");
     }
@@ -555,7 +558,8 @@ async fn a_pump_that_fails_to_start_stops_the_launch() {
         ),
     ];
     for (fails, started) in cases {
-        let (mut start, mut launch) = admit(question(Duration::from_secs(20)));
+        let (mut start, mut launch) =
+            admit(question(Duration::from_secs(20))).expect("a launch id");
         let (id_tx, id) = std_mpsc::channel();
         let (pumps, ended) = std_mpsc::channel();
         start.hooks.id = Some(id_tx);
@@ -583,7 +587,7 @@ async fn a_pump_that_fails_to_start_stops_the_launch() {
 async fn a_listener_that_outlives_the_grace_is_stuck() {
     let base = Base::new("launch-listener-held");
     let mut lane = found(&base, "deaf").await;
-    let (start, mut launch) = admit(question(Duration::from_secs(20)));
+    let (start, mut launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
     queue(&lane, start);
     let _pipes = pipes(&mut launch).await;
     assert_eq!(launch.lease().revoke(), Revoked::Idle);
@@ -599,15 +603,15 @@ async fn a_listener_that_outlives_the_grace_is_stuck() {
 async fn end_closes_stdin_and_the_child_exits() {
     let base = Base::new("launch-end-input");
     let lane = found(&base, "echo").await;
-    let (start, mut launch) = admit(question(Duration::from_secs(20)));
+    let (start, mut launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
     let control = start.control();
     queue(&lane, start);
     let mut pipes = pipes(&mut launch).await;
     pipes
-        .stdin
+        .raw()
         .try_send(Input::Chunk(b"hello".to_vec()))
         .expect("room");
-    pipes.stdin.try_send(Input::End).expect("room");
+    pipes.raw().try_send(Input::End).expect("room");
     let echoed_back = timeout(WAIT, pipes.stdout.recv()).await.expect("output");
     assert_eq!(echoed_back.as_deref(), Some(&b"hello"[..]));
     until("the child's exit ends it", || control.is_ended()).await;
@@ -620,7 +624,7 @@ async fn end_closes_stdin_and_the_child_exits() {
 async fn a_paused_admitted_write_is_in_flight_and_settles_before_cleanup() {
     let base = Base::new("launch-in-flight");
     let lane = found(&base, "echo").await;
-    let (mut start, mut launch) = admit(question(Duration::from_secs(20)));
+    let (mut start, mut launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
     let (paused, barrier) = barrier();
     let (pumps, ended) = std_mpsc::channel();
     start.hooks.write = Some(paused);
@@ -628,7 +632,7 @@ async fn a_paused_admitted_write_is_in_flight_and_settles_before_cleanup() {
     queue(&lane, start);
     let pipes = pipes(&mut launch).await;
     pipes
-        .stdin
+        .raw()
         .try_send(Input::Chunk(vec![b'a'; 10]))
         .expect("room");
     assert!(barrier.reached_within(WAIT), "admitted");
@@ -661,13 +665,13 @@ async fn a_paused_admitted_write_is_in_flight_and_settles_before_cleanup() {
 async fn a_write_held_past_the_grace_is_stuck() {
     let base = Base::new("launch-held-write");
     let mut lane = found(&base, "echo").await;
-    let (mut start, mut launch) = admit(question(Duration::from_secs(20)));
+    let (mut start, mut launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
     let (paused, barrier) = barrier();
     start.hooks.write = Some(paused);
     queue(&lane, start);
     let pipes = pipes(&mut launch).await;
     pipes
-        .stdin
+        .raw()
         .try_send(Input::Chunk(vec![b'a'; 10]))
         .expect("room");
     assert!(barrier.reached_within(WAIT), "admitted");
@@ -683,13 +687,13 @@ async fn a_write_held_past_the_grace_is_stuck() {
 async fn a_revocation_before_admission_admits_nothing() {
     let base = Base::new("launch-before-admission");
     let lane = found(&base, "echo").await;
-    let (mut start, mut launch) = admit(question(Duration::from_secs(20)));
+    let (mut start, mut launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
     let (paused, barrier) = barrier();
     start.hooks.write = Some(paused);
     queue(&lane, start);
     let pipes = pipes(&mut launch).await;
     assert_eq!(launch.lease().revoke(), Revoked::Idle);
-    pipes.stdin.try_send(Input::Chunk(vec![b'a'; 10])).ok();
+    pipes.raw().try_send(Input::Chunk(vec![b'a'; 10])).ok();
     assert!(
         !barrier.reached_within(Duration::from_millis(300)),
         "never admitted"
@@ -703,7 +707,7 @@ async fn a_revocation_before_admission_admits_nothing() {
 async fn both_pumps_end_with_their_endpoints_still_held() {
     let base = Base::new("launch-endpoints");
     let lane = found(&base, "flood").await;
-    let (mut start, mut launch) = admit(question(Duration::from_secs(20)));
+    let (mut start, mut launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
     let (pumps, ended) = std_mpsc::channel();
     start.hooks.pumps = Some(pumps);
     queue(&lane, start);
@@ -729,7 +733,7 @@ async fn both_pumps_end_with_their_endpoints_still_held() {
 async fn stdout_holds_four_chunks_for_a_round_that_never_reads() {
     let base = Base::new("launch-stdout-bound");
     let lane = found(&base, "flood").await;
-    let (start, mut launch) = admit(question(Duration::from_secs(20)));
+    let (start, mut launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
     queue(&lane, start);
     let mut pipes = pipes(&mut launch).await;
     until("stdout is full", || pipes.stdout.len() == 4).await;
@@ -750,23 +754,23 @@ async fn stdout_holds_four_chunks_for_a_round_that_never_reads() {
 async fn stdin_holds_four_chunks_for_a_deaf_child() {
     let base = Base::new("launch-stdin-bound");
     let lane = found(&base, "deaf").await;
-    let (mut start, mut launch) = admit(question(Duration::from_secs(20)));
+    let (mut start, mut launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
     let (paused, barrier) = barrier();
     start.hooks.write = Some(paused);
     queue(&lane, start);
     let pipes = pipes(&mut launch).await;
     let chunk = || Input::Chunk(vec![b'q'; 65536]);
-    pipes.stdin.try_send(chunk()).expect("room");
+    pipes.raw().try_send(chunk()).expect("room");
     assert!(
         barrier.reached_within(WAIT),
         "the pump holds the first chunk"
     );
-    pipes.stdin.try_send(chunk()).expect("room 1");
-    pipes.stdin.try_send(chunk()).expect("room 2");
-    pipes.stdin.try_send(chunk()).expect("room 3");
-    pipes.stdin.try_send(chunk()).expect("room 4");
+    pipes.raw().try_send(chunk()).expect("room 1");
+    pipes.raw().try_send(chunk()).expect("room 2");
+    pipes.raw().try_send(chunk()).expect("room 3");
+    pipes.raw().try_send(chunk()).expect("room 4");
     assert!(matches!(
-        pipes.stdin.try_send(chunk()),
+        pipes.raw().try_send(chunk()),
         Err(mpsc::error::TrySendError::Full(_))
     ));
     barrier.release();
@@ -778,17 +782,17 @@ async fn stdin_holds_four_chunks_for_a_deaf_child() {
 async fn the_lane_queue_holds_four_launches() {
     let base = Base::new("launch-lane-queue");
     let lane = found(&base, "deaf").await;
-    let (start, mut first) = admit(question(Duration::from_secs(20)));
+    let (start, mut first) = admit(question(Duration::from_secs(20))).expect("a launch id");
     queue(&lane, start);
     let _pipes = pipes(&mut first).await;
     until("the first runs", || questions(&base) == 1).await;
     let mut waiting = Vec::new();
     for _ in 0..4 {
-        let (start, launch) = admit(question(Duration::from_secs(20)));
+        let (start, launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
         queue(&lane, start);
         waiting.push(launch);
     }
-    let (start, _refused) = admit(question(Duration::from_secs(20)));
+    let (start, _refused) = admit(question(Duration::from_secs(20))).expect("a launch id");
     assert!(!lane.launch(start), "the fifth waits nowhere");
     for launch in &waiting {
         launch.lease().revoke();
@@ -805,11 +809,11 @@ async fn the_lane_queue_holds_four_launches() {
 async fn launches_run_one_at_a_time() {
     let base = Base::new("launch-serial");
     let lane = found(&base, "deaf").await;
-    let (start, mut first) = admit(question(Duration::from_secs(20)));
+    let (start, mut first) = admit(question(Duration::from_secs(20))).expect("a launch id");
     queue(&lane, start);
     let _first_pipes = pipes(&mut first).await;
     until("the first runs", || questions(&base) == 1).await;
-    let (start, mut second) = admit(question(Duration::from_secs(20)));
+    let (start, mut second) = admit(question(Duration::from_secs(20))).expect("a launch id");
     let second_control = start.control();
     queue(&lane, start);
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -827,17 +831,17 @@ async fn launches_run_one_at_a_time() {
 async fn a_queued_launch_revoked_before_its_turn_never_starts() {
     let base = Base::new("launch-revoked-queued");
     let lane = found(&base, "deaf").await;
-    let (start, mut first) = admit(question(Duration::from_secs(20)));
+    let (start, mut first) = admit(question(Duration::from_secs(20))).expect("a launch id");
     queue(&lane, start);
     let _pipes = pipes(&mut first).await;
     until("the first runs", || questions(&base) == 1).await;
-    let (start, mut revoked) = admit(question(Duration::from_secs(20)));
+    let (start, mut revoked) = admit(question(Duration::from_secs(20))).expect("a launch id");
     queue(&lane, start);
     assert_eq!(revoked.lease().revoke(), Revoked::Idle);
     assert_eq!(end(first).await, Teardown::Done);
     assert_eq!(failed(&mut revoked).await, LaunchFailed::Revoked);
     assert_eq!(end(revoked).await, Teardown::Done);
-    let (start, mut later) = admit(question(Duration::from_secs(20)));
+    let (start, mut later) = admit(question(Duration::from_secs(20))).expect("a launch id");
     queue(&lane, start);
     let _later_pipes = pipes(&mut later).await;
     until("the later one runs", || questions(&base) == 2).await;
@@ -850,20 +854,20 @@ async fn a_queued_launch_revoked_before_its_turn_never_starts() {
 async fn the_deadline_is_kept_from_admission() {
     let base = Base::new("launch-deadline");
     let lane = found(&base, "deaf").await;
-    let (start, mut zero) = admit(question(Duration::ZERO));
+    let (start, mut zero) = admit(question(Duration::ZERO)).expect("a launch id");
     queue(&lane, start);
     assert_eq!(failed(&mut zero).await, LaunchFailed::Expired);
-    let (start, mut first) = admit(question(Duration::from_secs(20)));
+    let (start, mut first) = admit(question(Duration::from_secs(20))).expect("a launch id");
     queue(&lane, start);
     let _pipes = pipes(&mut first).await;
     until("the first runs", || questions(&base) == 1).await;
-    let (start, mut waiting) = admit(question(Duration::from_millis(300)));
+    let (start, mut waiting) = admit(question(Duration::from_millis(300))).expect("a launch id");
     queue(&lane, start);
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(end(first).await, Teardown::Done);
     assert_eq!(failed(&mut waiting).await, LaunchFailed::Expired);
     assert_eq!(questions(&base), 1);
-    let (start, mut short) = admit(question(Duration::from_millis(300)));
+    let (start, mut short) = admit(question(Duration::from_millis(300))).expect("a launch id");
     let control = start.control();
     queue(&lane, start);
     let _short_pipes = pipes(&mut short).await;
@@ -876,13 +880,13 @@ async fn the_deadline_is_kept_from_admission() {
 async fn closing_ends_the_live_launch() {
     let base = Base::new("launch-close");
     let mut lane = found(&base, "deaf").await;
-    let (start, mut live) = admit(question(Duration::from_secs(20)));
+    let (start, mut live) = admit(question(Duration::from_secs(20))).expect("a launch id");
     queue(&lane, start);
     let _pipes = pipes(&mut live).await;
     until("it runs", || questions(&base) == 1).await;
     let mut queued = Vec::new();
     for _ in 0..3 {
-        let (start, launch) = admit(question(Duration::from_secs(20)));
+        let (start, launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
         let control = start.control();
         queue(&lane, start);
         queued.push((control, launch));
@@ -914,7 +918,7 @@ async fn a_failed_termination_keeps_everything() {
     })
     .await;
     TERMINATION_FAILS.store(true, Ordering::SeqCst);
-    let (start, mut launch) = admit(question(Duration::from_secs(20)));
+    let (start, mut launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
     let control = start.control();
     queue(&lane, start);
     let _pipes = pipes(&mut launch).await;
@@ -934,7 +938,7 @@ async fn a_failed_termination_keeps_everything() {
 async fn a_child_that_exits_or_lingers_is_ended_with_its_job() {
     let base = Base::new("launch-exits");
     let lane = found(&base, "out").await;
-    let (start, mut exits) = admit(question(Duration::from_secs(20)));
+    let (start, mut exits) = admit(question(Duration::from_secs(20))).expect("a launch id");
     let control = start.control();
     queue(&lane, start);
     let _pipes = pipes(&mut exits).await;
@@ -946,7 +950,7 @@ async fn a_child_that_exits_or_lingers_is_ended_with_its_job() {
     let lane = found(&linger_base, &format!("linger:{}", held.display())).await;
     // The Version's grandchild left this; the question's must make its own.
     fs::remove_file(held.with_extension("ready")).expect("the first grandchild was ready");
-    let (start, mut lingers) = admit(question(Duration::from_secs(20)));
+    let (start, mut lingers) = admit(question(Duration::from_secs(20))).expect("a launch id");
     let control = start.control();
     queue(&lane, start);
     let _pipes = pipes(&mut lingers).await;
@@ -977,7 +981,7 @@ async fn a_restarted_lane_sweeps_leftover_launches() {
 async fn a_locked_file_leaves_the_folder_for_the_sweep() {
     let base = Base::new("launch-folder-left");
     let mut lane = found(&base, "deaf").await;
-    let (mut start, mut launch) = admit(question(Duration::from_secs(20)));
+    let (mut start, mut launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
     let (id_tx, id) = std_mpsc::channel();
     start.hooks.id = Some(id_tx);
     queue(&lane, start);
@@ -998,7 +1002,7 @@ async fn a_locked_file_leaves_the_folder_for_the_sweep() {
 async fn the_subtree_handles_are_released_before_deletion() {
     let base = Base::new("launch-released");
     let lane = found(&base, "deaf").await;
-    let (start, mut launch) = admit(question(Duration::from_secs(20)));
+    let (start, mut launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
     queue(&lane, start);
     let _pipes = pipes(&mut launch).await;
     assert_eq!(launch_dirs(&base).len(), 1);
@@ -1013,7 +1017,7 @@ async fn a_partial_start_stops_in_order() {
     let lane = found(&base, "deaf").await;
     let mut bad = question(Duration::from_secs(20));
     bad.model = "nul\0inside".to_owned();
-    let (mut start, mut launch) = admit(bad);
+    let (mut start, mut launch) = admit(bad).expect("a launch id");
     let (id_tx, id) = std_mpsc::channel();
     start.hooks.id = Some(id_tx);
     queue(&lane, start);
@@ -1030,7 +1034,7 @@ async fn a_partial_start_stops_in_order() {
 async fn a_launch_owns_its_pipe_name() {
     let base = Base::new("launch-pipe-name");
     let lane = found(&base, "deaf").await;
-    let (mut start, mut launch) = admit(question(Duration::from_secs(20)));
+    let (mut start, mut launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
     let (id_tx, id) = std_mpsc::channel();
     start.hooks.id = Some(id_tx);
     queue(&lane, start);
@@ -1041,7 +1045,7 @@ async fn a_launch_owns_its_pipe_name() {
     assert_eq!(end(launch).await, Teardown::Done);
     assert!(Listener::create(id).is_ok(), "free after");
 
-    let (mut start, mut squatted) = admit(question(Duration::from_secs(20)));
+    let (mut start, mut squatted) = admit(question(Duration::from_secs(20))).expect("a launch id");
     let (id_tx, id) = std_mpsc::channel();
     let (paused, barrier) = barrier();
     start.hooks.id = Some(id_tx);
@@ -1063,7 +1067,7 @@ async fn a_second_lane_never_sweeps_a_live_launch() {
     let lane = found_with(&base, "deaf", |host| host.terminate = slow_terminate).await;
     let (other_host, _switches) = host(&base, "out");
     let mut other = Lane::start(other_host).expect("lane");
-    let (mut start, mut launch) = admit(question(Duration::from_secs(20)));
+    let (mut start, mut launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
     let (paused, barrier) = barrier();
     start.hooks.folder = Some(paused);
     queue(&lane, start);
@@ -1100,7 +1104,7 @@ async fn measure_launch_pipes() {
     const TOTAL: usize = 64 * 1024 * 1024;
     let base = Base::new("launch-measure");
     let lane = found(&base, "flood").await;
-    let (mut start, mut launch) = admit(question(MAX_LAUNCH));
+    let (mut start, mut launch) = admit(question(MAX_LAUNCH)).expect("a launch id");
     let (pumps, ended) = std_mpsc::channel();
     start.hooks.pumps = Some(pumps);
     queue(&lane, start);
