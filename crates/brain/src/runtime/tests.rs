@@ -86,7 +86,7 @@ fn staged_hold_controls_do_not_admit_or_change_a_run() {
 
 #[tokio::test]
 async fn offline_staging_controls_drop_admission_and_never_queue_credential_work() {
-    use kumochi_protocol::message::{ConnectionOp, KeyStageId};
+    use kumochi_protocol::message::{ConnectionOp, KeyStageFailure, KeyStageId, KeyStagePlan};
     let scratch = Scratch::new("offline-key-stage");
     let mut brain = patient_brain(&scratch, "");
     let (sender, queued) = std::sync::mpsc::channel();
@@ -103,7 +103,67 @@ async fn offline_staging_controls_drop_admission_and_never_queue_credential_work
         },
     ] {
         brain.account.connections.stage_session(Some(brain.epoch));
+        let plan = KeyStagePlan {
+            id: KeyStageId([1; 16]),
+            len: 16,
+        };
+        assert_eq!(
+            brain.account.stage_op(
+                brain.epoch,
+                ConnectionOp::BeginAnthropicKeyStage {
+                    request: 7,
+                    len: 16
+                }
+            ),
+            vec![]
+        );
+        assert!(matches!(
+            queued.try_recv(),
+            Ok(super::account::Work::Stage(
+                super::connections::StageWork::Begin {
+                    request: 7,
+                    len: 16,
+                    ..
+                }
+            ))
+        ));
+        assert_eq!(
+            brain
+                .account
+                .connection_event(super::connections::ConnectionEvent::StagePlan {
+                    epoch: brain.epoch,
+                    request: 7,
+                    result: Ok(plan)
+                }),
+            vec![ControlToShell::AnthropicKeyStage {
+                request: 7,
+                result: Ok(plan)
+            }]
+        );
         brain.control_offline(ControlToBrain::Connection(op), 1, &mut tap);
+        assert_eq!(
+            brain.account.stage_op(
+                brain.epoch,
+                ConnectionOp::AnthropicKeyStaged { plan: plan.id }
+            ),
+            vec![ControlToShell::AnthropicKeyStageDone {
+                plan: plan.id,
+                result: Err(KeyStageFailure::Changed)
+            }]
+        );
+        assert_eq!(
+            brain.account.stage_op(
+                brain.epoch,
+                ConnectionOp::BeginAnthropicKeyStage {
+                    request: 8,
+                    len: 16
+                }
+            ),
+            vec![ControlToShell::AnthropicKeyStage {
+                request: 8,
+                result: Err(KeyStageFailure::Unavailable)
+            }]
+        );
         assert!(matches!(
             queued.try_recv(),
             Err(std::sync::mpsc::TryRecvError::Empty)

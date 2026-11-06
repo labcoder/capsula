@@ -82,13 +82,27 @@ impl<S: CredentialStore> Vault<S> {
         let key = match parsed {
             Ok(key) => key,
             Err(error) => {
-                generation::delete_pending(&self.store, &self.service, &plan);
+                generation::delete_pending(
+                    &self.store,
+                    &self.service,
+                    Kind::AnthropicKey,
+                    plan.generation(),
+                    plan.layout(),
+                );
                 return Err(error.into());
             }
         };
         let bytes = Secret::new(Zeroizing::new(key.expose().as_str().as_bytes().to_vec()));
-        self.write_expected(Kind::AnthropicKey, plan.base(), &bytes, None)
-            .map_err(KeyError::from)?;
+        if let Err(error) = self.write_expected(Kind::AnthropicKey, plan.base(), &bytes, None) {
+            generation::delete_pending(
+                &self.store,
+                &self.service,
+                Kind::AnthropicKey,
+                plan.generation(),
+                plan.layout(),
+            );
+            return Err(KeyError::from(error).into());
+        }
         Ok(key)
     }
 }

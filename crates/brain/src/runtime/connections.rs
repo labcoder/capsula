@@ -298,8 +298,9 @@ impl Accounts {
     }
 
     pub(super) fn load_key(&mut self, op: KeyOp) {
-        self.connections.stage_request = None;
-        self.connections.stage_admission = None;
+        if matches!(op, KeyOp::Remove) {
+            self.connections.stage_admission = None;
+        }
         let generation = self.connections.advance();
         self.connections.view.anthropic = KeyView::Checking;
         self.connections.loading = true;
@@ -322,11 +323,12 @@ impl Accounts {
         result: Result<Secret<AnthropicKey>, KeyStageFailure>,
     ) -> Vec<ControlToShell> {
         let outcome = match result {
-            Ok(key) if generation == self.connections.generation => {
-                self.start_key(Ok(Some(key)));
+            Ok(key) => {
+                if generation == self.connections.generation {
+                    self.start_key(Ok(Some(key)));
+                }
                 Ok(())
             }
-            Ok(_) => Err(KeyStageFailure::Changed),
             Err(error) => Err(error),
         };
         if self.connections.stage_link != Some(epoch) {

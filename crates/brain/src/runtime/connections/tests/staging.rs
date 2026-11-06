@@ -1,6 +1,8 @@
 use super::*;
 use kumochi_protocol::constants::{generation_hex, generation_target};
 
+mod fold;
+
 #[tokio::test]
 async fn a_duplicate_notification_never_queues_or_rechecks_a_committed_key() {
     let scratch = Scratch::new("stage-runtime-once");
@@ -424,7 +426,7 @@ async fn fifo_adopt_then_begin_uses_the_new_head_and_remove_fences_late_results(
         }),
         vec![ControlToShell::AnthropicKeyStageDone {
             plan: plan.id,
-            result: Err(KeyStageFailure::Changed)
+            result: Ok(())
         }]
     );
     settle(&mut account).await;

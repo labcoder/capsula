@@ -299,6 +299,63 @@ mod tests {
     use super::*;
 
     #[test]
+    fn staging_frames_refuse_truncated_missing_trailing_and_oversized_payloads() {
+        use crate::frame::{self, FrameError, Pipe};
+        use crate::message::ControlToBrain;
+        for op in [
+            ConnectionOp::BeginAnthropicKeyStage {
+                request: 1,
+                len: 16,
+            },
+            ConnectionOp::AnthropicKeyStaged {
+                plan: KeyStageId([1; 16]),
+            },
+        ] {
+            let message = ControlToBrain::Connection(op);
+            let encoded = frame::encode(&message, Pipe::Control).expect("encoded");
+            assert_eq!(
+                frame::read::<ControlToBrain>(&mut encoded.as_slice(), Pipe::Control)
+                    .expect("complete"),
+                Some(message)
+            );
+            for end in 1..encoded.len() {
+                assert!(matches!(
+                    frame::read::<ControlToBrain>(&mut &encoded[..end], Pipe::Control),
+                    Err(FrameError::Truncated)
+                ));
+            }
+            let payload = &encoded[4..];
+            assert!(matches!(
+                frame::decode::<ControlToBrain>(&payload[..payload.len() - 1]),
+                Err(FrameError::Malformed(
+                    postcard::Error::DeserializeUnexpectedEnd
+                ))
+            ));
+            let mut trailing = payload.to_vec();
+            trailing.push(0);
+            assert!(matches!(
+                frame::decode::<ControlToBrain>(&trailing),
+                Err(FrameError::Malformed(
+                    postcard::Error::DeserializeBadEncoding
+                ))
+            ));
+        }
+        assert!(matches!(
+            frame::read::<ControlToBrain>(&mut &[0, 0, 0, 0][..], Pipe::Control),
+            Err(FrameError::Malformed(
+                postcard::Error::DeserializeUnexpectedEnd
+            ))
+        ));
+        assert!(matches!(
+            frame::read::<ControlToBrain>(&mut &65537_u32.to_le_bytes()[..], Pipe::Control),
+            Err(FrameError::TooLarge {
+                len: 65537,
+                max: 65536
+            })
+        ));
+    }
+
+    #[test]
     fn stage_metadata_has_literal_names_bounds_and_redacted_tap() {
         use crate::constants::{CredentialLayout, generation_hex, generation_target};
         use crate::message::{ControlToBrain, ControlToShell};

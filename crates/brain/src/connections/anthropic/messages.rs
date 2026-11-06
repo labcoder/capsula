@@ -4,6 +4,7 @@ use std::ops::ControlFlow;
 use std::time::Duration;
 
 use kumochi_protocol::Secret;
+use kumochi_protocol::message::ANTHROPIC_KEY_BYTES;
 use tokio::time::{Instant, timeout, timeout_at};
 use zeroize::Zeroizing;
 
@@ -132,7 +133,8 @@ pub async fn stream<C: AnthropicConnect, L>(
 }
 
 fn request(key: &str, body: &[u8]) -> Result<Secret<Zeroizing<Vec<u8>>>, Failure> {
-    if key.is_empty() || key.len() > 2048 || !key.bytes().all(|byte| byte.is_ascii_graphic()) {
+    if !ANTHROPIC_KEY_BYTES.contains(&key.len()) || !key.bytes().all(|byte| byte.is_ascii_graphic())
+    {
         return Err(Failure::Credential);
     }
     let head = format!("POST /v1/messages HTTP/1.1\r\nHost: {HOST}\r\nAuthorization: Bearer ");

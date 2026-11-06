@@ -203,19 +203,23 @@ flowchart LR
 
 | Message | Pipe | Fields |
 |---|---|---|
-| `Connection` | Control, shell to brain | a `ConnectionOp`: `AnthropicKeyStaged`, `CheckAnthropicKey`, `RemoveAnthropicKey`, `ConnectClaudeCode`, `CancelClaudeSignIn`, `DisconnectClaudeCode` or `FindClaudeCode`; no fields |
+| `Connection` | Control, shell to brain | a `ConnectionOp`: `BeginAnthropicKeyStage { request, len }`, `AnthropicKeyStaged { plan }`, or fieldless `CheckAnthropicKey`, `RemoveAnthropicKey`, `ConnectClaudeCode`, `CancelClaudeSignIn`, `DisconnectClaudeCode`, `FindClaudeCode` |
 | `Warm` | Control, shell to brain | the `ThreadId` the user is about to type into |
 | `Connections` | Control, brain to shell | a `ConnectionsView`: the key's `KeyView` and Claude Code's `ClaudeCodeView` |
+| `AnthropicKeyStage` | Control, brain to shell | the request number and a one-use plan or closed refusal |
+| `AnthropicKeyStageDone` | Control, brain to shell | the plan id and committed-adoption outcome; success does not imply the key is still current after a later Remove |
 
 - No key, token or anything Claude Code printed crosses the pipe. The shell stages a pasted key
-  in Credential Manager and sends only `AnthropicKeyStaged`; the brain checks it and moves it.
+  in Credential Manager using a brain-issued plan, then sends its id in
+  `AnthropicKeyStaged`; the brain validates and adopts it at fresh names.
 - Every reason is a closed enum: a refused key's `KeyRejection`, an `Unsupported` install, the
   audit check that failed (`AuditFailed`, never what it saw) and the `PolicyFailed` that closed
   the route. A `ClaudeVersion` is three 16-bit numbers.
-- All three messages are on the tap's content-free list.
+- `Warm`, `Connections` and the fieldless connection ops are on the tap's
+  content-free list. Staging ops and both paste replies redact their payloads.
 - A `ModelChoice` names its `ConnectionKind`; one saved before Claude existed reads as `ChatGpt`.
-- shortcut: nothing sends or answers these until A1, C2 and C5b, and the shell ignores
-  `Connections` until its Connect screen reads it.
+- The staging writer and link reply seam are available; the Settings paste
+  caller and its clipboard lifecycle land separately.
 
 ## Scenes and recovery
 

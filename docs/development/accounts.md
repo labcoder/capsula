@@ -49,8 +49,10 @@ that writer calls CredWriteW with generic, local-machine persistence and a
 zeroizing blob; it never uses keyring's enterprise-persistent secret path.
 
 Begin replies are tied to the requesting link and request number. Disconnect
-clears admission, and offline notifications cannot mint or adopt. The serialized
-worker consumes an identified permit once; an unknown/superseded/consumed id
+clears admission, and offline notifications cannot mint or adopt. Check retains
+a pending paste, so a Check during Begin still gets
+a plan reply and a Check after its reply does not discard the paste's admission.
+The serialized worker consumes an identified permit once; an unknown/superseded/consumed id
 is Changed, not an empty-key Format rejection. One two-second settle budget
 covers all staged reads; only complete present bytes are validated.
 
@@ -60,11 +62,13 @@ write or commit failure preserves both the saved key and the runtime key/view/
 catalog. A successful commit enters the normal catalog-check path even if its
 shell disconnected; generation, not link epoch, fences this brain-wide result.
 `AnthropicKeyStageDone` reports only that paste's save outcome to its original
-link, independently of the saved key's connection view.
+link, independently of the saved key's connection view. A committed paste reports
+success even if a later Check or Remove fenced its runtime result or removed it.
 
 The staged chunks and predecessor are swept after activation, never the new
-active names. Read/validation refusal and Remove also best-effort delete the
-consumed plan's staged names, without logging contents or retiring its row.
+active names. Any failed adoption and Remove also best-effort delete the
+consumed plan's staged names; write/activation failure deletes the uncommitted
+candidate's names too, without logging contents or retiring its row.
 Failed deletes wait for the next begin or open. Remove consumes admission and
 the permit even if its commit fails, so a late notification cannot adopt it.
 

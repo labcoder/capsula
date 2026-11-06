@@ -574,7 +574,7 @@ pub enum ControlToShell {
     AnthropicKeyStageDone {
         /// The consumed staging identity.
         plan: KeyStageId,
-        /// Whether adoption committed, independently of catalog validation.
+        /// Whether adoption committed, even if a later Check or Remove changed the current view.
         result: Result<(), KeyStageFailure>,
     },
 }

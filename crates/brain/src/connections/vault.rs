@@ -73,7 +73,13 @@ impl<S: CredentialStore> Vault<S> {
                 let paste = self.paste.take();
                 let result = self.remove(&[Kind::AnthropicKey], None);
                 if let Some(plan) = paste {
-                    generation::delete_pending(&self.store, &self.service, &plan);
+                    generation::delete_pending(
+                        &self.store,
+                        &self.service,
+                        Kind::AnthropicKey,
+                        plan.generation(),
+                        plan.layout(),
+                    );
                 }
                 result?;
                 Ok(None)
@@ -366,7 +372,7 @@ impl<S: CredentialStore> Vault<S> {
         Ok(true)
     }
 
-    /// Stores a key as the current one, as a paste staged through the authority will (C7).
+    /// Seeds a current key through the same authority path as an adopted paste.
     #[cfg(test)]
     pub(crate) fn save_anthropic_key(&mut self, key: &[u8]) -> Result<(), VaultError> {
         self.write(
@@ -414,8 +420,13 @@ impl<S: CredentialStore> Vault<S> {
         marker: Option<SignOutMarker>,
     ) -> Result<(), VaultError> {
         let plan = self.authority.begin(kind, revision, bytes.expose().len())?;
-        let verified = generation::write(&self.store, &self.service, plan, bytes)?;
-        self.authority.activate(verified, marker)?;
+        let candidate = (plan.generation(), plan.layout());
+        let result = generation::write(&self.store, &self.service, plan, bytes)
+            .and_then(|verified| self.authority.activate(verified, marker));
+        if let Err(error) = result {
+            generation::delete_pending(&self.store, &self.service, kind, candidate.0, candidate.1);
+            return Err(error.into());
+        }
         self.sweep();
         Ok(())
     }
@@ -455,14 +466,12 @@ impl<S: CredentialStore> Vault<S> {
     }
 
     /// Deletes the 262 names earlier builds wrote, never reading one, until a clean pass in any
-    /// open after the first one ends it; a refused delete waits for the next open. The shell
-    /// still stages pastes at its legacy name, so every open deletes that one.
+    /// open after the first one ends it; a refused delete waits for the next open. Every open
+    /// also deletes the old staging name as defense against earlier writers.
     fn sweep_legacy(&mut self) {
         match self.authority.legacy_owed() {
             Ok(true) => {}
             Ok(false) => {
-                // shortcut: the shell stages pastes at the legacy name until C7 stages them
-                // through the authority; C7 ends this delete.
                 if self
                     .store
                     .delete(&anthropic_staging_target(&self.service))

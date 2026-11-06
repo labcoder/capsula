@@ -185,7 +185,7 @@ fn failed_candidate_writes_and_failed_commits_preserve_the_saved_key() {
         if commit {
             raw(&path).execute_batch("CREATE TRIGGER refuse_activation BEFORE UPDATE OF state ON generations WHEN NEW.state = 'active' BEGIN SELECT RAISE(ABORT, 'refused'); END;").expect("activation-only failure");
         } else {
-            store.0.lock().expect("fake").refusing = true;
+            store.arm(0, crate::connections::vault::fake::Fault::Refuse);
         }
         let result = vault.adopt_anthropic_paste(plan.generation);
         if commit {
@@ -205,18 +205,20 @@ fn failed_candidate_writes_and_failed_commits_preserve_the_saved_key() {
             raw(&path)
                 .execute_batch("DROP TRIGGER refuse_activation;")
                 .expect("allow activation");
-        } else {
-            store.0.lock().expect("fake").refusing = false;
         }
         assert_eq!(loaded(&mut vault).as_deref(), Some(OLD));
         assert!(
             store
                 .names()
                 .iter()
-                .any(|name| name.contains(&plan.generation.hex())),
-            "a write/activation failure leaves staged names for the next begin"
+                .all(|name| !name.contains(&plan.generation.hex())),
+            "a write/activation failure deletes the staged copy"
         );
-        assert_eq!(store.names().len(), if commit { 3 } else { 2 });
+        assert_eq!(
+            store.names().len(),
+            1,
+            "only the previous active key remains"
+        );
         assert!(matches!(
             vault.adopt_anthropic_paste(plan.generation),
             Err(PasteError::Changed)
@@ -406,10 +408,29 @@ fn failed_deletes_do_not_undo_committed_adoption() {
 fn every_begin_requires_fresh_brain_minted_names() {
     let (_scratch, path, service, store) = setup("paste-fresh-names");
     let mut vault = open(&store, &service, &path);
-    for _ in 0..2 {
-        assert!(matches!(
-            vault.begin_anthropic_paste(16),
-            Ok(PastePlan { bytes: 16, .. })
-        ));
-    }
+    let first = vault.begin_anthropic_paste(16).expect("first");
+    assert_ne!(first.generation.hex(), "00000000000000000000000000000000");
+    let second = vault.begin_anthropic_paste(16).expect("second");
+    assert_eq!((first.bytes, second.bytes), (16, 16));
+    assert_ne!(first.generation, second.generation);
+    assert_ne!(second.generation.hex(), "00000000000000000000000000000000");
+}
+
+#[test]
+fn partial_candidate_writes_are_deleted_without_touching_the_active_key() {
+    let (_scratch, path, service, store) = setup("paste-partial-candidate");
+    let mut vault = open(&store, &service, &path);
+    vault.save_anthropic_key(OLD.as_bytes()).expect("old key");
+    let plan = vault.begin_anthropic_paste(2048).expect("plan");
+    let key = format!("sk-ant-api{}", "x".repeat(2038));
+    plant(&store, &service, &plan, key.as_bytes());
+    store.arm(1, crate::connections::vault::fake::Fault::Refuse);
+    assert!(matches!(
+        vault.adopt_anthropic_paste(plan.generation),
+        Err(PasteError::Key(KeyError::Vault(VaultError::Store(
+            CredentialStoreError::Write(5)
+        ))))
+    ));
+    assert_eq!(loaded(&mut vault).as_deref(), Some(OLD));
+    assert_eq!(store.names().len(), 1);
 }

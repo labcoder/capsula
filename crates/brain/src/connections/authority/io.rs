@@ -149,12 +149,15 @@ pub(crate) fn read_pending(
     read_pending_within(store, service, plan, SETTLE, clock)
 }
 
-pub(crate) fn delete_pending(store: &dyn CredentialStore, service: &str, plan: &WritePlan) {
-    for index in 0..plan.layout.chunks() {
-        if store
-            .delete(&target(service, plan.kind, plan.generation, index))
-            .is_err()
-        {
+pub(crate) fn delete_pending(
+    store: &dyn CredentialStore,
+    service: &str,
+    kind: Kind,
+    id: Generation,
+    layout: Layout,
+) {
+    for index in 0..layout.chunks() {
+        if store.delete(&target(service, kind, id, index)).is_err() {
             tracing::warn!("a staged credential could not be deleted");
         }
     }
