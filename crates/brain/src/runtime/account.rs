@@ -39,9 +39,23 @@ use super::connections::{ConnectionEvent, Connections};
 use super::{Brain, Full, Link, settings};
 use crate::coordinator::Input as CoreInput;
 
+#[cfg(test)]
+mod github_tests;
+
 #[derive(Debug)]
 pub(super) enum Work {
     Account(Job),
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the next P3b layer submits runtime credential jobs"
+        )
+    )]
+    GitHub {
+        job: crate::connections::github::lane::Job,
+        reply: oneshot::Sender<crate::connections::github::lane::Reply>,
+    },
     Key {
         generation: u64,
         op: crate::connections::anthropic::KeyOp,
@@ -597,6 +611,10 @@ fn spawn<S: CredentialStore + 'static>(
             for job in queued {
                 let job = match job {
                     Work::Account(job) => job,
+                    Work::GitHub { job, reply } => {
+                        reply.send(worker.github(job)).ok();
+                        continue;
+                    }
                     Work::Key { generation, op } => {
                         if reads
                             .send(Event::Connection(ConnectionEvent::Loaded {

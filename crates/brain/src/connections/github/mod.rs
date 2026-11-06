@@ -2,6 +2,8 @@
 
 pub mod api;
 pub mod device;
+pub(crate) mod lane;
+pub(crate) mod record;
 
 use std::fmt;
 use std::ops::RangeInclusive;

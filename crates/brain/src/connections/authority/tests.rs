@@ -14,6 +14,7 @@ use crate::connections::vault::fake::FakeStore;
 use crate::platform::credential::{CredentialStore, SecretBytes};
 use crate::test_support::Scratch;
 
+mod github;
 mod staging;
 
 const SERVICE: &str = "authority-test";
@@ -644,7 +645,7 @@ fn missing_or_invalid_rows_and_newer_files_are_refused() {
     ));
     setup
         .raw()
-        .execute_batch("PRAGMA user_version = 3")
+        .execute_batch("PRAGMA user_version = 4")
         .expect("newer");
     assert!(matches!(
         Authority::open(&setup.path(), &setup.lock),
@@ -690,7 +691,7 @@ fn a_version_one_file_is_migrated_with_the_legacy_cleanup_owed() {
         .raw()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("version");
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
 }
 
 /// The legacy cleanup ends only after a clean pass in any open after the first pass's open.
