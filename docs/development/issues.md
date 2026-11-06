@@ -25,23 +25,30 @@ counts the attempts that may have created an issue. It is 0 in Draft and Failed,
 enforces, and at least 1 in Unknown. The card shows `maybe_duplicate` from 2, and a discarded
 action's `maybe_filed` from 1.
 
-The transitions that exist so far:
-
 ```mermaid
 stateDiagram-v2
   [*] --> Draft: create
-  Draft --> Draft: edit
-  Failed --> Draft: edit
+  Draft --> Draft: edit, bind
+  Failed --> Draft: edit, bind
+  Draft --> Preflight: File
+  Failed --> Preflight: File
+  Unknown --> Preflight: File anyway
+  Unknown --> Filed: This is the issue, lookup placed
+  Unknown --> Unknown: lookup inconclusive
+  Preflight --> Posting: preflight ok
+  Preflight --> Failed: refused or interrupted, nothing unresolved
+  Preflight --> Unknown: refused or interrupted, an earlier attempt unresolved
+  Posting --> Filed: created
+  Posting --> Failed: definite, nothing unresolved
+  Posting --> Unknown: uncertain, interrupted, or definite with an earlier attempt unresolved
   Draft --> Discarded: discard
   Failed --> Discarded: discard
   Unknown --> Discarded: discard
-  Preflight --> Failed: restart, nothing unresolved
-  Preflight --> Unknown: restart, an earlier attempt unresolved
-  Posting --> Unknown: restart
 ```
 
-Nothing here admits a send, so no product path enters Preflight or Posting. The runtime and
-network wiring that sends an issue is separate.
+A restart follows the interrupted edges. Nothing here sends: the runtime runs the preflight and
+the create and reports their outcomes through the completions below. That wiring and the network
+are separate work.
 
 ## Approvals and versions
 
@@ -65,6 +72,58 @@ content.
 - `edit_draft` replaces title, body and repository together in Draft or Failed; a change makes
   it a Draft.
 - `discard_draft` dismisses a Draft, Failed or Unknown action.
+- `consent`, `bind_drafts` and the completions follow.
+
+## Consent
+
+`consent` takes the hash the card showed, its approval revision, a decision, and `Live`: the
+verified user from the device machine's `user()` and the listed repositories. The revision
+decides first:
+
+| Revision | Answer | Written |
+|---|---|---|
+| The last one used up | `Unchanged` | nothing |
+| Any other but the current one | `Refused(StaleApproval)` | nothing |
+| Current, a check fails | `Refused(reason)` with a fresh revision | `consumed`, `version`, `approval` |
+| Current, every check passes | `Changed` into Preflight, or Filed for a confirmed candidate | `consumed`, `stage`, `version`, `approval` |
+
+The checks run in order:
+1. The stage takes the decision: File needs Draft or Failed, File anyway needs Unknown, and This
+   is the issue needs Unknown with an unplaced candidate. Otherwise `NotAllowedNow`.
+2. The hash matches. Otherwise `ContentChanged`.
+3. The action has an account, and `Live` has a user with a nonzero id. Otherwise `NotConnected`.
+4. Their numeric ids are equal; logins don't count. Otherwise `OtherAccount`.
+5. The bound repository is listed. Otherwise `RepoNotListed`.
+
+A refusal never changes stage, content or binding. Because the refused revision is used up, a
+stale click can't file once its cause is fixed, and a double click on a sending card is a no-op.
+Every return to Draft, Failed or Unknown offers a new revision, so each send that could duplicate
+an issue needs a fresh File anyway.
+
+The hash is SHA-256 of `{"repo":…,"account":…,"title":…,"body":…}` in that order, with the
+account as its numeric id. It covers no screenshot, since the card shows none.
+
+`bind_drafts(account, repo)` sets the account and, where none is chosen, the repository on every
+Draft and Failed action in every live thread. A change makes a Failed action a Draft with a fresh
+revision. Unresolved actions are skipped, and bind never files.
+
+## Sending
+
+The runtime calls each completion with the version of the answer that entered its phase, never a
+version read later. At any other version, earlier or later, or in another stage, a completion
+answers `Refused(NotAllowedNow)` and writes nothing.
+
+- `preflighted(at, result)`: a mark enters Posting, and a refusal means nothing was sent.
+- `posted(at, outcome)` takes P3b's `CreateOutcome` unchanged. Created files; Definite means
+  nothing was sent; Uncertain, or Created with number 0, adds an uncertain attempt.
+- `interrupted(at)` ends a send the runtime gave up on, by the recovery rule. Whichever of it and
+  the send's own completion commits first wins, so a late Created leaves the action Unknown.
+
+An attempt that sent nothing fails a first attempt, and leaves a File anyway attempt Unknown with
+the earliest mark. `looked_up(episode, lookup)` applies only while Unknown with `uncertain ==
+episode`: Placed files, and anything else stays Unknown with the new result. The fence is the
+count, not the version, because a refused File anyway moves the version without ending the
+uncertainty.
 
 ## Recovery
 
@@ -74,8 +133,16 @@ live thread. It reads only the stage, never the content:
 - a Preflight carrying an unresolved mark becomes Unknown with that mark;
 - a Posting becomes Unknown with the earliest mark and one more uncertain attempt.
 
-Each gets a fresh revision. The "store recovered" log line adds `failed_sends` and
-`unknown_sends`.
+Each gets a fresh revision, and `consumed` stays, so a revision used before the crash can't
+file after it. Settled actions aren't touched. The "store recovered" log line adds
+`failed_sends` and `unknown_sends`.
+
+The sends are one transaction. If any sending row's stage doesn't decode, `recover` fails with
+`StoreError::Issue`, the whole batch rolls back, and the brain doesn't start; the next start
+fails the same way. `Store::open` still succeeds, and the steps before it, finished deletions
+and crashed runs, have committed. This is deliberate: skipping the row could hide an attempt
+that may have created an issue, and guessing its outcome could resend one. Starting again needs
+the row repaired or a backup restored.
 
 ## Schema and privacy
 
@@ -83,7 +150,9 @@ Each gets a fresh revision. The "store recovered" log line adds `failed_sends` a
 and SQL reads only the kind: a CHECK refuses a missing, null or unknown kind, and every stage but
 Draft, Failed and Discarded needs a repository and an account. GitHub's account ids are unsigned
 64-bit, so one is canonical decimal text (1 to 20 digits, no leading zero). Reads check it again,
-since SQLite doesn't recheck stored rows: zero, any other form and one past `u64::MAX` fail.
+since SQLite doesn't recheck stored rows: zero, any other form and one past `u64::MAX` fail. Reads
+also refuse an id without a login or a login without an id, and a stage other than Draft, Failed
+or Discarded without a repository and an account, so every action that loads can render.
 
 Debug of `Action`, `Stage` and `Answer` prints kinds, ids, versions, counts and the redacted
 Debug of titles, bodies, repositories and accounts. It never prints an unplaced candidate's URL,
