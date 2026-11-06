@@ -27,19 +27,21 @@ use windows::Win32::UI::Input::{
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     BS_PUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBN_SELCHANGE, CBS_DROPDOWNLIST,
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWL_STYLE, GetClientRect,
-    GetForegroundWindow, GetMessageExtraInfo, GetMessageTime, GetMessageW, GetPropW,
-    GetQueueStatus, GetWindowLongPtrW, ISMEX_NOSEND, InSendMessageEx, IsWindow, MSG, MoveWindow,
-    PostQuitMessage, QS_INPUT, RegisterClassW, SW_HIDE, SW_SHOWNA, SW_SHOWNOACTIVATE,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetPropW,
-    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_INPUT, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_SETFOCUS, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSW, WS_BORDER, WS_CHILD,
-    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE, WS_VSCROLL, WTS_SESSION_LOCK,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWL_EXSTYLE, GWL_STYLE,
+    GetClientRect, GetForegroundWindow, GetMessageExtraInfo, GetMessageTime, GetMessageW, GetPropW,
+    GetQueueStatus, GetWindowLongPtrW, HWND_NOTOPMOST, HWND_TOPMOST, ISMEX_NOSEND, InSendMessageEx,
+    IsWindow, MSG, MoveWindow, PostQuitMessage, QS_INPUT, RegisterClassW, SW_HIDE, SW_SHOWNA,
+    SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SendMessageW, SetPropW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY,
+    WM_INPUT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_SETFOCUS, WM_TIMER,
+    WM_WTSSESSION_CHANGE, WNDCLASSW, WS_BORDER, WS_CHILD, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW,
+    WS_POPUP, WS_VISIBLE, WS_VSCROLL, WTS_SESSION_LOCK,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
-use super::gate::{Feel, MouseSnapshot, Origin, Press, Verdict, away};
+use super::activation::away_across_guard;
+use super::gate::{Feel, MouseSnapshot, Origin, Press, Verdict};
 use super::guard::{self, StopCause, physical_input};
 use super::switch_window;
 use super::{
@@ -61,6 +63,8 @@ pub(super) const ESC_HELD: PCWSTR = w!("InputSessionEscHeld");
 pub(super) const CLICKS: PCWSTR = w!("InputSessionClicks");
 pub(super) const CLICK_QPC: PCWSTR = w!("InputSessionClickQpc");
 pub(super) const CLICK_POINT: PCWSTR = w!("InputSessionClickPoint");
+/// The idle activation: 0 unused, 1 pending, 2 used, whatever its outcome.
+const ACTIVATION: PCWSTR = w!("InputSessionActivation");
 
 pub(super) const LOAD_LAYOUT: u32 = WM_APP + 17;
 pub(super) const RESTORE_LAYOUTS: u32 = WM_APP + 18;
@@ -69,8 +73,10 @@ pub(super) const COVER: u32 = WM_APP + 20;
 pub(super) const UNCOVER: u32 = WM_APP + 21;
 pub(super) const REARM: u32 = WM_APP + 22;
 pub(super) const OPEN_GATE: u32 = WM_APP + 23;
-/// Arms without a Ready press once input has been idle for `wparam` milliseconds.
-pub(super) const ARM_IDLE: u32 = WM_APP + 25;
+/// Admits the one idle activation once input has been idle for `wparam` milliseconds.
+pub(super) const PREPARE_IDLE: u32 = WM_APP + 25;
+/// Ends the idle activation; `wparam` is 1 when the driver confirmed its click.
+pub(super) const FINALIZE_IDLE: u32 = WM_APP + 28;
 
 /// How often one fixture may take or give back its Esc reservation.
 const MAX_ESCAPE_TOGGLES: u32 = 64;
@@ -92,6 +98,7 @@ thread_local! {
     static CONTROLS: Cell<Option<Controls>> = const { Cell::new(None) };
     static PRESS: Cell<Press> = Cell::new(Press::default());
     static ESCAPE_TOGGLES: Cell<u32> = const { Cell::new(0) };
+    static WAS_TOPMOST: Cell<Option<bool>> = const { Cell::new(None) };
 }
 
 pub(super) fn class_name() -> String {
@@ -208,6 +215,7 @@ unsafe extern "system" fn ready_proc(
         && property(root, READY) == 0
         && property(root, OPEN) == 0
         && property(root, ABORT) == 0
+        && property(root, ACTIVATION) == 0
         && selections()
             .and_then(|feel| arm(root, up_time, feel))
             .is_err()
@@ -238,25 +246,90 @@ fn arm(root: HWND, up_time: u32, feel: usize) -> Result<()> {
     set_property(root, READY, 1)
 }
 
-/// The owner's away rule: arms with no feel verdicts once nobody has touched Rez for `away_ms`.
-/// 1 armed, 2 not idle yet, 3 the fixture could not take the foreground.
-fn arm_idle(root: HWND, away_ms: usize) -> Result<usize> {
+/// The owner's away rule, used up by its first call: once nobody has touched Rez for `away_ms`,
+/// arms the raw-input guard, under which any foreign input is terminal, then raises only the
+/// fixture topmost, without activating it, for the driver's one tagged click.
+fn prepare_idle(root: HWND, away_ms: usize) -> Result<()> {
+    let unused = property(root, ACTIVATION) == 0;
+    set_property(root, ACTIVATION, 2)?;
     ensure!(
-        property(root, READY) == 0 && property(root, OPEN) == 0 && property(root, ABORT) == 0,
-        "only an unarmed fixture may arm on idle"
+        unused
+            && property(root, READY) == 0
+            && property(root, OPEN) == 0
+            && property(root, ABORT) == 0,
+        "only an unused, unarmed fixture may prepare its activation"
+    );
+    ensure!(
+        super::desktop_ours(),
+        "the input desktop isn't this session's Default desktop"
     );
     let input = last_input()?;
     // SAFETY: reads the system tick count only.
     let now = unsafe { GetTickCount() };
-    if !away(input, now, Duration::from_millis(u64::try_from(away_ms)?)) {
-        return Ok(2);
+    let away_for = Duration::from_millis(u64::try_from(away_ms)?);
+    register_guards(root)?;
+    ensure!(
+        away_across_guard(input, last_input()?, now, away_for) && !queued_messages(),
+        "Rez wasn't idle long enough, or input arrived while the guard armed"
+    );
+    set_property(root, ACTIVATION, 1)?;
+    // SAFETY: reads this thread's own window's extended style.
+    let style = unsafe { GetWindowLongPtrW(root, GWL_EXSTYLE) };
+    WAS_TOPMOST.set(Some((style & isize::try_from(WS_EX_TOPMOST.0)?) != 0));
+    band(root, HWND_TOPMOST)
+}
+
+/// Ends the idle activation, used either way, back in the fixture's earlier band. Only a pending
+/// activation the driver confirmed, whose one tagged EDIT click arrived with no stop, with the
+/// fixture foreground and its EDIT focused on this desktop, stamps the quiet second's input after
+/// that click and publishes Ready.
+fn finalize_idle(root: HWND, confirmed: usize) -> Result<()> {
+    let pending = property(root, ACTIVATION) == 1;
+    set_property(root, ACTIVATION, 2)?;
+    match WAS_TOPMOST.take() {
+        Some(true) => band(root, HWND_TOPMOST)?,
+        Some(false) => band(root, HWND_NOTOPMOST)?,
+        None => {}
     }
-    // SAFETY: raises only this fixture's own window; idle past the foreground lock timeout allows it.
-    if !unsafe { SetForegroundWindow(root) }.as_bool() {
-        return Ok(3);
+    ensure!(
+        pending && confirmed == 1 && property(root, ABORT) == 0 && property(root, CLICKS) == 1,
+        "the activation isn't pending, confirmed and clicked exactly once"
+    );
+    // SAFETY: reads the foreground window without changing it.
+    let foreground = unsafe { GetForegroundWindow() };
+    // SAFETY: reads this thread's keyboard focus without changing it.
+    let focus = unsafe { GetFocus() };
+    ensure!(
+        foreground == root && focus == controls()?.edit && super::desktop_ours(),
+        "the fixture EDIT isn't the focused foreground of this desktop"
+    );
+    arm(root, last_input()?, 0)
+}
+
+/// Any idle activation failure stops the fixture for good.
+fn sticky(root: HWND, result: Result<()>) -> Result<()> {
+    if result.is_err() {
+        set_property(root, ABORT, 1)?;
     }
-    arm(root, input, 0)?;
-    Ok(1)
+    result
+}
+
+/// Moves only the fixture's own window into or out of the topmost band, without activating,
+/// moving or resizing it.
+fn band(root: HWND, after: HWND) -> Result<()> {
+    // SAFETY: reorders only this thread's own window; NOACTIVATE leaves the foreground alone.
+    unsafe {
+        SetWindowPos(
+            root,
+            Some(after),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )
+    }?;
+    Ok(())
 }
 
 fn selections() -> Result<usize> {
@@ -281,8 +354,11 @@ fn enable_choices() -> Result<()> {
 
 fn rearm(root: HWND) -> Result<()> {
     ensure!(
-        property(root, READY) != 0 && property(root, OPEN) == 0 && property(root, ABORT) == 0,
-        "only a pre-open Ready may rearm"
+        property(root, READY) != 0
+            && property(root, OPEN) == 0
+            && property(root, ABORT) == 0
+            && property(root, ACTIVATION) == 0,
+        "only a pre-open physical Ready may rearm"
     );
     raw_devices(HWND::default(), RIDEV_REMOVE)?;
     set_property(root, READY, 0)?;
@@ -366,7 +442,9 @@ unsafe extern "system" fn edit_proc(
     let root = HWND(std::ptr::with_exposed_provenance_mut(root));
     let counted = if message == WM_KEYDOWN && wp.0 == 0x1b {
         set_property(root, ESCAPES, property(root, ESCAPES) + 1)
-    } else if message == WM_LBUTTONDOWN && property(root, READY) != 0 {
+    } else if message == WM_LBUTTONDOWN
+        && (property(root, READY) != 0 || property(root, ACTIVATION) == 1)
+    {
         receive_click(window, root, lp)
     } else {
         Ok(())
@@ -380,11 +458,11 @@ unsafe extern "system" fn edit_proc(
 }
 
 /// Records a button-down the EDIT received from the session's tagged input: when, where on
-/// screen, and how many so far. Untagged clicks leave no count, time or point.
+/// screen, and how many so far. Untagged, sent or posted clicks leave no count, time or point.
 fn receive_click(edit: HWND, root: HWND, lp: LPARAM) -> Result<()> {
     // SAFETY: reads the extra info of the input message being handled; nothing changes.
     let tagged = unsafe { GetMessageExtraInfo() }.0.cast_unsigned() == MARKER;
-    if !tagged {
+    if !tagged || origin() != Origin::Injected {
         // Only the session's own clicks count; an owner's click aborts through raw input.
         return Ok(());
     }
@@ -428,10 +506,8 @@ unsafe extern "system" fn fixture_proc(
         COVER => return answer(cover(window, wp, lp)),
         UNCOVER => return answer(uncover(window)),
         REARM => return answer(rearm(window)),
-        ARM_IDLE => {
-            return arm_idle(window, wp.0)
-                .map_or(LRESULT(0), |response| LRESULT(response.cast_signed()));
-        }
+        PREPARE_IDLE => return answer(sticky(window, prepare_idle(window, wp.0))),
+        FINALIZE_IDLE => return answer(sticky(window, finalize_idle(window, wp.0))),
         OPEN_GATE => {
             return open_gate(window, wp.0)
                 .map_or(LRESULT(0), |response| LRESULT(response.cast_signed()));
@@ -456,23 +532,21 @@ unsafe extern "system" fn fixture_proc(
         // SAFETY: a failed control update stops only this fixture's own message loop.
         unsafe { PostQuitMessage(1) };
     }
-    let guard =
-        if message == WM_INPUT && (property(window, READY) != 0 || property(window, OPEN) != 0) {
-            match physical_input(lp) {
-                Ok(Some(input)) if property(window, OPEN) != 0 => {
-                    guard::stop(window, StopCause::Input(input))
-                }
-                Ok(Some(_)) if property(window, READY) != 0 => set_property(window, INTERRUPTED, 1),
-                Ok(_) => Ok(()),
-                Err(_) => guard::stop(window, StopCause::GuardReadFailure),
-            }
-        } else if message == WM_WTSSESSION_CHANGE
-            && wp.0 == usize::try_from(WTS_SESSION_LOCK).expect("session event fits usize")
-        {
-            guard::stop(window, StopCause::Lock)
-        } else {
-            Ok(())
-        };
+    let terminal = property(window, OPEN) != 0 || property(window, ACTIVATION) != 0;
+    let guard = if message == WM_INPUT && (terminal || property(window, READY) != 0) {
+        match physical_input(lp) {
+            Ok(Some(input)) if terminal => guard::stop(window, StopCause::Input(input)),
+            Ok(Some(_)) => set_property(window, INTERRUPTED, 1),
+            Ok(None) => Ok(()),
+            Err(_) => guard::stop(window, StopCause::GuardReadFailure),
+        }
+    } else if message == WM_WTSSESSION_CHANGE
+        && wp.0 == usize::try_from(WTS_SESSION_LOCK).expect("session event fits usize")
+    {
+        guard::stop(window, StopCause::Lock)
+    } else {
+        Ok(())
+    };
     if guard.is_err() {
         // SAFETY: a failed guard aborts the fixture rather than permitting unguarded input.
         unsafe { PostQuitMessage(1) };

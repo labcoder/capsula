@@ -5,7 +5,9 @@
 
 use std::f64::consts::{FRAC_PI_2, PI};
 
-use gpui_kit::{Bounds, Path, PathBuilder, Pixels, Point, point, px};
+use gpui_kit::{
+    Bounds, FillOptions, FillRule, Path, PathBuilder, PathStyle, Pixels, Point, point, px,
+};
 use kumochi_scene::{
     display::{
         BUILD_VERTEX_LIMIT, Contour, DASH, FILL_VERTEX_LIMIT, OUTLINE_POINT_LIMIT, Paint, Prim,
@@ -56,7 +58,7 @@ pub(super) fn paths(
     let mut built = Vec::new();
     match prim {
         Prim::Fill { points, color } => {
-            built.extend(fill(&[points])?.map(|path| (path, *color)));
+            built.extend(fill(&[points], FillRule::NonZero)?.map(|path| (path, *color)));
         }
         Prim::Line {
             points,
@@ -90,7 +92,7 @@ pub(super) fn paths(
             let (radius, segments) = corners(*rect, *radius, zoom, charge)?;
             let outer = rounded(*rect, radius, segments);
             if let Some(paint) = background {
-                built.extend(fill(&[&outer])?.map(|path| (path, *paint)));
+                built.extend(fill(&[&outer], FillRule::NonZero)?.map(|path| (path, *paint)));
             }
             if let Some((paint, width)) = border {
                 let half = rect.size.x.min(rect.size.y) / 2.0;
@@ -105,9 +107,9 @@ pub(super) fn paths(
                     let ring = if draw < 1.0 {
                         sector(&outer, &inner, draw)
                     } else if width < half {
-                        fill(&[&outer, &inner])
+                        fill(&[&outer, &inner], FillRule::EvenOdd)
                     } else {
-                        fill(&[&outer])
+                        fill(&[&outer], FillRule::NonZero)
                     }?;
                     built.extend(ring.map(|path| (path, *paint)));
                 }
@@ -143,13 +145,15 @@ fn place(path: &mut Path<Pixels>, transform: Affine) {
     path.bounds = Bounds::from_corners(min, max);
 }
 
-/// Closed contours of at most `FILL_VERTEX_LIMIT` points in all, filled even-odd. A fill's
-/// crossings are the guard's charge; a border's outlines are nested and never cross.
-fn fill(contours: &[&[Vec2]]) -> Result<Option<Path<Pixels>>, BuildError> {
+/// Closed contours of at most `FILL_VERTEX_LIMIT` points in all, filled by `rule`: polygons
+/// nonzero, as SVG and Canvas do, and a border's nested outlines even-odd so the inner is a hole.
+/// A fill's crossings are the guard's charge; a border's outlines never cross.
+fn fill(contours: &[&[Vec2]], rule: FillRule) -> Result<Option<Path<Pixels>>, BuildError> {
     if contours.iter().map(|points| points.len()).sum::<usize>() > FILL_VERTEX_LIMIT {
         return Err(BuildError::OverCharge);
     }
-    let mut path = PathBuilder::fill();
+    let options = FillOptions::default().with_fill_rule(rule);
+    let mut path = PathBuilder::fill().with_style(PathStyle::Fill(options));
     for points in contours {
         let mut points = points.iter().map(|local| pixel(*local));
         let Some(first) = points.next() else {
@@ -335,7 +339,7 @@ fn sector(outer: &[Vec2], inner: &[Vec2], draw: f32) -> Result<Option<Path<Pixel
         }
         left -= span;
     }
-    fill(&[&contour])
+    fill(&[&contour], FillRule::NonZero)
 }
 
 /// A rounded rectangle's radius, clamped as painted, and its chords per corner, flattened from

@@ -38,6 +38,7 @@ pub fn prepare(
         before,
         surface,
         theme,
+        paint_cap,
     } = input;
     let viewport = surface.viewport(ticket.canvas_size)?;
     let mut build = Build {
@@ -324,12 +325,19 @@ pub fn prepare(
             return Err(PrepareError::OverResidency);
         }
     }
+    // A capped scene whose own work passes its cap can never be admitted: stop counting there.
+    let mut total = PaintWork::default();
     for (id, object) in &mut after.objects {
-        object.work = match before.objects.get(id) {
-            Some(old) if Arc::ptr_eq(&old.item.primitives, &object.item.primitives) => old.work,
-            _ => PaintWork::of(&object.item.primitives),
+        object.work = match (before.objects.get(id), paint_cap) {
+            (Some(old), _) if Arc::ptr_eq(&old.item.primitives, &object.item.primitives) => {
+                old.work
+            }
+            (_, None) => PaintWork::of(&object.item.primitives),
+            (_, Some(cap)) => PaintWork::within(&object.item.primitives, total, cap)
+                .ok_or(PrepareError::OverResidency)?,
         };
-        if !object.work.fits_builds() {
+        total = total + object.work;
+        if !object.work.fits_builds() || paint_cap.is_some_and(|cap| !total.fits(cap)) {
             return Err(PrepareError::OverResidency);
         }
     }
@@ -462,6 +470,7 @@ pub fn prepare(
 }
 
 /// Rebuilds semantic state and layout together, skipping preparations later cuts drop.
+/// Each step prepares under `paint_cap` when one is given, as [`PrepareInput::with_paint_cap`].
 /// # Errors
 /// A failed kept preparation identifies its revision; invalid semantic input uses zero.
 pub fn recover(
@@ -471,6 +480,7 @@ pub fn recover(
     theme: &Arc<Theme>,
     measure: &mut dyn TextMeasure,
     cancel: &AtomicBool,
+    paint_cap: Option<PaintWork>,
 ) -> Result<(SceneState, LayoutState), RecoveryError> {
     if log.len() > crate::limits::MAX_STEPS * 2 {
         return Err(crate::StepError::new(ErrorCode::TooLong).into());
@@ -504,7 +514,8 @@ pub fn recover(
                             surface,
                             Arc::clone(theme),
                         )
-                        .map_err(|(error, _)| error)?;
+                        .map_err(|(error, _)| error)?
+                        .with_paint_cap(paint_cap);
                         let prepared = prepare(input, measure, cancel)?;
                         prepared.validate(scene, before)?;
                         Ok::<_, PrepareError>(prepared.after)
@@ -540,13 +551,21 @@ pub fn recover_all(
     theme: &Arc<Theme>,
     measure: &mut dyn TextMeasure,
     cancel: &AtomicBool,
+    paint_cap: Option<PaintWork>,
 ) -> (Vec<SceneRecovery>, GlobalBudget) {
     let mut global = GlobalBudget::default();
     let results = sources
         .iter()
         .map(|(header, log)| -> Result<_, RecoveryError> {
-            let (mut scene, layout) =
-                recover((*header).clone(), log, surface, theme, measure, cancel)?;
+            let (mut scene, layout) = recover(
+                (*header).clone(),
+                log,
+                surface,
+                theme,
+                measure,
+                cancel,
+                paint_cap,
+            )?;
             scene.bind(&mut global)?;
             Ok((scene, layout))
         })
