@@ -199,7 +199,7 @@ enum State {
     Awaiting(Attempt),
     Verifying {
         token: Secret<GitHubToken>,
-        loaded_login: Option<GitHubLogin>,
+        loaded_user: Option<GitHubUser>,
     },
     Saving(Account),
     Connected(Account),
@@ -376,7 +376,7 @@ impl Machine {
                         });
                         self.state = State::Verifying {
                             token: account.token,
-                            loaded_login: Some(account.user.login),
+                            loaded_user: Some(account.user),
                         };
                     }
                     Ok(None) => self.state = State::SignedOut(None),
@@ -423,7 +423,7 @@ impl Machine {
                     Ok(TokenReply::Token(token)) => {
                         self.state = State::Verifying {
                             token: token.clone(),
-                            loaded_login: None,
+                            loaded_user: None,
                         };
                         effects.push(Effect::ReadUser { stamp, token });
                     }
@@ -450,17 +450,15 @@ impl Machine {
             Input::User { stamp, result }
                 if stamp == self.stamp && matches!(self.state, State::Verifying { .. }) =>
             {
-                let State::Verifying {
-                    token,
-                    loaded_login,
-                } = std::mem::replace(&mut self.state, State::SignedOut(None))
+                let State::Verifying { token, loaded_user } =
+                    std::mem::replace(&mut self.state, State::SignedOut(None))
                 else {
                     unreachable!()
                 };
                 match result {
                     Ok(user) => {
                         let account = Account { token, user };
-                        if loaded_login.is_some() {
+                        if loaded_user.is_some() {
                             self.advance();
                             self.state = State::Connected(account);
                             effects.push(Effect::RefreshRepos {
@@ -480,10 +478,19 @@ impl Machine {
                             self.state = State::Saving(account);
                         }
                     }
-                    Err(ApiError::Refused { status: 401, .. }) if loaded_login.is_some() => {
+                    Err(ApiError::Refused { status: 401, .. }) if loaded_user.is_some() => {
                         self.advance();
-                        self.state =
-                            State::NeedsSignIn(loaded_login.expect("guard requires loaded login"));
+                        self.state = State::NeedsSignIn(
+                            loaded_user.expect("guard requires loaded user").login,
+                        );
+                    }
+                    Err(error) if loaded_user.is_some() => {
+                        self.advance();
+                        self.state = State::Connected(Account {
+                            token,
+                            user: loaded_user.expect("guard requires loaded user"),
+                        });
+                        effects.push(Effect::Error(api_key(error).into()));
                     }
                     Err(error) => self.fail(api_key(error), &mut effects),
                 }

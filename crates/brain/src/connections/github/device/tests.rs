@@ -576,3 +576,53 @@ async fn invalid_api_result_ends_attempt_and_another_attempt_has_a_new_stamp() {
         assert_eq!(m.view(Instant::now()), GitHubView::Requesting);
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn startup_non_401_failure_keeps_the_saved_account_with_an_empty_refreshable_list() {
+    for refusal in [
+        ApiError::Response,
+        ApiError::Http(crate::connections::http_client::HttpError::Connect),
+        ApiError::Refused {
+            status: 500,
+            meta: crate::connections::http_client::ResponseMeta::default(),
+        },
+    ] {
+        let mut m = Machine::new(Some(RepoName::new("owner/repo").unwrap()));
+        let stamp = m.stamp();
+        m.on(
+            Input::Loaded {
+                stamp,
+                result: Ok(Some(Account {
+                    token: bearer(),
+                    user: user(),
+                })),
+            },
+            Instant::now(),
+        );
+        let effects = m.on(
+            Input::User {
+                stamp,
+                result: Err(refusal),
+            },
+            Instant::now(),
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Save { .. } | Effect::Remove { .. }))
+        );
+        assert_eq!(
+            m.view(Instant::now()),
+            GitHubView::Connected {
+                login: user().login,
+                repos: Bounded::default(),
+                truncated: false,
+                default: None
+            }
+        );
+        let effects = m.on(Input::Op(GitHubOp::RefreshRepos), Instant::now());
+        assert!(
+            matches!(effects[0], Effect::RefreshRepos { generation } if generation == m.stamp().generation)
+        );
+    }
+}
