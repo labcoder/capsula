@@ -31,9 +31,12 @@ pub(crate) fn endpoints() -> Vec<GitHubEndpoint> {
         GitHubEndpoint::CreateIssue {
             token: token(),
             repo: RepoName::new("owner/repo").unwrap(),
-            body: Secret::new(Zeroizing::new(
-                format!(r#"{{"title":"{SENTINEL}","body":""}}"#).into_bytes(),
-            )),
+            body: super::issues::IssueContent {
+                title: &kumochi_protocol::message::IssueTitle::new(SENTINEL).unwrap(),
+                body: &kumochi_protocol::message::IssueBody::new("").unwrap(),
+            }
+            .into_payload()
+            .unwrap(),
         },
         GitHubEndpoint::Issues {
             token: token(),

@@ -19,9 +19,9 @@ use kumochi_protocol::BUILD_ID;
 use kumochi_protocol::constants::BRAIN_EXE;
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
-    AccountView, ControlToBrain, ControlToShell, DataToBrain, DataToShell, Deleted, Hello,
-    Incarnation, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase, RunId, SceneDescriptor,
-    SceneDescriptorV1, SettingsView, ThreadId, UserError,
+    AccountView, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain, DataToShell,
+    Deleted, Hello, Incarnation, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase, RunId,
+    SceneDescriptor, SceneDescriptorV1, SettingsView, ThreadId, UserError,
 };
 
 use kumochi_scene::deferred::Deferred;
@@ -76,6 +76,10 @@ pub(crate) enum LinkEvent {
         generation: u64,
         view: AccountView,
     },
+    Connections {
+        generation: u64,
+        view: ConnectionsView,
+    },
     /// A run's phase changed, from the control pipe.
     RunState {
         run: RunId,
@@ -112,6 +116,12 @@ pub(crate) enum LinkEvent {
     TurnRefused,
     /// The brain changed a listed thread, from the control pipe.
     ThreadsChanged,
+    /// A run asked to move the typed input, from connection `generation`'s control pipe.
+    Focus {
+        generation: u64,
+        run: RunId,
+        thread: ThreadId,
+    },
     /// Something the user should be told, from the control pipe.
     Error {
         generation: u64,
@@ -373,6 +383,8 @@ pub(crate) struct LinkHandle {
     retry: Sender<()>,
     /// Closes when the link thread ends.
     done: Receiver<()>,
+    #[cfg(test)]
+    recording: Option<Sender<DataToBrain>>,
 }
 
 impl LinkHandle {
@@ -470,6 +482,10 @@ impl LinkHandle {
     /// [`LinkHandle::send_control`]. A turn is counted once queued; one past the count ends the
     /// connection instead.
     pub(crate) fn send_data(&self, session: &Session, message: DataToBrain) -> bool {
+        #[cfg(test)]
+        if let Some(recording) = &self.recording {
+            return recording.try_send(message).is_ok();
+        }
         self.shared
             .outbox(session, |outbox| {
                 let turn = matches!(message, DataToBrain::TextSubmit { .. });
@@ -484,6 +500,49 @@ impl LinkHandle {
                 queued
             })
             .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+impl LinkHandle {
+    /// A handle with no link thread, pipe or outbox, so every send reports the connection gone.
+    pub(crate) fn detached() -> Self {
+        let (retry, _retries) = async_channel::bounded(1);
+        let (_alive, done) = async_channel::bounded(1);
+        Self {
+            shared: Arc::new(Shared::default()),
+            retry,
+            done,
+            recording: None,
+        }
+    }
+
+    pub(crate) fn recording() -> (Self, Receiver<DataToBrain>) {
+        let (recording, requests) = async_channel::unbounded();
+        let mut link = Self::detached();
+        link.recording = Some(recording);
+        (link, requests)
+    }
+}
+
+#[cfg(test)]
+impl Session {
+    /// A session with no connection behind it: its grants only add up here.
+    pub(crate) fn detached(generation: u64, incarnation: Incarnation) -> Self {
+        let (wake, _sleeping) = async_channel::bounded::<DataOut>(1);
+        Self {
+            generation,
+            credit: Arc::new(Credit {
+                bytes: AtomicU32::new(0),
+                wake: wake.downgrade(),
+            }),
+            incarnation,
+        }
+    }
+
+    /// The credit granted and not yet sent.
+    pub(crate) fn granted(&self) -> u32 {
+        self.credit.bytes.load(Ordering::SeqCst)
     }
 }
 
@@ -526,6 +585,8 @@ fn start(link: Link, events: Sender<LinkEvent>) -> (LinkHandle, LinkStart) {
         shared: Arc::clone(&link.shared),
         retry,
         done,
+        #[cfg(test)]
+        recording: None,
     };
     let start = LinkStart {
         link,
@@ -767,6 +828,7 @@ fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
             | ControlToShell::NoVisual { .. }
             | ControlToShell::Account(_)
             | ControlToShell::ThreadsChanged
+            | ControlToShell::Focus { .. }
             | ControlToShell::CaptureDone { .. }
             | ControlToShell::CaptureFailed { .. }
             | ControlToShell::ThreadModelSet { .. }
@@ -774,7 +836,8 @@ fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
             | ControlToShell::ActionState { .. }
             | ControlToShell::IssueRefused { .. }
             | ControlToShell::Connections(_)
-            | ControlToShell::SpeechRevoked { .. },
+            | ControlToShell::SpeechRevoked { .. }
+            | ControlToShell::Voice(_),
         ) => Err(LinkError::Rejected),
         Some(ControlToShell::BuildMismatch { brain_build }) => {
             tracing::warn!(
@@ -904,6 +967,16 @@ fn watch(
                     return;
                 }
             }
+            Ok(Some(ControlToShell::Focus { run, thread })) => {
+                let focus = LinkEvent::Focus {
+                    generation,
+                    run,
+                    thread,
+                };
+                if events.send_blocking(focus).is_err() {
+                    return;
+                }
+            }
             Ok(Some(ControlToShell::Error(error))) => {
                 if events
                     .send_blocking(LinkEvent::Error { generation, error })
@@ -920,18 +993,26 @@ fn watch(
                     return;
                 }
             }
-            // shortcut: B3a releases the exclusion lease on Capture*; nothing holds one yet. The
-            // brain sends no connections view until C2; the Connect screen reads it. Slice 7's
-            // PR 6 stops playback on SpeechRevoked; nothing plays yet.
+            Ok(Some(ControlToShell::Connections(view))) => {
+                if events
+                    .send_blocking(LinkEvent::Connections { generation, view })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            // shortcut: B3a releases the exclusion lease on Capture*; nothing holds one yet.
+            // Slice 7's PR 6 stops playback on SpeechRevoked; nothing plays yet. shortcut: nothing
+            // shows the voice parts yet; the Settings voice section will read Voice.
             Ok(Some(
                 ControlToShell::CaptureDone { .. }
                 | ControlToShell::CaptureFailed { .. }
-                | ControlToShell::Connections(_)
                 | ControlToShell::GitHub(_)
                 | ControlToShell::ActionState { .. }
                 | ControlToShell::IssueRefused { .. }
                 | ControlToShell::SpeechRevoked { .. }
-                | ControlToShell::ThreadModelSet { .. },
+                | ControlToShell::ThreadModelSet { .. }
+                | ControlToShell::Voice(_),
             )) => {}
             // shortcut: B8 consumes NoVisual; B3 switches the production fixture to v1.
             Ok(Some(ControlToShell::NoVisual { .. })) => {

@@ -82,6 +82,11 @@ impl SceneBinding {
         &self.state
     }
 
+    /// Cached attribution of the protected semantic owner when it retires inside a container.
+    pub fn attributed_bytes(&self) -> usize {
+        self.state.attribution()
+    }
+
     /// A snapshot for one worker, attributed the whole state since it may become its last owner.
     pub fn read(&self) -> SceneRead {
         SceneRead {

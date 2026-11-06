@@ -10,9 +10,9 @@ use kumochi_scene::{DetachedCandidate, deferred::Deferred, limits::MAX_RESIDENT_
 
 use super::super::{scene::WINDOW, window::ConsumeError};
 use super::{
-    Completion, Effect, LIVE, PrepareJob, Presenter, RUN, Shaper, acknowledge, begin, commit,
-    commit_as, controls, drained, exhausted, failed, jobs, live, ms, only_job, recovering, rect,
-    settle,
+    Completion, Effect, LIVE, PrepareJob, Presenter, RUN, Shaper, acknowledge, arrive, begin,
+    commit, commit_as, commit_frame, controls, drained, exhausted, failed, jobs, live, ms,
+    only_admission, only_job, recovering, rect, settle,
 };
 
 const FRAME_CACHE_METADATA_BYTES: usize =
@@ -93,6 +93,10 @@ fn shape(presenter: &Presenter) -> impl std::fmt::Debug + PartialEq + use<> {
         scene.running.is_some(),
         scene.retained,
         presenter.residency(),
+        scene.view.activated(),
+        scene.view_bytes,
+        presenter.frames.borrow().epoch(LIVE),
+        scene.pending_consumption,
     )
 }
 
@@ -121,14 +125,14 @@ fn eight_steps_fill_the_window_and_a_ninth_waits_untimed() {
 fn a_consumption_frees_one_position_and_starts_the_waiting_step_from_then() {
     let (mut presenter, now) = prepared(10);
     let first = presenter
-        .consume_ready(LIVE, 0, ms(now, 10_000))
+        .consume_ready(LIVE, 0, ms(now, 10_000), 0, 0)
         .expect("the head");
     let started = jobs(first.effects.expect("a current scene"));
     assert_eq!(started.len(), 1);
     assert_eq!(positions(&presenter), WINDOW);
     assert_eq!(presenter.deadline(), Some(ms(now, 10_250)));
     let second = presenter
-        .consume_ready(LIVE, 1, ms(now, 10_100))
+        .consume_ready(LIVE, 1, ms(now, 10_100), 0, 0)
         .expect("the next head");
     assert!(jobs(second.effects.expect("a current scene")).is_empty());
     assert_eq!(positions(&presenter), WINDOW - 1);
@@ -147,7 +151,7 @@ fn a_step_started_by_a_freed_position_is_timed_from_that_consumption() {
         let case = format!("{at} ms, tick {tick}");
         let (mut presenter, now) = prepared(9);
         let done = presenter
-            .consume_ready(LIVE, 0, ms(now, 10_000))
+            .consume_ready(LIVE, 0, ms(now, 10_000), 0, 0)
             .expect("the head");
         let job = only_job(done.effects.expect("a current scene"));
         let cut = presenter.scenes[&LIVE].cut_now();
@@ -193,7 +197,7 @@ fn a_scene_longer_than_the_window_is_consumed_through_its_end() {
                 continue;
             }
             let done = presenter
-                .consume_ready(LIVE, consumed, now)
+                .consume_ready(LIVE, consumed, now, 0, 0)
                 .expect("the head");
             running.extend(jobs(done.effects.expect("a current scene")));
             assert_eq!(done.step.step().index, consumed, "{count} steps");
@@ -230,24 +234,30 @@ fn refused_consumptions_change_nothing() {
         (LIVE, 7, ConsumeError::OutOfOrder),
     ] {
         let refused = presenter
-            .consume_ready(scene, index, now)
+            .consume_ready(scene, index, now, 0, 0)
             .expect_err("refused");
         assert_eq!(refused, error);
         assert_eq!(shape(&presenter), before, "{error:?}");
     }
-    drop(presenter.consume_ready(LIVE, 0, now).expect("the head"));
+    drop(
+        presenter
+            .consume_ready(LIVE, 0, now, 0, 0)
+            .expect("the head"),
+    );
     let after = shape(&presenter);
-    let refused = presenter.consume_ready(LIVE, 0, now).expect_err("consumed");
+    let refused = presenter
+        .consume_ready(LIVE, 0, now, 0, 0)
+        .expect_err("consumed");
     assert_eq!(refused, ConsumeError::AlreadyConsumed);
     assert_eq!(shape(&presenter), after);
     drop(
         presenter
-            .consume_ready(LIVE, 1, now)
+            .consume_ready(LIVE, 1, now, 0, 0)
             .expect("the last head"),
     );
     let after = shape(&presenter);
     let refused = presenter
-        .consume_ready(LIVE, 2, now)
+        .consume_ready(LIVE, 2, now, 0, 0)
         .expect_err("nothing ready");
     assert_eq!(refused, ConsumeError::NotReady);
     assert_eq!(shape(&presenter), after);
@@ -262,7 +272,9 @@ fn the_head_s_full_layout_becomes_the_rest_under_its_running_successor() {
     let second = only_job(answer(&mut presenter, first, now));
     let head = &presenter.scenes[&LIVE].ready[0];
     let (full_after, owner_bytes) = (head.full_after, head.step.attribution());
-    let done = presenter.consume_ready(LIVE, 0, now).expect("the head");
+    let done = presenter
+        .consume_ready(LIVE, 0, now, 0, 0)
+        .expect("the head");
     let scene = &presenter.scenes[&LIVE];
     assert_eq!(scene.retained, full_after);
     assert_eq!(scene.rest.resident_bytes(), full_after);
@@ -277,7 +289,11 @@ fn the_head_s_full_layout_becomes_the_rest_under_its_running_successor() {
 #[test]
 fn a_cut_s_revision_gap_does_not_hold_back_the_next_step() {
     let (mut presenter, now) = prepared(20);
-    drop(presenter.consume_ready(LIVE, 0, now).expect("the head"));
+    drop(
+        presenter
+            .consume_ready(LIVE, 0, now, 0, 0)
+            .expect("the head"),
+    );
     let cut = presenter.scenes[&LIVE].cut_now();
     presenter.stop(RUN, now).expect("a stop");
     acknowledge(&mut presenter, LIVE, 20, cut, now).expect("the cut");
@@ -289,12 +305,12 @@ fn a_cut_s_revision_gap_does_not_hold_back_the_next_step() {
         (19, ConsumeError::OutOfOrder),
     ] {
         let refused = presenter
-            .consume_ready(LIVE, index, now)
+            .consume_ready(LIVE, index, now, 0, 0)
             .expect_err("refused");
         assert_eq!(refused, error, "index {index}");
     }
     let done = presenter
-        .consume_ready(LIVE, 20, now)
+        .consume_ready(LIVE, 20, now, 0, 0)
         .expect("the first new successor");
     assert_eq!(done.step.step().index, 20);
     assert_eq!(presenter.scenes[&LIVE].state.view().activated(), 21);
@@ -564,19 +580,32 @@ fn a_kept_cut_checks_its_replacement_view_at_the_cap() {
 
 #[test]
 fn a_consumption_fits_at_exactly_the_cap_and_is_refused_one_byte_over() {
+    // The activated view's own charge, read from an identical scene after a real install.
+    let installed = {
+        let (mut presenter, now) = prepared(1);
+        let done = presenter
+            .consume_ready(LIVE, 0, now, 0, 0)
+            .expect("an identical head");
+        drop(done);
+        presenter.scenes[&LIVE].view.resident_bytes()
+    };
     for over in [1, 0] {
         let (mut presenter, now) = prepared(1);
         let scene = &presenter.scenes[&LIVE];
+        assert!(
+            installed > scene.view_bytes,
+            "the activated view outweighs the empty one, so omitting it would admit one over"
+        );
         let head = &scene.ready[0];
-        let after = presenter.residency() - scene.retained - head.step.resident_bytes
-            + head.full_after
-            + head.step.attribution();
+        let outgoing = scene.retained + scene.view_bytes + head.step.resident_bytes;
+        let incoming = head.full_after + installed + head.step.attribution();
+        let after = presenter.residency() - outgoing + incoming;
         presenter
             .returned
             .store(MAX_RESIDENT_BYTES - after + over, Ordering::Relaxed);
         let stamp = probe(&presenter);
         let before = shape(&presenter);
-        let result = presenter.consume_ready(LIVE, 0, now);
+        let result = presenter.consume_ready(LIVE, 0, now, 0, 0);
         if over == 1 {
             assert_eq!(result.expect_err("over the cap"), ConsumeError::Residency);
             assert_eq!(shape(&presenter), before);
@@ -588,6 +617,8 @@ fn a_consumption_fits_at_exactly_the_cap_and_is_refused_one_byte_over() {
         } else {
             let done = result.expect("at the cap");
             assert_eq!(presenter.residency(), MAX_RESIDENT_BYTES);
+            let scene = &presenter.scenes[&LIVE];
+            assert_eq!((scene.view.activated(), scene.view_bytes), (1, installed));
             drop(done);
         }
         presenter.returned.store(0, Ordering::Relaxed);
@@ -602,10 +633,12 @@ fn a_consumed_step_stays_charged_until_its_owner_drops_it() {
         ready.step.attribution()
     };
     let first_charge = charge(&presenter, 0);
-    let first = presenter.consume_ready(LIVE, 0, now).expect("the head");
+    let first = presenter
+        .consume_ready(LIVE, 0, now, 0, 0)
+        .expect("the head");
     let second_charge = charge(&presenter, 0);
     let second = presenter
-        .consume_ready(LIVE, 1, now)
+        .consume_ready(LIVE, 1, now, 0, 0)
         .expect("the next head");
     assert_eq!(
         presenter.returned.load(Ordering::Relaxed),
@@ -625,7 +658,9 @@ fn eviction_releases_waiting_positions_but_not_a_returned_owner() {
     let (mut presenter, now) = prepared(10);
     let head = &presenter.scenes[&LIVE].ready[0];
     let bytes = head.step.attribution();
-    let done = presenter.consume_ready(LIVE, 0, now).expect("the head");
+    let done = presenter
+        .consume_ready(LIVE, 0, now, 0, 0)
+        .expect("the head");
     let job = only_job(done.effects.expect("one newly eligible step"));
     assert_eq!(positions(&presenter), WINDOW);
     assert_eq!(presenter.scenes[&LIVE].queue.len(), 1);
@@ -661,11 +696,161 @@ fn a_returned_owner_keeps_the_original_record_charged_after_clear() {
     let expected = head.full_after + head.step.resident_bytes + original;
     assert_eq!(head.step.attribution(), expected);
     let done = presenter
-        .consume_ready(LIVE, 0, now)
+        .consume_ready(LIVE, 0, now, 0, 0)
         .expect("the narrated head");
     assert_eq!(presenter.returned.load(Ordering::Relaxed), expected);
     presenter.clear(now).expect("clear semantic ownership");
     assert_eq!(presenter.residency(), expected);
     drop(done);
+    assert_eq!(presenter.residency(), 0);
+}
+
+/// Items the overlay paints after sampling every view at `at` ms.
+fn sampled_items(presenter: &mut Presenter, at: u64) -> usize {
+    let (_, effects) = presenter.sample(at);
+    assert!(effects.is_empty());
+    let mut items = 0;
+    assert!(!presenter.frames.borrow().paint(|frame| {
+        items += frame.items().len();
+        Ok::<_, std::fmt::Error>(())
+    }));
+    items
+}
+
+/// Bounds, ready indices, frame epoch, pending request and returned charge, compared literally.
+fn bounds(presenter: &Presenter) -> (u32, u32, Vec<u32>, Option<u64>, Option<u32>, usize) {
+    let scene = &presenter.scenes[&LIVE];
+    (
+        scene.state.view().activated(),
+        scene.view.activated(),
+        scene.ready.iter().map(|ready| ready.step.index).collect(),
+        presenter.frames.borrow().epoch(LIVE),
+        scene.pending_consumption,
+        presenter.returned.load(Ordering::Relaxed),
+    )
+}
+
+#[test]
+fn a_consumption_installs_its_view_rest_epoch_and_charges_together() {
+    let (mut presenter, now) = prepared(2);
+    let epoch = presenter.frames.borrow().epoch(LIVE).expect("a frame");
+    let owner = presenter.scenes[&LIVE].ready[0].step.attribution();
+    assert_eq!(sampled_items(&mut presenter, 0), 0);
+    let first = presenter
+        .consume_ready(LIVE, 0, now, 0, 0)
+        .expect("the head");
+    assert_eq!(
+        bounds(&presenter),
+        (1, 1, vec![1], Some(epoch + 1), None, owner)
+    );
+    let scene = &presenter.scenes[&LIVE];
+    assert_eq!(
+        (scene.view.layout().revision(), scene.rest.revision()),
+        (1, 1)
+    );
+    assert_eq!(scene.view_bytes, scene.view.resident_bytes());
+    assert_eq!(
+        presenter.residency(),
+        scene.held() + scene.ready[0].step.resident_bytes + owner
+    );
+    assert_eq!(sampled_items(&mut presenter, 0), 1, "the first step paints");
+    drop(first);
+    let second = presenter
+        .consume_ready(LIVE, 1, now, 0, 0)
+        .expect("the next head");
+    assert_eq!(presenter.frames.borrow().epoch(LIVE), Some(epoch + 2));
+    assert_eq!(sampled_items(&mut presenter, 0), 2, "both steps paint");
+    drop(second);
+}
+
+#[test]
+fn refused_activations_leave_literal_bounds_and_every_charge_unchanged() {
+    let (mut presenter, now) = prepared(2);
+    let epoch = presenter.frames.borrow().epoch(LIVE);
+    let before = shape(&presenter);
+    let refused = presenter
+        .consume_ready(LIVE, 1, now, 0, 0)
+        .expect_err("not the head");
+    assert_eq!(refused, ConsumeError::OutOfOrder);
+    assert_eq!(bounds(&presenter), (0, 0, vec![0, 1], epoch, None, 0));
+    assert_eq!(shape(&presenter), before);
+    let admission = only_admission(
+        arrive(&mut presenter, commit_frame(LIVE, 2, step(2)), now).expect("an admission"),
+    );
+    let charged = (semantic(&presenter), presenter.residency());
+    for (index, error) in [(0, ConsumeError::Busy), (1, ConsumeError::OutOfOrder)] {
+        let refused = presenter
+            .consume_ready(LIVE, index, now, 0, 0)
+            .expect_err("refused");
+        assert_eq!(refused, error);
+        assert_eq!(
+            bounds(&presenter),
+            (0, 0, vec![0, 1], epoch, Some(0), 0),
+            "a second index never replaces the pending request"
+        );
+        assert_eq!((semantic(&presenter), presenter.residency()), charged);
+    }
+    drop(admission);
+}
+
+#[test]
+fn a_stale_head_is_refused_before_retirement_with_nothing_changed() {
+    for stale_view in [true, false] {
+        let (mut presenter, now) = prepared(2);
+        let unrelated = kumochi_scene::layout::LayoutState::new(
+            &kumochi_scene::SceneState::begin(super::header().begin).expect("the header"),
+        );
+        let scene = presenter.scenes.get_mut(&LIVE).expect("the scene");
+        if stale_view {
+            scene.view = kumochi_scene::SceneView::new(&unrelated, 0);
+            scene.view_bytes = scene.view.resident_bytes();
+        } else {
+            scene.rest = unrelated;
+            scene.retained = scene.rest.resident_bytes();
+        }
+        presenter.frames.borrow_mut().replaced(LIVE);
+        let epoch = presenter.frames.borrow().epoch(LIVE);
+        let before = shape(&presenter);
+        let refused = presenter
+            .consume_ready(LIVE, 0, now, 0, 0)
+            .expect_err("a stale head");
+        assert_eq!(refused, ConsumeError::Stale, "stale view {stale_view}");
+        assert_eq!(
+            bounds(&presenter),
+            (0, 0, vec![0, 1], epoch, None, 0),
+            "stale view {stale_view}"
+        );
+        assert_eq!(shape(&presenter), before, "stale view {stale_view}");
+    }
+}
+
+#[test]
+fn returned_owners_stay_charged_across_view_replacement_and_disconnect() {
+    let (mut presenter, now) = prepared(2);
+    let ready = &presenter.scenes[&LIVE].ready;
+    let charges = [ready[0].step.attribution(), ready[1].step.attribution()];
+    let first = presenter
+        .consume_ready(LIVE, 0, now, 0, 0)
+        .expect("the head");
+    let second = presenter
+        .consume_ready(LIVE, 1, now, 0, 0)
+        .expect("the next head replaces the first view");
+    let scene = &presenter.scenes[&LIVE];
+    assert_eq!(scene.view.activated(), 2);
+    assert_eq!(
+        presenter.residency(),
+        scene.held() + charges[0] + charges[1]
+    );
+    presenter.disconnected();
+    assert!(presenter.scenes.is_empty());
+    assert_eq!(presenter.residency(), charges[0] + charges[1]);
+    assert_eq!(
+        (first.step.step().index, second.step.step().index),
+        (0, 1),
+        "an owner's metadata outlives its scene"
+    );
+    drop(first);
+    assert_eq!(presenter.residency(), charges[1]);
+    drop(second);
     assert_eq!(presenter.residency(), 0);
 }

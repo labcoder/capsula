@@ -98,52 +98,67 @@ pub enum ErrorKey {
     VoiceUnavailable,
 }
 
+macro_rules! catalog {
+    ($($key:ident),* $(,)?) => {
+        /// Every key, for the shell's catalog test.
+        pub const ALL: [Self; [$(stringify!($key)),*].len()] = [$(Self::$key),*];
+    };
+}
+
 impl ErrorKey {
-    /// Every key, for the shell's catalog test.
-    pub const ALL: [Self; 42] = [
-        Self::SettingsRefused,
-        Self::ConfigUnreadable,
-        Self::SignInTimedOut,
-        Self::SignInFailed,
-        Self::SignInOtherAccount,
-        Self::BrowserUnavailable,
-        Self::AccountOffline,
-        Self::CredentialsUnavailable,
-        Self::RevocationBacklog,
-        Self::TrustStoreUnavailable,
-        Self::PlanNotEnabled,
-        Self::AccountMisconfigured,
-        Self::SignOutNotDurable,
-        Self::SessionEnded,
-        Self::PlanUnavailable,
-        Self::UsageLimit,
-        Self::AccountRefused,
-        Self::RequestRefused,
-        Self::ResponseUnreadable,
-        Self::SignInNeeded,
-        Self::ModelUnavailable,
-        Self::AnthropicKeyRejected,
-        Self::AnthropicKeyFormat,
-        Self::AnthropicUnreachable,
-        Self::AnthropicRateLimited,
-        Self::AnthropicCredit,
-        Self::ClaudeCodeNotFound,
-        Self::ClaudeCodeUnsupported,
-        Self::ClaudeCodeSignedOut,
-        Self::ClaudeCodeAuditFailed,
-        Self::ClaudeCodePolicy,
-        Self::ClaudeCodeInputUnsupported,
-        Self::ClaudeCodeBudget,
-        Self::ClaudeCodeCleanupPending,
-        Self::RenewalUnconfirmed,
-        Self::AnthropicAnswerLimit,
-        Self::VoiceNoSpace,
-        Self::VoiceDownload,
-        Self::VoiceCorrupt,
-        Self::VoiceStorage,
-        Self::VoiceLoad,
-        Self::VoiceUnavailable,
-    ];
+    catalog! {
+        // Settings
+        SettingsRefused,
+        ConfigUnreadable,
+
+        // ChatGPT and provider errors
+        SignInTimedOut,
+        SignInFailed,
+        SignInOtherAccount,
+        BrowserUnavailable,
+        AccountOffline,
+        CredentialsUnavailable,
+        RevocationBacklog,
+        TrustStoreUnavailable,
+        PlanNotEnabled,
+        AccountMisconfigured,
+        SignOutNotDurable,
+        SessionEnded,
+        PlanUnavailable,
+        UsageLimit,
+        AccountRefused,
+        RequestRefused,
+        ResponseUnreadable,
+        SignInNeeded,
+        ModelUnavailable,
+        RenewalUnconfirmed,
+
+        // Anthropic
+        AnthropicKeyRejected,
+        AnthropicKeyFormat,
+        AnthropicUnreachable,
+        AnthropicRateLimited,
+        AnthropicCredit,
+        AnthropicAnswerLimit,
+
+        // Claude Code
+        ClaudeCodeNotFound,
+        ClaudeCodeUnsupported,
+        ClaudeCodeSignedOut,
+        ClaudeCodeAuditFailed,
+        ClaudeCodePolicy,
+        ClaudeCodeInputUnsupported,
+        ClaudeCodeBudget,
+        ClaudeCodeCleanupPending,
+
+        // Voice
+        VoiceNoSpace,
+        VoiceDownload,
+        VoiceCorrupt,
+        VoiceStorage,
+        VoiceLoad,
+        VoiceUnavailable,
+    }
 }
 
 /// A typed, content-free argument; there's no text variant on purpose.

@@ -238,6 +238,8 @@ impl Pipes {
         if check_hello(&hello, identity) != Verdict::Welcome {
             return Err(SessionError::WrongCapability);
         }
+        let _shell_identity =
+            platform::shell_connection(&self.control, &self.data, &identity.shell_image)?;
         tracing::info!("shell connected");
         Ok(
             match brain.serve(&mut self.control, &mut self.data, tap).await {

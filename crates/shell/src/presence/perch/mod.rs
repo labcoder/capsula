@@ -4,3 +4,10 @@
 
 mod caption;
 mod place;
+mod target;
+
+pub(super) use caption::{WindowTarget, drop_target};
+pub(super) use place::{Extents, Placement};
+#[cfg(test)]
+pub(super) use target::tests as target_fixtures;
+pub(super) use target::{Check, Drop, Targeting};

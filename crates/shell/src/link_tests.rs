@@ -1060,6 +1060,31 @@ fn submit_message(turn: u32, thread: ThreadId, text: &str) -> DataToBrain {
 }
 
 #[test]
+fn connections_reach_the_shell_with_their_session() {
+    let link = attended("claude-connections");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    let connections = kumochi_protocol::message::ConnectionsView {
+        anthropic: kumochi_protocol::message::KeyView::Missing,
+        claude_code: kumochi_protocol::message::ClaudeCodeView::Finding,
+    };
+    frame::write(
+        &mut &link.control,
+        &ControlToShell::Connections(connections),
+        Pipe::Control,
+    )
+    .expect("connections written");
+    let LinkEvent::Connections { generation, view } = next(&events) else {
+        panic!("connections delivered");
+    };
+    assert_eq!(generation, session.generation());
+    assert_eq!(view, connections);
+
+    drop(link.control);
+    assert!(link.link.join().expect("joined"));
+}
+
+#[test]
 fn a_delete_counts_the_turns_queued_before_it_and_runs_settle_the_brain_s_answers() {
     let (t, u, v) = (ThreadId(9), ThreadId(3), ThreadId(5));
     let link = attended("delete-history");
@@ -1131,6 +1156,8 @@ fn a_delete_counts_the_turns_queued_before_it_and_runs_settle_the_brain_s_answer
             run: RunId(1),
             thread: Some(u),
             text: "a".to_owned(),
+            cut: false,
+            done: true,
         })
     );
     session.grant(bytes);
@@ -1258,6 +1285,8 @@ fn a_delete_answered_before_a_new_brain_never_fences_the_new_brain_s_runs() {
             run: RunId(4),
             thread: Some(u),
             text: "b".to_owned(),
+            cut: false,
+            done: false,
         })
     );
     drop(b_control);

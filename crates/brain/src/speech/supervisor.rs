@@ -9,7 +9,7 @@ use tokio::time::Instant;
 use super::wire::{MAX_PCM_BYTES, SpeechError, SpeechReply, SpeechRequest, check_audio};
 use crate::platform::Job;
 use crate::platform::sherpa::{MAX_TRANSCRIPT_BYTES, NativeError};
-use crate::supervise::{self, Handle, Kind, WorkerLost};
+use crate::supervise::{self, Generation, Handle, Kind, WorkerLost};
 
 /// The speech worker's kind for the shared supervisor.
 pub(super) struct Speech;
@@ -87,17 +87,18 @@ pub struct SpeechHandle {
 
 impl SpeechHandle {
     /// Stages the natives from `natives` and loads Parakeet from `models`, replacing any model.
+    /// Returns the generation of the worker that holds the model, which its loss names.
     ///
     /// # Errors
     /// Returns `WorkerLost`, or the native failure.
-    pub async fn load(&self, natives: PathBuf, models: PathBuf) -> Result<(), SpeechError> {
+    pub async fn load(&self, natives: PathBuf, models: PathBuf) -> Result<Generation, SpeechError> {
         let until = Instant::now() + self.deadlines.load;
         match self
             .send(SpeechRequest::Load { natives, models }, until)
             .await?
         {
-            SpeechReply::Loaded => Ok(()),
-            other => Err(refusal(&other)),
+            (SpeechReply::Loaded, generation) => Ok(generation),
+            (other, _) => Err(refusal(&other)),
         }
     }
 
@@ -118,6 +119,7 @@ impl SpeechHandle {
         match self
             .send(SpeechRequest::Decode { rate, pcm }, until)
             .await?
+            .0
         {
             SpeechReply::Text(text) if text.len() <= MAX_TRANSCRIPT_BYTES => Ok(text),
             SpeechReply::Text(_) => Err(SpeechError::Native(NativeError::Text)),
@@ -131,7 +133,7 @@ impl SpeechHandle {
     /// Returns `WorkerLost`; the model is gone either way.
     pub async fn unload(&self) -> Result<(), SpeechError> {
         let until = Instant::now() + self.deadlines.unload;
-        match self.send(SpeechRequest::Unload, until).await? {
+        match self.send(SpeechRequest::Unload, until).await?.0 {
             SpeechReply::Unloaded => Ok(()),
             other => Err(refusal(&other)),
         }
@@ -149,8 +151,9 @@ impl SpeechHandle {
             .map(drop)
     }
 
-    /// Subscribes before issuing work, so a lost model can't be missed.
-    pub fn lost(&self) -> broadcast::Receiver<WorkerLost> {
+    /// Subscribes before issuing work, so a lost model can't be missed. Each loss names the
+    /// generation that ended.
+    pub fn lost(&self) -> broadcast::Receiver<Generation> {
         self.inner.lost()
     }
 
@@ -158,7 +161,7 @@ impl SpeechHandle {
         &self,
         request: SpeechRequest,
         until: Instant,
-    ) -> Result<SpeechReply, SpeechError> {
+    ) -> Result<(SpeechReply, Generation), SpeechError> {
         self.inner
             .request(request, until)
             .await

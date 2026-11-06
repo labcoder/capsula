@@ -6,10 +6,12 @@ use kumochi_protocol::message::{ErrorArg, ErrorKey, UserError};
 use unic_langid::LanguageIdentifier;
 
 const ENGLISH: &str = include_str!("../../../locales/en/shell.ftl");
+mod claude;
 
 /// Every string the shell shows. A unit test checks each one is in the catalog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Text {
+    // Shell
     Connecting,
     Connected,
     Reconnecting,
@@ -18,6 +20,8 @@ pub(crate) enum Text {
     Stop,
     Quit,
     Chat,
+
+    // Dock
     DockPosition,
     TopLeft,
     TopCenter,
@@ -28,9 +32,21 @@ pub(crate) enum Text {
     BottomLeft,
     BottomCenter,
     BottomRight,
+    DockError,
+    DockBrainError,
+    PerchOn,
+    PerchUntitled,
+
+    // Turns
+    ChatLiveCut,
+    ChatEmpty,
+    ChatLoading,
+    ChatHistoryFailed,
     TurnBusy,
     TurnOffline,
     TurnTooLong,
+
+    // Tasks
     Threads,
     OpenThreads,
     NewThread,
@@ -66,6 +82,8 @@ pub(crate) enum Text {
     RenameNameTooLong,
     RenameOneLine,
     TaskFallback,
+
+    // Settings
     Settings,
     OpenSettings,
     CloseSettings,
@@ -76,7 +94,6 @@ pub(crate) enum Text {
     UserNameHelp,
     SettingsSaving,
     SettingsOffline,
-    DockError,
     RenameBusy,
     SettingsUnavailable,
     SettingsNotSaved,
@@ -87,9 +104,10 @@ pub(crate) enum Text {
     SettingsTaskbar,
     TaskbarAddFailed,
     TaskbarRemoveFailed,
-    DockBrainError,
     MaxFrameRate,
     FrameRateAutomatic,
+
+    // ChatGPT accounts
     AccountProvider,
     AccountWaiting,
     AccountOffline,
@@ -135,137 +153,195 @@ pub(crate) enum Text {
     AccountBacklogRetry,
     AccountBacklogExpiry,
     AccountBacklogRecovery,
+
+    // Claude Code
+    ClaudeProvider,
+    ClaudeReview,
+    ClaudeConnect,
+    ClaudeDisconnect,
+    ClaudeFind,
+    ClaudePolicyNotice,
+    ClaudeBefore,
+    ClaudeDuring,
+    ClaudeFallback,
+    ClaudeDeadline,
+    ClaudeAnalytics,
+    ClaudeDisconnectBody,
+}
+
+#[cfg(test)]
+macro_rules! catalog {
+    ($($key:ident),* $(,)?) => {
+        const ALL: [Self; [$(stringify!($key)),*].len()] = [$(Self::$key),*];
+
+        const fn listed(self) -> bool {
+            match self {
+                $(Self::$key)|* => true,
+            }
+        }
+    };
 }
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 125] = [
-        Self::Connecting,
-        Self::Connected,
-        Self::Reconnecting,
-        Self::Failed,
-        Self::Retry,
-        Self::Stop,
-        Self::Quit,
-        Self::Chat,
-        Self::DockPosition,
-        Self::TopLeft,
-        Self::TopCenter,
-        Self::TopRight,
-        Self::MiddleLeft,
-        Self::Center,
-        Self::MiddleRight,
-        Self::BottomLeft,
-        Self::BottomCenter,
-        Self::BottomRight,
-        Self::TurnBusy,
-        Self::TurnOffline,
-        Self::TurnTooLong,
-        Self::Threads,
-        Self::OpenThreads,
-        Self::NewThread,
-        Self::SearchThreads,
-        Self::EmptyThreads,
-        Self::EmptyThreadSearch,
-        Self::ThreadGone,
-        Self::SelectThread,
-        Self::ThreadCut,
-        Self::OlderMessages,
-        Self::CloseThreads,
-        Self::ThreadUser,
-        Self::ThreadAssistant,
-        Self::ThreadStep,
-        Self::ThreadsOffline,
-        Self::ThreadSearchTooLong,
-        Self::ThreadsFailed,
-        Self::DeleteThread,
-        Self::DeleteThreadTitle,
-        Self::DeleteThreadBody,
-        Self::DeleteThreadCancel,
-        Self::ThreadDeleting,
-        Self::ThreadDeleteFailed,
-        Self::ThreadDeletesFull,
-        Self::ThreadDeleted,
-        Self::BackToKumo,
-        Self::SwitchThread,
-        Self::RenameThread,
-        Self::SaveRename,
-        Self::CancelRename,
-        Self::RenameEmpty,
-        Self::RenameTooLong,
-        Self::RenameNameTooLong,
-        Self::RenameOneLine,
-        Self::TaskFallback,
-        Self::Settings,
-        Self::OpenSettings,
-        Self::CloseSettings,
-        Self::General,
-        Self::Accounts,
-        Self::AssistantName,
-        Self::UserName,
-        Self::UserNameHelp,
-        Self::SettingsSaving,
-        Self::SettingsOffline,
-        Self::DockError,
-        Self::RenameBusy,
-        Self::SettingsUnavailable,
-        Self::SettingsNotSaved,
-        Self::SettingsSaveHelp,
-        Self::SettingsVersion,
-        Self::SettingsCopyBuild,
-        Self::SettingsPositionUnavailable,
-        Self::SettingsTaskbar,
-        Self::TaskbarAddFailed,
-        Self::TaskbarRemoveFailed,
-        Self::DockBrainError,
-        Self::MaxFrameRate,
-        Self::FrameRateAutomatic,
-        Self::AccountProvider,
-        Self::AccountWaiting,
-        Self::AccountOffline,
-        Self::AccountUsePlan,
-        Self::AccountContinue,
-        Self::AccountSignedOut,
-        Self::AccountSigningIn,
-        Self::AccountReplaceHelp,
-        Self::AccountCancel,
-        Self::AccountOpenAgain,
-        Self::AccountBusy,
-        Self::AccountBusyHelp,
-        Self::AccountTryAgain,
-        Self::AccountIdentity,
-        Self::AccountUsingPlan,
-        Self::AccountPlanOff,
-        Self::AccountEnable,
-        Self::AccountUnavailable,
-        Self::AccountAttention,
-        Self::AccountRetryHelp,
-        Self::AccountSignInAgain,
-        Self::AccountSessionEnded,
-        Self::AccountManageUsage,
-        Self::AccountSignOut,
-        Self::AccountSignOutTitle,
-        Self::AccountSignOutBody,
-        Self::AccountSignOutRegistration,
-        Self::AccountSignOutConfirm,
-        Self::AccountDialogCancel,
-        Self::AccountSigningOut,
-        Self::AccountStopped,
-        Self::AccountCleanupRefused,
-        Self::AccountNotDurable,
-        Self::AccountRevocationPending,
-        Self::AccountRevocationUnconfirmed,
-        Self::AccountSendFailed,
-        Self::AccountLocal,
-        Self::AccountRemote,
-        Self::AccountSignOutNeedsRetry,
-        Self::AccountCleanupRefusedHelp,
-        Self::AccountNotDurableHelp,
-        Self::AccountBacklogLead,
-        Self::AccountBacklogRetry,
-        Self::AccountBacklogExpiry,
-        Self::AccountBacklogRecovery,
-    ];
+    catalog! {
+        // Shell
+        Connecting,
+        Connected,
+        Reconnecting,
+        Failed,
+        Retry,
+        Stop,
+        Quit,
+        Chat,
+
+        // Dock
+        DockPosition,
+        TopLeft,
+        TopCenter,
+        TopRight,
+        MiddleLeft,
+        Center,
+        MiddleRight,
+        BottomLeft,
+        BottomCenter,
+        BottomRight,
+        DockError,
+        DockBrainError,
+        PerchOn,
+        PerchUntitled,
+
+        // Turns
+        ChatLiveCut,
+        ChatEmpty,
+        ChatLoading,
+        ChatHistoryFailed,
+        TurnBusy,
+        TurnOffline,
+        TurnTooLong,
+
+        // Tasks
+        Threads,
+        OpenThreads,
+        NewThread,
+        SearchThreads,
+        EmptyThreads,
+        EmptyThreadSearch,
+        ThreadGone,
+        SelectThread,
+        ThreadCut,
+        OlderMessages,
+        CloseThreads,
+        ThreadUser,
+        ThreadAssistant,
+        ThreadStep,
+        ThreadsOffline,
+        ThreadSearchTooLong,
+        ThreadsFailed,
+        DeleteThread,
+        DeleteThreadTitle,
+        DeleteThreadBody,
+        DeleteThreadCancel,
+        ThreadDeleting,
+        ThreadDeleteFailed,
+        ThreadDeletesFull,
+        ThreadDeleted,
+        BackToKumo,
+        SwitchThread,
+        RenameThread,
+        SaveRename,
+        CancelRename,
+        RenameEmpty,
+        RenameTooLong,
+        RenameNameTooLong,
+        RenameOneLine,
+        TaskFallback,
+
+        // Settings
+        Settings,
+        OpenSettings,
+        CloseSettings,
+        General,
+        Accounts,
+        AssistantName,
+        UserName,
+        UserNameHelp,
+        SettingsSaving,
+        SettingsOffline,
+        RenameBusy,
+        SettingsUnavailable,
+        SettingsNotSaved,
+        SettingsSaveHelp,
+        SettingsVersion,
+        SettingsCopyBuild,
+        SettingsPositionUnavailable,
+        SettingsTaskbar,
+        TaskbarAddFailed,
+        TaskbarRemoveFailed,
+        MaxFrameRate,
+        FrameRateAutomatic,
+
+        // ChatGPT accounts
+        AccountProvider,
+        AccountWaiting,
+        AccountOffline,
+        AccountUsePlan,
+        AccountContinue,
+        AccountSignedOut,
+        AccountSigningIn,
+        AccountReplaceHelp,
+        AccountCancel,
+        AccountOpenAgain,
+        AccountBusy,
+        AccountBusyHelp,
+        AccountTryAgain,
+        AccountIdentity,
+        AccountUsingPlan,
+        AccountPlanOff,
+        AccountEnable,
+        AccountUnavailable,
+        AccountAttention,
+        AccountRetryHelp,
+        AccountSignInAgain,
+        AccountSessionEnded,
+        AccountManageUsage,
+        AccountSignOut,
+        AccountSignOutTitle,
+        AccountSignOutBody,
+        AccountSignOutRegistration,
+        AccountSignOutConfirm,
+        AccountDialogCancel,
+        AccountSigningOut,
+        AccountStopped,
+        AccountCleanupRefused,
+        AccountNotDurable,
+        AccountRevocationPending,
+        AccountRevocationUnconfirmed,
+        AccountSendFailed,
+        AccountLocal,
+        AccountRemote,
+        AccountSignOutNeedsRetry,
+        AccountCleanupRefusedHelp,
+        AccountNotDurableHelp,
+        AccountBacklogLead,
+        AccountBacklogRetry,
+        AccountBacklogExpiry,
+        AccountBacklogRecovery,
+
+        // Claude Code
+        ClaudeProvider,
+        ClaudeReview,
+        ClaudeConnect,
+        ClaudeDisconnect,
+        ClaudeFind,
+        ClaudePolicyNotice,
+        ClaudeBefore,
+        ClaudeDuring,
+        ClaudeFallback,
+        ClaudeDeadline,
+        ClaudeAnalytics,
+        ClaudeDisconnectBody,
+    }
 
     pub(crate) const POSITIONS: [Self; 9] = [
         Self::TopLeft,
@@ -285,12 +361,103 @@ impl Text {
     )]
     const fn id(self) -> &'static str {
         match self {
+            // Shell
+            Self::Connecting => "status-connecting",
+            Self::Connected => "status-connected",
+            Self::Reconnecting => "status-reconnecting",
+            Self::Failed => "status-failed",
+            Self::Retry => "action-retry",
+            Self::Stop => "action-stop",
+            Self::Quit => "action-quit",
+            Self::Chat => "action-chat",
+
+            // Dock
+            Self::DockPosition => "dock-position",
+            Self::TopLeft => "position-top-left",
+            Self::TopCenter => "position-top-center",
+            Self::TopRight => "position-top-right",
+            Self::MiddleLeft => "position-middle-left",
+            Self::Center => "position-center",
+            Self::MiddleRight => "position-middle-right",
+            Self::BottomLeft => "position-bottom-left",
+            Self::BottomCenter => "position-bottom-center",
+            Self::BottomRight => "position-bottom-right",
+            Self::DockError => "dock-error",
+            Self::DockBrainError => "dock-brain-error",
+            Self::PerchOn => "carry-perch-on",
+            Self::PerchUntitled => "carry-perch-untitled",
+
+            // Turns
+            Self::ChatLiveCut => "chat-live-cut",
+            Self::ChatEmpty => "chat-empty",
+            Self::ChatLoading => "chat-loading",
+            Self::ChatHistoryFailed => "chat-history-failed",
+            Self::TurnBusy => "turn-busy",
+            Self::TurnOffline => "turn-offline",
+            Self::TurnTooLong => "turn-too-long",
+
+            // Tasks
+            Self::Threads => "threads-title",
+            Self::OpenThreads => "action-threads",
+            Self::NewThread => "action-new-thread",
+            Self::SearchThreads => "threads-search",
+            Self::EmptyThreads => "threads-empty",
+            Self::EmptyThreadSearch => "threads-search-empty",
+            Self::ThreadGone => "thread-gone",
+            Self::SelectThread => "thread-select",
+            Self::ThreadCut => "thread-cut",
+            Self::OlderMessages => "thread-older",
+            Self::CloseThreads => "threads-close",
+            Self::ThreadUser => "thread-user",
+            Self::ThreadAssistant => "thread-assistant",
+            Self::ThreadStep => "thread-step",
+            Self::ThreadsOffline => "threads-offline",
+            Self::ThreadSearchTooLong => "threads-search-too-long",
+            Self::ThreadsFailed => "threads-failed",
+            Self::DeleteThread => "thread-delete",
+            Self::DeleteThreadTitle => "thread-delete-title",
+            Self::DeleteThreadBody => "thread-delete-body",
+            Self::DeleteThreadCancel => "thread-delete-cancel",
+            Self::ThreadDeleting => "thread-deleting",
+            Self::ThreadDeleteFailed => "thread-delete-failed",
+            Self::ThreadDeletesFull => "thread-deletes-full",
+            Self::ThreadDeleted => "thread-deleted",
+            Self::BackToKumo => "action-back-to-kumo",
+            Self::SwitchThread => "action-switch-task",
+            Self::RenameThread => "action-rename-task",
+            Self::SaveRename => "action-save-rename",
+            Self::CancelRename => "action-cancel-rename",
+            Self::RenameEmpty => "rename-empty",
+            Self::RenameTooLong => "rename-task-too-long",
+            Self::RenameNameTooLong => "rename-name-too-long",
+            Self::RenameOneLine => "rename-one-line",
+            Self::TaskFallback => "task-fallback",
+
+            // Settings
+            Self::Settings => "settings-title",
+            Self::OpenSettings => "action-settings",
+            Self::CloseSettings => "settings-close",
+            Self::General => "settings-general",
+            Self::Accounts => "settings-accounts",
+            Self::AssistantName => "settings-assistant-name",
+            Self::UserName => "settings-user-name",
+            Self::UserNameHelp => "settings-user-name-help",
+            Self::SettingsSaving => "settings-saving",
+            Self::SettingsOffline => "settings-offline",
+            Self::RenameBusy => "rename-busy",
+            Self::SettingsUnavailable => "settings-unavailable",
+            Self::SettingsNotSaved => "settings-not-saved",
+            Self::SettingsSaveHelp => "settings-save-help",
             Self::SettingsVersion => "settings-version",
             Self::SettingsCopyBuild => "settings-copy-build",
             Self::SettingsPositionUnavailable => "settings-position-unavailable",
             Self::SettingsTaskbar => "settings-taskbar",
             Self::TaskbarAddFailed => "taskbar-add-failed",
             Self::TaskbarRemoveFailed => "taskbar-remove-failed",
+            Self::MaxFrameRate => "settings-max-frame-rate",
+            Self::FrameRateAutomatic => "settings-frame-rate-automatic",
+
+            // ChatGPT accounts
             Self::AccountProvider => "accounts-provider",
             Self::AccountWaiting => "accounts-waiting",
             Self::AccountOffline => "accounts-offline",
@@ -336,80 +503,20 @@ impl Text {
             Self::AccountBacklogRetry => "accounts-backlog-retry",
             Self::AccountBacklogExpiry => "accounts-backlog-expiry",
             Self::AccountBacklogRecovery => "accounts-backlog-recovery",
-            Self::Connecting => "status-connecting",
-            Self::Connected => "status-connected",
-            Self::Reconnecting => "status-reconnecting",
-            Self::Failed => "status-failed",
-            Self::Retry => "action-retry",
-            Self::Stop => "action-stop",
-            Self::Quit => "action-quit",
-            Self::Chat => "action-chat",
-            Self::DockPosition => "dock-position",
-            Self::TopLeft => "position-top-left",
-            Self::TopCenter => "position-top-center",
-            Self::TopRight => "position-top-right",
-            Self::MiddleLeft => "position-middle-left",
-            Self::Center => "position-center",
-            Self::MiddleRight => "position-middle-right",
-            Self::BottomLeft => "position-bottom-left",
-            Self::BottomCenter => "position-bottom-center",
-            Self::BottomRight => "position-bottom-right",
-            Self::TurnBusy => "turn-busy",
-            Self::TurnOffline => "turn-offline",
-            Self::TurnTooLong => "turn-too-long",
-            Self::Threads => "threads-title",
-            Self::OpenThreads => "action-threads",
-            Self::NewThread => "action-new-thread",
-            Self::SearchThreads => "threads-search",
-            Self::EmptyThreads => "threads-empty",
-            Self::EmptyThreadSearch => "threads-search-empty",
-            Self::ThreadGone => "thread-gone",
-            Self::SelectThread => "thread-select",
-            Self::ThreadCut => "thread-cut",
-            Self::OlderMessages => "thread-older",
-            Self::CloseThreads => "threads-close",
-            Self::ThreadUser => "thread-user",
-            Self::ThreadAssistant => "thread-assistant",
-            Self::ThreadStep => "thread-step",
-            Self::ThreadsOffline => "threads-offline",
-            Self::ThreadSearchTooLong => "threads-search-too-long",
-            Self::ThreadsFailed => "threads-failed",
-            Self::DeleteThread => "thread-delete",
-            Self::DeleteThreadTitle => "thread-delete-title",
-            Self::DeleteThreadBody => "thread-delete-body",
-            Self::DeleteThreadCancel => "thread-delete-cancel",
-            Self::ThreadDeleting => "thread-deleting",
-            Self::ThreadDeleteFailed => "thread-delete-failed",
-            Self::ThreadDeletesFull => "thread-deletes-full",
-            Self::ThreadDeleted => "thread-deleted",
-            Self::BackToKumo => "action-back-to-kumo",
-            Self::SwitchThread => "action-switch-task",
-            Self::RenameThread => "action-rename-task",
-            Self::SaveRename => "action-save-rename",
-            Self::CancelRename => "action-cancel-rename",
-            Self::RenameEmpty => "rename-empty",
-            Self::RenameTooLong => "rename-task-too-long",
-            Self::RenameNameTooLong => "rename-name-too-long",
-            Self::RenameOneLine => "rename-one-line",
-            Self::TaskFallback => "task-fallback",
-            Self::Settings => "settings-title",
-            Self::OpenSettings => "action-settings",
-            Self::CloseSettings => "settings-close",
-            Self::General => "settings-general",
-            Self::Accounts => "settings-accounts",
-            Self::AssistantName => "settings-assistant-name",
-            Self::UserName => "settings-user-name",
-            Self::UserNameHelp => "settings-user-name-help",
-            Self::SettingsSaving => "settings-saving",
-            Self::SettingsOffline => "settings-offline",
-            Self::DockError => "dock-error",
-            Self::RenameBusy => "rename-busy",
-            Self::SettingsUnavailable => "settings-unavailable",
-            Self::SettingsNotSaved => "settings-not-saved",
-            Self::SettingsSaveHelp => "settings-save-help",
-            Self::DockBrainError => "dock-brain-error",
-            Self::MaxFrameRate => "settings-max-frame-rate",
-            Self::FrameRateAutomatic => "settings-frame-rate-automatic",
+
+            // Claude Code
+            Self::ClaudeProvider => "claude-provider",
+            Self::ClaudeReview => "claude-review",
+            Self::ClaudeConnect => "claude-connect",
+            Self::ClaudeDisconnect => "claude-disconnect",
+            Self::ClaudeFind => "claude-find",
+            Self::ClaudePolicyNotice => "claude-policy-notice",
+            Self::ClaudeBefore => "claude-before",
+            Self::ClaudeDuring => "claude-during",
+            Self::ClaudeFallback => "claude-fallback",
+            Self::ClaudeDeadline => "claude-deadline",
+            Self::ClaudeAnalytics => "claude-analytics",
+            Self::ClaudeDisconnectBody => "claude-disconnect-body",
         }
     }
 }
@@ -476,6 +583,13 @@ impl Strings {
         )
     }
 
+    /// The drop label under a carried Kumo: `app` is the window's title, which is screen text.
+    pub(crate) fn perch_on(&self, app: &str) -> String {
+        let mut args = FluentArgs::new();
+        args.set("app", app);
+        self.format(Text::PerchOn.id(), Some(&args))
+    }
+
     pub(crate) fn back_to_kumo(&self, assistant: &str) -> String {
         let mut args = FluentArgs::new();
         args.set("assistant", assistant);
@@ -523,11 +637,14 @@ impl Strings {
     }
 }
 
-/// Each error's catalog id. Append only, beside `ErrorKey`.
+/// Each error's catalog id, grouped by feature.
 const fn error_id(key: ErrorKey) -> &'static str {
     match key {
+        // Settings
         ErrorKey::SettingsRefused => "error-settings-refused",
         ErrorKey::ConfigUnreadable => "error-config-unreadable",
+
+        // ChatGPT and provider errors
         ErrorKey::SignInTimedOut => "error-sign-in-timed-out",
         ErrorKey::SignInFailed => "error-sign-in-failed",
         ErrorKey::SignInOtherAccount => "error-sign-in-other-account",
@@ -547,12 +664,17 @@ const fn error_id(key: ErrorKey) -> &'static str {
         ErrorKey::ResponseUnreadable => "error-response-unreadable",
         ErrorKey::SignInNeeded => "error-sign-in-needed",
         ErrorKey::ModelUnavailable => "error-model-unavailable",
+        ErrorKey::RenewalUnconfirmed => "error-renewal-unconfirmed",
+
+        // Anthropic
         ErrorKey::AnthropicKeyRejected => "error-anthropic-key-rejected",
         ErrorKey::AnthropicKeyFormat => "error-anthropic-key-format",
         ErrorKey::AnthropicUnreachable => "error-anthropic-unreachable",
         ErrorKey::AnthropicRateLimited => "error-anthropic-rate-limited",
         ErrorKey::AnthropicCredit => "error-anthropic-credit",
         ErrorKey::AnthropicAnswerLimit => "error-anthropic-answer-limit",
+
+        // Claude Code
         ErrorKey::ClaudeCodeNotFound => "error-claude-code-not-found",
         ErrorKey::ClaudeCodeUnsupported => "error-claude-code-unsupported",
         ErrorKey::ClaudeCodeSignedOut => "error-claude-code-signed-out",
@@ -561,7 +683,8 @@ const fn error_id(key: ErrorKey) -> &'static str {
         ErrorKey::ClaudeCodeInputUnsupported => "error-claude-code-input-unsupported",
         ErrorKey::ClaudeCodeBudget => "error-claude-code-budget",
         ErrorKey::ClaudeCodeCleanupPending => "error-claude-code-cleanup-pending",
-        ErrorKey::RenewalUnconfirmed => "error-renewal-unconfirmed",
+
+        // Voice
         ErrorKey::VoiceNoSpace => "error-voice-no-space",
         ErrorKey::VoiceDownload => "error-voice-download",
         ErrorKey::VoiceCorrupt => "error-voice-corrupt",
@@ -592,6 +715,7 @@ mod tests {
     fn every_text_is_in_the_catalog() {
         let strings = Strings::english();
         for text in Text::ALL {
+            assert!(text.listed());
             assert!(
                 strings
                     .bundle
@@ -658,14 +782,15 @@ mod tests {
     }
 
     #[test]
-    fn the_deletion_note_and_the_dialog_never_name_the_task() {
+    fn the_deletion_note_never_names_the_task_and_the_dialog_says_names_stay() {
         let strings = Strings::english();
         assert_eq!(strings.get(Text::ThreadDeleted), "You deleted a task.");
         assert_eq!(
             strings.delete_body("Cloud"),
             "This removes the task and its drawings from this PC. It can't remove issues you \
              already filed on GitHub, or what your model provider keeps under its own terms. \
-             Cloud keeps a note that a task was deleted, but not its name."
+             Cloud keeps a note that a task was deleted. Anything already in Cloud's \
+             conversation stays, including names it used."
         );
     }
 

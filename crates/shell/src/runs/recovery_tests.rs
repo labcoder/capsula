@@ -35,8 +35,8 @@ fn submit(runs: &mut Runs, text: &str) {
     runs.submit(text, |_| true).expect("sent");
 }
 
-fn answering(runs: &mut Runs, run: u64, thread: u64) {
-    runs.apply_run_state(RunId(run), ThreadId(thread), Phase::Answering, None);
+fn thinking(runs: &mut Runs, run: u64, thread: u64) {
+    runs.apply_run_state(RunId(run), ThreadId(thread), Phase::Thinking, None);
 }
 
 fn ended(runs: &mut Runs, run: u64, thread: u64, phase: Phase, key: Option<ErrorKey>) -> Applied {
@@ -55,7 +55,7 @@ fn each_reconnect_key_restores_the_exact_text_once() {
     for key in RECONNECT {
         let mut runs = ready();
         submit(&mut runs, "résumé ✓");
-        answering(&mut runs, 1, 1);
+        runs.apply_state(RunId(1), ThreadId(1), Phase::Thinking);
         assert_eq!(runs.kept(), vec![12], "{key:?}");
         assert_eq!(
             failed(&mut runs, 1, 1, key),
@@ -73,6 +73,18 @@ fn each_reconnect_key_restores_the_exact_text_once() {
             Some(Content::from("first state")),
             "{key:?}"
         );
+    }
+}
+
+#[test]
+fn reconnect_after_answering_never_restores_an_already_started_turn() {
+    for key in RECONNECT {
+        let mut runs = ready();
+        submit(&mut runs, "already started");
+        runs.apply_state(RunId(1), ThreadId(1), Phase::Answering);
+        assert_eq!(failed(&mut runs, 1, 1, key), None, "{key:?}");
+        assert_eq!(runs.kept(), Vec::<usize>::new());
+        assert_eq!(failed(&mut runs, 1, 1, key), None);
     }
 }
 
@@ -98,7 +110,7 @@ fn any_other_ending_uses_the_text_up_and_a_later_valid_failure_cannot_revive_it(
     for key in others {
         let mut runs = ready();
         submit(&mut runs, "x");
-        answering(&mut runs, 1, 1);
+        thinking(&mut runs, 1, 1);
         assert_eq!(
             ended(&mut runs, 1, 1, Phase::Failed, key).restore,
             None,
@@ -114,7 +126,7 @@ fn any_other_ending_uses_the_text_up_and_a_later_valid_failure_cannot_revive_it(
     for phase in [Phase::Done, Phase::Interrupted] {
         let mut runs = ready();
         submit(&mut runs, "x");
-        answering(&mut runs, 1, 1);
+        thinking(&mut runs, 1, 1);
         let applied = ended(&mut runs, 1, 1, phase, Some(ErrorKey::SessionEnded));
         assert_eq!(applied.restore, None, "{phase:?}");
         assert_eq!(runs.kept(), Vec::<usize>::new(), "{phase:?}");
@@ -163,7 +175,7 @@ fn queued_turns_map_to_their_own_runs_and_any_later_attempt_drops_earlier_texts(
 fn a_selection_change_drops_the_text_even_after_coming_back() {
     let mut runs = ready();
     submit(&mut runs, "x");
-    answering(&mut runs, 1, 1);
+    thinking(&mut runs, 1, 1);
     assert!(runs.select_thread(Some(ThreadId(2))));
     assert_eq!(runs.kept(), Vec::<usize>::new());
     runs.back_to_kumo();
@@ -172,7 +184,7 @@ fn a_selection_change_drops_the_text_even_after_coming_back() {
     let mut runs = ready();
     assert!(runs.select_thread(Some(ThreadId(2))));
     submit(&mut runs, "y");
-    answering(&mut runs, 1, 2);
+    thinking(&mut runs, 1, 2);
     runs.back_to_kumo();
     assert_eq!(runs.kept(), Vec::<usize>::new());
     assert!(runs.select_thread(Some(ThreadId(2))));
@@ -187,7 +199,7 @@ fn a_run_or_target_of_another_thread_never_restores() {
     let mut runs = ready();
     submit(&mut runs, "for one");
     runs.settings(ThreadId(3));
-    answering(&mut runs, 1, 3);
+    thinking(&mut runs, 1, 3);
     assert_eq!(
         runs.kept(),
         Vec::<usize>::new(),
@@ -198,7 +210,7 @@ fn a_run_or_target_of_another_thread_never_restores() {
     // Typed to 1 and answered in 1, but input now goes to 3.
     let mut runs = ready();
     submit(&mut runs, "for one");
-    answering(&mut runs, 1, 1);
+    thinking(&mut runs, 1, 1);
     runs.settings(ThreadId(3));
     assert_eq!(failed(&mut runs, 1, 1, ErrorKey::SessionEnded), None);
 }
@@ -207,7 +219,7 @@ fn a_run_or_target_of_another_thread_never_restores() {
 fn esc_drops_the_text_whether_it_stops_cancels_or_clears() {
     let mut runs = ready();
     submit(&mut runs, "x");
-    answering(&mut runs, 1, 1);
+    thinking(&mut runs, 1, 1);
     assert!(runs.stop().is_some());
     assert_eq!(runs.kept(), Vec::<usize>::new());
     let (applied, notice) = runs.apply_run_state(
@@ -230,7 +242,7 @@ fn esc_drops_the_text_whether_it_stops_cancels_or_clears() {
 
     let mut runs = ready();
     submit(&mut runs, "x");
-    answering(&mut runs, 1, 1);
+    thinking(&mut runs, 1, 1);
     runs.clear();
     assert_eq!(runs.kept(), Vec::<usize>::new());
     assert_eq!(failed(&mut runs, 1, 1, ErrorKey::SessionEnded), None);
@@ -247,7 +259,7 @@ fn a_confirmed_delete_drops_its_thread_s_text_even_when_another_is_the_target() 
 
     let mut runs = ready();
     submit(&mut runs, "named");
-    answering(&mut runs, 1, 1);
+    thinking(&mut runs, 1, 1);
     runs.settings(ThreadId(5));
     assert!(runs.confirm_delete(ThreadId(1)));
     assert_eq!(runs.kept(), Vec::<usize>::new());
@@ -265,7 +277,7 @@ fn a_confirmed_delete_drops_its_thread_s_text_even_when_another_is_the_target() 
 fn a_disconnect_or_a_new_brain_drops_the_text() {
     let mut runs = ready();
     submit(&mut runs, "x");
-    answering(&mut runs, 1, 1);
+    thinking(&mut runs, 1, 1);
     runs.disconnected();
     assert_eq!(runs.kept(), Vec::<usize>::new());
     // A new brain numbers runs afresh, so its run 1 isn't the old one.
@@ -279,7 +291,7 @@ fn a_disconnect_or_a_new_brain_drops_the_text() {
 fn a_new_brain_drops_held_texts_even_without_a_disconnect() {
     let mut runs = ready();
     submit(&mut runs, "x");
-    answering(&mut runs, 1, 1);
+    thinking(&mut runs, 1, 1);
     runs.met(Incarnation(1));
     assert_eq!(runs.kept(), vec![1], "the same brain keeps it");
     runs.met(Incarnation(2));
@@ -307,7 +319,7 @@ fn debug_prints_lengths_never_typed_or_answer_text() {
     assert_redacted(&pending);
     assert!(pending.contains("held: 1"), "{pending}");
 
-    answering(&mut runs, 1, 1);
+    thinking(&mut runs, 1, 1);
     let shown = runs.shown().expect("the answer shows");
     assert_eq!(shown.text, MARKER);
     let debug = format!("{shown:?}");

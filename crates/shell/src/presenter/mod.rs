@@ -16,9 +16,11 @@
 //!   job, scene, cut and layout base. A step has 250 ms from when its predecessor was ready and
 //!   the window had room, waiting for a worker slot included; the watchdog fails it then, whether
 //!   or not its worker has answered. A step the window holds back is untimed.
-//! - Only the oldest prepared step is consumed, and its layout becomes the rest. Before B6 nothing
-//!   consumes in production, so a cut or failure names the activated bound: the recovered resting
-//!   layout, or zero.
+//! - Only the oldest prepared step is consumed. One transaction stages its activated view against
+//!   the current one, checks the whole post-transition charge, then retires it semantically and
+//!   installs its layout as the rest with that view in a new frame epoch; a refusal changes
+//!   nothing. Until B6d nothing consumes in production, so a cut or failure names the activated
+//!   bound: the recovered resting layout, or zero.
 //! - A scene with a cut outstanding prepares nothing until the brain acknowledges the cut, and a
 //!   scene gets at most one cut between commits.
 //! - Scene frames, jobs, answers and scenes are held in [`Deferred`] from the moment the
@@ -124,7 +126,7 @@ pub(crate) enum Effect {
     /// A consumption refused as busy can be retried now, before this scene admits again.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "B6's activation owner is the production caller")
+        expect(dead_code, reason = "B6d's activation owner is the production caller")
     )]
     ConsumptionReady { scene: SceneId, index: u32 },
 }
@@ -213,7 +215,11 @@ impl Presenter {
         for scene in self.scenes.values_mut() {
             scene.halt();
         }
-        let bytes = self.scenes.values().map(Scene::attributed).sum();
+        let bytes = self
+            .scenes
+            .values()
+            .map(|scene| scene.residency() + scene.state.attributed_bytes())
+            .sum();
         let frames = self.frames.borrow_mut().take_all();
         drop(Deferred::new(
             (std::mem::take(&mut self.scenes), frames),
@@ -452,6 +458,7 @@ impl Presenter {
                 cut: scene.cut_now(),
             });
         }
+        self.drain(now, &mut out)?;
         let cuts = SceneCuts::new(cuts).expect("four scenes within the global caps fit one Stop");
         out.effects
             .push(Effect::Control(ControlToBrain::StopScenes { run, cuts }));
@@ -631,7 +638,8 @@ impl Presenter {
             .state
             .apply_detached(read, candidate, &mut self.global)
             .map_err(|_| Broken::Step)?;
-        let preparation = Deferred::new(preparation, scene.state.view().attributed_bytes());
+        let retained = preparation.attributed_bytes();
+        let preparation = Deferred::new(preparation, retained);
         out.credit(bytes);
         if let Some(pending) = scene.pending_consumption {
             out.effects.push(Effect::ConsumptionReady {
@@ -696,8 +704,9 @@ impl Presenter {
         scene.cut = Cut::Applied;
         scene.skipping = false;
         // B5 installs only at-rest views, so this unlogged cut leaves the view and frame current.
-        // shortcut: halt keeps live motion; before B6 activation, restrict this to at-rest views
-        // without delayed owners or settle motion first, with position-track and delayed-owner tests.
+        // shortcut: halt keeps live motion; before B6d's production activation, restrict this to
+        // at-rest views without delayed owners or settle motion first, with position-track and
+        // delayed-owner tests.
         if outcome == StopOutcome::Kept
             && scene.state.view().recovery_log().len() == logged
             && scene.view.activated() == scene.state.view().activated()
@@ -781,6 +790,11 @@ impl Presenter {
             self.fail(id, run, index, SceneFailure::Timeout, out);
             return Ok(());
         }
+        let bytes = ticket.preparation.attribution()
+            + scene
+                .ready
+                .back()
+                .map_or(scene.retained, |ready| ready.full_after);
         let input = ticket
             .preparation
             .map(|preparation| {
@@ -794,7 +808,7 @@ impl Presenter {
             .transpose();
         match input {
             Ok(mut input) => {
-                input.attribute(scene.attributed());
+                input.attribute(bytes);
                 let cancel = Arc::new(AtomicBool::new(false));
                 scene.running = Some(Running {
                     id: job,
@@ -899,7 +913,7 @@ impl Presenter {
     fn release(&mut self, id: SceneId) {
         if let Some(mut scene) = self.scenes.remove(&id) {
             scene.halt();
-            let bytes = scene.attributed();
+            let bytes = scene.held();
             let Scene {
                 state, rest, view, ..
             } = scene;

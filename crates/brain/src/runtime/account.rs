@@ -567,7 +567,7 @@ impl Brain {
                 .and_then(|models| default_model(self.config.view().default_model.as_ref(), models))
         {
             self.settings_ops.push_back(settings::Queued {
-                op: SettingsOp::SetDefaultModel(choice),
+                change: settings::Change::User(SettingsOp::SetDefaultModel(choice)),
                 epoch: settings::BRAIN,
             });
             self.pump_settings(link.as_deref_mut())?;

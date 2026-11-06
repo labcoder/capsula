@@ -276,5 +276,5 @@ fn no_carrier_prints_the_nonce_or_the_pixels() {
     );
 }
 
-#[path = "elements.rs"]
+#[path = "capture_elements_tests.rs"]
 mod elements;
