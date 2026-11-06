@@ -914,7 +914,7 @@ mod tests {
         for (squares, radius, length, outlines, dashes, new_outline, accepted) in [
             (99, 0.0625, 2_100.0, 512, 512, 17, true),
             (99, 0.0625, 2_110.0, 512, 513, 17, false),
-            (100, 0.015625, 2_100.0, 513, 512, 13, false),
+            (100, 0.015_625, 2_100.0, 513, 512, 13, false),
         ] {
             let mut previous = vec![rect(100.0, 0.0, None, Some((paint(), 2.0))); squares];
             previous.push(dash(2_980.0));
