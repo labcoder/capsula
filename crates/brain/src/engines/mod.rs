@@ -374,6 +374,8 @@ pub enum ToolName {
     Draw,
     /// Moves the user's typed input to a task, or back to Kumo.
     Focus,
+    /// Creates an empty task.
+    CreateTask,
     /// A name Kumochi doesn't offer.
     Unknown,
     /// The dispatcher's test tool that writes.

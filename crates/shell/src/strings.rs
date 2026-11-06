@@ -714,14 +714,15 @@ mod tests {
     }
 
     #[test]
-    fn the_deletion_note_and_the_dialog_never_name_the_task() {
+    fn the_deletion_note_never_names_the_task_and_the_dialog_says_names_stay() {
         let strings = Strings::english();
         assert_eq!(strings.get(Text::ThreadDeleted), "You deleted a task.");
         assert_eq!(
             strings.delete_body("Cloud"),
             "This removes the task and its drawings from this PC. It can't remove issues you \
              already filed on GitHub, or what your model provider keeps under its own terms. \
-             Cloud keeps a note that a task was deleted, but not its name."
+             Cloud keeps a note that a task was deleted. Anything already in Cloud's \
+             conversation stays, including names it used."
         );
     }
 
