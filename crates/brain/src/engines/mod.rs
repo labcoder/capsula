@@ -26,6 +26,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use kumochi_protocol::message::{RunId, ThreadId, UserError};
 use tokio::sync::{mpsc, oneshot};
@@ -129,11 +130,28 @@ impl SendGate {
     /// Waits for leave to send. A brain that's gone, or a coordinator that never answers
     /// because the round was dropped, means `Rebuild`: nothing is sent.
     pub async fn ask(&self) -> Answer {
+        self.ask_for(None).await
+    }
+
+    /// As [`ask`](Self::ask), for a send whose lease is held for up to `hold` from now: one that
+    /// can go out again until a process tree is confirmed ended. The coordinator caps it.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "C5b-1b's question round is the first caller")
+    )]
+    pub(crate) async fn ask_held(&self, hold: Duration) -> Answer {
+        self.ask_for(Some(hold)).await
+    }
+
+    async fn ask_for(&self, hold: Option<Duration>) -> Answer {
         let (answer, answered) = oneshot::channel();
         lock(&self.asks).push((self.key, answer));
         if self
             .inputs
-            .send(Input::SendReady { key: self.key })
+            .send(Input::SendReady {
+                key: self.key,
+                hold,
+            })
             .is_err()
         {
             return Answer::Rebuild;
@@ -157,19 +175,32 @@ pub enum Answer {
 #[must_use = "dropping a SendLease settles its send"]
 pub struct SendLease {
     lease: LeaseId,
-    inputs: mpsc::UnboundedSender<Input>,
+    /// `None` once abandoned.
+    inputs: Option<mpsc::UnboundedSender<Input>>,
 }
 
 impl SendLease {
     pub(crate) fn new(lease: LeaseId, inputs: mpsc::UnboundedSender<Input>) -> Self {
-        Self { lease, inputs }
+        Self {
+            lease,
+            inputs: Some(inputs),
+        }
+    }
+
+    /// Gives the lease up unsettled: its send may still be going out, so its sources stay held
+    /// until its deadline fails it closed.
+    pub(crate) fn abandon(mut self) {
+        self.inputs = None;
     }
 }
 
 impl Drop for SendLease {
     fn drop(&mut self) {
+        let Some(inputs) = self.inputs.take() else {
+            return;
+        };
         let settled = Input::SendSettled { lease: self.lease };
-        if self.inputs.send(settled).is_err() {
+        if inputs.send(settled).is_err() {
             tracing::debug!("a send settled after the brain ended");
         }
     }
@@ -629,7 +660,10 @@ mod tests {
         let round = tokio::spawn(async move { gate.ask().await });
         assert_eq!(
             received.recv().await,
-            Some(Input::SendReady { key: lease().key })
+            Some(Input::SendReady {
+                key: lease().key,
+                hold: None,
+            })
         );
         round.abort();
         assert!(round.await.expect_err("stopped").is_cancelled());
@@ -651,7 +685,10 @@ mod tests {
         let round = tokio::spawn(async move { gate.ask().await });
         assert_eq!(
             received.recv().await,
-            Some(Input::SendReady { key: lease().key })
+            Some(Input::SendReady {
+                key: lease().key,
+                hold: None,
+            })
         );
         answer(
             &asks,

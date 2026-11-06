@@ -759,3 +759,38 @@ fn the_callers_tool_set_is_what_both_audits_expect() {
         );
     }
 }
+
+/// §5's analytics API: initialize's `analytics_disabled` once initialize passed, shown and never
+/// judged; nothing before that, or for a signed-out launch.
+#[test]
+fn initializes_analytics_flag_is_read_only_once_it_passed() {
+    for (value, expected) in [
+        (Some(json!(true)), Some(true)),
+        (Some(json!(false)), Some(false)),
+        (None, None),
+        (Some(json!("false")), None),
+    ] {
+        let mut audit = audit();
+        assert_eq!(audit.analytics(), None);
+        let response = control(0, |line| {
+            signed_in(line);
+            let body = &mut line["response"]["response"];
+            match &value {
+                Some(value) => body["analytics_disabled"] = value.clone(),
+                None => drop(
+                    body.as_object_mut()
+                        .expect("a body")
+                        .remove("analytics_disabled"),
+                ),
+            }
+        });
+        assert_eq!(audit.control(&response), Ok(Progress::Waiting), "{value:?}");
+        assert_eq!(audit.analytics(), expected, "{value:?}");
+    }
+    let mut signed_out = audit();
+    assert_eq!(
+        signed_out.control(&control(0, |_| {})),
+        Ok(Progress::SignedOut)
+    );
+    assert_eq!(signed_out.analytics(), None);
+}

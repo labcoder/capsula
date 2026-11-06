@@ -957,10 +957,11 @@ fn a_colour_survives_retire_stop_recovery_removal_and_rebuild() {
     let u = |color: &str| cube("u", &json!({"pos":[4,0,0],"color":color}));
     // Measured at c1ec74c: a scene holding only the view charges 738 bytes, and each cube adds
     // 1,083: its mesh (520) and source (298) by the allocator oracle, then its object, slot and id.
-    // 738 + 1,083: the view and one cube.
-    let one_cube = 1_821;
-    // 738 + 2 * 1,083: the view and two cubes; colour is inline, so a recolour keeps it.
-    let two_cubes = 2_904;
+    // 6b adds 24 to each solid's slot for its settled pos3 and rot3 offsets: 1,107 per cube.
+    // 738 + 1,107: the view and one cube.
+    let one_cube = 1_845;
+    // 738 + 2 * 1,107: the view and two cubes; colour is inline, so a recolour keeps it.
+    let two_cubes = 2_952;
     let (mut scene, mut budget) = scene();
     let first = opening(
         &mut scene,

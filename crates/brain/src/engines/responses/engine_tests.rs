@@ -125,7 +125,10 @@ impl Round {
     async fn answer(&mut self, answered: Answer) {
         assert_eq!(
             self.inputs.recv().await,
-            Some(Input::SendReady { key: key() })
+            Some(Input::SendReady {
+                key: key(),
+                hold: None,
+            })
         );
         let (_, answer) = self
             .asks

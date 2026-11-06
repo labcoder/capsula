@@ -6,16 +6,21 @@ use crate::{
     display::{Item, Paint, Prim},
     geom::{Affine, Vec2},
     layout::{LayoutState, PrepareError, PreparedStep, Rest},
-    limits::{MAX_LIVE_OBJECTS, MAX_MOTION_MS, MAX_OBJECT_DEPTH},
+    limits::{MAX_LIVE_OBJECTS, MAX_MOTION_MS, MAX_OBJECT_DEPTH, MAX_SOLIDS},
     record::{Anim, Ease, Enter, KeyValue, Rgb, Track},
     state::{object, work},
     theme::Theme,
+    three::{Transform, view::ViewGeometry},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     sync::Arc,
 };
+pub use three::ViewFrame;
+use three::ViewMotion;
+
+mod three;
 
 /// K̃ = (1 + K)/S(1) − 1 = 0.375891 rounded up: the normalised spring's largest overshoot.
 pub(crate) const SPRING_OVERSHOOT: f32 = 0.3759;
@@ -207,6 +212,7 @@ enum Value {
     Num(f32),
     V2(Vec2),
     Color([f32; 3]),
+    V3([f32; 3]),
 }
 fn channels(color: Rgb) -> [f32; 3] {
     let [_, red, green, blue] = color.get().to_be_bytes();
@@ -228,7 +234,7 @@ fn compile(value: &KeyValue, theme: &Theme) -> Value {
         KeyValue::Num(value) => Value::Num(value.get()),
         KeyValue::V2(value) => Value::V2(Vec2::new(value[0].get(), value[1].get())),
         KeyValue::Color(color) => Value::Color(channels(theme.resolve(color))),
-        KeyValue::V3(_) => unreachable!("admission refuses 3D tracks until slice 5 PR 5"),
+        KeyValue::V3(value) => Value::V3(value.map(crate::Finite::get)),
     }
 }
 fn interpolate(track: Track, from: Value, to: Value, progress: f32) -> Value {
@@ -248,6 +254,9 @@ fn interpolate(track: Track, from: Value, to: Value, progress: f32) -> Value {
             lerp(from[1], to[1]),
             lerp(from[2], to[2]),
         ]),
+        (Value::V3(from), Value::V3(to)) => {
+            Value::V3(std::array::from_fn(|i| lerp(from[i], to[i])))
+        }
         (from, _) => from,
     }
 }
@@ -488,6 +497,10 @@ const HIDDEN: World = World {
 pub struct Frame {
     items: Vec<FrameItem>,
     world: Vec<World>,
+    /// The scene's sampled view; its pose storage moves to `poses` when cleared.
+    view: Option<ViewFrame>,
+    /// Pose storage while no view is bound, reserved for a full view once.
+    poses: Vec<Transform>,
     generation: Option<Arc<()>>,
 }
 impl fmt::Debug for Frame {
@@ -508,12 +521,18 @@ impl Frame {
         Self {
             items: Vec::with_capacity(MAX_LIVE_OBJECTS),
             world: Vec::with_capacity(MAX_LIVE_OBJECTS),
+            view: None,
+            poses: Vec::with_capacity(MAX_SOLIDS),
             generation: None,
         }
     }
     /// Objects in handle order. Use [`Self::paint_items`] for layered painting.
     pub fn items(&self) -> &[FrameItem] {
         &self.items
+    }
+    /// The sampled 3D view, if the scene has one: at most `MAX_VIEWS`.
+    pub fn views(&self) -> &[ViewFrame] {
+        self.view.as_slice()
     }
     /// Ordinary geometry followed by edge-label chips and text, without allocation.
     pub fn paint_items(&self) -> impl Iterator<Item = (&FrameItem, &[Prim])> {
@@ -532,11 +551,20 @@ impl Frame {
     pub fn clear(&mut self) {
         self.items.clear();
         self.world.clear();
+        if let Some(ViewFrame { poses, .. }) = self.view.take() {
+            self.poses = poses;
+            self.poses.clear();
+        }
         self.generation = None;
     }
-    /// Requested bytes of the reserved item and world storage; items share their geometry.
+    /// Requested bytes of the reserved item, world and pose storage; items and the view share
+    /// their geometry.
     pub fn resident_bytes(&self) -> usize {
-        self.items.capacity() * size_of::<FrameItem>() + self.world.capacity() * size_of::<World>()
+        let poses =
+            self.poses.capacity() + self.view.as_ref().map_or(0, |view| view.poses.capacity());
+        self.items.capacity() * size_of::<FrameItem>()
+            + self.world.capacity() * size_of::<World>()
+            + poses * size_of::<Transform>()
     }
 }
 
@@ -552,6 +580,8 @@ pub struct SceneView {
     nodes: Vec<Node>,
     paint: Vec<usize>,
     tracks: Vec<Live>,
+    /// The scene's 3D view, if any.
+    view: Option<ViewMotion>,
     generation: Arc<()>,
 }
 impl fmt::Debug for SceneView {
@@ -603,6 +633,7 @@ impl SceneView {
             activated,
             deadline: 0,
             tracks: Vec::new(),
+            view: view(at_rest).map(|geometry| ViewMotion::new(geometry, None, None)),
             generation: Arc::new(()),
         }
     }
@@ -623,6 +654,7 @@ impl SceneView {
             + self.paint.capacity() * size_of::<usize>()
             + self.tracks.capacity() * size_of::<Live>()
             + self.tracks.iter().map(Live::key_bytes).sum::<usize>()
+            + self.view.as_ref().map_or(0, ViewMotion::bytes)
             + crate::layout::heap::ARC_HEADER
     }
 
@@ -698,7 +730,10 @@ impl SceneView {
         // shortcut: explicit tracks keep the step clock under delayed parents; revisit when model instructions need parent-relative timing.
         for op in &*source.put {
             if let Op::Anim(anim) = op
-                && let Some(target) = step.after.handle(&anim.target)
+                && let Some(target) = step
+                    .after
+                    .handle(&anim.target)
+                    .or_else(|| step.after.is_three(&anim.target))
             {
                 let start = origin(anim.at_word, anim.delay);
                 candidates.push(Live::new(anim, target, start, step.theme()));
@@ -732,7 +767,9 @@ impl SceneView {
             // A surviving node already holds its visible start: ids cannot be re-put and parents cannot change.
             starts.push(node.timing.start);
         }
-        let (tracks, superseded) = own(&mut nodes, candidates);
+        let mut view = view(&step.after)
+            .map(|geometry| ViewMotion::new(geometry, self.view.as_ref(), Some(now)));
+        let (tracks, superseded) = own(&mut nodes, view.as_mut(), candidates);
         let view = Self {
             paint: paint_order(&nodes),
             nodes,
@@ -741,6 +778,7 @@ impl SceneView {
             activated: step.index + 1,
             deadline: now.saturating_add(u64::from(MAX_MOTION_MS)),
             tracks,
+            view,
             generation: Arc::new(()),
         };
         let bytes =
@@ -824,6 +862,45 @@ impl SceneView {
             .tracks
             .iter()
             .any(|live| active(live.start(), live.end()))
+            || self.view_motion(now)
+    }
+
+    /// Whether a spin or a 3D track is running at `now`. A track still to start is a hold.
+    pub fn view_motion(&self, now: u64) -> bool {
+        let deadline = self.deadline;
+        now < deadline
+            && (self
+                .view
+                .as_ref()
+                .and_then(|view| view.spin)
+                .is_some_and(|spin| spin.running(now, deadline))
+                || self.tracks.iter().any(|live| {
+                    three::slot(live.track).is_some() && live.start() <= now && now < live.end()
+                }))
+    }
+
+    /// Whether nothing still runs or waits to start at `now`, 2D or 3D: no track ending later,
+    /// no object whose timing still runs or flows, and no spin. A delayed owner keeps it false.
+    pub fn at_rest(&self, now: u64) -> bool {
+        let deadline = self.deadline;
+        now >= deadline
+            || !(self.tracks.iter().any(|live| live.end() > now)
+                || self
+                    .nodes
+                    .iter()
+                    .any(|node| node.timing.end > now || node.timing.flow != 0)
+                || self
+                    .view
+                    .as_ref()
+                    .and_then(|view| view.spin)
+                    .is_some_and(|spin| spin.stop(deadline) > now))
+    }
+
+    /// Stops the spin at its angle at `now`, as a drag does; later holds change nothing.
+    pub fn hold_spin(&mut self, now: u64) {
+        if let Some(spin) = self.view.as_mut().and_then(|view| view.spin.as_mut()) {
+            spin.hold(now);
+        }
     }
 
     /// The next instant after `now` when motion starts, ends or an object appears; the
@@ -842,8 +919,14 @@ impl SceneView {
             .tracks
             .iter()
             .flat_map(|live| [Some(live.start()), Some(live.end())]);
+        let spin = self
+            .view
+            .as_ref()
+            .and_then(|view| view.spin)
+            .map(|spin| spin.stop(deadline));
         nodes
             .chain(tracks)
+            .chain([spin])
             .flatten()
             .map(|time| time.min(deadline))
             .filter(|time| *time > now)
@@ -953,6 +1036,15 @@ impl SceneView {
                 visible: true,
             });
         }
+        if let Some(motion) = &self.view {
+            let spare = &mut out.poses;
+            let slot = out.view.get_or_insert_with(|| ViewFrame {
+                geometry: Arc::clone(&motion.geometry),
+                camera: None,
+                poses: std::mem::take(spare),
+            });
+            motion.sample(&self.tracks, now, self.deadline, slot);
+        }
         for &index in &self.paint {
             let world = out.world[index];
             if !world.visible {
@@ -1028,17 +1120,45 @@ fn births(
     born
 }
 
+/// The scene's prepared 3D view; a scene holds at most `MAX_VIEWS`, one.
+fn view(layout: &LayoutState) -> Option<&Arc<ViewGeometry>> {
+    layout.views().values().next()
+}
+
 /// Gives each (object, property) its newest candidate and keeps only owning tracks, returning
-/// the superseded candidates for the caller to retire.
-fn own(nodes: &mut [Node], candidates: Vec<Live>) -> (Vec<Live>, Vec<Option<Live>>) {
+/// the superseded candidates for the caller to retire. A 3D owner is aligned by handle to its
+/// solid's slot in the activated view, so compaction after a removal can't move it.
+fn own(
+    nodes: &mut [Node],
+    mut view: Option<&mut ViewMotion>,
+    candidates: Vec<Live>,
+) -> (Vec<Live>, Vec<Option<Live>>) {
     let index: BTreeMap<Handle, usize> = nodes
         .iter()
         .enumerate()
         .map(|(index, node)| (node.handle, index))
         .collect();
+    let solids: BTreeMap<Handle, usize> = view.as_ref().map_or_else(BTreeMap::new, |view| {
+        view.geometry
+            .solids
+            .iter()
+            .enumerate()
+            .map(|(index, solid)| (solid.handle, index))
+            .collect()
+    });
     for (position, live) in candidates.iter().enumerate() {
-        if let Some(node) = index.get(&live.target) {
-            nodes[*node].owners[slot(live.track)] = Some(position);
+        match (three::slot(live.track), view.as_deref_mut()) {
+            (Some(property), Some(view)) => {
+                if let Some(&solid) = solids.get(&live.target) {
+                    view.owners[solid][property] = Some(position);
+                }
+            }
+            (Some(_), None) => {}
+            (None, _) => {
+                if let Some(node) = index.get(&live.target) {
+                    nodes[*node].owners[slot(live.track)] = Some(position);
+                }
+            }
         }
     }
     let mut candidates: Vec<Option<Live>> = candidates.into_iter().map(Some).collect();
@@ -1052,6 +1172,17 @@ fn own(nodes: &mut [Node], candidates: Vec<Live>) -> (Vec<Live>, Vec<Option<Live
             );
             *owner = tracks.len() - 1;
         }
+    }
+    for owner in view
+        .into_iter()
+        .flat_map(|view| view.owners.iter_mut().flatten().flatten())
+    {
+        tracks.push(
+            candidates[*owner]
+                .take()
+                .expect("a track targets one solid property"),
+        );
+        *owner = tracks.len() - 1;
     }
     (tracks, candidates)
 }
