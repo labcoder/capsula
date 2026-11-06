@@ -180,6 +180,7 @@ impl Tapped for DataToBrain {
             Self::MicPcm(_) => "MicPcm",
             Self::IssueEdit { .. } => "IssueEdit",
             Self::IssueCards { .. } => "IssueCards",
+            Self::AskAbout { .. } => "AskAbout",
         }
     }
 

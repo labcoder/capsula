@@ -410,6 +410,12 @@ still settles pending turns in FIFO order; B2a replaces that with keyed correlat
 Slice 7 appended `t_qpc`, `chunks`, `KeyDown`, `MicPcm` and `Transcribing` without renaming these
 types or allocating another run.
 
+An ask about a clicked part, `DataToBrain::AskAbout { turn, scene, element }`, is the last data
+tag. It carries only its turn count, a `SceneId` and a `Handle`, all varints, so at most 19 bytes
+with the tag. It counts as a turn like `TextSubmit`, shares its 64-turn bound, and is answered by
+`TurnRefused` or the run's first `RunState`, and then a `Focus` (see
+[runs](runs.md#asking-about-a-part)). The tap records only its operation and length.
+
 ## Voice wire contract
 
 Voice is appended at the end of each enum, so earlier tags keep their bytes. The bounds live

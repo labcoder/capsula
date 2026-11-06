@@ -10,6 +10,7 @@
 //! which turns an engine round's events into text frames, steps and the run's end, is in `run`.
 
 mod admission;
+mod ask;
 mod availability;
 mod calls;
 mod delete;
@@ -101,6 +102,15 @@ pub enum Input {
         thread: Option<ThreadId>,
         /// What the user typed.
         text: Content,
+    },
+    /// The user clicked a labelled 3D part: a turn about it, in its drawing's thread.
+    Ask {
+        /// The ask's connection-local number, shared with typed turns.
+        turn: u32,
+        /// The visible scene.
+        scene: SceneId,
+        /// The solid's host identity.
+        element: kumochi_scene::Handle,
     },
     /// The shell stopped `run` locally; `revealed` are the steps that stayed on screen.
     Stop {
@@ -740,6 +750,11 @@ impl Coordinator {
             }
             Input::PageRead { reply, .. } => return Ok(vec![Effect::Data(reply)]),
             Input::Turn { turn, thread, text } => self.typed(turn, thread, text, &mut effects),
+            Input::Ask {
+                turn,
+                scene,
+                element,
+            } => self.asked(turn, scene, element, &mut effects),
             Input::Stop { run, .. } if run < self.session_start => return Err(Stale),
             Input::Stop { run, revealed } if self.current_run() != Some(run) => {
                 self.late_stop(run, revealed, &mut effects)?;
