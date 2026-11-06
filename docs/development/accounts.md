@@ -27,37 +27,6 @@ intent and the next startup may load and check the still-current key; retry remo
 succeeds. A paste refused while removal is pending requires a new explicit paste;
 it is not automatically adopted.
 
-### Authority paste staging primitives
-
-The vault has a two-phase paste path, not yet reachable from the pipe. The
-payload-free `AnthropicKeyStaged` operation remains fenced until the protocol,
-runtime admission and shell writer land together. No Settings paste control is
-enabled by these primitives.
-
-The credential worker can mint one pending write-once plan for a validated
-16–2048-byte length without changing the saved key. Credential Manager holds
-the chunks, while the worker retains the original head revision and plan.
-Adoption consumes the matching plan before reading. An unknown, superseded or
-already consumed plan is Changed, not an empty-key format rejection. Reads
-wait at most two seconds across all chunks for an exact layout; only complete
-present bytes undergo key validation.
-
-The vault copies a valid paste into a fresh generation, verifies those writes,
-then activates it with the captured revision's compare-and-swap. A failed read,
-validation, write or commit preserves the previous saved key. Only a committed
-activation returns a usable replacement. The staged chunks and predecessor
-are swept after activation; neither shares the active generation's names.
-Remove consumes the in-memory permit before committing its durable fence,
-even when that commit fails. A later old notification cannot adopt it.
-
-A lost notification or failed operation leaves Pending until another begin
-or the next open retires it. Startup never resumes or adopts a paste. A shell
-write can outlive a brain restart, including the later lifetime in which its
-generation is marked Swept. Such late chunks can remain physically orphaned
-in Credential Manager, but cannot authorize a key; cleanup is not a physical
-erasure guarantee. The shell writer must use local-machine persistence and
-zeroizing buffers, not keyring's enterprise-persistent secret-writing path.
-
 The brain checks `GET https://api.anthropic.com/v1/models?limit=65` with a sensitive
 `Authorization: Bearer` header and no `x-api-key`, redirects or environment proxy,
 a 1 MiB body bound and a 15-second whole-check deadline. More than 64 entries or `has_more`
