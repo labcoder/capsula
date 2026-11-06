@@ -6,6 +6,24 @@ use kumochi_protocol::message::KeyRejection;
 const OLD: &str = "sk-ant-api-old-fake-sentinel";
 const NEW: &str = "sk-ant-api-new-fake-sentinel";
 
+struct FastClock(std::time::Instant, std::cell::Cell<std::time::Duration>);
+impl FastClock {
+    fn new() -> Self {
+        Self(
+            std::time::Instant::now(),
+            std::cell::Cell::new(std::time::Duration::ZERO),
+        )
+    }
+}
+impl generation::Clock for FastClock {
+    fn now(&self) -> std::time::Instant {
+        self.0 + self.1.get()
+    }
+    fn sleep(&self, delay: std::time::Duration) {
+        self.1.set(self.1.get() + delay);
+    }
+}
+
 fn loaded(vault: &mut Vault<FakeStore>) -> Option<String> {
     vault
         .anthropic(KeyOp::Load)
@@ -37,6 +55,16 @@ fn paste_bounds_preserve_the_current_key_and_mint_distinct_names() {
             Err(KeyError::Vault(VaultError::Bounds))
         ));
         assert_eq!(store.names(), before);
+        assert_eq!(
+            raw(&path)
+                .query_row(
+                    "SELECT count(*) FROM generations WHERE state = 'pending'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("pending count"),
+            0
+        );
     }
     let mut previous = None;
     for len in [16, 2000, 2001, 2048] {
@@ -133,6 +161,12 @@ fn invalid_present_pastes_are_rejected_without_replacing_the_saved_key() {
             matches!(vault.adopt_anthropic_paste(plan.generation), Err(PasteError::Key(KeyError::Rejected(got))) if got == reason)
         );
         assert_eq!(loaded(&mut vault).as_deref(), Some(OLD));
+        assert!(
+            store
+                .names()
+                .iter()
+                .all(|name| !name.contains(&plan.generation.hex()))
+        );
         assert!(matches!(
             vault.adopt_anthropic_paste(plan.generation),
             Err(PasteError::Changed)
@@ -149,18 +183,40 @@ fn failed_candidate_writes_and_failed_commits_preserve_the_saved_key() {
         let plan = vault.begin_anthropic_paste(NEW.len()).expect("plan");
         plant(&store, &service, &plan, NEW.as_bytes());
         if commit {
-            refuse_commits(&path);
+            raw(&path).execute_batch("CREATE TRIGGER refuse_activation BEFORE UPDATE OF state ON generations WHEN NEW.state = 'active' BEGIN SELECT RAISE(ABORT, 'refused'); END;").expect("activation-only failure");
         } else {
             store.0.lock().expect("fake").refusing = true;
         }
         let result = vault.adopt_anthropic_paste(plan.generation);
-        assert!(matches!(result, Err(PasteError::Key(KeyError::Vault(_)))));
         if commit {
-            allow_commits(&path);
+            assert!(matches!(
+                result,
+                Err(PasteError::Key(KeyError::Vault(VaultError::Authority)))
+            ));
+        } else {
+            assert!(matches!(
+                result,
+                Err(PasteError::Key(KeyError::Vault(VaultError::Store(
+                    CredentialStoreError::Write(5)
+                ))))
+            ));
+        }
+        if commit {
+            raw(&path)
+                .execute_batch("DROP TRIGGER refuse_activation;")
+                .expect("allow activation");
         } else {
             store.0.lock().expect("fake").refusing = false;
         }
         assert_eq!(loaded(&mut vault).as_deref(), Some(OLD));
+        assert!(
+            store
+                .names()
+                .iter()
+                .any(|name| name.contains(&plan.generation.hex())),
+            "a write/activation failure leaves staged names for the next begin"
+        );
+        assert_eq!(store.names().len(), if commit { 3 } else { 2 });
         assert!(matches!(
             vault.adopt_anthropic_paste(plan.generation),
             Err(PasteError::Changed)
@@ -178,9 +234,15 @@ fn remove_consumes_the_permit_even_if_its_commit_fails() {
     refuse_commits(&path);
     assert!(matches!(
         vault.anthropic(KeyOp::Remove),
-        Err(KeyError::Vault(_))
+        Err(KeyError::Vault(VaultError::Authority))
     ));
     allow_commits(&path);
+    assert!(
+        store
+            .names()
+            .iter()
+            .all(|name| !name.contains(&plan.generation.hex()))
+    );
     assert!(matches!(
         vault.adopt_anthropic_paste(plan.generation),
         Err(PasteError::Changed)
@@ -289,7 +351,7 @@ fn absent_staging_is_unavailable_not_format_and_consumes_the_permit() {
     vault.save_anthropic_key(OLD.as_bytes()).expect("old key");
     let plan = vault.begin_anthropic_paste(NEW.len()).expect("plan");
     assert!(matches!(
-        vault.adopt_anthropic_paste(plan.generation),
+        vault.adopt_with_clock(plan.generation, &FastClock::new()),
         Err(PasteError::Key(KeyError::Vault(VaultError::Store(
             CredentialStoreError::Unsettled
         ))))
@@ -299,4 +361,55 @@ fn absent_staging_is_unavailable_not_format_and_consumes_the_permit() {
         vault.adopt_anthropic_paste(plan.generation),
         Err(PasteError::Changed)
     ));
+}
+
+#[test]
+fn legacy_bytes_cannot_authorize_a_fresh_plan() {
+    let (_scratch, path, service, store) = setup("paste-legacy-unread");
+    let mut vault = open(&store, &service, &path);
+    store
+        .set(
+            &kumochi_protocol::constants::anthropic_staging_target(&service),
+            &Secret::new(Zeroizing::new(NEW.as_bytes().to_vec())),
+        )
+        .expect("legacy bytes");
+    let plan = vault.begin_anthropic_paste(NEW.len()).expect("plan");
+    assert!(matches!(
+        vault.adopt_with_clock(plan.generation, &FastClock::new()),
+        Err(PasteError::Key(KeyError::Vault(VaultError::Store(
+            CredentialStoreError::Unsettled
+        ))))
+    ));
+    assert_eq!(loaded(&mut vault), None);
+}
+
+#[test]
+fn failed_deletes_do_not_undo_committed_adoption() {
+    let (_scratch, path, service, store) = setup("paste-delete-refused");
+    let mut vault = open(&store, &service, &path);
+    let plan = vault.begin_anthropic_paste(NEW.len()).expect("plan");
+    let names = plant(&store, &service, &plan, NEW.as_bytes());
+    store.0.lock().expect("fake").refuse_deletes = true;
+    assert_eq!(
+        vault
+            .adopt_anthropic_paste(plan.generation)
+            .expect("committed")
+            .expose()
+            .as_str(),
+        NEW
+    );
+    assert_eq!(loaded(&mut vault).as_deref(), Some(NEW));
+    assert!(names.iter().all(|name| store.names().contains(name)));
+}
+
+#[test]
+fn every_begin_requires_fresh_brain_minted_names() {
+    let (_scratch, path, service, store) = setup("paste-fresh-names");
+    let mut vault = open(&store, &service, &path);
+    for _ in 0..2 {
+        assert!(matches!(
+            vault.begin_anthropic_paste(16),
+            Ok(PastePlan { bytes: 16, .. })
+        ));
+    }
 }

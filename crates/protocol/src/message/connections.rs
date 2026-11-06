@@ -6,6 +6,9 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+/// Accepted trimmed API-key byte lengths for validation and staging.
+pub const ANTHROPIC_KEY_BYTES: std::ops::RangeInclusive<usize> = 16..=2048;
+
 /// Which connection a model choice runs on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ConnectionKind {
@@ -23,7 +26,10 @@ pub enum ConnectionKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnectionOp {
     /// The shell staged a pasted key in Credential Manager; the brain checks it and moves it.
-    AnthropicKeyStaged,
+    AnthropicKeyStaged {
+        /// The brain-issued one-use staging identity.
+        plan: KeyStageId,
+    },
     /// Check the saved key again, after it was left unconfirmed.
     CheckAnthropicKey,
     /// Forget the saved key.
@@ -36,6 +42,61 @@ pub enum ConnectionOp {
     DisconnectClaudeCode,
     /// Look for the installed Claude Code again.
     FindClaudeCode,
+    /// Ask the brain for names for a validated-length paste, never its bytes.
+    BeginAnthropicKeyStage {
+        /// The shell's outstanding request number.
+        request: u64,
+        /// The validated trimmed byte length, not key text.
+        len: u16,
+    },
+}
+
+/// A brain-minted write-once staging identity; never key material.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyStageId(pub [u8; 16]);
+
+impl fmt::Debug for KeyStageId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("KeyStageId(***)")
+    }
+}
+
+/// Bounded metadata for the shell's one-use writer.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyStagePlan {
+    /// The generation whose names may be written once.
+    pub id: KeyStageId,
+    /// The trimmed validated key length.
+    pub len: u16,
+}
+
+impl fmt::Debug for KeyStagePlan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("KeyStagePlan(***)")
+    }
+}
+
+impl KeyStagePlan {
+    /// Refuses lengths that cannot represent a validated API-key paste.
+    pub fn layout(self) -> Option<crate::constants::CredentialLayout> {
+        if !ANTHROPIC_KEY_BYTES.contains(&usize::from(self.len)) {
+            return None;
+        }
+        crate::constants::CredentialLayout::new(usize::from(self.len))
+    }
+}
+
+/// A content-free paste outcome, separate from the saved key's view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KeyStageFailure {
+    /// A credential or authority operation failed.
+    Unavailable,
+    /// The permit was consumed, superseded, disconnected or removed.
+    Changed,
+    /// The supplied length cannot describe an API key.
+    InvalidLength,
+    /// Present, complete bytes were not an accepted API key.
+    Rejected(KeyRejection),
 }
 
 /// Both Claude connections, authoritative: the shell never moves on its own.
@@ -93,7 +154,7 @@ pub fn validate_anthropic_key(text: &str) -> Result<&str, KeyRejection> {
     if key.starts_with("sk-ant-admin") {
         return Err(KeyRejection::AdminKey);
     }
-    if !(16..=2048).contains(&key.len())
+    if !ANTHROPIC_KEY_BYTES.contains(&key.len())
         || !key.bytes().all(|byte| byte.is_ascii_graphic())
         || !["sk-ant-api", "sk-ant-usr-", "sk-ant-svc-"]
             .iter()
@@ -236,6 +297,79 @@ impl fmt::Display for ClaudeVersion {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stage_metadata_has_literal_names_bounds_and_redacted_tap() {
+        use crate::constants::{CredentialLayout, generation_hex, generation_target};
+        use crate::message::{ControlToBrain, ControlToShell};
+        use crate::tap::Tapped as _;
+        let id = KeyStageId([0xab; 16]);
+        for (len, chunks, last) in [(2000, 1, 2000), (2048, 2, 48)] {
+            let plan = KeyStagePlan { id, len };
+            assert_eq!(format!("{plan:?}"), "KeyStagePlan(***)");
+            let layout = plan.layout().expect("bounded plan");
+            assert_eq!(layout.chunks(), chunks);
+            assert_eq!(layout.chunk_len(chunks - 1), last);
+            assert_eq!(
+                generation_target("test", "anthropic", &generation_hex(&id.0), 0),
+                "test/gen/anthropic/abababababababababababababababab/0"
+            );
+            assert_eq!(
+                generation_target("test", "anthropic", &generation_hex(&id.0), 1),
+                "test/gen/anthropic/abababababababababababababababab/1"
+            );
+            let reply = ControlToShell::AnthropicKeyStage {
+                request: 7,
+                result: Ok(plan),
+            };
+            assert_eq!(
+                postcard::from_bytes::<ControlToShell>(
+                    &postcard::to_stdvec(&reply).expect("encode")
+                )
+                .expect("decode"),
+                reply
+            );
+            assert!(!reply.content_free());
+        }
+        assert_eq!(CredentialLayout::new(0).expect("zero").chunks(), 1);
+        assert_eq!(CredentialLayout::new(49152).expect("limit").chunks(), 25);
+        assert_eq!(CredentialLayout::new(49153), None);
+        for len in [0, 15, 2049, u16::MAX] {
+            assert_eq!(KeyStagePlan { id, len }.layout(), None);
+        }
+        assert_eq!(
+            KeyStagePlan { id, len: 16 }.layout().expect("min").bytes(),
+            16
+        );
+        for op in [
+            ConnectionOp::BeginAnthropicKeyStage {
+                request: 7,
+                len: 2048,
+            },
+            ConnectionOp::AnthropicKeyStaged { plan: id },
+        ] {
+            let frame = ControlToBrain::Connection(op);
+            assert_eq!(
+                postcard::from_bytes::<ControlToBrain>(
+                    &postcard::to_stdvec(&frame).expect("encode")
+                )
+                .expect("decode"),
+                frame
+            );
+            assert!(!frame.content_free());
+        }
+        let done = ControlToShell::AnthropicKeyStageDone {
+            plan: id,
+            result: Err(KeyStageFailure::Changed),
+        };
+        assert_eq!(
+            postcard::from_bytes::<ControlToShell>(&postcard::to_stdvec(&done).expect("encode"))
+                .expect("decode"),
+            done
+        );
+        assert!(!done.content_free());
+        assert_eq!(format!("{id:?}"), "KeyStageId(***)");
+    }
 
     #[test]
     fn anthropic_keys_trim_boundaries_and_accept_only_console_prefixes() {

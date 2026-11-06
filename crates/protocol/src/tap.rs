@@ -96,8 +96,7 @@ impl Tapped for ControlToBrain {
                         | AccountOp::Retry
                 )
                 | Self::Connection(
-                    ConnectionOp::AnthropicKeyStaged
-                        | ConnectionOp::CheckAnthropicKey
+                    ConnectionOp::CheckAnthropicKey
                         | ConnectionOp::RemoveAnthropicKey
                         | ConnectionOp::ConnectClaudeCode
                         | ConnectionOp::CancelClaudeSignIn
@@ -128,6 +127,8 @@ impl Tapped for ControlToShell {
             Self::CaptureDone { .. } => "CaptureDone",
             Self::CaptureFailed { .. } => "CaptureFailed",
             Self::Connections(_) => "Connections",
+            Self::AnthropicKeyStage { .. } => "AnthropicKeyStage",
+            Self::AnthropicKeyStageDone { .. } => "AnthropicKeyStageDone",
             Self::SpeechRevoked { .. } => "SpeechRevoked",
             Self::GitHub(_) => "GitHub",
             Self::ActionState { .. } => "ActionState",

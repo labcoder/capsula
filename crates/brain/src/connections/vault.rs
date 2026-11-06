@@ -18,10 +18,6 @@ use super::records::{Account, MAX_RECORD_BYTES, Record, RevocationList};
 use crate::platform::credential::{CredentialStore, SecretBytes};
 use crate::platform::{self, SessionLock};
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "layer 5b wires authority paste staging")
-)]
 pub(crate) mod staging;
 
 /// Removed generations one sweep pass visits [guess]; the rest wait for the next pass.
@@ -74,12 +70,14 @@ impl<S: CredentialStore> Vault<S> {
         use super::anthropic::{KeyError, KeyOp, key::AnthropicKey};
         match op {
             KeyOp::Remove => {
-                self.paste = None;
-                self.remove(&[Kind::AnthropicKey], None)?;
+                let paste = self.paste.take();
+                let result = self.remove(&[Kind::AnthropicKey], None);
+                if let Some(plan) = paste {
+                    generation::delete_pending(&self.store, &self.service, &plan);
+                }
+                result?;
                 Ok(None)
             }
-            // shortcut: a staged paste isn't adopted until C7 stages it through the authority.
-            KeyOp::Adopt => Err(KeyError::Vault(VaultError::Fenced)),
             KeyOp::Load => self
                 .read_bytes(Kind::AnthropicKey)?
                 .map(AnthropicKey::parse)

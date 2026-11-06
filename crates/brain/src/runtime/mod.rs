@@ -604,6 +604,7 @@ impl Brain {
             .checked_add(1)
             .expect("connection epochs never wrap");
         self.coordinator.begin_session();
+        self.account.connections.stage_session(Some(self.epoch));
         self.crashes.begin_session();
         let (mut control_in, mut control_out) = tokio::io::split(control);
         let (mut data_in, mut data_out) = tokio::io::split(data);
@@ -670,6 +671,7 @@ impl Brain {
             None => ended,
         };
         self.offline(Input::ShellLost);
+        self.account.connections.stage_session(None);
         self.deadline = None;
         self.drain = None;
         self.quiet.clear();

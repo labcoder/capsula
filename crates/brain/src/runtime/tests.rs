@@ -84,6 +84,34 @@ fn staged_hold_controls_do_not_admit_or_change_a_run() {
     }
 }
 
+#[tokio::test]
+async fn offline_staging_controls_drop_admission_and_never_queue_credential_work() {
+    use kumochi_protocol::message::{ConnectionOp, KeyStageId};
+    let scratch = Scratch::new("offline-key-stage");
+    let mut brain = patient_brain(&scratch, "");
+    let (sender, queued) = std::sync::mpsc::channel();
+    brain.account.jobs = Some(sender);
+    let file = std::fs::File::create_new(scratch.db().with_file_name("offline.tap")).expect("tap");
+    let mut tap = Tap::to_file(file);
+    for op in [
+        ConnectionOp::BeginAnthropicKeyStage {
+            request: 1,
+            len: 16,
+        },
+        ConnectionOp::AnthropicKeyStaged {
+            plan: KeyStageId([1; 16]),
+        },
+    ] {
+        brain.account.connections.stage_session(Some(brain.epoch));
+        brain.control_offline(ControlToBrain::Connection(op), 1, &mut tap);
+        assert!(matches!(
+            queued.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+    }
+    brain.close().await;
+}
+
 #[test]
 fn staged_github_and_issue_controls_do_not_admit_or_change_a_run() {
     use kumochi_protocol::message::{DraftId, GitHubOp, IssueOp};

@@ -1,5 +1,27 @@
 # The pipes and the handshake
 
+## Anthropic paste metadata
+
+The build-id handshake rejects mixed binaries before decoding connection work.
+`AnthropicKeyStaged` retains its variant index with a new plan-id field;
+`BeginAnthropicKeyStage { request, len }` is appended. The brain alone mints
+the write-once generation using the validated trimmed byte length (16–2048).
+`AnthropicKeyStage { request, result }` and `AnthropicKeyStageDone { plan,
+result }` are appended control replies. They carry metadata and closed errors,
+never a key, target supplied by the shell or provider text. Their tap payloads
+are redacted, and plan ids have redacted Debug output.
+
+The runtime binds Begin replies/admission to the authenticated shell epoch,
+clears admission on disconnect and refuses staging controls in offline drain.
+The credential worker has no link epoch: its FIFO and one-use ids govern
+durable work. A committed adoption updates the brain-wide key by generation
+even after disconnect, while its paste reply cannot cross to a new shell.
+Admission and failure preserve the working key and catalog; only a committed
+replacement starts its catalog check. The shell link emits both replies as
+generation-tagged KeyStage events for the separate Accounts paste consumer.
+
+## Transport
+
 The shell and the brain talk over two named pipes per Windows session: **control** for small,
 urgent messages and **data** for everything that can grow. Frames are a `u32` little-endian
 length followed by a `postcard` payload from the closed enums in `crates/protocol`. The length

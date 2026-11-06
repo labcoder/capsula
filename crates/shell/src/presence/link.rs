@@ -95,6 +95,9 @@ impl Presence {
                 LinkEvent::Account { generation, view } => {
                     self.account_changed(generation, view, cx);
                 }
+                LinkEvent::KeyStage { generation, reply } => {
+                    drop((generation, reply));
+                }
                 LinkEvent::Error { generation, error } => {
                     if self
                         .session

@@ -26,6 +26,7 @@ pub(crate) struct FakeState {
     pub(crate) fault: Option<(usize, Fault)>,
     /// Refuse every mutation while set, as a Credential Manager that keeps failing.
     pub(crate) refusing: bool,
+    pub(crate) refuse_deletes: bool,
     pub(crate) denied_read: Option<String>,
     /// Reads of present names that answer "not found", as Rez's store did under concurrency.
     pub(crate) missed_reads: usize,
@@ -119,7 +120,7 @@ impl FakeStore {
                 || Mutation::Delete(target.to_owned()),
                 |_| Mutation::Set(target.to_owned()),
             ));
-            let fault = if state.refusing {
+            let fault = if state.refusing || (state.refuse_deletes && value.is_none()) {
                 Some(Fault::Refuse)
             } else if state.fault.is_some_and(|(at, _)| at == index) {
                 state.fault.take().map(|(_, fault)| fault)

@@ -41,6 +41,7 @@ use crate::coordinator::Input as CoreInput;
 
 #[derive(Debug)]
 pub(super) enum Work {
+    Stage(super::connections::StageWork),
     Account(Job),
     Key {
         generation: u64,
@@ -596,6 +597,15 @@ fn spawn<S: CredentialStore + 'static>(
             // and only a worker that can abandon a call would bound the wait.
             for job in queued {
                 let job = match job {
+                    Work::Stage(work) => {
+                        if reads
+                            .send(Event::Connection(work.run(&mut worker)))
+                            .is_err()
+                        {
+                            break;
+                        }
+                        continue;
+                    }
                     Work::Account(job) => job,
                     Work::Key { generation, op } => {
                         if reads
