@@ -230,7 +230,7 @@ fn removing_a_preceding_solid_leaves_a_running_track_on_its_own_solid() {
         &mut view,
         &mut frame,
         json!({"id":"a","put":[{"view3d":{"id":"v"}}, box_at("first", [0.0, 5.0, 0.0]),
-            box_at("tracked", [0.0; 3]),
+            box_at("tracked", [0.0; 3]), box_at("last", [0.0, -5.0, 0.0]),
             pos3("tracked", 0, &json!([[0, [0, 0, 0]], [10000, [10, 0, 0]]]))]}),
         0,
     );
@@ -242,8 +242,13 @@ fn removing_a_preceding_solid_leaves_a_running_track_on_its_own_solid() {
         json!({"id":"b","remove":["first"]}),
         100,
     );
-    assert_eq!(index(&view, "tracked"), 0);
+    assert_eq!([index(&view, "tracked"), index(&view, "last")], [0, 1]);
     assert_eq!(x(&view, 5000, "tracked"), 5.0);
+    assert_eq!(
+        x(&view, 5000, "last"),
+        0.0,
+        "the track's old slot now holds another solid"
+    );
 }
 
 #[test]
