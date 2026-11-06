@@ -23,6 +23,13 @@ const OTHER: ClaudeVersion = ClaudeVersion {
     patch: 307,
 };
 
+/// The unreviewed version the fake's `older` mode prints.
+const OLDER: ClaudeVersion = ClaudeVersion {
+    major: 2,
+    minor: 1,
+    patch: 305,
+};
+
 /// A connection on the fake, whose mode the test changes between finds.
 struct Found {
     claude: Claude,
@@ -138,10 +145,10 @@ async fn an_audit_failure_is_marked_and_survives_disconnect() {
     found.close().await;
 }
 
-/// Q3 and Q4: a restarted brain on the same version is refused by the marker alone; a different
-/// version clears it, and the reviewed one is Ready again.
+/// Q3 and Q4: a restarted brain on the same version is refused by the marker alone, and going
+/// back to it after another version refuses it again: no find clears its marker.
 #[tokio::test]
-async fn a_restart_keeps_it_and_a_different_version_clears_it() {
+async fn a_restart_keeps_it_and_another_version_found_between_never_clears_it() {
     let base = Base::new("quarantine-restart");
     let mut found = Found::start(&base, "in");
     found.settle().await;
@@ -166,15 +173,19 @@ async fn a_restart_keeps_it_and_a_different_version_clears_it() {
         found.find("other").await,
         ClaudeCodeView::Unsupported(Unsupported::Unreviewed(OTHER))
     );
-    assert_eq!(markers(&base), Vec::<String>::new());
-    assert_eq!(found.find("in").await, READY);
+    assert_eq!(markers(&base), ["claude-code.quarantine-2.1.306"]);
+    assert_eq!(
+        found.find("in").await,
+        ClaudeCodeView::AuditFailed(AuditFailed::Version)
+    );
+    assert!(found.refused());
     found.close().await;
 }
 
-/// Q4 in one brain: once the marker is written, a different version clears the refusal held in
-/// memory too.
+/// C5B1A-H1 in one brain: an unreviewed version found between ends nothing, and the bad
+/// version found again is still refused.
 #[tokio::test]
-async fn a_different_version_clears_the_refusal_held_in_memory() {
+async fn an_unreviewed_version_found_between_never_ends_the_refusal() {
     let base = Base::new("quarantine-memory");
     let mut found = Found::start(&base, "in");
     found.settle().await;
@@ -184,8 +195,48 @@ async fn a_different_version_clears_the_refusal_held_in_memory() {
         found.find("other").await,
         ClaudeCodeView::Unsupported(Unsupported::Unreviewed(OTHER))
     );
+    assert!(found.refused());
+    assert_eq!(markers(&base), ["claude-code.quarantine-2.1.306"]);
+    assert_eq!(
+        found.find("in").await,
+        ClaudeCodeView::AuditFailed(AuditFailed::Agents)
+    );
+    assert!(found.refused());
+    found.close().await;
+}
+
+/// C5B1A-H1 through a reviewed version: once the bad one's marker is written, the reviewed one
+/// found is Ready and admits launches, but its marker stays, so going back to the bad one
+/// refuses it, in this brain and after a restart.
+#[tokio::test]
+async fn a_reviewed_version_found_between_never_clears_the_bad_ones_marker() {
+    let base = Base::new("quarantine-reviewed");
+    let mut found = Found::start(&base, "in");
+    assert_eq!(found.settle().await, READY);
+    found.claude.audit_failed(OLDER, AuditFailed::Plugins);
+    assert_eq!(
+        found.settle().await,
+        READY,
+        "2.1.306 is found once 2.1.305 is marked"
+    );
+    assert_eq!(markers(&base), ["claude-code.quarantine-2.1.305"]);
+    assert!(!found.refused(), "2.1.306 admits launches");
+    assert_eq!(
+        found.find("older").await,
+        ClaudeCodeView::AuditFailed(AuditFailed::Version)
+    );
+    assert!(found.refused());
     assert_eq!(found.find("in").await, READY);
-    assert!(!found.refused(), "a launch is admitted again");
+    assert_eq!(markers(&base), ["claude-code.quarantine-2.1.305"]);
+    found.close().await;
+
+    let mut found = Found::start(&base, "older");
+    assert_eq!(
+        found.settle().await,
+        ClaudeCodeView::AuditFailed(AuditFailed::Version)
+    );
+    assert!(found.refused());
+    assert_eq!(markers(&base), ["claude-code.quarantine-2.1.305"]);
     found.close().await;
 }
 
@@ -214,7 +265,7 @@ async fn a_failed_marker_write_is_never_taken_as_durable() {
         found.find("other").await,
         ClaudeCodeView::Unsupported(Unsupported::Unreviewed(OTHER))
     );
-    assert_eq!(markers(&base), Vec::<String>::new());
+    assert_eq!(markers(&base), ["claude-code.quarantine-2.1.306"]);
     found.close().await;
 }
 

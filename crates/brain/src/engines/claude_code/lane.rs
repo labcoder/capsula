@@ -75,8 +75,8 @@ pub(crate) struct Host {
 /// A call the core asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Work {
-    /// Find the install and read its version. A version a quarantine marker names is refused,
-    /// and markers that name other versions are cleared.
+    /// Find the install and read its version. A version a quarantine marker names is refused;
+    /// no find clears a marker.
     Version,
     /// Write the quarantine marker for a version whose audit failed, then do a `Version`.
     Quarantine(ClaudeVersion),
@@ -430,12 +430,11 @@ impl Worker {
         Ok(Ready { program, folders })
     }
 
-    /// Refuses `version` while a marker names it; otherwise clears the markers, which all name
-    /// other versions. A name with the prefix that isn't a marker for a version refuses every
-    /// version, and nothing is cleared.
+    /// Refuses `version` while a marker names it. Markers naming other versions stay, so going
+    /// back to a version refused before refuses it again. A name with the prefix that isn't a
+    /// marker for a version refuses every version.
     fn quarantined(&self, version: ClaudeVersion) -> Result<(), Failure> {
         let _base = platform::hold_chain(&self.host.base).map_err(|_| Failure::Quarantine)?;
-        let mut others = Vec::new();
         for entry in std::fs::read_dir(&self.host.base).map_err(|_| Failure::Quarantine)? {
             let entry = entry.map_err(|_| Failure::Quarantine)?;
             let name = entry.file_name();
@@ -451,18 +450,15 @@ impl Worker {
                     (named.to_string() == suffix).then_some(named)
                 })
                 .ok_or(Failure::Quarantine)?;
-            let marker = platform::marker(&entry.path())
+            platform::marker(&entry.path())
                 .ok()
                 .flatten()
                 .ok_or(Failure::Quarantine)?;
             if named == version {
                 return Err(Failure::Quarantined(version));
             }
-            others.push(marker);
         }
-        others
-            .into_iter()
-            .try_for_each(|marker| platform::unmark(marker).map_err(|_| Failure::Quarantine))
+        Ok(())
     }
 
     fn found(&self) -> Result<(Program, ClaudeVersion), Failure> {

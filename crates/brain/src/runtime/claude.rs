@@ -51,8 +51,8 @@ pub(crate) struct Claude {
     cleaning: bool,
     /// The launches admitted, by thread, until each one's teardown is over.
     launches: Vec<(ThreadId, Arc<Control>)>,
-    /// The version whose audit failed in this brain, until a different version is found once
-    /// its marker is written.
+    /// The version whose audit failed in this brain, until a different reviewed version is found
+    /// once its marker is written. The marker itself stays.
     quarantine: Option<Quarantine>,
 }
 
@@ -231,9 +231,9 @@ impl Claude {
         {
             held.durable = true;
         }
-        // A version found past the quarantine check: the lane cleared every other's marker.
-        if let Ok(Outcome::Version(found))
-        | Err(Failure::Unsupported(Unsupported::Unreviewed(found))) = result
+        // A reviewed version found past the quarantine check; the marker keeps the refused one
+        // refused.
+        if let Ok(Outcome::Version(found)) = result
             && self
                 .quarantine
                 .is_some_and(|held| held.durable && held.version != found)

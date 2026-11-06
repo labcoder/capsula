@@ -345,8 +345,9 @@ marker. Each `Version` find lists the markers under the account lock before it t
 
 - a marker naming the found version refuses it (`AuditFailed`), so Disconnect, a sign-in and a
   restart all keep it;
-- markers naming only other versions are cleared, so a different Claude Code ends the
-  quarantine; that's the only way it ends;
+- no find clears a marker, so going back to a refused version, after any other one, refuses it
+  again. A different reviewed version found once the marker is written ends the refusal held in
+  memory, which covers every version, and only that; an unreviewed one ends nothing;
 - a name with the prefix that isn't exactly a version's marker, or a listing that fails, refuses
   every version (`AuditFailed(Malformed)`), clears nothing and shows nothing of the name.
 
