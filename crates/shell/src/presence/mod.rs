@@ -108,6 +108,7 @@ struct Presence {
     settings: Entity<Settings>,
     threads: Entity<Threads>,
     chat: Entity<Threads>,
+    chat_notice: crate::chat_notice::ChatNotice,
     events: Sender<PresenceEvent>,
     /// The channel's receiving end, for a drop's drains.
     events_in: Receiver<PresenceEvent>,
@@ -887,7 +888,6 @@ pub(crate) fn open(
     let kumo = cx.new(|_| KumoView::new());
     let (panel_window, panel) = status_window(&events, kumo.clone(), &mut input_windows, cx)?;
     let gesture = Rc::new(Cell::new(Gesture::default()));
-    let settings = cx.new(|_| Settings::default());
     // shortcut: B5 owns per-display geometry and refresh; preparation uses a default if none is primary.
     let logical_size = cx.primary_display().map_or([1920.0, 1080.0], |display| {
         let display_size = display.bounds().size;
@@ -912,9 +912,10 @@ pub(crate) fn open(
             text: None,
             thread_panel: None,
             settings_panel: None,
-            settings,
+            settings: cx.new(|_| Settings::default()),
             threads: cx.new(|_| Threads::default()),
             chat: cx.new(|_| Threads::chat()),
+            chat_notice: crate::chat_notice::ChatNotice::default(),
             events,
             events_in,
             carry: carry::Carry::default(),

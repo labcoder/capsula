@@ -42,7 +42,7 @@ impl From<Rgb> for u32 {
 }
 
 /// A theme colour token.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Token {
     /// Blue.

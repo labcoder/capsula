@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use super::StoreError;
 
 /// Each entry moves the schema up one version; append, never edit.
-pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6];
+pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7];
 
 /// Threads, their append-only events with full-text search, and runs. Foreign keys have no
 /// cascade, so deletion names every table and fails loudly if one is missed.
@@ -131,6 +131,41 @@ ALTER TABLE runs ADD COLUMN heard_sample INTEGER CHECK (heard_sample >= 0);
 ALTER TABLE runs ADD COLUMN heard_text INTEGER CHECK (heard_text >= 0
     AND (heard_segment IS NULL) = (heard_sample IS NULL)
     AND (heard_sample IS NULL) = (heard_text IS NULL));
+";
+
+/// Issue actions (docs/development/issues.md): one row per draft with its stage as JSON tagged by
+/// `kind`, and the high-water mark of approval revisions, which deletion and purges keep so no
+/// revision is issued twice. GitHub's account ids are unsigned 64-bit, so one is canonical
+/// decimal text. Draft and Failed never hold an attempt that may have created an issue.
+const V7: &str = "
+CREATE TABLE actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread INTEGER NOT NULL REFERENCES threads (id),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    -- A missing or null kind makes IN answer NULL, which a CHECK would let pass.
+    stage TEXT NOT NULL CHECK (json_valid(stage) AND coalesce(json_extract(stage, '$.kind') IN
+        ('draft', 'preflight', 'posting', 'filed', 'failed', 'unknown', 'discarded'), 0)),
+    repo TEXT,
+    account_id TEXT CHECK (account_id IS NULL OR (length(account_id) BETWEEN 1 AND 20
+        AND account_id GLOB '[1-9]*' AND account_id NOT GLOB '*[^0-9]*')),
+    account_login TEXT CHECK ((account_id IS NULL) = (account_login IS NULL)),
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    approval INTEGER CHECK (approval >= 1),
+    consumed INTEGER CHECK (consumed >= 1),
+    uncertain INTEGER NOT NULL DEFAULT 0 CHECK (uncertain BETWEEN 0 AND 4294967295),
+    created_ms INTEGER NOT NULL,
+    CHECK (json_extract(stage, '$.kind') IN ('draft', 'failed', 'discarded')
+        OR (repo IS NOT NULL AND account_id IS NOT NULL)),
+    CHECK (uncertain = 0 OR json_extract(stage, '$.kind') NOT IN ('draft', 'failed'))
+) STRICT;
+CREATE INDEX actions_thread ON actions (thread);
+
+CREATE TABLE approval_mark (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last INTEGER NOT NULL CHECK (last >= 0)
+) STRICT;
+INSERT INTO approval_mark (id, last) VALUES (1, 0);
 ";
 
 /// Applies every migration past the file's version, each in its own transaction.
