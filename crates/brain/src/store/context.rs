@@ -117,7 +117,7 @@ pub(crate) struct Uncovered {
 
 /// A read transaction, taken when it begins. It never writes.
 #[derive(Debug)]
-pub(crate) struct Snapshot<'a>(Transaction<'a>);
+pub(crate) struct Snapshot<'a>(pub(super) Transaction<'a>);
 
 impl<'a> Snapshot<'a> {
     /// Begins the transaction and takes its snapshot at once, before anything else is read.

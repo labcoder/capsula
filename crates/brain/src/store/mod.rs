@@ -16,6 +16,7 @@ mod heard;
 mod heard_tests;
 mod pages;
 mod purge;
+pub(crate) mod recall;
 mod rounds;
 mod scenes;
 mod schema;
