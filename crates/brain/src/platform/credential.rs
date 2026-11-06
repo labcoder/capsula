@@ -14,7 +14,7 @@ pub(crate) mod fixture;
 pub type SecretBytes = Secret<Zeroizing<Vec<u8>>>;
 
 /// The storage design's chunk size, below Windows' 2,560-byte generic credential limit.
-pub const CHUNK_SIZE: usize = 2_000;
+pub use kumochi_protocol::constants::CREDENTIAL_CHUNK_SIZE as CHUNK_SIZE;
 
 /// A credential operation failed; no target name or secret is carried in an error.
 #[derive(Debug, thiserror::Error)]

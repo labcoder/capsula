@@ -27,8 +27,9 @@ pub use account::{
     MAX_EMAIL_BYTES, PlanState,
 };
 pub use connections::{
-    AuditFailed, ClaudeCodeView, ClaudeVersion, ConnectionKind, ConnectionOp, ConnectionsView,
-    KeyRejection, KeyView, PolicyFailed, Unsupported, VersionError, validate_anthropic_key,
+    ANTHROPIC_KEY_BYTES, AuditFailed, ClaudeCodeView, ClaudeVersion, ConnectionKind, ConnectionOp,
+    ConnectionsView, KeyRejection, KeyStageFailure, KeyStageId, KeyStagePlan, KeyView,
+    PolicyFailed, Unsupported, VersionError, validate_anthropic_key,
 };
 pub use content::Content;
 pub use error::{
@@ -575,6 +576,20 @@ pub enum ControlToShell {
     /// Each voice part's state: once per connection after `Account` and before `Scenes`, then on
     /// each change.
     Voice(VoiceView),
+    /// The brain's metadata-only answer to a staging-plan request.
+    AnthropicKeyStage {
+        /// The shell's outstanding request number.
+        request: u64,
+        /// A one-use plan or content-free refusal.
+        result: Result<KeyStagePlan, KeyStageFailure>,
+    },
+    /// A paste outcome, independent of the saved key's connection view.
+    AnthropicKeyStageDone {
+        /// The consumed staging identity.
+        plan: KeyStageId,
+        /// Whether adoption committed, even if a later Check or Remove changed the current view.
+        result: Result<(), KeyStageFailure>,
+    },
 }
 
 /// Shell to brain, on the data pipe.
