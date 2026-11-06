@@ -60,7 +60,7 @@ flowchart LR
 
 | Pipe | Carries | Bound | When it's full |
 |---|---|---|---|
-| Control | `RunState`, `Ping`, `Settings`, `Error`, `Scenes`, `ThreadDeleted`, `TurnRefused`, `ThreadsChanged` | 256 queued frames [guess] | The connection ends, a deliberate overload policy; store, engine and timer effects still apply |
+| Control | `RunState`, `Ping`, `Settings`, `Error`, `Scenes`, `ThreadDeleted`, `TurnRefused`, `ThreadsChanged`, `Focus` | 256 queued frames [guess] | The connection ends, a deliberate overload policy; store, engine and timer effects still apply |
 | Data | `AssistantText`, `StepCommit`, `RunEnd`, `ThreadList`, `Page`, `PageFailed`, `SceneSnapshot`, `ScenesRemoved` | 512 KiB queued pauses the engine and new turns [guess]; credit limits bytes in flight to 512 KiB [guess] | Frames wait; 2 s with bytes waiting and no write finishing, on credit or on a shell that stopped reading, ends the run as `view_stalled` |
 
 | Page message | Direction | Fields |
