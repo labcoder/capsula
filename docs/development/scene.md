@@ -164,7 +164,8 @@ refused. Admission sizes each solid with `three::size::triangles` and `three::si
 the admission path. Outline checks do run here, and they grow with the square of the point
 count, so an extrude outline holds at most 64 points (`MAX_EXTRUDE_POINTS`); draw a smoother
 profile with a lathe, or split a detailed shape into several extrudes. A step holds at most
-2,688 outline points in all, so the outline checks of one step stay under 1 ms on Rez.
+2,304 outline points in all (36 full outlines), so the outline checks of one step stay under
+1 ms on Rez; 42 full outlines reached 1 ms p99 there.
 
 | Budget | Limit | Error |
 |---|---|---|
@@ -172,10 +173,12 @@ profile with a lathe, or split a detailed shape into several extrudes. A step ho
 | Solids | 160 per scene | `OverBudget(Solids)` |
 | Triangles | 24,000 per scene and across visible scenes | `OverBudget(Triangles)` |
 | Moving view | 6,000 triangles in a view with any `pos3` or `rot3` track | `OverBudget(MovingTriangles)` |
-| Outline points | 2,688 extrude outline points per step (42 full outlines) | `OverBudget(OutlinePoints)` |
+| Outline points | 2,304 extrude outline points per step (36 full outlines) | `OverBudget(OutlinePoints)` |
 
-Like 2D charges, these recompute from the after, pending and changed versions, so a removed
-solid releases its triangles only at retirement and a refusal moves no counter.
+Like 2D charges, the scene charges (solids, triangles and the moving view) recompute from the
+after, pending and changed versions, so a removed solid releases its triangles only at
+retirement and a refusal moves no counter. The outline budget is not a retained charge: it
+counts only the extrude outlines in the step being admitted.
 
 **Coordinate bound.** 3D admission refuses a solid unless the sum of its chain's translation
 lengths, plus its scaled reach, is at most 20,000. Each link adds its `pos` length and its

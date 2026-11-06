@@ -863,7 +863,7 @@ fn compact(name: &str) -> String {
 }
 
 #[test]
-fn a_step_admits_at_most_2688_extrude_outline_points() {
+fn a_step_admits_at_most_2304_extrude_outline_points() {
     let ops = |count: usize| {
         let mut ops = vec![view("v")];
         ops.extend((0..count).map(|i| compact(&format!("e{i}"))));
@@ -884,15 +884,42 @@ fn a_step_admits_at_most_2688_extrude_outline_points() {
         over(Budget::OutlinePoints)
     );
     assert_eq!(
-        refused(&state, &global, &ops(43)),
+        refused(&state, &global, &ops(37)),
         over(Budget::OutlinePoints)
     );
-    commit(&mut state, &mut global, &ops(42));
-    let more: Vec<String> = (42..84).map(|i| compact(&format!("e{i}"))).collect();
+    commit(&mut state, &mut global, &ops(36));
+    let more: Vec<String> = (36..72).map(|i| compact(&format!("e{i}"))).collect();
     commit(&mut state, &mut global, &put("b", &more));
     assert_eq!(
         (state.usage().solids, state.usage().triangles),
-        (84, 21_168)
+        (72, 18_144)
+    );
+}
+
+#[test]
+fn a_step_of_2305_extrude_outline_points_is_refused() {
+    let extrude = |name: &str, points: &[String]| {
+        format!(
+            r#"{{"solid":{{"in":"v","id":"{name}","shape":"extrude","points":[{}],"depth":2}}}}"#,
+            points.join(",")
+        )
+    };
+    let round: Vec<String> = (0..62)
+        .map(|i| {
+            let angle = f64::from(i) * std::f64::consts::TAU / 62.0;
+            format!("[{:.0},{:.0}]", 1000.0 * angle.cos(), 1000.0 * angle.sin())
+        })
+        .collect();
+    let triangle = ["[0,0]".to_owned(), "[16,0]".to_owned(), "[0,16]".to_owned()];
+    let mut ops = vec![view("v")];
+    ops.extend((0..35).map(|i| compact(&format!("e{i}"))));
+    ops.push(extrude("r", &round));
+    ops.push(extrude("t", &triangle));
+    assert_eq!(35 * 64 + round.len() + triangle.len(), 2_305);
+    let (state, global) = (scene(), GlobalBudget::default());
+    assert_eq!(
+        refused(&state, &global, &put("a", &ops)),
+        over(Budget::OutlinePoints)
     );
 }
 
