@@ -24,9 +24,9 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId};
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_ACCESS_RIGHTS, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW,
-    WaitForSingleObject,
+    GetCurrentProcess, GetProcessId, OpenProcess, OpenProcessToken, PROCESS_ACCESS_RIGHTS,
+    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    QueryFullProcessImageNameW, WaitForSingleObject,
 };
 
 /// The brain's end of a pipe.
@@ -287,6 +287,38 @@ pub fn client_process(server: &NamedPipeServer) -> io::Result<OwnedHandle> {
     open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE)
 }
 
+pub(crate) fn shell_connection(
+    server: &NamedPipeServer,
+    data: &NamedPipeServer,
+    expected: &std::path::Path,
+) -> io::Result<(
+    OwnedHandle,
+    super::super::connected_shell::Registration<'static>,
+)> {
+    let process = client_process(server)?;
+    if !process_image(process.as_handle())?
+        .as_os_str()
+        .eq_ignore_ascii_case(expected.as_os_str())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "shell identity changed",
+        ));
+    }
+    // SAFETY: process is a live owned query handle and remains held for the connection.
+    let pid = unsafe { GetProcessId(process.as_raw_handle()) };
+    let data_process = client_process(data)?;
+    // SAFETY: data_process is a live owned query handle for the authenticated data client.
+    let data_pid = unsafe { GetProcessId(data_process.as_raw_handle()) };
+    if !super::super::connected_shell::same_client(pid, data_pid) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "shell identity changed",
+        ));
+    }
+    Ok((process, super::super::register_shell(pid)))
+}
+
 /// Whether `process` has exited. An exited process still opens while anyone holds it.
 ///
 /// # Errors
@@ -413,5 +445,21 @@ mod tests {
         let third = create_owner_only(&name, Instance::Next);
         assert!(third.is_err(), "only two instances may exist");
         drop((first, next));
+    }
+
+    #[tokio::test]
+    async fn a_shell_connection_registers_its_pid_until_it_drops() {
+        let (control, _control_client) = super::test_pair("shell-identity-control")
+            .await
+            .expect("control pipe");
+        let (data, _data_client) = super::test_pair("shell-identity-data")
+            .await
+            .expect("data pipe");
+        let image = std::env::current_exe().expect("the test binary has a path");
+        let connection =
+            super::shell_connection(&control, &data, &image).expect("this process is both clients");
+        assert_eq!(crate::platform::connected_shell_pid(), std::process::id());
+        drop(connection);
+        assert_eq!(crate::platform::connected_shell_pid(), 0);
     }
 }

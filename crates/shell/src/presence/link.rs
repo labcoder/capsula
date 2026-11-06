@@ -92,6 +92,11 @@ impl Presence {
                     self.sync_deletes(cx);
                 }
                 LinkEvent::ThreadsChanged => self.threads_changed(cx),
+                LinkEvent::Focus {
+                    generation,
+                    run,
+                    thread,
+                } => self.focus(generation, run, thread, cx),
                 LinkEvent::Account { generation, view } => {
                     self.account_changed(generation, view, cx);
                 }
@@ -149,6 +154,19 @@ impl Presence {
         }
         self.sync_deletes(cx);
         self.request_pages(cx);
+    }
+
+    /// A run asked to move the typed input: it moves, and the task shows, only when the current
+    /// connection sent it and the runs still agree.
+    fn focus(&mut self, generation: u64, run: RunId, thread: ThreadId, cx: &mut Context<'_, Self>) {
+        let current = self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.generation() == generation);
+        if current && self.runs.focus(run, thread) {
+            self.select_thread(Some(thread), cx);
+            self.refresh_conversation(cx);
+        }
     }
 
     /// The brain changed a listed thread: the list is read again.

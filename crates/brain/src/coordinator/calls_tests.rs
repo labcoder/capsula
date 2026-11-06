@@ -6,7 +6,7 @@ use super::{BuildKey, ContextBuilt, Coordinator, Effect, Input, R, Stale, StoreO
 use crate::bridge::{CallKey, LaunchId};
 use crate::context::{Built, ModelRequest, Origin};
 use crate::coordinator::{BuildContext, LeaseId, SendKey};
-use crate::dispatch::{Caller, Dispatch, Route, ToolError, ToolOutput, schemas};
+use crate::dispatch::{Caller, Committed, Dispatch, Route, Then, ToolError, ToolOutput, schemas};
 use crate::engines::{CallId, ToolName};
 use crate::store::{Failure, RunEnd};
 
@@ -168,14 +168,16 @@ fn answered(core: &Coordinator) -> &[(Caller, ToolOutput)] {
 fn ack(caller: &Caller) -> Input {
     Input::CallCommitted {
         key: caller.key(),
-        committed: true,
+        outcome: Committed::Done,
+        then: None,
     }
 }
 
 fn refused(caller: &Caller) -> Input {
     Input::CallCommitted {
         key: caller.key(),
-        committed: false,
+        outcome: Committed::Failed,
+        then: None,
     }
 }
 
@@ -368,4 +370,135 @@ fn a_failed_write_fails_the_run_with_a_store_failure() {
         "{effects:?}"
     );
     assert_eq!(core.current_run(), None);
+}
+
+const TO_KUMO: &[u8] = br#"{"task":1}"#;
+const TO_B: &[u8] = br#"{"task":2}"#;
+
+/// Sends a focus call, returning what it came to and the follow-up its write carries.
+fn focusing(core: &mut Coordinator, caller: Caller, args: &[u8]) -> (Dispatch, Option<Then>) {
+    let mut effects = Vec::new();
+    let dispatch = core.tool_call(caller, ToolName::Focus, args, &mut effects);
+    let then = match effects.as_slice() {
+        [] => None,
+        [Effect::Store(StoreOp::CommitCall(call))] => call.then,
+        other => panic!("unexpected effects {other:?}"),
+    };
+    (dispatch, then)
+}
+
+fn settled(caller: &Caller, outcome: Committed, thread: ThreadId) -> Input {
+    Input::CallCommitted {
+        key: caller.key(),
+        outcome,
+        then: Some(Then::Focus(thread)),
+    }
+}
+
+fn moved(thread: ThreadId) -> Vec<Effect> {
+    vec![Effect::Control(ControlToShell::Focus { run: R, thread })]
+}
+
+fn focused() -> ToolOutput {
+    ToolOutput::Text(
+        "The user's next message should go to that task, unless they have already moved \
+         elsewhere."
+            .to_owned(),
+    )
+}
+
+#[test]
+fn a_committed_focus_moves_the_input_once_and_never_after_stop() {
+    let mut core = fresh();
+    running(&mut core, R, None);
+    let caller = model(R, "f1");
+    assert_eq!(
+        focusing(&mut core, caller.clone(), TO_KUMO),
+        (Dispatch::Committing, Some(Then::Focus(KUMO)))
+    );
+    assert_eq!(
+        core.handle(settled(&caller, Committed::Done, KUMO)),
+        Ok(moved(KUMO))
+    );
+    assert_eq!(answered(&core), [(caller.clone(), focused())]);
+    assert_eq!(
+        core.handle(settled(&caller, Committed::Done, KUMO)),
+        Ok(Vec::new()),
+        "a second acknowledgement moves nothing"
+    );
+
+    let mut core = fresh();
+    running(&mut core, R, None);
+    assert_eq!(
+        focusing(&mut core, caller.clone(), TO_KUMO).0,
+        Dispatch::Committing
+    );
+    core.handle(Input::Stop {
+        run: R,
+        revealed: Vec::new(),
+    })
+    .expect("stop");
+    assert_eq!(
+        core.handle(settled(&caller, Committed::Done, KUMO)),
+        Err(Stale)
+    );
+}
+
+#[test]
+fn a_task_focuses_only_kumo_and_kumo_focuses_a_task() {
+    let mut core = fresh();
+    running(&mut core, R, None);
+    assert_eq!(
+        focusing(&mut core, model(R, "f1"), TO_B),
+        (
+            Dispatch::Answered(ToolOutput::Error(ToolError::NotHere)),
+            None
+        )
+    );
+    let mut core = kumo_rendered_b();
+    assert_eq!(
+        focusing(&mut core, model(R, "f1"), TO_B),
+        (Dispatch::Committing, Some(Then::Focus(B)))
+    );
+}
+
+#[test]
+fn a_refused_focus_answers_every_caller_stays_refused_and_the_run_goes_on() {
+    let mut core = fresh();
+    running(&mut core, R, None);
+    let caller = model(R, "f1");
+    assert_eq!(
+        focusing(&mut core, caller.clone(), TO_KUMO).0,
+        Dispatch::Committing
+    );
+    assert_eq!(
+        focusing(&mut core, caller.clone(), TO_KUMO),
+        (Dispatch::Joined, None)
+    );
+    let no_task = ToolOutput::Error(ToolError::NoTask);
+    assert_eq!(
+        core.handle(settled(
+            &caller,
+            Committed::Refused(ToolError::NoTask),
+            KUMO
+        )),
+        Ok(Vec::new())
+    );
+    assert_eq!(
+        answered(&core),
+        [
+            (caller.clone(), no_task.clone()),
+            (caller.clone(), no_task.clone())
+        ]
+    );
+    assert_eq!(core.current_run(), Some(R));
+    assert_eq!(
+        focusing(&mut core, caller.clone(), TO_KUMO),
+        (Dispatch::Answered(no_task), None)
+    );
+    assert_eq!(
+        core.handle(settled(&caller, Committed::Done, KUMO)),
+        Ok(Vec::new()),
+        "a late acknowledgement can't undo the refusal"
+    );
 }

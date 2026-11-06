@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use kumochi_brain::platform::Job;
 use kumochi_brain::screen::{
-    ReplyBody, RequestBody, ScreenError, ScreenSupervisor, WorkerFault, WorkerLost,
+    Generation, ReplyBody, RequestBody, ScreenError, ScreenSupervisor, WorkerFault,
 };
 
 const WORKER: &str = env!("CARGO_BIN_EXE_kumochid");
@@ -26,12 +26,12 @@ async fn ping_loss_respawn_and_fourth_loss_backoff() {
             tokio::task::yield_now().await;
         }
     });
-    for fault in [WorkerFault::Crash, WorkerFault::Garbage] {
+    for (fault, dead) in [(WorkerFault::Crash, 0), (WorkerFault::Garbage, 1)] {
         assert_eq!(
             screen.request(RequestBody::Fault(fault)).await,
             Err(ScreenError::WorkerLost)
         );
-        assert_eq!(losses.recv().await.expect("loss"), WorkerLost);
+        assert_eq!(losses.recv().await.expect("loss"), Generation(dead));
         assert_eq!(screen.request(RequestBody::Ping).await, Ok(ReplyBody::Pong));
     }
     assert_eq!(
@@ -88,7 +88,7 @@ async fn hang_uses_one_absolute_deadline_and_kills_all_pending_work() {
     assert_eq!(queued, Err(ScreenError::WorkerLost));
     assert_eq!(
         losses.recv().await.expect("termination notification"),
-        WorkerLost
+        Generation(0)
     );
     let elapsed = at.elapsed();
     assert!(
@@ -171,7 +171,7 @@ async fn an_idle_worker_killed_from_outside_is_reported_and_replaced() {
     let loss = tokio::time::timeout(PATIENCE, losses.recv()).await;
     assert_eq!(
         loss.expect("lost with nothing pending").expect("loss"),
-        WorkerLost
+        Generation(0)
     );
     let started = std::time::Instant::now();
     let replacement = screen.request(RequestBody::Ping).await;

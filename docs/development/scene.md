@@ -696,8 +696,9 @@ A fill over `FILL_VERTEX_LIMIT` (21,845, a third of the u16 index space) or a re
 `OverResidency`. `PaintWork::within_limits` also checks the global dash, fill-vertex and
 outline budgets, which are measured on Rez. Solid strokes carry no paint charge because
 construction bounds every generated line: a flattened path has at most 4,096 segments and
-every other line at most 512 points, so the longest run, closed, costs 4 × 4,098 + 4 = 16,396
-of a build's 21,845 vertices. The painter still refuses a longer run loudly.
+every other line at most 513 points including a closed outline's repeated first point, so
+the longest run, closed, costs 4 × 4,098 + 4 = 16,396 of a build's 21,845 vertices.
+The painter still refuses a longer run loudly.
 
 The global limits are 512 dash pieces, 512 fill vertices and 512 outline points, shared
 across all visible scenes and reserved ready/rest states. Four radius-8 filled and bordered
@@ -1178,6 +1179,16 @@ call. Attributions are owner estimates, not heap measurements, and nested values
 aren't counted again. The queue has no byte bound and sits outside the 64 MiB
 presenter cap: it is metered, not limited, which is a known shortcut.
 
+Admission caches each preparation ticket's own source, compiled record and sizing-fact
+attribution on the worker. The UI reads that cache, not the whole semantic scene's size.
+A dispatched preparation input adds only its preceding layout's cached full charge.
+Halting meters each queue's buffer and its protected payloads. Releasing a scene meters
+its rest/view/frame separately from the binding's semantic owner; disconnecting queues
+both inside one container, so that outer attribution includes the semantic owner once.
+Shared allocations remain conservatively counted per holder; this is not deduplicated
+physical memory. An isolated queue-meter test checks halt, release and disconnect without
+other tests adding to the process-wide counters.
+
 **Known limits before v1.** The historical unbounded maximal-content probe, measured on
 Rez with real font shaping across four scenes and 256 prepared prefixes, charged
 200,009,012 B; that history does not fit the presenter allowance. The presenter instead
@@ -1189,7 +1200,7 @@ not RSS or a font-cache ceiling. Inputs and outputs held by up to eight workers 
 the presenter allowance, as does the dropper queue; returned consumption owners do not.
 v1 still needs admission at most 1 ms, clear/cut/eviction/timeout tails
 at most 2 ms, and concurrent worker/dropper churn measurements with throttling if the
-backlog grows. Queue attribution must be corrected before relying on its churn meter.
+backlog grows. Final churn measurements must use the payload-specific queue attribution above.
 
 Activation retires the tracks it drops with the outgoing nodes: settled tracks, color tracks
 a `set` recolors, and candidates a newer owner supersedes. Admission keeps its object-map

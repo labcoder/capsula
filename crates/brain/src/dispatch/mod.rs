@@ -13,6 +13,7 @@
     )
 )]
 
+mod focus;
 mod ledger;
 #[cfg(test)]
 mod tests;
@@ -132,7 +133,7 @@ impl fmt::Debug for LedgerKey {
 
 /// Why a call ran nothing. Each is final for its key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ToolError {
+pub enum ToolError {
     /// No tool has that name.
     Unknown,
     /// The tool isn't offered to this caller, route or reach.
@@ -145,6 +146,8 @@ pub(crate) enum ToolError {
     Reused,
     /// The run ended, or isn't the one the call came from.
     Ended,
+    /// The task it names isn't live.
+    NoTask,
 }
 
 impl ToolError {
@@ -157,6 +160,7 @@ impl ToolError {
             Self::Invalid => "invalid arguments",
             Self::Reused => "call id already used",
             Self::Ended => "the run ended",
+            Self::NoTask => "no such task",
         }
     }
 
@@ -168,6 +172,7 @@ impl ToolError {
             Self::Invalid,
             Self::Reused,
             Self::Ended,
+            Self::NoTask,
         ]
         .into_iter()
         .find(|error| error.text() == text)
@@ -250,6 +255,8 @@ impl fmt::Debug for ToolOutput {
 pub(crate) enum LocalWrite {
     /// A read-only call: only its ledger row is written.
     None,
+    /// Checks that the task is live; Kumo moves the user's input there after the commit.
+    Focus(ThreadId),
     /// Renames the run's thread; only the test tool writes it.
     #[cfg(test)]
     Title(String),
@@ -259,6 +266,7 @@ impl fmt::Debug for LocalWrite {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::None => f.write_str("None"),
+            Self::Focus(_) => f.write_str("Focus"),
             #[cfg(test)]
             Self::Title(title) => f
                 .debug_struct("Title")
@@ -278,6 +286,8 @@ pub struct CommitCall {
     pub(crate) hash: [u8; 32],
     pub(crate) write: LocalWrite,
     pub(crate) output: ToolOutput,
+    /// What the coordinator does once the write commits; it comes back with the acknowledgement.
+    pub(crate) then: Option<Then>,
 }
 
 impl fmt::Debug for CommitCall {
@@ -287,6 +297,7 @@ impl fmt::Debug for CommitCall {
             .field("thread", &self.thread)
             .field("write", &self.write)
             .field("output", &self.output)
+            .field("then", &self.then)
             .finish_non_exhaustive()
     }
 }
@@ -302,6 +313,25 @@ pub(crate) enum Dispatch {
     Committing,
 }
 
+/// A committed call's one follow-up, carried with its write and returned with the store's
+/// acknowledgement, so nothing has to be read back from the answer. It holds ids only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Then {
+    /// Move the user's input to the task, if the shell still agrees.
+    Focus(ThreadId),
+}
+
+/// How the store settled a call's write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Committed {
+    /// The write and its ledger row committed.
+    Done,
+    /// The write's check failed and nothing was written; the call is answered with the error.
+    Refused(ToolError),
+    /// Nothing was written: the run's thread is gone, or the store failed.
+    Failed,
+}
+
 /// What the dispatcher decided; the coordinator sends `Commit` to the store.
 #[derive(Debug)]
 pub(crate) enum Step {
@@ -314,6 +344,8 @@ pub(crate) enum Step {
 #[derive(Debug)]
 pub(crate) struct RunCtx<'a> {
     pub(crate) thread: ThreadId,
+    /// Kumo's thread, the one target a task's run may focus.
+    pub(crate) main: ThreadId,
     pub(crate) reach: Origin,
     /// The tools the admitted request offered the model.
     pub(crate) offered: &'a [ToolName],
@@ -342,8 +374,10 @@ struct Tool {
     prepare: fn(&[u8]) -> Result<Prepared, ToolError>,
 }
 
-/// Every tool. shortcut: none in production yet; 14b, 15 and B10 add theirs.
+/// Every tool. shortcut: none is offered to a model yet (`context::tools` is empty), until the
+/// staged producers are enabled (OSC-116); 14b, 15b and B10 add theirs.
 const TOOLS: &[Tool] = &[
+    focus::FOCUS,
     #[cfg(test)]
     tests::PROBE,
     #[cfg(test)]
@@ -421,6 +455,11 @@ pub(crate) fn call(run: &mut RunCtx<'_>, caller: Caller, name: ToolName, args: &
         Ok((tool, prepared)) => {
             run.ledger
                 .running(&key, prepared.hash, prepared.output.clone(), caller);
+            let then = if let LocalWrite::Focus(thread) = prepared.write {
+                Some(Then::Focus(thread))
+            } else {
+                None
+            };
             Step::Commit(CommitCall {
                 key,
                 thread: run.thread,
@@ -428,6 +467,7 @@ pub(crate) fn call(run: &mut RunCtx<'_>, caller: Caller, name: ToolName, args: &
                 hash: prepared.hash,
                 write: prepared.write,
                 output: prepared.output,
+                then,
             })
         }
     }
@@ -452,6 +492,11 @@ fn first(
         return Err(ToolError::TooLarge);
     }
     let prepared = (tool.prepare)(args)?;
+    if let (Origin::Task(_), LocalWrite::Focus(target)) = (run.reach, &prepared.write)
+        && *target != run.main
+    {
+        return Err(ToolError::NotHere);
+    }
     if prepared.output.stored().len() > MAX_OUTPUT {
         return Err(ToolError::TooLarge);
     }
