@@ -496,6 +496,45 @@ fn an_old_workers_loss_that_arrives_after_a_replacement_load_is_not_charged_to_i
     assert_eq!(harness.reports(1), [report(2, LoadEvent::Unloaded)]);
 }
 
+/// More old losses than the subscription holds: the lag drops the oldest, and the rest are still
+/// skipped as older than the load.
+#[test]
+fn a_lagged_loss_queue_still_skips_old_workers_losses() {
+    let harness = Harness::new();
+    for _ in 0..5 {
+        harness.lose_worker();
+    }
+    harness.handle.load("models".into(), 1);
+    assert_eq!(harness.event(), Event::Loaded("models".into()));
+    harness.wait_ready();
+    assert_eq!(harness.reports(1), [report(1, LoadEvent::Loaded)]);
+    let next = harness.decode(1).expect("runs");
+    assert_eq!(harness.event(), Event::Decoding(1));
+    harness.release();
+    assert_eq!(answer(next), text(1));
+    harness.lose_worker();
+    assert_eq!(
+        harness.event(),
+        Event::Lost,
+        "the serving worker's own loss still counts"
+    );
+    harness.release();
+    assert_eq!(harness.reports(1), [report(1, LoadEvent::Lost)]);
+}
+
+/// An overflow that keeps the served worker's own loss still reports it lost, and one that keeps
+/// only older workers' losses doesn't.
+#[test]
+fn a_lagged_read_finds_the_served_workers_loss_and_skips_older_ones() {
+    let (sender, mut kept_own) = broadcast::channel(2);
+    let mut only_older = sender.subscribe();
+    for dead in 0..4 {
+        sender.send(Generation(dead)).expect("subscribed");
+    }
+    assert!(super::lost(&mut kept_own, Generation(3)));
+    assert!(!super::lost(&mut only_older, Generation(4)));
+}
+
 #[test]
 fn a_decode_before_any_load_is_not_loaded() {
     let harness = Harness::new();

@@ -14,6 +14,7 @@ use crate::engines::{CallId, ToolName};
 const R: RunId = RunId(10);
 const T: ThreadId = ThreadId(4);
 const KUMO: ThreadId = ThreadId(1);
+const FRESH: ThreadId = ThreadId(12);
 const L1: LaunchId = LaunchId(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
 const L2: LaunchId = LaunchId(2);
 const MARKER: &str = "zqxplantedmarker";
@@ -92,6 +93,7 @@ fn ctx(ledger: &mut Ledger, reach: Origin, mcp: Option<LaunchId>) -> RunCtx<'_> 
     RunCtx {
         thread: T,
         main: KUMO,
+        fresh: FRESH,
         reach,
         offered: OFFERED,
         mcp,
@@ -487,7 +489,7 @@ fn history_is_kumo_only_and_model_only() {
     };
     assert_eq!(
         names(Origin::Kumo, Route::Model),
-        ["focus", "probe", "recall"]
+        ["create_task", "focus", "probe", "recall"]
     );
     assert_eq!(names(Origin::Kumo, Route::Mcp(L1)), ["probe"]);
     assert_eq!(names(Origin::Task(T), Route::Model), ["focus", "probe"]);
@@ -509,6 +511,7 @@ fn an_unknown_or_unoffered_tool_is_refused_and_stays_refused() {
         &mut RunCtx {
             thread: T,
             main: KUMO,
+            fresh: FRESH,
             reach: Origin::Task(T),
             offered: &[],
             mcp: None,

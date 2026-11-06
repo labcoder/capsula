@@ -145,7 +145,7 @@ impl Brain {
         if let ControlToBrain::Settings(op) = message {
             // Still written; the shell that sent it is gone, so nothing answers it.
             self.settings_ops.push_back(settings::Queued {
-                op,
+                change: settings::Change::User(op),
                 epoch: self.epoch,
             });
             return;
@@ -173,7 +173,7 @@ impl Brain {
         }
         if let ControlToBrain::Settings(op) = message {
             self.settings_ops.push_back(settings::Queued {
-                op,
+                change: settings::Change::User(op),
                 epoch: self.epoch,
             });
             self.pump_settings(Some(link)).map_err(|Full| Ended::Lost)?;

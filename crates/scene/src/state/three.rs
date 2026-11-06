@@ -4,8 +4,15 @@
 //! stricter than the coordinate cube; rotations preserve lengths and need no envelope.
 
 use super::object::{Kind, Object};
-use crate::{ErrorCode, Handle, WireId, limits::MAX_COORD};
-use std::collections::BTreeMap;
+use crate::{
+    ErrorCode, Handle, Op, Step, WireId,
+    limits::MAX_COORD,
+    three::view::{SolidInput, ViewInput, ViewUpdate},
+};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 #[derive(Clone, Copy)]
 struct Placement {
@@ -73,6 +80,71 @@ fn check(parent: Placement, offset: f64, scale: f64, reach: f64) -> Result<Place
         return Err(ErrorCode::OutOfRange);
     }
     Ok(Placement { origin, scale })
+}
+
+/// The views a step puts into or removes from, each composed from `after` or marked removed.
+/// Colour sets change no input: preparation applies them from the step.
+pub(super) fn view_updates(
+    step: &Step,
+    before: &BTreeMap<WireId, Object>,
+    after: &BTreeMap<WireId, Object>,
+) -> Vec<ViewUpdate> {
+    let view_of = |object: &Object, id: &WireId| match object.kind {
+        Kind::View3d => Some(id.clone()),
+        Kind::Solid => object.parent.clone(),
+        _ => None,
+    };
+    let mut views = BTreeSet::new();
+    for op in &*step.put {
+        match op {
+            Op::View3d(view) => _ = views.insert(view.id.clone()),
+            Op::Solid(solid) => _ = views.insert(solid.parent.clone()),
+            _ => {}
+        }
+    }
+    for id in &*step.remove {
+        views.extend(before.get(id).and_then(|object| view_of(object, id)));
+    }
+    views
+        .into_iter()
+        .map(|id| ViewUpdate {
+            input: after
+                .get(&id)
+                .map(|view| Arc::new(view_input(&id, view, after))),
+            id,
+        })
+        .collect()
+}
+
+fn view_input(id: &WireId, view: &Object, after: &BTreeMap<WireId, Object>) -> ViewInput {
+    let mut members: Vec<(&WireId, &Object)> = after
+        .iter()
+        .filter(|(_, object)| object.kind == Kind::Solid && object.parent.as_ref() == Some(id))
+        .collect();
+    members.sort_by_key(|(_, object)| object.handle);
+    let mut solids: Vec<SolidInput> = Vec::with_capacity(members.len());
+    for (_, object) in members {
+        let source = object.three.as_ref().expect("solids carry their source");
+        let Op::Solid(record) = &**source else {
+            unreachable!("a solid's source is its solid record");
+        };
+        // Members run in handle order, so a parent's slot is a binary search away.
+        let parent = record.attach.as_ref().map(|attach| {
+            solids
+                .binary_search_by_key(&after[attach].handle, |solid| solid.handle)
+                .expect("an attachment names an earlier solid in the same view")
+        });
+        solids.push(SolidInput {
+            handle: object.handle,
+            source: Arc::clone(source),
+            parent: parent.map(|p| u16::try_from(p).expect("a view holds at most 160 solids")),
+        });
+    }
+    ViewInput {
+        handle: view.handle,
+        source: Arc::clone(view.three.as_ref().expect("views carry their source")),
+        solids: solids.into_boxed_slice(),
+    }
 }
 
 #[cfg(test)]

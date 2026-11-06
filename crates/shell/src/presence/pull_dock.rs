@@ -173,6 +173,7 @@ impl Presence {
                 kumo.pull_step(dt);
             });
             self.show_pull(window, cx);
+            self.follow_carry(cx);
         }
         if paced.is_none() || self.kumo.read(cx).pull_wants_frame() || self.dock.read(cx).undrawn {
             on_next_frame(window, cx.weak_entity(), Self::pull_frame);

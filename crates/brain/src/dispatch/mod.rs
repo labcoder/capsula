@@ -13,6 +13,7 @@
     )
 )]
 
+mod create_task;
 mod focus;
 mod ledger;
 #[cfg(test)]
@@ -20,7 +21,7 @@ mod tests;
 
 use std::fmt;
 
-use kumochi_protocol::message::{RunId, ThreadId};
+use kumochi_protocol::message::{RunId, ThreadId, ThreadTitle};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -257,6 +258,12 @@ pub(crate) enum LocalWrite {
     None,
     /// Checks that the task is live; Kumo moves the user's input there after the commit.
     Focus(ThreadId),
+    /// Creates the task with the id the coordinator reserved; the store reserves it durably first.
+    CreateTask {
+        thread: ThreadId,
+        title: ThreadTitle,
+        focus: bool,
+    },
     /// Renames the run's thread; only the test tool writes it.
     #[cfg(test)]
     Title(String),
@@ -267,6 +274,16 @@ impl fmt::Debug for LocalWrite {
         match self {
             Self::None => f.write_str("None"),
             Self::Focus(_) => f.write_str("Focus"),
+            Self::CreateTask {
+                thread,
+                title,
+                focus,
+            } => f
+                .debug_struct("CreateTask")
+                .field("thread", thread)
+                .field("title", title)
+                .field("focus", focus)
+                .finish(),
             #[cfg(test)]
             Self::Title(title) => f
                 .debug_struct("Title")
@@ -319,6 +336,13 @@ pub(crate) enum Dispatch {
 pub enum Then {
     /// Move the user's input to the task, if the shell still agrees.
     Focus(ThreadId),
+    /// The task exists: the shell reads its list again, and the input moves when `focus`.
+    Created {
+        /// The new task.
+        thread: ThreadId,
+        /// The call asked to move the input there.
+        focus: bool,
+    },
 }
 
 /// How the store settled a call's write.
@@ -346,6 +370,8 @@ pub(crate) struct RunCtx<'a> {
     pub(crate) thread: ThreadId,
     /// Kumo's thread, the one target a task's run may focus.
     pub(crate) main: ThreadId,
+    /// The id a task created now takes: one above every id the coordinator has handed out.
+    pub(crate) fresh: ThreadId,
     pub(crate) reach: Origin,
     /// The tools the admitted request offered the model.
     pub(crate) offered: &'a [ToolName],
@@ -375,8 +401,9 @@ struct Tool {
 }
 
 /// Every tool. shortcut: none is offered to a model yet (`context::tools` is empty), until the
-/// staged producers are enabled (OSC-116); 14b, 15b and B10 add theirs.
+/// staged producers are enabled (OSC-116); 14b and B10 add theirs.
 const TOOLS: &[Tool] = &[
+    create_task::CREATE_TASK,
     focus::FOCUS,
     #[cfg(test)]
     tests::PROBE,
@@ -452,14 +479,23 @@ pub(crate) fn call(run: &mut RunCtx<'_>, caller: Caller, name: ToolName, args: &
             run.ledger.refuse(&key, error);
             Step::Answer(ToolOutput::Error(error))
         }
-        Ok((tool, prepared)) => {
+        Ok((tool, mut prepared)) => {
+            let then = match &mut prepared.write {
+                LocalWrite::Focus(thread) => Some(Then::Focus(*thread)),
+                LocalWrite::CreateTask { thread, focus, .. } => {
+                    *thread = run.fresh;
+                    prepared.output = create_task::answer(run.fresh, *focus);
+                    Some(Then::Created {
+                        thread: run.fresh,
+                        focus: *focus,
+                    })
+                }
+                #[cfg(test)]
+                LocalWrite::Title(_) => None,
+                LocalWrite::None => None,
+            };
             run.ledger
                 .running(&key, prepared.hash, prepared.output.clone(), caller);
-            let then = if let LocalWrite::Focus(thread) = prepared.write {
-                Some(Then::Focus(thread))
-            } else {
-                None
-            };
             Step::Commit(CommitCall {
                 key,
                 thread: run.thread,

@@ -32,7 +32,9 @@ fn stop_drains_a_pending_consumption_without_a_worker_and_keeps_later_commits_un
         arrive(&mut presenter, commit_frame(LIVE, 1, rect("b")), now).expect("admission"),
     );
     assert_eq!(
-        presenter.consume_ready(LIVE, 0, now).expect_err("busy"),
+        presenter
+            .consume_ready(LIVE, 0, now, 0, 0)
+            .expect_err("busy"),
         ConsumeError::Busy
     );
     let prepared = only_job(presenter.completed(admission.run(), now).expect("admitted"));
@@ -120,7 +122,7 @@ fn a_fresh_commit_after_the_wake_waits_for_the_pending_consumption_retry() {
     );
     assert_eq!(
         presenter
-            .consume_ready(LIVE, 0, ms(now, 3))
+            .consume_ready(LIVE, 0, ms(now, 3), 0, 0)
             .expect_err("busy"),
         ConsumeError::Busy
     );
@@ -149,7 +151,9 @@ fn a_fresh_commit_after_the_wake_waits_for_the_pending_consumption_retry() {
     assert_eq!(presenter.scenes[&LIVE].pending_consumption, Some(0));
     assert_eq!(presenter.scenes[&LIVE].state.view().revision(), 2);
     assert_eq!(presenter.global.usage(), usage);
-    let consumed = presenter.consume_ready(LIVE, 0, ms(now, 6)).expect("retry");
+    let consumed = presenter
+        .consume_ready(LIVE, 0, ms(now, 6), 0, 0)
+        .expect("retry");
     assert_eq!(consumed.step.step().index, 0);
     assert_eq!(presenter.scenes[&LIVE].pending_consumption, None);
     drop(only_admission(
@@ -188,11 +192,13 @@ fn a_consumption_during_admission_is_busy_then_served_before_the_scene_admits_ag
     };
     let before = shape(&presenter);
     let refused = presenter
-        .consume_ready(LIVE, 1, now)
+        .consume_ready(LIVE, 1, now, 0, 0)
         .expect_err("not the head");
     assert_eq!(refused, ConsumeError::OutOfOrder);
     assert_eq!(presenter.scenes[&LIVE].pending_consumption, None);
-    let refused = presenter.consume_ready(LIVE, 0, now).expect_err("busy");
+    let refused = presenter
+        .consume_ready(LIVE, 0, now, 0, 0)
+        .expect_err("busy");
     assert_eq!(refused, ConsumeError::Busy);
     assert_eq!(shape(&presenter), before);
     assert_eq!(presenter.scenes[&LIVE].pending_consumption, Some(0));
@@ -212,7 +218,7 @@ fn a_consumption_during_admission_is_busy_then_served_before_the_scene_admits_ag
     assert!(admissions(effects).is_empty(), "the next commit waits");
     assert_eq!(presenter.held.len(), 1);
     let done = presenter
-        .consume_ready(LIVE, 0, ms(now, 6))
+        .consume_ready(LIVE, 0, ms(now, 6), 0, 0)
         .expect("the woken retry");
     assert_eq!(presenter.scenes[&LIVE].pending_consumption, None);
     assert_eq!(presenter.scenes[&LIVE].state.view().activated(), 1);

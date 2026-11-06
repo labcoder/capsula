@@ -244,6 +244,8 @@ fn a_removal_clears_a_view_whose_owner_is_unknown_and_spares_the_next_run() {
             run: RunId(2),
             thread: Some(u),
             text: "t".to_owned(),
+            cut: false,
+            done: false,
         })
     );
     assert_eq!(
@@ -307,6 +309,8 @@ fn a_delete_that_hid_nothing_frees_its_slot_and_fences_nothing() {
             run: RunId(1),
             thread: Some(ThreadId(9)),
             text: "t".to_owned(),
+            cut: false,
+            done: false,
         }),
         "run 1 isn't fenced"
     );

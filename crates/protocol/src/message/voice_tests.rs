@@ -10,6 +10,51 @@ use crate::message::{ControlToBrain, DataToBrain, DataToShell, GestureId, RunId}
 use crate::tap::{Direction, Record};
 use crate::voice::VoicePart;
 
+/// The tags travel between builds, so moving a variant must fail here.
+#[test]
+fn voice_tags_are_pinned() {
+    use crate::message::{SettingsOp, SttUnload};
+    for (part, tag) in [(VoicePart::SpeechInput, 0), (VoicePart::SpokenReplies, 1)] {
+        assert_eq!(
+            postcard::to_allocvec(&part).expect("encodes"),
+            [tag],
+            "{part:?}"
+        );
+    }
+    for (state, tag) in [
+        (PartState::NotInstalled, 0),
+        (PartState::Verifying, 1),
+        (PartState::Downloading { done: 0, total: 0 }, 2),
+        (PartState::Loading, 3),
+        (PartState::Ready, 4),
+        (PartState::Unloaded, 5),
+        (
+            PartState::Failed {
+                key: ErrorKey::VoiceLoad,
+                installed: false,
+            },
+            6,
+        ),
+    ] {
+        assert_eq!(
+            postcard::to_allocvec(&state).expect("encodes")[0],
+            tag,
+            "{state:?}"
+        );
+    }
+    for (unload, tag) in [
+        (SttUnload::Kept, 0),
+        (SttUnload::After15Min, 1),
+        (SttUnload::After1Hour, 2),
+    ] {
+        assert_eq!(
+            postcard::to_allocvec(&SettingsOp::SetSttUnload(unload)).expect("encodes"),
+            [8, tag],
+            "{unload:?}"
+        );
+    }
+}
+
 #[test]
 fn voice_parts_and_part_states_round_trip() {
     for part in VoicePart::ALL {

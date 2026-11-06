@@ -5,7 +5,8 @@ use crate::drawing::{Broken, Chunk, Effect};
 use crate::link::{Batch, LinkEvent, LinkState};
 use crate::settings::Update;
 use kumochi_protocol::message::{
-    AccountView, ControlToBrain, DataToShell, Phase, RunId, SettingsView, ThreadId, UserError,
+    AccountView, ConnectionsView, ControlToBrain, DataToShell, Phase, RunId, SettingsView,
+    ThreadId, UserError,
 };
 use kumochi_scene::deferred::Deferred;
 use std::time::Instant;
@@ -92,6 +93,9 @@ impl Presence {
                     self.sync_deletes(cx);
                 }
                 LinkEvent::ThreadsChanged => self.threads_changed(cx),
+                LinkEvent::Connections { generation, view } => {
+                    self.connections_changed(generation, view, cx);
+                }
                 LinkEvent::Focus {
                     generation,
                     run,
@@ -146,6 +150,15 @@ impl Presence {
             self.stop_run(stop, cx);
         }
         self.grant(applied.credit);
+        if phase == Phase::Done
+            && applied.visible
+            && self
+                .runs
+                .shown()
+                .is_some_and(|shown| shown.run == run && shown.done)
+        {
+            self.chat.update(cx, |state, _| state.settled(thread, run));
+        }
         for model in [&self.threads, &self.chat] {
             model.update(cx, |state, cx| {
                 state.run_state(thread);
@@ -189,6 +202,20 @@ impl Presence {
         });
     }
 
+    fn connections_changed(
+        &self,
+        generation: u64,
+        view: ConnectionsView,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let current = self.session.as_ref().map(crate::link::Session::generation);
+        self.settings.update(cx, |state, cx| {
+            if state.claude.receive(current, generation, view.claude_code) {
+                cx.notify();
+            }
+        });
+    }
+
     /// Scene frames go to the presenter even when stale, so it drops them off the UI thread.
     fn scene_data(
         &mut self,
@@ -225,15 +252,9 @@ impl Presence {
             .is_some_and(|session| session.generation() == generation)
         {
             let credit = match message {
-                message @ (DataToShell::ThreadList { .. }
-                | DataToShell::Page { .. }
-                | DataToShell::PageFailed { .. }) => {
-                    let request = match &message {
-                        DataToShell::ThreadList { request, .. }
-                        | DataToShell::Page { request, .. }
-                        | DataToShell::PageFailed { request } => *request,
-                        _ => unreachable!("the match above selects page replies"),
-                    };
+                message @ (DataToShell::ThreadList { request, .. }
+                | DataToShell::Page { request, .. }
+                | DataToShell::PageFailed { request }) => {
                     let model = if self.chat.read(cx).owns_request(request) {
                         &self.chat
                     } else {
@@ -392,6 +413,7 @@ impl Presence {
             self.scene_deadline = None;
             self.settings.update(cx, |state, cx| {
                 state.accounts.disconnected();
+                state.claude.disconnected();
                 state.disconnected();
                 cx.notify();
             });

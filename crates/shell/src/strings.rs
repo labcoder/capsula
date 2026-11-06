@@ -6,6 +6,7 @@ use kumochi_protocol::message::{ErrorArg, ErrorKey, UserError};
 use unic_langid::LanguageIdentifier;
 
 const ENGLISH: &str = include_str!("../../../locales/en/shell.ftl");
+mod claude;
 
 /// Every string the shell shows. A unit test checks each one is in the catalog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,8 +34,14 @@ pub(crate) enum Text {
     BottomRight,
     DockError,
     DockBrainError,
+    PerchOn,
+    PerchUntitled,
 
     // Turns
+    ChatLiveCut,
+    ChatEmpty,
+    ChatLoading,
+    ChatHistoryFailed,
     TurnBusy,
     TurnOffline,
     TurnTooLong,
@@ -146,6 +153,20 @@ pub(crate) enum Text {
     AccountBacklogRetry,
     AccountBacklogExpiry,
     AccountBacklogRecovery,
+
+    // Claude Code
+    ClaudeProvider,
+    ClaudeReview,
+    ClaudeConnect,
+    ClaudeDisconnect,
+    ClaudeFind,
+    ClaudePolicyNotice,
+    ClaudeBefore,
+    ClaudeDuring,
+    ClaudeFallback,
+    ClaudeDeadline,
+    ClaudeAnalytics,
+    ClaudeDisconnectBody,
 }
 
 #[cfg(test)]
@@ -187,8 +208,14 @@ impl Text {
         BottomRight,
         DockError,
         DockBrainError,
+        PerchOn,
+        PerchUntitled,
 
         // Turns
+        ChatLiveCut,
+        ChatEmpty,
+        ChatLoading,
+        ChatHistoryFailed,
         TurnBusy,
         TurnOffline,
         TurnTooLong,
@@ -300,6 +327,20 @@ impl Text {
         AccountBacklogRetry,
         AccountBacklogExpiry,
         AccountBacklogRecovery,
+
+        // Claude Code
+        ClaudeProvider,
+        ClaudeReview,
+        ClaudeConnect,
+        ClaudeDisconnect,
+        ClaudeFind,
+        ClaudePolicyNotice,
+        ClaudeBefore,
+        ClaudeDuring,
+        ClaudeFallback,
+        ClaudeDeadline,
+        ClaudeAnalytics,
+        ClaudeDisconnectBody,
     }
 
     pub(crate) const POSITIONS: [Self; 9] = [
@@ -343,8 +384,14 @@ impl Text {
             Self::BottomRight => "position-bottom-right",
             Self::DockError => "dock-error",
             Self::DockBrainError => "dock-brain-error",
+            Self::PerchOn => "carry-perch-on",
+            Self::PerchUntitled => "carry-perch-untitled",
 
             // Turns
+            Self::ChatLiveCut => "chat-live-cut",
+            Self::ChatEmpty => "chat-empty",
+            Self::ChatLoading => "chat-loading",
+            Self::ChatHistoryFailed => "chat-history-failed",
             Self::TurnBusy => "turn-busy",
             Self::TurnOffline => "turn-offline",
             Self::TurnTooLong => "turn-too-long",
@@ -456,6 +503,20 @@ impl Text {
             Self::AccountBacklogRetry => "accounts-backlog-retry",
             Self::AccountBacklogExpiry => "accounts-backlog-expiry",
             Self::AccountBacklogRecovery => "accounts-backlog-recovery",
+
+            // Claude Code
+            Self::ClaudeProvider => "claude-provider",
+            Self::ClaudeReview => "claude-review",
+            Self::ClaudeConnect => "claude-connect",
+            Self::ClaudeDisconnect => "claude-disconnect",
+            Self::ClaudeFind => "claude-find",
+            Self::ClaudePolicyNotice => "claude-policy-notice",
+            Self::ClaudeBefore => "claude-before",
+            Self::ClaudeDuring => "claude-during",
+            Self::ClaudeFallback => "claude-fallback",
+            Self::ClaudeDeadline => "claude-deadline",
+            Self::ClaudeAnalytics => "claude-analytics",
+            Self::ClaudeDisconnectBody => "claude-disconnect-body",
         }
     }
 }
@@ -520,6 +581,13 @@ impl Strings {
             self.get(Text::DeleteThreadBody),
             self.format("thread-delete-kumo", Some(&args))
         )
+    }
+
+    /// The drop label under a carried Kumo: `app` is the window's title, which is screen text.
+    pub(crate) fn perch_on(&self, app: &str) -> String {
+        let mut args = FluentArgs::new();
+        args.set("app", app);
+        self.format(Text::PerchOn.id(), Some(&args))
     }
 
     pub(crate) fn back_to_kumo(&self, assistant: &str) -> String {
@@ -714,14 +782,15 @@ mod tests {
     }
 
     #[test]
-    fn the_deletion_note_and_the_dialog_never_name_the_task() {
+    fn the_deletion_note_never_names_the_task_and_the_dialog_says_names_stay() {
         let strings = Strings::english();
         assert_eq!(strings.get(Text::ThreadDeleted), "You deleted a task.");
         assert_eq!(
             strings.delete_body("Cloud"),
             "This removes the task and its drawings from this PC. It can't remove issues you \
              already filed on GitHub, or what your model provider keeps under its own terms. \
-             Cloud keeps a note that a task was deleted, but not its name."
+             Cloud keeps a note that a task was deleted. Anything already in Cloud's \
+             conversation stays, including names it used."
         );
     }
 

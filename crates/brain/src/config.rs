@@ -13,6 +13,7 @@ use kumochi_protocol::message::{
     AssistantName, DockPosition, ErrorKey, MaxFrameRate, ModelChoice, SettingsOp, SettingsView,
     SttUnload, ThreadId, UserName,
 };
+use kumochi_protocol::voice::VoicePart;
 use toml::{Table, Value};
 
 const ASSISTANT_NAME: &str = "assistant_name";
@@ -26,6 +27,8 @@ const SHOW_IN_TASKBAR: &str = "show_in_taskbar";
 const VOICE: &str = "voice";
 const TALK_BACK: &str = "talk_back";
 const STT_UNLOAD: &str = "stt_unload";
+const INSTALLED: &str = "installed";
+const REMOVING: &str = "removing";
 
 /// Why a settings change was refused.
 #[derive(Debug, thiserror::Error)]
@@ -161,12 +164,7 @@ impl Config {
     /// # Errors
     /// [`ConfigError::NoHome`] or [`ConfigError::Unreadable`] when the file can't be written.
     pub(crate) fn stage(&self, op: SettingsOp) -> Result<Pending, ConfigError> {
-        let mut table = match &self.table {
-            Ok(table) => table.clone(),
-            Err(Refusal::NoHome) => return Err(ConfigError::NoHome),
-            Err(Refusal::Unreadable) => return Err(ConfigError::Unreadable),
-        };
-        let path = self.path.clone().ok_or(ConfigError::NoHome)?;
+        let (path, mut table) = self.editable()?;
         match op {
             SettingsOp::SetAssistantName(name) => {
                 table.insert(ASSISTANT_NAME.to_owned(), Value::String(name.into()));
@@ -216,6 +214,64 @@ impl Config {
         }
         let view = view_of(&table, self.view.main_thread);
         Ok(Pending { path, table, view })
+    }
+
+    /// The parts `[voice] removing` names, by their folder names: a removal that hasn't
+    /// finished. A name this build doesn't know names nothing.
+    pub(crate) fn removing(&self) -> Vec<VoicePart> {
+        self.listed(REMOVING)
+    }
+
+    /// The parts `[voice] installed` names and `removing` doesn't: a removal wins.
+    pub(crate) fn installed(&self) -> Vec<VoicePart> {
+        let removing = self.removing();
+        let mut installed = self.listed(INSTALLED);
+        installed.retain(|part| !removing.contains(part));
+        installed
+    }
+
+    fn listed(&self, key: &str) -> Vec<VoicePart> {
+        let names = self
+            .table
+            .as_ref()
+            .ok()
+            .and_then(|table| table.get(VOICE))
+            .and_then(Value::as_table)
+            .and_then(|voice| voice.get(key))
+            .and_then(Value::as_array);
+        VoicePart::ALL
+            .into_iter()
+            .filter(|part| {
+                names
+                    .is_some_and(|names| names.iter().any(|name| name.as_str() == Some(part.dir())))
+            })
+            .collect()
+    }
+
+    /// Stages `part`'s removal as finished: it leaves `removing`, and every other name stays.
+    ///
+    /// # Errors
+    /// As [`Config::stage`].
+    pub(crate) fn stage_remove_done(&self, part: VoicePart) -> Result<Pending, ConfigError> {
+        let (path, mut table) = self.editable()?;
+        if let Some(names) = voice_mut(&mut table)
+            .get_mut(REMOVING)
+            .and_then(Value::as_array_mut)
+        {
+            names.retain(|name| name.as_str() != Some(part.dir()));
+        }
+        let view = view_of(&table, self.view.main_thread);
+        Ok(Pending { path, table, view })
+    }
+
+    /// The file's path and a copy of its table to change.
+    fn editable(&self) -> Result<(PathBuf, Table), ConfigError> {
+        let table = match &self.table {
+            Ok(table) => table.clone(),
+            Err(Refusal::NoHome) => return Err(ConfigError::NoHome),
+            Err(Refusal::Unreadable) => return Err(ConfigError::Unreadable),
+        };
+        Ok((self.path.clone().ok_or(ConfigError::NoHome)?, table))
     }
 
     /// Makes a written change the settings.
