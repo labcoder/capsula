@@ -88,11 +88,16 @@ intervals after 30 seconds of warmup) compared the credential-free fixture with 
 backend against the repeated-fast fix. Calibrated one-core CPU median/p95 was
 0.0606%/0.0865% before and 0.0600%/0.0806% after; no idle CPU regression was observed.
 Neither side painted the dock during its idle samples. Wakeups were not collected.
+These idle CPU measurements predate the idle-gap expiry above.
+
 The control's 100-chord WM_INPUT-to-Present p50/p95/p99/max was
-4.1620/7.8556/8.2558/8.2986 ms, with four chords over one refresh plus 1 ms.
-The fix's shortcut run was refused by fixture admission before any chord, so no shortcut
-latency improvement is established. These measurements predate the idle-gap expiry above;
-its hardware shortcut validation remains pending. The measurements below
+4.1620/7.8556/8.2558/8.2986 ms, with four chords over one refresh plus 1 ms (7.944 ms).
+The corrected run on `0503854`, including idle-gap expiry, measured
+4.6268/7.3910/7.8217/7.9703 ms, with one chord over that bar: 99 of 100 were within it.
+The valid earlier control was retained; only the fix side was rerun, after at least 660 s
+of measured idle, using the credential-free fixture at the same display settings.
+The median rose, and the old 7 ms bar still fails: 13 misses after against 11 before.
+This single pair does not establish statistical significance. The measurements below
 describe only the original demand-driven patch.
 
 ## Measured
