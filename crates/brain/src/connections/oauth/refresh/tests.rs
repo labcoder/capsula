@@ -22,6 +22,7 @@ impl Scripted {
             reply: Mutex::new(Some(Response {
                 status,
                 request_id: None,
+                meta: crate::connections::http_client::ResponseMeta::default(),
                 body: Secret::new(Zeroizing::new(body)),
             })),
             requests: Mutex::new(Vec::new()),

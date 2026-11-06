@@ -10,12 +10,13 @@ use std::time::Duration;
 
 use kumochi_protocol::Secret;
 use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair, KeyUsagePurpose};
+use reqwest::header::{HeaderMap, HeaderValue};
 use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use zeroize::Zeroizing;
 
 use super::{
-    Client, Endpoint, HttpError, IssuerUrl, MAX_BODY_BYTES, Request, anthropic_request,
-    body_buffer, connecting_within, from_roots, read_response,
+    Client, Endpoint, HttpError, IssuerUrl, MAX_BODY_BYTES, Request, ResponseMeta,
+    anthropic_request, body_buffer, connecting_within, from_roots, read_response,
 };
 use crate::connections::anthropic::key::AnthropicKey;
 use crate::platform::{TrustRoots, TrustRootsError};
@@ -31,6 +32,7 @@ struct Server {
 }
 
 struct WireRequest {
+    headers: BTreeMap<String, String>,
     line: Zeroizing<String>,
     content_type: Option<String>,
     authorization: Option<String>,
@@ -122,6 +124,11 @@ impl Server {
             let mut body = Zeroizing::new(vec![0; length]);
             tls.read_exact(&mut body)?;
             let wire = WireRequest {
+                headers: header
+                    .split("\r\n")
+                    .filter_map(|line| line.split_once(':'))
+                    .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_owned()))
+                    .collect(),
                 line: Zeroizing::new(
                     header
                         .lines()
@@ -231,6 +238,418 @@ fn request(endpoint: Endpoint) -> Request {
     }
 }
 
+#[tokio::test]
+async fn github_wire_policy_uses_typed_payloads_and_never_logs_them() {
+    use crate::connections::github::tests::endpoints;
+    let captured = Captured::default();
+    let _logging = captured.install();
+    tracing::info!("github-wire-control");
+    for (index, endpoint) in endpoints().into_iter().enumerate() {
+        let server = Server::start(reply(
+            "200 OK",
+            b"{}",
+            "Date: Thu, 29 Feb 2024 23:59:59 GMT\r\n",
+        ));
+        let original = endpoint.url().unwrap();
+        let mut target = original.clone();
+        target.set_host(Some("127.0.0.1")).unwrap();
+        target.set_port(Some(server.address.port())).unwrap();
+        let response = server
+            .client()
+            .send_to(target.as_str(), request(Endpoint::GitHub(endpoint)))
+            .await
+            .unwrap();
+        assert_eq!(response.meta.date_s, Some(1_709_251_199));
+        assert_eq!(response.body.expose().as_slice(), b"{}");
+        let wire = server.finish().unwrap();
+        let path = &original[url::Position::BeforePath..];
+        let method = if matches!(index, 0 | 1 | 5) {
+            "POST"
+        } else {
+            "GET"
+        };
+        assert_eq!(wire.line.as_str(), format!("{method} {path} HTTP/1.1"));
+        assert_eq!(
+            wire.headers["user-agent"],
+            kumochi_protocol::constants::HTTP_USER_AGENT
+        );
+        assert_eq!(wire.api_key, None);
+        assert_eq!(wire.anthropic_version, None);
+        if index < 2 {
+            assert_eq!(wire.authorization, None);
+            assert_eq!(wire.headers["accept"], "application/json");
+            assert_eq!(wire.headers.get("x-github-api-version"), None);
+            assert_eq!(
+                wire.content_type.as_deref(),
+                Some("application/x-www-form-urlencoded")
+            );
+            let fields: BTreeMap<_, _> = url::form_urlencoded::parse(wire.body.expose())
+                .into_owned()
+                .collect();
+            assert_eq!(fields["client_id"], SENTINEL);
+            if index == 1 {
+                assert_eq!(fields["device_code"], SENTINEL);
+                assert_eq!(
+                    fields["grant_type"],
+                    "urn:ietf:params:oauth:grant-type:device_code"
+                );
+                assert_eq!(fields.len(), 3);
+            } else {
+                assert_eq!(fields.len(), 1);
+            }
+        } else {
+            assert_eq!(
+                wire.authorization.as_deref(),
+                Some(format!("Bearer ghu_{SENTINEL}").as_str())
+            );
+            assert_eq!(wire.headers["accept"], "application/vnd.github+json");
+            assert_eq!(wire.headers["x-github-api-version"], "2026-03-10");
+            if index == 5 {
+                assert_eq!(wire.content_type.as_deref(), Some("application/json"));
+                assert_eq!(
+                    wire.body.expose().as_slice(),
+                    format!(r#"{{"title":"{SENTINEL}","body":""}}"#).as_bytes()
+                );
+            } else {
+                assert_eq!(wire.content_type, None);
+                assert_eq!(wire.body.expose().as_slice(), b"");
+            }
+        }
+    }
+    let logs = captured.text();
+    assert!(logs.contains("github-wire-control"));
+    assert!(!logs.contains(SENTINEL));
+    assert!(!logs.contains(&format!("{:?}", SENTINEL.as_bytes())));
+    assert!(
+        !logs.contains(
+            format!("{:?}", SENTINEL.as_bytes())
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+        )
+    );
+}
+
+#[tokio::test]
+async fn github_legacy_fields_are_refused_before_connecting() {
+    use crate::connections::github::tests::endpoints;
+    let unused = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = unused.local_addr().unwrap();
+    drop(unused);
+    let server = Server::start(reply("200 OK", b"", ""));
+    let client = server.client();
+    for endpoint in endpoints() {
+        let result = client
+            .send_to(
+                &format!("https://{address}/"),
+                Request {
+                    endpoint: Endpoint::GitHub(endpoint),
+                    fields: vec![(
+                        "client_id",
+                        Secret::new(Zeroizing::new("legacy".to_owned())),
+                    )],
+                },
+            )
+            .await;
+        assert_eq!(result.unwrap_err(), HttpError::Request);
+    }
+}
+
+fn single_header_meta(name: &'static str, value: &str) -> ResponseMeta {
+    let mut headers = HeaderMap::new();
+    headers.insert(name, HeaderValue::from_str(value).unwrap());
+    ResponseMeta::parse(&headers)
+}
+
+#[test]
+fn github_metadata_parses_fixed_gmt_and_retry_times_without_retaining_headers() {
+    let parse = single_header_meta;
+    assert_eq!(
+        ResponseMeta::parse(&HeaderMap::new()),
+        ResponseMeta::default()
+    );
+    for (date, seconds) in [
+        ("Thu, 01 Jan 1970 00:00:00 GMT", 0),
+        ("Sun, 06 Nov 1994 08:49:37 GMT", 784_111_777),
+        ("Thu, 29 Feb 2024 23:59:59 GMT", 1_709_251_199),
+    ] {
+        assert_eq!(parse("date", date).date_s, Some(seconds));
+    }
+    let date = "Sun, 06 Nov 1994 08:49:37 GMT";
+    let exact = format!("{}{}", " ".repeat(64 - date.len()), date);
+    assert_eq!(exact.len(), 64);
+    assert_eq!(parse("date", &exact).date_s, Some(784_111_777));
+    assert_eq!(parse("date", &format!(" {exact}")).date_s, None);
+    for bad in [
+        "",
+        "garbage",
+        "Thu, 01 Jan 1970",
+        "Thu, 01 Jan 1970 00:00:00 +0000",
+        "Wed, 31 Dec 1969 23:59:59 GMT",
+        "Thu, 30 Feb 2024 00:00:00 GMT",
+        "Mon, 06 Nov 1994 08:49:37 GMT",
+    ] {
+        assert_eq!(parse("date", bad).date_s, None);
+    }
+    assert_eq!(
+        parse("retry-after", &format!("{}1", "0".repeat(63))).retry_after_s,
+        Some(1)
+    );
+    assert_eq!(
+        parse("retry-after", &format!("{}1", "0".repeat(64))).retry_after_s,
+        None
+    );
+    for bad in ["", "-1", "1.5", "18446744073709551616", date] {
+        assert_eq!(parse("retry-after", bad).retry_after_s, None);
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "date",
+        HeaderValue::from_static("Sun, 06 Nov 1994 08:49:37 GMT"),
+    );
+    headers.insert(
+        "retry-after",
+        HeaderValue::from_static("Sun, 06 Nov 1994 08:50:37 GMT"),
+    );
+    assert_eq!(ResponseMeta::parse(&headers).retry_after_s, Some(60));
+    headers.insert(
+        "retry-after",
+        HeaderValue::from_static("Sun, 06 Nov 1994 08:49:36 GMT"),
+    );
+    assert_eq!(ResponseMeta::parse(&headers).retry_after_s, Some(0));
+    for name in [
+        "date",
+        "retry-after",
+        "x-ratelimit-remaining",
+        "x-ratelimit-reset",
+    ] {
+        let mut headers = HeaderMap::new();
+        let value = if name == "date" { date } else { "0" };
+        headers.append(name, HeaderValue::from_str(value).unwrap());
+        headers.append(name, HeaderValue::from_str(value).unwrap());
+        assert_eq!(ResponseMeta::parse(&headers), ResponseMeta::default());
+        headers.clear();
+        headers.insert(name, HeaderValue::from_bytes(&[0xff]).unwrap());
+        assert_eq!(ResponseMeta::parse(&headers), ResponseMeta::default());
+    }
+    headers.insert("date", HeaderValue::from_static("invalid"));
+    headers.insert(
+        "retry-after",
+        HeaderValue::from_static("Sun, 06 Nov 1994 08:50:37 GMT"),
+    );
+    assert_eq!(ResponseMeta::parse(&headers), ResponseMeta::default());
+    headers.clear();
+    headers.append("date", HeaderValue::from_str(date).unwrap());
+    headers.append("date", HeaderValue::from_str(date).unwrap());
+    headers.insert("retry-after", HeaderValue::from_static("60"));
+    headers.insert("x-ratelimit-remaining", HeaderValue::from_static("0"));
+    headers.insert("x-ratelimit-reset", HeaderValue::from_static("784111837"));
+    assert_eq!(
+        ResponseMeta::parse(&headers),
+        ResponseMeta {
+            date_s: None,
+            retry_after_s: Some(60),
+            rate_remaining: Some(0),
+            rate_reset_s: Some(784_111_837)
+        }
+    );
+}
+
+#[test]
+fn github_metadata_numeric_bounds_reject_whitespace_and_overflow() {
+    for name in ["x-ratelimit-remaining", "x-ratelimit-reset"] {
+        for (value, expected) in [
+            ("0", Some(0)),
+            ("18446744073709551615", Some(u64::MAX)),
+            ("00000000000000000001", Some(1)),
+            ("000000000000000000001", None),
+            ("18446744073709551616", None),
+            ("", None),
+            ("-1", None),
+            ("+1", None),
+            ("1.0", None),
+            (" 1", None),
+            ("1 ", None),
+        ] {
+            let meta = single_header_meta(name, value);
+            assert_eq!(
+                if name == "x-ratelimit-remaining" {
+                    meta.rate_remaining
+                } else {
+                    meta.rate_reset_s
+                },
+                expected
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn github_collection_bounds_cover_length_and_chunked_bodies() {
+    use crate::connections::github::tests::endpoints;
+    for index in [0, 1, 2, 3, 4, 5, 6] {
+        let server = Server::start(reply("200 OK", b"", ""));
+        let response = server
+            .client()
+            .send_to(
+                &server.url(),
+                request(Endpoint::GitHub(endpoints().remove(index))),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.body.expose().as_slice(), b"");
+        server.finish().unwrap();
+        let status = if index == 5 { "201 Created" } else { "200 OK" };
+        let limit = match index {
+            0 | 1 => 4096,
+            2 => 65_536,
+            _ => 1_048_576,
+        };
+        for chunked in [false, true] {
+            for length in [limit, limit + 1] {
+                let body = vec![b'x'; length];
+                let reply = if chunked {
+                    let mut reply = format!("HTTP/1.1 {status}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{length:x}\r\n").into_bytes();
+                    reply.extend_from_slice(&body);
+                    reply.extend_from_slice(b"\r\n0\r\n\r\n");
+                    reply
+                } else {
+                    reply(status, &body, "")
+                };
+                let server = Server::start(reply);
+                let endpoint = endpoints().remove(index);
+                let response = server
+                    .client()
+                    .send_to(&server.url(), request(Endpoint::GitHub(endpoint)))
+                    .await;
+                if length == limit {
+                    assert_eq!(response.unwrap().body.expose().as_slice(), body);
+                } else {
+                    assert_eq!(response.unwrap_err(), HttpError::BodyTooLarge);
+                }
+                server.finish().unwrap();
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn github_create_retains_every_rejection_without_reading_diagnostics() {
+    use crate::connections::github::tests::endpoints;
+    for status in [400, 401, 403, 404, 410, 422, 429, 499] {
+        let server = Server::start(format!("HTTP/1.1 {status} Refused\r\nContent-Length: 1048577\r\nRetry-After: 123\r\nConnection: close\r\n\r\n").into_bytes());
+        let response = server
+            .client()
+            .send_to(
+                &server.url(),
+                request(Endpoint::GitHub(endpoints().remove(5))),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status, status);
+        assert_eq!(response.meta.retry_after_s, Some(123));
+        assert_eq!(response.body.expose().as_slice(), b"");
+        server.finish().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn github_create_reads_bodies_outside_the_4xx_range() {
+    use crate::connections::github::tests::endpoints;
+    for (status, expected) in [(399, HttpError::Redirect), (500, HttpError::Transport)] {
+        let server = Server::start(
+            format!(
+                "HTTP/1.1 {status} Edge\r\nContent-Length: 1048577\r\nConnection: close\r\n\r\n"
+            )
+            .into_bytes(),
+        );
+        assert_eq!(
+            server
+                .client()
+                .send_to(
+                    &server.url(),
+                    request(Endpoint::GitHub(endpoints().remove(5))),
+                )
+                .await
+                .unwrap_err(),
+            expected
+        );
+        server.finish().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn github_refuses_redirects_without_followup_and_incomplete_bodies_are_transport() {
+    use crate::connections::github::tests::endpoints;
+    let followup = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    followup.set_nonblocking(true).unwrap();
+    let address = followup.local_addr().unwrap();
+    for endpoint in endpoints() {
+        let server = Server::start(reply(
+            "307 Temporary Redirect",
+            b"",
+            &format!("Location: https://{address}/forbidden\r\n"),
+        ));
+        assert_eq!(
+            server
+                .client()
+                .send_to(&server.url(), request(Endpoint::GitHub(endpoint)))
+                .await
+                .unwrap_err(),
+            HttpError::Redirect
+        );
+        assert_eq!(
+            followup.accept().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        server.finish().unwrap();
+    }
+    for endpoint in endpoints() {
+        let server = Server::start(
+            b"HTTP/1.1 201 Created\r\nContent-Length: 10\r\nConnection: close\r\n\r\nx".to_vec(),
+        );
+        assert_eq!(
+            server
+                .client()
+                .send_to(&server.url(), request(Endpoint::GitHub(endpoint)))
+                .await
+                .unwrap_err(),
+            HttpError::Transport
+        );
+        server.finish().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn github_deadlines_cover_held_headers_and_body_eof() {
+    use crate::connections::github::tests::endpoints;
+    for index in 0..7 {
+        for reply in [
+            Vec::new(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\n".to_vec(),
+        ] {
+            let mut server = Server::start_delayed(reply, Duration::from_secs(40));
+            let client = server.client();
+            let url = server.url();
+            let endpoint = endpoints().remove(index);
+            let mut task = tokio::spawn(async move {
+                client
+                    .send_to(&url, request(Endpoint::GitHub(endpoint)))
+                    .await
+            });
+            server.flushed.take().unwrap().await.unwrap();
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(if index >= 5 { 30 } else { 15 })).await;
+            let result = tokio::select! {
+                result = &mut task => result.unwrap(),
+                () = tokio::time::sleep(Duration::from_millis(1)) => panic!("whole GitHub deadline didn't end the request"),
+            };
+            assert_eq!(result.unwrap_err(), HttpError::Timeout);
+            tokio::time::resume();
+            server.finish().unwrap();
+        }
+    }
+}
+
 fn anthropic_key() -> Secret<AnthropicKey> {
     AnthropicKey::parse(Secret::new(Zeroizing::new(
         b"sk-ant-api-fake-only".to_vec(),
@@ -246,12 +665,12 @@ async fn anthropic_models_use_the_fixed_url_and_sensitive_bearer_without_legacy_
     let key = anthropic_key();
     let endpoint = Endpoint::AnthropicModels(key.clone());
     assert_eq!(
-        endpoint.url(),
+        endpoint.url().expect("fixed URL"),
         "https://api.anthropic.com/v1/models?limit=65"
     );
     let server = Server::start(reply("200 OK", b"{}", ""));
     let client = server.client();
-    let prepared = anthropic_request(&client.0, endpoint.url(), &key)
+    let prepared = anthropic_request(&client.0, &endpoint.url().expect("fixed URL"), &key)
         .expect("checked headers")
         .build()
         .expect("request encoding");
@@ -663,7 +1082,7 @@ async fn a_truncated_body_is_transport_and_a_stalled_body_is_timeout() {
         .await
         .expect("headers arrive before the body stalls");
     assert_eq!(
-        read_response(response).await.unwrap_err(),
+        read_response(response, None).await.unwrap_err(),
         HttpError::Timeout
     );
     server.finish().expect("request read before body stalled");
@@ -931,4 +1350,89 @@ fn production_client_ignores_proxy_environment_in_an_isolated_child() {
         target.finish().is_err(),
         "direct TLS connection rejected the private fixture CA"
     );
+}
+
+#[test]
+fn destinations_queries_methods_and_headers_are_closed() {
+    use crate::connections::github::tests::endpoints;
+    let expected = [
+        ("POST", "https://github.com/login/device/code"),
+        ("POST", "https://github.com/login/oauth/access_token"),
+        ("GET", "https://api.github.com/user"),
+        (
+            "GET",
+            "https://api.github.com/user/installations?per_page=100&page=2",
+        ),
+        (
+            "GET",
+            "https://api.github.com/user/installations/42/repositories?per_page=100&page=1",
+        ),
+        ("POST", "https://api.github.com/repos/owner/repo/issues"),
+        (
+            "GET",
+            "https://api.github.com/repos/owner/repo/issues?per_page=100&page=2&creator=owner&state=all&since=2024-02-29T23%3A59%3A59Z&sort=created&direction=desc",
+        ),
+    ];
+    let server = Server::start(reply("200 OK", b"", ""));
+    let client = server.client();
+    for (index, (endpoint, (method, url))) in endpoints().into_iter().zip(expected).enumerate() {
+        assert_eq!(endpoint.url().unwrap().as_str(), url);
+        let request = client
+            .github_request(&endpoint, url)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(request.method().as_str(), method);
+        assert_eq!(request.url().as_str(), url);
+        assert_eq!(
+            request.headers()["user-agent"],
+            kumochi_protocol::constants::HTTP_USER_AGENT
+        );
+        assert_eq!(request.headers().get("x-api-key"), None);
+        if index < 2 {
+            assert_eq!(request.headers()["accept"], "application/json");
+            assert_eq!(request.headers().get("authorization"), None);
+            assert_eq!(request.headers().get("x-github-api-version"), None);
+            assert_eq!(
+                request.headers()["content-type"],
+                "application/x-www-form-urlencoded"
+            );
+            assert_eq!(request.timeout(), Some(&Duration::from_secs(15)));
+            let body = request.body().unwrap().as_bytes().unwrap();
+            let fields: Vec<_> = url::form_urlencoded::parse(body).into_owned().collect();
+            let mut expected = vec![("client_id".to_owned(), SENTINEL.to_owned())];
+            if index == 1 {
+                expected.extend([
+                    ("device_code".to_owned(), SENTINEL.to_owned()),
+                    (
+                        "grant_type".to_owned(),
+                        "urn:ietf:params:oauth:grant-type:device_code".to_owned(),
+                    ),
+                ]);
+            }
+            assert_eq!(fields, expected);
+        } else {
+            assert_eq!(request.headers()["accept"], "application/vnd.github+json");
+            assert_eq!(request.headers()["x-github-api-version"], "2026-03-10");
+            assert_eq!(
+                request.headers()["authorization"],
+                format!("Bearer ghu_{SENTINEL}")
+            );
+            assert!(request.headers()["authorization"].is_sensitive());
+            assert_eq!(
+                request.timeout(),
+                Some(&Duration::from_secs(if index >= 5 { 30 } else { 15 }))
+            );
+            if index == 5 {
+                assert_eq!(request.headers()["content-type"], "application/json");
+                assert_eq!(
+                    request.body().unwrap().as_bytes().unwrap(),
+                    format!(r#"{{"title":"{SENTINEL}","body":""}}"#).as_bytes()
+                );
+            } else {
+                assert!(request.body().is_none(), "reads have no payload");
+                assert_eq!(request.headers().get("content-type"), None);
+            }
+        }
+    }
 }

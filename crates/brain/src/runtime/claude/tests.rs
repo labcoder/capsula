@@ -135,6 +135,7 @@ impl Http for EmptyCatalog {
         std::future::ready(Ok(Response {
             status: 200,
             request_id: None,
+            meta: crate::connections::http_client::ResponseMeta::default(),
             body: Secret::new(Zeroizing::new(br#"{"data":[],"has_more":false}"#.to_vec())),
         }))
     }

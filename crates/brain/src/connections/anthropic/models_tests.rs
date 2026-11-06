@@ -36,6 +36,7 @@ fn response(status: u16, bytes: Vec<u8>) -> Response {
     Response {
         status,
         request_id: None,
+        meta: crate::connections::http_client::ResponseMeta::default(),
         body: Secret::new(Zeroizing::new(bytes)),
     }
 }

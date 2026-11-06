@@ -361,7 +361,8 @@ impl Http for SlowCheck {
             | Endpoint::Jwks(_)
             | Endpoint::Revocation(_)
             | Endpoint::Models(_)
-            | Endpoint::AnthropicModels(_) => {
+            | Endpoint::AnthropicModels(_)
+            | Endpoint::GitHub(_) => {
                 self.0.fetch_add(20, Ordering::SeqCst);
                 (503, Vec::new())
             }
@@ -369,6 +370,7 @@ impl Http for SlowCheck {
         std::future::ready(Ok(Response {
             status,
             request_id: None,
+            meta: crate::connections::http_client::ResponseMeta::default(),
             body: Secret::new(Zeroizing::new(body)),
         }))
     }
@@ -438,11 +440,13 @@ impl Http for Rotating {
             | Endpoint::Jwks(_)
             | Endpoint::Revocation(_)
             | Endpoint::Models(_)
-            | Endpoint::AnthropicModels(_) => (503, Vec::new()),
+            | Endpoint::AnthropicModels(_)
+            | Endpoint::GitHub(_) => (503, Vec::new()),
         };
         std::future::ready(Ok(Response {
             status,
             request_id: None,
+            meta: crate::connections::http_client::ResponseMeta::default(),
             body: Secret::new(Zeroizing::new(body)),
         }))
     }
@@ -540,6 +544,7 @@ impl Http for Gated {
             Ok(Response {
                 status: 200,
                 request_id: None,
+                meta: crate::connections::http_client::ResponseMeta::default(),
                 body: Secret::new(Zeroizing::new(
                     serde_json::to_vec(&tokens).expect("fixture"),
                 )),
@@ -680,6 +685,7 @@ impl Http for Panicking {
             Ok(Response {
                 status: 200,
                 request_id: None,
+                meta: crate::connections::http_client::ResponseMeta::default(),
                 body: Secret::new(Zeroizing::new(body)),
             })
         }
@@ -838,6 +844,7 @@ impl Http for Catalog {
         std::future::ready(Ok(Response {
             status,
             request_id: None,
+            meta: crate::connections::http_client::ResponseMeta::default(),
             body: Secret::new(Zeroizing::new(body.into_bytes())),
         }))
     }
@@ -985,6 +992,7 @@ impl Http for RefusingModels {
             Ok(Response {
                 status: 401,
                 request_id: None,
+                meta: crate::connections::http_client::ResponseMeta::default(),
                 body: Secret::new(Zeroizing::new(Vec::new())),
             })
         }
@@ -1102,6 +1110,7 @@ impl Http for Probe {
         std::future::ready(Ok(Response {
             status: 503,
             request_id: None,
+            meta: crate::connections::http_client::ResponseMeta::default(),
             body: Secret::new(Zeroizing::new(Vec::new())),
         }))
     }
@@ -1334,6 +1343,7 @@ impl Http for Renewing {
             Ok(Response {
                 status,
                 request_id: None,
+                meta: crate::connections::http_client::ResponseMeta::default(),
                 body: Secret::new(Zeroizing::new(body.into_bytes())),
             })
         }
@@ -1376,6 +1386,7 @@ async fn a_run_waiting_on_an_unconfirmed_renewal_fails_saying_so() {
         Ok(Response {
             status: 400,
             request_id: None,
+            meta: crate::connections::http_client::ResponseMeta::default(),
             body: Secret::new(Zeroizing::new(br#"{"error":"invalid_grant"}"#.to_vec())),
         })
     };
@@ -1457,6 +1468,7 @@ async fn a_catalog_renewal_that_goes_unconfirmed_tells_the_shell_why() {
         Ok(Response {
             status: 408,
             request_id: None,
+            meta: crate::connections::http_client::ResponseMeta::default(),
             body: Secret::new(Zeroizing::new(
                 br#"{"error":"temporarily_unavailable"}"#.to_vec(),
             )),

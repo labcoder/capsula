@@ -1,7 +1,7 @@
 # Screen worker
 
 `kumochid --screen` installs its separate screen log and location-only panic hook before serving
-stdin/stdout. It answers Ping and Capture (below). Request contents and panic payloads never enter logs;
+stdin/stdout. It answers Ping, Capture and Elements (below). Request contents and panic payloads never enter logs;
 transport failures and foreign errors are numeric codes, not foreign error strings.
 
 ```mermaid
@@ -42,7 +42,7 @@ after the last handle has closed doesn't respawn, so shutdown can't start a work
 
 Debug builds accept one-request fault fixtures and `KUMOCHI_SCREEN_FAULT=hang|crash|garbage|panic`.
 The environment switch applies on the next request of every respawn; neither path exists in a
-release worker. No UI Automation or OCR is implemented here yet.
+release worker. The portable element operation is implemented; Windows UI Automation and OCR are not yet connected.
 
 The macOS platform equivalent is `posix_spawn` file actions for stdio and a process-group kill;
 it remains unimplemented and unverified.
@@ -157,27 +157,62 @@ record Rez's scale with that result.
 
 ## Portable element data and walk
 
-The control-view data and walk are implemented independently of the worker operation; A3a2
-connects them to capture authority and a bounded reader thread, and A3b supplies Windows UIA.
-Nothing in production calls the walk yet, and no new worker operation is served by this layer.
+The control-view data and walk run under capture authority on a bounded reader thread. A3b
+supplies Windows UIA; the production element opener returns E_NOTIMPL on every platform until
+then. Nothing in the brain requests Elements until A6/B2a connects the capture flow.
 
 One pre-order walk retains at most 512 elements, depth 16, 128 characters per name and 60,000
-bytes of element JSON. The byte cap usually binds first. A cut records Elements, Depth, Bytes,
+bytes of element JSON (commas and the reply envelope are additional). The byte cap usually binds
+first. A cut records Elements, Depth, Bytes,
 Budget or Provider; a hard stop replaces an earlier Depth cut. Capture-scoped ids (`c12.e7`)
 carry physical desktop and window-relative rectangles from the same cached properties. Names
-never appear in Debug or errors. Password names are discarded, their rectangles are published
+never appear in Debug or errors. Names outside the captured display are empty. Password names are discarded, their rectangles are published
 immediately, and password subtrees are never descended into.
 
 A source validates the root window and pid and returns its owning pid; the portable layer rejects
 roots off the captured display and excludes Kumochi's process-image names case-insensitively for
 every target, including Foreground. Each capture owns a fresh mask sink with its capture id,
-generation and completeness. Publishing a rectangle and finishing
-the walk both advance generation. A full walk is Complete unless a password rectangle has a zero
-side, which leaves masks Partial while retaining that rectangle. A cut is Partial, and unavailability
-is Unknown. Elevated, Busy, Excluded and NoWindow mean masks are unknown, never that nothing
+generation and completeness. Publishing a rectangle and the first finish both advance generation.
+After a Bytes or Elements text cut, mask-only discovery continues on the remaining stack, using
+at most 2,048 additional reads and the same deadline. Finishing that discovery can leave masks
+Complete despite the text cut. Depth skips, provider failures, deadline/read-cap exhaustion and
+password rectangles with a zero side leave masks Partial, retaining all published rectangles.
+Unavailability is Unknown. Elevated, Busy, Excluded and NoWindow mean masks are unknown, never that nothing
 needs masking: image consumers must withhold or flag those frames, not call them fully masked.
 
 Offline fake-source fixtures cover exact limits, Unicode names, provider/budget cuts, relative
-geometry, excluded roots and password/descendant sentinels. No real window or platform timing
-is exercised by these tests. Cancellation, worker authority and late/hung-thread handling belong
-to A3a2/A6 rather than this portable walk.
+geometry, excluded roots and password/descendant sentinels. Reader fixtures use real threads and
+clocks, but never read real windows or measure platform calls. Cancellation belongs to A6;
+worker authority and late/hung-thread handling are described below.
+
+## Capture-scoped element operation
+
+`Elements { capture, target }` spends the held frame's walk once, including refused or unavailable
+attempts. A different capture id is Stale and spends nothing; a second attempt for the held
+capture is Reused. Each new Capture drops authority and installs a fresh mask sink before checking
+its ticket, so refused captures leave no walkable frame and late writes reach only the old sink.
+
+Capture pins the foreground top-level window, pid and physical rectangle just before acquiring
+the frame. Foreground walks use that pin; explicit Window targets carry a pid too. Portable walks
+reject a root whose pid differs from that hint as NoWindow; the source must also recheck native
+root visibility and ownership before reading. A walk must start before both ticket expiry and
+frame arrival + 250 ms [guess]; its deadline is the earliest of those two and start + 120 ms [guess].
+
+One disposable thread constructs and owns the non-Send platform source. Both channels have one
+slot, sends never block, and jobs/replies carry capture ids. The serve thread waits until the
+cooperative deadline plus 200 ms (100 ms connection + 100 ms transaction timeouts). The first
+timeout returns Unavailable(Busy), retaining reached masks. Its Unknown(Busy) completeness is
+sticky: a late successful walk can never upgrade it to Complete or Partial. A later walk first
+drains and discards that reply, then reads only its own capture. If the source is still busy,
+the next walk replies Busy and the worker exits after writing the reply. A dead thread or poisoned
+sink also replies Busy and retires. Drop never joins the provider thread.
+
+A reader-opener failure does not discard a successfully acquired frame. Its first Elements
+attempt publishes Unknown(Busy) and reports the numeric fault, but the worker keeps serving Ping
+and Capture. The next capture retries a failed opener, including a failed reader-thread spawn.
+An opener that fails inside the reader thread is retried for the next capture's Elements.
+
+The supervisor accepts only an Elements tree naming the requested capture. Refusals pass through;
+other reply kinds or capture ids become WorkerLost. There is no cancel operation yet: A6's Drop
+will free capture authority and its mask sink, and the process supervisor tears down stuck threads.
+No live window is read by the fake-source tests, and no Windows or timing claim is made here.

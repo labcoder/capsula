@@ -49,7 +49,14 @@ fn a_capture_that_must_retire_answers_fault_and_serves_nothing_more() {
         ),
     ] {
         let mut output = Vec::new();
-        serve_on(&mut input.as_slice(), &mut output, open).expect("served");
+        serve_on(
+            &mut input.as_slice(),
+            &mut output,
+            open,
+            crate::screen::elements::tests::open_reader,
+            &Instant::now,
+        )
+        .expect("served");
         let mut replies = output.as_slice();
         let mut read = Vec::new();
         while let Some(reply) =
@@ -60,3 +67,6 @@ fn a_capture_that_must_retire_answers_fault_and_serves_nothing_more() {
         assert_eq!(read, answered);
     }
 }
+
+#[path = "elements.rs"]
+mod elements;
