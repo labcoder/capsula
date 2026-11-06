@@ -44,7 +44,10 @@ impl Presence {
         .detach();
         cx.subscribe(&kumo, |this, _, _: &WantsFrames, cx| this.want_frames(cx))
             .detach();
-        cx.subscribe(&kumo, |this, _, _: &PullChanged, cx| {
+        cx.subscribe(&kumo, |this, _, changed: &PullChanged, cx| {
+            if let PullChanged::Ended(drag, end) = *changed {
+                this.carry_ended(drag, end, cx);
+            }
             if let Err(error) = this.pull_changed(cx) {
                 tracing::error!(%error, "can't follow Kumo's pull");
             }
@@ -55,6 +58,7 @@ impl Presence {
     /// Quit began: a live drag ends now and gives back Esc, before any shutdown work waits.
     pub(super) fn end_pull(&mut self, cx: &mut Context<'_, Self>) {
         self.kumo.update(cx, KumoView::close);
+        self.end_carry(cx);
         self.activity.pulling = false;
         if let Err(error) = self.sync_escape(cx) {
             tracing::warn!(%error, "can't give back Esc at Quit");

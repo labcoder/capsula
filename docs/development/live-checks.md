@@ -70,10 +70,11 @@ Claude Code's own login in a console the owner answers, and its sign-in file lan
 Claude Code folder, under the one exception in `AGENTS.md`. `--disconnect` undoes it: the brain
 signs Claude Code out and deletes that folder.
 
-It reads the first Connections view and waits for the brain's own discovery to replace the
-placeholder `NotFound`; still `NotFound` at the deadline, that's the answer. It sends no
-`FindClaudeCode`: discovery already runs as the brain starts, and a Find that lands meanwhile
-queues a second round, during which the brain drops a Connect.
+It reads the first Connections view and waits through both the placeholder `NotFound` and the
+authoritative `Finding` until discovery settles. If neither is replaced before the discovery
+deadline, it reports `NotFound`. It sends no `FindClaudeCode`: discovery already runs as the
+brain starts, and a Find that lands meanwhile queues a second round, during which the brain
+drops a Connect.
 
 - **Ready:** it stops there, so a rerun never opens a console.
 - **Signed out:** it sends `ConnectClaudeCode` and waits for the view to leave `SigningIn`. It
@@ -124,7 +125,7 @@ path.
 | The client connecting | the gate client's own retries and per-operation pipe timeouts | fails |
 | The first view, and each op's answer | 10 s | fails |
 | The sign-in settling | 330 s from the answer, one deadline however many views arrive: the brain ends its attempt at 5 min | sends `CancelSignIn`, waits 10 s for its answer, fails |
-| Claude Code's discovery | 30 s from the first view [guess]: the harness's budget for `--version` and the status call, not derived from the lane's 10 s root-run bound, since teardown and folder checks come on top | `NotFound` is the answer |
+| Claude Code's discovery | 30 s from the first view [guess]: one deadline while waiting through `NotFound` and `Finding`, for `--version` and the status call; not derived from the lane's 10 s root-run bound, since teardown and folder checks come on top | reports `NotFound` if discovery has not settled |
 | Claude Code's sign-in settling | 330 s from the answer, one deadline: the lane ends the login at 5 min, then reads the status | sends `Quitting`, which ends the login, and fails |
 | Claude Code's op answers | 10 s from the op, one deadline: Connect's answer is the first view unlike the one before it, so stale snapshots such as the Anthropic key's are skipped; Disconnect's is `CleanupPending`, which a pending cleanup already is | fails, naming the last view |
 | Disconnect's cleanup | 45 s from the answer [guess]: the harness's budget for the logout, the deletion and discovery again; the lane bounds root runs, not teardown or deletion | fails; the brain retries the deletion as it starts |

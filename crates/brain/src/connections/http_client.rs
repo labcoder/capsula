@@ -386,7 +386,7 @@ impl Client {
                     bearer(token.expose().as_str())?,
                 )
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .body(body.expose().to_vec()),
+                .body(body.expose().as_bytes().to_vec()),
             GitHubEndpoint::User { token }
             | GitHubEndpoint::Installations { token, .. }
             | GitHubEndpoint::Repositories { token, .. }

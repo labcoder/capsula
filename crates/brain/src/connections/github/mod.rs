@@ -1,6 +1,8 @@
-//! Closed GitHub destinations and checked transient credentials; no account state lives here.
+//! Checked GitHub destinations, transient credentials and the sans-I/O device machine.
 
 pub mod api;
+pub mod device;
+pub mod issues;
 
 use std::fmt;
 use std::ops::RangeInclusive;
@@ -167,7 +169,7 @@ pub enum GitHubEndpoint {
         /// The checked owner/repository destination.
         repo: RepoName,
         /// Serialized title/body, wiped when this endpoint drops.
-        body: Secret<Zeroizing<Vec<u8>>>,
+        body: Secret<issues::IssuePayload>,
     },
     /// Read one bounded issue page for exact-match lookup.
     Issues {

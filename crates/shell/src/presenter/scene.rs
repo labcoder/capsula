@@ -27,7 +27,7 @@ pub(super) struct Scene {
     pub(super) rest: LayoutState,
     pub(super) retained: usize,
     pub(super) paint: PaintWork,
-    /// The sampled source of the rest, replaced with it; B6 activates it.
+    /// The sampled source of the rest: an activated view installed with it, or at rest.
     pub(super) view: SceneView,
     /// The view's bytes, cached when it is replaced.
     pub(super) view_bytes: usize,

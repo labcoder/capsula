@@ -379,6 +379,8 @@ pub(crate) struct LinkHandle {
     retry: Sender<()>,
     /// Closes when the link thread ends.
     done: Receiver<()>,
+    #[cfg(test)]
+    recording: Option<Sender<DataToBrain>>,
 }
 
 impl LinkHandle {
@@ -476,6 +478,10 @@ impl LinkHandle {
     /// [`LinkHandle::send_control`]. A turn is counted once queued; one past the count ends the
     /// connection instead.
     pub(crate) fn send_data(&self, session: &Session, message: DataToBrain) -> bool {
+        #[cfg(test)]
+        if let Some(recording) = &self.recording {
+            return recording.try_send(message).is_ok();
+        }
         self.shared
             .outbox(session, |outbox| {
                 let turn = matches!(message, DataToBrain::TextSubmit { .. });
@@ -490,6 +496,49 @@ impl LinkHandle {
                 queued
             })
             .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+impl LinkHandle {
+    /// A handle with no link thread, pipe or outbox, so every send reports the connection gone.
+    pub(crate) fn detached() -> Self {
+        let (retry, _retries) = async_channel::bounded(1);
+        let (_alive, done) = async_channel::bounded(1);
+        Self {
+            shared: Arc::new(Shared::default()),
+            retry,
+            done,
+            recording: None,
+        }
+    }
+
+    pub(crate) fn recording() -> (Self, Receiver<DataToBrain>) {
+        let (recording, requests) = async_channel::unbounded();
+        let mut link = Self::detached();
+        link.recording = Some(recording);
+        (link, requests)
+    }
+}
+
+#[cfg(test)]
+impl Session {
+    /// A session with no connection behind it: its grants only add up here.
+    pub(crate) fn detached(generation: u64, incarnation: Incarnation) -> Self {
+        let (wake, _sleeping) = async_channel::bounded::<DataOut>(1);
+        Self {
+            generation,
+            credit: Arc::new(Credit {
+                bytes: AtomicU32::new(0),
+                wake: wake.downgrade(),
+            }),
+            incarnation,
+        }
+    }
+
+    /// The credit granted and not yet sent.
+    pub(crate) fn granted(&self) -> u32 {
+        self.credit.bytes.load(Ordering::SeqCst)
     }
 }
 
@@ -532,6 +581,8 @@ fn start(link: Link, events: Sender<LinkEvent>) -> (LinkHandle, LinkStart) {
         shared: Arc::clone(&link.shared),
         retry,
         done,
+        #[cfg(test)]
+        recording: None,
     };
     let start = LinkStart {
         link,

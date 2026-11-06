@@ -152,6 +152,7 @@ impl Drawing {
     }
 
     /// The shown scenes, oldest first.
+    #[cfg(test)]
     pub(crate) fn shown(&self) -> impl Iterator<Item = (&SceneId, &Scene)> {
         self.shown.iter()
     }
