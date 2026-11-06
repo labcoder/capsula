@@ -106,6 +106,48 @@ fn call(core: &mut Coordinator, name: &str, args: &[u8]) -> (Dispatch, Vec<Effec
 }
 
 #[test]
+fn unavailable_drawing_returns_a_fixed_durable_refusal_without_failing_the_run() {
+    let scratch = Scratch::new("draw-unavailable");
+    let mut store = store(&scratch);
+    let mut core = offered(vec![T]);
+    assert!(
+        core.restore_drawings(Err(crate::store::StoreError::Closed))
+            .is_empty()
+    );
+    let (dispatch, effects) = call(&mut core, "unavailable", &args(None));
+    assert_eq!(dispatch, Dispatch::Committing);
+    let [Effect::Store(StoreOp::CommitCall(result))] = effects.as_slice() else {
+        panic!("only the refusal result may be written");
+    };
+    assert_eq!(result.output, ToolOutput::Error(ToolError::NotHere));
+    assert_eq!(result.write, crate::dispatch::LocalWrite::None);
+    let committed = store.commit_call(result).expect("durable refusal");
+    assert_eq!(committed, Committed::Done);
+    core.handle(Input::CallCommitted {
+        key: result.key.clone(),
+        outcome: committed,
+        then: None,
+    })
+    .expect("ack");
+    assert!(
+        core.current
+            .as_ref()
+            .expect("run stays active")
+            .ending
+            .is_none()
+    );
+    assert!(core.current.as_ref().expect("run").draw_calls.is_empty());
+    core.drawing = crate::drawing::Drawing::default();
+    assert_eq!(
+        call(&mut core, "unavailable", &args(None)),
+        (
+            Dispatch::Answered(ToolOutput::Error(ToolError::NotHere)),
+            Vec::new()
+        )
+    );
+}
+
+#[test]
 fn an_offered_draw_uses_real_scene_commits_then_waits_for_its_result_write() {
     let scratch = Scratch::new("draw-tool-order");
     let mut store = store(&scratch);

@@ -63,6 +63,10 @@ impl Coordinator {
             Step::Answer(output) => Dispatch::Answered(output),
             Step::Join => Dispatch::Joined,
             Step::Screen { key, draw } => {
+                if !self.drawing_available() {
+                    self.drawn(&key, ToolOutput::Error(ToolError::NotHere), effects);
+                    return Dispatch::Committing;
+                }
                 let current = self.current.as_mut().expect("the resolved run is current");
                 if current.draw_calls.len()
                     > usize::try_from(super::MAX_CALLS).expect("the call budget fits usize")

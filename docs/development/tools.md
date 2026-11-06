@@ -88,6 +88,10 @@ path and step id, spends the existing drawing rejection/repair budget, and admit
 scene record. Its refusal stays final for the caller's key. Semantic admission still
 runs once in the drawing reducer; a semantic failure can retain earlier committed steps.
 
+If drawing recovery is unavailable, calls return the fixed `not available here`
+refusal instead of entering the reducer or failing the run as a store error. A valid
+call's refusal still waits for its result-row acknowledgement and stays final for its key.
+
 The ledger holds callers in `Drawing` while the reducer writes. The coordinator assigns
 each handoff an internal call id, separate from the model/MCP id and launch, and keeps
 the association in that run. Every `CallEnd`, including immediate refusal, write
