@@ -6,7 +6,7 @@
 //! macOS counterpart: unverified, behind `platform`.
 
 use std::collections::BTreeSet;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, PipeReader, PipeWriter, Read as _, Write as _};
@@ -482,11 +482,9 @@ fn begin(
         ..folders.paths
     };
     let system = platform::system_env().map_err(|_| LaunchFailed::Spawn)?;
-    // Only a sign-in reads the browser.
     let data = policy::launch_data(
         &paths,
         &system,
-        OsStr::new(""),
         &EntryPoint::Question {
             mcp_config: &mcp_config,
             allowed_tools: &allowed,
