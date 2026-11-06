@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use kumochi_protocol::voice::{MODEL_FILES, VoicePart};
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::Level;
 
 use super::phonon::{Job, start_pool};
@@ -12,6 +13,7 @@ use super::{
     CONFIG, Engine, MAX_SAY_BYTES, SAMPLE_RATE, Speak, TOKENIZER, TtsBusy, TtsError, TtsEvent,
     TtsHandle, VOICE, WEIGHTS, to_pcm,
 };
+use crate::voice::{LoadEvent, LoadReport, Reports};
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -68,7 +70,12 @@ struct Harness {
     streams: std_mpsc::Sender<FakeStream>,
     live: Arc<AtomicUsize>,
     loads: Arc<AtomicUsize>,
+    reports: Mutex<UnboundedReceiver<LoadReport>>,
     runtime: tokio::runtime::Runtime,
+}
+
+fn report(ask: u64, event: LoadEvent) -> LoadReport {
+    LoadReport { ask, event }
 }
 
 /// The loader's side of a load the test holds open.
@@ -123,7 +130,8 @@ impl Harness {
         let live = Arc::new(AtomicUsize::new(0));
         let loads = Arc::new(AtomicUsize::new(0));
         let (live_in, loads_in) = (Arc::clone(&live), Arc::clone(&loads));
-        let handle = TtsHandle::spawn_with(runtime.handle().clone(), move |_dir: &Path| {
+        let (sender, reports) = Reports::new();
+        let handle = TtsHandle::spawn_with(runtime.handle().clone(), sender, move |_dir: &Path| {
             loads_in.fetch_add(1, Ordering::SeqCst);
             if let Some(gate) = &gate {
                 gate.started.send(()).expect("the test watches the load");
@@ -144,15 +152,41 @@ impl Harness {
             streams,
             live,
             loads,
+            reports: Mutex::new(reports),
             runtime,
         }
     }
 
+    /// Loaded for ask 1.
     fn loaded() -> Self {
         let harness = Self::new(Ok(()));
-        harness.handle.load("models".into());
+        harness.handle.load("models".into(), 1);
         harness.wait_live(1);
+        assert_eq!(harness.reports(1), [report(1, LoadEvent::Loaded)]);
         harness
+    }
+
+    /// The next `count` reports, in order.
+    fn reports(&self, count: usize) -> Vec<LoadReport> {
+        let mut reports = self.reports.lock().expect("one reader");
+        let mut got = Vec::new();
+        for _ in 0..500 {
+            while let Ok(next) = reports.try_recv() {
+                got.push(next);
+            }
+            if got.len() >= count {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(got.len(), count, "reports: {got:?}");
+        got
+    }
+
+    fn no_report(&self) {
+        std::thread::sleep(Duration::from_millis(100));
+        let next = self.reports.lock().expect("one reader").try_recv().ok();
+        assert_eq!(next, None);
     }
 
     fn script(&self) -> Script {
@@ -310,7 +344,7 @@ fn unload_while_full_rejects_the_waiting_speak_and_drops_the_model() {
         }),
         Err(TtsBusy)
     );
-    harness.handle.unload();
+    harness.handle.unload(1);
     assert_eq!(
         harness.next(&mut waiting),
         Some(failed(TtsError::NotLoaded))
@@ -383,13 +417,8 @@ fn nothing_speaks_before_a_successful_load() {
     assert_eq!(harness.next(&mut events), Some(failed(TtsError::NotLoaded)));
 
     let failing = Harness::new(Err(TtsError::Load));
-    failing.handle.load("models".into());
-    for _ in 0..500 {
-        if failing.loads.load(Ordering::SeqCst) == 1 {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    failing.handle.load("models".into(), 1);
+    assert_eq!(failing.reports(1), [report(1, LoadEvent::Failed)]);
     let mut events = failing.speak("hello", 4);
     assert_eq!(failing.next(&mut events), Some(failed(TtsError::NotLoaded)));
     assert_eq!(failing.loads.load(Ordering::SeqCst), 1, "no retry loop");
@@ -406,7 +435,7 @@ fn a_speak_that_arrives_during_a_load_waits_for_its_outcome() {
             release: released,
         }),
     );
-    harness.handle.load("models".into());
+    harness.handle.load("models".into(), 1);
     loading
         .recv_timeout(WAIT)
         .expect("the owner is inside the load");
@@ -433,7 +462,7 @@ fn a_speak_that_arrives_during_a_load_waits_for_its_outcome() {
             release: released,
         }),
     );
-    failing.handle.load("models".into());
+    failing.handle.load("models".into(), 1);
     loading
         .recv_timeout(WAIT)
         .expect("the owner is inside the load");
@@ -446,10 +475,12 @@ fn a_speak_that_arrives_during_a_load_waits_for_its_outcome() {
 #[test]
 fn unload_and_dropping_the_handle_drop_the_model() {
     let harness = Harness::loaded();
-    harness.handle.unload();
+    harness.handle.unload(1);
     harness.wait_live(0);
-    harness.handle.load("models".into());
+    assert_eq!(harness.reports(1), [report(1, LoadEvent::Unloaded)]);
+    harness.handle.load("models".into(), 2);
     harness.wait_live(1);
+    assert_eq!(harness.reports(1), [report(2, LoadEvent::Loaded)]);
     assert_eq!(harness.loads.load(Ordering::SeqCst), 2);
     let Harness { handle, live, .. } = harness;
     drop(handle);
@@ -460,6 +491,81 @@ fn unload_and_dropping_the_handle_drop_the_model() {
         std::thread::sleep(Duration::from_millis(10));
     }
     panic!("the owner kept the model after the handle was dropped");
+}
+
+#[test]
+fn a_load_that_finishes_after_its_unload_is_discarded_and_the_newer_ask_loads() {
+    let (started, loading) = std_mpsc::channel();
+    let (release, released) = std_mpsc::channel();
+    let harness = Harness::gated(
+        Ok(()),
+        Some(Gate {
+            started,
+            release: released,
+        }),
+    );
+    harness.handle.load("models".into(), 1);
+    loading
+        .recv_timeout(WAIT)
+        .expect("the owner is inside the load");
+    harness.handle.unload(1);
+    harness.handle.load("models".into(), 2);
+    harness.no_report();
+    release.send(()).expect("the first load is waiting");
+    assert_eq!(harness.reports(1), [report(1, LoadEvent::Discarded)]);
+    loading
+        .recv_timeout(WAIT)
+        .expect("the newer ask loads after the late one is freed");
+    assert_eq!(
+        harness.live.load(Ordering::SeqCst),
+        0,
+        "the late model is freed"
+    );
+    release.send(()).expect("the second load is waiting");
+    assert_eq!(harness.reports(1), [report(2, LoadEvent::Loaded)]);
+    harness.wait_live(1);
+    harness.no_report();
+    let script = harness.script();
+    let mut events = harness.speak("hello", 4);
+    drop(script.frames);
+    assert_eq!(
+        harness.next(&mut events),
+        Some(TtsEvent::Done {
+            segment: 7,
+            total: 0
+        })
+    );
+}
+
+#[test]
+fn unloading_another_ask_leaves_the_model_alone() {
+    let harness = Harness::loaded();
+    harness.handle.unload(7);
+    assert_eq!(harness.reports(1), [report(7, LoadEvent::Unloaded)]);
+    harness.no_report();
+    assert_eq!(harness.live.load(Ordering::SeqCst), 1);
+    let script = harness.script();
+    let mut events = harness.speak("hello", 4);
+    drop(script.frames);
+    assert_eq!(
+        harness.next(&mut events),
+        Some(TtsEvent::Done {
+            segment: 7,
+            total: 0
+        })
+    );
+}
+
+#[test]
+fn a_newer_ask_frees_the_held_model_before_loading_its_own() {
+    let harness = Harness::loaded();
+    harness.handle.load("other".into(), 2);
+    assert_eq!(
+        harness.reports(2),
+        [report(1, LoadEvent::Unloaded), report(2, LoadEvent::Loaded)]
+    );
+    harness.wait_live(1);
+    assert_eq!(harness.loads.load(Ordering::SeqCst), 2);
 }
 
 #[test]
@@ -524,7 +630,7 @@ fn a_cancelled_waiting_speak_is_replaced_unanswered() {
             release: released,
         }),
     );
-    harness.handle.load("models".into());
+    harness.handle.load("models".into(), 1);
     loading
         .recv_timeout(WAIT)
         .expect("the owner is inside the load");
@@ -636,7 +742,9 @@ fn measure_phonon() {
         .enable_time()
         .build()
         .expect("a test runtime");
-    let handle = TtsHandle::spawn(runtime.handle().clone()).expect("the owner thread starts");
+    let (reports, _received) = Reports::new();
+    let handle =
+        TtsHandle::spawn(runtime.handle().clone(), reports).expect("the owner thread starts");
     let speak = |text: &str| {
         let (out, events) = mpsc::channel(256);
         handle
@@ -670,7 +778,7 @@ fn measure_phonon() {
     };
 
     let started = Instant::now();
-    handle.load(models);
+    handle.load(models, 1);
     let mut events = speak("Hi.");
     while let Some(event) = next(&mut events) {
         assert!(!matches!(event, TtsEvent::Failed { .. }), "{event:?}");
