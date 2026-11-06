@@ -48,6 +48,8 @@ enabled-state changes. The recovery dispatcher rechecks the owner and declared a
 then uses the existing run, account or settings admission. An account Retry cannot resend
 run text. Public usage links use the existing URL, and settings routes select their exact
 tab without toggling a visible settings window closed.
+Retry and Dismiss return focus to the retained composer so typing and its Escape
+handling continue after the recovery control disappears.
 
 Renewal warnings coalesce within the connection lifetime. A named run promotes a general
 warning to run ownership; later duplicates cannot demote or resurrect a dismissed incident.

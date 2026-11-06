@@ -1,4 +1,4 @@
-use gpui_kit::{Entity, TestAppContext};
+use gpui_kit::{Entity, Focusable as _, TestAppContext};
 use kumochi_protocol::message::{
     AccountOp, AccountView, Action, ControlToBrain, DataToBrain, ErrorKey, Incarnation, Phase,
     RunId, ScreenChoice, ThreadId, UserError,
@@ -164,6 +164,89 @@ fn recovery_buttons_follow_live_drafts_and_dispatch_then_dismiss_the_named_failu
     });
     let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
     assert!(frame.debug_bounds("chat-recovery").is_none());
+    assert!(data.is_empty());
+    assert!(control.is_empty());
+}
+
+#[gpui::test]
+fn keyboard_retry_returns_typing_and_escape_to_the_composer(cx: &mut TestAppContext) {
+    keyboard_recovery_returns_composer(true, cx);
+}
+
+#[gpui::test]
+fn keyboard_dismiss_returns_typing_and_escape_to_the_composer(cx: &mut TestAppContext) {
+    keyboard_recovery_returns_composer(false, cx);
+}
+
+fn keyboard_recovery_returns_composer(retry: bool, cx: &mut TestAppContext) {
+    let (owner, data, control) = ready(cx);
+    draft(&owner, "keyboard retry", cx);
+    owner.update(cx, |owner, cx| owner.submit(cx).expect("original turn"));
+    assert_eq!(
+        data.try_recv().expect("original turn"),
+        DataToBrain::TextSubmit {
+            turn: 1,
+            screen: ScreenChoice::None,
+            thread: Some(ThreadId(1)),
+            text: "keyboard retry".into(),
+        }
+    );
+    receive(&owner, retry_failure(1), cx);
+    let (window, input, received) = owner.update(cx, |owner, cx| {
+        let text = owner.text.as_ref().expect("typing fixture");
+        text.view.update(cx, |view, cx| {
+            view.events = owner.events.clone();
+            cx.notify();
+        });
+        (text.window, text.input.clone(), owner.events_in.clone())
+    });
+    window
+        .update(cx, |_, window, cx| {
+            window.activate_window();
+            window.draw(cx).clear(cx);
+            input.update(cx, |input, cx| input.focus(window, cx));
+            window.draw(cx).clear(cx);
+        })
+        .expect("input focus");
+    cx.run_until_parked();
+    let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+    for key in if retry {
+        &["shift-tab", "shift-tab", "shift-tab", "tab", "enter"][..]
+    } else {
+        &["shift-tab", "shift-tab", "tab", "enter"][..]
+    } {
+        let keystroke = frame.update(|_, cx| {
+            gpui_kit::Keystroke::parse_with_os(key, cx.platform_info().os).expect("test key")
+        });
+        frame.simulate_event(gpui_kit::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        frame.simulate_event(gpui_kit::KeyUpEvent { keystroke });
+        frame.update(|window, cx| window.draw(cx).clear(cx));
+    }
+    cx.run_until_parked();
+    let expected = retry.then(|| DataToBrain::TextSubmit {
+        turn: 2,
+        screen: ScreenChoice::None,
+        thread: Some(ThreadId(1)),
+        text: "keyboard retry".into(),
+    });
+    assert_eq!(data.try_recv().ok(), expected);
+    window
+        .update(cx, |_, window, cx| {
+            assert!(input.read(cx).focus_handle(cx).is_focused(window));
+        })
+        .expect("composer owns focus");
+    cx.simulate_input(window, "next");
+    input.read_with(cx, |input, _| assert_eq!(input.value().as_ref(), "next"));
+    cx.simulate_keystrokes(window, "escape");
+    assert!(matches!(
+        received.try_recv(),
+        Ok(crate::platform::PresenceEvent::Escape)
+    ));
+    assert!(received.is_empty());
     assert!(data.is_empty());
     assert!(control.is_empty());
 }

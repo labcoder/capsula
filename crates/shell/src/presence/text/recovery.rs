@@ -116,6 +116,7 @@ impl TextView {
                     None => false,
                 };
                 let owner = self.owner.clone();
+                let input = self.input.clone();
                 if route == Some(Route::Usage) {
                     return Link::new(("chat-recovery", ix))
                         .debug_selector(move || format!("chat-recovery-action-{ix}"))
@@ -145,16 +146,20 @@ impl TextView {
                     .debug_selector(move || format!("chat-recovery-action-{ix}"))
                     .label(strings.get(label))
                     .disabled(!enabled)
-                    .on_click(move |_, _, cx| {
+                    .on_click(move |_, window, cx| {
                         if let Ok(Err(_)) =
                             owner.update(cx, |this, cx| this.recover(source, action, cx))
                         {
                             tracing::warn!("can't apply chat recovery");
                         }
+                        if action == Action::Retry {
+                            input.update(cx, |input, cx| input.focus(window, cx));
+                        }
                     })
                     .into_any_element()
             });
         let owner = self.owner.clone();
+        let input = self.input.clone();
         Some(
             div()
                 .debug_selector(|| "chat-recovery".into())
@@ -174,9 +179,10 @@ impl TextView {
                                 .debug_selector(|| "chat-recovery-dismiss".into())
                                 .ghost()
                                 .label(strings.get(Text::DismissNotice))
-                                .on_click(move |_, _, cx| {
+                                .on_click(move |_, window, cx| {
                                     let _gone = owner
                                         .update(cx, |this, cx| this.dismiss_recovery(source, cx));
+                                    input.update(cx, |input, cx| input.focus(window, cx));
                                 }),
                         ),
                 )
