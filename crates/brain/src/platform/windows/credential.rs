@@ -150,20 +150,13 @@ mod tests {
     use kumochi_protocol::constants::CREDENTIAL_SERVICE;
 
     use crate::platform::credential::fixture::Fixture;
-    use crate::platform::credential::{
-        CHUNK_SIZE, MAX_CHUNKS, delete_chunks, get_chunks, set_chunks,
-    };
 
     use super::*;
 
     fn isolated(test: impl FnOnce(&str)) {
         let nonce = getrandom::u64().expect("random test service");
         let service = format!("{CREDENTIAL_SERVICE}-credential-test-{nonce:016x}");
-        let _fixture = Fixture::new(
-            std::iter::once(service.clone())
-                .chain((0..MAX_CHUNKS).map(|index| format!("{service}/{index}")))
-                .collect(),
-        );
+        let _fixture = Fixture::new(vec![service.clone()]);
         test(&service);
     }
 
@@ -242,44 +235,6 @@ mod tests {
                 .is_none(),
             "Drop cleaned up during unwinding"
         );
-    }
-
-    #[test]
-    fn oversized_secret_round_trips_by_exact_chunk_names() {
-        isolated(|base| {
-            let secret = Secret::new(Zeroizing::new(vec![42; CHUNK_SIZE * 2 + 17]));
-            let count = set_chunks(&WindowsCredentialStore, base, &secret).expect("write chunks");
-            assert_eq!(count, 3);
-            for index in 0..3 {
-                let allocation = read(&format!("{base}/{index}"))
-                    .expect("read exact target")
-                    .expect("chunk exists");
-                assert_eq!(allocation.credential().Persist, CRED_PERSIST_LOCAL_MACHINE);
-                assert_eq!(
-                    allocation.credential().CredentialBlobSize,
-                    if index == 2 { 17 } else { 2_000 }
-                );
-            }
-            let actual = get_chunks(&WindowsCredentialStore, base, count).expect("read chunks");
-            assert!(actual.expose() == secret.expose(), "persisted chunks match");
-            assert!(
-                WindowsCredentialStore
-                    .get(base)
-                    .expect("base read")
-                    .is_none(),
-                "no implicit manifest"
-            );
-            delete_chunks(&WindowsCredentialStore, base, count).expect("delete chunks");
-            for index in 0..count {
-                assert!(
-                    WindowsCredentialStore
-                        .get(&format!("{base}/{index}"))
-                        .expect("read deleted name")
-                        .is_none(),
-                    "chunk removed"
-                );
-            }
-        });
     }
 
     #[test]

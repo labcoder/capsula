@@ -184,7 +184,7 @@ pub enum Pick {
 /// on each axis (including bilinear filtering), may disagree with an exact geometric ray.
 /// Rest ids use the most frequent sample id including background, ties by first sample.
 /// shortcut: translucent ids follow centroid paint order, not nearest-ray order; revisit
-/// when OSC-218's unsplit transparency approximation is replaced.
+/// when OSC-242's unsplit transparency approximation is replaced.
 pub fn pick(displayed: &DisplayedFrame, at: [f64; 2]) -> Pick {
     let Some(index) = displayed.state.mapping.index(at) else {
         return Pick::Miss;

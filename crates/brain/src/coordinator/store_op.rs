@@ -132,6 +132,13 @@ pub enum StoreOp {
     },
     /// A tool call's write and its ledger row, in one transaction; answered by `CallCommitted`.
     CommitCall(crate::dispatch::CommitCall),
+    /// How far the user heard a released spoken run. Nothing answers it: the run is gone.
+    Heard {
+        /// The run.
+        run: RunId,
+        /// The point.
+        heard: crate::voice::reply::Heard,
+    },
 }
 
 /// A summary's text. Its `Debug` shows only the length, so formatting a write never prints it.
@@ -167,13 +174,14 @@ impl StoreOp {
             | Self::Delete { .. }
             | Self::SetTitle { .. }
             | Self::StoreSummary { .. }
-            | Self::SetModel { .. } => None,
+            | Self::SetModel { .. }
+            | Self::Heard { .. } => None,
         }
     }
 
-    /// Answers an operation that couldn't reach the store.
-    pub fn failed(&self) -> Input {
-        match self {
+    /// Answers an operation that couldn't reach the store; a heard point has no answer.
+    pub fn failed(&self) -> Option<Input> {
+        Some(match self {
             Self::Drawing { serial, .. } => Input::DrawingWritten {
                 serial: *serial,
                 reply: Err(()),
@@ -230,6 +238,7 @@ impl StoreOp {
                 choice: choice.clone(),
                 applied: false,
             },
-        }
+            Self::Heard { .. } => return None,
+        })
     }
 }

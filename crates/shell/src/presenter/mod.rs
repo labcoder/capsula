@@ -688,12 +688,22 @@ impl Presenter {
             return Err(Broken::Cut);
         }
         scene.halt();
+        let logged = scene.state.view().recovery_log().len();
         let outcome = scene
             .state
             .stop(cut, &mut self.global)
             .map_err(|_| Broken::Cut)?;
         scene.cut = Cut::Applied;
         scene.skipping = false;
+        // B5 installs only at-rest views, so this unlogged cut leaves the view and frame current.
+        // shortcut: halt keeps live motion; before B6 activation, restrict this to at-rest views
+        // without delayed owners or settle motion first, with position-track and delayed-owner tests.
+        if outcome == StopOutcome::Kept
+            && scene.state.view().recovery_log().len() == logged
+            && scene.view.activated() == scene.state.view().activated()
+        {
+            return Ok(());
+        }
         let rest = match outcome {
             StopOutcome::Kept => scene.rest.cut(scene.state.view()).ok(),
             StopOutcome::Cleared => None,

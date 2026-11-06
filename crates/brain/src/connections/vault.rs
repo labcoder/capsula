@@ -6,7 +6,7 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use kumochi_protocol::Secret;
-use kumochi_protocol::constants::CREDENTIAL_SERVICE;
+use kumochi_protocol::constants::{CREDENTIAL_SERVICE, account_targets, anthropic_staging_target};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use zeroize::Zeroizing;
@@ -89,7 +89,8 @@ impl<S: CredentialStore> Vault<S> {
         Self::with_service(store, CREDENTIAL_SERVICE, &path)
     }
 
-    /// Takes the lock at `path`, then opens the authority beside it and sweeps once.
+    /// Takes the lock at `path`, then opens the authority beside it and sweeps once, legacy
+    /// names included.
     pub(crate) fn with_service(store: S, service: &str, path: &Path) -> Result<Self, VaultError> {
         let session = SessionLock::try_acquire(path)?;
         let authority = Authority::open(&path.with_file_name(authority::FILE), &session)?;
@@ -99,6 +100,7 @@ impl<S: CredentialStore> Vault<S> {
             service: service.to_owned(),
             _session: session,
         };
+        vault.sweep_legacy();
         vault.sweep();
         Ok(vault)
     }
@@ -432,6 +434,40 @@ impl<S: CredentialStore> Vault<S> {
                 }
                 _ => Ok(()),
             },
+        }
+    }
+
+    /// Deletes the 262 names earlier builds wrote, never reading one, until a clean pass in any
+    /// open after the first one ends it; a refused delete waits for the next open. The shell
+    /// still stages pastes at its legacy name, so every open deletes that one.
+    fn sweep_legacy(&mut self) {
+        match self.authority.legacy_owed() {
+            Ok(true) => {}
+            Ok(false) => {
+                // shortcut: the shell stages pastes at the legacy name until C7 stages them
+                // through the authority; C7 ends this delete.
+                if self
+                    .store
+                    .delete(&anthropic_staging_target(&self.service))
+                    .is_err()
+                {
+                    tracing::warn!("a staged key paste wasn't deleted");
+                }
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "earlier credential names weren't checked for cleanup");
+                return;
+            }
+        }
+        let refused = account_targets(&self.service)
+            .filter(|name| self.store.delete(name).is_err())
+            .count();
+        if refused > 0 {
+            tracing::warn!(refused, "earlier credential names weren't all deleted");
+        }
+        if let Err(error) = self.authority.legacy_deleted(refused) {
+            tracing::warn!(%error, "an earlier credential cleanup wasn't recorded");
         }
     }
 

@@ -935,6 +935,19 @@ impl Coordinator {
         }
         let done = self.ending.swap_remove(at);
         let ending = done.ending.as_ref().expect("an ending run has an Ending");
+        // shortcut: a run whose store write failed keeps no heard point, since its stored text
+        // may lack what was heard; track the committed text prefix if that point is ever wanted.
+        if !ending.failed
+            && let Some(heard) = done
+                .reply
+                .as_ref()
+                .and_then(crate::voice::reply::Reply::heard)
+        {
+            effects.push(Effect::Store(StoreOp::Heard {
+                run: done.id,
+                heard,
+            }));
+        }
         if ending.quieting && ending.notify == Notify::Shell {
             let phase = if ending.failed {
                 Phase::Failed

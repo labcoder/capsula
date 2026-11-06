@@ -149,7 +149,7 @@ flowchart LR
 **3D** uses a CPU depth-buffered raster; the planned shell host paints its BGRA image because
 GPUI on Windows has no depth buffer for element content. Opaque solids write per-sample depth;
 translucent polygons follow in centroid order without writing depth, which can blend intersecting
-translucent geometry in the wrong order (OSC-218). Rest frames supersample edges. The scene frame
+translucent geometry in the wrong order (OSC-242). Rest frames supersample edges. The scene frame
 stage transforms indexed source geometry at the sampled, attachment-composed pose, culls back
 faces, clips near and guard planes in f64, projects, snaps and shades into reserved raster scratch.
 Every source face shares one reciprocal-depth plane across its triangles. Camera defaults target

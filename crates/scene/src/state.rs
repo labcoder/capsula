@@ -11,9 +11,9 @@ use crate::{
     budget::Usage,
     deferred::Deferred,
     layout::heap,
-    limits::{MAX_LIVE_OBJECTS, MAX_STEPS},
+    limits::{MAX_LIVE_OBJECTS, MAX_STEP_OUTLINE_POINTS, MAX_STEPS},
     mermaid::{self, Expansion},
-    record::{Start, Track},
+    record::{SolidShape, Start, Track},
     text::Bounded,
 };
 pub use binding::{BindingError, SceneBinding, SceneRead};
@@ -454,6 +454,20 @@ impl SceneState {
             return Err(fail(
                 FieldPath::default(),
                 ErrorCode::OverBudget(Budget::LiveObjects),
+            ));
+        }
+        let outline_points: usize = step
+            .put
+            .iter()
+            .map(|op| match op {
+                crate::Op::Solid(solid) if solid.shape == SolidShape::Extrude => solid.points.len(),
+                _ => 0,
+            })
+            .sum();
+        if outline_points > MAX_STEP_OUTLINE_POINTS {
+            return Err(fail(
+                FieldPath::default(),
+                ErrorCode::OverBudget(Budget::OutlinePoints),
             ));
         }
         if let Some(global) = global {

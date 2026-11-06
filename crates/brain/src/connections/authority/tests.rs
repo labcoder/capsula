@@ -642,12 +642,87 @@ fn missing_or_invalid_rows_and_newer_files_are_refused() {
     ));
     setup
         .raw()
-        .execute_batch("PRAGMA user_version = 2")
+        .execute_batch("PRAGMA user_version = 3")
         .expect("newer");
     assert!(matches!(
         Authority::open(&setup.path(), &setup.lock),
         Err(AuthorityError::NewerSchema)
     ));
+}
+
+/// A version 1 file gains the legacy cleanup's columns, still owed, and keeps its rows exactly.
+#[test]
+fn a_version_one_file_is_migrated_with_the_legacy_cleanup_owed() {
+    let setup = Setup::new("auth-migrate");
+    let mut authority = setup.open();
+    let value = secret(7, 45);
+    let saved = setup.save(&mut authority, Kind::Host, &value);
+    authority
+        .set_marker(SignOutMarker::fail_closed())
+        .expect("a nondefault marker");
+    drop(authority);
+    setup
+        .raw()
+        .execute_batch(
+            "ALTER TABLE control DROP COLUMN legacy_done;
+             ALTER TABLE control DROP COLUMN legacy_deleted_in;
+             PRAGMA user_version = 1;",
+        )
+        .expect("a version 1 file");
+    let authority = setup.open();
+    assert!(authority.legacy_owed().expect("owed"));
+    assert_eq!(
+        authority.current(Kind::Host).expect("head").active,
+        Some(saved)
+    );
+    let read = io::read(&setup.store, SERVICE, &saved).expect("read");
+    assert!(
+        read.expose() == value.expose(),
+        "the saved bytes read back exactly"
+    );
+    assert_eq!(
+        authority.marker().expect("marker"),
+        SignOutMarker::fail_closed()
+    );
+    let version: i64 = setup
+        .raw()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("version");
+    assert_eq!(version, 2);
+}
+
+/// The legacy cleanup ends only after a clean pass in any open after the first pass's open.
+#[test]
+fn the_legacy_cleanup_ends_after_a_clean_pass_in_a_later_open() {
+    let setup = Setup::new("auth-legacy");
+    let mut authority = setup.open();
+    assert!(authority.legacy_owed().expect("owed"));
+    authority.legacy_deleted(0).expect("first clean pass");
+    assert!(authority.legacy_owed().expect("one open isn't enough"));
+    drop(authority);
+    let mut authority = setup.open();
+    authority.legacy_deleted(1).expect("a refused pass");
+    assert!(authority.legacy_owed().expect("a refusal never ends it"));
+    drop(authority);
+    let mut authority = setup.open();
+    authority.legacy_deleted(0).expect("a later clean pass");
+    assert!(!authority.legacy_owed().expect("done"));
+    drop(authority);
+    assert!(!setup.open().legacy_owed().expect("done for good"));
+}
+
+/// A second pass in the same open never ends the cleanup; the next open's clean pass does.
+#[test]
+fn two_clean_passes_in_one_open_leave_the_legacy_cleanup_owed() {
+    let setup = Setup::new("auth-legacy-same-open");
+    let mut authority = setup.open();
+    authority.legacy_deleted(0).expect("first clean pass");
+    authority.legacy_deleted(0).expect("second clean pass");
+    assert!(authority.legacy_owed().expect("the same open isn't later"));
+    drop(authority);
+    let mut authority = setup.open();
+    authority.legacy_deleted(0).expect("a later clean pass");
+    assert!(!authority.legacy_owed().expect("done"));
 }
 
 #[test]
