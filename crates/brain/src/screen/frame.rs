@@ -53,6 +53,10 @@ impl RawFrame {
         self.valid.map(|meta| (meta, self.bgra.as_mut_slice()))
     }
 
+    pub(super) fn meta(&self) -> Option<FrameMeta> {
+        self.valid
+    }
+
     #[cfg(test)]
     pub(crate) fn image(&self) -> Option<(FrameMeta, &[u8])> {
         self.valid.map(|meta| (meta, self.bgra.as_slice()))

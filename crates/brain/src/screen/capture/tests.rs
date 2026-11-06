@@ -86,7 +86,7 @@ impl Rig {
             Exclusion::KumochiWindows,
             self.start,
             &move || knobs.clock.get(),
-            || Err(9),
+            (|| Err(9), crate::screen::elements::tests::open_reader),
         )
     }
 }
@@ -240,7 +240,7 @@ fn a_failed_open_is_a_fault_and_is_retried_on_the_next_ticket() {
             Exclusion::KumochiWindows,
             start,
             &now,
-            || Err(-3),
+            (|| Err(-3), crate::screen::elements::tests::open_reader),
         )
     };
     assert_eq!(take(&mut screen, 1), Err(Failure::Fault(-3)));
@@ -275,3 +275,6 @@ fn no_carrier_prints_the_nonce_or_the_pixels() {
         "RawFrame { bytes: 48, valid: None, .. }"
     );
 }
+
+#[path = "elements.rs"]
+mod elements;

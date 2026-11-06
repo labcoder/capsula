@@ -6,6 +6,7 @@ pub(crate) mod authority;
 pub mod catalog;
 pub mod clock;
 pub mod error;
+pub mod github;
 pub mod http_client;
 pub mod marker;
 pub mod model;

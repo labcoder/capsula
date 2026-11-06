@@ -360,6 +360,7 @@ fn an_unlisted_refusal_keeps_the_marked_set_and_offers_sign_in() {
         let response = Response {
             status,
             request_id: None,
+            meta: crate::connections::http_client::ResponseMeta::default(),
             body: Secret::new(Zeroizing::new(
                 format!(r#"{{"error":"{code}"}}"#).into_bytes(),
             )),

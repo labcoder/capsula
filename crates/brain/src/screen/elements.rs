@@ -26,7 +26,7 @@ pub enum ElementTarget {
     },
 }
 
-/// One capture's bounded control view. Elevated, Busy and Excluded mean masks are unknown;
+/// One capture's bounded control view. Elevated, Busy, Excluded and `NoWindow` mean masks are unknown;
 /// consumers must withhold or flag the image, never treat it as fully masked.
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
 pub struct ElementTree {
@@ -90,7 +90,9 @@ impl<'de> Deserialize<'de> for ElementId {
                     index: e.parse().ok()?,
                 })
             });
-        parsed.ok_or_else(|| serde::de::Error::custom("invalid element id"))
+        parsed
+            .filter(|id| value == format!("c{}.e{}", id.capture.0, id.index))
+            .ok_or_else(|| serde::de::Error::custom("invalid element id"))
     }
 }
 
@@ -112,7 +114,7 @@ pub enum Cut {
 /// Whether the window's root was readable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Availability {
-    /// The root was read.
+    /// The window resolved; an empty or partial tree is explained by `cut`.
     Read,
     /// No content was available.
     Unavailable(Unavailable),
@@ -147,7 +149,14 @@ pub(crate) struct NodeProps {
 impl std::fmt::Debug for NodeProps {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NodeProps")
-            .field("name_chars", &self.name.chars().count())
+            .field(
+                "name_chars",
+                &if self.password {
+                    0
+                } else {
+                    self.name.chars().count()
+                },
+            )
             .field("password", &self.password)
             .finish_non_exhaustive()
     }
@@ -178,9 +187,19 @@ pub(crate) trait ElementSource {
         target: ElementTarget,
     ) -> Result<(Self::Node, PhysicalRect, u32), SourceError>;
     fn read(&mut self, node: &Self::Node) -> Result<NodeProps, SourceError>;
+    fn mask(&mut self, node: &Self::Node) -> Result<(bool, PhysicalRect), SourceError> {
+        self.read(node).map(|props| (props.password, props.rect))
+    }
     fn first_child(&mut self, node: &Self::Node) -> Result<Option<Self::Node>, SourceError>;
     fn next_sibling(&mut self, node: &Self::Node) -> Result<Option<Self::Node>, SourceError>;
 }
+
+pub(crate) trait ElementReader {
+    fn foreground(&mut self) -> Option<TopWindow>;
+    fn walk(&mut self, job: WalkJob) -> Result<Walked, Failure>;
+}
+
+pub(crate) type OpenElements = fn() -> Result<Box<dyn ElementReader>, i32>;
 
 pub(crate) struct ElementLimits {
     pub(crate) elements: usize,
@@ -197,7 +216,22 @@ pub(crate) const LIMITS: ElementLimits = ElementLimits {
     bytes: 60_000,
 };
 
+const MASK_READ_LIMIT: usize = 2_048;
+
+pub(crate) struct TopWindow {
+    pub(crate) window: WindowRef,
+    pub(crate) pid: u32,
+    pub(crate) rect: PhysicalRect,
+}
+
+impl std::fmt::Debug for TopWindow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TopWindow(..)")
+    }
+}
+
 pub(crate) trait ElementPlatform: Clone + Send + 'static {
+    fn foreground(&mut self) -> Option<TopWindow>;
     fn excluded(&mut self, pid: u32) -> Result<bool, SourceError>;
 }
 
@@ -207,6 +241,11 @@ pub(crate) struct WalkJob {
     pub(crate) display: PhysicalRect,
     pub(crate) until: Instant,
     pub(crate) masks: MaskSink,
+}
+
+pub(crate) struct Walked {
+    pub(crate) tree: ElementTree,
+    pub(crate) retire: bool,
 }
 
 impl ElementTree {
@@ -222,32 +261,42 @@ impl ElementTree {
             availability: Availability::Unavailable(why),
         }
     }
+}
 
-    pub(crate) fn finish(&self, masks: &MaskSink) -> bool {
-        let completeness = match self.availability {
-            Availability::Unavailable(why) => Completeness::Unknown(why),
-            Availability::Read
-                if self.cut.is_some()
-                    || self
-                        .elements
-                        .iter()
-                        .any(|element| element.password && element.screen.size.contains(&0)) =>
-            {
-                Completeness::Partial
+pub(super) fn finish_unavailable(masks: &MaskSink, why: Unavailable) -> bool {
+    finish_masks(masks, Completeness::Unknown(why))
+}
+
+impl std::fmt::Debug for WalkJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WalkJob(..)")
+    }
+}
+
+impl std::fmt::Debug for Walked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Walked")
+            .field("tree", &self.tree)
+            .field("retire", &self.retire)
+            .finish()
+    }
+}
+
+fn finish_masks(masks: &MaskSink, completeness: Completeness) -> bool {
+    match masks.lock() {
+        Ok(mut masks) => {
+            // MaskSet keeps the first finish; this also drops a late walk's text reply.
+            if masks.completeness() == Completeness::Unknown(Unavailable::Busy) {
+                return false;
             }
-            Availability::Read => Completeness::Complete,
-        };
-        match masks.lock() {
-            Ok(mut masks) => {
-                masks.finish(completeness);
-                true
-            }
-            Err(poisoned) => {
-                poisoned
-                    .into_inner()
-                    .finish(Completeness::Unknown(Unavailable::Busy));
-                false
-            }
+            masks.finish(completeness);
+            true
+        }
+        Err(poisoned) => {
+            poisoned
+                .into_inner()
+                .finish(Completeness::Unknown(Unavailable::Busy));
+            false
         }
     }
 }
@@ -278,12 +327,20 @@ pub(crate) fn walk<S: ElementSource>(
     now: &dyn Fn() -> Instant,
     platform: &mut impl ElementPlatform,
 ) -> Result<ElementTree, Failure> {
+    if !job
+        .masks
+        .lock()
+        .is_ok_and(|masks| masks.capture() == job.capture)
+    {
+        finish_unavailable(&job.masks, Unavailable::Busy);
+        return Ok(ElementTree::unavailable(job.capture, Unavailable::Busy));
+    }
     let result = walk_tree(source, job, limits, now, platform);
     match result {
-        Ok(tree) if tree.finish(&job.masks) => Ok(tree),
+        Ok((tree, completeness)) if finish_masks(&job.masks, completeness) => Ok(tree),
         Ok(_) => Ok(ElementTree::unavailable(job.capture, Unavailable::Busy)),
         Err(error) => {
-            ElementTree::unavailable(job.capture, Unavailable::Busy).finish(&job.masks);
+            finish_unavailable(&job.masks, Unavailable::Busy);
             Err(error)
         }
     }
@@ -299,7 +356,7 @@ fn walk_tree<S: ElementSource>(
     limits: &ElementLimits,
     now: &dyn Fn() -> Instant,
     platform: &mut impl ElementPlatform,
-) -> Result<ElementTree, Failure> {
+) -> Result<(ElementTree, Completeness), Failure> {
     let WalkJob {
         target,
         capture,
@@ -319,6 +376,11 @@ fn walk_tree<S: ElementSource>(
         availability: Availability::Read,
     };
     let rooted = source.root(*target).and_then(|(root, window, pid)| {
+        if let ElementTarget::Window { pid: hint, .. } = target
+            && pid != *hint
+        {
+            return Err(SourceError::NoWindow);
+        }
         if !intersects(window, *display) {
             return Err(SourceError::NoWindow);
         }
@@ -334,73 +396,106 @@ fn walk_tree<S: ElementSource>(
         }
         Err(SourceError::Fault(code)) => return Err(Failure::Fault(code)),
         Err(reason) => {
-            return Ok(ElementTree::unavailable(
-                capture,
-                match reason {
-                    SourceError::Elevated => Unavailable::Elevated,
-                    SourceError::Excluded => Unavailable::Excluded,
-                    _ => Unavailable::NoWindow,
-                },
+            let why = match reason {
+                SourceError::Elevated => Unavailable::Elevated,
+                SourceError::Excluded => Unavailable::Excluded,
+                _ => Unavailable::NoWindow,
+            };
+            return Ok((
+                ElementTree::unavailable(capture, why),
+                Completeness::Unknown(why),
             ));
         }
     };
     let mut stack = vec![(root, None, 0)];
     let mut bytes = 0;
+    let mut mask_only = false;
+    let mut mask_reads = 0;
+    let mut complete = true;
     while let Some((node, parent, depth)) = stack.pop() {
-        let stop = if tree.elements.len() >= limits.elements {
+        let stop = if !mask_only && tree.elements.len() >= limits.elements {
             Some(Cut::Elements)
-        } else if bytes >= limits.bytes {
+        } else if !mask_only && bytes >= limits.bytes {
             Some(Cut::Bytes)
-        } else if now() >= *until {
-            Some(Cut::Budget)
         } else {
             None
         };
         if stop.is_some() {
             tree.cut = stop;
+            mask_only = true;
+        }
+        if now() >= *until || (mask_only && mask_reads >= MASK_READ_LIMIT) {
+            if !mask_only {
+                tree.cut = Some(Cut::Budget);
+            }
+            complete = false;
             break;
         }
-        let Ok(props) = source.read(&node) else {
-            tree.cut = Some(Cut::Provider);
+        mask_reads += usize::from(mask_only);
+        let read = if mask_only {
+            source.mask(&node).map(|(password, rect)| NodeProps {
+                name: String::new(),
+                password,
+                rect,
+                control_type: 0,
+            })
+        } else {
+            source.read(&node)
+        };
+        let Ok(props) = read else {
+            if !mask_only {
+                tree.cut = Some(Cut::Provider);
+            }
+            complete = false;
             break;
         };
         if props.password {
             match masks.lock() {
                 Ok(mut masks) => masks.push(props.rect),
-                Err(_) => return Ok(ElementTree::unavailable(capture, Unavailable::Busy)),
+                Err(_) => {
+                    return Ok((
+                        ElementTree::unavailable(capture, Unavailable::Busy),
+                        Completeness::Unknown(Unavailable::Busy),
+                    ));
+                }
             }
+            complete &= !props.rect.size.contains(&0);
         }
         let index = u16::try_from(tree.elements.len()).map_err(|_| Failure::Fault(0))?;
-        let name_cut = !props.password && props.name.chars().count() > limits.name_chars;
-        let element = Element {
-            id: ElementId { capture, index },
-            parent,
-            name: if props.password {
-                String::new()
+        if !mask_only {
+            let visible = !props.password && intersects(props.rect, *display);
+            let name_cut = visible && props.name.chars().count() > limits.name_chars;
+            let element = Element {
+                id: ElementId { capture, index },
+                parent,
+                name: if visible {
+                    props.name.chars().take(limits.name_chars).collect()
+                } else {
+                    String::new()
+                },
+                name_cut,
+                password: props.password,
+                control_type: props.control_type,
+                screen: props.rect,
+                in_window: PhysicalRect {
+                    origin: [
+                        props.rect.origin[0].saturating_sub(tree.window.origin[0]),
+                        props.rect.origin[1].saturating_sub(tree.window.origin[1]),
+                    ],
+                    size: props.rect.size,
+                },
+            };
+            let len = serde_json::to_vec(&element)
+                .map_err(|_| Failure::Fault(0))?
+                .len();
+            if bytes + len > limits.bytes {
+                tree.cut = Some(Cut::Bytes);
+                mask_only = true;
             } else {
-                props.name.chars().take(limits.name_chars).collect()
-            },
-            name_cut,
-            password: props.password,
-            control_type: props.control_type,
-            screen: props.rect,
-            in_window: PhysicalRect {
-                origin: [
-                    props.rect.origin[0].saturating_sub(tree.window.origin[0]),
-                    props.rect.origin[1].saturating_sub(tree.window.origin[1]),
-                ],
-                size: props.rect.size,
-            },
-        };
-        let len = serde_json::to_vec(&element)
-            .map_err(|_| Failure::Fault(0))?
-            .len();
-        if bytes + len > limits.bytes {
-            tree.cut = Some(Cut::Bytes);
-            break;
+                bytes += len;
+                tree.elements.push(element);
+            }
         }
-        bytes += len;
-        tree.elements.push(element);
         let navigation = (|| {
             if parent.is_some()
                 && let Some(sibling) = source.next_sibling(&node)?
@@ -413,17 +508,30 @@ fn walk_tree<S: ElementSource>(
                 if depth < limits.depth {
                     stack.push((child, Some(index), depth + 1));
                 } else {
-                    tree.cut = Some(Cut::Depth);
+                    if !mask_only {
+                        tree.cut = Some(Cut::Depth);
+                    }
+                    complete = false;
                 }
             }
             Ok::<_, SourceError>(())
         })();
         if navigation.is_err() {
-            tree.cut = Some(Cut::Provider);
+            if !mask_only {
+                tree.cut = Some(Cut::Provider);
+            }
+            complete = false;
             break;
         }
     }
-    Ok(tree)
+    Ok((
+        tree,
+        if complete {
+            Completeness::Complete
+        } else {
+            Completeness::Partial
+        },
+    ))
 }
 
 #[cfg(test)]
