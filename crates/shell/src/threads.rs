@@ -5,8 +5,8 @@ use std::collections::{HashMap, VecDeque};
 use kumochi_protocol::constants;
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
-    DataToBrain, DataToShell, EventId, PageEvent, PageOf, SettingsView, ThreadCursor, ThreadId,
-    ThreadKind, ThreadRow,
+    DataToBrain, DataToShell, EventId, PageEvent, PageOf, RunId, SettingsView, ThreadCursor,
+    ThreadId, ThreadKind, ThreadRow,
 };
 
 #[cfg(test)]
@@ -28,6 +28,7 @@ struct Pending {
     /// A `RunState` arrived while this list read was in flight, so its reply may predate it.
     stale: bool,
     after: Option<ThreadCursor>,
+    proves: Option<RunId>,
 }
 
 #[derive(Clone, Copy, Debug, thiserror::Error)]
@@ -51,6 +52,8 @@ pub(crate) struct Threads {
     pub(crate) before: Option<EventId>,
     pub(crate) listed: bool,
     pub(crate) loaded: bool,
+    pub(crate) proven: Option<RunId>,
+    settled: Option<RunId>,
     pub(crate) search_error: Option<SearchError>,
     /// The last read failed; cleared by the next page that lands.
     pub(crate) failed: bool,
@@ -150,6 +153,8 @@ impl Threads {
 
     pub(crate) fn connected(&mut self) {
         self.connected = true;
+        self.proven = None;
+        self.settled = None;
         self.refresh();
         self.event_revision = self.event_revision.wrapping_add(1);
         self.event_needed = self.open.map(|_| Read::First);
@@ -185,6 +190,8 @@ impl Threads {
 
     pub(crate) fn disconnected(&mut self) {
         self.connected = false;
+        self.proven = None;
+        self.settled = None;
         self.list_pending = None;
         self.event_pending = None;
         self.list_needed = None;
@@ -243,6 +250,8 @@ impl Threads {
 
     pub(crate) fn select(&mut self, thread: Option<ThreadId>) {
         self.open = thread;
+        self.proven = None;
+        self.settled = None;
         self.events.clear();
         self.before = None;
         self.loaded = false;
@@ -286,6 +295,12 @@ impl Threads {
     pub(crate) fn older_events(&mut self) {
         if self.before.is_some() && !self.reading() {
             self.event_needed = Some(Read::More);
+        }
+    }
+
+    pub(crate) fn settled(&mut self, thread: ThreadId, run: RunId) {
+        if self.open == Some(thread) {
+            self.settled = Some(run);
         }
     }
 
@@ -356,6 +371,7 @@ impl Threads {
                 read,
                 stale: false,
                 after,
+                proves: None,
             });
             requests.push(DataToBrain::PageRequest {
                 request,
@@ -376,6 +392,11 @@ impl Threads {
                 read,
                 stale: false,
                 after: None,
+                proves: if matches!(read, Read::First | Read::Repair) {
+                    self.settled
+                } else {
+                    None
+                },
             });
             requests.push(DataToBrain::PageRequest {
                 request,
@@ -451,6 +472,9 @@ impl Threads {
                 }
                 self.loaded = true;
                 self.failed = false;
+                if pending.proves.is_some() {
+                    self.proven = pending.proves;
+                }
             }
             DataToShell::PageFailed { request } => self.read_failed(request),
             DataToShell::IssueCard(_)

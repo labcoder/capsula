@@ -487,6 +487,41 @@ impl LinkHandle {
     }
 }
 
+#[cfg(test)]
+impl LinkHandle {
+    /// A handle with no link thread, pipe or outbox, so every send reports the connection gone.
+    pub(crate) fn detached() -> Self {
+        let (retry, _retries) = async_channel::bounded(1);
+        let (_alive, done) = async_channel::bounded(1);
+        Self {
+            shared: Arc::new(Shared::default()),
+            retry,
+            done,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Session {
+    /// A session with no connection behind it: its grants only add up here.
+    pub(crate) fn detached(generation: u64, incarnation: Incarnation) -> Self {
+        let (wake, _sleeping) = async_channel::bounded::<DataOut>(1);
+        Self {
+            generation,
+            credit: Arc::new(Credit {
+                bytes: AtomicU32::new(0),
+                wake: wake.downgrade(),
+            }),
+            incarnation,
+        }
+    }
+
+    /// The credit granted and not yet sent.
+    pub(crate) fn granted(&self) -> u32 {
+        self.credit.bytes.load(Ordering::SeqCst)
+    }
+}
+
 /// Where to find the brain.
 #[derive(Debug)]
 struct Link {

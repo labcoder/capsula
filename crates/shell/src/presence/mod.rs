@@ -34,6 +34,8 @@ mod pull_picture;
 mod pulling;
 mod settings;
 #[cfg(test)]
+mod test_fixture;
+#[cfg(test)]
 mod tests;
 mod text;
 mod thread_selection;

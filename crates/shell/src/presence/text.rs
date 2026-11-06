@@ -2,12 +2,13 @@
 
 use async_channel::Sender;
 use gpui_kit::component::input::{Escape as EscapeKey, Input, InputEvent};
-use gpui_kit::component::{ActiveTheme as _, button::Button};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, button::Button};
 use gpui_kit::{
     AnyWindowHandle, AppContext as _, InteractiveElement as _, IntoElement, ParentElement as _,
     Render, Styled as _, WeakEntity, Window, div,
 };
 
+use super::messages::Messages;
 use super::{
     Context, Diagnostics, Entity, Foreground, InputState, OpenError, PanelVisibility, Presence,
     PresenceEvent, PresenceSurface, SharedString, configure_surface, constants, diagnostics,
@@ -15,7 +16,7 @@ use super::{
 };
 use crate::runs::{Refused, Target};
 use crate::strings::{Strings, Text};
-use crate::threads::row_label;
+use crate::threads::{Threads, row_label};
 
 #[derive(Clone, Copy)]
 pub(super) enum Hide {
@@ -68,6 +69,32 @@ pub(super) struct TextPanel {
     _submit: gpui_kit::Subscription,
 }
 
+#[cfg(test)]
+impl TextPanel {
+    /// A hidden typing panel with its real view and input in a GPUI test window, without
+    /// `create_text`'s native surface, capture, activation or Enter wiring.
+    pub(super) fn detached(model: Entity<Threads>, cx: &mut Context<'_, Presence>) -> Self {
+        let (events, _closed) = async_channel::unbounded();
+        let owner = cx.weak_entity();
+        let (window, view) =
+            gpui_kit::open_window(gpui_kit::WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| TextView::new(model, owner, events, window, cx))
+            })
+            .expect("a GPUI test window opens");
+        let input = view.read(cx).input.clone();
+        Self {
+            window,
+            view,
+            typing: Typing::default(),
+            input,
+            previous: None,
+            draft: None,
+            activation: None,
+            _submit: gpui_kit::Subscription::new(|| {}),
+        }
+    }
+}
+
 impl Presence {
     pub(super) fn open_text(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
         self.dismiss_settings(cx)?;
@@ -77,10 +104,16 @@ impl Presence {
         }
         self.pointer_settle = None;
         self.set_panel(PanelVisibility::Hidden, cx)?;
-        // The accepted dock's anchor, at the typing panel's own height, as the peek's place.
+        let rem = self
+            .text
+            .as_ref()
+            .expect("created above")
+            .window
+            .update(cx, |_, window, _| f32::from(window.rem_size()))
+            .map_err(|error| OpenError::Gpui(error.into()))?;
         let bounds = self.layout.anchored_panel(
             platform::work_area()?,
-            [380.0, 140.0].map(|value| super::scaled(value, self.scale)),
+            [30.0, 34.0].map(|value| super::scaled(value * rem, self.scale)),
         );
         let Some(text) = self.text.as_mut() else {
             return Ok(());
@@ -92,11 +125,14 @@ impl Presence {
                 Ok::<_, platform::PresenceError>(())
             })
             .map_err(|error| OpenError::Gpui(error.into()))??;
+        let opening = !text.typing.visible;
         text.typing.open();
-        self.chat.update(cx, |state, cx| {
-            state.show_for(self.runs.thread());
-            cx.notify();
-        });
+        if opening {
+            self.chat.update(cx, |state, cx| {
+                state.show_for(self.runs.thread());
+                cx.notify();
+            });
+        }
         let draft = text
             .draft
             .take()
@@ -129,7 +165,6 @@ impl Presence {
                 format_args!("input draft nonempty={nonempty} preserved={preserved}"),
             );
         }
-        // The placeholder steps count as a drawing only while the panel shows them.
         self.request_pages(cx);
         self.runs_changed(cx)
     }
@@ -140,20 +175,18 @@ impl Presence {
         let close_events = self.events.clone();
         let owner = cx.weak_entity();
         let notice = typing_notice(self.error.as_ref(), self.refusal, cx.global::<Strings>());
+        let model = self.chat.clone();
         let (window, view) = gpui_kit::open_window(options(), cx, |window, cx| {
             window.set_window_title(constants::DISPLAY_NAME);
             window.on_window_should_close(cx, move |_, _| {
                 send(&close_events, PresenceEvent::DismissPanel);
                 false
             });
-            let input = cx.new(|cx| InputState::new(window, cx));
-            cx.new(|_| TextView {
-                input,
-                stop,
-                conversation: Conversation::default(),
-                notice,
-                owner,
-                events,
+            cx.new(|cx| {
+                let mut view = TextView::new(model, owner, events, window, cx);
+                view.notice = notice;
+                view.stop = stop;
+                view
             })
         })
         .map_err(|error| OpenError::Gpui(error.into()))?;
@@ -327,12 +360,17 @@ impl Presence {
         self.notices_changed(&previous, cx);
     }
 
-    /// Shows the drawing's steps and the end of the newest answer in the typing panel.
+    /// Follows the input target and pushes its bounded live answer into the retained chat.
     pub(super) fn refresh_conversation(&mut self, cx: &mut Context<'_, Self>) {
         if self.text.as_ref().is_some_and(|text| text.typing.visible) {
             self.chat.update(cx, |state, cx| {
                 if state.follow(self.runs.thread()) {
                     cx.notify();
+                }
+                if let Some(shown) = self.runs.shown().filter(|shown| shown.done)
+                    && let Some(thread) = shown.thread
+                {
+                    state.settled(thread, shown.run);
                 }
             });
             self.request_pages(cx);
@@ -349,81 +387,28 @@ impl Presence {
         let Some(text) = &self.text else {
             return;
         };
-        let steps: Vec<SharedString> = self
-            .runs
-            .scenes()
-            .flat_map(|scene| &scene.steps)
-            .map(|(_, step)| step.label.clone().into())
-            .collect();
-        let answer: SharedString = self
-            .runs
-            .shown()
-            .map_or_else(Default::default, |shown| answer_tail(&shown.text).into());
-        let deleting = self.runs.shown().is_some_and(|shown| {
-            shown
-                .thread
-                .is_some_and(|thread| self.runs.deleting().contains(&thread))
-        });
-        let threads = self.threads.read(cx);
-        let strings = cx.global::<Strings>();
-        let label = match self.runs.target() {
-            Target::Kumo => None,
-            Target::Task(thread) => Some(threads.row(thread).map_or_else(
-                || strings.get(Text::TaskFallback),
-                |row| row_label(row, threads.settings.as_ref()),
-            )),
-            Target::New => Some(strings.get(Text::NewThread)),
-        };
-        let context = label.map(|label| {
-            let back_label = strings.back_to_kumo(
-                threads
-                    .settings
-                    .as_ref()
-                    .map_or(constants::DEFAULT_ASSISTANT_NAME, |settings| {
-                        settings.assistant_name.as_str()
-                    }),
-            );
-            (strings.focus(&label).into(), back_label.into())
-        });
-        let conversation = Conversation {
-            steps,
-            answer,
-            deleting,
-            context,
-        };
+        let answer = self.runs.shown();
+        let target = self.runs.target();
         text.view.update(cx, |view, cx| {
-            if view.conversation.update(conversation) {
+            view.messages
+                .update(cx, |messages, cx| messages.live(answer, cx));
+            if view.target != target {
+                view.target = target;
                 cx.notify();
             }
         });
     }
 }
 
-#[derive(Default, PartialEq, Eq)]
-struct Conversation {
-    steps: Vec<SharedString>,
-    answer: SharedString,
-    deleting: bool,
-    context: Option<(SharedString, SharedString)>,
-}
-
-impl Conversation {
-    fn update(&mut self, next: Self) -> bool {
-        if *self == next {
-            return false;
-        }
-        *self = next;
-        true
-    }
-}
-
-/// The anchored typing surface: the newest run's placeholder steps and the end of its answer,
-/// one focused input, and why a turn wasn't sent.
+/// Focused history, a bounded live preview and the retained composer.
 pub(super) struct TextView {
     pub(super) input: Entity<InputState>,
     /// The Stop fallback, here too because this panel covers the status panel's.
     pub(super) stop: bool,
-    conversation: Conversation,
+    model: Entity<Threads>,
+    messages: Entity<Messages>,
+    target: Target,
+    _watch: gpui_kit::Subscription,
     /// Pushed by presence, never read from it: the first frame renders while presence is updating.
     notice: Option<SharedString>,
     owner: WeakEntity<Presence>,
@@ -431,6 +416,156 @@ pub(super) struct TextView {
 }
 
 impl TextView {
+    fn new(
+        model: Entity<Threads>,
+        owner: WeakEntity<Presence>,
+        events: Sender<PresenceEvent>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
+        let input = cx.new(|cx| InputState::new(window, cx));
+        cx.bind_keys([gpui_kit::KeyBinding::new(
+            "escape",
+            EscapeKey,
+            Some("ChatPanel"),
+        )]);
+        let messages = cx.new(|cx| Messages::new(model.clone(), owner.clone(), window, cx));
+        let watch = cx.observe(&model, |_, _, cx| cx.notify());
+        Self {
+            input,
+            model,
+            messages,
+            target: Target::Kumo,
+            stop: false,
+            notice: None,
+            owner,
+            events,
+            _watch: watch,
+        }
+    }
+
+    fn context(&self, cx: &gpui_kit::App) -> (SharedString, Option<SharedString>) {
+        let state = self.model.read(cx);
+        let strings = cx.global::<Strings>();
+        let name = state
+            .settings
+            .as_ref()
+            .map_or(constants::DEFAULT_ASSISTANT_NAME, |settings| {
+                settings.assistant_name.as_str()
+            });
+        let label = match self.target {
+            Target::Kumo => return (strings.assistant(name).into(), None),
+            Target::Task(thread) => state.row(thread).map_or_else(
+                || strings.get(Text::TaskFallback),
+                |row| row_label(row, state.settings.as_ref()),
+            ),
+            Target::New => strings.get(Text::NewThread),
+        };
+        (
+            strings.focus(&label).into(),
+            Some(strings.back_to_kumo(name).into()),
+        )
+    }
+
+    fn header(&self, cx: &Context<'_, Self>) -> gpui_kit::AnyElement {
+        let (context, back_label) = self.context(cx);
+        let back_owner = self.owner.clone();
+        let tasks_owner = self.owner.clone();
+        div()
+            .p_3()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .min_w_0()
+                    .max_w_full()
+                    .truncate()
+                    .text_sm()
+                    .child(context),
+            )
+            .children(back_label.map(|back_label| {
+                Button::new("back-to-kumo")
+                    .label(back_label)
+                    .on_click(move |_, _, cx| {
+                        let _gone = back_owner.update(cx, Presence::back_to_kumo);
+                    })
+            }))
+            .child(
+                Button::new("chat-tasks")
+                    .label(cx.global::<Strings>().get(Text::OpenThreads))
+                    .on_click(move |_, _, cx| {
+                        if let Ok(Err(_)) = tasks_owner.update(cx, Presence::open_threads) {
+                            tracing::warn!("can't open tasks from chat");
+                        }
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn history_controls(&self, cx: &Context<'_, Self>) -> gpui_kit::AnyElement {
+        let state = self.model.read(cx);
+        let failed = state.failed;
+        let more = state.before.is_some();
+        let reading = state.reading();
+        let online = state.online();
+        let retry_owner = self.owner.clone();
+        let older_owner = self.owner.clone();
+        let model = self.model.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .children(failed.then(|| {
+                div()
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .child(cx.global::<Strings>().get(Text::ChatHistoryFailed)),
+                    )
+                    .child(
+                        div().debug_selector(|| "chat-retry-control".into()).child(
+                            Button::new("chat-history-retry")
+                                .label(cx.global::<Strings>().get(Text::Retry))
+                                .disabled(!online || reading)
+                                .on_click(move |_, _, cx| {
+                                    let _gone = retry_owner.update(cx, |owner, cx| {
+                                        owner.chat.update(cx, |state, cx| {
+                                            state.refresh();
+                                            if let Some(thread) = state.open {
+                                                state.run_state(thread);
+                                            }
+                                            cx.notify();
+                                        });
+                                        owner.request_pages(cx);
+                                    });
+                                }),
+                        ),
+                    )
+            }))
+            .children(
+                more.then(|| {
+                    div().px_3().child(
+                        Button::new("chat-older-messages")
+                            .label(cx.global::<Strings>().get(Text::OlderMessages))
+                            .disabled(!online || reading)
+                            .on_click(move |_, _, cx| {
+                                super::messages::older(&model, &older_owner, cx);
+                            }),
+                    )
+                })
+                .map(|control| control.debug_selector(|| "chat-older-control".into())),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn restore(
         &self,
         text: kumochi_protocol::message::Content,
@@ -449,31 +584,25 @@ impl Render for TextView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let events = self.events.clone();
         let notice = self.notice.clone();
-        let context = self.conversation.context.clone();
-        let back_owner = self.owner.clone();
         let stop = self.stop.then(|| {
             let events = self.events.clone();
             Button::new("stop")
                 .label(cx.global::<Strings>().get(Text::Stop))
                 .on_click(move |_, _, _| send(&events, PresenceEvent::Escape))
         });
-        let steps = (!self.conversation.steps.is_empty()).then(|| {
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_1()
-                .children(self.conversation.steps.iter().map(|label| {
-                    div()
-                        .px_1()
-                        .rounded_sm()
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .child(label.clone())
-                }))
+        let failed = self.model.read(cx).failed;
+        let empty = self.messages.read(cx).is_empty().then(|| {
+            let state = self.model.read(cx);
+            cx.global::<Strings>().get(if !state.online() {
+                Text::ThreadsOffline
+            } else if state.reading() && !state.loaded {
+                Text::ChatLoading
+            } else {
+                Text::ChatEmpty
+            })
         });
         div()
             .size_full()
-            .p_3()
             .rounded_lg()
             .border_1()
             .border_color(cx.theme().border)
@@ -481,51 +610,44 @@ impl Render for TextView {
             .text_color(cx.theme().popover_foreground)
             .flex()
             .flex_col()
-            .gap_2()
+            .key_context("ChatPanel")
             .on_action(move |_: &EscapeKey, _, _| send(&events, PresenceEvent::Escape))
-            .children(context.map(|(context, back_label)| {
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(div().text_xs().child(context))
-                    .child(Button::new("back-to-kumo").label(back_label).on_click(
-                        move |_, _, cx| {
-                            let _gone = back_owner.update(cx, Presence::back_to_kumo);
-                        },
-                    ))
-            }))
+            .child(self.header(cx))
             .child(
                 div()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_hidden()
+                    .p_3()
                     .flex()
                     .flex_col()
-                    .justify_end()
-                    .gap_1()
-                    .text_xs()
-                    .text_color(if self.conversation.deleting {
-                        cx.theme().muted_foreground
-                    } else {
-                        cx.theme().popover_foreground
-                    })
-                    .children(steps)
-                    .child(self.conversation.answer.clone()),
+                    .gap_2()
+                    .children(notice.map(|notice| {
+                        div()
+                            .debug_selector(|| format!("typing-notice {notice}"))
+                            .text_sm()
+                            .child(notice)
+                    }))
+                    .child(Input::new(&self.input))
+                    .children(stop),
             )
-            .children(self.conversation.deleting.then(|| {
+            .child(self.history_controls(cx))
+            .child(
                 div()
-                    .text_xs()
-                    .child(cx.global::<Strings>().get(Text::ThreadDeleting))
-            }))
-            .children(notice.map(|notice| {
-                div()
-                    .debug_selector(|| format!("typing-notice {notice}"))
-                    .text_xs()
-                    .child(notice)
-            }))
-            .child(Input::new(&self.input))
-            .children(stop)
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.messages.clone())
+                    .children(empty.filter(|_| !failed).map(|empty| {
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .p_3()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(empty)
+                    })),
+            )
     }
 }
 
@@ -557,25 +679,14 @@ fn typing_notice(
         .or_else(|| error.cloned())
 }
 
-/// The end of an answer the typing panel has room for [guess], cut at a character boundary.
-fn answer_tail(text: &str) -> &str {
-    const SHOWN: usize = 280;
-    let mut start = text.len().saturating_sub(SHOWN);
-    while !text.is_char_boundary(start) {
-        start += 1;
-    }
-    &text[start..]
-}
-
 #[cfg(test)]
 mod tests {
-    use gpui_kit::component::input::InputState;
     use gpui_kit::{
         AnyWindowHandle, AppContext as _, Entity, SharedString, TestAppContext, VisualTestContext,
         WeakEntity, WindowOptions,
     };
 
-    use super::{Conversation, Hide, TextView, Typing, answer_tail};
+    use super::{Hide, TextView, Typing};
     use crate::strings::Strings;
 
     /// The typing panel as the shell opens it, with a pushed notice and no readable presence.
@@ -588,14 +699,12 @@ mod tests {
             cx.set_global(Strings::english());
             let (events, _) = async_channel::unbounded();
             gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
-                let input = cx.new(|cx| InputState::new(window, cx));
-                cx.new(|_| TextView {
-                    input,
-                    stop: false,
-                    conversation: Conversation::default(),
-                    notice: notice.map(SharedString::from),
-                    owner: WeakEntity::new_invalid(),
-                    events,
+                let model = cx.new(|_| crate::threads::Threads::chat());
+                cx.new(|cx| {
+                    let mut view =
+                        TextView::new(model, WeakEntity::new_invalid(), events, window, cx);
+                    view.notice = notice.map(SharedString::from);
+                    view
                 })
             })
             .expect("a window")
@@ -604,6 +713,146 @@ mod tests {
 
     const OFFLINE: &str = "typing-notice Kumo can't reach the brain.";
     const TOO_LONG: &str = "typing-notice That turn is too long.";
+
+    #[gpui::test]
+    fn history_controls_dispatch_the_focused_reader_without_touching_the_draft(
+        cx: &mut TestAppContext,
+    ) {
+        use kumochi_protocol::message::{
+            DataToBrain, DataToShell, EventId, Incarnation, PageOf, ThreadId,
+        };
+        for retry in [false, true] {
+            let owner = crate::presence::test_fixture::presence(cx);
+            let (window, view) = owner.update(cx, |owner, cx| {
+                owner.session = Some(crate::link::Session::detached(1, Incarnation(1)));
+                owner.chat.update(cx, |state, cx| {
+                    state.connected();
+                    state.show_for(Some(ThreadId(3)));
+                    for request in state.requests() {
+                        let DataToBrain::PageRequest { request, page } = request else {
+                            panic!("page request");
+                        };
+                        state.apply(match page {
+                            PageOf::Threads { .. } => DataToShell::ThreadList {
+                                request,
+                                threads: Vec::new(),
+                                next: None,
+                            },
+                            PageOf::Events { .. } => DataToShell::Page {
+                                request,
+                                thread: ThreadId(3),
+                                events: Vec::new(),
+                                before: (!retry).then_some(EventId(1)),
+                            },
+                        });
+                    }
+                    state.failed = retry;
+                    cx.notify();
+                });
+                let text = owner.text.as_ref().expect("typing fixture");
+                (text.window, text.view.clone())
+            });
+            window
+                .update(cx, |_, window, cx| {
+                    view.update(cx, |view, cx| {
+                        view.input.update(cx, |input, cx| {
+                            input.set_value("keep this draft", window, cx);
+                        });
+                    });
+                })
+                .expect("typing window");
+            cx.run_until_parked();
+            owner.read_with(cx, |owner, cx| assert!(owner.chat.read(cx).online()));
+            {
+                let mut frame = VisualTestContext::from_window(window, cx);
+                let bounds = frame
+                    .debug_bounds(if retry {
+                        "chat-retry-control"
+                    } else {
+                        "chat-older-control"
+                    })
+                    .expect("history action");
+                frame.simulate_click(
+                    gpui_kit::point(bounds.left() + gpui_kit::px(20.0), bounds.center().y),
+                    gpui_kit::Modifiers::default(),
+                );
+            }
+            cx.run_until_parked();
+            owner.read_with(cx, |owner, cx| {
+                assert!(
+                    !owner.chat.read(cx).online(),
+                    "the real request reached the refusing fixture link"
+                );
+                assert_eq!(owner.chat.read(cx).open, Some(ThreadId(3)));
+            });
+            view.read_with(cx, |view, cx| {
+                assert_eq!(view.input.read(cx).value().as_ref(), "keep this draft");
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn escape_from_input_messages_and_navigation_preserves_the_draft(cx: &mut TestAppContext) {
+        let (window, view) = open(cx, None);
+        let (events, received) = async_channel::unbounded();
+        view.update(cx, |view, cx| {
+            view.events = events;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |view, cx| {
+                    view.input.update(cx, |input, cx| {
+                        input.set_value("retained draft", window, cx);
+                        input.focus(window, cx);
+                    });
+                });
+                let _arena = window.draw(cx);
+            })
+            .expect("chat window");
+        let input_focus = window
+            .update(cx, |_, window, cx| window.focused(cx).expect("input focus"))
+            .expect("chat window");
+        let press_escape = |cx: &mut TestAppContext| {
+            cx.simulate_keystrokes(window, "escape");
+            assert!(matches!(
+                received.try_recv(),
+                Ok(super::PresenceEvent::Escape)
+            ));
+            assert!(matches!(
+                received.try_recv(),
+                Err(async_channel::TryRecvError::Empty)
+            ));
+            view.read_with(cx, |view, cx| {
+                assert_eq!(view.input.read(cx).value().as_ref(), "retained draft");
+            });
+        };
+        press_escape(cx);
+        {
+            let mut frame = VisualTestContext::from_window(window, cx);
+            let bounds = frame
+                .debug_bounds("chat-message-region")
+                .expect("message region");
+            frame.simulate_click(bounds.center(), gpui_kit::Modifiers::default());
+        }
+        let messages_focus = window
+            .update(cx, |_, window, cx| {
+                window.focused(cx).expect("message focus")
+            })
+            .expect("chat window");
+        assert_ne!(messages_focus, input_focus);
+        press_escape(cx);
+        cx.simulate_keystrokes(window, "shift-tab shift-tab");
+        let navigation_focus = window
+            .update(cx, |_, window, cx| {
+                window.focused(cx).expect("navigation focus")
+            })
+            .expect("chat window");
+        assert_ne!(navigation_focus, input_focus);
+        assert_ne!(navigation_focus, messages_focus);
+        press_escape(cx);
+    }
 
     /// Which of the two notices the window's latest frame drew.
     fn drawn(cx: &mut TestAppContext, window: AnyWindowHandle) -> [bool; 2] {
@@ -719,68 +968,6 @@ mod tests {
             super::typing_notice(error.as_ref(), refusal, &strings).as_deref(),
             Some("Not sent: the background process isn't connected.")
         );
-    }
-
-    #[test]
-    fn only_a_changed_conversation_requests_a_redraw() {
-        use super::Conversation;
-        let mut conversation = Conversation::default();
-        assert!(!conversation.update(Conversation::default()));
-        assert!(conversation.update(Conversation {
-            answer: "hello".into(),
-            ..Conversation::default()
-        }));
-        assert_eq!(conversation.answer.as_ref(), "hello");
-        assert!(!conversation.update(Conversation {
-            answer: "hello".into(),
-            ..Conversation::default()
-        }));
-        assert!(conversation.update(Conversation {
-            answer: "hello!".into(),
-            ..Conversation::default()
-        }));
-        assert_eq!(conversation.answer.as_ref(), "hello!");
-        assert!(conversation.update(Conversation {
-            steps: vec!["step".into()],
-            answer: "hello!".into(),
-            deleting: true,
-            context: Some(("You're in: Draft".into(), "Back to Kumo".into()))
-        }));
-        assert_eq!(
-            conversation.steps.as_slice(),
-            &[gpui_kit::SharedString::from("step")]
-        );
-        assert!(conversation.deleting);
-        assert_eq!(
-            conversation
-                .context
-                .as_ref()
-                .map(|(label, back)| (label.as_ref(), back.as_ref())),
-            Some(("You're in: Draft", "Back to Kumo"))
-        );
-        assert!(!conversation.update(Conversation {
-            steps: vec!["step".into()],
-            answer: "hello!".into(),
-            deleting: true,
-            context: Some(("You're in: Draft".into(), "Back to Kumo".into()))
-        }));
-    }
-
-    #[test]
-    fn a_short_answer_shows_whole() {
-        assert_eq!(answer_tail("hi"), "hi");
-    }
-
-    #[test]
-    fn a_long_answer_shows_its_last_280_bytes() {
-        let text = format!("{}end", "a".repeat(300));
-        assert_eq!(answer_tail(&text), format!("{}end", "a".repeat(277)));
-    }
-
-    #[test]
-    fn a_long_answer_is_cut_after_a_character_split_by_the_limit() {
-        let text = format!("{}!", "é".repeat(141));
-        assert_eq!(answer_tail(&text), format!("{}!", "é".repeat(139)));
     }
 
     #[test]

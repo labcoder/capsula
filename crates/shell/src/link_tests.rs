@@ -1127,6 +1127,8 @@ fn a_delete_counts_the_turns_queued_before_it_and_runs_settle_the_brain_s_answer
             run: RunId(1),
             thread: Some(u),
             text: "a".to_owned(),
+            cut: false,
+            done: true,
         })
     );
     session.grant(bytes);
@@ -1254,6 +1256,8 @@ fn a_delete_answered_before_a_new_brain_never_fences_the_new_brain_s_runs() {
             run: RunId(4),
             thread: Some(u),
             text: "b".to_owned(),
+            cut: false,
+            done: false,
         })
     );
     drop(b_control);

@@ -2,6 +2,112 @@ use super::*;
 use kumochi_protocol::message::{PageEventKind, RunId, ThreadKind};
 
 #[test]
+fn only_a_repair_issued_after_committed_done_proves_the_stored_answer() {
+    let mut state = Threads::chat();
+    state.connected();
+    state.show_for(Some(ThreadId(3)));
+    let first = state.requests();
+    state.settled(ThreadId(3), RunId(1));
+    state.run_state(ThreadId(3));
+    state.apply(DataToShell::Page {
+        request: request_id(&first[1]),
+        thread: ThreadId(3),
+        events: vec![event(1)],
+        before: None,
+    });
+    assert_eq!(state.proven, None, "the request preceded Done");
+    let repair = state.requests();
+    assert_eq!(repair.len(), 1);
+    let mut early = event(2);
+    early.kind = PageEventKind::AssistantText;
+    early.text = "early round".into();
+    let mut late = event(3);
+    late.kind = PageEventKind::AssistantText;
+    late.text = "late round".into();
+    let stored = vec![late, early, event(1)];
+    state.apply(DataToShell::Page {
+        request: request_id(&repair[0]),
+        thread: ThreadId(3),
+        events: stored.clone(),
+        before: None,
+    });
+    assert_eq!(state.proven, Some(RunId(1)));
+    assert_eq!(state.events, stored);
+    state.run_state(ThreadId(3));
+    let next = state.requests();
+    state.apply(DataToShell::Page {
+        request: request_id(&next[0]),
+        thread: ThreadId(3),
+        events: stored.clone(),
+        before: None,
+    });
+    assert_eq!(
+        state.events, stored,
+        "distinct rows survive another repair exactly once"
+    );
+    assert_eq!(state.proven, Some(RunId(1)));
+}
+
+#[test]
+fn an_older_page_cannot_replace_a_failed_post_done_repair_as_proof() {
+    let mut state = Threads::chat();
+    state.connected();
+    state.show_for(Some(ThreadId(3)));
+    let first = state.requests();
+    state.apply(DataToShell::Page {
+        request: request_id(&first[1]),
+        thread: ThreadId(3),
+        events: vec![event(8)],
+        before: Some(EventId(8)),
+    });
+    state.settled(ThreadId(3), RunId(1));
+    state.run_state(ThreadId(3));
+    let repair = state.requests();
+    state.apply(DataToShell::PageFailed {
+        request: request_id(&repair[0]),
+    });
+    state.older_events();
+    let older = state.requests();
+    state.apply(DataToShell::Page {
+        request: request_id(&older[0]),
+        thread: ThreadId(3),
+        events: vec![event(7)],
+        before: None,
+    });
+    assert_eq!(state.proven, None);
+    assert_eq!(state.events, [event(8), event(7)]);
+}
+
+#[test]
+fn selection_and_connection_lifetimes_fence_stored_answer_proof() {
+    let mut state = Threads::chat();
+    state.connected();
+    state.show_for(Some(ThreadId(3)));
+    state.settled(ThreadId(3), RunId(1));
+    let first = state.requests();
+    state.select(Some(ThreadId(4)));
+    state.apply(DataToShell::Page {
+        request: request_id(&first[1]),
+        thread: ThreadId(3),
+        events: vec![event(1)],
+        before: None,
+    });
+    assert_eq!(state.proven, None);
+    assert_eq!(state.events, []);
+    state.settled(ThreadId(3), RunId(2));
+    assert_eq!(
+        state.settled, None,
+        "another thread cannot mark this selection committed"
+    );
+    state.settled(ThreadId(4), RunId(2));
+    state.proven = Some(RunId(2));
+    state.disconnected();
+    assert_eq!((state.settled, state.proven), (None, None));
+    state.connected();
+    assert_eq!((state.settled, state.proven), (None, None));
+}
+
+#[test]
 fn chat_follows_the_input_target_not_the_browsed_task() {
     let mut runs = crate::runs::Runs::default();
     runs.settings(ThreadId(1));

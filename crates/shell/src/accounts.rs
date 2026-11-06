@@ -122,19 +122,7 @@ impl Accounts {
                 AccountOp::Retry,
             ) => true,
             (Some(AccountView::SignedIn { plan, recovery, .. }), op) => match op {
-                AccountOp::SignIn => {
-                    *recovery == Some(AccountRecovery::SignInAgain)
-                        || self.error_action(Action::SignIn)
-                            && self.error.as_ref().is_some_and(|error| {
-                                matches!(
-                                    error.key(),
-                                    ErrorKey::AccountRefused
-                                        | ErrorKey::SignInNeeded
-                                        | ErrorKey::SessionEnded
-                                        | ErrorKey::RenewalUnconfirmed
-                                )
-                            })
-                }
+                AccountOp::SignIn => self.sign_in_again(),
                 AccountOp::EnablePlan => recovery.is_none() && *plan == PlanState::Declined,
                 AccountOp::Retry => {
                     *recovery == Some(AccountRecovery::Retry) || self.error_action(Action::Retry)
@@ -146,6 +134,26 @@ impl Accounts {
             }
             _ => false,
         }
+    }
+
+    pub(crate) fn sign_in_again(&self) -> bool {
+        matches!(
+            self.view,
+            Some(AccountView::SignedIn {
+                recovery: Some(AccountRecovery::SignInAgain),
+                ..
+            })
+        ) || matches!(self.view, Some(AccountView::SignedIn { .. }))
+            && self.error_action(Action::SignIn)
+            && self.error.as_ref().is_some_and(|error| {
+                matches!(
+                    error.key(),
+                    ErrorKey::AccountRefused
+                        | ErrorKey::SignInNeeded
+                        | ErrorKey::SessionEnded
+                        | ErrorKey::RenewalUnconfirmed
+                )
+            })
     }
 
     fn error_action(&self, action: Action) -> bool {

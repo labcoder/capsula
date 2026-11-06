@@ -387,6 +387,10 @@ impl PresenceNative {
     /// # Errors
     /// Fails when another app, or this one, already holds Esc.
     pub(crate) fn register_escape(&self) -> Result<EscapeHotkey, PresenceError> {
+        #[cfg(test)]
+        if self.hwnd.is_invalid() {
+            return Err(PresenceError::NotWin32);
+        }
         EscapeHotkey::register(self.hwnd)
     }
 
@@ -422,6 +426,42 @@ impl PresenceNative {
 
     fn class(&self) -> PCWSTR {
         PCWSTR(std::ptr::without_provenance(usize::from(self.atom)))
+    }
+}
+
+#[cfg(test)]
+impl PresenceNative {
+    /// The owner's state with no window, tray icon, keyboard hook, hotkey or taskbar button:
+    /// only the mask's 1x1 memory DC, so presence's glue runs headless in GPUI tests. Nothing
+    /// that needs the proxy window may be called on it.
+    ///
+    /// # Errors
+    /// Fails when Windows refuses the mask's memory DC.
+    pub(crate) fn detached(
+        labels: PresenceLabels,
+        events: Sender<PresenceEvent>,
+    ) -> Result<Self, PresenceError> {
+        let mask = HitMask::new([1, 1])?;
+        let state = Rc::new(ProxyState {
+            labels,
+            keys: Keys::default(),
+            hover: Hover::new(events.clone()),
+            icon: HICON::default(),
+            taskbar_created: 0,
+            position: Cell::new(1),
+            retry_enabled: Cell::new(false),
+            observe: OnceCell::new(),
+        });
+        Ok(Self {
+            taskbar: super::taskbar::TaskbarButton::new(events),
+            instance: HINSTANCE::default(),
+            atom: 0,
+            hwnd: HWND::default(),
+            mask,
+            tray: false,
+            keyboard: false,
+            state: Rc::into_raw(state),
+        })
     }
 }
 

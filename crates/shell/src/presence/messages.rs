@@ -1,15 +1,17 @@
 //! The retained, virtualized conversation shared by the task and chat surfaces.
 
-use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::scroll::Scrollbar;
+use gpui_kit::component::{ActiveTheme as _, ThemeStyled as _};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement, KeyBinding,
     ListAlignment, ListState as MessageList, ParentElement as _, Pixels, Render, Styled as _,
     Subscription, WeakEntity, Window, div, list, px,
 };
-use kumochi_protocol::message::{EventId, PageEventKind, ThreadId};
+use kumochi_protocol::message::{EventId, PageEventKind, RunId, ThreadId};
 
 use super::Presence;
+use crate::runs::Shown;
 use crate::strings::{Strings, Text};
 use crate::threads::Threads;
 
@@ -23,10 +25,16 @@ pub(super) struct Messages {
     newest: Option<EventId>,
     count: usize,
     rem: Pixels,
+    live: Option<Shown>,
+    live_row: Option<RunId>,
+    proven: Option<RunId>,
     _watch: Subscription,
 }
 
 impl Messages {
+    pub(super) fn is_empty(&self) -> bool {
+        self.count == 0
+    }
     pub(super) fn new(
         model: Entity<Threads>,
         owner: WeakEntity<Presence>,
@@ -50,20 +58,7 @@ impl Messages {
                 }
             }
         });
-        let watch = cx.observe(&model, |view, _, cx| {
-            let state = view.model.read(cx);
-            let count = state.events.len();
-            let newest = state.events.first().map(|event| event.id);
-            if view.shown_thread == state.open && view.newest == newest && count >= view.count {
-                view.list.splice(0..0, count - view.count);
-            } else {
-                view.list.reset(count);
-            }
-            view.shown_thread = state.open;
-            view.newest = newest;
-            view.count = count;
-            cx.notify();
-        });
+        let watch = cx.observe(&model, |view, _, cx| view.sync(cx));
         Self {
             model,
             list: messages,
@@ -72,8 +67,53 @@ impl Messages {
             newest,
             count,
             rem: window.rem_size(),
+            live: None,
+            live_row: None,
+            proven: None,
             _watch: watch,
         }
+    }
+
+    pub(super) fn live(&mut self, answer: Option<&Shown>, cx: &mut Context<'_, Self>) {
+        if self.live.as_ref() != answer {
+            self.live = answer.cloned();
+            self.sync(cx);
+            if self.live_row.is_some() {
+                self.list.remeasure_items(self.count - 1..self.count);
+            }
+        }
+    }
+
+    fn sync(&mut self, cx: &mut Context<'_, Self>) {
+        let state = self.model.read(cx);
+        let live = self
+            .live
+            .as_ref()
+            .filter(|live| {
+                live.thread.is_some()
+                    && live.thread == state.open
+                    && Some(live.run) != state.proven
+                    && !live.text.is_empty()
+            })
+            .map(|live| live.run);
+        let count = state.events.len() + usize::from(live.is_some());
+        let newest = state.events.first().map(|event| event.id);
+        if self.shown_thread == state.open
+            && self.newest == newest
+            && self.proven == state.proven
+            && self.live_row == live
+            && count >= self.count
+        {
+            self.list.splice(0..0, count - self.count);
+        } else {
+            self.list.reset(count);
+        }
+        self.shown_thread = state.open;
+        self.newest = newest;
+        self.count = count;
+        self.live_row = live;
+        self.proven = state.proven;
+        cx.notify();
     }
 }
 
@@ -95,59 +135,33 @@ impl Render for Messages {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         if self.rem != window.rem_size() {
             self.rem = window.rem_size();
-            self.list.splice(0..self.count, self.count);
+            self.list.remeasure();
         }
         let model = self.model.clone();
+        let live = self.live.clone();
+        let live_row = self.live_row;
         let messages = list(self.list.clone(), move |ix, _, cx| {
             let state = model.read(cx);
-            let Some(event) = state.events.iter().rev().nth(ix) else {
-                return div().into_any_element();
-            };
-            let strings = cx.global::<Strings>();
-            let label = match event.kind {
-                PageEventKind::User => Some(strings.get(Text::ThreadUser)),
-                PageEventKind::AssistantText => {
-                    Some(strings.assistant(state.settings.as_ref().map_or(
-                        kumochi_protocol::constants::DEFAULT_ASSISTANT_NAME,
-                        |settings| settings.assistant_name.as_str(),
-                    )))
-                }
-                PageEventKind::SceneStep => Some(strings.get(Text::ThreadStep)),
-                PageEventKind::Issue { .. } => None,
-            };
-            let text = if label.is_some() {
-                event.text.clone()
-            } else {
-                strings.issue_draft(&event.text)
-            };
-            div()
-                .id(("event", event.id.0))
-                .w_full()
-                .p_3()
-                .border_b_1()
-                .border_color(cx.theme().border)
-                .children(label.map(|label| {
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(label)
-                }))
-                .child(div().text_sm().child(text))
-                .children(event.cut.then(|| {
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(cx.global::<Strings>().get(Text::ThreadCut))
-                }))
-                .into_any_element()
+            message(
+                ix,
+                state,
+                live.as_ref().filter(|live| Some(live.run) == live_row),
+                cx,
+            )
         })
         .size_full();
         div()
             .id("thread-messages")
+            .debug_selector(|| "chat-message-region".into())
             .relative()
+            .mx_1()
+            .my_1()
             .flex_1()
             .min_h_0()
             .track_focus(&self.focus)
+            .when(self.focus.is_focused(window), |this| {
+                this.focus_ring_style(window, cx)
+            })
             .key_context("ThreadMessages")
             .on_mouse_down(
                 gpui_kit::MouseButton::Left,
@@ -156,8 +170,10 @@ impl Render for Messages {
                 }),
             )
             .on_action(cx.listener(|view, _: &EarlierMessages, _, cx| {
-                view.list
-                    .scroll_by(-view.list.viewport_bounds().size.height * 0.9);
+                let height = view.list.viewport_bounds().size.height;
+                let bottom = view.list.logical_scroll_top().item_ix == view.list.item_count();
+                let end_anchor = if bottom { height } else { px(0.0) };
+                view.list.scroll_by(-height * 0.9 - end_anchor);
                 cx.notify();
             }))
             .on_action(cx.listener(|view, _: &LaterMessages, _, cx| {
@@ -168,6 +184,77 @@ impl Render for Messages {
             .child(messages)
             .child(Scrollbar::vertical(&self.list))
     }
+}
+
+fn message(ix: usize, state: &Threads, live: Option<&Shown>, cx: &App) -> gpui_kit::AnyElement {
+    let (id, kind, text, cut) = if ix == state.events.len() {
+        let Some(live) = live else {
+            return div().into_any_element();
+        };
+        (
+            ("live", live.run.0),
+            PageEventKind::AssistantText,
+            live.text.clone(),
+            live.cut,
+        )
+    } else {
+        let Some(event) = state.events.iter().rev().nth(ix) else {
+            return div().into_any_element();
+        };
+        if event.kind == PageEventKind::AssistantText
+            && event.run.is_some()
+            && event.run == live.map(|live| live.run)
+        {
+            return div().into_any_element();
+        }
+        (
+            ("event", event.id.0),
+            event.kind,
+            event.text.clone(),
+            event.cut,
+        )
+    };
+    let strings = cx.global::<Strings>();
+    let label = match kind {
+        PageEventKind::User => Some(strings.get(Text::ThreadUser)),
+        PageEventKind::AssistantText => Some(strings.assistant(state.settings.as_ref().map_or(
+            kumochi_protocol::constants::DEFAULT_ASSISTANT_NAME,
+            |settings| settings.assistant_name.as_str(),
+        ))),
+        PageEventKind::SceneStep => Some(strings.get(Text::ThreadStep)),
+        PageEventKind::Issue { .. } => None,
+    };
+    let text = if label.is_some() {
+        text
+    } else {
+        strings.issue_draft(&text)
+    };
+    div()
+        .id(id)
+        .debug_selector(move || format!("message-{}-{}", id.0, id.1))
+        .w_full()
+        .p_3()
+        .px_2()
+        .border_b_1()
+        .border_color(cx.theme().border)
+        .children(label.map(|label| {
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(label)
+        }))
+        .child(div().text_sm().child(text))
+        .children(cut.then(|| {
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(cx.global::<Strings>().get(if id.0 == "live" {
+                    Text::ChatLiveCut
+                } else {
+                    Text::ThreadCut
+                }))
+        }))
+        .into_any_element()
 }
 
 #[cfg(test)]
@@ -195,6 +282,226 @@ mod tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> impl IntoElement {
             div().size_full().flex().flex_col().child(self.0.clone())
         }
+    }
+
+    fn open(
+        cx: &mut TestAppContext,
+    ) -> (Entity<Threads>, Entity<Messages>, gpui_kit::AnyWindowHandle) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_global(Strings::english());
+            let model = cx.new(|_| {
+                let mut state = Threads::chat();
+                state.open = Some(ThreadId(1));
+                state
+            });
+            let mut view = None;
+            let (window, _) = gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        point(px(0.0), px(0.0)),
+                        size(px(600.0), px(800.0)),
+                    ))),
+                    ..WindowOptions::default()
+                },
+                cx,
+                |window, cx| {
+                    let messages = cx.new(|cx| {
+                        Messages::new(model.clone(), WeakEntity::new_invalid(), window, cx)
+                    });
+                    view = Some(messages.clone());
+                    cx.new(|_| Frame(messages))
+                },
+            )
+            .expect("window");
+            (model, view.expect("messages"), window)
+        })
+    }
+
+    #[gpui::test]
+    fn page_keys_scroll_the_focused_message_region(cx: &mut TestAppContext) {
+        let (model, view, window) = open(cx);
+        model.update(cx, |state, cx| {
+            state.events = (1..=50).rev().map(event).collect();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        {
+            let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+            assert!(frame.debug_bounds("message-event-50").is_some());
+        }
+        let before = view.update(cx, |view, _| view.list.logical_scroll_top());
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |view, cx| {
+                    view.focus.focus(window, cx);
+                    assert!(view.focus.is_focused(window));
+                });
+                let _arena = window.draw(cx);
+                assert!(window.is_action_available(&EarlierMessages, cx));
+                assert!(window.dispatch_keystroke(
+                    gpui_kit::Keystroke::parse("pageup").expect("page up"),
+                    cx
+                ));
+                view.read_with(cx, |view, _| {
+                    assert!(
+                        view.list.logical_scroll_top().item_ix < before.item_ix,
+                        "immediate offset: {:?}",
+                        view.list.logical_scroll_top()
+                    );
+                });
+            })
+            .expect("message window");
+        cx.run_until_parked();
+        {
+            let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+            assert!(frame.debug_bounds("chat-message-region").is_some());
+        }
+        view.update(cx, |view, _| {
+            assert!(
+                view.list.logical_scroll_top().item_ix < before.item_ix,
+                "before={before:?} after={:?} viewport={:?}",
+                view.list.logical_scroll_top(),
+                view.list.viewport_bounds()
+            );
+        });
+        window
+            .update(cx, |_, window, cx| {
+                window.dispatch_keystroke(
+                    gpui_kit::Keystroke::parse("pagedown").expect("page down"),
+                    cx,
+                );
+            })
+            .expect("message window");
+        cx.run_until_parked();
+        view.update(cx, |view, _| {
+            assert_eq!(view.list.logical_scroll_top().item_ix, before.item_ix);
+        });
+    }
+
+    #[gpui::test]
+    fn live_preview_survives_partial_history_then_yields_to_every_distinct_stored_row(
+        cx: &mut TestAppContext,
+    ) {
+        let (model, view, window) = open(cx);
+        let mut user = event(1);
+        user.kind = PageEventKind::User;
+        let mut step = event(3);
+        step.kind = PageEventKind::SceneStep;
+        model.update(cx, |state, cx| {
+            state.events = vec![step.clone(), event(2), user.clone()];
+            cx.notify();
+        });
+        let mut answer = Shown {
+            run: RunId(1),
+            thread: Some(ThreadId(1)),
+            text: "before after".into(),
+            cut: true,
+            done: false,
+        };
+        view.update(cx, |view, cx| view.live(Some(&answer), cx));
+        cx.run_until_parked();
+        {
+            let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+            for (id, visible) in [
+                ("message-event-1", true),
+                ("message-event-2", false),
+                ("message-event-3", true),
+                ("message-live-1", true),
+            ] {
+                assert_eq!(frame.debug_bounds(id).is_some(), visible, "{id}");
+            }
+        }
+        model.update(cx, |state, cx| {
+            state.events = vec![event(4), step, event(2), user];
+            state.proven = Some(RunId(1));
+            cx.notify();
+        });
+        answer.text.push_str(" late frame");
+        view.update(cx, |view, cx| view.live(Some(&answer), cx));
+        cx.run_until_parked();
+        let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+        for id in [
+            "message-event-1",
+            "message-event-2",
+            "message-event-3",
+            "message-event-4",
+        ] {
+            assert!(frame.debug_bounds(id).is_some());
+        }
+        assert!(frame.debug_bounds("message-live-1").is_none());
+        view.update(cx, |view, _| assert_eq!(view.list.item_count(), 4));
+    }
+
+    #[gpui::test]
+    fn empty_repairs_keep_live_text_and_its_row_remeasures_with_the_font(cx: &mut TestAppContext) {
+        let (model, view, window) = open(cx);
+        let mut answer = Shown {
+            run: RunId(7),
+            thread: Some(ThreadId(1)),
+            text: "Long wrapping answer. ".repeat(15),
+            cut: false,
+            done: false,
+        };
+        view.update(cx, |view, cx| view.live(Some(&answer), cx));
+        model.update(cx, |state, cx| {
+            state.loaded = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let before = {
+            let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+            frame
+                .debug_bounds("message-live-7")
+                .expect("live row")
+                .size
+                .height
+        };
+        answer
+            .text
+            .push_str(&" More streaming text that changes the row height.".repeat(20));
+        view.update(cx, |view, cx| view.live(Some(&answer), cx));
+        cx.run_until_parked();
+        let grown = {
+            let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+            frame
+                .debug_bounds("message-live-7")
+                .expect("grown live row")
+                .size
+                .height
+        };
+        assert!(grown > before);
+        cx.update(|cx| {
+            gpui_kit::component::Theme::update(cx, |theme| theme.font_size = px(24.0));
+        });
+        cx.run_until_parked();
+        let after = {
+            let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+            frame
+                .debug_bounds("message-live-7")
+                .expect("remeasured row")
+                .size
+                .height
+        };
+        view.update(cx, |view, _| {
+            assert_eq!(view.list.item_count(), 1);
+            assert_eq!(view.rem, px(24.0));
+            assert!(after > grown);
+        });
+        view.update(cx, |view, cx| {
+            view.live(
+                Some(&Shown {
+                    thread: Some(ThreadId(2)),
+                    ..answer
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, _| assert_eq!(view.list.item_count(), 0));
+        window
+            .update(cx, |_, _, _| {})
+            .expect("window remains open");
     }
 
     #[gpui::test]

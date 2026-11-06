@@ -111,11 +111,20 @@ another surface's selected task. Moving the component out of Tasks does not chan
 or rendering.
 
 Presence keeps two independent `Threads` models: Tasks owns browsed history, while the focused
-chat history follows `Runs::thread()`. The latter is prepared while typing is visible; the
-typing panel's visible answer remains unchanged until the chat surface is introduced. Both
+chat history follows `Runs::thread()` and is displayed below the retained composer. Both
 models receive connection, settings, run, rename, title-change and deletion updates. Browsing
 does not select the chat's task. Every chat show selects the focused task before refreshing,
 including reopening with unchanged focus after a hide cleared its selection.
+
+Chat keeps a bounded trailing preview for the focused run, with an explicit cut marker.
+While that preview is provisional, it hides only the same run's stored assistant rows, never
+user turns, drawing steps or issues. Stored event ids remain distinct: one run can commit
+several assistant rows, and streamed text is not a reliable stored-row identifier. Only a
+first-page or repair request issued after committed Done can replace the preview; a page
+already in flight, a failed read or an older-page continuation cannot. Failed and interrupted
+runs remain provisional until superseded or disconnected, because their control state can
+precede storage. Selection and connection changes clear the proof. Font changes invalidate
+the list's measured heights, including the live row.
 
 The list highlight follows changes to `Threads.open`, including Back to Kumo and hide/reopen.
 Unrelated model notifications preserve a row highlighted with the arrow keys, so Enter still

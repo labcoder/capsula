@@ -17,13 +17,15 @@ use kumochi_protocol::message::{
     ThreadKind, ThreadRow, UserError,
 };
 
-use crate::drawing::{Broken, Chunk, Drawing, Effect, Scene};
+#[cfg(test)]
+use crate::drawing::Scene;
+use crate::drawing::{Broken, Chunk, Drawing, Effect};
 
-/// The most answer text the placeholder keeps, from the end [guess].
+/// The most streamed answer text kept until history replaces it, from the end [guess].
 const TEXT_KEPT: usize = 4096;
 /// Room in a data frame for a `TextSubmit`'s other fields [guess].
 const SUBMIT_OVERHEAD: usize = 64;
-/// Failures that mean the turn never reached a model, so its text may go back to the composer.
+/// Sign-in failures that may restore a submission before its run starts answering.
 const RECONNECT: [ErrorKey; 6] = [
     ErrorKey::SessionEnded,
     ErrorKey::AccountRefused,
@@ -47,13 +49,15 @@ pub(crate) enum Refused {
 }
 
 /// The newest run on screen.
-#[derive(Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub(crate) struct Shown {
     pub(crate) run: RunId,
     /// Its thread, when its run was the live one as it began showing.
     pub(crate) thread: Option<ThreadId>,
     /// The end of its answer, at most [`TEXT_KEPT`] bytes.
     pub(crate) text: String,
+    pub(crate) cut: bool,
+    pub(crate) done: bool,
 }
 
 impl fmt::Debug for Shown {
@@ -62,6 +66,8 @@ impl fmt::Debug for Shown {
             .field("run", &self.run)
             .field("thread", &self.thread)
             .field("text_len", &self.text.len())
+            .field("cut", &self.cut)
+            .field("done", &self.done)
             .finish()
     }
 }
@@ -75,7 +81,7 @@ pub(crate) struct Applied {
     pub(crate) credit: u32,
     /// The run isn't fenced off, by Esc or a delete, so its feedback may show.
     pub(crate) visible: bool,
-    /// The text of a turn that failed before reaching a model, given back once for an empty
+    /// The text of a turn that failed before answering, given back once for an empty
     /// composer.
     pub(crate) restore: Option<Content>,
 }
@@ -99,6 +105,7 @@ struct Submitted {
     thread: Option<ThreadId>,
     /// What was typed, until nothing may put it back.
     text: Option<Content>,
+    answering: bool,
 }
 
 impl fmt::Debug for Submitted {
@@ -107,6 +114,7 @@ impl fmt::Debug for Submitted {
             .field("revision", &self.revision)
             .field("thread", &self.thread)
             .field("text_len", &self.text.as_ref().map(|text| text.len()))
+            .field("answering", &self.answering)
             .finish()
     }
 }
@@ -306,6 +314,7 @@ impl Runs {
     }
 
     /// The scenes on screen, oldest first.
+    #[cfg(test)]
     pub(crate) fn scenes(&self) -> impl Iterator<Item = &Scene> {
         self.drawing.shown().map(|(_, scene)| scene)
     }
@@ -386,6 +395,7 @@ impl Runs {
             revision,
             thread: self.thread(),
             text: Some(text.into()),
+            answering: false,
         });
         self.turns_sent += 1;
         Ok(())
@@ -409,6 +419,8 @@ impl Runs {
         // The answer stays on screen, but run 0 is none of the new brain's runs.
         if let Some(shown) = &mut self.shown {
             shown.run = RunId(0);
+            shown.thread = None;
+            shown.done = false;
         }
         self.drawing.forget_runs();
     }
@@ -524,6 +536,10 @@ impl Runs {
     /// it hadn't answered never will be.
     pub(crate) fn disconnected(&mut self) {
         self.connected = false;
+        if let Some(shown) = &mut self.shown {
+            shown.thread = None;
+            shown.done = false;
+        }
         self.fence = self.fence.max(self.answered);
         self.live = None;
         self.main = None;
@@ -540,7 +556,7 @@ impl Runs {
     /// turn. Only a pending turn at the current revision can adopt a New target's thread.
     /// A `RunState` with the brain's reason: what applying it asks, and the notice to show, which
     /// is withheld once Esc or a delete has fenced the run off. A failure that means the turn
-    /// never reached a model restores its text once, only while its thread and selection are
+    /// needs sign-in restores its text once before answering, only while its thread and selection are
     /// current.
     pub(crate) fn apply_run_state(
         &mut self,
@@ -604,14 +620,29 @@ impl Runs {
                 });
             }
         }
+        if phase == Phase::Answering
+            && let Some((_, submitted)) = self.named.as_mut().filter(|(named, _)| *named == run)
+        {
+            submitted.answering = true;
+        }
         if matches!(phase, Phase::Answering | Phase::Done) && self.thread() == Some(thread) {
             self.durable = true;
+        }
+        if phase == Phase::Done
+            && self
+                .live
+                .is_some_and(|live| live.run == run && !live.state_ended)
+            && let Some(shown) = self.view(run)
+        {
+            shown.thread = Some(thread);
+            shown.done = true;
         }
         if matches!(phase, Phase::Done | Phase::Interrupted | Phase::Failed) {
             self.end(run, |live| live.state_ended = true);
             // The first terminal state uses the submission up, so a duplicate finds nothing.
             if let Some((_, submitted)) = self.named.take_if(|(named, _)| *named == run)
                 && phase == Phase::Failed
+                && !submitted.answering
                 && run > self.fence
                 && error.is_some_and(|error| RECONNECT.contains(&error.key()))
                 && submitted.revision == self.revision
@@ -657,7 +688,7 @@ impl Runs {
             DataToShell::AssistantText { run, delta } => {
                 if let Some(shown) = self.view(run) {
                     shown.text.push_str(&delta);
-                    keep_end(&mut shown.text, TEXT_KEPT);
+                    shown.cut |= keep_end(&mut shown.text, TEXT_KEPT);
                     self.answered_from(run);
                 }
             }
@@ -763,15 +794,16 @@ fn run_of(message: &DataToShell) -> Option<RunId> {
 }
 
 /// Drops the start of `text` so at most `max` bytes stay, cutting at a character boundary.
-fn keep_end(text: &mut String, max: usize) {
+fn keep_end(text: &mut String, max: usize) -> bool {
     if text.len() <= max {
-        return;
+        return false;
     }
     let mut cut = text.len() - max;
     while !text.is_char_boundary(cut) {
         cut += 1;
     }
     text.drain(..cut);
+    true
 }
 
 #[cfg(test)]

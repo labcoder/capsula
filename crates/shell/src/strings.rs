@@ -40,6 +40,10 @@ pub(crate) enum Text {
     ThreadGone,
     SelectThread,
     ThreadCut,
+    ChatLiveCut,
+    ChatEmpty,
+    ChatLoading,
+    ChatHistoryFailed,
     OlderMessages,
     CloseThreads,
     ThreadUser,
@@ -138,7 +142,7 @@ pub(crate) enum Text {
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 124] = [
+    const ALL: [Self; 128] = [
         Self::Connecting,
         Self::Connected,
         Self::Reconnecting,
@@ -169,6 +173,10 @@ impl Text {
         Self::ThreadGone,
         Self::SelectThread,
         Self::ThreadCut,
+        Self::ChatLiveCut,
+        Self::ChatEmpty,
+        Self::ChatLoading,
+        Self::ChatHistoryFailed,
         Self::OlderMessages,
         Self::CloseThreads,
         Self::ThreadUser,
@@ -364,6 +372,10 @@ impl Text {
             Self::ThreadGone => "thread-gone",
             Self::SelectThread => "thread-select",
             Self::ThreadCut => "thread-cut",
+            Self::ChatLiveCut => "chat-live-cut",
+            Self::ChatEmpty => "chat-empty",
+            Self::ChatLoading => "chat-loading",
+            Self::ChatHistoryFailed => "chat-history-failed",
             Self::OlderMessages => "thread-older",
             Self::CloseThreads => "threads-close",
             Self::ThreadUser => "thread-user",

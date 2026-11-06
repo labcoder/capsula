@@ -543,6 +543,76 @@ mod tests {
     }
 
     #[gpui::test]
+    fn provider_recovery_button_is_enabled_and_unrelated_sign_in_does_not_hide_enable(
+        cx: &mut TestAppContext,
+    ) {
+        use kumochi_protocol::message::{
+            AccountOp, AccountView, Action, ErrorKey, Incarnation, PlanState, UserError,
+        };
+        let owner = crate::presence::test_fixture::presence(cx);
+        let (window, view) = open(cx);
+        view.update(cx, |view, cx| {
+            view.owner = owner.downgrade();
+            owner.update(cx, |this, _| {
+                this.settings = view.model.clone();
+                this.session = Some(crate::link::Session::detached(1, Incarnation(1)));
+            });
+        });
+        for (key, waiting, recovery) in [
+            (ErrorKey::AccountRefused, false, true),
+            (ErrorKey::SignInNeeded, true, true),
+            (ErrorKey::PlanUnavailable, false, false),
+        ] {
+            view.update(cx, |view, cx| {
+                view.tab = 1;
+                view.model.update(cx, |model, cx| {
+                    model.accounts.receive(
+                        Some(1),
+                        1,
+                        AccountView::SignedIn {
+                            email: None,
+                            plan: PlanState::Declined,
+                            recovery: None,
+                        },
+                    );
+                    model.accounts.error(
+                        &UserError::new(key, Vec::new(), vec![Action::SignIn]).expect("bounded"),
+                    );
+                    model.accounts.waiting = waiting.then_some(AccountOp::SignIn);
+                    cx.notify();
+                });
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+            assert_eq!(
+                frame.debug_bounds("account-sign-in-recovery").is_some(),
+                recovery,
+                "{key:?}"
+            );
+            let bounds = frame
+                .debug_bounds(if recovery {
+                    "account-sign-in-recovery"
+                } else {
+                    "account-actions"
+                })
+                .expect("the offered first action");
+            frame.simulate_click(
+                gpui_kit::point(bounds.left() + px(10.0), bounds.center().y),
+                gpui_kit::Modifiers::default(),
+            );
+            view.read_with(cx, |view, cx| {
+                let accounts = &view.model.read(cx).accounts;
+                assert_eq!(
+                    accounts.send_failed, !waiting,
+                    "{key:?}: an enabled action reached the refusing fixture link"
+                );
+                assert_eq!(accounts.waiting, waiting.then_some(AccountOp::SignIn));
+            });
+        }
+    }
+
+    #[gpui::test]
     fn account_confirmation_closes_on_disconnect_state_loss_or_new_session(
         cx: &mut TestAppContext,
     ) {
