@@ -18,7 +18,9 @@ use super::audit::{self, PostSeedAudit, PreInputAudit, Progress};
 use super::policy::Reviewed;
 use super::seed;
 use super::stream::{LineFramer, Mapped, StreamMapper};
-use super::supervisor::{Launch, LaunchFailed, LaunchRefused, Pipes, SETTLE, StdinWriter};
+use super::supervisor::{
+    Launch, LaunchFailed, LaunchRefused, Pipes, SETTLE, StdinRefused, StdinWriter,
+};
 use crate::bridge::LaunchId;
 use crate::connections::model::budget::Budget;
 use crate::context::{self, Origin};
@@ -444,14 +446,11 @@ impl Question<'_> {
         }
         let until = launch.deadline().min(self.clock.now() + QUESTION);
         let hold = (launch.deadline() + SETTLE).saturating_duration_since(Instant::now());
+        // A timeout polls the ask first, so a Grant ready after the deadline still needs refusing.
         let lease = match tokio::time::timeout_at(until.into(), self.gate.ask_held(hold)).await {
-            Ok(Answer::Grant(lease)) => lease,
+            Ok(Answer::Grant(lease)) if Instant::now() < until => lease,
             Ok(Answer::Rebuild) => return None,
-            Err(_) => {
-                launch.lease().revoke();
-                report.report(Outcome::Deadline);
-                return Some(failed(Outcome::Deadline));
-            }
+            Ok(Answer::Grant(_)) | Err(_) => return Some(expired(launch, report)),
         };
         if !self.budget.reserve() {
             drop(lease);
@@ -463,9 +462,13 @@ impl Question<'_> {
             return Some(Finish::Failed(EngineFailure::Provider));
         }
         let seed = seed::encode(&request.request, &context::tools(attempt.snapshot.origin));
-        if writer.seed(&seed, until).await.is_err() {
-            report.report(Outcome::Launch);
-            return Some(Finish::Failed(EngineFailure::Provider));
+        match writer.seed(&seed, until).await {
+            Ok(()) => {}
+            Err(StdinRefused::Deadline) => return Some(expired(launch, report)),
+            Err(_) => {
+                report.report(Outcome::Launch);
+                return Some(Finish::Failed(EngineFailure::Provider));
+            }
         }
         let answer = Reading {
             pipes: &mut pipes,
@@ -551,6 +554,14 @@ struct Reading<'a> {
 
 fn claude(key: ErrorKey) -> Finish {
     Finish::Failed(EngineFailure::Claude(key.into()))
+}
+
+/// The question's deadline passed before the seed was queued: the launch goes and the attempt
+/// reports `Deadline`.
+fn expired(launch: &Launch, report: Report) -> Finish {
+    launch.lease().revoke();
+    report.report(Outcome::Deadline);
+    failed(Outcome::Deadline)
 }
 
 /// How a round ends on `outcome`.

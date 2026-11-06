@@ -192,9 +192,9 @@ impl StdinWriter {
             return Err(StdinRefused::Revoked);
         }
         let permit = match tokio::time::timeout_at(until.into(), self.sender.reserve()).await {
-            Err(_) => return Err(StdinRefused::Deadline),
             Ok(Err(_)) => return Err(StdinRefused::Revoked),
-            Ok(Ok(permit)) => permit,
+            Ok(Ok(permit)) if Instant::now() < until => permit,
+            Err(_) | Ok(Ok(_)) => return Err(StdinRefused::Deadline),
         };
         if self.control.is_revoked() {
             return Err(StdinRefused::Revoked);

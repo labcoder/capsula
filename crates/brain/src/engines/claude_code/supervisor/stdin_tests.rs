@@ -238,3 +238,24 @@ async fn a_launch_carries_its_id_deadline_binding_and_gate_from_admission() {
     assert_eq!(launch.lease().revoke(), Revoked::Idle);
     assert_eq!(end(launch).await, Teardown::Done);
 }
+
+/// A seed whose deadline has passed queues nothing, even with room on stdin.
+#[tokio::test]
+async fn a_seed_past_its_deadline_queues_nothing_with_room() {
+    let base = Base::new("stdin-seed-late");
+    let lane = found(&base, "echo").await;
+    let (mut start, mut launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
+    let (entries, entered) = std_mpsc::channel();
+    start.hooks.entries = Some(entries);
+    queue(&lane, start);
+    let mut pipes = pipes(&mut launch).await;
+    let mut writer = pipes.writer().expect("the writer");
+    assert_eq!(
+        writer.seed(b"x", Instant::now()).await,
+        Err(StdinRefused::Deadline)
+    );
+    writer.end();
+    assert_eq!(end(launch).await, Teardown::Done);
+    assert_eq!(entered.try_iter().count(), 0);
+    assert_eq!(echoed(&base), Vec::<usize>::new());
+}

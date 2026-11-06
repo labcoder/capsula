@@ -1105,3 +1105,52 @@ async fn a_dead_warm_launch_is_not_reused() {
     }
     rig.close().await;
 }
+
+/// M2's ready-after-deadline schedule: the round is polled to its ask, then not polled again until
+/// both the Grant and the question's deadline are ready. The expired Grant seeds nothing, spends
+/// no question and settles unused, and the attempt reports `Deadline` once.
+#[tokio::test]
+async fn a_grant_ready_with_its_expired_deadline_seeds_nothing() {
+    let mut rig = Rig::new("question-ready-late-grant", &synthetic_signed_in()).await;
+    rig.claude.budget = Arc::new(Budget::limited(Some(1)));
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let (id, _) = rig.last();
+    deadline_in(&rig, Duration::from_millis(300));
+    let request = RunRequest::for_tests(RunId(1), ThreadId(1), "Be brief.");
+    let key = request.key;
+    let asks = Asks::default();
+    let (inputs_tx, mut inputs) = mpsc::unbounded_channel();
+    let (events_tx, mut events) = mpsc::channel(64);
+    let gate = SendGate::new(key, Arc::clone(&asks), inputs_tx.clone());
+    let mut round = question.start(request, events_tx, gate);
+    let ask = rig
+        .drive(async {
+            tokio::select! {
+                () = &mut round => panic!("the round ended before its ask"),
+                ask = inputs.recv() => ask,
+            }
+        })
+        .await;
+    assert!(matches!(ask, Some(Input::SendReady { .. })), "an ask");
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let lease = LeaseId { key, send: 1 };
+    engines::answer(
+        &asks,
+        key,
+        Answer::Grant(SendLease::new(lease, inputs_tx.clone())),
+    );
+    rig.drive(&mut round).await;
+    let mut seen = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        seen.push(event);
+    }
+    assert_eq!(
+        seen,
+        [TurnEvent::Finished(Finish::Failed(EngineFailure::Provider))]
+    );
+    assert_eq!(inputs.try_recv().ok(), Some(Input::SendSettled { lease }));
+    assert_eq!(rig.reported(id).await, [launch::Outcome::Deadline]);
+    assert!(rig.stdin().iter().all(|line| !line.ends_with(" user")));
+    assert!(rig.claude.budget.reserve(), "no question was spent");
+    rig.close().await;
+}

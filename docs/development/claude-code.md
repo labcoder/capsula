@@ -401,7 +401,8 @@ attempts. Nothing in production asks a question yet: C5b-2's engine selection is
      one `Refresh` asks the core for a fresh attempt;
   3. binds the run, which fixes the question's deadline: `QUESTION` (120 s) from the bind, or
      the launch's deadline if that's sooner. The ask, the seed and the read all end at it, and
-     at it the launch is revoked and the attempt reports `Deadline`;
+     at it the launch is revoked and the attempt reports `Deadline`. A Grant or stdin room that's
+     ready only once it has passed is refused the same way, since a timeout polls its work first;
   4. asks with `ask_held` for the launch's deadline plus `SETTLE` (a `Rebuild` writes nothing
      and spends no question);
   5. reserves one question from `KUMOCHI_CLAUDE_QUESTIONS` (debug builds only; out means
