@@ -7,7 +7,7 @@ use std::{
 };
 
 use kumochi_protocol::message::{MAX_VISIBLE_SCENES, SceneId};
-use kumochi_scene::{Frame, SceneView};
+use kumochi_scene::{Frame, PreparedActivation, SceneView};
 
 use super::{Effect, Presenter, scene::Out};
 
@@ -38,7 +38,7 @@ pub(crate) struct Sample {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "B6 StepShown consumes this observation")
+    expect(dead_code, reason = "B6d's StepShown consumes this observation")
 )]
 pub(crate) struct Painted {
     pub(crate) epoch: u64,
@@ -91,15 +91,44 @@ impl Frames {
     /// The scene's view was replaced while the caller still holds the old one, so clearing the
     /// frame frees nothing here, and it binds to the new view on its next sample.
     pub(super) fn replaced(&mut self, scene: SceneId) {
-        let epoch = self.next_epoch();
-        if let Some((_, slot)) = self.slots.iter_mut().flatten().find(|(id, _)| *id == scene) {
-            slot.frame.clear();
-            slot.epoch = epoch;
-            slot.sampled = None;
-            slot.painted.set(None);
-            slot.acknowledged = None;
-            // `failed` stays set: a paint failure is terminal and paint_failed clears the scene.
+        if let Some(frame) = self.reset(scene) {
+            frame.clear();
         }
+    }
+
+    /// Installs a staged activation into the scene's view with its own frame, which the view
+    /// clears while the outgoing objects still own the geometry; no earlier paint counts.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "B6d's activation owner is the production caller")
+    )]
+    pub(super) fn activate(
+        &mut self,
+        scene: SceneId,
+        view: &mut SceneView,
+        activation: PreparedActivation,
+    ) {
+        let frame = self
+            .reset(scene)
+            .expect("each adopted scene has a frame slot");
+        view.install(activation, frame)
+            .expect("the presenter staged it from this view in the same update");
+    }
+
+    /// Starts a new epoch for the scene's frame, forgetting what was sampled and painted.
+    fn reset(&mut self, scene: SceneId) -> Option<&mut Frame> {
+        let epoch = self.next_epoch();
+        let (_, slot) = self
+            .slots
+            .iter_mut()
+            .flatten()
+            .find(|(id, _)| *id == scene)?;
+        slot.epoch = epoch;
+        slot.sampled = None;
+        slot.painted.set(None);
+        slot.acknowledged = None;
+        // `failed` stays set: a paint failure is terminal and paint_failed clears the scene.
+        Some(&mut slot.frame)
     }
 
     pub(super) fn take(&mut self, scene: SceneId) -> Option<Slot> {
@@ -176,7 +205,7 @@ impl Frames {
     /// The bound a shown overlay last painted for `scene`, at its current epoch.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "B6 StepShown consumes this observation")
+        expect(dead_code, reason = "B6d's StepShown consumes this observation")
     )]
     pub(crate) fn painted(&self, scene: SceneId) -> Option<Painted> {
         let (_, slot) = self.slots.iter().flatten().find(|(id, _)| *id == scene)?;
@@ -190,7 +219,7 @@ impl Frames {
     /// already acknowledged at this epoch.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "B6 StepShown consumes this observation")
+        expect(dead_code, reason = "B6d's StepShown consumes this observation")
     )]
     pub(crate) fn acknowledge(&mut self, scene: SceneId, painted: Painted) -> bool {
         let Some((_, slot)) = self.slots.iter_mut().flatten().find(|(id, _)| *id == scene) else {
@@ -217,6 +246,12 @@ impl Frames {
     fn next_epoch(&mut self) -> u64 {
         self.epoch += 1;
         self.epoch
+    }
+
+    #[cfg(test)]
+    pub(super) fn epoch(&self, scene: SceneId) -> Option<u64> {
+        let (_, slot) = self.slots.iter().flatten().find(|(id, _)| *id == scene)?;
+        Some(slot.epoch)
     }
 
     #[cfg(test)]
