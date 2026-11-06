@@ -381,6 +381,7 @@ fn a_failed_solid_empties_its_view_until_removed_and_recovery_matches() {
         &Arc::new(Theme::default()),
         &mut Measure,
         &AtomicBool::new(false),
+        None,
     )
     .expect("recovery");
     let again = geometry(&replayed);
@@ -1011,6 +1012,7 @@ fn a_colour_survives_retire_stop_recovery_removal_and_rebuild() {
         &Arc::new(Theme::default()),
         &mut Measure,
         &AtomicBool::new(false),
+        None,
     )
     .expect("recovery");
     assert_eq!(rgbs(&recovered), reds);
