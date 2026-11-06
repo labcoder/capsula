@@ -375,6 +375,8 @@ pub(crate) struct LinkHandle {
     done: Receiver<()>,
     #[cfg(test)]
     recording: Option<Sender<DataToBrain>>,
+    #[cfg(test)]
+    control_recording: Option<Sender<ControlToBrain>>,
 }
 
 impl LinkHandle {
@@ -457,6 +459,10 @@ impl LinkHandle {
     /// Queues a control message for `session`'s brain. False once that connection has ended, or
     /// when the brain has stopped reading. Never blocks.
     pub(crate) fn send_control(&self, session: &Session, message: ControlToBrain) -> bool {
+        #[cfg(test)]
+        if let Some(recording) = &self.control_recording {
+            return recording.try_send(message).is_ok();
+        }
         self.shared
             .outbox(session, |outbox| outbox.control.try_send(message).is_ok())
             .unwrap_or(false)
@@ -504,6 +510,7 @@ impl LinkHandle {
             retry,
             done,
             recording: None,
+            control_recording: None,
         }
     }
 
@@ -512,6 +519,12 @@ impl LinkHandle {
         let mut link = Self::detached();
         link.recording = Some(recording);
         (link, requests)
+    }
+
+    pub(crate) fn record_controls(&mut self) -> Receiver<ControlToBrain> {
+        let (sender, receiver) = async_channel::unbounded();
+        self.control_recording = Some(sender);
+        receiver
     }
 }
 
@@ -577,6 +590,8 @@ fn start(link: Link, events: Sender<LinkEvent>) -> (LinkHandle, LinkStart) {
         done,
         #[cfg(test)]
         recording: None,
+        #[cfg(test)]
+        control_recording: None,
     };
     let start = LinkStart {
         link,

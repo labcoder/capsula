@@ -107,6 +107,7 @@ struct Presence {
     settings: Entity<Settings>,
     threads: Entity<Threads>,
     chat: Entity<Threads>,
+    chat_notice: crate::chat_notice::ChatNotice,
     events: Sender<PresenceEvent>,
     link: LinkHandle,
     /// The connection the UI last applied `Connected` for, until its next state.
@@ -853,6 +854,7 @@ pub(crate) fn open(
             settings,
             threads: cx.new(|_| Threads::default()),
             chat: cx.new(|_| Threads::chat()),
+            chat_notice: crate::chat_notice::ChatNotice::default(),
             events,
             link,
             session: None,

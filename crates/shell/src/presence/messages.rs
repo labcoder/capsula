@@ -156,8 +156,12 @@ impl Messages {
                 .zip(ids[prefix..].iter().rev())
                 .take_while(|(old, new)| old == new)
                 .count();
-            self.list
-                .splice(prefix..self.ids.len() - suffix, count - prefix - suffix);
+            if prefix == 0 && suffix == 0 {
+                self.list.reset(count);
+            } else {
+                self.list
+                    .splice(prefix..self.ids.len() - suffix, count - prefix - suffix);
+            }
             if self.live_row != live || self.proven != state.proven {
                 self.list.remeasure_items(0..count);
             }
@@ -477,6 +481,35 @@ mod tests {
             assert_eq!(actual.offset_in_item, anchor.offset_in_item);
             assert_eq!(view.live_row, None);
             assert_eq!(view.list.item_count(), 51);
+        });
+    }
+
+    #[gpui::test]
+    fn a_repair_with_no_shared_rows_resets_a_scrolled_reader_to_the_latest_tail(
+        cx: &mut TestAppContext,
+    ) {
+        let (model, view, _) = open(cx);
+        model.update(cx, |state, cx| {
+            state.events = (1..=50).rev().map(event).collect();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, _| {
+            view.list.scroll_to(ListOffset {
+                item_ix: 10,
+                offset_in_item: px(7.0),
+            });
+        });
+        model.update(cx, |state, cx| {
+            state.events = (101..=150).rev().map(event).collect();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, _| {
+            assert_eq!(view.list.item_count(), 50);
+            assert_eq!(view.list.logical_scroll_top().item_ix, 50);
+            assert_eq!(view.ids.first(), Some(&("event", 101)));
+            assert_eq!(view.ids.last(), Some(&("event", 150)));
         });
     }
 

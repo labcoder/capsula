@@ -1,5 +1,7 @@
 //! The reusable typing surface and its activation lifetime.
 
+mod recovery;
+
 use async_channel::Sender;
 use gpui_kit::component::input::{Escape as EscapeKey, Input, InputEvent};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, button::Button};
@@ -14,7 +16,9 @@ use super::{
     PresenceEvent, PresenceSurface, SharedString, configure_surface, constants, diagnostics,
     options, platform, send,
 };
+use crate::chat_notice::{Notice, Source};
 use crate::runs::{Refused, Target};
+use crate::settings::Settings;
 use crate::strings::{Strings, Text};
 use crate::threads::{Threads, row_label};
 
@@ -73,12 +77,16 @@ pub(super) struct TextPanel {
 impl TextPanel {
     /// A hidden typing panel with its real view and input in a GPUI test window, without
     /// `create_text`'s native surface, capture, activation or Enter wiring.
-    pub(super) fn detached(model: Entity<Threads>, cx: &mut Context<'_, Presence>) -> Self {
+    pub(super) fn detached(
+        model: Entity<Threads>,
+        settings: Entity<Settings>,
+        cx: &mut Context<'_, Presence>,
+    ) -> Self {
         let (events, _closed) = async_channel::unbounded();
         let owner = cx.weak_entity();
         let (window, view) =
             gpui_kit::open_window(gpui_kit::WindowOptions::default(), cx, |window, cx| {
-                cx.new(|cx| TextView::new(model, owner, events, window, cx))
+                cx.new(|cx| TextView::new(model, settings, owner, events, window, cx))
             })
             .expect("a GPUI test window opens");
         let input = view.read(cx).input.clone();
@@ -173,8 +181,13 @@ impl Presence {
         let events = self.events.clone();
         let close_events = self.events.clone();
         let owner = cx.weak_entity();
-        let notice = typing_notice(self.error.as_ref(), self.refusal, cx.global::<Strings>());
+        let notice = typing_notice(
+            self.chat_notice.shown().and(self.error.as_ref()),
+            self.refusal,
+            cx.global::<Strings>(),
+        );
         let model = self.chat.clone();
+        let settings = self.settings.clone();
         let (window, view) = gpui_kit::open_window(options(), cx, |window, cx| {
             window.set_window_title(constants::DISPLAY_NAME);
             window.on_window_should_close(cx, move |_, _| {
@@ -182,7 +195,7 @@ impl Presence {
                 false
             });
             cx.new(|cx| {
-                let mut view = TextView::new(model, owner, events, window, cx);
+                let mut view = TextView::new(model, settings, owner, events, window, cx);
                 view.notice = notice;
                 view.stop = stop;
                 view
@@ -313,6 +326,7 @@ impl Presence {
         let previous = (self.error.clone(), self.refusal);
         submission_notice(&mut self.error, &mut self.refusal, result);
         if result.is_ok() {
+            self.chat_notice.clear();
             self.settings.update(cx, |state, _| state.clear_notice());
         }
         self.notices_changed(&previous, cx);
@@ -333,12 +347,17 @@ impl Presence {
         cx: &mut Context<'_, Self>,
     ) {
         let strings = cx.global::<Strings>();
-        let notice = typing_notice(self.error.as_ref(), self.refusal, strings);
+        let notice = typing_notice(
+            self.chat_notice.shown().and(self.error.as_ref()),
+            self.refusal,
+            strings,
+        );
         if typing_notice(previous.0.as_ref(), previous.1, strings) != notice
             && let Some(text) = &self.text
         {
             text.view.update(cx, |view, cx| {
                 view.notice = notice;
+                view.refusal = self.refusal;
                 cx.notify();
             });
         }
@@ -388,11 +407,35 @@ impl Presence {
         };
         let answer = self.runs.shown();
         let target = self.runs.target();
+        let recovery = self.chat_notice.shown().cloned();
+        let notice = typing_notice(
+            recovery.as_ref().and(self.error.as_ref()),
+            self.refusal,
+            cx.global::<Strings>(),
+        );
+        let retry = recovery.as_ref().is_some_and(
+            |notice| matches!(notice.source, Source::Run(run) if self.runs.retry_ready(run)),
+        );
+        let refusal = self.refusal;
         text.view.update(cx, |view, cx| {
             view.messages
                 .update(cx, |messages, cx| messages.live(answer, cx));
-            if view.target != target {
+            if view.target != target
+                || view.recovery != recovery
+                || view.retry != retry
+                || view.refusal != refusal
+                || view.notice != notice
+            {
                 view.target = target;
+                if view.recovery != recovery {
+                    view.recovery_text = recovery
+                        .as_ref()
+                        .map(|notice| cx.global::<Strings>().error(&notice.error).into());
+                }
+                view.recovery = recovery;
+                view.retry = retry;
+                view.refusal = refusal;
+                view.notice = notice;
                 cx.notify();
             }
         });
@@ -405,9 +448,14 @@ pub(super) struct TextView {
     /// The Stop fallback, here too because this panel covers the status panel's.
     pub(super) stop: bool,
     model: Entity<Threads>,
+    settings: Entity<Settings>,
+    recovery: Option<Notice>,
+    recovery_text: Option<SharedString>,
+    retry: bool,
+    refusal: Option<Text>,
     messages: Entity<Messages>,
     target: Target,
-    _watch: gpui_kit::Subscription,
+    _watch: Vec<gpui_kit::Subscription>,
     /// Pushed by presence, never read from it: the first frame renders while presence is updating.
     notice: Option<SharedString>,
     owner: WeakEntity<Presence>,
@@ -417,6 +465,7 @@ pub(super) struct TextView {
 impl TextView {
     fn new(
         model: Entity<Threads>,
+        settings: Entity<Settings>,
         owner: WeakEntity<Presence>,
         events: Sender<PresenceEvent>,
         window: &mut Window,
@@ -429,10 +478,19 @@ impl TextView {
             Some("ChatPanel"),
         )]);
         let messages = cx.new(|cx| Messages::new(model.clone(), owner.clone(), window, cx));
-        let watch = cx.observe(&model, |_, _, cx| cx.notify());
+        let watch = vec![
+            cx.observe(&model, |_, _, cx| cx.notify()),
+            cx.observe(&settings, |_, _, cx| cx.notify()),
+            cx.observe(&input, |_, _, cx| cx.notify()),
+        ];
         Self {
             input,
             model,
+            settings,
+            recovery: None,
+            recovery_text: None,
+            retry: false,
+            refusal: None,
             messages,
             target: Target::Kumo,
             stop: false,
@@ -582,7 +640,12 @@ impl TextView {
 impl Render for TextView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let events = self.events.clone();
-        let notice = self.notice.clone();
+        let notice = if self.refusal.is_some() || self.recovery.is_none() {
+            self.notice.clone()
+        } else {
+            None
+        };
+        let recovery = self.recovery(cx);
         let stop = self.stop.then(|| {
             let events = self.events.clone();
             Button::new("stop")
@@ -618,6 +681,7 @@ impl Render for TextView {
                     .flex()
                     .flex_col()
                     .gap_2()
+                    .children(recovery)
                     .children(notice.map(|notice| {
                         div()
                             .debug_selector(|| format!("typing-notice {notice}"))
@@ -699,9 +763,16 @@ mod tests {
             let (events, _) = async_channel::unbounded();
             gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
                 let model = cx.new(|_| crate::threads::Threads::chat());
+                let settings = cx.new(|_| crate::settings::Settings::default());
                 cx.new(|cx| {
-                    let mut view =
-                        TextView::new(model, WeakEntity::new_invalid(), events, window, cx);
+                    let mut view = TextView::new(
+                        model,
+                        settings,
+                        WeakEntity::new_invalid(),
+                        events,
+                        window,
+                        cx,
+                    );
                     view.notice = notice.map(SharedString::from);
                     view
                 })

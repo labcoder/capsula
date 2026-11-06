@@ -10,6 +10,7 @@
 mod allocation;
 
 mod accounts;
+mod chat_notice;
 mod confirmation;
 mod credential;
 mod drawing;

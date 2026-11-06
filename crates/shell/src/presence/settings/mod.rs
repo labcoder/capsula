@@ -139,6 +139,16 @@ impl SettingsView {
         self.editing
     }
 
+    pub(super) fn select_tab(
+        &mut self,
+        tab: usize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.tab = tab;
+        self.finish_edit(window, cx);
+    }
+
     #[cfg(debug_assertions)]
     pub(super) fn fixture_general(&mut self) {
         self.fixture = true;

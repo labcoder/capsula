@@ -1,5 +1,8 @@
 //! Settings window lifetime and nonblocking edits over the current session.
 
+#[cfg(test)]
+mod tests;
+
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::{AnyWindowHandle, AppContext as _, Context, Entity, Subscription};
 use kumochi_protocol::message::{AccountOp, AssistantName, ControlToBrain, MaxFrameRate};
@@ -22,6 +25,40 @@ pub(in crate::presence) struct SettingsPanel {
 }
 
 impl Presence {
+    pub(in crate::presence) fn open_accounts(
+        &mut self,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
+        self.open_settings_tab(1, cx)
+    }
+
+    pub(in crate::presence) fn open_general(
+        &mut self,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
+        self.open_settings_tab(0, cx)
+    }
+
+    fn open_settings_tab(
+        &mut self,
+        tab: usize,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
+        if !self.settings_open() {
+            self.toggle_settings(cx)?;
+        }
+        let panel = self.settings_panel.as_ref().expect("settings opened above");
+        panel
+            .window
+            .update(cx, |_, window, cx| {
+                panel
+                    .view
+                    .update(cx, |view, cx| view.select_tab(tab, window, cx));
+            })
+            .map_err(|error| OpenError::Gpui(error.into()))?;
+        Ok(())
+    }
+
     pub(in crate::presence) fn save_taskbar(
         &mut self,
         choice: TaskbarChoice,

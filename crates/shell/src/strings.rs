@@ -44,6 +44,8 @@ pub(crate) enum Text {
     ChatEmpty,
     ChatLoading,
     ChatHistoryFailed,
+    RecoverySignIn,
+    DismissNotice,
     OlderMessages,
     CloseThreads,
     ThreadUser,
@@ -142,7 +144,7 @@ pub(crate) enum Text {
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 128] = [
+    const ALL: [Self; 130] = [
         Self::Connecting,
         Self::Connected,
         Self::Reconnecting,
@@ -177,6 +179,8 @@ impl Text {
         Self::ChatEmpty,
         Self::ChatLoading,
         Self::ChatHistoryFailed,
+        Self::RecoverySignIn,
+        Self::DismissNotice,
         Self::OlderMessages,
         Self::CloseThreads,
         Self::ThreadUser,
@@ -376,6 +380,8 @@ impl Text {
             Self::ChatEmpty => "chat-empty",
             Self::ChatLoading => "chat-loading",
             Self::ChatHistoryFailed => "chat-history-failed",
+            Self::RecoverySignIn => "recovery-sign-in",
+            Self::DismissNotice => "dismiss-notice",
             Self::OlderMessages => "thread-older",
             Self::CloseThreads => "threads-close",
             Self::ThreadUser => "thread-user",

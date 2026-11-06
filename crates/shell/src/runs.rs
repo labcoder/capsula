@@ -12,7 +12,7 @@ use std::fmt;
 
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{
-    Content, ControlToBrain, DataToBrain, DataToShell, Deleted, ErrorKey, Incarnation,
+    Action, Content, ControlToBrain, DataToBrain, DataToShell, Deleted, ErrorKey, Incarnation,
     MAX_PENDING_DELETES, MAX_PENDING_TURNS, Phase, RunId, SceneDescriptor, SceneId, ThreadId,
     ThreadKind, ThreadRow, UserError,
 };
@@ -150,6 +150,7 @@ pub(crate) struct Runs {
     submitted: VecDeque<Submitted>,
     /// The newest named run's submission, until that run's first terminal `RunState`.
     named: Option<(RunId, Submitted)>,
+    recovery: Option<(RunId, Submitted)>,
     /// How many of the oldest submitted turns Esc cancelled.
     cancelled: usize,
     /// Data frames, with their size, for runs not named yet. Their credit is withheld, so the
@@ -183,6 +184,7 @@ impl fmt::Debug for Runs {
             .field("answered", &self.answered)
             .field("submitted", &self.submitted)
             .field("named", &self.named)
+            .field("recovery", &self.recovery)
             .field("cancelled", &self.cancelled)
             .field("held", &self.held.len())
             .field("target", &self.target)
@@ -240,6 +242,7 @@ impl Runs {
         self.submitted
             .iter()
             .chain(self.named.as_ref().map(|(_, submitted)| submitted))
+            .chain(self.recovery.as_ref().map(|(_, submitted)| submitted))
             .filter_map(|submitted| submitted.text.as_ref().map(|text| text.len()))
             .collect()
     }
@@ -258,6 +261,13 @@ impl Runs {
     /// Drops the text of every submission, pending or named, whose captured thread `owned`
     /// accepts, so nothing can put it back.
     fn forget_texts(&mut self, owned: impl Fn(Option<ThreadId>) -> bool) {
+        if self
+            .recovery
+            .as_ref()
+            .is_some_and(|(_, submitted)| owned(submitted.thread))
+        {
+            self.recovery = None;
+        }
         for submitted in &mut self.submitted {
             if owned(submitted.thread) {
                 submitted.text = None;
@@ -321,6 +331,38 @@ impl Runs {
 
     pub(crate) fn shown(&self) -> Option<&Shown> {
         self.shown.as_ref()
+    }
+
+    pub(crate) fn retry_ready(&self, run: RunId) -> bool {
+        self.recovery.as_ref().is_some_and(|(owner, submitted)| {
+            *owner == run
+                && submitted.text.is_some()
+                && submitted.revision == self.revision
+                && submitted.thread == self.thread()
+        })
+    }
+
+    pub(crate) fn dismiss_retry(&mut self) {
+        self.recovery = None;
+    }
+
+    pub(crate) fn retry(
+        &mut self,
+        run: RunId,
+        draft: &str,
+        send: impl FnOnce(DataToBrain) -> bool,
+    ) -> Result<(), Refused> {
+        let Some((_, submitted)) = self.recovery.take_if(|(owner, _)| *owner == run) else {
+            return Err(Refused::Busy);
+        };
+        if !draft.is_empty()
+            || submitted.revision != self.revision
+            || submitted.thread != self.thread()
+        {
+            return Err(Refused::Busy);
+        }
+        let text = submitted.text.ok_or(Refused::Busy)?;
+        self.submit(&text, send)
     }
 
     fn stoppable(&self) -> Option<RunId> {
@@ -545,6 +587,7 @@ impl Runs {
         self.main = None;
         self.submitted.clear();
         self.named = None;
+        self.recovery = None;
         self.cancelled = 0;
         self.held.clear();
         self.gone.clear();
@@ -642,14 +685,18 @@ impl Runs {
             // The first terminal state uses the submission up, so a duplicate finds nothing.
             if let Some((_, submitted)) = self.named.take_if(|(named, _)| *named == run)
                 && phase == Phase::Failed
-                && !submitted.answering
                 && run > self.fence
-                && error.is_some_and(|error| RECONNECT.contains(&error.key()))
                 && submitted.revision == self.revision
                 && submitted.thread == Some(thread)
                 && self.thread() == Some(thread)
             {
-                applied.restore = submitted.text;
+                if !submitted.answering
+                    && error.is_some_and(|error| RECONNECT.contains(&error.key()))
+                {
+                    applied.restore = submitted.text;
+                } else if error.is_some_and(|error| error.actions().contains(&Action::Retry)) {
+                    self.recovery = Some((run, submitted));
+                }
             }
         }
         applied.credit = self.release();

@@ -1,6 +1,7 @@
 //! Applying session-fenced link events to browsed and focused histories and runs.
 
 use super::{Context, OpenError, Presence, diagnostics};
+use crate::chat_notice::Source;
 use crate::drawing::{Broken, Chunk, Effect};
 use crate::link::{Batch, LinkEvent, LinkState};
 use crate::settings::Update;
@@ -101,7 +102,7 @@ impl Presence {
                         .as_ref()
                         .is_some_and(|session| session.generation() == generation)
                     {
-                        self.show_error(&error, cx);
+                        self.show_error(&error, Source::Account, cx);
                     }
                 }
             }
@@ -135,7 +136,7 @@ impl Presence {
             tracing::warn!("can't restore the submitted draft");
         }
         if let Some(error) = notice {
-            self.show_error(&error, cx);
+            self.show_error(&error, Source::Run(run), cx);
         }
         if let Some(stop) = applied.stop {
             self.stop_run(stop, cx);
@@ -171,13 +172,27 @@ impl Presence {
         self.request_pages(cx);
     }
 
-    fn account_changed(&self, generation: u64, view: AccountView, cx: &mut Context<'_, Self>) {
+    fn account_changed(&mut self, generation: u64, view: AccountView, cx: &mut Context<'_, Self>) {
         let current = self.session.as_ref().map(crate::link::Session::generation);
-        self.settings.update(cx, |state, cx| {
+        let recovered = self.settings.update(cx, |state, cx| {
             if state.accounts.receive(current, generation, view) {
                 cx.notify();
+                return matches!(
+                    state.accounts.view,
+                    Some(AccountView::SignedIn { recovery: None, .. })
+                ) && state.accounts.error.is_none();
             }
+            false
         });
+        if recovered {
+            self.chat_notice.recovered();
+            if self.settings.read(cx).notice().is_some_and(|error| {
+                error.key() == kumochi_protocol::message::ErrorKey::RenewalUnconfirmed
+            }) {
+                self.settings.update(cx, |state, _| state.clear_notice());
+                self.sync_settings_notice(cx);
+            }
+        }
     }
 
     /// Scene frames go to the presenter even when stale, so it drops them off the UI thread.
@@ -285,6 +300,13 @@ impl Presence {
         self.runs.settings(view.main_thread);
         self.clear_refusal(cx);
         self.sync_settings_notice(cx);
+        if matches!(
+            self.chat_notice.shown().map(|notice| notice.source),
+            Some(Source::Settings(_))
+        ) && self.settings.read(cx).notice().is_none()
+        {
+            self.chat_notice.dismiss();
+        }
         self.threads.update(cx, |state, cx| {
             state.set_settings(view.clone());
             cx.notify();
@@ -302,12 +324,23 @@ impl Presence {
     }
 
     /// Shows the brain's error in both panels and on the connected dock.
-    fn show_error(&mut self, error: &UserError, cx: &mut Context<'_, Self>) {
-        self.settings.update(cx, |state, cx| {
+    fn show_error(&mut self, error: &UserError, source: Source, cx: &mut Context<'_, Self>) {
+        let field = self.settings.update(cx, |state, cx| {
             state.accounts.error(error);
-            let _field = state.error(error.clone());
+            let field = state.error(error.clone());
             cx.notify();
+            field
         });
+        let source = if matches!(
+            error.key(),
+            kumochi_protocol::message::ErrorKey::SettingsRefused
+                | kumochi_protocol::message::ErrorKey::ConfigUnreadable
+        ) {
+            Source::Settings(field)
+        } else {
+            source
+        };
+        self.chat_notice.present(error.clone(), source);
         self.sync_settings_notice(cx);
         self.sync_taskbar(cx);
     }
@@ -347,6 +380,7 @@ impl Presence {
     }
 
     fn link_state(&mut self, state: LinkState, cx: &mut Context<'_, Self>) {
+        self.chat_notice.clear();
         self.end_selection(crate::presenter::overlay_input::ExitCause::BrainLost, cx);
         if state == LinkState::Connected {
             self.clear_refusal(cx);
