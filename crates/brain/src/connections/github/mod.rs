@@ -3,8 +3,6 @@
 pub mod api;
 pub mod device;
 
-pub mod api;
-
 use std::fmt;
 use std::ops::RangeInclusive;
 use std::time::Duration;
