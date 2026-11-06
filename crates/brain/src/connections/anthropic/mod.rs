@@ -16,7 +16,6 @@ use crate::connections::error::VaultError;
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum KeyOp {
     Load,
-    Adopt,
     Remove,
 }
 

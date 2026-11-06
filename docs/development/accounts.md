@@ -2,61 +2,30 @@
 
 ## Anthropic API key
 
-The shell staging helper validates and trims a pasted API key, then writes it to
-Credential Manager. Its caller must run it on a background worker and send only
-`AnthropicKeyStaged` after success; the Accounts UI wiring lands separately.
+The shell validates a pasted API key and asks the brain for a one-use staging
+plan using only its trimmed byte length. A background writer puts its chunks
+in Credential Manager at those authority-owned names, then sends
+`AnthropicKeyStaged { plan }`. The Accounts UI wiring lands separately.
 The key never crosses the pipe or enters a file, log, command line or environment variable.
 Only keys connected inside Kumochi are used; live checks must read the same Kumochi-owned
 credential, never another app's key.
 
 The saved key is the [credential authority](#credential-authority)'s `anthropic` record: Check
 reads its current generation, and Remove commits the removal first, then sweeps the names, so a
-removed key is never read again even while Credential Manager still serves it. The shell still
-stages a paste at keyring's `anthropic-key-staged.{service}` target, but the brain doesn't adopt
-it yet: `AnthropicKeyStaged` is refused (the view becomes Unconfirmed), and every open deletes
-the staged entry. C7 stages a paste through the authority instead. Neither that name nor the
-old `anthropic-key.{service}` record is read. All work runs on the credential worker under the
+removed key is never read again even while Credential Manager still serves it.
+Neither the legacy `anthropic-key-staged.{service}` target nor the old
+`anthropic-key.{service}` record is read. All work runs on the credential worker under the
 vault's session lock, one job at a time and in order, so a Remove sent while a Check's native
 read is blocked runs after it, and the runtime generation guard drops the stale Check's reply.
 A cancelled waiter never interrupts an in-flight call.
 
-A failed key removal remains pending in this brain process; Check/Retry and a staged-key
-notification retry Remove and never reload or adopt a key. Unconfirmed is not confirmation of
-removal. Until the removal transaction commits, quitting or restarting loses that in-memory
+A failed key removal remains pending in this brain process; Check/Retry retries
+Remove, and staging requests/notifications are refused without adoption.
+Unconfirmed is not confirmation of removal. Until the removal transaction commits,
+quitting or restarting loses that in-memory
 intent and the next startup may load and check the still-current key; retry removal until it
-succeeds. A paste received while removal is pending remains staged and is not automatically
-adopted.
-
-### Authority paste staging primitives
-
-The vault has a two-phase paste path, not yet reachable from the pipe. The
-payload-free `AnthropicKeyStaged` operation remains fenced until the protocol,
-runtime admission and shell writer land together. No Settings paste control is
-enabled by these primitives.
-
-The credential worker can mint one pending write-once plan for a validated
-16–2048-byte length without changing the saved key. Credential Manager holds
-the chunks, while the worker retains the original head revision and plan.
-Adoption consumes the matching plan before reading. An unknown, superseded or
-already consumed plan is Changed, not an empty-key format rejection. Reads
-wait at most two seconds across all chunks for an exact layout; only complete
-present bytes undergo key validation.
-
-The vault copies a valid paste into a fresh generation, verifies those writes,
-then activates it with the captured revision's compare-and-swap. A failed read,
-validation, write or commit preserves the previous saved key. Only a committed
-activation returns a usable replacement. The staged chunks and predecessor
-are swept after activation; neither shares the active generation's names.
-Remove consumes the in-memory permit before committing its durable fence,
-even when that commit fails. A later old notification cannot adopt it.
-
-A lost notification or failed operation leaves Pending until another begin
-or the next open retires it. Startup never resumes or adopts a paste. A shell
-write can outlive a brain restart, including the later lifetime in which its
-generation is marked Swept. Such late chunks can remain physically orphaned
-in Credential Manager, but cannot authorize a key; cleanup is not a physical
-erasure guarantee. The shell writer must use local-machine persistence and
-zeroizing buffers, not keyring's enterprise-persistent secret-writing path.
+succeeds. A paste refused while removal is pending requires a new explicit paste;
+it is not automatically adopted.
 
 The brain checks `GET https://api.anthropic.com/v1/models?limit=65` with a sensitive
 `Authorization: Bearer` header and no `x-api-key`, redirects or environment proxy,
@@ -65,10 +34,52 @@ refuses the catalog. A successful catalog is tagged AnthropicKey; 401/403 reject
 as does a 400 `invalid_request_error` naming the exact `anthropic-workspace-id` token
 (`WorkspaceRequired`). No workspace id is accepted or provider message forwarded. Rate limits,
 server, transport or catalog failures keep it Unconfirmed for a later Check.
-Every change fences late worker/HTTP replies
+Every saved-key check or replacement fences late worker/HTTP replies
 by generation and clears the old catalog. Catalog checks do not authorize inference or
 automatic fallback to another connection. Fixtures are synthetic API-reference examples;
 no live provider call is part of the tests.
+
+### Authority paste staging
+
+The worker mints one pending write-once plan for a validated 16–2048-byte
+length without changing the saved key. One protocol helper owns its lowercase
+generation spelling and 2,000-byte chunk layout for both processes. The shell
+carrier is moved, not cloned or serialized, into an injected writer. On Windows
+that writer calls CredWriteW with generic, local-machine persistence and a
+zeroizing blob; it never uses keyring's enterprise-persistent secret path.
+
+Begin replies are tied to the requesting link and request number. Disconnect
+clears admission, and offline notifications cannot mint or adopt. Check retains
+a pending paste, so a Check during Begin still gets
+a plan reply and a Check after its reply does not discard the paste's admission.
+Remove cancels an outstanding Begin reply before its plan can be forwarded,
+as well as consuming any issued admission.
+The serialized worker consumes an identified permit once; an unknown/superseded/consumed id
+is Changed, not an empty-key Format rejection. One two-second settle budget
+covers all staged reads; only complete present bytes are validated.
+
+Adoption copies a valid paste into fresh names, verifies the writes, then
+activates with the captured revision's compare-and-swap. Read, validation,
+write or commit failure preserves both the saved key and the runtime key/view/
+catalog. A successful commit enters the normal catalog-check path even if its
+shell disconnected; generation, not link epoch, fences this brain-wide result.
+`AnthropicKeyStageDone` reports only that paste's save outcome to its original
+link, independently of the saved key's connection view. A committed paste reports
+success even if a later Check or Remove fenced its runtime result or removed it.
+
+The staged chunks and predecessor are swept after activation, never the new
+active names. Any failed adoption and Remove also best-effort delete the
+consumed plan's staged names; write/activation failure deletes the uncommitted
+candidate's names too, without logging contents or retiring its row.
+Failed deletes wait for the next begin or open. Remove consumes admission and
+the permit even if its commit fails, so a late notification cannot adopt it.
+
+A lost notification or failed operation leaves Pending until another begin
+or the next open retires it. Startup never resumes a paste. A shell write can
+outlive a brain restart, including the later lifetime that marks its generation
+Swept. Such late chunks can remain physically orphaned but cannot authorize a
+key: cleanup is not a physical-erasure guarantee. No Settings paste control
+is enabled by this backend/stager prerequisite.
 
 ## Stored namespaces and credential names
 
@@ -82,11 +93,11 @@ The vault writes only write-once generation names, `<service>/gen/<kind>/<genera
 bounded `account_targets(service)` inventory name what earlier builds wrote: host, sign-out
 marker, chatgpt/revoke manifests, and each record's two slots of 64 chunks, plus the active and
 staged Anthropic targets in their dot form. These are 262 exact targets, not a service-prefix
-match. The vault never reads or writes them; the shell still writes the staging name. Opens
+match. Neither process reads or writes key bytes at these legacy names. Opens
 delete all 262 by exact name before their first sweep, and a refused delete waits for the next
 open. The pass repeats at each open until a clean pass in any open after the first one ends
 it, recorded in credentials.db's `control` row; after that each open deletes only the
-staging name, until C7 stages pastes through the authority. Anyone signed in on an earlier build sees Signed out and
+legacy staging name as defense against earlier writers. Anyone signed in on an earlier build sees Signed out and
 connects again, and the revocations it still owed are dropped unsent.
 
 Instance capabilities use keyring instead: `instance_entry(session)` is the account
@@ -94,9 +105,9 @@ Instance capabilities use keyring instead: `instance_entry(session)` is the acco
 On Windows, keyring stores `{account}.{service}`, represented by `instance_target`:
 `capability-7.Kumochi instance`, or `capability-7.Kumochi Dev instance`. An enumerated
 target is not an account and must not be fed directly to the account parser. Existing
-instance callers retain keyring's default mapping. Anthropic staging instead passes the
-shared `anthropic_staging_target` explicitly to `Entry::new_with_target`; the brain and
-purge inventory use the same helper, so a keyring default change cannot separate them.
+instance callers retain keyring's default mapping. Anthropic paste staging uses
+only authority generation names through the raw Windows writer described above;
+`anthropic_staging_target` remains only in legacy cleanup inventories.
 
 ## Sign-in callback
 

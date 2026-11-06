@@ -158,7 +158,7 @@ pub async fn run() -> Result<(), BrainError> {
     if let Some(models) = models {
         start_voice(&mut brain, models, &stuck, &exe, &jobs);
     }
-    let lane = claude_lane(vault_held, &jobs);
+    let lane = claude_lane(vault_held, &jobs, &exe);
     brain.attach_claude(match lane {
         Some(lane) if claude_on => runtime::claude::Claude::start(lane, runtime::claude::SIGN_IN),
         None if claude_on => runtime::claude::Claude::default(),
@@ -224,7 +224,8 @@ fn start_voice(
     let tts = TtsHandle::spawn(runtime, tts_reports)
         .inspect_err(|error| tracing::warn!(kind = ?error.kind(), "spoken replies can't start"))
         .ok();
-    brain.attach_voice(models, stuck, (stt, tts), [stt_heard, tts_heard]);
+    let fetcher = std::sync::Arc::new(voice::download::Online(models.clone()));
+    brain.attach_voice(models, stuck, (stt, tts), [stt_heard, tts_heard], fetcher);
 }
 
 /// The account system on the real credential store, browser, clock and network, and the fact that
@@ -254,6 +255,7 @@ fn accounts() -> io::Result<(
 fn claude_lane(
     vault_held: std::sync::Arc<std::sync::atomic::AtomicBool>,
     jobs: &std::sync::Arc<Job>,
+    brain_exe: &std::path::Path,
 ) -> Option<engines::claude_code::lane::Lane> {
     use engines::claude_code::install::{FindError, locate};
     use engines::claude_code::lane::{Host, Lane, Program};
@@ -285,6 +287,8 @@ fn claude_lane(
         brain_job: std::sync::Arc::clone(jobs),
         console: platform::Stdio::Console,
         terminate: Job::terminate,
+        brain_exe: brain_exe.to_owned(),
+        runtime: tokio::runtime::Handle::current(),
     };
     Lane::start(host)
         .inspect_err(

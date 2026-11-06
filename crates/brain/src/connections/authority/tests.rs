@@ -10,6 +10,7 @@ use zeroize::Zeroizing;
 
 use super::io;
 use super::*;
+use crate::connections::records::MAX_RECORD_BYTES;
 use crate::connections::vault::fake::FakeStore;
 use crate::platform::credential::{CredentialStore, SecretBytes};
 use crate::test_support::Scratch;
