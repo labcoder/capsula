@@ -4,7 +4,7 @@ use kumochi_scene::{
     record::{Segments, Solid},
     three::{
         Transform, Triangle,
-        mesh::{Built, MeshScratch, build},
+        mesh::{Built, MeshScratch, build, build_local},
         size::{MeshError, triangles},
     },
 };
@@ -99,6 +99,36 @@ fn area(mesh: &[Triangle]) -> f64 {
                 / 2.0
         })
         .sum()
+}
+
+/// Each local point placed by `world` and narrowed as the world build narrows, as f32 bits.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "narrows exactly as the world build does"
+)]
+fn narrowed(world: &Transform, local: &[[[f64; 3]; 3]]) -> Vec<[[u32; 3]; 3]> {
+    local
+        .iter()
+        .map(|triangle| {
+            triangle.map(|p| {
+                world.apply(p).map(|c| {
+                    let v = c as f32;
+                    if v == 0.0 { 0 } else { v.to_bits() }
+                })
+            })
+        })
+        .collect()
+}
+fn bits(world: &[Triangle]) -> Vec<[[u32; 3]; 3]> {
+    world
+        .iter()
+        .map(|triangle| {
+            triangle
+                .v
+                .map(|p| [p.x, p.y, p.z].map(|v| if v == 0.0 { 0 } else { v.to_bits() }))
+        })
+        .collect()
 }
 
 fn maximum_outline() -> Value {
@@ -581,5 +611,177 @@ fn maximum_point_counts_are_sized_without_allocating() {
     assert_eq!(
         triangles(&solid("lathe", json!({"points":profile,"segments":48}))),
         Ok(24000)
+    );
+}
+
+#[test]
+fn local_and_world_builds_agree_at_the_composed_rest() {
+    let parent = Transform::local([10.0, 0.0, 0.0], [0.0; 3], 2.0);
+    let rest = Transform::local([1.0, 0.0, 0.0], [30.0, 0.0, 0.0], 1.5).then(&parent);
+    let far = Transform::local([0.0; 3], [0.0; 3], 0.001).then(&Transform::local(
+        [19998.0, 0.0, 0.0],
+        [0.0; 3],
+        1.0,
+    ));
+    let ok = |written, dropped| Ok(Built { written, dropped });
+    // Counts from each shape's topology: 6 quads; a 320-face icosphere; 4n − 4 and 2n − 2 for
+    // cylinder and cone; 2n² for the torus; one axis triangle dropped per lathe quad; 4 sides
+    // and 2 caps for the square; 4 bands and 2 two-triangle caps for the tube.
+    let cases = [
+        (solid("box", json!({"size":[1,2,3]})), &rest, ok(12, 0)),
+        (
+            solid("sphere", json!({"r":1,"segments":12})),
+            &rest,
+            ok(320, 0),
+        ),
+        (
+            solid("cylinder", json!({"r":1,"h":2,"segments":12})),
+            &rest,
+            ok(44, 0),
+        ),
+        (
+            solid("cone", json!({"r":1,"h":2,"segments":12})),
+            &rest,
+            ok(22, 0),
+        ),
+        (
+            solid("torus", json!({"r":2,"r2":0.5,"segments":12})),
+            &rest,
+            ok(288, 0),
+        ),
+        (
+            solid("lathe", json!({"points":[[0,-1],[1,0],[0,1]],"segments":8})),
+            &rest,
+            ok(16, 16),
+        ),
+        (
+            solid(
+                "extrude",
+                json!({"points":[[0,0],[1,0],[1,1],[0,1]],"depth":1}),
+            ),
+            &rest,
+            ok(12, 0),
+        ),
+        (
+            solid(
+                "tube",
+                json!({"path":[[0,0,0],[0,0,1]],"r2":0.25,"segments":4}),
+            ),
+            &rest,
+            ok(12, 0),
+        ),
+        (
+            solid("box", json!({"size":[1,1,1]})),
+            &far,
+            Err(MeshError::Degenerate("pos")),
+        ),
+    ];
+    let mut scratch = MeshScratch::new();
+    for (shape, world, expected) in cases {
+        let count = usize::try_from(triangles(&shape).expect("valid count")).expect("bounded");
+        let (mut a, mut b, mut groups) = (
+            Vec::with_capacity(count),
+            Vec::with_capacity(count),
+            Vec::new(),
+        );
+        let cancel = AtomicBool::new(false);
+        let local = build_local(&shape, world, &mut b, &mut groups, &cancel, &mut scratch);
+        assert_eq!(local, expected, "{:?}", shape.shape);
+        assert_eq!(
+            build(&shape, world, 0, &mut a, &cancel, &mut scratch),
+            expected,
+            "{:?}",
+            shape.shape
+        );
+        if let Ok(built) = expected {
+            assert_eq!(
+                groups.iter().map(|&n| u32::from(n)).sum::<u32>(),
+                built.written
+            );
+            assert_eq!(narrowed(world, &b), bits(&a), "{:?}", shape.shape);
+        }
+    }
+    let mut out = Vec::with_capacity(12);
+    let alone = build_local(
+        &solid("box", json!({"size":[1,1,1]})),
+        &Transform::local([0.0; 3], [0.0; 3], 0.001),
+        &mut out,
+        &mut Vec::new(),
+        &AtomicBool::new(false),
+        &mut scratch,
+    );
+    assert_eq!(
+        alone.map(|built| built.written),
+        Ok(12),
+        "only the parent collapses it"
+    );
+}
+
+#[test]
+fn adversarial_extrusions_keep_their_authored_points_locally() {
+    // CAPS-191's three-point and CAPS-194's seven-point outlines: a first-vertex f32 origin made
+    // both caps or B, C and D collinear. Local f64 points are the authored ones, exactly.
+    let identity = Transform::local([0.0; 3], [0.0; 3], 1.0);
+    let cases: [(&[[f32; 2]], u32); 2] = [
+        (&[[-6000.0, -5999.0], [1.001, 2.001], [0.0, 1.0]], 8),
+        (
+            &[
+                [-8500.0, 1.0],
+                [9000.0, 0.0],
+                [9000.001, 1.0],
+                [9000.0, 2.0],
+                [8999.0, 0.5],
+                [-9500.0, 2.0],
+                [-9500.0, 0.0],
+            ],
+            24,
+        ),
+    ];
+    let mut scratch = MeshScratch::new();
+    let cancel = AtomicBool::new(false);
+    for (outline, written) in cases {
+        let shape = solid("extrude", json!({"points": outline, "depth": 1}));
+        let count = usize::try_from(written).expect("bounded");
+        let (mut world, mut local, mut groups) = (
+            Vec::with_capacity(count),
+            Vec::with_capacity(count),
+            Vec::new(),
+        );
+        let expected = Ok(Built {
+            written,
+            dropped: 0,
+        });
+        assert_eq!(
+            build(&shape, &identity, 0, &mut world, &cancel, &mut scratch),
+            expected
+        );
+        assert_eq!(
+            build_local(
+                &shape,
+                &identity,
+                &mut local,
+                &mut groups,
+                &cancel,
+                &mut scratch
+            ),
+            expected
+        );
+        assert_eq!(narrowed(&identity, &local), bits(&world));
+        let authored: Vec<[f64; 2]> = outline.iter().map(|p| p.map(f64::from)).collect();
+        for p in local.iter().flatten() {
+            assert!(
+                authored.contains(&[p[0], p[1]]),
+                "{p:?} is not an authored point"
+            );
+            assert!(
+                [-0.5_f64, 0.5].map(f64::to_bits).contains(&p[2].to_bits()),
+                "{p:?}"
+            );
+            assert_eq!(identity.apply(*p).map(f64::to_bits), p.map(f64::to_bits));
+        }
+    }
+    assert_eq!(
+        f64::from(1.001_f32).to_bits(),
+        1.001_000_046_730_041_5_f64.to_bits()
     );
 }

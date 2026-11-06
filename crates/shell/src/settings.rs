@@ -122,6 +122,7 @@ impl DockIntent {
 #[derive(Default)]
 pub(crate) struct Settings {
     pub(crate) accounts: crate::accounts::Accounts,
+    pub(crate) claude: crate::claude_accounts::ClaudeAccounts,
     pub(crate) native_taskbar_notice: Option<Text>,
     view: Option<SettingsView>,
     notice: Option<UserError>,

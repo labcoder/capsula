@@ -867,7 +867,15 @@ impl Coordinator {
             Input::Engines(now) => self.available(now, &mut effects),
             Input::CallCommitted { key, outcome, then } => match outcome {
                 crate::dispatch::Committed::Done => {
-                    self.call_committed(&key, then, &mut effects)?;
+                    // The task exists whether or not its run is still current.
+                    let created = matches!(then, Some(crate::dispatch::Then::Created { .. }));
+                    if created {
+                        effects.push(Effect::Control(ControlToShell::ThreadsChanged));
+                    }
+                    match self.call_committed(&key, then, &mut effects) {
+                        Err(Stale) if created => {}
+                        settled => settled?,
+                    }
                 }
                 crate::dispatch::Committed::Refused(error) => {
                     self.call_refused(&key, error, &mut effects)?;

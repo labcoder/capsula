@@ -613,6 +613,7 @@ mod tests {
             references: Box::default(),
             parent: None,
             work: crate::state::work::Work::default(),
+            three: None,
         };
         let objects = BTreeMap::from([(visual.id.clone(), target)]);
         let error = result
