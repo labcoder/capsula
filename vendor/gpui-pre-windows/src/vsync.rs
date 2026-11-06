@@ -30,8 +30,8 @@ const DEFAULT_VSYNC_INTERVAL: Duration = Duration::from_micros(16_666); // ~60Hz
 
 pub(crate) struct VSyncProvider {
     interval: Duration,
-    f: Box<dyn Fn() -> (bool, Duration)>,
-    early: bool,
+    f: Box<dyn Fn() -> (bool, Instant, Instant)>,
+    last_early_end: Option<Instant>,
 }
 
 impl VSyncProvider {
@@ -44,12 +44,12 @@ impl VSyncProvider {
             let start = Instant::now();
             // SAFETY: DwmFlush takes no arguments and waits for the compositor.
             let succeeded = unsafe { DwmFlush().is_ok() };
-            (succeeded, start.elapsed())
+            (succeeded, start, Instant::now())
         });
         Self {
             interval,
             f,
-            early: false,
+            last_early_end: None,
         }
     }
 
@@ -58,9 +58,13 @@ impl VSyncProvider {
     }
 
     fn wait_with(&mut self, sleep: impl FnOnce(Duration)) -> FrameRequestSource {
-        let (wait_succeeded, elapsed) = (self.f)();
-        let early = wait_succeeded && elapsed < VSYNC_INTERVAL_THRESHOLD;
-        let previous_early = std::mem::replace(&mut self.early, early);
+        let (wait_succeeded, start, end) = (self.f)();
+        let early =
+            wait_succeeded && end.saturating_duration_since(start) < VSYNC_INTERVAL_THRESHOLD;
+        let previous_early = self
+            .last_early_end
+            .is_some_and(|previous| start.saturating_duration_since(previous) < self.interval * 2);
+        self.last_early_end = early.then_some(end);
         if !wait_succeeded || (early && previous_early) {
             log::trace!("VSyncProvider::wait_for_vsync() took less time than expected");
             sleep(self.interval);
@@ -107,11 +111,18 @@ mod tests {
     const INTERVAL: Duration = Duration::from_millis(7);
 
     fn fake_provider(waits: &[(bool, Duration)]) -> VSyncProvider {
-        let waits = RefCell::new(waits.to_vec().into_iter());
+        let waits = RefCell::new((waits.to_vec().into_iter(), Instant::now()));
         VSyncProvider {
             interval: INTERVAL,
-            f: Box::new(move || waits.borrow_mut().next().expect("fixture has another wait")),
-            early: false,
+            f: Box::new(move || {
+                let mut waits = waits.borrow_mut();
+                let (succeeded, elapsed) = waits.0.next().expect("fixture has another wait");
+                let start = waits.1;
+                let end = start + elapsed;
+                waits.1 = end;
+                (succeeded, start, end)
+            }),
+            last_early_end: None,
         }
     }
 
@@ -182,5 +193,57 @@ mod tests {
         assert_wait(&mut provider, LocalSchedule, Some(INTERVAL));
         assert_wait(&mut provider, LocalSchedule, Some(INTERVAL));
         assert_wait(&mut provider, NativeCallback, None);
+    }
+
+    #[test]
+    fn an_idle_gap_expires_fast_wait_history_without_losing_backoff() {
+        for (gap, elapsed, source, sleep) in [
+            (
+                INTERVAL * 2 - Duration::from_nanos(1),
+                Duration::ZERO,
+                LocalSchedule,
+                Some(INTERVAL),
+            ),
+            (
+                INTERVAL * 2 - Duration::from_nanos(1),
+                VSYNC_INTERVAL_THRESHOLD - Duration::from_nanos(1),
+                LocalSchedule,
+                Some(INTERVAL),
+            ),
+            (INTERVAL * 2, Duration::ZERO, NativeCallback, None),
+            (
+                INTERVAL * 2 + Duration::from_nanos(1),
+                Duration::ZERO,
+                NativeCallback,
+                None,
+            ),
+            (
+                Duration::from_millis(200),
+                Duration::ZERO,
+                NativeCallback,
+                None,
+            ),
+        ] {
+            let first = Instant::now();
+            let second_start = first + gap;
+            let second_end = second_start + elapsed;
+            let third = second_end + INTERVAL;
+            let waits = RefCell::new(
+                [
+                    (true, first, first),
+                    (true, second_start, second_end),
+                    (true, third, third),
+                ]
+                .into_iter(),
+            );
+            let mut provider = VSyncProvider {
+                interval: INTERVAL,
+                f: Box::new(move || waits.borrow_mut().next().expect("fixture has another wait")),
+                last_early_end: None,
+            };
+            assert_wait(&mut provider, NativeCallback, None);
+            assert_wait(&mut provider, source, sleep);
+            assert_wait(&mut provider, LocalSchedule, Some(INTERVAL));
+        }
     }
 }

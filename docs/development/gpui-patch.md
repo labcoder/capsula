@@ -74,12 +74,26 @@ requested frame. `VSyncProvider` now allows the first fast success without sleep
 `NativeCallback`. A second consecutive fast success, and each subsequent one, sleeps one refresh
 and reports `LocalSchedule`, so a sleeping or unplugged monitor still cannot spin. A successful
 wait of at least 1 ms resets that history. A failed wait always sleeps and resets it too. The
-history belongs to the vsync thread and introduces no per-frame allocation or lock.
+previous fast wait counts only if the next wait starts less than two refresh intervals after
+it ended, so isolated one-frame updates don't retain fast-wait history across idle gaps.
+The history belongs to the vsync thread and introduces no per-frame allocation or lock.
 
 Fake wait durations and sleep observation cover the first fast success, repeated successes,
-the exact 1 ms boundary, normal waits, failures and recovery. CI's `vsync` test filter runs these
-alongside the existing frame-demand tests. Before/after latency and idle CPU for this change
-remain unmeasured; the measurements below describe only the original demand-driven patch.
+the exact 1 ms boundary, normal waits, failures and recovery. Fake timestamps cover the
+two-interval freshness boundary and a long idle gap, with recent fast returns still backing
+off. CI's `vsync` test filter runs these alongside the existing frame-demand tests.
+
+On Rez at 144 Hz and 100% scale, two interleaved idle samples per side (30 one-second
+intervals after 30 seconds of warmup) compared the credential-free fixture with main's
+backend against the repeated-fast fix. Calibrated one-core CPU median/p95 was
+0.0606%/0.0865% before and 0.0600%/0.0806% after; no idle CPU regression was observed.
+Neither side painted the dock during its idle samples. Wakeups were not collected.
+The control's 100-chord WM_INPUT-to-Present p50/p95/p99/max was
+4.1620/7.8556/8.2558/8.2986 ms, with four chords over one refresh plus 1 ms.
+The fix's shortcut run was refused by fixture admission before any chord, so no shortcut
+latency improvement is established. These measurements predate the idle-gap expiry above;
+its hardware shortcut validation remains pending. The measurements below
+describe only the original demand-driven patch.
 
 ## Measured
 
