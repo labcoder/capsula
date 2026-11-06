@@ -181,3 +181,34 @@ stateDiagram-v2
     Saving --> SignedOut: failure or Cancel, then cleanup
     Connected --> SignedOut: Sign out, then cleanup
 ```
+
+## Credential authority and lane
+
+GitHub records use the same credential thread, vault session lock and write-once
+generation names as other accounts. The record contains only a checked `ghu_`
+token, a checked login and a positive numeric user ID. JSON is limited to 2,048
+bytes; unknown or duplicate fields fail closed. Jobs and replies have content-free
+Debug output. A save checks the device machine's shared generation immediately
+before writing. Closing its reply receiver never stops the credential thread or
+discards a later removal; an admitted save finishes before that removal runs.
+
+Authority schema v3 adds the `github` head. Upgrades rebuild only `heads`, with
+foreign keys disabled before the transaction and checked before commit, then
+enabled again. Existing generations and indexes are retained. Older binaries
+refuse the whole v3 authority, including other accounts; they do not delete it.
+Live testing must isolate application data and coordinate the credential service
+instead of migrating an existing Dev authority silently.
+
+Remove first commits durable retirement, then deletes the retired generation's
+names. Load cleans retired GitHub rows without retiring a valid active record.
+Explicit cleanup queries every removed GitHub row, including deletions attempted
+in this process, so a refused delete can be retried immediately. Physical absence
+is reported as clean, but the authority marks a row Swept only after another
+process lifetime confirms absence. A failed retirement commit is NotDurable;
+remaining names are Refused.
+
+A whole malformed or oversized record is retired and cleaned. A failed or
+missing chunk read instead refuses the load and leaves the active generation
+unchanged, because a transient credential-store glitch is not sign-out. A vault
+that could not open likewise returns a typed refusal. The runtime orchestration
+and user-facing connection controls remain separate from this credential layer.

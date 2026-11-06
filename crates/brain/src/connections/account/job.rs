@@ -184,6 +184,16 @@ impl Worker<NativeCredentialStore> {
 }
 
 impl<S: CredentialStore> Worker<S> {
+    pub(crate) fn github(
+        &mut self,
+        job: crate::connections::github::lane::Job,
+    ) -> crate::connections::github::lane::Reply {
+        match self.vault.as_mut() {
+            Some(vault) => vault.github(job),
+            None => job.unavailable(),
+        }
+    }
+
     pub(crate) fn begin_key_paste(
         &mut self,
         len: usize,
