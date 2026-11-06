@@ -1,5 +1,5 @@
 //! `cargo xtask live <check>`: the real dev brain, on the developer's own dev account, driven over
-//! its real pipes by slice 2's gate client. The only check so far is `signin`.
+//! its real pipes by slice 2's gate client. The checks are `signin` and `claude-signin`.
 //!
 //! The brain serves only the `kumochi.exe` beside it, so, as in the slice 2 gate, an outer xtask
 //! builds the brain, copies it and itself (as `kumochi.exe`) into `target/live/<time>/bin`, and
@@ -9,6 +9,7 @@
     reason = "the harness's progress and the account's state are its output"
 )]
 
+mod claude_signin;
 mod signin;
 
 use std::fs;
@@ -21,6 +22,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use kumochi_protocol::constants::{BRAIN_EXE, LIVE_BUDGET_ENV, SHELL_EXE};
 
+use self::claude_signin::Ask;
 use crate::platform;
 
 /// The argument the copied harness runs with.
@@ -43,8 +45,9 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         Build::Release
     };
     match entry(build, &args.collect::<Vec<_>>())? {
-        Entry::Prepare => prepare(),
-        Entry::Inner => signin::inner(),
+        Entry::Prepare(check) => prepare(check),
+        Entry::Inner(Check::SignIn) => signin::inner(),
+        Entry::Inner(Check::Claude(ask)) => claude_signin::inner(ask),
     }
 }
 
@@ -56,9 +59,32 @@ enum Build {
 
 #[derive(Debug, PartialEq, Eq)]
 enum Entry {
-    Prepare,
+    Prepare(Check),
     /// The copied harness, which runs the brain beside its own executable.
-    Inner,
+    Inner(Check),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Check {
+    SignIn,
+    Claude(Ask),
+}
+
+impl Check {
+    const ALL: [Self; 3] = [
+        Self::SignIn,
+        Self::Claude(Ask::SignIn),
+        Self::Claude(Ask::Disconnect),
+    ];
+
+    /// The arguments after `live` that name it.
+    fn args(self) -> &'static [&'static str] {
+        match self {
+            Self::SignIn => &["signin"],
+            Self::Claude(Ask::SignIn) => &["claude-signin"],
+            Self::Claude(Ask::Disconnect) => &["claude-signin", "--disconnect"],
+        }
+    }
 }
 
 /// Which side of the harness the arguments after `live` ask for; both need a debug build.
@@ -68,11 +94,24 @@ fn entry(build: Build, args: &[String]) -> Result<Entry> {
         "run it from a debug xtask (`cargo xtask live signin`): a release one uses the installed \
          product's pipe and credential names"
     );
-    match args {
-        [check] if check == "signin" => Ok(Entry::Prepare),
-        [check, flag] if check == "signin" && flag == INNER => Ok(Entry::Inner),
-        _ => bail!("usage: cargo xtask live signin"),
-    }
+    let (words, inner) = match args.split_last() {
+        Some((last, words)) if last == INNER => (words, true),
+        _ => (args, false),
+    };
+    let check = Check::ALL
+        .into_iter()
+        .find(|check| {
+            words
+                .iter()
+                .map(String::as_str)
+                .eq(check.args().iter().copied())
+        })
+        .context("usage: cargo xtask live signin | claude-signin [--disconnect]")?;
+    Ok(if inner {
+        Entry::Inner(check)
+    } else {
+        Entry::Prepare(check)
+    })
 }
 
 /// Fails while a product process other than `me` runs: a dev brain holds the pipes the harness
@@ -92,9 +131,10 @@ fn refuse_running(running: &[platform::Entry], me: u32) -> Result<()> {
 }
 
 /// Builds the dev brain, copies it and this program into a fresh folder, and runs the check there.
-fn prepare() -> Result<()> {
+fn prepare(check: Check) -> Result<()> {
+    let name = check.args().join(" ");
     refuse_running(&platform::processes()?, std::process::id())?;
-    println!("live signin: building the dev brain (at most {BUILD_LIMIT:?})");
+    println!("live {name}: building the dev brain (at most {BUILD_LIMIT:?})");
     let mut cargo = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     cargo.args(["build", "--quiet", "--package", "kumochi-brain"]);
     let built = run_bounded(cargo, BUILD_LIMIT, "the brain build")?;
@@ -111,11 +151,11 @@ fn prepare() -> Result<()> {
     fs::create_dir_all(&bin)?;
     fs::copy(target.join(BRAIN_EXE), bin.join(BRAIN_EXE)).context("copying the brain")?;
     fs::copy(&me, bin.join(SHELL_EXE)).context("copying the client")?;
-    println!("live signin: running in {}", folder.display());
+    println!("live {name}: running in {}", folder.display());
     let mut inner = Command::new(bin.join(SHELL_EXE));
-    inner.args(["live", "signin", INNER]);
+    inner.arg("live").args(check.args()).arg(INNER);
     let ran = run_bounded(inner, RUN_LIMIT, "the live run")?;
-    ensure!(ran.success(), "live signin failed ({ran})");
+    ensure!(ran.success(), "live {name} failed ({ran})");
     Ok(())
 }
 
@@ -279,7 +319,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        Build, Entry, end, end_with, entry, refuse_running, run_bounded, wait_bounded,
+        Ask, Build, Check, Entry, end, end_with, entry, refuse_running, run_bounded, wait_bounded,
         warn_cleanup, with_cleanup,
     };
     use crate::platform;
@@ -419,26 +459,50 @@ mod tests {
         let args = |list: &[&str]| list.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
         let release = "run it from a debug xtask (`cargo xtask live signin`): a release one uses \
                        the installed product's pipe and credential names";
-        for list in [&["signin"][..], &["signin", "--inner"]] {
+        for list in [
+            &["signin"][..],
+            &["signin", "--inner"],
+            &["claude-signin", "--disconnect", "--inner"],
+        ] {
             let error = entry(Build::Release, &args(list)).expect_err("release");
             assert_eq!(format!("{error:#}"), release);
         }
-        assert_eq!(
-            entry(Build::Debug, &args(&["signin"])).expect("debug"),
-            Entry::Prepare
-        );
-        assert_eq!(
-            entry(Build::Debug, &args(&["signin", "--inner"])).expect("debug"),
-            Entry::Inner
-        );
+        let claude = Check::Claude;
+        for (list, want) in [
+            (&["signin"][..], Entry::Prepare(Check::SignIn)),
+            (&["signin", "--inner"], Entry::Inner(Check::SignIn)),
+            (&["claude-signin"], Entry::Prepare(claude(Ask::SignIn))),
+            (
+                &["claude-signin", "--inner"],
+                Entry::Inner(claude(Ask::SignIn)),
+            ),
+            (
+                &["claude-signin", "--disconnect"],
+                Entry::Prepare(claude(Ask::Disconnect)),
+            ),
+            (
+                &["claude-signin", "--disconnect", "--inner"],
+                Entry::Inner(claude(Ask::Disconnect)),
+            ),
+        ] {
+            assert_eq!(entry(Build::Debug, &args(list)).expect("debug"), want);
+        }
         for list in [
             &[][..],
+            &["--inner"],
             &["signin", "--inner", "C:/elsewhere"],
             &["signin", "C:/elsewhere"],
+            &["signin", "--disconnect"],
+            &["claude-signin", "--inner", "--disconnect"],
+            &["claude-signin", "--disconnect", "--disconnect"],
+            &["--disconnect"],
             &["first-text"],
         ] {
             let error = entry(Build::Debug, &args(list)).expect_err("refused");
-            assert_eq!(format!("{error:#}"), "usage: cargo xtask live signin");
+            assert_eq!(
+                format!("{error:#}"),
+                "usage: cargo xtask live signin | claude-signin [--disconnect]"
+            );
         }
     }
 
