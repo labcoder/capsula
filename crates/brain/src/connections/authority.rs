@@ -234,6 +234,20 @@ pub(crate) struct WritePlan {
     base: u64,
 }
 
+impl WritePlan {
+    pub(crate) fn generation(&self) -> Generation {
+        self.generation
+    }
+
+    pub(crate) fn layout(&self) -> Layout {
+        self.layout
+    }
+
+    pub(crate) fn base(&self) -> u64 {
+        self.base
+    }
+}
+
 /// What a sweep of a retired generation's names found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Observed {

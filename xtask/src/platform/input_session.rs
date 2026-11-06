@@ -1,18 +1,22 @@
 //! Owned Win32 fixture, physical-input guard and tagged native input for approved sessions.
 
+use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 use std::os::windows::process::CommandExt as _;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use kumochi_protocol::constants::{INPUT_SESSION_MARKER, OBSERVER_REPAINT_MESSAGE};
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::System::StationsAndDesktops::{
     CloseDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS, GetThreadDesktop,
     GetUserObjectInformationW, OpenInputDesktop, UOI_NAME,
 };
-use windows::Win32::System::Threading::{GetCurrentThreadId, NORMAL_PRIORITY_CLASS};
+use windows::Win32::System::Threading::{
+    GetCurrentThreadId, NORMAL_PRIORITY_CLASS, OpenProcess, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetClassNameW, GetForegroundWindow, GetSystemMetrics, GetWindowRect,
@@ -21,8 +25,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_DIGITIZER, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
     SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_CLOSE,
 };
-use windows::core::BOOL;
+use windows::core::{BOOL, PWSTR};
 
+mod activation;
 mod fixture;
 mod gate;
 mod guard;
@@ -80,11 +85,79 @@ fn last_input() -> Result<u32> {
     Ok(info.dwTime)
 }
 
+fn foreground_refusal() -> String {
+    // SAFETY: samples only the current foreground handle without reading window text.
+    let foreground = unsafe { GetForegroundWindow() };
+    let foreground_pid = pid(foreground);
+    let process = foreground_process_name(foreground_pid);
+    let desktop = input_desktop_state().map(|state| state.default);
+    format!(
+        "foreground_pid={foreground_pid} foreground_process={:?} input_desktop_default={:?}",
+        process.ok(),
+        desktop.ok()
+    )
+}
+
+fn foreground_process_name(process_id: u32) -> Result<String> {
+    // SAFETY: opens a numeric PID for read-only image-name queries, without inheriting it.
+    let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }?;
+    // SAFETY: the successful OpenProcess call transfers its uniquely owned handle.
+    let handle = unsafe { OwnedHandle::from_raw_handle(raw.0) };
+    let mut image = vec![0u16; 32768];
+    let mut length = u32::try_from(image.len())?;
+    // SAFETY: the live handle allows queries and image/length describe the writable buffer.
+    unsafe {
+        QueryFullProcessImageNameW(
+            HANDLE(handle.as_raw_handle()),
+            PROCESS_NAME_WIN32,
+            PWSTR(image.as_mut_ptr()),
+            &raw mut length,
+        )
+    }?;
+    let image = image
+        .get(..usize::try_from(length)?)
+        .context("process image length exceeds its buffer")?;
+    process_basename(&String::from_utf16_lossy(image))
+}
+
+fn process_basename(image: &str) -> Result<String> {
+    Ok(Path::new(image)
+        .file_name()
+        .context("foreground process image has no basename")?
+        .to_string_lossy()
+        .into_owned())
+}
+
+fn desktop_is_default(name: &[u16]) -> bool {
+    name.iter()
+        .copied()
+        .take_while(|unit| *unit != 0)
+        .eq("Default".encode_utf16())
+}
+
+/// The input desktop is Default and this thread's own; a failed query counts as neither.
+fn desktop_ours() -> bool {
+    input_desktop_state().is_ok_and(|state| state.default && state.assigned)
+}
+
 fn input_desktop_available() -> Result<()> {
+    ensure!(
+        input_desktop_state()?.assigned,
+        "input desktop changed or is locked"
+    );
+    Ok(())
+}
+
+struct DesktopState {
+    default: bool,
+    assigned: bool,
+}
+
+fn input_desktop_state() -> Result<DesktopState> {
     // SAFETY: opens the input desktop read-only, without inheriting or switching it.
     let input =
         unsafe { OpenInputDesktop(DESKTOP_CONTROL_FLAGS::default(), false, DESKTOP_READOBJECTS) }?;
-    let checked: Result<()> = (|| {
+    let checked: Result<DesktopState> = (|| {
         // SAFETY: this only obtains the calling thread's numeric identity.
         let thread = unsafe { GetCurrentThreadId() };
         // SAFETY: the returned thread desktop is borrowed and is never closed here.
@@ -111,18 +184,17 @@ fn input_desktop_available() -> Result<()> {
                 None,
             )
         }?;
-        ensure!(
-            input_name == assigned_name,
-            "input desktop changed or is locked"
-        );
-        Ok(())
+        Ok(DesktopState {
+            default: desktop_is_default(&input_name),
+            assigned: input_name == assigned_name,
+        })
     })();
     // SAFETY: only the handle owned by the successful OpenInputDesktop call is closed.
     let closed = unsafe { CloseDesktop(input) };
     match (checked, closed) {
-        (Ok(()), Ok(())) => Ok(()),
+        (Ok(state), Ok(())) => Ok(state),
         (Err(error), Ok(())) => Err(error),
-        (Ok(()), Err(error)) => Err(error.into()),
+        (Ok(_), Err(error)) => Err(error.into()),
         (Err(error), Err(close)) => {
             Err(error.context(format!("closing input desktop also failed: {close}")))
         }
@@ -407,7 +479,29 @@ fn desktop_rect() -> [i32; 4] {
 
 #[cfg(test)]
 mod tests {
-    use super::{digitizer_free, normalized, pack, unpack};
+    use super::{desktop_is_default, digitizer_free, normalized, pack, process_basename, unpack};
+
+    #[test]
+    fn foreground_diagnostic_keeps_only_the_executable_basename() {
+        let name = process_basename(r"C:\private-path-sentinel\nested\LogonUI.exe").unwrap();
+        assert_eq!(name, "LogonUI.exe");
+        assert!(!format!("{name:?}").contains("private-path-sentinel"));
+        assert!(process_basename("").is_err());
+        assert!(process_basename(r"C:\").is_err());
+    }
+
+    #[test]
+    fn foreground_diagnostic_distinguishes_default_from_other_desktops() {
+        for name in ["", "Defaul", "DefaultExtra", "Winlogon", "Screen-saver"] {
+            let units = name.encode_utf16().chain([0]).collect::<Vec<_>>();
+            assert!(!desktop_is_default(&units), "must reject {name}");
+        }
+        let mut default = [0u16; 256];
+        for (to, from) in default.iter_mut().zip("Default".encode_utf16()) {
+            *to = from;
+        }
+        assert!(desktop_is_default(&default));
+    }
 
     #[test]
     fn any_pen_or_touch_bit_or_unknown_bit_is_unsupported() {
