@@ -45,13 +45,14 @@ pub(super) enum Ask {
 
 fn drive(wire: &mut impl Wire, out: &mut impl Write, ask: Ask) -> Result<()> {
     let first = answer(wire, "first Connections view")?;
-    let waiting = if first == ClaudeCodeView::Finding {
-        first
-    } else {
-        ClaudeCodeView::NotFound
-    };
-    let found = leave(wire, first, waiting, FIND, "finding Claude Code")?
-        .unwrap_or(ClaudeCodeView::NotFound);
+    let found = leave(
+        wire,
+        first,
+        |view| matches!(view, ClaudeCodeView::NotFound | ClaudeCodeView::Finding),
+        FIND,
+        "finding Claude Code",
+    )?
+    .unwrap_or(ClaudeCodeView::NotFound);
     writeln!(out, "claude code: {}", state(found))?;
     match ask {
         Ask::SignIn => sign_in(wire, out, found),
@@ -76,8 +77,14 @@ fn sign_in(wire: &mut impl Wire, out: &mut impl Write, found: ClaudeCodeView) ->
             out,
             "signing in: finish in Claude Code's console; waiting at most {SIGNIN:?}"
         )?;
-        now = leave(wire, now, ClaudeCodeView::SigningIn, SIGNIN, "signing in")?
-            .ok_or_else(|| anyhow!("the sign-in didn't settle in {SIGNIN:?}; Quitting ends it"))?;
+        now = leave(
+            wire,
+            now,
+            |view| view == ClaudeCodeView::SigningIn,
+            SIGNIN,
+            "signing in",
+        )?
+        .ok_or_else(|| anyhow!("the sign-in didn't settle in {SIGNIN:?}; Quitting ends it"))?;
     }
     writeln!(out, "claude code: {}", state(now))?;
     ensure!(
@@ -107,7 +114,7 @@ fn sign_out(wire: &mut impl Wire, out: &mut impl Write, found: ClaudeCodeView) -
     let end = leave(
         wire,
         now,
-        ClaudeCodeView::CleanupPending,
+        |view| view == ClaudeCodeView::CleanupPending,
         CLEANUP,
         "cleaning up",
     )?
@@ -157,8 +164,14 @@ fn answer(wire: &mut impl Wire, what: &str) -> Result<ClaudeCodeView> {
 /// Snapshots the brain sends for other reasons, such as the Anthropic key's checks, may still
 /// show `before` after the op was sent.
 fn ack(wire: &mut impl Wire, before: ClaudeCodeView, op: &str) -> Result<ClaudeCodeView> {
-    leave(wire, before, before, VIEW, "waiting for an answer")?
-        .ok_or_else(|| anyhow!("no answer to {op} in {VIEW:?}"))
+    leave(
+        wire,
+        before,
+        |view| view == before,
+        VIEW,
+        "waiting for an answer",
+    )?
+    .ok_or_else(|| anyhow!("no answer to {op} in {VIEW:?}"))
 }
 
 /// Reads views from `view` on until one is `want`, within [`VIEW`]; `view` itself may be it.
@@ -182,16 +195,16 @@ fn reach(
     Ok(view)
 }
 
-/// Reads views from `view` on until one isn't `stay`, for at most `limit`; `None` past it.
+/// Reads views while `stay` matches, for at most `limit`; `None` past it.
 fn leave(
     wire: &mut impl Wire,
     mut view: ClaudeCodeView,
-    stay: ClaudeCodeView,
+    stay: impl Fn(ClaudeCodeView) -> bool,
     limit: Duration,
     what: &str,
 ) -> Result<Option<ClaudeCodeView>> {
     let deadline = Instant::now() + limit;
-    while view == stay {
+    while stay(view) {
         view = match next(wire, deadline.saturating_duration_since(Instant::now())) {
             Next::View(view) => view,
             Next::Closed => bail!("the brain closed the pipe while {what}"),
@@ -451,6 +464,25 @@ mod tests {
     fn the_authoritative_finding_state_settles_before_connect() {
         let mut brain = fixture(vec![
             Step::View(ClaudeCodeView::Finding),
+            Step::View(ClaudeCodeView::Finding),
+            Step::View(signed_out()),
+            Step::View(ClaudeCodeView::SigningIn),
+            Step::View(ready()),
+        ]);
+        let (out, error, quit_sent) = run(&mut brain, Ask::SignIn);
+        assert_eq!(
+            out,
+            format!("claude code: signed out\n{WAITING}claude code: ready\n")
+        );
+        assert_eq!(error, None);
+        assert_eq!(brain.sent, [CONNECT, QUIT]);
+        assert!(quit_sent);
+    }
+
+    #[test]
+    fn placeholder_then_finding_still_waits_for_settled_discovery() {
+        let mut brain = fixture(vec![
+            Step::View(ClaudeCodeView::NotFound),
             Step::View(ClaudeCodeView::Finding),
             Step::View(signed_out()),
             Step::View(ClaudeCodeView::SigningIn),
