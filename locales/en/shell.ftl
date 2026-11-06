@@ -51,6 +51,8 @@ thread-delete-cancel = Cancel
 thread-deleting = Deleting…
 thread-delete-failed = Couldn't delete the task. It's still here; try again.
 thread-deletes-full = Wait for the other deletes to finish.
+thread-delete-kumo = { $assistant } keeps a note that a task was deleted, but not its name.
+thread-deleted = You deleted a task.
 
 action-back-to-kumo = Back to { $assistant }
 action-switch-task = Switch to this task

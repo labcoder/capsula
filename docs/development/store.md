@@ -21,7 +21,7 @@ brain opens it. The code is `crates/brain/src/store/`.
 |---|---|
 | `threads` | Title, timestamps, `state` (`live` or `deleting`), `deletion_generation`, `kind` (`main` or `thread`), `title_source` (`words`, `model` or `user`), and the nullable `model` and `effort`. `AUTOINCREMENT`, so a deleted thread's id never comes back for a new thread that late work could be mistaken for |
 | `runs` | One per user turn: thread, `state` (`active`, `done`, `interrupted`, `failed`), reason, timestamps. `AUTOINCREMENT`, so a run id is never issued twice, even after the thread holding the highest one is deleted. Since version 6, a spoken run's heard point ([voice](voice.md#a-spoken-run)): `heard_segment`, `heard_sample` and `heard_text`, all NULL (unknown) or all set |
-| `events` | Thread, run, kind (`user`, `assistant_text`, `scene_step`, `revealed`, `scene_begin`, `scene_cleared`, `scene_cut`, and a model round's `output_item` and `tool_result`, whose JSON `body` holds the native item with its connection, or the call id and its result, with no searchable text), searchable `text`, JSON `body`. A trigger refuses updates. An event's run must be an active run of the same thread, so a late completion after a run ends is refused; scene clears, v1 cuts and the `revealed` of a late Stop are written without one |
+| `events` | Thread, run, kind (`user`, `assistant_text`, `scene_step`, `revealed`, `scene_begin`, `scene_cleared`, `scene_cut`, `task_deleted`, and a model round's `output_item` and `tool_result`, whose JSON `body` holds the native item with its connection, or the call id and its result, with no searchable text), searchable `text`, JSON `body`. A trigger refuses updates. An event's run must be an active run of the same thread, so a late completion after a run ends is refused; scene clears, v1 cuts and the `revealed` of a late Stop are written without one. A `task_deleted` note goes in Kumo's thread with no run and no text: it keeps no title, so a deleted task's name still leaves the files with it |
 | `events_fts` | FTS5 over `events.text`, kept by triggers, with FTS5's `secure-delete` on so a deleted row's entries leave the index at once. A deleted term can still survive whole as an `events_fts_idx` separator key until the purge rebuilds the index (see below) |
 | `purge_pending` | One row while a deletion's purge is owed, written in its second transaction and cleared only after the purge finishes |
 | `summaries` | Compaction's summaries: thread, `first_event`, `last_event`, `text`, the nullable `model` (none for the fixture), `created_ms`. Derived, so no full-text index: search finds the raw events, which stay. Inserted only while the thread is live in the deletion generation the summary was read in, so a delete during compaction stores nothing; the builder reads the newest. A deleted task's summaries go in the deletion's second transaction, and the purge clears their leftover copies like the events'. Version 4 |
@@ -222,7 +222,7 @@ sequenceDiagram
   participant S as Store thread
   participant H as Purge helper
   participant DB as kumochi.db
-  S->>DB: tx 1: state=deleting, deletion_generation+1
+  S->>DB: tx 1: state=deleting, deletion_generation+1, an untitled note in Kumo's thread
   Note over S: hidden from lists and search, takes no new runs or events
   S->>S: stop the thread's producers (later slices)
   S->>DB: tx 2: delete events (and FTS rows), tool_calls, runs, summaries, thread; purge_pending=1

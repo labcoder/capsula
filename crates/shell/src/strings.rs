@@ -55,6 +55,7 @@ pub(crate) enum Text {
     ThreadDeleting,
     ThreadDeleteFailed,
     ThreadDeletesFull,
+    ThreadDeleted,
     BackToKumo,
     SwitchThread,
     RenameThread,
@@ -138,7 +139,7 @@ pub(crate) enum Text {
 
 impl Text {
     #[cfg(test)]
-    const ALL: [Self; 124] = [
+    const ALL: [Self; 125] = [
         Self::Connecting,
         Self::Connected,
         Self::Reconnecting,
@@ -184,6 +185,7 @@ impl Text {
         Self::ThreadDeleting,
         Self::ThreadDeleteFailed,
         Self::ThreadDeletesFull,
+        Self::ThreadDeleted,
         Self::BackToKumo,
         Self::SwitchThread,
         Self::RenameThread,
@@ -379,6 +381,7 @@ impl Text {
             Self::ThreadDeleting => "thread-deleting",
             Self::ThreadDeleteFailed => "thread-delete-failed",
             Self::ThreadDeletesFull => "thread-deletes-full",
+            Self::ThreadDeleted => "thread-deleted",
             Self::BackToKumo => "action-back-to-kumo",
             Self::SwitchThread => "action-switch-task",
             Self::RenameThread => "action-rename-task",
@@ -460,6 +463,17 @@ impl Strings {
         let mut args = FluentArgs::new();
         args.set("title", title);
         self.format("thread-issue-draft", Some(&args))
+    }
+
+    /// The delete dialog's body, with what Kumo keeps.
+    pub(crate) fn delete_body(&self, assistant: &str) -> String {
+        let mut args = FluentArgs::new();
+        args.set("assistant", assistant);
+        format!(
+            "{} {}",
+            self.get(Text::DeleteThreadBody),
+            self.format("thread-delete-kumo", Some(&args))
+        )
     }
 
     pub(crate) fn back_to_kumo(&self, assistant: &str) -> String {
@@ -641,6 +655,18 @@ mod tests {
         assert_eq!(strings.assistant("Cloud"), "Cloud");
         assert_eq!(strings.back_to_kumo("Cloud"), "Back to Cloud");
         assert_eq!(strings.focus("Birthday"), "You're in: Birthday");
+    }
+
+    #[test]
+    fn the_deletion_note_and_the_dialog_never_name_the_task() {
+        let strings = Strings::english();
+        assert_eq!(strings.get(Text::ThreadDeleted), "You deleted a task.");
+        assert_eq!(
+            strings.delete_body("Cloud"),
+            "This removes the task and its drawings from this PC. It can't remove issues you \
+             already filed on GitHub, or what your model provider keeps under its own terms. \
+             Cloud keeps a note that a task was deleted, but not its name."
+        );
     }
 
     #[test]
