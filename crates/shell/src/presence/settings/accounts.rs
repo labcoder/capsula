@@ -9,7 +9,7 @@ use gpui_kit::{
     Styled as _, Window, div,
 };
 use kumochi_protocol::message::{
-    AccountOp, AccountRecovery, AccountView, Action, Cleanup, ErrorKey, MANAGE_USAGE_URL, PlanState,
+    AccountOp, AccountRecovery, AccountView, Cleanup, ErrorKey, MANAGE_USAGE_URL, PlanState,
 };
 
 use super::SettingsView;
@@ -36,7 +36,12 @@ impl SettingsView {
     fn account_actions(&self, cx: &Context<'_, Self>) -> impl IntoElement {
         let strings = cx.global::<Strings>();
         let state = &self.model.read(cx).accounts;
-        let mut actions = div().flex().flex_wrap().items_center().gap_2();
+        let mut actions = div()
+            .debug_selector(|| "account-actions".into())
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_2();
         match &state.view {
             Some(AccountView::SignedOut { .. }) => {
                 actions = actions.child(self.account_button(
@@ -61,13 +66,7 @@ impl SettingsView {
                         cx,
                     ));
             }
-            Some(AccountView::SignedIn { recovery, .. })
-                if *recovery == Some(AccountRecovery::SignInAgain)
-                    || state
-                        .error
-                        .as_ref()
-                        .is_some_and(|error| error.actions().contains(&Action::SignIn)) =>
-            {
+            Some(AccountView::SignedIn { .. }) if state.sign_in_again() => {
                 actions = actions
                     .debug_selector(|| "account-sign-in-recovery".into())
                     .child(self.account_button(

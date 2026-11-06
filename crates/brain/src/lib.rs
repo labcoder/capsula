@@ -149,7 +149,15 @@ pub async fn run() -> Result<(), BrainError> {
         account,
     )
     .map_err(BrainError::StoreThread)?;
+    let models = platform::data_dir().map(|data| data.join(kumochi_protocol::voice::MODELS_DIR));
+    let stuck = models
+        .as_deref()
+        .map(|models| brain.finish_removals(models))
+        .unwrap_or_default();
     let jobs = std::sync::Arc::new(Job::new().map_err(BrainError::Helpers)?);
+    if let Some(models) = models {
+        start_voice(&mut brain, models, &stuck, &exe, &jobs);
+    }
     let lane = claude_lane(vault_held, &jobs, &exe);
     brain.attach_claude(match lane {
         Some(lane) if claude_on => runtime::claude::Claude::start(lane, runtime::claude::SIGN_IN),
@@ -187,6 +195,37 @@ pub async fn run() -> Result<(), BrainError> {
         tracing::warn!(%error, "couldn't delete the instance capability");
     }
     ended.map(|_| ()).map_err(BrainError::from)
+}
+
+/// Starts speech input's worker and spoken replies' thread, then voice. A handle that can't start
+/// leaves its part unavailable for the session.
+fn start_voice(
+    brain: &mut Brain,
+    models: PathBuf,
+    stuck: &[kumochi_protocol::voice::VoicePart],
+    exe: &std::path::Path,
+    jobs: &std::sync::Arc<Job>,
+) {
+    use voice::Reports;
+    use voice::stt::SttHandle;
+    use voice::tts::TtsHandle;
+
+    let runtime = tokio::runtime::Handle::current();
+    let natives = exe
+        .parent()
+        .expect("the brain's path names a file in a folder")
+        .to_path_buf();
+    let (stt_reports, stt_heard) = Reports::new();
+    let stt = speech::SpeechSupervisor::start(exe.to_path_buf(), std::sync::Arc::clone(jobs))
+        .and_then(|speech| SttHandle::spawn(runtime.clone(), speech, natives, stt_reports))
+        .inspect_err(|error| tracing::warn!(kind = ?error.kind(), "speech input can't start"))
+        .ok();
+    let (tts_reports, tts_heard) = Reports::new();
+    let tts = TtsHandle::spawn(runtime, tts_reports)
+        .inspect_err(|error| tracing::warn!(kind = ?error.kind(), "spoken replies can't start"))
+        .ok();
+    let fetcher = std::sync::Arc::new(voice::download::Online(models.clone()));
+    brain.attach_voice(models, stuck, (stt, tts), [stt_heard, tts_heard], fetcher);
 }
 
 /// The account system on the real credential store, browser, clock and network, and the fact that

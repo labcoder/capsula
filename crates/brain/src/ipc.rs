@@ -238,6 +238,8 @@ impl Pipes {
         if check_hello(&hello, identity) != Verdict::Welcome {
             return Err(SessionError::WrongCapability);
         }
+        let _shell_identity =
+            platform::shell_connection(&self.control, &self.data, &identity.shell_image)?;
         tracing::info!("shell connected");
         Ok(
             match brain.serve(&mut self.control, &mut self.data, tap).await {
@@ -391,6 +393,66 @@ mod tests {
             capability: Secret::new(one_byte_off),
         };
         assert_eq!(check_hello(&near, &id), Verdict::WrongCapability);
+    }
+
+    #[tokio::test]
+    async fn a_mixed_build_is_refused_before_queued_staging_frames_are_decoded() {
+        use kumochi_protocol::frame::{self, Pipe};
+        use kumochi_protocol::message::{ConnectionOp, ControlToBrain, ControlToShell, KeyStageId};
+        use tokio::io::AsyncWriteExt as _;
+        let (control, mut client) = crate::platform::test_pair("mixed-stage-control")
+            .await
+            .expect("control");
+        let (data, client_data) = crate::platform::test_pair("mixed-stage-data")
+            .await
+            .expect("data");
+        let mut pipes = Pipes {
+            session: 0,
+            control,
+            data,
+        };
+        let mut id = identity();
+        id.shell_image = std::env::current_exe().expect("test executable");
+        let scratch = Scratch::new("mixed-stage-build");
+        let mut brain = test_support::brain(&scratch, "");
+        let mut tap = Tap::from_env();
+        let peer = async {
+            let mut bytes = frame::encode(
+                &ControlToBrain::Hello(hello(1, "different-staging-shape")),
+                Pipe::Control,
+            )
+            .expect("hello");
+            for op in [
+                ConnectionOp::BeginAnthropicKeyStage {
+                    request: 1,
+                    len: 16,
+                },
+                ConnectionOp::AnthropicKeyStaged {
+                    plan: KeyStageId([1; 16]),
+                },
+            ] {
+                bytes.extend(
+                    frame::encode(&ControlToBrain::Connection(op), Pipe::Control).expect("staging"),
+                );
+            }
+            client.write_all(&bytes).await.expect("sent");
+            assert_eq!(
+                super::read::<ControlToShell>(&mut client, Pipe::Control)
+                    .await
+                    .expect("reply"),
+                Some(ControlToShell::BuildMismatch {
+                    brain_build: BUILD_ID.to_owned()
+                })
+            );
+            drop((client, client_data));
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(pipes.session(&id, &mut brain, &mut tap), peer)
+        })
+        .await
+        .expect("handshake ends");
+        assert_eq!(result.expect("session"), Session::BuildMismatch);
+        brain.close().await;
     }
 
     #[tokio::test]

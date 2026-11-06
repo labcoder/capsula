@@ -117,6 +117,66 @@ fn a_non_durable_task_and_a_deleted_focus_fall_back_to_kumo() {
 }
 
 #[test]
+fn only_the_first_terminal_state_can_mark_a_live_answer_committed() {
+    for phase in [Phase::Done, Phase::Failed, Phase::Interrupted] {
+        for data_first in [false, true] {
+            let mut runs = Runs::default();
+            runs.settings(ThreadId(1));
+            runs.apply_state(RunId(1), ThreadId(1), Phase::Answering);
+            data(&mut runs, text(1, "kept"));
+            if data_first {
+                data(&mut runs, DataToShell::RunEnd { run: RunId(1) });
+            }
+            runs.apply_state(RunId(1), ThreadId(1), phase);
+            assert_eq!(
+                runs.shown().map(|shown| (shown.done, shown.text.as_str())),
+                Some((phase == Phase::Done, "kept"))
+            );
+            runs.apply_state(RunId(1), ThreadId(1), Phase::Answering);
+            runs.apply_state(RunId(1), ThreadId(1), Phase::Done);
+            assert_eq!(
+                runs.shown().map(|shown| (shown.done, shown.text.as_str())),
+                Some((phase == Phase::Done, "kept"))
+            );
+            if !data_first {
+                data(&mut runs, DataToShell::RunEnd { run: RunId(1) });
+            }
+        }
+    }
+}
+
+#[test]
+fn streamed_cut_is_explicit_and_connection_changes_remove_live_thread_ownership() {
+    let mut runs = Runs::default();
+    runs.met(Incarnation(1));
+    runs.connected(1);
+    runs.settings(ThreadId(1));
+    runs.apply_state(RunId(1), ThreadId(1), Phase::Answering);
+    data(&mut runs, text(1, &"é".repeat(TEXT_KEPT / 2)));
+    assert_eq!(
+        runs.shown().map(|shown| (shown.cut, shown.text.len())),
+        Some((false, TEXT_KEPT))
+    );
+    data(&mut runs, text(1, "!"));
+    assert_eq!(
+        runs.shown().map(|shown| (shown.cut, shown.text.len())),
+        Some((true, TEXT_KEPT - 1))
+    );
+    data(&mut runs, text(1, ""));
+    assert_eq!(runs.shown().map(|shown| shown.cut), Some(true));
+    runs.met(Incarnation(2));
+    assert_eq!(runs.shown().and_then(|shown| shown.thread), None);
+    runs.apply_state(RunId(2), ThreadId(1), Phase::Answering);
+    data(&mut runs, text(2, "fresh"));
+    assert_eq!(
+        runs.shown().map(|shown| (shown.cut, shown.thread)),
+        Some((false, Some(ThreadId(1))))
+    );
+    runs.disconnected();
+    assert_eq!(runs.shown().and_then(|shown| shown.thread), None);
+}
+
+#[test]
 fn a_late_answer_belongs_to_its_turn_not_the_manually_switched_focus() {
     let mut runs = Runs::default();
     runs.connected(1);
@@ -131,7 +191,9 @@ fn a_late_answer_belongs_to_its_turn_not_the_manually_switched_focus() {
         Some(&super::Shown {
             run: RunId(1),
             thread: Some(ThreadId(1)),
-            text: "Kumo's answer".to_owned()
+            text: "Kumo's answer".to_owned(),
+            cut: false,
+            done: false,
         })
     );
     assert_eq!(runs.target(), Target::Task(ThreadId(9)));

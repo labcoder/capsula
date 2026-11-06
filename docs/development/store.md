@@ -30,6 +30,9 @@ brain opens it. The code is `crates/brain/src/store/`.
 The coordinator issues thread and run ids itself, above `high_water()` (the highest ids in
 `sqlite_sequence`, deleted ones included), and the store refuses any id that isn't new. A whole
 user turn (a new thread when there is one, the run, and the user's text) is one transaction.
+`create_task` reserves its id first, raising the threads row of `sqlite_sequence` in a commit of
+its own, so the id is issued before its task exists; a purge's copy keeps `sqlite_sequence`, so
+a reservation with no row behind it outlives a purge and a restart ([tools](tools.md)).
 
 Later slices add assets, sends, actions and cleanup jobs, each as a
 new migration. Migrations are numbered by `PRAGMA user_version`, run forward only, one

@@ -32,7 +32,9 @@ worker can therefore make the brain hold up to 16 × 4 MiB of partial replies, p
 256 KiB frames, for at most one deadline.
 
 Each request has one 1.5 s absolute deadline [guess], including queue time; fixtures can inject it.
-A loss terminates the worker, fails all pending operations and broadcasts `WorkerLost`. The first
+A loss terminates the worker, fails all pending operations, then broadcasts its `Generation`: the
+first worker is 0 and each respawn the next, and every reply names the generation that sent it.
+The first
 two losses respawn immediately; a third within 60 s waits 0.2 s, then 1 s and 5 s for later losses
 [guess]. Requests during backoff fail fast. During an in-flight respawn, requests wait for the new
 worker under their original absolute deadline; a failed spawn immediately fails its queued callers.
@@ -42,7 +44,7 @@ after the last handle has closed doesn't respawn, so shutdown can't start a work
 
 Debug builds accept one-request fault fixtures and `KUMOCHI_SCREEN_FAULT=hang|crash|garbage|panic`.
 The environment switch applies on the next request of every respawn; neither path exists in a
-release worker. The portable element operation is implemented; Windows UI Automation and OCR are not yet connected.
+release worker. Windows UI Automation supplies the element operation; OCR is not connected.
 
 The macOS platform equivalent is `posix_spawn` file actions for stdio and a process-group kill;
 it remains unimplemented and unverified.
@@ -50,14 +52,13 @@ it remains unimplemented and unverified.
 ## Capture under a ticket
 
 `Capture { ticket, display, exclude }` takes one frame of one physical display into the worker's
-`RawFrame` and answers `Captured(FrameMeta)` or `Refused`; **pixels never cross the pipe**. A4
-encodes them and A6 decides what leaves the worker; nothing here sends them anywhere, and there's
-no operation that reads or exports them.
+`RawFrame` and answers `Captured(FrameMeta)` or `Refused`; **pixels never cross the pipe**.
+The worker can sanitize and encode them locally, but no operation exports them.
 
-- **Authority.** `TicketWire` can only be built inside the brain, and B2a's ticket book is the only
-  minter: from a recognized hold or an Include send, under a live exclusion lease. Until B2a
-  lands, nothing in production sends `Capture`. `Exclusion::KumochiWindows` is a declaration the
-  caller makes because it holds the shell's lease, not proof of one.
+- **Authority.** `TicketWire` can only be built inside the brain. Nothing in production sends
+  `Capture` yet; ticket minting and the capture flow are not connected.
+  `Exclusion::KumochiWindows` is the caller's declaration of a live shell exclusion lease,
+  not proof of one.
 - **Local validity.** The worker starts the ticket's `ttl_ms` at receipt on its own monotonic
   clock. It refuses at exactly `ttl_ms` and accepts a millisecond before, checks again right
   before starting the capture session, stops waiting at expiry, and discards a frame that
@@ -91,7 +92,7 @@ no operation that reads or exports them.
 
 ```mermaid
 sequenceDiagram
-  participant B as Brain (B2a)
+  participant B as Brain
   participant W as Worker
   participant P as Platform capturer
   B->>W: Capture { ticket, display, exclude }
@@ -115,7 +116,7 @@ frame and encoded image carries the capture's mask completeness (`Pending`, `Com
 `Partial`, or `Unknown` with an availability reason); an empty set never implies a completed
 walk. Both publishing a mask and finishing the walk bump the generation. The first finish wins:
 a late `Complete` can't overwrite `Unknown` or `Partial`. Encoded images also
-carry their capture id and generation: A6 must never stage a superseded generation.
+carry their capture id and generation: consumers must never stage a superseded generation.
 
 The platform's write-only `RawFrame::begin` seam remains crate-visible because the adapter
 fills it, but invalidates the image before lending its buffer. Read access to a committed image
@@ -137,8 +138,57 @@ floating-point coordinates must be validated as finite by their first parser. Im
 output contains only dimensions, byte counts and mask generations,
 and encoding errors expose only a fixed numeric code, never pixels or foreign error text.
 
-These entry points have no production caller yet: A6 owns scheduling, staged replies and
-generation checks. Nothing here exports images or captures another frame.
+These entry points have no production caller yet; scheduling, staged replies and generation
+checks are not connected. Nothing here exports images or captures another frame.
+
+## Regional OCR
+
+`screen/ocr.rs` accepts only `SanitizedFrame`. Sanitizing records the exact clipped physical
+rectangles it painted at that generation; these, not a later independent mask list, filter OCR
+words. `OcrRegion` comes from the focus crop's `CaptureTransform` or a readable completed
+`ElementTree` window belonging to that capture. Regions clip to the captured display; empty
+intersections are refused. There is no display source or fallback, but a maximized window is
+valid even when its bounds equal the display.
+
+The portable trigger uses fewer than 20 nonempty named elements [guess], or the exact native
+class `Chrome_RenderWidgetHostHWND` of the **focused element's HWND**, not the top-level window.
+A6 supplies that metadata and integrates the operation; A5 adds no UIA reads or production
+request/reply route. OCR remains disconnected from the worker and exports no content.
+
+One bounded channel (capacity one) feeds a dedicated OS thread. Only that thread creates its
+MTA apartment, English WinRT OCR engine, BGRA8 bitmap and recognition operation; no native object
+crosses threads. Regional rows retain the capture's BGRA order without a channel swap.
+Missing English or a native failure returns fixed `Unavailable`, never foreign
+error text. macOS has no adapter yet. The only pixel copy is the selected sanitized region.
+Before allocating a native bitmap, oversized regions scale aspect-preservingly to
+`OcrEngine::MaxImageDimension`, without enlargement. Small text can be lost at that scale;
+tiling is deferred until integration measurements or a user's misses justify it.
+
+Pending masks are refused before recognition. Results retain capture, generation and mask
+completeness, including `Partial` and `Unknown`; neither claims full protection. Native floating
+word bounds scale back to the region, round outward, clip, and translate to desktop physical
+coordinates before any mask intersection. Any intersecting word is removed **before** caps of
+2,000 words and 32,768 UTF-8 bytes [guesses]. Byte truncation preserves scalar boundaries and is
+reported explicitly. After completion the caller re-locks the shared `MaskSink`; changed capture
+or generation (or poison) discards all words and returns content-free `Superseded`. A6 must still
+admit only current generations when publishing.
+
+Admission, response and final mask-lock waits observe cancellation, channel EOF and the same
+absolute deadline. Pixel copying checks between rows; native operation polling and word extraction
+observe the shared stop flag and deadline. An aborted caller retires that recognizer, so a late
+reply cannot revive it. A native failure also stays failed for that recognizer's lifetime.
+Drop does not join or forcibly kill the native thread; native cancellation
+is cooperative and a hung call remains contained by the killable screen worker. A6 owns worker
+retirement. All carriers have content-redacted Debug, and errors contain fixed kinds only.
+
+Offline fixtures use synthetic pixels and fake engines, including a blocked engine with a newly
+published mask. They cover trigger boundaries, region provenance/clipping, maximized windows,
+one pixel over the engine maximum, outward inverse geometry, mask filtering before both caps,
+Unicode bounds, completeness, supersession, every caller wait's cancellation/EOF/deadline, closed
+engine channels, fixed unavailability, and sentinel-safe diagnostics. They never read real windows,
+capture the desktop or run native OCR. An ignored, manually named Windows smoke test checks
+that the real recognizer accepts a blank synthetic BGRA bitmap and returns zero words.
+It never runs in CI. Real-region recognition and timing need a separately scheduled check.
 
 ## Deadline evidence on Rez
 
@@ -157,9 +207,15 @@ record Rez's scale with that result.
 
 ## Portable element data and walk
 
-The control-view data and walk run under capture authority on a bounded reader thread. A3b
-supplies Windows UIA; the production element opener returns E_NOTIMPL on every platform until
-then. Nothing in the brain requests Elements until A6/B2a connects the capture flow.
+The control-view data and walk run under capture authority on a bounded reader thread.
+On Windows, the source creates `CUIAutomation8` in that thread's MTA, with 100 ms connection
+and transaction timeouts. A control-view walker builds a per-node cache of name, control type,
+physical bounds and password/offscreen flags. Password and offscreen names are not fetched
+from that cache. Root handles are checked for top-level visibility and ownership before the UIA
+lookup, and the native window owner is checked again after it. The worker and the
+connected shell are excluded by pid, with Kumochi process-image names also excluded by the
+portable policy. Other platforms return E_NOTIMPL. Nothing in production requests Elements
+yet because the brain's capture flow is not connected.
 
 One pre-order walk retains at most 512 elements, depth 16, 128 characters per name and 60,000
 bytes of element JSON (commas and the reply envelope are additional). The byte cap usually binds
@@ -174,7 +230,7 @@ roots off the captured display and excludes Kumochi's process-image names case-i
 every target, including Foreground. Each capture owns a fresh mask sink with its capture id,
 generation and completeness. Publishing a rectangle and the first finish both advance generation.
 After a Bytes or Elements text cut, mask-only discovery continues on the remaining stack, using
-at most 2,048 additional reads and the same deadline. Finishing that discovery can leave masks
+at most 2,048 additional reads [guess] and the same deadline. Finishing that discovery can leave masks
 Complete despite the text cut. Depth skips, provider failures, deadline/read-cap exhaustion and
 password rectangles with a zero side leave masks Partial, retaining all published rectangles.
 Unavailability is Unknown. Elevated, Busy, Excluded and NoWindow mean masks are unknown, never that nothing
@@ -182,8 +238,27 @@ needs masking: image consumers must withhold or flag those frames, not call them
 
 Offline fake-source fixtures cover exact limits, Unicode names, provider/budget cuts, relative
 geometry, excluded roots and password/descendant sentinels. Reader fixtures use real threads and
-clocks, but never read real windows or measure platform calls. Cancellation belongs to A6;
+clocks, but never read real windows or measure platform calls. There is no cancel operation yet;
 worker authority and late/hung-thread handling are described below.
+
+The ignored owner-run UIA smoke/timing checks require explicit `UIA_TEST_HWND` and
+`UIA_TEST_PID` values; they never select the foreground or launch an application. An
+outside-repo wrapper owns the fixture or newly launched Settings process and its cleanup.
+The `test-support` feature exposes `WindowSession` and `WindowProbe` for a release worker
+that measures the actual bounded reader, serializes the complete tree in memory and discards it.
+Cold samples use separate worker processes and UIA objects; warm samples retain one process
+and discard its first walk. The first check gap includes lazy UIA setup; a walk with no checks
+reports its entire duration as both the longest unchecked gap and the tail. The harness reports only
+structural counts and timings: text and mask reads, navigation-call count, deadline-check count,
+the longest interval between deadline checks, and the tail interval from the last check to
+completion. It never reports window names, element text, rectangles or captured content.
+The first walk is timed separately through the bounded reader, including lazy UIA initialization;
+the second walk uses the same initialized source. Initialization remains lazy until measurement
+justifies changing it. A COM guard balances initialization even if later setup fails or unwinds.
+The source's root pid is the native window owner's pid, matching foreground pinning, not the UIA
+provider process, which can differ for hosted UWP content. The second ignored check verifies
+that contract for the explicitly supplied Settings root. Live checks belong only to an
+owner-approved session; short unlocked dry runs do not qualify as timing measurements.
 
 ## Capture-scoped element operation
 
@@ -209,10 +284,12 @@ sink also replies Busy and retires. Drop never joins the provider thread.
 
 A reader-opener failure does not discard a successfully acquired frame. Its first Elements
 attempt publishes Unknown(Busy) and reports the numeric fault, but the worker keeps serving Ping
-and Capture. The next capture retries a failed opener, including a failed reader-thread spawn.
-An opener that fails inside the reader thread is retried for the next capture's Elements.
+and Capture. The portable capture state retries a failed reader opener, including a failed
+reader-thread spawn, on the next capture attempt. The reader thread likewise discards a failed
+source initialization and retries it for the next capture's Elements; a successfully initialized
+source stays on that thread. Neither retry replays a spent walk or renews capture authority.
 
 The supervisor accepts only an Elements tree naming the requested capture. Refusals pass through;
-other reply kinds or capture ids become WorkerLost. There is no cancel operation yet: A6's Drop
-will free capture authority and its mask sink, and the process supervisor tears down stuck threads.
-No live window is read by the fake-source tests, and no Windows or timing claim is made here.
+other reply kinds or capture ids become WorkerLost. There is no cancel operation yet;
+new captures replace authority and the mask sink, and worker termination tears down stuck threads.
+No live window is read by the fake-source tests; they do not verify native UIA behavior or timing.

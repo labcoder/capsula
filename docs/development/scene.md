@@ -201,7 +201,11 @@ one expression and one narrowing path to world-space f32. Periodic indices wrap
 before trigonometry; cap and seam vertices reuse those expressions. Sphere midpoint
 endpoints have a canonical order on their f32 bits. Spheres subdivide an icosahedron;
 extrudes ear-clip CCW outlines; tubes use bisected path tangents and parallel-transported
-frames, initially using the axis least aligned with the first tangent.
+frames, initially using the axis least aligned with the first tangent. Where both segment
+directions at a joint are bit-identical, the tangent and frame carry over unchanged instead of
+renormalizing their sum, so a straight run's rings are exact translations that group into planar
+faces. That moved some straight tubes' world vertices by about one f32 ulp against the earlier
+builder, without changing any outcome; the local and world builds share it.
 
 Generation refuses non-finite world vertices, distinct local vertices that narrow
 to the same world point, and retained triangles whose narrowed points have zero
@@ -692,8 +696,9 @@ A fill over `FILL_VERTEX_LIMIT` (21,845, a third of the u16 index space) or a re
 `OverResidency`. `PaintWork::within_limits` also checks the global dash, fill-vertex and
 outline budgets, which are measured on Rez. Solid strokes carry no paint charge because
 construction bounds every generated line: a flattened path has at most 4,096 segments and
-every other line at most 512 points, so the longest run, closed, costs 4 × 4,098 + 4 = 16,396
-of a build's 21,845 vertices. The painter still refuses a longer run loudly.
+every other line at most 513 points including a closed outline's repeated first point, so
+the longest run, closed, costs 4 × 4,098 + 4 = 16,396 of a build's 21,845 vertices.
+The painter still refuses a longer run loudly.
 
 The global limits are 512 dash pieces, 512 fill vertices and 512 outline points, shared
 across all visible scenes and reserved ready/rest states. Four radius-8 filled and bordered
@@ -742,6 +747,47 @@ before B6 activates presenter views, this fast path must require an at-rest view
 owners, or Stop must settle motion first. Position-track and delayed-owner tests must cover this;
 `moving(now) == false` alone cannot rule out a track that starts later.
 
+### 3D preparation
+
+A 3D `put` clones its `view3d` or `solid` record once into an `Arc` on the state object.
+Admission builds the sources and, in its candidate, one `three::view::ViewInput` per view a 3D
+put or removal changes: each solid's source, handle and attach parent, in attach order. Commit
+moves them into `Preparation`, so that cost lands in admission, not commit. Sets change no
+input and keep no undo copy: preparation reads 3D colour sets from the step, and `label` and
+`info` sets reach no view.
+
+`prepare` routes 3D sets, removals and tracks away from the 2D loops, then runs
+`tessellate_view` per changed view, including removals of objects the same step put. It composes
+each solid's rest transform down its attach chain there, on the worker. A view that only a colour
+set touches is reshaded from the predecessor's geometry, sharing every mesh and source; a solid
+keeps its latest authored colour across later rebuilds of its view while its record is unchanged.
+`mesh::build_local` writes the canonical, unscaled local f64 points of each triangle and one
+triangle run per source face, after running `build`'s world checks at the rest transform, so
+authored scale reaches the world once, through the rest transform. `SolidMesh` stores those f64
+points, and `Transform::apply` at rest gives exactly the value `build` narrows and checks, so
+every mesh `build` accepts prepares with the same triangles; f32 offsets from one origin can't
+promise that far from it. This doubles vertex bytes over f32. Before publishing `Built`,
+preparation checks the stored mesh at rest: three distinct indices per triangle, then
+`mesh::narrowed`, the very check `build` applies to each triangle's narrowed f32 world points.
+Collinear f64 points can narrow to a real triangle, so an unrounded f64 check would refuse meshes
+`build` accepts. A failure is a typed `Mesh::Failed`. The frame stage (6b) must take its face
+normals from those same narrowed rest points. Two triangles share a face only where their four
+vertices are coplanar by construction: box and extrude sides, revolved and torus bands, and tube
+bands between rings that are exact translations. A bent tube band is two one-triangle faces. A solid whose
+record is unchanged reuses its mesh `Arc`, so a colour set only resolves the theme RGB again.
+A solid that fails at rest keeps a typed `Mesh::Failed` while its record is unchanged, and its
+view is published as an explicit `failed` replacement that draws nothing; removing the solid
+rebuilds a good view from the shared meshes. Cancellation and `Full` publish nothing. A cut
+keeps each surviving view's surviving solids and recomputes `failed`; recovery replays prepare.
+
+`PreparedStep::resident_bytes` charges `ViewGeometry::marginal_bytes`, leaving out meshes and
+sources the predecessor holds; `LayoutState::resident_bytes` charges `full_bytes`, every mesh
+and source once, so a colour-only revision still carries its full mesh charge once its
+predecessor retires. `PreparedStep::scratch_bytes` reports only the fixed `MeshScratch`, which
+is allocated once per preparation that builds a view, never for a reshade, and never retained; it isn't the peak, which also holds the output
+triangles, face groups and the indexing map. An emptied view map is replaced, like the 2D maps,
+and the consumed view inputs leave no buffer behind. Prepared views don't move yet, and the brain's gate still refuses 3D steps.
+
 ### Motion and the host clock
 
 `motion::SceneView` owns the activated layout and live property owners. Construct an
@@ -750,6 +796,21 @@ revision: a cut can leave a higher dropped revision in that layout. Live Stop an
 recovery use this same at-rest construction. `activate` accepts only the matching
 prepared predecessor, clears its caller-owned frame outside paint, applies removals,
 and rebuilds parent-first sampling order. Pass that frame into `activate`.
+`activate` is two steps a host can also call apart. `prepare_activation(&self, &PreparedStep,
+now, segment_ms)` builds a `PreparedActivation` (the candidate view, its exact
+`resident_bytes` and the superseded candidates) without changing the view or the step, or
+returns `Stale`. Running and delayed tracks carry into the candidate as clones that share
+their immutable key arrays; each holder charges a shared array's whole allocation, its Arc
+header and alignment padding included. `install` then clears the frame while the outgoing
+view still owns the geometry, swaps the candidate
+in and sends the outgoing view and superseded candidates to the dropper. `install` refuses with
+`Stale`, leaving the view and frame untouched, unless the stage came from the view's current
+generation. Queue attribution includes the full shared layout geometry per holder and the
+source-generation Arc, even if the host drops the borrowed step before the stage. That geometry
+charge is cached, not recomputed at staging or install: preparation computes the full `after`
+layout once on its worker as `PreparedStep::retained_bytes()`, which the shell also uses as the
+rest's charge, and `SceneView::new` computes its at-rest layout once. A candidate dropped
+uninstalled goes to the dropper whole, so a refused host transition frees nothing on UI.
 Activation may allocate or free; `frame` does neither and takes no locks. A `Frame` reserves
 space for the per-scene object cap and reuses it. Its items share immutable primitive
 Arcs, so the host must clear the frame outside paint when clearing its scene or
@@ -1069,7 +1130,8 @@ motion maps, geometry, chart storage and private facts include their Arc headers
 and are counted once by allocation identity. Empty indexes release retained root
 leaves, and preparation discards sizing facts before publishing its result. These
 are requested-byte allowances, not RSS or allocator bookkeeping bounds. When the oldest
-ready result becomes the rest, charge its layout in full and keep only later ready deltas.
+ready result becomes the rest, charge its layout in full (`retained_bytes`, measured by the
+worker) and keep only later ready deltas.
 The returned step also carries its full attribution inside the same allowance until its
 owner releases it, even after another consumption, clear, removal or disconnect. This
 includes the original record even when the compiled run aliases the semantic log: the
@@ -1133,6 +1195,17 @@ call. Attributions are owner estimates, not heap measurements, and nested values
 aren't counted again. The queue has no byte bound and sits outside the 64 MiB
 presenter cap: it is metered, not limited, which is a known shortcut.
 
+Admission caches each preparation ticket's own source, compiled record, view-update and
+sizing-fact attribution on the worker. The UI reads that cache, not the whole semantic
+scene's size.
+A dispatched preparation input adds only its preceding layout's cached full charge.
+Halting meters each queue's buffer and its protected payloads. Releasing a scene meters
+its rest/view/frame separately from the binding's semantic owner; disconnecting queues
+both inside one container, so that outer attribution includes the semantic owner once.
+Shared allocations remain conservatively counted per holder; this is not deduplicated
+physical memory. An isolated queue-meter test checks halt, release and disconnect without
+other tests adding to the process-wide counters.
+
 **Known limits before v1.** The historical unbounded maximal-content probe, measured on
 Rez with real font shaping across four scenes and 256 prepared prefixes, charged
 200,009,012 B; that history does not fit the presenter allowance. The presenter instead
@@ -1144,9 +1217,9 @@ not RSS or a font-cache ceiling. Inputs and outputs held by up to eight workers 
 the presenter allowance, as does the dropper queue; returned consumption owners do not.
 v1 still needs admission at most 1 ms, clear/cut/eviction/timeout tails
 at most 2 ms, and concurrent worker/dropper churn measurements with throttling if the
-backlog grows. Queue attribution must be corrected before relying on its churn meter.
+backlog grows. Final churn measurements must use the payload-specific queue attribution above.
 
-Activation retires the tracks it drops with the outgoing nodes: settled tracks, color tracks
+Activation retires the tracks it drops with the outgoing view: settled tracks, color tracks
 a `set` recolors, and candidates a newer owner supersedes. Admission keeps its object-map
 copy and the predecessor copies attributed as it builds them, from cached owned bytes,
 so a rejection at any point queues them at their `map_bytes` estimate. Each object
@@ -1328,17 +1401,21 @@ On Rez at 100% scale (96 DPI, 2560×1440/144 Hz), the 2026-11-05 run charged pea
 That binary was built before the final main merge; these are not exact-final-head native results.
 These are allowance checks, not before/after performance comparisons or heap bounds.
 
-Private `consume_ready(scene, expected_index, now)` accepts only the ready head, advances
-semantic retirement, and returns the protected charged owner plus scheduler effects. Unknown
-scenes, consumed indices, out-of-order requests, missing ready results and insufficient
-residency leave state unchanged. Freeing a window position immediately gives its next
-successor a chance to become eligible. No production caller consumes yet: B6 owns activation
-and `StepShown`. While the scene's admission is in the lane, including its worker-slot wait,
-a valid consumption request returns Busy and records one pending request without changing
-semantic state, residency or window positions.
-Returning the read offers a wake/retry point before the next admission for that scene.
-Test-only consumption still keeps the previous view. B6 must replace that view and its charge
-atomically with the consumed rest before introducing a production caller.
+Private `consume_ready(scene, expected_index, now, scene_time, segment_ms)` accepts only the
+ready head and activates it in one transaction. It checks the scene, index and Busy first,
+then validates the head against the semantic state and rest, stages the activated view from
+the current view and the borrowed step, and checks the whole post-transition charge: the
+other scenes, returned owners, the head's full rest, the candidate view and the new owner.
+Exactly 64 MiB fits. Only then does it retire the step semantically, install the rest and the
+view, start a new frame epoch so no earlier paint counts, update every charge and free one
+window position, before scheduling successors. It returns the protected charged owner plus
+scheduler effects. Unknown scenes, consumed indices, out-of-order requests, missing ready
+results, stale heads and insufficient residency leave every bound, epoch and charge unchanged,
+and the staged candidate goes to the dropper. While the scene's admission is in the lane,
+including its worker-slot wait, a valid request returns Busy and records one pending request;
+a different index is out of order and never replaces it. Returning the read offers a
+wake/retry point before the next admission for that scene. No production caller consumes
+yet: B6d owns the conductor, its scene clock and `StepShown`.
 Both fresh arrivals and already-held commits wait behind the pending request, even when
 the lane and held queue were empty at arrival.
 A Residency refusal instead fails without waiting for bytes; the activation caller must

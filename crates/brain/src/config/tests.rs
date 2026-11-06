@@ -90,6 +90,142 @@ fn bad_voice_values_read_as_the_defaults_and_outlive_writes_to_other_keys() {
 }
 
 #[test]
+fn installed_names_known_parts_and_a_removal_wins() {
+    for (voice, expected) in [
+        (
+            "installed = [\"spoken-replies\", \"later-part\", \"speech-input\"]\nremoving = [\"speech-input\"]",
+            vec![VoicePart::SpokenReplies],
+        ),
+        (
+            "installed = [\"spoken-replies\", \"speech-input\"]",
+            vec![VoicePart::SpeechInput, VoicePart::SpokenReplies],
+        ),
+        ("removing = [\"speech-input\"]", vec![]),
+        ("installed = \"speech-input\"", vec![]),
+    ] {
+        let scratch = Scratch::new("config-installed");
+        let dir = dir(&scratch);
+        std::fs::write(dir.join(CONFIG_FILE), format!("[voice]\n{voice}\n")).expect("seeded");
+        let config = Config::load(Some(dir), ThreadId(1));
+        assert_eq!(config.installed(), expected, "{voice}");
+    }
+}
+
+#[test]
+fn removing_names_known_parts_by_their_folder_names_only() {
+    for (list, expected) in [
+        (
+            "[\"later-part\", \"spoken-replies\", \"spoken_replies\", \"spoken-replies\"]",
+            vec![VoicePart::SpokenReplies],
+        ),
+        (
+            "[\"spoken-replies\", \"speech-input\"]",
+            vec![VoicePart::SpeechInput, VoicePart::SpokenReplies],
+        ),
+        ("[]", vec![]),
+        ("\"speech-input\"", vec![]),
+        ("[1, \"Speech-Input\"]", vec![]),
+    ] {
+        let scratch = Scratch::new("config-removing");
+        let dir = dir(&scratch);
+        std::fs::write(
+            dir.join(CONFIG_FILE),
+            format!("[voice]\ninstalled = [\"speech-input\"]\nremoving = {list}\n"),
+        )
+        .expect("seeded");
+        let config = Config::load(Some(dir), ThreadId(1));
+        assert_eq!(config.removing(), expected, "{list}");
+    }
+    let scratch = Scratch::new("config-removing-none");
+    assert_eq!(
+        Config::load(Some(dir(&scratch)), ThreadId(1)).removing(),
+        []
+    );
+}
+
+#[test]
+fn a_finished_removal_takes_only_its_part_out_of_removing() {
+    let scratch = Scratch::new("config-remove-done");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    std::fs::write(
+        &path,
+        "[voice]\ntalk_back = true\ninstalled = [\"spoken-replies\"]\n\
+         removing = [\"speech-input\", \"later-part\", \"spoken-replies\", \"speech-input\"]\n",
+    )
+    .expect("seeded");
+    let mut config = Config::load(Some(dir), ThreadId(1));
+    let view = config.view().clone();
+    let pending = config
+        .stage_remove_done(VoicePart::SpeechInput)
+        .expect("staged");
+    pending.write().expect("written");
+    config.commit(pending);
+    let voice = &saved(&path)["voice"];
+    assert_eq!(
+        voice["removing"],
+        toml::Value::Array(vec!["later-part".into(), "spoken-replies".into()])
+    );
+    assert_eq!(
+        voice["installed"],
+        toml::Value::Array(vec!["spoken-replies".into()])
+    );
+    assert_eq!(voice["talk_back"].as_bool(), Some(true));
+    assert_eq!(config.view(), &view);
+    assert_eq!(config.removing(), [VoicePart::SpokenReplies]);
+}
+
+#[test]
+fn an_install_joins_installed_once_and_turns_talk_back_on_only_if_the_user_never_chose() {
+    for (part, voice, installed, talk_back) in [
+        (
+            VoicePart::SpokenReplies,
+            "installed = [\"later-part\"]",
+            vec!["later-part", "spoken-replies"],
+            Some(true),
+        ),
+        (
+            VoicePart::SpokenReplies,
+            "talk_back = false",
+            vec!["spoken-replies"],
+            Some(false),
+        ),
+        (VoicePart::SpeechInput, "", vec!["speech-input"], None),
+        (
+            VoicePart::SpeechInput,
+            "installed = [\"speech-input\"]",
+            vec!["speech-input"],
+            None,
+        ),
+    ] {
+        let scratch = Scratch::new("config-voice-activate");
+        let dir = dir(&scratch);
+        let path = dir.join(CONFIG_FILE);
+        std::fs::write(&path, format!("[voice]\n{voice}\n")).expect("seeded");
+        let mut config = Config::load(Some(dir), ThreadId(1));
+        let pending = config.stage_activate(part).expect("staged");
+        pending.write().expect("written");
+        config.commit(pending);
+        let saved = &saved(&path)["voice"];
+        assert_eq!(
+            saved["installed"],
+            toml::Value::Array(installed.into_iter().map(Into::into).collect()),
+            "{voice:?}"
+        );
+        assert_eq!(
+            saved.get("talk_back").and_then(toml::Value::as_bool),
+            talk_back,
+            "{voice:?}"
+        );
+        assert_eq!(
+            config.view().talk_back,
+            talk_back == Some(true),
+            "{voice:?}"
+        );
+    }
+}
+
+#[test]
 fn only_the_three_exact_unload_names_are_read() {
     for bad in ["", "15M", " 1h", "1h ", "Kept", "2h"] {
         let scratch = Scratch::new("config-voice-names");

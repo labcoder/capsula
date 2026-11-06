@@ -144,18 +144,30 @@ impl Claude {
             self.again = true;
             return;
         }
-        self.begin(match (self.finds, self.cleaning) {
-            (false, _) => Work::Cleanup,
-            (true, true) => Work::Disconnect { logout: false },
+        match (self.finds, self.cleaning) {
+            (false, _) => {
+                self.begin(Work::Cleanup);
+            }
+            (true, true) => {
+                self.begin(Work::Disconnect { logout: false });
+            }
             (true, false) => match self.quarantine {
                 Some(Quarantine {
                     version,
                     durable: false,
                     ..
-                }) => Work::Quarantine(version),
-                _ => Work::Version,
+                }) => {
+                    self.begin(Work::Quarantine(version));
+                }
+                _ => {
+                    if self.begin(Work::Version)
+                        && !matches!(self.view, ClaudeCodeView::Ready { .. })
+                    {
+                        self.view = ClaudeCodeView::Finding;
+                    }
+                }
             },
-        });
+        }
     }
 
     /// Refuses `version` from now on for `reason`: every launch ends, and the lane writes its

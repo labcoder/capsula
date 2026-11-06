@@ -2,11 +2,20 @@
 
 pub mod credential;
 
+#[cfg(all(windows, feature = "test-support"))]
+pub use windows::{WindowProbe, WindowSample, WindowSession};
+
+mod connected_shell;
 mod session_lock;
 mod trust_roots;
 
+pub(crate) use connected_shell::connected_shell_pid;
+#[cfg(windows)]
+pub(super) use connected_shell::register_shell;
 pub use session_lock::{SessionLock, SessionLockError};
 pub use trust_roots::{TrustRoots, TrustRootsError};
+#[cfg(windows)]
+pub(crate) use windows::shell_connection;
 
 #[cfg(windows)]
 #[expect(
@@ -33,10 +42,10 @@ pub(crate) mod sherpa;
 pub(crate) use windows::call_throwing_export;
 #[cfg(all(test, windows))]
 pub(crate) use windows::fake_claude::FAKE_CLAUDE;
+#[cfg(windows)]
+pub(crate) use windows::ocr::open as open_ocr;
 #[cfg(all(windows, debug_assertions))]
 pub use windows::raise_access_violation;
-#[cfg(windows)]
-pub(crate) use windows::screen_capturer;
 #[cfg(windows)]
 pub use windows::{
     ChildPipes, Helper, Instance, Job, PipeServer, client_image, client_process, config_dir,
@@ -57,6 +66,8 @@ pub(crate) use windows::{
 };
 #[cfg(windows)]
 pub use windows::{managed_presence, system_env};
+#[cfg(windows)]
+pub(crate) use windows::{screen_capturer, screen_elements};
 
 /// Whether one managed-policy source exists, by existence only. Only a proven-missing source is
 /// `Absent`; access denied and every other unresolved result are `Indeterminate`.

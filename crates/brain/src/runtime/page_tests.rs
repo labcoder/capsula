@@ -24,7 +24,12 @@ fn threads() -> PageOf {
 }
 
 async fn queue_turn(turns: &mpsc::Sender<crate::runtime::Turn>, turn: u32, text: &str) {
-    turns.send((turn, None, text.into())).await.expect("turn");
+    let turn = crate::coordinator::Input::Turn {
+        turn,
+        thread: None,
+        text: text.into(),
+    };
+    turns.send(turn).await.expect("turn");
 }
 
 /// The main thread a reply to request 7 lists as a fresh store's only row.

@@ -27,13 +27,17 @@ connection's id cannot be reused before the new view arrives.
 
 The shell also retains the submitted text until its named run ends. A named Failed state
 with SessionEnded, AccountRefused, SignInNeeded, ClaudeCodeSignedOut, AnthropicKeyRejected or
-RenewalUnconfirmed returns that text once, only while its captured selection revision and
+RenewalUnconfirmed returns that text once before Answering, only while its captured selection revision and
 thread still match the current input target. The typing view restores it only into an empty
 input; even whitespace is a newer draft. No frame resends a turn automatically. General
 account errors and TurnRefused cannot restore text because neither identifies a failed run.
 Esc, a new submit attempt, a target change, disconnect, a new brain incarnation, confirmed
 deletion, success or interruption discard the recovery content. Duplicate terminal states
 cannot offer it again. Recovery carriers redact their text in Debug output.
+
+Answering is ordered before a later Failed on the control pipe. It suppresses automatic
+restoration even if text on the data pipe is delayed: authentication can fail on a later
+model round after earlier output. Thinking alone does not prove no model or tool ran.
 
 While `Target::New` has a submission pending at the current revision, another submit is
 refused as `Busy` without sending a second `TextSubmit { thread: None }`. The typing draft
@@ -82,6 +86,39 @@ Quit drains in-flight typed writes, supersedes failed cut debt with its clear an
 the clear acknowledgement within the existing deadline; an unconfirmed clear is incomplete.
 During staging, a v1 recovery is sent only when typed scenes exist; the production
 fixture and an empty placeholder-only recovery remain legacy until B3 switches both ends.
+
+## Asking about a part
+
+A click on a labelled 3D solid sends `DataToBrain::AskAbout { turn, scene, element }` on the
+data pipe. It carries ids only, never text. It queues with `TextSubmit` in one FIFO of turns,
+so the two keep their order and share the 64-turn bound. The coordinator counts it as a turn on
+the connection, like `TextSubmit`, and classifies it once, whether or not the part resolves,
+so the delete fences it passed retire (`coordinator/ask.rs`).
+
+`Drawing::part` looks the part up in a live scene only, never a cleared, deleted or held-gone
+one. It needs the exact `Handle` of a live `Solid` that has a label, and returns the scene's
+thread, its `alt`, and the part's current label and info: the put at the handle's revision,
+then each later *kept* `set` in order (`scene/src/state/part.rs`). A part that doesn't
+resolve, or a thread with a delete pending or fenced, answers `TurnRefused { turn, thread:
+None }`. That takes no run id, and the debug log names only whether the ask was admitted.
+
+Otherwise the ask becomes the turn text from `ask-about-part`, `ask-about-part-info` and
+`ask-about-part-alt` in `locales/en/brain.ftl`, which quote the drawing's own text as
+descriptive data. It runs in the scene's thread, never the shell's selected one, as a typed
+turn would: it replaces the current run, uses that thread's model and history, and gets the
+builder's local-time suffix. Right after its first state, and before the immediate failure of
+an ask sent while signed out, the brain sends `Focus { run, thread }` so the shell follows it.
+A delete, a sign-out or a newer turn that cuts the run before its turn is stored, while its
+build is held, or before its send is granted leaves it nothing to send. A granted send follows
+the lease contract.
+
+`Focus` is fenced by run (15a), so a stale one moves nothing. The fence can't take back a click
+the shell already sent: an ask that reached the brain before a later typed turn or a manual
+switch still starts its run, as a typed turn would. The shell's ask sender (slice 5 PR 12) has
+to drop stale clicks before enqueueing. It records each ask as submitted to the scene's
+thread, counts the turn only after a successful send, rechecks for a newer submission under
+the same selection at send time, and never lets a deferred click overtake a typed turn that
+was already enqueued.
 
 ## Ids and staleness
 

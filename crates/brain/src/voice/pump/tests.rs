@@ -64,14 +64,15 @@ impl Harness {
         let streams = Streams::default();
         let (entry, entered) = std_mpsc::channel();
         let engine = Arc::clone(&streams);
-        let tts = TtsHandle::spawn_with(runtime.handle().clone(), move |_dir: &Path| {
+        let (reports, _) = crate::voice::Reports::new();
+        let tts = TtsHandle::spawn_with(runtime.handle().clone(), reports, move |_dir: &Path| {
             Ok(Fake {
                 streams: Arc::clone(&engine),
                 entered: entry.clone(),
             })
         })
         .expect("the owner thread starts");
-        tts.load("models".into());
+        tts.load("models".into(), 1);
         Self {
             pump: Pump::new(tts),
             streams,

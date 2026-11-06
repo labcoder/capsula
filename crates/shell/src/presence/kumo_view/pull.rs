@@ -50,6 +50,27 @@ impl KumoView {
         matches!(self.pulling.phase(), Phase::Live(_))
     }
 
+    /// The live drag, once its neck has snapped: the carry.
+    pub(in crate::presence) fn carrying(&self) -> Option<Generation> {
+        let Phase::Live(generation) = self.pulling.phase() else {
+            return None;
+        };
+        let (pull, _) = self.pulling.pull()?;
+        pull.neck().broken().then_some(generation)
+    }
+
+    /// `at`, a point in the peek, in physical screen pixels at the pull's scale.
+    #[expect(
+        clippy::as_conversions,
+        clippy::cast_possible_truncation,
+        reason = "a rounded screen offset fits an i32"
+    )]
+    pub(in crate::presence) fn screen_point(&self, at: Point<Pixels>) -> Option<[i32; 2]> {
+        let (_, space) = self.pulling.pull()?;
+        let offset = |value: Pixels| (f32::from(value) * space.scale).round() as i32;
+        Some([self.origin[0] + offset(at.x), self.origin[1] + offset(at.y)])
+    }
+
     /// A press on Kumo, read while the native bridge forwards it, so its stamp orders it
     /// against capture losses. A press nothing stamped can't be ordered, so it starts nothing.
     fn press(

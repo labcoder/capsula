@@ -68,5 +68,5 @@ fn a_capture_that_must_retire_answers_fault_and_serves_nothing_more() {
     }
 }
 
-#[path = "elements.rs"]
+#[path = "worker_elements_tests.rs"]
 mod elements;

@@ -7,6 +7,7 @@ use std::fs::{self, File, OpenOptions};
 use std::future::Future;
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,8 +33,18 @@ pub(crate) struct Downloader {
     space: Option<u64>,
 }
 
+/// What a fetch is doing now; a change is sent at once, unlike byte counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FetchPhase {
+    /// Hashing bytes already on disk.
+    Verifying,
+    /// Requesting or receiving bytes.
+    Downloading,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Progress {
+    pub phase: FetchPhase,
     pub done: u64,
     pub total: u64,
 }
@@ -56,6 +67,34 @@ pub(crate) enum DownloadError {
     Io,
     #[error("model download cancelled")]
     Cancelled,
+}
+
+/// A part's fetch, as the installer starts it.
+pub(crate) trait Fetch: Send + Sync + std::fmt::Debug {
+    fn fetch<'a>(
+        &'a self,
+        part: VoicePart,
+        progress: &'a watch::Sender<Progress>,
+        cancel: &'a watch::Receiver<bool>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), DownloadError>> + Send + 'a>>;
+}
+
+/// Fetches into its models folder with a downloader made for each fetch, so start-up builds none.
+#[derive(Debug)]
+pub(crate) struct Online(pub(crate) PathBuf);
+
+impl Fetch for Online {
+    fn fetch<'a>(
+        &'a self,
+        part: VoicePart,
+        progress: &'a watch::Sender<Progress>,
+        cancel: &'a watch::Receiver<bool>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), DownloadError>> + Send + 'a>> {
+        Box::pin(async move {
+            let downloader = Downloader::new(self.0.clone())?;
+            downloader.fetch(part, progress, cancel).await
+        })
+    }
 }
 
 #[derive(Clone, Default)]
@@ -149,7 +188,7 @@ impl Downloader {
     }
 
     /// The caller supplies the models folder under `platform::data_dir`; no network value
-    /// contributes to any local path. PR 8 owns that caller and the single install task.
+    /// contributes to any local path. The installer's one fetch is its only caller.
     pub(crate) async fn fetch(
         &self,
         part: VoicePart,
@@ -166,6 +205,16 @@ impl Downloader {
         progress: &watch::Sender<Progress>,
         cancel: &watch::Receiver<bool>,
     ) -> Result<(), DownloadError> {
+        let mut report = Reporter {
+            sender: progress,
+            last: Instant::now(),
+            value: Progress {
+                phase: FetchPhase::Verifying,
+                done: 0,
+                total: files.iter().map(|f| f.bytes).sum(),
+            },
+        };
+        report.sender.send_replace(report.value);
         let mut pending = Vec::new();
         let mut done = 0;
         let mut missing = 0;
@@ -209,16 +258,11 @@ impl Downloader {
         if available < needed {
             return Err(DownloadError::NoSpace { needed });
         }
-        let mut report = Reporter {
-            sender: progress,
-            last: Instant::now(),
-            value: Progress {
-                done,
-                total: files.iter().map(|f| f.bytes).sum(),
-            },
-        };
+        report.value.done = done;
         report.sender.send_replace(report.value);
         for (model, path, partial, existing) in pending {
+            // `fetch_file` hashes the bytes already in the `.part` first.
+            report.phase(FetchPhase::Verifying);
             let result = self
                 .fetch_file(model, &partial, existing, &mut report, cancel)
                 .await;
@@ -275,6 +319,7 @@ impl Downloader {
             if !self.rules.accepts(&url) {
                 return Err(DownloadError::Refused);
             }
+            report.phase(FetchPhase::Downloading);
             let mut request = self.client.get(url).header(ACCEPT_ENCODING, "identity");
             if offset != 0 {
                 request = request.header(RANGE, format!("bytes={offset}-"));
@@ -462,6 +507,15 @@ struct Reporter<'a> {
 }
 
 impl Reporter<'_> {
+    /// Sent at once when it changes; only byte counts wait for the interval.
+    fn phase(&mut self, phase: FetchPhase) {
+        if self.value.phase != phase {
+            self.value.phase = phase;
+            self.sender.send_replace(self.value);
+            self.last = Instant::now();
+        }
+    }
+
     fn update(&mut self, done: u64) {
         self.value.done = done;
         if self.last.elapsed() >= PROGRESS_INTERVAL {

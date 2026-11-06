@@ -55,6 +55,10 @@ pub(crate) struct AdmitJob {
 
 /// A job's answer, sent back to [`super::Presenter::completed`] whether or not it is still wanted.
 /// Its payload drops on the dropper thread wherever the answer is discarded.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Prepared is 400 bytes (size_of: a 368-byte deferred PreparedStep result plus four words) and moves once per prepare job, so boxing would only add an allocation"
+)]
 pub(crate) enum Completion {
     /// A step's preparation.
     Prepared {
@@ -108,9 +112,7 @@ impl PrepareJob {
                 &cancel,
             )
         });
-        let full_after = result
-            .as_ref()
-            .map_or(0, |prepared| prepared.after.resident_bytes());
+        let full_after = result.as_ref().map_or(0, PreparedStep::retained_bytes);
         let owner_bytes = result.as_ref().map_or(0, |prepared| {
             full_after
                 .saturating_add(prepared.resident_bytes)
@@ -129,6 +131,11 @@ impl PrepareJob {
     #[cfg(test)]
     pub(super) fn cancelled(&self) -> bool {
         self.cancel.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(super) fn attribution(&self) -> usize {
+        self.input.attribution()
     }
 
     #[cfg(test)]

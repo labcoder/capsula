@@ -14,6 +14,7 @@ fn handle() -> LinkHandle {
         shared: Arc::new(Shared::default()),
         retry,
         done,
+        recording: None,
     }
 }
 

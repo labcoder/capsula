@@ -27,8 +27,9 @@ pub use account::{
     MAX_EMAIL_BYTES, PlanState,
 };
 pub use connections::{
-    AuditFailed, ClaudeCodeView, ClaudeVersion, ConnectionKind, ConnectionOp, ConnectionsView,
-    KeyRejection, KeyView, PolicyFailed, Unsupported, VersionError, validate_anthropic_key,
+    ANTHROPIC_KEY_BYTES, AuditFailed, ClaudeCodeView, ClaudeVersion, ConnectionKind, ConnectionOp,
+    ConnectionsView, KeyRejection, KeyStageFailure, KeyStageId, KeyStagePlan, KeyView,
+    PolicyFailed, Unsupported, VersionError, validate_anthropic_key,
 };
 pub use content::Content;
 pub use error::{
@@ -36,6 +37,7 @@ pub use error::{
 };
 pub use github::{
     GitHubLogin, GitHubOp, GitHubView, IssueValueError, MAX_GITHUB_REPOS, RepoName, UserCode,
+    VERIFICATION_URI,
 };
 pub use issues::{
     ActionState, ApprovalRev, ContentHash, Decision, DraftId, FailReason, IssueBody, IssueCard,
@@ -562,6 +564,32 @@ pub enum ControlToShell {
         /// A live row matched and the write committed.
         applied: bool,
     },
+    /// `run` asked to move the user's typed input to `thread`, sent once its tool call
+    /// committed. The shell applies it only while `run` is its newest named run, not stopped,
+    /// typed at the selection still current, with no turn sent after it.
+    Focus {
+        /// The run whose tool asked.
+        run: RunId,
+        /// The task, or Kumo's thread.
+        thread: ThreadId,
+    },
+    /// Each voice part's state: once per connection after `Account` and before `Scenes`, then on
+    /// each change.
+    Voice(VoiceView),
+    /// The brain's metadata-only answer to a staging-plan request.
+    AnthropicKeyStage {
+        /// The shell's outstanding request number.
+        request: u64,
+        /// A one-use plan or content-free refusal.
+        result: Result<KeyStagePlan, KeyStageFailure>,
+    },
+    /// A paste outcome, independent of the saved key's connection view.
+    AnthropicKeyStageDone {
+        /// The consumed staging identity.
+        plan: KeyStageId,
+        /// Whether adoption committed, even if a later Check or Remove changed the current view.
+        result: Result<(), KeyStageFailure>,
+    },
 }
 
 /// Shell to brain, on the data pipe.
@@ -610,6 +638,16 @@ pub enum DataToBrain {
     IssueCards {
         /// The action ids to read.
         drafts: kumochi_scene::text::Bounded<DraftId, MAX_ISSUE_CARDS>,
+    },
+    /// A click on a labelled 3D part: a turn asking about it in its drawing's thread, answered
+    /// like a [`DataToBrain::TextSubmit`] by one run state or one refusal.
+    AskAbout {
+        /// Counted with `TextSubmit`s from one on each connection.
+        turn: u32,
+        /// The visible scene.
+        scene: SceneId,
+        /// The solid's host identity, from the displayed frame's pick.
+        element: kumochi_scene::Handle,
     },
 }
 
@@ -810,6 +848,54 @@ mod tests {
                 brain_build: "b".to_owned()
             })),
             [1, 1, b'b']
+        );
+    }
+
+    /// Variants are appended, so an added one never renumbers the tags before it.
+    #[test]
+    fn control_variants_keep_their_tags_and_focus_is_last() {
+        let encode = |message: &ControlToShell| postcard::to_allocvec(message).expect("encodes");
+        assert_eq!(encode(&ControlToShell::Ping), [3]);
+        assert_eq!(encode(&ControlToShell::ThreadsChanged), [12]);
+        assert_eq!(
+            encode(&ControlToShell::Focus {
+                run: RunId(1),
+                thread: ThreadId(2)
+            }),
+            [21, 1, 2]
+        );
+    }
+
+    /// An ask is the data pipe's last tag, and its largest valid ids still fit a small frame.
+    #[test]
+    fn ask_about_is_the_last_data_tag_and_its_largest_ids_round_trip() {
+        let encode = |message: &DataToBrain| postcard::to_allocvec(message).expect("encodes");
+        let handle = |revision, slot| kumochi_scene::Handle::new(revision, slot).expect("valid");
+        assert_eq!(
+            encode(&DataToBrain::AskAbout {
+                turn: 1,
+                scene: SceneId(2),
+                element: handle(1, 0),
+            }),
+            [7, 1, 2, 128, 8]
+        );
+        let largest = DataToBrain::AskAbout {
+            turn: u32::MAX,
+            scene: SceneId(u64::MAX),
+            element: handle(
+                u32::try_from(kumochi_scene::limits::MAX_STEPS).expect("small"),
+                kumochi_scene::limits::MAX_STEP_OPS - 1,
+            ),
+        };
+        let bytes = encode(&largest);
+        assert_eq!(
+            bytes.len(),
+            1 + 5 + 10 + 3,
+            "tag, turn, scene and handle varints"
+        );
+        assert_eq!(
+            postcard::from_bytes::<DataToBrain>(&bytes).expect("decodes"),
+            largest
         );
     }
 

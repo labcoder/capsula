@@ -36,7 +36,7 @@ The transport collects at most 4 KiB for device replies, 64 KiB for `/user`, and
 issues: a future preflight must fail without sending if the page exceeds it, and
 a post-send lookup must remain Unknown. Never raise this cap or omit malformed
 rows to make a lookup appear complete. The API layer applies these caps again to
-injected `Http` responses; the issue layer must also bound both match pages together.
+injected `Http` responses; the issue layer also bounds both match pages together.
 
 `ResponseMeta` retains only parsed Date, Retry-After and rate-window numbers.
 Duplicate, oversized, malformed and overflowing headers become absent, not zero.
@@ -46,7 +46,7 @@ reading diagnostic bodies. Body failures after headers never become Connect.
 Per-request deadlines include the response body: 15 seconds for device, user,
 installation-page and repository-page calls, 30 seconds for create and issue-page calls.
 
-Create-outcome classification and two-page exact matching belong to a later
+Create-outcome classification and two-page exact matching belong to the
 `github/issues.rs` layer. The account layer owns polling, account
 generations and repository aggregation, including a total installation traversal
 bound; a two-page limit on each list alone does not bound that traversal.
@@ -89,5 +89,95 @@ An unusable but present Retry-After still makes 403 RateLimited, without inventi
 retry advice. API refusals cap usable Retry-After advice to one hour (3,600 seconds).
 Timeout, transport loss, redirects, malformed success and unexpected non-4xx
 statuses remain uncertain. Hand-written Debug never prints credentials, user
-codes, logins, repository names or provider text. Issue posting and matching are
-a later `github/issues.rs` layer and add no caller here.
+codes, logins, repository names or provider text. These layers add no runtime caller.
+
+## Single-attempt issue creation and exact matching
+
+`connections/github/issues.rs` borrows checked `IssueTitle` and `IssueBody` through
+`IssueContent`. Only that content can construct the private-field `IssuePayload`
+used by the public create endpoint. Serialization writes just title and body into
+a zeroizing buffer; arbitrary bytes and additional issue fields have no constructor.
+`create_issue` makes one HTTP call under a 30-second outer deadline, with no retry.
+Created requires a 201, a positive issue number and the exact canonical URL built
+from the requested repository and number. Malformed or oversized 201 replies,
+foreign URLs, unexpected non-4xx statuses and post-dispatch transport failures
+are Uncertain. Pre-dispatch refusals and Connect are definite Network failures.
+Known 4xx responses use the shared closed reason table and retain only numeric
+status and parsed metadata, with usable retry advice capped at one hour.
+`rate_reset_s` stays uncapped as absolute timestamp data; this layer derives no wait from it.
+
+`list_matches` makes at most two GETs under one shared 30-second deadline. It
+compares remote title/body exactly, without applying local authoring normalization
+or bounds. A null body compares as empty; any `pull_request` field, even null,
+excludes that row. Missing, mistyped, duplicate or malformed known fields, invalid
+timestamps, duplicate issue numbers and pages over 100 rows fail the whole lookup.
+Returned candidates contain only checked numbers, locally built URLs and creation
+seconds, plus unchanged page-one metadata. A full second page is incomplete even
+when every row was filtered out; no Link or third page is followed.
+
+Parser-entry caps enforce 1 MiB even for injected clients. A large remote page
+therefore fails the lookup that runs before a create, so nothing is sent, or
+leaves the lookup after a send Unknown; callers must require completeness.
+Dropping either API future drops its active request future. No task survives
+cancellation. The action coordinator owns consent, durable admission, pre-send
+exclusions, generation checks and placement; this layer never resends or
+substitutes the local clock for missing server evidence.
+
+## Device sign-in machine
+
+The sans-I/O device machine owns one attempt and one connection generation.
+It emits work rather than starting requests, timers, browser launches or
+credential jobs. The runtime adapter must supply completions with their original
+generation stamp, which identifies both an attempt and its connection. A changed
+stamp, expired deadline or terminal state
+makes a late completion inert. Sign out advances the shared generation before
+emitting cancellation and serialized removal, so token consumers can fence
+their final dispatch. The adapter must preserve queued saves when their result
+receiver closes, and drain removal behind them. Cancel or expiry during a save also
+queues removal, because that write may already have passed its fence check.
+
+The first poll waits the code reply's interval. Each pending reply schedules
+another wait; slow_down increases the interval by five seconds, takes the larger
+of that and the reply's interval, and caps it at 900 seconds. The attempt ends
+at its expiry even when a poll or identity read is outstanding. The API accepts
+device error bodies on 200 and RFC 8628's 400; only 200 can yield a bearer.
+The optional reply interval must be an integer from 1 to 900; null, duplicates
+and out-of-range values refuse the whole reply, including a token reply.
+Unknown codes and malformed replies end the attempt. Expiring token shapes
+remain unsupported. No retry wait is derived from REST rate metadata.
+
+The approving identity is read before saving. Only a successful save produces
+Connected. Startup checks a loaded bearer with the same user endpoint; a 401
+drops it and shows NeedsSignIn. Cleanup outcomes remain signed out, including
+a failed durable removal. A clean SignedOut view has no cleanup warning. Connect
+is also permitted after a refused physical delete, because durable removal has
+already fenced the old credential; Running and NotDurable still block it.
+Repository defaults are displayed and accepted only by exact membership in the
+fetched list, preserving GitHub's spelling.
+
+The verification page is the protocol's VERIFICATION_URI constant. The API
+checks the reply against it; neither the view nor a brain effect carries a
+provider-supplied URL. The machine and protocol are separate from the runtime
+credential adapter and the connection UI. The connection UI's Open GitHub action
+and browser-opening behavior belong to the shell layer, not this machine.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Loading
+    Loading --> SignedOut: no usable record
+    Loading --> Verifying: saved account
+    SignedOut --> Requesting: Connect when clean or Refused
+    NeedsSignIn --> Requesting: Connect
+    Requesting --> Awaiting: checked challenge
+    Awaiting --> Verifying: token
+    Verifying --> Saving: approving identity
+    Verifying --> Connected: saved account checked or offline
+    Verifying --> NeedsSignIn: saved bearer refused
+    Saving --> Connected: saved
+    Connected --> NeedsSignIn: current-generation 401
+    Requesting --> SignedOut: Cancel or failure
+    Awaiting --> SignedOut: Cancel, expiry or failure
+    Verifying --> SignedOut: expiry or failed sign-in
+    Saving --> SignedOut: failure or Cancel, then cleanup
+    Connected --> SignedOut: Sign out, then cleanup
+```

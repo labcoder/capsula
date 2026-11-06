@@ -15,6 +15,7 @@ mod settings;
 mod store_thread;
 #[cfg(test)]
 mod tests;
+mod voice;
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -23,7 +24,7 @@ use std::time::Duration;
 
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
-    Content, ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, Deleted,
+    ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, Deleted,
     MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, SceneId, SpeechPcm, ThreadId,
     Transcript,
 };
@@ -170,8 +171,10 @@ pub(crate) struct Brain {
     /// When each granted send's deadline passes, in no order.
     send_deadlines: Vec<(LeaseId, Instant)>,
     deadline: Option<(RunId, Instant)>,
-    /// The one reader of TTS; none until spoken replies are installed (slice 7's PR 8).
+    /// The one reader of TTS; none when TTS couldn't start.
     pump: Option<Pump>,
+    /// The voice parts; none when there's no data folder for them.
+    voice: Option<voice::Voice>,
     /// The current run's drain stall timer: its run, epoch and deadline.
     drain: Option<(RunId, u32, Instant)>,
     /// When each revoked run's wait for the shell to go quiet ends.
@@ -298,6 +301,7 @@ impl Brain {
             send_deadlines: Vec::new(),
             deadline: None,
             pump: None,
+            voice: None,
             drain: None,
             quiet: Vec::new(),
             retry_at: None,
@@ -398,6 +402,7 @@ impl Brain {
     /// the next start, as after a crash.
     pub(crate) async fn quit(mut self, deadline: Instant) -> Quit {
         self.offline(Input::ShellLost);
+        self.voice_quit();
         self.pump_settings_offline();
         #[cfg(test)]
         self.observer.send(Seen::QuitDraining).ok();
@@ -470,6 +475,7 @@ impl Brain {
     /// the store become `failed(crash)`; committed outcomes stay, and uncommitted work may be lost.
     pub(crate) async fn close(mut self) {
         let deadline = Instant::now() + close_wait();
+        self.voice_quit();
         self.pump_settings_offline();
         let settled = tokio::time::timeout(close_wait(), async {
             while self.coordinator.ending_runs() > 0 {
@@ -530,6 +536,12 @@ impl Brain {
                 Some(ask) = self.access.recv() => {
                     let answered = self.access_asked(ask, None);
                     debug_assert!(answered.is_ok(), "answering without a shell can't fail");
+                    continue;
+                }
+                event = voice::next(&mut self.voice) => {
+                    let applied = self.voice_event(event, None);
+                    debug_assert!(applied.is_ok(), "applying without a shell can't fail");
+                    self.pump_settings_offline();
                     continue;
                 }
             };
@@ -604,6 +616,7 @@ impl Brain {
             .checked_add(1)
             .expect("connection epochs never wrap");
         self.coordinator.begin_session();
+        self.account.connections.stage_session(Some(self.epoch));
         self.crashes.begin_session();
         let (mut control_in, mut control_out) = tokio::io::split(control);
         let (mut data_in, mut data_out) = tokio::io::split(data);
@@ -670,6 +683,7 @@ impl Brain {
             None => ended,
         };
         self.offline(Input::ShellLost);
+        self.account.connections.stage_session(None);
         self.deadline = None;
         self.drain = None;
         self.quiet.clear();
@@ -780,7 +794,7 @@ impl Brain {
                 }
                 Some(input) = self.inputs.recv() => input,
                 Some(input) = pages.recv() => input,
-                Some((turn, thread, text)) = turns.recv(), if take_turns => Input::Turn { turn, thread, text },
+                Some(input) = turns.recv(), if take_turns => input,
                 Some(input) = self.engine_events.recv(), if take_engine => input,
                 () = room.notified(), if !take_engine => continue,
                 () = sleep_until(self.retry_at) => {
@@ -789,6 +803,14 @@ impl Brain {
                 }
                 () = sleep_until(send_due) => self.send_deadline_passed(),
                 (run, event) = next_tts(&mut self.pump), if take_engine => tts_input(run, event),
+                event = voice::next(&mut self.voice) => {
+                    if self.voice_event(event, Some(&mut link)).is_err()
+                        || self.pump_settings(Some(&mut link)).is_err()
+                    {
+                        return Ended::Lost;
+                    }
+                    continue;
+                }
                 () = sleep_until(self.drain.map(|(_, _, at)| at)) => {
                     let (run, epoch, _) = self.drain.take().expect("the drain timer fired");
                     Input::DrainTimeout { run, epoch }
@@ -846,6 +868,7 @@ impl Brain {
         let connected = self.account.connections.connected();
         link.control(&self.composed(&connected))
             .map_err(|Full| Ended::Lost)?;
+        self.voice_opened(link).map_err(|Full| Ended::Lost)?;
         if let Some(models) = self.account.connections.models_unsent() {
             link.data(&models).map_err(|Full| Ended::Lost)?;
         }
@@ -1145,8 +1168,18 @@ fn descriptor(state: &SceneState) -> SceneDescriptor {
     }
 }
 
-/// A typed turn: the thread to continue, or `None` for a new one, and the text.
-type Turn = (u32, Option<ThreadId>, Content);
+/// A typed turn or an ask about a part, in the order the shell sent them: each is numbered and
+/// answered once.
+type Turn = Input;
+
+/// Queues a turn without waiting for the core; a shell that outruns the queue is broken.
+fn take(turns: &mpsc::Sender<Turn>, turn: Turn) -> Option<Ended> {
+    match turns.try_send(turn) {
+        Ok(()) => None,
+        Err(TrySendError::Full(_)) => Some(Ended::Broken("turns sent faster than taken")),
+        Err(TrySendError::Closed(_)) => Some(Ended::Lost),
+    }
+}
 
 /// Reads the data pipe. Credit is applied here, so it never waits behind turns the core
 /// isn't taking yet.
@@ -1194,11 +1227,27 @@ async fn read_data(
             // Never waits for the core, so credit behind a turn is always read.
             Ok(Some(DataToBrain::TextSubmit {
                 turn, thread, text, ..
-            })) => match turns.try_send((turn, thread, text)) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => return Ended::Broken("turns sent faster than taken"),
-                Err(TrySendError::Closed(_)) => return Ended::Lost,
-            },
+            })) => {
+                if let Some(ended) = take(turns, Input::Turn { turn, thread, text }) {
+                    return ended;
+                }
+            }
+            Ok(Some(DataToBrain::AskAbout {
+                turn,
+                scene,
+                element,
+            })) => {
+                if let Some(ended) = take(
+                    turns,
+                    Input::Ask {
+                        turn,
+                        scene,
+                        element,
+                    },
+                ) {
+                    return ended;
+                }
+            }
             Ok(None) => return Ended::Lost,
             Err(error) => {
                 tracing::warn!(%error, "data pipe failed");

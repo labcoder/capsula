@@ -62,6 +62,41 @@ async fn a_found_install_shows_by_its_sign_in_and_the_store() {
     assert_eq!(found("view-in", "in", SIGN_IN).await, READY);
 }
 
+#[test]
+fn finding_without_a_lane_keeps_not_found() {
+    let mut claude = Claude::default();
+    claude.op(ConnectionOp::FindClaudeCode);
+    assert_eq!(claude.view(), ClaudeCodeView::NotFound);
+}
+
+#[tokio::test]
+async fn finding_preserves_ready_and_blocks_connect_until_discovery_settles() {
+    let base = Base::new("finding-view");
+    let (host, _switches) = host(&base, "out");
+    let mut claude = Claude::start(Lane::start(host).expect("lane"), SIGN_IN);
+    assert_eq!(claude.view(), ClaudeCodeView::Finding);
+    claude.op(ConnectionOp::ConnectClaudeCode);
+    assert_eq!(claude.out, Some(Work::Version));
+    claude.op(ConnectionOp::FindClaudeCode);
+    let done = claude.next().await;
+    assert!(!claude.done(done));
+    assert_eq!(claude.view(), ClaudeCodeView::Finding);
+    let done = claude.next().await;
+    assert!(claude.done(done));
+    assert_eq!(claude.view(), ClaudeCodeView::Finding);
+    settle(&mut claude).await;
+    assert_eq!(claude.view(), ClaudeCodeView::SignedOut { version: V });
+    claude.op(ConnectionOp::FindClaudeCode);
+    assert_eq!(claude.view(), ClaudeCodeView::Finding);
+    settle(&mut claude).await;
+    claude.view = READY;
+    claude.op(ConnectionOp::FindClaudeCode);
+    assert_eq!(claude.view(), READY);
+    settle(&mut claude).await;
+    assert!(claude.close(soon()).await);
+    assert!(base.calls().iter().all(|call| call != "auth login"));
+}
+
 #[tokio::test]
 async fn finds_asked_for_while_one_runs_coalesce_into_one_more() {
     let base = Base::new("coalesce");
