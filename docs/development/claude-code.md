@@ -128,14 +128,10 @@ version: its launch policy and the facts its audit expects. Any other version is
   `CLAUDE_CODE_SKIP_PROMPT_HISTORY` and `CLAUDE_CODE_DISABLE_AUTO_MEMORY`. `SystemRoot`,
   `SystemDrive` and `PATH` come from the OS (`platform::system_env`): `PATH` is the system folder
   then the Windows folder, never the brain's own `PATH`, and there's no `PATHEXT`. `auth login`
-  alone also gets `BROWSER`, the Windows folder's `explorer.exe` (`platform::login_browser`):
-  Claude Code's own opener (`rundll32 url,OpenURL`) would start the browser with this
-  environment and its owned folders; on Rez no browser came up. A second explorer is meant to pass
-  the URL to the running shell, which opens the default browser in the user's own environment, so
-  the localhost callback completes with no pasted code. Shown so far: with `BROWSER` set, `auth
-  login` takes the listener branch and calls `BROWSER` once with one argument. Unverified until the
-  live sign-in: that explorer.exe opens the browser, that the callback completes without a code,
-  and what a Windows folder path with spaces does.
+  gets the same environment, and Kumochi sets no `BROWSER`. Claude Code's opener runs as a child
+  of the launch, so it inherits this environment and the brain's jobs, and on Windows no browser
+  came up, either with its own `rundll32 url,OpenURL` or with `BROWSER` set to explorer.exe. The
+  cause is unconfirmed (OSC-244).
 - **Ownership.** C3 returns owned `LaunchData`; C2 and C5a keep it alive and borrow it into
   `platform::Launch` with the exe, the `work` folder, the stdio and the jobs. C3 starts nothing.
 - **Before any launch,** `may_launch` refuses with `PolicyFailed::ManagedPolicy` when an endpoint
@@ -236,7 +232,9 @@ stateDiagram-v2
   new generation; the running call sees it at its next 20 ms poll, its job is terminated within the
   bounds above, and its late result is dropped. Cancel only stops the sign-in: if Claude Code had
   already saved one, the Status after it shows Ready, and only Disconnect signs out. A second
-  Cancel while the first's Status is out is ignored.
+  Cancel while the first's Status is out is ignored. For now the expected path is the paste-code
+  fallback (OSC-244): the user opens the link the console prints, signs in, and pastes the code
+  the page shows back into the console. Kumochi never reads or relays that link or code.
 - **Disconnect** holds the chain from the volume root, then makes `claude-code.deleting` beside the
   folder as a new file, never truncating or following what's at that name; one an earlier
   Disconnect left is taken only if it's a plain file with no other name that passes the folder

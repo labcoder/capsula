@@ -78,5 +78,5 @@ async fn capture_accepts_only_its_own_frame_and_passes_refusals_through() {
     }
 }
 
-#[path = "elements.rs"]
+#[path = "supervisor_elements_tests.rs"]
 mod elements;

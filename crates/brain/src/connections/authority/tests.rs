@@ -14,6 +14,8 @@ use crate::connections::vault::fake::FakeStore;
 use crate::platform::credential::{CredentialStore, SecretBytes};
 use crate::test_support::Scratch;
 
+mod staging;
+
 const SERVICE: &str = "authority-test";
 
 struct Setup {

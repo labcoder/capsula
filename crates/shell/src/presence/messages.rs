@@ -104,21 +104,20 @@ impl Render for Messages {
                 return div().into_any_element();
             };
             let strings = cx.global::<Strings>();
-            let label = match event.kind {
-                PageEventKind::User => Some(strings.get(Text::ThreadUser)),
-                PageEventKind::AssistantText => {
+            let (label, text) = match event.kind {
+                PageEventKind::User => (Some(strings.get(Text::ThreadUser)), event.text.clone()),
+                PageEventKind::AssistantText => (
                     Some(strings.assistant(state.settings.as_ref().map_or(
                         kumochi_protocol::constants::DEFAULT_ASSISTANT_NAME,
                         |settings| settings.assistant_name.as_str(),
-                    )))
+                    ))),
+                    event.text.clone(),
+                ),
+                PageEventKind::SceneStep => {
+                    (Some(strings.get(Text::ThreadStep)), event.text.clone())
                 }
-                PageEventKind::SceneStep => Some(strings.get(Text::ThreadStep)),
-                PageEventKind::Issue { .. } => None,
-            };
-            let text = if label.is_some() {
-                event.text.clone()
-            } else {
-                strings.issue_draft(&event.text)
+                PageEventKind::Issue { .. } => (None, strings.issue_draft(&event.text)),
+                PageEventKind::TaskDeleted => (None, strings.get(Text::ThreadDeleted)),
             };
             div()
                 .id(("event", event.id.0))

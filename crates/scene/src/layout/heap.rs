@@ -222,6 +222,43 @@ mod allocation;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_preparation_caches_only_its_source_and_sizing_allocations() {
+        let Record::Step(step) =
+            parse_record(br#"{"step":{"id":"s","put":[{"path":{"id":"p","d":"M0 0L1 1"}}]}}"#)
+                .expect("path step")
+        else {
+            panic!("step")
+        };
+        let (source, _, [allocated, released]) = allocation::usage(|| Arc::new(step.clone()));
+        let source_bytes = allocated - released;
+        let Record::Begin(begin) =
+            parse_record(br#"{"begin":{"v":1,"scene":"s","surface":"inline","alt":""}}"#)
+                .expect("header")
+        else {
+            panic!("begin")
+        };
+        let mut scene = crate::SceneState::begin(begin).expect("scene");
+        let mut budget = crate::GlobalBudget::default();
+        let crate::Admission::New(candidate) = scene.admit(&step, &budget).expect("admission")
+        else {
+            panic!("new step")
+        };
+        let ticket = scene
+            .commit(candidate, &mut budget)
+            .expect("commit")
+            .preparation;
+        assert!(Arc::ptr_eq(&ticket.step, &ticket.run));
+        assert_eq!(ticket.path_scales.len(), 1);
+        assert_eq!(ticket.extras.len(), 0);
+        assert_eq!(
+            ticket.attributed_bytes(),
+            source_bytes + 16 + 40 + 104,
+            "source allocation, owner Arc, empty extras Arc/map and one 104-byte B-tree leaf"
+        );
+        drop(source);
+    }
     use crate::{
         Finite, Record, WireId, parse_record,
         record::{Change, Point},

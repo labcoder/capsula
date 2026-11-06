@@ -175,24 +175,25 @@ impl Scene {
             .saturating_add(self.frame_bytes)
     }
 
-    /// What the dropper is told this scene owns: its prepared layouts, its view and frame, and
-    /// its semantic state.
-    pub(super) fn attributed(&self) -> usize {
-        self.residency()
-            .saturating_add(self.state.view().attributed_bytes())
-    }
-
     /// Drops queued and prepared work with any consumption waiting on it, and asks a running job
     /// to stop. Its window positions free here, once; a late answer finds nothing running.
     pub(super) fn halt(&mut self) {
         if let Some(running) = self.running.take() {
             running.cancel.store(true, Ordering::Relaxed);
         }
-        drop(Deferred::new(
-            std::mem::take(&mut self.queue),
-            self.state.view().attributed_bytes(),
-        ));
-        let bytes = self.residency().saturating_sub(self.held());
+        let bytes = self.queue.capacity() * size_of::<Ticket>()
+            + self
+                .queue
+                .iter()
+                .map(|ticket| ticket.preparation.attribution())
+                .sum::<usize>();
+        drop(Deferred::new(std::mem::take(&mut self.queue), bytes));
+        let bytes = self.ready.capacity() * size_of::<Ready>()
+            + self
+                .ready
+                .iter()
+                .map(|ready| ready.step.attribution())
+                .sum::<usize>();
         drop(Deferred::new(std::mem::take(&mut self.ready), bytes));
         self.paint = self.rest.paint_work();
         self.pending_consumption = None;

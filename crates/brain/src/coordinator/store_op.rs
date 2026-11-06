@@ -231,7 +231,8 @@ impl StoreOp {
             },
             Self::CommitCall(call) => Input::CallCommitted {
                 key: call.key.clone(),
-                committed: false,
+                outcome: crate::dispatch::Committed::Failed,
+                then: None,
             },
             Self::SetModel { thread, choice } => Input::ModelSet {
                 thread: *thread,

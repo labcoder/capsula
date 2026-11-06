@@ -1,14 +1,17 @@
 # The shell's text. Product names come from the constants file, never from here.
 
+# Shell
+
 status-connecting = Starting…
 status-connected = Ready
 status-reconnecting = Reconnecting…
 status-failed = Can't reach the background process.
-
 action-retry = Retry
 action-stop = Stop
 action-quit = Quit
 action-chat = Chat…
+
+# Dock
 
 dock-position = Dock position
 position-top-left = Top left
@@ -20,10 +23,16 @@ position-middle-right = Middle right
 position-bottom-left = Bottom left
 position-bottom-center = Bottom center
 position-bottom-right = Bottom right
+dock-error = Check settings
+dock-brain-error = Needs attention
+
+# Turns
 
 turn-busy = Still answering earlier messages. Try again in a moment.
 turn-offline = Not sent: the background process isn't connected.
 turn-too-long = That message is too long to send.
+
+# Tasks
 
 threads-title = Tasks
 action-threads = Tasks…
@@ -43,7 +52,6 @@ thread-issue-draft = Issue draft: { $title }
 threads-offline = Reconnect to load tasks.
 threads-search-too-long = That search is too long to send.
 threads-failed = Couldn't load tasks. Close this panel and open it again to retry.
-
 thread-delete = Delete
 thread-delete-title = Delete this task?
 thread-delete-body = This removes the task and its drawings from this PC. It can't remove issues you already filed on GitHub, or what your model provider keeps under its own terms.
@@ -51,7 +59,8 @@ thread-delete-cancel = Cancel
 thread-deleting = Deleting…
 thread-delete-failed = Couldn't delete the task. It's still here; try again.
 thread-deletes-full = Wait for the other deletes to finish.
-
+thread-delete-kumo = { $assistant } keeps a note that a task was deleted, but not its name.
+thread-deleted = You deleted a task.
 action-back-to-kumo = Back to { $assistant }
 action-switch-task = Switch to this task
 action-rename-task = Rename
@@ -64,11 +73,36 @@ rename-one-line = Use one line without control characters.
 task-fallback = a task
 task-focus = You're in: { $task }
 
+# Settings
+
 settings-title = Settings
 action-settings = Settings…
 settings-close = Close
 settings-general = General
 settings-accounts = Accounts
+settings-assistant-name = Assistant's name
+settings-user-name = Your name
+settings-user-name-help = Leave blank to unset.
+settings-save-help = Press Enter or leave a field to save.
+settings-version = Version and build
+settings-copy-build = Copy version and build
+settings-position-unavailable = Couldn't move the dock.
+settings-taskbar = Also show { $app } in the taskbar
+taskbar-add-failed = Couldn't add to the taskbar.
+taskbar-remove-failed = Couldn't remove the taskbar button.
+settings-max-frame-rate = Max frame rate
+settings-frame-rate-automatic = Automatic
+settings-frame-rate-now = Drawing at { $fps } frames a second on this display.
+settings-saving = Saving…
+settings-offline = Reconnect to change settings.
+rename-busy = The assistant's name is still saving. Try again in a moment.
+settings-unavailable = Couldn't send that change. Try again in a moment.
+settings-not-saved = Settings not saved
+error-settings-refused = Couldn't save that setting. Try again.
+error-config-unreadable = Your settings file can't be read, so changes aren't saved. Repair or delete config.toml, then restart.
+
+# ChatGPT accounts
+
 accounts-provider = ChatGPT
 accounts-waiting = Waiting for account status…
 accounts-offline = Reconnect to manage your ChatGPT account.
@@ -114,29 +148,6 @@ accounts-backlog-lead = Still ending earlier ChatGPT sessions. A new sign-in can
 accounts-backlog-retry = Retry tries now. The app also retries the next time it starts.
 accounts-backlog-expiry = An expired session is normally removed from this list about 32 days after it was added. If this computer's clock changed, restart the app with the right time first.
 accounts-backlog-recovery = You can also disconnect this app in your ChatGPT settings.
-settings-assistant-name = Assistant's name
-settings-user-name = Your name
-settings-user-name-help = Leave blank to unset.
-settings-save-help = Press Enter or leave a field to save.
-settings-version = Version and build
-settings-copy-build = Copy version and build
-settings-position-unavailable = Couldn't move the dock.
-settings-taskbar = Also show { $app } in the taskbar
-taskbar-add-failed = Couldn't add to the taskbar.
-taskbar-remove-failed = Couldn't remove the taskbar button.
-settings-max-frame-rate = Max frame rate
-settings-frame-rate-automatic = Automatic
-settings-frame-rate-now = Drawing at { $fps } frames a second on this display.
-settings-saving = Saving…
-settings-offline = Reconnect to change settings.
-dock-error = Check settings
-rename-busy = The assistant's name is still saving. Try again in a moment.
-settings-unavailable = Couldn't send that change. Try again in a moment.
-settings-not-saved = Settings not saved
-dock-brain-error = Needs attention
-
-error-settings-refused = Couldn't save that setting. Try again.
-error-config-unreadable = Your settings file can't be read, so changes aren't saved. Repair or delete config.toml, then restart.
 error-sign-in-timed-out = Sign-in took too long. Try again.
 error-sign-in-failed = Couldn't finish signing in to ChatGPT. Try again.
 error-sign-in-other-account = That's a different ChatGPT account from the one this computer signed in with. Sign in with the same account.
@@ -156,6 +167,9 @@ error-request-refused = That request couldn't be accepted. Trying again won't he
 error-response-unreadable = The answer couldn't be read. Try again.
 error-sign-in-needed = Sign in to ChatGPT to get an answer.
 error-model-unavailable = This thread's model isn't available on your account. Pick another in Settings.
+
+# Anthropic
+
 error-anthropic-key-rejected = Anthropic didn't accept this API key. Check it and paste it again.
 error-anthropic-key-format = That doesn't look like an Anthropic API key.
 error-anthropic-key-subscription-token = This is a Claude subscription token. Paste an Anthropic API key instead.
@@ -164,6 +178,10 @@ error-anthropic-key-workspace-required = This key needs a workspace header. Past
 error-anthropic-unreachable = Anthropic couldn't be reached. Check your connection and try again.
 error-anthropic-rate-limited = Anthropic is limiting requests for this key. Try again in a moment.
 error-anthropic-credit = Your Anthropic account is out of credit.
+error-anthropic-answer-limit = The answer reached the limit Kumochi sets for one reply. Try asking for something shorter.
+
+# Claude Code
+
 error-claude-code-not-found = Claude Code isn't installed, or isn't where Kumochi looks for it.
 error-claude-code-unsupported = Kumochi can't use this Claude Code install yet.
 error-claude-code-signed-out = Claude Code isn't signed in. Connect it in Accounts.
@@ -172,7 +190,9 @@ error-claude-code-policy = A policy or safety check keeps Kumochi from using Cla
 error-claude-code-input-unsupported = Claude Code can't take a screenshot here. Switch connection to send one.
 error-claude-code-budget = Kumochi's Claude Code allowance for now is used up.
 error-claude-code-cleanup-pending = Disconnecting Claude Code isn't finished yet. Kumochi keeps retrying.
-error-anthropic-answer-limit = The answer reached the limit Kumochi sets for one reply. Try asking for something shorter.
+
+# Voice
+
 error-voice-no-space = There isn't enough free disk space to install voice.
 error-voice-download = Voice couldn't be downloaded. Check your connection and try again.
 error-voice-corrupt = A voice file didn't match what Kumochi expected, so it wasn't used.
