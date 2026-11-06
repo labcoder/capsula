@@ -29,6 +29,8 @@ pub(crate) const REREAD_CAP: usize = 32 * 1024;
 pub(crate) const REMOVED: &str = "[removed with a deleted task]";
 /// What a reference the run's origin may not reach renders as.
 pub(crate) const UNAVAILABLE: &str = "[not available here]";
+/// The most deletion notes a request carries, newest kept [guess].
+pub(crate) const MAX_NOTES: usize = 32;
 
 /// Where a run was started, which decides what it may reach. It comes from the run's thread,
 /// never from anything a model produced.
@@ -161,6 +163,14 @@ pub(crate) fn summary_item(first: EventId, last: EventId, text: &str) -> InputIt
     InputItem::Message {
         role: Role::Developer,
         text: format!("Summary of events {}–{}:\n{text}", first.0, last.0),
+    }
+}
+
+/// The input item a deletion note becomes.
+pub(crate) fn note_item(note: &crate::store::context::Note) -> InputItem {
+    InputItem::Message {
+        role: Role::Developer,
+        text: format!("Note: a task was deleted at {}.", note.when),
     }
 }
 

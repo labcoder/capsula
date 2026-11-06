@@ -3,13 +3,14 @@
 use std::collections::BTreeSet;
 
 use kumochi_protocol::constants::DISPLAY_NAME;
-use kumochi_protocol::message::{RunId, ThreadId, ThreadKind};
+use kumochi_protocol::message::{EventId, RunId, ThreadId, ThreadKind};
 use serde_json::{Value, json};
 
 use super::bound::{fixed_bytes, item_bytes};
 use super::{
-    Body, BuildError, Built, HistoryRef, InputItem, Item, ModelRequest, Origin, RAW_RUNS, REMOVED,
-    REREAD_CAP, Role, RunSnapshot, Supplied, UNAVAILABLE, summary_item, tools,
+    Body, BuildError, Built, HistoryRef, InputItem, Item, MAX_NOTES, ModelRequest, Origin,
+    RAW_RUNS, REMOVED, REREAD_CAP, Role, RunSnapshot, Supplied, UNAVAILABLE, note_item,
+    summary_item, tools,
 };
 use crate::store::StoreError;
 use crate::store::context::Snapshot;
@@ -91,10 +92,25 @@ fn assemble(
             .flatten();
         return Err(BuildError::TooLarge { room });
     }
+    // A deletion note follows the last run that began before it, never splitting one, and is
+    // dropped with that run; notes older than every run stay only while no run left the window.
+    let mut notes = snapshot.notes(turn.thread, after, MAX_NOTES)?;
+    let whole = older.len() < RAW_RUNS;
+    let mut segments = older.iter().rev().take(RAW_RUNS - 1);
     let mut kept = Vec::new();
-    for older in older.iter().rev().take(RAW_RUNS - 1) {
+    loop {
+        let segment = segments.next();
+        if segment.is_none() && !whole {
+            break;
+        }
         let mut reached = BTreeSet::new();
-        let rendered = render(snapshot, run, older, None, &mut reached)?;
+        let mut rendered = match segment {
+            Some(segment) => render(snapshot, run, segment, None, &mut reached)?,
+            None => Vec::new(),
+        };
+        let start = segment.map_or(EventId(0), |segment| segment[0].id);
+        let at = notes.partition_point(|note| note.id <= start);
+        rendered.extend(notes.drain(at..).map(|note| note_item(&note)));
         let bytes = rendered.iter().map(item_bytes).sum::<usize>();
         if total + bytes > bound {
             break;
@@ -102,6 +118,9 @@ fn assemble(
         total += bytes;
         sources.append(&mut reached);
         kept.push(rendered);
+        if segment.is_none() {
+            break;
+        }
     }
     let input = summary
         .into_iter()
