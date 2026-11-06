@@ -11,6 +11,8 @@ fn view(position: DockPosition) -> SettingsView {
         default_model: None,
         dock_position: position,
         show_in_taskbar: false,
+        talk_back: false,
+        stt_unload: kumochi_protocol::message::SttUnload::Kept,
     }
 }
 

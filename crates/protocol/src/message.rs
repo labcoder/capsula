@@ -50,7 +50,7 @@ pub use scenes::{
 };
 pub use settings::{
     AssistantName, DockPosition, MAX_NAME_CHARS, MaxFrameRate, NameError, NotACap, SettingsOp,
-    SettingsView, UserName,
+    SettingsView, SttUnload, UserName,
 };
 pub use threads::{
     Effort, LISTED_MODELS_CALL_TOOLS, MAX_MODEL_NAME_CHARS, MAX_MODELS, MAX_SLUG_BYTES,
@@ -60,8 +60,8 @@ pub use threads::{
 pub use voice::{
     Cursor, MAX_AHEAD_SEGMENTS, MAX_HOLD_CHUNKS, MAX_MIC_SAMPLES, MAX_RATE, MAX_SAY_BYTES,
     MAX_SEGMENT_SECONDS, MAX_SEGMENTS_PER_RUN, MAX_SPEECH_SAMPLES, MAX_TRANSCRIPT_BYTES,
-    MAX_UNPLAYED_SECONDS, MIN_RATE, MicPcm, OutputGeneration, PROGRESS_INTERVAL_MS, SegmentId,
-    SpeechPcm, StepRef, Transcript, VoiceBound, check_rate,
+    MAX_UNPLAYED_SECONDS, MIN_RATE, MicPcm, OutputGeneration, PROGRESS_INTERVAL_MS, PartState,
+    SegmentId, SpeechPcm, StepRef, Transcript, VoiceBound, VoiceView, check_rate,
 };
 
 /// The most rows one page carries [guess].

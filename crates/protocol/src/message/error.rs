@@ -84,11 +84,23 @@ pub enum ErrorKey {
     RenewalUnconfirmed,
     /// The Anthropic answer reached the app's token or context limit.
     AnthropicAnswerLimit,
+    /// The disk hasn't room for a voice part.
+    VoiceNoSpace,
+    /// A voice download was refused, timed out or broke off.
+    VoiceDownload,
+    /// A voice file had the wrong size or hash.
+    VoiceCorrupt,
+    /// A voice file couldn't be read, written or deleted.
+    VoiceStorage,
+    /// A voice part is installed but didn't load.
+    VoiceLoad,
+    /// A voice install, remove or cancel can't be taken now.
+    VoiceUnavailable,
 }
 
 impl ErrorKey {
     /// Every key, for the shell's catalog test.
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 42] = [
         Self::SettingsRefused,
         Self::ConfigUnreadable,
         Self::SignInTimedOut,
@@ -125,6 +137,12 @@ impl ErrorKey {
         Self::ClaudeCodeCleanupPending,
         Self::RenewalUnconfirmed,
         Self::AnthropicAnswerLimit,
+        Self::VoiceNoSpace,
+        Self::VoiceDownload,
+        Self::VoiceCorrupt,
+        Self::VoiceStorage,
+        Self::VoiceLoad,
+        Self::VoiceUnavailable,
     ];
 }
 

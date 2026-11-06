@@ -35,6 +35,8 @@ fn view() -> ControlToShell {
             default_model: None,
             dock_position: crate::message::DockPosition::TopCenter,
             show_in_taskbar: false,
+            talk_back: false,
+            stt_unload: crate::message::SttUnload::Kept,
         },
         answer: true,
     }
