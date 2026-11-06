@@ -452,6 +452,7 @@ pub(super) struct TextView {
     recovery: Option<Notice>,
     recovery_text: Option<SharedString>,
     retry: bool,
+    draft_empty: bool,
     refusal: Option<Text>,
     messages: Entity<Messages>,
     target: Target,
@@ -481,7 +482,13 @@ impl TextView {
         let watch = vec![
             cx.observe(&model, |_, _, cx| cx.notify()),
             cx.observe(&settings, |_, _, cx| cx.notify()),
-            cx.observe(&input, |_, _, cx| cx.notify()),
+            cx.observe(&input, |view, input, cx| {
+                let empty = input.read(cx).value().is_empty();
+                if view.draft_empty != empty {
+                    view.draft_empty = empty;
+                    cx.notify();
+                }
+            }),
         ];
         Self {
             input,
@@ -490,6 +497,7 @@ impl TextView {
             recovery: None,
             recovery_text: None,
             retry: false,
+            draft_empty: true,
             refusal: None,
             messages,
             target: Target::Kumo,

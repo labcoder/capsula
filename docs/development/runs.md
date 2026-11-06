@@ -44,7 +44,9 @@ be retried; Retry never submits another unbound New turn. Dismissal also drops t
 
 `chat_notice.rs` retains the typed error and its run, account or settings-field owner.
 Presence pushes that notice into the composer, which observes Settings and Input for
-enabled-state changes. The recovery dispatcher rechecks the owner and declared action,
+enabled-state changes. Input notifications redraw the composer only when draft emptiness
+changes; typing within a nonempty draft and caret blinking stay local to Input.
+The recovery dispatcher rechecks the owner and declared action,
 then uses the existing run, account or settings admission. An account Retry cannot resend
 run text. Public usage links use the existing URL, and settings routes select their exact
 tab without toggling a visible settings window closed.

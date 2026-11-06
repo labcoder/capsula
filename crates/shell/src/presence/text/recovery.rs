@@ -107,7 +107,7 @@ impl TextView {
                     Some(Route::RunRetry(_)) => {
                         connected
                             && self.retry
-                            && self.input.read(cx).value().is_empty()
+                            && self.draft_empty
                             && settings.accounts.waiting.is_none()
                     }
                     Some(Route::Account(op)) => connected && settings.accounts.allows(op),

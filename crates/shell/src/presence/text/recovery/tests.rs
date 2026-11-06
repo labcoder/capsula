@@ -169,6 +169,51 @@ fn recovery_buttons_follow_live_drafts_and_dispatch_then_dismiss_the_named_failu
 }
 
 #[gpui::test]
+fn typing_and_caret_notifications_redraw_recovery_only_when_draft_emptiness_changes(
+    cx: &mut TestAppContext,
+) {
+    use std::{cell::Cell, rc::Rc};
+
+    let (owner, data, control) = ready(cx);
+    let (window, view, input) = owner.read_with(cx, |owner, _| {
+        let text = owner.text.as_ref().expect("typing fixture");
+        (text.window, text.view.clone(), text.input.clone())
+    });
+    window
+        .update(cx, |_, window, cx| {
+            window.activate_window();
+            input.update(cx, |input, cx| input.focus(window, cx));
+            window.draw(cx).clear(cx);
+        })
+        .expect("composer focus");
+    cx.run_until_parked();
+    let notified = Rc::new(Cell::new(0));
+    let _watch = cx.update(|cx| {
+        let notified = notified.clone();
+        cx.observe(&view, move |_, _| notified.set(notified.get() + 1))
+    });
+    cx.simulate_input(window, "n");
+    cx.run_until_parked();
+    assert_eq!(notified.replace(0), 1, "empty to nonempty redraws");
+    cx.simulate_input(window, "ext");
+    cx.run_until_parked();
+    assert_eq!(input.read_with(cx, |input, _| input.value()), "next");
+    assert_eq!(notified.replace(0), 0, "unchanged emptiness stays local");
+    input.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    assert_eq!(
+        notified.replace(0),
+        0,
+        "caret-only notification stays local"
+    );
+    draft(&owner, "", cx);
+    cx.run_until_parked();
+    assert_eq!(notified.get(), 1, "nonempty to empty redraws");
+    assert!(data.is_empty());
+    assert!(control.is_empty());
+}
+
+#[gpui::test]
 fn keyboard_retry_returns_typing_and_escape_to_the_composer(cx: &mut TestAppContext) {
     keyboard_recovery_returns_composer(true, cx);
 }
