@@ -32,8 +32,18 @@ pub(crate) struct Downloader {
     space: Option<u64>,
 }
 
+/// What a fetch is doing now; a change is sent at once, unlike byte counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FetchPhase {
+    /// Hashing bytes already on disk.
+    Verifying,
+    /// Requesting or receiving bytes.
+    Downloading,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Progress {
+    pub phase: FetchPhase,
     pub done: u64,
     pub total: u64,
 }
@@ -166,6 +176,16 @@ impl Downloader {
         progress: &watch::Sender<Progress>,
         cancel: &watch::Receiver<bool>,
     ) -> Result<(), DownloadError> {
+        let mut report = Reporter {
+            sender: progress,
+            last: Instant::now(),
+            value: Progress {
+                phase: FetchPhase::Verifying,
+                done: 0,
+                total: files.iter().map(|f| f.bytes).sum(),
+            },
+        };
+        report.sender.send_replace(report.value);
         let mut pending = Vec::new();
         let mut done = 0;
         let mut missing = 0;
@@ -209,16 +229,11 @@ impl Downloader {
         if available < needed {
             return Err(DownloadError::NoSpace { needed });
         }
-        let mut report = Reporter {
-            sender: progress,
-            last: Instant::now(),
-            value: Progress {
-                done,
-                total: files.iter().map(|f| f.bytes).sum(),
-            },
-        };
+        report.value.done = done;
         report.sender.send_replace(report.value);
         for (model, path, partial, existing) in pending {
+            // `fetch_file` hashes the bytes already in the `.part` first.
+            report.phase(FetchPhase::Verifying);
             let result = self
                 .fetch_file(model, &partial, existing, &mut report, cancel)
                 .await;
@@ -275,6 +290,7 @@ impl Downloader {
             if !self.rules.accepts(&url) {
                 return Err(DownloadError::Refused);
             }
+            report.phase(FetchPhase::Downloading);
             let mut request = self.client.get(url).header(ACCEPT_ENCODING, "identity");
             if offset != 0 {
                 request = request.header(RANGE, format!("bytes={offset}-"));
@@ -462,6 +478,15 @@ struct Reporter<'a> {
 }
 
 impl Reporter<'_> {
+    /// Sent at once when it changes; only byte counts wait for the interval.
+    fn phase(&mut self, phase: FetchPhase) {
+        if self.value.phase != phase {
+            self.value.phase = phase;
+            self.sender.send_replace(self.value);
+            self.last = Instant::now();
+        }
+    }
+
     fn update(&mut self, done: u64) {
         self.value.done = done;
         if self.last.elapsed() >= PROGRESS_INTERVAL {

@@ -21,6 +21,89 @@ use super::{
 const OTHER: SceneId = SceneId(21);
 
 #[test]
+fn stop_drains_a_pending_consumption_without_a_worker_and_keeps_later_commits_unprepared() {
+    let (mut presenter, now) = live();
+    begin(&mut presenter, LIVE, now);
+    let first = only_job(commit(&mut presenter, LIVE, 0, rect("a"), now).expect("a step"));
+    presenter
+        .completed(first.run(&mut Shaper), now)
+        .expect("prepared");
+    let admission = only_admission(
+        arrive(&mut presenter, commit_frame(LIVE, 1, rect("b")), now).expect("admission"),
+    );
+    assert_eq!(
+        presenter.consume_ready(LIVE, 0, now).expect_err("busy"),
+        ConsumeError::Busy
+    );
+    let prepared = only_job(presenter.completed(admission.run(), now).expect("admitted"));
+    presenter
+        .completed(prepared.run(&mut Shaper), now)
+        .expect("prepared");
+    assert_eq!(presenter.workers(), 0);
+    assert_eq!(presenter.deadline(), None);
+    assert_eq!(presenter.scenes[&LIVE].pending_consumption, Some(0));
+    assert!(
+        arrive(&mut presenter, commit_frame(LIVE, 2, rect("c")), now)
+            .expect("held commit")
+            .is_empty()
+    );
+    assert_eq!(presenter.held_bytes, FRAME);
+
+    let mut stopped = presenter.stop(RUN, now).expect("stop");
+    assert!(matches!(stopped.last(), Some(Effect::Control(message))
+        if *message == stop_scenes(vec![SceneCut { scene: LIVE, cut: zero_cut() }])));
+    let position = stopped
+        .iter()
+        .position(|effect| matches!(effect, Effect::Admit(_)))
+        .expect("Stop drains the held commit without waiting for another input");
+    let Effect::Admit(admission) = stopped.remove(position) else {
+        unreachable!()
+    };
+    assert!(presenter.held.is_empty());
+    assert_eq!(presenter.held_bytes, 0);
+    assert_eq!(presenter.scenes[&LIVE].pending_consumption, None);
+    let effects = presenter
+        .completed(admission.run(), now)
+        .expect("fenced admission");
+    assert_eq!(credit(&effects), FRAME);
+    assert!(controls(&effects).is_empty());
+    assert!(
+        jobs(effects).is_empty(),
+        "the drained commit never prepares"
+    );
+    let effects = commit(&mut presenter, LIVE, 3, rect("d"), now).expect("post-Stop commit");
+    assert!(controls(&effects).is_empty());
+    assert!(
+        jobs(effects).is_empty(),
+        "the post-Stop commit never prepares"
+    );
+    let scene = &presenter.scenes[&LIVE];
+    assert_eq!(scene.state.view().revision(), 4);
+    assert_eq!(scene.state.view().activated(), 0);
+    assert_eq!(scene.view.activated(), 0);
+    assert!(scene.ready.is_empty());
+    assert_eq!(
+        presenter
+            .frames
+            .borrow()
+            .painted(LIVE)
+            .map(|paint| (paint.epoch, paint.bound)),
+        None
+    );
+    let effects =
+        acknowledge(&mut presenter, LIVE, 4, zero_cut(), now).expect("cut acknowledgement");
+    assert!(controls(&effects).is_empty());
+    assert!(jobs(effects).is_empty());
+    assert!(!presenter.holds_scenes());
+    assert!(
+        presenter
+            .tick(ms(now, 5_000))
+            .expect("past all old deadlines")
+            .is_empty()
+    );
+}
+
+#[test]
 fn a_fresh_commit_after_the_wake_waits_for_the_pending_consumption_retry() {
     let (mut presenter, now) = live();
     begin(&mut presenter, LIVE, now);

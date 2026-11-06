@@ -416,27 +416,18 @@ fn github_metadata_parses_fixed_gmt_and_retry_times_without_retaining_headers() 
         HeaderValue::from_static("Sun, 06 Nov 1994 08:49:36 GMT"),
     );
     assert_eq!(ResponseMeta::parse(&headers).retry_after_s, Some(0));
-    for name in [
-        "date",
-        "retry-after",
-        "x-ratelimit-remaining",
-        "x-ratelimit-reset",
-    ] {
-        let mut headers = HeaderMap::new();
-        let value = if name == "date" { date } else { "0" };
-        headers.append(name, HeaderValue::from_str(value).unwrap());
-        headers.append(name, HeaderValue::from_str(value).unwrap());
-        assert_eq!(ResponseMeta::parse(&headers), ResponseMeta::default());
-        headers.clear();
-        headers.insert(name, HeaderValue::from_bytes(&[0xff]).unwrap());
-        assert_eq!(ResponseMeta::parse(&headers), ResponseMeta::default());
-    }
     headers.insert("date", HeaderValue::from_static("invalid"));
     headers.insert(
         "retry-after",
         HeaderValue::from_static("Sun, 06 Nov 1994 08:50:37 GMT"),
     );
-    assert_eq!(ResponseMeta::parse(&headers), ResponseMeta::default());
+    assert_eq!(
+        ResponseMeta::parse(&headers),
+        ResponseMeta {
+            retry_after_present: true,
+            ..ResponseMeta::default()
+        }
+    );
     headers.clear();
     headers.append("date", HeaderValue::from_str(date).unwrap());
     headers.append("date", HeaderValue::from_str(date).unwrap());
@@ -448,10 +439,38 @@ fn github_metadata_parses_fixed_gmt_and_retry_times_without_retaining_headers() 
         ResponseMeta {
             date_s: None,
             retry_after_s: Some(60),
+            retry_after_present: true,
             rate_remaining: Some(0),
             rate_reset_s: Some(784_111_837)
         }
     );
+}
+
+#[test]
+fn github_metadata_duplicates_and_non_ascii_headers_have_no_parsed_values() {
+    for name in [
+        "date",
+        "retry-after",
+        "x-ratelimit-remaining",
+        "x-ratelimit-reset",
+    ] {
+        let mut headers = HeaderMap::new();
+        let value = if name == "date" {
+            "Sun, 06 Nov 1994 08:49:37 GMT"
+        } else {
+            "0"
+        };
+        headers.append(name, HeaderValue::from_str(value).unwrap());
+        headers.append(name, HeaderValue::from_str(value).unwrap());
+        let expected = ResponseMeta {
+            retry_after_present: name == "retry-after",
+            ..ResponseMeta::default()
+        };
+        assert_eq!(ResponseMeta::parse(&headers), expected);
+        headers.clear();
+        headers.insert(name, HeaderValue::from_bytes(&[0xff]).unwrap());
+        assert_eq!(ResponseMeta::parse(&headers), expected);
+    }
 }
 
 #[test]
@@ -481,6 +500,46 @@ fn github_metadata_numeric_bounds_reject_whitespace_and_overflow() {
             );
         }
     }
+}
+
+#[test]
+fn retry_after_presence_survives_invalid_values_duplicates_and_bad_date() {
+    assert_eq!(
+        ResponseMeta::parse(&HeaderMap::new()),
+        ResponseMeta::default()
+    );
+    let present = ResponseMeta {
+        retry_after_present: true,
+        ..ResponseMeta::default()
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert("retry-after", HeaderValue::from_static("60"));
+    assert_eq!(
+        ResponseMeta::parse(&headers),
+        ResponseMeta {
+            retry_after_s: Some(60),
+            ..present
+        }
+    );
+    headers.insert("retry-after", HeaderValue::from_static("invalid"));
+    assert_eq!(ResponseMeta::parse(&headers), present);
+    headers.insert("retry-after", HeaderValue::from_static("60"));
+    headers.append("retry-after", HeaderValue::from_static("60"));
+    assert_eq!(ResponseMeta::parse(&headers), present);
+    headers.clear();
+    headers.insert(
+        "retry-after",
+        HeaderValue::from_static("Sun, 06 Nov 1994 08:50:37 GMT"),
+    );
+    assert_eq!(ResponseMeta::parse(&headers), present);
+    headers.insert(
+        "date",
+        HeaderValue::from_static("Mon, 06 Nov 1994 08:49:37 GMT"),
+    );
+    assert_eq!(ResponseMeta::parse(&headers), present);
+    let printed = format!("{:?}", ResponseMeta::parse(&headers));
+    assert!(printed.contains("retry_after_present: true"));
+    assert!(!printed.contains("Mon, 06 Nov 1994"));
 }
 
 #[tokio::test]

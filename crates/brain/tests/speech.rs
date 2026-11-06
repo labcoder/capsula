@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use kumochi_brain::platform::Job;
 use kumochi_brain::speech::{
-    Deadlines, NativeError, SpeechError, SpeechFault, SpeechHandle, SpeechSupervisor, WorkerLost,
+    Deadlines, Generation, NativeError, SpeechError, SpeechFault, SpeechHandle, SpeechSupervisor,
 };
 
 const WORKER: &str = env!("CARGO_BIN_EXE_kumochid");
@@ -82,7 +82,7 @@ async fn every_fault_loses_only_the_worker_and_the_next_one_serves() {
         );
         assert_eq!(faulted, Err(SpeechError::WorkerLost), "{fault:?}");
         assert_eq!(queued, Err(SpeechError::WorkerLost), "{fault:?} queued");
-        assert_eq!(losses.recv().await.expect("loss"), WorkerLost);
+        assert_eq!(losses.recv().await.expect("loss"), Generation(0));
         serves(&speech).await;
         drop(speech);
     }
@@ -125,7 +125,10 @@ async fn measure_a_native_throw_costs_only_the_worker() {
     let job = Arc::new(Job::new().expect("job"));
     let speech = start(&job);
     let mut losses = speech.lost();
-    assert_eq!(speech.load(natives.clone(), models.clone()).await, Ok(()));
+    assert_eq!(
+        speech.load(natives.clone(), models.clone()).await,
+        Ok(Generation(0))
+    );
     let thrown = std::time::Instant::now();
     assert_eq!(
         speech.fault(SpeechFault::Throw(dll)).await,
@@ -136,13 +139,13 @@ async fn measure_a_native_throw_costs_only_the_worker() {
         thrown.elapsed() < FIXTURE.decode,
         "the worker ended, not the deadline"
     );
-    assert_eq!(losses.recv().await.expect("loss"), WorkerLost);
+    assert_eq!(losses.recv().await.expect("loss"), Generation(0));
     assert_eq!(
         speech.decode(16_000, &vec![0; 16_000]).await,
         Err(SpeechError::NotLoaded),
         "the model went with the worker"
     );
-    assert_eq!(speech.load(natives, models).await, Ok(()));
+    assert_eq!(speech.load(natives, models).await, Ok(Generation(1)));
     assert!(speech.decode(16_000, &vec![0; 16_000]).await.is_ok());
     drop(speech);
     tokio::task::yield_now().await;

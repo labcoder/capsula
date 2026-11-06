@@ -182,6 +182,7 @@ impl std::fmt::Debug for SourceError {
 
 pub(crate) trait ElementSource {
     type Node;
+    /// Returns the native window owner's pid, as foreground does, not a hosted UIA provider's pid.
     fn root(
         &mut self,
         target: ElementTarget,
@@ -195,6 +196,7 @@ pub(crate) trait ElementSource {
 }
 
 pub(crate) trait ElementReader {
+    fn set_shell_pid(&mut self, _pid: u32) {}
     fn foreground(&mut self) -> Option<TopWindow>;
     fn walk(&mut self, job: WalkJob) -> Result<Walked, Failure>;
 }
@@ -231,6 +233,7 @@ impl std::fmt::Debug for TopWindow {
 }
 
 pub(crate) trait ElementPlatform: Clone + Send + 'static {
+    fn set_shell_pid(&mut self, _pid: u32) {}
     fn foreground(&mut self) -> Option<TopWindow>;
     fn excluded(&mut self, pid: u32) -> Result<bool, SourceError>;
 }

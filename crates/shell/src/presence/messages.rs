@@ -284,12 +284,12 @@ fn row(
             |settings| settings.assistant_name.as_str(),
         ))),
         PageEventKind::SceneStep => Some(strings.get(Text::ThreadStep)),
-        PageEventKind::Issue { .. } => None,
+        PageEventKind::Issue { .. } | PageEventKind::TaskDeleted => None,
     };
-    let text = if label.is_some() {
-        text.to_owned()
-    } else {
-        strings.issue_draft(text)
+    let text = match kind {
+        PageEventKind::Issue { .. } => strings.issue_draft(text),
+        PageEventKind::TaskDeleted => strings.get(Text::ThreadDeleted),
+        _ => text.to_owned(),
     };
     Row {
         id,
@@ -386,6 +386,30 @@ mod tests {
             .expect("window");
             (model, view.expect("messages"), window)
         })
+    }
+
+    #[gpui::test]
+    fn a_task_deleted_row_renders_the_exact_localized_note(cx: &mut TestAppContext) {
+        let (model, view, window) = open(cx);
+        model.update(cx, |state, cx| {
+            state.events = vec![PageEvent {
+                id: EventId(7),
+                run: None,
+                kind: PageEventKind::TaskDeleted,
+                text: String::new(),
+                cut: false,
+            }];
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.rows.len(), 1);
+            assert_eq!(view.rows[0].id, ("event", 7));
+            assert_eq!(view.rows[0].label, None);
+            assert_eq!(view.rows[0].text.as_ref(), "You deleted a task.");
+        });
+        let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+        assert!(frame.debug_bounds("message-event-7").is_some());
     }
 
     #[gpui::test]

@@ -1,6 +1,7 @@
 //! Settings window state and shared frame, with one module per tab.
 
 mod accounts;
+mod claude;
 mod general;
 mod window;
 
@@ -256,7 +257,8 @@ impl Render for SettingsView {
                             .flex_col()
                             .gap_4()
                             .children((self.tab == 0).then(|| self.general(window, cx)))
-                            .children((self.tab == 1).then(|| self.accounts(cx))),
+                            .children((self.tab == 1).then(|| self.accounts(cx)))
+                            .children((self.tab == 1).then(|| self.claude(cx))),
                     ),
             )
             .children(self.stop.then(|| {

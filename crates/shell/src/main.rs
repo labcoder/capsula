@@ -11,6 +11,7 @@ mod allocation;
 
 mod accounts;
 mod chat_notice;
+mod claude_accounts;
 mod confirmation;
 mod credential;
 mod drawing;

@@ -11,8 +11,9 @@ use std::path::{Path, PathBuf};
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
 use kumochi_protocol::message::{
     AssistantName, DockPosition, ErrorKey, MaxFrameRate, ModelChoice, SettingsOp, SettingsView,
-    ThreadId, UserName,
+    SttUnload, ThreadId, UserName,
 };
+use kumochi_protocol::voice::VoicePart;
 use toml::{Table, Value};
 
 const ASSISTANT_NAME: &str = "assistant_name";
@@ -23,6 +24,10 @@ const DEFAULT_MODEL: &str = "default_model";
 const CLAUDE_CODE: &str = "claude_code";
 const DOCK_POSITION: &str = "dock_position";
 const SHOW_IN_TASKBAR: &str = "show_in_taskbar";
+const VOICE: &str = "voice";
+const TALK_BACK: &str = "talk_back";
+const STT_UNLOAD: &str = "stt_unload";
+const REMOVING: &str = "removing";
 
 /// Why a settings change was refused.
 #[derive(Debug, thiserror::Error)]
@@ -36,6 +41,9 @@ pub(crate) enum ConfigError {
     /// Writing the file failed; nothing changed.
     #[error("config.toml couldn't be written")]
     Write(#[source] io::Error),
+    /// A voice install, remove or cancel, which this build refuses until its installer lands.
+    #[error("voice can't be installed or removed yet")]
+    VoiceUnavailable,
 }
 
 impl ConfigError {
@@ -44,6 +52,7 @@ impl ConfigError {
         match self {
             Self::Unreadable => ErrorKey::ConfigUnreadable,
             Self::NoHome | Self::Write(_) => ErrorKey::SettingsRefused,
+            Self::VoiceUnavailable => ErrorKey::VoiceUnavailable,
         }
     }
 }
@@ -154,12 +163,7 @@ impl Config {
     /// # Errors
     /// [`ConfigError::NoHome`] or [`ConfigError::Unreadable`] when the file can't be written.
     pub(crate) fn stage(&self, op: SettingsOp) -> Result<Pending, ConfigError> {
-        let mut table = match &self.table {
-            Ok(table) => table.clone(),
-            Err(Refusal::NoHome) => return Err(ConfigError::NoHome),
-            Err(Refusal::Unreadable) => return Err(ConfigError::Unreadable),
-        };
-        let path = self.path.clone().ok_or(ConfigError::NoHome)?;
+        let (path, mut table) = self.editable()?;
         match op {
             SettingsOp::SetAssistantName(name) => {
                 table.insert(ASSISTANT_NAME.to_owned(), Value::String(name.into()));
@@ -192,9 +196,69 @@ impl Config {
             SettingsOp::SetTaskbar(shown) => {
                 table.insert(SHOW_IN_TASKBAR.to_owned(), Value::Boolean(shown));
             }
+            SettingsOp::SetTalkBack(on) => {
+                voice_mut(&mut table).insert(TALK_BACK.to_owned(), Value::Boolean(on));
+            }
+            SettingsOp::SetSttUnload(unload) => {
+                let name = match unload {
+                    SttUnload::Kept => "kept",
+                    SttUnload::After15Min => "15m",
+                    SttUnload::After1Hour => "1h",
+                };
+                voice_mut(&mut table).insert(STT_UNLOAD.to_owned(), Value::String(name.to_owned()));
+            }
+            SettingsOp::InstallVoice(_)
+            | SettingsOp::RemoveVoice(_)
+            | SettingsOp::CancelVoiceInstall => return Err(ConfigError::VoiceUnavailable),
         }
         let view = view_of(&table, self.view.main_thread);
         Ok(Pending { path, table, view })
+    }
+
+    /// The parts `[voice] removing` names, by their folder names: a removal that hasn't
+    /// finished. A name this build doesn't know names nothing.
+    pub(crate) fn removing(&self) -> Vec<VoicePart> {
+        let names = self
+            .table
+            .as_ref()
+            .ok()
+            .and_then(|table| table.get(VOICE))
+            .and_then(Value::as_table)
+            .and_then(|voice| voice.get(REMOVING))
+            .and_then(Value::as_array);
+        VoicePart::ALL
+            .into_iter()
+            .filter(|part| {
+                names
+                    .is_some_and(|names| names.iter().any(|name| name.as_str() == Some(part.dir())))
+            })
+            .collect()
+    }
+
+    /// Stages `part`'s removal as finished: it leaves `removing`, and every other name stays.
+    ///
+    /// # Errors
+    /// As [`Config::stage`].
+    pub(crate) fn stage_remove_done(&self, part: VoicePart) -> Result<Pending, ConfigError> {
+        let (path, mut table) = self.editable()?;
+        if let Some(names) = voice_mut(&mut table)
+            .get_mut(REMOVING)
+            .and_then(Value::as_array_mut)
+        {
+            names.retain(|name| name.as_str() != Some(part.dir()));
+        }
+        let view = view_of(&table, self.view.main_thread);
+        Ok(Pending { path, table, view })
+    }
+
+    /// The file's path and a copy of its table to change.
+    fn editable(&self) -> Result<(PathBuf, Table), ConfigError> {
+        let table = match &self.table {
+            Ok(table) => table.clone(),
+            Err(Refusal::NoHome) => return Err(ConfigError::NoHome),
+            Err(Refusal::Unreadable) => return Err(ConfigError::Unreadable),
+        };
+        Ok((self.path.clone().ok_or(ConfigError::NoHome)?, table))
     }
 
     /// Makes a written change the settings.
@@ -226,6 +290,17 @@ fn write_replacing(path: &Path, text: &[u8]) -> io::Result<()> {
     file.sync_all()?;
     drop(file);
     crate::platform::replace_file(&temp, path)
+}
+
+/// The `[voice]` table, made one if the key is absent or isn't a table.
+fn voice_mut(table: &mut Table) -> &mut Table {
+    let voice = table
+        .entry(VOICE)
+        .or_insert_with(|| Value::Table(Table::new()));
+    if !voice.is_table() {
+        *voice = Value::Table(Table::new());
+    }
+    voice.as_table_mut().expect("the voice key holds a table")
 }
 
 /// The settings a table holds. A known key with a bad value reads as its default, and stays in
@@ -278,6 +353,25 @@ fn view_of(table: &Table, main_thread: ThreadId) -> SettingsView {
         Some(Value::Boolean(shown)) => *shown,
         Some(_) => invalid(SHOW_IN_TASKBAR).unwrap_or(false),
     };
+    let voice = match table.get(VOICE) {
+        None => None,
+        Some(Value::Table(voice)) => Some(voice),
+        Some(_) => invalid(VOICE),
+    };
+    let talk_back = match voice.and_then(|voice| voice.get(TALK_BACK)) {
+        None => false,
+        Some(Value::Boolean(on)) => *on,
+        Some(_) => invalid(TALK_BACK).unwrap_or(false),
+    };
+    let stt_unload = match voice.and_then(|voice| voice.get(STT_UNLOAD)) {
+        None => SttUnload::Kept,
+        Some(value) => match value.as_str() {
+            Some("kept") => SttUnload::Kept,
+            Some("15m") => SttUnload::After15Min,
+            Some("1h") => SttUnload::After1Hour,
+            _ => invalid(STT_UNLOAD).unwrap_or_default(),
+        },
+    };
     SettingsView {
         assistant_name,
         user_name,
@@ -287,6 +381,8 @@ fn view_of(table: &Table, main_thread: ThreadId) -> SettingsView {
         default_model,
         dock_position,
         show_in_taskbar,
+        talk_back,
+        stt_unload,
     }
 }
 

@@ -59,6 +59,21 @@ impl Presence {
         Ok(())
     }
 
+    pub(in crate::presence) fn claude_op(
+        &mut self,
+        op: kumochi_protocol::message::ConnectionOp,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let (link, session) = (&self.link, &self.session);
+        self.settings.update(cx, |state, cx| {
+            state.claude.send(op, |op| {
+                session.as_ref().is_some_and(|session| {
+                    link.send_control(session, ControlToBrain::Connection(op))
+                })
+            });
+            cx.notify();
+        });
+    }
     pub(in crate::presence) fn save_taskbar(
         &mut self,
         choice: TaskbarChoice,

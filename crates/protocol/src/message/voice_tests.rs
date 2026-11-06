@@ -1,12 +1,98 @@
 //! Every voice bound at its limit and one past it, the largest frames, and redaction.
 
 use super::{
-    Cursor, MAX_HOLD_CHUNKS, MAX_TRANSCRIPT_BYTES, MicPcm, OutputGeneration, SegmentId, SpeechPcm,
-    Transcript, VoiceBound, check_rate,
+    Cursor, MAX_HOLD_CHUNKS, MAX_TRANSCRIPT_BYTES, MicPcm, OutputGeneration, PartState, SegmentId,
+    SpeechPcm, Transcript, VoiceBound, VoiceView, check_rate,
 };
 use crate::frame::{self, FrameError, HEADER_LEN, Pipe};
+use crate::message::ErrorKey;
 use crate::message::{ControlToBrain, DataToBrain, DataToShell, GestureId, RunId};
 use crate::tap::{Direction, Record};
+use crate::voice::VoicePart;
+
+/// The tags travel between builds, so moving a variant must fail here.
+#[test]
+fn voice_tags_are_pinned() {
+    use crate::message::{SettingsOp, SttUnload};
+    for (part, tag) in [(VoicePart::SpeechInput, 0), (VoicePart::SpokenReplies, 1)] {
+        assert_eq!(
+            postcard::to_allocvec(&part).expect("encodes"),
+            [tag],
+            "{part:?}"
+        );
+    }
+    for (state, tag) in [
+        (PartState::NotInstalled, 0),
+        (PartState::Verifying, 1),
+        (PartState::Downloading { done: 0, total: 0 }, 2),
+        (PartState::Loading, 3),
+        (PartState::Ready, 4),
+        (PartState::Unloaded, 5),
+        (
+            PartState::Failed {
+                key: ErrorKey::VoiceLoad,
+                installed: false,
+            },
+            6,
+        ),
+    ] {
+        assert_eq!(
+            postcard::to_allocvec(&state).expect("encodes")[0],
+            tag,
+            "{state:?}"
+        );
+    }
+    for (unload, tag) in [
+        (SttUnload::Kept, 0),
+        (SttUnload::After15Min, 1),
+        (SttUnload::After1Hour, 2),
+    ] {
+        assert_eq!(
+            postcard::to_allocvec(&SettingsOp::SetSttUnload(unload)).expect("encodes"),
+            [8, tag],
+            "{unload:?}"
+        );
+    }
+}
+
+#[test]
+fn voice_parts_and_part_states_round_trip() {
+    for part in VoicePart::ALL {
+        let bytes = postcard::to_allocvec(&part).expect("encodes");
+        assert_eq!(postcard::from_bytes::<VoicePart>(&bytes), Ok(part));
+    }
+    assert!(postcard::from_bytes::<VoicePart>(&[2]).is_err());
+    let states = [
+        PartState::NotInstalled,
+        PartState::Verifying,
+        PartState::Downloading {
+            done: 0,
+            total: u64::MAX,
+        },
+        PartState::Loading,
+        PartState::Ready,
+        PartState::Unloaded,
+        PartState::Failed {
+            key: ErrorKey::VoiceCorrupt,
+            installed: false,
+        },
+        PartState::Failed {
+            key: ErrorKey::VoiceLoad,
+            installed: true,
+        },
+    ];
+    for speech_input in states {
+        for spoken_replies in states {
+            let view = VoiceView {
+                speech_input,
+                spoken_replies,
+            };
+            let bytes = postcard::to_allocvec(&view).expect("encodes");
+            assert_eq!(postcard::from_bytes::<VoiceView>(&bytes), Ok(view));
+        }
+    }
+    assert!(postcard::from_bytes::<PartState>(&[7]).is_err());
+}
 
 fn mic(rate: u32, len: usize, seq: u32) -> MicPcm {
     MicPcm {

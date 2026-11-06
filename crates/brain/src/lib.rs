@@ -149,6 +149,9 @@ pub async fn run() -> Result<(), BrainError> {
         account,
     )
     .map_err(BrainError::StoreThread)?;
+    if let Some(data) = platform::data_dir() {
+        brain.finish_removals(&data.join(kumochi_protocol::voice::MODELS_DIR));
+    }
     let jobs = std::sync::Arc::new(Job::new().map_err(BrainError::Helpers)?);
     let lane = claude_lane(vault_held, &jobs);
     brain.attach_claude(match lane {

@@ -12,6 +12,8 @@ fn view(assistant: &str, user: Option<&str>) -> SettingsView {
         default_model: None,
         dock_position: kumochi_protocol::message::DockPosition::TopCenter,
         show_in_taskbar: false,
+        talk_back: false,
+        stt_unload: kumochi_protocol::message::SttUnload::Kept,
     }
 }
 
@@ -114,7 +116,11 @@ fn followup_invalid_dismissed_edits_keep_a_dock_notice_until_corrected() {
 #[test]
 fn followup_settings_error_keys_mark_only_the_fifo_head() {
     use kumochi_protocol::message::ErrorKey;
-    for key in [ErrorKey::SettingsRefused, ErrorKey::ConfigUnreadable] {
+    for key in [
+        ErrorKey::SettingsRefused,
+        ErrorKey::ConfigUnreadable,
+        ErrorKey::VoiceUnavailable,
+    ] {
         let mut settings = connected();
         settings.change(Field::User, "Alex");
         assert!(settings.save(Field::User, |_| true));

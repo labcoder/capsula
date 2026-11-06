@@ -33,7 +33,7 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
         gpui_kit::init(cx);
         cx.set_global(Strings::english());
         kumochi_scene::deferred::start().expect("the dropper starts before intake");
-        let (events, _closed) = async_channel::unbounded();
+        let (events, events_in) = async_channel::unbounded();
         let native = PresenceNative::detached(presence_labels(cx), events.clone())
             .expect("a 1x1 memory mask");
         let mut blank = || {
@@ -66,6 +66,8 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             chat: cx.new(|_| Threads::chat()),
             chat_notice: crate::chat_notice::ChatNotice::default(),
             events,
+            events_in,
+            carry: super::carry::Carry::default(),
             link: LinkHandle::detached(),
             session: None,
             state: LinkState::Connecting,

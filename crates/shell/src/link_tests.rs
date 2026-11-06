@@ -145,6 +145,8 @@ fn settings_frames_keep_their_connection_generation_and_authoritative_view() {
         default_model: None,
         dock_position: kumochi_protocol::message::DockPosition::TopCenter,
         show_in_taskbar: false,
+        talk_back: false,
+        stt_unload: kumochi_protocol::message::SttUnload::Kept,
     };
     frame::write(
         &mut &link.control,
@@ -836,6 +838,8 @@ fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
         default_model: None,
         dock_position: kumochi_protocol::message::DockPosition::TopCenter,
         show_in_taskbar: false,
+        talk_back: false,
+        stt_unload: kumochi_protocol::message::SttUnload::Kept,
     };
     for message in [
         ControlToShell::Welcome {
@@ -1053,6 +1057,31 @@ fn submit_message(turn: u32, thread: ThreadId, text: &str) -> DataToBrain {
         thread: Some(thread),
         text: text.into(),
     }
+}
+
+#[test]
+fn connections_reach_the_shell_with_their_session() {
+    let link = attended("claude-connections");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    let connections = kumochi_protocol::message::ConnectionsView {
+        anthropic: kumochi_protocol::message::KeyView::Missing,
+        claude_code: kumochi_protocol::message::ClaudeCodeView::Finding,
+    };
+    frame::write(
+        &mut &link.control,
+        &ControlToShell::Connections(connections),
+        Pipe::Control,
+    )
+    .expect("connections written");
+    let LinkEvent::Connections { generation, view } = next(&events) else {
+        panic!("connections delivered");
+    };
+    assert_eq!(generation, session.generation());
+    assert_eq!(view, connections);
+
+    drop(link.control);
+    assert!(link.link.join().expect("joined"));
 }
 
 #[test]

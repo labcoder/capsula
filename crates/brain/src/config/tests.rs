@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
 use kumochi_protocol::message::{
     AssistantName, DockPosition, Effort, ErrorKey, MAX_SLUG_BYTES, MaxFrameRate, ModelChoice,
-    ModelSlug, SettingsOp, ThreadId, UserName,
+    ModelSlug, SettingsOp, SttUnload, ThreadId, UserName,
 };
+use kumochi_protocol::voice::VoicePart;
 
 use super::{Config, ConfigError};
 use crate::test_support::Scratch;
@@ -17,6 +18,221 @@ fn dir(scratch: &Scratch) -> PathBuf {
 
 fn name(text: &str) -> AssistantName {
     AssistantName::new(text).expect("valid")
+}
+
+fn saved(path: &std::path::Path) -> toml::Table {
+    std::fs::read_to_string(path)
+        .expect("readable")
+        .parse()
+        .expect("parses")
+}
+
+#[test]
+fn talk_back_and_the_unload_policy_default_off_and_kept_and_are_saved_in_the_voice_table() {
+    let scratch = Scratch::new("config-voice");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    let mut config = Config::load(Some(dir.clone()), ThreadId(1));
+    assert!(!config.view().talk_back);
+    assert_eq!(config.view().stt_unload, SttUnload::Kept);
+    for (unload, name) in [
+        (SttUnload::After15Min, "15m"),
+        (SttUnload::After1Hour, "1h"),
+        (SttUnload::Kept, "kept"),
+    ] {
+        for on in [true, false] {
+            apply(&mut config, SettingsOp::SetTalkBack(on));
+            apply(&mut config, SettingsOp::SetSttUnload(unload));
+            let saved = saved(&path);
+            assert_eq!(saved["voice"]["talk_back"].as_bool(), Some(on));
+            assert_eq!(saved["voice"]["stt_unload"].as_str(), Some(name));
+            let reloaded = Config::load(Some(dir.clone()), ThreadId(1));
+            assert_eq!(reloaded.view().talk_back, on);
+            assert_eq!(reloaded.view().stt_unload, unload);
+        }
+    }
+}
+
+#[test]
+fn bad_voice_values_read_as_the_defaults_and_outlive_writes_to_other_keys() {
+    let scratch = Scratch::new("config-voice-bad");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    std::fs::write(
+        &path,
+        "[voice]\ntalk_back = \"yes\"\nstt_unload = \"2h\"\n\
+         installed = [\"speech_input\", \"later_part\"]\nremoving = [\"spoken_replies\"]\n\
+         future = 1\n",
+    )
+    .expect("seeded");
+    let original = saved(&path);
+    let mut config = Config::load(Some(dir.clone()), ThreadId(1));
+    assert!(!config.view().talk_back);
+    assert_eq!(config.view().stt_unload, SttUnload::Kept);
+    apply(&mut config, SettingsOp::SetTaskbar(true));
+    assert_eq!(saved(&path)["voice"], original["voice"]);
+    apply(&mut config, SettingsOp::SetTalkBack(true));
+    let after = saved(&path);
+    assert_eq!(after["voice"]["talk_back"].as_bool(), Some(true));
+    for key in ["stt_unload", "installed", "removing", "future"] {
+        assert_eq!(after["voice"][key], original["voice"][key], "{key}");
+    }
+    apply(&mut config, SettingsOp::SetSttUnload(SttUnload::After1Hour));
+    let after = saved(&path);
+    assert_eq!(after["voice"]["stt_unload"].as_str(), Some("1h"));
+    assert_eq!(after["voice"]["talk_back"].as_bool(), Some(true));
+    for key in ["installed", "removing", "future"] {
+        assert_eq!(after["voice"][key], original["voice"][key], "{key}");
+    }
+    let reloaded = Config::load(Some(dir), ThreadId(1));
+    assert!(reloaded.view().talk_back);
+    assert_eq!(reloaded.view().stt_unload, SttUnload::After1Hour);
+}
+
+#[test]
+fn removing_names_known_parts_by_their_folder_names_only() {
+    for (list, expected) in [
+        (
+            "[\"later-part\", \"spoken-replies\", \"spoken_replies\", \"spoken-replies\"]",
+            vec![VoicePart::SpokenReplies],
+        ),
+        (
+            "[\"spoken-replies\", \"speech-input\"]",
+            vec![VoicePart::SpeechInput, VoicePart::SpokenReplies],
+        ),
+        ("[]", vec![]),
+        ("\"speech-input\"", vec![]),
+        ("[1, \"Speech-Input\"]", vec![]),
+    ] {
+        let scratch = Scratch::new("config-removing");
+        let dir = dir(&scratch);
+        std::fs::write(
+            dir.join(CONFIG_FILE),
+            format!("[voice]\ninstalled = [\"speech-input\"]\nremoving = {list}\n"),
+        )
+        .expect("seeded");
+        let config = Config::load(Some(dir), ThreadId(1));
+        assert_eq!(config.removing(), expected, "{list}");
+    }
+    let scratch = Scratch::new("config-removing-none");
+    assert_eq!(
+        Config::load(Some(dir(&scratch)), ThreadId(1)).removing(),
+        []
+    );
+}
+
+#[test]
+fn a_finished_removal_takes_only_its_part_out_of_removing() {
+    let scratch = Scratch::new("config-remove-done");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    std::fs::write(
+        &path,
+        "[voice]\ntalk_back = true\ninstalled = [\"spoken-replies\"]\n\
+         removing = [\"speech-input\", \"later-part\", \"spoken-replies\", \"speech-input\"]\n",
+    )
+    .expect("seeded");
+    let mut config = Config::load(Some(dir), ThreadId(1));
+    let view = config.view().clone();
+    let pending = config
+        .stage_remove_done(VoicePart::SpeechInput)
+        .expect("staged");
+    pending.write().expect("written");
+    config.commit(pending);
+    let voice = &saved(&path)["voice"];
+    assert_eq!(
+        voice["removing"],
+        toml::Value::Array(vec!["later-part".into(), "spoken-replies".into()])
+    );
+    assert_eq!(
+        voice["installed"],
+        toml::Value::Array(vec!["spoken-replies".into()])
+    );
+    assert_eq!(voice["talk_back"].as_bool(), Some(true));
+    assert_eq!(config.view(), &view);
+    assert_eq!(config.removing(), [VoicePart::SpokenReplies]);
+}
+
+#[test]
+fn only_the_three_exact_unload_names_are_read() {
+    for bad in ["", "15M", " 1h", "1h ", "Kept", "2h"] {
+        let scratch = Scratch::new("config-voice-names");
+        let dir = dir(&scratch);
+        let path = dir.join(CONFIG_FILE);
+        std::fs::write(&path, format!("[voice]\nstt_unload = {bad:?}\n")).expect("seeded");
+        let mut config = Config::load(Some(dir), ThreadId(1));
+        assert_eq!(config.view().stt_unload, SttUnload::Kept, "{bad:?}");
+        apply(&mut config, SettingsOp::SetTaskbar(true));
+        assert_eq!(saved(&path)["voice"]["stt_unload"].as_str(), Some(bad));
+    }
+}
+
+#[test]
+fn an_empty_voice_table_reads_as_the_defaults_and_takes_a_setting() {
+    let scratch = Scratch::new("config-voice-empty");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    std::fs::write(&path, "[voice]\n").expect("seeded");
+    let mut config = Config::load(Some(dir.clone()), ThreadId(1));
+    assert!(!config.view().talk_back);
+    assert_eq!(config.view().stt_unload, SttUnload::Kept);
+    apply(&mut config, SettingsOp::FinishOnboarding);
+    assert_eq!(
+        saved(&path)["voice"].as_table().map(toml::Table::len),
+        Some(0)
+    );
+    apply(&mut config, SettingsOp::SetSttUnload(SttUnload::After15Min));
+    assert_eq!(saved(&path)["voice"]["stt_unload"].as_str(), Some("15m"));
+    assert_eq!(
+        Config::load(Some(dir), ThreadId(1)).view().stt_unload,
+        SttUnload::After15Min
+    );
+}
+
+#[test]
+fn a_voice_key_that_isnt_a_table_reads_as_the_defaults_until_a_voice_setting_replaces_it() {
+    for seeded in ["voice = 3\n", "[voice]\ntalk_back = 1\nstt_unload = 15\n"] {
+        let scratch = Scratch::new("config-voice-shape");
+        let dir = dir(&scratch);
+        let path = dir.join(CONFIG_FILE);
+        std::fs::write(&path, seeded).expect("seeded");
+        let original = saved(&path);
+        let mut config = Config::load(Some(dir.clone()), ThreadId(1));
+        assert!(!config.view().talk_back, "{seeded}");
+        assert_eq!(config.view().stt_unload, SttUnload::Kept, "{seeded}");
+        apply(&mut config, SettingsOp::FinishOnboarding);
+        assert_eq!(saved(&path)["voice"], original["voice"], "{seeded}");
+        apply(&mut config, SettingsOp::SetTalkBack(true));
+        assert_eq!(saved(&path)["voice"]["talk_back"].as_bool(), Some(true));
+        assert!(Config::load(Some(dir), ThreadId(1)).view().talk_back);
+    }
+}
+
+#[test]
+fn the_installer_operations_are_refused_and_change_nothing() {
+    let scratch = Scratch::new("config-voice-dormant");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    let mut config = Config::load(Some(dir), ThreadId(1));
+    apply(&mut config, SettingsOp::SetTalkBack(true));
+    let before = std::fs::read_to_string(&path).expect("readable");
+    let view = config.view().clone();
+    for op in [
+        SettingsOp::InstallVoice(VoicePart::SpeechInput),
+        SettingsOp::InstallVoice(VoicePart::SpokenReplies),
+        SettingsOp::RemoveVoice(VoicePart::SpeechInput),
+        SettingsOp::RemoveVoice(VoicePart::SpokenReplies),
+        SettingsOp::CancelVoiceInstall,
+    ] {
+        let refused = config.stage(op).err();
+        assert!(matches!(refused, Some(ConfigError::VoiceUnavailable)));
+        assert_eq!(
+            refused.map(|error| error.key()),
+            Some(ErrorKey::VoiceUnavailable)
+        );
+        assert_eq!(config.view(), &view);
+        assert_eq!(std::fs::read_to_string(&path).expect("readable"), before);
+    }
 }
 
 fn apply(config: &mut Config, op: SettingsOp) {

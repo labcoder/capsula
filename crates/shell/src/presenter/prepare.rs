@@ -17,7 +17,7 @@ use kumochi_protocol::message::{DataToShell, SceneId};
 use kumochi_scene::{
     DetachedCandidate, GlobalBudget, SceneRead, StepError,
     deferred::Deferred,
-    display::TextMeasure,
+    display::{PaintWork, TextMeasure},
     layout::{self, PrepareError, PrepareInput, PreparedStep, SceneRecovery, SurfaceGeometry},
     theme::Theme,
 };
@@ -55,6 +55,10 @@ pub(crate) struct AdmitJob {
 
 /// A job's answer, sent back to [`super::Presenter::completed`] whether or not it is still wanted.
 /// Its payload drops on the dropper thread wherever the answer is discarded.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Prepared is 400 bytes (size_of: a 368-byte deferred PreparedStep result plus four words) and moves once per prepare job, so boxing would only add an allocation"
+)]
 pub(crate) enum Completion {
     /// A step's preparation.
     Prepared {
@@ -101,9 +105,13 @@ impl PrepareJob {
     /// Prepares on the calling worker thread until done or cancelled.
     pub(crate) fn run(self, measure: &mut dyn TextMeasure) -> Completion {
         let cancel = self.cancel;
-        let mut result = self
-            .input
-            .map(|input| layout::prepare(input, measure, &cancel));
+        let mut result = self.input.map(|input| {
+            layout::prepare(
+                input.with_paint_cap(Some(PaintWork::LIMITS)),
+                measure,
+                &cancel,
+            )
+        });
         let full_after = result
             .as_ref()
             .map_or(0, |prepared| prepared.after.resident_bytes());
@@ -125,6 +133,11 @@ impl PrepareJob {
     #[cfg(test)]
     pub(super) fn cancelled(&self) -> bool {
         self.cancel.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(super) fn attribution(&self) -> usize {
+        self.input.attribution()
     }
 
     #[cfg(test)]
@@ -199,8 +212,14 @@ impl RecoveryJob {
                 .iter()
                 .map(|source| (&source.header.begin, source.log.as_slice()))
                 .collect();
-            let (results, budget) =
-                layout::recover_all(&batch, self.surface, &self.theme, measure, &self.cancel);
+            let (results, budget) = layout::recover_all(
+                &batch,
+                self.surface,
+                &self.theme,
+                measure,
+                &self.cancel,
+                Some(PaintWork::LIMITS),
+            );
             global = budget;
             sources
                 .iter()
