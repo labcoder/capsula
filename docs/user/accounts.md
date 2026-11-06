@@ -87,5 +87,5 @@ before trying again.
 
 Before Kumochi sends Claude Code anything of yours, it checks how that Claude Code is set up. If
 the check fails, Kumochi stops using that version of Claude Code and remembers it, even after
-Disconnect, signing in again or a restart. Installing a different version of Claude Code clears
-it.
+Disconnect, signing in again or a restart. Installing another version doesn't clear it: Kumochi
+keeps refusing that version even if you go back to it later.
