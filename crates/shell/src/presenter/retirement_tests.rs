@@ -15,6 +15,123 @@ const OBJECTS: usize = 64;
 /// Extra id bytes per object, keeping the longest id within the 40-character cap.
 const PAD: usize = 37;
 
+#[test]
+fn preparation_attribution_tracks_its_source_and_tip_not_the_whole_scene() {
+    let (mut presenter, now) = live();
+    begin(&mut presenter, LIVE, now);
+    let first = only_job(commit(&mut presenter, LIVE, 0, rects(""), now).expect("large step"));
+    let source = rect("c");
+    let (copy, _, [allocated, released]) = crate::allocation::usage(|| Arc::new(source.clone()));
+    let original_bytes =
+        2 * size_of::<usize>() + size_of::<Step>() + size_of::<kumochi_scene::Op>() + 2;
+    assert_eq!(
+        allocated - released,
+        original_bytes,
+        "one source Arc, record, op and two one-byte ids"
+    );
+    drop(copy);
+    let ticket_bytes = original_bytes
+        + 4 * size_of::<usize>()
+        + size_of::<std::collections::BTreeMap<usize, usize>>();
+    let queued = commit(&mut presenter, LIVE, 1, source, now).expect("queued step");
+    assert_eq!(credit(&queued), FRAME);
+    assert!(controls(&queued).is_empty());
+    assert!(jobs(queued).is_empty());
+    let scene = &presenter.scenes[&LIVE];
+    assert!(scene.state.view().attributed_bytes() > ticket_bytes);
+    let ticket = &scene.queue.front().expect("one ticket").preparation;
+    assert_eq!(ticket.attributed_bytes(), ticket_bytes);
+    assert_eq!(ticket.attribution(), ticket_bytes);
+    let done = first.run(&mut Shaper);
+    let Completion::Prepared { full_after, .. } = &done else {
+        panic!("prepared answer")
+    };
+    let expected = ticket_bytes + full_after;
+    let next = only_job(
+        presenter
+            .completed(done, now)
+            .expect("next step dispatched"),
+    );
+    assert_eq!(
+        next.attribution(),
+        expected,
+        "only this ticket and its preceding layout"
+    );
+}
+
+#[test]
+#[ignore = "manual isolated queue-meter check; the process-wide dropper must have no other tests"]
+fn retirement_meter_counts_queue_owners_and_semantic_state_only_once() {
+    let (mut presenter, now) = live();
+    begin(&mut presenter, LIVE, now);
+    let first = only_job(commit(&mut presenter, LIVE, 0, rect("a"), now).expect("step"));
+    commit(&mut presenter, LIVE, 1, rect("b"), now).expect("queued step");
+    commit(&mut presenter, LIVE, 2, rect("c"), now).expect("queued step");
+    drop(only_job(
+        presenter
+            .completed(first.run(&mut Shaper), now)
+            .expect("prepared"),
+    ));
+    let scene = &presenter.scenes[&LIVE];
+    assert_eq!(scene.ready.len(), 1);
+    assert_eq!(scene.queue.len(), 1);
+    let expected = scene.queue.capacity() * size_of::<super::super::scene::Ticket>()
+        + scene
+            .queue
+            .iter()
+            .map(|ticket| ticket.preparation.attribution())
+            .sum::<usize>()
+        + scene.ready.capacity() * size_of::<super::super::scene::Ready>()
+        + scene
+            .ready
+            .iter()
+            .map(|ready| ready.step.attribution())
+            .sum::<usize>();
+    settled();
+    let release = hold_dropper();
+    presenter.scenes.get_mut(&LIVE).expect("scene").halt();
+    assert_eq!(
+        kumochi_scene::deferred::pending().bytes,
+        expected,
+        "only the two queue payloads"
+    );
+    drop(release);
+    drop(presenter);
+    settled();
+
+    for disconnect in [false, true] {
+        let (mut presenter, now, job) = recovering(vec![(LIVE, rect("a"))]);
+        presenter
+            .completed(job.run(&mut Shaper), now)
+            .expect("recovered");
+        let scene = &presenter.scenes[&LIVE];
+        let semantic = 2 * size_of::<usize>()
+            + size_of::<SceneState>()
+            + scene.state.view().attributed_bytes();
+        let expected = semantic + scene.retained + scene.view_bytes + scene.frame_bytes;
+        settled();
+        let release = hold_dropper();
+        if disconnect {
+            presenter.disconnected();
+            assert_eq!(
+                kumochi_scene::deferred::pending().bytes,
+                expected + usize::try_from(FRAME).expect("snapshot frame"),
+                "one semantic owner plus the assembler's retained wire charge"
+            );
+        } else {
+            presenter.clear(now).expect("clear");
+            assert_eq!(
+                kumochi_scene::deferred::pending().bytes,
+                expected,
+                "semantic state has one owner"
+            );
+        }
+        drop(release);
+        drop(presenter);
+        settled();
+    }
+}
+
 /// Waits until the dropper has destroyed everything queued before this call.
 fn settled() {
     let marker = Arc::new(());

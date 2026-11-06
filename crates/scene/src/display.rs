@@ -245,7 +245,7 @@ impl PaintWork {
         largest_outline: OUTLINE_POINT_LIMIT,
     };
     /// Whether every component is at most `cap`'s.
-    pub fn fits(self, cap: Self) -> bool {
+    pub(crate) fn fits(self, cap: Self) -> bool {
         self.dash_pieces <= cap.dash_pieces
             && self.fill_vertices <= cap.fill_vertices
             && self.largest_fill <= cap.largest_fill
@@ -255,7 +255,7 @@ impl PaintWork {
     /// The work of `primitives` on top of `spent`, or `None` once the sum doesn't fit `cap`.
     /// Each fill counts crossings only up to the room left in `cap`, so work that can never
     /// fit stops after at most `cap.fill_vertices` counted fill points.
-    pub fn within(primitives: &[Prim], spent: Self, cap: Self) -> Option<Self> {
+    pub(crate) fn within(primitives: &[Prim], spent: Self, cap: Self) -> Option<Self> {
         primitives
             .iter()
             .try_fold(Self::default(), |sum, primitive| {
@@ -900,5 +900,44 @@ mod tests {
             "fills in one item share the room left"
         );
         assert_eq!(within(&[square, bowtie], 504), None);
+    }
+
+    #[test]
+    fn within_checks_accumulated_dash_and_outline_work_componentwise() {
+        let dash = |length| Prim::Line {
+            points: points(&[[0.0, 0.0], [length, 0.0]]),
+            color: paint(),
+            width: 1.0,
+            closed: false,
+            dashed: true,
+        };
+        for (squares, radius, length, outlines, dashes, new_outline, accepted) in [
+            (99, 0.0625, 2_100.0, 512, 512, 17, true),
+            (99, 0.0625, 2_110.0, 512, 513, 17, false),
+            (100, 0.015625, 2_100.0, 513, 512, 13, false),
+        ] {
+            let mut previous = vec![rect(100.0, 0.0, None, Some((paint(), 2.0))); squares];
+            previous.push(dash(2_980.0));
+            let spent = PaintWork::of(&previous);
+            let next = [
+                dash(length),
+                rect(100.0, radius, None, Some((paint(), 2.0))),
+            ];
+            let work = PaintWork::of(&next);
+            let total = spent + work;
+            assert_eq!(
+                (total.dash_pieces, total.outline_points),
+                (dashes, outlines)
+            );
+            assert_eq!(
+                PaintWork::within(&next, spent, PaintWork::LIMITS),
+                accepted.then_some(PaintWork {
+                    dash_pieces: 212,
+                    outline_points: new_outline,
+                    largest_outline: new_outline,
+                    ..PaintWork::default()
+                })
+            );
+        }
     }
 }

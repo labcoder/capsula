@@ -620,7 +620,6 @@ fn the_worker_recovers_under_the_d1_cap() {
                 error: PrepareError::OverResidency
             })
         ),
-        "{:?}",
-        scenes[0].1.as_ref().err()
+        "recovery must refuse revision one with OverResidency"
     );
 }
