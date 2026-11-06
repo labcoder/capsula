@@ -73,17 +73,10 @@ impl Transform {
         Self(result)
     }
 
-    /// The same transform applied to points first offset by `origin`: `self(origin + p)`.
+    /// Transforms a point in f64 without narrowing, as the frame stage does: the value
+    /// [`Self::point`] narrows, bit for bit.
     #[must_use]
-    pub fn shifted(mut self, origin: [f64; 3]) -> Self {
-        for row in &mut self.0 {
-            row[3] += row[0] * origin[0] + row[1] * origin[1] + row[2] * origin[2];
-        }
-        self
-    }
-
-    /// Transforms a point in f64 without narrowing, as the frame stage does.
-    pub(crate) fn apply(&self, point: [f64; 3]) -> [f64; 3] {
+    pub fn apply(&self, point: [f64; 3]) -> [f64; 3] {
         self.0
             .map(|row| row[0] * point[0] + row[1] * point[1] + row[2] * point[2] + row[3])
     }

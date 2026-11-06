@@ -201,7 +201,11 @@ one expression and one narrowing path to world-space f32. Periodic indices wrap
 before trigonometry; cap and seam vertices reuse those expressions. Sphere midpoint
 endpoints have a canonical order on their f32 bits. Spheres subdivide an icosahedron;
 extrudes ear-clip CCW outlines; tubes use bisected path tangents and parallel-transported
-frames, initially using the axis least aligned with the first tangent.
+frames, initially using the axis least aligned with the first tangent. Where both segment
+directions at a joint are bit-identical, the tangent and frame carry over unchanged instead of
+renormalizing their sum, so a straight run's rings are exact translations that group into planar
+faces. That moved some straight tubes' world vertices by about one f32 ulp against the earlier
+builder, without changing any outcome; the local and world builds share it.
 
 Generation refuses non-finite world vertices, distinct local vertices that narrow
 to the same world point, and retained triangles whose narrowed points have zero
@@ -732,22 +736,26 @@ owners, or Stop must settle motion first. Position-track and delayed-owner tests
 
 ### 3D preparation
 
-A 3D `put` clones its `view3d` or `solid` record once into an `Arc` on the state object; a
-`color` set makes a new source sharing that record. Admission builds the sources and, in its
-candidate, one `three::view::ViewInput` per view the step changes (a 3D put, a removal or a
-colour set; `label` and `info` sets change none), with each solid's complete rest transform
-composed down its attach chain; commit moves them into `Preparation`. So that cost lands in
-admission, not commit.
+A 3D `put` clones its `view3d` or `solid` record once into an `Arc` on the state object.
+Admission builds the sources and, in its candidate, one `three::view::ViewInput` per view a 3D
+put or removal changes: each solid's source, handle and attach parent, in attach order. Commit
+moves them into `Preparation`, so that cost lands in admission, not commit. Sets change no
+input and keep no undo copy: preparation reads 3D colour sets from the step, and `label` and
+`info` sets reach no view.
 
 `prepare` routes 3D sets, removals and tracks away from the 2D loops, then runs
-`tessellate_view` per changed view, including removals of objects the same step put.
-`mesh::build_local` writes canonical, unscaled local vertices and one triangle run per source
-face, after running `build`'s world checks at the rest transform, so authored scale reaches the
-world once, through the pose. Vertices are stored as f32 offsets from an f64 local origin (the
-first vertex), which `SolidMesh::pose` folds into the rest translation, so f32 keeps the checked
-rest geometry far from the local origin. Before publishing `Built`, preparation checks the stored
-mesh at rest as the frame stage reads it: three distinct indices and a nonzero normal per
-triangle; a failure is a typed `Mesh::Failed`. Two triangles share a face only where their four
+`tessellate_view` per changed view, including removals of objects the same step put. It composes
+each solid's rest transform down its attach chain there, on the worker. A view that only a colour
+set touches is reshaded from the predecessor's geometry, sharing every mesh and source; a solid
+keeps its latest authored colour across later rebuilds of its view while its record is unchanged.
+`mesh::build_local` writes the canonical, unscaled local f64 points of each triangle and one
+triangle run per source face, after running `build`'s world checks at the rest transform, so
+authored scale reaches the world once, through the rest transform. `SolidMesh` stores those f64
+points, and `Transform::apply` at rest gives exactly the value `build` narrows and checks, so
+every mesh `build` accepts prepares with the same triangles; f32 offsets from one origin can't
+promise that far from it. This doubles vertex bytes over f32. Before publishing `Built`,
+preparation checks the stored mesh at rest as the frame stage reads it: three distinct indices
+and a nonzero f64 normal per triangle; a failure is a typed `Mesh::Failed`. Two triangles share a face only where their four
 vertices are coplanar by construction: box and extrude sides, revolved and torus bands, and tube
 bands between rings that are exact translations. A bent tube band is two one-triangle faces. A solid whose
 record is unchanged reuses its mesh `Arc`, so a colour set only resolves the theme RGB again.
@@ -760,7 +768,7 @@ keeps each surviving view's surviving solids and recomputes `failed`; recovery r
 sources the predecessor holds; `LayoutState::resident_bytes` charges `full_bytes`, every mesh
 and source once, so a colour-only revision still carries its full mesh charge once its
 predecessor retires. `PreparedStep::scratch_bytes` reports only the fixed `MeshScratch`, which
-is allocated per preparation and never retained; it isn't the peak, which also holds the output
+is allocated once per preparation that builds a view, never for a reshade, and never retained; it isn't the peak, which also holds the output
 triangles, face groups and the indexing map. An emptied view map is replaced, like the 2D maps,
 and the consumed view inputs leave no buffer behind. Prepared views don't move yet, and the brain's gate still refuses 3D steps.
 

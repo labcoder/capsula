@@ -8,7 +8,7 @@ use crate::{
     Begin, ErrorCode, GlobalBudget, Handle, Op, SceneEvent, SceneState, WireId,
     display::{DisplayList, Item, PaintWork, Prim, TextMeasure},
     geom::{Affine, Rect, Vec2},
-    record::{Anchor, Change, Enter, Track},
+    record::{Anchor, Change, Color, Enter, Track},
     state::{object, work},
     theme::Theme,
     three::{mesh::MeshScratch, size::MeshError, view::tessellate_view},
@@ -338,38 +338,59 @@ pub fn prepare(
         after.objects = BTreeMap::new();
         after.handles = BTreeMap::new();
     }
+    let colors: HashMap<&WireId, Color> = ticket
+        .run
+        .set
+        .iter()
+        .filter(|change| is_three(&change.target))
+        .filter_map(|change| change.color.map(|color| (&change.target, color)))
+        .collect();
     let mut views = Vec::with_capacity(ticket.views.len());
-    let mut scratch_bytes = 0;
-    if ticket.views.iter().any(|update| update.input.is_some()) {
-        let mut scratch = MeshScratch::new();
-        scratch_bytes = scratch.bytes();
-        for update in &ticket.views {
-            build.check_cancel()?;
-            let Some(input) = &update.input else {
-                after.views.remove(&update.id);
+    let mut scratch = None;
+    for update in &ticket.views {
+        build.check_cancel()?;
+        let Some(input) = &update.input else {
+            after.views.remove(&update.id);
+            continue;
+        };
+        let geometry = tessellate_view(
+            input,
+            before.views.get(&update.id).map(|view| &**view),
+            &colors,
+            &theme,
+            cancel,
+            scratch.get_or_insert_with(MeshScratch::new),
+        )
+        .map_err(|error| match error {
+            MeshError::Cancelled => PrepareError::Cancelled,
+            _ => PrepareError::OverResidency,
+        })?;
+        let geometry = Arc::new(geometry);
+        after.views.insert(update.id.clone(), Arc::clone(&geometry));
+        views.push(PreparedView {
+            view: input.handle,
+            geometry,
+        });
+    }
+    let scratch_bytes = scratch.as_ref().map_or(0, MeshScratch::bytes);
+    if !colors.is_empty() {
+        // A colour-only view keeps its inputs, so it reshades the predecessor's geometry.
+        for (id, old) in &before.views {
+            if ticket.views.iter().any(|update| update.id == *id)
+                || !old
+                    .solids
+                    .iter()
+                    .any(|solid| colors.contains_key(&solid.id))
+            {
                 continue;
-            };
-            let geometry = tessellate_view(
-                input,
-                before.views.get(&update.id).map(|view| &**view),
-                &theme,
-                cancel,
-                &mut scratch,
-            )
-            .map_err(|error| match error {
-                MeshError::Cancelled => PrepareError::Cancelled,
-                _ => PrepareError::OverResidency,
-            })?;
-            let geometry = Arc::new(geometry);
-            after.views.insert(update.id.clone(), Arc::clone(&geometry));
+            }
+            build.check_cancel()?;
+            let geometry = Arc::new(old.recolored(&colors, &theme));
+            after.views.insert(id.clone(), Arc::clone(&geometry));
             views.push(PreparedView {
-                view: input.handle,
+                view: old.handle,
                 geometry,
             });
-        }
-    } else {
-        for update in &ticket.views {
-            after.views.remove(&update.id);
         }
     }
     if after.views.is_empty() {

@@ -633,17 +633,6 @@ pub(super) fn changes(
         if let Some(cells) = &change.cells {
             object.work.cells = cells.len();
         }
-        if let Some(color) = change.color
-            && let Some(source) = object.three.as_ref().map(|three| Arc::clone(&three.op))
-        {
-            if object.handle.revision() != revision {
-                keep(&mut original, &mut held, &change.target, object);
-            }
-            object.three = Some(super::three::Source {
-                op: source,
-                color: Some(color),
-            });
-        }
         if let Some(data) = &change.data {
             *owned -= retire::owned((&change.target, &*object));
             object.work.data = Some(Data::Set(index));

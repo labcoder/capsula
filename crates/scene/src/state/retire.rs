@@ -88,7 +88,7 @@ pub(super) fn owned((id, object): (&WireId, &Object)) -> usize {
         + object
             .three
             .as_ref()
-            .map_or(0, |three| heap::source_bytes(&three.op))
+            .map_or(0, |three| heap::source_bytes(three))
 }
 
 /// Estimated bytes of a semantic object map, for queue attribution rather than a bound.

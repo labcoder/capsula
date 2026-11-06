@@ -159,13 +159,27 @@ fn sift(keys: &mut [[u32; 4]], mut root: usize, cancel: &AtomicBool) -> Result<(
     Ok(())
 }
 
+/// Where checked triangles go: world f32 triangles, or the unscaled local f64 points that
+/// produced them, with one group per source face.
+enum Sink<'a> {
+    World(&'a mut Vec<Triangle>),
+    Local {
+        triangles: &'a mut Vec<[Point; 3]>,
+        groups: &'a mut Vec<u8>,
+    },
+}
+impl Sink<'_> {
+    fn spare(&self) -> usize {
+        match self {
+            Self::World(out) => out.capacity() - out.len(),
+            Self::Local { triangles, .. } => triangles.capacity() - triangles.len(),
+        }
+    }
+}
+
 struct Emitter<'a> {
     world: &'a Transform,
-    /// Output in the solid's own unscaled space, checked at `world`, with one group per source face.
-    local: Option<&'a mut Vec<u8>>,
-    /// The first local vertex; local output is stored relative to it so f32 keeps rest precision.
-    origin: Option<Point>,
-    out: &'a mut Vec<Triangle>,
+    sink: Sink<'a>,
     cancel: &'a AtomicBool,
     part: u16,
     cutoff: f64,
@@ -187,7 +201,7 @@ impl Emitter<'_> {
         Ok(())
     }
     fn group(&mut self, before: u32) {
-        if let Some(groups) = &mut self.local
+        if let Sink::Local { groups, .. } = &mut self.sink
             && self.built.written > before
         {
             groups.push(
@@ -208,28 +222,23 @@ impl Emitter<'_> {
             }
             return Err(MeshError::Degenerate(self.field));
         }
-        let local = v;
-        let v = [
+        let world = [
             self.world.point64(v[0])?,
             self.world.point64(v[1])?,
             self.world.point64(v[2])?,
         ];
-        let p = v.map(|p| [f64::from(p.x), f64::from(p.y), f64::from(p.z)]);
+        let p = world.map(|p| [f64::from(p.x), f64::from(p.y), f64::from(p.z)]);
         let normal = cross(subtract(p[1], p[0]), subtract(p[2], p[0]));
         if dot(normal, normal).to_bits() == 0 {
             return Err(MeshError::Degenerate("pos"));
         }
-        let v = if self.local.is_some() {
-            let origin = *self.origin.get_or_insert(local[0]);
-            [
-                IDENTITY.point64(subtract(local[0], origin))?,
-                IDENTITY.point64(subtract(local[1], origin))?,
-                IDENTITY.point64(subtract(local[2], origin))?,
-            ]
-        } else {
-            v
-        };
-        self.out.push(Triangle { v, part: self.part });
+        match &mut self.sink {
+            Sink::World(out) => out.push(Triangle {
+                v: world,
+                part: self.part,
+            }),
+            Sink::Local { triangles, .. } => triangles.push(v),
+        }
         self.built.written += 1;
         Ok(())
     }
@@ -258,33 +267,32 @@ pub fn build(
     cancel: &AtomicBool,
     scratch: &mut MeshScratch,
 ) -> Result<Built, MeshError> {
-    emit(solid, world, None, part, out, cancel, scratch).map(|(built, _)| built)
+    emit(solid, world, Sink::World(out), part, cancel, scratch)
 }
 
-/// Like [`build`], with every check at the complete rest transform `rest`, but appends the
-/// solid's canonical unscaled vertices relative to the returned local origin, and one entry per
-/// source face to `groups`: how many of the appended triangles that face emitted. On failure,
-/// truncate both to their saved lengths.
+/// Like [`build`], with every check at the complete rest transform `rest`, but appends each
+/// triangle as the solid's own unscaled f64 points, which `rest` places exactly where [`build`]
+/// checked them, and one entry per source face to `groups`: how many of the appended triangles
+/// that face emitted. On failure, truncate both to their saved lengths.
 /// # Errors
 /// As [`build`].
 pub fn build_local(
     solid: &Solid,
     rest: &Transform,
-    part: u16,
-    out: &mut Vec<Triangle>,
+    triangles: &mut Vec<[[f64; 3]; 3]>,
     groups: &mut Vec<u8>,
     cancel: &AtomicBool,
     scratch: &mut MeshScratch,
-) -> Result<(Built, [f64; 3]), MeshError> {
-    emit(solid, rest, Some(groups), part, out, cancel, scratch)
-        .map(|(built, origin)| (built, origin.unwrap_or_default()))
+) -> Result<Built, MeshError> {
+    emit(
+        solid,
+        rest,
+        Sink::Local { triangles, groups },
+        0,
+        cancel,
+        scratch,
+    )
 }
-
-const IDENTITY: Transform = Transform([
-    [1.0, 0.0, 0.0, 0.0],
-    [0.0, 1.0, 0.0, 0.0],
-    [0.0, 0.0, 1.0, 0.0],
-]);
 
 #[expect(
     clippy::too_many_lines,
@@ -293,12 +301,11 @@ const IDENTITY: Transform = Transform([
 fn emit(
     solid: &Solid,
     world: &Transform,
-    local: Option<&mut Vec<u8>>,
+    sink: Sink<'_>,
     part: u16,
-    out: &mut Vec<Triangle>,
     cancel: &AtomicBool,
     scratch: &mut MeshScratch,
-) -> Result<(Built, Option<Point>), MeshError> {
+) -> Result<Built, MeshError> {
     let MeshScratch {
         keys,
         tangents,
@@ -308,7 +315,7 @@ fn emit(
     } = scratch;
     poll(cancel)?;
     let candidates = triangles(solid)?;
-    if out.capacity() - out.len() < usize::try_from(candidates).map_err(|_| MeshError::Full)? {
+    if sink.spare() < usize::try_from(candidates).map_err(|_| MeshError::Full)? {
         return Err(MeshError::Full);
     }
     let shape = solid.geometry()?;
@@ -323,9 +330,7 @@ fn emit(
     };
     let mut emit = Emitter {
         world,
-        local,
-        origin: None,
-        out,
+        sink,
         cancel,
         part,
         cutoff: area_cutoff(eps),
@@ -405,7 +410,7 @@ fn emit(
         }
     }
     poll(cancel)?;
-    Ok((emit.built, emit.origin))
+    Ok(emit.built)
 }
 
 fn quad_indices(row: usize, next: usize, column: usize, n: usize) -> [usize; 4] {
@@ -711,9 +716,7 @@ mod tests {
             let mut out = Vec::with_capacity(2);
             let mut emit = Emitter {
                 world: &world,
-                local: None,
-                origin: None,
-                out: &mut out,
+                sink: Sink::World(&mut out),
                 cancel: &cancel,
                 part: 1,
                 cutoff: 0.125,
@@ -731,9 +734,7 @@ mod tests {
         let mut out = Vec::with_capacity(2);
         let mut emit = Emitter {
             world: &world,
-            local: None,
-            origin: None,
-            out: &mut out,
+            sink: Sink::World(&mut out),
             cancel: &cancel,
             part: 1,
             cutoff: 1e-12,
@@ -754,6 +755,6 @@ mod tests {
                 dropped: 0
             }
         );
-        assert_eq!(emit.out.len(), 1);
+        assert!(matches!(&emit.sink, Sink::World(out) if out.len() == 1));
     }
 }

@@ -4,16 +4,15 @@
 //! [`ViewGeometry`] that shares each unchanged solid's mesh with the revision before it.
 
 use super::{
-    Transform, Triangle,
+    Transform,
     camera::{Camera, Light},
     mesh::{MeshScratch, build_local},
     size::{MeshError, triangles},
 };
 use crate::{
     Handle, Op, WireId,
-    geom::Vec3,
     layout::heap,
-    record::{Color, Rgb, Solid, Token, View3d},
+    record::{Color, Solid, Token, View3d},
     theme::Theme,
 };
 use std::{
@@ -38,7 +37,7 @@ impl fmt::Debug for ViewUpdate {
     }
 }
 
-/// Every solid of one view after a step, with rest transforms composed down attach chains.
+/// Every solid of one view after a step, in attach order.
 #[derive(PartialEq)]
 pub struct ViewInput {
     /// The view's identity.
@@ -56,23 +55,16 @@ impl fmt::Debug for ViewInput {
     }
 }
 
-/// One solid as committed: its shared record, latest authored colour and placement.
+/// One solid as committed: its shared record and placement. Colour sets reach preparation
+/// through the step, so admission composes no input for them.
 #[derive(PartialEq)]
 pub struct SolidInput {
-    /// Model id.
-    pub id: WireId,
     /// Identity.
     pub handle: Handle,
     /// The admitted `solid`, cloned once at its put and shared from then on.
     pub source: Arc<Op>,
-    /// The latest authored colour: a `set`, else the record's.
-    pub color: Option<Color>,
     /// Index of the attachment parent in [`ViewInput::solids`].
     pub parent: Option<u16>,
-    /// The solid's own position, rotation and scale.
-    pub local: Transform,
-    /// The complete composed rest transform, where world checks run.
-    pub rest: Transform,
 }
 impl fmt::Debug for SolidInput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -96,16 +88,9 @@ impl ViewInput {
             _ => unreachable!("view inputs hold view records"),
         }
     }
-    /// Bytes this input owns beyond the shared sources: the box, the solid array and ids.
+    /// Bytes this input owns beyond the shared sources: the box and the solid array.
     pub(crate) fn owned_bytes(&self) -> usize {
-        heap::ARC_HEADER
-            + size_of::<Self>()
-            + size_of_val(&*self.solids)
-            + self
-                .solids
-                .iter()
-                .map(|solid| solid.id.as_str().len())
-                .sum::<usize>()
+        heap::ARC_HEADER + size_of::<Self>() + size_of_val(&*self.solids)
     }
 }
 
@@ -122,10 +107,9 @@ pub struct FaceRange {
 
 /// A solid's canonical mesh at its authored dimensions, before scale or placement.
 pub struct SolidMesh {
-    /// Local f64 point the vertices are stored relative to, so f32 keeps the rest geometry.
-    pub origin: [f64; 3],
-    /// Distinct local vertices, relative to `origin`.
-    pub vertices: Box<[Vec3]>,
+    /// Distinct unscaled local vertices in f64: the rest transform's [`Transform::apply`]
+    /// gives exactly the world points `build` checked, which f32 offsets can't promise.
+    pub vertices: Box<[[f64; 3]]>,
     /// Outward-wound triangles indexing `vertices`.
     pub triangles: Box<[[u32; 3]]>,
     /// Source faces in emission order.
@@ -139,11 +123,6 @@ impl fmt::Debug for SolidMesh {
     }
 }
 impl SolidMesh {
-    /// The transform that places this mesh's stored vertices: `rest` after the local origin.
-    #[must_use]
-    pub fn pose(&self, rest: &Transform) -> Transform {
-        rest.shifted(self.origin)
-    }
     fn bytes(&self) -> usize {
         heap::ARC_HEADER
             + size_of::<Self>()
@@ -163,6 +142,7 @@ pub enum Mesh {
 }
 
 /// One prepared solid.
+#[derive(Clone)]
 pub struct PreparedSolid {
     /// Model id.
     pub id: WireId,
@@ -178,6 +158,8 @@ pub struct PreparedSolid {
     pub rest: Transform,
     /// Canonical mesh or its failure.
     pub mesh: Mesh,
+    /// The latest authored colour: a `set`, else the record's.
+    pub color: Option<Color>,
     /// Theme-resolved colour.
     pub rgb: [u8; 3],
     /// Authored opacity, 1 when omitted.
@@ -246,6 +228,30 @@ impl ViewGeometry {
         bytes
     }
 
+    /// The same view with `colors` applied to its solids, sharing every mesh and source.
+    #[must_use]
+    pub(crate) fn recolored(&self, colors: &HashMap<&WireId, Color>, theme: &Theme) -> Self {
+        Self {
+            handle: self.handle,
+            source: Arc::clone(&self.source),
+            camera: self.camera,
+            light: self.light,
+            solids: self
+                .solids
+                .iter()
+                .map(|solid| {
+                    let color = colors.get(&solid.id).copied().or(solid.color);
+                    PreparedSolid {
+                        color,
+                        rgb: resolved(color, theme),
+                        ..solid.clone()
+                    }
+                })
+                .collect(),
+            failed: self.failed,
+        }
+    }
+
     /// The same view without the solids a cut dropped, sharing every mesh.
     #[must_use]
     pub(crate) fn retain(&self, keep: impl Fn(Handle) -> bool) -> Self {
@@ -268,6 +274,7 @@ impl ViewGeometry {
                     local: solid.local,
                     rest: solid.rest,
                     mesh: solid.mesh.clone(),
+                    color: solid.color,
                     rgb: solid.rgb,
                     opacity: solid.opacity,
                 });
@@ -294,41 +301,56 @@ impl ViewGeometry {
     }
 }
 
-/// Builds every solid whose record changed since `before` and shares the rest.
+/// Builds every solid whose record changed since `before` and shares the rest. A solid keeps
+/// its colour from `colors`, this step's sets, else from `before` while its record is unchanged.
 ///
 /// A solid that fails at rest keeps that failure while its record is unchanged, and the view
 /// is published empty. Only cancellation and an exhausted output fail the call.
 /// # Errors
 /// Returns `Cancelled` or `Full`; nothing is published.
-pub fn tessellate_view(
+pub(crate) fn tessellate_view(
     input: &ViewInput,
     before: Option<&ViewGeometry>,
+    colors: &HashMap<&WireId, Color>,
     theme: &Theme,
     cancel: &AtomicBool,
     scratch: &mut MeshScratch,
 ) -> Result<ViewGeometry, MeshError> {
     let mut out = Vec::new();
     let mut groups = Vec::new();
-    let mut solids = Vec::with_capacity(input.solids.len());
-    for (part, solid) in input.solids.iter().enumerate() {
-        let reused = before
-            .and_then(|old| old.solids.iter().find(|old| old.id == solid.id))
-            .filter(|old| Arc::ptr_eq(&old.source, &solid.source))
-            .map(|old| old.mesh.clone());
-        let mesh = match reused {
-            Some(mesh) => mesh,
-            None => build(solid, part, &mut out, &mut groups, cancel, scratch)?,
-        };
+    let mut solids: Vec<PreparedSolid> = Vec::with_capacity(input.solids.len());
+    for solid in &*input.solids {
         let record = solid.record();
+        let get = |v: Option<[crate::Finite; 3]>| v.map_or([0.0; 3], |v| v.map(crate::Finite::get));
+        let local = Transform::local(
+            get(record.pos),
+            get(record.rot),
+            record.scale.map_or(1.0, crate::record::Size::get),
+        );
+        let rest = solid
+            .parent
+            .map_or(local, |p| local.then(&solids[usize::from(p)].rest));
+        let old = before
+            .and_then(|old| old.solids.iter().find(|old| old.id == record.id))
+            .filter(|old| Arc::ptr_eq(&old.source, &solid.source));
+        let mesh = match old {
+            Some(old) => old.mesh.clone(),
+            None => build(record, &rest, &mut out, &mut groups, cancel, scratch)?,
+        };
+        let color = colors
+            .get(&record.id)
+            .copied()
+            .or(old.map_or(record.color, |old| old.color));
         solids.push(PreparedSolid {
-            id: solid.id.clone(),
+            id: record.id.clone(),
             handle: solid.handle,
             source: Arc::clone(&solid.source),
             parent: solid.parent,
-            local: solid.local,
-            rest: solid.rest,
+            local,
+            rest,
             mesh,
-            rgb: rgb(theme.resolve(&solid.color.unwrap_or(Color::Token(Token::Accent)))),
+            color,
+            rgb: resolved(color, theme),
             opacity: record.opacity.map_or(1.0, crate::record::Unit::get),
         });
     }
@@ -346,29 +368,20 @@ pub fn tessellate_view(
 }
 
 fn build(
-    solid: &SolidInput,
-    part: usize,
-    out: &mut Vec<Triangle>,
+    record: &Solid,
+    rest: &Transform,
+    out: &mut Vec<[[f64; 3]; 3]>,
     groups: &mut Vec<u8>,
     cancel: &AtomicBool,
     scratch: &mut MeshScratch,
 ) -> Result<Mesh, MeshError> {
     out.clear();
     groups.clear();
-    let built = triangles(solid.record()).and_then(|count| {
+    let built = triangles(record).and_then(|count| {
         out.reserve(usize::try_from(count).map_err(|_| MeshError::Full)?);
-        let part = u16::try_from(part).map_err(|_| MeshError::Full)?;
-        build_local(
-            solid.record(),
-            &solid.rest,
-            part,
-            out,
-            groups,
-            cancel,
-            scratch,
-        )
+        build_local(record, rest, out, groups, cancel, scratch)
     });
-    match built.and_then(|(_, origin)| index(out, groups, origin, &solid.rest)) {
+    match built.and_then(|_| index(out, groups, rest)) {
         Ok(mesh) => Ok(Mesh::Built(Arc::new(mesh))),
         Err(error @ (MeshError::Cancelled | MeshError::Full)) => Err(error),
         Err(error) => Ok(Mesh::Failed(error)),
@@ -377,20 +390,15 @@ fn build(
 
 /// Merges exactly equal vertices, gives each source face its triangle run, and checks the stored
 /// mesh at rest the way the frame stage reads it: three distinct indices and a nonzero f64 normal.
-fn index(
-    out: &[Triangle],
-    groups: &[u8],
-    origin: [f64; 3],
-    rest: &Transform,
-) -> Result<SolidMesh, MeshError> {
+fn index(out: &[[[f64; 3]; 3]], groups: &[u8], rest: &Transform) -> Result<SolidMesh, MeshError> {
     let mut seen = HashMap::with_capacity(out.len());
     let mut vertices = Vec::new();
     let triangles: Vec<[u32; 3]> = out
         .iter()
         .map(|triangle| {
-            triangle.v.map(|v| {
+            triangle.map(|v| {
                 *seen
-                    .entry([v.x, v.y, v.z].map(f32::to_bits))
+                    .entry(v.map(|c| if c == 0.0 { 0 } else { c.to_bits() }))
                     .or_insert_with(|| {
                         vertices.push(v);
                         u32::try_from(vertices.len() - 1).expect("a solid's vertices fit u32")
@@ -412,16 +420,11 @@ fn index(
         })
         .collect();
     let mesh = SolidMesh {
-        origin,
         vertices: vertices.into_boxed_slice(),
         triangles: triangles.into_boxed_slice(),
         faces,
     };
-    let pose = mesh.pose(rest);
-    let world = |i: u32| {
-        let v = mesh.vertices[usize::try_from(i).expect("u32 fits usize")];
-        pose.apply([v.x, v.y, v.z].map(f64::from))
-    };
+    let world = |i: u32| rest.apply(mesh.vertices[usize::try_from(i).expect("u32 fits usize")]);
     for &[a, b, c] in &*mesh.triangles {
         let [first, second, third] = [a, b, c].map(world);
         let [e1, e2] =
@@ -444,20 +447,21 @@ fn camera(view: &View3d, solids: &[PreparedSolid]) -> Option<Camera> {
         let Mesh::Built(mesh) = &solid.mesh else {
             return None;
         };
-        let pose = mesh.pose(&solid.rest);
         for &v in &*mesh.vertices {
-            let p = pose.point(v).ok()?;
-            for (i, c) in [p.x, p.y, p.z].into_iter().enumerate() {
-                bounds[0][i] = bounds[0][i].min(f64::from(c));
-                bounds[1][i] = bounds[1][i].max(f64::from(c));
+            for (i, c) in solid.rest.apply(v).into_iter().enumerate() {
+                bounds[0][i] = bounds[0][i].min(c);
+                bounds[1][i] = bounds[1][i].max(c);
             }
         }
     }
     Camera::authored(view, bounds).ok()
 }
 
-fn rgb(color: Rgb) -> [u8; 3] {
-    let [_, r, g, b] = color.get().to_be_bytes();
+fn resolved(color: Option<Color>, theme: &Theme) -> [u8; 3] {
+    let [_, r, g, b] = theme
+        .resolve(&color.unwrap_or(Color::Token(Token::Accent)))
+        .get()
+        .to_be_bytes();
     [r, g, b]
 }
 
@@ -493,11 +497,57 @@ mod tests {
         let mut scratch = MeshScratch::new();
         let theme = Theme::default();
         assert_eq!(
-            tessellate_view(&input, None, &theme, &AtomicBool::new(true), &mut scratch).err(),
+            tessellate_view(
+                &input,
+                None,
+                &HashMap::new(),
+                &theme,
+                &AtomicBool::new(true),
+                &mut scratch
+            )
+            .err(),
             Some(MeshError::Cancelled)
         );
-        let geometry = tessellate_view(&input, None, &theme, &AtomicBool::new(false), &mut scratch)
-            .expect("built after a cancelled attempt");
+        let geometry = tessellate_view(
+            &input,
+            None,
+            &HashMap::new(),
+            &theme,
+            &AtomicBool::new(false),
+            &mut scratch,
+        )
+        .expect("built after a cancelled attempt");
         assert!(!geometry.failed);
+    }
+
+    #[test]
+    fn a_colour_only_step_admits_no_view_input() {
+        let Ok(Record::Begin(header)) =
+            parse_record(br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":""}}"#)
+        else {
+            panic!("begin fixture");
+        };
+        let (mut scene, mut budget) = (
+            SceneState::begin(header).expect("scene"),
+            GlobalBudget::default(),
+        );
+        let mut commit = |record: &[u8]| {
+            let Ok(Record::Step(step)) = parse_record(record) else {
+                panic!("step fixture");
+            };
+            let Admission::New(candidate) = scene.admit(&step, &budget).expect("admitted") else {
+                panic!("new step");
+            };
+            scene.commit(candidate, &mut budget).expect("fresh")
+        };
+        let put = commit(
+            br#"{"step":{"id":"a","put":[{"view3d":{"id":"v"}},{"solid":{"in":"v","id":"s","shape":"box","size":[2,2,2]}}]}}"#,
+        );
+        assert_eq!(put.preparation.views.len(), 1);
+        let shaded = commit(br##"{"step":{"id":"b","set":[{"target":"s","color":"#ff0000"}]}}"##);
+        assert!(
+            shaded.preparation.views.is_empty(),
+            "preparation reshades from the step; admission composes nothing"
+        );
     }
 }

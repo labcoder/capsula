@@ -10,7 +10,9 @@ use kumochi_scene::{
     text::Bounded,
     theme::Theme,
     three::{
-        size::MeshError,
+        Transform, Triangle,
+        mesh::{MeshScratch, build},
+        size::{MeshError, triangles},
         view::{Mesh, SolidMesh, ViewGeometry},
     },
 };
@@ -136,7 +138,6 @@ fn requested<T>(make: impl FnOnce() -> T) -> usize {
 fn mesh_bytes(mesh: &SolidMesh) -> usize {
     requested(|| {
         Arc::new(SolidMesh {
-            origin: mesh.origin,
             vertices: mesh.vertices.clone(),
             triangles: mesh.triangles.clone(),
             faces: mesh.faces.clone(),
@@ -190,14 +191,18 @@ fn scale_reaches_world_vertices_once_through_the_composed_rest() {
     assert_eq!(child.parent, Some(0));
     let mesh = built(geometry, 1);
     assert_eq!(mesh.triangles.len(), 12);
-    let mut corner = [f32::NEG_INFINITY; 3];
+    let mut corner = [f64::NEG_INFINITY; 3];
     for &v in &*mesh.vertices {
-        let p = mesh.pose(&child.rest).point(v).expect("finite rest");
-        corner = [corner[0].max(p.x), corner[1].max(p.y), corner[2].max(p.z)];
+        let p = child.rest.apply(v);
+        corner = [
+            corner[0].max(p[0]),
+            corner[1].max(p[1]),
+            corner[2].max(p[2]),
+        ];
     }
     assert_eq!(
-        corner.map(f32::to_bits),
-        [15.0_f32, 3.0, 3.0].map(f32::to_bits),
+        corner.map(f64::to_bits),
+        [15.0_f64, 3.0, 3.0].map(f64::to_bits),
         "a baked scale gives (16.5, 4.5, 4.5)"
     );
 }
@@ -288,7 +293,7 @@ fn a_reshaded_view_carries_the_full_mesh_charge_of_a_fresh_one() {
     assert_eq!(shaded.after.resident_bytes(), fresh.after.resident_bytes());
     assert!(fresh.resident_bytes >= scratch.full_bytes());
     assert!(fresh.scratch_bytes > 0);
-    assert_eq!(shaded.scratch_bytes, fresh.scratch_bytes);
+    assert_eq!(shaded.scratch_bytes, 0, "a reshade builds nothing");
 }
 
 #[test]
@@ -436,15 +441,11 @@ fn tube(path: &Value, r2: f64, segments: u8, pos: &Value) -> Value {
 }
 /// The single solid's stored vertices at its rest pose, in f64 as the frame stage reads them.
 fn rest_vertices(geometry: &ViewGeometry) -> Vec<[f64; 3]> {
-    let solid = &geometry.solids[0];
-    let pose = built(geometry, 0).pose(&solid.rest);
+    let rest = geometry.solids[0].rest;
     built(geometry, 0)
         .vertices
         .iter()
-        .map(|&v| {
-            let p = pose.point(v).expect("finite rest");
-            [p.x, p.y, p.z].map(f64::from)
-        })
+        .map(|&v| rest.apply(v))
         .collect()
 }
 
@@ -513,10 +514,7 @@ fn every_face_group_lies_on_its_anchor_plane() {
             (triangles, faces),
             "{path}: a straight run keeps its bands grouped, a bend splits them"
         );
-        let at = |i: u32| {
-            let v = mesh.vertices[usize::try_from(i).expect("index")];
-            [v.x, v.y, v.z].map(f64::from)
-        };
+        let at = |i: u32| mesh.vertices[usize::try_from(i).expect("index")];
         for face in &*mesh.faces {
             let [base, second, third] = face.anchors.map(at);
             let offset = |p: [f64; 3]| [p[0] - base[0], p[1] - base[1], p[2] - base[2]];
@@ -655,4 +653,203 @@ fn prepared_carriers_keep_solid_text_out_of_debug() {
             assert!(!debug.contains(bytes.trim_matches(['[', ']'])), "{debug}");
         }
     }
+}
+
+/// Each stored vertex placed by `rest` and narrowed as the world build narrows, as f32 bits.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "narrows exactly as the world build does"
+)]
+fn narrowed(rest: &Transform, mesh: &SolidMesh) -> Vec<[[u32; 3]; 3]> {
+    mesh.triangles
+        .iter()
+        .map(|triangle| {
+            triangle.map(|i| {
+                let p = mesh.vertices[usize::try_from(i).expect("index")];
+                rest.apply(p).map(|c| {
+                    let v = c as f32;
+                    if v == 0.0 { 0 } else { v.to_bits() }
+                })
+            })
+        })
+        .collect()
+}
+fn bits(world: &[Triangle]) -> Vec<[[u32; 3]; 3]> {
+    world
+        .iter()
+        .map(|triangle| {
+            triangle
+                .v
+                .map(|p| [p.x, p.y, p.z].map(|v| if v == 0.0 { 0 } else { v.to_bits() }))
+        })
+        .collect()
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fixture table beside its single check"
+)]
+fn prepared_rest_vertices_narrow_to_the_world_build_bit_for_bit() {
+    let child = |shape: &str, fields: Value| {
+        let mut solid = json!({"in":"v","id":"s","shape":shape,"attach":"p","pos":[1,0,0],"rot":[30,0,0],"scale":1.5});
+        solid
+            .as_object_mut()
+            .expect("object")
+            .extend(fields.as_object().expect("object").clone());
+        json!({ "solid": solid })
+    };
+    let alone = |fields: Value| {
+        let mut solid = json!({"in":"v","id":"s"});
+        solid
+            .as_object_mut()
+            .expect("object")
+            .extend(fields.as_object().expect("object").clone());
+        json!({ "solid": solid })
+    };
+    // (solid, triangles, distinct vertices), counted from each shape's topology.
+    let cases = [
+        (child("box", json!({"size":[1,2,3]})), 12, 8),
+        (child("sphere", json!({"r":1,"segments":12})), 320, 162),
+        (
+            child("cylinder", json!({"r":1,"h":2,"segments":12})),
+            44,
+            24,
+        ),
+        (child("cone", json!({"r":1,"h":2,"segments":12})), 22, 13),
+        (
+            child("torus", json!({"r":2,"r2":0.5,"segments":12})),
+            288,
+            144,
+        ),
+        (
+            child("lathe", json!({"points":[[0,-1],[1,0],[0,1]],"segments":8})),
+            16,
+            10,
+        ),
+        (
+            child(
+                "extrude",
+                json!({"points":[[0,0],[1,0],[1,1],[0,1]],"depth":1}),
+            ),
+            12,
+            8,
+        ),
+        (
+            child(
+                "tube",
+                json!({"path":[[0,0,0],[0,0,1]],"r2":0.25,"segments":4}),
+            ),
+            12,
+            8,
+        ),
+        (
+            alone(
+                json!({"shape":"tube","path":[[9000,0,0],[9000,1,0]],"r2":0.001,"segments":4,"pos":[-9000,0,0]}),
+            ),
+            12,
+            8,
+        ),
+        (
+            alone(
+                json!({"shape":"tube","path":[[6000,6000,0],[6000,6000,1]],"r2":0.001,"segments":24,"pos":[-6000,-6000,0]}),
+            ),
+            92,
+            48,
+        ),
+        (
+            alone(
+                json!({"shape":"extrude","points":[[-6000,-5999],[1.001,2.001],[0,1]],"depth":1}),
+            ),
+            8,
+            6,
+        ),
+        (
+            alone(
+                json!({"shape":"extrude","points":[[-8500,1],[9000,0],[9000.001,1],[9000,2],[8999,0.5],[-9500,2],[-9500,0]],"depth":1}),
+            ),
+            24,
+            14,
+        ),
+    ];
+    let mut scratch = MeshScratch::new();
+    for (solid, count, distinct) in cases {
+        let (mut scene, mut budget) = scene();
+        let prepared = opening(
+            &mut scene,
+            &mut budget,
+            json!({"id":"a","put":[view(), cube("p", &json!({"pos":[10,0,0],"scale":2})), solid]}),
+        );
+        let geometry = geometry(&prepared.after);
+        assert!(!geometry.failed, "{solid}");
+        let index = geometry
+            .solids
+            .iter()
+            .position(|solid| solid.id == id("s"))
+            .expect("the solid");
+        let prepared_solid = &geometry.solids[index];
+        let mesh = built(geometry, index);
+        assert_eq!(
+            (mesh.triangles.len(), mesh.vertices.len()),
+            (count, distinct),
+            "{solid}"
+        );
+        let Op::Solid(record) = &*prepared_solid.source else {
+            panic!("a solid record");
+        };
+        let mut world = Vec::with_capacity(
+            usize::try_from(triangles(record).expect("valid count")).expect("bounded"),
+        );
+        let written = build(
+            record,
+            &prepared_solid.rest,
+            0,
+            &mut world,
+            &AtomicBool::new(false),
+            &mut scratch,
+        )
+        .expect("the world build accepts it")
+        .written;
+        assert_eq!(usize::try_from(written).expect("bounded"), count);
+        assert_eq!(
+            narrowed(&prepared_solid.rest, mesh),
+            bits(&world),
+            "{solid}"
+        );
+    }
+}
+
+#[test]
+fn a_set_colour_survives_a_later_rebuild_of_its_view() {
+    let (mut scene, mut budget) = scene();
+    let first = opening(
+        &mut scene,
+        &mut budget,
+        json!({"id":"a","put":[view(), cube("s", &json!({}))]}),
+    );
+    let red = next(
+        &mut scene,
+        &mut budget,
+        &first.after,
+        json!({"id":"b","set":[{"target":"s","color":"#ff0000"}]}),
+    );
+    let grown = next(
+        &mut scene,
+        &mut budget,
+        &red.after,
+        json!({"id":"c","put":[cube("u", &json!({"pos":[4,0,0],"color":"#00ff00"}))]}),
+    );
+    let view = geometry(&grown.after);
+    assert_eq!(
+        view.solids
+            .iter()
+            .map(|solid| solid.rgb)
+            .collect::<Vec<_>>(),
+        [[0xff, 0, 0], [0, 0xff, 0]]
+    );
+    assert!(Arc::ptr_eq(
+        built(view, 0),
+        built(geometry(&first.after), 0)
+    ));
 }

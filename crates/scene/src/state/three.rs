@@ -7,11 +7,7 @@ use super::object::{Kind, Object};
 use crate::{
     ErrorCode, Handle, Op, Step, WireId,
     limits::MAX_COORD,
-    record::Color,
-    three::{
-        Transform,
-        view::{SolidInput, ViewInput, ViewUpdate},
-    },
+    three::view::{SolidInput, ViewInput, ViewUpdate},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -86,19 +82,8 @@ fn check(parent: Placement, offset: f64, scale: f64, reach: f64) -> Result<Place
     Ok(Placement { origin, scale })
 }
 
-/// A 3D object's shared record and its latest authored colour.
-#[derive(Clone)]
-pub(crate) struct Source {
-    pub op: Arc<Op>,
-    pub color: Option<Color>,
-}
-impl std::fmt::Debug for Source {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Source(..)")
-    }
-}
-
-/// The views a step changes, each composed from `after` or marked removed.
+/// The views a step puts into or removes from, each composed from `after` or marked removed.
+/// Colour sets change no input: preparation applies them from the step.
 pub(super) fn view_updates(
     step: &Step,
     before: &BTreeMap<WireId, Object>,
@@ -120,14 +105,6 @@ pub(super) fn view_updates(
     for id in &*step.remove {
         views.extend(before.get(id).and_then(|object| view_of(object, id)));
     }
-    for change in step.set.iter().filter(|change| change.color.is_some()) {
-        views.extend(
-            after
-                .get(&change.target)
-                .filter(|object| object.kind == Kind::Solid)
-                .and_then(|object| object.parent.clone()),
-        );
-    }
     views
         .into_iter()
         .map(|id| ViewUpdate {
@@ -146,37 +123,26 @@ fn view_input(id: &WireId, view: &Object, after: &BTreeMap<WireId, Object>) -> V
         .collect();
     members.sort_by_key(|(_, object)| object.handle);
     let mut solids: Vec<SolidInput> = Vec::with_capacity(members.len());
-    for (solid_id, object) in members {
+    for (_, object) in members {
         let source = object.three.as_ref().expect("solids carry their source");
-        let Op::Solid(record) = &*source.op else {
+        let Op::Solid(record) = &**source else {
             unreachable!("a solid's source is its solid record");
         };
-        let get = |v: Option<[crate::Finite; 3]>| v.map_or([0.0; 3], |v| v.map(crate::Finite::get));
-        let local = Transform::local(
-            get(record.pos),
-            get(record.rot),
-            record.scale.map_or(1.0, crate::record::Size::get),
-        );
+        // Members run in handle order, so a parent's slot is a binary search away.
         let parent = record.attach.as_ref().map(|attach| {
             solids
-                .iter()
-                .position(|solid| solid.id == *attach)
+                .binary_search_by_key(&after[attach].handle, |solid| solid.handle)
                 .expect("an attachment names an earlier solid in the same view")
         });
-        let rest = parent.map_or(local, |p| local.then(&solids[p].rest));
         solids.push(SolidInput {
-            id: solid_id.clone(),
             handle: object.handle,
-            source: Arc::clone(&source.op),
-            color: source.color.or(record.color),
+            source: Arc::clone(source),
             parent: parent.map(|p| u16::try_from(p).expect("a view holds at most 160 solids")),
-            local,
-            rest,
         });
     }
     ViewInput {
         handle: view.handle,
-        source: Arc::clone(&view.three.as_ref().expect("views carry their source").op),
+        source: Arc::clone(view.three.as_ref().expect("views carry their source")),
         solids: solids.into_boxed_slice(),
     }
 }

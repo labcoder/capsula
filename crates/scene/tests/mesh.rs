@@ -101,6 +101,36 @@ fn area(mesh: &[Triangle]) -> f64 {
         .sum()
 }
 
+/// Each local point placed by `world` and narrowed as the world build narrows, as f32 bits.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "narrows exactly as the world build does"
+)]
+fn narrowed(world: &Transform, local: &[[[f64; 3]; 3]]) -> Vec<[[u32; 3]; 3]> {
+    local
+        .iter()
+        .map(|triangle| {
+            triangle.map(|p| {
+                world.apply(p).map(|c| {
+                    let v = c as f32;
+                    if v == 0.0 { 0 } else { v.to_bits() }
+                })
+            })
+        })
+        .collect()
+}
+fn bits(world: &[Triangle]) -> Vec<[[u32; 3]; 3]> {
+    world
+        .iter()
+        .map(|triangle| {
+            triangle
+                .v
+                .map(|p| [p.x, p.y, p.z].map(|v| if v == 0.0 { 0 } else { v.to_bits() }))
+        })
+        .collect()
+}
+
 fn maximum_outline() -> Value {
     let points: Vec<_> = (0..16)
         .map(|i| [i, 0])
@@ -655,8 +685,7 @@ fn local_and_world_builds_agree_at_the_composed_rest() {
             Vec::new(),
         );
         let cancel = AtomicBool::new(false);
-        let local = build_local(&shape, world, 0, &mut b, &mut groups, &cancel, &mut scratch)
-            .map(|(built, _)| built);
+        let local = build_local(&shape, world, &mut b, &mut groups, &cancel, &mut scratch);
         assert_eq!(local, expected, "{:?}", shape.shape);
         assert_eq!(
             build(&shape, world, 0, &mut a, &cancel, &mut scratch),
@@ -665,26 +694,94 @@ fn local_and_world_builds_agree_at_the_composed_rest() {
             shape.shape
         );
         if let Ok(built) = expected {
-            assert_eq!(b.len(), a.len());
             assert_eq!(
                 groups.iter().map(|&n| u32::from(n)).sum::<u32>(),
                 built.written
             );
+            assert_eq!(narrowed(world, &b), bits(&a), "{:?}", shape.shape);
         }
     }
     let mut out = Vec::with_capacity(12);
     let alone = build_local(
         &solid("box", json!({"size":[1,1,1]})),
         &Transform::local([0.0; 3], [0.0; 3], 0.001),
-        0,
         &mut out,
         &mut Vec::new(),
         &AtomicBool::new(false),
         &mut scratch,
     );
     assert_eq!(
-        alone.map(|(built, _)| built.written),
+        alone.map(|built| built.written),
         Ok(12),
         "only the parent collapses it"
+    );
+}
+
+#[test]
+fn adversarial_extrusions_keep_their_authored_points_locally() {
+    // CAPS-191's three-point and CAPS-194's seven-point outlines: a first-vertex f32 origin made
+    // both caps or B, C and D collinear. Local f64 points are the authored ones, exactly.
+    let identity = Transform::local([0.0; 3], [0.0; 3], 1.0);
+    let cases: [(&[[f32; 2]], u32); 2] = [
+        (&[[-6000.0, -5999.0], [1.001, 2.001], [0.0, 1.0]], 8),
+        (
+            &[
+                [-8500.0, 1.0],
+                [9000.0, 0.0],
+                [9000.001, 1.0],
+                [9000.0, 2.0],
+                [8999.0, 0.5],
+                [-9500.0, 2.0],
+                [-9500.0, 0.0],
+            ],
+            24,
+        ),
+    ];
+    let mut scratch = MeshScratch::new();
+    let cancel = AtomicBool::new(false);
+    for (outline, written) in cases {
+        let shape = solid("extrude", json!({"points": outline, "depth": 1}));
+        let count = usize::try_from(written).expect("bounded");
+        let (mut world, mut local, mut groups) = (
+            Vec::with_capacity(count),
+            Vec::with_capacity(count),
+            Vec::new(),
+        );
+        let expected = Ok(Built {
+            written,
+            dropped: 0,
+        });
+        assert_eq!(
+            build(&shape, &identity, 0, &mut world, &cancel, &mut scratch),
+            expected
+        );
+        assert_eq!(
+            build_local(
+                &shape,
+                &identity,
+                &mut local,
+                &mut groups,
+                &cancel,
+                &mut scratch
+            ),
+            expected
+        );
+        assert_eq!(narrowed(&identity, &local), bits(&world));
+        let authored: Vec<[f64; 2]> = outline.iter().map(|p| p.map(f64::from)).collect();
+        for p in local.iter().flatten() {
+            assert!(
+                authored.contains(&[p[0], p[1]]),
+                "{p:?} is not an authored point"
+            );
+            assert!(
+                [-0.5_f64, 0.5].map(f64::to_bits).contains(&p[2].to_bits()),
+                "{p:?}"
+            );
+            assert_eq!(identity.apply(*p).map(f64::to_bits), p.map(f64::to_bits));
+        }
+    }
+    assert_eq!(
+        f64::from(1.001_f32).to_bits(),
+        1.001_000_046_730_041_5_f64.to_bits()
     );
 }
