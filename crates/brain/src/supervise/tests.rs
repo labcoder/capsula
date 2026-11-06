@@ -46,8 +46,7 @@ fn pending(id: u64) -> (BTreeMap<u64, Pending<Test>>, Reply) {
 
 fn handle() -> (Handle<Test>, mpsc::Receiver<Command<Test>>) {
     let (commands, receive) = mpsc::channel(QUEUE);
-    let (losses, _) = broadcast::channel(QUEUE);
-    (Handle { commands, losses }, receive)
+    (Handle::new(commands), receive)
 }
 
 #[test]
@@ -305,4 +304,42 @@ fn each_malformed_frame_is_its_own_frame_error() {
         read(mistyped),
         Err(frame::FrameError::Malformed(_))
     ));
+}
+
+#[tokio::test]
+async fn exit_confirmation_waits_off_the_runtime_and_fails_new_commands_at_once() {
+    for confirmed in [false, true] {
+        let (decide, exited) = blocking::channel();
+        let (asked, asks) = blocking::channel();
+        let (handle, mut commands) = handle();
+        let (sender, mut exits) = (handle.exits.clone(), handle.exits());
+        let held = move |timeout| {
+            asked.send(timeout).expect("the test listens");
+            exited.recv_timeout(Duration::from_secs(5)).unwrap_or(false)
+        };
+        let confirming = tokio::spawn(async move {
+            confirm_exit::<Test>(held, Generation(7), &mut commands, &sender).await
+        });
+        let request = handle.request(vec![], Instant::now() + Duration::from_secs(60));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), request).await,
+            Ok(Err(WorkerLost)),
+            "the runtime kept serving and the command failed at once"
+        );
+        assert_eq!(
+            asks.recv_timeout(Duration::from_secs(1)),
+            Ok(EXIT_CONFIRMATION)
+        );
+        assert!(!confirming.is_finished());
+        assert_eq!(exits.try_recv(), Err(broadcast::error::TryRecvError::Empty));
+        decide.send(confirmed).expect("still waiting");
+        assert_eq!(confirming.await.expect("joined"), Some(()));
+        assert_eq!(
+            exits.try_recv(),
+            Ok(Exit {
+                generation: Generation(7),
+                confirmed
+            })
+        );
+    }
 }

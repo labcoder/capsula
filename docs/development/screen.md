@@ -50,7 +50,10 @@ A hostile worker can make the brain hold up to 16 × 12 MiB of streamed replies 
 Each request has one 1.5 s absolute deadline [guess], including queue time; fixtures can inject it.
 A loss fails all pending operations, requests worker termination, then broadcasts its `Generation`: the
 first worker is 0 and each respawn the next, and every reply names the generation that sent it.
-`WorkerLost` alone is not confirmation that the native process exited.
+`WorkerLost` alone is not confirmation that the native process exited. The supervisor then waits
+off the async thread, up to 2 s [guess], for the process to exit, and broadcasts
+`Exit { generation, confirmed }` once per lost generation, after its loss and before any respawn.
+Requests during that wait fail fast. An unconfirmed exit is logged and the worker still respawns.
 The first
 two losses respawn immediately; a third within 60 s waits 0.2 s, then 1 s and 5 s for later losses
 [guess]. Requests during backoff fail fast. During an in-flight respawn, requests wait for the new
@@ -90,7 +93,8 @@ The worker can sanitize and encode them locally, but no operation exports them.
   valid only after a complete copy whose size equals the requested display, before expiry. A
   smaller frame shrinks the logical length, so an old tail is never part of the image, while the
   CPU buffer keeps its allocation for equal or smaller frames after warm-up. That says nothing
-  about COM or GPU allocations, which happen per capture.
+  about COM or GPU allocations, which happen per capture. Releasing the frame zeroes the buffer's
+  whole capacity with `zeroize` and frees it; the next capture allocates afresh.
 - **Windows.** One D3D11 device for the worker's life, created on the first capture on the serve
   thread. Per ticket: the monitor must have exactly the requested physical bounds
   (per-monitor-v2 DPI awareness), then a WGC item, a one-buffer free-threaded pool and a session
@@ -291,7 +295,15 @@ root visibility and ownership before reading. A walk must start before both tick
 frame arrival + 250 ms [guess]; its deadline is the earliest of those two and start + 120 ms [guess].
 
 One disposable thread constructs and owns the non-Send platform source. Both channels have one
-slot, sends never block, and jobs/replies carry capture ids. The serve thread waits until the
+slot, sends never block, and jobs/replies carry capture ids. `begin` hands the thread a job
+without waiting and `poll` takes its completion. A `begin` while a job is pending, even one
+whose completion landed and wasn't taken, retires the reader rather than queue a second job or
+drop that completion, so the reply slot never fills. The reader opener takes a wake that the
+thread calls after each completion lands; it never blocks, and a dropped wake leaves the
+completion in its slot for `poll`. Today's serve path passes a wake nobody listens to. The foreground window is sampled on the capture side, never on this
+thread, so a stuck walk can't delay the next capture's foreground. Today's `walk` is the
+compatibility path: it discards a timed-out walk's late completion, calls `begin`, then waits
+on the reply channel until the
 cooperative deadline plus 200 ms (100 ms connection + 100 ms transaction timeouts). The first
 timeout returns Unavailable(Busy), retaining reached masks. Its Unknown(Busy) completeness is
 sticky: a late successful walk can never upgrade it to Complete or Partial. A later walk first

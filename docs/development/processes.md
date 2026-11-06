@@ -28,7 +28,8 @@ flowchart LR
   Ending a run terminates its run job and waits until the job is empty, which ends that run's
   processes and nothing else.
 - **The screen worker** sits in the brain job directly, so ending a run never touches it.
-  Its [supervisor](screen.md) owns its pipes, deadlines and respawns.
+  Its [supervisor](screen.md) owns its pipes, deadlines and respawns, and reports whether each lost
+  worker's process was seen to exit before it respawns one.
 - **The speech worker** sits there too, under the same supervisor. It's the only process that
   loads sherpa-onnx (see [voice.md](voice.md), "The speech worker").
 - Helpers inherit no handles except each worker's two explicit stdin/stdout handles. A worker's

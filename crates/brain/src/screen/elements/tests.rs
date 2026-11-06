@@ -150,6 +150,12 @@ impl ElementReader for FakeReader {
     fn foreground(&mut self) -> Option<TopWindow> {
         FakePlatform(false).foreground()
     }
+    fn begin(&mut self, _job: WalkJob) -> Result<(), Walked> {
+        unreachable!("the serve path walks")
+    }
+    fn poll(&mut self) -> Option<Result<Walked, Failure>> {
+        unreachable!("the serve path walks")
+    }
     fn walk(&mut self, job: WalkJob) -> Result<Walked, Failure> {
         walk(
             &mut FakeSource::flat(1),
@@ -169,7 +175,7 @@ impl ElementReader for FakeReader {
     clippy::unnecessary_wraps,
     reason = "matches the production opener signature"
 )]
-pub(crate) fn open_reader() -> Result<Box<dyn ElementReader>, i32> {
+pub(crate) fn open_reader(_wake: Wake) -> Result<Box<dyn ElementReader>, i32> {
     Ok(Box::new(FakeReader))
 }
 

@@ -47,7 +47,6 @@ struct Fake {
 
 fn fake() -> Fake {
     let (commands, mut receive) = mpsc::channel(QUEUE);
-    let (losses, _) = broadcast::channel(QUEUE);
     let (reads, mut replies) = mpsc::channel(QUEUE);
     let (writes, written) = blocking::sync_channel(QUEUE);
     let served = tokio::spawn(async move {
@@ -55,7 +54,7 @@ fn fake() -> Fake {
         serve::<Staged>(&mut replies, &writes, &mut receive, &mut id, SERVED).await
     });
     Fake {
-        handle: Handle { commands, losses },
+        handle: Handle::new(commands),
         reads,
         written,
         served,
@@ -296,8 +295,7 @@ async fn a_stream_keeps_its_absolute_deadline_through_its_stages() {
 #[tokio::test(start_paused = true)]
 async fn an_unanswered_stream_ends_at_its_deadline() {
     let (commands, _held) = mpsc::channel(QUEUE);
-    let (losses, _) = broadcast::channel(QUEUE);
-    let handle = Handle::<Staged> { commands, losses };
+    let handle = Handle::<Staged>::new(commands);
     let started = Instant::now();
     let mut stream = handle
         .request_stream(vec![], started + Duration::from_millis(1500))
@@ -344,8 +342,7 @@ async fn an_unwritable_stream_loses_the_worker() {
 #[test]
 fn a_streams_debug_shows_no_reply() {
     let (commands, mut receive) = mpsc::channel(QUEUE);
-    let (losses, _) = broadcast::channel(QUEUE);
-    let handle = Handle::<Staged> { commands, losses };
+    let handle = Handle::<Staged>::new(commands);
     let stream = handle.request_stream(vec![], far()).expect("queued");
     let Destination::Stream(stages) = receive.try_recv().expect("queued").answer else {
         panic!("a stream");

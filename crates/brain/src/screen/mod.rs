@@ -28,7 +28,7 @@ pub(crate) use elements::WalkJob;
 pub use elements::{Availability, Cut, Element, ElementId, ElementTarget, ElementTree};
 #[cfg(windows)]
 pub(crate) use elements::{
-    ElementPlatform, ElementReader, ElementSource, LIMITS, NodeProps, SourceError, TopWindow,
+    ElementPlatform, ElementReader, ElementSource, LIMITS, NodeProps, SourceError, TopWindow, Wake,
     excluded_image,
 };
 pub(crate) use frame::{RawFrame, display_edges};
