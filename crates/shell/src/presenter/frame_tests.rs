@@ -2,13 +2,13 @@
 
 use std::time::Instant;
 
-use kumochi_protocol::message::{DataToShell, SceneId};
+use kumochi_protocol::message::{DataToShell, RunId, SceneId};
 use kumochi_scene::{SceneView, Step};
 
 use super::super::paint::Sample;
 use super::{
-    LIVE, Presenter, RUN, Shaper, acknowledge, begin, clear_drawing, controls, data, kept, live,
-    recovering, rect, step,
+    LIVE, Presenter, RUN, Shaper, acknowledge, begin, clear_drawing, commit_as, controls, data,
+    kept, live, only_job, recovering, rect, step,
 };
 
 fn pair() -> Step {
@@ -127,6 +127,35 @@ fn only_a_shown_paint_is_observed_once_per_epoch_and_bound() {
     assert_eq!(cut.bound, seen.bound);
     assert!(!frames.borrow_mut().acknowledge(LIVE, seen), "still stale");
     assert!(frames.borrow_mut().acknowledge(LIVE, cut));
+}
+
+#[test]
+fn a_cut_that_changes_nothing_keeps_the_rest_view_and_paint_observation() {
+    let (mut presenter, now) = recovered(vec![(LIVE, rect("r"))]);
+    assert_eq!(sample(&mut presenter), FIRST);
+    let frames = presenter.frames();
+    frames.borrow_mut().shown = true;
+    assert!(!frames.borrow().paint(|_| Ok::<_, std::fmt::Error>(())));
+    let seen = frames.borrow().painted(LIVE).expect("a shown paint");
+    let cut = presenter.scenes[&LIVE].cut_now();
+    presenter.stop(RUN, now).expect("a stop at rest");
+    let effects = acknowledge(&mut presenter, LIVE, 1, cut, now).expect("the cut");
+    assert!(controls(&effects).is_empty(), "the kept cut stays");
+    assert_eq!(
+        frames.borrow().painted(LIVE),
+        Some(seen),
+        "the same view's paint"
+    );
+    assert_eq!(sample(&mut presenter), REST);
+    assert!(frames.borrow_mut().acknowledge(LIVE, seen));
+    let job = only_job(
+        commit_as(&mut presenter, RunId(6), LIVE, 1, rect("s"), now).expect("a step after the cut"),
+    );
+    let effects = presenter
+        .completed(job.run(&mut Shaper), now)
+        .expect("prepared on the kept rest");
+    assert!(controls(&effects).is_empty());
+    assert_eq!(presenter.scenes[&LIVE].ready.len(), 1);
 }
 
 #[test]

@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use super::StoreError;
 
 /// Each entry moves the schema up one version; append, never edit.
-pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
+pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6];
 
 /// Threads, their append-only events with full-text search, and runs. Foreign keys have no
 /// cascade, so deletion names every table and fails loudly if one is missed.
@@ -119,6 +119,18 @@ CREATE TABLE tool_calls (
     FOREIGN KEY (run, thread) REFERENCES runs (id, thread)
 ) STRICT;
 CREATE INDEX tool_calls_thread ON tool_calls (thread);
+";
+
+/// How far the user heard a spoken run (docs/development/voice.md): the segment, its samples
+/// played, and the byte offset in the run's answer text where heard speech ends. All three are
+/// NULL, which is unknown and every older run, or all three are set; a column `CHECK` may name
+/// earlier columns, so the rule needs no table rebuild.
+const V6: &str = "
+ALTER TABLE runs ADD COLUMN heard_segment INTEGER CHECK (heard_segment >= 0);
+ALTER TABLE runs ADD COLUMN heard_sample INTEGER CHECK (heard_sample >= 0);
+ALTER TABLE runs ADD COLUMN heard_text INTEGER CHECK (heard_text >= 0
+    AND (heard_segment IS NULL) = (heard_sample IS NULL)
+    AND (heard_sample IS NULL) = (heard_text IS NULL));
 ";
 
 /// Applies every migration past the file's version, each in its own transaction.
