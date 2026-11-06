@@ -97,6 +97,14 @@ impl fmt::Debug for FirstAsk {
     }
 }
 
+/// Kumo's note that a task was deleted, at the local time to the minute. It holds no title, so a
+/// deleted task's name leaves the files with it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Note {
+    pub(crate) id: EventId,
+    pub(crate) when: String,
+}
+
 /// One run of a thread that no summary covers yet, for compaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Uncovered {
@@ -196,6 +204,35 @@ impl Snapshot<'_> {
         }
         items.reverse();
         Ok(items)
+    }
+
+    /// The thread's newest `max` deletion notes after `after`, oldest first.
+    ///
+    /// # Errors
+    /// Fails when SQLite fails.
+    pub(crate) fn notes(
+        &self,
+        thread: ThreadId,
+        after: Option<EventId>,
+        max: usize,
+    ) -> Result<Vec<Note>, StoreError> {
+        let thread = sql_id(thread.0, StoreError::NoThread)?;
+        let after = after.map_or(Ok(0), |id| sql_id(id.0, StoreError::Read))?;
+        let max = i64::try_from(max).map_err(|_| StoreError::Read)?;
+        let mut statement = self.0.prepare(
+            "SELECT id, strftime('%Y-%m-%d %H:%M', created_ms / 1000, 'unixepoch', 'localtime')
+             FROM events WHERE thread = ?1 AND id > ?2 AND kind = 'task_deleted'
+             ORDER BY id DESC LIMIT ?3",
+        )?;
+        let rows = statement.query_map(params![thread, after, max], |row| {
+            Ok(Note {
+                id: EventId(row_id(row.get(0)?)),
+                when: row.get(1)?,
+            })
+        })?;
+        let mut notes = rows.collect::<Result<Vec<_>, _>>()?;
+        notes.reverse();
+        Ok(notes)
     }
 
     /// A live thread's deletion generation; `None` once it's being deleted or gone.

@@ -251,6 +251,7 @@ fn descendant_anchors_cancel_nested_and_already_ranked_cluster_transforms() {
         &Arc::new(Theme::default()),
         &mut Measure,
         &AtomicBool::new(false),
+        None,
     )
     .expect("recovered anchors");
     assert_eq!(third.after.items(), recovered.items());

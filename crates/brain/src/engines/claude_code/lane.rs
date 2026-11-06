@@ -408,8 +408,7 @@ impl Worker {
         how: Call,
     ) -> Result<(u32, Vec<u8>), Failure> {
         let system = platform::system_env().map_err(|_| Failure::Spawn)?;
-        let browser = platform::login_browser().map_err(|_| Failure::Spawn)?;
-        let data = policy::launch_data(folders, &system, &browser, entry);
+        let data = policy::launch_data(folders, &system, entry);
         let args: Vec<OsString> = program.prefix.iter().cloned().chain(data.args).collect();
         let job = Job::new().map_err(|_| Failure::Spawn)?;
         let mut spawned = platform::spawn(&Launch {

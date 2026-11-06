@@ -11,7 +11,7 @@ use crate::test_support::Scratch;
 
 use super::{
     Cancel, EventKind, Failure, Interruption, NewEvent, Recovered, RunEnd, SceneTarget, Store,
-    StoreError, Swap, checkpoint_now, purge as steps,
+    StoreError, Swap, TitleSource, checkpoint_now, purge as steps,
 };
 
 const MARKER: &str = "zqxplantedmarker";
@@ -1995,4 +1995,70 @@ fn a_delete_that_cant_hide_the_thread_leaves_it_live() {
         .map(|(rows, _)| rows)
         .expect("threads");
     assert_eq!(threads.len(), 1, "still live");
+}
+
+#[test]
+fn a_note_that_fails_rolls_back_the_whole_first_transaction() {
+    let scratch = Scratch::new("delete-note");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    store.recover().expect("recovered");
+    let main = store.main_thread().expect("main");
+    let task = ThreadId(main.0 + 1);
+    store
+        .begin_turn(task, Some("first words"), RunId(1), "ask")
+        .expect("turn");
+    store
+        .end_run(task, RunId(1), &[], RunEnd::Done)
+        .expect("ended");
+    let title = kumochi_protocol::message::ThreadTitle::new("named").expect("valid");
+    store
+        .set_title(task, &title, TitleSource::User)
+        .expect("renamed");
+    let notes = |store: &Store| -> Vec<(i64, Option<i64>, Option<String>)> {
+        let mut statement = store
+            .conn
+            .prepare("SELECT thread, run, text FROM events WHERE kind = 'task_deleted'")
+            .expect("prepared");
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("rows")
+            .collect::<Result<_, _>>()
+            .expect("read")
+    };
+    let state = |store: &Store| -> String {
+        store
+            .conn
+            .query_row("SELECT state FROM threads WHERE id = ?1", [2], |row| {
+                row.get(0)
+            })
+            .expect("state")
+    };
+    store
+        .conn
+        .execute_batch(
+            "CREATE TEMP TRIGGER no_note BEFORE INSERT ON events WHEN new.kind = 'task_deleted'
+             BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+        )
+        .expect("trigger");
+    assert!(store.begin_delete(task).is_err());
+    assert_eq!(state(&store), "live", "no half delete");
+    assert_eq!(notes(&store), []);
+
+    store
+        .conn
+        .execute_batch("DROP TRIGGER no_note")
+        .expect("dropped");
+    store.begin_delete(task).expect("hidden");
+    assert_eq!(state(&store), "deleting");
+    let main = i64::try_from(main.0).expect("small");
+    assert_eq!(
+        notes(&store),
+        [(main, None, None)],
+        "no title, even a user's"
+    );
+    assert!(matches!(
+        store.begin_delete(task),
+        Err(StoreError::NoThread)
+    ));
+    assert_eq!(notes(&store).len(), 1, "one note per delete");
 }

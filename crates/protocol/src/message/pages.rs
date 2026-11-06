@@ -98,6 +98,8 @@ pub enum PageEventKind {
         /// The durable action to read back.
         draft: super::DraftId,
     },
+    /// Kumo's note that a task was deleted. Its text is empty: the note keeps no title.
+    TaskDeleted,
 }
 
 /// An event as the thread panel reads it.
