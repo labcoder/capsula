@@ -863,7 +863,7 @@ fn compact(name: &str) -> String {
 }
 
 #[test]
-fn a_full_record_holds_63_compact_64_point_extrudes() {
+fn a_step_admits_at_most_2688_extrude_outline_points() {
     let ops = |count: usize| {
         let mut ops = vec![view("v")];
         ops.extend((0..count).map(|i| compact(&format!("e{i}"))));
@@ -879,10 +879,20 @@ fn a_full_record_holds_63_compact_64_point_extrudes() {
         ErrorCode::TooLong
     );
     let (mut state, mut global) = (scene(), GlobalBudget::default());
-    commit(&mut state, &mut global, &ops(63));
+    assert_eq!(
+        refused(&state, &global, &ops(63)),
+        over(Budget::OutlinePoints)
+    );
+    assert_eq!(
+        refused(&state, &global, &ops(43)),
+        over(Budget::OutlinePoints)
+    );
+    commit(&mut state, &mut global, &ops(42));
+    let more: Vec<String> = (42..84).map(|i| compact(&format!("e{i}"))).collect();
+    commit(&mut state, &mut global, &put("b", &more));
     assert_eq!(
         (state.usage().solids, state.usage().triangles),
-        (63, 15_876)
+        (84, 21_168)
     );
 }
 
@@ -902,6 +912,7 @@ fn polygon(name: &str) -> String {
 #[test]
 #[ignore = "release CPU timing on a quiet machine with no concurrent builds"]
 fn measure_admit() {
+    use kumochi_scene::limits::MAX_STEP_OUTLINE_POINTS;
     use std::{hint::black_box, time::Instant};
 
     let extrudes = |outline: fn(&str) -> String, first: Option<String>| {
@@ -909,7 +920,9 @@ fn measure_admit() {
         let mut count = 0;
         loop {
             ops.push(outline(&format!("e{count}")));
-            if format!(r#"{{"step":{}}}"#, put("a", &ops)).len() > 32 * 1024 {
+            if count == MAX_STEP_OUTLINE_POINTS / 64
+                || format!(r#"{{"step":{}}}"#, put("a", &ops)).len() > 32 * 1024
+            {
                 ops.pop();
                 return (count, step(&put("a", &ops)));
             }

@@ -82,3 +82,5 @@ pub const MAX_VIEWS: usize = 1;
 pub const MAX_CURVED_SEGMENTS: usize = 48;
 /// Points in one extrude outline; admission checks outlines quadratically and synchronously.
 pub const MAX_EXTRUDE_POINTS: usize = 64;
+/// Extrude outline points in one step: 42 full outlines, the step Rez admits under 1 ms p99.
+pub const MAX_STEP_OUTLINE_POINTS: usize = 42 * MAX_EXTRUDE_POINTS;
