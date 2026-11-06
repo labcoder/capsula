@@ -229,4 +229,14 @@ fn outermost_carriers_redact_credentials_content_form_names_and_request_id() {
     assert!(!text.contains(SENTINEL));
     assert!(!text.contains(&byte_list));
     assert!(!text.contains(byte_list.trim_start_matches('[').trim_end_matches(']')));
+    for text in [
+        format!("{:?}", token().expose()),
+        format!(
+            "{:?}",
+            DeviceCodeValue::new(Zeroizing::new(SENTINEL.to_owned())).unwrap()
+        ),
+    ] {
+        assert!(!text.contains(SENTINEL));
+        assert!(!text.contains(&byte_list));
+    }
 }
