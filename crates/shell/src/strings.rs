@@ -33,6 +33,8 @@ pub(crate) enum Text {
     BottomRight,
     DockError,
     DockBrainError,
+    PerchOn,
+    PerchUntitled,
 
     // Turns
     TurnBusy,
@@ -75,8 +77,6 @@ pub(crate) enum Text {
     RenameNameTooLong,
     RenameOneLine,
     TaskFallback,
-    PerchOn,
-    PerchUntitled,
 
     // Settings
     Settings,
@@ -189,6 +189,8 @@ impl Text {
         BottomRight,
         DockError,
         DockBrainError,
+        PerchOn,
+        PerchUntitled,
 
         // Turns
         TurnBusy,
@@ -231,8 +233,6 @@ impl Text {
         RenameNameTooLong,
         RenameOneLine,
         TaskFallback,
-        PerchOn,
-        PerchUntitled,
 
         // Settings
         Settings,
@@ -347,6 +347,8 @@ impl Text {
             Self::BottomRight => "position-bottom-right",
             Self::DockError => "dock-error",
             Self::DockBrainError => "dock-brain-error",
+            Self::PerchOn => "carry-perch-on",
+            Self::PerchUntitled => "carry-perch-untitled",
 
             // Turns
             Self::TurnBusy => "turn-busy",
@@ -389,8 +391,6 @@ impl Text {
             Self::RenameNameTooLong => "rename-name-too-long",
             Self::RenameOneLine => "rename-one-line",
             Self::TaskFallback => "task-fallback",
-            Self::PerchOn => "carry-perch-on",
-            Self::PerchUntitled => "carry-perch-untitled",
 
             // Settings
             Self::Settings => "settings-title",
