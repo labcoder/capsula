@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
 use kumochi_protocol::message::{
     AssistantName, DockPosition, ErrorKey, MaxFrameRate, ModelChoice, SettingsOp, SettingsView,
-    ThreadId, UserName,
+    SttUnload, ThreadId, UserName,
 };
 use toml::{Table, Value};
 
@@ -23,6 +23,14 @@ const DEFAULT_MODEL: &str = "default_model";
 const CLAUDE_CODE: &str = "claude_code";
 const DOCK_POSITION: &str = "dock_position";
 const SHOW_IN_TASKBAR: &str = "show_in_taskbar";
+const VOICE: &str = "voice";
+const TALK_BACK: &str = "talk_back";
+const STT_UNLOAD: &str = "stt_unload";
+const STT_UNLOADS: [(SttUnload, &str); 3] = [
+    (SttUnload::Kept, "kept"),
+    (SttUnload::After15Min, "15m"),
+    (SttUnload::After1Hour, "1h"),
+];
 
 /// Why a settings change was refused.
 #[derive(Debug, thiserror::Error)]
@@ -36,6 +44,9 @@ pub(crate) enum ConfigError {
     /// Writing the file failed; nothing changed.
     #[error("config.toml couldn't be written")]
     Write(#[source] io::Error),
+    /// A voice install, remove or cancel, which this build refuses until its installer lands.
+    #[error("voice can't be installed or removed yet")]
+    VoiceUnavailable,
 }
 
 impl ConfigError {
@@ -44,6 +55,7 @@ impl ConfigError {
         match self {
             Self::Unreadable => ErrorKey::ConfigUnreadable,
             Self::NoHome | Self::Write(_) => ErrorKey::SettingsRefused,
+            Self::VoiceUnavailable => ErrorKey::VoiceUnavailable,
         }
     }
 }
@@ -192,6 +204,19 @@ impl Config {
             SettingsOp::SetTaskbar(shown) => {
                 table.insert(SHOW_IN_TASKBAR.to_owned(), Value::Boolean(shown));
             }
+            SettingsOp::SetTalkBack(on) => {
+                voice_mut(&mut table).insert(TALK_BACK.to_owned(), Value::Boolean(on));
+            }
+            SettingsOp::SetSttUnload(unload) => {
+                let (_, name) = STT_UNLOADS
+                    .into_iter()
+                    .find(|(each, _)| *each == unload)
+                    .expect("every unload policy has a name");
+                voice_mut(&mut table).insert(STT_UNLOAD.to_owned(), Value::String(name.to_owned()));
+            }
+            SettingsOp::InstallVoice(_)
+            | SettingsOp::RemoveVoice(_)
+            | SettingsOp::CancelVoiceInstall => return Err(ConfigError::VoiceUnavailable),
         }
         let view = view_of(&table, self.view.main_thread);
         Ok(Pending { path, table, view })
@@ -226,6 +251,17 @@ fn write_replacing(path: &Path, text: &[u8]) -> io::Result<()> {
     file.sync_all()?;
     drop(file);
     crate::platform::replace_file(&temp, path)
+}
+
+/// The `[voice]` table, made one if the key is absent or isn't a table.
+fn voice_mut(table: &mut Table) -> &mut Table {
+    let voice = table
+        .entry(VOICE)
+        .or_insert_with(|| Value::Table(Table::new()));
+    if !voice.is_table() {
+        *voice = Value::Table(Table::new());
+    }
+    voice.as_table_mut().expect("the voice key holds a table")
 }
 
 /// The settings a table holds. A known key with a bad value reads as its default, and stays in
@@ -278,6 +314,25 @@ fn view_of(table: &Table, main_thread: ThreadId) -> SettingsView {
         Some(Value::Boolean(shown)) => *shown,
         Some(_) => invalid(SHOW_IN_TASKBAR).unwrap_or(false),
     };
+    let voice = match table.get(VOICE) {
+        None => None,
+        Some(Value::Table(voice)) => Some(voice),
+        Some(_) => invalid(VOICE),
+    };
+    let talk_back = match voice.and_then(|voice| voice.get(TALK_BACK)) {
+        None => false,
+        Some(Value::Boolean(on)) => *on,
+        Some(_) => invalid(TALK_BACK).unwrap_or(false),
+    };
+    let stt_unload = match voice.and_then(|voice| voice.get(STT_UNLOAD)) {
+        None => SttUnload::Kept,
+        Some(value) => STT_UNLOADS
+            .into_iter()
+            .find(|(_, name)| value.as_str() == Some(*name))
+            .map(|(unload, _)| unload)
+            .or_else(|| invalid(STT_UNLOAD))
+            .unwrap_or_default(),
+    };
     SettingsView {
         assistant_name,
         user_name,
@@ -287,6 +342,8 @@ fn view_of(table: &Table, main_thread: ThreadId) -> SettingsView {
         default_model,
         dock_position,
         show_in_taskbar,
+        talk_back,
+        stt_unload,
     }
 }
 

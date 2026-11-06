@@ -6,7 +6,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::{GestureId, RunId, SceneId};
+use super::{ErrorKey, GestureId, RunId, SceneId};
 use crate::frame::Pipe;
 
 /// The lowest microphone or output rate, in Hz [guess].
@@ -74,6 +74,45 @@ pub struct Cursor {
     pub segment: SegmentId,
     /// Samples of it played.
     pub sample: u32,
+}
+
+/// Each voice part's state, as the brain's installer reports it. Nothing sends it until the
+/// installer lands (slice 7, PR 8b).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoiceView {
+    /// Speech to text.
+    pub speech_input: PartState,
+    /// Text to speech.
+    pub spoken_replies: PartState,
+}
+
+/// One voice part's state. Append only: the tags travel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PartState {
+    /// Not on disk.
+    NotInstalled,
+    /// Checking files already on disk.
+    Verifying,
+    /// Downloading: bytes so far of the part's total.
+    Downloading {
+        /// Bytes on disk and checked so far.
+        done: u64,
+        /// The part's installed size.
+        total: u64,
+    },
+    /// Installed and loading.
+    Loading,
+    /// Loaded and ready.
+    Ready,
+    /// Installed, and unloaded while idle.
+    Unloaded,
+    /// The last install, load or remove failed.
+    Failed {
+        /// Why.
+        key: ErrorKey,
+        /// Whether the part is still installed.
+        installed: bool,
+    },
 }
 
 /// Why a voice frame was refused. It carries no audio or text.

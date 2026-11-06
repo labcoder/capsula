@@ -6,6 +6,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use super::{ModelChoice, ThreadId};
+use crate::voice::VoicePart;
 
 /// The longest name, in Unicode scalar values.
 pub const MAX_NAME_CHARS: usize = 24;
@@ -158,6 +159,29 @@ pub enum SettingsOp {
     SetDockPosition(DockPosition),
     /// Also show the app in the taskbar.
     SetTaskbar(bool),
+    /// Speak replies aloud.
+    SetTalkBack(bool),
+    /// When an idle speech-input model is unloaded.
+    SetSttUnload(SttUnload),
+    /// Download, check and load a voice part. Refused with `VoiceUnavailable` until the
+    /// installer lands (slice 7, PR 8b).
+    InstallVoice(VoicePart),
+    /// Unload and delete a voice part. Refused like `InstallVoice` until then.
+    RemoveVoice(VoicePart),
+    /// Stop the install in progress. Refused like `InstallVoice` until then.
+    CancelVoiceInstall,
+}
+
+/// When an idle speech-input model is unloaded to free its memory.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SttUnload {
+    /// Kept loaded.
+    #[default]
+    Kept,
+    /// Unloaded after 15 idle minutes.
+    After15Min,
+    /// Unloaded after an idle hour.
+    After1Hour,
 }
 
 /// The settings as the brain holds them: once per connection before `Scenes`, and after
@@ -180,6 +204,10 @@ pub struct SettingsView {
     pub dock_position: DockPosition,
     /// Whether the app also appears in the taskbar.
     pub show_in_taskbar: bool,
+    /// Whether replies are spoken aloud.
+    pub talk_back: bool,
+    /// When an idle speech-input model is unloaded.
+    pub stt_unload: SttUnload,
 }
 
 /// The most frames a second Kumo draws. The shell paces to the display, so the rate it runs at
@@ -238,8 +266,78 @@ impl From<MaxFrameRate> for Option<u16> {
 mod tests {
     use super::{
         AssistantName, DockPosition, MAX_NAME_CHARS, MaxFrameRate, NameError, NotACap, SettingsOp,
-        SettingsView, ThreadId, UserName,
+        SettingsView, SttUnload, ThreadId, UserName,
     };
+    use crate::voice::VoicePart;
+
+    fn view() -> SettingsView {
+        SettingsView {
+            assistant_name: AssistantName::new("Sentinelname").expect("valid"),
+            user_name: Some(UserName::new("Sentineluser").expect("valid")),
+            onboarded: true,
+            main_thread: ThreadId(1),
+            max_frame_rate: MaxFrameRate::AUTOMATIC,
+            default_model: None,
+            dock_position: DockPosition::TopCenter,
+            show_in_taskbar: false,
+            talk_back: false,
+            stt_unload: SttUnload::Kept,
+        }
+    }
+
+    #[test]
+    fn voice_operations_are_appended_and_round_trip() {
+        let ops = [
+            (7, SettingsOp::SetTalkBack(true)),
+            (7, SettingsOp::SetTalkBack(false)),
+            (8, SettingsOp::SetSttUnload(SttUnload::Kept)),
+            (8, SettingsOp::SetSttUnload(SttUnload::After15Min)),
+            (8, SettingsOp::SetSttUnload(SttUnload::After1Hour)),
+            (9, SettingsOp::InstallVoice(VoicePart::SpeechInput)),
+            (9, SettingsOp::InstallVoice(VoicePart::SpokenReplies)),
+            (10, SettingsOp::RemoveVoice(VoicePart::SpeechInput)),
+            (10, SettingsOp::RemoveVoice(VoicePart::SpokenReplies)),
+            (11, SettingsOp::CancelVoiceInstall),
+        ];
+        for (tag, op) in ops {
+            let bytes = postcard::to_allocvec(&op).expect("encodes");
+            assert_eq!(bytes[0], tag, "{op:?}");
+            assert_eq!(
+                postcard::from_bytes::<SettingsOp>(&bytes).expect("decodes"),
+                op
+            );
+        }
+        assert_eq!(
+            postcard::to_allocvec(&SettingsOp::SetTaskbar(true)).expect("encodes"),
+            [6, 1]
+        );
+        assert!(postcard::from_bytes::<SettingsOp>(&[12]).is_err());
+        assert!(postcard::from_bytes::<SettingsOp>(&[8, 3]).is_err());
+        assert!(postcard::from_bytes::<SettingsOp>(&[9, 2]).is_err());
+        assert_eq!(SttUnload::default(), SttUnload::Kept);
+    }
+
+    #[test]
+    fn the_voice_settings_round_trip_in_the_view() {
+        for talk_back in [false, true] {
+            for stt_unload in [
+                SttUnload::Kept,
+                SttUnload::After15Min,
+                SttUnload::After1Hour,
+            ] {
+                let view = SettingsView {
+                    talk_back,
+                    stt_unload,
+                    ..view()
+                };
+                let bytes = postcard::to_allocvec(&view).expect("encodes");
+                assert_eq!(
+                    postcard::from_bytes::<SettingsView>(&bytes).expect("decodes"),
+                    view
+                );
+            }
+        }
+    }
 
     #[test]
     fn dock_and_taskbar_operations_and_views_round_trip() {
@@ -277,6 +375,8 @@ mod tests {
                     default_model: None,
                     dock_position: position,
                     show_in_taskbar: shown,
+                    talk_back: false,
+                    stt_unload: SttUnload::Kept,
                 };
                 let bytes = postcard::to_allocvec(&view).expect("encodes");
                 assert_eq!(
