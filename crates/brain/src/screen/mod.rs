@@ -1,7 +1,7 @@
 //! Killable screen work, isolated from the brain's async runtime.
 
 mod capture;
-#[cfg_attr(not(test), expect(dead_code, reason = "A3a2 serves the walk"))]
+#[cfg_attr(not(test), expect(dead_code, reason = "A3b opens the platform reader"))]
 mod elements;
 mod encode;
 mod frame;
@@ -10,6 +10,7 @@ mod frame;
     expect(dead_code, reason = "A3 and A6 populate shared capture masks")
 )]
 mod mask;
+mod reader;
 mod sanitize;
 mod supervisor;
 mod wire;

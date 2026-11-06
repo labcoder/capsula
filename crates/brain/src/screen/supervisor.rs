@@ -7,8 +7,10 @@ use kumochi_protocol::geometry::DisplayRef;
 use tokio::sync::broadcast;
 use tokio::time::Instant;
 
+use super::elements::ElementTree;
 use super::wire::{
-    Exclusion, FrameMeta, MAX_REPLY_BYTES, Refusal, ReplyBody, RequestBody, ScreenError, TicketWire,
+    CaptureId, ElementTarget, Exclusion, FrameMeta, MAX_REPLY_BYTES, Refusal, ReplyBody,
+    RequestBody, ScreenError, TicketWire,
 };
 use crate::platform::Job;
 use crate::supervise::{self, Handle, Kind, WorkerLost};
@@ -16,7 +18,7 @@ use crate::supervise::{self, Handle, Kind, WorkerLost};
 /// Absolute request budget, including queueing (guess).
 pub const REQUEST_DEADLINE: Duration = Duration::from_millis(1500);
 
-/// Why a capture produced no frame.
+/// Why a capture or its element walk was refused or lost.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum CaptureError {
     /// The worker refused the ticket or the display.
@@ -91,6 +93,26 @@ impl ScreenHandle {
             ReplyBody::Captured(meta) if meta.capture == capture && meta.display == display.0 => {
                 Ok(meta)
             }
+            ReplyBody::Refused(refusal) => Err(CaptureError::Refused(refusal)),
+            _ => Err(ScreenError::WorkerLost.into()),
+        }
+    }
+
+    /// Reads the held capture's control view once.
+    ///
+    /// # Errors
+    /// A refusal, a numeric fault, or `WorkerLost` for a reply from another capture.
+    // shortcut: A6 or B2a will submit Elements in production.
+    pub async fn elements(
+        &self,
+        capture: CaptureId,
+        target: ElementTarget,
+    ) -> Result<ElementTree, CaptureError> {
+        match self
+            .request(RequestBody::Elements { capture, target })
+            .await?
+        {
+            ReplyBody::Elements(tree) if tree.capture == capture => Ok(tree),
             ReplyBody::Refused(refusal) => Err(CaptureError::Refused(refusal)),
             _ => Err(ScreenError::WorkerLost.into()),
         }

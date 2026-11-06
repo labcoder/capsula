@@ -1,25 +1,25 @@
 //! The worker's capture operation: ticket checks, the platform seam and the frame's validity.
 
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::geometry::DisplayRef;
 
+use super::elements::{
+    ElementReader, ElementTree, MaskSink, OpenElements, TopWindow, WalkJob, Walked, intersects,
+};
 use super::frame::{RawFrame, display_edges};
-use super::wire::{Exclusion, FrameMeta, Refusal, TicketWire};
+use super::mask::MaskSet;
+use super::wire::{CaptureId, ElementTarget, Exclusion, FrameMeta, Refusal, TicketWire};
 
-/// Why the platform took no frame.
+/// Why a screen operation failed or requires worker retirement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Failure {
     /// An expected refusal, such as expiry or a changed display.
     Refused(Refusal),
     /// A numeric platform code.
     Fault(i32),
-    /// The capture may still be running or the device is lost, so the worker must exit after
-    /// answering.
-    #[cfg_attr(
-        not(any(test, windows)),
-        expect(dead_code, reason = "only the Windows adapter retires")
-    )]
+    /// The platform state can't safely be reused, so the worker must exit after answering.
     Retire(i32),
 }
 
@@ -78,12 +78,38 @@ impl TicketBook {
     }
 }
 
+/// The interval in which screen text still describes a newly arrived frame (guess).
+const WALK_WINDOW: Duration = Duration::from_millis(250);
+
+struct Held {
+    capture: CaptureId,
+    expires: Instant,
+    walk_by: Instant,
+    foreground: Option<TopWindow>,
+    spent: bool,
+}
+
 /// The capture state one worker owns on its serve thread.
-#[derive(Default)]
 pub(super) struct Screen {
     book: TicketBook,
     frame: RawFrame,
     capturer: Option<Box<dyn Capturer>>,
+    held: Option<Held>,
+    masks: MaskSink,
+    reader: Option<Result<Box<dyn ElementReader>, i32>>,
+}
+
+impl Default for Screen {
+    fn default() -> Self {
+        Self {
+            book: TicketBook::default(),
+            frame: RawFrame::default(),
+            capturer: None,
+            held: None,
+            masks: Arc::new(Mutex::new(MaskSet::new(CaptureId(0)))),
+            reader: None,
+        }
+    }
 }
 
 impl Screen {
@@ -96,9 +122,11 @@ impl Screen {
         exclude: Exclusion,
         received: Instant,
         now: &dyn Fn() -> Instant,
-        open: Open,
+        open: (Open, OpenElements),
     ) -> Result<FrameMeta, Failure> {
         self.frame.invalidate();
+        self.held = None;
+        self.masks = Arc::new(Mutex::new(MaskSet::new(ticket.capture())));
         self.book.spend(ticket.generation())?;
         let expires = received + Duration::from_millis(ticket.ttl_ms().into());
         display_edges(display)?;
@@ -107,8 +135,17 @@ impl Screen {
         }
         let capturer = match &mut self.capturer {
             Some(capturer) => capturer,
-            None => self.capturer.insert(open().map_err(Failure::Fault)?),
+            None => self.capturer.insert(open.0().map_err(Failure::Fault)?),
         };
+        if self.reader.as_ref().is_some_and(Result::is_err) {
+            self.reader = None;
+        }
+        let foreground = self
+            .reader
+            .get_or_insert_with(open.1)
+            .as_mut()
+            .ok()
+            .and_then(|reader| reader.foreground());
         let acquired = capturer.capture_into(display, exclude, expires, &mut self.frame)?;
         if acquired.arrived >= expires || now() >= expires {
             self.frame.invalidate();
@@ -127,7 +164,85 @@ impl Screen {
             .unwrap_or(u32::MAX),
         };
         self.frame.commit(meta)?;
+        self.held = Some(Held {
+            capture: meta.capture,
+            expires,
+            walk_by: acquired.arrived + WALK_WINDOW,
+            foreground,
+            spent: false,
+        });
         Ok(meta)
+    }
+
+    pub(super) fn elements(
+        &mut self,
+        capture: CaptureId,
+        target: ElementTarget,
+        now: &dyn Fn() -> Instant,
+    ) -> Result<Walked, Failure> {
+        let Some(held) = &mut self.held else {
+            return Err(Refusal::Stale.into());
+        };
+        if held.capture != capture {
+            return Err(Refusal::Stale.into());
+        }
+        if std::mem::replace(&mut held.spent, true) {
+            return Err(Refusal::Reused.into());
+        }
+        if let ElementTarget::Window { window, pid } = target
+            && (window.0 == 0 || pid == 0)
+        {
+            return Err(Refusal::Invalid.into());
+        }
+        let start = now();
+        let expires = held.expires.min(held.walk_by);
+        if start >= expires {
+            return Err(Refusal::Expired.into());
+        }
+        let reader = match self.reader.as_mut().ok_or(Failure::Fault(0))? {
+            Ok(reader) => reader,
+            Err(code) => {
+                if !super::elements::finish_unavailable(
+                    &self.masks,
+                    super::elements::Unavailable::Busy,
+                ) {
+                    return Err(Failure::Retire(*code));
+                }
+                return Err(Failure::Fault(*code));
+            }
+        };
+        let display = self.frame.meta().ok_or(Failure::Fault(0))?.display;
+        let target = match target {
+            ElementTarget::Foreground => held
+                .foreground
+                .as_ref()
+                .filter(|top| intersects(top.rect, display))
+                .map(|top| ElementTarget::Window {
+                    window: top.window,
+                    pid: top.pid,
+                }),
+            window @ ElementTarget::Window { .. } => Some(window),
+        };
+        let Some(target) = target else {
+            let mut tree =
+                ElementTree::unavailable(capture, super::elements::Unavailable::NoWindow);
+            let retire = !super::elements::finish_unavailable(
+                &self.masks,
+                super::elements::Unavailable::NoWindow,
+            );
+            if retire {
+                tree = ElementTree::unavailable(capture, super::elements::Unavailable::Busy);
+            }
+            return Ok(Walked { tree, retire });
+        };
+        let job = WalkJob {
+            target,
+            capture,
+            display,
+            until: (start + Duration::from_millis(120)).min(expires),
+            masks: Arc::clone(&self.masks),
+        };
+        reader.walk(job)
     }
 
     #[cfg(test)]
