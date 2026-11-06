@@ -65,6 +65,22 @@ fn a_turn_sent_after_the_run_was_named_makes_its_focus_stale() {
 }
 
 #[test]
+fn a_newer_turn_the_brain_refused_still_makes_the_old_focus_stale() {
+    let mut runs = typed(1);
+    named(&mut runs, 1);
+    submit(&mut runs, "a newer turn");
+    runs.refused();
+    let revision = runs.revision();
+    assert!(!runs.focus(RunId(1), TASK));
+    assert_eq!(runs.target(), Target::Kumo);
+    assert_eq!(runs.revision(), revision);
+    submit(&mut runs, "again");
+    named(&mut runs, 2);
+    assert!(runs.focus(RunId(2), TASK));
+    assert_eq!(runs.target(), Target::Task(TASK));
+}
+
+#[test]
 fn a_manual_switch_or_an_unsolicited_run_keeps_the_input_where_it_is() {
     let mut runs = typed(1);
     named(&mut runs, 1);
