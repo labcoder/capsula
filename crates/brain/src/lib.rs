@@ -17,6 +17,7 @@ pub mod issues;
 mod jobs;
 pub mod logging;
 pub mod platform;
+mod recall;
 mod relaunch;
 mod runtime;
 pub mod screen;
