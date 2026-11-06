@@ -11,6 +11,18 @@ directory.
 
 ## Shell editor
 
+Accounts also composes Claude Code through `presence/settings/claude.rs`. The plain
+`claude_accounts.rs` reducer owns only session-fenced snapshots, pending commands and whether
+the Connect guidance is expanded. A new connection must supply its snapshot before commands
+are enabled; a stale generation cannot change the row. An enqueue never changes the displayed
+connection state. A failed send stays visible until an explicit successful retry.
+
+The first Connect action expands the managed-policy notice and manual sign-in guidance without
+sending an operation. Only the second action sends Connect. Discovery's authoritative `Finding`
+state removes that action until a settled SignedOut snapshot arrives. Disconnect uses the shared
+Cancel-first confirmation and rechecks the session and allowed operation when confirmed.
+No login URL, code or credential contents reach the shell. See [Claude Code](claude-code.md).
+
 The status panel's **Settings…** opens a retained window, the tasks panel's size and anchored
 with the same work-area clamping. Kit's tabs expose **General** and **Accounts**.
 `shell/settings.rs` owns the plain drafts, validation, per-field saving and errors;
