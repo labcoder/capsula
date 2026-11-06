@@ -152,6 +152,46 @@ fn each_observed_account_shape_gets_its_verdict() {
             json!({"tokenSource": 7, "subscriptionType": "max", "apiProvider": "firstParty"}),
             Err(AuditFailed::Malformed),
         ),
+        (
+            "a null source beside a subscription",
+            json!({"tokenSource": null, "subscriptionType": "max", "apiProvider": "firstParty"}),
+            Err(AuditFailed::Malformed),
+        ),
+        (
+            "a null source while signed out",
+            json!({"tokenSource": null, "apiProvider": "firstParty"}),
+            Err(AuditFailed::Malformed),
+        ),
+        (
+            "a null subscription",
+            json!({"subscriptionType": null, "apiProvider": "firstParty"}),
+            Err(AuditFailed::Malformed),
+        ),
+        (
+            "a numeric subscription",
+            json!({"subscriptionType": 3, "apiProvider": "firstParty"}),
+            Err(AuditFailed::Malformed),
+        ),
+        (
+            "an object subscription",
+            json!({"subscriptionType": {"plan": "max"}, "apiProvider": "firstParty"}),
+            Err(AuditFailed::Malformed),
+        ),
+        (
+            "a null provider",
+            json!({"subscriptionType": "max", "apiProvider": null}),
+            Err(AuditFailed::Malformed),
+        ),
+        (
+            "a null key source beside a subscription",
+            json!({"subscriptionType": "max", "apiKeySource": null, "apiProvider": "firstParty"}),
+            Err(AuditFailed::KeySource),
+        ),
+        (
+            "a numeric key source beside a subscription",
+            json!({"subscriptionType": "max", "apiKeySource": 0, "apiProvider": "firstParty"}),
+            Err(AuditFailed::KeySource),
+        ),
     ];
     for (case, account, verdict) in shapes {
         let response = control(0, |line| line["response"]["response"]["account"] = account);

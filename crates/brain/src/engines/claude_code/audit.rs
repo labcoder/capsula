@@ -10,11 +10,10 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use kumochi_protocol::constants::MCP_SERVER_NAME;
 use kumochi_protocol::message::AuditFailed;
 use serde::Deserialize;
-use serde::de::IgnoredAny;
 use serde_json::Value;
 
 use super::policy::Reviewed;
-use super::stream::{ControlResponse, InitFacts};
+use super::stream::{ControlBody, ControlResponse, Field, InitFacts};
 
 /// What a reviewed version reports when nothing but Kumochi's server is configured.
 #[derive(Debug)]
@@ -110,7 +109,7 @@ impl PreInputAudit {
                 self.initialize = true;
             }
             MCP_STATUS_ID if !self.mcp => {
-                self.mcp_passes(&response.response)?;
+                self.mcp_passes(&response.response.rest)?;
                 self.mcp = true;
             }
             _ => return Err(AuditFailed::Malformed),
@@ -123,8 +122,8 @@ impl PreInputAudit {
     }
 
     /// `Ok(false)` when every check passed but Claude Code is signed out.
-    fn initialize_passes(&self, body: &Value) -> Result<bool, AuditFailed> {
-        let body = Initialize::deserialize(body).map_err(|_| AuditFailed::Malformed)?;
+    fn initialize_passes(&self, whole: &ControlBody) -> Result<bool, AuditFailed> {
+        let body = Initialize::deserialize(&whole.rest).map_err(|_| AuditFailed::Malformed)?;
         let schema = &self.reviewed.audit;
         if body.claude_code_version.parse() != Ok(self.reviewed.version) {
             return Err(AuditFailed::Version);
@@ -136,17 +135,28 @@ impl PreInputAudit {
         if !exactly(agents, schema.agents.iter().copied()) {
             return Err(AuditFailed::Agents);
         }
-        let account = body.account;
-        if account.api_provider != FIRST_PARTY {
+        let account = whole.account.as_ref().ok_or(AuditFailed::Malformed)?;
+        let Field::Text(provider) = &account.api_provider else {
+            return Err(AuditFailed::Malformed);
+        };
+        let token = match &account.token_source {
+            Field::Absent => None,
+            Field::Text(token) => Some(token.as_str()),
+            Field::Null | Field::Other => return Err(AuditFailed::Malformed),
+        };
+        let subscribed = match account.subscription_type {
+            Field::Absent => false,
+            Field::Text(_) => true,
+            Field::Null | Field::Other => return Err(AuditFailed::Malformed),
+        };
+        if provider != FIRST_PARTY {
             return Err(AuditFailed::TokenSource);
         }
-        if account.api_key_source.is_some() {
+        // Present at all, null included: a key source Kumochi didn't set.
+        if account.api_key_source != Field::Absent {
             return Err(AuditFailed::KeySource);
         }
-        match (
-            account.token_source.as_deref(),
-            account.subscription_type.is_some(),
-        ) {
+        match (token, subscribed) {
             (Some(SIGNED_OUT), false) => Ok(false),
             (None | Some(STORED_SIGN_IN), true) => Ok(true),
             _ => Err(AuditFailed::TokenSource),
@@ -269,18 +279,6 @@ struct Initialize {
     claude_code_version: String,
     commands: Vec<Value>,
     agents: Vec<Named>,
-    account: Account,
-}
-
-/// Only what the audit judges: email and organization are never read, and a key source or
-/// subscription is judged by presence alone.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Account {
-    api_provider: String,
-    token_source: Option<String>,
-    api_key_source: Option<IgnoredAny>,
-    subscription_type: Option<IgnoredAny>,
 }
 
 #[derive(Deserialize)]

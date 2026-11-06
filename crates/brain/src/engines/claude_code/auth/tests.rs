@@ -24,6 +24,25 @@ fn signed_in_by(logged_in: &str, method: &str, provider: &str, dir: &str) -> Vec
 }
 
 #[test]
+fn a_signed_out_status_is_read_with_or_without_its_method_and_provider() {
+    let dir = config().to_str().expect("text").to_owned();
+    let dir = serde_json::to_string(&dir).expect("a string");
+    // Exactly the keys 2.1.306 printed signed out (handoffs/CAPS-158/signin-followups.md).
+    let printed = format!(
+        r#"{{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty","analyticsDisabled":true,"projectsDirectory":"C:\\Users\\someone\\projects","configDirectory":{dir}}}"#
+    );
+    assert_eq!(parse_status(printed.as_bytes(), 1, &config()), Ok(false));
+    let bare = format!(r#"{{"loggedIn":false,"configDirectory":{dir}}}"#);
+    assert_eq!(parse_status(bare.as_bytes(), 1, &config()), Ok(false));
+    let signed_in = format!(r#"{{"loggedIn":true,"configDirectory":{dir}}}"#);
+    assert_eq!(
+        parse_status(signed_in.as_bytes(), 0, &config()),
+        Err(StatusFailure::Malformed),
+        "signed in, the method and provider are required"
+    );
+}
+
+#[test]
 fn signed_in_counts_only_as_a_claude_ai_sign_in_to_anthropic() {
     let dir = config().to_str().expect("text").to_owned();
     // 2.1.306's answers on Rez (handoffs/CAPS-158/signin-followups.md), and two crossings.

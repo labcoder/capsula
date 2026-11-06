@@ -20,14 +20,15 @@ pub(crate) enum StatusFailure {
 #[serde(rename_all = "camelCase")]
 struct Fields {
     logged_in: bool,
-    auth_method: String,
-    api_provider: String,
+    auth_method: Option<String>,
+    api_provider: Option<String>,
     config_directory: String,
 }
 
 /// Whether the status says signed in. `config` is the `CLAUDE_CONFIG_DIR` it was given, which
 /// `configDirectory` must equal exactly, or the route fails closed. Signed in counts only as a
-/// Claude.ai sign-in to Anthropic: a key, a token or another provider is `Malformed`.
+/// Claude.ai sign-in to Anthropic: a key, a token, another provider or a missing field is
+/// `Malformed`. Signed out, neither field is judged.
 pub(crate) fn parse_status(stdout: &[u8], exit: u32, config: &Path) -> Result<bool, StatusFailure> {
     if exit > 1 {
         return Err(StatusFailure::Exit);
@@ -39,7 +40,8 @@ pub(crate) fn parse_status(stdout: &[u8], exit: u32, config: &Path) -> Result<bo
         return Err(StatusFailure::OtherFolder);
     }
     if fields.logged_in
-        && (fields.auth_method != "claude.ai" || fields.api_provider != "firstParty")
+        && (fields.auth_method.as_deref() != Some("claude.ai")
+            || fields.api_provider.as_deref() != Some("firstParty"))
     {
         return Err(StatusFailure::Malformed);
     }
