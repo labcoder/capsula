@@ -180,8 +180,10 @@ impl Lane {
         std::thread::Builder::new()
             .name("claude-code".to_owned())
             .spawn(move || {
+                let mut left = None;
                 for item in &queued {
                     if worker.closing.load(Ordering::Acquire) {
+                        left = Some(item);
                         break;
                     }
                     let (generation, work) = match item {
@@ -205,8 +207,9 @@ impl Lane {
                         break;
                     }
                 }
-                // Queued questions never start once the lane closes.
-                for item in queued.try_iter() {
+                // Queued questions never start once the lane closes, the one taken as it closed
+                // included.
+                for item in left.into_iter().chain(queued.try_iter()) {
                     if let Queued::Launch(start) = item {
                         start.refuse(supervisor::LaunchFailed::Lane(Failure::Refused));
                     }

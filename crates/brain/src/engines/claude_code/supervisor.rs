@@ -375,7 +375,7 @@ pub(super) fn run(
         started,
         ended,
         #[cfg(test)]
-        hooks,
+        mut hooks,
     } = start;
     let mut running = Running {
         control: Arc::clone(&control),
@@ -385,6 +385,8 @@ pub(super) fn run(
         listener: None,
         job: None,
         pumps: Vec::new(),
+        #[cfg(test)]
+        terminate: hooks.terminate.take(),
     };
     let begun = ready.map_err(LaunchFailed::Lane).and_then(|ready| {
         let parts = Parts {
@@ -518,14 +520,15 @@ fn begin(
         stdin,
         control,
         #[cfg(test)]
-        (
-            tests::Stdin {
+        tests::Pumps {
+            stdin: tests::Stdin {
                 admit: hooks.admit,
                 write: hooks.write,
                 writes: hooks.writes,
             },
-            hooks.pumps,
-        ),
+            report: hooks.pumps,
+            fails: hooks.spawn_fails,
+        },
     )?;
     Ok((
         Pipes {
@@ -536,13 +539,14 @@ fn begin(
     ))
 }
 
-/// Starts the three pumps on the child's pipes, into `running`; the round's stdout.
+/// Starts the three pumps on the child's pipes, each into `running` as it starts; the round's
+/// stdout.
 fn pumps(
     running: &mut Running,
     spawned: &mut platform::Spawned,
     stdin: mpsc::Receiver<Input>,
     control: &Arc<Control>,
-    #[cfg(test)] hooks: (tests::Stdin, Option<std_mpsc::Sender<&'static str>>),
+    #[cfg(test)] hooks: tests::Pumps,
 ) -> Result<mpsc::Receiver<Vec<u8>>, LaunchFailed> {
     let (Some(child_stdin), Some(child_stdout), Some(child_stderr)) = (
         spawned.stdin.take(),
@@ -555,8 +559,12 @@ fn pumps(
     let writer = Arc::clone(control);
     let reader = Arc::clone(control);
     #[cfg(test)]
-    let (stdin_hooks, report) = hooks;
-    running.pumps = vec![
+    let tests::Pumps {
+        stdin: stdin_hooks,
+        report,
+        fails,
+    } = hooks;
+    running.pumps.push(
         pump(
             "claude-code-stdin",
             move || {
@@ -569,14 +577,20 @@ fn pumps(
                 );
             },
             #[cfg(test)]
-            report.clone(),
-        ),
+            (report.clone(), fails),
+        )
+        .map_err(|_| LaunchFailed::Spawn)?,
+    );
+    running.pumps.push(
         pump(
             "claude-code-stdout",
             move || read_output(child_stdout, &output, &reader),
             #[cfg(test)]
-            report.clone(),
-        ),
+            (report.clone(), fails),
+        )
+        .map_err(|_| LaunchFailed::Spawn)?,
+    );
+    running.pumps.push(
         pump(
             "claude-code-stderr",
             move || {
@@ -585,9 +599,10 @@ fn pumps(
                 io::copy(&mut stderr, &mut io::sink()).ok();
             },
             #[cfg(test)]
-            report,
-        ),
-    ];
+            (report, fails),
+        )
+        .map_err(|_| LaunchFailed::Spawn)?,
+    );
     Ok(stdout)
 }
 
@@ -659,19 +674,26 @@ struct Running {
     listener: Option<(tokio::task::AbortHandle, std_mpsc::Receiver<()>)>,
     job: Option<Arc<Job>>,
     pumps: Vec<std_mpsc::Receiver<()>>,
+    #[cfg(test)]
+    terminate: Option<tests::Pause>,
 }
 
 impl Running {
-    /// Fails the gate and closes stdin, aborts the listener, ends the job and confirms it empty,
-    /// waits for the pumps, and only then deletes the folder. A failure to end never falls
-    /// through to the deletion.
+    /// Fails the gate and closes stdin, aborts the listener and waits up to [`PIPE_GRACE`] for its
+    /// task to end, ends the job and confirms it empty, waits for the pumps, and only then
+    /// deletes the folder. Anything not confirmed ended never falls through to the deletion.
     fn stop(self, host: &Host) -> Teardown {
         self.control.revoke();
-        if let Some((serve, gone)) = &self.listener {
+        // A runtime that's gone dropped the task already, which also counts as ended.
+        let served = self.listener.as_ref().is_none_or(|(serve, gone)| {
             serve.abort();
-            // A runtime that's gone dropped the task already; it holds no process either way.
-            gone.recv_timeout(PIPE_GRACE).ok();
-        }
+            !matches!(
+                gone.recv_timeout(PIPE_GRACE),
+                Err(std_mpsc::RecvTimeoutError::Timeout)
+            )
+        });
+        #[cfg(test)]
+        tests::pause(self.terminate);
         if let Some(job) = &self.job
             && (host.terminate)(job).is_err()
         {
@@ -686,6 +708,11 @@ impl Running {
                 tracing::warn!("a claude launch's pipe didn't end; Claude Code stays closed");
                 return Teardown::Stuck;
             }
+        }
+        // A task still running may hold the launch's pipe name.
+        if !served {
+            tracing::warn!("a claude launch's listener didn't end; Claude Code stays closed");
+            return Teardown::Stuck;
         }
         drop(self.held);
         match self.dir.as_deref().map(platform::remove_tree) {
@@ -709,20 +736,22 @@ fn ended(pumps: &[std_mpsc::Receiver<()>]) -> bool {
 fn pump(
     name: &'static str,
     work: impl FnOnce() + Send + 'static,
-    #[cfg(test)] report: Option<std_mpsc::Sender<&'static str>>,
-) -> std_mpsc::Receiver<()> {
+    #[cfg(test)] (report, fails): (Option<std_mpsc::Sender<&'static str>>, Option<&'static str>),
+) -> io::Result<std_mpsc::Receiver<()>> {
+    #[cfg(test)]
+    if fails == Some(name) {
+        return Err(io::Error::other("a pump thread that can't start"));
+    }
     let (signal, ended) = std_mpsc::channel::<()>();
     #[cfg(test)]
     let signal = tests::Ending::new(signal, name, report);
-    let spawned = std::thread::Builder::new()
+    let _thread = std::thread::Builder::new()
         .name(name.to_owned())
         .spawn(move || {
             let _signal = signal;
             work();
-        });
-    // With no thread the work and its signal drop at once, so the pump counts as ended.
-    drop(spawned);
-    ended
+        })?;
+    Ok(ended)
 }
 
 /// stdin: each chunk is admitted, then written. `End`, `Wake`, a refused admission or a failed

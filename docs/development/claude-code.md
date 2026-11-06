@@ -276,9 +276,12 @@ one at a time. Nothing in production starts one yet; C5b's engine is the first c
   write, and `revoke()` swaps `Open → Revoked` (`Idle`: no write admitted after that instant,
   none in flight) or `Writing → RevokedWriting` (`WriteInFlight`: that one write settles before
   the folder is deleted). `revoke()` fails the gate and wakes stdin, and never waits.
-- **Pipes.** stdin and stdout are bounded channels of `PIPE_QUEUE` (4) chunks of at most `CHUNK`
-  (64 KiB). stdout never parks in a blocking send: on a full channel it retries every `POLL`, and
-  once the round lets go it drops what it reads until EOF. stderr is drained and dropped.
+- **Pipes.** stdin and stdout are bounded channels of `PIPE_QUEUE` (4) chunks. stdout's chunks
+  are at most `CHUNK` (64 KiB). stdin is bounded by chunk count only, not bytes: a round can queue
+  four chunks of any size. A byte budget at the enqueue boundary, retained capacity included, is
+  C5b's to enforce. stdout never parks in a blocking send: on a full channel it retries every
+  `POLL`, and once the round lets go it drops what it reads until EOF. stderr is drained and
+  dropped.
 - **Who revokes.** Stop or Esc (the lease drops with the round), a finished run, Disconnect
   (before its logout), a settled view that isn't `Ready` (`Finding` and rounds in progress never
   revoke), deleting the launch's thread, and closing the lane.
@@ -298,10 +301,14 @@ stateDiagram-v2
     Settled --> Ended: folder deleted (Done)
 ```
 
-Stopping always goes in this order: revoke, abort the listener, terminate the run job and confirm
-it empty, then wait up to `PIPE_GRACE` for each pump. A failed termination or a pump that doesn't
-end is `Stuck`: the lane goes stuck, keeps the lock and the folder, and refuses the next call.
-Only a settled launch drops its folder's handles and deletes it.
+Stopping always goes in this order: revoke, abort the listener and wait up to `PIPE_GRACE` (1 s)
+for its task to end, terminate the run job and confirm it empty, then wait up to `PIPE_GRACE` for
+each pump. A pump still running after that gets the round's stdout let go and up to `PIPE_GRACE`
+again, so each pump can take up to two graces. A failed termination, a pump that doesn't end or a
+listener task that didn't end is `Stuck`: the job is still terminated, but the lane goes stuck,
+keeps the lock and the folder, and refuses the next call. Only a settled launch drops its
+folder's handles and deletes it. A pump thread that can't start fails the launch as `Spawn`
+through the same stop.
 
 **The folder is the crash record.** Every launch process sits in the kill-on-close brain job, so a
 crash leaves only files under `engine\`, which is reserved for launch folders. `settle()` takes

@@ -19,7 +19,7 @@ use super::{
 use crate::bridge::listener::Listener;
 use crate::coordinator::Input as CoordinatorInput;
 use crate::engines::claude_code::lane::tests::{Base, host, locked, soon};
-use crate::engines::claude_code::lane::{Failure, LANE_QUEUE, Lane, Outcome, Work};
+use crate::engines::claude_code::lane::{Failure, LANE_QUEUE, Lane, Outcome, PIPE_GRACE, Work};
 use crate::engines::{self, Asks, Engine, Finish, Round, RunRequest, SendGate, TurnEvent};
 use crate::platform::{self, FAKE_CLAUDE, Job, Stdio};
 
@@ -38,6 +38,17 @@ pub(crate) struct Hooks {
     pub(crate) id: Option<std_mpsc::Sender<LaunchId>>,
     /// Hears each pump's name as its thread ends.
     pub(crate) pumps: Option<std_mpsc::Sender<&'static str>>,
+    /// The pump whose thread fails to start.
+    pub(crate) spawn_fails: Option<&'static str>,
+    /// Where the teardown waits, once the listener is aborted and before it ends the job.
+    pub(crate) terminate: Option<Pause>,
+}
+
+/// The pumps' share of [`Hooks`].
+pub(super) struct Pumps {
+    pub(super) stdin: Stdin,
+    pub(super) report: Option<std_mpsc::Sender<&'static str>>,
+    pub(super) fails: Option<&'static str>,
 }
 
 /// The stdin pump's share of [`Hooks`].
@@ -452,8 +463,8 @@ async fn finished_reaches_the_brain_before_teardown() {
 }
 
 /// S4: a chunk taken but not yet admitted when the launch is revoked is never written, and chunks
-/// queued behind an admitted write never are either. Writes are heard at the pipe, since the
-/// teardown may end the child before it reads what was written.
+/// queued behind an admitted write never are either. Writes are heard at the pipe; the second
+/// case also holds the teardown before the job ends, so the child reads the admitted chunk.
 #[tokio::test]
 async fn no_chunk_admitted_after_revoke_reaches_the_child() {
     let base = Base::new("launch-admission");
@@ -476,10 +487,12 @@ async fn no_chunk_admitted_after_revoke_reaches_the_child() {
     assert_eq!(written.try_iter().collect::<Vec<_>>(), Vec::<usize>::new());
 
     let (mut start, mut launch) = admit(question(Duration::from_secs(20)));
+    let (held, termination) = barrier();
     let (paused, barrier) = barrier();
     let (writes, written) = std_mpsc::channel();
     start.hooks.write = Some(paused);
     start.hooks.writes = Some(writes);
+    start.hooks.terminate = Some(held);
     queue(&lane, start);
     let pipes = pipes(&mut launch).await;
     pipes
@@ -494,13 +507,91 @@ async fn no_chunk_admitted_after_revoke_reaches_the_child() {
             .expect("room");
     }
     assert_eq!(launch.lease().revoke(), Revoked::WriteInFlight);
+    // Waited off this runtime, which serves the listener the teardown aborts first.
+    let termination = tokio::task::spawn_blocking(move || {
+        assert!(
+            termination.reached_within(WAIT),
+            "the teardown waits to end the job"
+        );
+        termination
+    })
+    .await
+    .expect("the wait");
     barrier.release();
+    assert_eq!(
+        written.recv_timeout(WAIT),
+        Ok(10),
+        "the admitted write returned"
+    );
+    until("the child read the admitted chunk", || {
+        echoed(&base) == [10]
+    })
+    .await;
+    termination.release();
     assert_eq!(end(launch).await, Teardown::Done);
     assert_eq!(
         written.try_iter().collect::<Vec<_>>(),
-        [10],
-        "only the admitted chunk was written"
+        Vec::<usize>::new(),
+        "no queued chunk was written"
     );
+    assert_eq!(
+        echoed(&base),
+        [10],
+        "the child read only the admitted chunk"
+    );
+}
+
+/// M2: a pump thread that can't start fails the launch as `Spawn`, and the pumps already
+/// started, the job, the listener and the folder are ended in order.
+#[tokio::test]
+async fn a_pump_that_fails_to_start_stops_the_launch() {
+    let base = Base::new("launch-pump-fails");
+    let lane = found(&base, "deaf").await;
+    let cases: [(&str, &[&str]); 2] = [
+        ("claude-code-stdout", &["claude-code-stdin"]),
+        (
+            "claude-code-stderr",
+            &["claude-code-stdin", "claude-code-stdout"],
+        ),
+    ];
+    for (fails, started) in cases {
+        let (mut start, mut launch) = admit(question(Duration::from_secs(20)));
+        let (id_tx, id) = std_mpsc::channel();
+        let (pumps, ended) = std_mpsc::channel();
+        start.hooks.id = Some(id_tx);
+        start.hooks.pumps = Some(pumps);
+        start.hooks.spawn_fails = Some(fails);
+        queue(&lane, start);
+        assert_eq!(failed(&mut launch).await, LaunchFailed::Spawn);
+        assert_eq!(
+            end(launch).await,
+            Teardown::Done,
+            "the job was confirmed empty"
+        );
+        let mut names: Vec<_> = ended.try_iter().collect();
+        names.sort_unstable();
+        assert_eq!(names, started, "the started pumps ended");
+        let id = id.recv_timeout(WAIT).expect("the id");
+        assert!(Listener::create(id).is_ok(), "the listener was ended");
+        assert!(launch_dirs(&base).is_empty(), "the folder is gone");
+    }
+}
+
+/// C-M1: a listener task the runtime can't drop within the grace leaves the launch `Stuck`, the
+/// folder kept and the lane refusing.
+#[tokio::test]
+async fn a_listener_that_outlives_the_grace_is_stuck() {
+    let base = Base::new("launch-listener-held");
+    let mut lane = found(&base, "deaf").await;
+    let (start, mut launch) = admit(question(Duration::from_secs(20)));
+    queue(&lane, start);
+    let _pipes = pipes(&mut launch).await;
+    assert_eq!(launch.lease().revoke(), Revoked::Idle);
+    // The listener's task runs on this test's runtime, so blocking it withholds the abort.
+    std::thread::sleep(PIPE_GRACE * 3);
+    assert_eq!(end(launch).await, Teardown::Stuck);
+    assert_eq!(launch_dirs(&base).len(), 1, "the folder is kept");
+    assert_eq!(version(&mut lane).await, Err(Failure::Refused));
 }
 
 /// End closes stdin: the child reads its end and exits, which ends the launch.
@@ -659,22 +750,26 @@ async fn stdout_holds_four_chunks_for_a_round_that_never_reads() {
 async fn stdin_holds_four_chunks_for_a_deaf_child() {
     let base = Base::new("launch-stdin-bound");
     let lane = found(&base, "deaf").await;
-    let (start, mut launch) = admit(question(Duration::from_secs(20)));
+    let (mut start, mut launch) = admit(question(Duration::from_secs(20)));
+    let (paused, barrier) = barrier();
+    start.hooks.write = Some(paused);
     queue(&lane, start);
     let pipes = pipes(&mut launch).await;
     let chunk = || Input::Chunk(vec![b'q'; 65536]);
     pipes.stdin.try_send(chunk()).expect("room");
-    until("the pump took the first chunk", || {
-        pipes.stdin.capacity() == 4
-    })
-    .await;
-    for _ in 0..4 {
-        pipes.stdin.try_send(chunk()).expect("room");
-    }
+    assert!(
+        barrier.reached_within(WAIT),
+        "the pump holds the first chunk"
+    );
+    pipes.stdin.try_send(chunk()).expect("room 1");
+    pipes.stdin.try_send(chunk()).expect("room 2");
+    pipes.stdin.try_send(chunk()).expect("room 3");
+    pipes.stdin.try_send(chunk()).expect("room 4");
     assert!(matches!(
         pipes.stdin.try_send(chunk()),
         Err(mpsc::error::TrySendError::Full(_))
     ));
+    barrier.release();
     assert_eq!(end(launch).await, Teardown::Done);
 }
 
@@ -785,14 +880,24 @@ async fn closing_ends_the_live_launch() {
     queue(&lane, start);
     let _pipes = pipes(&mut live).await;
     until("it runs", || questions(&base) == 1).await;
-    let (start, mut queued) = admit(question(Duration::from_secs(20)));
-    queue(&lane, start);
+    let mut queued = Vec::new();
+    for _ in 0..3 {
+        let (start, launch) = admit(question(Duration::from_secs(20)));
+        let control = start.control();
+        queue(&lane, start);
+        queued.push((control, launch));
+    }
     assert!(lane.close(soon()).await, "closed clean");
     assert_eq!(end(live).await, Teardown::Done);
-    assert_eq!(
-        failed(&mut queued).await,
-        LaunchFailed::Lane(Failure::Refused)
-    );
+    // The first is the one the worker takes as it sees the close; each is settled.
+    for (control, mut launch) in queued {
+        assert_eq!(
+            failed(&mut launch).await,
+            LaunchFailed::Lane(Failure::Refused)
+        );
+        assert_eq!(end(launch).await, Teardown::Done);
+        assert!(control.is_ended(), "its control is ended");
+    }
     assert!(launch_dirs(&base).is_empty());
     assert_eq!(questions(&base), 1);
 }
