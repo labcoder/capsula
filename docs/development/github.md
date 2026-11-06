@@ -121,6 +121,6 @@ fetched list, preserving GitHub's spelling.
 
 The verification page is the protocol's VERIFICATION_URI constant. The API
 checks the reply against it; neither the view nor a brain effect carries a
-provider-supplied URL. The shell's connection UI opens the constant with GPUI's
-open_url, guarded against fixture runs. The machine and protocol are separate
+provider-supplied URL. The shell's connection UI adapter must open the constant
+with GPUI's open_url, guarded against fixture runs. The machine and protocol are separate
 from the runtime credential adapter and the connection UI.
