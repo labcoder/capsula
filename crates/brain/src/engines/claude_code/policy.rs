@@ -3,7 +3,7 @@
 //! functions: C2 and C5a start the processes, own the jobs and keep [`LaunchData`] alive.
 
 use std::collections::BTreeSet;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -147,9 +147,13 @@ const SWITCHES: [&str; 6] = [
 
 /// The arguments and environment for `entry`. `system` is `platform::system_env()`: the only
 /// values not owned by Kumochi, read from the OS and never from the brain's environment.
+/// `browser` is `platform::login_browser()`, Login's `BROWSER`: Claude Code's own opener would
+/// start the browser with the launch's environment, which fails and would hand it the owned
+/// folders.
 pub(crate) fn launch_data(
     folders: &OwnedFolders,
     system: &[(OsString, OsString)],
+    browser: &OsStr,
     entry: &EntryPoint<'_>,
 ) -> LaunchData {
     let words = |words: &[&str]| words.iter().map(OsString::from).collect::<Vec<_>>();
@@ -213,6 +217,7 @@ pub(crate) fn launch_data(
         .map(|(name, path)| (name.into(), path.into()))
         .chain(SWITCHES.into_iter().map(|name| (name.into(), "1".into())))
         .chain(system.iter().cloned())
+        .chain(matches!(entry, EntryPoint::Login).then(|| ("BROWSER".into(), browser.to_owned())))
         .collect();
     LaunchData { args, env }
 }

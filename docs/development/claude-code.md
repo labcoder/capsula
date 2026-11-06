@@ -127,7 +127,12 @@ version: its launch policy and the facts its audit expects. Any other version is
   `DISABLE_ERROR_REPORTING`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`,
   `CLAUDE_CODE_SKIP_PROMPT_HISTORY` and `CLAUDE_CODE_DISABLE_AUTO_MEMORY`. `SystemRoot`,
   `SystemDrive` and `PATH` come from the OS (`platform::system_env`): `PATH` is the system folder
-  then the Windows folder, never the brain's own `PATH`, and there's no `PATHEXT`.
+  then the Windows folder, never the brain's own `PATH`, and there's no `PATHEXT`. `auth login`
+  alone also gets `BROWSER`, the Windows folder's `explorer.exe` (`platform::login_browser`):
+  Claude Code's own opener starts the browser with this environment, which fails and would hand
+  it the owned folders, while a second explorer passes the URL to the running shell, which opens
+  the default browser in the user's own environment. The localhost callback then completes the
+  sign-in with no pasted code.
 - **Ownership.** C3 returns owned `LaunchData`; C2 and C5a keep it alive and borrow it into
   `platform::Launch` with the exe, the `work` folder, the stdio and the jobs. C3 starts nothing.
 - **Before any launch,** `may_launch` refuses with `PolicyFailed::ManagedPolicy` when an endpoint
