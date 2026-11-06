@@ -6,6 +6,7 @@ use kumochi_protocol::message::{ErrorArg, ErrorKey, UserError};
 use unic_langid::LanguageIdentifier;
 
 const ENGLISH: &str = include_str!("../../../locales/en/shell.ftl");
+mod claude;
 
 /// Every string the shell shows. A unit test checks each one is in the catalog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,6 +149,20 @@ pub(crate) enum Text {
     AccountBacklogRetry,
     AccountBacklogExpiry,
     AccountBacklogRecovery,
+
+    // Claude Code
+    ClaudeProvider,
+    ClaudeReview,
+    ClaudeConnect,
+    ClaudeDisconnect,
+    ClaudeFind,
+    ClaudePolicyNotice,
+    ClaudeBefore,
+    ClaudeDuring,
+    ClaudeFallback,
+    ClaudeDeadline,
+    ClaudeAnalytics,
+    ClaudeDisconnectBody,
 }
 
 #[cfg(test)]
@@ -304,6 +319,20 @@ impl Text {
         AccountBacklogRetry,
         AccountBacklogExpiry,
         AccountBacklogRecovery,
+
+        // Claude Code
+        ClaudeProvider,
+        ClaudeReview,
+        ClaudeConnect,
+        ClaudeDisconnect,
+        ClaudeFind,
+        ClaudePolicyNotice,
+        ClaudeBefore,
+        ClaudeDuring,
+        ClaudeFallback,
+        ClaudeDeadline,
+        ClaudeAnalytics,
+        ClaudeDisconnectBody,
     }
 
     pub(crate) const POSITIONS: [Self; 9] = [
@@ -462,6 +491,20 @@ impl Text {
             Self::AccountBacklogRetry => "accounts-backlog-retry",
             Self::AccountBacklogExpiry => "accounts-backlog-expiry",
             Self::AccountBacklogRecovery => "accounts-backlog-recovery",
+
+            // Claude Code
+            Self::ClaudeProvider => "claude-provider",
+            Self::ClaudeReview => "claude-review",
+            Self::ClaudeConnect => "claude-connect",
+            Self::ClaudeDisconnect => "claude-disconnect",
+            Self::ClaudeFind => "claude-find",
+            Self::ClaudePolicyNotice => "claude-policy-notice",
+            Self::ClaudeBefore => "claude-before",
+            Self::ClaudeDuring => "claude-during",
+            Self::ClaudeFallback => "claude-fallback",
+            Self::ClaudeDeadline => "claude-deadline",
+            Self::ClaudeAnalytics => "claude-analytics",
+            Self::ClaudeDisconnectBody => "claude-disconnect-body",
         }
     }
 }

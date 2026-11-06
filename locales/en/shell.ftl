@@ -192,6 +192,53 @@ error-claude-code-policy = A policy or safety check keeps Kumochi from using Cla
 error-claude-code-input-unsupported = Claude Code can't take a screenshot here. Switch connection to send one.
 error-claude-code-budget = Kumochi's Claude Code allowance for now is used up.
 error-claude-code-cleanup-pending = Disconnecting Claude Code isn't finished yet. Kumochi keeps retrying.
+claude-provider = Claude Code
+claude-review = Connect…
+claude-connect = Connect Claude Code
+claude-disconnect = Disconnect Claude Code
+claude-find = Look again
+claude-policy-notice = Your Team or Enterprise organization’s server-managed Claude Code settings apply to Kumochi’s questions too. Kumochi can’t see those settings. Personal plans have no organization-managed settings.
+claude-before = A Claude Code window will open. If it asks how to sign in, choose “Claude account with subscription,” not the Anthropic Console API option.
+claude-during = Continue in the Claude Code window. If it asks how to sign in, choose “Claude account with subscription,” not the Anthropic Console API option.
+claude-fallback = If your browser doesn’t open, open the link shown in that window yourself, sign in and authorize access. Copy the code from the page, paste it into the Claude Code window, and press Enter.
+claude-deadline = Sign-in stops after five minutes. You can cancel it or try again afterwards.
+claude-analytics = Claude Code reports its own analytics as on.
+claude-disconnect-body = This signs Claude Code out of Kumochi and removes Kumochi’s Claude Code folder. Your other apps’ sign-ins are not changed.
+claude-status-waiting = Waiting for Claude Code status…
+claude-status-finding = Looking for Claude Code…
+claude-status-not-found = Claude Code was not found.
+claude-status-off = Claude Code is turned off in config.
+claude-status-out = Claude Code { $version } is signed out.
+claude-status-ready = Claude Code { $version } is ready.
+claude-status-signing = Signing in…
+claude-status-cleanup = Cleanup is pending. Choose Look again to retry removing Kumochi’s Claude Code folder.
+claude-status-in-use = Another Kumochi session is using Claude Code. Close that session, then look again.
+claude-status-unavailable = Claude Code is unavailable. Restart Kumochi before trying again.
+claude-status-unsupported =
+    { $reason ->
+        [shim] This Claude Code installation is a wrapper or shim, not the native executable.
+        [store] This build cannot use Claude Code’s sign-in store.
+       *[version] Claude Code { $version } has not been reviewed for this build.
+    }
+claude-status-audit =
+    Claude Code’s launch audit failed: { $reason ->
+        [version] version mismatch
+        [commands] unexpected slash commands
+        [agents] unexpected agents
+        [mcp] unexpected MCP server
+        [tools] unexpected tools
+        [plugins] unexpected plugins
+        [skills] unexpected skills
+        [key] unexpected API key source
+        [token] unexpected sign-in source
+        [deadline] audit timed out
+       *[malformed] unreadable launch facts
+    }.
+claude-status-policy =
+    { $reason ->
+        [managed] A managed policy is present or could not be ruled out. Claude Code cannot be used.
+       *[turns] This Claude Code version’s turn limit is not verified.
+    }
 
 # Voice
 
