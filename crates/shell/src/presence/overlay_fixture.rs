@@ -33,7 +33,7 @@ const END: f32 = 40.0;
 type PaintUnit = (FrameItem, Arc<[Prim]>);
 
 #[derive(Clone, Copy)]
-enum Mode {
+pub(super) enum Mode {
     Dry,
     Rest,
     Animated,
@@ -52,7 +52,7 @@ const TURNED: [(usize, Vec2); 2] = [
 
 /// The fixture step prepared with `measure` at rest: each paint unit with its own primitives,
 /// in paint order, and the rest's paint work.
-fn resting(
+pub(super) fn resting(
     measure: &mut dyn TextMeasure,
     logical_size: [f32; 2],
     mode: Mode,
