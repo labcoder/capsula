@@ -1,7 +1,10 @@
 //! Closed GitHub destinations and checked transient credentials; no account state lives here.
 
+pub mod api;
+
 use std::fmt;
 use std::ops::RangeInclusive;
+use std::time::Duration;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -252,6 +255,13 @@ impl GitHubEndpoint {
             Self::User { .. } => 64 * 1024,
             _ => super::http_client::MAX_BODY_BYTES,
         }
+    }
+
+    pub(super) fn deadline(&self) -> Duration {
+        Duration::from_secs(match self {
+            Self::CreateIssue { .. } | Self::Issues { .. } => 30,
+            _ => 15,
+        })
     }
 }
 
