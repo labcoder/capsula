@@ -70,8 +70,10 @@ fn legacy_names_are_deleted_unread_and_a_staged_paste_is_refused() {
     );
     assert!(
         matches!(
-            vault.anthropic(KeyOp::Adopt),
-            Err(KeyError::Vault(VaultError::Fenced))
+            vault.adopt_anthropic_paste(authority::Generation::from_stage_id(
+                kumochi_protocol::message::KeyStageId([0; 16])
+            )),
+            Err(super::super::staging::PasteError::Changed)
         ),
         "adoption is refused"
     );

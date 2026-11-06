@@ -496,6 +496,18 @@ impl Drawing {
             .map(|held| held.thread)
     }
 
+    /// A live scene's labelled solid, for an ask: the scene's thread, its `alt` and the part's
+    /// current text. `None` once the scene is cleared, deleted or gone, or the part isn't one.
+    pub(crate) fn part(
+        &self,
+        scene: SceneId,
+        element: kumochi_scene::Handle,
+    ) -> Option<(ThreadId, &kumochi_scene::Text, kumochi_scene::Part<'_>)> {
+        let held = &self.scenes[self.live(scene)?];
+        let part = held.state.part(element)?;
+        Some((held.thread, &held.state.header().alt, part))
+    }
+
     /// Runs queued work until a write is in the store. Scenes that left go first, so their
     /// charges are released before anything is admitted.
     fn pump(&mut self, out: &mut Output) {

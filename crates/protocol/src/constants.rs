@@ -212,6 +212,45 @@ pub const CREDENTIAL_GENERATION_SEGMENT: &str = "gen";
 pub fn generation_target(service: &str, kind: &str, generation: &str, index: usize) -> String {
     format!("{service}/{CREDENTIAL_GENERATION_SEGMENT}/{kind}/{generation}/{index}")
 }
+
+/// The credential chunk size, below Windows' generic credential blob limit.
+pub const CREDENTIAL_CHUNK_SIZE: usize = 2000;
+
+/// One write-once credential's exact bounded layout, shared by both processes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CredentialLayout(usize);
+
+impl CredentialLayout {
+    /// Refuses records above the existing 48-KiB authority bound.
+    pub fn new(bytes: usize) -> Option<Self> {
+        (bytes <= 49152).then_some(Self(bytes))
+    }
+    /// The exact total byte length.
+    pub const fn bytes(self) -> usize {
+        self.0
+    }
+    /// The number of names, including one empty chunk for an empty record.
+    pub fn chunks(self) -> usize {
+        self.0.div_ceil(CREDENTIAL_CHUNK_SIZE).max(1)
+    }
+    /// The exact size of a chunk at an index below `chunks()`.
+    pub fn chunk_len(self, index: usize) -> usize {
+        if index + 1 < self.chunks() {
+            CREDENTIAL_CHUNK_SIZE
+        } else {
+            self.0 - CREDENTIAL_CHUNK_SIZE * (self.chunks() - 1)
+        }
+    }
+}
+
+/// Canonical lowercase identity spelling for every generation's target names.
+pub fn generation_hex(id: &[u8; 16]) -> String {
+    use std::fmt::Write as _;
+    id.iter().fold(String::with_capacity(32), |mut hex, byte| {
+        write!(hex, "{byte:02x}").expect("writing into a String cannot fail");
+        hex
+    })
+}
 /// Where Claude Code's native installer puts `claude.exe`, under `%USERPROFILE%`, in the order they're tried.
 pub const CLAUDE_CODE_PATHS: &[&str] = &[r".local\bin\claude.exe"];
 /// Dev builds only: set this to a file path and the brain records every pipe frame there, for
