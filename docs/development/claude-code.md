@@ -197,11 +197,12 @@ sequenceDiagram
 - **Close.** `Brain::quit` and `Brain::close` close the lane before the accounts: no more work, the
   running call's processes end, queued jobs are dropped, and the lock goes only once every job was
   confirmed empty.
-- **The sign-in store isn't decided** (owner call 1), so `SIGN_IN` ships `Undecided`: Connect,
-  Cancel and Disconnect do nothing, and a signed-out install shows `Unsupported(SignInStore)`.
-  Everything under "Signing in and out" below is built and tested against the fake, and stays
-  dormant until the owner picks `FileWithDacl`. Under `Undecided`, a sign-in found in the owned
-  folder is shown but must never be used: C5a's question path checks the store, not only Ready.
+- **The sign-in store** is option a (owner call 1, 2026-11-05), so `SIGN_IN` ships
+  `FileWithDacl`. It's the one exception to keeping secrets only in Credential Manager: Claude Code's own credential file may exist only inside Kumochi's Claude Code folder, readable by the user and SYSTEM only. Kumochi never reads, copies or relays its contents. It opens handles only to check the file's metadata and permissions, and to delete it. Disconnect removes it (logout, then delete).
+  Connect, Cancel and Disconnect work as "Signing in and out" below describes. `Undecided`, the
+  off position, stays for tests: Connect, Cancel and Disconnect do nothing, a signed-out install
+  shows `Unsupported(SignInStore)`, and a sign-in found in the owned folder is shown but never
+  used, because C5a's question path checks the store, not only Ready.
 - **One view.** The key's half of `ConnectionsView` belongs to the account worker and Claude Code's
   half to `runtime/claude.rs`; every Connections frame is put together from both when it's sent.
 
@@ -282,7 +283,7 @@ sequenceDiagram
 - **The stated limit:** the seed can reach the chosen model before init is checked, but no tool
   runs before the check.
 - **Signed-in sources aren't recorded yet,** so 2.1.306's row accepts no `tokenSource` but `none`
-  (signed out). The signed-in probe, after owner call 1, adds the value.
+  (signed out). The signed-in probe, on the first real sign-in, adds the value.
 
 The brain's side of the pipe, and the launch that writes `mcp.json`, come with C4b and C5a.
 On macOS the pipe would be a Unix socket in the owned folder (unverified).

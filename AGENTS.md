@@ -48,6 +48,9 @@ THIRD-PARTY-NOTICES.md  notices for incorporated third-party source
 - No telemetry. Nothing leaves the machine except calls to accounts the user set up.
 - Secrets live only in Windows Credential Manager: never in logs, command lines, files or the
   environment. Hold them in `Secret`, which prints `***`.
+- The one exception: Claude Code's own credential file may exist only inside Kumochi's Claude
+  Code folder, readable by the user and SYSTEM only. Kumochi never reads, copies or relays its
+  contents, and Disconnect removes it (logout, then delete). Nothing else is exempt.
 - Never log prompts, transcripts, screen text, images or tool arguments.
 - Screenshots go only to the model the user chose.
 - Use only the connections the user sets up inside Kumochi. Never read, copy or depend on credentials, tokens, sessions or config that other apps or the developer's machine hold (Claude Code, Codex, gh, browsers and the like).

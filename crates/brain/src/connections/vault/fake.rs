@@ -1,6 +1,7 @@
 //! An in-memory credential store for tests: it can refuse, or "crash" after, any mutation.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -34,6 +35,9 @@ pub(crate) struct FakeState {
     pub(crate) slow_write: Option<(Arc<AtomicU64>, u64)>,
     /// Fail the test on any second write of a name, even after a delete (OSC-233 write-once).
     pub(crate) write_once: bool,
+    /// While set, each mutation first notes the marker the authority file there holds, so a
+    /// trace shows which control state every store mutation ran under.
+    pub(crate) note_markers: Option<(PathBuf, Vec<String>)>,
     written: BTreeSet<String>,
 }
 
@@ -99,6 +103,16 @@ impl FakeStore {
             if value.is_some() && state.write_once {
                 let fresh = state.written.insert(target.to_owned());
                 assert!(fresh, "a write-once credential name was written twice");
+            }
+            if let Some((path, notes)) = state.note_markers.as_mut() {
+                let marker = rusqlite::Connection::open(&*path)
+                    .and_then(|conn| {
+                        conn.query_row("SELECT marker FROM control WHERE id = 1", [], |row| {
+                            row.get(0)
+                        })
+                    })
+                    .expect("the authority's marker");
+                notes.push(marker);
             }
             let index = state.mutations.len();
             state.mutations.push(value.map_or_else(

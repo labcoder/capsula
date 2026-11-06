@@ -47,6 +47,8 @@ pub(super) struct Connections {
     unsent: bool,
     read: Option<JoinHandle<()>>,
     loading: bool,
+    /// A Remove is admitted but hasn't committed (design §5): every key op retries it.
+    removing: bool,
 }
 
 impl Default for Connections {
@@ -62,6 +64,7 @@ impl Default for Connections {
             unsent: false,
             read: None,
             loading: false,
+            removing: false,
         }
     }
 }
@@ -152,17 +155,26 @@ impl Accounts {
 
     pub(super) fn connection_event(&mut self, event: ConnectionEvent) -> Vec<ControlToShell> {
         match event {
-            ConnectionEvent::Op(op) => match op {
-                ConnectionOp::AnthropicKeyStaged => self.load_key(KeyOp::Adopt),
-                ConnectionOp::CheckAnthropicKey => self.load_key(KeyOp::Load),
-                ConnectionOp::RemoveAnthropicKey => self.load_key(KeyOp::Remove),
-                _ => return Vec::new(),
-            },
+            ConnectionEvent::Op(op) => {
+                let op = match op {
+                    ConnectionOp::AnthropicKeyStaged => KeyOp::Adopt,
+                    ConnectionOp::CheckAnthropicKey => KeyOp::Load,
+                    ConnectionOp::RemoveAnthropicKey => KeyOp::Remove,
+                    _ => return Vec::new(),
+                };
+                self.connections.removing |= matches!(op, KeyOp::Remove);
+                self.load_key(if self.connections.removing {
+                    KeyOp::Remove
+                } else {
+                    op
+                });
+            }
             ConnectionEvent::Loaded { generation, result } => {
                 if generation != self.connections.generation || !self.connections.loading {
                     return Vec::new();
                 }
                 self.connections.loading = false;
+                self.connections.removing &= !matches!(result, Ok(None));
                 match result {
                     Ok(Some(key)) => {
                         self.connections.key = Some(key.clone());
