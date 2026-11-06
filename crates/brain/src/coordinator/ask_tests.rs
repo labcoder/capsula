@@ -7,12 +7,13 @@ use kumochi_protocol::message::{
 };
 use kumochi_scene::Handle;
 
-use super::{R, T, WALL_CLOCK, built, start_engine, state};
+use super::{R, T, WALL_CLOCK, admit, built, start_engine, state};
 use crate::coordinator::availability::sign_in_needed;
 use crate::coordinator::{
     Availability, BuildKey, Coordinator, Effect, Input, SendKey, Stale, StoreOp,
 };
-use crate::drawing::{Reply, Target, Write};
+use crate::drawing::{self, Reply, Target, Write};
+use crate::engines::CallId;
 use crate::store::{RunEnd, Store};
 use crate::test_support::Scratch;
 
@@ -226,6 +227,44 @@ fn an_ask_in_a_thread_being_deleted_or_deleted_is_refused() {
         "its scene left with it"
     );
     assert_eq!(core.current_run(), None);
+}
+
+/// A scene whose thread was deleted while a drawing write is still pending is held until that
+/// write answers, but it is gone: an ask about it is refused.
+#[test]
+fn a_scene_held_after_its_thread_left_is_refused() {
+    let scratch = Scratch::new("ask-held-gone");
+    let (mut core, scene) = drawn(&scratch);
+    core.handle(typed()).expect("a turn is never stale");
+    admit(&mut core, ASKED);
+    let args = serde_json::to_vec(&serde_json::json!({"records":[
+        {"begin":{"v":1,"scene":"flat","surface":"overlay","alt":"a box"}},
+        {"step":{"id":"s1","put":[{"shape":{"id":"a","kind":"rect","box":[0,0,10,10]}}]}},
+        {"end":{}}
+    ]}))
+    .expect("arguments");
+    let pending = core
+        .handle(Input::Drawing(drawing::Input::Call {
+            thread: ThreadId(5),
+            run: ASKED,
+            call: CallId::new("draw").expect("call"),
+            args,
+        }))
+        .expect("fresh call");
+    assert!(
+        pending
+            .iter()
+            .any(|effect| matches!(effect, Effect::Store(StoreOp::Drawing { .. }))),
+        "a write is pending: {pending:?}"
+    );
+    core.handle(delete(T, core.turns_read)).expect("accepted");
+    core.handle(answer(T, Deleted::Removed)).expect("answered");
+    assert_eq!(core.handle(ask(scene, handle(1))), Ok(refused()));
+    assert_eq!(
+        core.current_run(),
+        Some(ASKED),
+        "the refusal replaced nothing"
+    );
 }
 
 /// M1: an ask the brain reads retires the fences it passed even when its part doesn't resolve,
