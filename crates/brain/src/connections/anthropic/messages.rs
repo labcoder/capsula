@@ -111,6 +111,7 @@ pub async fn stream<C: AnthropicConnect, L>(
             content_by = Instant::now() + CONTENT_IDLE;
         }
         let capacity_by = Instant::now() + BACKPRESSURE;
+        // shortcut: a stalled delivery can replace Exhausted/Refused with BackpressureTimeout; revisit in A3b.
         let taken = timeout_at(content_by.min(capacity_by), out.taken())
             .await
             .map_err(|_| {

@@ -74,19 +74,29 @@ provider latency or end-to-end throughput.
 
 `engines::anthropic::Mapper` consumes the reader's events for one round. It requires a
 message start, unique block indices and tool ids, matching delta kinds, and one stop per
-block. A failure is sticky. Text becomes TextDelta; exact `draw` becomes Draw and every
+block. A validation failure is sticky, but the reader's Exhausted, Refused or Provider
+ending takes precedence. Empty initial text is skipped; other text becomes TextDelta.
+Exact `draw` becomes Draw and every
 other bounded tool name becomes Unknown. The coordinator alone decides offers, charges
 calls and dispatches. Tool arguments use concatenated fragments, or the start object when
-there are none, and must be a complete JSON object before ToolCallReady.
+there are none, ignoring empty argument fragments, and must be a complete JSON object
+before ToolCallReady.
 
 Thinking and redacted thinking become private Opaque items indexed in provider order;
-thinking without a signature fails closed. Unknown/fallback blocks are bounded and skipped.
-The mapper caps blocks and queued events at 64, retained plus queued content at 1 MiB,
-and each Opaque item at 256 KiB. Taking events transfers ownership before the next read.
+an absent initial signature waits for signature_delta, and thinking stopped without a
+signature fails closed. Unknown/fallback blocks are skipped without copying their payload.
+The mapper caps blocks at 64, retained plus queued content at 1 MiB, and each Opaque
+item at 256 KiB. Each queued event carries 64 bytes of overhead, including zero-length
+events, with 64 bytes reserved at message start for final Usage. Events have no
+per-read event-count cap, so a dense 16-KiB read can deliver all
+its deltas. Taking events transfers ownership before the next read.
 
-Usage fields retain literal nonnegative u32 counts, absent fields preserve earlier counts,
-and cumulative counts cannot decrease. On success or a final exhaustion/refusal delta,
+Usage fields retain literal nonnegative u32 counts; absent fields and null input/cache
+fields preserve earlier counts, while output_tokens stays strict. Cumulative counts cannot
+decrease. On success or a final exhaustion/refusal delta,
 the mapper stages one Usage with `first_request: Some(whole)` before the caller emits
-Finished. Premature EOF emits no Usage because its snapshot is only a lower bound.
+Finished, including when an exhausted/refused round has truncated tool arguments.
+Premature EOF emits no Usage because its snapshot is only a lower bound. A stalled
+consumer during delivery can still replace the semantic failure with a delivery timeout.
 There is no usage persistence, retry loop, key access, runtime router or replay contract
 in A3a. Those integration decisions belong to A3b.

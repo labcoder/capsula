@@ -172,4 +172,4 @@ error-claude-code-policy = A policy or safety check keeps Kumochi from using Cla
 error-claude-code-input-unsupported = Claude Code can't take a screenshot here. Switch connection to send one.
 error-claude-code-budget = Kumochi's Claude Code allowance for now is used up.
 error-claude-code-cleanup-pending = Disconnecting Claude Code isn't finished yet. Kumochi keeps retrying.
-error-anthropic-answer-limit = The answer reached the app’s token or context limit. Try a shorter question.
+error-anthropic-answer-limit = The answer reached the limit Kumochi sets for one reply. Try asking for something shorter.

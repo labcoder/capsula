@@ -13,6 +13,7 @@ use crate::connections::{
 const ITEMS: usize = 64;
 const BYTES: usize = 1024 * 1024;
 const NAME: usize = 64;
+const EVENT_BYTES: usize = 64;
 
 enum Block {
     Text,
@@ -71,8 +72,14 @@ impl fmt::Debug for Mapper {
 impl Mapper {
     /// Maps a callback without allowing later input to undo a failure or ending.
     pub(crate) fn event(&mut self, event: &SseEvent) {
-        if !self.broken && !self.terminal && self.map(event).is_err() {
+        if self.terminal || (self.broken && event.kind() != "message_delta") {
+            return;
+        }
+        if self.map(event).is_err() {
             self.broken = true;
+            if event.kind() == "message_delta" {
+                self.final_usage = false;
+            }
         }
     }
 
@@ -85,24 +92,25 @@ impl Mapper {
 
     /// Stages exact final usage, then returns the ending once. Drain `take` before Finished.
     /// Premature EOF never publishes a potentially incomplete usage snapshot.
+    /// Message start reserves Usage's overhead so a full queue cannot hide a semantic failure.
     pub(crate) fn finish(&mut self, read: Result<Progress, Failure>) -> Option<Finish> {
         if self.terminal {
             return None;
         }
-        let mut finish = if self.broken {
-            Finish::Failed(EngineFailure::Anthropic(Failure::Protocol))
-        } else {
-            match read {
-                Ok(Progress::More) => return None,
-                Ok(Progress::Completed)
-                    if self.usage.is_none()
-                        || self.blocks.iter().any(|(_, b)| !matches!(b, Block::Closed)) =>
-                {
-                    Finish::Failed(EngineFailure::Anthropic(Failure::Protocol))
-                }
-                Ok(Progress::Completed) => Finish::Completed,
-                Err(failure) => Finish::Failed(EngineFailure::Anthropic(failure)),
+        let finish = match read {
+            Err(failure @ (Failure::Exhausted | Failure::Refused | Failure::Provider(_))) => {
+                Finish::Failed(EngineFailure::Anthropic(failure))
             }
+            _ if self.broken => Finish::Failed(EngineFailure::Anthropic(Failure::Protocol)),
+            Ok(Progress::More) => return None,
+            Ok(Progress::Completed)
+                if self.usage.is_none()
+                    || self.blocks.iter().any(|(_, b)| !matches!(b, Block::Closed)) =>
+            {
+                Finish::Failed(EngineFailure::Anthropic(Failure::Protocol))
+            }
+            Ok(Progress::Completed) => Finish::Completed,
+            Err(failure) => Finish::Failed(EngineFailure::Anthropic(failure)),
         };
         let exact = matches!(
             &finish,
@@ -114,14 +122,11 @@ impl Mapper {
         if exact
             && self.final_usage
             && let Some(whole) = self.usage
-            && self
-                .queue(TurnEvent::Usage(Usage {
-                    whole,
-                    first_request: Some(whole),
-                }))
-                .is_err()
         {
-            finish = Finish::Failed(EngineFailure::Anthropic(Failure::Protocol));
+            self.events.push(TurnEvent::Usage(Usage {
+                whole,
+                first_request: Some(whole),
+            }));
         }
         self.terminal = true;
         Some(finish)
@@ -134,6 +139,7 @@ impl Mapper {
                 if self.usage.is_some() || !self.blocks.is_empty() {
                     return Err(());
                 }
+                self.charge(EVENT_BYTES)?;
                 self.usage = Some(Tokens::default());
                 self.counts(&v["message"]["usage"])?;
             }
@@ -166,6 +172,9 @@ impl Mapper {
             ("cache_creation_input_tokens", &mut tokens.cache_write),
         ] {
             if let Some(value) = v.get(key) {
+                if value.is_null() && key != "output_tokens" {
+                    continue;
+                }
                 let next = value
                     .as_u64()
                     .and_then(|n| u32::try_from(n).ok())
@@ -190,11 +199,10 @@ impl Mapper {
         let block = match text(&v["type"])? {
             "text" => {
                 let initial = text(&v["text"])?;
-                self.charge(initial.len())?;
-                if self.events.len() == ITEMS {
-                    return Err(());
+                if !initial.is_empty() {
+                    self.charge(initial.len() + EVENT_BYTES)?;
+                    self.events.push(TurnEvent::TextDelta(initial.to_owned()));
                 }
-                self.events.push(TurnEvent::TextDelta(initial.to_owned()));
                 Block::Text
             }
             "tool_use" => {
@@ -227,7 +235,11 @@ impl Mapper {
             }
             "thinking" => {
                 let thought = text(&v["thinking"])?;
-                let signature = text(&v["signature"])?;
+                let signature = v
+                    .get("signature")
+                    .map(text)
+                    .transpose()?
+                    .unwrap_or_default();
                 self.charge(thought.len().checked_add(signature.len()).ok_or(())?)?;
                 Block::Thinking {
                     text: thought.to_owned(),
@@ -239,10 +251,7 @@ impl Mapper {
                 self.charge(data.len())?;
                 Block::RedactedThinking(data.to_owned())
             }
-            _ => {
-                self.serialize(v, BYTES)?;
-                Block::Skipped
-            }
+            _ => Block::Skipped,
         };
         self.blocks.push((index, block));
         Ok(())
@@ -256,26 +265,23 @@ impl Mapper {
             (Block::Tool { .. }, "input_json_delta") => ("partial_json", 2),
             (Block::Thinking { .. }, "thinking_delta") => ("thinking", 1),
             (Block::Thinking { .. }, "signature_delta") => ("signature", 1),
-            (Block::Skipped, _) => {
-                self.serialize(v, BYTES)?;
-                return Ok(());
-            }
+            (Block::Skipped, _) => return Ok(()),
             _ => return Err(()),
         };
         let delta = text(&v[key])?;
-        if (copies == 2 || matches!(&self.blocks[at].1, Block::Text)) && self.events.len() == ITEMS
-        {
-            return Err(());
+        if copies == 2 && delta.is_empty() {
+            return Ok(());
         }
-        let id_bytes = match &self.blocks[at].1 {
-            Block::Tool { call, .. } => call.as_str().len(),
+        let queued = match &self.blocks[at].1 {
+            Block::Tool { call, .. } => call.as_str().len() + EVENT_BYTES,
+            Block::Text => EVENT_BYTES,
             _ => 0,
         };
         self.charge(
             delta
                 .len()
                 .checked_mul(copies)
-                .and_then(|n| n.checked_add(id_bytes))
+                .and_then(|n| n.checked_add(queued))
                 .ok_or(())?,
         )?;
         match &mut self.blocks[at].1 {
@@ -372,9 +378,6 @@ impl Mapper {
     }
 
     fn queue(&mut self, event: TurnEvent) -> Result<(), ()> {
-        if self.events.len() == ITEMS {
-            return Err(());
-        }
         self.charge(event_bytes(&event))?;
         self.events.push(event);
         Ok(())
@@ -448,14 +451,15 @@ fn index(value: &Value) -> Result<u32, ()> {
         .ok_or(())
 }
 fn event_bytes(event: &TurnEvent) -> usize {
-    match event {
-        TurnEvent::TextDelta(text) => text.len(),
-        TurnEvent::ToolCallStarted { call, .. } => call.as_str().len(),
-        TurnEvent::ToolArgsDelta { call, delta } => call.as_str().len() + delta.len(),
-        TurnEvent::ToolCallReady { call, args } => call.as_str().len() + args.len(),
-        TurnEvent::OutputItem { item, .. } => item.size(),
-        _ => 0,
-    }
+    EVENT_BYTES
+        + match event {
+            TurnEvent::TextDelta(text) => text.len(),
+            TurnEvent::ToolCallStarted { call, .. } => call.as_str().len(),
+            TurnEvent::ToolArgsDelta { call, delta } => call.as_str().len() + delta.len(),
+            TurnEvent::ToolCallReady { call, args } => call.as_str().len() + args.len(),
+            TurnEvent::OutputItem { item, .. } => item.size(),
+            _ => 0,
+        }
 }
 
 #[cfg(test)]
