@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 
-use kumochi_protocol::constants::{INSTANCE_SERVICE, SESSION_LOCK};
+use kumochi_protocol::constants::{INSTANCE_SERVICE, SESSION_LOCK, generation_target};
+use rusqlite::Connection;
 
 use super::fake::{FakeStore, Fault, Mutation};
 use super::*;
@@ -11,16 +13,15 @@ use crate::platform::credential::CredentialStoreError;
 use crate::test_support::Scratch;
 
 mod anthropic;
-#[cfg(all(windows, debug_assertions))]
-mod anthropic_roundtrip;
 mod bounds;
 mod inventory;
 mod marker;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Replacement {
-    Tokens,
+enum Record {
+    Account,
     Registration,
+    Revocations,
 }
 
 fn setup(name: &str) -> (Scratch, PathBuf, String, FakeStore) {
@@ -35,6 +36,51 @@ fn setup(name: &str) -> (Scratch, PathBuf, String, FakeStore) {
 
 fn open(store: &FakeStore, service: &str, path: &Path) -> Vault<FakeStore> {
     Vault::with_service(store.clone(), service, path).expect("test vault lock")
+}
+
+/// The vault's authority file, as another process would see it.
+fn raw(path: &Path) -> Connection {
+    Connection::open(path.with_file_name(authority::FILE)).expect("raw authority connection")
+}
+
+/// A copy of a closed vault's authority file in a new folder, as a crash test's restart point.
+fn fork_dir(path: &Path, name: &str) -> (Scratch, PathBuf) {
+    let scratch = Scratch::new(name);
+    let copy = scratch.db().with_file_name(SESSION_LOCK);
+    std::fs::create_dir_all(copy.parent().expect("scratch folder")).expect("scratch folder");
+    std::fs::copy(
+        path.with_file_name(authority::FILE),
+        copy.with_file_name(authority::FILE),
+    )
+    .expect("copy authority");
+    (scratch, copy)
+}
+
+const TABLES: [(&str, &str); 4] = [
+    ("heads", "UPDATE"),
+    ("control", "UPDATE"),
+    ("generations", "UPDATE"),
+    ("generations", "INSERT"),
+];
+
+/// Makes the authority refuse every commit at once, as a failing disk would, until allowed.
+fn refuse_commits(path: &Path) {
+    let conn = raw(path);
+    for (index, (table, operation)) in TABLES.iter().enumerate() {
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER refuse_{index} BEFORE {operation} ON {table} \
+             BEGIN SELECT RAISE(ABORT, 'refused'); END;"
+        ))
+        .expect("refusal trigger");
+    }
+}
+
+fn allow_commits(path: &Path) {
+    let conn = raw(path);
+    for index in 0..TABLES.len() {
+        conn.execute_batch(&format!("DROP TRIGGER refuse_{index};"))
+            .expect("drop refusal trigger");
+    }
 }
 
 fn account(label: &str) -> Secret<Account> {
@@ -77,8 +123,7 @@ fn list(label: &str) -> Secret<RevocationList> {
 
 fn committed(result: SaveResult) {
     match result {
-        SaveResult::Committed { leftovers: false } => {}
-        SaveResult::Committed { leftovers: true } => panic!("unexpected cleanup leftovers"),
+        SaveResult::Committed => {}
         SaveResult::NotCommitted(error) => panic!("expected a commit: {error:?}"),
     }
 }
@@ -86,37 +131,55 @@ fn committed(result: SaveResult) {
 fn gone(result: DeleteResult) {
     match result {
         DeleteResult::Gone => {}
-        DeleteResult::Refused(error) => panic!("expected every name removed: {error:?}"),
+        DeleteResult::Refused(error) => panic!("expected the record removed: {error:?}"),
     }
 }
 
-fn assert_record_absent(store: &FakeStore, service: &str, record: &str) {
-    let prefix = format!("{service}/{record}");
-    assert!(
-        store
-            .names()
-            .iter()
-            .all(|name| name != &prefix && !name.starts_with(&format!("{prefix}/"))),
-        "no manifest or orphan chunk remains"
-    );
+fn is_current(vault: &Vault<FakeStore>, kind: Kind) -> bool {
+    vault
+        .authority
+        .current(kind)
+        .expect("authority head")
+        .active
+        .is_some()
 }
 
-fn assert_only_active_slot(vault: &Vault<FakeStore>, store: &FakeStore, record: Chunked) {
-    let manifest = vault
-        .manifest(record)
-        .expect("manifest read")
-        .expect("manifest exists");
-    let names = store.names();
-    for slot in 0..2 {
-        for index in 0..MAX_CHUNKS {
-            let name = format!("{}/{}/{slot}/{index}", vault.service, record.name());
-            assert_eq!(
-                names.contains(&name),
-                slot == manifest.slot && index < manifest.chunks,
-                "only active chunks remain"
-            );
+/// The exact names of every record's current generation, sorted.
+fn current_names(vault: &Vault<FakeStore>) -> Vec<String> {
+    let mut names = Vec::new();
+    for kind in [
+        Kind::Host,
+        Kind::Account,
+        Kind::Revocations,
+        Kind::AnthropicKey,
+    ] {
+        if let Some(active) = vault
+            .authority
+            .current(kind)
+            .expect("authority head")
+            .active
+        {
+            names.extend((0..active.layout.chunks()).map(|index| {
+                generation_target(
+                    &vault.service,
+                    kind.label(),
+                    &active.generation.hex(),
+                    index,
+                )
+            }));
         }
     }
+    names.sort();
+    names
+}
+
+/// Every removed generation was swept: the store holds current generations and nothing else.
+fn assert_only_current(vault: &Vault<FakeStore>, store: &FakeStore) {
+    assert_eq!(
+        store.names(),
+        current_names(vault),
+        "only current names remain"
+    );
 }
 
 #[test]
@@ -180,24 +243,53 @@ fn records_and_host_round_trip_and_a_second_client_is_busy() {
             == list("one").expose(),
         "list round trip"
     );
+    assert!(
+        store
+            .names()
+            .iter()
+            .all(|name| name.starts_with(&format!("{service}/gen/"))),
+        "every name is a write-once generation name"
+    );
+    assert_only_current(&vault, &store);
+}
+
+/// A current host whose bytes went missing stays an error and is never replaced (L2).
+#[test]
+fn a_host_that_stops_reading_back_is_never_replaced() {
+    let (_scratch, path, service, store) = setup("vault-host-missing");
+    let mut vault = open(&store, &service, &path);
+    let host = vault.host_id().expect("host");
+    let saved = store.snapshot();
+    store.rollback(&BTreeMap::new(), &store.names());
+    assert!(matches!(
+        vault.host_id(),
+        Err(VaultError::Store(CredentialStoreError::Unsettled))
+    ));
+    assert!(store.names().is_empty(), "no new host was written");
+    store.rollback(&saved, &saved.keys().cloned().collect::<Vec<_>>());
+    assert!(
+        vault.host_id().expect("host again").expose() == host.expose(),
+        "the host id survives a reopen"
+    );
 }
 
 #[test]
 fn failure_and_crash_at_each_save_mutation_preserve_the_commit_boundary() {
-    exercise_save_faults(Chunked::Account, Replacement::Tokens);
-    exercise_save_faults(Chunked::Account, Replacement::Registration);
-    exercise_save_faults(Chunked::Revoke, Replacement::Tokens);
+    exercise_save_faults(Record::Account);
+    exercise_save_faults(Record::Registration);
+    exercise_save_faults(Record::Revocations);
 }
 
-fn exercise_save_faults(record: Chunked, replacement: Replacement) {
+fn exercise_save_faults(record: Record) {
     let (_scratch, path, service, seed) = setup("vault-save-faults");
     {
         let mut vault = open(&seed, &service, &path);
-        match record {
-            Chunked::Account => committed(vault.save_account(&account("old"))),
-            Chunked::Revoke => committed(vault.save_revocations(&list("old"))),
+        if record == Record::Revocations {
+            committed(vault.save_revocations(&list("old")));
+        } else {
+            committed(vault.save_account(&account("old")));
         }
-        if replacement == Replacement::Registration {
+        if record == Record::Registration {
             vault
                 .update_marker(MarkerUpdate::Promote(Disposition::Keep))
                 .expect("promote");
@@ -208,136 +300,193 @@ fn exercise_save_faults(record: Chunked, replacement: Replacement) {
                 .expect("checkpoint");
         }
     }
-    let new_account = if replacement == Replacement::Registration {
+    let replacement = if record == Record::Registration {
         registration(&account("old"))
     } else {
         account("new")
     };
-    let baseline = seed.fork();
-    {
-        let mut vault = open(&baseline, &service, &path);
-        match record {
-            Chunked::Account => committed(vault.save_account(&new_account)),
-            Chunked::Revoke => committed(vault.save_revocations(&list("new"))),
+    let save = |vault: &mut Vault<FakeStore>| {
+        if record == Record::Revocations {
+            vault.save_revocations(&list("new"))
+        } else {
+            vault.save_account(&replacement)
         }
-    }
-    let trace = baseline.0.lock().expect("fake lock").mutations.clone();
-    let commit_at = trace.iter().position(|op| matches!(op, Mutation::Set(name) if name == &format!("{service}/{}", record.name()))).expect("manifest commit in trace");
-    for (index, mutation) in trace.iter().enumerate() {
+    };
+    let trace = {
+        let baseline = seed.fork();
+        let (_copy, copy) = fork_dir(&path, "vault-save-baseline");
+        let mut vault = open(&baseline, &service, &copy);
+        baseline.arm(usize::MAX, Fault::Refuse);
+        committed(save(&mut vault));
+        baseline.0.lock().expect("fake lock").mutations.clone()
+    };
+    let commit_at = trace
+        .iter()
+        .position(|mutation| matches!(mutation, Mutation::Delete(_)))
+        .expect("the old generation is swept after the commit");
+    assert!(commit_at > 0, "the new generation is written first");
+    for index in 0..trace.len() {
         for fault in [Fault::Refuse, Fault::CrashAfter] {
             let store = seed.fork();
-            let mut vault = open(&store, &service, &path);
+            let (_copy, copy) = fork_dir(&path, "vault-save-fault");
+            let mut vault = open(&store, &service, &copy);
             store.arm(index, fault);
-            let outcome = panic::catch_unwind(AssertUnwindSafe(|| match record {
-                Chunked::Account => vault.save_account(&new_account),
-                Chunked::Revoke => vault.save_revocations(&list("new")),
-            }));
-            let changed = save_changed_after_fault(outcome, mutation, fault, index, commit_at);
-            drop(vault);
-            let mut restarted = open(&store, &service, &path);
-            match record {
-                Chunked::Account => {
-                    let loaded = restarted
-                        .load::<Account>(record)
-                        .expect("account after crash")
-                        .expect("old or new account");
-                    let expected = if changed {
-                        new_account.clone()
-                    } else {
-                        account("old")
-                    };
-                    assert!(
-                        loaded.expose() == expected.expose(),
-                        "manifest selects exactly the committed account"
-                    );
-                    committed(restarted.save_account(&new_account));
+            let outcome = panic::catch_unwind(AssertUnwindSafe(|| save(&mut vault)));
+            let changed = index >= commit_at;
+            match (fault, outcome) {
+                (Fault::Refuse, Ok(SaveResult::Committed)) => {
+                    assert!(changed, "a refused write never commits");
                 }
-                Chunked::Revoke => {
-                    let loaded = restarted
-                        .load_revocations()
-                        .expect("list after crash")
-                        .expect("old or new list");
-                    let expected = if changed { list("new") } else { list("old") };
-                    assert!(
-                        loaded.expose() == expected.expose(),
-                        "manifest selects exactly the committed list"
-                    );
-                    committed(restarted.save_revocations(&list("new")));
-                }
+                (
+                    Fault::Refuse,
+                    Ok(SaveResult::NotCommitted(VaultError::Store(CredentialStoreError::Write(5)))),
+                ) => assert!(!changed, "a refused sweep isn't a failed save"),
+                (Fault::CrashAfter, Err(_)) => {}
+                (fault, outcome) => panic!("unexpected {fault:?} outcome: {outcome:?}"),
             }
-            assert_only_active_slot(&restarted, &store, record);
-        }
-    }
-}
-
-fn save_changed_after_fault(
-    outcome: std::thread::Result<SaveResult>,
-    mutation: &Mutation,
-    fault: Fault,
-    index: usize,
-    commit_at: usize,
-) -> bool {
-    match fault {
-        Fault::Refuse => {
-            let result = outcome.expect("refusal returns, not crashes");
-            if index > commit_at {
+            drop(vault);
+            let mut restarted = open(&store, &service, &copy);
+            if record == Record::Revocations {
+                let expected = if changed { list("new") } else { list("old") };
                 assert!(
-                    matches!(result, SaveResult::Committed { leftovers: true }),
-                    "post-commit cleanup is not a failed save"
+                    restarted
+                        .load_revocations()
+                        .expect("list after the fault")
+                        .expect("a list")
+                        .expose()
+                        == expected.expose(),
+                    "exactly the committed list"
                 );
             } else {
+                let expected = if changed {
+                    replacement.clone()
+                } else {
+                    account("old")
+                };
                 assert!(
-                    matches!(
-                        (mutation, result),
-                        (
-                            Mutation::Set(_),
-                            SaveResult::NotCommitted(VaultError::Store(
-                                CredentialStoreError::Write(5)
-                            ))
-                        ) | (
-                            Mutation::Delete(_),
-                            SaveResult::NotCommitted(VaultError::Store(
-                                CredentialStoreError::Delete(5)
-                            ))
-                        )
-                    ),
-                    "pre-commit refusal preserves the exact store error"
+                    restarted
+                        .read::<Account>(Kind::Account)
+                        .expect("account after the fault")
+                        .expect("an account")
+                        .expose()
+                        == expected.expose(),
+                    "exactly the committed account"
                 );
             }
-            index > commit_at
-        }
-        Fault::CrashAfter => {
-            assert!(outcome.is_err(), "crash point reached");
-            index >= commit_at
+            committed(save(&mut restarted));
+            assert_only_current(&restarted, &store);
         }
     }
 }
 
+/// CAPS-179 M2: begin and every write land, then the head update inside the commit is
+/// refused. Nothing changes, even after the removal's generations retired in the same
+/// transaction, and a retry commits a fresh generation.
 #[test]
-fn an_interrupted_first_write_leaves_orphans_that_the_next_writer_sweeps() {
-    let (_scratch, path, service, store) = setup("vault-first-write");
+fn a_refused_head_update_rolls_back_the_whole_commit() {
+    let (_scratch, path, service, store) = setup("vault-late-refusal");
     let mut vault = open(&store, &service, &path);
-    store.arm(MAX_CHUNKS, Fault::CrashAfter);
+    committed(vault.save_account(&account("old")));
+    vault
+        .save_anthropic_key(b"sk-ant-api-fake-late-refusal")
+        .expect("key");
+    let old = current_names(&vault);
+    let marker = vault.marker().expect("marker");
+    let refuse = raw(&path);
+    refuse
+        .execute_batch(
+            "CREATE TRIGGER refuse_head BEFORE UPDATE ON heads \
+             BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+        )
+        .expect("refusal trigger");
+    let before = store.0.lock().expect("fake lock").mutations.len();
+    let result = vault.save_account(&account("new"));
     assert!(
-        panic::catch_unwind(AssertUnwindSafe(|| vault.save_account(&account("old")))).is_err(),
-        "crash after first chunk"
+        matches!(result, SaveResult::NotCommitted(VaultError::Authority)),
+        "{result:?}"
     );
+    let attempted: Vec<String> = store.0.lock().expect("fake lock").mutations[before..]
+        .iter()
+        .filter_map(|mutation| match mutation {
+            Mutation::Set(name) => Some(name.clone()),
+            Mutation::Delete(_) => None,
+        })
+        .collect();
     assert!(
-        store.names().contains(&format!("{service}/chatgpt/0/0")),
-        "orphan really exists"
+        !attempted.is_empty(),
+        "every write landed before the commit"
     );
-    assert!(
-        !store.names().contains(&format!("{service}/chatgpt")),
-        "no commit yet"
-    );
+    assert!(matches!(
+        vault.anthropic(crate::connections::anthropic::KeyOp::Remove),
+        Err(crate::connections::anthropic::KeyError::Vault(
+            VaultError::Authority
+        ))
+    ));
+    refuse
+        .execute_batch("DROP TRIGGER refuse_head;")
+        .expect("drop refusal trigger");
     drop(vault);
-    let mut restarted = open(&store, &service, &path);
-    committed(restarted.save_account(&registration(&account("new"))));
-    assert_only_active_slot(&restarted, &store, Chunked::Account);
+    let mut vault = open(&store, &service, &path);
+    assert_eq!(current_names(&vault), old, "the head is unchanged");
+    assert_eq!(vault.marker().expect("marker"), marker, "and the marker");
+    assert_eq!(
+        vault
+            .load_account()
+            .expect("read")
+            .expect("the old account")
+            .expose()
+            .email
+            .as_deref()
+            .map(String::as_str),
+        Some("old@example.invalid")
+    );
+    assert!(
+        is_current(&vault, Kind::AnthropicKey),
+        "the removal rolled back"
+    );
+    committed(vault.save_account(&account("new")));
+    let fresh = current_names(&vault);
+    assert!(
+        fresh
+            .iter()
+            .filter(|name| name.contains("/gen/chatgpt/"))
+            .all(|name| !attempted.contains(name) && !old.contains(name)),
+        "the retry commits a fresh generation"
+    );
+    assert_eq!(
+        vault
+            .load_account()
+            .expect("read")
+            .expect("the new account")
+            .expose()
+            .email
+            .as_deref()
+            .map(String::as_str),
+        Some("new@example.invalid")
+    );
 }
 
 #[test]
-fn every_delete_refusal_or_crash_is_retryable_without_losing_the_marker_or_instance() {
+fn an_interrupted_first_write_leaves_orphans_that_the_next_open_sweeps() {
+    let (_scratch, path, service, store) = setup("vault-first-write");
+    let mut vault = open(&store, &service, &path);
+    store.arm(0, Fault::CrashAfter);
+    assert!(
+        panic::catch_unwind(AssertUnwindSafe(|| vault.save_account(&account("old")))).is_err(),
+        "crash after the first chunk"
+    );
+    assert_eq!(store.names().len(), 1, "the orphan really exists");
+    assert!(!is_current(&vault, Kind::Account), "no commit yet");
+    drop(vault);
+    let mut restarted = open(&store, &service, &path);
+    assert!(store.names().is_empty(), "the reopen swept the orphan");
+    committed(restarted.save_account(&registration(&account("new"))));
+    assert_only_current(&restarted, &store);
+}
+
+#[test]
+fn every_sweep_refusal_or_crash_after_a_removal_is_retryable_without_losing_the_marker_or_instance()
+{
     let (_scratch, path, service, seed) = setup("vault-delete-faults");
     let instance = format!(
         "{INSTANCE_SERVICE}/test-{:016x}",
@@ -358,30 +507,34 @@ fn every_delete_refusal_or_crash_is_retryable_without_losing_the_marker_or_insta
             })
             .expect("checkpoint");
     }
-    for record in [Chunked::Account, Chunked::Revoke] {
-        for index in 0..=(2 * MAX_CHUNKS) {
+    for record in [Kind::Account, Kind::Revocations] {
+        let delete = |vault: &mut Vault<FakeStore>| match record {
+            Kind::Account => vault.delete_account(),
+            _ => vault.delete_revocations(),
+        };
+        let count = {
+            let dry = seed.fork();
+            let (_copy, copy) = fork_dir(&path, "vault-delete-dry");
+            let mut vault = open(&dry, &service, &copy);
+            dry.arm(usize::MAX, Fault::Refuse);
+            gone(delete(&mut vault));
+            dry.0.lock().expect("fake lock").mutations.len()
+        };
+        assert!(count > 0, "the removal's names are swept");
+        for index in 0..count {
             for fault in [Fault::Refuse, Fault::CrashAfter] {
                 let store = seed.fork();
-                let mut vault = open(&store, &service, &path);
+                let (_copy, copy) = fork_dir(&path, "vault-delete-fault");
+                let mut vault = open(&store, &service, &copy);
                 store.arm(index, fault);
-                let outcome = panic::catch_unwind(AssertUnwindSafe(|| match record {
-                    Chunked::Account => vault.delete_account(),
-                    Chunked::Revoke => vault.delete_revocations(),
-                }));
+                let outcome = panic::catch_unwind(AssertUnwindSafe(|| delete(&mut vault)));
                 match fault {
-                    Fault::Refuse => assert!(
-                        matches!(
-                            outcome.expect("refusal returns"),
-                            DeleteResult::Refused(VaultError::Store(CredentialStoreError::Delete(
-                                5
-                            )))
-                        ),
-                        "refused deletion is reported"
-                    ),
-                    Fault::CrashAfter => assert!(outcome.is_err(), "crash point reached"),
+                    Fault::Refuse => gone(outcome.expect("a refused sweep returns")),
+                    Fault::CrashAfter => {}
                 }
                 drop(vault);
-                let mut restarted = open(&store, &service, &path);
+                let mut restarted = open(&store, &service, &copy);
+                assert!(!is_current(&restarted, record), "the removal committed");
                 let marker = restarted.marker().expect("marker survives");
                 assert!(
                     marker
@@ -392,11 +545,11 @@ fn every_delete_refusal_or_crash_is_retryable_without_losing_the_marker_or_insta
                 assert!(marker.notice, "remote warning remains");
                 gone(restarted.delete_account());
                 gone(restarted.delete_revocations());
-                assert_record_absent(&store, &service, "chatgpt");
-                assert_record_absent(&store, &service, "revoke");
                 restarted
                     .update_marker(MarkerUpdate::FinishSignOut)
-                    .expect("finish after checks");
+                    .expect("finish after the removals");
+                drop(restarted);
+                let restarted = open(&store, &service, &copy);
                 assert!(
                     store
                         .get(&instance)
@@ -408,9 +561,10 @@ fn every_delete_refusal_or_crash_is_retryable_without_losing_the_marker_or_insta
                 );
                 assert_eq!(
                     store.names(),
-                    vec![instance.clone(), format!("{service}/signout")],
-                    "only the instance and token-free notice remain"
+                    vec![instance.clone()],
+                    "only the instance remains once the sweep catches up"
                 );
+                assert!(restarted.marker().expect("notice").notice);
             }
         }
     }
@@ -429,108 +583,98 @@ fn outside_sign_out_only_an_empty_revocation_list_may_be_deleted() {
         ),
         "unconfirmed entries cannot be discarded by a sweep"
     );
-    assert_eq!(
-        store.names(),
-        names,
-        "a refusal leaves every record name intact"
-    );
+    assert_eq!(store.names(), names, "a refusal leaves every name intact");
+    assert!(is_current(&vault, Kind::Revocations));
     committed(vault.save_revocations(&Secret::new(RevocationList::default())));
     assert!(
         matches!(
             vault.update_marker(MarkerUpdate::FinishSweep),
             Err(VaultError::NotGone)
         ),
-        "an empty record still has names that must be deleted"
+        "an empty record is still current until it's removed"
     );
     gone(vault.delete_revocations());
-    assert_record_absent(&store, &service, "revoke");
     vault
         .update_marker(MarkerUpdate::FinishSweep)
         .expect("sweep finishes");
     assert!(
         store.names().is_empty(),
-        "empty-list cleanup removes the marker too"
+        "the empty list's names were swept"
     );
+    assert_eq!(vault.marker().expect("marker"), SignOutMarker::default());
 }
 
-/// L6: "not found" for a name the vault just wrote is a store miss: retried, never absence.
+/// L6: a read of the current generation makes one exact pass, so a miss is Unsettled, never
+/// a signed-out account, while a fresh save waits its own misses out (M2).
 #[test]
-fn a_missed_read_of_the_vaults_own_write_is_retried_and_never_reads_as_absent() {
+fn a_missed_read_of_the_current_generation_is_unsettled_and_never_absent() {
     let (_scratch, path, service, store) = setup("missed-read");
     let mut vault = open(&store, &service, &path);
     let saved = account("one");
+    store.0.lock().expect("fake lock").missed_reads = 3;
     committed(vault.save_account(&saved));
-    store.0.lock().expect("fake lock").missed_reads = lane_store::TRIES - 1;
-    assert!(
-        vault
-            .load_account()
-            .expect("a retried read")
-            .expect("the account")
-            .expose()
-            == saved.expose(),
-        "misses short of the bound are retried"
-    );
-    store.0.lock().expect("fake lock").missed_reads = lane_store::TRIES;
+    assert_eq!(store.0.lock().expect("fake lock").missed_reads, 0);
+    store.0.lock().expect("fake lock").missed_reads = 1;
     assert!(
         matches!(
             vault.load_account(),
             Err(VaultError::Store(CredentialStoreError::Unsettled))
         ),
-        "a lasting miss is an error, not a signed-out account"
+        "a miss is an error, not a signed-out account"
     );
-    assert_eq!(store.0.lock().expect("fake lock").missed_reads, 0);
-    assert!(vault.load_account().expect("read").is_some());
+    assert!(
+        vault
+            .load_account()
+            .expect("read")
+            .expect("the account")
+            .expose()
+            == saved.expose(),
+        "the saved account reads back"
+    );
 }
 
-/// L6: a delete is confirmed by reading the name back, and retried while the name stays.
+/// L6: a delete that didn't stick can't bring a removed record back; a later sweep retries it.
 #[test]
-fn a_delete_that_does_not_stick_is_retried_and_never_reported_gone() {
+fn a_delete_that_does_not_stick_never_brings_the_record_back() {
     let (_scratch, path, service, store) = setup("sticky-delete");
     let mut vault = open(&store, &service, &path);
-    let empty = Secret::new(RevocationList::default());
-    committed(vault.save_revocations(&empty));
-    store.0.lock().expect("fake lock").sticky_deletes = lane_store::TRIES - 1;
+    committed(vault.save_revocations(&Secret::new(RevocationList::default())));
+    store.0.lock().expect("fake lock").sticky_deletes = 1;
     gone(vault.delete_revocations());
-    assert_record_absent(&store, &service, "revoke");
-    committed(vault.save_revocations(&empty));
-    store.0.lock().expect("fake lock").sticky_deletes = lane_store::TRIES;
+    assert_eq!(store.names().len(), 1, "the name outlived its delete");
     assert!(
-        matches!(
-            vault.delete_revocations(),
-            DeleteResult::Refused(VaultError::Store(CredentialStoreError::Unsettled))
-        ),
-        "a name that outlives every delete is reported"
+        vault.load_revocations().expect("read").is_none(),
+        "the removal is final"
     );
-    assert!(
-        store.names().contains(&format!("{service}/revoke/0/0")),
-        "the surviving chunk is still there"
-    );
-    gone(vault.delete_revocations());
-    assert_record_absent(&store, &service, "revoke");
+    drop(vault);
+    let vault = open(&store, &service, &path);
+    assert!(store.names().is_empty(), "the next open's sweep deleted it");
+    assert!(vault.load_revocations().expect("read").is_none());
 }
 
-/// CAPS-116: a delete that didn't stick, read back once as "not found", isn't confirmed.
+/// OSC-233: Credential Manager served a confirmed delete again; a removal stays final.
 #[test]
-fn a_sticky_delete_hidden_by_a_missed_read_is_never_reported_gone() {
-    let store = FakeStore::default();
-    let lane = lane_store::LaneStore::new(store.clone());
-    let value = Secret::new(Zeroizing::new(b"value".to_vec()));
-    let faults = |sticky_deletes| {
-        let mut state = store.0.lock().expect("fake lock");
-        state.sticky_deletes = sticky_deletes;
-        state.missed_reads = 1;
-    };
-    lane.set("name", &value).expect("set");
-    faults(1);
-    lane.delete("name").expect("a retried delete");
-    assert!(store.names().is_empty(), "confirmed only once it's gone");
-    lane.set("name", &value).expect("set");
-    faults(lane_store::TRIES);
-    assert!(
-        matches!(lane.delete("name"), Err(CredentialStoreError::Unsettled)),
-        "a name that outlives every delete is reported"
-    );
-    assert_eq!(store.names(), ["name"]);
+fn resurrected_bytes_of_a_removed_record_are_never_read() {
+    let (_scratch, path, service, store) = setup("vault-resurrect");
+    let mut vault = open(&store, &service, &path);
+    committed(vault.save_account(&account("old")));
+    let before = store.snapshot();
+    vault
+        .update_marker(MarkerUpdate::Promote(Disposition::Erase))
+        .expect("promote");
+    vault
+        .update_marker(MarkerUpdate::Checkpoint {
+            list_empty_on_disk: false,
+        })
+        .expect("checkpoint");
+    gone(vault.delete_for_sign_out());
+    assert!(store.names().is_empty(), "swept");
+    store.rollback(&before, &before.keys().cloned().collect::<Vec<_>>());
+    assert!(vault.load_for_sign_out().expect("read").is_none());
+    vault
+        .update_marker(MarkerUpdate::FinishSignOut)
+        .expect("finish over resurrected names");
+    assert!(vault.load_account().expect("read").is_none());
 }
 
 #[test]
@@ -586,11 +730,14 @@ fn unreadable_revocations_need_persisted_uncertainty_and_os_read_errors_stay_err
     let (_scratch, path, service, store) = setup("revoke-unreadable-delete");
     let mut vault = open(&store, &service, &path);
     committed(vault.save_revocations(&list("one")));
-    let manifest = format!("{service}/revoke");
-    store
-        .set(&manifest, &Secret::new(Zeroizing::new(b"{".to_vec())))
-        .expect("corrupt test manifest");
-    let names = store.names();
+    let first = current_names(&vault)[0].clone();
+    let mut corrupt = store.snapshot();
+    let length = corrupt[&first].expose().len();
+    corrupt.insert(
+        first.clone(),
+        Secret::new(Zeroizing::new(vec![b'{'; length])),
+    );
+    store.rollback(&corrupt, std::slice::from_ref(&first));
     assert!(
         matches!(
             vault.delete_revocations(),
@@ -598,13 +745,16 @@ fn unreadable_revocations_need_persisted_uncertainty_and_os_read_errors_stay_err
         ),
         "unreadable data cannot be discarded without recording uncertainty"
     );
-    assert_eq!(store.names(), names, "refused cleanup changes no names");
+    assert!(
+        is_current(&vault, Kind::Revocations),
+        "refused cleanup removes nothing"
+    );
     vault
         .update_marker(MarkerUpdate::UnknownOutcome)
         .expect("persist uncertainty before deletion");
     drop(vault);
     let mut vault = open(&store, &service, &path);
-    store.0.lock().expect("fake lock").denied_read = Some(manifest);
+    store.0.lock().expect("fake lock").denied_read = Some(first);
     assert!(
         matches!(
             vault.delete_revocations(),
@@ -612,10 +762,13 @@ fn unreadable_revocations_need_persisted_uncertainty_and_os_read_errors_stay_err
         ),
         "an OS read refusal remains a typed error"
     );
-    assert_eq!(store.names(), names, "an OS refusal changes no names");
+    assert!(
+        is_current(&vault, Kind::Revocations),
+        "an OS refusal removes nothing"
+    );
     store.0.lock().expect("fake lock").denied_read = None;
     gone(vault.delete_revocations());
-    assert_record_absent(&store, &service, "revoke");
+    assert!(!is_current(&vault, Kind::Revocations));
     assert!(
         vault.marker().expect("marker").outcome_unknown,
         "cleanup cannot reset the persisted uncertainty"
@@ -629,23 +782,27 @@ fn windows_vault_persists_only_under_its_random_test_service() {
     use crate::platform::credential::fixture::Fixture;
 
     let (_scratch, path, service, _) = setup("windows-vault");
-    let mut targets: Vec<_> = ["host", "signout", "chatgpt", "revoke"]
-        .into_iter()
-        .map(|name| format!("{service}/{name}"))
-        .collect();
-    for record in ["chatgpt", "revoke"] {
-        for slot in 0..2 {
-            for index in 0..MAX_CHUNKS {
-                targets.push(format!("{service}/{record}/{slot}/{index}"));
-            }
-        }
-    }
-    let _fixture = Fixture::new(targets);
     let mut vault =
         Vault::with_service(NativeCredentialStore, &service, &path).expect("test vault");
     let host = vault.host_id().expect("host");
     committed(vault.save_account(&account("old")));
     committed(vault.save_revocations(&list("one")));
+    let names = {
+        let mut names = Vec::new();
+        for kind in [Kind::Host, Kind::Account, Kind::Revocations] {
+            let active = vault
+                .authority
+                .current(kind)
+                .expect("head")
+                .active
+                .expect("saved");
+            names.extend((0..active.layout.chunks()).map(|index| {
+                generation_target(&service, kind.label(), &active.generation.hex(), index)
+            }));
+        }
+        names
+    };
+    let _fixture = Fixture::new(names);
     drop(vault);
     let mut vault =
         Vault::with_service(NativeCredentialStore, &service, &path).expect("reopen vault");
