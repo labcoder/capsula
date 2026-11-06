@@ -41,8 +41,10 @@ pub enum JobKind {
 }
 
 /// A job's read, for the page reader.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Equality compares request data, not its execution-time cancellation capability.
+#[derive(Clone, Debug)]
 pub struct ReadJob {
+    pub(crate) control: crate::recall::control::Control,
     pub(crate) key: JobKey,
     pub(crate) kind: JobKind,
     pub(crate) origin: Origin,
@@ -53,6 +55,17 @@ pub struct ReadJob {
     /// fills it in.
     pub(crate) compact_at: u64,
 }
+
+impl PartialEq for ReadJob {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+            && self.kind == other.kind
+            && self.origin == other.origin
+            && self.snapshot == other.snapshot
+            && self.compact_at == other.compact_at
+    }
+}
+impl Eq for ReadJob {}
 
 /// A job's read, finished.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,6 +106,7 @@ impl fmt::Debug for JobOutput {
 /// The job in the slot.
 #[derive(Debug)]
 pub(super) struct Job {
+    _control: crate::recall::control::CancelOnDrop,
     key: JobKey,
     kind: JobKind,
     /// The run whose end started it.
@@ -149,7 +163,10 @@ impl Coordinator {
             thread,
             serial: self.attempts,
         };
+        let control =
+            crate::recall::control::Control::new(std::time::Instant::now() + super::WALL_CLOCK);
         self.job = Some(Job {
+            _control: crate::recall::control::CancelOnDrop(control.clone()),
             key,
             kind,
             run,
@@ -157,6 +174,7 @@ impl Coordinator {
             stage: Stage::Reading,
         });
         effects.push(Effect::Store(StoreOp::ReadJob(ReadJob {
+            control,
             key,
             kind,
             origin: origin(thread, self.main_thread),

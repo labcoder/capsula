@@ -2,8 +2,10 @@
 
 #![cfg_attr(
     not(test),
-    expect(dead_code, reason = "14b-2 activates asynchronous model recall")
+    expect(dead_code, reason = "14b-2b activates asynchronous model recall")
 )]
+
+pub(crate) mod control;
 
 use std::fmt;
 
@@ -37,6 +39,12 @@ pub(crate) enum Error {
     NoTask,
     #[error("can't read history")]
     Read,
+    #[error("history read timed out")]
+    Timeout,
+    #[error("the run ended")]
+    Ended,
+    #[error("can't configure the history read")]
+    Handler,
 }
 
 pub(crate) fn id(value: u64) -> bool {

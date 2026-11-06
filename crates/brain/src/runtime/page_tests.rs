@@ -111,6 +111,9 @@ fn page_forwarding_leaves_the_current_run_and_its_pending_writes_alone() {
     assert_eq!(
         coordinator.handle(Input::TurnStored { run: RunId(1) }),
         Ok(vec![Effect::Store(StoreOp::BuildContext(BuildContext {
+            control: crate::recall::control::Control::new(
+                std::time::Instant::now() + crate::coordinator::WALL_CLOCK
+            ),
             key: BuildKey {
                 run: RunId(1),
                 round: 1,

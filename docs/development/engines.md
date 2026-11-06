@@ -94,6 +94,23 @@ A build that's too large ends the run as `failed(budget)`, and any other failure
 `failed(store)`. Stop, a replacement, the deadline or the thread's own delete end the run, and
 its pending result is stale.
 
+### Recall read ownership
+
+Builds and background jobs own cancellation guards. A replacement, Stop, failure or a
+voided build cancels its readers; a new round keeps the run's original 120-second end.
+The accepted-op barrier, side-connection slot and swap waits check cancellation, EOF and
+that end. Closing the store raises EOF before waiting for the side connections.
+
+Recall replay shares a two-second budget from reader admission, capped by the owner's
+end. A scoped SQLite progress handler enforces it only while recall SQL runs; ordinary
+context SQL keeps its previous timeout behavior. Exhaustion discards the whole build as
+`failed(budget)`, never a partial request or `failed(store)`. Background compaction is
+text-only, and inline rewriting reads summaries; neither activates recall SQL today.
+Their read waits still use the owner's cancellation and end. Handler installation and
+removal failures are typed storage failures. Failed handler setup/cleanup or an unwind
+discards the connection before another page read.
+No model schemas or asynchronous tool dispatch are enabled by this lifecycle layer.
+
 ## The send lease
 
 Admission closes the window from the read to `StartEngine`, and the send lease closes the one

@@ -27,8 +27,10 @@ pub struct BuildKey {
 }
 
 /// A build for the page reader, after every op sent to the store before it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Equality compares request data, not its execution-time cancellation capability.
+#[derive(Clone, Debug)]
 pub struct BuildContext {
+    pub(crate) control: crate::recall::control::Control,
     pub(crate) key: BuildKey,
     pub(crate) thread: ThreadId,
     pub(crate) origin: Origin,
@@ -38,6 +40,17 @@ pub struct BuildContext {
     /// The run's first build.
     pub(crate) first: bool,
 }
+
+impl PartialEq for BuildContext {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+            && self.thread == other.thread
+            && self.origin == other.origin
+            && self.snapshot == other.snapshot
+            && self.first == other.first
+    }
+}
+impl Eq for BuildContext {}
 
 /// A finished build.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +97,7 @@ pub enum Unbuilt {
 /// The current run's build.
 #[derive(Debug)]
 pub(super) struct Build {
+    pub(super) control: crate::recall::control::CancelOnDrop,
     key: BuildKey,
     /// Threads whose delete was pending when the build began or was accepted since. Kept
     /// through the deletes' answers, so one answered before the result arrives still voids it.
@@ -102,8 +116,14 @@ pub(super) struct Build {
 }
 
 impl Build {
-    pub(super) fn new(key: BuildKey, exposed: BTreeSet<ThreadId>, inline: Option<Inline>) -> Self {
+    pub(super) fn new(
+        key: BuildKey,
+        exposed: BTreeSet<ThreadId>,
+        inline: Option<Inline>,
+        control: crate::recall::control::Control,
+    ) -> Self {
         Self {
+            control: crate::recall::control::CancelOnDrop(control),
             key,
             exposed,
             blocked: BTreeSet::new(),
@@ -166,8 +186,10 @@ impl Coordinator {
         let Ok(current) = self.current(run) else {
             return;
         };
-        current.build = Some(Build::new(key, exposed, None));
+        let control = current.control.0.child();
+        current.build = Some(Build::new(key, exposed, None, control.clone()));
         effects.push(Effect::Store(StoreOp::BuildContext(BuildContext {
+            control,
             key,
             thread: current.thread,
             origin: origin(current.thread, main),
@@ -295,6 +317,7 @@ impl Coordinator {
             return;
         };
         build.admitted = false;
+        build.control.0.cancel();
         build.blocked = voided & pending;
         if build.blocked.is_empty() {
             self.build(key.run, key.round, effects);

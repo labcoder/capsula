@@ -88,6 +88,37 @@ impl Barrier {
             .unwrap_or_else(PoisonError::into_inner);
         !progress.terminal
     }
+
+    fn wait_until(
+        &self,
+        stamp: u64,
+        control: &crate::recall::control::Control,
+    ) -> Result<(), crate::recall::Error> {
+        #[cfg(test)]
+        let mut notified = false;
+        loop {
+            control.check()?;
+            let progress = lock(&self.progress);
+            if progress.terminal {
+                return Err(crate::recall::Error::Ended);
+            }
+            if progress.completed >= stamp {
+                return Ok(());
+            }
+            #[cfg(test)]
+            if !notified && let Some(waiting) = &self.waiting {
+                notified = true;
+                if waiting.send(super::super::Seen::ReadWaiting).is_err() {
+                    tracing::debug!("a reader wait had no observer");
+                }
+            }
+            drop(
+                self.moved
+                    .wait_timeout(progress, crate::recall::control::POLL)
+                    .unwrap_or_else(PoisonError::into_inner),
+            );
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -192,7 +223,23 @@ pub(super) fn spawn_reader(
                         .position(|gate: &super::Gate| (gate.matches)(&op));
                     at.map(|at| gates.remove(at))
                 };
-                let open = barrier.wait(stamp);
+                let control = match &op {
+                    StoreOp::BuildContext(read) => Some(&read.control),
+                    StoreOp::CompactContext(read) => Some(&read.control),
+                    StoreOp::ReadJob(read) => Some(&read.control),
+                    _ => None,
+                };
+                let open = control
+                    .map_or_else(
+                        || {
+                            barrier
+                                .wait(stamp)
+                                .then_some(())
+                                .ok_or(crate::recall::Error::Ended)
+                        },
+                        |control| barrier.wait_until(stamp, control),
+                    )
+                    .is_ok();
                 let reply = match op {
                     StoreOp::BuildContext(build) => Input::ContextBuilt(context::read(
                         open.then_some(&*side),
@@ -311,5 +358,9 @@ pub(super) fn spawn_helper(
 }
 
 mod context;
+#[cfg(test)]
+mod lifecycle_replay_tests;
+#[cfg(test)]
+mod lifecycle_tests;
 #[cfg(test)]
 mod tests;

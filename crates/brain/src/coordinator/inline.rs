@@ -20,8 +20,10 @@ use crate::engines::{Finish, RunRequest, TurnEvent};
 use crate::store::{Failure, Generation};
 
 /// Inline compaction's read, for the page reader.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Equality compares request data, not its execution-time cancellation capability.
+#[derive(Clone, Debug)]
 pub struct CompactContext {
+    pub(crate) control: crate::recall::control::Control,
     pub(crate) key: BuildKey,
     pub(crate) thread: kumochi_protocol::message::ThreadId,
     /// What the run read when its first build began.
@@ -29,6 +31,16 @@ pub struct CompactContext {
     /// The bytes the bound leaves for the summary after the current turn.
     pub(crate) room: usize,
 }
+
+impl PartialEq for CompactContext {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+            && self.thread == other.thread
+            && self.snapshot == other.snapshot
+            && self.room == other.room
+    }
+}
+impl Eq for CompactContext {}
 
 /// Inline compaction's read, finished.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,8 +105,15 @@ impl Coordinator {
         }
         current.compacted = Some(key.round);
         let key = BuildKey { attempt, ..key };
-        current.build = Some(Build::new(key, exposed, Some(Inline::Reading)));
+        let control = current.control.0.child();
+        current.build = Some(Build::new(
+            key,
+            exposed,
+            Some(Inline::Reading),
+            control.clone(),
+        ));
         effects.push(Effect::Store(StoreOp::CompactContext(CompactContext {
+            control,
             key,
             thread: current.thread,
             snapshot: current.snapshot.clone(),

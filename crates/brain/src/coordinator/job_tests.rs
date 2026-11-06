@@ -22,6 +22,33 @@ const R2: RunId = RunId(11);
 /// Kumo's thread, as `fresh` makes it.
 const MAIN: ThreadId = ThreadId(1);
 
+#[test]
+fn lifecycle_job_reader_is_canceled_by_new_runs_and_sign_out() {
+    for sign_out in [false, true] {
+        let mut core = signed_in();
+        let effects = run_done(&mut core, None, R);
+        let read = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::Store(StoreOp::ReadJob(read)) => Some(read.control),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(read.check(), Ok(()));
+        let input = if sign_out {
+            Input::SignedOut { generation: 1 }
+        } else {
+            Input::Turn {
+                turn: 2,
+                thread: Some(T),
+                text: "next".into(),
+            }
+        };
+        core.handle(input).unwrap();
+        assert_eq!(read.check(), Err(crate::recall::Error::Ended));
+    }
+}
+
 fn signed_in() -> Coordinator {
     let mut core = fresh();
     assert_eq!(
@@ -68,6 +95,9 @@ fn reading() -> Coordinator {
 
 fn read_job(key: JobKey, kind: JobKind) -> Effect {
     Effect::Store(StoreOp::ReadJob(ReadJob {
+        control: crate::recall::control::Control::new(
+            std::time::Instant::now() + crate::coordinator::WALL_CLOCK,
+        ),
         key,
         kind,
         origin: if key.thread == MAIN {

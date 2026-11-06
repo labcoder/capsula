@@ -117,6 +117,9 @@ fn b_hidden() -> Input {
 /// Kumo's round built again, from the snapshot it never read.
 fn rebuilt(attempt: u64) -> Effect {
     Effect::Store(StoreOp::BuildContext(BuildContext {
+        control: crate::recall::control::Control::new(
+            std::time::Instant::now() + crate::coordinator::WALL_CLOCK,
+        ),
         key: build_key(attempt),
         thread: KUMO,
         origin: Origin::Kumo,
