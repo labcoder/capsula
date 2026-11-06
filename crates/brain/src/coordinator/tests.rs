@@ -13,10 +13,14 @@ use crate::store::{Failure, Interruption, RunEnd, SceneTarget};
 
 #[path = "admission_tests.rs"]
 mod admission;
+#[path = "ask_tests.rs"]
+mod asks;
 #[path = "availability_tests.rs"]
 mod availability;
 #[path = "calls_tests.rs"]
 mod calls;
+#[path = "claude_hold_tests.rs"]
+mod claude_hold;
 #[path = "delete_tests.rs"]
 mod deletes;
 #[path = "drawing_tests.rs"]

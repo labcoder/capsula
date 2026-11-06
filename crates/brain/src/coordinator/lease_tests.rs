@@ -1,11 +1,13 @@
 //! The send lease: a granted send holds back each delete of a source it carries until every
 //! lease carrying it settles, and one that never settles refuses them for good.
 
+use std::time::Duration;
+
 use kumochi_protocol::message::{ControlToShell, DataToShell, Deleted, Phase, RunId, ThreadId};
 
 use super::{R, T, build_context, built, ends_failed, fresh, start_engine};
 use crate::coordinator::{
-    BuildKey, Coordinator, Effect, Input, LeaseId, SEND_DEADLINE, SendKey, Stale, StoreOp,
+    BuildKey, Coordinator, Effect, Input, LeaseId, MAX_HOLD, SEND_DEADLINE, SendKey, Stale, StoreOp,
 };
 use crate::store::{Failure, Interruption, RunEnd};
 
@@ -32,6 +34,7 @@ fn lease(run: RunId, attempt: u64, send: u64) -> LeaseId {
 fn ready(run: RunId, attempt: u64) -> Input {
     Input::SendReady {
         key: key(run, attempt),
+        hold: None,
     }
 }
 
@@ -405,4 +408,77 @@ fn a_held_delete_survives_a_shell_reconnect() {
         core.handle(settled(lease(R, 1, 1))),
         Ok(vec![store_delete(B)])
     );
+}
+
+/// What a held ask arms for run 10's first send: `hold` up to [`MAX_HOLD`], or
+/// [`SEND_DEADLINE`] without one.
+fn armed_for_build(hold: Option<Duration>) -> Vec<Effect> {
+    let mut core = fresh();
+    core.handle(Input::Turn {
+        turn: 1,
+        thread: None,
+        text: "hi".into(),
+    })
+    .expect("a turn is never stale");
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    core.handle(built(R, 1, &[T])).expect("current");
+    core.handle(Input::SendReady {
+        key: key(R, 1),
+        hold,
+    })
+    .expect("asked")
+}
+
+fn armed(lease: LeaseId, seconds: u64) -> Vec<Effect> {
+    vec![
+        Effect::Grant(lease),
+        Effect::ArmSendDeadline {
+            lease,
+            after: Duration::from_secs(seconds),
+        },
+    ]
+}
+
+/// H-h, a build's send: the default, under the cap, exactly at it, and over it.
+#[test]
+fn a_held_build_send_arms_its_hold_capped_at_165_seconds() {
+    assert_eq!(MAX_HOLD, Duration::from_secs(165));
+    let first = lease(R, 1, 1);
+    assert_eq!(armed_for_build(None), armed(first, 15));
+    assert_eq!(
+        armed_for_build(Some(Duration::from_secs(20))),
+        armed(first, 20)
+    );
+    assert_eq!(
+        armed_for_build(Some(Duration::from_secs(165))),
+        armed(first, 165)
+    );
+    assert_eq!(
+        armed_for_build(Some(Duration::from_secs(166))),
+        armed(first, 165)
+    );
+}
+
+/// H-h: a held send's deadline fails closed like any other.
+#[test]
+fn a_held_send_past_its_hold_fails_the_run_and_keeps_its_deletes() {
+    let mut core = fresh();
+    core.handle(Input::Turn {
+        turn: 1,
+        thread: None,
+        text: "hi".into(),
+    })
+    .expect("a turn is never stale");
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    core.handle(built(R, 1, &[T, B])).expect("current");
+    core.handle(Input::SendReady {
+        key: key(R, 1),
+        hold: Some(Duration::from_secs(40)),
+    })
+    .expect("asked");
+    core.handle(delete(B)).expect("held");
+    let mut expected = ends_failed(Failure::Engine);
+    expected.push(told(B, Deleted::NotHidden));
+    assert_eq!(core.handle(due(lease(R, 1, 1))), Ok(expected));
+    assert_eq!(core.handle(settled(lease(R, 1, 1))), Ok(Vec::new()));
 }

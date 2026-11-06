@@ -40,12 +40,12 @@ fn chunk(bytes: &[u8], layout: Layout, index: usize) -> Result<&[u8], AuthorityE
 }
 
 /// Monotonic time and waiting, so the settle tests move time without sleeping.
-pub(super) trait Clock {
+pub(crate) trait Clock {
     fn now(&self) -> Instant;
     fn sleep(&self, duration: Duration);
 }
 
-struct System;
+pub(crate) struct System;
 
 impl Clock for System {
     fn now(&self) -> Instant {
@@ -144,8 +144,23 @@ pub(crate) fn read_pending(
     store: &dyn CredentialStore,
     service: &str,
     plan: &WritePlan,
+    clock: &dyn Clock,
 ) -> Result<SecretBytes, AuthorityError> {
-    read_pending_within(store, service, plan, SETTLE, &System)
+    read_pending_within(store, service, plan, SETTLE, clock)
+}
+
+pub(crate) fn delete_pending(
+    store: &dyn CredentialStore,
+    service: &str,
+    kind: Kind,
+    id: Generation,
+    layout: Layout,
+) {
+    for index in 0..layout.chunks() {
+        if store.delete(&target(service, kind, id, index)).is_err() {
+            tracing::warn!("a staged credential could not be deleted");
+        }
+    }
 }
 
 pub(super) fn read_pending_within(

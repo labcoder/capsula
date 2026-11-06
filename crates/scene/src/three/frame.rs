@@ -4,39 +4,43 @@ use super::{
     Transform,
     camera::{Camera, Light},
     raster::{self, Fragment, FrameScratch, PushError},
+    view::FaceRange,
 };
-use crate::{
-    geom::Vec3,
-    limits::{MAX_SOLIDS, MAX_TRIANGLES},
-};
+use crate::limits::{MAX_SOLIDS, MAX_TRIANGLES};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 type Point = [f64; 3];
 
-/// A source face's stable plane anchors and its outward-wound tessellation.
-/// Triangles tessellate one source plane, allowing f32 vertex rounding off it; preparation retains
-/// the same anchors across triangulations. Indices name vertices within the solid, including edges.
-#[derive(Debug, Clone, Copy)]
-pub struct Face<'a> {
-    /// Three noncollinear original vertices defining the source face, independent of triangulation.
-    pub anchors: [u32; 3],
-    /// Triangles indexing the solid's vertices.
-    pub triangles: &'a [[u32; 3]],
-}
-
 /// Borrowed prepared geometry and one already-composed sampled pose; no per-frame mesh rebuild.
+///
+/// Each local f64 vertex and face anchor is transformed once by `pose`, narrowed to world f32
+/// exactly as preparation's rest check narrows it, then widened for camera-space work.
 #[derive(Clone, Copy)]
 pub struct Solid<'a> {
-    /// Shared local vertices, indexed identically by every face.
-    pub vertices: &'a [Vec3],
-    /// Source faces, preserving their stable plane anchors.
-    pub faces: &'a [Face<'a>],
+    /// Shared unscaled local vertices, indexed identically by every face.
+    pub vertices: &'a [[f64; 3]],
+    /// Outward-wound triangles indexing `vertices`.
+    pub triangles: &'a [[u32; 3]],
+    /// Source faces: stable plane anchors and their run of `triangles`. Triangles tessellate one
+    /// source plane, allowing f32 vertex rounding off it.
+    pub faces: &'a [FaceRange],
     /// Local-to-world sampled transform, including attachment ancestors.
     pub pose: Transform,
     /// Theme-resolved straight colour.
     pub rgb: [u8; 3],
     /// Authored opacity in 0..=1.
     pub opacity: f32,
+}
+impl Solid<'_> {
+    /// No geometry at the identity pose: filler for caller-owned solid arrays.
+    pub const EMPTY: Solid<'static> = Solid {
+        vertices: &[],
+        triangles: &[],
+        faces: &[],
+        pose: Transform::IDENTITY,
+        rgb: [0; 3],
+        opacity: 1.0,
+    };
 }
 impl std::fmt::Debug for Solid<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -102,9 +106,16 @@ fn poll(cancel: &AtomicBool) -> Result<(), FrameError> {
     }
 }
 
-fn world(solid: &Solid<'_>, v: Vec3) -> Result<Point, FrameError> {
-    let p = [v.x, v.y, v.z].map(f64::from);
-    finite(solid.pose.0.map(|r| dot([r[0], r[1], r[2]], p) + r[3]))
+/// The world point preparation certified at rest: transformed once, narrowed in world space.
+fn world(solid: &Solid<'_>, v: Point) -> Result<Point, FrameError> {
+    let p = solid.pose.point64(v).map_err(|_| FrameError::Numeric)?;
+    Ok([p.x, p.y, p.z].map(f64::from))
+}
+fn triangles<'a>(solid: &Solid<'a>, face: &FaceRange) -> Result<&'a [[u32; 3]], FrameError> {
+    let start = usize::try_from(face.start).map_err(|_| FrameError::Invalid)?;
+    let len = usize::try_from(face.len).map_err(|_| FrameError::Invalid)?;
+    let end = start.checked_add(len).ok_or(FrameError::Invalid)?;
+    solid.triangles.get(start..end).ok_or(FrameError::Invalid)
 }
 fn point(
     solid: &Solid<'_>,
@@ -239,8 +250,9 @@ fn build(
         }
         for face in solid.faces {
             poll(cancel)?;
+            let face_triangles = triangles(solid, face)?;
             count = count
-                .checked_add(face.triangles.len())
+                .checked_add(face_triangles.len())
                 .ok_or(FrameError::Over)?;
             if count > MAX_TRIANGLES {
                 return Err(FrameError::Over);
@@ -248,7 +260,7 @@ fn build(
             for (i, index) in face
                 .anchors
                 .iter()
-                .chain(face.triangles.iter().flatten())
+                .chain(face_triangles.iter().flatten())
                 .enumerate()
             {
                 if i % 1024 == 0 {
@@ -319,7 +331,7 @@ fn build(
             let world_normal =
                 std::array::from_fn(|i| (0..3).map(|j| normal[j] * basis[j][i]).sum());
             let rgb = light.shade(world_normal, solid.rgb);
-            for triangle in face.triangles {
+            for triangle in triangles(solid, face)? {
                 if count.is_multiple_of(1024) {
                     poll(cancel)?;
                 }
@@ -394,20 +406,141 @@ mod tests {
         })
     }
 
+    fn prepared(put: &str) -> crate::three::view::ViewGeometry {
+        use crate::{Admission, GlobalBudget, Record, SceneState, parse_record, theme::Theme};
+        let Ok(Record::Begin(header)) =
+            parse_record(br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":""}}"#)
+        else {
+            panic!("begin fixture");
+        };
+        let record = format!(r#"{{"step":{{"id":"a","put":[{{"view3d":{{"id":"v"}}}},{put}]}}}}"#);
+        let Ok(Record::Step(step)) = parse_record(record.as_bytes()) else {
+            panic!("step fixture");
+        };
+        let (mut scene, mut budget) = (SceneState::begin(header).unwrap(), GlobalBudget::default());
+        let Admission::New(candidate) = scene.admit(&step, &budget).unwrap() else {
+            panic!("new step");
+        };
+        let committed = scene.commit(candidate, &mut budget).unwrap();
+        let input = committed.preparation.views[0].input.clone().unwrap();
+        super::super::view::tessellate_view(
+            &input,
+            None,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+            &Theme::default(),
+            &AtomicBool::new(false),
+            &mut super::super::mesh::MeshScratch::new(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    #[expect(
+        clippy::large_stack_arrays,
+        clippy::as_conversions,
+        clippy::float_cmp,
+        reason = "the caller-owned 160-solid array design-6 §7 puts on the stack; u32 mesh indices; exact rest literals"
+    )]
+    fn frame_world_points_are_the_rest_points_preparation_narrowed() {
+        let six = r#"{"solid":{"in":"v","id":"p0","shape":"box","size":[1,1,1],"pos":[10,10.000000953674316,0],"scale":0.5}},
+            {"solid":{"in":"v","id":"p1","shape":"box","size":[1,1,1],"attach":"p0","pos":[0.00000095367431640625,0.00000095367431640625,0],"scale":0.001}},
+            {"solid":{"in":"v","id":"p2","shape":"box","size":[1,1,1],"attach":"p1","pos":[0,0,0],"scale":0.001}},
+            {"solid":{"in":"v","id":"p3","shape":"box","size":[1,1,1],"attach":"p2","pos":[0,0,0],"scale":0.001}},
+            {"solid":{"in":"v","id":"p4","shape":"box","size":[1,1,1],"attach":"p3","pos":[0,0,0],"scale":0.001}},
+            {"solid":{"in":"v","id":"s","shape":"extrude","attach":"p4","scale":0.001,"points":[[-4,-4],[0,0.001],[4,4]],"depth":1}}"#;
+        let tube = r#"{"solid":{"in":"v","id":"s","shape":"tube","path":[[9000,0,0],[9000,1,0]],"r2":0.001,"segments":4,"pos":[-9000,0,0]}}"#;
+        let extrusion = r#"{"solid":{"in":"v","id":"s","shape":"extrude","points":[[-6000,-5999],[1.001,2.001],[0,1]],"depth":1}}"#;
+        let scaled = r#"{"solid":{"in":"v","id":"p","shape":"box","size":[2,2,2],"pos":[10,0,0],"scale":2}},
+            {"solid":{"in":"v","id":"c","shape":"box","size":[2,2,2],"attach":"p","pos":[1,0,0],"scale":1.5}}"#;
+        let mut surviving = Vec::new();
+        for (name, put) in [
+            ("six", six),
+            ("tube", tube),
+            ("extrusion", extrusion),
+            ("scaled", scaled),
+        ] {
+            let geometry = prepared(put);
+            assert!(!geometry.failed, "{name}");
+            let poses: Vec<Transform> = geometry.solids.iter().map(|solid| solid.rest).collect();
+            let mut storage = [Solid::EMPTY; MAX_SOLIDS];
+            let solids = geometry.solids_at(&poses, &mut storage);
+            assert_eq!(solids.len(), geometry.solids.len(), "{name}");
+            let mut corner = [f64::NEG_INFINITY; 3];
+            for (solid, prepared) in solids.iter().zip(&*geometry.solids) {
+                let world_bits = |index: u32| {
+                    world(solid, solid.vertices[index as usize])
+                        .unwrap()
+                        .map(f64::to_bits)
+                };
+                for &triangle in solid.triangles {
+                    let narrowed = super::super::mesh::narrowed(
+                        &prepared.rest,
+                        triangle.map(|i| solid.vertices[i as usize]),
+                    )
+                    .unwrap();
+                    for (index, point) in triangle.into_iter().zip(narrowed) {
+                        assert_eq!(
+                            world_bits(index),
+                            [point.x, point.y, point.z].map(|c| f64::from(c).to_bits()),
+                            "{name}"
+                        );
+                    }
+                }
+                for face in solid.faces {
+                    for index in face.anchors {
+                        let point = prepared
+                            .rest
+                            .point64(solid.vertices[index as usize])
+                            .unwrap();
+                        assert_eq!(
+                            world_bits(index),
+                            [point.x, point.y, point.z].map(|c| f64::from(c).to_bits()),
+                            "{name} anchor"
+                        );
+                    }
+                }
+                if prepared.id.as_str() == "c" {
+                    for &v in solid.vertices {
+                        let p = world(solid, v).unwrap();
+                        corner = std::array::from_fn(|i| corner[i].max(p[i]));
+                    }
+                }
+            }
+            if name == "scaled" {
+                assert_eq!(corner, [15.0, 3.0, 3.0], "scale applies once");
+            }
+            let mut out = FrameScratch::with_capacity(64);
+            frame(
+                solids,
+                &geometry.camera.unwrap(),
+                &geometry.light,
+                [128, 128],
+                &mut out,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            surviving.push((name, out.len()));
+        }
+        assert_eq!(
+            surviving,
+            [("six", 12), ("tube", 6), ("extrusion", 3), ("scaled", 12)],
+            "front-facing triangles at each view's authored camera, recorded at 6b"
+        );
+    }
+
     #[test]
     fn triangle_loop_stops_at_exactly_1024_and_frame_clears_partial_output() {
-        let vertices = [
-            Vec3::new(-1.0, -1.0, 0.0),
-            Vec3::new(1.0, -1.0, 0.0),
-            Vec3::new(0.0, 1.0, 0.0),
-        ];
+        let vertices = [[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]];
         let triangles = vec![[0, 1, 2]; 2049];
-        let faces = [Face {
+        let faces = [FaceRange {
             anchors: [0, 1, 2],
-            triangles: &triangles,
+            start: 0,
+            len: 2049,
         }];
         let solids = [Solid {
             vertices: &vertices,
+            triangles: &triangles,
             faces: &faces,
             pose: Transform::local([0.0; 3], [0.0; 3], 1.0),
             rgb: [255; 3],
@@ -542,9 +675,10 @@ mod tests {
     #[test]
     fn translated_minimum_camera_projects_target_to_centre_in_f64() {
         let camera = Camera::new(30.0, 20.0, 0.001, 40.0, [20000.0; 3]).unwrap();
-        let vertices = [Vec3::new(20000.0, 20000.0, 20000.0)];
+        let vertices = [[20000.0; 3]];
         let solid = Solid {
             vertices: &vertices,
+            triangles: &[],
             faces: &[],
             pose: Transform::local([0.0; 3], [0.0; 3], 1.0),
             rgb: [0; 3],

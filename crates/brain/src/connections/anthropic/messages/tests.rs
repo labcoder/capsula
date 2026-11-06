@@ -353,6 +353,16 @@ fn header_controls_are_refused_before_request_assembly() {
         assert!(matches!(request(key, b"{}"), Err(Failure::Credential)));
     }
     assert!(matches!(
+        request("xxxxxxxxxxxxxxx", b"{}"),
+        Err(Failure::Credential)
+    ));
+    assert!(
+        request("xxxxxxxxxxxxxxxx", b"{}")
+            .expect("minimum key bound")
+            .expose()
+            .ends_with(b"\r\n\r\n{}")
+    );
+    assert!(matches!(
         request(&"x".repeat(2049), b"{}"),
         Err(Failure::Credential)
     ));

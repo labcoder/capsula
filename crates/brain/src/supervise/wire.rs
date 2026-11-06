@@ -21,7 +21,7 @@ pub(crate) struct Frame {
     pub body: Vec<u8>,
 }
 
-/// One message's chunks, in order, up to a cap.
+/// Each message's chunks, in order, up to a cap per message.
 pub(crate) struct Assembly {
     max: usize,
     next: u32,
@@ -51,6 +51,7 @@ impl Assembly {
         if !chunk.last {
             return Ok(None);
         }
+        self.next = 0;
         Ok(Some(std::mem::take(&mut self.bytes)))
     }
 }
