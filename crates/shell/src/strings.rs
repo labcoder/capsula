@@ -100,18 +100,6 @@ pub(crate) enum Text {
     TaskbarRemoveFailed,
     MaxFrameRate,
     FrameRateAutomatic,
-    ClaudeProvider,
-    ClaudeReview,
-    ClaudeConnect,
-    ClaudeDisconnect,
-    ClaudeFind,
-    ClaudePolicyNotice,
-    ClaudeBefore,
-    ClaudeDuring,
-    ClaudeFallback,
-    ClaudeDeadline,
-    ClaudeAnalytics,
-    ClaudeDisconnectBody,
 
     // ChatGPT accounts
     AccountProvider,
@@ -159,6 +147,20 @@ pub(crate) enum Text {
     AccountBacklogRetry,
     AccountBacklogExpiry,
     AccountBacklogRecovery,
+
+    // Claude Code
+    ClaudeProvider,
+    ClaudeReview,
+    ClaudeConnect,
+    ClaudeDisconnect,
+    ClaudeFind,
+    ClaudePolicyNotice,
+    ClaudeBefore,
+    ClaudeDuring,
+    ClaudeFallback,
+    ClaudeDeadline,
+    ClaudeAnalytics,
+    ClaudeDisconnectBody,
 }
 
 #[cfg(test)]
@@ -266,18 +268,6 @@ impl Text {
         TaskbarRemoveFailed,
         MaxFrameRate,
         FrameRateAutomatic,
-        ClaudeProvider,
-        ClaudeReview,
-        ClaudeConnect,
-        ClaudeDisconnect,
-        ClaudeFind,
-        ClaudePolicyNotice,
-        ClaudeBefore,
-        ClaudeDuring,
-        ClaudeFallback,
-        ClaudeDeadline,
-        ClaudeAnalytics,
-        ClaudeDisconnectBody,
 
         // ChatGPT accounts
         AccountProvider,
@@ -325,6 +315,20 @@ impl Text {
         AccountBacklogRetry,
         AccountBacklogExpiry,
         AccountBacklogRecovery,
+
+        // Claude Code
+        ClaudeProvider,
+        ClaudeReview,
+        ClaudeConnect,
+        ClaudeDisconnect,
+        ClaudeFind,
+        ClaudePolicyNotice,
+        ClaudeBefore,
+        ClaudeDuring,
+        ClaudeFallback,
+        ClaudeDeadline,
+        ClaudeAnalytics,
+        ClaudeDisconnectBody,
     }
 
     pub(crate) const POSITIONS: [Self; 9] = [
@@ -432,18 +436,6 @@ impl Text {
             Self::SettingsTaskbar => "settings-taskbar",
             Self::TaskbarAddFailed => "taskbar-add-failed",
             Self::TaskbarRemoveFailed => "taskbar-remove-failed",
-            Self::ClaudeProvider => "claude-provider",
-            Self::ClaudeReview => "claude-review",
-            Self::ClaudeConnect => "claude-connect",
-            Self::ClaudeDisconnect => "claude-disconnect",
-            Self::ClaudeFind => "claude-find",
-            Self::ClaudePolicyNotice => "claude-policy-notice",
-            Self::ClaudeBefore => "claude-before",
-            Self::ClaudeDuring => "claude-during",
-            Self::ClaudeFallback => "claude-fallback",
-            Self::ClaudeDeadline => "claude-deadline",
-            Self::ClaudeAnalytics => "claude-analytics",
-            Self::ClaudeDisconnectBody => "claude-disconnect-body",
             Self::MaxFrameRate => "settings-max-frame-rate",
             Self::FrameRateAutomatic => "settings-frame-rate-automatic",
 
@@ -493,6 +485,20 @@ impl Text {
             Self::AccountBacklogRetry => "accounts-backlog-retry",
             Self::AccountBacklogExpiry => "accounts-backlog-expiry",
             Self::AccountBacklogRecovery => "accounts-backlog-recovery",
+
+            // Claude Code
+            Self::ClaudeProvider => "claude-provider",
+            Self::ClaudeReview => "claude-review",
+            Self::ClaudeConnect => "claude-connect",
+            Self::ClaudeDisconnect => "claude-disconnect",
+            Self::ClaudeFind => "claude-find",
+            Self::ClaudePolicyNotice => "claude-policy-notice",
+            Self::ClaudeBefore => "claude-before",
+            Self::ClaudeDuring => "claude-during",
+            Self::ClaudeFallback => "claude-fallback",
+            Self::ClaudeDeadline => "claude-deadline",
+            Self::ClaudeAnalytics => "claude-analytics",
+            Self::ClaudeDisconnectBody => "claude-disconnect-body",
         }
     }
 }
