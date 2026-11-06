@@ -751,6 +751,21 @@ revision: a cut can leave a higher dropped revision in that layout. Live Stop an
 recovery use this same at-rest construction. `activate` accepts only the matching
 prepared predecessor, clears its caller-owned frame outside paint, applies removals,
 and rebuilds parent-first sampling order. Pass that frame into `activate`.
+`activate` is two steps a host can also call apart. `prepare_activation(&self, &PreparedStep,
+now, segment_ms)` builds a `PreparedActivation` (the candidate view, its exact
+`resident_bytes` and the superseded candidates) without changing the view or the step, or
+returns `Stale`. Running and delayed tracks carry into the candidate as clones that share
+their immutable key arrays; each holder charges a shared array's whole allocation, its Arc
+header and alignment padding included. `install` then clears the frame while the outgoing
+view still owns the geometry, swaps the candidate
+in and sends the outgoing view and superseded candidates to the dropper. `install` refuses with
+`Stale`, leaving the view and frame untouched, unless the stage came from the view's current
+generation. Queue attribution includes the full shared layout geometry per holder and the
+source-generation Arc, even if the host drops the borrowed step before the stage. That geometry
+charge is cached, not recomputed at staging or install: preparation computes the full `after`
+layout once on its worker as `PreparedStep::retained_bytes()`, which the shell also uses as the
+rest's charge, and `SceneView::new` computes its at-rest layout once. A candidate dropped
+uninstalled goes to the dropper whole, so a refused host transition frees nothing on UI.
 Activation may allocate or free; `frame` does neither and takes no locks. A `Frame` reserves
 space for the per-scene object cap and reuses it. Its items share immutable primitive
 Arcs, so the host must clear the frame outside paint when clearing its scene or
@@ -1070,7 +1085,8 @@ motion maps, geometry, chart storage and private facts include their Arc headers
 and are counted once by allocation identity. Empty indexes release retained root
 leaves, and preparation discards sizing facts before publishing its result. These
 are requested-byte allowances, not RSS or allocator bookkeeping bounds. When the oldest
-ready result becomes the rest, charge its layout in full and keep only later ready deltas.
+ready result becomes the rest, charge its layout in full (`retained_bytes`, measured by the
+worker) and keep only later ready deltas.
 The returned step also carries its full attribution inside the same allowance until its
 owner releases it, even after another consumption, clear, removal or disconnect. This
 includes the original record even when the compiled run aliases the semantic log: the
@@ -1157,7 +1173,7 @@ v1 still needs admission at most 1 ms, clear/cut/eviction/timeout tails
 at most 2 ms, and concurrent worker/dropper churn measurements with throttling if the
 backlog grows. Final churn measurements must use the payload-specific queue attribution above.
 
-Activation retires the tracks it drops with the outgoing nodes: settled tracks, color tracks
+Activation retires the tracks it drops with the outgoing view: settled tracks, color tracks
 a `set` recolors, and candidates a newer owner supersedes. Admission keeps its object-map
 copy and the predecessor copies attributed as it builds them, from cached owned bytes,
 so a rejection at any point queues them at their `map_bytes` estimate. Each object
@@ -1339,17 +1355,21 @@ On Rez at 100% scale (96 DPI, 2560×1440/144 Hz), the 2026-11-05 run charged pea
 That binary was built before the final main merge; these are not exact-final-head native results.
 These are allowance checks, not before/after performance comparisons or heap bounds.
 
-Private `consume_ready(scene, expected_index, now)` accepts only the ready head, advances
-semantic retirement, and returns the protected charged owner plus scheduler effects. Unknown
-scenes, consumed indices, out-of-order requests, missing ready results and insufficient
-residency leave state unchanged. Freeing a window position immediately gives its next
-successor a chance to become eligible. No production caller consumes yet: B6 owns activation
-and `StepShown`. While the scene's admission is in the lane, including its worker-slot wait,
-a valid consumption request returns Busy and records one pending request without changing
-semantic state, residency or window positions.
-Returning the read offers a wake/retry point before the next admission for that scene.
-Test-only consumption still keeps the previous view. B6 must replace that view and its charge
-atomically with the consumed rest before introducing a production caller.
+Private `consume_ready(scene, expected_index, now, scene_time, segment_ms)` accepts only the
+ready head and activates it in one transaction. It checks the scene, index and Busy first,
+then validates the head against the semantic state and rest, stages the activated view from
+the current view and the borrowed step, and checks the whole post-transition charge: the
+other scenes, returned owners, the head's full rest, the candidate view and the new owner.
+Exactly 64 MiB fits. Only then does it retire the step semantically, install the rest and the
+view, start a new frame epoch so no earlier paint counts, update every charge and free one
+window position, before scheduling successors. It returns the protected charged owner plus
+scheduler effects. Unknown scenes, consumed indices, out-of-order requests, missing ready
+results, stale heads and insufficient residency leave every bound, epoch and charge unchanged,
+and the staged candidate goes to the dropper. While the scene's admission is in the lane,
+including its worker-slot wait, a valid request returns Busy and records one pending request;
+a different index is out of order and never replaces it. Returning the read offers a
+wake/retry point before the next admission for that scene. No production caller consumes
+yet: B6d owns the conductor, its scene clock and `StepShown`.
 Both fresh arrivals and already-held commits wait behind the pending request, even when
 the lane and held queue were empty at arrival.
 A Residency refusal instead fails without waiting for bytes; the activation caller must

@@ -108,9 +108,7 @@ impl PrepareJob {
                 &cancel,
             )
         });
-        let full_after = result
-            .as_ref()
-            .map_or(0, |prepared| prepared.after.resident_bytes());
+        let full_after = result.as_ref().map_or(0, PreparedStep::retained_bytes);
         let owner_bytes = result.as_ref().map_or(0, |prepared| {
             full_after
                 .saturating_add(prepared.resident_bytes)

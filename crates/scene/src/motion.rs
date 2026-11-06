@@ -258,13 +258,14 @@ fn fraction(part: u64, whole: u64) -> f32 {
     }
 }
 
-/// One activated explicit track or generated glide, compiled once at activation.
-#[derive(Debug)]
+/// One activated explicit track or generated glide, compiled once at activation. Its keys are
+/// immutable, so every staged view that carries the track shares them.
+#[derive(Debug, Clone)]
 struct Live {
     target: Handle,
     track: Track,
     origin: u64,
-    keys: Box<[(u32, Value)]>,
+    keys: Arc<[(u32, Value)]>,
     ease: Ease,
     plays: u32,
     yoyo: bool,
@@ -284,6 +285,12 @@ impl Live {
             plays: plays(anim),
             yoyo: anim.yoyo,
         }
+    }
+    /// Requested bytes of this holder's key array allocation: the Arc header and the keys,
+    /// padded to the allocation's alignment as the allocator is asked for it.
+    fn key_bytes(&self) -> usize {
+        (crate::layout::heap::ARC_HEADER + size_of_val(&*self.keys))
+            .next_multiple_of(align_of::<usize>().max(align_of::<(u32, Value)>()))
     }
     fn period(&self) -> u32 {
         self.keys.last().map_or(0, |key| key.0)
@@ -474,10 +481,10 @@ const HIDDEN: World = World {
 ///
 /// A frame binds to the view generation it first samples after it was created or cleared.
 /// Its items share geometry with that generation's objects, so [`SceneView::frame`] never
-/// drops the last reference to any primitives and never frees. [`SceneView::activate`] clears
-/// the frame it is handed. After [`SceneView::new`], or an activation handed another frame,
-/// call [`Frame::clear`] outside paint before sampling again, and clear it when its scene
-/// clears so it keeps no geometry resident past the scene.
+/// drops the last reference to any primitives and never frees. [`SceneView::install`], and so
+/// [`SceneView::activate`], clears the frame it is handed. After [`SceneView::new`], or an
+/// activation handed another frame, call [`Frame::clear`] outside paint before sampling
+/// again, and clear it when its scene clears so it keeps no geometry resident past the scene.
 pub struct Frame {
     items: Vec<FrameItem>,
     world: Vec<World>,
@@ -538,6 +545,8 @@ impl Frame {
 /// The host supplies a monotonic clock in milliseconds; the view never reads one.
 pub struct SceneView {
     layout: LayoutState,
+    /// The layout's full requested bytes, geometry included, cached so retirement never walks it.
+    layout_bytes: usize,
     activated: u32,
     deadline: u64,
     nodes: Vec<Node>,
@@ -554,6 +563,29 @@ impl fmt::Debug for SceneView {
             .finish_non_exhaustive()
     }
 }
+
+/// One step's activation, staged from a borrowed view and step without changing either: the
+/// candidate view, the candidates newer owners superseded, and the generation of the view it
+/// was staged from, which alone may install it. Dropped uninstalled, as a refused host
+/// transition drops it, it goes whole to the dropper.
+pub struct PreparedActivation(Deferred<(SceneView, Vec<Option<Live>>, Arc<()>)>);
+impl PreparedActivation {
+    /// Requested bytes the installed view owns: its [`SceneView::resident_bytes`].
+    pub fn resident_bytes(&self) -> usize {
+        let (view, ..) = &*self.0;
+        view.resident_bytes()
+    }
+}
+impl fmt::Debug for PreparedActivation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (view, superseded, _) = &*self.0;
+        f.debug_struct("PreparedActivation")
+            .field("view", view)
+            .field("superseded", &superseded.len())
+            .finish()
+    }
+}
+
 impl SceneView {
     /// Installs a layout at rest with no live motion: recovery and every post-cut tip.
     /// Pass `scene.activated()`, never the layout's revision, which counts dropped commits:
@@ -567,6 +599,7 @@ impl SceneView {
             paint: paint_order(&nodes),
             nodes,
             layout: at_rest.clone(),
+            layout_bytes: at_rest.resident_bytes(),
             activated,
             deadline: 0,
             tracks: Vec::new(),
@@ -582,44 +615,51 @@ impl SceneView {
         &self.layout
     }
     /// Requested bytes this view owns beyond geometry its layout shares: the layout's own
-    /// index copy, nodes, paint order, tracks with their keys, and the generation.
+    /// index copy, nodes, paint order, tracks with their key arrays, and the generation. A key
+    /// array a staged or outgoing view also holds is counted for each holder.
     pub fn resident_bytes(&self) -> usize {
         self.layout.index_bytes()
             + self.nodes.capacity() * size_of::<Node>()
             + self.paint.capacity() * size_of::<usize>()
             + self.tracks.capacity() * size_of::<Live>()
-            + self
-                .tracks
-                .iter()
-                .map(|live| size_of_val(&*live.keys))
-                .sum::<usize>()
+            + self.tracks.iter().map(Live::key_bytes).sum::<usize>()
             + crate::layout::heap::ARC_HEADER
     }
 
-    /// Activates a prepared step at `now`, scheduling its objects and tracks against the
-    /// narration segment; a later step takes over a property only from this instant.
-    ///
-    /// `out` is the host's paint frame. Once the step is accepted it is cleared here, while
-    /// the outgoing objects still own its geometry, and the view starts a new generation that
-    /// the cleared frame binds to on its next [`SceneView::frame`]. Any other frame bound to
-    /// this view must then be cleared outside paint before it is sampled again.
+    /// Activates a prepared step at `now`: [`Self::prepare_activation`], then
+    /// [`Self::install`] into the host's paint frame `out`. The step goes to the dropper.
     /// # Errors
     /// Returns `Stale`, leaving the view and `out` untouched, unless the step was prepared
     /// on this view's layout.
-    #[expect(clippy::too_many_lines, reason = "atomic activation and retirement")]
     pub fn activate(
         &mut self,
-        mut step: PreparedStep,
+        step: PreparedStep,
         now: u64,
         segment_ms: u64,
         out: &mut Frame,
     ) -> Result<(), PrepareError> {
+        let installed = self
+            .prepare_activation(&step, now, segment_ms)
+            .and_then(|activation| self.install(activation, out));
+        let bytes = step.resident_bytes;
+        drop(Deferred::new(step, bytes));
+        installed
+    }
+
+    /// Stages `step` at `now` without changing this view or the step, scheduling its objects
+    /// and tracks against the narration segment; a later step takes over a property only
+    /// from this instant. Running and delayed tracks carry over, sharing their keys.
+    /// # Errors
+    /// Returns `Stale` unless the step was prepared on this view's layout.
+    pub fn prepare_activation(
+        &self,
+        step: &PreparedStep,
+        now: u64,
+        segment_ms: u64,
+    ) -> Result<PreparedActivation, PrepareError> {
         if !step.is_based_on(&self.layout) {
-            let bytes = step.resident_bytes;
-            drop(Deferred::new(step, bytes));
             return Err(PrepareError::Stale);
         }
-        out.clear();
         let source = step.run();
         let say = source.say.as_ref().map_or("", Text::as_str);
         let words = word_count(say);
@@ -627,7 +667,7 @@ impl SceneView {
             now.saturating_add(word_offset_ms(words, word.unwrap_or(0), segment_ms))
                 .saturating_add(u64::from(delay.map_or(0, Ms::get)))
         };
-        let born = births(&step, origin);
+        let born = births(step, origin);
         let recolored: BTreeSet<Handle> = source
             .set
             .iter()
@@ -641,7 +681,7 @@ impl SceneView {
                 target: glide.target,
                 track: Track::Pos,
                 origin: now,
-                keys: Box::new([
+                keys: Arc::new([
                     (
                         0,
                         Value::V2(self.position(glide.target, now).unwrap_or(glide.to)),
@@ -693,44 +733,69 @@ impl SceneView {
             starts.push(node.timing.start);
         }
         let (tracks, superseded) = own(&mut nodes, candidates);
-        let settled = std::mem::replace(&mut self.tracks, tracks);
-        let paint = paint_order(&nodes);
-        let keys = |live: &Live| size_of_val(&*live.keys);
-        // The outgoing layout may hold the last references to geometry this step removed.
-        let bytes = self.layout.index_bytes()
-            + self.nodes.capacity() * size_of::<Node>()
-            + self.paint.capacity() * size_of::<usize>()
-            + settled.capacity() * size_of::<Live>()
-            + settled.iter().map(keys).sum::<usize>()
-            + superseded.capacity() * size_of::<Option<Live>>()
-            + superseded.iter().flatten().map(keys).sum::<usize>();
-        let activated = step.index + 1;
-        std::mem::swap(&mut self.layout, &mut step.after);
-        drop(Deferred::new(
-            (
-                step,
-                std::mem::replace(&mut self.nodes, nodes),
-                std::mem::replace(&mut self.paint, paint),
-                settled,
-                superseded,
-            ),
+        let view = Self {
+            paint: paint_order(&nodes),
+            nodes,
+            layout: step.after.clone(),
+            layout_bytes: step.retained_bytes(),
+            activated: step.index + 1,
+            deadline: now.saturating_add(u64::from(MAX_MOTION_MS)),
+            tracks,
+            generation: Arc::new(()),
+        };
+        let bytes =
+            view.attributed_bytes() + retired_bytes(&superseded) + crate::layout::heap::ARC_HEADER;
+        let source = Arc::clone(&self.generation);
+        Ok(PreparedActivation(Deferred::new(
+            (view, superseded, source),
             bytes,
-        ));
-        self.activated = activated;
-        self.deadline = now.saturating_add(u64::from(MAX_MOTION_MS));
-        self.generation = Arc::new(());
+        )))
+    }
+
+    /// Installs an activation staged from this view's current generation. `out` is the host's
+    /// paint frame: it is cleared first, while the outgoing objects still own its geometry, and
+    /// binds to the new generation on its next [`SceneView::frame`]. Any other frame bound to
+    /// this view must then be cleared outside paint before it is sampled again.
+    /// # Errors
+    /// Returns `Stale`, leaving the view and `out` untouched, when the activation was staged
+    /// from another view or from this one before it changed; the activation goes to the dropper.
+    pub fn install(
+        &mut self,
+        activation: PreparedActivation,
+        out: &mut Frame,
+    ) -> Result<(), PrepareError> {
+        let (_, _, source) = &*activation.0;
+        if !Arc::ptr_eq(source, &self.generation) {
+            return Err(PrepareError::Stale);
+        }
+        out.clear();
+        let (view, superseded, source) = activation.0.into_inner();
+        // The outgoing layout may hold the last references to geometry this step removed.
+        let outgoing = std::mem::replace(self, view);
+        let bytes = outgoing.attributed_bytes()
+            + retired_bytes(&superseded)
+            + crate::layout::heap::ARC_HEADER;
+        drop(Deferred::new((outgoing, superseded, source), bytes));
         Ok(())
     }
 
-    /// Moves out running tracks that survive into the next activation. Settled and recolored
-    /// tracks rest in layout and stay in `self.tracks` for activation to retire.
-    fn carried(&mut self, now: u64, recolored: &BTreeSet<Handle>) -> Vec<Live> {
+    /// What retiring this view may free: its own bytes plus its layout's cached geometry, which
+    /// it may hold last. Counted per holder, from the cache, so retirement walks nothing.
+    fn attributed_bytes(&self) -> usize {
+        self.resident_bytes() + self.layout_bytes.saturating_sub(self.layout.index_bytes())
+    }
+
+    /// Running and delayed tracks that survive into the next activation, sharing their keys.
+    /// Settled and recolored tracks rest in layout and retire with the outgoing view.
+    fn carried(&self, now: u64, recolored: &BTreeSet<Handle>) -> Vec<Live> {
         let deadline = self.deadline;
         self.tracks
-            .extract_if(.., |live| {
+            .iter()
+            .filter(|live| {
                 live.end().min(deadline) > now
                     && (live.track != Track::Color || !recolored.contains(&live.target))
             })
+            .cloned()
             .collect()
     }
 
@@ -906,6 +971,16 @@ impl SceneView {
         }
         Ok(())
     }
+}
+
+/// Requested bytes of the superseded candidates an activation retires.
+fn retired_bytes(superseded: &Vec<Option<Live>>) -> usize {
+    superseded.capacity() * size_of::<Option<Live>>()
+        + superseded
+            .iter()
+            .flatten()
+            .map(Live::key_bytes)
+            .sum::<usize>()
 }
 
 /// Indices of drawable nodes in handle order, the paint order of prepared display lists.
