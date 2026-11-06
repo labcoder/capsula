@@ -231,7 +231,14 @@ fn provider_body_bound_and_outermost_formatters_are_content_free() {
         json!({"type":"error","error":{"type":marker,"message":marker},"request_id":marker});
     let error = Failure::Provider(answered(400, &value));
     let byte_marker = format!("{:?}", marker.as_bytes());
-    for formatted in [format!("{error:?}"), format!("{error}")] {
+    for formatted in [
+        format!("{error:?}"),
+        format!("{error}"),
+        format!(
+            "{:?}",
+            crate::engines::Finish::Failed(crate::engines::EngineFailure::Anthropic(error))
+        ),
+    ] {
         assert!(!formatted.contains(marker), "provider text is redacted");
         assert!(
             !formatted.contains(byte_marker.trim_matches(['[', ']'])),
@@ -242,6 +249,12 @@ fn provider_body_bound_and_outermost_formatters_are_content_free() {
 
 #[test]
 fn local_and_reused_transport_failures_remain_closed() {
+    check(
+        &Failure::Exhausted,
+        ErrorKey::AnthropicAnswerLimit,
+        &[],
+        Recovery::FixRequest,
+    );
     for error in [Failure::Request, Failure::Spent, Failure::Refused] {
         check(&error, ErrorKey::RequestRefused, &[], Recovery::FixRequest);
     }
@@ -310,6 +323,7 @@ fn every_anthropic_failure_renders_without_naming_chatgpt() {
         Failure::Refused,
         Failure::BackpressureTimeout,
     ];
+    failures.push(Failure::Exhausted);
     for status in [401, 403, 402, 429, 529, 500, 400, 404] {
         failures.push(Failure::Provider(answered(status, &json!({}))));
     }
@@ -321,6 +335,7 @@ fn every_anthropic_failure_renders_without_naming_chatgpt() {
             ErrorKey::AnthropicUnreachable => "error-anthropic-unreachable",
             ErrorKey::AnthropicRateLimited => "error-anthropic-rate-limited",
             ErrorKey::AnthropicCredit => "error-anthropic-credit",
+            ErrorKey::AnthropicAnswerLimit => "error-anthropic-answer-limit",
             _ => panic!("new Anthropic error key needs a rendering fixture"),
         };
         let pattern = bundle

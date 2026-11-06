@@ -37,7 +37,7 @@ pub enum Kind {
 }
 
 /// One bounded provider refusal. Its body remains private and wiped on drop.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ProviderFailure {
     status: u16,
     kind: Kind,
@@ -136,7 +136,7 @@ impl fmt::Display for ProviderFailure {
 impl std::error::Error for ProviderFailure {}
 
 /// One failed attempt, without foreign diagnostics or automatic recovery actions.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Failure {
     /// Invalid envelope or request bound exceeded; nothing was sent.
     Request,
@@ -150,8 +150,10 @@ pub enum Failure {
     Transport,
     /// Invalid framing, event shape or byte bound.
     Protocol,
-    /// The answer ended early or exhausted context.
+    /// The transport ended before the answer completed.
     Truncated,
+    /// The answer reached the request's token or context limit.
+    Exhausted,
     /// The model explicitly refused.
     Refused,
     /// The consumer did not accept events before its deadline.
@@ -170,10 +172,10 @@ impl Failure {
         {
             return Self::Protocol;
         }
-        let Ok(body) = serde_json::to_vec(event) else {
+        let Ok(body) = super::request::encode(event, MAX_BODY_BYTES) else {
             return Self::Protocol;
         };
-        match ProviderFailure::answered(200, Secret::new(Zeroizing::new(body))) {
+        match ProviderFailure::answered(200, Secret::new(body)) {
             Ok(error) => Self::Provider(error),
             Err(error) => error,
         }
@@ -205,6 +207,7 @@ impl Failure {
                 user_error(ErrorKey::AnthropicUnreachable, Some(Action::Retry))
             }
             Self::Protocol => user_error(ErrorKey::ResponseUnreadable, Some(Action::Retry)),
+            Self::Exhausted => user_error(ErrorKey::AnthropicAnswerLimit, None),
             Self::Request | Self::Spent | Self::Refused => {
                 user_error(ErrorKey::RequestRefused, None)
             }
@@ -241,6 +244,7 @@ impl fmt::Debug for Failure {
             Self::Transport => f.write_str("Transport"),
             Self::Protocol => f.write_str("Protocol"),
             Self::Truncated => f.write_str("Truncated"),
+            Self::Exhausted => f.write_str("Exhausted"),
             Self::Refused => f.write_str("Refused"),
             Self::BackpressureTimeout => f.write_str("BackpressureTimeout"),
         }
