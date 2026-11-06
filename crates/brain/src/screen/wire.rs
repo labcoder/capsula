@@ -2,6 +2,9 @@ use kumochi_protocol::geometry::{DisplayRef, PhysicalRect};
 use kumochi_protocol::message::RunId;
 use serde::{Deserialize, Serialize};
 
+pub(super) use super::elements::ElementTarget;
+use super::elements::ElementTree;
+
 /// The largest reply, serialized.
 pub(super) const MAX_REPLY_BYTES: usize = 4 * 1024 * 1024;
 
@@ -29,6 +32,13 @@ pub enum RequestBody {
         display: DisplayRef,
         /// What must not appear in the frame.
         exclude: Exclusion,
+    },
+    /// Read control-view elements under the held capture.
+    Elements {
+        /// The committed frame whose authority is spent.
+        capture: CaptureId,
+        /// The top-level window to read.
+        target: ElementTarget,
     },
     /// Trigger one failure without modifying the parent's environment.
     #[cfg(debug_assertions)]
@@ -117,7 +127,7 @@ pub enum Exclusion {
     KumochiWindows,
 }
 
-/// Why the worker took no frame, for a reason that isn't a platform fault.
+/// Why the worker refused a capture or element walk without a platform fault.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Refusal {
     /// The ticket's local validity ran out before a complete frame.
@@ -160,7 +170,9 @@ pub enum ReplyBody {
     Fault(i32),
     /// A complete frame is held in the worker.
     Captured(FrameMeta),
-    /// No frame was taken.
+    /// A bounded, capture-scoped control-view tree.
+    Elements(ElementTree),
+    /// The requested operation was refused.
     Refused(Refusal),
 }
 
@@ -170,6 +182,7 @@ impl std::fmt::Debug for ReplyBody {
             Self::Pong => f.write_str("Pong"),
             Self::Fault(code) => write!(f, "Fault({code})"),
             Self::Captured(meta) => write!(f, "Captured({meta:?})"),
+            Self::Elements(tree) => write!(f, "Elements({tree:?})"),
             Self::Refused(refusal) => write!(f, "Refused({refusal:?})"),
         }
     }

@@ -72,3 +72,6 @@ async fn capture_accepts_only_its_own_frame_and_passes_refusals_through() {
         assert_eq!(result, expected);
     }
 }
+
+#[path = "elements.rs"]
+mod elements;
