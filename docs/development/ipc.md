@@ -1,5 +1,27 @@
 # The pipes and the handshake
 
+## Anthropic paste metadata
+
+The build-id handshake rejects mixed binaries before decoding connection work.
+`AnthropicKeyStaged` retains its variant index with a new plan-id field;
+`BeginAnthropicKeyStage { request, len }` is appended. The brain alone mints
+the write-once generation using the validated trimmed byte length (16–2048).
+`AnthropicKeyStage { request, result }` and `AnthropicKeyStageDone { plan,
+result }` are appended control replies. They carry metadata and closed errors,
+never a key, target supplied by the shell or provider text. Their tap payloads
+are redacted, and plan ids have redacted Debug output.
+
+The runtime binds Begin replies/admission to the authenticated shell epoch,
+clears admission on disconnect and refuses staging controls in offline drain.
+The credential worker has no link epoch: its FIFO and one-use ids govern
+durable work. A committed adoption updates the brain-wide key by generation
+even after disconnect, while its paste reply cannot cross to a new shell.
+Admission and failure preserve the working key and catalog; only a committed
+replacement starts its catalog check. The shell link emits both replies as
+generation-tagged KeyStage events for the separate Accounts paste consumer.
+
+## Transport
+
 The shell and the brain talk over two named pipes per Windows session: **control** for small,
 urgent messages and **data** for everything that can grow. Frames are a `u32` little-endian
 length followed by a `postcard` payload from the closed enums in `crates/protocol`. The length
@@ -193,19 +215,23 @@ flowchart LR
 
 | Message | Pipe | Fields |
 |---|---|---|
-| `Connection` | Control, shell to brain | a `ConnectionOp`: `AnthropicKeyStaged`, `CheckAnthropicKey`, `RemoveAnthropicKey`, `ConnectClaudeCode`, `CancelClaudeSignIn`, `DisconnectClaudeCode` or `FindClaudeCode`; no fields |
+| `Connection` | Control, shell to brain | a `ConnectionOp`: `BeginAnthropicKeyStage { request, len }`, `AnthropicKeyStaged { plan }`, or fieldless `CheckAnthropicKey`, `RemoveAnthropicKey`, `ConnectClaudeCode`, `CancelClaudeSignIn`, `DisconnectClaudeCode`, `FindClaudeCode` |
 | `Warm` | Control, shell to brain | the `ThreadId` the user is about to type into |
 | `Connections` | Control, brain to shell | a `ConnectionsView`: the key's `KeyView` and Claude Code's `ClaudeCodeView` |
+| `AnthropicKeyStage` | Control, brain to shell | the request number and a one-use plan or closed refusal |
+| `AnthropicKeyStageDone` | Control, brain to shell | the plan id and committed-adoption outcome; success does not imply the key is still current after a later Remove |
 
 - No key, token or anything Claude Code printed crosses the pipe. The shell stages a pasted key
-  in Credential Manager and sends only `AnthropicKeyStaged`; the brain checks it and moves it.
+  in Credential Manager using a brain-issued plan, then sends its id in
+  `AnthropicKeyStaged`; the brain validates and adopts it at fresh names.
 - Every reason is a closed enum: a refused key's `KeyRejection`, an `Unsupported` install, the
   audit check that failed (`AuditFailed`, never what it saw) and the `PolicyFailed` that closed
   the route. A `ClaudeVersion` is three 16-bit numbers.
-- All three messages are on the tap's content-free list.
+- `Warm`, `Connections` and the fieldless connection ops are on the tap's
+  content-free list. Staging ops and both paste replies redact their payloads.
 - A `ModelChoice` names its `ConnectionKind`; one saved before Claude existed reads as `ChatGpt`.
-- shortcut: nothing sends or answers these until A1, C2 and C5b, and the shell ignores
-  `Connections` until its Connect screen reads it.
+- The staging writer and link reply seam are available; the Settings paste
+  caller and its clipboard lifecycle land separately.
 
 ## Scenes and recovery
 
@@ -409,6 +435,12 @@ run's first `RunState.origin: Some(RunOrigin::Typed { turn })`. Later states hav
 still settles pending turns in FIFO order; B2a replaces that with keyed correlation.
 Slice 7 appended `t_qpc`, `chunks`, `KeyDown`, `MicPcm` and `Transcribing` without renaming these
 types or allocating another run.
+
+An ask about a clicked part, `DataToBrain::AskAbout { turn, scene, element }`, is the last data
+tag. It carries only its turn count, a `SceneId` and a `Handle`, all varints, so at most 19 bytes
+with the tag. It counts as a turn like `TextSubmit`, shares its 64-turn bound, and is answered by
+`TurnRefused` or the run's first `RunState`, and then a `Focus` (see
+[runs](runs.md#asking-about-a-part)). The tap records only its operation and length.
 
 ## Voice wire contract
 

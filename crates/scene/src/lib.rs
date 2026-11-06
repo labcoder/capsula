@@ -27,7 +27,7 @@ pub use motion::{Frame, FrameItem, PreparedActivation, SceneView, ViewFrame};
 pub use parse::parse_record;
 pub use record::{Begin, End, Op, Record, Step};
 pub use state::{
-    Admission, Admitted, BindingError, CallState, Committed, DetachedCandidate, Preparation,
+    Admission, Admitted, BindingError, CallState, Committed, DetachedCandidate, Part, Preparation,
     SceneBinding, SceneEvent, SceneRead, SceneState, StaleAdmission, StopCut, StopOutcome,
     refuse_three_dimensional,
 };

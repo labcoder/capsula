@@ -7,6 +7,7 @@ use std::fs::{self, File, OpenOptions};
 use std::future::Future;
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -66,6 +67,34 @@ pub(crate) enum DownloadError {
     Io,
     #[error("model download cancelled")]
     Cancelled,
+}
+
+/// A part's fetch, as the installer starts it.
+pub(crate) trait Fetch: Send + Sync + std::fmt::Debug {
+    fn fetch<'a>(
+        &'a self,
+        part: VoicePart,
+        progress: &'a watch::Sender<Progress>,
+        cancel: &'a watch::Receiver<bool>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), DownloadError>> + Send + 'a>>;
+}
+
+/// Fetches into its models folder with a downloader made for each fetch, so start-up builds none.
+#[derive(Debug)]
+pub(crate) struct Online(pub(crate) PathBuf);
+
+impl Fetch for Online {
+    fn fetch<'a>(
+        &'a self,
+        part: VoicePart,
+        progress: &'a watch::Sender<Progress>,
+        cancel: &'a watch::Receiver<bool>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), DownloadError>> + Send + 'a>> {
+        Box::pin(async move {
+            let downloader = Downloader::new(self.0.clone())?;
+            downloader.fetch(part, progress, cancel).await
+        })
+    }
 }
 
 #[derive(Clone, Default)]
@@ -159,7 +188,7 @@ impl Downloader {
     }
 
     /// The caller supplies the models folder under `platform::data_dir`; no network value
-    /// contributes to any local path. PR 8 owns that caller and the single install task.
+    /// contributes to any local path. The installer's one fetch is its only caller.
     pub(crate) async fn fetch(
         &self,
         part: VoicePart,

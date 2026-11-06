@@ -10,6 +10,8 @@ use std::sync::Arc;
 use tokio::sync::Notify;
 use zeroize::Zeroizing;
 
+mod staging;
+
 fn key() -> Secret<AnthropicKey> {
     AnthropicKey::parse(Secret::new(Zeroizing::new(
         b"sk-ant-api-zqxsentinellabel".to_vec(),
@@ -82,7 +84,6 @@ async fn settle(accounts: &mut Accounts) {
     .expect("the key settles");
 }
 
-/// shortcut: a staged paste isn't adopted until C7 stages it through the authority.
 #[tokio::test]
 async fn a_staged_paste_is_refused_and_the_saved_key_still_checks_out() {
     let scratch = Scratch::new("key-staged-refused");
@@ -108,11 +109,34 @@ async fn a_staged_paste_is_refused_and_the_saved_key_still_checks_out() {
     store
         .set("anthropic-key-staged.key-test", &paste)
         .expect("fake paste");
-    accounts.connection_event(ConnectionEvent::Op(ConnectionOp::AnthropicKeyStaged));
-    accounts.connection_event(ConnectionEvent::Op(ConnectionOp::AnthropicKeyStaged));
+    accounts.connections.stage_session(Some(1));
+    let op = ConnectionOp::AnthropicKeyStaged {
+        plan: KeyStageId([0; 16]),
+    };
+    assert_eq!(
+        accounts.stage_op(1, op),
+        vec![ControlToShell::AnthropicKeyStageDone {
+            plan: KeyStageId([0; 16]),
+            result: Err(KeyStageFailure::Changed)
+        }]
+    );
+    assert_eq!(
+        accounts.stage_op(1, op),
+        vec![ControlToShell::AnthropicKeyStageDone {
+            plan: KeyStageId([0; 16]),
+            result: Err(KeyStageFailure::Changed)
+        }]
+    );
     settle(&mut accounts).await;
-    assert_eq!(accounts.connections.view.anthropic, KeyView::Unconfirmed);
-    assert_eq!(accounts.connections.key.as_ref().map(|_| ()), None);
+    assert_eq!(accounts.connections.view.anthropic, KeyView::Ready);
+    assert_eq!(
+        accounts
+            .connections
+            .key
+            .as_ref()
+            .map(|key| key.expose().as_str()),
+        Some("sk-ant-api-fake-saved-value")
+    );
     assert_eq!(
         store.get("anthropic-key-staged.key-test").expect("staged"),
         Some(paste),
@@ -345,12 +369,17 @@ async fn changed_or_removed_keys_ignore_late_worker_and_check_results() {
         result: Ok(vec![]),
     });
     assert_eq!(accounts.connections.view.anthropic, KeyView::Missing);
-    accounts.connection_event(ConnectionEvent::Op(ConnectionOp::AnthropicKeyStaged));
+    accounts.stage_op(
+        1,
+        ConnectionOp::AnthropicKeyStaged {
+            plan: KeyStageId([0; 16]),
+        },
+    );
     accounts.connection_event(ConnectionEvent::Checked {
         generation: current,
         result: Ok(vec![]),
     });
-    assert_eq!(accounts.connections.view.anthropic, KeyView::Checking);
+    assert_eq!(accounts.connections.view.anthropic, KeyView::Missing);
     assert_eq!(accounts.connections.models.len(), 0);
     accounts
         .close(tokio::time::Instant::now(), tokio::time::Instant::now())
