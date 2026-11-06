@@ -402,6 +402,7 @@ impl Brain {
     /// the next start, as after a crash.
     pub(crate) async fn quit(mut self, deadline: Instant) -> Quit {
         self.offline(Input::ShellLost);
+        self.voice_quit();
         self.pump_settings_offline();
         #[cfg(test)]
         self.observer.send(Seen::QuitDraining).ok();
@@ -474,6 +475,7 @@ impl Brain {
     /// the store become `failed(crash)`; committed outcomes stay, and uncommitted work may be lost.
     pub(crate) async fn close(mut self) {
         let deadline = Instant::now() + close_wait();
+        self.voice_quit();
         self.pump_settings_offline();
         let settled = tokio::time::timeout(close_wait(), async {
             while self.coordinator.ending_runs() > 0 {
@@ -534,6 +536,12 @@ impl Brain {
                 Some(ask) = self.access.recv() => {
                     let answered = self.access_asked(ask, None);
                     debug_assert!(answered.is_ok(), "answering without a shell can't fail");
+                    continue;
+                }
+                event = voice::next(&mut self.voice) => {
+                    let applied = self.voice_event(event, None);
+                    debug_assert!(applied.is_ok(), "applying without a shell can't fail");
+                    self.pump_settings_offline();
                     continue;
                 }
             };
@@ -795,8 +803,10 @@ impl Brain {
                 }
                 () = sleep_until(send_due) => self.send_deadline_passed(),
                 (run, event) = next_tts(&mut self.pump), if take_engine => tts_input(run, event),
-                (part, report) = voice::next(&mut self.voice) => {
-                    if self.voice_reported(part, report, Some(&mut link)).is_err() {
+                event = voice::next(&mut self.voice) => {
+                    if self.voice_event(event, Some(&mut link)).is_err()
+                        || self.pump_settings(Some(&mut link)).is_err()
+                    {
                         return Ended::Lost;
                     }
                     continue;
