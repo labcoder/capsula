@@ -184,6 +184,42 @@ impl Worker<NativeCredentialStore> {
 }
 
 impl<S: CredentialStore> Worker<S> {
+    pub(crate) fn github(
+        &mut self,
+        job: crate::connections::github::lane::Job,
+    ) -> crate::connections::github::lane::Reply {
+        match self.vault.as_mut() {
+            Some(vault) => vault.github(job),
+            None => job.unavailable(),
+        }
+    }
+
+    pub(crate) fn begin_key_paste(
+        &mut self,
+        len: usize,
+    ) -> Result<super::super::vault::staging::PastePlan, crate::connections::anthropic::KeyError>
+    {
+        self.vault
+            .as_mut()
+            .ok_or(VaultError::Busy)?
+            .begin_anthropic_paste(len)
+    }
+
+    pub(crate) fn adopt_key_paste(
+        &mut self,
+        id: super::super::authority::Generation,
+    ) -> Result<
+        Secret<crate::connections::anthropic::key::AnthropicKey>,
+        super::super::vault::staging::PasteError,
+    > {
+        self.vault
+            .as_mut()
+            .ok_or(crate::connections::anthropic::KeyError::from(
+                VaultError::Busy,
+            ))?
+            .adopt_anthropic_paste(id)
+    }
+
     pub(crate) fn anthropic(
         &mut self,
         op: crate::connections::anthropic::KeyOp,

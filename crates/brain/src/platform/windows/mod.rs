@@ -12,6 +12,8 @@ mod folders;
 mod fs;
 mod job;
 mod library;
+#[expect(dead_code, reason = "A6 opens OCR; tests never run native recognition")]
+pub(crate) mod ocr;
 mod pipe;
 mod policy;
 mod process;

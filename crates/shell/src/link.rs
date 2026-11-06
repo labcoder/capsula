@@ -63,6 +63,10 @@ pub(crate) enum LinkState {
 /// before `Connected`, and none of a connection's messages after its next state.
 #[derive(Debug)]
 pub(crate) enum LinkEvent {
+    KeyStage {
+        generation: u64,
+        reply: ControlToShell,
+    },
     /// Any state but `Connected`, which comes as [`LinkEvent::Connected`].
     State(LinkState),
     /// A new connection, and the session the UI sends and grants credit through.
@@ -494,7 +498,10 @@ impl LinkHandle {
         }
         self.shared
             .outbox(session, |outbox| {
-                let turn = matches!(message, DataToBrain::TextSubmit { .. });
+                let turn = matches!(
+                    message,
+                    DataToBrain::TextSubmit { .. } | DataToBrain::AskAbout { .. }
+                );
                 if turn && outbox.submits.load(Ordering::SeqCst) == u32::MAX {
                     outbox.pipe.abort();
                     return false;
@@ -851,6 +858,8 @@ fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
             | ControlToShell::ActionState { .. }
             | ControlToShell::IssueRefused { .. }
             | ControlToShell::Connections(_)
+            | ControlToShell::AnthropicKeyStage { .. }
+            | ControlToShell::AnthropicKeyStageDone { .. }
             | ControlToShell::SpeechRevoked { .. }
             | ControlToShell::Voice(_),
         ) => Err(LinkError::Rejected),
@@ -1003,6 +1012,17 @@ fn watch(
             Ok(Some(ControlToShell::Account(view))) => {
                 if events
                     .send_blocking(LinkEvent::Account { generation, view })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Ok(Some(
+                reply @ (ControlToShell::AnthropicKeyStage { .. }
+                | ControlToShell::AnthropicKeyStageDone { .. }),
+            )) => {
+                if events
+                    .send_blocking(LinkEvent::KeyStage { generation, reply })
                     .is_err()
                 {
                     return;

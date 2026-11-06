@@ -10,6 +10,7 @@
 //! which turns an engine round's events into text frames, steps and the run's end, is in `run`.
 
 mod admission;
+mod ask;
 mod availability;
 mod calls;
 mod delete;
@@ -42,7 +43,7 @@ pub use availability::{Availability, Ready};
 pub use inline::{CompactBuilt, CompactContext};
 pub(crate) use job::JobAsk;
 pub use job::{JobBuilt, JobKey, JobKind, JobOutput, ReadJob};
-pub use lease::{LeaseId, SEND_DEADLINE, SendKey};
+pub use lease::{LeaseId, MAX_HOLD, SEND_DEADLINE, SendKey};
 pub use speech::{DRAIN_STALL, QUIET_TIMEOUT, Synthesized};
 pub use store_op::{StoreOp, SummaryText};
 pub use tools::{MAX_CALLS, MAX_ROUNDS, RoundItems};
@@ -102,6 +103,15 @@ pub enum Input {
         /// What the user typed.
         text: Content,
     },
+    /// The user clicked a labelled 3D part: a turn about it, in its drawing's thread.
+    Ask {
+        /// The ask's connection-local number, shared with typed turns.
+        turn: u32,
+        /// The visible scene.
+        scene: SceneId,
+        /// The solid's host identity.
+        element: kumochi_scene::Handle,
+    },
     /// The shell stopped `run` locally; `revealed` are the steps that stayed on screen.
     Stop {
         /// The stopped run.
@@ -123,6 +133,9 @@ pub enum Input {
     SendReady {
         /// The build or job.
         key: SendKey,
+        /// How long its lease may go unsettled, for a send that can go out again until a process
+        /// tree ends; capped at `MAX_HOLD`. `None` is `SEND_DEADLINE`.
+        hold: Option<Duration>,
     },
     /// An inline compaction's read finished.
     CompactBuilt(CompactBuilt),
@@ -740,6 +753,11 @@ impl Coordinator {
             }
             Input::PageRead { reply, .. } => return Ok(vec![Effect::Data(reply)]),
             Input::Turn { turn, thread, text } => self.typed(turn, thread, text, &mut effects),
+            Input::Ask {
+                turn,
+                scene,
+                element,
+            } => self.asked(turn, scene, element, &mut effects),
             Input::Stop { run, .. } if run < self.session_start => return Err(Stale),
             Input::Stop { run, revealed } if self.current_run() != Some(run) => {
                 self.late_stop(run, revealed, &mut effects)?;
@@ -767,10 +785,12 @@ impl Coordinator {
             Input::ContextBuilt(built) => self.context_built(built, &mut effects)?,
             Input::SendReady {
                 key: SendKey::Build(key),
-            } => self.send_ready(key, &mut effects),
+                hold,
+            } => self.send_ready(key, hold, &mut effects),
             Input::SendReady {
                 key: SendKey::Job(key),
-            } => self.job_ready(key, &mut effects),
+                hold,
+            } => self.job_ready(key, hold, &mut effects),
             Input::CompactBuilt(built) => self.compact_built(built, &mut effects)?,
             Input::JobBuilt(built) => self.job_built(built, &mut effects)?,
             Input::JobDone { key, output } => self.job_done(key, output, &mut effects)?,
@@ -992,7 +1012,7 @@ impl Coordinator {
         thread: Option<ThreadId>,
         text: Content,
         effects: &mut Vec<Effect>,
-    ) {
+    ) -> RunId {
         self.cancel_job(effects);
         if let Some(current) = self.current.take() {
             let replaced = RunEnd::Interrupted(Interruption::Replaced);
@@ -1055,7 +1075,11 @@ impl Coordinator {
             run,
             after: WALL_CLOCK,
         });
-        // The turn is kept, but nothing answers it.
+        run
+    }
+
+    /// Fails the run `turn` just started while nothing can answer it; the turn is kept.
+    fn unanswered(&mut self, run: RunId, effects: &mut Vec<Effect>) {
         if let Availability::Unavailable(reason) = &self.availability {
             let reason = reason.clone();
             self.fail_with(run, Failure::Engine, reason, effects)

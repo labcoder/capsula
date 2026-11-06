@@ -74,6 +74,7 @@ fn start(attempt: u64) -> Effect {
 fn ready(attempt: u64) -> Input {
     Input::SendReady {
         key: SendKey::Build(key(attempt)),
+        hold: None,
     }
 }
 

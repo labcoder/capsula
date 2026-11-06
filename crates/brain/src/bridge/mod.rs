@@ -9,9 +9,12 @@
 mod id;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "C5a creates the listener for each launch")
+    expect(
+        dead_code,
+        reason = "C5b binds a launch's run and C4b-2 dispatches its calls"
+    )
 )]
-mod listener;
+pub(crate) mod listener;
 mod stdio;
 #[cfg(test)]
 mod tests;

@@ -42,6 +42,8 @@ pub(crate) mod sherpa;
 pub(crate) use windows::call_throwing_export;
 #[cfg(all(test, windows))]
 pub(crate) use windows::fake_claude::FAKE_CLAUDE;
+#[cfg(windows)]
+pub(crate) use windows::ocr::open as open_ocr;
 #[cfg(all(windows, debug_assertions))]
 pub use windows::raise_access_violation;
 #[cfg(windows)]

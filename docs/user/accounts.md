@@ -82,3 +82,10 @@ that cleanup without another confirmation; Kumochi also retries at startup.
 **In use** can mean another Kumochi session is using Claude Code. Close that session, then choose
 **Look again**. **Unavailable** means Kumochi cannot start Claude Code work; restart Kumochi
 before trying again.
+
+## When Claude Code fails Kumochi's check
+
+Before Kumochi sends Claude Code anything of yours, it checks how that Claude Code is set up. If
+the check fails, Kumochi stops using that version of Claude Code and remembers it, even after
+Disconnect, signing in again or a restart. Installing another version doesn't clear it: Kumochi
+keeps refusing that version even if you go back to it later.
