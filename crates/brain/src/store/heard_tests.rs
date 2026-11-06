@@ -67,12 +67,12 @@ fn a_v5_store_reopens_at_v6_with_its_runs_unknown() {
     )
     .expect("V5 rows");
     drop(conn);
-    let store = Store::open(&scratch.db()).expect("opens at V6");
+    let store = Store::open(&scratch.db()).expect("opens at the current schema");
     let version: i64 = store
         .conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("version");
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     assert_eq!(point(&store.conn, RunId(7)), (None, None, None));
     let state: String = store
         .conn

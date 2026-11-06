@@ -441,15 +441,20 @@ impl Launch {
         self.lease.0.hold_send(lease)
     }
 
-    /// The pipes once it runs, or why it never did; `None` after the first answer.
-    pub(crate) async fn started(&mut self) -> Option<Result<Pipes, LaunchFailed>> {
-        let started = self.started.take()?;
-        // A lane gone before the launch's turn refused it.
-        Some(
-            started
-                .await
-                .unwrap_or(Err(LaunchFailed::Lane(Failure::Refused))),
-        )
+    /// The pipes once it runs, or why it never did; `None` after the first answer. The future
+    /// borrows nothing, so the audit task can own it.
+    pub(crate) fn started(
+        &mut self,
+    ) -> impl Future<Output = Option<Result<Pipes, LaunchFailed>>> + Send + 'static {
+        let started = self.started.take();
+        async move {
+            // A lane gone before the launch's turn refused it.
+            Some(
+                started?
+                    .await
+                    .unwrap_or(Err(LaunchFailed::Lane(Failure::Refused))),
+            )
+        }
     }
 
     /// Revokes the launch and waits for its teardown.

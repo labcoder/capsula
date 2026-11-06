@@ -38,6 +38,8 @@ pub(crate) enum Text {
     PerchUntitled,
 
     // Turns
+    RecoverySignIn,
+    DismissNotice,
     ChatLiveCut,
     ChatEmpty,
     ChatLoading,
@@ -212,6 +214,8 @@ impl Text {
         PerchUntitled,
 
         // Turns
+        RecoverySignIn,
+        DismissNotice,
         ChatLiveCut,
         ChatEmpty,
         ChatLoading,
@@ -388,6 +392,8 @@ impl Text {
             Self::PerchUntitled => "carry-perch-untitled",
 
             // Turns
+            Self::RecoverySignIn => "recovery-sign-in",
+            Self::DismissNotice => "dismiss-notice",
             Self::ChatLiveCut => "chat-live-cut",
             Self::ChatEmpty => "chat-empty",
             Self::ChatLoading => "chat-loading",

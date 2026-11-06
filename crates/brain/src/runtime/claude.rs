@@ -3,16 +3,24 @@
 //! both at the moment it's sent.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use kumochi_protocol::message::{
     AuditFailed, ClaudeCodeView, ClaudeVersion, ConnectionOp, ConnectionsView, ControlToShell,
     ThreadId, Unsupported,
 };
+use tokio::sync::mpsc;
 
 use super::{Brain, Full, Link};
+use crate::bridge::LaunchId;
+use crate::context::{self, Origin};
 use crate::coordinator::StoreOp;
 use crate::engines::claude_code::install::FindError;
 use crate::engines::claude_code::lane::{Done, Failure, Lane, Outcome, Work};
+use crate::engines::claude_code::launch::{
+    self, Attempt, Clock, LaunchSnapshot, Note, Report, WARM,
+};
+use crate::engines::claude_code::policy;
 use crate::engines::claude_code::supervisor::{
     self, Control, Launch, LaunchRefused, MAX_LAUNCH, Question,
 };
@@ -49,11 +57,41 @@ pub(crate) struct Claude {
     again: bool,
     /// A Disconnect is still to finish.
     cleaning: bool,
-    /// The launches admitted, by thread, until each one's teardown is over.
-    launches: Vec<(ThreadId, Arc<Control>)>,
+    /// The launches admitted, until each one's teardown is over and its report, if one is due,
+    /// was heard.
+    launches: Vec<Held>,
     /// The version whose audit failed in this brain, until a different reviewed version is found
     /// once its marker is written. The marker itself stays.
     quarantine: Option<Quarantine>,
+    /// The warm attempt, waiting for its question.
+    warm: Option<Attempt>,
+    /// What attempts tell the core.
+    notes: (mpsc::UnboundedSender<Note>, mpsc::UnboundedReceiver<Note>),
+    clock: Clock,
+}
+
+/// One admitted launch, as the core tracks it.
+#[derive(Debug)]
+struct Held {
+    thread: ThreadId,
+    id: LaunchId,
+    control: Arc<Control>,
+    /// The generation and version it was admitted under.
+    generation: u64,
+    version: ClaudeVersion,
+    /// An attempt's one report is still to come.
+    due: bool,
+    /// A replacement revoked it: its report changes nothing.
+    replaced: bool,
+}
+
+/// What woke the connection.
+#[derive(Debug)]
+pub(crate) enum Wake {
+    Lane(Done),
+    Note(Note),
+    /// The warm attempt's window may have closed.
+    Expired,
 }
 
 /// A version this brain saw fail its audit.
@@ -85,6 +123,9 @@ impl Claude {
             cleaning: false,
             launches: Vec::new(),
             quarantine: None,
+            warm: None,
+            notes: mpsc::unbounded_channel(),
+            clock: Clock::default(),
         }
     }
 
@@ -173,10 +214,6 @@ impl Claude {
     /// Refuses `version` from now on for `reason`: every launch ends, and the lane writes its
     /// marker, which survives Disconnect and restarts. Until that write succeeds, every version
     /// stays refused. The first failure's reason stays.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "C5b-1b's question is the first caller")
-    )]
     pub(crate) fn audit_failed(&mut self, version: ClaudeVersion, reason: AuditFailed) {
         if self.quarantine.is_none_or(|held| held.version != version) {
             self.quarantine = Some(Quarantine {
@@ -314,14 +351,12 @@ impl Claude {
     /// on, no Disconnect is pending and no version's audit failed; [`LaunchRefused::Lifetime`]
     /// over [`MAX_LAUNCH`]; [`LaunchRefused::Identity`] when no launch id can be drawn;
     /// [`LaunchRefused::Busy`] when the lane's queue is full. Nothing is queued then.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "C5b's engine is the first caller")
-    )]
     pub(crate) fn launch(&mut self, question: Question) -> Result<Launch, LaunchRefused> {
-        self.launches.retain(|(_, control)| !control.is_ended());
-        let ready = matches!(self.view, ClaudeCodeView::Ready { .. })
-            && self.sign_in == SignInStore::FileWithDacl
+        self.prune();
+        let ClaudeCodeView::Ready { version, .. } = self.view else {
+            return Err(LaunchRefused::NotReady);
+        };
+        let ready = self.sign_in == SignInStore::FileWithDacl
             && self.finds
             && !self.cleaning
             && self.quarantine.is_none();
@@ -339,14 +374,174 @@ impl Claude {
         if !lane.launch(start) {
             return Err(LaunchRefused::Busy);
         }
-        self.launches.push((thread, control));
+        self.launches.push(Held {
+            thread,
+            id: launch.id(),
+            control,
+            generation: self.generation,
+            version,
+            due: false,
+            replaced: false,
+        });
         Ok(launch)
+    }
+
+    /// What a launch for `thread` would be fixed to now.
+    ///
+    /// # Errors
+    /// [`LaunchRefused::NotReady`] unless Claude Code is Ready.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "C5b-2's engine selection is the first caller")
+    )]
+    pub(crate) fn snapshot(
+        &self,
+        thread: ThreadId,
+        model: String,
+        effort: Option<String>,
+        origin: Origin,
+    ) -> Result<LaunchSnapshot, LaunchRefused> {
+        let ClaudeCodeView::Ready { version, .. } = self.view else {
+            return Err(LaunchRefused::NotReady);
+        };
+        Ok(LaunchSnapshot {
+            thread,
+            model,
+            effort,
+            account: self.generation,
+            origin,
+            version,
+        })
+    }
+
+    /// Starts a launch for `snapshot`'s question before it's asked. A repeat for the same
+    /// snapshot keeps the warm one and its expiry; another snapshot replaces it.
+    ///
+    /// # Errors
+    /// As [`launch`](Self::launch), and [`LaunchRefused::NotReady`] for a stale snapshot.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "C5b-2's engine selection is the first caller")
+    )]
+    pub(crate) fn warm(&mut self, snapshot: LaunchSnapshot) -> Result<LaunchId, LaunchRefused> {
+        if let Some(warm) = &self.warm
+            && *warm.snapshot() == snapshot
+        {
+            return Ok(warm.id());
+        }
+        if let Some(warm) = self.warm.take() {
+            self.replaced(warm.id());
+        }
+        let attempt = self.attempt(snapshot, Some(self.clock.now() + WARM))?;
+        let id = attempt.id();
+        self.warm = Some(attempt);
+        Ok(id)
+    }
+
+    /// The question's attempt: the warm one if its snapshot is equal and it hasn't expired, else
+    /// a fresh one. The warm attempt goes either way.
+    ///
+    /// # Errors
+    /// As [`warm`](Self::warm).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "C5b-2's engine selection is the first caller")
+    )]
+    pub(crate) fn take(&mut self, snapshot: &LaunchSnapshot) -> Result<Attempt, LaunchRefused> {
+        let now = self.clock.now();
+        Ok(match self.warm.take() {
+            Some(warm)
+                if warm.snapshot() == snapshot
+                    && warm.expires().is_some_and(|expires| now < expires) =>
+            {
+                warm
+            }
+            stale => {
+                if let Some(stale) = stale {
+                    self.replaced(stale.id());
+                }
+                self.attempt(snapshot.clone(), None)?
+            }
+        })
+    }
+
+    /// Admits a launch for `snapshot` with its one report due.
+    fn attempt(
+        &mut self,
+        snapshot: LaunchSnapshot,
+        expires: Option<Instant>,
+    ) -> Result<Attempt, LaunchRefused> {
+        let current = matches!(self.view, ClaudeCodeView::Ready { version, .. } if version == snapshot.version);
+        if !current || snapshot.account != self.generation {
+            return Err(LaunchRefused::NotReady);
+        }
+        let reviewed = policy::reviewed(snapshot.version).map_err(|_| LaunchRefused::NotReady)?;
+        let launch = self.launch(Question {
+            thread: snapshot.thread,
+            model: snapshot.model.clone(),
+            effort: snapshot.effort.clone(),
+            tools: context::tools(snapshot.origin),
+            lifetime: MAX_LAUNCH,
+        })?;
+        if let Some(held) = self.launches.last_mut() {
+            held.due = true;
+        }
+        let report = Report::new(launch.id(), self.notes.0.clone());
+        Ok(Attempt::new(snapshot, launch, reviewed, report, expires))
+    }
+
+    /// Revokes the launch `id` for a replacement, so its report changes nothing.
+    fn replaced(&mut self, id: LaunchId) {
+        if let Some(held) = self.launches.iter_mut().find(|held| held.id == id) {
+            held.replaced = true;
+            held.control.withdraw();
+        }
+    }
+
+    /// Forgets the launches whose teardown is over, unless an attempt's report that still counts
+    /// is to come.
+    fn prune(&mut self) {
+        let generation = self.generation;
+        self.launches.retain(|held| {
+            !held.control.is_ended()
+                || (held.due && !held.replaced && held.generation == generation)
+        });
+    }
+
+    /// An attempt's one report: an audit failure quarantines its version, and a sign-out shows.
+    fn ended(&mut self, id: LaunchId, outcome: launch::Outcome) -> bool {
+        let generation = self.generation;
+        let Some(held) = self
+            .launches
+            .iter_mut()
+            .find(|held| held.id == id && held.due)
+        else {
+            return false;
+        };
+        held.due = false;
+        if held.replaced || held.generation != generation {
+            return false;
+        }
+        let version = held.version;
+        match outcome {
+            launch::Outcome::Audit(reason) => {
+                self.audit_failed(version, reason);
+                true
+            }
+            launch::Outcome::SignedOut if matches!(self.view, ClaudeCodeView::Ready { .. }) => {
+                self.view = ClaudeCodeView::SignedOut { version };
+                self.revoke_all();
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Revokes every launch; each one's teardown runs on the lane before its next call.
     fn revoke_all(&mut self) {
-        for (_, control) in self.launches.drain(..) {
-            control.withdraw();
+        self.warm = None;
+        for held in &self.launches {
+            held.control.withdraw();
         }
     }
 
@@ -359,19 +554,55 @@ impl Claude {
 
     /// Revokes `thread`'s launches.
     fn revoke_thread(&mut self, thread: ThreadId) {
-        self.launches.retain(|(held, control)| {
-            if *held != thread {
-                return true;
-            }
-            control.withdraw();
-            false
-        });
+        if self
+            .warm
+            .as_ref()
+            .is_some_and(|warm| warm.snapshot().thread == thread)
+        {
+            self.warm = None;
+        }
+        for held in self.launches.iter().filter(|held| held.thread == thread) {
+            held.control.withdraw();
+        }
     }
 
-    pub(crate) async fn next(&mut self) -> Done {
-        match &mut self.lane {
-            Some(lane) => lane.next().await,
-            None => std::future::pending().await,
+    pub(crate) async fn next(&mut self) -> Wake {
+        // An unused warm launch would hold the lane, which runs one launch at a time, until its
+        // deadline, so it ends at its expiry.
+        let expiry = self.warm.as_ref().and_then(Attempt::expires);
+        let left = expiry.map(|expiry| expiry.saturating_duration_since(self.clock.now()));
+        let Self { lane, notes, .. } = self;
+        let lane = async {
+            match lane {
+                Some(lane) => lane.next().await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            done = lane => Wake::Lane(done),
+            Some(note) = notes.1.recv() => Wake::Note(note),
+            () = tokio::time::sleep(left.unwrap_or_default()), if left.is_some() => Wake::Expired,
+        }
+    }
+
+    /// What woke it; true when the view may have changed.
+    pub(crate) fn wake(&mut self, wake: Wake) -> bool {
+        match wake {
+            Wake::Lane(done) => self.done(done),
+            Wake::Note(Note::Ended { id, outcome }) => {
+                self.prune();
+                self.ended(id, outcome)
+            }
+            Wake::Expired => {
+                let now = self.clock.now();
+                if let Some(warm) = self
+                    .warm
+                    .take_if(|warm| warm.expires().is_some_and(|expires| now >= expires))
+                {
+                    self.replaced(warm.id());
+                }
+                false
+            }
         }
     }
 
@@ -439,10 +670,10 @@ impl Brain {
 
     pub(super) fn claude_done(
         &mut self,
-        done: Done,
+        wake: Wake,
         link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
-        let changed = self.claude.done(done);
+        let changed = self.claude.wake(wake);
         match link {
             Some(link) if changed => link.control(&self.connections_frame()),
             _ => Ok(()),
@@ -452,5 +683,7 @@ impl Brain {
 
 #[cfg(test)]
 mod quarantine_tests;
+#[cfg(test)]
+mod question_tests;
 #[cfg(test)]
 pub(super) mod tests;

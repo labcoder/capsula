@@ -149,6 +149,7 @@ pub enum TokenReply {
 }
 
 /// The authenticated account, without provider profile text.
+#[derive(Clone, PartialEq, Eq)]
 pub struct GitHubUser {
     /// A positive account identifier.
     pub id: u64,

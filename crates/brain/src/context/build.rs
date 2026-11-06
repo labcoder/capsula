@@ -163,7 +163,11 @@ fn runs(items: Vec<Item>, current: RunId) -> Result<Vec<Vec<Item>>, BuildError> 
                 Body::Call { call, .. } if open.is_none() => open = Some(call),
                 Body::History { call, .. } if open == Some(call) => open = None,
                 Body::Call { .. } | Body::History { .. } => return Err(BuildError::InvalidCut),
-                Body::User(_) | Body::Assistant(_) | Body::Native { .. } | Body::Result { .. } => {}
+                Body::User(_)
+                | Body::Assistant(_)
+                | Body::Native { .. }
+                | Body::Result { .. }
+                | Body::Recall { .. } => {}
             }
         }
         if open.is_some() {
@@ -205,7 +209,12 @@ pub(super) fn render(
     );
     let after_rounds = items
         .iter()
-        .rposition(|item| matches!(item.body, Body::Native { .. } | Body::Result { .. }))
+        .rposition(|item| {
+            matches!(
+                item.body,
+                Body::Native { .. } | Body::Result { .. } | Body::Recall { .. }
+            )
+        })
         .filter(|_| native);
     let mut input: Vec<InputItem> = Vec::with_capacity(items.len());
     for (at, item) in items.iter().enumerate() {
@@ -257,6 +266,14 @@ pub(super) fn render(
                     input.push(InputItem::FunctionOutput {
                         call: call.clone(),
                         output: output.clone(),
+                    });
+                }
+            }
+            Body::Recall { call, selection } => {
+                if native {
+                    input.push(InputItem::FunctionOutput {
+                        call: call.clone(),
+                        output: snapshot.render_recall(run.origin, selection, sources)?,
                     });
                 }
             }
