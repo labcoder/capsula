@@ -715,6 +715,11 @@ after releasing the borrow. Replacement invalidates old observations; removal/di
 retires frame ownership with its scene and hides an empty overlay. Resting B5 views request no
 animation frames. B5 neither activates live steps nor emits StepShown; B6 consumes that seam.
 
+A kept cut that changes nothing, because its Stop adds no log entry and keeps the activated
+bound, isn't a replacement. The presenter keeps that scene's rest, view and frame, so their paint
+observation stays current and the next sample reports no change. Every other kept cut rebuilds
+the rest and view and starts a new frame epoch.
+
 ### Motion and the host clock
 
 `motion::SceneView` owns the activated layout and live property owners. Construct an

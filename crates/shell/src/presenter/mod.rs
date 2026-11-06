@@ -688,12 +688,20 @@ impl Presenter {
             return Err(Broken::Cut);
         }
         scene.halt();
+        let logged = scene.state.view().recovery_log().len();
         let outcome = scene
             .state
             .stop(cut, &mut self.global)
             .map_err(|_| Broken::Cut)?;
         scene.cut = Cut::Applied;
         scene.skipping = false;
+        // Only an effective cut is logged, so this one left the rest, view and frame current.
+        if outcome == StopOutcome::Kept
+            && scene.state.view().recovery_log().len() == logged
+            && scene.view.activated() == scene.state.view().activated()
+        {
+            return Ok(());
+        }
         let rest = match outcome {
             StopOutcome::Kept => scene.rest.cut(scene.state.view()).ok(),
             StopOutcome::Cleared => None,
