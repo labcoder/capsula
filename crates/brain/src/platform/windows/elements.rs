@@ -28,15 +28,16 @@ use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_I
 
 use crate::screen::{
     CONNECTION_TIMEOUT, ElementPlatform, ElementReader, ElementSource, ElementTarget, LIMITS,
-    NodeProps, SourceError, TRANSACTION_TIMEOUT, ThreadedReader, TopWindow, excluded_image,
+    NodeProps, SourceError, TRANSACTION_TIMEOUT, ThreadedReader, TopWindow, Wake, excluded_image,
 };
 
-pub(crate) fn screen_elements() -> Result<Box<dyn ElementReader>, i32> {
+pub(crate) fn screen_elements(wake: Wake) -> Result<Box<dyn ElementReader>, i32> {
     let shell = Arc::new(AtomicU32::new(0));
     let source_shell = Arc::clone(&shell);
     ThreadedReader::new(
         move || Automation::new(Arc::clone(&source_shell)).map_err(|e| e.code().0),
         Native(shell),
+        wake,
     )
     .map(|reader| -> Box<dyn ElementReader> { Box::new(reader) })
 }

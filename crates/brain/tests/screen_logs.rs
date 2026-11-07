@@ -3,14 +3,39 @@
 #![cfg(all(windows, debug_assertions))]
 
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kumochi_brain::platform::Job;
 use kumochi_brain::screen::{Generation, RequestBody, ScreenError, ScreenSupervisor};
 
 const WORKER: &str = env!("CARGO_BIN_EXE_kumochid");
 const PATIENCE: Duration = Duration::from_secs(10);
+/// One fixture process, start to exit [guess: each takes a few seconds].
+const FIXTURE_PATIENCE: Duration = Duration::from_secs(60);
+
+/// Waits for `next` under [`PATIENCE`] of real time, which a paused tokio clock can't measure.
+async fn within_patience<T>(next: impl std::future::Future<Output = T>) -> T {
+    let (expire, expired) = tokio::sync::oneshot::channel::<()>();
+    drop(std::thread::spawn(move || {
+        std::thread::sleep(PATIENCE);
+        drop(expire);
+    }));
+    tokio::select! {
+        value = next => value,
+        _ = expired => panic!("nothing within {PATIENCE:?}"),
+    }
+}
+
+/// Everything `pipe` carries, read on its own thread so a full pipe can't stall the child.
+fn drain(mut pipe: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        pipe.read_to_end(&mut bytes).expect("fixture output");
+        String::from_utf8_lossy(&bytes).into_owned()
+    })
+}
 
 #[test]
 #[expect(
@@ -25,18 +50,41 @@ fn panic_hook_and_environment_fault_are_exercised_in_child_processes() {
         ("environment_crash_fixture", "crash"),
         ("exit_at_launch_fixture", "exit"),
     ] {
-        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"))
             .args(["--exact", test, "--ignored", "--nocapture"])
             .env(kumochi_protocol::constants::SCREEN_FAULT_ENV, fault)
             .env("LOCALAPPDATA", &dir)
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .expect("fixture process");
-        assert_eq!(
-            output.status.code(),
-            Some(0),
-            "{}",
-            String::from_utf8_lossy(&output.stdout)
+        let stdout = drain(child.stdout.take().expect("piped stdout"));
+        let stderr = drain(child.stderr.take().expect("piped stderr"));
+        let until = Instant::now() + FIXTURE_PATIENCE;
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("fixture status") {
+                break status;
+            }
+            if Instant::now() >= until {
+                child.kill().expect("end the late fixture");
+                let reap_by = Instant::now() + PATIENCE;
+                while child.try_wait().expect("late fixture status").is_none() {
+                    assert!(Instant::now() < reap_by, "{test} did not exit after kill");
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                panic!("{test} outlived {FIXTURE_PATIENCE:?}");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        while !stdout.is_finished() || !stderr.is_finished() {
+            assert!(Instant::now() < until, "{test} output did not close");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (stdout, stderr) = (
+            stdout.join().expect("stdout"),
+            stderr.join().expect("stderr"),
         );
+        assert_eq!(status.code(), Some(0), "{test}: {stdout}{stderr}");
     }
     let logs = std::fs::read_dir(dir.join(kumochi_protocol::constants::DATA_DIR).join("logs"))
         .expect("logs")
@@ -81,7 +129,10 @@ async fn environment_crash_fixture() {
             screen.request(RequestBody::Ping).await,
             Err(ScreenError::WorkerLost)
         );
-        assert_eq!(losses.recv().await.expect("worker loss"), Generation(dead));
+        assert_eq!(
+            within_patience(losses.recv()).await.expect("worker loss"),
+            Generation(dead)
+        );
     }
     assert_eq!(
         screen.request(RequestBody::Ping).await,

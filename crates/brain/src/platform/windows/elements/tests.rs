@@ -373,6 +373,7 @@ fn selected_window_walks(top: &TopWindow) -> Availability {
         },
         Native(shell),
         move || clock_stats.lock().unwrap().observe(Instant::now()),
+        || true,
     )
     .expect("reader thread opens");
     let mut availability = Availability::Unavailable(crate::screen::Unavailable::Busy);

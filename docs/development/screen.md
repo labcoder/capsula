@@ -32,23 +32,34 @@ worker can therefore make the brain hold up to 16 × 4 MiB of partial replies, p
 256 KiB frames, for at most one deadline.
 
 A request can also be streamed (`request_stream`): the worker sends several whole replies under
-one id, and the kind's `is_terminal` reply ends it. A plain request keeps only its terminal reply,
-and every reply of today's screen and speech kinds is terminal, so they get one reply as before.
+one id, and the kind's `is_terminal` reply ends it. A plain request requires one terminal reply;
+an intermediate reply to it is a protocol break. Every reply of today's screen and speech kinds
+is terminal, so they get one reply as before.
 A request takes at most 16 messages. A stream also takes at most 12 MiB of serialized replies in
 total, counted on every chunk before it is stored, partial messages included; a plain request
 keeps its kind's cap. Going over either bound loses the worker, and so does any reply after the
 terminal one, whose id is no longer pending. A stream queues 4 whole replies for its reader
-[guess]. A reader that
-closes or falls behind ends only its stream, which then reports `WorkerLost` after the replies
-already queued: the supervisor keeps the id and discards its replies until the terminal one or the
-deadline, so an Esc never loses the worker. No reply extends the stream's absolute deadline. A
-loss ends each stream after the replies it had already queued. Dropping a stream doesn't tell the
+[guess]. A reader that falls behind gets `WorkerLost` after the replies already queued: the
+supervisor keeps the id and discards its replies until the terminal one or the
+deadline. Closing a stream does not itself lose the worker, but its deadline still can.
+No reply extends the stream's absolute deadline. A loss ends each stream after the replies it had
+already queued. Dropping a stream doesn't tell the
 worker yet; the screen kind sends its Drop control with the capture streams that come next.
 A hostile worker can make the brain hold up to 16 × 12 MiB of streamed replies for one deadline.
 
 Each request has one 1.5 s absolute deadline [guess], including queue time; fixtures can inject it.
-A loss terminates the worker, fails all pending operations, then broadcasts its `Generation`: the
-first worker is 0 and each respawn the next, and every reply names the generation that sent it.
+A loss fails all pending operations and requests worker termination. The supervisor then waits
+off the async thread, up to 2 s [guess], for the process to exit, and broadcasts
+`Exit { generation, confirmed }` and then the loss's `Generation`: the first worker is 0 and each
+respawn the next, and every reply names the generation that sent it. `WorkerLost` alone is not
+confirmation that the native process exited. The loss broadcast is the one recovery boundary.
+Requests that arrive while the exit is confirmed wait in the queue under their absolute deadlines,
+as during a respawn, so a caller that retries at once after a failed request isn't refused; the
+replacement serves them after the loss. Outside crash backoff, a request made after the loss also
+reaches the next worker without a retry. An exit that isn't seen in 2 s is fatal. The supervisor
+marks every handle refused before it broadcasts that loss, starts no worker beside one that may
+still run, and ends; held requests and every request from then on get `ExitUnconfirmed`
+(`ScreenError::ExitUnconfirmed`, `SpeechError::ExitUnconfirmed`).
 The first
 two losses respawn immediately; a third within 60 s waits 0.2 s, then 1 s and 5 s for later losses
 [guess]. Requests during backoff fail fast. During an in-flight respawn, requests wait for the new
@@ -88,7 +99,8 @@ The worker can sanitize and encode them locally, but no operation exports them.
   valid only after a complete copy whose size equals the requested display, before expiry. A
   smaller frame shrinks the logical length, so an old tail is never part of the image, while the
   CPU buffer keeps its allocation for equal or smaller frames after warm-up. That says nothing
-  about COM or GPU allocations, which happen per capture.
+  about COM or GPU allocations, which happen per capture. Releasing the frame zeroes the buffer's
+  whole capacity with `zeroize` and frees it; the next capture allocates afresh.
 - **Windows.** One D3D11 device for the worker's life, created on the first capture on the serve
   thread. Per ticket: the monitor must have exactly the requested physical bounds
   (per-monitor-v2 DPI awareness), then a WGC item, a one-buffer free-threaded pool and a session
@@ -289,7 +301,15 @@ root visibility and ownership before reading. A walk must start before both tick
 frame arrival + 250 ms [guess]; its deadline is the earliest of those two and start + 120 ms [guess].
 
 One disposable thread constructs and owns the non-Send platform source. Both channels have one
-slot, sends never block, and jobs/replies carry capture ids. The serve thread waits until the
+slot, sends never block, and jobs/replies carry capture ids. `begin` hands the thread a job
+without waiting and `poll` takes its completion. A `begin` while a job is pending, even one
+whose completion landed and wasn't taken, retires the reader rather than queue a second job or
+drop that completion, so the reply slot never fills. The reader opener takes a wake that the
+thread calls after each completion lands; it never blocks, and a dropped wake leaves the
+completion in its slot for `poll`. Today's serve path passes a wake nobody listens to. The foreground window is sampled on the capture side, never on this
+thread, so a stuck walk can't delay the next capture's foreground. Today's `walk` is the
+compatibility path: it discards a timed-out walk's late completion, calls `begin`, then waits
+on the reply channel until the
 cooperative deadline plus 200 ms (100 ms connection + 100 ms transaction timeouts). The first
 timeout returns Unavailable(Busy), retaining reached masks. Its Unknown(Busy) completeness is
 sticky: a late successful walk can never upgrade it to Complete or Partial. A later walk first

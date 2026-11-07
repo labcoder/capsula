@@ -38,6 +38,7 @@ fn captured_shell_identity_reaches_the_threaded_exclusion_before_text_is_read() 
                 Ok(source)
             },
             platform,
+            || true,
         )
         .unwrap(),
     )));
@@ -49,7 +50,7 @@ fn captured_shell_identity_reaches_the_threaded_exclusion_before_text_is_read() 
             Exclusion::KumochiWindows,
             now,
             &|| now,
-            (|| Err(9), || Err(9))
+            (|| Err(9), |_| Err(9))
         ),
         Ok(meta(1, [4, 3], 0))
     );
@@ -137,7 +138,7 @@ fn reader_initialization_failure_preserves_capture_and_spends_the_faulted_walk()
             Exclusion::KumochiWindows,
             now,
             &|| now,
-            (|| Err(9), || Err(-7))
+            (|| Err(9), |_| Err(-7))
         ),
         Ok(meta(1, [4, 3], 0))
     );
@@ -167,7 +168,7 @@ fn reader_initialization_failure_preserves_capture_and_spends_the_faulted_walk()
             &|| now,
             (
                 || Err(9),
-                || Ok(Box::new(Probe {
+                |_| Ok(Box::new(Probe {
                     current: Rc::new(Cell::new(7)),
                     jobs: Rc::new(RefCell::new(Vec::new())),
                 }))
@@ -197,6 +198,12 @@ impl ElementReader for Probe {
             pid: 8,
             rect: rect([4, 3]).0,
         })
+    }
+    fn begin(&mut self, _job: WalkJob) -> Result<(), Walked> {
+        unreachable!("the serve path walks")
+    }
+    fn poll(&mut self) -> Option<Result<Walked, Failure>> {
+        unreachable!("the serve path walks")
     }
     fn walk(&mut self, job: WalkJob) -> Result<Walked, Failure> {
         let name = if job.target

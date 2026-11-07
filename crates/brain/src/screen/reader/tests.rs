@@ -29,6 +29,7 @@ fn the_instrumented_clock_observes_the_walks_deadline_check() {
             observed.fetch_add(1, Ordering::Relaxed);
             Instant::now()
         },
+        || true,
     )
     .unwrap();
     let walked = reader
@@ -80,6 +81,12 @@ impl<F: FnMut(u32) -> NodeProps> ElementSource for Source<F> {
 }
 
 fn reader(read: impl FnMut(u32) -> NodeProps + Send + 'static) -> ThreadedReader<Platform> {
+    waking(read, || true)
+}
+fn waking(
+    read: impl FnMut(u32) -> NodeProps + Send + 'static,
+    wake: impl Fn() -> bool + Send + 'static,
+) -> ThreadedReader<Platform> {
     let mut read = Some(read);
     ThreadedReader::new(
         move || {
@@ -90,6 +97,7 @@ fn reader(read: impl FnMut(u32) -> NodeProps + Send + 'static) -> ThreadedReader
             })
         },
         Platform,
+        wake,
     )
     .unwrap()
 }
@@ -150,6 +158,7 @@ fn failed_source_initialization_is_a_fault_and_the_next_capture_retries() {
             })
         },
         Platform,
+        || true,
     )
     .unwrap();
     let sink = masks(20);
@@ -488,7 +497,7 @@ fn a_wrong_capture_tag_in_the_drain_retires_without_starting_work() {
         platform: Platform,
         jobs,
         replies,
-        pending: Some(CaptureId(10)),
+        pending: Some((CaptureId(10), masks(10))),
         retired: false,
     };
     assert_busy(
@@ -497,4 +506,130 @@ fn a_wrong_capture_tag_in_the_drain_retires_without_starting_work() {
         true,
     );
     assert!(matches!(requests.try_recv(), Err(TryRecvError::Empty)));
+}
+
+/// A read that reports entering, then waits for its release.
+fn gate() -> (
+    impl FnMut(u32) -> NodeProps + Send + 'static,
+    mpsc::Receiver<()>,
+    mpsc::Sender<()>,
+) {
+    let (entered, entering) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let read = move |_| {
+        entered.send(()).unwrap();
+        released.recv_timeout(Duration::from_secs(5)).ok();
+        props("gated")
+    };
+    (read, entering, release)
+}
+
+/// A wake that reports each call. The thread wakes only after the completion is in its slot, so
+/// one report means one `poll` answers.
+fn told() -> (impl Fn() -> bool + Send + 'static, mpsc::Receiver<()>) {
+    let (tell, told) = mpsc::channel();
+    (move || tell.send(()).is_ok(), told)
+}
+
+fn later() -> Instant {
+    Instant::now() + Duration::from_secs(5)
+}
+
+#[test]
+fn a_pending_walk_never_blocks_poll_and_a_dropped_wake_keeps_its_completion() {
+    let (listener, woken) = mpsc::sync_channel(1);
+    listener.try_send(()).unwrap();
+    let (attempted, attempts) = mpsc::channel();
+    let (read, entering, release) = gate();
+    let mut reader = waking(read, move || {
+        let sent = listener.try_send(());
+        let open = !matches!(sent, Err(mpsc::TrySendError::Disconnected(())));
+        attempted.send(sent.is_ok()).is_ok() && open
+    });
+    assert!(matches!(reader.begin(job(40, later(), masks(40))), Ok(())));
+    entering.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert!(reader.poll().is_none(), "the walk is still running");
+    release.send(()).unwrap();
+    assert_eq!(
+        attempts.recv_timeout(Duration::from_secs(1)),
+        Ok(false),
+        "the full listener dropped the wake"
+    );
+    let first = reader
+        .poll()
+        .expect("the completion outlived its wake")
+        .unwrap();
+    assert_eq!(first.tree.capture, CaptureId(40));
+    assert_eq!(first.tree.elements[0].name, "gated");
+    assert_eq!(woken.try_recv(), Ok(()));
+    assert_eq!(woken.try_recv(), Err(TryRecvError::Empty));
+    release.send(()).unwrap();
+    assert!(matches!(reader.begin(job(41, later(), masks(41))), Ok(())));
+    assert_eq!(
+        attempts.recv_timeout(Duration::from_secs(1)),
+        Ok(true),
+        "a free listener gets the wake"
+    );
+    let second = reader.poll().expect("landed before its wake").unwrap();
+    assert_eq!(second.tree.capture, CaptureId(41));
+    assert!(!second.retire);
+    assert_eq!(woken.try_recv(), Ok(()));
+}
+
+#[test]
+fn begin_while_a_walk_is_pending_retires_without_queueing_a_second() {
+    let (read, entering, release) = gate();
+    let mut reader = waking(read, || true);
+    assert!(matches!(reader.begin(job(42, later(), masks(42))), Ok(())));
+    entering.recv_timeout(Duration::from_secs(1)).unwrap();
+    let sink = masks(43);
+    let Err(refused) = reader.begin(job(43, later(), Arc::clone(&sink))) else {
+        panic!("a second job was queued");
+    };
+    assert_busy(&refused, 43, true);
+    assert_eq!(
+        sink.lock().unwrap().completeness(),
+        Completeness::Unknown(Unavailable::Busy)
+    );
+    release.send(()).unwrap();
+}
+
+#[test]
+fn begin_after_an_untaken_completion_retires_and_keeps_that_completion() {
+    let (wake, landed) = told();
+    let mut reader = waking(|_| props("untaken"), wake);
+    assert!(matches!(reader.begin(job(44, later(), masks(44))), Ok(())));
+    landed.recv_timeout(Duration::from_secs(1)).unwrap();
+    let sink = masks(45);
+    let Err(refused) = reader.begin(job(45, later(), Arc::clone(&sink))) else {
+        panic!("begin dropped the untaken completion");
+    };
+    assert_busy(&refused, 45, true);
+    assert_eq!(
+        sink.lock().unwrap().completeness(),
+        Completeness::Unknown(Unavailable::Busy)
+    );
+    let kept = reader.poll().expect("still in its slot").unwrap();
+    assert_eq!(kept.tree.capture, CaptureId(44));
+    assert_eq!(kept.tree.elements[0].name, "untaken");
+    assert!(
+        kept.retire,
+        "taking a completion cannot revive a retired reader"
+    );
+}
+
+#[test]
+fn a_blocked_walk_does_not_delay_the_next_captures_foreground() {
+    let (read, entering, release) = gate();
+    let (wake, landed) = told();
+    let mut reader = waking(read, wake);
+    assert!(matches!(reader.begin(job(46, later(), masks(46))), Ok(())));
+    entering.recv_timeout(Duration::from_secs(1)).unwrap();
+    let top = reader.foreground().expect("the platform's foreground");
+    assert_eq!((top.window, top.pid, top.rect), (WindowRef(17), 23, RECT));
+    assert!(reader.poll().is_none(), "the walk is still blocked");
+    release.send(()).unwrap();
+    landed.recv_timeout(Duration::from_secs(1)).unwrap();
+    let walked = reader.poll().expect("landed before its wake").unwrap();
+    assert_eq!(walked.tree.capture, CaptureId(46));
 }

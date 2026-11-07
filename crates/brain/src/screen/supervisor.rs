@@ -13,7 +13,7 @@ use super::wire::{
     RequestBody, ScreenError, TicketWire,
 };
 use crate::platform::Job;
-use crate::supervise::{self, Generation, Handle, Kind, WorkerLost};
+use crate::supervise::{self, Generation, Handle, Kind};
 
 /// Absolute request budget, including queueing (guess).
 pub const REQUEST_DEADLINE: Duration = Duration::from_millis(1500);
@@ -57,7 +57,8 @@ impl ScreenHandle {
     /// Submits one operation. Backoff and a full queue fail fast.
     ///
     /// # Errors
-    /// Returns `WorkerLost` on a deadline, transport failure, overload or shutdown, and `Fault`
+    /// Returns `WorkerLost` on a deadline, transport failure, overload or shutdown,
+    /// `ExitUnconfirmed` for good once a lost worker wasn't seen to exit, and `Fault`
     /// when the worker refused the operation.
     pub async fn request(&self, body: RequestBody) -> Result<ReplyBody, ScreenError> {
         match self
@@ -67,7 +68,7 @@ impl ScreenHandle {
         {
             Ok((ReplyBody::Fault(code), _)) => Err(ScreenError::Fault(code)),
             Ok((reply, _)) => Ok(reply),
-            Err(WorkerLost) => Err(ScreenError::WorkerLost),
+            Err(lost) => Err(lost.into()),
         }
     }
 

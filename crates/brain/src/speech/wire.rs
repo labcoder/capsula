@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::platform::sherpa::NativeError;
+use crate::supervise::WorkerLost;
 
 /// The lowest capture rate accepted, in Hz [guess].
 pub const MIN_RATE: u32 = 8_000;
@@ -19,6 +20,9 @@ pub enum SpeechError {
     /// The worker died, broke its protocol or missed a deadline, and its model went with it.
     #[error("speech worker lost")]
     WorkerLost,
+    /// A lost worker wasn't seen to exit, so nothing replaces it and speech input stays refused.
+    #[error("speech worker exit unconfirmed")]
+    ExitUnconfirmed,
     /// The worker has no model loaded.
     #[error("no speech model is loaded")]
     NotLoaded,
@@ -28,6 +32,15 @@ pub enum SpeechError {
     /// The worker's native side failed.
     #[error(transparent)]
     Native(#[from] NativeError),
+}
+
+impl From<WorkerLost> for SpeechError {
+    fn from(lost: WorkerLost) -> Self {
+        match lost {
+            WorkerLost::Lost => Self::WorkerLost,
+            WorkerLost::ExitUnconfirmed => Self::ExitUnconfirmed,
+        }
+    }
 }
 
 /// Checks a capture rate and a sample count against the rate bounds, the byte ceiling and the
