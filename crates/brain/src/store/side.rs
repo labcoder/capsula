@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags};
@@ -13,9 +13,19 @@ use super::StoreError;
 
 type Slot = Mutex<Option<Connection>>;
 
+struct ReadSlot<'a>(MutexGuard<'a, Option<Connection>>, bool);
+impl Drop for ReadSlot<'_> {
+    fn drop(&mut self) {
+        if !self.1 {
+            *self.0 = None;
+        }
+    }
+}
+
 /// The side connections, shared by the store's thread, the page reader and the helper.
 #[derive(Debug)]
 pub struct Side {
+    closed: Arc<AtomicBool>,
     path: PathBuf,
     reader: Slot,
     helper: Slot,
@@ -60,6 +70,7 @@ fn try_lock<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
 impl Side {
     pub(super) fn new(path: PathBuf) -> Self {
         Self {
+            closed: Arc::new(AtomicBool::new(false)),
             path,
             reader: Mutex::new(None),
             helper: Mutex::new(None),
@@ -113,6 +124,7 @@ impl Side {
     /// Closes both connections for good, as the store's thread ends; a read waiting on a swap
     /// then fails.
     pub(crate) fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
         self.hold().unavailable();
         self.end_swap();
     }
@@ -147,6 +159,42 @@ impl Side {
                     .wait_while(lock(&self.swapping), |swapping| *swapping)
                     .unwrap_or_else(PoisonError::into_inner),
             );
+        }
+    }
+
+    pub(crate) fn control(
+        &self,
+        control: &crate::recall::control::Control,
+    ) -> crate::recall::control::Control {
+        control.observe(Arc::clone(&self.closed))
+    }
+
+    pub(crate) fn read_until<T, E>(
+        &self,
+        control: &crate::recall::control::Control,
+        read: impl FnOnce(&mut Connection, &crate::recall::control::Control) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<StoreError> + From<crate::recall::Error>,
+    {
+        let control = self.control(control);
+        loop {
+            control.check()?;
+            if let Some(slot) = try_lock(&self.reader)
+                && let Some(swapping) = try_lock(&self.swapping)
+                && !*swapping
+            {
+                drop(swapping);
+                let mut slot = ReadSlot(slot, false);
+                let conn = self.open(&mut slot.0, Self::reader)?;
+                control.check()?;
+                let result = read(conn, &control);
+                slot.1 = result.is_ok();
+                return result;
+            }
+            #[cfg(test)]
+            control.test.waiting.store(true, Ordering::SeqCst);
+            std::thread::sleep(crate::recall::control::POLL);
         }
     }
 
@@ -188,14 +236,14 @@ impl Side {
         &self,
         slot: &'a mut Option<Connection>,
         connect: fn(&Self) -> Result<Connection, StoreError>,
-    ) -> Result<&'a Connection, StoreError> {
+    ) -> Result<&'a mut Connection, StoreError> {
         if slot.is_none() {
             if !self.available.load(Ordering::SeqCst) {
                 return Err(StoreError::Closed);
             }
             *slot = Some(connect(self)?);
         }
-        Ok(slot.as_ref().expect("the slot was just filled"))
+        Ok(slot.as_mut().expect("the slot was just filled"))
     }
 
     /// Read-only and query-only, with the serving connection's in-memory temp store.

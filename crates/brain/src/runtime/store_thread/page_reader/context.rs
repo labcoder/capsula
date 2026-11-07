@@ -8,8 +8,17 @@ use crate::coordinator::{
     BuildContext, CompactBuilt, CompactContext, ContextBuilt, JobAsk, JobBuilt, JobKind, ReadJob,
     Unbuilt,
 };
+use crate::recall::control::READ_TIME;
 use crate::store::context::Snapshot;
 use crate::store::{Side, StoreError};
+use std::time::Instant;
+
+fn closed(control: &crate::recall::control::Control) -> StoreError {
+    control
+        .check()
+        .err()
+        .map_or(StoreError::Closed, StoreError::from)
+}
 
 /// Builds `job` on `side`, or fails it when the store closed before its turn (`None`). A run's
 /// first build reads its model choice into its snapshot. Failures are logged by kind only.
@@ -19,6 +28,7 @@ pub(super) fn read(
     #[cfg(test)] hold: impl FnOnce(),
 ) -> ContextBuilt {
     let BuildContext {
+        control,
         key,
         thread,
         snapshot,
@@ -34,31 +44,39 @@ pub(super) fn read(
         };
     };
     let built = if let Some(side) = side {
-        side.read(|conn| {
-            let read = Snapshot::begin(conn)?;
-            #[cfg(test)]
-            hold();
-            if first {
-                snapshot.choice = read.choice(thread)?.or(snapshot.choice.take());
-            }
-            let local_time = read.local_time()?;
-            let turn = Turn {
-                thread,
-                run: key.run,
-                local_time: &local_time,
-            };
-            let supplied = Supplied {
-                summary: read.summary(thread)?,
-                items: Vec::new(),
-            };
-            Ok(build(read, &snapshot, turn, supplied, BOUND))
+        side.read_until(&control, |conn, control| {
+            control
+                .until(Instant::now() + READ_TIME)
+                .with_handler(conn, |conn, scope| {
+                    let read = Snapshot::begin(conn)?.controlled(scope.clone());
+                    #[cfg(test)]
+                    hold();
+                    if first {
+                        snapshot.choice = read.choice(thread)?.or(snapshot.choice.take());
+                    }
+                    let local_time = read.local_time()?;
+                    let turn = Turn {
+                        thread,
+                        run: key.run,
+                        local_time: &local_time,
+                    };
+                    let supplied = Supplied {
+                        summary: read.summary(thread)?,
+                        items: Vec::new(),
+                    };
+                    Ok(build(read, &snapshot, turn, supplied, BOUND))
+                })
+                .map_err(StoreError::from)?
         })
     } else {
-        Err(StoreError::Closed)
+        Err(closed(&control))
     };
     let result = match built {
         Ok(Ok(built)) => Ok(built),
         Ok(Err(BuildError::TooLarge { room })) => Err(Unbuilt::TooLarge { room }),
+        Ok(Err(BuildError::Store(StoreError::RecallBudget))) | Err(StoreError::RecallBudget) => {
+            Err(Unbuilt::TooLarge { room: None })
+        }
         Ok(Err(error)) => {
             tracing::warn!(%error, run = key.run.0, "a context build failed");
             Err(Unbuilt::Failed)
@@ -84,6 +102,7 @@ pub(super) fn read_compact(
     #[cfg(test)] hold: impl FnOnce(),
 ) -> CompactBuilt {
     let CompactContext {
+        control,
         key,
         thread,
         snapshot,
@@ -96,17 +115,25 @@ pub(super) fn read_compact(
             result: Err(Unbuilt::Failed),
         };
     };
-    let read = side.map_or(Err(StoreError::Closed), |side| {
-        side.read(|conn| {
-            let read = Snapshot::begin(conn)?;
-            #[cfg(test)]
-            hold();
-            let found = rewrite(&read, &snapshot, thread, room);
-            read.end()?;
-            Ok(found)
+    let read = side.map_or(Err(closed(&control)), |side| {
+        side.read_until(&control, |conn, control| {
+            control
+                .until(Instant::now() + READ_TIME)
+                .with_handler(conn, |conn, scope| {
+                    let read = Snapshot::begin(conn)?.controlled(scope.clone());
+                    #[cfg(test)]
+                    hold();
+                    let found = rewrite(&read, &snapshot, thread, room);
+                    read.end()?;
+                    Ok(found)
+                })
+                .map_err(StoreError::from)?
         })
     });
     let result = match read {
+        Ok(Err(BuildError::Store(StoreError::RecallBudget))) | Err(StoreError::RecallBudget) => {
+            Err(Unbuilt::TooLarge { room: None })
+        }
         Ok(Ok(found)) => Ok(found.map(|(found, allowance)| {
             (
                 JobAsk {
@@ -139,6 +166,7 @@ pub(super) fn read_job(
     #[cfg(test)] hold: impl FnOnce(),
 ) -> JobBuilt {
     let ReadJob {
+        control,
         key,
         kind,
         snapshot,
@@ -152,36 +180,43 @@ pub(super) fn read_job(
             result: Err(Unbuilt::Failed),
         };
     };
-    let read = side.map_or(Err(StoreError::Closed), |side| {
-        side.read(|conn| {
-            let read = Snapshot::begin(conn)?;
-            #[cfg(test)]
-            hold();
-            snapshot.choice = read.choice(key.thread)?.or(snapshot.choice.take());
-            let ask = match kind {
-                JobKind::Title => Ok(read.first_ask(key.thread)?.map(|ask| JobAsk {
-                    generation: ask.generation,
-                    built: Built {
-                        request: crate::jobs::title_request(&snapshot, &ask.text),
-                        sources: vec![key.thread],
-                    },
-                    covers: None,
-                })),
-                JobKind::Compact => {
-                    compaction(&read, &snapshot, key.thread, compact_at).map(|found| {
-                        found.map(|found| JobAsk {
-                            generation: found.generation,
-                            built: found.built,
-                            covers: Some(found.covers),
-                        })
-                    })
-                }
-            };
-            read.end()?;
-            Ok(ask)
+    let read = side.map_or(Err(closed(&control)), |side| {
+        side.read_until(&control, |conn, control| {
+            control
+                .until(Instant::now() + READ_TIME)
+                .with_handler(conn, |conn, scope| {
+                    let read = Snapshot::begin(conn)?.controlled(scope.clone());
+                    #[cfg(test)]
+                    hold();
+                    snapshot.choice = read.choice(key.thread)?.or(snapshot.choice.take());
+                    let ask = match kind {
+                        JobKind::Title => Ok(read.first_ask(key.thread)?.map(|ask| JobAsk {
+                            generation: ask.generation,
+                            built: Built {
+                                request: crate::jobs::title_request(&snapshot, &ask.text),
+                                sources: vec![key.thread],
+                            },
+                            covers: None,
+                        })),
+                        JobKind::Compact => compaction(&read, &snapshot, key.thread, compact_at)
+                            .map(|found| {
+                                found.map(|found| JobAsk {
+                                    generation: found.generation,
+                                    built: found.built,
+                                    covers: Some(found.covers),
+                                })
+                            }),
+                    };
+                    read.end()?;
+                    Ok(ask)
+                })
+                .map_err(StoreError::from)?
         })
     });
     let result = match read {
+        Ok(Err(BuildError::Store(StoreError::RecallBudget))) | Err(StoreError::RecallBudget) => {
+            Err(Unbuilt::TooLarge { room: None })
+        }
         Ok(Ok(ask)) => Ok(ask),
         Ok(Err(error)) => {
             tracing::warn!(%error, thread = key.thread.0, ?kind, "a job's read failed");

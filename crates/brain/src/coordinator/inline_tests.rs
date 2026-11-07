@@ -17,6 +17,29 @@ const B: ThreadId = ThreadId(2);
 const COVERS: (EventId, EventId) = (EventId(20), EventId(31));
 const ROOM: usize = 500;
 
+#[test]
+fn lifecycle_inline_reader_is_owned_by_the_original_run() {
+    let mut core = compacting();
+    let read = core
+        .current
+        .as_ref()
+        .unwrap()
+        .build
+        .as_ref()
+        .unwrap()
+        .control
+        .0
+        .clone();
+    assert_eq!(read.end, core.current.as_ref().unwrap().control.0.end);
+    assert_eq!(read.check(), Ok(()));
+    core.handle(Input::Stop {
+        run: R,
+        revealed: vec![],
+    })
+    .unwrap();
+    assert_eq!(read.check(), Err(crate::recall::Error::Ended));
+}
+
 fn key(attempt: u64) -> BuildKey {
     BuildKey {
         run: R,
@@ -35,6 +58,9 @@ fn too_large(attempt: u64, room: Option<usize>) -> Input {
 
 fn compact_context(attempt: u64) -> Effect {
     Effect::Store(StoreOp::CompactContext(CompactContext {
+        control: crate::recall::control::Control::new(
+            std::time::Instant::now() + crate::coordinator::WALL_CLOCK,
+        ),
         key: key(attempt),
         thread: T,
         snapshot: None,
@@ -113,6 +139,9 @@ fn store_summary(attempt: u64, text: &str) -> Effect {
 /// A later attempt of the run's first round, after its first build read the snapshot.
 fn rebuilt(attempt: u64) -> Effect {
     Effect::Store(StoreOp::BuildContext(BuildContext {
+        control: crate::recall::control::Control::new(
+            std::time::Instant::now() + crate::coordinator::WALL_CLOCK,
+        ),
         key: key(attempt),
         thread: T,
         origin: Origin::Task(T),

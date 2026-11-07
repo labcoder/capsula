@@ -480,6 +480,7 @@ enum Notify {
 /// The run in flight, or one that ended and is waiting on the store.
 #[derive(Debug)]
 struct Run {
+    control: crate::recall::control::CancelOnDrop,
     id: RunId,
     thread: ThreadId,
     turn_stored: bool,
@@ -1032,6 +1033,9 @@ impl Coordinator {
             text,
         };
         self.current = Some(Run {
+            control: crate::recall::control::CancelOnDrop(crate::recall::control::Control::new(
+                std::time::Instant::now() + WALL_CLOCK,
+            )),
             id: run,
             thread,
             turn_stored: false,
@@ -1186,6 +1190,7 @@ impl Coordinator {
         notify: Notify,
         effects: &mut Vec<Effect>,
     ) {
+        run.control.0.cancel();
         if outcome != RunEnd::Done {
             speech::revoke(&mut run, crate::voice::reply::Revoker::Brain, effects);
         }

@@ -165,6 +165,9 @@ fn a_read_sees_the_ops_queued_before_it() {
 /// A run's first build in task `thread`, run `thread`.
 fn build(thread: u64, attempt: u64, choice: Option<ModelChoice>) -> StoreOp {
     StoreOp::BuildContext(BuildContext {
+        control: crate::recall::control::Control::new(
+            std::time::Instant::now() + crate::coordinator::WALL_CLOCK,
+        ),
         key: BuildKey {
             run: RunId(thread),
             round: 1,

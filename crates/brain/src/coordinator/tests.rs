@@ -117,6 +117,9 @@ fn request() -> ModelRequest {
 /// Attempt `attempt` of `run`'s first round in task `thread`, before the run read its snapshot.
 fn build_context(run: RunId, thread: ThreadId, attempt: u64) -> Effect {
     Effect::Store(StoreOp::BuildContext(BuildContext {
+        control: crate::recall::control::Control::new(
+            std::time::Instant::now() + crate::coordinator::WALL_CLOCK,
+        ),
         key: BuildKey {
             run,
             round: 1,

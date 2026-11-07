@@ -15,6 +15,85 @@ const MAIN: ThreadId = ThreadId(1);
 const B: ThreadId = ThreadId(2);
 const C: ThreadId = ThreadId(3);
 
+#[test]
+fn lifecycle_replacement_preserves_the_end_and_stop_cancels_before_store_ack() {
+    use crate::recall::Error;
+    let mut core = kumo_building();
+    let first = core
+        .current
+        .as_ref()
+        .unwrap()
+        .build
+        .as_ref()
+        .unwrap()
+        .control
+        .0
+        .clone();
+    let mut effects = Vec::new();
+    core.build(R, 2, &mut effects);
+    let second = core
+        .current
+        .as_ref()
+        .unwrap()
+        .build
+        .as_ref()
+        .unwrap()
+        .control
+        .0
+        .clone();
+    assert_eq!(first.check(), Err(Error::Ended));
+    assert_eq!(second.end, first.end);
+    assert_eq!(second.check(), Ok(()));
+    core.handle(Input::Stop {
+        run: R,
+        revealed: vec![],
+    })
+    .unwrap();
+    assert_eq!(core.ending_runs(), 1);
+    assert_eq!(second.check(), Err(Error::Ended));
+}
+
+#[test]
+fn lifecycle_voided_build_cancels_while_it_waits_for_a_delete() {
+    use crate::recall::Error;
+    let mut core = kumo_building();
+    let read = core
+        .current
+        .as_ref()
+        .unwrap()
+        .build
+        .as_ref()
+        .unwrap()
+        .control
+        .0
+        .clone();
+    core.handle(delete(B)).unwrap();
+    core.handle(kumo_built(1, &[MAIN, B])).unwrap();
+    assert_eq!(read.check(), Err(Error::Ended));
+    assert!(
+        !core
+            .current
+            .as_ref()
+            .unwrap()
+            .build
+            .as_ref()
+            .unwrap()
+            .admitted()
+    );
+    core.handle(hidden(B)).unwrap();
+    let next = &core
+        .current
+        .as_ref()
+        .unwrap()
+        .build
+        .as_ref()
+        .unwrap()
+        .control
+        .0;
+    assert_eq!(next.end, read.end);
+    assert_eq!(next.check(), Ok(()));
+}
+
 fn key(attempt: u64) -> BuildKey {
     BuildKey {
         run: R,
@@ -25,6 +104,9 @@ fn key(attempt: u64) -> BuildKey {
 
 fn kumo_build(attempt: u64, snapshot: Option<RunSnapshot>) -> Effect {
     Effect::Store(StoreOp::BuildContext(BuildContext {
+        control: crate::recall::control::Control::new(
+            std::time::Instant::now() + crate::coordinator::WALL_CLOCK,
+        ),
         key: key(attempt),
         thread: MAIN,
         origin: Origin::Kumo,

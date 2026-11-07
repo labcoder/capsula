@@ -90,6 +90,9 @@ pub enum StoreError {
     /// A page couldn't be read or encoded; SQLite details may contain user content.
     #[error("can't read the store page")]
     Read,
+    /// A replay read exhausted its budget; no partial context is usable.
+    #[error("the history read exhausted its budget")]
+    RecallBudget,
 
     /// A drawing write or recovery failed; no database or drawing content is exposed.
     #[error("can't store or recover the drawing")]

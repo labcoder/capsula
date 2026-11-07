@@ -248,9 +248,15 @@ impl Snapshot<'_> {
         selection: &Selection,
         sources: &mut BTreeSet<ThreadId>,
     ) -> Result<String, StoreError> {
-        self.render_selected(origin, selection, sources)
-            .map(|value| value.to_string())
-            .map_err(|_| StoreError::Read)
+        let mut read = || {
+            self.render_selected(origin, selection, sources)
+                .map(|value| value.to_string())
+        };
+        match &self.1 {
+            Some(control) => control.query(&self.0, read),
+            None => read(),
+        }
+        .map_err(StoreError::from)
     }
 
     fn render_selected(

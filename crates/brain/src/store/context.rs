@@ -117,7 +117,10 @@ pub(crate) struct Uncovered {
 
 /// A read transaction, taken when it begins. It never writes.
 #[derive(Debug)]
-pub(crate) struct Snapshot<'a>(pub(super) Transaction<'a>);
+pub(crate) struct Snapshot<'a>(
+    pub(super) Transaction<'a>,
+    pub(super) Option<crate::recall::control::ReadScope>,
+);
 
 impl<'a> Snapshot<'a> {
     /// Begins the transaction and takes its snapshot at once, before anything else is read.
@@ -128,7 +131,12 @@ impl<'a> Snapshot<'a> {
         let tx = conn.unchecked_transaction()?;
         // A deferred transaction's snapshot starts at its first read, so this read starts it.
         tx.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))?;
-        Ok(Self(tx))
+        Ok(Self(tx, None))
+    }
+
+    pub(crate) fn controlled(mut self, control: crate::recall::control::ReadScope) -> Self {
+        self.1 = Some(control);
+        self
     }
 }
 

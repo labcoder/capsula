@@ -8,6 +8,136 @@ use rusqlite::Connection;
 use crate::store::{Cancel, Copied, Pages, RunEnd, Store, StoreError, Swap};
 use crate::test_support::Scratch;
 
+#[test]
+fn controlled_slot_and_swap_waits_end_before_the_block_is_released() {
+    use crate::recall::{Error, control::Control};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+    for swapping in [false, true] {
+        for cause in 0..3 {
+            let scratch = Scratch::new("recall-side-waits");
+            let store = owing(&scratch);
+            let side = store.side();
+            let held = (!swapping).then(|| side.reader.lock().expect("slot"));
+            if swapping {
+                side.begin_swap();
+            }
+            let control = Control::new(Instant::now() + Duration::from_secs(60));
+            let (reply, result) = mpsc::channel();
+            let worker = {
+                let side = Arc::clone(&side);
+                let control = control.clone();
+                std::thread::spawn(move || {
+                    reply
+                        .send(side.read_until::<u8, Error>(&control, |_, _| Ok(9)))
+                        .expect("reply");
+                })
+            };
+            let end = Instant::now() + Duration::from_secs(10);
+            while !control.test.waiting.load(Ordering::SeqCst) {
+                assert!(Instant::now() < end, "reader entered the wait");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let closer = match cause {
+                0 => {
+                    control.cancel();
+                    None
+                }
+                1 => {
+                    let side = Arc::clone(&side);
+                    Some(std::thread::spawn(move || side.close()))
+                }
+                2 => {
+                    *control.test.time.lock().expect("clock") = Some(control.end);
+                    None
+                }
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                result
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("wait ends"),
+                Err(if cause == 2 {
+                    Error::Timeout
+                } else {
+                    Error::Ended
+                })
+            );
+            drop(held);
+            side.end_swap();
+            worker.join().expect("reader");
+            if let Some(closer) = closer {
+                closer.join().expect("closer");
+                let retry = Control::new(Instant::now() + Duration::from_secs(60));
+                assert_eq!(
+                    side.read_until::<u8, Error>(&retry, |_, _| Ok(9)),
+                    Err(Error::Ended)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn failed_hook_cleanup_discards_the_side_connection() {
+    use crate::recall::control::Control;
+    use std::time::{Duration, Instant};
+    for point in [1, 2, 3] {
+        let scratch = Scratch::new("recall-hook-failure");
+        let store = owing(&scratch);
+        let side = store.side();
+        let control = Control::new(Instant::now() + Duration::from_secs(60));
+        control.test.fault.store(point, Ordering::SeqCst);
+        let result = side.read_until::<i64, StoreError>(&control, |conn, control| {
+            conn.busy_timeout(Duration::from_millis(333))?;
+            control
+                .with_handler(conn, |conn, scope| scope.query(conn, || Ok(7)))
+                .map_err(StoreError::from)?
+                .map_err(StoreError::from)
+        });
+        assert!(matches!(result, Err(StoreError::Read)));
+        assert_eq!(
+            side.read(|conn| Ok(conn.query_row::<i64, _, _>(
+                "PRAGMA busy_timeout",
+                [],
+                |row| row.get(0)
+            )?))
+            .expect("ordinary page connection"),
+            5000
+        );
+        assert_eq!(live(&store), [ThreadId(2)]);
+    }
+}
+
+#[test]
+fn unwinding_a_controlled_read_discards_its_connection() {
+    use crate::recall::control::Control;
+    use std::time::{Duration, Instant};
+    let scratch = Scratch::new("recall-side-unwind");
+    let store = owing(&scratch);
+    let side = store.side();
+    let control = Control::new(Instant::now() + Duration::from_secs(60));
+    control.test.fault.store(2, Ordering::SeqCst);
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let result = side.read_until::<(), StoreError>(&control, |conn, control| {
+            conn.busy_timeout(Duration::from_millis(333))?;
+            control
+                .with_handler(conn, |_, _| panic!("fixture unwind"))
+                .map_err(StoreError::from)
+        });
+        panic!("expected unwind, got {result:?}");
+    }));
+    assert!(panic.is_err());
+    assert_eq!(
+        side.read(|conn| Ok(
+            conn.query_row::<i64, _, _>("PRAGMA busy_timeout", [], |row| row.get(0))?
+        ))
+        .expect("fresh connection"),
+        5000
+    );
+    assert_eq!(live(&store), [ThreadId(2)]);
+}
+
 /// Thread 1 deleted, so a purge is owed, and thread 2 kept.
 fn owing(scratch: &Scratch) -> Store {
     let mut store = Store::open(&scratch.db()).expect("store");
