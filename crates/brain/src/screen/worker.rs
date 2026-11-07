@@ -137,13 +137,17 @@ fn open() -> Result<Box<dyn Capturer>, i32> {
 const NO_CAPTURER: i32 = 0x8000_4001_u32.cast_signed();
 
 #[cfg(windows)]
-fn open_elements() -> Result<Box<dyn super::elements::ElementReader>, i32> {
-    crate::platform::screen_elements()
+fn open_elements(
+    wake: super::elements::Wake,
+) -> Result<Box<dyn super::elements::ElementReader>, i32> {
+    crate::platform::screen_elements(wake)
 }
 
 // shortcut: macOS will open its accessibility source here.
 #[cfg(not(windows))]
-fn open_elements() -> Result<Box<dyn super::elements::ElementReader>, i32> {
+fn open_elements(
+    _wake: super::elements::Wake,
+) -> Result<Box<dyn super::elements::ElementReader>, i32> {
     Err(0x8000_4001_u32.cast_signed())
 }
 

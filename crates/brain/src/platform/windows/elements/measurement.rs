@@ -117,6 +117,7 @@ impl WindowSession {
             },
             Native(shell),
             move || probe.now(),
+            || true,
         )?;
         Ok(Self {
             reader,

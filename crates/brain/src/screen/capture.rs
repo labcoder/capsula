@@ -145,7 +145,8 @@ impl Screen {
         }
         let foreground = self
             .reader
-            .get_or_insert_with(open.1)
+            // shortcut: no listener until A6b2's actor; the legacy walk waits for its own reply.
+            .get_or_insert_with(|| open.1(Box::new(|| true)))
             .as_mut()
             .ok()
             .and_then(|reader| {

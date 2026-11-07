@@ -1,5 +1,6 @@
 use super::super::*;
 use crate::screen::{ElementTree, Unavailable};
+use crate::supervise::WorkerLost;
 
 #[tokio::test(start_paused = true)]
 async fn elements_waits_end_on_cancellation_eof_and_deadline() {
@@ -77,8 +78,12 @@ async fn elements_accept_only_the_requested_capture_and_map_refusals() {
             Err(CaptureError::Screen(ScreenError::Fault(-7))),
         ),
         (
-            Err(WorkerLost),
+            Err(WorkerLost::Lost),
             Err(CaptureError::Screen(ScreenError::WorkerLost)),
+        ),
+        (
+            Err(WorkerLost::ExitUnconfirmed),
+            Err(CaptureError::Screen(ScreenError::ExitUnconfirmed)),
         ),
     ] {
         let request = handle.elements(CaptureId(7), ElementTarget::Foreground);
