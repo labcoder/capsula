@@ -275,6 +275,13 @@ pub const LIVE_BUDGET_ENV: &str = "KUMOCHI_LIVE_BUDGET";
 /// count allows none.
 pub const CLAUDE_QUESTIONS_ENV: &str = "KUMOCHI_CLAUDE_QUESTIONS";
 
+/// Dev builds only: the brain's one-shot catalog provenance capture, which
+/// `cargo xtask live catalog-provenance` runs. A brain built without it exits 10.
+pub const CATALOG_PROVENANCE_ARG: &str = "--catalog-provenance";
+
+/// The capture's one output file, in its `target\live\<time>` run folder.
+pub const CATALOG_PROVENANCE_FILE: &str = "catalog-provenance.json";
+
 /// Dev builds only: the uncovered backlog, in estimated tokens, at which a thread compacts after
 /// a run, lowered for the live check. A value that isn't a count keeps the default.
 pub const COMPACT_AT_ENV: &str = "KUMOCHI_COMPACT_AT";

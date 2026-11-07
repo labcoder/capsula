@@ -3,7 +3,8 @@
 `cargo xtask live <check>` runs the real dev brain on the developer's own dev account and drives it
 over its real pipes with the slice 2 gate's client (see [the slice 2 gate](slice2-gate.md)). Live
 checks run on Rez, never in CI, and only with the owner present or in a session the Captain
-approved. The checks are `account`, `signin` and `claude-signin`.
+approved. The checks are `account`, `signin`, `claude-signin` and `catalog-provenance`, which runs
+the brain alone, with no client (see its section).
 
 ## How it runs
 
@@ -124,6 +125,114 @@ path.
 4. To undo it, run `cargo xtask live claude-signin --disconnect`, which ends at
    `claude code: signed out`.
 
+## `catalog-provenance`
+
+`cargo xtask live catalog-provenance` records which fields the account's model list carries,
+without keeping what they say. Starting the dev brain can't do that within a request budget: it
+reads the catalog on every connection, refreshes a due bearer first (three or four auth requests),
+and revokes listed entries as it loads the account. Run it only in a live turn the Captain
+assigned, from the reviewed head.
+
+- xtask copies only `kumochid.exe` into `target\live\<time>\bin` and runs
+  `kumochid.exe --catalog-provenance` itself, in its kill-on-close job, with stdin, stdout and
+  stderr null, for at most 180 s. No log, store, pipe, tap or scene thread starts.
+- The mode is built into debug brains only. A brain without it still recognizes the flag and exits
+  10 before logging, so the flag never reaches a normal start. The mode refuses unless the
+  credential service and data folder are the dev names.
+- The brain checks that it runs as `...\live\<digits>\bin\kumochid.exe` and that the output doesn't
+  exist yet. It opens the vault once (no retry when busy), reads the account, and builds the async
+  runtime and the account client. It checks the saved set, sends one `Endpoint::Models` GET,
+  scrubs a 200 body in memory, writes `target\live\<time>\catalog-provenance.json` with
+  `create_new` and exits. The vault and its session lock drop last, so no other dev brain can
+  renew the session meanwhile.
+- It never renews the session. With no account or tokens, a plan that isn't enabled, a refresh sent
+  and never answered, an identity check pending, no wall clock, or a bearer that expires within
+  180 s (refresh's 60 s margin plus the client's 120 s limit), it exits before any request. Nothing
+  in the mode can start a sign-in, refresh, exchange or revocation.
+
+**Requests.** The brain's only `Http` is a counting wrapper. It lets one `Models` request through,
+refuses every auth endpoint (token, discovery, JWKS, revocation) and every non-account one, and
+counts a request before sending it, so a failed attempt still counts. The client follows no
+redirects and never retries. xtask prints one line, built only from the exit code:
+
+```
+catalog provenance: written: <repo>\target\live\<time>\catalog-provenance.json (requests: auth 0, catalog 1)
+catalog provenance: not written, exit 16 (requests: auth 0, catalog 0)
+catalog provenance: no exit code (requests: auth 0, counted as catalog 1)
+```
+
+The last line is any run xtask couldn't see end: the 180 s bound or a failed wait. A run that
+printed no line, because xtask itself was killed, counts as one catalog request; a brain that never
+started counts none. The live turn's ledger is one line per run, and its total stays at two
+requests or fewer. After a run that spent its request and failed, stop: a second run needs the
+Captain's word, and xtask never reruns.
+
+| Exit | Meaning | Requests (auth, catalog) |
+|---|---|---|
+| 0 | written | 0, 1 |
+| 10 | not the dev names, not in a `live\<digits>\bin` folder, the output exists, or the mode isn't built in | 0, 0 |
+| 11 | another brain holds the session lock | 0, 0 |
+| 12 | the vault couldn't be opened or read | 0, 0 |
+| 13 | no account or no tokens (a pending sign-out reads as none) | 0, 0 |
+| 14 | the plan isn't enabled | 0, 0 |
+| 15 | a refresh was sent and never answered, or an identity check is pending | 0, 0 |
+| 16 | no wall clock, or the bearer expires within 180 s | 0, 0 |
+| 17 | no async runtime or account client (trust store or configuration) | 0, 0 |
+| 20 | the request failed, a body over 1 MiB included | 0, 1 |
+| 21–25 | 401, 403, 429, 5xx, any other status but 200 | 0, 1 |
+| 26 | a 200 that isn't a JSON object | 0, 1 |
+| 27 | over a scrub or output bound | 0, 1 |
+| 28 | the file wasn't written; a failed write is removed, but if that fails too a partial scrubbed file stays | 0, 1 |
+| 29 | the wrapper refused the request (can't happen) | 0, 1 |
+
+Any other exit, a panic's 101 included, counts as one catalog request, and every exit but 0 fails
+the command.
+
+**What the file holds.** One pretty-printed JSON object of at most 1 MiB: `format`
+(`catalog-provenance/1`), `captured_utc_date` (no time of day), `requests` (the wrapper's two
+counters), `body_bytes` (the raw body's length), `scrubbed` (how many `models` entries were
+renamed, and how many keys, strings and numbers were replaced) and `body`. No request id, header,
+account fact or product name is written. In `body`:
+
+- A key stays only on an exact, case-sensitive match with one of 14 approved observation keys:
+  `models`, `slug`, `display_name`, `visibility`, `supported_reasoning_levels`,
+  `supported_reasoning_efforts`, `supported_efforts`, `reasoning_levels`, `reasoning_efforts`,
+  `default_reasoning_level`, `default_reasoning_effort`, `default_effort`, `reasoning_effort` and
+  `effort`. Any other becomes `<key-n>`, its index within its own object in serde_json's map
+  order, so `<key-2>` in two entries needn't be the same key. Its value is still scrubbed and kept.
+- A string stays, in its own case, only if it equals `list`, `none`, `minimal`, `low`, `medium`,
+  `high`, `xhigh`, `x-high`, `x_high`, `extra-high`, `extra_high`, `max` or `maximum` without
+  ASCII case. Any other becomes `<string:N>`, N its byte length.
+- Integers 0–16, booleans and null stay; any other number becomes `-1`.
+- In each object of the top-level `models` array, a string `slug` becomes `m-<k>` when it's a valid
+  slug (k numbers the distinct valid slugs in order, so duplicates stay duplicates) and `<invalid>`
+  when it isn't. A string `display_name` becomes `Model <i>`, i the entry's index, when it's a valid
+  name and `""` when it isn't. A `slug` or `display_name` that isn't a string keeps its type under
+  the rules above, so the reader still rejects it. So the scrubbed body admits the same models at
+  the same positions through `catalog::read`.
+- More than 32 levels of nesting or 65,536 values exits 27.
+
+The approved keys and words decide only what's visible, never what the core decodes. A field
+under a key the list doesn't hold shows as `<key-n>` with its effort-shaped values; naming it
+needs a newly approved key and another live turn. The parsed body's strings aren't zeroized, as
+in `catalog::read`; the bearer and the raw bytes are.
+
+**What opening the vault does.** The capture saves no record, marker, refresh mark or revocation,
+but `Vault::open` does what it does on every dev brain start. It creates the dev data folder and
+`session.lock` if missing, opens or creates `credentials.db` (in WAL mode, so `-wal` and `-shm`
+files appear), migrates its schema if needed, adds one to `control.lifetime` and retires every
+pending generation. Then it sweeps: up to 262 legacy Credential Manager names while that sweep is
+owed (otherwise the legacy Anthropic staging name), and the names of up to 16 removed
+generations. It reads each swept dev name back to record in `credentials.db` whether it's gone.
+
+**From the file to a fixture.** Only an exit-0 file can become a fixture: a file left beside exit 28
+is partial and must be deleted, never adopted. On exit 0, read the whole file before it leaves
+`target/`. If a kept key looks like data rather than a field name, stop. Otherwise it becomes
+`crates/brain/fixtures/catalog/models-<date>.json` in the decode PR's first commit. A README
+beside it names the command, this check's PR and the exact head it ran at (a squash merge leaves
+that commit off main), the date and the counters. The fixture's walk test carries its own literal
+lists of the approved keys, words and placeholder forms rather than importing this module's.
+
 ## Bounds
 
 | Wait | Bound | Then |
@@ -138,6 +247,7 @@ path.
 | Claude Code's op answers | 10 s from the op, one deadline: Connect's answer is the first view unlike the one before it, so stale snapshots such as the Anthropic key's are skipped; Disconnect's is `CleanupPending`, which a pending cleanup already is | fails, naming the last view |
 | Disconnect's cleanup | 45 s from the answer [guess]: the harness's budget for the logout, the deletion and discovery again; the lane bounds root runs, not teardown or deletion | fails; the brain retries the deletion as it starts |
 | The brain exiting after `Quitting` | 15 s | it's ended |
+| The catalog capture | 180 s [guess: its 120 s request plus the vault open and trust store] | it's ended, and counted as one catalog request |
 | Each `taskkill /T /F` | 10 s, then 10 s for the process to go | names every process that may still run |
 
 Ending a process tree is the platform's job (`platform::kill_tree`): std can end one child, not

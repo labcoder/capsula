@@ -70,6 +70,11 @@ tasks:
                     console the owner answers; --disconnect signs it out and deletes
                     Kumochi's folder for it; only the view's state is printed; refuses
                     while any product process runs; needs the owner at the desk
+  live catalog-provenance
+                    one model-list request with the dev account's saved session, never
+                    renewing it; writes target\\live\\<time>\\catalog-provenance.json with
+                    only approved keys and closed words; exits 10-19 having sent nothing;
+                    refuses while any product process runs
   slice2-gate       the slice 2 gate: the real dev brain with fixture scripts, driven
                     over its real pipes by a scripted client; no input; refuses while
                     any product process runs
