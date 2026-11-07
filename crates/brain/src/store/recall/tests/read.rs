@@ -1,6 +1,51 @@
 use super::*;
 
 #[test]
+fn sparse_ranges_persist_only_actual_shown_endpoints_and_leave_empty_ranges_empty() {
+    let (_scratch, store) = world("recall-sparse-endpoints");
+    task(&store, 2, "B");
+    for id in [10, 30, 90] {
+        say(&store, id, 2, "user", "fact");
+    }
+    assert_eq!(
+        select(
+            &store,
+            Origin::Kumo,
+            &Query::Read {
+                task: 2,
+                from: 5,
+                to: 85
+            }
+        ),
+        Ok(Selection::Read {
+            task: 2,
+            first_shown: Some(10),
+            last_shown: Some(30),
+            cut: None,
+            next: None,
+        })
+    );
+    assert_eq!(
+        select(
+            &store,
+            Origin::Kumo,
+            &Query::Read {
+                task: 2,
+                from: 31,
+                to: 80
+            }
+        ),
+        Ok(Selection::Read {
+            task: 2,
+            first_shown: None,
+            last_shown: None,
+            cut: None,
+            next: None,
+        })
+    );
+}
+
+#[test]
 fn activation_main_thread_is_unavailable_rather_than_a_missing_task() {
     let (_scratch, store) = world("recall-main-unavailable");
     assert_eq!(
