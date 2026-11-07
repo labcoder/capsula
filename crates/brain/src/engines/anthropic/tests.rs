@@ -178,6 +178,44 @@ fn no_fragments_use_the_start_object_and_fallback_is_skipped() {
 }
 
 #[test]
+fn wire_catalog_names_are_recognized_without_offering_or_activating_them() {
+    for (name, expected) in [
+        ("draw", ToolName::Draw),
+        ("search_history", ToolName::SearchHistory),
+        ("read_history", ToolName::ReadHistory),
+        ("list_tasks", ToolName::ListTasks),
+        ("create_task", ToolName::CreateTask),
+        ("focus", ToolName::Focus),
+        ("unknown-wire-tool", ToolName::Unknown),
+    ] {
+        let mut mapper = started();
+        start(
+            &mut mapper,
+            0,
+            json!({"type":"tool_use", "id":"wire", "name":name, "input":{}}),
+        );
+        stop(&mut mapper, 0);
+        assert_eq!(
+            mapper.take(),
+            vec![
+                TurnEvent::ToolCallStarted {
+                    call: call("wire"),
+                    name: expected
+                },
+                TurnEvent::ToolCallReady {
+                    call: call("wire"),
+                    args: "{}".into()
+                },
+            ]
+        );
+        assert_eq!(
+            mapper.finish(Ok(Progress::Completed)),
+            Some(Finish::Completed)
+        );
+    }
+}
+
+#[test]
 fn empty_tool_fragments_preserve_start_until_nonempty_json_arrives() {
     for fragment in [None, Some("{\"x\":1}")] {
         let mut m = started();

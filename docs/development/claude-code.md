@@ -373,7 +373,8 @@ attempts. Nothing in production asks a question yet: C5b-2's engine selection is
 `Claude::warm` and `Claude::take`.
 
 - **The snapshot.** A `LaunchSnapshot` fixes the thread, model, effort, Claude Code's connection
-  generation, the origin (and so the frozen tools, `context::tools(origin)`) and the version.
+  generation, the origin (and so the frozen MCP subset of its model tools) and the version.
+  Model-only history schemas do not enter the MCP listener, launch audit or seed.
   `Claude::snapshot` makes one only while the view is `Ready`. A snapshot is current only while
   the view is `Ready` at its version and its generation is Claude Code's current one; `warm`,
   `take` and every reuse of the warm attempt check that first. A stale snapshot is refused as

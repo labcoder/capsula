@@ -23,7 +23,7 @@ use super::supervisor::{
 };
 use crate::bridge::LaunchId;
 use crate::connections::model::budget::Budget;
-use crate::context::{self, Origin};
+use crate::context::Origin;
 use crate::engines::{
     Answer, ClaudeStreamFailure, Engine, EngineFailure, Finish, Round, RunRequest, SendGate,
     TurnEvent,
@@ -67,7 +67,7 @@ pub(crate) struct LaunchSnapshot {
     pub(crate) effort: Option<String>,
     /// Claude Code's connection generation.
     pub(crate) account: u64,
-    /// The frozen tool set is `context::tools(origin)`.
+    /// The frozen tool set is the MCP subset of the origin's model offers.
     pub(crate) origin: Origin,
     pub(crate) version: ClaudeVersion,
 }
@@ -246,7 +246,7 @@ impl Attempt {
 
 /// The launch's frozen `mcp__kumochi__*` names.
 fn tool_names(origin: Origin) -> BTreeSet<String> {
-    context::tools(origin)
+    crate::dispatch::mcp_schemas(origin)
         .iter()
         .map(|tool| format!("mcp__{MCP_SERVER_NAME}__{}", tool.name))
         .collect()
@@ -461,7 +461,10 @@ impl Question<'_> {
             report.report(Outcome::Launch);
             return Some(Finish::Failed(EngineFailure::Provider));
         }
-        let seed = seed::encode(&request.request, &context::tools(attempt.snapshot.origin));
+        let seed = seed::encode(
+            &request.request,
+            &crate::dispatch::mcp_schemas(attempt.snapshot.origin),
+        );
         match writer.seed(&seed, until).await {
             Ok(()) => {}
             Err(StdinRefused::Deadline) => return Some(expired(launch, report)),

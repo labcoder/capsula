@@ -33,6 +33,8 @@ pub enum StoreOp {
     BuildContext(super::BuildContext),
     /// Read a background job's request on the page reader, in one read transaction.
     ReadJob(super::ReadJob),
+    /// Select a history call on the stamped page reader.
+    ReadCall(crate::dispatch::ReadCall),
     /// Read an inline compaction's request on the page reader, in one read transaction.
     CompactContext(super::CompactContext),
     /// The turn, its run, and the thread when `title` names a new one.
@@ -168,6 +170,7 @@ impl StoreOp {
             | Self::ReadPage { .. }
             | Self::BuildContext(_)
             | Self::ReadJob(_)
+            | Self::ReadCall(_)
             | Self::CompactContext(_)
             | Self::ClearScenes { .. }
             | Self::KeepScene { .. }
@@ -182,6 +185,11 @@ impl StoreOp {
     /// Answers an operation that couldn't reach the store; a heard point has no answer.
     pub fn failed(&self) -> Option<Input> {
         Some(match self {
+            Self::ReadCall(call) => Input::ReadFinished(crate::dispatch::ReadFinished {
+                key: call.key.clone(),
+                build: call.build,
+                result: Err(crate::recall::Error::Read),
+            }),
             Self::Drawing { serial, .. } => Input::DrawingWritten {
                 serial: *serial,
                 reply: Err(()),

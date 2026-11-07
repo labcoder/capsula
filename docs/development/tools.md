@@ -6,16 +6,16 @@ run may reach, and records it in the run's ledger. The coordinator owns the ledg
 call only after the store has acknowledged the call's write.
 
 Slice 3's 13b-2 tool loop and slice 8's C4b-2 MCP listener hand calls to
-`Coordinator::tool_call`. The registered tools are `draw`, `create_task` and `focus`.
-Model requests offer only `draw`, in both the main conversation and tasks; this does not
-enable the other staged producers. The test tools in `dispatch/tests.rs` exercise the
-rest of the path.
+`Coordinator::tool_call`. The catalog contains drawing, local writes and history reads.
+Model requests offer `draw`, `search_history` and `read_history`; Kumo also gets `list_tasks`.
+Create/focus remain unoffered. MCP gets only `draw`, the intersection of model offers and
+the catalog's MCP permissions. The test tools in `dispatch/tests.rs` exercise the rest of the path.
 
-## Staged history reads
+## History reads
 
-The recall backend is staged; this change offers no new model or MCP tools. The next layer
-wires its asynchronous reads, cancellation, completion fence and model-schema allowlist.
-It must not enable schemas before those fences exist.
+History calls enter `Reading` while the stamped reader selects bounded references. Completion
+checks the original build, owner, caller and both source sets before a reference-only commit;
+the model receives its result only after the store acknowledges that commit.
 
 `recall::Query` describes word-OR event search, an inclusive event range, or task metadata.
 `Snapshot::select_recall` checks the frozen origin independently of dispatch: Kumo reaches
@@ -235,13 +235,11 @@ its row.
 
 ## Results
 
-`ToolOutput` is `Text`, `History` or `Error`, stored as tagged JSON: `{"text": …}`,
-`{"history": [{"thread", "first", "last"}]}` or `{"error": "unknown tool"}`. A history result is
-references only. Today a stored `History` result replays as its reference JSON, not as the re-read
-content, and no production tool returns one. Before the first history tool is enabled, its results
-must go through the context builder's live re-read of each range at every build, fenced against
-deletes by 12b's admission and send lease, so a deleted task's text is never copied into the
-ledger or another task.
+`ToolOutput` stores tagged `text`, legacy `history` ranges, `recall` selectors or a fixed `error`.
+History results contain references only. The context builder re-reads live sources at every
+build, fenced against deletion by admission and the send lease, so source text is never copied
+into the ledger or another task. Legacy range results remain readable; production history
+tools return the more precise `recall` selectors.
 
 History tools are **model-only**. MCP gets no schema for them, and the dispatcher refuses them from
 `Mcp`, because an MCP reply doesn't pass through a model build's delete fence. Before history is
@@ -251,9 +249,10 @@ against deletion and revocation at the reply-write boundary.
 
 ## Schemas
 
-Each tool's JSON Schema comes from `schemars` on the same `deny_unknown_fields` struct that parses
-its arguments, so the two can't drift, and the schema is closed with `additionalProperties: false`.
-`dispatch::schemas(reach, route)` lists what a run is offered on a route.
+Local-write and history schemas come from `schemars` on their closed argument structs.
+Draw uses the scene v1 schema and its typed decoder, with `strict:false` as described above.
+`dispatch::schemas` lists catalog permissions; `model_schemas` applies the model allowlist,
+and `mcp_schemas` intersects those offers with MCP permission.
 
 ## Diagnostics
 

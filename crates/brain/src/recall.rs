@@ -1,10 +1,5 @@
 //! Bounded recall selectors: persisted decisions, never copied source text.
 
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "14b-2b activates asynchronous model recall")
-)]
-
 pub(crate) mod control;
 
 use std::fmt;
@@ -21,8 +16,7 @@ pub(crate) const TASKS: usize = 100;
 pub(crate) const CUT: &str = "The rest of this cut event cannot be read with read_history.";
 pub(crate) const MORE: &str = "More matches may exist; narrow the words or name a task.";
 
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) enum Query {
     Search { query: String, task: Option<u64> },
     Read { task: u64, from: u64, to: u64 },

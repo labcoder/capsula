@@ -90,7 +90,15 @@ pub(super) const RECALL: Tool = Tool {
 const OFFERED: &[ToolName] = &[ToolName::Probe, ToolName::Recall];
 
 fn ctx(ledger: &mut Ledger, reach: Origin, mcp: Option<LaunchId>) -> RunCtx<'_> {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
     RunCtx {
+        build: crate::coordinator::BuildKey {
+            run: R,
+            round: 1,
+            attempt: 1,
+        },
+        end,
+        control: crate::recall::control::Control::new(end),
         thread: T,
         main: KUMO,
         fresh: FRESH,
@@ -489,12 +497,21 @@ fn history_is_kumo_only_and_model_only() {
     };
     assert_eq!(
         names(Origin::Kumo, Route::Model),
-        ["draw", "create_task", "focus", "probe", "recall"]
+        [
+            "draw",
+            "create_task",
+            "focus",
+            "search_history",
+            "read_history",
+            "list_tasks",
+            "probe",
+            "recall"
+        ]
     );
     assert_eq!(names(Origin::Kumo, Route::Mcp(L1)), ["draw", "probe"]);
     assert_eq!(
         names(Origin::Task(T), Route::Model),
-        ["draw", "focus", "probe"]
+        ["draw", "focus", "search_history", "read_history", "probe"]
     );
 }
 
@@ -512,13 +529,8 @@ fn an_unknown_or_unoffered_tool_is_refused_and_stays_refused() {
     );
     let unoffered = call(
         &mut RunCtx {
-            thread: T,
-            main: KUMO,
-            fresh: FRESH,
-            reach: Origin::Task(T),
             offered: &[],
-            mcp: None,
-            ledger: &mut ledger,
+            ..ctx(&mut ledger, Origin::Task(T), None)
         },
         model("n"),
         ToolName::Probe,

@@ -1,12 +1,5 @@
 # Engines: what each request sends
 
-Stored native rounds may contain a tagged `recall` result. `store::rounds` preserves its
-typed selectors instead of turning them into reference JSON text. The context builder
-dereferences them in its current snapshot and includes every live quoted task in the
-build's source set. Like other native results, recall replays only when the current
-connection matches the round's native items. This backend alone offers no new schemas;
-model activation and asynchronous completion fencing are a separate layer.
-
 A model request is built from the store, never from what the shell sent. `context/` builds it as
 typed data (`ModelRequest`), and the engine gets only that request. PR 13a serialises it into the
 Responses body, with `store: false` and `stream: true`, and PR 11's transport sends it on the
@@ -27,7 +20,7 @@ flowchart LR
 |---|---|
 | Model and effort | The run's snapshot: the thread's model choice, else the default model, read by the run's first build. The coordinator checks it against the catalog once, on that build's result, and fails the run with `ModelUnavailable` when the catalog doesn't list it (runs.md, "Availability"). The dev fixture needs none, and a real engine refuses a request without one. |
 | Instructions | `prompts/instructions.md` and the role file for the run's origin (`kumo.md` or `task.md`). The assistant's name and the user's name come from the run's snapshot, taken once when the run starts, so a rename applies from the next run. An unset user name leaves its line out. Names are filled in one pass, so a name is never read as a placeholder. |
-| Tools | The schemas the origin may use. None yet: slice 4's B10 adds the draw tool, 14a the history tools. |
+| Tools | Kumo: `draw`, `search_history`, `read_history`, `list_tasks`; a task: `draw`, `search_history`, `read_history`. |
 | Summary | The newest summary (PR 17), as `Summary of events 1–212:` and its text. Events it covers aren't sent raw. |
 | Raw runs | Up to the newest 8 runs, the current one included, oldest dropped first while over the bound. A run is kept or dropped whole, so a tool call never travels without its result. |
 | Deletion notes | Kumo's thread only: up to the newest 32 notes [guess] past the summary, each one developer message, `Note: a task was deleted at 2026-11-06 01:23.` A note sits after the last run that began before it, never inside a run, and is dropped with that run. A summary covers the notes up to its last event. A note names no task, so a deleted title never comes back in a request. |
@@ -43,6 +36,25 @@ in its snapshot. A stored item or result that doesn't decode, or a result over 6
 fails the build, and their bytes count toward the bound.
 
 ## Origin and references
+
+Stored native rounds may contain a tagged `recall` result. `store::rounds` preserves its
+typed selectors instead of turning them into reference JSON text. The context builder
+dereferences them in its current snapshot and includes every live quoted task in the
+build's source set. Like other native results, recall replays only when the current
+connection matches the round's native items. Older untagged history references remain readable.
+
+History calls run on the stamped page reader, not the coordinator. Their run ledger holds a
+`Reading` entry with the original build key and cancellation owner. Canonical retries join;
+changed arguments are refused. Completion checks the current admitted build, live caller,
+finishing state and both the calling build's and selected results' sources. A delete that
+reached either source set cancels and rebuilds the round, leaving the key terminally refused.
+Only validated selectors are committed; the caller waits for that commit's acknowledgement.
+These tools are never exposed through MCP, and create/focus remain unoffered to the model.
+
+Read payloads are capped at 32 KiB before the title and outer wrapper. That is not a bound
+on the final encoded response: titles, wrappers and all replayed results count toward the
+whole request's 512 KiB budget. Stored selectors separately obey the 64 KiB output bound.
+An interrupted task is labelled Stopped for every interruption cause, not only an explicit Stop.
 
 A run's origin is `Kumo` (the main thread) or `Task(t)`. The coordinator derives it from the
 run's thread and never from anything a model produced. The builder refuses an origin that doesn't
@@ -311,7 +323,7 @@ builds nothing.
 | Responses event | Turn event |
 |---|---|
 | `response.output_text.delta` | `TextDelta` |
-| `response.output_item.added`, a `function_call` | `ToolCallStarted` with its name (`draw`, or `Unknown`), before any delta. The provider's item id is mapped to its `call_id` here and never leaves the adapter |
+| `response.output_item.added`, a `function_call` | `ToolCallStarted` with its catalog name, or `Unknown`, before any delta. Both provider mappers share this resolution and preserve the existing `draw` name. Recognition grants no permission: dispatch still checks the run's offers and origin. The provider's item id is mapped to its `call_id` here and never leaves the adapter |
 | `response.function_call_arguments.delta` | `ToolArgsDelta`, tagged with the call id |
 | `response.function_call_arguments.done` | nothing; its arguments must equal the deltas |
 | `response.output_item.done` | for a call, `ToolCallReady` once; then, for every item, `OutputItem` with its `output_index`, for replay |

@@ -224,23 +224,29 @@ pub(super) fn spawn_reader(
                     at.map(|at| gates.remove(at))
                 };
                 let control = match &op {
+                    StoreOp::ReadCall(call) => Some(&call.control),
                     StoreOp::BuildContext(read) => Some(&read.control),
                     StoreOp::CompactContext(read) => Some(&read.control),
                     StoreOp::ReadJob(read) => Some(&read.control),
                     _ => None,
                 };
-                let open = control
-                    .map_or_else(
-                        || {
-                            barrier
-                                .wait(stamp)
-                                .then_some(())
-                                .ok_or(crate::recall::Error::Ended)
-                        },
-                        |control| barrier.wait_until(stamp, control),
-                    )
-                    .is_ok();
+                let admitted = control.map_or_else(
+                    || {
+                        barrier
+                            .wait(stamp)
+                            .then_some(())
+                            .ok_or(crate::recall::Error::Ended)
+                    },
+                    |control| barrier.wait_until(stamp, control),
+                );
+                let open = admitted.is_ok();
                 let reply = match op {
+                    StoreOp::ReadCall(call) => Input::ReadFinished(context::read_call(
+                        admitted.map(|()| &*side),
+                        call,
+                        #[cfg(test)]
+                        || wait_at(gate, hooks.observed.as_ref()),
+                    )),
                     StoreOp::BuildContext(build) => Input::ContextBuilt(context::read(
                         open.then_some(&*side),
                         build,

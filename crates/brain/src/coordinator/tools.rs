@@ -114,8 +114,16 @@ impl Loop {
         self.dispatched
     }
 
+    pub(super) fn waiting(&self, call: &str) -> bool {
+        self.dispatched
+            && self
+                .open
+                .iter()
+                .any(|open| open.call.as_str() == call && open.output.is_none())
+    }
+
     /// Forgets the round a voided build produced: its calls, answered or not, and its items.
-    fn drop_round(&mut self) {
+    pub(super) fn drop_round(&mut self) {
         self.open.clear();
         self.dispatched = false;
         self.items.clear();

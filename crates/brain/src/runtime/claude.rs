@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use super::{Brain, Full, Link};
 use crate::bridge::LaunchId;
 use crate::connections::model::budget::Budget;
-use crate::context::{self, Origin};
+use crate::context::Origin;
 use crate::coordinator::StoreOp;
 use crate::engines::claude_code::install::FindError;
 use crate::engines::claude_code::lane::{Done, Failure, Lane, Outcome, Work};
@@ -510,7 +510,7 @@ impl Claude {
             thread: snapshot.thread,
             model: snapshot.model.clone(),
             effort: snapshot.effort.clone(),
-            tools: context::tools(snapshot.origin),
+            tools: crate::dispatch::mcp_schemas(snapshot.origin),
             lifetime: MAX_LAUNCH,
         })?;
         if let Some(held) = self.launches.last_mut() {

@@ -409,6 +409,12 @@ pub enum ToolName {
     Focus,
     /// Creates an empty task.
     CreateTask,
+    /// Search live conversation events.
+    SearchHistory,
+    /// Read a live task's event range.
+    ReadHistory,
+    /// List live task metadata.
+    ListTasks,
     /// A name Kumochi doesn't offer.
     Unknown,
     /// The dispatcher's test tool that writes.
@@ -417,6 +423,15 @@ pub enum ToolName {
     /// The dispatcher's test tool that returns history references.
     #[cfg(test)]
     Recall,
+}
+
+impl ToolName {
+    pub(crate) fn from_wire(name: &str) -> Self {
+        match name {
+            DRAW => Self::Draw,
+            _ => crate::dispatch::named(name).unwrap_or(Self::Unknown),
+        }
+    }
 }
 
 /// A native output item's bytes, never parsed or logged.

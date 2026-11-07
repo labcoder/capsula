@@ -486,6 +486,7 @@ impl StoreThread {
         if matches!(
             op,
             StoreOp::ReadPage { .. }
+                | StoreOp::ReadCall(_)
                 | StoreOp::BuildContext(_)
                 | StoreOp::ReadJob(_)
                 | StoreOp::CompactContext(_)
@@ -525,6 +526,7 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
             purger.op_arrived(store);
         }
         StoreOp::ReadPage { .. }
+        | StoreOp::ReadCall(_)
         | StoreOp::BuildContext(_)
         | StoreOp::ReadJob(_)
         | StoreOp::CompactContext(_) => {

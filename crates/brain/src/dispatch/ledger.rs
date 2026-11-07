@@ -4,8 +4,9 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use super::{Caller, LedgerKey, Route, Step, ToolError, ToolOutput, rehash};
+use super::{Caller, LedgerKey, ReadCall, Route, Step, ToolError, ToolOutput, rehash};
 use crate::engines::ToolName;
+use crate::recall::control::CancelOnDrop;
 
 /// The calls of one run, dropped with it. Its size is bounded by the run's call budget, which
 /// the tool loop and the MCP listener charge before dispatch.
@@ -15,6 +16,11 @@ pub(crate) struct Ledger {
 }
 
 enum Entry {
+    Reading {
+        call: Box<ReadCall>,
+        waiting: Vec<Caller>,
+        _cancel: CancelOnDrop,
+    },
     /// The call was refused; the key stays refused.
     Refused(ToolOutput),
     Reserved {
@@ -53,7 +59,15 @@ impl Ledger {
         args: &[u8],
     ) -> Option<Step> {
         let entry = self.entries.get_mut(&(key.route, key.call.clone()))?;
+        if let Entry::Reading { call, .. } = entry
+            && let Err(error) = call.control.check()
+        {
+            *entry = Entry::Refused(ToolOutput::Error(error.into()));
+        }
         Some(match entry {
+            Entry::Reading { call, .. } if rehash(name, args) != Some(call.hash) => {
+                Step::Answer(ToolOutput::Error(ToolError::Reused))
+            }
             Entry::Drawing { hash, .. }
             | Entry::Running { hash, .. }
             | Entry::Done { hash, .. }
@@ -62,7 +76,8 @@ impl Ledger {
                 Step::Answer(ToolOutput::Error(ToolError::Reused))
             }
             Entry::Refused(output) | Entry::Done { output, .. } => Step::Answer(output.clone()),
-            Entry::Reserved { waiting }
+            Entry::Reading { waiting, .. }
+            | Entry::Reserved { waiting }
             | Entry::Drawing { waiting, .. }
             | Entry::Running { waiting, .. } => {
                 waiting.push(caller);
@@ -130,6 +145,55 @@ impl Ledger {
         }
     }
 
+    pub(super) fn reading(&mut self, call: &ReadCall, caller: Caller) {
+        self.entries.insert(
+            (call.key.route, call.key.call.clone()),
+            Entry::Reading {
+                call: Box::new(call.clone()),
+                waiting: vec![caller],
+                _cancel: CancelOnDrop(call.control.clone()),
+            },
+        );
+    }
+
+    pub(crate) fn read_call(&self, key: &LedgerKey) -> Option<&ReadCall> {
+        match self.entries.get(&(key.route, key.call.clone()))? {
+            Entry::Reading { call, .. } => Some(call),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn read_finished(
+        &mut self,
+        key: &LedgerKey,
+        output: ToolOutput,
+    ) -> Option<super::CommitCall> {
+        let id = (key.route, key.call.clone());
+        if !matches!(self.entries.get(&id), Some(Entry::Reading { .. })) {
+            return None;
+        }
+        let Entry::Reading { call, waiting, .. } = self.entries.remove(&id)? else {
+            unreachable!()
+        };
+        self.entries.insert(
+            id,
+            Entry::Running {
+                hash: call.hash,
+                output: output.clone(),
+                waiting,
+            },
+        );
+        Some(super::CommitCall {
+            key: key.clone(),
+            thread: call.thread,
+            tool: call.tool,
+            hash: call.hash,
+            write: super::LocalWrite::None,
+            output,
+            then: None,
+        })
+    }
+
     pub(super) fn running(
         &mut self,
         key: &LedgerKey,
@@ -178,7 +242,7 @@ impl Ledger {
     pub(crate) fn refused(&mut self, key: &LedgerKey, error: ToolError) -> Vec<Caller> {
         let id = (key.route, key.call.clone());
         match self.entries.remove(&id) {
-            Some(Entry::Running { waiting, .. }) => {
+            Some(Entry::Running { waiting, .. } | Entry::Reading { waiting, .. }) => {
                 self.entries
                     .insert(id, Entry::Refused(ToolOutput::Error(error)));
                 waiting

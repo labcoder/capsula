@@ -172,6 +172,10 @@ mod tests {
 
     #[test]
     #[ignore = "requires an assigned quiet Rez timing turn; builder runs are dry runs only"]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the bounded timing fixture also initializes required reader ownership"
+    )]
     fn measure_complete_draw_intake() {
         fn fixture(count: usize) -> Vec<u8> {
             let put: Vec<_> = (0..count)
@@ -200,7 +204,15 @@ mod tests {
             let call_id = CallId::new("measure").expect("ASCII");
             let args = if matches!(path, Path::Adapter) {
                 let mut ledger = Ledger::default();
+                let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
                 let mut ctx = RunCtx {
+                    build: crate::coordinator::BuildKey {
+                        run,
+                        round: 1,
+                        attempt: 1,
+                    },
+                    end,
+                    control: crate::recall::control::Control::new(end),
                     thread,
                     main: thread,
                     fresh: ThreadId(2),
