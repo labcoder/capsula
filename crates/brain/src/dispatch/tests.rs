@@ -38,12 +38,10 @@ fn one() -> u32 {
 fn prepare_probe(args: &[u8]) -> Result<Prepared, ToolError> {
     let (probe, hash) = parse::<ProbeArgs>("probe", args)?;
     let repeats = usize::try_from(probe.count).map_err(|_| ToolError::Invalid)?;
-    Ok(Prepared {
+    Ok(Prepared::Local {
         hash,
-        action: super::Action::Write {
-            write: probe.title.map_or(LocalWrite::None, LocalWrite::Title),
-            output: ToolOutput::Text(format!("probed {}", probe.word.repeat(repeats))),
-        },
+        write: probe.title.map_or(LocalWrite::None, LocalWrite::Title),
+        output: ToolOutput::Text(format!("probed {}", probe.word.repeat(repeats))),
     })
 }
 
@@ -68,16 +66,14 @@ struct RecallArgs {
 
 fn prepare_recall(args: &[u8]) -> Result<Prepared, ToolError> {
     let (recall, hash) = parse::<RecallArgs>("recall", args)?;
-    Ok(Prepared {
+    Ok(Prepared::Local {
         hash,
-        action: super::Action::Write {
-            write: LocalWrite::None,
-            output: ToolOutput::History(vec![HistoryRef {
-                thread: ThreadId(recall.task),
-                first: EventId(recall.first),
-                last: EventId(recall.last),
-            }]),
-        },
+        write: LocalWrite::None,
+        output: ToolOutput::History(vec![HistoryRef {
+            thread: ThreadId(recall.task),
+            first: EventId(recall.first),
+            last: EventId(recall.last),
+        }]),
     })
 }
 
@@ -502,6 +498,7 @@ fn history_is_kumo_only_and_model_only() {
     assert_eq!(
         names(Origin::Kumo, Route::Model),
         [
+            "draw",
             "create_task",
             "focus",
             "search_history",
@@ -511,10 +508,10 @@ fn history_is_kumo_only_and_model_only() {
             "recall"
         ]
     );
-    assert_eq!(names(Origin::Kumo, Route::Mcp(L1)), ["probe"]);
+    assert_eq!(names(Origin::Kumo, Route::Mcp(L1)), ["draw", "probe"]);
     assert_eq!(
         names(Origin::Task(T), Route::Model),
-        ["focus", "search_history", "read_history", "probe"]
+        ["draw", "focus", "search_history", "read_history", "probe"]
     );
 }
 

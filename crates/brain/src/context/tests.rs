@@ -226,7 +226,7 @@ fn a_kumo_request_states_its_model_names_role_and_ordered_runs() {
             .iter()
             .map(|tool| tool.name)
             .collect::<Vec<_>>(),
-        ["search_history", "read_history", "list_tasks"]
+        ["draw", "search_history", "read_history", "list_tasks"]
     );
     assert_eq!(built.sources, [main]);
     let instructions = &built.request.instructions;

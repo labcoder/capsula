@@ -48,8 +48,8 @@ fn closed_history_arguments_reject_foreign_fields_duplicates_and_bad_shapes() {
     }
     assert!(matches!(
         tasks(b"{}"),
-        Ok(Prepared {
-            action: Action::Read(Query::Tasks),
+        Ok(Prepared::Read {
+            query: Query::Tasks,
             ..
         })
     ));
@@ -105,11 +105,11 @@ fn activation_offers_exact_ordered_model_schemas_and_no_mcp_history() {
     for (origin, names) in [
         (
             Origin::Kumo,
-            vec!["search_history", "read_history", "list_tasks"],
+            vec!["draw", "search_history", "read_history", "list_tasks"],
         ),
         (
             Origin::Task(ThreadId(2)),
-            vec!["search_history", "read_history"],
+            vec!["draw", "search_history", "read_history"],
         ),
     ] {
         assert_eq!(
@@ -123,9 +123,15 @@ fn activation_offers_exact_ordered_model_schemas_and_no_mcp_history() {
             assert_eq!(schema.parameters["additionalProperties"], false);
         }
         let mcp = dispatch::schemas(origin, Route::Mcp(crate::bridge::LaunchId(1)));
-        assert_eq!(dispatch::mcp_schemas(origin), Vec::new());
         assert_eq!(
-            mcp.iter().filter(|tool| names.contains(&tool.name)).count(),
+            dispatch::mcp_schemas(origin)
+                .iter()
+                .map(|tool| tool.name)
+                .collect::<Vec<_>>(),
+            ["draw"]
+        );
+        assert_eq!(
+            mcp.iter().filter(|tool| ["search_history", "read_history", "list_tasks"].contains(&tool.name)).count(),
             0
         );
     }

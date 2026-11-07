@@ -9,7 +9,7 @@ use kumochi_protocol::message::ThreadId;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::{Action, LedgerKey, Prepared, Tool, ToolError, parameters, parse};
+use super::{LedgerKey, Prepared, Tool, ToolError, parameters, parse};
 use crate::context::Origin;
 use crate::coordinator::BuildKey;
 use crate::engines::ToolName;
@@ -97,30 +97,30 @@ struct TasksArgs {}
 
 fn search(args: &[u8]) -> Result<Prepared, ToolError> {
     let (args, hash) = parse::<SearchArgs>("search_history", args)?;
-    Ok(Prepared {
+    Ok(Prepared::Read {
         hash,
-        action: Action::Read(Query::Search {
+        query: Query::Search {
             query: args.query,
             task: args.task,
-        }),
+        },
     })
 }
 fn read(args: &[u8]) -> Result<Prepared, ToolError> {
     let (args, hash) = parse::<ReadArgs>("read_history", args)?;
-    Ok(Prepared {
+    Ok(Prepared::Read {
         hash,
-        action: Action::Read(Query::Read {
+        query: Query::Read {
             task: args.task,
             from: args.from,
             to: args.to,
-        }),
+        },
     })
 }
 fn tasks(args: &[u8]) -> Result<Prepared, ToolError> {
     let (_, hash) = parse::<TasksArgs>("list_tasks", args)?;
-    Ok(Prepared {
+    Ok(Prepared::Read {
         hash,
-        action: Action::Read(Query::Tasks),
+        query: Query::Tasks,
     })
 }
 

@@ -9,7 +9,7 @@ use tokio::time::Instant;
 use super::wire::{MAX_PCM_BYTES, SpeechError, SpeechReply, SpeechRequest, check_audio};
 use crate::platform::Job;
 use crate::platform::sherpa::{MAX_TRANSCRIPT_BYTES, NativeError};
-use crate::supervise::{self, Generation, Handle, Kind, WorkerLost};
+use crate::supervise::{self, Generation, Handle, Kind};
 
 /// The speech worker's kind for the shared supervisor.
 pub(super) struct Speech;
@@ -165,7 +165,7 @@ impl SpeechHandle {
         self.inner
             .request(request, until)
             .await
-            .map_err(|WorkerLost| SpeechError::WorkerLost)
+            .map_err(SpeechError::from)
     }
 }
 

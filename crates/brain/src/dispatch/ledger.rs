@@ -22,7 +22,14 @@ enum Entry {
         _cancel: CancelOnDrop,
     },
     /// The call was refused; the key stays refused.
-    Refused(ToolError),
+    Refused(ToolOutput),
+    Reserved {
+        waiting: Vec<Caller>,
+    },
+    Drawing {
+        hash: [u8; 32],
+        waiting: Vec<Caller>,
+    },
     /// The call's write is in the store; `waiting` are answered when it's acknowledged.
     Running {
         hash: [u8; 32],
@@ -30,7 +37,16 @@ enum Entry {
         waiting: Vec<Caller>,
     },
     /// The call committed.
-    Done { hash: [u8; 32], output: ToolOutput },
+    Done {
+        hash: [u8; 32],
+        output: ToolOutput,
+    },
+}
+
+pub(crate) enum Drawn {
+    Refused(Vec<(Caller, ToolOutput)>),
+    Commit([u8; 32]),
+    Stale,
 }
 
 impl Ledger {
@@ -46,20 +62,24 @@ impl Ledger {
         if let Entry::Reading { call, .. } = entry
             && let Err(error) = call.control.check()
         {
-            *entry = Entry::Refused(error.into());
+            *entry = Entry::Refused(ToolOutput::Error(error.into()));
         }
         Some(match entry {
-            Entry::Refused(error) => Step::Answer(ToolOutput::Error(*error)),
             Entry::Reading { call, .. } if rehash(name, args) != Some(call.hash) => {
                 Step::Answer(ToolOutput::Error(ToolError::Reused))
             }
-            Entry::Running { hash, .. } | Entry::Done { hash, .. }
+            Entry::Drawing { hash, .. }
+            | Entry::Running { hash, .. }
+            | Entry::Done { hash, .. }
                 if rehash(name, args) != Some(*hash) =>
             {
                 Step::Answer(ToolOutput::Error(ToolError::Reused))
             }
-            Entry::Done { output, .. } => Step::Answer(output.clone()),
-            Entry::Reading { waiting, .. } | Entry::Running { waiting, .. } => {
+            Entry::Refused(output) | Entry::Done { output, .. } => Step::Answer(output.clone()),
+            Entry::Reading { waiting, .. }
+            | Entry::Reserved { waiting }
+            | Entry::Drawing { waiting, .. }
+            | Entry::Running { waiting, .. } => {
                 waiting.push(caller);
                 Step::Join
             }
@@ -67,8 +87,62 @@ impl Ledger {
     }
 
     pub(super) fn refuse(&mut self, key: &LedgerKey, error: ToolError) {
-        self.entries
-            .insert((key.route, key.call.clone()), Entry::Refused(error));
+        self.entries.insert(
+            (key.route, key.call.clone()),
+            Entry::Refused(ToolOutput::Error(error)),
+        );
+    }
+
+    pub(super) fn reserve(&mut self, key: &LedgerKey, caller: Caller) {
+        self.entries.insert(
+            (key.route, key.call.clone()),
+            Entry::Reserved {
+                waiting: vec![caller],
+            },
+        );
+    }
+
+    pub(super) fn bind_draw(&mut self, key: &LedgerKey, hash: [u8; 32]) {
+        let id = (key.route, key.call.clone());
+        match self.entries.remove(&id) {
+            Some(Entry::Reserved { waiting }) => {
+                self.entries.insert(id, Entry::Drawing { hash, waiting });
+            }
+            Some(other) => {
+                self.entries.insert(id, other);
+            }
+            None => {}
+        }
+    }
+
+    pub(crate) fn drawn(&mut self, key: &LedgerKey, output: ToolOutput) -> Drawn {
+        let id = (key.route, key.call.clone());
+        match self.entries.remove(&id) {
+            Some(Entry::Reserved { waiting }) => {
+                let answers = waiting
+                    .into_iter()
+                    .map(|caller| (caller, output.clone()))
+                    .collect();
+                self.entries.insert(id, Entry::Refused(output));
+                Drawn::Refused(answers)
+            }
+            Some(Entry::Drawing { hash, waiting }) => {
+                self.entries.insert(
+                    id,
+                    Entry::Running {
+                        hash,
+                        output,
+                        waiting,
+                    },
+                );
+                Drawn::Commit(hash)
+            }
+            Some(other) => {
+                self.entries.insert(id, other);
+                Drawn::Stale
+            }
+            None => Drawn::Stale,
+        }
     }
 
     pub(super) fn reading(&mut self, call: &ReadCall, caller: Caller) {
@@ -169,7 +243,8 @@ impl Ledger {
         let id = (key.route, key.call.clone());
         match self.entries.remove(&id) {
             Some(Entry::Running { waiting, .. } | Entry::Reading { waiting, .. }) => {
-                self.entries.insert(id, Entry::Refused(error));
+                self.entries
+                    .insert(id, Entry::Refused(ToolOutput::Error(error)));
                 waiting
             }
             Some(other) => {
@@ -183,8 +258,11 @@ impl Ledger {
     /// The store refused `key`'s write: nobody is answered and the key stays refused.
     pub(crate) fn failed(&mut self, key: &LedgerKey) {
         let id = (key.route, key.call.clone());
-        if let Some(entry @ Entry::Running { .. }) = self.entries.get_mut(&id) {
-            *entry = Entry::Refused(ToolError::Ended);
+        if let Some(
+            entry @ (Entry::Reserved { .. } | Entry::Drawing { .. } | Entry::Running { .. }),
+        ) = self.entries.get_mut(&id)
+        {
+            *entry = Entry::Refused(ToolOutput::Error(ToolError::Ended));
         }
     }
 }

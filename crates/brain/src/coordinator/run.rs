@@ -44,6 +44,7 @@ impl Coordinator {
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
         let drawing_pending = self.drawing.pending_for(run);
+        let trusted_draw = self.trusted_draw();
         let current = self.current(run)?;
         // The engine hasn't started before its turn is stored, and has nothing more after Done.
         if !current.started() || current.finishing {
@@ -66,7 +67,8 @@ impl Coordinator {
             TurnEvent::ToolCallStarted {
                 call,
                 name: ToolName::Draw,
-            } if current.draw.is_none()
+            } if trusted_draw
+                && current.draw.is_none()
                 && current
                     .build
                     .as_ref()

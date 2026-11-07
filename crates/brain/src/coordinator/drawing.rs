@@ -3,7 +3,7 @@
 use kumochi_protocol::message::{DataToShell, RunId, SceneId, StepRef, ThreadId};
 
 use super::{Coordinator, Effect, Stale, StoreOp, speech};
-use crate::drawing::{CallEnd, Drawing, Input, Output};
+use crate::drawing::{Drawing, Input, Output};
 
 const MAX_RESULTS: usize = 64;
 
@@ -78,11 +78,6 @@ impl Coordinator {
         self.drawing.available()
     }
 
-    /// Completed call outcomes for the caller, never diagnostic text.
-    pub fn take_drawing_results(&mut self) -> Vec<CallEnd> {
-        std::mem::take(&mut self.drawing_results)
-    }
-
     /// A frozen, validated v1 snapshot for the next connection's data FIFO.
     /// # Errors
     /// Rejects a visible set whose earlier writes have not settled.
@@ -102,6 +97,7 @@ impl Coordinator {
     ) -> Result<(), Stale> {
         match &input {
             Input::Call { thread, run, .. }
+            | Input::Rejected { thread, run, .. }
             | Input::Record { thread, run, .. }
             | Input::CallFinished { thread, run, .. } => {
                 let current = self.current(*run)?;
@@ -173,10 +169,25 @@ impl Coordinator {
                 self.say(run, step, &say, effects);
             }
         }
-        if self.drawing_results.len() + output.calls.len() > MAX_RESULTS {
-            effects.push(Effect::Broken("drawing call outcomes were not consumed"));
-        } else {
-            self.drawing_results.extend(output.calls);
+        for end in output.calls {
+            let key = self
+                .current
+                .as_ref()
+                .filter(|run| run.id == end.run)
+                .and_then(|run| run.draw_calls.iter().find(|(call, _)| *call == end.call))
+                .map(|(_, key)| key.clone());
+            if let Some(key) = key {
+                if matches!(end.error, Some(crate::drawing::CallError::Store)) {
+                    self.call_failed(&key, effects)
+                        .expect("the associated drawing run is current");
+                    continue;
+                }
+                self.drawn(
+                    &key,
+                    crate::dispatch::ToolOutput::Text(end.tool_text()),
+                    effects,
+                );
+            }
         }
     }
 

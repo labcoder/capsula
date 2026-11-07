@@ -1,6 +1,7 @@
 //! The worker's one frame: a reused CPU buffer and, separately, whether it holds a valid image.
 
 use kumochi_protocol::geometry::DisplayRef;
+use zeroize::Zeroize as _;
 
 use super::wire::{FrameMeta, Refusal};
 
@@ -37,6 +38,27 @@ impl RawFrame {
 
     pub(super) fn invalidate(&mut self) {
         self.valid = None;
+    }
+
+    /// Zeroes and frees the buffer, so a dropped, retired or expired capture leaves no pixels in
+    /// the worker. Only a replacement capture reuses the allocation.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "A6b2's Drop, Retire and expiry release")
+    )]
+    pub(super) fn release(&mut self) {
+        drop(self.scrubbed());
+    }
+
+    /// Takes the whole allocation out, every byte of its capacity zeroed with volatile writes the
+    /// optimizer keeps.
+    fn scrubbed(&mut self) -> Vec<u8> {
+        self.valid = None;
+        self.filled = [0; 2];
+        let capacity = self.bgra.capacity();
+        self.bgra.resize(capacity, 0);
+        self.bgra.as_mut_slice().zeroize();
+        std::mem::take(&mut self.bgra)
     }
 
     /// Publishes the image only when the copy filled exactly the requested size.
@@ -104,3 +126,6 @@ fn byte_len([width, height]: [u32; 2]) -> Option<usize> {
         .checked_mul(usize::try_from(height).ok()?)?
         .checked_mul(4)
 }
+
+#[cfg(test)]
+mod tests;

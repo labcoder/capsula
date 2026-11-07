@@ -6,16 +6,16 @@ run may reach, and records it in the run's ledger. The coordinator owns the ledg
 call only after the store has acknowledged the call's write.
 
 Slice 3's 13b-2 tool loop and slice 8's C4b-2 MCP listener hand calls to
-`Coordinator::tool_call`. The production tools are `create_task` and `focus`. No tool is offered
-to a model yet, because `context::tools` is empty until the staged producers are enabled
-(OSC-116); slice 4's B10 adds `draw`'s ledger entry. The test tools in `dispatch/tests.rs`
-exercise the rest of the path.
+`Coordinator::tool_call`. The catalog contains drawing, local writes and history reads.
+Model requests offer `draw`, `search_history` and `read_history`; Kumo also gets `list_tasks`.
+Create/focus remain unoffered. MCP gets only `draw`, the intersection of model offers and
+the catalog's MCP permissions. The test tools in `dispatch/tests.rs` exercise the rest of the path.
 
-## Staged history reads
+## History reads
 
-The recall backend is staged; this change offers no new model or MCP tools. The next layer
-wires its asynchronous reads, cancellation, completion fence and model-schema allowlist.
-It must not enable schemas before those fences exist.
+History calls enter `Reading` while the stamped reader selects bounded references. Completion
+checks the original build, owner, caller and both source sets before a reference-only commit;
+the model receives its result only after the store acknowledges that commit.
 
 `recall::Query` describes word-OR event search, an inclusive event range, or task metadata.
 `Snapshot::select_recall` checks the frozen origin independently of dispatch: Kumo reaches
@@ -73,8 +73,8 @@ flowchart TD
     C -- no --> E2[NotHere, key not used]
     C -- yes --> D{the key has an entry?}
     D -- refused --> E3[the same refusal]
-    D -- running/done, same hash --> J[joins / stored output]
-    D -- running/done, other or bad args --> E4[Reused]
+    D -- drawing/running/done, same hash --> J[joins / stored output]
+    D -- drawing/running/done, other or bad args --> E4[Reused]
     D -- none --> F{known, offered on this route,<br/>allowed for this reach?}
     F -- no --> E5[Unknown / NotHere, recorded]
     F -- yes --> G{arguments within 16 KiB,<br/>an object that parses with no unknown fields,<br/>output within 64 KiB?}
@@ -113,6 +113,52 @@ flowchart TD
 - **Follow-ups.** A write can carry a `Then`, which comes back with its acknowledgement. The
   coordinator runs it once, only on `Done` for a key that was still running, and only while the run
   is current, so a stopped run's or a repeated acknowledgement's follow-up never runs.
+
+## `draw`
+
+`draw { records }` accepts the scene v1 2D contract, with a 16 KiB complete-argument
+ceiling. Its description comes from `crates/brain/prompts/draw.md`. Responses sends
+`strict: false` specifically for this tool: optional scene fields remain optional.
+Fenced Mermaid text is not a tool call; diagrams use the Mermaid scene operation.
+
+The serialized parameter schema was 30,704 UTF-8 bytes in the accepted live gate
+at `bc2dfaa` (2026-11-06). A test holds export growth below 32 KiB; exceeding it
+requires reviewing the request overhead. That is a review budget, not a provider
+limit, the history reread bound or the 16 KiB tool-argument ceiling.
+
+Before admission, the dispatcher tokenizes the entire envelope, decodes every record
+and rejects 3D views, solids, 3D tracks, three-component keys and any solid-only
+`set[].info` field, including null. The first typed failure returns its code, sanitized
+path and step id, spends the existing drawing rejection/repair budget, and admits no
+scene record. Its refusal stays final for the caller's key. Semantic admission still
+runs once in the drawing reducer; a semantic failure can retain earlier committed steps.
+
+If drawing recovery is unavailable, calls return the fixed `not available here`
+refusal instead of entering the reducer or failing the run as a store error. A valid
+call's refusal still waits for its result-row acknowledgement and stays final for its key.
+
+The ledger holds callers in `Drawing` while the reducer writes. The coordinator assigns
+each handoff an internal call id, separate from the model/MCP id and launch, and keeps
+the association in that run. Every `CallEnd`, including immediate refusal, write
+completion and preparation failure, settles through `drawing_output`; a fixture with
+no associated caller answers nobody. There is no session-level result buffer.
+
+A preflight refusal is recorded in the in-memory ledger. An executed call's actual
+committed-prefix result becomes `Running`, then one `CommitCall(LocalWrite::None)`.
+Only its acknowledgement answers the caller. Scene writes and the result row are
+separate transactions: committed steps may survive a crash before the result row,
+but an interrupted run is not replayed as a fresh drawing. Stop, deletion, account
+loss and replacement retain the existing run fences and accepted-write cutoff.
+
+Production draw calls use the complete-call tool loop; argument deltas execute nothing.
+Only the explicitly trusted debug fixture retains newline-label placeholder drawing.
+Inline chat rendering, fenced-text conversion and production streamed scene intake
+are separate work.
+
+Before a separately authorized live schema check, `cargo xtask live account` can
+inspect Kumochi Dev's own non-secret account view with a zero-request inference
+budget. It prints only state words, never signs in, and refuses while another
+product process is running. `cargo test` uses offline fixtures instead.
 
 ## `create_task`
 
@@ -189,13 +235,11 @@ its row.
 
 ## Results
 
-`ToolOutput` is `Text`, `History` or `Error`, stored as tagged JSON: `{"text": …}`,
-`{"history": [{"thread", "first", "last"}]}` or `{"error": "unknown tool"}`. A history result is
-references only. Today a stored `History` result replays as its reference JSON, not as the re-read
-content, and no production tool returns one. Before the first history tool is enabled, its results
-must go through the context builder's live re-read of each range at every build, fenced against
-deletes by 12b's admission and send lease, so a deleted task's text is never copied into the
-ledger or another task.
+`ToolOutput` stores tagged `text`, legacy `history` ranges, `recall` selectors or a fixed `error`.
+History results contain references only. The context builder re-reads live sources at every
+build, fenced against deletion by admission and the send lease, so source text is never copied
+into the ledger or another task. Legacy range results remain readable; production history
+tools return the more precise `recall` selectors.
 
 History tools are **model-only**. MCP gets no schema for them, and the dispatcher refuses them from
 `Mcp`, because an MCP reply doesn't pass through a model build's delete fence. Before history is
@@ -205,9 +249,10 @@ against deletion and revocation at the reply-write boundary.
 
 ## Schemas
 
-Each tool's JSON Schema comes from `schemars` on the same `deny_unknown_fields` struct that parses
-its arguments, so the two can't drift, and the schema is closed with `additionalProperties: false`.
-`dispatch::schemas(reach, route)` lists what a run is offered on a route.
+Local-write and history schemas come from `schemars` on their closed argument structs.
+Draw uses the scene v1 schema and its typed decoder, with `strict:false` as described above.
+`dispatch::schemas` lists catalog permissions; `model_schemas` applies the model allowlist,
+and `mcp_schemas` intersects those offers with MCP permission.
 
 ## Diagnostics
 

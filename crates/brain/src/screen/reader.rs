@@ -14,6 +14,10 @@ pub(crate) const CONNECTION_TIMEOUT: Duration = Duration::from_millis(100);
 pub(crate) const TRANSACTION_TIMEOUT: Duration = Duration::from_millis(100);
 const SLACK: Duration = CONNECTION_TIMEOUT.saturating_add(TRANSACTION_TIMEOUT);
 
+/// The walk thread's one completion: it finishes at most one job at a time, and `begin` refuses a
+/// job while the last one's completion hasn't been taken, so this one-slot channel never fills.
+type Completion = (CaptureId, Result<ElementTree, Failure>);
+
 #[cfg_attr(
     not(any(test, windows)),
     expect(dead_code, reason = "macOS adapter follows Windows")
@@ -21,8 +25,9 @@ const SLACK: Duration = CONNECTION_TIMEOUT.saturating_add(TRANSACTION_TIMEOUT);
 pub(crate) struct ThreadedReader<P> {
     platform: P,
     jobs: SyncSender<WalkJob>,
-    replies: Receiver<(CaptureId, Result<ElementTree, Failure>)>,
-    pending: Option<CaptureId>,
+    replies: Receiver<Completion>,
+    /// The job sent whose completion hasn't been taken.
+    pending: Option<(CaptureId, MaskSink)>,
     retired: bool,
 }
 
@@ -34,14 +39,19 @@ impl<P: ElementPlatform> ThreadedReader<P> {
     pub(crate) fn new<S: ElementSource + 'static>(
         open: impl FnMut() -> Result<S, i32> + Send + 'static,
         platform: P,
+        wake: impl Fn() -> bool + Send + 'static,
     ) -> Result<Self, i32> {
-        Self::with_clock(open, platform, Instant::now)
+        Self::with_clock(open, platform, Instant::now, wake)
     }
 
+    /// Calls `wake` after each completion lands in its slot. `wake` must not block: a full
+    /// listener drops the wake and the completion waits for `poll`. `false` means the listener
+    /// is gone, so the thread ends.
     pub(crate) fn with_clock<S: ElementSource + 'static>(
         mut open: impl FnMut() -> Result<S, i32> + Send + 'static,
         platform: P,
         now: impl Fn() -> Instant + Send + 'static,
+        wake: impl Fn() -> bool + Send + 'static,
     ) -> Result<Self, i32> {
         let (jobs, requests) = mpsc::sync_channel::<WalkJob>(1);
         let (answers, replies) = mpsc::sync_channel(1);
@@ -69,7 +79,7 @@ impl<P: ElementPlatform> ThreadedReader<P> {
                     if source.as_ref().is_some_and(Result::is_err) {
                         source = None;
                     }
-                    if answers.try_send((job.capture, result)).is_err() {
+                    if answers.try_send((job.capture, result)).is_err() || !wake() {
                         break;
                     }
                 }
@@ -99,6 +109,30 @@ impl<P: ElementPlatform> ThreadedReader<P> {
             retire: self.retired,
         }
     }
+
+    /// Ends the pending walk with its completion; a missing, foreign or extra completion, or
+    /// poisoned masks, retire the reader.
+    fn settle(
+        &mut self,
+        capture: CaptureId,
+        masks: &MaskSink,
+        reply: Option<Completion>,
+    ) -> Result<Walked, Failure> {
+        match reply {
+            Some((received, result)) if received == capture && !masks.is_poisoned() => {
+                self.pending = None;
+                if !matches!(self.replies.try_recv(), Err(TryRecvError::Empty)) {
+                    return Ok(self.retire(capture, masks));
+                }
+                self.retired |= matches!(&result, Err(Failure::Retire(_)));
+                result.map(|tree| Walked {
+                    tree,
+                    retire: self.retired,
+                })
+            }
+            _ => Ok(self.retire(capture, masks)),
+        }
+    }
 }
 
 impl<P: ElementPlatform> ElementReader for ThreadedReader<P> {
@@ -109,43 +143,51 @@ impl<P: ElementPlatform> ElementReader for ThreadedReader<P> {
         self.platform.foreground()
     }
 
+    fn begin(&mut self, job: WalkJob) -> Result<(), Walked> {
+        let (capture, masks) = (job.capture, Arc::clone(&job.masks));
+        if self.retired || masks.is_poisoned() || self.pending.is_some() {
+            return Err(self.retire(capture, &masks));
+        }
+        self.pending = Some((capture, Arc::clone(&masks)));
+        if let Err(error) = self.jobs.try_send(job) {
+            self.retired = matches!(error, mpsc::TrySendError::Disconnected(_));
+            return Err(self.busy(capture, &masks));
+        }
+        Ok(())
+    }
+
+    fn poll(&mut self) -> Option<Result<Walked, Failure>> {
+        let (capture, masks) = self.pending.clone()?;
+        match self.replies.try_recv() {
+            Err(TryRecvError::Empty) if !masks.is_poisoned() => None,
+            reply => Some(self.settle(capture, &masks, reply.ok())),
+        }
+    }
+
+    /// Discards a timed-out walk's late completion, then begins `job` and waits for its completion
+    /// until its deadline plus the UIA slack; a timeout answers Busy and leaves the job pending, so
+    /// the next walk retires the reader if it's still running.
+    // shortcut: a bounded blocking wait on the serve thread; A6b2's actor uses begin and poll.
     fn walk(&mut self, job: WalkJob) -> Result<Walked, Failure> {
         let (capture, until, masks) = (job.capture, job.until, Arc::clone(&job.masks));
-        if self.retired || masks.is_poisoned() {
-            return Ok(self.retire(capture, &masks));
-        }
         loop {
             match self.replies.try_recv() {
-                Ok((old, _)) if self.pending == Some(old) => self.pending = None,
+                Ok((old, _)) if self.pending.as_ref().is_some_and(|(p, _)| *p == old) => {
+                    self.pending = None;
+                }
                 Err(TryRecvError::Empty) => break,
                 _ => return Ok(self.retire(capture, &masks)),
             }
         }
-        if self.pending.is_some() {
-            return Ok(self.retire(capture, &masks));
-        }
-        self.pending = Some(capture);
-        if let Err(error) = self.jobs.try_send(job) {
-            self.retired = matches!(error, mpsc::TrySendError::Disconnected(_));
-            return Ok(self.busy(capture, &masks));
+        if let Err(walked) = self.begin(job) {
+            return Ok(walked);
         }
         let timeout = (until + SLACK).saturating_duration_since(Instant::now());
         match self.replies.recv_timeout(timeout) {
-            Ok((received, result)) if received == capture && !masks.is_poisoned() => {
-                self.pending = None;
-                if !matches!(self.replies.try_recv(), Err(TryRecvError::Empty)) {
-                    return Ok(self.retire(capture, &masks));
-                }
-                self.retired |= matches!(&result, Err(Failure::Retire(_)));
-                result.map(|tree| Walked {
-                    tree,
-                    retire: false,
-                })
-            }
             Err(RecvTimeoutError::Timeout) if !masks.is_poisoned() => {
                 Ok(self.busy(capture, &masks))
             }
-            _ => Ok(self.retire(capture, &masks)),
+            reply => self.settle(capture, &masks, reply.ok()),
         }
     }
 }

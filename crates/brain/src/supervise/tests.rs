@@ -1,4 +1,6 @@
 use std::future::Future as _;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
 use std::task::{Context, Poll, Waker};
 
 use super::wire::CHUNK;
@@ -46,8 +48,7 @@ fn pending(id: u64) -> (BTreeMap<u64, Pending<Test>>, Reply) {
 
 fn handle() -> (Handle<Test>, mpsc::Receiver<Command<Test>>) {
     let (commands, receive) = mpsc::channel(QUEUE);
-    let (losses, _) = broadcast::channel(QUEUE);
-    (Handle { commands, losses }, receive)
+    (Handle::new(commands), receive)
 }
 
 #[test]
@@ -56,7 +57,10 @@ fn identities_completion_trailing_and_gaps() {
     let (mut requests, mut receive) = pending(1);
     let mut other = pong();
     other.id = 2;
-    assert_eq!(accept(&mut requests, other, Generation(3)), Err(WorkerLost));
+    assert_eq!(
+        accept(&mut requests, other, Generation(3)),
+        Err(WorkerLost::Lost)
+    );
     assert_eq!(accept(&mut requests, pong(), Generation(3)), Ok(()));
     assert_eq!(
         receive.try_recv(),
@@ -64,7 +68,7 @@ fn identities_completion_trailing_and_gaps() {
     );
     assert_eq!(
         accept(&mut requests, pong(), Generation(3)),
-        Err(WorkerLost),
+        Err(WorkerLost::Lost),
         "after the last"
     );
     let (mut requests, _) = pending(1);
@@ -72,7 +76,7 @@ fn identities_completion_trailing_and_gaps() {
     trailing.body.push(0);
     assert_eq!(
         accept(&mut requests, trailing, Generation(0)),
-        Err(WorkerLost)
+        Err(WorkerLost::Lost)
     );
     let (mut requests, _) = pending(1);
     let first = Frame {
@@ -88,7 +92,10 @@ fn identities_completion_trailing_and_gaps() {
         last: true,
         body: vec![0],
     };
-    assert_eq!(accept(&mut requests, gap, Generation(0)), Err(WorkerLost));
+    assert_eq!(
+        accept(&mut requests, gap, Generation(0)),
+        Err(WorkerLost::Lost)
+    );
 }
 
 #[test]
@@ -123,17 +130,17 @@ fn reassembly_cap_empty_gap_and_duplicate() {
     assert_eq!(assembly.push(chunk(0, false, vec![0; 8])), Ok(None));
     assert_eq!(
         assembly.push(chunk(1, true, vec![0])),
-        Err(WorkerLost),
+        Err(WorkerLost::Lost),
         "over the cap"
     );
     for frame in [chunk(0, true, vec![]), chunk(1, true, vec![0])] {
-        assert_eq!(Assembly::new(8).push(frame), Err(WorkerLost));
+        assert_eq!(Assembly::new(8).push(frame), Err(WorkerLost::Lost));
     }
     let mut assembly = Assembly::new(8);
     assert_eq!(assembly.push(chunk(0, false, vec![1])), Ok(None));
     assert_eq!(
         assembly.push(chunk(0, true, vec![2])),
-        Err(WorkerLost),
+        Err(WorkerLost::Lost),
         "a repeat"
     );
     assert_eq!(assembly.push(chunk(1, true, vec![2])), Ok(Some(vec![1, 2])));
@@ -196,7 +203,7 @@ async fn request_queue_accepts_sixteen_and_refuses_seventeen() {
         assert_eq!(request.as_mut().poll(&mut context), Poll::Pending);
         requests.push(request);
     }
-    assert_eq!(handle.request(vec![], until).await, Err(WorkerLost));
+    assert_eq!(handle.request(vec![], until).await, Err(WorkerLost::Lost));
     assert_eq!(receive.len(), 16);
     for _ in 0..16 {
         let Destination::Single(answer) = receive.try_recv().expect("accepted request").answer
@@ -221,7 +228,7 @@ async fn a_request_queued_behind_a_held_respawn_keeps_its_deadline() {
     tokio::time::advance(Duration::from_millis(1499)).await;
     assert_eq!(request.as_mut().poll(&mut context), Poll::Pending);
     tokio::time::advance(Duration::from_millis(2)).await;
-    assert_eq!(request.await, Err(WorkerLost));
+    assert_eq!(request.await, Err(WorkerLost::Lost));
     assert!(
         receive
             .try_recv()
@@ -305,4 +312,203 @@ fn each_malformed_frame_is_its_own_frame_error() {
         read(mistyped),
         Err(frame::FrameError::Malformed(_))
     ));
+}
+
+/// A process whose exit the test decides once the wait for it has begun.
+struct Held {
+    asked: blocking::Sender<Duration>,
+    exited: blocking::Receiver<bool>,
+}
+
+impl Process for Held {
+    fn terminate(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn exits_within(&self, timeout: Duration) -> io::Result<bool> {
+        self.asked.send(timeout).expect("the test listens");
+        Ok(self
+            .exited
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap_or(false))
+    }
+}
+
+type Played = (
+    blocking::Receiver<(u64, Vec<u8>)>,
+    mpsc::Sender<Option<Frame>>,
+);
+
+/// A worker whose pipes the test plays: the requests written to it and the frames it answers.
+fn staged(process: Option<Box<dyn Process>>) -> (Worker<Test>, Played) {
+    let (writes, requests) = blocking::sync_channel(QUEUE);
+    let (replies, reads) = mpsc::channel(QUEUE);
+    let worker = Worker {
+        process,
+        writes,
+        reads,
+    };
+    (worker, (requests, replies))
+}
+
+type Request = std::pin::Pin<Box<dyn Future<Output = Result<(String, Generation), WorkerLost>>>>;
+
+/// A supervisor whose first worker is lost and whose exit wait is held, with one request sent
+/// during that wait and the one replacement it may spawn.
+struct Confirming {
+    handle: Handle<Test>,
+    running: tokio::task::JoinHandle<()>,
+    decide: blocking::Sender<bool>,
+    held: Request,
+    next: Played,
+    spawns: Arc<AtomicUsize>,
+}
+
+async fn confirming() -> Confirming {
+    let (decide, exited) = blocking::channel();
+    let (asked, asks) = blocking::channel();
+    let (first, (_written, lose)) = staged(Some(Box::new(Held { asked, exited })));
+    let (next, played) = staged(None);
+    let next = Arc::new(Mutex::new(Some(next)));
+    let spawns = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&spawns);
+    let spawn = move || {
+        counted.fetch_add(1, Ordering::Relaxed);
+        next.lock()
+            .expect("unpoisoned")
+            .take()
+            .ok_or_else(|| io::Error::other("one replacement"))
+    };
+    let (handle, receive) = handle();
+    let running = tokio::spawn(run(spawn, first, receive, handle.notices.clone()));
+    lose.send(None).await.expect("the supervisor reads");
+    let asked = tokio::task::spawn_blocking(move || asks.recv_timeout(Duration::from_secs(5)));
+    assert_eq!(asked.await.expect("joined"), Ok(EXIT_CONFIRMATION));
+    let sender = handle.clone();
+    let mut held: Request = Box::pin(async move {
+        let until = Instant::now() + Duration::from_secs(60);
+        sender.request(b"held".to_vec(), until).await
+    });
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(held.as_mut().poll(&mut context).is_pending(), "queued");
+    tokio::task::yield_now().await;
+    assert!(
+        held.as_mut().poll(&mut context).is_pending(),
+        "held through the exit wait, not failed"
+    );
+    Confirming {
+        handle,
+        running,
+        decide,
+        held,
+        next: played,
+        spawns,
+    }
+}
+
+#[tokio::test]
+async fn a_request_during_exit_confirmation_is_served_by_the_replacement_after_the_loss() {
+    let rig = confirming().await;
+    let (mut exits, mut losses) = (rig.handle.exits(), rig.handle.lost());
+    assert_eq!(exits.try_recv(), Err(broadcast::error::TryRecvError::Empty));
+    assert_eq!(
+        losses.try_recv(),
+        Err(broadcast::error::TryRecvError::Empty),
+        "no loss before the exit is settled"
+    );
+    rig.decide.send(true).expect("still waiting");
+    let (requests, replies) = rig.next;
+    let written =
+        tokio::task::spawn_blocking(move || requests.recv_timeout(Duration::from_secs(5)));
+    let (id, body) = written.await.expect("joined").expect("the held request");
+    assert_eq!(body, b"held");
+    for frame in frames(id, &"served", Test::MAX_REPLY) {
+        replies
+            .send(Some(frame))
+            .await
+            .expect("the supervisor reads");
+    }
+    assert_eq!(rig.held.await, Ok(("served".to_owned(), Generation(1))));
+    assert_eq!(
+        exits.try_recv(),
+        Ok(Exit {
+            generation: Generation(0),
+            confirmed: true
+        })
+    );
+    assert_eq!(losses.try_recv(), Ok(Generation(0)));
+    assert_eq!(rig.spawns.load(Ordering::Relaxed), 1);
+    rig.running.abort();
+}
+
+#[tokio::test]
+async fn an_unseen_exit_refuses_held_and_later_requests_by_type_without_a_respawn() {
+    let rig = confirming().await;
+    let (mut exits, mut losses) = (rig.handle.exits(), rig.handle.lost());
+    rig.decide.send(false).expect("still waiting");
+    assert_eq!(rig.held.await, Err(WorkerLost::ExitUnconfirmed));
+    tokio::time::timeout(Duration::from_secs(5), rig.running)
+        .await
+        .expect("the supervisor ends")
+        .expect("joined");
+    assert_eq!(
+        rig.spawns.load(Ordering::Relaxed),
+        0,
+        "no worker starts beside one that may still run"
+    );
+    assert_eq!(
+        exits.try_recv(),
+        Ok(Exit {
+            generation: Generation(0),
+            confirmed: false
+        })
+    );
+    assert_eq!(losses.try_recv(), Ok(Generation(0)));
+    let until = Instant::now() + Duration::from_secs(60);
+    assert_eq!(
+        rig.handle.request(vec![], until).await,
+        Err(WorkerLost::ExitUnconfirmed)
+    );
+    assert_eq!(
+        rig.handle.request_stream(vec![], until).err(),
+        Some(WorkerLost::ExitUnconfirmed)
+    );
+}
+
+/// A waker that records what the exit channel holds at the instant a loss wakes it, which is
+/// inside the loss's send, before the sender runs another line.
+struct Peek(Mutex<(broadcast::Receiver<Exit>, Seen)>);
+
+type Seen = Option<Result<Exit, broadcast::error::TryRecvError>>;
+
+impl std::task::Wake for Peek {
+    fn wake(self: Arc<Self>) {
+        let mut peek = self.0.lock().expect("unpoisoned");
+        let seen = peek.0.try_recv();
+        peek.1.get_or_insert(seen);
+    }
+}
+
+#[tokio::test]
+async fn whoever_a_loss_wakes_already_sees_that_losss_exit() {
+    let (handle, _commands) = handle();
+    let peek = Arc::new(Peek(Mutex::new((handle.exits(), None))));
+    let waker = Waker::from(Arc::clone(&peek));
+    let mut losses = handle.lost();
+    let mut lost = Box::pin(losses.recv());
+    assert!(
+        lost.as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+    assert!(confirm_exit::<Test>(|_| true, Generation(4), &handle.notices).await);
+    assert_eq!(
+        peek.0.lock().expect("unpoisoned").1,
+        Some(Ok(Exit {
+            generation: Generation(4),
+            confirmed: true
+        })),
+        "the exit was broadcast before the loss woke anyone"
+    );
+    assert_eq!(lost.await, Ok(Generation(4)));
 }

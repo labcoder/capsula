@@ -54,12 +54,16 @@ pub(crate) fn body(request: &ModelRequest) -> Result<Value, BodyError> {
         .tools
         .iter()
         .map(|tool| {
-            json!({
+            let mut value = json!({
                 "type": "function",
                 "name": tool.name,
                 "description": tool.description,
                 "parameters": tool.parameters,
-            })
+            });
+            if tool.name == "draw" {
+                value["strict"] = Value::Bool(false);
+            }
+            value
         })
         .collect();
     let body = json!({

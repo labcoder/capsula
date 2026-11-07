@@ -58,6 +58,8 @@ tasks:
                     baseline uses that directory and closes its own shell window
                     panel opens the current shell's panel before settling, without input
                     the current shell must paint no dock frame from the settle to Quit
+  live account      print only the dev brain's non-secret account state; never signs in
+                    or sends a model request; refuses while any product process runs
   live signin       sign the dev brain in to its account: the brain opens the browser,
                     and only the account's state is printed; refuses while any
                     product process runs; needs the owner at the desk
@@ -66,6 +68,11 @@ tasks:
                     console the owner answers; --disconnect signs it out and deletes
                     Kumochi's folder for it; only the view's state is printed; refuses
                     while any product process runs; needs the owner at the desk
+  live catalog-provenance
+                    one model-list request with the dev account's saved session, never
+                    renewing it; writes target\\live\\<time>\\catalog-provenance.json with
+                    only approved keys and closed words; exits 10-19 having sent nothing;
+                    refuses while any product process runs
   slice2-gate       the slice 2 gate: the real dev brain with fixture scripts, driven
                     over its real pipes by a scripted client; no input; refuses while
                     any product process runs

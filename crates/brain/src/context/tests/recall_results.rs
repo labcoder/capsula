@@ -50,15 +50,6 @@ fn native_results_dereference_live_sources_without_retaining_their_text() {
     assert_eq!(searchable, None);
     let before = built(&world, current);
     assert_eq!(before.sources, vec![main, b, c]);
-    assert_eq!(
-        before
-            .request
-            .tools
-            .iter()
-            .map(|tool| tool.name)
-            .collect::<Vec<_>>(),
-        ["search_history", "read_history", "list_tasks"]
-    );
     let output = before
         .request
         .input

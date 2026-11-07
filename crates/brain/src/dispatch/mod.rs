@@ -14,6 +14,7 @@
 )]
 
 mod create_task;
+mod draw;
 mod focus;
 mod history;
 mod ledger;
@@ -33,7 +34,7 @@ use crate::context::{HistoryRef, Origin, ToolSchema};
 use crate::engines::{CallId, ToolName};
 
 pub use history::{ReadCall, ReadFinished};
-pub(crate) use ledger::Ledger;
+pub(crate) use ledger::{Drawn, Ledger};
 
 /// The most bytes a call's complete arguments may hold [guess].
 pub(crate) const MAX_ARGS: usize = 16 * 1024;
@@ -373,6 +374,10 @@ pub(crate) enum Step {
     Join,
     Commit(CommitCall),
     Read(ReadCall),
+    Screen {
+        key: LedgerKey,
+        draw: Result<draw::DrawArgs, crate::drawing::CallError>,
+    },
 }
 
 /// The run a call resolved to, borrowed from the coordinator's current run.
@@ -395,17 +400,17 @@ pub(crate) struct RunCtx<'a> {
 }
 
 /// A tool's arguments, hashed and turned into its write and output.
-struct Prepared {
-    hash: [u8; 32],
-    action: Action,
-}
-
-enum Action {
-    Write {
+enum Prepared {
+    Local {
+        hash: [u8; 32],
         write: LocalWrite,
         output: ToolOutput,
     },
-    Read(crate::recall::Query),
+    Read {
+        hash: [u8; 32],
+        query: crate::recall::Query,
+    },
+    Draw(Result<draw::DrawArgs, crate::drawing::CallError>),
 }
 
 /// One tool.
@@ -421,8 +426,9 @@ struct Tool {
     prepare: fn(&[u8]) -> Result<Prepared, ToolError>,
 }
 
-/// Every dispatcher tool; model offers are the narrower history-only allowlist below.
+/// Tools admitted by reach and route; model offers use the allowlist below.
 const TOOLS: &[Tool] = &[
+    draw::DRAW,
     create_task::CREATE_TASK,
     focus::FOCUS,
     history::SEARCH,
@@ -463,6 +469,7 @@ pub(crate) fn schemas(reach: Origin, route: Route) -> Vec<ToolSchema> {
 
 pub(crate) fn model_schemas(origin: Origin) -> Vec<ToolSchema> {
     const OFFERED: &[ToolName] = &[
+        ToolName::Draw,
         ToolName::SearchHistory,
         ToolName::ReadHistory,
         ToolName::ListTasks,
@@ -526,28 +533,35 @@ pub(crate) fn call(run: &mut RunCtx<'_>, caller: Caller, name: ToolName, args: &
             run.ledger.refuse(&key, error);
             Step::Answer(ToolOutput::Error(error))
         }
-        Ok((tool, prepared)) => {
-            let Action::Write {
+        Ok((tool, Prepared::Read { hash, query })) => {
+            let call = ReadCall {
+                key,
+                build: run.build,
+                thread: run.thread,
+                tool: tool.wire,
+                hash,
+                origin: run.reach,
+                query,
+                control: run.control.child().until(run.end),
+            };
+            run.ledger.reading(&call, caller);
+            Step::Read(call)
+        }
+        Ok((_, Prepared::Draw(draw))) => {
+            run.ledger.reserve(&key, caller);
+            if let Ok(draw) = &draw {
+                run.ledger.bind_draw(&key, draw.hash);
+            }
+            Step::Screen { key, draw }
+        }
+        Ok((
+            tool,
+            Prepared::Local {
+                hash,
                 mut write,
                 mut output,
-            } = prepared.action
-            else {
-                let Action::Read(query) = prepared.action else {
-                    unreachable!()
-                };
-                let call = ReadCall {
-                    key,
-                    build: run.build,
-                    thread: run.thread,
-                    tool: tool.wire,
-                    hash: prepared.hash,
-                    origin: run.reach,
-                    query,
-                    control: run.control.child().until(run.end),
-                };
-                run.ledger.reading(&call, caller);
-                return Step::Read(call);
-            };
+            },
+        )) => {
             let then = match &mut write {
                 LocalWrite::Focus(thread) => Some(Then::Focus(*thread)),
                 LocalWrite::CreateTask { thread, focus, .. } => {
@@ -562,13 +576,12 @@ pub(crate) fn call(run: &mut RunCtx<'_>, caller: Caller, name: ToolName, args: &
                 LocalWrite::Title(_) => None,
                 LocalWrite::None => None,
             };
-            run.ledger
-                .running(&key, prepared.hash, output.clone(), caller);
+            run.ledger.running(&key, hash, output.clone(), caller);
             Step::Commit(CommitCall {
                 key,
                 thread: run.thread,
                 tool: tool.wire,
-                hash: prepared.hash,
+                hash,
                 write,
                 output,
                 then,
@@ -596,23 +609,17 @@ fn first(
         return Err(ToolError::TooLarge);
     }
     let prepared = (tool.prepare)(args)?;
-    if let (
-        Origin::Task(_),
-        Action::Write {
-            write: LocalWrite::Focus(target),
-            ..
-        },
-    ) = (run.reach, &prepared.action)
-        && *target != run.main
-    {
-        return Err(ToolError::NotHere);
+    if let Prepared::Local { write, output, .. } = &prepared {
+        if let (Origin::Task(_), LocalWrite::Focus(target)) = (run.reach, write)
+            && *target != run.main
+        {
+            return Err(ToolError::NotHere);
+        }
+        if output.stored().len() > MAX_OUTPUT {
+            return Err(ToolError::TooLarge);
+        }
     }
-    if let Action::Write { output, .. } = &prepared.action
-        && output.stored().len() > MAX_OUTPUT
-    {
-        return Err(ToolError::TooLarge);
-    }
-    if let Action::Read(query) = &prepared.action {
+    if let Prepared::Read { query, .. } = &prepared {
         query.validate().map_err(ToolError::from)?;
     }
     Ok((tool, prepared))
@@ -625,5 +632,9 @@ fn rehash(name: ToolName, args: &[u8]) -> Option<[u8; 32]> {
     (args.len() <= MAX_ARGS)
         .then(|| (tool.prepare)(args).ok())
         .flatten()
-        .map(|prepared| prepared.hash)
+        .and_then(|prepared| match prepared {
+            Prepared::Local { hash, .. } | Prepared::Read { hash, .. } => Some(hash),
+            Prepared::Draw(Ok(draw)) => Some(draw.hash),
+            Prepared::Draw(Err(_)) => None,
+        })
 }
