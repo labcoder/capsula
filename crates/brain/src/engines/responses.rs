@@ -235,10 +235,7 @@ impl Round {
         self.charge(1, id.len() + call.as_str().len() + name.len())?;
         self.events.push(TurnEvent::ToolCallStarted {
             call: call.clone(),
-            name: match name {
-                super::DRAW => ToolName::Draw,
-                _ => ToolName::Unknown,
-            },
+            name: ToolName::from_wire(name),
         });
         self.calls.push(Started {
             item: id.to_owned(),

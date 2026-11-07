@@ -1,0 +1,10 @@
+data: {"type":"response.output_item.added","item":{"type":"function_call","id":"fc_history","call_id":"history","name":"search_history","arguments":""}}
+
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_history","delta":"{\"query\":\"small\"}"}
+
+data: {"type":"response.function_call_arguments.done","item_id":"fc_history","arguments":"{\"query\":\"small\"}"}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_history","call_id":"history","name":"search_history","arguments":"{\"query\":\"small\"}"}}
+
+data: {"type":"response.completed"}
+

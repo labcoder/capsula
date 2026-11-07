@@ -220,11 +220,7 @@ impl Mapper {
                 self.charge(start.len())?;
                 self.queue(TurnEvent::ToolCallStarted {
                     call: call.clone(),
-                    name: if name == super::DRAW {
-                        ToolName::Draw
-                    } else {
-                        ToolName::Unknown
-                    },
+                    name: ToolName::from_wire(name),
                 })?;
                 self.ids.push(call.clone());
                 Block::Tool {

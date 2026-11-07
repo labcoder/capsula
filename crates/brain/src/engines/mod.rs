@@ -425,6 +425,15 @@ pub enum ToolName {
     Recall,
 }
 
+impl ToolName {
+    pub(crate) fn from_wire(name: &str) -> Self {
+        match name {
+            DRAW => Self::Draw,
+            _ => crate::dispatch::named(name).unwrap_or(Self::Unknown),
+        }
+    }
+}
+
 /// A native output item's bytes, never parsed or logged.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Opaque(Box<[u8]>);

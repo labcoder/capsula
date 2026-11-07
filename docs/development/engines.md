@@ -323,7 +323,7 @@ builds nothing.
 | Responses event | Turn event |
 |---|---|
 | `response.output_text.delta` | `TextDelta` |
-| `response.output_item.added`, a `function_call` | `ToolCallStarted` with its name (`draw`, or `Unknown`), before any delta. The provider's item id is mapped to its `call_id` here and never leaves the adapter |
+| `response.output_item.added`, a `function_call` | `ToolCallStarted` with its catalog name, or `Unknown`, before any delta. Both provider mappers share this resolution and preserve the existing `draw` name. Recognition grants no permission: dispatch still checks the run's offers and origin. The provider's item id is mapped to its `call_id` here and never leaves the adapter |
 | `response.function_call_arguments.delta` | `ToolArgsDelta`, tagged with the call id |
 | `response.function_call_arguments.done` | nothing; its arguments must equal the deltas |
 | `response.output_item.done` | for a call, `ToolCallReady` once; then, for every item, `OutputItem` with its `output_index`, for replay |

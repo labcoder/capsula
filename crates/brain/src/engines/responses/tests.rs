@@ -150,6 +150,35 @@ fn play(stream: &[u8], chunk: usize) -> Vec<TurnEvent> {
     events
 }
 
+#[test]
+fn wire_synthetic_history_fixture_preserves_the_catalog_call_and_arguments() {
+    let stream = include_bytes!("../../../fixtures/responses/history.sse");
+    for chunk in [1, 7, 1024] {
+        assert_eq!(
+            play(stream, chunk),
+            vec![
+                TurnEvent::ToolCallStarted {
+                    call: call_id("history"),
+                    name: ToolName::SearchHistory
+                },
+                TurnEvent::ToolArgsDelta {
+                    call: call_id("history"),
+                    delta: r#"{"query":"small"}"#.into()
+                },
+                TurnEvent::ToolCallReady {
+                    call: call_id("history"),
+                    args: r#"{"query":"small"}"#.into()
+                },
+                item(
+                    0,
+                    &json!({"type":"function_call", "id":"fc_history", "call_id":"history", "name":"search_history", "arguments":r#"{"query":"small"}"#})
+                ),
+                finished(Finish::Completed),
+            ]
+        );
+    }
+}
+
 fn item(index: u32, item: &Value) -> TurnEvent {
     TurnEvent::OutputItem {
         index,

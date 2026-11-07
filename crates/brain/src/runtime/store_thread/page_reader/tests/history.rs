@@ -4,6 +4,8 @@ use crate::dispatch::{Caller, Dispatch, ToolError, ToolOutput};
 use crate::engines::{CallId, Finish, Opaque, ToolName, TurnEvent};
 use crate::recall::Selection;
 
+mod wire;
+
 const R: RunId = RunId(10);
 const MAIN: ThreadId = ThreadId(1);
 const SOURCE: ThreadId = ThreadId(2);
@@ -100,6 +102,15 @@ fn recorded(scratch: &Scratch) -> (i64, i64) {
 }
 
 fn active(name: &str, text: &str, prior: Prior) -> (Scratch, Running, Coordinator) {
+    active_on(name, text, prior, MAIN)
+}
+
+fn active_on(
+    name: &str,
+    text: &str,
+    prior: Prior,
+    thread: ThreadId,
+) -> (Scratch, Running, Coordinator) {
     let scratch = Scratch::new(name);
     let mut store = Store::open(&scratch.db()).unwrap();
     store.recover().unwrap();
@@ -115,12 +126,12 @@ fn active(name: &str, text: &str, prior: Prior) -> (Scratch, Running, Coordinato
             &[(CallId::new("prior").unwrap(), ToolOutput::Recall(Selection::Read { task: 2, first_shown: Some(1), last_shown: Some(1), cut: None, next: None }))]).unwrap();
         store.end_run(MAIN, RunId(2), &[], RunEnd::Done).unwrap();
     }
-    store.begin_turn(MAIN, None, R, "read").unwrap();
+    store.begin_turn(thread, None, R, "read").unwrap();
     let running = run(store, None);
     let mut core = Coordinator::ready_for_tests(MAIN, SOURCE, RunId(9), Vec::new());
     core.handle(Input::Turn {
         turn: 1,
-        thread: Some(MAIN),
+        thread: Some(thread),
         text: "read".into(),
     })
     .unwrap();
@@ -130,7 +141,11 @@ fn active(name: &str, text: &str, prior: Prior) -> (Scratch, Running, Coordinato
     };
     let mut build = build.clone();
     build.snapshot = Some(RunSnapshot {
-        origin: Origin::Kumo,
+        origin: if thread == MAIN {
+            Origin::Kumo
+        } else {
+            Origin::Task(thread)
+        },
         assistant: AssistantName::new("Kumo").unwrap(),
         user: None,
         choice: None,
@@ -150,7 +165,7 @@ fn active(name: &str, text: &str, prior: Prior) -> (Scratch, Running, Coordinato
         if matches!(prior, Prior::Reference) {
             vec![MAIN, SOURCE]
         } else {
-            vec![MAIN]
+            vec![thread]
         }
     );
     core.handle(reply).unwrap();
