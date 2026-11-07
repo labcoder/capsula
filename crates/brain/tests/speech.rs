@@ -90,6 +90,29 @@ async fn every_fault_loses_only_the_worker_and_the_next_one_serves() {
     job.terminate().expect("end job");
 }
 
+/// The installer's one reload after a lost decode, sent the moment the decode fails and before
+/// the loss is seen, as speech input does, is held through the exit wait and served by the next
+/// worker.
+#[tokio::test]
+async fn a_reload_sent_as_a_decode_is_lost_is_served_by_the_next_worker() {
+    let job = Arc::new(Job::new().expect("job"));
+    let speech = start(&job);
+    let mut losses = speech.lost();
+    assert_eq!(
+        speech.fault(SpeechFault::Crash).await,
+        Err(SpeechError::WorkerLost)
+    );
+    serves(&speech).await;
+    assert_eq!(
+        losses.try_recv(),
+        Ok(Generation(0)),
+        "served after the loss"
+    );
+    drop(speech);
+    tokio::task::yield_now().await;
+    job.terminate().expect("end job");
+}
+
 /// Builds a DLL whose `kumochi_test_throw` throws, with the same compiler as the layout probe.
 #[expect(
     clippy::disallowed_methods,

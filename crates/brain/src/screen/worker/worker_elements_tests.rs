@@ -213,14 +213,18 @@ thread_local! {
 
 #[test]
 fn opener_failures_answer_fault_keep_ping_and_retry_for_the_next_capture() {
-    let outer: OpenElements = || {
+    let outer: OpenElements = |wake| {
         let attempt = OPENS.with(|opens| {
             opens.set(opens.get() + 1);
             opens.get()
         });
-        if attempt == 1 { Err(-7) } else { open_reader() }
+        if attempt == 1 {
+            Err(-7)
+        } else {
+            open_reader(wake)
+        }
     };
-    let inner: OpenElements = || {
+    let inner: OpenElements = |wake| {
         let mut attempts = 0;
         crate::screen::reader::ThreadedReader::new(
             move || {
@@ -232,6 +236,7 @@ fn opener_failures_answer_fault_keep_ping_and_retry_for_the_next_capture() {
                 }
             },
             crate::screen::elements::tests::FakePlatform(false),
+            wake,
         )
         .map(|reader| -> Box<dyn crate::screen::elements::ElementReader> { Box::new(reader) })
     };
@@ -310,13 +315,14 @@ impl crate::screen::elements::ElementSource for Blocked {
 
 #[test]
 fn first_busy_answers_and_second_busy_replies_before_retiring() {
-    let opener: OpenElements = || {
+    let opener: OpenElements = |wake| {
         let (send, receive) = std::sync::mpsc::channel();
         RELEASE.with(|slot| *slot.borrow_mut() = Some(send));
         let mut receive = Some(receive);
         crate::screen::reader::ThreadedReader::new(
             move || Ok(Blocked(receive.take().unwrap())),
             crate::screen::elements::tests::FakePlatform(false),
+            wake,
         )
         .map(|reader| -> Box<dyn crate::screen::elements::ElementReader> { Box::new(reader) })
     };

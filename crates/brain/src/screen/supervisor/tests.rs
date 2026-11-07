@@ -3,6 +3,7 @@ use kumochi_protocol::message::RunId;
 
 use super::super::wire::CaptureId;
 use super::*;
+use crate::supervise::WorkerLost;
 
 #[tokio::test]
 async fn capture_accepts_only_its_own_frame_and_passes_refusals_through() {
@@ -51,8 +52,12 @@ async fn capture_accepts_only_its_own_frame_and_passes_refusals_through() {
             Err(CaptureError::Screen(ScreenError::Fault(-9))),
         ),
         (
-            Err(WorkerLost),
+            Err(WorkerLost::Lost),
             Err(CaptureError::Screen(ScreenError::WorkerLost)),
+        ),
+        (
+            Err(WorkerLost::ExitUnconfirmed),
+            Err(CaptureError::Screen(ScreenError::ExitUnconfirmed)),
         ),
     ] {
         let ticket = TicketWire::new(RunId(1), CaptureId(7), 1, [0; 16], 2_000);
