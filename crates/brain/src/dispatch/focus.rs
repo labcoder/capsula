@@ -19,8 +19,10 @@ fn prepare(args: &[u8]) -> Result<Prepared, ToolError> {
     let (focus, hash) = parse::<FocusArgs>("focus", args)?;
     Ok(Prepared {
         hash,
-        write: LocalWrite::Focus(ThreadId(focus.task)),
-        output: ToolOutput::Text(ANSWER.to_owned()),
+        action: super::Action::Write {
+            write: LocalWrite::Focus(ThreadId(focus.task)),
+            output: ToolOutput::Text(ANSWER.to_owned()),
+        },
     })
 }
 

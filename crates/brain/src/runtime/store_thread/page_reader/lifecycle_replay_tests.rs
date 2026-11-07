@@ -234,7 +234,14 @@ fn lifecycle_replayed_content_is_redacted_at_the_outer_reply() {
     let built = super::context::read(Some(&side), build(control), || ());
     let request = &built.result.as_ref().unwrap().request;
     assert!(request.input.iter().any(|item| matches!(item, crate::context::InputItem::FunctionOutput { output, .. } if output.contains("private-replay-marker"))));
-    assert_eq!(request.tools.len(), 0);
+    assert_eq!(
+        request
+            .tools
+            .iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>(),
+        ["search_history", "read_history", "list_tasks"]
+    );
     let diagnostic = format!("{:?}", crate::coordinator::Input::ContextBuilt(built));
     assert!(!diagnostic.contains("private-replay-marker"));
     assert!(!diagnostic.contains(&format!("{:?}", b"private-replay-marker")));

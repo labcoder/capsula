@@ -1,10 +1,5 @@
 //! Live recall in the context snapshot; errors discard SQLite's content-bearing diagnostics.
 
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "14b-2 activates asynchronous model recall")
-)]
-
 use std::collections::BTreeSet;
 
 use kumochi_protocol::message::{ThreadId, ThreadKind};
@@ -49,7 +44,12 @@ fn range(task: u64, events: &[Value], cut: Option<usize>, next: Option<u64>) -> 
 }
 
 fn event(row: &Event, text: &str) -> Value {
-    json!({"event":row.id,"speaker":row.speaker,"text":text})
+    let speaker = if row.speaker == "assistant_text" {
+        "assistant"
+    } else {
+        "user"
+    };
+    json!({"event":row.id,"speaker":speaker,"text":text})
 }
 
 fn prefix(text: &str, fits: impl Fn(&str) -> bool) -> usize {
@@ -63,6 +63,13 @@ fn prefix(text: &str, fits: impl Fn(&str) -> bool) -> usize {
             end -= 1;
         }
         if end == lo {
+            end += text[lo..]
+                .chars()
+                .next()
+                .expect("lo precedes hi within the text")
+                .len_utf8();
+        }
+        if end == hi {
             break;
         }
         if fits(&text[..end]) {
@@ -79,10 +86,14 @@ impl Snapshot<'_> {
         if own(origin).is_some_and(|own| own != task) {
             return Err(Error::NotHere);
         }
-        Ok(self
-            .source(ThreadId(task))
-            .map_err(|_| Error::Read)?
-            .is_some_and(|source| source.live && source.kind == ThreadKind::Thread))
+        let source = self.source(ThreadId(task)).map_err(|_| Error::Read)?;
+        if source
+            .as_ref()
+            .is_some_and(|source| source.kind == ThreadKind::Main)
+        {
+            return Err(Error::NotHere);
+        }
+        Ok(source.is_some_and(|source| source.live && source.kind == ThreadKind::Thread))
     }
 
     fn recall_events(
@@ -208,7 +219,11 @@ impl Snapshot<'_> {
         if origin != Origin::Kumo {
             return Err(Error::NotHere);
         }
-        let mut statement = sql(self.0.prepare("SELECT id FROM threads WHERE kind='thread' AND state='live' ORDER BY updated_ms DESC,id DESC LIMIT ?1"))?;
+        let mut statement = sql(self.0.prepare(
+            "SELECT id FROM threads
+             WHERE kind='thread' AND state='live'
+             ORDER BY updated_ms DESC,id DESC LIMIT ?1",
+        ))?;
         let rows = sql(statement.query_map(
             [i64::try_from(TASKS + 1).map_err(|_| Error::Invalid)?],
             |row| row.get::<_, i64>(0).map(row_id),
@@ -219,7 +234,16 @@ impl Snapshot<'_> {
         let mut metadata = Vec::new();
         for task in &tasks {
             metadata.push(self.metadata(*task)?);
-            if json!({"quoted_history":metadata,"note":null,"duplicate_titles":false,"truncated":false}).to_string().len() > TEXT_BYTES {
+            if json!({
+                "quoted_history": metadata,
+                "note": null,
+                "duplicate_titles": false,
+                "truncated": false
+            })
+            .to_string()
+            .len()
+                > TEXT_BYTES
+            {
                 metadata.pop();
                 truncated = true;
                 break;
@@ -231,15 +255,30 @@ impl Snapshot<'_> {
 
     fn metadata(&self, task: u64) -> Result<Value, Error> {
         sql(self.0.query_row(
-            "SELECT t.title,t.updated_ms,r.state,EXISTS(SELECT 1 FROM runs a WHERE a.thread=t.id AND a.state='active') FROM threads t LEFT JOIN runs r
-             ON r.id=(SELECT max(id) FROM runs WHERE thread=t.id) WHERE t.id=?1",
-            [key(task)?], |row| {
+            "SELECT t.title,t.updated_ms,r.state,
+             EXISTS(SELECT 1 FROM runs a WHERE a.thread=t.id AND a.state='active')
+             FROM threads t LEFT JOIN runs r
+             ON r.id=(SELECT max(id) FROM runs WHERE thread=t.id)
+             WHERE t.id=?1",
+            [key(task)?],
+            |row| {
                 let state: Option<String> = row.get(2)?;
-                Ok(json!({"task":task,"title":row.get::<_,String>(0)?,"kind":"thread",
-                    "working":row.get::<_,bool>(3)?,
-                    "outcome":match state.as_deref() { Some("done")=>Some("Done"),Some("interrupted")=>Some("Stopped"),Some("failed")=>Some("Failed"),_=>None },
-                    "last_use":row.get::<_,i64>(1)?}))
-            }))
+                let outcome = match state.as_deref() {
+                    Some("done") => Some("Done"),
+                    Some("interrupted") => Some("Stopped"),
+                    Some("failed") => Some("Failed"),
+                    _ => None,
+                };
+                Ok(json!({
+                    "task": task,
+                    "title": row.get::<_, String>(0)?,
+                    "kind": "thread",
+                    "working": row.get::<_, bool>(3)?,
+                    "outcome": outcome,
+                    "last_use": row.get::<_, i64>(1)?
+                }))
+            },
+        ))
     }
 
     pub(crate) fn render_recall(
@@ -257,6 +296,18 @@ impl Snapshot<'_> {
             None => read(),
         }
         .map_err(StoreError::from)
+    }
+
+    pub(crate) fn recall_call(
+        &self,
+        origin: Origin,
+        query: &Query,
+    ) -> Result<(Selection, Vec<ThreadId>), Error> {
+        let selection = self.select_recall(origin, query)?;
+        selection.validate()?;
+        let mut sources = BTreeSet::new();
+        self.render_selected(origin, &selection, &mut sources)?;
+        Ok((selection, sources.into_iter().collect()))
     }
 
     fn render_selected(
@@ -349,15 +400,17 @@ impl Snapshot<'_> {
         }
         let duplicate_titles = quoted.iter().enumerate().any(|(at, item)| {
             item.get("title").is_some_and(|title| {
-                quoted[..at]
-                    .iter()
-                    .any(|other| other.get("title") == Some(title))
+                quoted[..at].iter().any(|other| {
+                    other.get("title") == Some(title) && other.get("task") != item.get("task")
+                })
             })
         });
-        Ok(
-            json!({"quoted_history":quoted,"note":note,"duplicate_titles":duplicate_titles,
-            "truncated":matches!(selection, Selection::Tasks { truncated:true, .. })}),
-        )
+        Ok(json!({
+            "quoted_history": quoted,
+            "note": note,
+            "duplicate_titles": duplicate_titles,
+            "truncated": matches!(selection, Selection::Tasks { truncated: true, .. })
+        }))
     }
 }
 

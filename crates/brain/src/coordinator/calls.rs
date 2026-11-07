@@ -12,6 +12,74 @@ use crate::engines::ToolName;
 use crate::store::Failure;
 
 impl Coordinator {
+    pub(super) fn read_finished(
+        &mut self,
+        done: crate::dispatch::ReadFinished,
+        effects: &mut Vec<Effect>,
+    ) -> Result<(), Stale> {
+        let pending = self.pending_deletes();
+        let deleting = self
+            .current
+            .as_ref()
+            .is_some_and(|run| self.deleting_thread(run.thread));
+        let run = self.current(done.key.run)?;
+        let Some(call) = run.ledger.read_call(&done.key) else {
+            return Ok(());
+        };
+        if call.build != done.build {
+            return Ok(());
+        }
+        let available = call.control.check();
+        let current_build = run
+            .build
+            .as_ref()
+            .filter(|build| build.key() == done.build && build.admitted());
+        let mut voided = current_build.map_or_default(|build| build.voided(build.sources()));
+        if let (Some(build), Ok((_, sources))) = (current_build, &done.result) {
+            voided.extend(build.voided(sources));
+        }
+        if deleting
+            || run.finishing
+            || current_build.is_none()
+            || !run.tools.waiting(&done.key.call)
+            || !voided.is_empty()
+        {
+            run.ledger.refused(&done.key, ToolError::Ended);
+            if !voided.is_empty() {
+                run.tools.drop_round();
+                run.unstored.clear();
+                effects.push(Effect::CancelEngine { run: done.key.run });
+                self.rebuild(done.build, &voided, &pending, effects);
+            }
+            return Ok(());
+        }
+        if done.result.is_ok()
+            && let Err(error) = available
+        {
+            return self.call_refused(&done.key, error.into(), effects);
+        }
+        let output = match done.result {
+            Ok((selection, _)) => {
+                if let Err(error) = selection.validate() {
+                    return self.call_refused(&done.key, error.into(), effects);
+                }
+                ToolOutput::Recall(selection)
+            }
+            Err(crate::recall::Error::Read | crate::recall::Error::Handler) => {
+                run.ledger.refused(&done.key, ToolError::Ended);
+                return self.fail(done.key.run, Failure::Store, effects);
+            }
+            Err(error) => return self.call_refused(&done.key, error.into(), effects),
+        };
+        if output.stored().len() > dispatch::MAX_OUTPUT {
+            return self.call_refused(&done.key, ToolError::TooLarge, effects);
+        }
+        if let Some(call) = run.ledger.read_finished(&done.key, output) {
+            effects.push(Effect::Store(StoreOp::CommitCall(call)));
+        }
+        Ok(())
+    }
+
     /// Dispatches one call. The tool loop (slice 3's 13b-2) and the MCP listener (slice 8's C4b-2)
     /// hand calls here; a call whose run isn't the current, started one, or whose thread is being
     /// deleted, runs nothing. Nor does a call from a build that rendered a thread a delete has
@@ -46,11 +114,16 @@ impl Coordinator {
         let voided = build.voided(build.sources());
         if !voided.is_empty() {
             let key = build.key();
+            run.tools.drop_round();
+            run.unstored.clear();
             effects.push(Effect::CancelEngine { run: key.run });
             self.rebuild(key, &voided, &pending, effects);
             return ended;
         }
         let mut ctx = RunCtx {
+            build: build.key(),
+            end: run.control.0.end,
+            control: build.control.0.clone(),
             thread,
             main,
             fresh,
@@ -62,6 +135,10 @@ impl Coordinator {
         match dispatch::call(&mut ctx, caller, tool, args) {
             Step::Answer(output) => Dispatch::Answered(output),
             Step::Join => Dispatch::Joined,
+            Step::Read(call) => {
+                effects.push(Effect::Store(StoreOp::ReadCall(call)));
+                Dispatch::Committing
+            }
             Step::Commit(call) => {
                 // Advanced at dispatch: a candidate whose reserve never commits was never seen.
                 if let LocalWrite::CreateTask { thread, .. } = &call.write {

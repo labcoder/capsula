@@ -20,6 +20,34 @@ fn closed(control: &crate::recall::control::Control) -> StoreError {
         .map_or(StoreError::Closed, StoreError::from)
 }
 
+pub(super) fn read_call(
+    side: Result<&Side, crate::recall::Error>,
+    call: crate::dispatch::ReadCall,
+    #[cfg(test)] hold: impl FnOnce(),
+) -> crate::dispatch::ReadFinished {
+    let result = side.and_then(|side| {
+        side.read_until(&call.control, |conn, control| {
+            control
+                .until(Instant::now() + READ_TIME)
+                .with_handler(conn, |conn, scope| {
+                    scope.query(conn, || {
+                        let read = Snapshot::begin(conn).map_err(crate::recall::Error::from)?;
+                        #[cfg(test)]
+                        hold();
+                        let result = read.recall_call(call.origin, &call.query)?;
+                        read.end().map_err(crate::recall::Error::from)?;
+                        Ok(result)
+                    })
+                })?
+        })
+    });
+    crate::dispatch::ReadFinished {
+        key: call.key,
+        build: call.build,
+        result,
+    }
+}
+
 /// Builds `job` on `side`, or fails it when the store closed before its turn (`None`). A run's
 /// first build reads its model choice into its snapshot. Failures are logged by kind only.
 pub(super) fn read(

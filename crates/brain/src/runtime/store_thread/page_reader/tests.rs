@@ -16,6 +16,8 @@ use crate::runtime::Seen;
 use crate::store::{Cancel, Pause, Pauses, Point, RunEnd, Store, StoreError};
 use crate::test_support::Scratch;
 
+mod history;
+
 /// Forwards a tokio channel to one a test can wait on with a timeout.
 fn forward<T: Send + 'static>(mut from: mpsc::UnboundedReceiver<T>) -> std_mpsc::Receiver<T> {
     let (to, out) = std_mpsc::channel();

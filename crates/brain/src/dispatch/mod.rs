@@ -15,6 +15,7 @@
 
 mod create_task;
 mod focus;
+mod history;
 mod ledger;
 #[cfg(test)]
 mod tests;
@@ -31,6 +32,7 @@ use crate::bridge::{CallKey, LaunchId};
 use crate::context::{HistoryRef, Origin, ToolSchema};
 use crate::engines::{CallId, ToolName};
 
+pub use history::{ReadCall, ReadFinished};
 pub(crate) use ledger::Ledger;
 
 /// The most bytes a call's complete arguments may hold [guess].
@@ -149,6 +151,8 @@ pub enum ToolError {
     Ended,
     /// The task it names isn't live.
     NoTask,
+    /// The read exhausted its own time budget.
+    Timeout,
 }
 
 impl ToolError {
@@ -162,6 +166,7 @@ impl ToolError {
             Self::Reused => "call id already used",
             Self::Ended => "the run ended",
             Self::NoTask => "no such task",
+            Self::Timeout => "history read timed out",
         }
     }
 
@@ -174,6 +179,7 @@ impl ToolError {
             Self::Reused,
             Self::Ended,
             Self::NoTask,
+            Self::Timeout,
         ]
         .into_iter()
         .find(|error| error.text() == text)
@@ -366,11 +372,15 @@ pub(crate) enum Step {
     Answer(ToolOutput),
     Join,
     Commit(CommitCall),
+    Read(ReadCall),
 }
 
 /// The run a call resolved to, borrowed from the coordinator's current run.
 #[derive(Debug)]
 pub(crate) struct RunCtx<'a> {
+    pub(crate) build: crate::coordinator::BuildKey,
+    pub(crate) end: std::time::Instant,
+    pub(crate) control: crate::recall::control::Control,
     pub(crate) thread: ThreadId,
     /// Kumo's thread, the one target a task's run may focus.
     pub(crate) main: ThreadId,
@@ -387,8 +397,15 @@ pub(crate) struct RunCtx<'a> {
 /// A tool's arguments, hashed and turned into its write and output.
 struct Prepared {
     hash: [u8; 32],
-    write: LocalWrite,
-    output: ToolOutput,
+    action: Action,
+}
+
+enum Action {
+    Write {
+        write: LocalWrite,
+        output: ToolOutput,
+    },
+    Read(crate::recall::Query),
 }
 
 /// One tool.
@@ -404,11 +421,13 @@ struct Tool {
     prepare: fn(&[u8]) -> Result<Prepared, ToolError>,
 }
 
-/// Every tool. shortcut: none is offered to a model yet (`context::tools` is empty), until the
-/// staged producers are enabled (OSC-116); 14b and B10 add theirs.
+/// Every dispatcher tool; model offers are the narrower history-only allowlist below.
 const TOOLS: &[Tool] = &[
     create_task::CREATE_TASK,
     focus::FOCUS,
+    history::SEARCH,
+    history::READ,
+    history::TASKS,
     #[cfg(test)]
     tests::PROBE,
     #[cfg(test)]
@@ -438,6 +457,30 @@ pub(crate) fn schemas(reach: Origin, route: Route) -> Vec<ToolSchema> {
             name: tool.wire,
             description: tool.description,
             parameters: (tool.parameters)(),
+        })
+        .collect()
+}
+
+pub(crate) fn model_schemas(origin: Origin) -> Vec<ToolSchema> {
+    const OFFERED: &[ToolName] = &[
+        ToolName::SearchHistory,
+        ToolName::ReadHistory,
+        ToolName::ListTasks,
+    ];
+    schemas(origin, Route::Model)
+        .into_iter()
+        .filter(|schema| named(schema.name).is_some_and(|name| OFFERED.contains(&name)))
+        .collect()
+}
+
+/// Only model offers that the dispatcher also permits through MCP.
+pub(crate) fn mcp_schemas(origin: Origin) -> Vec<ToolSchema> {
+    model_schemas(origin)
+        .into_iter()
+        .filter(|schema| {
+            named(schema.name)
+                .and_then(tool)
+                .is_some_and(|tool| tool.mcp)
         })
         .collect()
 }
@@ -483,12 +526,33 @@ pub(crate) fn call(run: &mut RunCtx<'_>, caller: Caller, name: ToolName, args: &
             run.ledger.refuse(&key, error);
             Step::Answer(ToolOutput::Error(error))
         }
-        Ok((tool, mut prepared)) => {
-            let then = match &mut prepared.write {
+        Ok((tool, prepared)) => {
+            let Action::Write {
+                mut write,
+                mut output,
+            } = prepared.action
+            else {
+                let Action::Read(query) = prepared.action else {
+                    unreachable!()
+                };
+                let call = ReadCall {
+                    key,
+                    build: run.build,
+                    thread: run.thread,
+                    tool: tool.wire,
+                    hash: prepared.hash,
+                    origin: run.reach,
+                    query,
+                    control: run.control.child().until(run.end),
+                };
+                run.ledger.reading(&call, caller);
+                return Step::Read(call);
+            };
+            let then = match &mut write {
                 LocalWrite::Focus(thread) => Some(Then::Focus(*thread)),
                 LocalWrite::CreateTask { thread, focus, .. } => {
                     *thread = run.fresh;
-                    prepared.output = create_task::answer(run.fresh, *focus);
+                    output = create_task::answer(run.fresh, *focus);
                     Some(Then::Created {
                         thread: run.fresh,
                         focus: *focus,
@@ -499,14 +563,14 @@ pub(crate) fn call(run: &mut RunCtx<'_>, caller: Caller, name: ToolName, args: &
                 LocalWrite::None => None,
             };
             run.ledger
-                .running(&key, prepared.hash, prepared.output.clone(), caller);
+                .running(&key, prepared.hash, output.clone(), caller);
             Step::Commit(CommitCall {
                 key,
                 thread: run.thread,
                 tool: tool.wire,
                 hash: prepared.hash,
-                write: prepared.write,
-                output: prepared.output,
+                write,
+                output,
                 then,
             })
         }
@@ -532,13 +596,24 @@ fn first(
         return Err(ToolError::TooLarge);
     }
     let prepared = (tool.prepare)(args)?;
-    if let (Origin::Task(_), LocalWrite::Focus(target)) = (run.reach, &prepared.write)
+    if let (
+        Origin::Task(_),
+        Action::Write {
+            write: LocalWrite::Focus(target),
+            ..
+        },
+    ) = (run.reach, &prepared.action)
         && *target != run.main
     {
         return Err(ToolError::NotHere);
     }
-    if prepared.output.stored().len() > MAX_OUTPUT {
+    if let Action::Write { output, .. } = &prepared.action
+        && output.stored().len() > MAX_OUTPUT
+    {
         return Err(ToolError::TooLarge);
+    }
+    if let Action::Read(query) = &prepared.action {
+        query.validate().map_err(ToolError::from)?;
     }
     Ok((tool, prepared))
 }

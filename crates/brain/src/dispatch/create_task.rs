@@ -22,12 +22,14 @@ fn prepare(args: &[u8]) -> Result<Prepared, ToolError> {
     let title = ThreadTitle::new(&create.title).map_err(|_| ToolError::Invalid)?;
     Ok(Prepared {
         hash,
-        write: LocalWrite::CreateTask {
-            thread: ThreadId(0),
-            title,
-            focus: create.focus,
+        action: super::Action::Write {
+            write: LocalWrite::CreateTask {
+                thread: ThreadId(0),
+                title,
+                focus: create.focus,
+            },
+            output: answer(ThreadId(0), create.focus),
         },
-        output: answer(ThreadId(0), create.focus),
     })
 }
 

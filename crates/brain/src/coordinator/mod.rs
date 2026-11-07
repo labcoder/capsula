@@ -290,6 +290,8 @@ pub enum Input {
         /// The call's follow-up, as the dispatcher built it.
         then: Option<crate::dispatch::Then>,
     },
+    /// A stamped history read finished without retaining its source text.
+    ReadFinished(crate::dispatch::ReadFinished),
     /// The shell's output device: its rate and generation.
     AudioOutput {
         /// The rate in Hz, already checked.
@@ -886,6 +888,7 @@ impl Coordinator {
             }
             Input::ThreadOp(op) => self.thread_op(op, &mut effects),
             Input::Engines(now) => self.available(now, &mut effects),
+            Input::ReadFinished(done) => self.read_finished(done, &mut effects)?,
             Input::CallCommitted { key, outcome, then } => match outcome {
                 crate::dispatch::Committed::Done => {
                     // The task exists whether or not its run is still current.

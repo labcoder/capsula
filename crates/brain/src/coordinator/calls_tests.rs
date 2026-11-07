@@ -1,5 +1,8 @@
 //! Tool calls through the coordinator: run resolution, MCP authority and acknowledgements.
 
+#[path = "history_call_tests.rs"]
+mod history;
+
 use kumochi_protocol::message::{ControlToShell, Deleted, RunId, ThreadId};
 
 use super::{BuildKey, ContextBuilt, Coordinator, Effect, Input, R, Stale, StoreOp, T, fresh};

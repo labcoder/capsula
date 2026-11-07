@@ -409,6 +409,12 @@ pub enum ToolName {
     Focus,
     /// Creates an empty task.
     CreateTask,
+    /// Search live conversation events.
+    SearchHistory,
+    /// Read a live task's event range.
+    ReadHistory,
+    /// List live task metadata.
+    ListTasks,
     /// A name Kumochi doesn't offer.
     Unknown,
     /// The dispatcher's test tool that writes.

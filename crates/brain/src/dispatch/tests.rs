@@ -40,8 +40,10 @@ fn prepare_probe(args: &[u8]) -> Result<Prepared, ToolError> {
     let repeats = usize::try_from(probe.count).map_err(|_| ToolError::Invalid)?;
     Ok(Prepared {
         hash,
-        write: probe.title.map_or(LocalWrite::None, LocalWrite::Title),
-        output: ToolOutput::Text(format!("probed {}", probe.word.repeat(repeats))),
+        action: super::Action::Write {
+            write: probe.title.map_or(LocalWrite::None, LocalWrite::Title),
+            output: ToolOutput::Text(format!("probed {}", probe.word.repeat(repeats))),
+        },
     })
 }
 
@@ -68,12 +70,14 @@ fn prepare_recall(args: &[u8]) -> Result<Prepared, ToolError> {
     let (recall, hash) = parse::<RecallArgs>("recall", args)?;
     Ok(Prepared {
         hash,
-        write: LocalWrite::None,
-        output: ToolOutput::History(vec![HistoryRef {
-            thread: ThreadId(recall.task),
-            first: EventId(recall.first),
-            last: EventId(recall.last),
-        }]),
+        action: super::Action::Write {
+            write: LocalWrite::None,
+            output: ToolOutput::History(vec![HistoryRef {
+                thread: ThreadId(recall.task),
+                first: EventId(recall.first),
+                last: EventId(recall.last),
+            }]),
+        },
     })
 }
 
@@ -90,7 +94,15 @@ pub(super) const RECALL: Tool = Tool {
 const OFFERED: &[ToolName] = &[ToolName::Probe, ToolName::Recall];
 
 fn ctx(ledger: &mut Ledger, reach: Origin, mcp: Option<LaunchId>) -> RunCtx<'_> {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
     RunCtx {
+        build: crate::coordinator::BuildKey {
+            run: R,
+            round: 1,
+            attempt: 1,
+        },
+        end,
+        control: crate::recall::control::Control::new(end),
         thread: T,
         main: KUMO,
         fresh: FRESH,
@@ -489,10 +501,21 @@ fn history_is_kumo_only_and_model_only() {
     };
     assert_eq!(
         names(Origin::Kumo, Route::Model),
-        ["create_task", "focus", "probe", "recall"]
+        [
+            "create_task",
+            "focus",
+            "search_history",
+            "read_history",
+            "list_tasks",
+            "probe",
+            "recall"
+        ]
     );
     assert_eq!(names(Origin::Kumo, Route::Mcp(L1)), ["probe"]);
-    assert_eq!(names(Origin::Task(T), Route::Model), ["focus", "probe"]);
+    assert_eq!(
+        names(Origin::Task(T), Route::Model),
+        ["focus", "search_history", "read_history", "probe"]
+    );
 }
 
 #[test]
@@ -509,13 +532,8 @@ fn an_unknown_or_unoffered_tool_is_refused_and_stays_refused() {
     );
     let unoffered = call(
         &mut RunCtx {
-            thread: T,
-            main: KUMO,
-            fresh: FRESH,
-            reach: Origin::Task(T),
             offered: &[],
-            mcp: None,
-            ledger: &mut ledger,
+            ..ctx(&mut ledger, Origin::Task(T), None)
         },
         model("n"),
         ToolName::Probe,
