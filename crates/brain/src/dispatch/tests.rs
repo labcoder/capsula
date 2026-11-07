@@ -38,7 +38,7 @@ fn one() -> u32 {
 fn prepare_probe(args: &[u8]) -> Result<Prepared, ToolError> {
     let (probe, hash) = parse::<ProbeArgs>("probe", args)?;
     let repeats = usize::try_from(probe.count).map_err(|_| ToolError::Invalid)?;
-    Ok(Prepared {
+    Ok(Prepared::Local {
         hash,
         write: probe.title.map_or(LocalWrite::None, LocalWrite::Title),
         output: ToolOutput::Text(format!("probed {}", probe.word.repeat(repeats))),
@@ -66,7 +66,7 @@ struct RecallArgs {
 
 fn prepare_recall(args: &[u8]) -> Result<Prepared, ToolError> {
     let (recall, hash) = parse::<RecallArgs>("recall", args)?;
-    Ok(Prepared {
+    Ok(Prepared::Local {
         hash,
         write: LocalWrite::None,
         output: ToolOutput::History(vec![HistoryRef {
@@ -489,10 +489,13 @@ fn history_is_kumo_only_and_model_only() {
     };
     assert_eq!(
         names(Origin::Kumo, Route::Model),
-        ["create_task", "focus", "probe", "recall"]
+        ["draw", "create_task", "focus", "probe", "recall"]
     );
-    assert_eq!(names(Origin::Kumo, Route::Mcp(L1)), ["probe"]);
-    assert_eq!(names(Origin::Task(T), Route::Model), ["focus", "probe"]);
+    assert_eq!(names(Origin::Kumo, Route::Mcp(L1)), ["draw", "probe"]);
+    assert_eq!(
+        names(Origin::Task(T), Route::Model),
+        ["draw", "focus", "probe"]
+    );
 }
 
 #[test]

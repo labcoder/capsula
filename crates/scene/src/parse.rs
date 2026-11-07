@@ -2,6 +2,31 @@
 
 use crate::{ErrorCode, FieldPath, Record, StepError, limits::MAX_RECORD_BYTES};
 
+/// Parses the closed 2D draw-tool surface, excluding even null solid-only fields.
+/// # Errors
+/// Returns the first typed decoding failure or an unsupported 3D field.
+pub fn parse_draw_record(bytes: &[u8]) -> Result<Record, StepError> {
+    let record = parse_record(bytes)?;
+    if let Record::Step(step) = &record {
+        crate::refuse_three_dimensional(step)?;
+        if !step.set.is_empty() {
+            let raw: serde_json::Value =
+                serde_json::from_slice(bytes).map_err(|_| StepError::new(ErrorCode::Malformed))?;
+            if let Some(index) = raw["step"]["set"]
+                .as_array()
+                .and_then(|set| set.iter().position(|change| change.get("info").is_some()))
+            {
+                return Err(StepError::in_step(
+                    &step.id,
+                    FieldPath::default().field("set").index(index).field("info"),
+                    ErrorCode::Unsupported,
+                ));
+            }
+        }
+    }
+    Ok(record)
+}
+
 /// Parses one closed record, never echoing drawing content in diagnostics.
 /// # Errors
 /// Returns a bounded path and code for invalid syntax, fields or values.

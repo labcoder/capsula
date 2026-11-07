@@ -219,7 +219,15 @@ fn a_kumo_request_states_its_model_names_role_and_ordered_runs() {
             message(Role::User, &format!("second ask\n\nLocal time: {TIME}")),
         ]
     );
-    assert_eq!(built.request.tools, []);
+    assert_eq!(
+        built
+            .request
+            .tools
+            .iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>(),
+        ["draw"]
+    );
     assert_eq!(built.sources, [main]);
     let instructions = &built.request.instructions;
     assert!(

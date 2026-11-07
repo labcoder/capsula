@@ -2,6 +2,8 @@ use kumochi_protocol::geometry::{DisplayRef, PhysicalRect};
 use kumochi_protocol::message::RunId;
 use serde::{Deserialize, Serialize};
 
+use crate::supervise::WorkerLost;
+
 pub(super) use super::elements::ElementTarget;
 use super::elements::ElementTree;
 
@@ -14,9 +16,21 @@ pub enum ScreenError {
     /// The worker died, broke its protocol or missed a deadline.
     #[error("screen worker lost")]
     WorkerLost,
+    /// A lost worker wasn't seen to exit, so nothing replaces it and screen work stays refused.
+    #[error("screen worker exit unconfirmed")]
+    ExitUnconfirmed,
     /// The worker refused an operation with a numeric platform code.
     #[error("screen operation failed ({0})")]
     Fault(i32),
+}
+
+impl From<WorkerLost> for ScreenError {
+    fn from(lost: WorkerLost) -> Self {
+        match lost {
+            WorkerLost::Lost => Self::WorkerLost,
+            WorkerLost::ExitUnconfirmed => Self::ExitUnconfirmed,
+        }
+    }
 }
 
 /// A request to the isolated worker.

@@ -23,6 +23,8 @@ mod calls;
 mod claude_hold;
 #[path = "delete_tests.rs"]
 mod deletes;
+#[path = "draw_tool_tests.rs"]
+mod draw_tool;
 #[path = "drawing_tests.rs"]
 mod drawing;
 #[path = "engine_tests.rs"]

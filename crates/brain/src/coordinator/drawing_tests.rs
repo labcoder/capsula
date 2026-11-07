@@ -20,6 +20,51 @@ fn open(scratch: &Scratch) -> Store {
     store
 }
 
+#[test]
+fn sixty_five_fixture_calls_across_runs_retain_no_session_outcomes() {
+    let mut core = super::fresh();
+    for offset in 0..65 {
+        let run = kumochi_protocol::message::RunId(R.0 + offset);
+        core.handle(Input::Turn {
+            turn: u32::try_from(offset + 1).expect("65 turns"),
+            thread: (offset != 0).then_some(T),
+            text: "hi".into(),
+        })
+        .expect("new turn");
+        super::admit(&mut core, run);
+        assert_eq!(
+            core.handle(Input::Drawing(drawing::Input::Call {
+                thread: T,
+                run,
+                call: CallId::new("fixture").expect("ASCII"),
+                args: br#"{"records":[]}"#.to_vec(),
+            })),
+            Ok(Vec::new())
+        );
+        let effects = core
+            .handle(Input::Engine {
+                run,
+                event: TurnEvent::Finished(Finish::Completed),
+            })
+            .expect("completed round");
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| matches!(
+                    effect,
+                    Effect::Store(StoreOp::EndRun {
+                        end: RunEnd::Done,
+                        ..
+                    })
+                ))
+                .count(),
+            1
+        );
+        core.handle(Input::RunStored { run })
+            .expect("stored outcome");
+    }
+}
+
 fn draw(core: &mut Coordinator) -> Vec<Effect> {
     draw_named(core, "draw", "diagram")
 }
@@ -227,14 +272,28 @@ fn provider_completion_waits_for_the_accepted_drawing_prefix() {
         store.drawing_scenes().expect("history").scenes[0].log.len(),
         2
     );
-    let calls = core.take_drawing_results();
-    assert_eq!(calls.len(), 1);
-    assert!(calls[0].complete());
     assert_eq!(
-        calls[0]
-            .drawn
+        final_step
             .iter()
-            .map(kumochi_scene::WireId::as_str)
+            .filter(|effect| matches!(
+                effect,
+                Effect::Data(DataToShell::SceneEnd {
+                    run: R,
+                    complete: true,
+                    ..
+                })
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        store.drawing_scenes().expect("history").scenes[0]
+            .log
+            .iter()
+            .filter_map(|event| match event {
+                kumochi_scene::SceneEvent::Step { step, .. } => Some(step.id.as_str()),
+                kumochi_scene::SceneEvent::Stop(_) => None,
+            })
             .collect::<Vec<_>>(),
         ["s1", "s2"]
     );

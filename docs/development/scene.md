@@ -74,8 +74,9 @@ Source's UTF-8 byte ceiling, reference ordering, header equality, composed
 scale and scene/global budgets remain runtime checks. A schema-valid drawing
 is not necessarily admissible. Optional fields and defaults remain optional.
 
-This export alone does not offer a tool or execute a drawing. The brain's draw
-adapter must enforce the same 2D restrictions before admitting a complete call.
+The brain advertises this schema through its draw tool. Its complete-call adapter
+enforces the same 2D restrictions before admitting any scene record; the drawing
+reducer remains authoritative for semantic and resource admission.
 
 ### 3D records
 
@@ -1537,6 +1538,12 @@ Every syntax, size, depth or truncation error is terminal. There is no newline
 resynchronization, and trailing non-whitespace after the envelope fails. Earlier
 records may already have been emitted, so callers retain their committed prefix.
 Tokenizer and closed-record Debug formatting never prints buffered bytes.
+
+`parse_draw_record` adds the tool's closed 2D ingress to `parse_record`: it uses the
+shared runtime 3D refusal predicate and rejects a present `set[].info`, even null.
+The general scene decoder remains capable of reading stored 3D records. Complete
+draw-tool calls preflight every record before sending any of them to admission;
+the tokenizer's general streamed-prefix behavior above is unchanged.
 
 ### Tokenizer measurement method
 

@@ -125,6 +125,12 @@ fn drive(wire: &mut impl Wire, out: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn inspect(wire: &mut impl Wire, out: &mut impl Write) -> Result<()> {
+    let view = answer(wire, "first account view")?;
+    writeln!(out, "account: {}", state(&view))?;
+    Ok(())
+}
+
 fn signed_in(view: &AccountView) -> bool {
     matches!(view, AccountView::SignedIn { recovery: None, .. })
 }
@@ -217,7 +223,7 @@ mod tests {
         ThreadId, ThreadKind, ThreadRow, UserName,
     };
 
-    use super::{SIGNIN, VIEW, Wire, drive, session, state};
+    use super::{SIGNIN, VIEW, Wire, drive, inspect, session, state};
     use crate::slice2::client::Frame;
 
     /// Every planted value starts with this, so one search finds any of them.
@@ -409,6 +415,22 @@ mod tests {
         assert_eq!(error, None);
         assert_eq!(ops(&brain), [QUIT]);
         assert!(quit_sent);
+    }
+
+    #[test]
+    fn inspecting_the_account_never_starts_signin_or_prints_account_content() {
+        for (view, expected) in [
+            (signed_out(), "account: signed out\n"),
+            (signed_in(None), "account: signed in, plan enabled\n"),
+        ] {
+            let mut brain = fixture(vec![Step::View(view)]);
+            let mut out = Vec::new();
+            let (result, quit_sent) = session(Ok(&mut brain), &mut out, inspect);
+            assert_eq!(result.err().map(|error| format!("{error:#}")), None);
+            assert_eq!(String::from_utf8(out).expect("UTF-8"), expected);
+            assert_eq!(ops(&brain), [QUIT]);
+            assert!(quit_sent);
+        }
     }
 
     #[test]

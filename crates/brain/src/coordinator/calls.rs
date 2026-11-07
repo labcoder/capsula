@@ -62,6 +62,41 @@ impl Coordinator {
         match dispatch::call(&mut ctx, caller, tool, args) {
             Step::Answer(output) => Dispatch::Answered(output),
             Step::Join => Dispatch::Joined,
+            Step::Screen { key, draw } => {
+                if !self.drawing_available() {
+                    self.drawn(&key, ToolOutput::Error(ToolError::NotHere), effects);
+                    return Dispatch::Committing;
+                }
+                let current = self.current.as_mut().expect("the resolved run is current");
+                if current.draw_calls.len()
+                    > usize::try_from(super::MAX_CALLS).expect("the call budget fits usize")
+                {
+                    self.drawn(&key, ToolOutput::Error(ToolError::TooLarge), effects);
+                    return Dispatch::Committing;
+                }
+                let call =
+                    crate::engines::CallId::new(&format!("draw-{}", current.draw_calls.len()))
+                        .expect("a bounded host-generated ASCII id");
+                current.draw_calls.push((call.clone(), key.clone()));
+                let input = match draw {
+                    Ok(draw) => crate::drawing::Input::Call {
+                        thread,
+                        run: key.run,
+                        call,
+                        args: draw.args,
+                    },
+                    Err(error) => crate::drawing::Input::Rejected {
+                        thread,
+                        run: key.run,
+                        call,
+                        error,
+                    },
+                };
+                if self.drawing_input(input, effects).is_err() {
+                    self.drawn(&key, ToolOutput::Error(ToolError::Ended), effects);
+                }
+                Dispatch::Committing
+            }
             Step::Commit(call) => {
                 // Advanced at dispatch: a candidate whose reserve never commits was never seen.
                 if let LocalWrite::CreateTask { thread, .. } = &call.write {
@@ -70,6 +105,27 @@ impl Coordinator {
                 effects.push(Effect::Store(StoreOp::CommitCall(call)));
                 Dispatch::Committing
             }
+        }
+    }
+
+    pub(super) fn drawn(&mut self, key: &LedgerKey, output: ToolOutput, effects: &mut Vec<Effect>) {
+        let Ok(current) = self.current(key.run) else {
+            return;
+        };
+        match current.ledger.drawn(key, output.clone()) {
+            dispatch::Drawn::Refused(answers) => deliver(current, answers),
+            dispatch::Drawn::Commit(hash) => {
+                effects.push(Effect::Store(StoreOp::CommitCall(dispatch::CommitCall {
+                    key: key.clone(),
+                    thread: current.thread,
+                    tool: "draw",
+                    hash,
+                    write: LocalWrite::None,
+                    output,
+                    then: None,
+                })));
+            }
+            dispatch::Drawn::Stale => {}
         }
     }
 

@@ -14,6 +14,7 @@
 )]
 
 mod create_task;
+mod draw;
 mod focus;
 mod ledger;
 #[cfg(test)]
@@ -31,7 +32,7 @@ use crate::bridge::{CallKey, LaunchId};
 use crate::context::{HistoryRef, Origin, ToolSchema};
 use crate::engines::{CallId, ToolName};
 
-pub(crate) use ledger::Ledger;
+pub(crate) use ledger::{Drawn, Ledger};
 
 /// The most bytes a call's complete arguments may hold [guess].
 pub(crate) const MAX_ARGS: usize = 16 * 1024;
@@ -366,6 +367,10 @@ pub(crate) enum Step {
     Answer(ToolOutput),
     Join,
     Commit(CommitCall),
+    Screen {
+        key: LedgerKey,
+        draw: Result<draw::DrawArgs, crate::drawing::CallError>,
+    },
 }
 
 /// The run a call resolved to, borrowed from the coordinator's current run.
@@ -385,10 +390,13 @@ pub(crate) struct RunCtx<'a> {
 }
 
 /// A tool's arguments, hashed and turned into its write and output.
-struct Prepared {
-    hash: [u8; 32],
-    write: LocalWrite,
-    output: ToolOutput,
+enum Prepared {
+    Local {
+        hash: [u8; 32],
+        write: LocalWrite,
+        output: ToolOutput,
+    },
+    Draw(Result<draw::DrawArgs, crate::drawing::CallError>),
 }
 
 /// One tool.
@@ -404,9 +412,9 @@ struct Tool {
     prepare: fn(&[u8]) -> Result<Prepared, ToolError>,
 }
 
-/// Every tool. shortcut: none is offered to a model yet (`context::tools` is empty), until the
-/// staged producers are enabled (OSC-116); 14b and B10 add theirs.
+/// Tools admitted by reach and route; `context::tools` advertises draw to model runs.
 const TOOLS: &[Tool] = &[
+    draw::DRAW,
     create_task::CREATE_TASK,
     focus::FOCUS,
     #[cfg(test)]
@@ -483,12 +491,26 @@ pub(crate) fn call(run: &mut RunCtx<'_>, caller: Caller, name: ToolName, args: &
             run.ledger.refuse(&key, error);
             Step::Answer(ToolOutput::Error(error))
         }
-        Ok((tool, mut prepared)) => {
-            let then = match &mut prepared.write {
+        Ok((_, Prepared::Draw(draw))) => {
+            run.ledger.reserve(&key, caller);
+            if let Ok(draw) = &draw {
+                run.ledger.bind_draw(&key, draw.hash);
+            }
+            Step::Screen { key, draw }
+        }
+        Ok((
+            tool,
+            Prepared::Local {
+                hash,
+                mut write,
+                mut output,
+            },
+        )) => {
+            let then = match &mut write {
                 LocalWrite::Focus(thread) => Some(Then::Focus(*thread)),
                 LocalWrite::CreateTask { thread, focus, .. } => {
                     *thread = run.fresh;
-                    prepared.output = create_task::answer(run.fresh, *focus);
+                    output = create_task::answer(run.fresh, *focus);
                     Some(Then::Created {
                         thread: run.fresh,
                         focus: *focus,
@@ -498,15 +520,14 @@ pub(crate) fn call(run: &mut RunCtx<'_>, caller: Caller, name: ToolName, args: &
                 LocalWrite::Title(_) => None,
                 LocalWrite::None => None,
             };
-            run.ledger
-                .running(&key, prepared.hash, prepared.output.clone(), caller);
+            run.ledger.running(&key, hash, output.clone(), caller);
             Step::Commit(CommitCall {
                 key,
                 thread: run.thread,
                 tool: tool.wire,
-                hash: prepared.hash,
-                write: prepared.write,
-                output: prepared.output,
+                hash,
+                write,
+                output,
                 then,
             })
         }
@@ -532,13 +553,15 @@ fn first(
         return Err(ToolError::TooLarge);
     }
     let prepared = (tool.prepare)(args)?;
-    if let (Origin::Task(_), LocalWrite::Focus(target)) = (run.reach, &prepared.write)
-        && *target != run.main
-    {
-        return Err(ToolError::NotHere);
-    }
-    if prepared.output.stored().len() > MAX_OUTPUT {
-        return Err(ToolError::TooLarge);
+    if let Prepared::Local { write, output, .. } = &prepared {
+        if let (Origin::Task(_), LocalWrite::Focus(target)) = (run.reach, write)
+            && *target != run.main
+        {
+            return Err(ToolError::NotHere);
+        }
+        if output.stored().len() > MAX_OUTPUT {
+            return Err(ToolError::TooLarge);
+        }
     }
     Ok((tool, prepared))
 }
@@ -550,5 +573,9 @@ fn rehash(name: ToolName, args: &[u8]) -> Option<[u8; 32]> {
     (args.len() <= MAX_ARGS)
         .then(|| (tool.prepare)(args).ok())
         .flatten()
-        .map(|prepared| prepared.hash)
+        .and_then(|prepared| match prepared {
+            Prepared::Local { hash, .. } => Some(hash),
+            Prepared::Draw(Ok(draw)) => Some(draw.hash),
+            Prepared::Draw(Err(_)) => None,
+        })
 }
