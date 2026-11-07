@@ -1,6 +1,7 @@
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
+use super::signin::session;
 use super::{Brain, with_cleanup};
 use crate::slice2::client::{Client, Frame};
 use anyhow::{Result, anyhow, ensure};
@@ -17,11 +18,7 @@ const RESPONSE: Duration = Duration::from_secs(180);
 
 pub(super) fn inner() -> Result<()> {
     let brain = Brain::start(3)?;
-    let Ok(mut client) = Client::connect() else {
-        return with_cleanup(Err(anyhow!("live pipe connection failed")), brain.stop());
-    };
-    let result = drive(&mut client, &mut io::stdout().lock());
-    let sent = client.control(&ControlToBrain::Quitting).is_ok();
+    let (result, sent) = session(Client::connect(), &mut io::stdout().lock(), drive);
     let cleanup = if sent { brain.quit() } else { brain.stop() };
     with_cleanup(result, cleanup)
 }
@@ -187,7 +184,6 @@ fn account(view: &AccountView) -> Result<()> {
 }
 
 fn drive(client: &mut Client, out: &mut impl Write) -> Result<()> {
-    let schema_bytes = kumochi_scene::draw_schema().to_string().len();
     let mut counts = Counts::default();
     let mut submitted = 0;
     let result = attempt(client, &mut counts, &mut submitted);
@@ -207,23 +203,49 @@ fn drive(client: &mut Client, out: &mut impl Write) -> Result<()> {
     } else {
         result
     };
+    finish(&mut Unrecorded(client), &counts, result, out, submitted)
+}
+
+struct Unrecorded<'a>(&'a mut Client);
+
+impl super::signin::Wire for Unrecorded<'_> {
+    fn send(&mut self, message: &ControlToBrain) -> Result<()> {
+        self.0.control(message).map(drop)
+    }
+
+    fn until<T>(
+        &mut self,
+        limit: Duration,
+        mut pick: impl FnMut(&Frame) -> Option<T>,
+    ) -> Result<T> {
+        self.0.observe_unrecorded(limit, |seen| pick(&seen.frame))
+    }
+}
+
+fn finish(
+    wire: &mut impl super::signin::Wire,
+    counts: &Counts,
+    result: Result<bool>,
+    out: &mut impl Write,
+    submitted: usize,
+) -> Result<()> {
+    let schema_bytes = kumochi_scene::draw_schema().to_string().len();
     let status = match &result {
         Ok(true) => "complete_draw_observed",
         Ok(false) => "run_ended_without_complete_draw",
         Err(_) => "stopped_or_failed",
     };
-    counts.report(out, status, submitted, schema_bytes)?;
+    let report = counts.report(out, status, submitted, schema_bytes);
     let cleanup = if let Some(thread) = counts.thread.filter(|_| counts.run_end || counts.expired())
     {
-        client
-            .control(&ControlToBrain::DeleteThread {
-                thread,
-                after_turns: 1,
-                resend: false,
-            })
-            .map_err(|_| anyhow!("temporary task deletion send failed"))?;
-        client
-            .observe_unrecorded(Duration::from_secs(15), |seen| match &seen.frame {
+        wire.send(&ControlToBrain::DeleteThread {
+            thread,
+            after_turns: 1,
+            resend: false,
+        })
+        .map_err(|_| anyhow!("temporary task deletion send failed"))
+        .and_then(|()| {
+            wire.until(Duration::from_secs(15), |frame| match frame {
                 Frame::Control(ControlToShell::ThreadDeleted {
                     thread: deleted,
                     outcome,
@@ -236,14 +258,18 @@ fn drive(client: &mut Client, out: &mut impl Write) -> Result<()> {
             })
             .map_err(|_| anyhow!("temporary task deletion did not settle"))
             .and_then(std::convert::identity)
+        })
     } else {
         Ok(())
     };
     with_cleanup(
-        result.and_then(|complete| {
-            ensure!(complete, "no complete draw was observed");
-            Ok(())
-        }),
+        with_cleanup(
+            result.and_then(|complete| {
+                ensure!(complete, "no complete draw was observed");
+                Ok(())
+            }),
+            report,
+        ),
         cleanup,
     )
 }
@@ -346,6 +372,150 @@ fn attempt(client: &mut Client, counts: &mut Counts, submitted: &mut usize) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct Deletion {
+        sent: Vec<(ThreadId, u32, bool)>,
+        remaining: std::collections::VecDeque<Frame>,
+        waits: Vec<Duration>,
+    }
+
+    impl super::super::signin::Wire for Deletion {
+        fn send(&mut self, message: &ControlToBrain) -> Result<()> {
+            if matches!(message, ControlToBrain::Quitting) {
+                return Err(anyhow!("fixture quit send failed"));
+            }
+            let ControlToBrain::DeleteThread {
+                thread,
+                after_turns,
+                resend,
+            } = message
+            else {
+                return Err(anyhow!("only task deletion is expected"));
+            };
+            self.sent.push((*thread, *after_turns, *resend));
+            Ok(())
+        }
+
+        fn until<T>(
+            &mut self,
+            limit: Duration,
+            mut pick: impl FnMut(&Frame) -> Option<T>,
+        ) -> Result<T> {
+            self.waits.push(limit);
+            while let Some(frame) = self.remaining.pop_front() {
+                if let Some(value) = pick(&frame) {
+                    return Ok(value);
+                }
+            }
+            Err(anyhow!("fixture acknowledgment missing"))
+        }
+    }
+
+    struct BrokenOutput;
+
+    impl Write for BrokenOutput {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "output unavailable",
+            ))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_failed_quit_remains_failed_after_successful_drive_and_forced_stop() {
+        let (result, quit_sent) = session(Ok(Deletion::default()), &mut Vec::new(), |_, _| Ok(()));
+        assert!(!quit_sent);
+        let stopped = Ok(());
+        let error = with_cleanup(result, stopped).expect_err("failed graceful quit is retained");
+        assert_eq!(
+            error.to_string(),
+            "couldn't send Quitting; the brain was ended"
+        );
+    }
+
+    #[test]
+    fn broken_output_still_deletes_a_fenced_task_and_awaits_its_acknowledgment() {
+        let mut counts = admitted();
+        assert_eq!(counts.observe(&end()).transpose().expect("fence"), None);
+        assert_eq!(
+            counts
+                .observe(&control(Phase::Done, None))
+                .transpose()
+                .expect("terminal"),
+            Some(false)
+        );
+        let deadline = Instant::now() + RESPONSE;
+        counts.deadline = Some(deadline);
+        let mut wire = Deletion::default();
+        for thread in [ThreadId(9), ThreadId(2)] {
+            wire.remaining
+                .push_back(Frame::Control(ControlToShell::ThreadDeleted {
+                    thread,
+                    outcome: Deleted::Removed,
+                    last_run: Some(RunId(1)),
+                }));
+        }
+        let error = finish(&mut wire, &counts, Ok(true), &mut BrokenOutput, 1)
+            .expect_err("output failure remains a failure");
+        assert_eq!(wire.sent, [(ThreadId(2), 1, false)]);
+        assert_eq!(wire.waits, [Duration::from_secs(15)]);
+        assert!(
+            wire.remaining.is_empty(),
+            "matching durable acknowledgment awaited"
+        );
+        assert_eq!(error.to_string(), "output unavailable");
+        assert_eq!(counts.deadline, Some(deadline));
+    }
+
+    #[test]
+    fn broken_output_preserves_deferred_cleanup_without_a_fence_or_task_identity() {
+        for (thread, run_end) in [(Some(ThreadId(2)), false), (None, true)] {
+            let deadline = Instant::now() + RESPONSE;
+            let counts = Counts {
+                thread,
+                run_end,
+                deadline: Some(deadline),
+                ..Counts::default()
+            };
+            let mut wire = Deletion::default();
+            let error = finish(&mut wire, &counts, Ok(true), &mut BrokenOutput, 1)
+                .expect_err("output failure remains a failure");
+            assert_eq!(error.to_string(), "output unavailable");
+            assert!(wire.sent.is_empty());
+            assert!(wire.waits.is_empty());
+            assert_eq!(counts.deadline, Some(deadline));
+        }
+    }
+
+    #[test]
+    fn attempt_output_and_durable_cleanup_failures_are_all_preserved() {
+        let counts = Counts {
+            thread: Some(ThreadId(2)),
+            run_end: true,
+            ..Counts::default()
+        };
+        let mut wire = Deletion::default();
+        let error = finish(
+            &mut wire,
+            &counts,
+            Err(anyhow!("attempt failed")),
+            &mut BrokenOutput,
+            1,
+        )
+        .expect_err("all failures remain");
+        assert_eq!(wire.sent, [(ThreadId(2), 1, false)]);
+        assert_eq!(wire.waits, [Duration::from_secs(15)]);
+        assert_eq!(
+            error.to_string(),
+            "attempt failed; cleanup also failed: output unavailable; cleanup also failed: temporary task deletion did not settle"
+        );
+    }
 
     fn control(phase: Phase, key: Option<ErrorKey>) -> Frame {
         Frame::Control(ControlToShell::RunState {

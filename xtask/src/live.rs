@@ -107,7 +107,7 @@ impl Check {
 fn entry(build: Build, args: &[String]) -> Result<Entry> {
     ensure!(
         build == Build::Debug,
-        "run it from a debug xtask (`cargo xtask live signin`): a release one uses the installed \
+        "run this check from a debug xtask: a release one uses the installed \
          product's pipe and credential names"
     );
     let (words, inner) = match args.split_last() {
@@ -484,7 +484,7 @@ mod tests {
     #[test]
     fn both_sides_refuse_a_release_build_and_take_no_folder() {
         let args = |list: &[&str]| list.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
-        let release = "run it from a debug xtask (`cargo xtask live signin`): a release one uses \
+        let release = "run this check from a debug xtask: a release one uses \
                        the installed product's pipe and credential names";
         for list in [
             &["draw-schema"][..],

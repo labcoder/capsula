@@ -273,5 +273,8 @@ turn with a three-request process budget, and reports counts and closed terminal
 The reported request upper bound is submitted turns times three, not a measured request count.
 A positive draw result still drains both terminal metadata and `RunEnd`; failure metadata stays
 failed if a later terminal arrives. Missing fences stop at the deadline, and task deletion waits
-for a durable `ThreadDeleted::Removed` acknowledgment. The shared reader forwards settings for
+for a durable `ThreadDeleted::Removed` acknowledgment even when writing the report fails.
+Attempt, output and eligible deletion failures are combined after cleanup. A failed `Quitting`
+write remains a failure even if forced stop succeeds; release refusal never recommends sign-in.
+The shared reader forwards settings for
 readiness, while the live observer avoids retaining received payloads in its diagnostic history.
