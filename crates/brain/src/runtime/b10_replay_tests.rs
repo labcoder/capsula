@@ -89,8 +89,8 @@ fn event(kind: &str, mut value: Value) -> String {
     format!("data: {value}\n\n")
 }
 
-fn draw_stream(invalid: bool, request: usize) -> Vec<u8> {
-    let args = if invalid {
+fn draw_stream(case: Case, request: usize) -> Vec<u8> {
+    let args = if matches!(case, Case::InvalidDraw) {
         json!({"records":[{"step":{"id":"B10_PRIVATE_DRAW_SENTINEL"}}]})
     } else {
         json!({"records":[
@@ -172,8 +172,8 @@ async fn serve(
         .expect("request deadline");
         let tools = body["tools"].as_array().expect("tools");
         let is_job = tools.is_empty();
-        assert!(body["model"] == "gpt-6-luna");
-        assert!(body["reasoning"]["effort"] == "low");
+        assert_eq!(body["model"], "gpt-6-luna");
+        assert_eq!(body["reasoning"]["effort"], "low");
         assert!(body["input"].as_array().expect("input").iter().any(|item| {
             item["content"]
                 .as_str()
@@ -186,8 +186,8 @@ async fn serve(
                 counts.job_requests += 1;
             } else {
                 assert_eq!(tools.len(), 1);
-                assert!(tools[0]["name"] == "draw");
-                assert!(tools[0]["strict"] == false);
+                assert_eq!(tools[0]["name"], "draw");
+                assert_eq!(tools[0]["strict"], false);
                 counts.draw_requests += 1;
                 counts.schema_bytes = tools[0]["parameters"].to_string().len();
                 counts.instruction_bytes =
@@ -204,8 +204,8 @@ async fn serve(
             .into_bytes()
         };
         let (status, media, response) = match case {
-            Case::Draw => (200, "text/event-stream", if requests == 1 && !is_job { draw_stream(false, requests) } else { completed() }),
-            Case::InvalidDraw => (200, "text/event-stream", match requests { 1 => draw_stream(true, requests), 2 => draw_stream(false, requests), _ => completed() }),
+            Case::Draw => (200, "text/event-stream", if requests == 1 && !is_job { draw_stream(Case::Draw, requests) } else { completed() }),
+            Case::InvalidDraw => (200, "text/event-stream", match requests { 1 => draw_stream(Case::InvalidDraw, requests), 2 => draw_stream(Case::Draw, requests), _ => completed() }),
             Case::BadRequest => (
                 400,
                 "application/json",
@@ -230,8 +230,8 @@ async fn serve(
     }
 }
 
-#[tokio::test]
-async fn b10_loopback_replays_one_budgeted_typed_turn() {
+#[test]
+fn non_provider_failures_have_closed_debug_values() {
     assert_eq!(
         format!(
             "{:?}",
@@ -248,6 +248,10 @@ async fn b10_loopback_replays_one_budgeted_typed_turn() {
         ),
         "[Incomplete, Truncated, Protocol, Rebuild, Spent, Transport, Request, Credential]"
     );
+}
+
+#[tokio::test]
+async fn b10_loopback_replays_one_budgeted_typed_turn() {
     let captured = Captured::default();
     let _capture = captured.install();
     for case in [

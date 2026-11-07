@@ -175,7 +175,7 @@ impl<C: Connect> Shared<C> {
                 "responses attempt failed"
             ),
             Err(failure) => {
-                tracing::warn!(?failure, owner = ?request.key, "responses attempt failed")
+                tracing::warn!(?failure, owner = ?request.key, "responses attempt failed");
             }
             Ok(()) => {}
         }
