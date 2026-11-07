@@ -11,5 +11,7 @@ pub mod http_client;
 pub mod marker;
 pub mod model;
 pub mod oauth;
+#[cfg(debug_assertions)]
+pub mod provenance;
 pub mod records;
 pub mod vault;

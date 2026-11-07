@@ -1,5 +1,6 @@
 //! `cargo xtask live <check>`: the real dev brain, on the developer's own dev account, driven over
-//! its real pipes by slice 2's gate client. The checks are `signin` and `claude-signin`.
+//! its real pipes by slice 2's gate client. The checks are `signin` and `claude-signin`, and
+//! `catalog-provenance`, which runs only the copied brain, in its capture mode.
 //!
 //! The brain serves only the `kumochi.exe` beside it, so, as in the slice 2 gate, an outer xtask
 //! builds the brain, copies it and itself (as `kumochi.exe`) into `target/live/<time>/bin`, and
@@ -9,6 +10,7 @@
     reason = "the harness's progress and the account's state are its output"
 )]
 
+mod catalog;
 mod claude_signin;
 mod signin;
 
@@ -48,6 +50,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         Entry::Prepare(check) => prepare(check),
         Entry::Inner(Check::SignIn) => signin::inner(),
         Entry::Inner(Check::Claude(ask)) => claude_signin::inner(ask),
+        Entry::Inner(Check::Catalog) => unreachable!("entry refuses --inner for the capture"),
     }
 }
 
@@ -68,13 +71,15 @@ enum Entry {
 enum Check {
     SignIn,
     Claude(Ask),
+    Catalog,
 }
 
 impl Check {
-    const ALL: [Self; 3] = [
+    const ALL: [Self; 4] = [
         Self::SignIn,
         Self::Claude(Ask::SignIn),
         Self::Claude(Ask::Disconnect),
+        Self::Catalog,
     ];
 
     /// The arguments after `live` that name it.
@@ -83,6 +88,7 @@ impl Check {
             Self::SignIn => &["signin"],
             Self::Claude(Ask::SignIn) => &["claude-signin"],
             Self::Claude(Ask::Disconnect) => &["claude-signin", "--disconnect"],
+            Self::Catalog => &["catalog-provenance"],
         }
     }
 }
@@ -106,7 +112,10 @@ fn entry(build: Build, args: &[String]) -> Result<Entry> {
                 .map(String::as_str)
                 .eq(check.args().iter().copied())
         })
-        .context("usage: cargo xtask live signin | claude-signin [--disconnect]")?;
+        .filter(|check| !(inner && *check == Check::Catalog))
+        .context(
+            "usage: cargo xtask live signin | claude-signin [--disconnect] | catalog-provenance",
+        )?;
     Ok(if inner {
         Entry::Inner(check)
     } else {
@@ -150,8 +159,11 @@ fn prepare(check: Check) -> Result<()> {
     let bin = folder.join("bin");
     fs::create_dir_all(&bin)?;
     fs::copy(target.join(BRAIN_EXE), bin.join(BRAIN_EXE)).context("copying the brain")?;
-    fs::copy(&me, bin.join(SHELL_EXE)).context("copying the client")?;
     println!("live {name}: running in {}", folder.display());
+    if check == Check::Catalog {
+        return catalog::run(&folder);
+    }
+    fs::copy(&me, bin.join(SHELL_EXE)).context("copying the client")?;
     let mut inner = Command::new(bin.join(SHELL_EXE));
     inner.arg("live").args(check.args()).arg(INNER);
     let ran = run_bounded(inner, RUN_LIMIT, "the live run")?;
@@ -159,11 +171,16 @@ fn prepare(check: Check) -> Result<()> {
     Ok(())
 }
 
-/// Runs `command` for at most `limit`; past that it and everything it started are ended.
+/// Starts `command` and waits for it as [`bounded`] does.
 fn run_bounded(mut command: Command, limit: Duration, what: &str) -> Result<ExitStatus> {
-    let mut child = command
+    let child = command
         .spawn()
         .with_context(|| format!("starting {what}"))?;
+    bounded(child, limit, what)
+}
+
+/// Waits for `child` at most `limit`; past that it and everything it started are ended.
+fn bounded(mut child: Child, limit: Duration, what: &str) -> Result<ExitStatus> {
     let failure = match wait_bounded(&mut child, limit) {
         Ok(Some(status)) => return Ok(status),
         Ok(None) => anyhow!("{what} didn't finish in {limit:?}"),
@@ -463,6 +480,7 @@ mod tests {
             &["signin"][..],
             &["signin", "--inner"],
             &["claude-signin", "--disconnect", "--inner"],
+            &["catalog-provenance"],
         ] {
             let error = entry(Build::Release, &args(list)).expect_err("release");
             assert_eq!(format!("{error:#}"), release);
@@ -484,6 +502,7 @@ mod tests {
                 &["claude-signin", "--disconnect", "--inner"],
                 Entry::Inner(claude(Ask::Disconnect)),
             ),
+            (&["catalog-provenance"], Entry::Prepare(Check::Catalog)),
         ] {
             assert_eq!(entry(Build::Debug, &args(list)).expect("debug"), want);
         }
@@ -497,11 +516,13 @@ mod tests {
             &["claude-signin", "--disconnect", "--disconnect"],
             &["--disconnect"],
             &["first-text"],
+            &["catalog-provenance", "--inner"],
+            &["catalog-provenance", "C:/elsewhere"],
         ] {
             let error = entry(Build::Debug, &args(list)).expect_err("refused");
             assert_eq!(
                 format!("{error:#}"),
-                "usage: cargo xtask live signin | claude-signin [--disconnect]"
+                "usage: cargo xtask live signin | claude-signin [--disconnect] | catalog-provenance"
             );
         }
     }
