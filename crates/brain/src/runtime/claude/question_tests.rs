@@ -7,7 +7,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::constants::CLAUDE_CODE_QUARANTINE;
+use kumochi_protocol::constants::{CLAUDE_CODE_QUARANTINE, MCP_SERVER_NAME};
 use kumochi_protocol::message::{ErrorKey, RunId};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -42,9 +42,10 @@ struct Script {
 }
 
 /// P0's recordings made synthetic and signed in (§8). The edits: Kumochi's request ids; 2.1.306's
-/// signed-in `account` shape with made-up values; the launch's frozen tool set, empty for both
-/// origins, in `mcp_status` and in init; and init's `apiKeySource` set to `none`.
+/// signed-in `account` shape with made-up values; the launch's frozen Kumo tool set in
+/// `mcp_status` and init; and init's `apiKeySource` set to `none`.
 fn synthetic_signed_in() -> Script {
+    let tools = context::tools(Origin::Kumo);
     let facts = lines(FACTS);
     let mut initialize = facts[0].clone();
     initialize["response"]["request_id"] = json!("k-initialize");
@@ -52,9 +53,13 @@ fn synthetic_signed_in() -> Script {
         json!({"subscriptionType": "max", "apiProvider": "firstParty"});
     let mut mcp = facts[1].clone();
     mcp["response"]["request_id"] = json!("k-mcp-status");
-    mcp["response"]["response"]["mcpServers"][0]["tools"] = json!([]);
+    mcp["response"]["response"]["mcpServers"][0]["tools"] =
+        tools.iter().map(|tool| json!({"name":tool.name})).collect();
     let mut user = lines(TEXT);
-    user[0]["tools"] = json!([]);
+    user[0]["tools"] = tools
+        .iter()
+        .map(|tool| json!(format!("mcp__{MCP_SERVER_NAME}__{}", tool.name)))
+        .collect();
     user[0]["apiKeySource"] = json!("none");
     Script {
         initialize: vec![initialize.to_string()],
@@ -963,11 +968,13 @@ async fn analytics_from_a_stale_or_unready_attempt_changes_nothing() {
     rig.close().await;
 }
 
-/// Sets the clock so a bind now fixes a question deadline `left` from now.
-fn deadline_in(rig: &Rig, left: Duration) {
-    *rig.now.lock().unwrap_or_else(PoisonError::into_inner) = Instant::now()
-        .checked_sub(launch::QUESTION.saturating_sub(left))
-        .expect("the machine has been up for two minutes");
+/// Fixes the question's deadline `left` after bind, independently of child audit time.
+fn deadline_in(rig: &mut Rig, left: Duration) {
+    rig.claude.clock = Clock(Arc::new(move || {
+        Instant::now()
+            .checked_sub(launch::QUESTION.saturating_sub(left))
+            .expect("the machine has been up for two minutes")
+    }));
 }
 
 /// A Grant after the question's deadline, which bind fixed: nothing is seeded, the lease goes
@@ -975,9 +982,9 @@ fn deadline_in(rig: &Rig, left: Duration) {
 #[tokio::test]
 async fn a_grant_after_the_question_deadline_seeds_nothing() {
     let mut rig = Rig::new("question-late-grant", &synthetic_signed_in()).await;
+    deadline_in(&mut rig, Duration::from_millis(300));
     let question = rig.claude.take(&rig.snapshot()).expect("taken");
     let (id, _) = rig.last();
-    deadline_in(&rig, Duration::from_millis(300));
     let mut played = play(&question);
     let ask = rig.drive(played.inputs.recv()).await;
     assert!(matches!(ask, Some(Input::SendReady { .. })), "an ask");
@@ -997,9 +1004,9 @@ async fn a_grant_after_the_question_deadline_seeds_nothing() {
 #[tokio::test]
 async fn an_unanswered_ask_ends_at_the_question_deadline() {
     let mut rig = Rig::new("question-unanswered", &synthetic_signed_in()).await;
+    deadline_in(&mut rig, Duration::from_millis(300));
     let question = rig.claude.take(&rig.snapshot()).expect("taken");
     let (id, _) = rig.last();
-    deadline_in(&rig, Duration::from_millis(300));
     let mut played = play(&question);
     let ask = rig.drive(played.inputs.recv()).await;
     assert!(matches!(ask, Some(Input::SendReady { .. })), "an ask");
@@ -1113,9 +1120,10 @@ async fn a_dead_warm_launch_is_not_reused() {
 async fn a_grant_ready_with_its_expired_deadline_seeds_nothing() {
     let mut rig = Rig::new("question-ready-late-grant", &synthetic_signed_in()).await;
     rig.claude.budget = Arc::new(Budget::limited(Some(1)));
+    deadline_in(&mut rig, Duration::from_millis(300));
     let question = rig.claude.take(&rig.snapshot()).expect("taken");
     let (id, _) = rig.last();
-    deadline_in(&rig, Duration::from_millis(300));
+    tokio::time::sleep(Duration::from_millis(600)).await;
     let request = RunRequest::for_tests(RunId(1), ThreadId(1), "Be brief.");
     let key = request.key;
     let asks = Asks::default();

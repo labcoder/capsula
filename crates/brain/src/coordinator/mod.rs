@@ -512,6 +512,7 @@ struct Run {
     compacted: Option<u32>,
     /// The draw call the engine's steps stream in, once it starts.
     draw: Option<run::DrawArgs>,
+    draw_calls: Vec<(crate::engines::CallId, crate::dispatch::LedgerKey)>,
     /// Why the run failed, for the shell.
     error: Option<UserError>,
     /// The run's tool calls, one entry per key.
@@ -576,7 +577,6 @@ impl Run {
 /// The core loop's state.
 pub struct Coordinator {
     drawing: crate::drawing::Drawing,
-    drawing_results: Vec<crate::drawing::CallEnd>,
     drawing_held: Vec<(ThreadId, DataToShell)>,
     /// Never deleted or renamed.
     main_thread: ThreadId,
@@ -659,7 +659,6 @@ impl Coordinator {
     ) -> Self {
         Self {
             drawing: crate::drawing::Drawing::default(),
-            drawing_results: Vec::new(),
             drawing_held: Vec::new(),
             main_thread,
             last_thread,
@@ -1051,6 +1050,7 @@ impl Coordinator {
             connection: self.connection(),
             compacted: None,
             draw: None,
+            draw_calls: Vec::new(),
             error: None,
             ledger: crate::dispatch::Ledger::default(),
             mcp: None,

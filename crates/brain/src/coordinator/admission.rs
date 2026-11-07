@@ -291,7 +291,11 @@ impl Coordinator {
         pending: &BTreeSet<ThreadId>,
         effects: &mut Vec<Effect>,
     ) {
-        let Some(build) = self.current.as_mut().and_then(|run| run.build.as_mut()) else {
+        let Some(current) = self.current.as_mut() else {
+            return;
+        };
+        current.finishing = false;
+        let Some(build) = current.build.as_mut() else {
             return;
         };
         build.admitted = false;

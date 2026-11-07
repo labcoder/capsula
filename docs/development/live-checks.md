@@ -3,8 +3,8 @@
 `cargo xtask live <check>` runs the real dev brain on the developer's own dev account and drives it
 over its real pipes with the slice 2 gate's client (see [the slice 2 gate](slice2-gate.md)). Live
 checks run on Rez, never in CI, and only with the owner present or in a session the Captain
-approved. The checks are `signin`, `claude-signin` and `catalog-provenance`, which runs the brain
-alone, with no client (see its section).
+approved. The checks are `account`, `signin`, `claude-signin` and `catalog-provenance`, which runs
+the brain alone, with no client (see its section).
 
 ## How it runs
 
@@ -35,8 +35,16 @@ flowchart LR
   Manager read is the per-session instance capability the dev brain has just written, which
   authenticates the pipe exactly as the shell does. It never reads another service: no spike's,
   and nothing Claude Code, Codex, gh or a browser holds.
-- `KUMOCHI_LIVE_BUDGET` is set on the brain's environment only. Both checks set it to 0, since
-  neither dispatches a model request. shortcut: the brain ignores it until slice 3 PR 11 enforces it.
+- `KUMOCHI_LIVE_BUDGET` is set on the brain's environment only. These checks set it to 0;
+  the model request budget refuses inference once that cap is spent.
+
+## `account`
+
+`cargo xtask live account` reads only the first non-secret account view, prints its
+state words and sends `Quitting`. It never sends an account operation, opens a sign-in
+window or sends an inference request. Signed-out, busy and recovery states are reported
+without changing them. It uses the same ten-second view deadline and cleanup as `signin`;
+only Kumochi Dev's own connections and authenticated pipes are involved.
 
 ## `signin`
 

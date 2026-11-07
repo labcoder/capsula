@@ -51,9 +51,13 @@ fn native_results_dereference_live_sources_without_retaining_their_text() {
     let before = built(&world, current);
     assert_eq!(before.sources, vec![main, b, c]);
     assert_eq!(
-        before.request.tools.len(),
-        0,
-        "14b-1 exposes no tool schemas"
+        before
+            .request
+            .tools
+            .iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>(),
+        ["draw"]
     );
     let output = before
         .request

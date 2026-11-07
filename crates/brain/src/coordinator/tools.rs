@@ -198,7 +198,7 @@ impl Coordinator {
                 // A delete reached what the build rendered: the round is built again, so the
                 // response's calls, items and text are dropped, not stored.
                 // shortcut: steps a voided response drew stay, and its text stays on screen, until
-                // B10 offers draw to a model and the shell can retract a round.
+                // the round-retraction follow-up teaches the shell to retract a round.
                 if !current
                     .build
                     .as_ref()
@@ -206,6 +206,7 @@ impl Coordinator {
                 {
                     current.tools.drop_round();
                     current.unstored.clear();
+                    current.finishing = false;
                     return Ok(());
                 }
                 if let Dispatch::Answered(output) = dispatch {

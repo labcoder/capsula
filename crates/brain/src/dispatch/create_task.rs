@@ -20,7 +20,7 @@ struct CreateTaskArgs {
 fn prepare(args: &[u8]) -> Result<Prepared, ToolError> {
     let (create, hash) = parse::<CreateTaskArgs>("create_task", args)?;
     let title = ThreadTitle::new(&create.title).map_err(|_| ToolError::Invalid)?;
-    Ok(Prepared {
+    Ok(Prepared::Local {
         hash,
         write: LocalWrite::CreateTask {
             thread: ThreadId(0),
