@@ -17,6 +17,18 @@ const FILESEC_OWNER: libc::c_int = 1;
 const FILESEC_MODE: libc::c_int = 4;
 const FILESEC_ACL: libc::c_int = 5;
 
+const PRESENT_ACL_ATTRIBUTES: libc::attrgroup_t = libc::ATTR_CMN_RETURNED_ATTRS
+    | libc::ATTR_CMN_DEVID
+    | libc::ATTR_CMN_OBJTYPE
+    | libc::ATTR_CMN_OWNERID
+    | libc::ATTR_CMN_GRPID
+    | libc::ATTR_CMN_ACCESSMASK
+    | libc::ATTR_CMN_EXTENDED_SECURITY
+    | libc::ATTR_CMN_FILEID;
+
+#[repr(C, align(4))]
+struct AttributeBuffer([u8; 4096]);
+
 unsafe extern "C" {
     fn filesec_init() -> *mut libc::c_void;
     fn filesec_free(filesec: *mut libc::c_void);
@@ -42,10 +54,13 @@ unsafe extern "C" {
 ///
 /// Fds do not freeze names. This admission alone cannot authorize native loading or launch,
 /// and does not establish real application anchors or Windows integrity-label equivalence.
+/// Inspection samples held objects; it does not establish an atomic ACL/BSD transaction or
+/// detect every intervening change. Arbitrary or ownership-disabled volumes are not certified.
 ///
 /// # Errors
 /// Refuses non-absolute, dot, parent or NUL components, links, device crossings, unsafe
-/// ownership/modes, any present ACL, and every incomplete or failed inspection.
+/// ownership/modes, ACL grants or unsupported ACL data, and every incomplete or failed
+/// inspection. Only completed absence or a fully supported returned empty/DENY-only ACL passes.
 pub fn hold_chain(path: &Path) -> Result<Vec<File>, Untrusted> {
     if !path.is_absolute() {
         return Err(Untrusted::Unsafe);
@@ -185,8 +200,114 @@ impl Filesec {
         // SAFETY: FILESEC_ACL queries presence into a live int without allocating an ACL.
         let result =
             unsafe { filesec_query_property(self.0.as_ptr(), FILESEC_ACL, &raw mut present) };
-        acl_absent(result, present)
+        match acl_absent(result, present) {
+            Ok(()) => Ok(()),
+            Err(Untrusted::Unsafe) => inspect_present_acl(fd, expected),
+            Err(error) => Err(error),
+        }
     }
+}
+
+fn inspect_present_acl(fd: RawFd, expected: &libc::stat) -> Result<(), Untrusted> {
+    let mut attributes = libc::attrlist {
+        bitmapcount: 5,
+        reserved: 0,
+        commonattr: PRESENT_ACL_ATTRIBUTES,
+        volattr: 0,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: 0,
+    };
+    let mut buffer = AttributeBuffer([0; 4096]);
+    // SAFETY: fd is borrowed; the request and aligned bounded output buffer remain live.
+    let result = unsafe {
+        libc::fgetattrlist(
+            fd,
+            (&raw mut attributes).cast(),
+            buffer.0.as_mut_ptr().cast(),
+            buffer.0.len(),
+            libc::FSOPT_REPORT_FULLSIZE,
+        )
+    };
+    classify_present_acl(result, &buffer.0, expected)
+}
+
+fn attribute_bytes<const N: usize>(bytes: &[u8], offset: usize) -> Result<[u8; N], Untrusted> {
+    let end = offset.checked_add(N).ok_or(Untrusted::Io)?;
+    bytes
+        .get(offset..end)
+        .and_then(|value| value.try_into().ok())
+        .ok_or(Untrusted::Io)
+}
+
+fn classify_present_acl(
+    result: libc::c_int,
+    bytes: &[u8],
+    expected: &libc::stat,
+) -> Result<(), Untrusted> {
+    if result != 0 {
+        return Err(Untrusted::Io);
+    }
+    let length = usize::try_from(u32::from_ne_bytes(attribute_bytes(bytes, 0)?))
+        .map_err(|_| Untrusted::Io)?;
+    if !(60..=4096).contains(&length) {
+        return Err(Untrusted::Io);
+    }
+    let bytes = bytes.get(..length).ok_or(Untrusted::Io)?;
+    if u32::from_ne_bytes(attribute_bytes(bytes, 4)?) != PRESENT_ACL_ATTRIBUTES
+        || [8, 12, 16, 20]
+            .into_iter()
+            .any(|offset| attribute_bytes(bytes, offset) != Ok([0; 4]))
+    {
+        return Err(Untrusted::Io);
+    }
+    if i32::from_ne_bytes(attribute_bytes(bytes, 24)?) != expected.st_dev
+        || u32::from_ne_bytes(attribute_bytes(bytes, 28)?) != 2
+        || expected.st_mode & libc::S_IFMT != libc::S_IFDIR
+        || u32::from_ne_bytes(attribute_bytes(bytes, 32)?) != expected.st_uid
+        || u32::from_ne_bytes(attribute_bytes(bytes, 36)?) != expected.st_gid
+        || u32::from_ne_bytes(attribute_bytes(bytes, 40)?) & 0o7777
+            != u32::from(expected.st_mode & 0o7777)
+        || u64::from_ne_bytes(attribute_bytes(bytes, 52)?) != expected.st_ino
+    {
+        return Err(Untrusted::Io);
+    }
+    let offset = i32::from_ne_bytes(attribute_bytes(bytes, 44)?);
+    let start = 44_i64
+        .checked_add(i64::from(offset))
+        .and_then(|start| usize::try_from(start).ok())
+        .ok_or(Untrusted::Io)?;
+    let payload_length = usize::try_from(u32::from_ne_bytes(attribute_bytes(bytes, 48)?))
+        .map_err(|_| Untrusted::Io)?;
+    let end = start.checked_add(payload_length).ok_or(Untrusted::Io)?;
+    if start < 60 || !start.is_multiple_of(4) || end != length {
+        return Err(Untrusted::Io);
+    }
+    let payload = bytes.get(start..end).ok_or(Untrusted::Io)?;
+    let count = u32::from_ne_bytes(attribute_bytes(payload, 36)?);
+    if count > 128 {
+        return Err(Untrusted::Io);
+    }
+    let count = usize::try_from(count).map_err(|_| Untrusted::Io)?;
+    let required = count
+        .checked_mul(24)
+        .and_then(|entries| entries.checked_add(44))
+        .ok_or(Untrusted::Io)?;
+    if payload.len() != required {
+        return Err(Untrusted::Io);
+    }
+    if u32::from_ne_bytes(attribute_bytes(payload, 40)?) & !(1 << 17) != 0 {
+        return Err(Untrusted::Unsafe);
+    }
+    for index in 0..count {
+        let entry = 44 + index * 24;
+        let flags = u32::from_ne_bytes(attribute_bytes(payload, entry + 16)?);
+        let rights = u32::from_ne_bytes(attribute_bytes(payload, entry + 20)?);
+        if flags & 0xf != 2 || flags & !0x1ff != 0 || rights & !0x0010_3ffe != 0 {
+            return Err(Untrusted::Unsafe);
+        }
+    }
+    Ok(())
 }
 
 fn acl_absent(result: libc::c_int, present: libc::c_int) -> Result<(), Untrusted> {

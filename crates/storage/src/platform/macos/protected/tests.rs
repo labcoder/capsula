@@ -86,6 +86,342 @@ fn every_inspected_identity_and_access_field_must_match() {
     }
 }
 
+fn put_word(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
+}
+
+fn acl_response(entries: &[(u32, u32)]) -> Vec<u8> {
+    let payload_length = 44 + 24 * entries.len();
+    let mut bytes = vec![0; 60 + payload_length];
+    put_word(
+        &mut bytes,
+        0,
+        u32::try_from(60 + payload_length).expect("small fixture"),
+    );
+    put_word(&mut bytes, 4, 0x8243_800a);
+    put_word(&mut bytes, 24, 7);
+    put_word(&mut bytes, 28, 2);
+    put_word(&mut bytes, 32, 501);
+    put_word(&mut bytes, 36, 20);
+    put_word(&mut bytes, 40, 0o700);
+    put_word(&mut bytes, 44, 16);
+    put_word(
+        &mut bytes,
+        48,
+        u32::try_from(payload_length).expect("small fixture"),
+    );
+    bytes[52..60].copy_from_slice(&91_u64.to_ne_bytes());
+    bytes[60..96].fill(0xa5);
+    put_word(
+        &mut bytes,
+        96,
+        u32::try_from(entries.len()).expect("small fixture"),
+    );
+    for (index, &(flags, rights)) in entries.iter().enumerate() {
+        bytes[104 + 24 * index..120 + 24 * index].fill(0xb6);
+        put_word(&mut bytes, 120 + 24 * index, flags);
+        put_word(&mut bytes, 124 + 24 * index, rights);
+    }
+    bytes
+}
+
+#[test]
+fn completed_public_acl_bytes_admit_only_supported_denials() {
+    for entries in [
+        vec![],
+        vec![(2, 0)],
+        vec![(0x1f2, 0x0010_3ffe)],
+        vec![(2, 4); 128],
+    ] {
+        let mut bytes = acl_response(&entries);
+        assert_eq!(classify_present_acl(0, &bytes, &sample()), Ok(()));
+        put_word(&mut bytes, 100, 1 << 17);
+        assert_eq!(classify_present_acl(0, &bytes, &sample()), Ok(()));
+    }
+    let mut bytes = acl_response(&[]);
+    let payload = bytes[60..].to_vec();
+    bytes.resize(4096, 0xc7);
+    bytes[4052..].copy_from_slice(&payload);
+    put_word(&mut bytes, 0, 4096);
+    put_word(&mut bytes, 44, 4008);
+    assert_eq!(
+        classify_present_acl(0, &bytes, &sample()),
+        Ok(()),
+        "aligned padding is not ACL authority"
+    );
+}
+
+#[test]
+fn public_acl_query_requires_completed_matching_attributes() {
+    let bytes = acl_response(&[]);
+    for result in [-1, 1, libc::c_int::MAX] {
+        assert_eq!(
+            classify_present_acl(result, &bytes, &sample()),
+            Err(Untrusted::Io)
+        );
+    }
+    assert_eq!(
+        classify_present_acl(0, &[0; 4096], &sample()),
+        Err(Untrusted::Io)
+    );
+    for length in 0..bytes.len() {
+        assert_eq!(
+            classify_present_acl(0, &bytes[..length], &sample()),
+            Err(Untrusted::Io),
+            "truncated byte {length}"
+        );
+    }
+    for offset in [4, 8, 12, 16, 20] {
+        for bit in 0..32 {
+            let mut changed = bytes.clone();
+            let initial = if offset == 4 { 0x8243_800a } else { 0 };
+            put_word(&mut changed, offset, initial ^ (1 << bit));
+            assert_eq!(
+                classify_present_acl(0, &changed, &sample()),
+                Err(Untrusted::Io),
+                "returned group {offset}, bit {bit}"
+            );
+        }
+    }
+    let granting = acl_response(&[(1, 4)]);
+    assert_eq!(
+        classify_present_acl(-1, &granting, &sample()),
+        Err(Untrusted::Io),
+        "query failure precedes policy refusal"
+    );
+    assert_eq!(
+        classify_present_acl(0, &bytes, &sample()),
+        Ok(()),
+        "a later valid response does not alter the failed result"
+    );
+}
+
+#[test]
+fn public_acl_reported_lengths_and_references_are_bounded() {
+    for length in [0, 59, 103, 105, 4097, u32::MAX] {
+        let mut bytes = acl_response(&[]);
+        put_word(&mut bytes, 0, length);
+        assert_eq!(
+            classify_present_acl(0, &bytes, &sample()),
+            Err(Untrusted::Io)
+        );
+    }
+    for offset in [
+        0,
+        4,
+        12,
+        17,
+        20,
+        0xffff_ffff,
+        0xffff_ffd4,
+        0x8000_0000,
+        0x7fff_ffff,
+    ] {
+        let mut bytes = acl_response(&[]);
+        put_word(&mut bytes, 44, offset);
+        assert_eq!(
+            classify_present_acl(0, &bytes, &sample()),
+            Err(Untrusted::Io),
+            "reference {offset}"
+        );
+    }
+    for length in [0, 40, 43, 45, 68, u32::MAX] {
+        let mut bytes = acl_response(&[]);
+        put_word(&mut bytes, 48, length);
+        assert_eq!(
+            classify_present_acl(0, &bytes, &sample()),
+            Err(Untrusted::Io)
+        );
+    }
+    let mut trailing = acl_response(&[]);
+    trailing.extend_from_slice(&[0; 4]);
+    put_word(&mut trailing, 0, 108);
+    assert_eq!(
+        classify_present_acl(0, &trailing, &sample()),
+        Err(Untrusted::Io),
+        "unexplained trailing data"
+    );
+}
+
+#[test]
+fn public_acl_counted_payload_is_exact() {
+    assert_eq!(
+        classify_present_acl(0, &acl_response(&[(2, 4); 128]), &sample()),
+        Ok(())
+    );
+    assert_eq!(
+        classify_present_acl(0, &acl_response(&[(2, 4); 129]), &sample()),
+        Err(Untrusted::Io)
+    );
+    for count in [1, 128, 129, u32::MAX] {
+        let mut bytes = acl_response(&[]);
+        put_word(&mut bytes, 96, count);
+        assert_eq!(
+            classify_present_acl(0, &bytes, &sample()),
+            Err(Untrusted::Io),
+            "count {count}"
+        );
+    }
+    let mut extra_entry = acl_response(&[(2, 4)]);
+    put_word(&mut extra_entry, 96, 0);
+    assert_eq!(
+        classify_present_acl(0, &extra_entry, &sample()),
+        Err(Untrusted::Io),
+        "count does not hide appended entries"
+    );
+    for payload_length in [40_usize, 45, 48] {
+        let mut bytes = acl_response(&[]);
+        bytes.resize(60 + payload_length, 0);
+        put_word(
+            &mut bytes,
+            0,
+            u32::try_from(60 + payload_length).expect("small fixture"),
+        );
+        put_word(
+            &mut bytes,
+            48,
+            u32::try_from(payload_length).expect("small fixture"),
+        );
+        assert_eq!(
+            classify_present_acl(0, &bytes, &sample()),
+            Err(Untrusted::Io),
+            "payload {payload_length}"
+        );
+    }
+}
+
+#[test]
+fn public_acl_rejects_every_unsupported_word_bit() {
+    for bit in 0..32 {
+        let mut bytes = acl_response(&[(2, 0)]);
+        if bit != 17 {
+            put_word(&mut bytes, 100, 1 << bit);
+            assert_eq!(
+                classify_present_acl(0, &bytes, &sample()),
+                Err(Untrusted::Unsafe),
+                "ACL bit {bit}"
+            );
+        }
+        if 0x1f2 & (1 << bit) == 0 {
+            let mut bytes = acl_response(&[(2, 0)]);
+            put_word(&mut bytes, 120, 2 | (1 << bit));
+            assert_eq!(
+                classify_present_acl(0, &bytes, &sample()),
+                Err(Untrusted::Unsafe),
+                "ACE bit {bit}"
+            );
+        }
+        if 0x0010_3ffe & (1 << bit) == 0 {
+            let mut bytes = acl_response(&[(2, 0)]);
+            put_word(&mut bytes, 124, 1 << bit);
+            assert_eq!(
+                classify_present_acl(0, &bytes, &sample()),
+                Err(Untrusted::Unsafe),
+                "right bit {bit}"
+            );
+        }
+    }
+    for flag in [1, 1 << 16] {
+        let mut bytes = acl_response(&[]);
+        put_word(&mut bytes, 100, flag);
+        assert_eq!(
+            classify_present_acl(0, &bytes, &sample()),
+            Err(Untrusted::Unsafe),
+            "opaque bit 0 and raw deferred bit 16 both refuse"
+        );
+    }
+    for kind in [0, 1, 3, 4, 15] {
+        assert_eq!(
+            classify_present_acl(0, &acl_response(&[(kind, 0)]), &sample()),
+            Err(Untrusted::Unsafe)
+        );
+    }
+}
+
+#[test]
+fn public_acl_binds_every_returned_identity_and_permission_field() {
+    for (offset, value) in [
+        (24, 8),
+        (28, 1),
+        (32, 0),
+        (36, 21),
+        (40, 0o720),
+        (40, 0o600),
+    ] {
+        let mut bytes = acl_response(&[]);
+        put_word(&mut bytes, offset, value);
+        assert_eq!(
+            classify_present_acl(0, &bytes, &sample()),
+            Err(Untrusted::Io),
+            "binding field {offset}"
+        );
+    }
+    let mut bytes = acl_response(&[]);
+    bytes[52..60].copy_from_slice(&92_u64.to_ne_bytes());
+    assert_eq!(
+        classify_present_acl(0, &bytes, &sample()),
+        Err(Untrusted::Io)
+    );
+    bytes[52..60].copy_from_slice(&(0x5b_u64 | (1 << 40)).to_ne_bytes());
+    assert_eq!(
+        classify_present_acl(0, &bytes, &sample()),
+        Err(Untrusted::Io),
+        "full 64-bit file identity"
+    );
+    let mut high_identity = sample();
+    high_identity.st_ino = 0x5b | (1 << 40);
+    assert_eq!(classify_present_acl(0, &bytes, &high_identity), Ok(()));
+    let mut bytes = acl_response(&[]);
+    put_word(&mut bytes, 40, 0o040_700);
+    assert_eq!(
+        classify_present_acl(0, &bytes, &sample()),
+        Ok(()),
+        "only ACCESSMASK permission bits are valid"
+    );
+    put_word(&mut bytes, 28, 1);
+    assert_eq!(
+        classify_present_acl(0, &bytes, &sample()),
+        Err(Untrusted::Io),
+        "ACCESSMASK cannot replace OBJTYPE"
+    );
+    let mut wrong_type = sample();
+    wrong_type.st_mode = libc::S_IFREG | 0o700;
+    assert_eq!(
+        classify_present_acl(0, &acl_response(&[]), &wrong_type),
+        Err(Untrusted::Io)
+    );
+}
+
+#[test]
+fn public_acl_rejects_any_allow_even_late_or_mixed() {
+    for entries in [
+        vec![(1, 0)],
+        vec![(1, 2)],
+        vec![(1, 4)],
+        vec![(0x101, 0)],
+        vec![(2, 4), (1, 0)],
+        vec![(1, 0), (2, 4)],
+    ] {
+        assert_eq!(
+            classify_present_acl(0, &acl_response(&entries), &sample()),
+            Err(Untrusted::Unsafe)
+        );
+    }
+    let mut entries = vec![(2, 4); 128];
+    entries[127] = (1, 0);
+    assert_eq!(
+        classify_present_acl(0, &acl_response(&entries), &sample()),
+        Err(Untrusted::Unsafe),
+        "all counted entries must pass"
+    );
+    entries[127] = (2, 1 << 31);
+    assert_eq!(
+        classify_present_acl(0, &acl_response(&entries), &sample()),
+        Err(Untrusted::Unsafe),
+        "late unsupported right"
+    );
+}
+
 unsafe extern "C" {
     fn acl_from_text(text: *const libc::c_char) -> *mut libc::c_void;
     fn acl_set_fd(fd: libc::c_int, acl: *mut libc::c_void) -> libc::c_int;
@@ -284,7 +620,7 @@ fn native_held_identity_access_and_symlink_refusal() {
     let safe = scratch.directory(c"safe");
     let held = scratch
         .walk("safe")
-        .expect("actual production walker admits ACL-free owned dirs");
+        .expect("actual production walker admits owned non-granting directories");
     assert_eq!(held.len(), 2, "fixture root and leaf retained");
     assert!(
         same_inspection(
@@ -363,7 +699,7 @@ fn native_inspection_query_and_present_acl_refusal() {
     assert_eq!(
         security.inspect(safe.as_raw_fd(), &expected),
         Ok(()),
-        "completed ACL absence"
+        "completed descriptor security inspection"
     );
     drop(security);
     let security = Filesec::new().expect("fresh filesec");
@@ -391,9 +727,12 @@ fn native_inspection_query_and_present_acl_refusal() {
     ] {
         install_acl(&safe, text).expect("install fixed UUID deny-only fixture ACL");
         assert_eq!(
-            scratch.walk("safe").err(),
-            Some(Untrusted::Unsafe),
-            "present ACL refused"
+            scratch
+                .walk("safe")
+                .expect("supported deny-only ACL admitted")
+                .len(),
+            2,
+            "fixture root and deny-only leaf retained"
         );
         let mut mismatch = stat(safe.as_raw_fd()).expect("ACL fixture metadata");
         mismatch.st_ino += 1;
@@ -403,6 +742,14 @@ fn native_inspection_query_and_present_acl_refusal() {
             Err(Untrusted::Io),
             "inspection mismatch precedes present-ACL refusal"
         );
+    }
+    for text in [
+        c"!#acl 1\ngroup:11111111-2222-3333-4444-555555555555:::allow:read\n",
+        c"!#acl 1\ngroup:11111111-2222-3333-4444-555555555555:::deny:write\ngroup:11111111-2222-3333-4444-555555555555:::allow:read\n",
+        c"!#acl 1\ngroup:11111111-2222-3333-4444-555555555555:::allow:read\ngroup:11111111-2222-3333-4444-555555555555:::deny:write\n",
+    ] {
+        install_acl(&safe, text).expect("install fixed UUID granting or mixed fixture ACL");
+        assert_eq!(scratch.walk("safe").err(), Some(Untrusted::Unsafe), "every ALLOW refuses regardless of order");
     }
     scratch
         .cleanup()
