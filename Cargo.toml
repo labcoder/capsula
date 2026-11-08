@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/protocol", "crates/scene", "crates/brain", "crates/shell", "xtask"]
+members = ["crates/protocol", "crates/scene", "crates/storage", "crates/brain", "crates/shell", "xtask"]
 # Vendored third-party crates build as dependencies, not members, so workspace lints skip them.
 exclude = ["vendor"]
 
@@ -14,6 +14,7 @@ publish = false
 [workspace.dependencies]
 kumochi-protocol = { path = "crates/protocol" }
 kumochi-scene = { path = "crates/scene" }
+kumochi-storage = { path = "crates/storage" }
 fluent-bundle = "0.16"
 getrandom = { version = "0.3", features = ["std"] }
 gpui-kit = "0.8.1"

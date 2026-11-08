@@ -3847,6 +3847,7 @@ dependencies = [
  "keyring",
  "kumochi-protocol",
  "kumochi-scene",
+ "kumochi-storage",
  "ptts",
  "rcgen",
  "reqwest",
@@ -3920,6 +3921,14 @@ dependencies = [
  "unic-langid",
  "windows 0.62.2",
  "zeroize",
+]
+
+[[package]]
+name = "kumochi-storage"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

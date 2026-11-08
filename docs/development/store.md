@@ -4,6 +4,11 @@ The brain keeps threads, their events and runs in one SQLite file,
 `%LOCALAPPDATA%\<product>\kumochi.db`, through `rusqlite` with SQLite and FTS5 built in. Only the
 brain opens it. The code is `crates/brain/src/store/`.
 
+Production Windows protected-file trust checks live in `kumochi-storage`, consumed by the
+brain through its existing platform exports. Folder discovery, file replacement, locks and
+SQLite/store policy remain in the brain. This boundary adds no Mac admission or durability
+guarantee.
+
 ## Settings
 
 | Pragma | Why |

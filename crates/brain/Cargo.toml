@@ -16,6 +16,7 @@ base64 = "0.22"
 fluent-bundle.workspace = true
 kumochi-protocol.workspace = true
 kumochi-scene.workspace = true
+kumochi-storage.workspace = true
 getrandom.workspace = true
 httparse = "1.10"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
@@ -99,5 +100,6 @@ workspace = true
 test-support = []
 
 [dev-dependencies]
+kumochi-storage = { workspace = true, features = ["test-support"] }
 rcgen = { version = "0.14", default-features = false, features = ["ring"] }
 tokio = { version = "1", features = ["test-util"] }
