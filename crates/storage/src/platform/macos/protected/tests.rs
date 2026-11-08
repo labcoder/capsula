@@ -225,6 +225,28 @@ fn public_acl_reported_lengths_and_references_are_bounded() {
             "reference {offset}"
         );
     }
+    for start in [56_usize, 61] {
+        let mut bytes = acl_response(&[]);
+        let payload = bytes[60..].to_vec();
+        bytes.resize(start + 44, 0);
+        bytes[start..].copy_from_slice(&payload);
+        bytes[52..60].copy_from_slice(&91_u64.to_ne_bytes());
+        put_word(
+            &mut bytes,
+            0,
+            u32::try_from(start + 44).expect("small fixture"),
+        );
+        put_word(
+            &mut bytes,
+            44,
+            u32::try_from(start - 44).expect("small fixture"),
+        );
+        assert_eq!(
+            classify_present_acl(0, &bytes, &sample()),
+            Err(Untrusted::Io),
+            "payload start {start}"
+        );
+    }
     for length in [0, 40, 43, 45, 68, u32::MAX] {
         let mut bytes = acl_response(&[]);
         put_word(&mut bytes, 48, length);
