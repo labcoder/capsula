@@ -35,13 +35,13 @@ pub use job::{ChildPipes, Helper, Job};
 pub(super) use library::{
     Library, RawExport, missing_dependency, modules, open_locked, system_dir,
 };
-pub(crate) use pipe::shell_connection;
+#[cfg(test)]
+pub(crate) use pipe::test_pair;
+pub(crate) use pipe::{BridgeConnectError, PipeClient, open_bridge, shell_connection};
 pub use pipe::{
     Instance, PipeServer, client_image, client_process, create_owner_only, has_exited,
     process_image, server_image, session_id,
 };
-#[cfg(test)]
-pub(crate) use pipe::{PipeClient, test_pair};
 pub use policy::{managed_presence, system_env};
 pub use process::launch_detached;
 #[cfg(test)]

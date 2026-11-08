@@ -6,9 +6,9 @@ use std::os::windows::ffi::OsStringExt as _;
 use std::os::windows::io::{
     AsHandle as _, AsRawHandle, BorrowedHandle, FromRawHandle as _, OwnedHandle,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
 use windows_sys::Win32::Foundation::{
     ERROR_SUCCESS, HANDLE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
@@ -32,9 +32,33 @@ use windows_sys::Win32::System::Threading::{
 /// The brain's end of a pipe.
 pub type PipeServer = NamedPipeServer;
 
-/// A test's client end of a pipe.
-#[cfg(test)]
+/// The client's end of a pipe.
 pub(crate) type PipeClient = tokio::net::windows::named_pipe::NamedPipeClient;
+
+/// Why the bridge couldn't open and admit its server.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum BridgeConnectError {
+    #[error("can't open or check the bridge pipe")]
+    Io(#[from] io::Error),
+    #[error("bridge server image mismatch")]
+    NotOurBrain,
+}
+
+/// Opens `name` and checks its server runs `expected`, before the bridge sends anything.
+///
+/// # Errors
+/// Fails when the pipe can't be opened or queried, or its server image doesn't match.
+pub(crate) fn open_bridge(name: &str, expected: &Path) -> Result<PipeClient, BridgeConnectError> {
+    let pipe = ClientOptions::new().open(name)?;
+    let server = server_image(&pipe)?;
+    if !server
+        .as_os_str()
+        .eq_ignore_ascii_case(expected.as_os_str())
+    {
+        return Err(BridgeConnectError::NotOurBrain);
+    }
+    Ok(pipe)
+}
 
 /// A connected owner-only pipe and its client, under a name no running brain uses, for tests
 /// over a real pipe.

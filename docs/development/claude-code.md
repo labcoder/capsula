@@ -25,9 +25,11 @@ sequenceDiagram
     B->>C: {"jsonrpc":"2.0","id":7,"result":body}
 ```
 
-- **Squatting fails closed.** Right after connecting, the bridge asks for the pipe's server process
-  (`GetNamedPipeServerProcessId`) and requires its image to be the bridge's own executable.
-  Otherwise it sends nothing and exits 1.
+- **Squatting fails closed.** The platform's `open_bridge` opens the pipe, asks for its server
+  process (`GetNamedPipeServerProcessId` on Windows) and requires its image to match the bridge's
+  own executable, case-insensitively on Windows. Open/query failures retain their I/O source;
+  an image mismatch is a separate refusal. Either failure sends nothing and exits 1. The shared
+  bridge calls this admission inside its existing tokio runtime; no macOS transport exists yet.
 - **Lines.** A stdin line holds at most 512 KiB. A longer one gets `-32600` with a null id, and the
   rest of it is discarded up to the next newline. Batches, a missing or wrong `jsonrpc`, and an id
   that is null, an object, a float, past `i64`, or a string over 29 bytes are `-32600`, and so

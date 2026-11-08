@@ -15,7 +15,7 @@ pub(super) use connected_shell::register_shell;
 pub use session_lock::{SessionLock, SessionLockError};
 pub use trust_roots::{TrustRoots, TrustRootsError};
 #[cfg(windows)]
-pub(crate) use windows::shell_connection;
+pub(crate) use windows::{BridgeConnectError, PipeClient, open_bridge, shell_connection};
 
 #[cfg(windows)]
 #[expect(
@@ -101,4 +101,4 @@ impl ManagedPresence {
     }
 }
 #[cfg(all(test, windows))]
-pub(crate) use windows::{PipeClient, test_pair};
+pub(crate) use windows::test_pair;
