@@ -120,6 +120,7 @@ struct Entry {
 struct Scratch {
     root: File,
     entries: Vec<Entry>,
+    _ancestors: Vec<File>,
     residual: CString,
     user: libc::uid_t,
     cleaned: bool,
@@ -147,8 +148,9 @@ impl Scratch {
     fn new() -> Self {
         let parent = std::env::var_os("STORAGE_ADMISSION_FIXTURE_PARENT")
             .expect("native execution requires an explicitly approved fixture parent");
-        let parent_name = CString::new(parent.as_bytes()).expect("fixture parent has no NUL");
-        let parent = open_directory(libc::AT_FDCWD, &parent_name).expect("open approved parent");
+        let mut ancestors = crate::hold_chain(Path::new(&parent))
+            .expect("admit the complete approved fixture-parent chain");
+        let parent = ancestors.pop().expect("admitted chain contains its parent");
         // SAFETY: getuid has no arguments or ownership effects.
         let user = unsafe { libc::getuid() };
         let metadata = inspect(&parent, user).expect("approved parent passes actual inspection");
@@ -172,6 +174,7 @@ impl Scratch {
         let mut scratch = Self {
             root,
             entries: Vec::new(),
+            _ancestors: ancestors,
             residual: name.clone(),
             user,
             cleaned: false,
