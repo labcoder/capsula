@@ -16,6 +16,7 @@ use std::os::windows::fs::OpenOptionsExt as _;
 use std::os::windows::io::AsRawHandle as _;
 use std::path::{Component, Path, PathBuf, Prefix};
 
+use super::Untrusted;
 use super::sid::user_sid;
 use windows_sys::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, ERROR_NO_MORE_FILES, ERROR_SUCCESS, GENERIC_ALL, GENERIC_EXECUTE,
@@ -48,23 +49,6 @@ use windows_sys::Win32::System::SystemServices::{
     ACCESS_DENIED_CALLBACK_ACE_TYPE, SECURITY_MANDATORY_MEDIUM_RID,
     SYSTEM_MANDATORY_LABEL_ACE_TYPE, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
 };
-
-/// Why a path can't be trusted. It carries no path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum Untrusted {
-    /// A path component does not exist.
-    #[error("a path component doesn't exist")]
-    Missing,
-    /// A component is a reparse point or resolves elsewhere.
-    #[error("a path component is a reparse point or resolves elsewhere")]
-    Reparse,
-    /// An untrusted principal can change a component.
-    #[error("someone other than this user or the system can change a path component")]
-    Unsafe,
-    /// A component could not be opened or inspected.
-    #[error("a path component can't be opened or read")]
-    Io,
-}
 
 /// SYSTEM, Administrators and `TrustedInstaller`, which may change anything here; this user joins
 /// them at run time.

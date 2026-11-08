@@ -1,6 +1,11 @@
-//! Protected filesystem operations. Only the Windows implementation is currently available.
+//! Protected filesystem operations, with admission-only support on macOS.
 
 mod platform;
+
+#[cfg(not(windows))]
+pub use platform::Untrusted;
+#[cfg(target_os = "macos")]
+pub use platform::macos::hold_chain;
 
 #[cfg(all(windows, any(test, feature = "test-support")))]
 pub use platform::windows::{

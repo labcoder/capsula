@@ -6,8 +6,11 @@ brain opens it. The code is `crates/brain/src/store/`.
 
 Production Windows protected-file trust checks live in `kumochi-storage`, consumed by the
 brain through its existing platform exports. Folder discovery, file replacement, locks and
-SQLite/store policy remain in the brain. This boundary adds no Mac admission or durability
-guarantee.
+SQLite/store policy remain in the brain. macOS storage implements only directory-chain
+admission: descriptor-relative no-follow opens, root/current-UID ownership, safe mode bits,
+and completed ACL-absence inspection; all present ACLs and device crossings are refused.
+Descriptors retain objects, not names. This does not prove real application anchors,
+firmlink handling, Windows MIC equivalence, durability, or safe native loading/launch.
 
 ## Settings
 
