@@ -77,9 +77,13 @@ writes `mcp.json`, under a fresh `LaunchId`; it's never recreated for the same l
   the first and only instance of its name (`Instance::Only`, an OS maximum of one), so a taken
   name fails the launch and nobody can add a second server instance. `serve` consumes the
   listener: the first connection uses up the session, refusals included.
-- **The client checks**, on one process handle opened from the pid the pipe reports, before any
-  byte is written: the process hasn't exited, it runs the brain's executable, and it's inside this
-  launch's own run job. Any failure ends the session with no `Hello`, and C5a fails the launch.
+- **The client checks.** `platform::admit_bridge_client` opens one process handle from the pid
+  the pipe reports and checks, in order, that the process hasn't exited, it runs the brain's
+  executable, and it's inside this launch's own run job, before any byte is written. Its opaque
+  `BridgePeer` guard holds that same process handle across the session's await; ending or aborting
+  the session drops it. Any failure ends the session with no `Hello`, and C5a fails the launch.
+  This boundary has no macOS adapter; the same-user, pid-reuse and handle-transfer limits below
+  are unchanged.
 - **What the checks prove** (Captain's ruling, 2026-11-05). The DACL admits only the owner's
   account, and code running as that account can already read its Credential Manager entries and
   open Kumochi's processes. So the checks turn away stray and unrelated connections (another app,

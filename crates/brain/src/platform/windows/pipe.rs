@@ -29,6 +29,9 @@ use windows_sys::Win32::System::Threading::{
     QueryFullProcessImageNameW, WaitForSingleObject,
 };
 
+use super::Job;
+use crate::platform::BridgePeerError;
+
 /// The brain's end of a pipe.
 pub type PipeServer = NamedPipeServer;
 
@@ -58,6 +61,35 @@ pub(crate) fn open_bridge(name: &str, expected: &Path) -> Result<PipeClient, Bri
         return Err(BridgeConnectError::NotOurBrain);
     }
     Ok(pipe)
+}
+
+/// Keeps the admitted bridge client's process object held for its session.
+pub(crate) struct BridgePeer {
+    _process: OwnedHandle,
+}
+
+/// Checks the connected client on one held process handle, before any byte is written.
+///
+/// # Errors
+/// Fails when the process can't be queried, has exited, has another image or isn't in `job`.
+pub(crate) fn admit_bridge_client(
+    server: &PipeServer,
+    job: &Job,
+    expected: &Path,
+) -> Result<BridgePeer, BridgePeerError> {
+    let query = |_| BridgePeerError::Query;
+    let process = client_process(server).map_err(query)?;
+    if has_exited(process.as_handle()).map_err(query)? {
+        return Err(BridgePeerError::Exited);
+    }
+    let image = process_image(process.as_handle()).map_err(query)?;
+    if !image.as_os_str().eq_ignore_ascii_case(expected.as_os_str()) {
+        return Err(BridgePeerError::NotOurImage);
+    }
+    if !job.contains(process.as_handle()).map_err(query)? {
+        return Err(BridgePeerError::NotInJob);
+    }
+    Ok(BridgePeer { _process: process })
 }
 
 /// A connected owner-only pipe and its client, under a name no running brain uses, for tests

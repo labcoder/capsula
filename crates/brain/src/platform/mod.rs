@@ -15,7 +15,22 @@ pub(super) use connected_shell::register_shell;
 pub use session_lock::{SessionLock, SessionLockError};
 pub use trust_roots::{TrustRoots, TrustRootsError};
 #[cfg(windows)]
-pub(crate) use windows::{BridgeConnectError, PipeClient, open_bridge, shell_connection};
+pub(crate) use windows::{
+    BridgeConnectError, BridgePeer, PipeClient, admit_bridge_client, open_bridge, shell_connection,
+};
+
+/// The check a bridge client failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BridgePeerError {
+    /// Its process had exited.
+    Exited,
+    /// It doesn't run the brain's executable.
+    NotOurImage,
+    /// It isn't in this launch's job.
+    NotInJob,
+    /// Its process couldn't be opened or queried.
+    Query,
+}
 
 #[cfg(windows)]
 #[expect(

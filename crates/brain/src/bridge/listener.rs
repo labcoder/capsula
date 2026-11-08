@@ -6,7 +6,6 @@
 //! number can name another process once the opener exits.
 
 use std::io;
-use std::os::windows::io::{AsHandle as _, OwnedHandle};
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
@@ -24,6 +23,7 @@ use super::stdio::RpcError;
 use super::wire::{CallKey, Method, Reassembly, ToBrain, ToBridge, chunks};
 use crate::context::ToolSchema;
 use crate::engines::claude_code::audit::AuditGate;
+pub(crate) use crate::platform::BridgePeerError as ClientRefused;
 use crate::platform::{self, Instance, Job, PipeServer};
 
 /// The MCP versions this server speaks; a client asking for another gets the first.
@@ -69,7 +69,9 @@ impl Listener {
         ) {
             return SessionEnd::NoClient;
         }
-        let end = match check_client(&self.server, &launch) {
+        let client: Result<platform::BridgePeer, ClientRefused> =
+            platform::admit_bridge_client(&self.server, launch.job, launch.brain_exe);
+        let end = match client {
             Ok(_client) => session(&mut self.server, self.launch, &launch).await,
             Err(refused) => SessionEnd::Refused(refused),
         };
@@ -151,42 +153,6 @@ pub(crate) enum SessionEnd {
     Deadline,
     /// A frame was malformed, a chunk didn't continue its request, or the pipe ended inside one.
     Broken,
-}
-
-/// The check a client failed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ClientRefused {
-    /// Its process had exited.
-    Exited,
-    /// It doesn't run the brain's executable.
-    NotOurImage,
-    /// It isn't in this launch's job.
-    NotInJob,
-    /// Its process couldn't be opened or queried.
-    Query,
-}
-
-/// Checks the connected client on one held process handle, before any byte is written.
-fn check_client(
-    server: &PipeServer,
-    launch: &LaunchContext<'_>,
-) -> Result<OwnedHandle, ClientRefused> {
-    let query = |_| ClientRefused::Query;
-    let process = platform::client_process(server).map_err(query)?;
-    if platform::has_exited(process.as_handle()).map_err(query)? {
-        return Err(ClientRefused::Exited);
-    }
-    let image = platform::process_image(process.as_handle()).map_err(query)?;
-    if !image
-        .as_os_str()
-        .eq_ignore_ascii_case(launch.brain_exe.as_os_str())
-    {
-        return Err(ClientRefused::NotOurImage);
-    }
-    if !launch.job.contains(process.as_handle()).map_err(query)? {
-        return Err(ClientRefused::NotInJob);
-    }
-    Ok(process)
 }
 
 /// The one request being reassembled; its first chunk fixes its key and method.

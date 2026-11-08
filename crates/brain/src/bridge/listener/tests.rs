@@ -514,6 +514,16 @@ async fn the_name_takes_one_instance_and_one_client() {
 }
 
 #[tokio::test]
+async fn a_listener_without_a_connected_peer_refuses_query() {
+    let fixture = fixture();
+    let listener = Listener::create(unique_launch(10)).expect("listener");
+    assert_eq!(
+        platform::admit_bridge_client(&listener.server, &fixture.job, &fixture.exe).err(),
+        Some(ClientRefused::Query)
+    );
+}
+
+#[tokio::test]
 async fn a_refused_client_reads_nothing_and_the_name_is_gone_after() {
     let fixture = fixture();
     let listener = Listener::create(unique_launch(2)).expect("listener");
@@ -659,6 +669,18 @@ async fn only_a_live_brain_image_in_the_launch_job_is_served() {
     );
     assert!(output(child).contains("client: nothing"));
 
+    let listener = Listener::create(unique_launch(9)).expect("listener");
+    let child = start_client(CHILD, listener.name(), "read", &[&parent, &other]);
+    let context = LaunchContext {
+        brain_exe: elsewhere,
+        ..fixture.context(Duration::from_secs(10))
+    };
+    assert_eq!(
+        listener.serve(context).await,
+        SessionEnd::Refused(ClientRefused::NotOurImage)
+    );
+    assert!(output(child).contains("client: nothing"));
+
     // A client that connected and exited while its process object is still held still opens
     // by its pid, so only the liveness check refuses it.
     let listener = Listener::create(unique_launch(7)).expect("listener");
@@ -672,9 +694,12 @@ async fn only_a_live_brain_image_in_the_launch_job_is_served() {
             .exits_within(Duration::from_secs(30))
             .expect("wait")
     );
-    let context = fixture.context(Duration::from_secs(10));
     assert_eq!(
-        check_client(&listener.server, &context).err(),
+        platform::admit_bridge_client(&listener.server, &fixture.job, &fixture.exe).err(),
+        Some(ClientRefused::Exited)
+    );
+    assert_eq!(
+        platform::admit_bridge_client(&listener.server, &fixture.job, elsewhere).err(),
         Some(ClientRefused::Exited)
     );
 }
