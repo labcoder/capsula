@@ -209,6 +209,11 @@ impl Filesec {
 }
 
 fn inspect_present_acl(fd: RawFd, expected: &libc::stat) -> Result<(), Untrusted> {
+    let (result, buffer) = query_present_acl(fd);
+    classify_present_acl(result, &buffer.0, expected)
+}
+
+fn query_present_acl(fd: RawFd) -> (libc::c_int, AttributeBuffer) {
     let mut attributes = libc::attrlist {
         bitmapcount: 5,
         reserved: 0,
@@ -229,7 +234,7 @@ fn inspect_present_acl(fd: RawFd, expected: &libc::stat) -> Result<(), Untrusted
             libc::FSOPT_REPORT_FULLSIZE,
         )
     };
-    classify_present_acl(result, &buffer.0, expected)
+    (result, buffer)
 }
 
 fn attribute_bytes<const N: usize>(bytes: &[u8], offset: usize) -> Result<[u8; N], Untrusted> {

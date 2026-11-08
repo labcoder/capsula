@@ -18,6 +18,9 @@ ACL/BSD transaction or ABA detection. This does not certify arbitrary/ownership-
 uninterpreted disk bits, real application anchors, firmlink handling, Windows MIC equivalence,
 durability, or safe native loading/launch. The fd symbol's macOS 10.6 availability is not a
 certified product support floor; native release still needs a known running OS/build/filesystem.
+Fixture-only conformance checks share the production acquisition, require completed positive
+presence, and assert returned numeric policy independently. Normalized absence is not evidence
+of a returned empty or DENY-only ACL; the native present-empty capability remains unestablished.
 
 ## Settings
 

@@ -777,3 +777,106 @@ fn native_inspection_query_and_present_acl_refusal() {
         .cleanup()
         .expect("identity-checked cleanup; uncertainty leaves reported residual");
 }
+
+#[test]
+#[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+fn native_returned_deny_acl_policy() {
+    let mut scratch = Scratch::new();
+    let safe = scratch.directory(c"safe");
+    for (text, expected_flags) in [
+        (
+            c"!#acl 1\ngroup:11111111-2222-3333-4444-555555555555:::deny:write\n",
+            0x2,
+        ),
+        (
+            c"!#acl 1\ngroup:11111111-2222-3333-4444-555555555555:::deny,inherited:write\n",
+            0x12,
+        ),
+        (
+            c"!#acl 1\ngroup:11111111-2222-3333-4444-555555555555:::deny,file_inherit,directory_inherit:write\n",
+            0x62,
+        ),
+    ] {
+        install_acl(&safe, text).expect("install fixed UUID deny fixture");
+        let expected = stat(safe.as_raw_fd()).expect("owned fixture metadata");
+        let security = Filesec::new().expect("fresh filesec");
+        // SAFETY: all-zero libc stat is valid writable storage, not inspection evidence.
+        let mut observed: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: the fixture fd is borrowed, metadata is writable, and filesec remains live.
+        let result = unsafe {
+            fstatx_np(safe.as_raw_fd(), &raw mut observed, security.0.as_ptr())
+        };
+        assert_eq!(result, 0, "completed fixture filesec acquisition");
+        assert!(same_inspection(&expected, &observed), "fixture binding");
+        let mut present = -1;
+        // SAFETY: the populated filesec and int presence output remain live.
+        let presence = unsafe {
+            filesec_query_property(security.0.as_ptr(), FILESEC_ACL, &raw mut present)
+        };
+        assert_eq!(presence, 0, "completed presence query");
+        assert!(present > 0, "deny fixture must remain explicitly present");
+
+        let (result, buffer) = query_present_acl(safe.as_raw_fd());
+        assert_eq!(result, 0, "actual bounded fd query");
+        let word = |offset| {
+            u32::from_ne_bytes(attribute_bytes(&buffer.0, offset).expect("bounded numeric field"))
+        };
+        let returned = word(4);
+        assert_eq!(returned, 0x8243_800a, "complete returned common bitmap");
+        for offset in [8, 12, 16, 20] {
+            assert_eq!(word(offset), 0, "no other returned groups");
+        }
+        let length = word(0);
+        assert!((128..=4096).contains(&length), "bounded one-entry response");
+        let reference = i32::from_ne_bytes(
+            attribute_bytes(&buffer.0, 44).expect("bounded signed reference"),
+        );
+        assert!(reference >= 16, "payload follows the fixed fields");
+        let start = 44_usize
+            .checked_add(usize::try_from(reference).expect("positive fixture reference"))
+            .expect("bounded fixture start");
+        assert!(start.is_multiple_of(4), "four-aligned payload");
+        let payload_length = word(48);
+        assert_eq!(payload_length, 68, "exact one-entry payload");
+        assert_eq!(
+            start.checked_add(68),
+            Some(usize::try_from(length).expect("bounded fixture length")),
+            "reference ends at the reported full length"
+        );
+        let count = word(start + 36);
+        let acl_flags = word(start + 40);
+        let flags = word(start + 60);
+        let rights = word(start + 64);
+        assert_eq!(count, 1, "one returned ACE, not normalization to empty");
+        assert_eq!(acl_flags & !0x0002_0000, 0, "supported full ACL flags");
+        assert_eq!(flags, expected_flags, "full raw DENY and inheritance flags");
+        assert_eq!(rights, 0x4, "full raw write-data rights");
+        assert_eq!(classify_present_acl(result, &buffer.0, &expected), Ok(()));
+        eprintln!(
+            "owned-deny presence_result={presence} presence={present} query={result} returned={returned:#x} length={length} reference={reference} payload_length={payload_length} count={count} acl_flags={acl_flags:#x} flags={flags:#x} rights={rights:#x}"
+        );
+    }
+    scratch
+        .cleanup()
+        .expect("identity-checked cleanup; uncertainty leaves reported residual");
+}
+
+#[test]
+#[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+fn native_present_acl_query_failure() {
+    let scratch = Scratch::new();
+    let expected = stat(scratch.root.as_raw_fd()).expect("owned fixture metadata");
+    let (result, buffer) = query_present_acl(-1);
+    assert_eq!(
+        result, -1,
+        "actual bounded fd query fails, not earlier fstatx"
+    );
+    assert_eq!(
+        classify_present_acl(result, &buffer.0, &expected),
+        Err(Untrusted::Io)
+    );
+    eprintln!("owned-query-error result={result}");
+    scratch
+        .cleanup()
+        .expect("identity-checked cleanup; uncertainty leaves reported residual");
+}
