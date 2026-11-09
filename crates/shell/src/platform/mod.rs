@@ -3,7 +3,15 @@
 pub(crate) mod credential;
 pub(crate) mod host;
 pub(crate) mod input;
+#[expect(
+    dead_code,
+    reason = "dormant logger owner awaits coordinated caller integration"
+)]
+pub(crate) mod logging;
 mod presence;
+
+#[cfg(target_os = "macos")]
+mod macos;
 
 pub(crate) use presence::{
     Capture, Deliver, EventTime, MaskUpdate, PresenceEvent, PresenceLabels, PresenceSurface,

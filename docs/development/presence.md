@@ -1,5 +1,17 @@
 # Presence and native surfaces
 
+## Dormant log file owners
+
+`platform/logging.rs` defines the file boundary for a future shared logger owner. macOS retains
+opaque `ShellStorage`/`AdmittedLog` owners; Windows retains the absolute per-user product namespace
+and append/create daily filenames. Retention uses exact date names, protects current identity and
+targets seven files within a 256-entry pass, not a seven-file guarantee. Name-based deletion still
+has a check-to-unlink race. No recursive deletion, repair or content inspection is added.
+`logging::init(prefix)` and startup remain unchanged: none of these dormant backends is constructed.
+Shared worker/caller integration, source review, native validation and performance evidence remain open.
+
+## Shared presence contracts
+
 `platform/presence.rs` holds shared compatibility contracts, not universally implemented
 native behavior. `Deliver` and `Observe` are owned, implicitly `'static` `Box<dyn Fn>`
 callbacks invoked synchronously on the UI thread, without `Send`/`Sync` bounds or a `FnMut`

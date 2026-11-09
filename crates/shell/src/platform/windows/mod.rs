@@ -5,6 +5,8 @@ mod folders;
 mod hit_mask;
 mod host;
 mod keyboard;
+#[expect(dead_code, reason = "dormant logger backend has no startup caller")]
+pub(crate) mod logging;
 mod observer;
 mod overlay_input;
 mod pipe;
