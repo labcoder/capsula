@@ -3,6 +3,12 @@
 Kumochi runs as two processes, and the brain runs its helpers inside Windows Job Objects so that
 nothing it started can outlive it.
 
+Executable names come from `protocol::constants`: `kumochi.exe` and `kumochid.exe` on Windows,
+`kumochi` and `kumochid` on macOS, matching Cargo's native output. Each process resolves the
+other beside its own executable, never through PATH. Only the executable names differ;
+stored DEV/release namespaces are unchanged. This naming does not implement macOS process,
+desktop or authenticated transport support; the lifecycle below describes Windows.
+
 Each process starts its scene dropper before accepting scene data and fails startup if the
 thread cannot start. Retirement never joins that thread from the shell's UI.
 

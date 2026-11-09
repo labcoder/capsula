@@ -12,11 +12,19 @@ pub const HTTP_USER_AGENT: &str = "Kumochi";
 /// The assistant's name until the user picks their own.
 pub const DEFAULT_ASSISTANT_NAME: &str = "Kumo";
 
-/// The shell's executable, `kumochi.exe`. Cargo's `[[bin]]` names must match.
-pub const SHELL_EXE: &str = "kumochi.exe";
+/// The shell's target-native executable. Cargo's `[[bin]]` names must match.
+pub const SHELL_EXE: &str = if cfg!(target_os = "macos") {
+    "kumochi"
+} else {
+    "kumochi.exe"
+};
 
-/// The brain's executable, `kumochid.exe`.
-pub const BRAIN_EXE: &str = "kumochid.exe";
+/// The brain's target-native executable.
+pub const BRAIN_EXE: &str = if cfg!(target_os = "macos") {
+    "kumochid"
+} else {
+    "kumochid.exe"
+};
 
 /// The folder under `%LOCALAPPDATA%` (logs, store, models) and `%APPDATA%` (config).
 pub const DATA_DIR: &str = ProductIdentity::ACTIVE.data_dir;
