@@ -1,5 +1,30 @@
 use super::*;
 use std::collections::BTreeSet;
+use std::path::Path;
+
+#[test]
+fn executable_names_resolve_only_the_native_sibling() {
+    #[cfg(target_os = "macos")]
+    let (shell, brain, shell_path, brain_path) =
+        ("kumochi", "kumochid", "/app/kumochi", "/app/kumochid");
+    #[cfg(not(target_os = "macos"))]
+    let (shell, brain, shell_path, brain_path) = (
+        "kumochi.exe",
+        "kumochid.exe",
+        "C:/app/kumochi.exe",
+        "C:/app/kumochid.exe",
+    );
+    assert_eq!(SHELL_EXE, shell);
+    assert_eq!(BRAIN_EXE, brain);
+    assert_eq!(
+        Path::new(shell_path).with_file_name(BRAIN_EXE),
+        Path::new(brain_path)
+    );
+    assert_eq!(
+        Path::new(brain_path).with_file_name(SHELL_EXE),
+        Path::new(shell_path)
+    );
+}
 
 #[test]
 fn identities_preserve_stored_names_and_profile_aliases() {
