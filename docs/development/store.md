@@ -6,8 +6,21 @@ brain opens it. The code is `crates/brain/src/store/`.
 
 Production Windows protected-file trust checks live in `kumochi-storage`, consumed by the
 brain through its existing platform exports. Folder discovery, file replacement, locks and
-SQLite/store policy remain in the brain. This boundary adds no Mac admission or durability
-guarantee.
+SQLite/store policy remain in the brain. macOS storage implements only directory-chain
+admission: descriptor-relative no-follow opens, root/current-UID ownership, safe mode bits,
+and completed ACL-absence inspection. On completed presence, one bounded public fd attribute
+query must return a fully supported empty or DENY-only ACL, bound to the held object's numeric
+identity, type and permission bits. Every ALLOW/mixed ACL, unsupported ACL/ACE/right bit,
+deferred/private ACL flag, incomplete response and device crossing is refused. Omitted security
+and NOACL are not empty or absence evidence. No principal lookup or opaque ACL object is used.
+Descriptors retain objects, not names; these are before/after held-object samples, not an atomic
+ACL/BSD transaction or ABA detection. This does not certify arbitrary/ownership-disabled volumes,
+uninterpreted disk bits, real application anchors, firmlink handling, Windows MIC equivalence,
+durability, or safe native loading/launch. The fd symbol's macOS 10.6 availability is not a
+certified product support floor; native release still needs a known running OS/build/filesystem.
+Fixture-only conformance checks share the production acquisition, require completed positive
+presence, and assert returned numeric policy independently. Normalized absence is not evidence
+of a returned empty or DENY-only ACL; the native present-empty capability remains unestablished.
 
 ## Settings
 
