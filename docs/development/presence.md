@@ -1,5 +1,16 @@
 # Presence and native surfaces
 
+`platform/presence.rs` holds shared compatibility contracts, not universally implemented
+native behavior. `Deliver` and `Observe` are owned, implicitly `'static` `Box<dyn Fn>`
+callbacks invoked synchronously on the UI thread, without `Send`/`Sync` bounds or a `FnMut`
+callback contract.
+The retained input vocabulary includes `Key::Other(u16)`: low-eight-bit make code with E0/E1
+in bits eight/nine, bounded below 1024. `EventTime.instant` remains the shared scheduling
+authority; `qpc` counters, proxy after-draw dispatch and physical screen coordinates retain
+their Windows diagnostic meanings. Native owners, handles, errors, capture enforcement and
+mask/window lifecycle stay in `platform/windows`; moving the payloads implements none of
+those mechanisms on another platform.
+
 Overlay hit testing belongs to the presenter's `OverlayOwner`, not to a view. The native
 `OverlayWindows` adapter binds the existing dock overlay and body proxy, plus panels; B5,
 slice 5 and B3b attach their visual, regional and selection surfaces through the same seam.

@@ -55,8 +55,10 @@ use windows::core::{HSTRING, PCWSTR, w};
 use super::hit_mask::{HitMask, MaskUpdate};
 use super::keyboard::{self, Deliver, EscapeHotkey, Keys};
 use super::observer::{self, Observe, ProxyHandle};
-use crate::platform::host::{HostChange, WatchGen};
 use crate::platform::input;
+pub(crate) use crate::platform::presence::{
+    Capture, PresenceEvent, PresenceLabels, PresenceSurface,
+};
 
 /// The tray's callback message to the proxy window.
 const TRAY_MESSAGE: u32 = WM_APP + 1;
@@ -68,61 +70,6 @@ const HOVER_SUBCLASS_ID: usize = 0xca5;
 const RETRY_COMMAND: usize = 10;
 /// See [`RETRY_COMMAND`].
 const QUIT_COMMAND: usize = 11;
-
-/// What the presence surfaces tell the UI thread.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PresenceEvent {
-    ShowStatus,
-    DockPressed {
-        qpc: i64,
-    },
-    /// The pointer entered or left the proxy or a presence window; ask `cursor_position`.
-    /// `entered_qpc` is the counter when the entering move was dispatched, `None` on leave.
-    PointerChanged {
-        entered_qpc: Option<i64>,
-    },
-    /// The user picked a dock position in the tray menu, an index into `positions`.
-    Position(usize),
-    /// The user picked Retry in the tray menu.
-    Retry,
-    /// A panel close request hides the panel without quitting the shell.
-    DismissPanel,
-    /// Esc reached Kumochi: the global hotkey, a focused panel, or the Stop fallback.
-    Escape,
-    /// The user picked Quit in the tray menu.
-    Quit,
-    /// `--gate-observer` only: the harness asked for one dock repaint.
-    Repaint,
-    /// A presence window lost mouse capture, stamped `seq` in the UI thread's input sequence.
-    /// `released` is the button whose forwarded release caused it; `None` is a cancel mode or a
-    /// capture taken from outside.
-    CaptureLost {
-        seq: u64,
-        released: Option<MouseButton>,
-    },
-    /// The outermost button release returned while a drained capture loss waited for it.
-    Reconcile,
-    /// A watched perch host changed; `w` is the watch's generation.
-    HostChanged {
-        w: WatchGen,
-        change: HostChange,
-    },
-}
-
-/// The localized text of the tray icon and its menu.
-#[derive(Clone, Debug)]
-pub(crate) struct PresenceLabels {
-    /// The tray icon's tooltip; Windows shows at most 127 UTF-16 units.
-    pub(crate) tooltip: String,
-    /// The title of the submenu that holds `positions`.
-    pub(crate) position_menu: String,
-    /// The nine dock positions, in the order `PresenceEvent::Position` indexes.
-    pub(crate) positions: [String; 9],
-    /// The Retry item.
-    pub(crate) retry: String,
-    /// The Quit item.
-    pub(crate) quit: String,
-}
 
 /// Why a presence surface couldn't be set up or moved.
 #[derive(Debug, thiserror::Error)]
@@ -502,15 +449,6 @@ impl Drop for PresenceNative {
     }
 }
 
-/// Whether a GPUI surface paints only, owns status controls, or takes typing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PresenceSurface {
-    Overlay,
-    Panel,
-    /// The only surface Kumochi activates, and only when asked to.
-    Text,
-}
-
 /// Configures a tool window, reporting pointer boundaries on status panels. Overlay and status
 /// surfaces never activate, and overlays pass clicks through. A text surface activates only
 /// through [`activate_presence_window`]. This neither shows nor resizes the window.
@@ -642,13 +580,6 @@ fn hide(hwnd: HWND) -> windows::core::Result<()> {
     let flags = SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
     // SAFETY: `hwnd` is live; it is hidden without being moved, sized or activated.
     unsafe { SetWindowPos(hwnd, None, 0, 0, 0, 0, flags) }
-}
-
-/// Whether screenshots and recordings may show a presence window.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Capture {
-    Excluded,
-    Allowed,
 }
 
 /// Keeps a presence window out of screenshots and recordings, or lets it back in.

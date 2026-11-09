@@ -3,6 +3,12 @@
 pub(crate) mod credential;
 pub(crate) mod host;
 pub(crate) mod input;
+mod presence;
+
+pub(crate) use presence::{
+    Capture, Deliver, EventTime, MaskUpdate, PresenceEvent, PresenceLabels, PresenceSurface,
+    ProxyNote,
+};
 
 #[cfg(windows)]
 #[expect(
@@ -15,9 +21,8 @@ mod windows;
 pub(crate) use windows::test_pair;
 #[cfg(windows)]
 pub(crate) use windows::{
-    Capture, Deliver, EscapeHotkey, EventTime, Foreground, HostWatch, MaskUpdate, OverlayWindows,
-    PipeClient, PresenceError, PresenceEvent, PresenceLabels, PresenceNative, PresenceSurface,
-    ProxyHandle, ProxyNote, activate_presence_window, client_origin, configure_presence_window,
+    EscapeHotkey, Foreground, HostWatch, OverlayWindows, PipeClient, PresenceError, PresenceNative,
+    ProxyHandle, activate_presence_window, client_origin, configure_presence_window,
     cursor_position, data_dir, hide_presence_window, host_at, launch_detached, performance_counter,
     performance_frequency, place_presence_window, restore_foreground, session_id, set_capture,
     watch_host, window_handle, work_area,

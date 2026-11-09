@@ -14,21 +14,11 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::WindowsAndMessaging::{ULW_ALPHA, UpdateLayeredWindow};
 
 use super::presence::{PresenceError, struct_size};
+pub(crate) use crate::platform::presence::MaskUpdate;
 use crate::platform::{ROW_SPANS, RowSpans};
 
 /// Premultiplied BGRA with alpha 1: invisible, but Windows hit-tests it.
 const OWNED: u32 = 0x0100_0000;
-
-/// What one mask update did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MaskUpdate {
-    /// No pixel changed, so Windows wasn't called.
-    Unchanged,
-    /// Pixels changed in place.
-    Shape,
-    /// The proxy moved or resized, with its pixels, in the same call.
-    Moved,
-}
 
 /// A 32-bit top-down DIB in a memory DC, and the owned spans each of its rows holds.
 #[derive(Debug)]

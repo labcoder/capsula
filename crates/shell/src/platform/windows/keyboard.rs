@@ -28,6 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::presence::{PresenceError, performance_counter, struct_size};
 use crate::input::{Edge, Event, Key};
+pub(crate) use crate::platform::presence::{Deliver, EventTime};
 
 /// The proxy's only timer: the gesture's next one-shot deadline.
 const DEADLINE_TIMER: usize = 1;
@@ -44,17 +45,6 @@ thread_local! {
     /// The proxy that hears desktop switches; the WinEvent callback has no context of its own.
     static PROXY: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
 }
-
-/// When the native callback that carried an event began, on both clocks: `instant` for the
-/// gesture, `qpc` for joining diagnostics to `PresentMon`.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct EventTime {
-    pub(crate) instant: Instant,
-    pub(crate) qpc: i64,
-}
-
-/// Reduces one gesture event at its callback time and returns the next deadline to arm.
-pub(crate) type Deliver = Box<dyn Fn(Event, EventTime) -> Option<Instant>>;
 
 /// The proxy's keyboard state. Only the UI thread touches it.
 #[derive(Default)]
