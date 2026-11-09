@@ -1,5 +1,5 @@
 // Added for Kumochi under Apache-2.0: opt-in AppKit termination negotiation.
-use objc2::rc::Retained;
+use objc2::{rc::Retained, runtime::AnyObject};
 use objc2_app_kit::{NSApplication, NSApplicationTerminateReply};
 use std::{
     cell::RefCell,
@@ -177,13 +177,14 @@ impl Control {
 
     pub(super) fn should_terminate(
         self: &Rc<Self>,
-        application: &NSApplication,
+        application: *mut AnyObject,
     ) -> NSApplicationTerminateReply {
-        let matches = self
-            .application
-            .borrow()
-            .as_ref()
-            .is_some_and(|original| std::ptr::eq(&**original, application));
+        let matches = self.application.borrow().as_ref().is_some_and(|original| {
+            std::ptr::eq(
+                std::ptr::from_ref(&**original).cast::<AnyObject>(),
+                application,
+            )
+        });
         if !matches {
             return NSApplicationTerminateReply::TerminateCancel;
         }
