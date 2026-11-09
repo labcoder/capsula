@@ -102,8 +102,13 @@ flowchart LR
   `TOKENIZERS_PARALLELISM` (tokenizers). That's a granted exception until upstream takes explicit
   configuration. Nothing else is allowed: no network, no model hub or cache, and no other app's
   tokens or config.
-- **Worker threads:** each stream's two Phonon workers start with `std::thread::spawn`, so a
-  refused thread aborts a release brain. Fallible spawns are a follow-up before release.
+- **Worker threads:** the vendored `ptts` 0.6.0 patch uses fallible thread creation for the
+  decoder and backbone (and the single-worker inline path). The stream owns each worker as
+  soon as it starts. If the next worker cannot start, the failed spawn drops its captured
+  channel ends, then the partial stream closes PCM output and joins the decoder before
+  returning an error. No worker is detached on this path. Warm-up failures map to `TtsError::Load`;
+  request failures map to `TtsError::Synthesis`, without dependency error text. The owner can
+  accept a later Speak or unload normally. This does not change xn's permanent-pool guard.
 - **Logs:** the `ptts`, `xn`, `xn_gemm` and `tokenizers` targets are off at every level, since
   their messages can carry paths or text. Errors map to content-free `TtsError` values.
 

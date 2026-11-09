@@ -84,6 +84,7 @@ debug-assertions = false
 # The gpui-kit revision S1 built and measured, over registry gpui-pre 0.3.10. Upgrading it is a
 # deliberate change that reruns P1's window tests.
 [patch.crates-io]
+ptts = { path = "vendor/ptts" }
 gpui-kit = { git = "https://github.com/longbridge/gpui-kit", rev = "99576db58ec8103417c41a092e891b4022d24e7e" }
 gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "99576db58ec8103417c41a092e891b4022d24e7e" }
 gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "99576db58ec8103417c41a092e891b4022d24e7e" }

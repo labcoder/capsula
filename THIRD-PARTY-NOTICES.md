@@ -96,6 +96,15 @@ layout/glyph APIs with one current color and no underline, strikethrough or back
 hard lines continue to use GPUI's public layout painter. No dependency source is modified.
 The full Apache-2.0 license is included at `vendor/gpui-pre-windows/LICENSE-APACHE`.
 
+## ptts 0.6.0 (`vendor/ptts/`)
+
+- Upstream: [gradium-ai/xn-ptts](https://github.com/gradium-ai/xn-ptts), the crates.io
+  `ptts` 0.6.0 package (SHA-256 `2b158aa0dc7770331c6b6efa64d292e28ff95952a042977fa9262390a2b9a824`).
+- License: MIT OR Apache-2.0. Both full license texts are retained in `vendor/ptts/`.
+- Changes: `src/synth.rs` uses fallible stream-worker creation and the existing stream
+  cleanup to close and join a partially started pipeline. Focused startup regressions are
+  included there. No model weights or native audio runtime are vendored.
+
 ## Voice models (downloaded on request, not in the repo)
 
 Kumochi downloads these only when the user installs voice. Pins and provenance are in
