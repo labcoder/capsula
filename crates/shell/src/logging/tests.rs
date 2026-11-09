@@ -354,7 +354,9 @@ fn caught_producer_formatter_unwind_cannot_prefix_the_next_event() {
     };
     tracing::subscriber::with_default(plain_subscriber(&writer), || {
         let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            tracing::info!(value = tracing::field::display(&field), "failed");
+            tracing::info_span!("outer_event_prefix").in_scope(|| {
+                tracing::info!(value = tracing::field::display(&field), "failed");
+            });
         }));
         assert!(failed.is_err());
         assert_eq!(receiver.try_recv().unwrap_err(), TryRecvError::Empty);
