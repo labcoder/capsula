@@ -202,6 +202,8 @@ The public AppKit return is `NSApplicationTerminateReply` (NSUInteger), not BOOL
 The retained original NSApplication and Control belong to the platform's graphical
 lifetime, independently of Presence. Delivery/settlement jobs also retain Control.
 The selector validates original application identity before admitting an epoch.
+Its borrowed sender uses objc2's raw object-argument ABI: nil is rejected and the address
+is compared with that retained application, never dereferenced, made static or taken into ownership.
 
 ```mermaid
 stateDiagram-v2

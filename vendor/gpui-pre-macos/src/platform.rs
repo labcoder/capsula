@@ -177,7 +177,7 @@ unsafe fn build_classes() {
         decl.add_method(
             sel!(applicationShouldTerminate:),
             should_terminate
-                as extern "C-unwind" fn(_, Sel, &NSApplication) -> NSApplicationTerminateReply,
+                as extern "C-unwind" fn(_, Sel, *mut AnyObject) -> NSApplicationTerminateReply,
         );
     }
     let registered = decl.register();
@@ -1449,8 +1449,11 @@ extern "C-unwind" fn will_terminate(this: &AnyObject, _: Sel, _: *mut AnyObject)
 extern "C-unwind" fn should_terminate(
     this: &AnyObject,
     _: Sel,
-    application: &NSApplication,
+    application: *mut AnyObject,
 ) -> NSApplicationTerminateReply {
+    if application.is_null() {
+        return NSApplicationTerminateReply::TerminateCancel;
+    }
     // SAFETY: the inherited checked ivar is initialized before run and nulled on return.
     let pointer = unsafe { *mac_platform_ivar(this).load::<*mut c_void>(this) };
     // SAFETY: a non-null ivar points to the platform borrowed for this graphical run.
