@@ -1,3 +1,4 @@
+// Modified for Kumochi: export the opt-in termination token (docs/development/gpui-patch.md).
 #![cfg(target_os = "macos")]
 //! macOS platform implementation for GPUI.
 //!
@@ -42,7 +43,7 @@ pub(crate) use keyboard::*;
 pub(crate) use platform::*;
 pub(crate) use window::*;
 
-pub use platform::MacPlatform;
+pub use platform::{MacPlatform, TerminationRequest};
 
 trait BoolExt {
     fn to_objc(self) -> Bool;

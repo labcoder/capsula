@@ -87,6 +87,17 @@ SOFTWARE.
   windows stop waking every vblank and hidden windows open at their requested size. Each modified
   file says so in its first line; the changes are described in [docs/development/gpui-patch.md](docs/development/gpui-patch.md).
 
+## gpui-pre-macos 0.3.10 (`vendor/gpui-pre-macos/`)
+
+- Upstream: Zed's `gpui_macos` crate (github.com/zed-industries/zed, `crates/gpui_macos`),
+  published as `gpui-pre-macos` 0.3.10, snapshot `08cbb88a152c3751a43e853425a70e9f631a5918`.
+- License: Apache-2.0; unchanged text at `vendor/gpui-pre-macos/LICENSE-APACHE`.
+  Copyright/source notices are preserved; the published package supplied no NOTICE file.
+- Changes: an opt-in GPUI-owned termination delegate and reply token. `src/platform.rs`
+  and `src/gpui_macos.rs` are marked modified; `src/platform/termination.rs` and its tests
+  are added under Apache-2.0. No renderer/core/Kit change or caller activation.
+  Provenance, re-vendoring and limits: [docs/development/gpui-patch.md](docs/development/gpui-patch.md).
+
 ## Voice models (downloaded on request, not in the repo)
 
 Kumochi downloads these only when the user installs voice. Pins and provenance are in

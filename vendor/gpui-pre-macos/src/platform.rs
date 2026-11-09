@@ -1,3 +1,9 @@
+// Modified for Kumochi: opt-in native termination negotiation (docs/development/gpui-patch.md).
+mod termination;
+
+use termination::Control as TerminationControl;
+pub use termination::TerminationRequest;
+
 use crate::{
     AppleActivity, AppleDispatcher, BoolExt, MacDisplay, MacKeyboardLayout, MacKeyboardMapper,
     MacWindow, events::key_to_native, main_thread_marker, ns_string, pasteboard::Pasteboard,
@@ -32,9 +38,10 @@ use objc2::{
 use objc2_app_kit::{
     NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSAppearanceNameVibrantDark,
     NSAppearanceNameVibrantLight, NSApplication, NSApplicationActivationPolicy,
-    NSControlStateValueOn, NSCursor, NSDocumentController, NSEventModifierFlags, NSMenu,
-    NSMenuItem, NSModalResponse, NSModalResponseOK, NSOpenPanel, NSSavePanel, NSScroller,
-    NSScrollerStyle, NSWorkspace, NSWorkspaceDidWakeNotification, NSWorkspaceWillSleepNotification,
+    NSApplicationTerminateReply, NSControlStateValueOn, NSCursor, NSDocumentController,
+    NSEventModifierFlags, NSMenu, NSMenuItem, NSModalResponse, NSModalResponseOK, NSOpenPanel,
+    NSSavePanel, NSScroller, NSScrollerStyle, NSWorkspace, NSWorkspaceDidWakeNotification,
+    NSWorkspaceWillSleepNotification,
 };
 use objc2_foundation::{
     NSActivityOptions, NSArray, NSBundle, NSError, NSInteger, NSProcessInfo, NSString, NSURL,
@@ -59,6 +66,7 @@ use std::{
 const MAC_PLATFORM_IVAR: &CStr = c"platform";
 static mut APP_CLASS: *const AnyClass = ptr::null();
 static mut APP_DELEGATE_CLASS: *const AnyClass = ptr::null();
+static mut TERMINATION_DELEGATE_CLASS: *const AnyClass = ptr::null();
 
 #[ctor(unsafe)]
 unsafe fn build_classes() {
@@ -160,9 +168,28 @@ unsafe fn build_classes() {
             decl.register()
         }
     }
+    // SAFETY: registration runs once after the superclass has been registered above.
+    let parent = unsafe { &*APP_DELEGATE_CLASS };
+    let mut decl = ClassBuilder::new(c"GPUIApplicationTerminationDelegate", parent)
+        .expect("failed to register GPUIApplicationTerminationDelegate");
+    // SAFETY: the selector's public ABI is NSUInteger-backed NSApplicationTerminateReply.
+    unsafe {
+        decl.add_method(
+            sel!(applicationShouldTerminate:),
+            should_terminate
+                as extern "C-unwind" fn(_, Sel, &NSApplication) -> NSApplicationTerminateReply,
+        );
+    }
+    let registered = decl.register();
+    // SAFETY: this constructor is the sole writer before the class is used on main.
+    unsafe { TERMINATION_DELEGATE_CLASS = registered };
 }
 
-pub struct MacPlatform(Mutex<MacPlatformState>, MainThreadMarker);
+pub struct MacPlatform(
+    Mutex<MacPlatformState>,
+    MainThreadMarker,
+    Option<Rc<TerminationControl>>,
+);
 
 pub(crate) struct MacPlatformState {
     background_executor: BackgroundExecutor,
@@ -263,7 +290,27 @@ impl MacPlatform {
             cursor_visible: Arc::new(AtomicBool::new(true)),
             system_notifications: crate::system_notifications::SystemNotificationState::new(),
         });
-        Self(state, marker)
+        Self(state, marker, None)
+    }
+
+    /// Creates a platform with deferred, application-owned graphical termination.
+    ///
+    /// The handler runs on the main executor after ShouldTerminate returns Later, outside
+    /// GPUI's App borrow. Keep its token in a bootstrap-owned UI slot, independently of any
+    /// window/entity. Drop it on missing recipients. Reply YES only after actual resource
+    /// retirement; retain explicit app-owned Quit intent separately from native cancellation.
+    /// Headless CFRunLoop mode does not provide graphical termination negotiation.
+    pub fn new_with_termination_handler(
+        headless: bool,
+        handler: Box<dyn FnMut(TerminationRequest)>,
+    ) -> Self {
+        let mut platform = Self::new(headless);
+        let executor = platform.0.lock().foreground_executor.clone();
+        platform.2 = Some(TerminationControl::new(
+            Box::new(move |job| executor.spawn(async move { job() }).detach()),
+            handler,
+        ));
+        platform
     }
 
     unsafe fn create_menu_bar(
@@ -546,7 +593,16 @@ impl Platform for MacPlatform {
             if policy == ActivationPolicy::Accessory {
                 let _: Bool = msg_send![app, setActivationPolicy: native_activation_policy(policy)];
             }
-            let app_delegate: *mut AnyObject = msg_send![APP_DELEGATE_CLASS, new];
+            let delegate_class = if let Some(control) = &self.2 {
+                // SAFETY: sharedApplication returned a live NSApplication subclass on main.
+                let application = Retained::retain(app.cast::<NSApplication>())
+                    .expect("shared application is missing");
+                control.bind(application);
+                TERMINATION_DELEGATE_CLASS
+            } else {
+                APP_DELEGATE_CLASS
+            };
+            let app_delegate: *mut AnyObject = msg_send![delegate_class, new];
             let _: () = msg_send![app, setDelegate: app_delegate];
 
             let self_ptr = self as *const Self as *mut c_void;
@@ -561,6 +617,9 @@ impl Platform for MacPlatform {
                 let _: () = msg_send![app, run];
             });
 
+            if let Some(control) = &self.2 {
+                control.dispose();
+            }
             mac_platform_ivar(&*app)
                 .load_ptr::<*mut c_void>(&*app)
                 .write(ptr::null_mut());
@@ -1384,6 +1443,22 @@ extern "C-unwind" fn will_terminate(this: &AnyObject, _: Sel, _: *mut AnyObject)
         drop(lock);
         callback();
         platform.0.lock().quit.get_or_insert(callback);
+    }
+}
+
+extern "C-unwind" fn should_terminate(
+    this: &AnyObject,
+    _: Sel,
+    application: &NSApplication,
+) -> NSApplicationTerminateReply {
+    // SAFETY: the inherited checked ivar is initialized before run and nulled on return.
+    let pointer = unsafe { *mac_platform_ivar(this).load::<*mut c_void>(this) };
+    // SAFETY: a non-null ivar points to the platform borrowed for this graphical run.
+    let platform = unsafe { (pointer as *const MacPlatform).as_ref() };
+    let control = platform.and_then(|platform| platform.2.clone());
+    match control {
+        Some(control) => control.should_terminate(application),
+        None => NSApplicationTerminateReply::TerminateCancel,
     }
 }
 
