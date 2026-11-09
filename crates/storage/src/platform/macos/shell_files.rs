@@ -259,6 +259,18 @@ impl ShellStorage {
         create: bool,
     ) -> Result<File, AcquisitionError> {
         self.0.check()?;
+        let file = self.open_candidate(parent, name, access, create)?;
+        self.0.check()?;
+        Ok(file)
+    }
+
+    fn open_candidate(
+        &self,
+        parent: usize,
+        name: &CStr,
+        access: libc::c_int,
+        create: bool,
+    ) -> Result<File, AcquisitionError> {
         let folder = &self.0.held[parent].file;
         let flags = access | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY;
         let file = if create {
@@ -284,7 +296,6 @@ impl ShellStorage {
             return Err(Untrusted::Unsafe.into());
         }
         named(folder, name, &identity)?;
-        self.0.check()?;
         Ok(file)
     }
 
@@ -346,8 +357,10 @@ impl ShellStorage {
                 result.skipped += 1;
                 continue;
             };
-            let Ok(file) =
-                self.open_private(self.0.private_start + 1, &name, libc::O_RDONLY, false)
+            let Some(file) = checked_candidate(
+                || self.0.check(),
+                || self.open_candidate(self.0.private_start + 1, &name, libc::O_RDONLY, false),
+            )?
             else {
                 result.skipped += 1;
                 continue;
@@ -368,9 +381,10 @@ impl ShellStorage {
                 .then_with(|| a.1.as_bytes().cmp(b.1.as_bytes()))
         });
         for (_, name, identity) in candidates.into_iter().skip(keep - 1) {
-            self.0.check()?;
-            let Ok(file) =
-                self.open_private(self.0.private_start + 1, &name, libc::O_RDONLY, false)
+            let Some(file) = checked_candidate(
+                || self.0.check(),
+                || self.open_candidate(self.0.private_start + 1, &name, libc::O_RDONLY, false),
+            )?
             else {
                 result.skipped += 1;
                 continue;
@@ -392,6 +406,16 @@ impl ShellStorage {
         }
         Ok(result)
     }
+}
+
+fn checked_candidate<T>(
+    mut check_parent: impl FnMut() -> Result<(), AcquisitionError>,
+    open_candidate: impl FnOnce() -> Result<T, AcquisitionError>,
+) -> Result<Option<T>, AcquisitionError> {
+    check_parent()?;
+    let candidate = open_candidate();
+    check_parent()?;
+    Ok(candidate.ok())
 }
 
 impl Directories {

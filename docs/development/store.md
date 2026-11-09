@@ -32,8 +32,9 @@ ancestors, expose no file/descriptor/path escape, and logs support shared-refere
 Creation/open I/O errors are distinct from failed privacy/type/ACL/identity admission.
 
 Retention consumes at most 256 total entries, isolates an exact prefix/date namespace, excludes
-the supplied current log by identity, and reports skips/removals/incomplete scans. Concurrent
-missing/busy/unsafe/replaced candidates are skipped, without a rotation lock or mandatory new
+the supplied current log by identity, and reports skips/removals/incomplete scans.
+Ancestor admission failures propagate separately from candidate skips in both retention phases.
+Concurrent missing/busy/unsafe/replaced candidates are skipped, without a rotation lock or mandatory new
 Darwin unlink flags. Held-directory deletion remains name-based with a check-to-unlink race under
 the trusted OS/owning-UID boundary. Neither seven-file retention nor latency is guaranteed.
 These primitives do not integrate the shell/logger, certify the real anchor or native races,

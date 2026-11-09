@@ -144,3 +144,59 @@ fn private_directory_requires_the_current_owner_and_exact_mode() {
         assert_eq!(private_directory(&metadata, 501), Err(Untrusted::Unsafe));
     }
 }
+
+#[test]
+fn retention_routing_never_downgrades_observed_parent_refusal() {
+    use std::cell::Cell;
+
+    // SAFETY: zeroed integer stat storage is a fixture, not an acquired object.
+    let mut parent: libc::stat = unsafe { std::mem::zeroed() };
+    parent.st_mode = libc::S_IFDIR | 0o700;
+    parent.st_uid = 501;
+    let mut candidate = parent;
+    candidate.st_mode = libc::S_IFREG | 0o644;
+    candidate.st_nlink = 1;
+    let parent = Cell::new(parent);
+    let opened = Cell::new(false);
+    let check_parent = || private_directory(&parent.get(), 501).map_err(AcquisitionError::from);
+    let mut unsafe_parent = parent.get();
+    unsafe_parent.st_mode = libc::S_IFDIR | 0o750;
+    parent.set(unsafe_parent);
+    let refused = checked_candidate(check_parent, || {
+        opened.set(true);
+        protected::safe_regular(&candidate, 501).map_err(AcquisitionError::from)
+    });
+    assert_eq!(refused, Err(AcquisitionError::Admission(Untrusted::Unsafe)));
+    assert!(!opened.get());
+    let mut restored_parent = parent.get();
+    restored_parent.st_mode = libc::S_IFDIR | 0o700;
+    parent.set(restored_parent);
+    assert_eq!(check_parent(), Ok(()));
+    assert_eq!(refused, Err(AcquisitionError::Admission(Untrusted::Unsafe)));
+    assert_eq!(
+        checked_candidate(check_parent, || protected::safe_regular(&candidate, 501)
+            .map_err(AcquisitionError::from)),
+        Ok(None)
+    );
+    for candidate_succeeds in [false, true] {
+        parent.set(restored_parent);
+        let refused_after_open = checked_candidate(check_parent, || {
+            parent.set(unsafe_parent);
+            if candidate_succeeds {
+                Ok(())
+            } else {
+                protected::safe_regular(&candidate, 501).map_err(AcquisitionError::from)
+            }
+        });
+        assert_eq!(
+            refused_after_open,
+            Err(AcquisitionError::Admission(Untrusted::Unsafe))
+        );
+        parent.set(restored_parent);
+        assert_eq!(check_parent(), Ok(()));
+        assert_eq!(
+            refused_after_open,
+            Err(AcquisitionError::Admission(Untrusted::Unsafe))
+        );
+    }
+}

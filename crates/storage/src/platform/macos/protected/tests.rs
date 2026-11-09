@@ -684,7 +684,7 @@ impl Drop for Scratch {
 
 #[test]
 #[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
-fn native_opaque_shell_files_retain_ownership_and_do_not_truncate() {
+fn native_shell_files_append_reopen_and_skip_unsafe_candidates() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let mut scratch = Scratch::new();
@@ -705,6 +705,8 @@ fn native_opaque_shell_files_retain_ownership_and_do_not_truncate() {
         .record(&product, c"shell-7.lock")
         .expect("record lock");
     first.try_lock().expect("uncontended private fixture lock");
+    std::fs::write(support.join("product/shell-7.lock"), b"lock-sentinel")
+        .expect("seed only the recorded fixture lock");
     let log = std::sync::Arc::new(
         storage
             .append_log("shell.2026-11-09.log")
@@ -723,11 +725,15 @@ fn native_opaque_shell_files_retain_ownership_and_do_not_truncate() {
         Err(std::fs::TryLockError::WouldBlock)
     ));
     drop(second);
+    assert_eq!(
+        std::fs::read(support.join("product/shell-7.lock")).expect("fixture lock bytes"),
+        b"lock-sentinel"
+    );
     drop(storage);
     let mut shared = log.as_ref();
     shared
         .write_all(b"metadata-only\n")
-        .expect("shared append after original storage drops");
+        .expect("shared append while other opaque and fixture owners remain");
     shared.flush().expect("synchronous flush");
     let again = second_storage
         .append_log("shell.2026-11-09.log")
@@ -793,10 +799,8 @@ fn native_opaque_shell_files_retain_ownership_and_do_not_truncate() {
         .try_lock()
         .expect("dropping the prior owner releases its lock");
     assert_eq!(
-        std::fs::metadata(support.join("product/shell-7.lock"))
-            .expect("fixture lock")
-            .len(),
-        0
+        std::fs::read(support.join("product/shell-7.lock")).expect("fixture lock bytes"),
+        b"lock-sentinel"
     );
     drop(third);
     drop(log);
