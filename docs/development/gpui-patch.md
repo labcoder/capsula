@@ -280,3 +280,10 @@ progress, pre-open/reentrant/lost-delivery/disposal flows and last-owner cleanup
 plus applicable Mac/Windows regression and resource/performance checks. No authored
 assertion is an execution result. The SDK source reviewed is 14.4; other OS versions,
 architectures/displays/input/session states and all native behavior remain unmeasured.
+
+The backend's normalized manifest and upstream-style manifest mirror also forward the existing
+`gpui-pre-apple =0.3.10` dependency's `test-support` through a macOS-only dev edge. Backend
+`cfg(test)` exposes renderer test APIs, but does not set `cfg(test)` on the Apple dependency;
+this edge enables its matching APIs (and forwards core test-support) for root library tests
+without a CLI feature override. Regular dependencies, production defaults and lock identities
+are unchanged. Keep this test-only edge when re-vendoring unless upstream supplies it.

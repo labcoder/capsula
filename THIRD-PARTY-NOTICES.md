@@ -96,6 +96,7 @@ SOFTWARE.
 - Changes: an opt-in GPUI-owned termination delegate and reply token. `src/platform.rs`
   and `src/gpui_macos.rs` are marked modified; `src/platform/termination.rs` and its tests
   are added under Apache-2.0. No renderer/core/Kit change or caller activation.
+  Both manifest files are marked modified for test-only Apple dependency feature forwarding.
   Provenance, re-vendoring and limits: [docs/development/gpui-patch.md](docs/development/gpui-patch.md).
 
 ## Voice models (downloaded on request, not in the repo)
