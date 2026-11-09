@@ -1,11 +1,14 @@
-//! Protected filesystem operations, with admission-only support on macOS.
+//! Protected filesystem operations and dormant macOS shell-file primitives.
 
 mod platform;
 
 #[cfg(not(windows))]
 pub use platform::Untrusted;
 #[cfg(target_os = "macos")]
-pub use platform::macos::hold_chain;
+pub use platform::macos::{
+    AcquisitionError, AdmittedLock, AdmittedLog, Retention, ShellStorage, hold_chain,
+    open_shell_storage,
+};
 
 #[cfg(all(windows, any(test, feature = "test-support")))]
 pub use platform::windows::{

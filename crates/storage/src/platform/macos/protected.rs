@@ -72,7 +72,7 @@ pub fn hold_chain(path: &Path) -> Result<Vec<File>, Untrusted> {
     hold_from(root, &names, user)
 }
 
-fn components(path: &Path) -> Result<Vec<CString>, Untrusted> {
+pub(super) fn components(path: &Path) -> Result<Vec<CString>, Untrusted> {
     let bytes = path.as_os_str().as_bytes();
     if bytes.is_empty() || bytes.contains(&0) || bytes.starts_with(b"//") {
         return Err(Untrusted::Unsafe);
@@ -120,7 +120,7 @@ fn open_directory(parent: RawFd, name: &CStr) -> Result<File, Untrusted> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
-fn stat(fd: RawFd) -> Result<libc::stat, Untrusted> {
+pub(super) fn stat(fd: RawFd) -> Result<libc::stat, Untrusted> {
     let mut metadata = MaybeUninit::uninit();
     // SAFETY: metadata has the libc stat layout and writable storage; fd is not consumed.
     if unsafe { libc::fstat(fd, metadata.as_mut_ptr()) } != 0 {
@@ -140,7 +140,7 @@ fn safe_directory(metadata: &libc::stat, user: libc::uid_t) -> Result<(), Untrus
     Ok(())
 }
 
-fn same_inspection(left: &libc::stat, right: &libc::stat) -> bool {
+pub(super) fn same_inspection(left: &libc::stat, right: &libc::stat) -> bool {
     left.st_dev == right.st_dev
         && left.st_ino == right.st_ino
         && left.st_uid == right.st_uid
@@ -148,13 +148,60 @@ fn same_inspection(left: &libc::stat, right: &libc::stat) -> bool {
         && left.st_mode == right.st_mode
 }
 
-fn inspect(file: &File, user: libc::uid_t) -> Result<libc::stat, Untrusted> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ObjectKind {
+    Directory,
+    Regular,
+}
+
+impl ObjectKind {
+    fn attribute_type(self) -> u32 {
+        match self {
+            Self::Directory => 2,
+            Self::Regular => 1,
+        }
+    }
+
+    fn from_mode(mode: libc::mode_t) -> Result<Self, Untrusted> {
+        match mode & libc::S_IFMT {
+            libc::S_IFDIR => Ok(Self::Directory),
+            libc::S_IFREG => Ok(Self::Regular),
+            _ => Err(Untrusted::Io),
+        }
+    }
+}
+
+pub(super) fn safe_regular(metadata: &libc::stat, user: libc::uid_t) -> Result<(), Untrusted> {
+    if metadata.st_mode & libc::S_IFMT != libc::S_IFREG
+        || metadata.st_uid != user
+        || metadata.st_mode & 0o7777 != 0o600
+        || metadata.st_nlink != 1
+    {
+        return Err(Untrusted::Unsafe);
+    }
+    Ok(())
+}
+
+pub(super) fn inspect(file: &File, user: libc::uid_t) -> Result<libc::stat, Untrusted> {
+    inspect_object(file, user, ObjectKind::Directory)
+}
+
+pub(super) fn inspect_object(
+    file: &File,
+    user: libc::uid_t,
+    kind: ObjectKind,
+) -> Result<libc::stat, Untrusted> {
     let before = stat(file.as_raw_fd())?;
-    safe_directory(&before, user)?;
+    match kind {
+        ObjectKind::Directory => safe_directory(&before, user)?,
+        ObjectKind::Regular => safe_regular(&before, user)?,
+    }
     let security = Filesec::new()?;
     security.inspect(file.as_raw_fd(), &before)?;
     let after = stat(file.as_raw_fd())?;
-    if !same_inspection(&before, &after) {
+    if !same_inspection(&before, &after)
+        || (kind == ObjectKind::Regular && before.st_nlink != after.st_nlink)
+    {
         return Err(Untrusted::Io);
     }
     Ok(after)
@@ -177,7 +224,10 @@ impl Filesec {
         if unsafe { fstatx_np(fd, &raw mut metadata, self.0.as_ptr()) } != 0 {
             return Err(Untrusted::Io);
         }
-        if !same_inspection(expected, &metadata) {
+        if !same_inspection(expected, &metadata)
+            || (expected.st_mode & libc::S_IFMT == libc::S_IFREG
+                && expected.st_nlink != metadata.st_nlink)
+        {
             return Err(Untrusted::Io);
         }
         let mut owner = libc::uid_t::MAX;
@@ -267,8 +317,8 @@ fn classify_present_acl(
         return Err(Untrusted::Io);
     }
     if i32::from_ne_bytes(attribute_bytes(bytes, 24)?) != expected.st_dev
-        || u32::from_ne_bytes(attribute_bytes(bytes, 28)?) != 2
-        || expected.st_mode & libc::S_IFMT != libc::S_IFDIR
+        || u32::from_ne_bytes(attribute_bytes(bytes, 28)?)
+            != ObjectKind::from_mode(expected.st_mode)?.attribute_type()
         || u32::from_ne_bytes(attribute_bytes(bytes, 32)?) != expected.st_uid
         || u32::from_ne_bytes(attribute_bytes(bytes, 36)?) != expected.st_gid
         || u32::from_ne_bytes(attribute_bytes(bytes, 40)?) & 0o7777

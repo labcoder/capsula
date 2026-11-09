@@ -90,6 +90,53 @@ fn put_word(bytes: &mut [u8], offset: usize, value: u32) {
     bytes[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
 }
 
+#[test]
+fn regular_privacy_requires_one_link_and_exact_private_permissions() {
+    let mut file = sample();
+    file.st_mode = libc::S_IFREG | 0o600;
+    file.st_nlink = 1;
+    assert_eq!(safe_regular(&file, 501), Ok(()));
+    for links in [0, 2, 3] {
+        file.st_nlink = links;
+        assert_eq!(safe_regular(&file, 501), Err(Untrusted::Unsafe));
+    }
+    file.st_nlink = 1;
+    for mode in [0o400, 0o640, 0o606, 0o1600, 0o4600] {
+        file.st_mode = libc::S_IFREG | mode;
+        assert_eq!(safe_regular(&file, 501), Err(Untrusted::Unsafe));
+    }
+    file.st_mode = libc::S_IFREG | 0o600;
+    assert_eq!(safe_regular(&file, 0), Err(Untrusted::Unsafe));
+    file.st_mode = libc::S_IFDIR | 0o600;
+    assert_eq!(safe_regular(&file, 501), Err(Untrusted::Unsafe));
+}
+
+#[test]
+fn returned_acl_types_are_bound_to_directory_or_regular_metadata() {
+    let mut file = sample();
+    file.st_mode = libc::S_IFREG | 0o600;
+    file.st_nlink = 1;
+    let mut bytes = acl_response(&[(2, 4)]);
+    put_word(&mut bytes, 28, 1);
+    put_word(&mut bytes, 40, 0o600);
+    assert_eq!(classify_present_acl(0, &bytes, &file), Ok(()));
+    put_word(&mut bytes, 28, 2);
+    assert_eq!(classify_present_acl(0, &bytes, &file), Err(Untrusted::Io));
+    let mut directory = acl_response(&[]);
+    put_word(&mut directory, 28, 1);
+    assert_eq!(
+        classify_present_acl(0, &directory, &sample()),
+        Err(Untrusted::Io)
+    );
+    put_word(&mut bytes, 28, 1);
+    put_word(&mut bytes, 120, 1);
+    assert_eq!(
+        classify_present_acl(0, &bytes, &file),
+        Err(Untrusted::Unsafe)
+    );
+    assert_eq!(classify_present_acl(-1, &bytes, &file), Err(Untrusted::Io));
+}
+
 fn acl_response(entries: &[(u32, u32)]) -> Vec<u8> {
     let payload_length = 44 + 24 * entries.len();
     let mut bytes = vec![0; 60 + payload_length];
@@ -633,6 +680,131 @@ impl Drop for Scratch {
             );
         }
     }
+}
+
+#[test]
+#[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+fn native_opaque_shell_files_retain_ownership_and_do_not_truncate() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mut scratch = Scratch::new();
+    let parent = std::env::var_os("STORAGE_ADMISSION_FIXTURE_PARENT")
+        .expect("an explicitly commissioned fixture parent");
+    let support =
+        std::path::PathBuf::from(parent).join(OsStr::from_bytes(scratch.residual.to_bytes()));
+    let storage = crate::open_shell_storage(&support, "product").expect("admit fixture storage");
+    let root = scratch.root.try_clone().expect("retain fixture parent");
+    scratch.record(&root, c"product").expect("record product");
+    let product = open_directory(root.as_raw_fd(), c"product").expect("fixture product");
+    scratch.record(&product, c"logs").expect("record logs");
+    let logs = open_directory(product.as_raw_fd(), c"logs").expect("fixture logs");
+    let first = storage
+        .open_instance_lock("shell-7.lock")
+        .expect("private lock");
+    scratch
+        .record(&product, c"shell-7.lock")
+        .expect("record lock");
+    first.try_lock().expect("uncontended private fixture lock");
+    let log = std::sync::Arc::new(
+        storage
+            .append_log("shell.2026-11-09.log")
+            .expect("private log"),
+    );
+    scratch
+        .record(&logs, c"shell.2026-11-09.log")
+        .expect("record log");
+    let second_storage =
+        crate::open_shell_storage(&support, "product").expect("reopen admitted storage");
+    let second = second_storage
+        .open_instance_lock("shell-7.lock")
+        .expect("reopen lock without truncation");
+    assert!(matches!(
+        second.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    drop(second);
+    drop(storage);
+    let mut shared = log.as_ref();
+    shared
+        .write_all(b"metadata-only\n")
+        .expect("shared append after original storage drops");
+    shared.flush().expect("synchronous flush");
+    let again = second_storage
+        .append_log("shell.2026-11-09.log")
+        .expect("existing private append");
+    (&again)
+        .write_all(b"second\n")
+        .expect("append without truncating");
+    assert_eq!(
+        std::fs::read(support.join("product/logs/shell.2026-11-09.log")).expect("fixture bytes"),
+        b"metadata-only\nsecond\n"
+    );
+    let old = second_storage
+        .append_log("shell.2026-11-08.log")
+        .expect("old private log");
+    scratch
+        .record(&logs, c"shell.2026-11-08.log")
+        .expect("record old log");
+    drop(old);
+    let unsafe_old = second_storage
+        .append_log("shell.2026-11-07.log")
+        .expect("private candidate");
+    scratch
+        .record(&logs, c"shell.2026-11-07.log")
+        .expect("record candidate");
+    drop(unsafe_old);
+    std::fs::set_permissions(
+        support.join("product/logs/shell.2026-11-07.log"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .expect("change only fixture candidate permissions");
+    assert_eq!(
+        second_storage.retain_logs("shell", 1, &again),
+        Ok(crate::Retention {
+            scanned: 5,
+            skipped: 4,
+            removed: 1,
+            incomplete: false
+        })
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(support.join("product/logs/shell.2026-11-08.log"))
+            .expect_err("old candidate removed")
+            .kind(),
+        std::io::ErrorKind::NotFound
+    );
+    scratch
+        .entries
+        .retain(|entry| entry.name.as_c_str() != c"shell.2026-11-08.log");
+    assert_eq!(
+        std::fs::metadata(support.join("product/logs/shell.2026-11-07.log"))
+            .expect("unsafe candidate left alone")
+            .permissions()
+            .mode()
+            & 0o7777,
+        0o644
+    );
+    drop(again);
+    drop(first);
+    let third = second_storage
+        .open_instance_lock("shell-7.lock")
+        .expect("lock remains named");
+    third
+        .try_lock()
+        .expect("dropping the prior owner releases its lock");
+    assert_eq!(
+        std::fs::metadata(support.join("product/shell-7.lock"))
+            .expect("fixture lock")
+            .len(),
+        0
+    );
+    drop(third);
+    drop(log);
+    drop(second_storage);
+    drop(logs);
+    drop(product);
+    drop(root);
+    scratch.cleanup().expect("remove recorded fixture objects");
 }
 
 #[test]

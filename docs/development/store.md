@@ -6,7 +6,7 @@ brain opens it. The code is `crates/brain/src/store/`.
 
 Production Windows protected-file trust checks live in `kumochi-storage`, consumed by the
 brain through its existing platform exports. Folder discovery, file replacement, locks and
-SQLite/store policy remain in the brain. macOS storage implements only directory-chain
+SQLite/store policy remain in the brain. The original macOS `hold_chain` provides directory-chain
 admission: descriptor-relative no-follow opens, root/current-UID ownership, safe mode bits,
 and completed ACL-absence inspection. On completed presence, one bounded public fd attribute
 query must return a fully supported empty or DENY-only ACL, bound to the held object's numeric
@@ -21,6 +21,23 @@ certified product support floor; native release still needs a known running OS/b
 Fixture-only conformance checks share the production acquisition, require completed positive
 presence, and assert returned numeric policy independently. Normalized absence is not evidence
 of a returned empty or DENY-only ACL; the native present-empty capability remains unestablished.
+
+The dormant macOS shell-file primitives admit an OS-discovered Support candidate without
+creating its ancestors. The read-only anchor walk independently requires local, ownership-enforced
+APFS volumes; product/log directories and private files cannot cross the Support volume. Legacy
+`hold_chain` still refuses every device crossing. Private directories require current UID/0700;
+regular files require current UID/0600, one link, the same ACL/identity inspection, and checked
+no-follow/nontruncating relative acquisition. Opaque lock/log owners retain their admitted
+ancestors, expose no file/descriptor/path escape, and logs support shared-reference append writes.
+Creation/open I/O errors are distinct from failed privacy/type/ACL/identity admission.
+
+Retention consumes at most 256 total entries, isolates an exact prefix/date namespace, excludes
+the supplied current log by identity, and reports skips/removals/incomplete scans. Concurrent
+missing/busy/unsafe/replaced candidates are skipped, without a rotation lock or mandatory new
+Darwin unlink flags. Held-directory deletion remains name-based with a check-to-unlink race under
+the trusted OS/owning-UID boundary. Neither seven-file retention nor latency is guaranteed.
+These primitives do not integrate the shell/logger, certify the real anchor or native races,
+make kernel operations cancelable, or establish a deployment floor or durable flush guarantee.
 
 ## Settings
 
