@@ -1,14 +1,38 @@
 # Presence and native surfaces
 
-## Dormant log file owners
+## Dormant logger owner
 
-`platform/logging.rs` defines the file boundary for a future shared logger owner. macOS retains
-opaque `ShellStorage`/`AdmittedLog` owners; Windows retains the absolute per-user product namespace
-and append/create daily filenames. Retention uses exact date names, protects current identity and
-targets seven files within a 256-entry pass, not a seven-file guarantee. Name-based deletion still
+`logging::init(prefix)` is unchanged; startup does not construct `logging::owner::Logging`.
+The dormant owner admits its initial file before publication and owns one fallible std worker,
+a bounded whole-record channel and its real join handle. The proposed 64-record/4096-byte bounds
+cover queued copies, not formatter allocations, latency or measured responsiveness. Normal producers
+only try-lock ingress and try-send; they never take the file gate or perform filesystem I/O.
+Formatter errors and full, contended, oversized, revoked and abandoned records have saturating counters.
+An I/O error may leave a prefix; the record is counted, never blindly replayed or called durable.
+
+The worker alone rotates by an advancing UTC-day high-water and performs finite retention outside
+the current-writer gate. Ordinary errors retain the current writer when possible. An observed
+admission refusal latches only this sink; no later valid input readmits it. macOS retains opaque
+`ShellStorage`/`AdmittedLog` owners. Windows retains the absolute per-user product namespace and
+append/create daily filenames. Retention uses exact date names, protects current file identity and
+targets seven files within a 256-entry pass, not a seven-file guarantee; name-based deletion still
 has a check-to-unlink race. No recursive deletion, repair or content inspection is added.
-`logging::init(prefix)` and startup remain unchanged: none of these dormant backends is constructed.
-Shared worker/caller integration, source review, native validation and performance evidence remain open.
+
+The future caller must retain cleanup/instance custody off the UI thread: stop, enter Closing through
+the writer gate, revoke the sole sender, discard/count queued work, join actual worker return, then
+flush when still usable and drop current/namespace owners before Closed, instance unlock or `cx.quit`.
+Poison or security refusal permits reclamation, not renewed sink I/O. Drop is a blocking join fallback,
+not something to put in a UI entity or cancelable UI task. Late subscriber/hook references retain
+counters, not files. A stuck filesystem call keeps custody; no timeout proves retirement.
+The new hook writes only panic location synchronously to the admitted current file, never a payload
+or fallback path. Internal/recursive panics omit/count rather than reacquire their own gate.
+Unwind permits join/reclamation; the unchanged release `panic = "abort"` runs the hook then aborts
+without unwinding, queue-drain or graceful-retirement guarantees. Neither path promises durability.
+
+Caller integration, native storage/Windows validation and measured resource/UI evidence remain open.
+GPUI's irrevocable 200 ms quit observer and `applicationWillTerminate:` are not retirement barriers.
+Native AppKit ShouldTerminate/Later/reply support remains a separate activation prerequisite; this
+increment installs no hook, subscriber, worker, service or native delegate at startup.
 
 ## Shared presence contracts
 
