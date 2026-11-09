@@ -752,13 +752,28 @@ fn off_display_and_excluded_images_are_unavailable() {
         assert_eq!(masks.generation(), 1);
         assert_eq!(masks.completeness(), Completeness::Unknown(why));
     }
-    for (name, expected) in [
+    #[cfg(not(target_os = "macos"))]
+    let images = [
         ("C:\\app\\KUMOCHI.EXE", true),
         ("/app/Kumochid.exe", true),
         ("kumochi.exe.old", false),
+        ("kumochid.exe.old", false),
+        ("/app/kumochi", false),
+        ("/app/kumochid", false),
         ("another.exe", false),
-    ] {
-        assert_eq!(excluded_image(name), expected);
+    ];
+    #[cfg(target_os = "macos")]
+    let images = [
+        ("/app/KUMOCHI", true),
+        ("/app/Kumochid", true),
+        ("kumochi.old", false),
+        ("kumochid.old", false),
+        ("/app/kumochi.exe", false),
+        ("/app/kumochid.exe", false),
+        ("another", false),
+    ];
+    for (name, expected) in images {
+        assert_eq!(excluded_image(name), expected, "{name}");
     }
 }
 
