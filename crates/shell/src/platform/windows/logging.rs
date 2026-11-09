@@ -44,16 +44,13 @@ impl Store for Backend {
     type Log = FileLog;
 
     fn open(&mut self, day: Date) -> Result<FileLog, Error> {
-        let file = OpenOptions::new()
+        let opened = OpenOptions::new()
             .create(true)
             .append(true)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
-            .open(self.directory.join(logging::filename(&self.prefix, day)?))
-            .map_err(ordinary)?;
-        Ok(FileLog {
-            identity: identity(&file).map_err(ordinary)?,
-            file,
-        })
+            .open(self.directory.join(logging::filename(&self.prefix, day)?));
+        let (file, identity) = active_file(opened, identity)?;
+        Ok(FileLog { identity, file })
     }
 
     fn retain(&mut self, current: &FileLog) -> Result<Retention, Error> {
@@ -148,4 +145,26 @@ fn identity(file: &File) -> io::Result<Identity> {
 
 fn ordinary(error: io::Error) -> Error {
     Error::Open(error.kind())
+}
+
+pub(crate) fn active_file<T>(
+    opened: io::Result<T>,
+    inspect: impl FnOnce(&T) -> io::Result<Identity>,
+) -> Result<(T, Identity), Error> {
+    let file = opened.map_err(ordinary)?;
+    let identity = inspect(&file).map_err(|_| Error::SecurityRefused)?;
+    Ok((file, identity))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_open_is_ordinary_and_never_inspects_a_handle() {
+        let result = active_file::<()>(Err(io::ErrorKind::PermissionDenied.into()), |_| {
+            panic!("a failed open has no handle to inspect");
+        });
+        assert_eq!(result, Err(Error::Open(io::ErrorKind::PermissionDenied)));
+    }
 }

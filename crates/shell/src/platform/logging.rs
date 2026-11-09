@@ -4,6 +4,9 @@ use std::io;
 
 use time::Date;
 
+#[cfg(all(test, windows))]
+pub(crate) use super::windows::logging::active_file;
+
 pub(crate) const KEEP_FILES: usize = 7;
 pub(crate) const SCAN_LIMIT: usize = 256;
 

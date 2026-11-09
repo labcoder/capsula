@@ -21,7 +21,10 @@ pub(crate) mod owner {
     use std::thread::{self, JoinHandle};
 
     use time::{Date, OffsetDateTime};
-    use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields, MakeWriter, format};
+    use tracing_subscriber::field::RecordFields;
+    use tracing_subscriber::fmt::{
+        FmtContext, FormatEvent, FormatFields, FormattedFields, MakeWriter, format,
+    };
     use tracing_subscriber::registry::LookupSpan;
 
     use crate::platform::logging::{Error, Log, Retention, Store};
@@ -44,6 +47,7 @@ pub(crate) mod owner {
         Discarded,
         Abandoned,
         Format,
+        FieldFormat,
         Write,
         Flush,
         Open,
@@ -301,6 +305,94 @@ pub(crate) mod owner {
         }
     }
 
+    thread_local! { static FIELD_FAILED: Cell<Option<bool>> = const { Cell::new(None) }; }
+
+    struct EventFields {
+        previous: Option<bool>,
+    }
+    impl EventFields {
+        fn enter() -> Self {
+            Self {
+                previous: FIELD_FAILED.with(|failed| failed.replace(Some(false))),
+            }
+        }
+        fn failed() -> bool {
+            FIELD_FAILED.with(|failed| failed.get() == Some(true))
+        }
+    }
+    impl Drop for EventFields {
+        fn drop(&mut self) {
+            FIELD_FAILED.with(|failed| {
+                failed.set(self.previous.map(|old| old || failed.get() == Some(true)))
+            });
+        }
+    }
+
+    struct FormatAttempt<'a> {
+        counts: &'a Counts,
+        kind: Count,
+        success: bool,
+    }
+    impl<'a> FormatAttempt<'a> {
+        fn new(counts: &'a Counts, kind: Count) -> Self {
+            Self {
+                counts,
+                kind,
+                success: false,
+            }
+        }
+    }
+    impl Drop for FormatAttempt<'_> {
+        fn drop(&mut self) {
+            if !self.success {
+                self.counts.add(self.kind, 1);
+                FIELD_FAILED.with(|failed| {
+                    if failed.get().is_some() {
+                        failed.set(Some(true));
+                    }
+                });
+            }
+        }
+    }
+
+    struct StagedFields {
+        counts: Arc<Counts>,
+    }
+    impl<'writer> FormatFields<'writer> for StagedFields {
+        fn format_fields<R: RecordFields>(
+            &self,
+            mut writer: format::Writer<'writer>,
+            fields: R,
+        ) -> fmt::Result {
+            let mut attempt = FormatAttempt::new(&self.counts, Count::FieldFormat);
+            let mut staged = String::new();
+            if format::DefaultFields::new()
+                .format_fields(format::Writer::new(&mut staged), fields)
+                .is_ok()
+                && writer.write_str(&staged).is_ok()
+            {
+                attempt.success = true;
+            }
+            Ok(())
+        }
+        fn add_fields(
+            &self,
+            current: &'writer mut FormattedFields<Self>,
+            fields: &tracing::span::Record<'_>,
+        ) -> fmt::Result {
+            let mut attempt = FormatAttempt::new(&self.counts, Count::FieldFormat);
+            let mut staged = FormattedFields::<format::DefaultFields>::new(current.fields.clone());
+            if format::DefaultFields::new()
+                .add_fields(&mut staged, fields)
+                .is_ok()
+            {
+                current.fields = staged.fields;
+                attempt.success = true;
+            }
+            Ok(())
+        }
+    }
+
     struct CountFormat<F> {
         inner: F,
         counts: Arc<Counts>,
@@ -314,15 +406,48 @@ pub(crate) mod owner {
         fn format_event(
             &self,
             cx: &FmtContext<'_, S, N>,
-            writer: format::Writer<'_>,
+            mut writer: format::Writer<'_>,
             event: &tracing::Event<'_>,
         ) -> fmt::Result {
-            let result = self.inner.format_event(cx, writer, event);
-            if result.is_err() {
-                self.counts.add(Count::Format, 1);
+            let _fields = EventFields::enter();
+            let mut attempt = FormatAttempt::new(&self.counts, Count::Format);
+            let mut staged = String::new();
+            self.inner
+                .format_event(cx, format::Writer::new(&mut staged), event)?;
+            if EventFields::failed() {
+                return Err(fmt::Error);
             }
-            result
+            writer.write_str(&staged)?;
+            attempt.success = true;
+            Ok(())
         }
+    }
+
+    fn subscriber<L: Log + 'static>(
+        writer: Writer<L>,
+        event_format: impl FormatEvent<tracing_subscriber::Registry, StagedFields>
+        + Send
+        + Sync
+        + 'static,
+    ) -> impl tracing::Subscriber + Send + Sync + 'static {
+        let counts = &writer.0.counts;
+        tracing_subscriber::fmt()
+            .fmt_fields(StagedFields {
+                counts: Arc::clone(counts),
+            })
+            .event_format(CountFormat {
+                inner: event_format,
+                counts: Arc::clone(counts),
+            })
+            .with_writer(writer)
+            .with_ansi(false)
+            .with_max_level(if cfg!(debug_assertions) {
+                tracing::Level::DEBUG
+            } else {
+                tracing::Level::INFO
+            })
+            .log_internal_errors(false)
+            .finish()
     }
 
     #[derive(Debug, thiserror::Error)]
@@ -408,19 +533,7 @@ pub(crate) mod owner {
         where
             B::Log: 'static,
         {
-            let subscriber = tracing_subscriber::fmt()
-                .event_format(CountFormat {
-                    inner: format::format(),
-                    counts: Arc::clone(&self.writer.0.counts),
-                })
-                .with_writer(self.writer())
-                .with_max_level(if cfg!(debug_assertions) {
-                    tracing::Level::DEBUG
-                } else {
-                    tracing::Level::INFO
-                })
-                .log_internal_errors(false)
-                .finish();
+            let subscriber = subscriber(self.writer(), format::format());
             if let Err(error) = install(tracing::Dispatch::new(subscriber)) {
                 self.close();
                 return Err(error);

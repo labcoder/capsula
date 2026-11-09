@@ -246,18 +246,128 @@ where
 fn formatter_error_counts_without_publishing_partial_content() {
     let fixture = Arc::new(Fixture::default());
     let (writer, receiver) = ingress(&fixture, 1);
-    let subscriber = tracing_subscriber::fmt()
-        .event_format(CountFormat {
-            inner: BadFormat,
-            counts: Arc::clone(&writer.0.counts),
-        })
-        .with_writer(writer.clone())
-        .log_internal_errors(false)
-        .finish();
+    let subscriber = subscriber(writer.clone(), BadFormat);
     tracing::subscriber::with_default(subscriber, || tracing::info!("fixture"));
     assert_eq!(writer.statistics().get(Count::Format), 1);
     assert_eq!(writer.statistics().get(Count::Submitted), 0);
     assert_eq!(receiver.try_recv().unwrap_err(), TryRecvError::Empty);
+}
+
+struct FailedField {
+    calls: AtomicUsize,
+    panic: bool,
+}
+impl FailedField {
+    fn error() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            panic: false,
+        }
+    }
+}
+impl fmt::Display for FailedField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let first = self.calls.fetch_add(1, Ordering::SeqCst) == 0;
+        f.write_str("PRIVATE_FORMAT_PREFIX")?;
+        assert!(!(first && self.panic), "producer formatting fixture");
+        if first { Err(fmt::Error) } else { Ok(()) }
+    }
+}
+fn plain_subscriber(writer: &Writer<TestLog>) -> impl tracing::Subscriber + Send + Sync + 'static {
+    subscriber(
+        writer.clone(),
+        format::format()
+            .without_time()
+            .with_level(false)
+            .with_target(false),
+    )
+}
+fn accepted_bytes(receiver: &Receiver<Record>) -> Vec<u8> {
+    let mut record = receiver.try_recv().unwrap();
+    record.finish(Count::Discarded);
+    std::mem::take(&mut record.bytes)
+}
+
+#[test]
+fn new_span_field_error_never_reformats_raw_attributes_or_accepts_partial_fields() {
+    let fixture = Arc::new(Fixture::default());
+    let (writer, receiver) = ingress(&fixture, 1);
+    let field = FailedField::error();
+    tracing::subscriber::with_default(plain_subscriber(&writer), || {
+        let span = tracing::info_span!(
+            "fixture_span",
+            value = tracing::field::display(&field),
+            following = "RAW_ATTRIBUTE_SECRET"
+        );
+        span.in_scope(|| tracing::info!("valid"));
+    });
+    assert_eq!(field.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(accepted_bytes(&receiver), b"fixture_span: valid\n");
+    assert_eq!(writer.statistics().get(Count::FieldFormat), 1);
+    assert_eq!(writer.statistics().get(Count::Format), 0);
+    assert_eq!(writer.statistics().get(Count::Submitted), 1);
+    assert_eq!(receiver.try_recv().unwrap_err(), TryRecvError::Empty);
+}
+
+#[test]
+fn failed_span_field_update_preserves_only_the_prior_committed_text() {
+    let fixture = Arc::new(Fixture::default());
+    let (writer, receiver) = ingress(&fixture, 1);
+    let field = FailedField::error();
+    tracing::subscriber::with_default(plain_subscriber(&writer), || {
+        let span = tracing::info_span!("fixture_span", safe = 1_u64, value = tracing::field::Empty);
+        span.record("value", tracing::field::display(&field));
+        span.in_scope(|| tracing::info!("valid"));
+    });
+    assert_eq!(field.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(accepted_bytes(&receiver), b"fixture_span{safe=1}: valid\n");
+    assert_eq!(writer.statistics().get(Count::FieldFormat), 1);
+    assert_eq!(writer.statistics().get(Count::Format), 0);
+    assert_eq!(writer.statistics().get(Count::Submitted), 1);
+}
+
+#[test]
+fn event_field_error_rejects_the_whole_event_and_allows_a_later_valid_event() {
+    let fixture = Arc::new(Fixture::default());
+    let (writer, receiver) = ingress(&fixture, 1);
+    let field = FailedField::error();
+    tracing::subscriber::with_default(plain_subscriber(&writer), || {
+        tracing::info!(value = tracing::field::display(&field), "failed");
+        assert_eq!(receiver.try_recv().unwrap_err(), TryRecvError::Empty);
+        tracing::info!("valid");
+    });
+    assert_eq!(accepted_bytes(&receiver), b"valid\n");
+    assert_eq!(writer.statistics().get(Count::FieldFormat), 1);
+    assert_eq!(writer.statistics().get(Count::Format), 1);
+    assert_eq!(writer.statistics().get(Count::Submitted), 1);
+    assert_eq!(writer.statistics().get(Count::Abandoned), 0);
+}
+
+#[test]
+#[cfg(panic = "unwind")]
+fn caught_producer_formatter_unwind_cannot_prefix_the_next_event() {
+    let fixture = Arc::new(Fixture::default());
+    let (writer, receiver) = ingress(&fixture, 1);
+    let field = FailedField {
+        calls: AtomicUsize::new(0),
+        panic: true,
+    };
+    tracing::subscriber::with_default(plain_subscriber(&writer), || {
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tracing::info!(value = tracing::field::display(&field), "failed");
+        }));
+        assert!(failed.is_err());
+        assert_eq!(receiver.try_recv().unwrap_err(), TryRecvError::Empty);
+        assert_eq!(FIELD_FAILED.with(Cell::get), None);
+        tracing::info!("valid");
+    });
+    assert_eq!(field.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(accepted_bytes(&receiver), b"valid\n");
+    assert_eq!(writer.statistics().get(Count::FieldFormat), 1);
+    assert_eq!(writer.statistics().get(Count::Format), 1);
+    assert_eq!(writer.statistics().get(Count::WorkerPanic), 0);
+    assert_eq!(writer.statistics().get(Count::Submitted), 1);
+    assert_eq!(writer.statistics().get(Count::Abandoned), 0);
 }
 
 #[test]
@@ -383,7 +493,13 @@ fn active_file_admission_refusal_is_not_a_retention_candidate_skip() {
     let mut store = TestStore::new(&fixture);
     let (writer, _receiver) = ingress(&fixture, 1);
     let mut day = today();
-    *fixture.open_error.lock().unwrap() = Some(Error::SecurityRefused);
+    #[cfg(windows)]
+    let refusal =
+        crate::platform::logging::active_file(Ok(()), |_| Err(io::ErrorKind::InvalidData.into()))
+            .unwrap_err();
+    #[cfg(not(windows))]
+    let refusal = Error::SecurityRefused;
+    *fixture.open_error.lock().unwrap() = Some(refusal);
     rollover(&mut store, &writer.0, &mut day, today().next_day().unwrap());
     assert_eq!(
         writer.0.current.lock().unwrap().state,

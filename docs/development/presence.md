@@ -8,14 +8,24 @@ a bounded whole-record channel and its real join handle. The proposed 64-record/
 cover queued copies, not formatter allocations, latency or measured responsiveness. Normal producers
 only try-lock ingress and try-send; they never take the file gate or perform filesystem I/O.
 Formatter errors and full, contended, oversized, revoked and abandoned records have saturating counters.
+The installed default span-field formatter stages new fields and updates before commitment. Failed
+new-span formatting returns an empty field set without reaching tracing's raw-attribute stderr fallback;
+a failed update retains only previously committed text. Event formatting uses a fresh staging string,
+so a caught producer-side formatter unwind leaves no failed prefix in tracing's reusable TLS buffer.
+Nested field failures reject the enclosing whole event. FieldFormat counts failed field operations;
+Format separately counts rejected event attempts, including unwinds, not two lost records.
+Files disable ANSI output; staging allocation and latency are unmeasured. Release panic=abort does not
+run these unwind guards or recover to a later event; the location-only panic contract is unchanged.
 An I/O error may leave a prefix; the record is counted, never blindly replayed or called durable.
 
 The worker alone rotates by an advancing UTC-day high-water and performs finite retention outside
 the current-writer gate. Ordinary errors retain the current writer when possible. An observed
 admission refusal latches only this sink; no later valid input readmits it. macOS retains opaque
 `ShellStorage`/`AdmittedLog` owners. Windows retains the absolute per-user product namespace and
-append/create daily filenames. Retention uses exact date names, protects current file identity and
-targets seven files within a 256-entry pass, not a seven-file guarantee; name-based deletion still
+append/create behavior: an actual active-file open failure is ordinary, but subsequent type/reparse/
+handle-identity admission failure latches SecurityRefused. Retention-candidate failures remain skips.
+Daily filenames and retention use exact date names, protect sampled current file identity and
+target seven files within a 256-entry pass, not a seven-file guarantee; name-based deletion still
 has a check-to-unlink race. No recursive deletion, repair or content inspection is added.
 
 The future caller must retain cleanup/instance custody off the UI thread: stop, enter Closing through
