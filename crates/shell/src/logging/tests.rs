@@ -35,6 +35,7 @@ impl Pause {
 struct Fixture {
     files: AtomicUsize,
     namespaces: AtomicUsize,
+    retired: Mutex<Vec<&'static str>>,
     generations: AtomicUsize,
     opens: Mutex<Vec<Date>>,
     bytes: Mutex<Vec<u8>>,
@@ -48,25 +49,32 @@ struct Fixture {
     flushes: AtomicUsize,
     skipped: AtomicUsize,
 }
-struct TestStore(Arc<Fixture>);
+struct TestNamespace(Arc<Fixture>);
+struct TestStore(Arc<Fixture>, Arc<TestNamespace>);
 struct TestLog {
     fixture: Arc<Fixture>,
     generation: usize,
+    _namespace: Arc<TestNamespace>,
 }
 impl TestStore {
     fn new(fixture: &Arc<Fixture>) -> Self {
         fixture.namespaces.fetch_add(1, Ordering::SeqCst);
-        Self(Arc::clone(fixture))
+        Self(
+            Arc::clone(fixture),
+            Arc::new(TestNamespace(Arc::clone(fixture))),
+        )
     }
 }
-impl Drop for TestStore {
+impl Drop for TestNamespace {
     fn drop(&mut self) {
         self.0.namespaces.fetch_sub(1, Ordering::SeqCst);
+        self.0.retired.lock().unwrap().push("namespace");
     }
 }
 impl Drop for TestLog {
     fn drop(&mut self) {
         self.fixture.files.fetch_sub(1, Ordering::SeqCst);
+        self.fixture.retired.lock().unwrap().push("file");
     }
 }
 impl Store for TestStore {
@@ -85,6 +93,7 @@ impl Store for TestStore {
         Ok(TestLog {
             fixture: Arc::clone(&self.0),
             generation,
+            _namespace: Arc::clone(&self.1),
         })
     }
     fn retain(&mut self, _: &TestLog) -> Result<Retention, Error> {
@@ -369,6 +378,31 @@ fn closing_rejects_an_already_preparing_candidate_without_replacing_current() {
 }
 
 #[test]
+fn active_file_admission_refusal_is_not_a_retention_candidate_skip() {
+    let fixture = Arc::new(Fixture::default());
+    let mut store = TestStore::new(&fixture);
+    let (writer, _receiver) = ingress(&fixture, 1);
+    let mut day = today();
+    *fixture.open_error.lock().unwrap() = Some(Error::SecurityRefused);
+    rollover(&mut store, &writer.0, &mut day, today().next_day().unwrap());
+    assert_eq!(
+        writer.0.current.lock().unwrap().state,
+        State::SecurityRefused
+    );
+    rollover(
+        &mut store,
+        &writer.0,
+        &mut day,
+        today().next_day().unwrap().next_day().unwrap(),
+    );
+    writer.submit(b"valid after active-file refusal");
+    assert_eq!(fixture.generations.load(Ordering::SeqCst), 1);
+    assert_eq!(writer.statistics().get(Count::PruneSkipped), 0);
+    assert_eq!(writer.statistics().get(Count::Refused), 1);
+    assert!(fixture.bytes.lock().unwrap().is_empty());
+}
+
+#[test]
 fn close_waits_for_entered_io_and_releases_last_owners_before_unlock_or_quit() {
     let fixture = Arc::new(Fixture::default());
     let owner = start(&fixture, today());
@@ -386,6 +420,10 @@ fn close_waits_for_entered_io_and_releases_last_owners_before_unlock_or_quit() {
         let counts = owner.close();
         assert_eq!(closed_fixture.files.load(Ordering::SeqCst), 0);
         assert_eq!(closed_fixture.namespaces.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            &*closed_fixture.retired.lock().unwrap(),
+            &["file", "namespace"]
+        );
         instance.store(true, Ordering::SeqCst);
         quit.send(counts).unwrap();
     });
@@ -473,6 +511,7 @@ fn worker_unwind_attributes_inflight_and_queued_records_and_still_reclaims_curre
     assert_eq!(counts.get(Count::Write), 0);
     assert_eq!(fixture.files.load(Ordering::SeqCst), 0);
     assert_eq!(fixture.namespaces.load(Ordering::SeqCst), 0);
+    assert_eq!(&*fixture.retired.lock().unwrap(), &["file", "namespace"]);
     assert!(writer.0.current.is_poisoned());
     assert!(
         writer
