@@ -2240,7 +2240,7 @@ mod tests {
     fn worker_startup_backbone_failure_closes_output_and_joins_the_started_decoder() {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::mpsc;
-        use std::time::Duration;
+        use std::time::{Duration, Instant};
 
         let wait = Duration::from_secs(2);
         let (pcm_tx, pcm_rx) = mpsc::sync_channel(1);
@@ -2261,7 +2261,14 @@ mod tests {
             .with_worker(std::thread::Builder::new().spawn(move || {
                 ready_tx.send(()).unwrap();
                 assert_eq!(latent_rx.recv_timeout(wait), Err(mpsc::RecvTimeoutError::Disconnected));
-                assert!(pcm_tx.send(Ok(vec![0.1])).is_err());
+                let close_deadline = Instant::now() + wait;
+                while !matches!(
+                    pcm_tx.try_send(Ok(vec![0.1])),
+                    Err(mpsc::TrySendError::Disconnected(_))
+                ) {
+                    assert!(Instant::now() < close_deadline, "PCM output must close");
+                    std::thread::yield_now();
+                }
                 stopping_tx.send(()).unwrap();
                 release_rx.recv_timeout(wait).unwrap();
                 worker_stopped.store(true, Ordering::Release);
@@ -2283,8 +2290,9 @@ mod tests {
             done_tx.send(matches!(result, Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock)).unwrap();
         }).unwrap();
         stopping_rx.recv_timeout(wait).unwrap();
-        assert_eq!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty));
+        let completion = done_rx.recv_timeout(Duration::from_millis(100));
         release_tx.send(()).unwrap();
+        assert_eq!(completion, Err(mpsc::RecvTimeoutError::Timeout));
         assert!(done_rx.recv_timeout(wait).unwrap());
         cleanup.join().unwrap();
         assert!(stopped.load(Ordering::Acquire));
