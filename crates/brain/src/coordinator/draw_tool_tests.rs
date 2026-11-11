@@ -1,8 +1,8 @@
-use kumochi_protocol::message::{DataToShell, ThreadId};
+use kumochi_protocol::message::{AssistantName, DataToShell, ThreadId};
 use serde_json::{Value, json};
 
 use super::{R, T, fresh};
-use crate::context::{Built, Origin};
+use crate::context::{Built, ConnectionTag, Origin, RunSnapshot};
 use crate::coordinator::{BuildKey, ContextBuilt, Coordinator, Effect, Input, StoreOp};
 use crate::dispatch::{Caller, Committed, Dispatch, ToolError, ToolOutput};
 use crate::engines::{CallId, Finish, TurnEvent};
@@ -45,7 +45,13 @@ fn offered(sources: Vec<ThreadId>) -> Coordinator {
 fn built(key: BuildKey, sources: Vec<ThreadId>) -> Input {
     Input::ContextBuilt(ContextBuilt {
         key,
-        snapshot: None,
+        snapshot: Some(RunSnapshot {
+            origin: Origin::Task(T),
+            assistant: AssistantName::new("Kumo").expect("name"),
+            user: None,
+            choice: None,
+            connection: ConnectionTag(0),
+        }),
         result: Ok(Built {
             request: crate::context::ModelRequest {
                 tools: crate::context::tools(Origin::Task(T)),
