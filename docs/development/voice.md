@@ -53,6 +53,10 @@ destroyed. These storage guarantees are the platform adapter contract; model pol
 conditionals. Intentional linked-folder relocation is not supported.
 Installation opens or creates every needed partial before discarding any invalid final, so a
 later acquisition refusal leaves the existing files intact.
+It denies write sharing on the owned model root and part directory through partial acquisition,
+including while empty. These directory guards then close before publication; the checked partial
+handles stay held. The shared primitive's threat boundary still applies: medium-integrity code
+running as this user can already change the brain, so it isn't defended against here.
 Drive-letter network mappings are refused before opening their root; local drives still pass
 the existing held-chain ownership, permission and resolved-path checks.
 Start-up inspects sizes through the same checked file handles. A refused path becomes the

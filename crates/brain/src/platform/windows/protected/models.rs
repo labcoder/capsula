@@ -82,6 +82,17 @@ pub(crate) fn model_file(path: &Path) -> Result<File, Untrusted> {
     Ok(file)
 }
 
+pub(crate) fn hold_model_creation(path: &Path) -> Result<File, Untrusted> {
+    let bound = File::options()
+        .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|_| Untrusted::Io)?;
+    check(&bound, path, Kind::Folder, &Trusted::new()?)?;
+    Ok(bound)
+}
+
 pub(crate) fn open_model_write(path: &Path) -> Result<File, Untrusted> {
     checked_write(open(path, Kind::File, FILE_GENERIC_WRITE | DELETE)?, path)
 }

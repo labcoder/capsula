@@ -6,6 +6,10 @@
 //! Writable opens never truncate before checking ownership, aliases and exclusive access.
 //! Publication renames the checked partial handle into a held parent without replacing a new
 //! arrival. Callers preflight every final and partial before deleting, truncating or writing.
+//! Installation denies write sharing on its owned model root and part directory until every
+//! needed partial handle is acquired, so an empty directory cannot redirect creation. As with the
+//! shared primitive, medium-integrity code running as this user can already change the brain,
+//! so it isn't defended against here.
 
 use std::fs::File;
 use std::path::Path;

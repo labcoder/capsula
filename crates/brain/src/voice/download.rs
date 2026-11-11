@@ -229,7 +229,15 @@ impl Downloader {
             return Err(DownloadError::Refused);
         }
         let dir = self.models.join(first.part.dir());
-        let held = create_model_dir(&dir).map_err(path_error)?;
+        let mut held = create_model_dir(&self.models).map_err(path_error)?;
+        let root_creation =
+            crate::platform::hold_model_creation(&self.models).map_err(path_error)?;
+        #[cfg(test)]
+        crate::platform::paused(&self.models);
+        held.extend(create_model_dir(&dir).map_err(path_error)?);
+        let part_creation = crate::platform::hold_model_creation(&dir).map_err(path_error)?;
+        #[cfg(test)]
+        crate::platform::paused(&dir);
         let mut checked = Vec::new();
         for &model in files {
             check_cancel(cancel)?;
@@ -252,7 +260,7 @@ impl Downloader {
                     continue;
                 }
                 #[cfg(test)]
-                crate::platform::paused(&path);
+                crate::platform::paused(&partial);
                 check_model_final(&file, &path).map_err(path_error)?;
                 final_file = Some(file);
             }
@@ -287,10 +295,13 @@ impl Downloader {
             };
             ready.push((model, path, final_file, file));
         }
+        drop((root_creation, part_creation));
         report.value.done = done;
         report.sender.send_replace(report.value);
         for (model, path, final_file, mut file) in ready {
             if let Some(file) = final_file {
+                #[cfg(test)]
+                crate::platform::paused(&path);
                 discard_model(file).map_err(|_| DownloadError::Io)?;
             }
             // `fetch_file` hashes the bytes already in the `.part` first.

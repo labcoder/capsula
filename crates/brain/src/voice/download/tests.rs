@@ -262,6 +262,45 @@ enum LinkedFolder {
 }
 
 #[tokio::test]
+async fn model_review_h1_held_empty_directory_cannot_redirect_partial_creation() {
+    for root in [false, true] {
+        let server = Server::start(vec![Reply::full()]);
+        let (scratch, downloader) = server.downloader();
+        let part = downloader.models.join(MODEL.part.dir());
+        let folder = if root {
+            downloader.models.clone()
+        } else {
+            part
+        };
+        let outside = scratch.dir().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("sentinel"), b"outside").unwrap();
+        let attempted = Arc::new(std::sync::Mutex::new(None));
+        let changed = Arc::clone(&attempted);
+        let target = outside.clone();
+        crate::platform::pause_after_check(
+            folder.clone(),
+            Box::new(move || {
+                *changed.lock().unwrap() = Some(
+                    crate::platform::sherpa::tests::set_junction(&folder, &target)
+                        .map_err(|error| error.raw_os_error()),
+                );
+            }),
+        );
+        let result = fetch(&downloader).await.0;
+        let names = fs::read_dir(&outside)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["sentinel"], "root={root}");
+        assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"outside");
+        assert_eq!(*attempted.lock().unwrap(), Some(Err(Some(32))));
+        assert_eq!(result, Ok(()));
+        assert_eq!(fs::read(final_path(&downloader)).unwrap(), b"abcdef");
+    }
+}
+
+#[tokio::test]
 async fn model_review_acquisition_refusal_preserves_an_earlier_invalid_final() {
     let server = Server::start(vec![Reply::full()]);
     let (_scratch, downloader) = server.downloader();
@@ -274,7 +313,7 @@ async fn model_review_acquisition_refusal_preserves_an_earlier_invalid_final() {
     let blocker = target.with_file_name("second.bin.part");
     let create = blocker.clone();
     crate::platform::pause_after_check(
-        target.clone(),
+        part_path(&downloader),
         Box::new(move || {
             fs::create_dir(&create).unwrap();
             fs::write(create.join("sentinel"), b"keep").unwrap();
