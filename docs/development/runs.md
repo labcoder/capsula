@@ -516,3 +516,15 @@ input and cancel. This applies while a snapshot read is pending and after it com
 an answered deletion cannot revive an old admission. Once submitted, the coordinator also
 fences target deletion/model inputs before routing them. SendReady requires the live flag,
 exact pinned snapshot, ready connection and model; cancellation never grants another send.
+
+The Shell retains one gesture/selection/target handoff without words or a typed
+turn count. Only its first matching Hold-origin state can bind New to a real
+thread. Thinking remains cancellable; Answering transfers to ordinary run
+handling. Selection changes, confirmed deletion and newer typed/Ask input
+invalidate it. Callers revoke collection and drain `take_hold_cancel` before
+queueing replacement input; typed submission refuses while cancellation is
+undelivered. Refused/offline gestures are consumed too. Once this Shell has
+attempted a voice hold, unrequested or cancelled first Hold states are stopped,
+never displayed or allowed to retarget. Before that, the existing unowned-run
+display behavior is unchanged. Disconnect
+clears connection-local cancellation but retains the lifetime gesture high-water.
