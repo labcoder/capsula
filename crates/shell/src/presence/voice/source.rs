@@ -139,26 +139,33 @@ impl Presence {
                 };
                 match receipt {
                     Ok(receipt) => {
+                        let notice = match receipt.finalization {
+                            Finalization::Discarded(
+                                crate::platform::microphone::MicError::Cancelled
+                                | crate::platform::microphone::MicError::SessionLost,
+                            ) => Text::HoldCancelled,
+                            Finalization::Discarded(
+                                crate::platform::microphone::MicError::Unavailable
+                                | crate::platform::microphone::MicError::Format,
+                            ) => Text::HoldMicrophoneUnavailable,
+                            _ => Text::HoldFailed,
+                        };
                         hold.source = Source::Sent;
                         if let Some(terminal) = hold.terminal {
-                            this.end_voice(terminal, cx);
+                            this.end_voice(
+                                if terminal == Text::HoldUnavailable {
+                                    notice
+                                } else {
+                                    terminal
+                                },
+                                cx,
+                            );
                         } else if receipt.finalization
                             == (Finalization::Released { packets: count })
                         {
                             hold.source = Source::Joined(count);
                             this.finish_voice();
                         } else {
-                            let notice = match receipt.finalization {
-                                Finalization::Discarded(
-                                    crate::platform::microphone::MicError::Cancelled
-                                    | crate::platform::microphone::MicError::SessionLost,
-                                ) => Text::HoldCancelled,
-                                Finalization::Discarded(
-                                    crate::platform::microphone::MicError::Unavailable
-                                    | crate::platform::microphone::MicError::Format,
-                                ) => Text::HoldMicrophoneUnavailable,
-                                _ => Text::HoldFailed,
-                            };
                             this.end_voice(notice, cx);
                         }
                     }

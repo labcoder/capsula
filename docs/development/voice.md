@@ -885,6 +885,8 @@ unconfirmed source remains unavailable rather than claiming stopped or allowing 
 No-Running start failures take their notice from the true stop result, not a manufactured
 user cancellation. Confirmed unavailable/unsupported microphones have a dedicated notice;
 only unconfirmed source cleanup uses the microphone-active restart warning.
+When a late receipt confirms cleanup, its confirmed notice replaces that warning without
+reviving the terminal hold or transcribing its expired audio.
 
 The Shell data writer serializes into one caller-owned zeroizing buffer and scrubs its
 owned capacity after success, encoding refusal or a partial/failed write. Frame headers,

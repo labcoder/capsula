@@ -888,6 +888,10 @@ fn a_stalled_open_or_stop_warns_without_releasing_its_generation(cx: &mut TestAp
         until(cx, |cx| {
             owner.read_with(cx, |o, _| o.voice.pending.is_none())
         });
+        owner.read_with(cx, |owner, cx| {
+            assert_eq!(owner.voice.status, Some(Text::HoldCancelled));
+            assert!(!owner.dock.read(cx).listening);
+        });
         assert!(token.retired());
         assert_eq!(
             controls.try_recv().unwrap(),
