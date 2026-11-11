@@ -23,6 +23,12 @@ fn awaiting(seconds: u16) -> GitHubView {
     }
 }
 
+fn not_verified() -> GitHubView {
+    GitHubView::NotVerified {
+        login: GitHubLogin::new("example").unwrap(),
+    }
+}
+
 fn model(view: GitHubView) -> GitHubConnections {
     let mut state = GitHubConnections::default();
     assert!(state.receive(Some(7), 7, view, Instant::now()));
@@ -95,6 +101,14 @@ fn each_view_has_exact_copy_and_commands() {
             vec![(Text::GitHubSignOut, GitHubOp::SignOut)],
         ),
         (
+            not_verified(),
+            Text::GitHubNotVerified,
+            vec![
+                (Text::GitHubCheckAgain, GitHubOp::RefreshRepos),
+                (Text::GitHubSignOut, GitHubOp::SignOut),
+            ],
+        ),
+        (
             GitHubView::NeedsSignIn { login },
             Text::GitHubNeedsSignIn,
             vec![
@@ -128,6 +142,10 @@ fn each_view_has_exact_copy_and_commands() {
             assert!(!state.allows(Some(8), &command));
         }
     }
+}
+
+#[test]
+fn an_absent_snapshot_waits_without_connect_authority() {
     let state = GitHubConnections::default();
     assert_eq!(state.status(), Text::GitHubWaiting);
     assert_eq!(
@@ -364,6 +382,7 @@ fn exact_listed_repository_spelling_is_required_and_saving_is_not_optimistic() {
     }));
     assert_eq!(sent, vec![command]);
     assert_eq!(state.view, Some(connected()));
+    assert!(state.receive_error(Some(7), 7, ErrorKey::SettingsRefused.into()));
     let GitHubView::Connected { login, .. } = connected() else {
         unreachable!()
     };
@@ -382,6 +401,7 @@ fn exact_listed_repository_spelling_is_required_and_saving_is_not_optimistic() {
             },
             Instant::now()
         ));
+        assert_eq!(state.waiting, None);
         assert!(!state.allows(
             Some(7),
             &GitHubOp::SetDefaultRepo(RepoName::new("Example/Absent").unwrap())
@@ -459,6 +479,16 @@ fn error_copy_uses_only_github_localized_keys() {
             "GitHub refused that operation. Check the connection and try again.",
         ),
         (
+            ErrorKey::SettingsRefused,
+            Text::GitHubDefaultRetained,
+            "Couldn't save the default repository. The previous default is unchanged. Try again.",
+        ),
+        (
+            ErrorKey::AccountMisconfigured,
+            Text::GitHubConfiguration,
+            "Connecting is unavailable until this build has a registered GitHub App client ID. No token or client secret can be entered here.",
+        ),
+        (
             ErrorKey::PlanUnavailable,
             Text::GitHubFailure,
             "Couldn't complete the GitHub operation. Try again.",
@@ -499,7 +529,110 @@ fn every_state_uses_the_reviewed_fixed_github_copy() {
             Text::GitHubNeedsSignIn,
             "Sign in again to use this GitHub account.",
         ),
+        (Text::GitHubNotVerified, "Saved sign-in, not verified"),
+        (Text::GitHubCheckAgain, "Check again"),
     ] {
         assert_eq!(strings.get(text), copy);
     }
+}
+
+#[test]
+fn leaving_a_challenge_clears_its_text_without_extending_its_deadline() {
+    let now = Instant::now();
+    let mut state = GitHubConnections::default();
+    state.receive(Some(7), 7, awaiting(30), now);
+    let origin = Arc::clone(&state.controls_origin);
+    assert!(state.is_current(Some(7), Some(7), &origin));
+    state.receive(
+        Some(7),
+        7,
+        GitHubView::Requesting,
+        now + Duration::from_secs(1),
+    );
+    assert_eq!(state.challenge, None);
+    assert!(!state.is_current(Some(7), Some(7), &origin));
+    state.receive(Some(7), 7, awaiting(30), now + Duration::from_secs(2));
+    assert_eq!(state.code(Some(7), now + Duration::from_secs(30)), None);
+    assert!(state.send(Some(7), GitHubOp::CancelConnect, |_| true));
+    state.receive(Some(7), 7, awaiting(30), now + Duration::from_secs(3));
+    assert_eq!(state.challenge, None);
+    assert_eq!(state.code(Some(7), now + Duration::from_secs(3)), None);
+    assert!(!state.allows(Some(7), &GitHubOp::CancelConnect));
+    state.receive(Some(7), 7, signed_out(), now + Duration::from_secs(4));
+    assert!(state.allows(Some(7), &GitHubOp::Connect));
+}
+
+#[test]
+fn only_a_matching_default_or_error_settles_a_default_request() {
+    let mut state = model(connected());
+    let repo = RepoName::new("Example/Repo").unwrap();
+    assert!(state.send(Some(7), GitHubOp::SetDefaultRepo(repo.clone()), |_| true));
+    assert_eq!(state.status(), Text::GitHubSavingDefault);
+    state.receive(Some(7), 7, connected(), Instant::now());
+    assert_eq!(state.status(), Text::GitHubSavingDefault);
+    assert!(!state.allows(Some(7), &GitHubOp::SignOut));
+    let mut committed = connected();
+    let GitHubView::Connected { default, .. } = &mut committed else {
+        unreachable!()
+    };
+    *default = Some(repo.clone());
+    state.receive(Some(7), 7, committed.clone(), Instant::now());
+    assert_eq!(state.status(), Text::GitHubConnected);
+    assert_eq!(state.waiting, None);
+    assert_eq!(state.view, Some(committed));
+    assert!(!state.allows(Some(7), &GitHubOp::SetDefaultRepo(repo)));
+    let origin = Arc::clone(&state.controls_origin);
+    assert!(!state.is_current(Some(8), Some(7), &origin));
+    assert!(!state.is_current(None, Some(7), &origin));
+    state.receive_error(Some(7), 7, ErrorKey::SettingsRefused.into());
+    assert!(!state.is_current(Some(7), Some(7), &origin));
+    assert_eq!(state.error_text(), Some(Text::GitHubDefaultRetained));
+}
+
+#[test]
+fn an_incomplete_listing_never_authorizes_a_default_even_when_the_name_is_present() {
+    let mut view = connected();
+    let GitHubView::Connected { truncated, .. } = &mut view else {
+        unreachable!()
+    };
+    *truncated = true;
+    let mut state = model(connected());
+    let origin = Arc::clone(&state.controls_origin);
+    state.receive(Some(7), 7, view, Instant::now());
+    assert!(!state.is_current(Some(7), Some(7), &origin));
+    assert!(!state.send(
+        Some(7),
+        GitHubOp::SetDefaultRepo(RepoName::new("Example/Repo").unwrap()),
+        |_| panic!("an incomplete listing has no repository authority"),
+    ));
+}
+
+#[test]
+fn not_verified_metadata_keeps_consent_and_control_fences_separate() {
+    let mut state = model(connected());
+    let consent = Arc::clone(&state.origin);
+    let controls = Arc::clone(&state.controls_origin);
+    assert!(state.receive(Some(7), 7, not_verified(), Instant::now()));
+    assert!(!Arc::ptr_eq(&consent, &state.origin));
+    assert!(!Arc::ptr_eq(&controls, &state.controls_origin));
+    assert_eq!(state.login().map(GitHubLogin::as_str), Some("example"));
+    assert_eq!(state.code(Some(7), Instant::now()), None);
+    for op in [
+        GitHubOp::Connect,
+        GitHubOp::CancelConnect,
+        GitHubOp::RetryCleanup,
+        GitHubOp::SetDefaultRepo(RepoName::new("Example/Repo").unwrap()),
+    ] {
+        assert!(!state.send(Some(7), op, |_| panic!(
+            "unverified metadata is not authority"
+        )));
+    }
+    let consent = Arc::clone(&state.origin);
+    let controls = Arc::clone(&state.controls_origin);
+    assert!(state.receive_error(Some(7), 7, ErrorKey::AccountOffline.into()));
+    assert!(Arc::ptr_eq(&consent, &state.origin));
+    assert!(!Arc::ptr_eq(&controls, &state.controls_origin));
+    assert_eq!(state.view, Some(not_verified()));
+    assert!(state.allows(Some(7), &GitHubOp::RefreshRepos));
+    assert!(state.allows(Some(7), &GitHubOp::SignOut));
 }

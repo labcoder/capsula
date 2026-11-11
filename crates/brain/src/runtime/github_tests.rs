@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "github_tests/activation.rs"]
+mod activation;
 use kumochi_protocol::message::{
     Decision, ErrorKey, GitHubOp, IssueBody, IssueOp, IssueTitle, RepoName,
 };
@@ -84,12 +87,15 @@ async fn live_refusals_and_offline_controls_never_start_work_or_change_approval(
         assert!(shell.scenes().await.is_empty());
         shell.send(&issue).await;
         for op in operations() {
+            let error = if op == GitHubOp::Connect {
+                ErrorKey::AccountMisconfigured
+            } else {
+                ErrorKey::GitHubUnavailable
+            };
             shell.send(&ControlToBrain::GitHub(op)).await;
             assert_eq!(
                 shell.control().await,
-                Some(ControlToShell::GitHubError(
-                    ErrorKey::GitHubUnavailable.into()
-                ))
+                Some(ControlToShell::GitHubError(error.into()))
             );
         }
         shell.control_out.shutdown().await.unwrap();
@@ -162,7 +168,7 @@ async fn one_slot_refusal_output_is_exact_and_full_or_closed_output_loses_the_co
         ),
         Err(Ended::Lost)
     ));
-    assert_eq!(frames.try_recv().unwrap(), [4, 0, 0, 0, 25, 42, 0, 0]);
+    assert_eq!(frames.try_recv().unwrap(), [4, 0, 0, 0, 25, 11, 0, 0]);
     assert!(matches!(
         frames.try_recv(),
         Err(mpsc::error::TryRecvError::Empty)
@@ -229,12 +235,15 @@ async fn production_off_is_observed_before_account_startup_and_survives_all_sess
         let client = async {
             assert!(shell.scenes().await.is_empty());
             for op in operations() {
+                let error = if op == GitHubOp::Connect {
+                    ErrorKey::AccountMisconfigured
+                } else {
+                    ErrorKey::GitHubUnavailable
+                };
                 shell.send(&ControlToBrain::GitHub(op)).await;
                 assert_eq!(
                     shell.control().await,
-                    Some(ControlToShell::GitHubError(
-                        ErrorKey::GitHubUnavailable.into()
-                    ))
+                    Some(ControlToShell::GitHubError(error.into()))
                 );
             }
             shell.control_out.shutdown().await.unwrap();
@@ -287,9 +296,10 @@ async fn eof_and_close_preserve_an_already_connected_credential_and_only_publish
     assert!(!truncated);
     assert_eq!(*selected, None);
     let stamp = accounts.github.machine().stamp();
-    assert!(
-        matches!(accounts.github.suspended(), [(owner, GitHubEffect::RefreshRepos { generation })] if *owner == stamp && *generation == stamp.generation)
-    );
+    assert!(matches!(accounts.github.suspended(), [
+            (owner, GitHubEffect::RefreshRepos { generation }),
+            (clock, GitHubEffect::Wake(due)),
+        ] if *owner == stamp && *generation == stamp.generation && *clock == stamp && *due > Instant::now()));
     let mut brain = brain_with_github_owner(&scratch, accounts);
     let mut tap = Tap::from_env();
     for _ in 0..2 {
@@ -446,7 +456,7 @@ async fn a_loaded_user_request_survives_eof_and_settles_through_idle_before_repl
     let scratch = Scratch::new("github-user-idle-replacement");
     let http = UserHttp::new(Ok(user_response(
         200,
-        br#"{"id":11,"login":"fresh"}"#,
+        br#"{"id":7,"login":"fresh"}"#,
         ResponseMeta::default(),
     )));
     let release = http.hold();
@@ -481,7 +491,7 @@ async fn a_loaded_user_request_survives_eof_and_settles_through_idle_before_repl
             () = async { while fence.load(Ordering::Acquire) == 0 { tokio::task::yield_now().await; } } => {}
         }
     }).await.unwrap();
-    assert_eq!(brain.account.github.machine().user().unwrap().id, 11);
+    assert_eq!(brain.account.github.machine().user().unwrap().id, 7);
     assert!(!brain.account.github.verifying());
     let ((control, data), mut replacement) = duplex();
     let client = async {
@@ -551,11 +561,8 @@ async fn an_old_load_origin_error_is_suppressed_after_the_replacement_is_already
         release.send(()).unwrap();
         assert_eq!(
             replacement.control().await,
-            Some(ControlToShell::GitHub(GitHubView::Connected {
+            Some(ControlToShell::GitHub(GitHubView::NotVerified {
                 login: GitHubLogin::new("owner-sentinel").unwrap(),
-                repos: kumochi_scene::text::Bounded::default(),
-                truncated: false,
-                default: None,
             }))
         );
         replacement.control_out.shutdown().await.unwrap();
@@ -567,7 +574,9 @@ async fn an_old_load_origin_error_is_suppressed_after_the_replacement_is_already
     .await
     .unwrap();
     assert_eq!(ended, Ended::Lost);
-    assert_eq!(brain.account.github.machine().user().unwrap().id, 7);
+    assert_eq!(brain.account.github.machine().user(), None);
+    assert!(brain.account.github.machine().token().is_none());
+    assert_eq!(brain.account.github.machine().repositories(), None);
     assert_eq!(http.calls.load(Ordering::SeqCst), 1);
     brain.close().await;
 }

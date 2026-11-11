@@ -263,7 +263,7 @@ async fn github_wire_policy_uses_typed_payloads_and_never_logs_them() {
         assert_eq!(response.body.expose().as_slice(), b"{}");
         let wire = server.finish().unwrap();
         let path = &original[url::Position::BeforePath..];
-        let method = if matches!(index, 0 | 1 | 5) {
+        let method = if matches!(index, 0 | 1 | 5 | 7) {
             "POST"
         } else {
             "GET"
@@ -275,7 +275,7 @@ async fn github_wire_policy_uses_typed_payloads_and_never_logs_them() {
         );
         assert_eq!(wire.api_key, None);
         assert_eq!(wire.anthropic_version, None);
-        if index < 2 {
+        if matches!(index, 0 | 1 | 7) {
             assert_eq!(wire.authorization, None);
             assert_eq!(wire.headers["accept"], "application/json");
             assert_eq!(wire.headers.get("x-github-api-version"), None);
@@ -294,6 +294,11 @@ async fn github_wire_policy_uses_typed_payloads_and_never_logs_them() {
                     "urn:ietf:params:oauth:grant-type:device_code"
                 );
                 assert_eq!(fields.len(), 3);
+            } else if index == 7 {
+                assert_eq!(fields["grant_type"], "refresh_token");
+                assert_eq!(fields["refresh_token"], format!("ghr_{SENTINEL}"));
+                assert_eq!(fields.len(), 3);
+                assert!(!fields.contains_key("client_secret"));
             } else {
                 assert_eq!(fields.len(), 1);
             }
@@ -545,7 +550,7 @@ fn retry_after_presence_survives_invalid_values_duplicates_and_bad_date() {
 #[tokio::test]
 async fn github_collection_bounds_cover_length_and_chunked_bodies() {
     use crate::connections::github::tests::endpoints;
-    for index in [0, 1, 2, 3, 4, 5, 6] {
+    for index in 0..8 {
         let server = Server::start(reply("200 OK", b"", ""));
         let response = server
             .client()
@@ -559,7 +564,7 @@ async fn github_collection_bounds_cover_length_and_chunked_bodies() {
         server.finish().unwrap();
         let status = if index == 5 { "201 Created" } else { "200 OK" };
         let limit = match index {
-            0 | 1 => 4096,
+            0 | 1 | 7 => 4096,
             2 => 65_536,
             _ => 1_048_576,
         };
@@ -681,7 +686,7 @@ async fn github_refuses_redirects_without_followup_and_incomplete_bodies_are_tra
 #[tokio::test]
 async fn github_deadlines_cover_held_headers_and_body_eof() {
     use crate::connections::github::tests::endpoints;
-    for index in 0..7 {
+    for index in 0..8 {
         for reply in [
             Vec::new(),
             b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\n".to_vec(),
@@ -697,7 +702,12 @@ async fn github_deadlines_cover_held_headers_and_body_eof() {
             });
             server.flushed.take().unwrap().await.unwrap();
             tokio::time::pause();
-            tokio::time::advance(Duration::from_secs(if index >= 5 { 30 } else { 15 })).await;
+            tokio::time::advance(Duration::from_secs(if matches!(index, 5 | 6) {
+                30
+            } else {
+                15
+            }))
+            .await;
             let result = tokio::select! {
                 result = &mut task => result.unwrap(),
                 () = tokio::time::sleep(Duration::from_millis(1)) => panic!("whole GitHub deadline didn't end the request"),
@@ -1431,6 +1441,7 @@ fn destinations_queries_methods_and_headers_are_closed() {
             "GET",
             "https://api.github.com/repos/owner/repo/issues?per_page=100&page=2&creator=owner&state=all&since=2024-02-29T23%3A59%3A59Z&sort=created&direction=desc",
         ),
+        ("POST", "https://github.com/login/oauth/access_token"),
     ];
     let server = Server::start(reply("200 OK", b"", ""));
     let client = server.client();
@@ -1448,7 +1459,7 @@ fn destinations_queries_methods_and_headers_are_closed() {
             kumochi_protocol::constants::HTTP_USER_AGENT
         );
         assert_eq!(request.headers().get("x-api-key"), None);
-        if index < 2 {
+        if matches!(index, 0 | 1 | 7) {
             assert_eq!(request.headers()["accept"], "application/json");
             assert_eq!(request.headers().get("authorization"), None);
             assert_eq!(request.headers().get("x-github-api-version"), None);
@@ -1467,6 +1478,11 @@ fn destinations_queries_methods_and_headers_are_closed() {
                         "grant_type".to_owned(),
                         "urn:ietf:params:oauth:grant-type:device_code".to_owned(),
                     ),
+                ]);
+            } else if index == 7 {
+                expected.extend([
+                    ("grant_type".to_owned(), "refresh_token".to_owned()),
+                    ("refresh_token".to_owned(), format!("ghr_{SENTINEL}")),
                 ]);
             }
             assert_eq!(fields, expected);

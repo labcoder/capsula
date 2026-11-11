@@ -2,8 +2,12 @@
 
 use super::{
     DeviceCodeValue, GitHubToken,
-    api::{ApiError, DeviceCode, GitHubUser, TokenError, TokenReply},
+    api::{
+        ACCESS_LIFETIME_S, ApiError, DeviceCode, GitHubUser, REFRESH_LIFETIME_S, TokenError,
+        TokenReply, Tokens,
+    },
 };
+use crate::connections::clock::{Clock, SystemClock};
 use kumochi_protocol::{
     Secret,
     message::{
@@ -24,6 +28,8 @@ use tokio::time::Instant;
 #[cfg(test)]
 mod tests;
 
+const REFRESH_LEAD: Duration = Duration::from_secs(60);
+
 /// Identifies the admission epoch for both an attempt and its connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Stamp {
@@ -32,15 +38,48 @@ pub struct Stamp {
 }
 
 /// A checked account awaiting durable ownership.
+#[derive(Clone)]
 pub struct Account {
-    /// Only the runtime and credential lane may use this bearer.
-    pub token: Secret<GitHubToken>,
+    /// The pair is replaced together through the credential FIFO.
+    pub credentials: Tokens,
     /// Identity verified by the authenticated user endpoint.
     pub user: GitHubUser,
+    /// Persisted before dispatch so a lost refresh is never replayed after restart.
+    pub refresh_sent: bool,
 }
 impl fmt::Debug for Account {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("GitHubAccount")
+    }
+}
+
+/// A non-secret default scoped to one verified numeric account.
+#[derive(Clone)]
+pub struct DefaultRepo {
+    /// The account that selected this repository.
+    pub account: u64,
+    /// GitHub's checked repository spelling.
+    pub repo: RepoName,
+}
+
+impl fmt::Debug for DefaultRepo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("GitHubDefaultRepo")
+    }
+}
+
+/// A complete bounded listing, never a partial authority snapshot.
+#[derive(Clone)]
+pub struct Repositories {
+    /// Names in GitHub's spelling.
+    pub names: Bounded<RepoName, MAX_GITHUB_REPOS>,
+}
+
+impl fmt::Debug for Repositories {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GitHubRepositories")
+            .field("count", &self.names.len())
+            .finish()
     }
 }
 
@@ -80,6 +119,13 @@ pub enum Input {
         /// API-validated token or refusal.
         result: Result<TokenReply, ApiError>,
     },
+    /// One single-use refresh finished.
+    Refreshed {
+        /// Rotation identity.
+        stamp: Stamp,
+        /// A complete expiring pair, or a terminal refusal.
+        result: Result<Tokens, ApiError>,
+    },
     /// The authenticated identity check finished.
     User {
         /// Check identity.
@@ -105,15 +151,27 @@ pub enum Input {
     Repos {
         /// Listing fence.
         generation: u64,
-        /// Names in GitHub's spelling, not user-supplied names.
-        names: Bounded<RepoName, MAX_GITHUB_REPOS>,
-        /// More repositories exist beyond this bounded list.
-        truncated: bool,
+        /// Only a complete successful listing can grant authority.
+        result: Result<Repositories, ApiError>,
+    },
+    /// The ordered settings writer settled a default change.
+    DefaultSaved {
+        /// The account generation that selected the repository.
+        generation: u64,
+        /// The proposed spelling.
+        repo: RepoName,
+        /// True only after the file was committed.
+        saved: bool,
     },
     /// A consumer received 401.
     Unauthorized {
         /// Consumer fence.
         generation: u64,
+    },
+    /// An owned task ended without an API result.
+    Stopped {
+        /// The operation that ended; a stale one cannot end its replacement.
+        stamp: Stamp,
     },
     /// A scheduled poll or deadline is due.
     Tick,
@@ -132,6 +190,13 @@ pub enum Effect {
         stamp: Stamp,
         /// Secret device credential.
         code: Secret<DeviceCodeValue>,
+    },
+    /// Rotate a refresh token whose single use was durably recorded first.
+    RefreshToken {
+        /// Completion identity.
+        stamp: Stamp,
+        /// The one secret to send; no client secret is used in device flow.
+        token: Secret<super::RefreshToken>,
     },
     /// Wake at this instant, or end earlier on cancellation/shutdown.
     Wake(Instant),
@@ -162,7 +227,12 @@ pub enum Effect {
         generation: u64,
     },
     /// Persist a fetched repository spelling.
-    SaveDefault(RepoName),
+    SaveDefault {
+        /// Completion fence.
+        generation: u64,
+        /// Non-secret account-bound metadata.
+        default: DefaultRepo,
+    },
     /// Publish the authoritative view.
     View(GitHubView),
     /// Show a content-free catalog error.
@@ -195,12 +265,24 @@ enum State {
     Requesting,
     Awaiting(Attempt),
     Verifying {
-        token: Secret<GitHubToken>,
+        credentials: Tokens,
         loaded_user: Option<GitHubUser>,
+        rotated: bool,
     },
-    Saving(Account),
+    Saving {
+        account: Account,
+        next: AfterSave,
+    },
+    Refreshing(Account),
     Connected(Account),
     NeedsSignIn(GitHubLogin),
+}
+
+#[derive(Clone, Copy)]
+enum AfterSave {
+    Connect,
+    Refresh,
+    Rotated,
 }
 
 /// Owns the one attempt, bearer and authoritative connection generation.
@@ -211,7 +293,13 @@ pub struct Machine {
     deadline: Option<Instant>,
     repos: Bounded<RepoName, MAX_GITHUB_REPOS>,
     truncated: bool,
-    default: Option<RepoName>,
+    default: Option<DefaultRepo>,
+    pending_default: Option<RepoName>,
+    verified: bool,
+    listed: bool,
+    token_end: Option<Instant>,
+    refresh_due: Option<Instant>,
+    clock: Arc<dyn Clock>,
 }
 impl fmt::Debug for Machine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -221,7 +309,7 @@ impl fmt::Debug for Machine {
 
 impl Machine {
     /// Starts fenced until Loaded arrives. Queue the startup load with `stamp()`.
-    pub fn new(default: Option<RepoName>) -> Self {
+    pub fn new(default: Option<DefaultRepo>) -> Self {
         Self {
             state: State::Loading,
             stamp: Stamp { generation: 0 },
@@ -230,6 +318,12 @@ impl Machine {
             repos: Bounded::default(),
             truncated: false,
             default,
+            pending_default: None,
+            verified: false,
+            listed: false,
+            token_end: None,
+            refresh_due: None,
+            clock: Arc::new(SystemClock),
         }
     }
 
@@ -242,6 +336,10 @@ impl Machine {
         matches!(self.state, State::Loading)
     }
 
+    pub(crate) fn connecting(&self) -> bool {
+        self.deadline.is_some() || matches!(self.state, State::Requesting)
+    }
+
     /// Consumers load this with Acquire immediately before using a bearer or saving.
     pub fn fence(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.fence)
@@ -250,9 +348,49 @@ impl Machine {
     /// The verified connected user, without its bearer: `Some` only while Connected.
     pub fn user(&self) -> Option<&GitHubUser> {
         match &self.state {
-            State::Connected(account) => Some(&account.user),
+            State::Connected(account)
+                if self.verified
+                    && self.token_end.is_some_and(|end| Instant::now() < end)
+                    && self
+                        .remaining(account.credentials.expires_at_s, ACCESS_LIFETIME_S)
+                        .is_some() =>
+            {
+                Some(&account.user)
+            }
             _ => None,
         }
+    }
+
+    /// Restores only committed non-secret configuration; the view checks its owner.
+    pub(crate) fn restore_default(&mut self, default: Option<DefaultRepo>) {
+        self.default = default;
+    }
+
+    /// A transient bearer for the current verified account generation.
+    pub(crate) fn token(&self) -> Option<Secret<GitHubToken>> {
+        self.user()?;
+        match &self.state {
+            State::Connected(account) => Some(account.credentials.token.clone()),
+            _ => None,
+        }
+    }
+
+    /// Complete repository authority for consumers in this generation.
+    pub(crate) fn repositories(&self) -> Option<&[RepoName]> {
+        self.user()?;
+        self.listed.then_some(self.repos.as_ref())
+    }
+
+    pub(crate) fn rotating(&self) -> bool {
+        matches!(
+            self.state,
+            State::Refreshing(_)
+                | State::Verifying { rotated: true, .. }
+                | State::Saving {
+                    next: AfterSave::Refresh | AfterSave::Rotated,
+                    ..
+                }
+        )
     }
 
     /// A projection with no bearer, device credential or provider URL.
@@ -260,9 +398,10 @@ impl Machine {
         match &self.state {
             State::Loading => GitHubView::SignedOut { cleanup: None },
             State::SignedOut(cleanup) => GitHubView::SignedOut { cleanup: *cleanup },
-            State::Requesting | State::Verifying { .. } | State::Saving(_) => {
-                GitHubView::Requesting
-            }
+            State::Requesting
+            | State::Verifying { .. }
+            | State::Saving { .. }
+            | State::Refreshing(_) => GitHubView::Requesting,
             State::Awaiting(a) => GitHubView::AwaitingUser {
                 user_code: a.challenge.user_code.clone(),
                 expires_in_s: u16::try_from(
@@ -273,6 +412,9 @@ impl Machine {
                 )
                 .unwrap_or(900),
             },
+            State::Connected(account) if !self.verified => GitHubView::NotVerified {
+                login: account.user.login.clone(),
+            },
             State::Connected(account) => GitHubView::Connected {
                 login: account.user.login.clone(),
                 repos: self.repos.clone(),
@@ -280,8 +422,10 @@ impl Machine {
                 default: self
                     .default
                     .as_ref()
-                    .filter(|repo| self.repos.contains(repo))
-                    .cloned(),
+                    .filter(|default| {
+                        default.account == account.user.id && self.repos.contains(&default.repo)
+                    })
+                    .map(|default| default.repo.clone()),
             },
             State::NeedsSignIn(login) => GitHubView::NeedsSignIn {
                 login: login.clone(),
@@ -299,6 +443,11 @@ impl Machine {
         self.deadline = None;
         self.repos = Bounded::new(Vec::new()).expect("empty repository list is bounded");
         self.truncated = false;
+        self.verified = false;
+        self.listed = false;
+        self.pending_default = None;
+        self.token_end = None;
+        self.refresh_due = None;
     }
 
     fn fail(&mut self, key: ErrorKey, effects: &mut Vec<Effect>) {
@@ -307,7 +456,33 @@ impl Machine {
     }
 
     fn cancel(&mut self, effects: &mut Vec<Effect>) {
-        let saving = matches!(self.state, State::Saving(_));
+        if matches!(
+            self.state,
+            State::Verifying {
+                loaded_user: Some(_),
+                rotated: false,
+                ..
+            }
+        ) {
+            let State::Verifying {
+                credentials,
+                loaded_user: Some(user),
+                ..
+            } = std::mem::replace(&mut self.state, State::SignedOut(None))
+            else {
+                unreachable!()
+            };
+            self.not_verified(
+                Account {
+                    credentials,
+                    user,
+                    refresh_sent: false,
+                },
+                effects,
+            );
+            return;
+        }
+        let saving = matches!(self.state, State::Saving { .. });
         self.advance();
         self.state = State::SignedOut(saving.then_some(Cleanup::Running));
         effects.push(Effect::CancelAll);
@@ -316,6 +491,70 @@ impl Machine {
                 generation: self.stamp.generation,
             });
         }
+    }
+
+    fn remaining(&self, expires_at: u64, maximum: u64) -> Option<Duration> {
+        expires_at
+            .checked_sub(self.clock.unix_seconds()?)
+            .filter(|seconds| (1..=maximum).contains(seconds))
+            .map(Duration::from_secs)
+    }
+
+    fn needs_sign_in(&mut self, login: GitHubLogin, effects: &mut Vec<Effect>) {
+        self.advance();
+        self.state = State::NeedsSignIn(login);
+        effects.push(Effect::CancelAll);
+    }
+
+    fn connected(&mut self, account: Account, now: Instant, effects: &mut Vec<Effect>) {
+        let Some(remaining) = self.remaining(account.credentials.expires_at_s, ACCESS_LIFETIME_S)
+        else {
+            self.state = State::Connected(account);
+            self.start_refresh(effects);
+            return;
+        };
+        self.advance();
+        self.token_end = Some(now + remaining);
+        self.refresh_due = Some(now + remaining.saturating_sub(REFRESH_LEAD));
+        self.verified = true;
+        self.state = State::Connected(account);
+        effects.push(Effect::RefreshRepos {
+            generation: self.stamp.generation,
+        });
+        effects.extend(self.refresh_due.map(Effect::Wake));
+    }
+
+    fn not_verified(&mut self, account: Account, effects: &mut Vec<Effect>) {
+        self.advance();
+        self.state = State::Connected(account);
+        effects.push(Effect::CancelAll);
+    }
+
+    fn start_refresh(&mut self, effects: &mut Vec<Effect>) {
+        let State::Connected(mut account) =
+            std::mem::replace(&mut self.state, State::SignedOut(None))
+        else {
+            return;
+        };
+        if account.refresh_sent
+            || self
+                .remaining(account.credentials.refresh_expires_at_s, REFRESH_LIFETIME_S)
+                .is_none()
+        {
+            self.needs_sign_in(account.user.login, effects);
+            return;
+        }
+        self.advance();
+        account.refresh_sent = true;
+        effects.push(Effect::CancelAll);
+        effects.push(Effect::Save {
+            stamp: self.stamp,
+            account: account.clone(),
+        });
+        self.state = State::Saving {
+            account,
+            next: AfterSave::Refresh,
+        };
     }
 
     /// Apply one event at the caller's clock. Ended attempts cannot be revived by completions.
@@ -343,7 +582,9 @@ impl Machine {
                 ]);
             }
             Input::Op(GitHubOp::CancelConnect)
-                if self.deadline.is_some() || matches!(self.state, State::Requesting) =>
+                if self.connecting()
+                    || self.rotating()
+                    || matches!(self.state, State::Verifying { .. }) =>
             {
                 self.cancel(&mut effects);
             }
@@ -379,14 +620,32 @@ impl Machine {
             {
                 match result {
                     Ok(Some(account)) => {
-                        effects.push(Effect::ReadUser {
-                            stamp,
-                            token: account.token.clone(),
-                        });
-                        self.state = State::Verifying {
-                            token: account.token,
-                            loaded_user: Some(account.user),
-                        };
+                        if account.refresh_sent
+                            || self
+                                .remaining(
+                                    account.credentials.refresh_expires_at_s,
+                                    REFRESH_LIFETIME_S,
+                                )
+                                .is_none()
+                        {
+                            self.needs_sign_in(account.user.login, &mut effects);
+                        } else if self
+                            .remaining(account.credentials.expires_at_s, ACCESS_LIFETIME_S)
+                            .is_none()
+                        {
+                            self.state = State::Connected(account);
+                            self.start_refresh(&mut effects);
+                        } else {
+                            effects.push(Effect::ReadUser {
+                                stamp,
+                                token: account.credentials.token.clone(),
+                            });
+                            self.state = State::Verifying {
+                                credentials: account.credentials,
+                                loaded_user: Some(account.user),
+                                rotated: false,
+                            };
+                        }
                     }
                     Ok(None) => self.state = State::SignedOut(None),
                     Err(result) => self.state = State::SignedOut(cleanup(result)),
@@ -411,6 +670,11 @@ impl Machine {
                 }
             }
             Input::Tick => {
+                if matches!(self.state, State::Connected(_))
+                    && self.refresh_due.is_some_and(|due| now >= due)
+                {
+                    self.start_refresh(&mut effects);
+                }
                 if let State::Awaiting(a) = &mut self.state
                     && !a.polling
                     && now >= a.next_poll
@@ -428,10 +692,12 @@ impl Machine {
                     && matches!(&self.state, State::Awaiting(a) if a.polling) =>
             {
                 match result {
-                    Ok(TokenReply::Token(token)) => {
+                    Ok(TokenReply::Token(credentials)) => {
+                        let token = credentials.token.clone();
                         self.state = State::Verifying {
-                            token: token.clone(),
+                            credentials,
                             loaded_user: None,
+                            rotated: false,
                         };
                         effects.push(Effect::ReadUser { stamp, token });
                     }
@@ -458,68 +724,126 @@ impl Machine {
                     Err(error) => self.fail(api_key(error), &mut effects),
                 }
             }
-            Input::User { stamp, result }
-                if stamp == self.stamp && matches!(self.state, State::Verifying { .. }) =>
+            Input::Refreshed { stamp, result }
+                if stamp == self.stamp && matches!(self.state, State::Refreshing(_)) =>
             {
-                let State::Verifying { token, loaded_user } =
+                let State::Refreshing(account) =
                     std::mem::replace(&mut self.state, State::SignedOut(None))
                 else {
                     unreachable!()
                 };
                 match result {
+                    Ok(credentials) => {
+                        effects.push(Effect::ReadUser {
+                            stamp,
+                            token: credentials.token.clone(),
+                        });
+                        self.state = State::Verifying {
+                            credentials,
+                            loaded_user: Some(account.user),
+                            rotated: true,
+                        };
+                    }
+                    Err(error) => {
+                        self.needs_sign_in(account.user.login, &mut effects);
+                        effects.push(Effect::Error(api_key(error).into()));
+                    }
+                }
+            }
+            Input::User { stamp, result }
+                if stamp == self.stamp && matches!(self.state, State::Verifying { .. }) =>
+            {
+                let State::Verifying {
+                    credentials,
+                    loaded_user,
+                    rotated,
+                } = std::mem::replace(&mut self.state, State::SignedOut(None))
+                else {
+                    unreachable!()
+                };
+                match result {
+                    Ok(user)
+                        if loaded_user
+                            .as_ref()
+                            .is_some_and(|loaded| loaded.id != user.id) =>
+                    {
+                        self.needs_sign_in(
+                            loaded_user.expect("guard requires loaded user").login,
+                            &mut effects,
+                        );
+                        effects.push(Effect::Error(ErrorKey::RequestRefused.into()));
+                    }
                     Ok(user) => {
-                        let account = Account { token, user };
-                        if loaded_user.is_some() {
-                            self.advance();
-                            self.state = State::Connected(account);
-                            effects.push(Effect::RefreshRepos {
-                                generation: self.stamp.generation,
-                            });
+                        let account = Account {
+                            credentials,
+                            user,
+                            refresh_sent: false,
+                        };
+                        if loaded_user.is_some() && !rotated {
+                            self.connected(account, now, &mut effects);
                         } else {
                             effects.push(Effect::Save {
                                 stamp,
-                                account: Account {
-                                    token: account.token.clone(),
-                                    user: GitHubUser {
-                                        id: account.user.id,
-                                        login: account.user.login.clone(),
-                                    },
-                                },
+                                account: account.clone(),
                             });
-                            self.state = State::Saving(account);
+                            self.state = State::Saving {
+                                account,
+                                next: if rotated {
+                                    AfterSave::Rotated
+                                } else {
+                                    AfterSave::Connect
+                                },
+                            };
                         }
                     }
-                    Err(ApiError::Refused { status: 401, .. }) if loaded_user.is_some() => {
-                        self.advance();
-                        self.state = State::NeedsSignIn(
+                    Err(error)
+                        if loaded_user.is_some()
+                            && (rotated
+                                || matches!(error, ApiError::Refused { status: 401, .. })) =>
+                    {
+                        self.needs_sign_in(
                             loaded_user.expect("guard requires loaded user").login,
+                            &mut effects,
                         );
+                        effects.push(Effect::Error(api_key(error).into()));
                     }
                     Err(error) if loaded_user.is_some() => {
-                        self.advance();
-                        self.state = State::Connected(Account {
-                            token,
-                            user: loaded_user.expect("guard requires loaded user"),
-                        });
+                        self.not_verified(
+                            Account {
+                                credentials,
+                                user: loaded_user.expect("guard requires loaded user"),
+                                refresh_sent: false,
+                            },
+                            &mut effects,
+                        );
                         effects.push(Effect::Error(api_key(error).into()));
                     }
                     Err(error) => self.fail(api_key(error), &mut effects),
                 }
             }
             Input::Saved { stamp, saved }
-                if stamp == self.stamp && matches!(self.state, State::Saving(_)) =>
+                if stamp == self.stamp && matches!(self.state, State::Saving { .. }) =>
             {
+                let State::Saving { account, next } =
+                    std::mem::replace(&mut self.state, State::SignedOut(None))
+                else {
+                    unreachable!()
+                };
                 if saved {
-                    if let State::Saving(account) =
-                        std::mem::replace(&mut self.state, State::SignedOut(None))
-                    {
-                        self.advance();
-                        self.state = State::Connected(account);
-                        effects.push(Effect::RefreshRepos {
-                            generation: self.stamp.generation,
-                        });
+                    match next {
+                        AfterSave::Connect | AfterSave::Rotated => {
+                            self.connected(account, now, &mut effects);
+                        }
+                        AfterSave::Refresh => {
+                            effects.push(Effect::RefreshToken {
+                                stamp,
+                                token: account.credentials.refresh.clone(),
+                            });
+                            self.state = State::Refreshing(account);
+                        }
                     }
                 } else {
+                    self.state = State::Saving { account, next };
                     self.fail(ErrorKey::CredentialsUnavailable, &mut effects);
                 }
             }
@@ -530,39 +854,119 @@ impl Machine {
                 if let State::Connected(account) =
                     std::mem::replace(&mut self.state, State::SignedOut(None))
                 {
-                    self.advance();
-                    self.state = State::NeedsSignIn(account.user.login);
-                    effects.push(Effect::CancelAll);
+                    self.needs_sign_in(account.user.login, &mut effects);
                 }
             }
-            Input::Repos {
-                generation,
-                names,
-                truncated,
-            } if generation == self.stamp.generation
-                && matches!(self.state, State::Connected(_)) =>
+            Input::Stopped { stamp } if stamp == self.stamp => {
+                let login = match &self.state {
+                    State::Verifying {
+                        loaded_user: Some(user),
+                        ..
+                    } => Some(user.login.clone()),
+                    State::Connected(account) | State::Refreshing(account) => {
+                        Some(account.user.login.clone())
+                    }
+                    _ => None,
+                };
+                if let Some(login) = login {
+                    self.needs_sign_in(login, &mut effects);
+                    effects.push(Effect::Error(ErrorKey::RequestRefused.into()));
+                } else {
+                    self.fail(ErrorKey::RequestRefused, &mut effects);
+                }
+            }
+            Input::Repos { generation, result }
+                if generation == self.stamp.generation
+                    && matches!(self.state, State::Connected(_)) =>
             {
-                self.repos = names;
-                self.truncated = truncated;
+                self.repos = Bounded::default();
+                self.listed = false;
+                match result {
+                    Ok(repositories) if self.verified => {
+                        self.repos = repositories.names;
+                        self.listed = true;
+                    }
+                    Ok(_) => {}
+                    Err(ApiError::Refused { status: 401, .. }) => {
+                        if let State::Connected(account) =
+                            std::mem::replace(&mut self.state, State::SignedOut(None))
+                        {
+                            self.needs_sign_in(account.user.login, &mut effects);
+                        }
+                    }
+                    Err(error) => effects.push(Effect::Error(api_key(error).into())),
+                }
             }
             Input::Op(GitHubOp::RefreshRepos) if matches!(self.state, State::Connected(_)) => {
-                effects.push(Effect::RefreshRepos {
-                    generation: self.stamp.generation,
-                });
+                self.repos = Bounded::default();
+                self.listed = false;
+                if self.verified {
+                    effects.push(Effect::RefreshRepos {
+                        generation: self.stamp.generation,
+                    });
+                } else if let State::Connected(account) =
+                    std::mem::replace(&mut self.state, State::SignedOut(None))
+                {
+                    effects.push(Effect::ReadUser {
+                        stamp: self.stamp,
+                        token: account.credentials.token.clone(),
+                    });
+                    self.state = State::Verifying {
+                        credentials: account.credentials,
+                        loaded_user: Some(account.user),
+                        rotated: false,
+                    };
+                }
             }
             Input::Op(GitHubOp::SetDefaultRepo(repo))
                 if matches!(self.state, State::Connected(_)) =>
             {
-                if let Some(name) = self.repos.iter().find(|name| *name == &repo) {
-                    self.default = Some(name.clone());
-                    effects.push(Effect::SaveDefault(name.clone()));
+                if self.pending_default.is_none()
+                    && let Some(user) = self.user()
+                    && let Some(name) = self
+                        .repositories()
+                        .and_then(|repos| repos.iter().find(|name| *name == &repo))
+                {
+                    let default = DefaultRepo {
+                        account: user.id,
+                        repo: name.clone(),
+                    };
+                    self.pending_default = Some(name.clone());
+                    effects.push(Effect::SaveDefault {
+                        generation: self.stamp.generation,
+                        default,
+                    });
                 } else {
                     effects.push(Effect::Error(ErrorKey::RequestRefused.into()));
                 }
             }
+            Input::DefaultSaved {
+                generation,
+                repo,
+                saved,
+            } if generation == self.stamp.generation
+                && self.pending_default.as_ref() == Some(&repo) =>
+            {
+                self.pending_default = None;
+                if saved {
+                    if let Some(user) = self.user() {
+                        self.default = Some(DefaultRepo {
+                            account: user.id,
+                            repo,
+                        });
+                    }
+                } else {
+                    effects.push(Effect::Error(ErrorKey::SettingsRefused.into()));
+                }
+            }
             _ => {}
         }
-        effects.push(Effect::View(self.view(now)));
+        if !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::SaveDefault { .. }))
+        {
+            effects.push(Effect::View(self.view(now)));
+        }
         effects
     }
 }
@@ -586,7 +990,6 @@ fn token_key(code: TokenError) -> ErrorKey {
 fn api_key(error: ApiError) -> ErrorKey {
     match error {
         ApiError::Http(_) => ErrorKey::AccountOffline,
-        ApiError::RefreshUnsupported => ErrorKey::AccountMisconfigured,
         _ => ErrorKey::ResponseUnreadable,
     }
 }

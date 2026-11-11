@@ -325,6 +325,52 @@ fn a_batched_scope_loss_and_same_return_rejects_focused_confirm_before_observers
 }
 
 #[gpui::test]
+fn an_unverified_saved_login_rejects_focused_consent_and_cannot_open_a_new_confirmation(
+    cx: &mut TestAppContext,
+) {
+    let f = fixture(cx, ActionState::Draft, "saved body");
+    open(&f, 0, cx);
+    cx.simulate_keystrokes(f.views[0].1, "tab");
+    cx.update(|cx| {
+        f.owner.update(cx, |owner, cx| {
+            owner
+                .link_events(
+                    Batch::Plain(vec![LinkEvent::GitHub {
+                        generation: 1,
+                        view: GitHubView::NotVerified {
+                            login: GitHubLogin::new("octo").unwrap(),
+                        },
+                    }]),
+                    cx,
+                )
+                .unwrap();
+        });
+        f.views[0]
+            .1
+            .update(cx, |_, window, cx| {
+                window.dispatch_keystroke(gpui_kit::Keystroke::parse("enter").unwrap(), cx);
+            })
+            .unwrap();
+        assert!(f.controls.try_recv().is_err());
+        assert!(f.views[0].0.read(cx).pending_issue.is_none());
+    });
+    cx.run_until_parked();
+    let mut frame = gpui_kit::VisualTestContext::from_window(f.views[0].1, cx);
+    frame.update(|window, cx| {
+        assert!(!window.has_active_dialog(cx));
+        window.draw(cx).clear(cx);
+    });
+    let bounds = frame.debug_bounds("dormant-issue-opener").unwrap();
+    frame.simulate_click(bounds.center(), gpui_kit::Modifiers::default());
+    frame.run_until_parked();
+    frame.update(|window, cx| {
+        assert!(!window.has_active_dialog(cx));
+        assert!(f.views[0].0.read(cx).pending_issue.is_none());
+    });
+    assert!(f.controls.try_recv().is_err());
+}
+
+#[gpui::test]
 fn hide_and_selection_loss_return_cannot_borrow_the_peers_retained_full_card(
     cx: &mut TestAppContext,
 ) {

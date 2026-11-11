@@ -9,6 +9,9 @@ pub const DISPLAY_NAME: &str = "Kumochi";
 /// The fixed product identity sent on GitHub requests.
 pub const HTTP_USER_AGENT: &str = "Kumochi";
 
+/// Unset until the owner supplies the registered application's public client identifier.
+pub const GITHUB_CLIENT_ID: Option<&str> = None;
+
 /// The assistant's name until the user picks their own.
 pub const DEFAULT_ASSISTANT_NAME: &str = "Kumo";
 

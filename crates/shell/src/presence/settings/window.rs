@@ -25,6 +25,26 @@ pub(in crate::presence) struct SettingsPanel {
 }
 
 impl Presence {
+    pub(in crate::presence) fn github_op(
+        &mut self,
+        op: kumochi_protocol::message::GitHubOp,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let (link, session) = (&self.link, &self.session);
+        self.settings.update(cx, |state, cx| {
+            state.github.send(
+                session.as_ref().map(crate::link::Session::generation),
+                op,
+                |op| {
+                    session.as_ref().is_some_and(|session| {
+                        link.send_control(session, ControlToBrain::GitHub(op))
+                    })
+                },
+            );
+            cx.notify();
+        });
+    }
+
     pub(in crate::presence) fn speech_input_action(
         &mut self,
         intent: crate::settings::SpeechInputIntent,

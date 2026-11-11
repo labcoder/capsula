@@ -8,7 +8,8 @@ beside the field. Change the field to clear that error and try again.
 Names use one line and 1–24 characters, with surrounding whitespace removed. Leave **Your
 name** blank to unset it. Settings are stored locally; changing a name doesn't switch tasks
 or discard your message draft. If the background process is disconnected, reconnect before
-editing. **Accounts** manages your [ChatGPT sign-in](accounts.md).
+editing. **Accounts** manages your [model accounts](accounts.md) and
+[GitHub connection](github.md).
 
 In Settings, Ctrl+Tab goes to the next tab and Ctrl+Shift+Tab to the previous one, wrapping
 at either end. Focus returns to the Settings frame; use Tab or Shift+Tab to reach its controls

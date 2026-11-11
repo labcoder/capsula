@@ -1,7 +1,8 @@
 use super::*;
+use crate::connections::clock::{Clock, SystemClock};
 use crate::connections::github::{
-    GitHubToken,
-    api::GitHubUser,
+    GitHubToken, RefreshToken,
+    api::{GitHubUser, Tokens},
     device::{Account, Removed, Stamp},
     lane::{Job as GitHubJob, Reply},
 };
@@ -40,7 +41,13 @@ fn an_unopened_vault_refuses_each_github_operation_without_exposing_the_cause() 
             }
         ));
         let bytes = Secret::new(Zeroizing::new(
-            br#"{"token":"ghu_fake_marker","login":"sentinel","id":7}"#.to_vec(),
+            serde_json::to_vec(&serde_json::json!({
+                "token":"ghu_fake_marker", "refresh":"ghr_fake_marker",
+                "expires_at_s":SystemClock.unix_seconds().unwrap() + 28_800,
+                "refresh_expires_at_s":SystemClock.unix_seconds().unwrap() + 15_897_600,
+                "refresh_sent":false, "login":"sentinel", "id":7
+            }))
+            .unwrap(),
         ));
         let job = GitHubJob::Save {
             stamp: Stamp { generation: 3 },
@@ -50,7 +57,12 @@ fn an_unopened_vault_refuses_each_github_operation_without_exposing_the_cause() 
         let (reply, _receiver) = oneshot::channel();
         let work = Work::GitHub { job, reply };
         let debug = format!("{work:?}");
-        for marker in ["ghu_fake_marker", "sentinel", "foreign-error-sentinel"] {
+        for marker in [
+            "ghu_fake_marker",
+            "ghr_fake_marker",
+            "sentinel",
+            "foreign-error-sentinel",
+        ] {
             assert!(!debug.contains(marker));
             assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
         }
@@ -104,15 +116,14 @@ async fn a_closed_save_receiver_cannot_drop_the_queued_removal() {
         job: GitHubJob::Save {
             stamp: Stamp { generation: 1 },
             fence: Arc::new(AtomicU64::new(1)),
-            account: Account {
-                token: Secret::new(
+            account: {
+                let mut account = checked_account();
+                account.credentials.token = Secret::new(
                     GitHubToken::new(Zeroizing::new("ghu_fake_worker_sentinel".to_owned()))
                         .unwrap(),
-                ),
-                user: GitHubUser {
-                    login: kumochi_protocol::message::GitHubLogin::new("octocat").unwrap(),
-                    id: 7,
-                },
+                );
+                account.user.login = GitHubLogin::new("octocat").unwrap();
+                account
             },
         },
         reply: save_tx,
@@ -296,14 +307,23 @@ pub(crate) fn active_github(scratch: &Scratch) -> i64 {
 }
 
 fn checked_account() -> Account {
+    let now = SystemClock.unix_seconds().unwrap();
     Account {
-        token: Secret::new(
-            GitHubToken::new(Zeroizing::new("ghu_owner_sentinel".to_owned())).unwrap(),
-        ),
+        credentials: Tokens {
+            token: Secret::new(
+                GitHubToken::new(Zeroizing::new("ghu_owner_sentinel".to_owned())).unwrap(),
+            ),
+            refresh: Secret::new(
+                RefreshToken::new(Zeroizing::new("ghr_owner_sentinel".to_owned())).unwrap(),
+            ),
+            expires_at_s: now + 28_800,
+            refresh_expires_at_s: now + 15_897_600,
+        },
         user: GitHubUser {
             id: 7,
             login: GitHubLogin::new("owner-sentinel").unwrap(),
         },
+        refresh_sent: false,
     }
 }
 
@@ -390,7 +410,7 @@ pub(crate) async fn saving_owner(accounts: &mut Accounts) -> Stamp {
         accounts,
         GitHubInput::Poll {
             stamp,
-            result: Ok(TokenReply::Token(checked_account().token)),
+            result: Ok(TokenReply::Token(checked_account().credentials)),
         },
     );
     drive(
@@ -568,7 +588,7 @@ async fn a_real_saved_account_stops_at_owned_stamped_verification_without_http_o
         },
     };
     let debug = format!("{accounts:?} {:?} {event:?}", accounts.github.suspended());
-    for marker in ["ghu_owner_sentinel", "owner-sentinel"] {
+    for marker in ["ghu_owner_sentinel", "ghr_owner_sentinel", "owner-sentinel"] {
         assert!(!debug.contains(marker));
         assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
     }
@@ -852,6 +872,7 @@ fn assert_private_verification(event: &VerificationEvent, accounts: &Accounts) {
     let debug = format!("{:?} {accounts:?}", Event::Verification(event.clone()));
     for marker in [
         "ghu_owner_sentinel",
+        "ghr_owner_sentinel",
         "owner-sentinel",
         "fresh-user-sentinel",
         "private-provider-sentinel",
@@ -932,7 +953,7 @@ async fn next_verifying_attempt(accounts: &mut Accounts) -> Stamp {
         accounts,
         GitHubInput::Poll {
             stamp,
-            result: Ok(TokenReply::Token(checked_account().token)),
+            result: Ok(TokenReply::Token(checked_account().credentials)),
         },
     );
     tokio::time::resume();
@@ -956,6 +977,20 @@ async fn loaded_verification_preserves_actual_user_api_results_and_never_resaves
         (
             Ok(user_response(
                 200,
+                br#"{"id":7,"login":"fresh-user-sentinel"}"#,
+                ResponseMeta::default(),
+            )),
+            Ok(GitHubUser {
+                id: 7,
+                login: GitHubLogin::new("fresh-user-sentinel").unwrap(),
+            }),
+            Some(7),
+            None,
+            connected_view("fresh-user-sentinel"),
+        ),
+        (
+            Ok(user_response(
+                200,
                 br#"{"id":11,"login":"fresh-user-sentinel"}"#,
                 ResponseMeta::default(),
             )),
@@ -963,9 +998,11 @@ async fn loaded_verification_preserves_actual_user_api_results_and_never_resaves
                 id: 11,
                 login: GitHubLogin::new("fresh-user-sentinel").unwrap(),
             }),
-            Some(11),
             None,
-            connected_view("fresh-user-sentinel"),
+            Some(ErrorKey::RequestRefused),
+            GitHubView::NeedsSignIn {
+                login: GitHubLogin::new("owner-sentinel").unwrap(),
+            },
         ),
         (
             Ok(user_response(
@@ -978,7 +1015,7 @@ async fn loaded_verification_preserves_actual_user_api_results_and_never_resaves
                 meta: ResponseMeta::default(),
             }),
             None,
-            None,
+            Some(ErrorKey::ResponseUnreadable),
             GitHubView::NeedsSignIn {
                 login: GitHubLogin::new("owner-sentinel").unwrap(),
             },
@@ -986,25 +1023,31 @@ async fn loaded_verification_preserves_actual_user_api_results_and_never_resaves
         (
             Ok(user_response(403, b"private-provider-sentinel", meta)),
             Err(crate::connections::github::api::ApiError::Refused { status: 403, meta }),
-            Some(7),
+            None,
             Some(ErrorKey::ResponseUnreadable),
-            connected_view("owner-sentinel"),
+            GitHubView::NotVerified {
+                login: GitHubLogin::new("owner-sentinel").unwrap(),
+            },
         ),
         (
             Err(HttpError::Transport),
             Err(crate::connections::github::api::ApiError::Http(
                 HttpError::Transport,
             )),
-            Some(7),
+            None,
             Some(ErrorKey::AccountOffline),
-            connected_view("owner-sentinel"),
+            GitHubView::NotVerified {
+                login: GitHubLogin::new("owner-sentinel").unwrap(),
+            },
         ),
         (
             Ok(user_response(200, b"{", ResponseMeta::default())),
             Err(crate::connections::github::api::ApiError::Response),
-            Some(7),
+            None,
             Some(ErrorKey::ResponseUnreadable),
-            connected_view("owner-sentinel"),
+            GitHubView::NotVerified {
+                login: GitHubLogin::new("owner-sentinel").unwrap(),
+            },
         ),
     ];
     for (response, expected, user, error, view) in cases {
@@ -1045,14 +1088,21 @@ async fn loaded_verification_preserves_actual_user_api_results_and_never_resaves
         assert_eq!(accounts.handle(Event::Verification(event)), frames);
         assert_eq!(accounts.github.machine().view(Instant::now()), view);
         assert_eq!(accounts.github.machine().user().map(|user| user.id), user);
+        if user.is_none() {
+            assert!(accounts.github.machine().token().is_none());
+            assert!(accounts.github.machine().repositories().is_none());
+        }
         assert_eq!(accounts.github.machine().stamp(), Stamp { generation: 1 });
-        if user == Some(11) {
+        if user == Some(7) {
             assert!(matches!(
                 accounts.github.suspended(),
-                [(
-                    Stamp { generation: 1 },
-                    GitHubEffect::RefreshRepos { generation: 1 }
-                )]
+                [
+                    (
+                        Stamp { generation: 1 },
+                        GitHubEffect::RefreshRepos { generation: 1 }
+                    ),
+                    (Stamp { generation: 1 }, GitHubEffect::Wake(_))
+                ]
             ));
         } else {
             assert_eq!(accounts.github.suspended().len(), 0);
@@ -1109,18 +1159,27 @@ async fn genuine_factory_refusal_uses_api_semantics_but_factory_and_request_pani
                 frames,
                 vec![
                     ControlToShell::GitHubError(ErrorKey::AccountOffline.into()),
-                    ControlToShell::GitHub(connected_view("owner-sentinel"))
+                    ControlToShell::GitHub(GitHubView::NotVerified {
+                        login: GitHubLogin::new("owner-sentinel").unwrap(),
+                    })
                 ]
             );
-            assert_eq!(accounts.github.machine().user().unwrap().id, 7);
+            assert!(accounts.github.machine().user().is_none());
         } else {
             assert_eq!(
                 frames,
-                vec![ControlToShell::GitHubError(ErrorKey::RequestRefused.into())]
+                vec![
+                    ControlToShell::GitHubError(ErrorKey::RequestRefused.into()),
+                    ControlToShell::GitHub(GitHubView::NeedsSignIn {
+                        login: GitHubLogin::new("owner-sentinel").unwrap(),
+                    }),
+                ]
             );
             assert_eq!(
                 accounts.github.machine().view(Instant::now()),
-                GitHubView::Requesting
+                GitHubView::NeedsSignIn {
+                    login: GitHubLogin::new("owner-sentinel").unwrap(),
+                }
             );
             assert!(accounts.github.machine().user().is_none());
         }
@@ -1167,7 +1226,7 @@ async fn a_held_user_future_times_out_at_fifteen_seconds_and_is_joined_after_dro
     assert_eq!(http.dropped.load(Ordering::SeqCst), 1);
     accounts.handle(Event::Verification(event));
     tokio::time::resume();
-    assert_eq!(accounts.github.machine().user().unwrap().id, 7);
+    assert!(accounts.github.machine().user().is_none());
     accounts.close(Instant::now(), Instant::now()).await;
 }
 
@@ -1187,7 +1246,9 @@ async fn sign_out_aborts_and_joins_the_exact_user_request_without_reviving_its_s
     assert!(accounts.github.verifying());
     assert_eq!(
         accounts.github.machine().view(Instant::now()),
-        GitHubView::Requesting
+        GitHubView::NotVerified {
+            login: GitHubLogin::new("owner-sentinel").unwrap()
+        }
     );
     assert_eq!(http.active.load(Ordering::SeqCst), 1);
     drive(&mut accounts, GitHubInput::Op(GitHubOp::SignOut));
@@ -1209,6 +1270,88 @@ async fn sign_out_aborts_and_joins_the_exact_user_request_without_reviving_its_s
         GitHubView::SignedOut { cleanup: None }
     );
     assert_eq!(active_github(&scratch), 0);
+    accounts.close(Instant::now(), Instant::now()).await;
+}
+
+#[tokio::test]
+async fn canceling_a_saved_check_preserves_credentials_but_requires_explicit_reverification() {
+    let scratch = Scratch::new("github-saved-check-cancel");
+    let first = UserHttp::new(Ok(user_response(
+        200,
+        br#"{"id":7,"login":"fresh-user-sentinel"}"#,
+        ResponseMeta::default(),
+    )));
+    let release = first.hold();
+    let (mut accounts, store) = verification_accounts(&scratch, first.factory(), Some(1));
+    let saved = store.store.snapshot();
+    start_user_request(&mut accounts).await;
+    first.entered.notified().await;
+    let unchecked = GitHubView::NotVerified {
+        login: GitHubLogin::new("owner-sentinel").unwrap(),
+    };
+    assert_eq!(
+        drive(&mut accounts, GitHubInput::Op(GitHubOp::CancelConnect)),
+        vec![ControlToShell::GitHub(unchecked.clone())]
+    );
+    let stopped = verification_event(&mut accounts).await;
+    assert!(matches!(stopped.outcome, VerificationOutcome::Stopped));
+    assert_eq!(
+        accounts.handle(Event::Verification(stopped.clone())),
+        Vec::<ControlToShell>::new()
+    );
+    settle_owner(&mut accounts).await;
+    assert_eq!(first.active.load(Ordering::SeqCst), 0);
+    assert_eq!(first.dropped.load(Ordering::SeqCst), 1);
+    assert_eq!(store.store.snapshot(), saved);
+    assert!(release.send(()).is_err());
+    assert!(!accounts.github.verifying());
+    assert!(!accounts.github.pending());
+    assert_eq!(accounts.github.machine().user(), None);
+    assert!(accounts.github.machine().token().is_none());
+    assert_eq!(accounts.github.machine().repositories(), None);
+    assert_eq!(active_github(&scratch), 1);
+    assert_eq!(store.writes.load(Ordering::SeqCst), 0);
+    for outcome in [
+        VerificationOutcome::User(Ok(GitHubUser {
+            id: 7,
+            login: GitHubLogin::new("late-user").unwrap(),
+        })),
+        VerificationOutcome::User(Err(crate::connections::github::api::ApiError::Http(
+            HttpError::Transport,
+        ))),
+    ] {
+        let mut late = stopped.clone();
+        late.outcome = outcome;
+        assert_eq!(
+            accounts.handle(Event::Verification(late)),
+            Vec::<ControlToShell>::new()
+        );
+        assert_eq!(accounts.github.machine().view(Instant::now()), unchecked);
+        assert_eq!(accounts.github.machine().user(), None);
+    }
+    tokio::time::pause();
+    assert!(
+        tokio::time::timeout(Duration::from_hours(9), accounts.github.next_verification())
+            .await
+            .is_err()
+    );
+    tokio::time::resume();
+    assert_eq!(first.calls.load(Ordering::SeqCst), 1);
+    let second = UserHttp::new(Ok(user_response(
+        200,
+        br#"{"id":7,"login":"fresh-user-sentinel"}"#,
+        ResponseMeta::default(),
+    )));
+    accounts.net.http = second.factory();
+    drive(&mut accounts, GitHubInput::Op(GitHubOp::RefreshRepos));
+    start_user_request(&mut accounts).await;
+    let checked = verification_event(&mut accounts).await;
+    accounts.handle(Event::Verification(checked));
+    assert_eq!(accounts.github.machine().user().unwrap().id, 7);
+    assert_eq!(second.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(active_github(&scratch), 1);
+    assert_eq!(store.writes.load(Ordering::SeqCst), 0);
+    assert_eq!(store.store.snapshot(), saved);
     accounts.close(Instant::now(), Instant::now()).await;
 }
 
@@ -1316,7 +1459,7 @@ async fn the_request_body_rechecks_the_real_fence_before_its_first_poll() {
     let future = super::github::read_user(
         stamp,
         fence,
-        checked_account().token,
+        checked_account().credentials.token,
         SharedHttp::new(http.clone()),
     );
     drive(&mut accounts, GitHubInput::Op(GitHubOp::SignOut));
@@ -1437,9 +1580,11 @@ async fn verification_keeps_the_load_origin_when_the_owner_session_changes_befor
     assert_eq!(user.session, None);
     assert_eq!(
         accounts.handle(Event::Verification(user)),
-        vec![ControlToShell::GitHub(connected_view("owner-sentinel"))]
+        vec![ControlToShell::GitHub(GitHubView::NotVerified {
+            login: GitHubLogin::new("owner-sentinel").unwrap(),
+        })]
     );
-    assert_eq!(accounts.github.machine().user().unwrap().id, 7);
+    assert!(accounts.github.machine().user().is_none());
     accounts.close(Instant::now(), Instant::now()).await;
 }
 

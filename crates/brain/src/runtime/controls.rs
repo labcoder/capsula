@@ -1,9 +1,7 @@
 use std::cell::Cell;
 
 use kumochi_protocol::frame::Pipe;
-use kumochi_protocol::message::{
-    ControlToBrain, ControlToShell, ErrorKey, MAX_VISIBLE_SCENES, check_rate,
-};
+use kumochi_protocol::message::{ControlToBrain, MAX_VISIBLE_SCENES, check_rate};
 use kumochi_protocol::tap::{Direction, Tapped};
 use tokio::io::AsyncRead;
 use tokio::sync::mpsc;
@@ -174,11 +172,8 @@ impl Brain {
         if message == ControlToBrain::Pong {
             *ping_sent = None;
         }
-        if matches!(message, ControlToBrain::GitHub(_)) {
-            link.control(&ControlToShell::GitHubError(
-                ErrorKey::GitHubUnavailable.into(),
-            ))
-            .map_err(|Full| Ended::Lost)?;
+        if let ControlToBrain::GitHub(op) = message {
+            self.github_op(op, Some(link)).map_err(|Full| Ended::Lost)?;
             return Ok(None);
         }
         if let ControlToBrain::Settings(op) = message {

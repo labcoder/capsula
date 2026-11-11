@@ -6,6 +6,43 @@ use crate::frame::{HEADER_LEN, Pipe, encode};
 use crate::tap::{Direction, Record, Tapped, write};
 
 #[test]
+fn an_unchecked_saved_account_appends_tag_six_and_unknown_tag_seven_is_refused() {
+    use crate::frame::{FrameError, read};
+    let login = GitHubLogin::new("saved").unwrap();
+    assert_eq!(
+        postcard::to_allocvec(&GitHubView::NeedsSignIn {
+            login: login.clone()
+        })
+        .unwrap(),
+        [5, 5, b's', b'a', b'v', b'e', b'd']
+    );
+    let view = GitHubView::NotVerified { login };
+    let message = ControlToShell::GitHub(view.clone());
+    let wire = encode(&message, Pipe::Control).unwrap();
+    private(&message, Pipe::Control, Direction::ToShell, &["saved"]);
+    assert_eq!(wire, [8, 0, 0, 0, 17, 6, 5, b's', b'a', b'v', b'e', b'd']);
+    assert_eq!(
+        read::<ControlToShell>(&mut wire.as_slice(), Pipe::Control).unwrap(),
+        Some(message)
+    );
+    let json = serde_json::json!({"NotVerified":{"login":"saved"}});
+    assert_eq!(serde_json::to_value(&view).unwrap(), json);
+    assert_eq!(serde_json::from_value::<GitHubView>(json).unwrap(), view);
+    for length in 1..wire.len() {
+        assert!(matches!(
+            read::<ControlToShell>(&mut &wire[..length], Pipe::Control),
+            Err(FrameError::Truncated)
+        ));
+    }
+    let mut unknown = wire;
+    unknown[5] = 7;
+    assert!(matches!(
+        read::<ControlToShell>(&mut unknown.as_slice(), Pipe::Control),
+        Err(FrameError::Malformed(_))
+    ));
+}
+
+#[test]
 fn tagged_github_refusal_appends_wire_tags_and_keeps_error_validation() {
     use crate::frame::{FrameError, read};
     let refusal = ControlToShell::GitHubError(ErrorKey::GitHubUnavailable.into());

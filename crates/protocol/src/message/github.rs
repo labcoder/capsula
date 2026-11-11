@@ -117,7 +117,7 @@ pub enum GitHubOp {
     RetryCleanup,
     /// Set the repository used for new drafts.
     SetDefaultRepo(RepoName),
-    /// Refetch the repositories the connected account can use.
+    /// Recheck a saved identity or refetch its repositories using GET requests.
     RefreshRepos,
 }
 
@@ -159,6 +159,11 @@ pub enum GitHubView {
         /// The account previously connected.
         login: GitHubLogin,
     },
+    /// A saved account whose identity has not been verified for current use.
+    NotVerified {
+        /// The previously saved account, not current authority.
+        login: GitHubLogin,
+    },
 }
 
 impl fmt::Debug for GitHubView {
@@ -182,6 +187,7 @@ impl fmt::Debug for GitHubView {
                 .finish_non_exhaustive(),
             Self::NotInstalled { .. } => f.write_str("NotInstalled(..)"),
             Self::NeedsSignIn { .. } => f.write_str("NeedsSignIn(..)"),
+            Self::NotVerified { .. } => f.write_str("NotVerified(..)"),
         }
     }
 }

@@ -3,11 +3,12 @@ use std::path::PathBuf;
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
 use kumochi_protocol::message::{
     AssistantName, DockPosition, Effort, ErrorKey, MAX_SLUG_BYTES, MaxFrameRate, ModelChoice,
-    ModelSlug, SettingsOp, SttUnload, ThreadId, UserName,
+    ModelSlug, RepoName, SettingsOp, SttUnload, ThreadId, UserName,
 };
 use kumochi_protocol::voice::VoicePart;
 
 use super::{Config, ConfigError};
+use crate::connections::github::device::DefaultRepo;
 use crate::test_support::Scratch;
 
 fn dir(scratch: &Scratch) -> PathBuf {
@@ -25,6 +26,237 @@ fn saved(path: &std::path::Path) -> toml::Table {
         .expect("readable")
         .parse()
         .expect("parses")
+}
+
+fn github_default(config: &Config) -> Option<(u64, RepoName)> {
+    config
+        .github_default()
+        .map(|default| (default.account, default.repo))
+}
+
+#[test]
+fn github_defaults_publish_only_on_commit_and_keep_unknown_keys_across_restart() {
+    let scratch = Scratch::new("config-github-default");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    std::fs::write(
+        &path,
+        "future_key = 3\n[later]\nmodel = \"x\"\n[github]\nfuture = [\"keep\"]\n\
+         [github.options]\nenabled = true\n",
+    )
+    .expect("seeded");
+    let original = saved(&path);
+    let mut config = Config::load(Some(dir.clone()), ThreadId(1));
+    assert_eq!(github_default(&config), None);
+    for (account, decimal, repo) in [
+        (1, "1", "Owner/Repo"),
+        (u64::MAX, "18446744073709551615", "Other/Next"),
+    ] {
+        let default = DefaultRepo {
+            account,
+            repo: RepoName::new(repo).expect("valid repo"),
+        };
+        let before = github_default(&config);
+        let view = config.view().clone();
+        let text = std::fs::read_to_string(&path).expect("readable");
+        let pending = config.stage_github_default(&default).expect("staged");
+        assert_eq!(github_default(&config), before);
+        assert_eq!(config.view(), &view);
+        assert_eq!(std::fs::read_to_string(&path).expect("readable"), text);
+        pending.write().expect("written");
+        assert_eq!(github_default(&config), before);
+        assert_eq!(config.view(), &view);
+        let table = saved(&path);
+        assert_eq!(table["github"]["default_account"].as_str(), Some(decimal));
+        assert_eq!(table["github"]["default_repo"].as_str(), Some(repo));
+        assert_eq!(table["future_key"], original["future_key"]);
+        assert_eq!(table["later"], original["later"]);
+        assert_eq!(table["github"]["future"], original["github"]["future"]);
+        assert_eq!(table["github"]["options"], original["github"]["options"]);
+        config.commit(pending);
+        assert_eq!(
+            github_default(&config),
+            Some((account, default.repo.clone()))
+        );
+        assert_eq!(config.view(), &view);
+        let reloaded = Config::load(Some(dir.clone()), ThreadId(1));
+        assert_eq!(github_default(&reloaded), Some((account, default.repo)));
+    }
+    let github = saved(&path)["github"].clone();
+    apply(&mut config, SettingsOp::FinishOnboarding);
+    assert_eq!(saved(&path)["github"], github);
+    let reloaded = Config::load(Some(dir), ThreadId(1));
+    assert_eq!(
+        github_default(&reloaded),
+        Some((u64::MAX, RepoName::new("Other/Next").expect("valid repo")))
+    );
+}
+
+#[test]
+fn malformed_or_incomplete_github_defaults_are_absent_and_survive_unrelated_saves() {
+    let bad_accounts = [
+        "\"\"",
+        "\"0\"",
+        "\"-1\"",
+        "\"+1\"",
+        "\" 1\"",
+        "\"1 \"",
+        "\"1.0\"",
+        "\"1x\"",
+        "\"18446744073709551616\"",
+        "\"１２\"",
+        "1",
+        "0",
+        "-1",
+        "1.5",
+        "true",
+        "[]",
+        "{}",
+    ]
+    .map(|account| {
+        format!("[github]\ndefault_account = {account}\ndefault_repo = \"owner/repo\"\n")
+    });
+    let bad_repos = [
+        "\"\"",
+        "\"owner\"",
+        "\"owner/\"",
+        "\"/repo\"",
+        "\"owner/repo/extra\"",
+        "\"owner/re po\"",
+        "1",
+        "true",
+        "[]",
+        "{}",
+    ]
+    .map(|repo| format!("[github]\ndefault_account = \"1\"\ndefault_repo = {repo}\n"));
+    let bad_sections = [
+        "",
+        "github = 3\n",
+        "github = \"owner/repo\"\n",
+        "github = []\n",
+        "[github]\n",
+        "[github]\ndefault_account = \"1\"\n",
+        "[github]\ndefault_repo = \"owner/repo\"\n",
+    ]
+    .map(str::to_owned);
+    let scratch = Scratch::new("config-github-malformed");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    for section in bad_accounts
+        .into_iter()
+        .chain(bad_repos)
+        .chain(bad_sections)
+    {
+        let text = format!("future_key = 7\n{section}");
+        std::fs::write(&path, &text).expect("seeded");
+        let original = saved(&path);
+        let mut config = Config::load(Some(dir.clone()), ThreadId(1));
+        assert_eq!(github_default(&config), None, "{text}");
+        apply(&mut config, SettingsOp::SetTaskbar(true));
+        let table = saved(&path);
+        assert_eq!(table.get("github"), original.get("github"), "{text}");
+        assert_eq!(table["future_key"].as_integer(), Some(7), "{text}");
+        let reloaded = Config::load(Some(dir.clone()), ThreadId(1));
+        assert_eq!(github_default(&reloaded), None, "{text}");
+    }
+}
+
+#[test]
+fn setting_a_github_default_replaces_a_malformed_section_without_losing_other_keys() {
+    let scratch = Scratch::new("config-github-repair");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    std::fs::write(&path, "future_key = 7\ngithub = false\n").expect("seeded");
+    let mut config = Config::load(Some(dir.clone()), ThreadId(1));
+    let default = DefaultRepo {
+        account: 17,
+        repo: RepoName::new("owner/repo").expect("valid repo"),
+    };
+    let pending = config.stage_github_default(&default).expect("staged");
+    pending.write().expect("written");
+    config.commit(pending);
+    assert_eq!(saved(&path)["future_key"].as_integer(), Some(7));
+    let reloaded = Config::load(Some(dir), ThreadId(1));
+    assert_eq!(github_default(&reloaded), Some((17, default.repo)));
+}
+
+#[test]
+fn refused_github_defaults_preserve_the_file_view_and_default_in_later_saves() {
+    let scratch = Scratch::new("config-github-refused");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    let temp = dir.join(format!("{CONFIG_FILE}.tmp"));
+    let text = "assistant_name = \"Nimbus\"\n[github]\n\
+                default_account = \"7\"\ndefault_repo = \"Old/Repo\"\n";
+    std::fs::write(&path, text).expect("seeded");
+    let mut config = Config::load(Some(dir.clone()), ThreadId(1));
+    let before = Some((7, RepoName::new("Old/Repo").expect("valid repo")));
+    assert_eq!(github_default(&config), before);
+    let view = config.view().clone();
+    let mut default = DefaultRepo {
+        account: 0,
+        repo: RepoName::new("New/Repo").expect("valid repo"),
+    };
+    assert!(matches!(
+        config.stage_github_default(&default),
+        Err(ConfigError::InvalidGitHubAccount)
+    ));
+    assert_eq!(
+        ConfigError::InvalidGitHubAccount.key(),
+        ErrorKey::SettingsRefused
+    );
+    assert_eq!(github_default(&config), before);
+    assert_eq!(config.view(), &view);
+    assert_eq!(std::fs::read_to_string(&path).expect("readable"), text);
+    default.account = 8;
+    std::fs::create_dir(&temp).expect("blocker");
+    let pending = config.stage_github_default(&default).expect("staged");
+    assert_eq!(github_default(&config), before);
+    assert_eq!(config.view(), &view);
+    assert!(matches!(pending.write(), Err(ConfigError::Write(_))));
+    drop(pending);
+    assert_eq!(github_default(&config), before);
+    assert_eq!(config.view(), &view);
+    assert_eq!(std::fs::read_to_string(&path).expect("readable"), text);
+    std::fs::remove_dir(&temp).expect("unblocked");
+    apply(&mut config, SettingsOp::FinishOnboarding);
+    assert_eq!(github_default(&config), before);
+    let reloaded = Config::load(Some(dir), ThreadId(1));
+    assert_eq!(github_default(&reloaded), before);
+}
+
+#[test]
+fn github_default_staging_honors_an_unavailable_or_unreadable_config() {
+    let default = DefaultRepo {
+        account: 1,
+        repo: RepoName::new("owner/repo").expect("valid repo"),
+    };
+    let config = Config::load(None, ThreadId(1));
+    assert_eq!(github_default(&config), None);
+    assert!(matches!(
+        config.stage_github_default(&default),
+        Err(ConfigError::NoHome)
+    ));
+    let scratch = Scratch::new("config-github-unreadable");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    let broken = "[github\n";
+    std::fs::write(&path, broken).expect("seeded");
+    let config = Config::load(Some(dir.clone()), ThreadId(1));
+    assert_eq!(github_default(&config), None);
+    assert!(matches!(
+        config.stage_github_default(&default),
+        Err(ConfigError::Unreadable)
+    ));
+    assert_eq!(std::fs::read_to_string(&path).expect("readable"), broken);
+    std::fs::remove_file(&path).expect("removed broken fixture");
+    std::fs::create_dir(&path).expect("a folder where the file goes");
+    let config = Config::load(Some(dir), ThreadId(1));
+    assert_eq!(github_default(&config), None);
+    assert!(matches!(
+        config.stage_github_default(&default),
+        Err(ConfigError::Unreadable)
+    ));
 }
 
 #[test]

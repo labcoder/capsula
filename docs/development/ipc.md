@@ -498,6 +498,13 @@ Mixed binaries still fail the build-id check. Protocol values carry no credentia
 owns account binding, content hashes, approval revisions and monotonic state versions; the
 shell will own presentation and pending edits.
 
+Current connection controls route to the configured [GitHub account owner](github.md).
+The unset public client ID refuses Connect without starting account work. Issue consent,
+discard/check commands and IssueEdit remain dormant; displayed saved cards use the bounded
+history/card reader described in [issue actions](issues.md). None of those reads grants consent.
+`GitHubView::NotVerified { login }` is appended at tag 6. It carries only the saved
+display identity and grants no authority; Check again reuses RefreshRepos for GET-only verification.
+
 | Pipe and direction | Message | Fields |
 | --- | --- | --- |
 | Control, shell to brain | `GitHub(GitHubOp)` | Connect, cancel, sign out, retry cleanup, set default repository or refresh repositories |
@@ -516,10 +523,11 @@ CRLF normalization; wire decoding refuses CR. Issue URLs allow only canonical
 repository and login values compare byte for byte. A card fits the 256 KiB data cap and the
 bounded repository view fits the 64 KiB control cap.
 
-P1 stages these messages without senders or action handlers. The brain logs only the operation
-kind and drops GitHub/issue requests, including edits and card reads; no reply is owed until
-later slices implement them. The shell explicitly ignores the new controls and cards, returning
-data credit for each dropped card without waiting for a run state. A history event can carry
+P1 originally staged these messages without senders or action handlers. That staging baseline
+is superseded by the current account and saved-card paths above: it logged only the operation
+kind and dropped GitHub/issue requests, including edits and card reads, without a reply.
+The shell ignored the new controls and cards, returning data credit for each dropped card
+without waiting for a run state. A history event can carry
 `PageEventKind::Issue { draft }`; its existing text supplies the localized one-line
 `Issue draft: {title}` placeholder, not a card or a consent surface. The tap records the new
 controls only as operation and payload length, never content; data frames are not tapped.

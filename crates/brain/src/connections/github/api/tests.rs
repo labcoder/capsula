@@ -8,7 +8,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
     task::Poll,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use kumochi_protocol::{
@@ -19,11 +19,11 @@ use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 use super::{
-    ApiError, TokenError, TokenReply, installations, poll_device_token, repositories,
-    request_device_code, user,
+    ApiError, TokenError, TokenReply, TokenWire, installations, poll_device_token,
+    refresh_user_token, repositories, request_device_code, token_response, user,
 };
 use crate::connections::{
-    github::{DeviceCodeValue, GitHubEndpoint, GitHubToken, Page},
+    github::{ClientId, DeviceCodeValue, GitHubEndpoint, GitHubToken, Page, RefreshToken},
     http_client::{Endpoint, Http, HttpError, Request, Response, ResponseMeta},
 };
 use crate::test_support::{Captured, SENTINEL};
@@ -75,24 +75,29 @@ fn token() -> Secret<GitHubToken> {
 fn code() -> Secret<DeviceCodeValue> {
     Secret::new(DeviceCodeValue::new(Zeroizing::new("device-fake".to_owned())).unwrap())
 }
+fn refresh() -> Secret<RefreshToken> {
+    Secret::new(RefreshToken::new(Zeroizing::new("ghr_fake".to_owned())).unwrap())
+}
 fn device() -> Value {
     json!({"device_code":"device-fake", "user_code":"ABCD-EFGH", "verification_uri":"https://github.com/login/device", "expires_in":900, "interval":5})
 }
 fn bearer() -> Value {
-    json!({"access_token":"ghu_fake", "token_type":"bearer"})
+    json!({"access_token":"ghu_fake", "token_type":"bearer", "refresh_token":"ghr_fake", "expires_in":28800, "refresh_token_expires_in":15_897_600})
 }
 
 #[derive(Clone, Copy, Debug)]
 enum Call {
     Device,
     Token,
+    Refresh,
     User,
     Installations,
     Repositories,
 }
-const CALLS: [Call; 5] = [
+const CALLS: [Call; 6] = [
     Call::Device,
     Call::Token,
+    Call::Refresh,
     Call::User,
     Call::Installations,
     Call::Repositories,
@@ -102,6 +107,11 @@ fn valid(call: Call) -> Value {
     match call {
         Call::Device => device(),
         Call::Token => bearer(),
+        Call::Refresh => {
+            let mut value = bearer();
+            value["refresh_token"] = json!("ghr_rotated");
+            value
+        }
         Call::User => json!({"id":1,"login":"owner"}),
         Call::Installations => json!({"total_count":1,"installations":[{"id":42}]}),
         Call::Repositories => json!({"total_count":1,"repositories":[{"full_name":"owner/repo"}]}),
@@ -111,6 +121,9 @@ async fn invoke(http: &impl Http, call: Call) -> Result<(), ApiError> {
     match call {
         Call::Device => request_device_code(http, "client-fake").await.map(|_| ()),
         Call::Token => poll_device_token(http, "client-fake", &code())
+            .await
+            .map(|_| ()),
+        Call::Refresh => refresh_user_token(http, "client-fake", &refresh())
             .await
             .map(|_| ()),
         Call::User => user(http, &token()).await.map(|_| ()),
@@ -124,7 +137,7 @@ async fn invoke(http: &impl Http, call: Call) -> Result<(), ApiError> {
 }
 fn cap(call: Call) -> usize {
     match call {
-        Call::Device | Call::Token => 4096,
+        Call::Device | Call::Token | Call::Refresh => 4096,
         Call::User => 65_536,
         _ => 1_048_576,
     }
@@ -152,7 +165,8 @@ async fn each_call_builds_its_checked_endpoint_and_returns_exact_values() {
     else {
         panic!("token reply")
     };
-    assert_eq!(reply.expose().as_str(), "ghu_fake");
+    assert_eq!(reply.token.expose().as_str(), "ghu_fake");
+    assert_eq!(reply.refresh.expose().as_str(), "ghr_fake");
     {
         let requests = http.requests.lock().unwrap();
         let Endpoint::GitHub(GitHubEndpoint::AccessToken { client_id, code }) =
@@ -231,6 +245,12 @@ async fn local_input_refusals_never_dispatch() {
             poll_device_token(&http, bad, &code()).await.unwrap_err(),
             ApiError::Http(HttpError::Request)
         );
+        assert_eq!(
+            refresh_user_token(&http, bad, &refresh())
+                .await
+                .unwrap_err(),
+            ApiError::Http(HttpError::Request)
+        );
         assert_eq!(http.requests.lock().unwrap().len(), 0);
     }
     let http = Script::json(&valid(Call::Repositories));
@@ -261,7 +281,7 @@ async fn every_parser_enforces_its_entry_byte_cap_with_scripted_http() {
 }
 
 #[tokio::test]
-async fn every_parser_refuses_empty_truncated_and_mistyped_roots_but_ignores_extras() {
+async fn every_parser_refuses_bad_roots_and_token_parsers_also_refuse_unknown_fields() {
     for call in CALLS {
         for bad in ["", "{", "null", "[]", "42", "true", "\"text\""] {
             assert_eq!(
@@ -285,7 +305,11 @@ async fn every_parser_refuses_empty_truncated_and_mistyped_roots_but_ignores_ext
         extra["unknown"] = json!({"message":SENTINEL,"ignored":[1,2,3]});
         assert_eq!(
             invoke(&Script::json(&extra), call).await,
-            Ok(()),
+            if matches!(call, Call::Token | Call::Refresh) {
+                Err(ApiError::Response)
+            } else {
+                Ok(())
+            },
             "{call:?}"
         );
     }
@@ -299,7 +323,26 @@ async fn required_and_duplicate_known_fields_are_refused() {
             Call::Device,
             vec!["device_code", "user_code", "verification_uri", "expires_in"],
         ),
-        (Call::Token, vec!["access_token", "token_type"]),
+        (
+            Call::Token,
+            vec![
+                "access_token",
+                "token_type",
+                "refresh_token",
+                "expires_in",
+                "refresh_token_expires_in",
+            ],
+        ),
+        (
+            Call::Refresh,
+            vec![
+                "access_token",
+                "token_type",
+                "refresh_token",
+                "expires_in",
+                "refresh_token_expires_in",
+            ],
+        ),
         (Call::User, vec!["id", "login"]),
         (Call::Installations, vec!["total_count", "installations"]),
         (Call::Repositories, vec!["total_count", "repositories"]),
@@ -472,16 +515,15 @@ async fn token_reply_maps_only_closed_codes_and_checks_the_bearer() {
         assert_eq!(kind, expected);
     }
     let exact = format!("ghu_{}", "x".repeat(251));
-    let TokenReply::Token(reply) = poll_device_token(
-        &Script::json(&json!({"access_token":exact,"token_type":"bearer"})),
-        "client",
-        &code(),
-    )
-    .await
-    .unwrap() else {
+    let mut value = bearer();
+    value["access_token"] = json!(exact);
+    let TokenReply::Token(reply) = poll_device_token(&Script::json(&value), "client", &code())
+        .await
+        .unwrap()
+    else {
         panic!("checked bearer")
     };
-    assert_eq!(reply.expose().as_str(), exact);
+    assert_eq!(reply.token.expose().as_str(), exact);
     for bad in [
         String::new(),
         "ghu_".to_owned(),
@@ -491,14 +533,12 @@ async fn token_reply_maps_only_closed_codes_and_checks_the_bearer() {
         "ghu_é".to_owned(),
         format!("ghu_{}", "x".repeat(252)),
     ] {
+        let mut value = bearer();
+        value["access_token"] = json!(bad);
         assert_eq!(
-            poll_device_token(
-                &Script::json(&json!({"access_token":bad,"token_type":"bearer"})),
-                "client",
-                &code()
-            )
-            .await
-            .unwrap_err(),
+            poll_device_token(&Script::json(&value), "client", &code())
+                .await
+                .unwrap_err(),
             ApiError::Response
         );
     }
@@ -520,51 +560,272 @@ async fn token_reply_maps_only_closed_codes_and_checks_the_bearer() {
 }
 
 #[tokio::test]
-async fn refresh_and_expiry_shapes_never_return_a_usable_token() {
-    for field in ["refresh_token", "expires_in", "refresh_token_expires_in"] {
-        for value in if field == "refresh_token" {
-            vec![json!(""), json!(format!("ghr_{}", "x".repeat(251)))]
-        } else {
-            vec![json!(0), json!(28800)]
-        } {
-            let mut reply = bearer();
-            reply[field] = value;
+async fn only_complete_documented_expiring_credentials_are_accepted() {
+    for call in [Call::Token, Call::Refresh] {
+        assert_eq!(
+            invoke(
+                &Script::json(&json!({"access_token":"ghu_fake","token_type":"bearer"})),
+                call
+            )
+            .await,
+            Err(ApiError::Response)
+        );
+        for (field, values) in [
+            ("expires_in", vec![0, 1, 28_799, 28_801, u64::MAX]),
+            (
+                "refresh_token_expires_in",
+                vec![0, 1, 15_897_599, 15_897_601, u64::MAX],
+            ),
+        ] {
+            for value in values {
+                let mut body = valid(call);
+                body[field] = json!(value);
+                assert_eq!(
+                    invoke(&Script::json(&body), call).await,
+                    Err(ApiError::Response)
+                );
+            }
+        }
+        for value in [
+            "",
+            "ghr_",
+            "ghu_fake",
+            "ghr_a b",
+            "ghr_x\n",
+            "ghr_é",
+            &format!("ghr_{}", "x".repeat(252)),
+        ] {
+            let mut body = valid(call);
+            body["refresh_token"] = json!(value);
             assert_eq!(
-                poll_device_token(&Script::json(&reply), "client", &code())
-                    .await
-                    .unwrap_err(),
-                ApiError::RefreshUnsupported
+                invoke(&Script::json(&body), call).await,
+                Err(ApiError::Response)
             );
         }
-        for value in [Value::Null, json!([]), json!({}), json!(true)] {
-            let mut reply = bearer();
-            reply[field] = value;
+        for field in ["refresh_token", "expires_in", "refresh_token_expires_in"] {
+            for value in [Value::Null, json!([]), json!({}), json!(true)] {
+                let mut body = valid(call);
+                body[field] = value;
+                assert_eq!(
+                    invoke(&Script::json(&body), call).await,
+                    Err(ApiError::Response)
+                );
+            }
+        }
+        for scope in [None, Some("")] {
+            let mut body = valid(call);
+            body["refresh_token"] = json!(format!("ghr_{}", "x".repeat(251)));
+            if let Some(scope) = scope {
+                body["scope"] = json!(scope);
+            }
+            assert_eq!(invoke(&Script::json(&body), call).await, Ok(()));
+        }
+    }
+}
+
+#[tokio::test]
+async fn token_shapes_reject_mixed_errors_polling_advice_scope_and_unknown_fields() {
+    for call in [Call::Token, Call::Refresh] {
+        for (field, value) in [
+            ("token_type", json!("Bearer")),
+            ("token_type", json!("other")),
+            ("scope", json!("repo")),
+            ("scope", json!(" ")),
+            ("scope", Value::Null),
+            ("scope", json!([])),
+            ("scope", json!({})),
+            ("scope", json!(false)),
+            ("scope", json!(0)),
+            ("interval", json!(5)),
+            ("error", json!("slow_down")),
+            ("error_description", json!(SENTINEL)),
+            ("error_uri", json!(SENTINEL)),
+            ("unknown", json!(SENTINEL)),
+        ] {
+            let mut body = valid(call);
+            body[field] = value;
             assert_eq!(
-                poll_device_token(&Script::json(&reply), "client", &code())
-                    .await
-                    .unwrap_err(),
-                ApiError::Response
+                invoke(&Script::json(&body), call).await,
+                Err(ApiError::Response),
+                "{field}"
             );
         }
     }
-    let mut reply = bearer();
-    reply["refresh_token"] = json!("x".repeat(256));
-    assert_eq!(
-        poll_device_token(&Script::json(&reply), "client", &code())
+    for (field, value) in bearer().as_object().unwrap() {
+        let mut body = json!({"error":"slow_down"});
+        body[field] = value.clone();
+        assert_eq!(
+            invoke(&Script::json(&body), Call::Token).await,
+            Err(ApiError::Response),
+            "{field}"
+        );
+        assert_eq!(
+            invoke(&Script::json(&body), Call::Refresh).await,
+            Err(ApiError::Response),
+            "{field}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn expiry_uses_request_start_rounded_down_not_completion_or_provider_clock() {
+    struct ClockHttp(Mutex<SystemTime>);
+    impl Http for ClockHttp {
+        fn execute(&self, _request: Request) -> impl Future<Output = Result<Response, HttpError>> {
+            *self.0.lock().unwrap() += Duration::from_secs(60);
+            std::future::ready(Ok(response(
+                200,
+                serde_json::to_vec(&bearer()).unwrap(),
+                ResponseMeta {
+                    date_s: Some(u64::MAX),
+                    ..ResponseMeta::default()
+                },
+            )))
+        }
+    }
+    for endpoint in [
+        GitHubEndpoint::AccessToken {
+            client_id: ClientId::new("client").unwrap(),
+            code: code(),
+        },
+        GitHubEndpoint::RefreshToken {
+            client_id: ClientId::new("client").unwrap(),
+            refresh: refresh(),
+        },
+    ] {
+        let http = ClockHttp(Mutex::new(
+            UNIX_EPOCH + Duration::new(1_700_000_000, 999_999_999),
+        ));
+        let (response, started_at_s) = token_response(&http, endpoint, || *http.0.lock().unwrap())
             .await
-            .unwrap_err(),
+            .unwrap();
+        assert_eq!(started_at_s, 1_700_000_000);
+        assert_eq!(
+            *http.0.lock().unwrap(),
+            UNIX_EPOCH + Duration::new(1_700_000_060, 999_999_999)
+        );
+        let raw: TokenWire = super::parse(&response, 200, 4096).unwrap();
+        let TokenReply::Token(tokens) = raw.reply(started_at_s).unwrap() else {
+            panic!("expiring credentials")
+        };
+        assert_eq!(tokens.token.expose().as_str(), "ghu_fake");
+        assert_eq!(tokens.refresh.expose().as_str(), "ghr_fake");
+        assert_eq!(tokens.expires_at_s, 1_700_028_800);
+        assert_eq!(tokens.refresh_expires_at_s, 1_715_897_600);
+    }
+    let http = Script::json(&bearer());
+    assert_eq!(
+        token_response(
+            &http,
+            GitHubEndpoint::RefreshToken {
+                client_id: ClientId::new("client").unwrap(),
+                refresh: refresh()
+            },
+            || UNIX_EPOCH - Duration::from_secs(1)
+        )
+        .await
+        .unwrap_err(),
         ApiError::Response
     );
-    let mut reply = bearer();
-    reply["refresh_token"] = json!(format!("ghr_{SENTINEL}"));
-    reply["expires_in"] = json!(28800);
-    reply["refresh_token_expires_in"] = json!(15_897_600);
-    assert_eq!(
-        poll_device_token(&Script::json(&reply), "client", &code())
-            .await
-            .unwrap_err(),
-        ApiError::RefreshUnsupported
-    );
+    assert_eq!(http.requests.lock().unwrap().len(), 0);
+}
+
+#[test]
+fn expiry_addition_refuses_each_overflow_and_accepts_the_last_representable_pair() {
+    for start in [u64::MAX - 15_897_600 + 1, u64::MAX - 28_800 + 1, u64::MAX] {
+        let raw: TokenWire = serde_json::from_value(bearer()).unwrap();
+        assert_eq!(raw.reply(start).unwrap_err(), ApiError::Response);
+    }
+    let raw: TokenWire = serde_json::from_value(bearer()).unwrap();
+    let TokenReply::Token(tokens) = raw.reply(u64::MAX - 15_897_600).unwrap() else {
+        panic!("last expiring pair")
+    };
+    assert_eq!(tokens.expires_at_s, u64::MAX - 15_868_800);
+    assert_eq!(tokens.refresh_expires_at_s, u64::MAX);
+}
+
+#[tokio::test]
+async fn refresh_rotates_once_and_provider_errors_never_poll_or_retry() {
+    let mut value = bearer();
+    value["access_token"] = json!("ghu_rotated");
+    value["refresh_token"] = json!("ghr_rotated");
+    let http = Script::json(&value);
+    let reply = refresh_user_token(&http, "client", &refresh())
+        .await
+        .unwrap();
+    assert_eq!(reply.token.expose().as_str(), "ghu_rotated");
+    assert_eq!(reply.refresh.expose().as_str(), "ghr_rotated");
+    {
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].fields.len(), 0);
+        let Endpoint::GitHub(GitHubEndpoint::RefreshToken { client_id, refresh }) =
+            &requests[0].endpoint
+        else {
+            panic!("typed refresh endpoint")
+        };
+        assert_eq!(client_id.as_str(), "client");
+        assert_eq!(refresh.expose().as_str(), "ghr_fake");
+    }
+    for status in [200, 400] {
+        for code in [
+            "authorization_pending",
+            "slow_down",
+            "bad_refresh_token",
+            "incorrect_client_credentials",
+            SENTINEL,
+        ] {
+            let http = Script::new(Ok(response(
+                status,
+                serde_json::to_vec(&json!({"error":code,"error_description":SENTINEL,"error_uri":SENTINEL,"interval":5})).unwrap(),
+                ResponseMeta { retry_after_s: Some(u64::MAX), retry_after_present: true, ..ResponseMeta::default() },
+            )));
+            http.replies.lock().unwrap().push_back(Ok(response(
+                200,
+                serde_json::to_vec(&value).unwrap(),
+                ResponseMeta::default(),
+            )));
+            let error = refresh_user_token(&http, "client", &refresh())
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error,
+                ApiError::Refused {
+                    status,
+                    meta: ResponseMeta {
+                        retry_after_s: Some(3600),
+                        retry_after_present: true,
+                        ..ResponseMeta::default()
+                    }
+                }
+            );
+            assert_redacted(&format!("{error:?} {error}"));
+            assert_eq!(http.requests.lock().unwrap().len(), 1);
+            assert_eq!(http.replies.lock().unwrap().len(), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn refresh_rejects_a_reused_refresh_credential_even_with_a_changed_access_token() {
+    let original =
+        Secret::new(RefreshToken::new(Zeroizing::new(format!("ghr_{SENTINEL}"))).unwrap());
+    let mut value = bearer();
+    value["access_token"] = json!("ghu_rotated");
+    value["refresh_token"] = json!(format!("ghr_{SENTINEL}"));
+    let http = Script::json(&value);
+    http.replies.lock().unwrap().push_back(Ok(response(
+        200,
+        serde_json::to_vec(&valid(Call::Refresh)).unwrap(),
+        ResponseMeta::default(),
+    )));
+    let error = refresh_user_token(&http, "client", &original)
+        .await
+        .unwrap_err();
+    assert_eq!(error, ApiError::Response);
+    assert_redacted(&format!("{error:?} {error}"));
+    assert_eq!(http.requests.lock().unwrap().len(), 1);
+    assert_eq!(http.replies.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -574,6 +835,7 @@ async fn optional_token_fields_reject_duplicates_and_invalid_expiry_types() {
         ("refresh_token", json!("ghr_fake")),
         ("expires_in", json!(28800)),
         ("refresh_token_expires_in", json!(15_897_600)),
+        ("scope", json!("")),
     ] {
         let mut original = bearer();
         original[field] = value.clone();
@@ -845,7 +1107,6 @@ fn definite_classification_keeps_transport_uncertainty_and_the_full_status_table
         );
     }
     assert_eq!(ApiError::Response.definite_reason(), None);
-    assert_eq!(ApiError::RefreshUnsupported.definite_reason(), None);
 }
 
 #[tokio::test]
@@ -1024,18 +1285,38 @@ async fn outermost_success_carriers_redact_credentials_user_codes_logins_and_rep
     let reply = request_device_code(&Script::json(&value), "client")
         .await
         .unwrap();
+    let cloned = reply.clone();
     assert_eq!(reply.code.expose().as_str(), SENTINEL);
     assert_eq!(reply.user_code.as_str(), SENTINEL.to_ascii_uppercase());
     assert_redacted(&format!("{:?}", Ok::<_, ApiError>(reply)));
-    let value = json!({"access_token":format!("ghu_{SENTINEL}"),"token_type":"bearer"});
+    assert_eq!(cloned.code.expose().as_str(), SENTINEL);
+    assert_redacted(&format!("{:?}", Ok::<_, ApiError>(cloned)));
+    let mut value = bearer();
+    value["access_token"] = json!(format!("ghu_{SENTINEL}"));
+    value["refresh_token"] = json!(format!("ghr_{SENTINEL}"));
     let reply = poll_device_token(&Script::json(&value), "client", &code())
         .await
         .unwrap();
+    let cloned = reply.clone();
     let TokenReply::Token(bearer) = &reply else {
         panic!("sentinel bearer")
     };
-    assert_eq!(bearer.expose().as_str(), format!("ghu_{SENTINEL}"));
+    assert_eq!(bearer.token.expose().as_str(), format!("ghu_{SENTINEL}"));
+    assert_eq!(bearer.refresh.expose().as_str(), format!("ghr_{SENTINEL}"));
+    assert_redacted(&format!("{:?}", Ok::<_, ApiError>(bearer.clone())));
     assert_redacted(&format!("{:?}", Ok::<_, ApiError>(reply)));
+    let TokenReply::Token(cloned) = cloned else {
+        panic!("cloned sentinel credentials")
+    };
+    assert_eq!(cloned.token.expose().as_str(), format!("ghu_{SENTINEL}"));
+    assert_eq!(cloned.refresh.expose().as_str(), format!("ghr_{SENTINEL}"));
+    assert_redacted(&format!("{:?}", Ok::<_, ApiError>(cloned)));
+    let tokens = refresh_user_token(&Script::json(&value), "client", &refresh())
+        .await
+        .unwrap();
+    assert_redacted(&format!("{:?}", Ok::<_, ApiError>(tokens.clone())));
+    assert_eq!(tokens.token.expose().as_str(), format!("ghu_{SENTINEL}"));
+    assert_eq!(tokens.refresh.expose().as_str(), format!("ghr_{SENTINEL}"));
     let reply = user(&Script::json(&json!({"id":1,"login":SENTINEL})), &token())
         .await
         .unwrap();
@@ -1110,10 +1391,11 @@ async fn foreign_reply_text_and_request_ids_never_enter_errors_debug_or_logs() {
     assert_redacted(&format!("{error:?}"));
     let mut value = bearer();
     value["refresh_token"] = json!(format!("ghr_{SENTINEL}"));
+    value.as_object_mut().unwrap().remove("expires_in");
     let error = poll_device_token(&Script::json(&value), "client", &code())
         .await
         .unwrap_err();
-    assert_eq!(error, ApiError::RefreshUnsupported);
+    assert_eq!(error, ApiError::Response);
     assert_redacted(&format!("{error:?} {error}"));
     let logs = captured.text();
     assert!(logs.contains("p2b1-capture-control"));
@@ -1229,6 +1511,6 @@ async fn interval_duplicates_and_bad_intervals_on_other_token_shapes_fail_closed
         poll_device_token(&http, "client", &code())
             .await
             .unwrap_err(),
-        ApiError::RefreshUnsupported
+        ApiError::Response
     );
 }

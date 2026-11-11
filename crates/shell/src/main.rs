@@ -16,10 +16,6 @@ mod confirmation;
 mod credential;
 mod drawing;
 mod escape;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "connection controls remain dormant")
-)]
 mod github_connections;
 #[cfg(test)]
 mod github_link_tests;

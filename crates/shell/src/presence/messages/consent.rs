@@ -126,8 +126,14 @@ impl Messages {
         {
             return None;
         }
-        let GitHubView::Connected { login, repos, .. } = github.view.as_ref()? else {
-            return None;
+        let (login, repos) = match github.view.as_ref()? {
+            GitHubView::Connected { login, repos, .. } => (login, repos),
+            GitHubView::SignedOut { .. }
+            | GitHubView::Requesting
+            | GitHubView::AwaitingUser { .. }
+            | GitHubView::NotInstalled { .. }
+            | GitHubView::NeedsSignIn { .. }
+            | GitHubView::NotVerified { .. } => return None,
         };
         let model = self.model.read(cx);
         let entry = model.issue(draft)?;

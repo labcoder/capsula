@@ -1,11 +1,11 @@
-use super::{Accounts, Event, HttpFactory, Work};
+use super::{Accounts, Brain, Event, Full, HttpFactory, Link, Work, settings};
 use crate::connections::github::{
-    GitHubToken,
+    DeviceCodeValue, GitHubToken, RefreshToken,
     api::{self, ApiError, GitHubUser},
-    device::{Effect, Input, Machine, Stamp},
+    device::{DefaultRepo, Effect, Input, Machine, Repositories, Stamp},
     lane::{Job, LoadError, Reply},
 };
-use crate::connections::http_client::{HttpError, SharedHttp};
+use crate::connections::http_client::{Http, HttpError, Request, Response, SharedHttp};
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::{ControlToShell, ErrorKey, GitHubOp};
 use std::sync::{
@@ -17,16 +17,24 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
+mod repositories;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum VerificationStage {
     Construction,
     Request,
+    Wake,
 }
 
 #[derive(Clone)]
 pub(crate) enum VerificationOutcome {
     Built(Result<SharedHttp, HttpError>),
     User(Result<GitHubUser, ApiError>),
+    Code(Result<api::DeviceCode, ApiError>),
+    Poll(Result<api::TokenReply, ApiError>),
+    Refreshed(Result<api::Tokens, ApiError>),
+    Repositories(Result<Repositories, ApiError>),
+    Wake,
     Stopped,
 }
 
@@ -35,6 +43,11 @@ impl std::fmt::Debug for VerificationOutcome {
         f.write_str(match self {
             Self::Built(_) => "GitHubClientBuilt",
             Self::User(_) => "GitHubUserResult",
+            Self::Code(_) => "GitHubCodeResult",
+            Self::Poll(_) => "GitHubPollResult",
+            Self::Refreshed(_) => "GitHubRefreshResult",
+            Self::Repositories(_) => "GitHubRepositoriesResult",
+            Self::Wake => "GitHubWake",
             Self::Stopped => "GitHubVerificationStopped",
         })
     }
@@ -57,7 +70,7 @@ impl std::fmt::Debug for VerificationEvent {
 
 enum VerificationPhase {
     Construction(JoinHandle<Result<SharedHttp, HttpError>>),
-    Request(JoinHandle<Option<Result<GitHubUser, ApiError>>>),
+    Request(JoinHandle<Option<VerificationOutcome>>),
     Completed(VerificationStage),
 }
 
@@ -66,8 +79,80 @@ struct Verification {
     stamp: Stamp,
     session: Option<u64>,
     cancelled: bool,
-    token: Option<Secret<GitHubToken>>,
+    operation: Option<Operation>,
+    kind: OperationKind,
     phase: VerificationPhase,
+}
+
+#[cfg(test)]
+enum Execution {
+    Manual,
+    VerificationOnly,
+    Automatic,
+}
+
+#[derive(Clone, Copy)]
+enum OperationKind {
+    User,
+    Code,
+    Poll,
+    Refresh,
+    Repositories,
+}
+
+enum Operation {
+    User(Secret<GitHubToken>),
+    Code,
+    Poll(Secret<DeviceCodeValue>),
+    Refresh(Secret<RefreshToken>),
+    Repositories(Secret<GitHubToken>),
+}
+
+impl Operation {
+    fn kind(&self) -> OperationKind {
+        match self {
+            Self::User(_) => OperationKind::User,
+            Self::Code => OperationKind::Code,
+            Self::Poll(_) => OperationKind::Poll,
+            Self::Refresh(_) => OperationKind::Refresh,
+            Self::Repositories(_) => OperationKind::Repositories,
+        }
+    }
+}
+
+impl OperationKind {
+    fn failed(self, stamp: Stamp, error: ApiError) -> Input {
+        match self {
+            Self::User => Input::User {
+                stamp,
+                result: Err(error),
+            },
+            Self::Code => Input::Code {
+                stamp,
+                result: Err(error),
+            },
+            Self::Poll => Input::Poll {
+                stamp,
+                result: Err(error),
+            },
+            Self::Refresh => Input::Refreshed {
+                stamp,
+                result: Err(error),
+            },
+            Self::Repositories => Input::Repos {
+                generation: stamp.generation,
+                result: Err(error),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Wake {
+    id: u64,
+    stamp: Stamp,
+    session: Option<u64>,
+    at: Instant,
 }
 
 impl std::fmt::Debug for Verification {
@@ -90,12 +175,17 @@ pub(super) async fn read_user(
 
 pub(crate) struct GitHub {
     enabled: bool,
-    verify_loaded: bool,
     next_verification: u64,
     verification: Option<Verification>,
+    wake: Option<Wake>,
+    client_id: Option<&'static str>,
+    defaults: Option<(u64, DefaultRepo)>,
+    #[cfg(test)]
+    execution: Execution,
     machine: Machine,
     session: Option<u64>,
     closing: bool,
+    rotation_stopped: bool,
     outstanding: usize,
     suspended: Vec<(Stamp, Effect)>,
 }
@@ -108,20 +198,31 @@ impl std::fmt::Debug for GitHub {
 
 impl GitHub {
     pub(super) fn new() -> Self {
+        Self::with_client(kumochi_protocol::constants::GITHUB_CLIENT_ID)
+    }
+
+    pub(in crate::runtime) fn with_client(client_id: Option<&'static str>) -> Self {
+        let client_id =
+            client_id.filter(|value| crate::connections::github::ClientId::new(value).is_ok());
         Self {
-            enabled: false,
-            verify_loaded: false,
+            enabled: client_id.is_some(),
             next_verification: 0,
             verification: None,
+            wake: None,
+            client_id,
+            defaults: None,
+            #[cfg(test)]
+            execution: Execution::Automatic,
             machine: Machine::new(None),
             session: None,
             closing: false,
+            rotation_stopped: false,
             outstanding: 0,
             suspended: Vec::new(),
         }
     }
 
-    pub(super) fn start(
+    pub(in crate::runtime) fn start(
         &mut self,
         jobs: Option<&Sender<Work>>,
         events: &mpsc::UnboundedSender<Event>,
@@ -148,7 +249,7 @@ impl GitHub {
     fn cancel_verification(&mut self) {
         if let Some(verification) = &mut self.verification {
             verification.cancelled = true;
-            verification.token = None;
+            verification.operation = None;
             if let VerificationPhase::Request(task) = &verification.phase {
                 task.abort();
             }
@@ -161,33 +262,22 @@ impl GitHub {
     }
 
     pub(super) async fn next_verification(&mut self) -> VerificationEvent {
-        let Some(verification) = &mut self.verification else {
-            return std::future::pending().await;
-        };
-        let (stage, outcome) = match &mut verification.phase {
-            VerificationPhase::Construction(task) => (
-                VerificationStage::Construction,
-                match task.await {
-                    Ok(result) => VerificationOutcome::Built(result),
-                    Err(_) => VerificationOutcome::Stopped,
-                },
-            ),
-            VerificationPhase::Request(task) => (
-                VerificationStage::Request,
-                match task.await {
-                    Ok(Some(result)) => VerificationOutcome::User(result),
-                    Ok(None) | Err(_) => VerificationOutcome::Stopped,
-                },
-            ),
-            VerificationPhase::Completed(_) => return std::future::pending().await,
-        };
-        verification.phase = VerificationPhase::Completed(stage);
-        VerificationEvent {
-            id: verification.id,
-            stamp: verification.stamp,
-            session: verification.session,
-            stage,
-            outcome,
+        let wake = self.wake;
+        tokio::select! {
+            event = next_request(&mut self.verification) => event,
+            event = async move {
+                let Some(wake) = wake else {
+                    return std::future::pending().await;
+                };
+                tokio::time::sleep_until(wake.at).await;
+                VerificationEvent {
+                    id: wake.id,
+                    stamp: wake.stamp,
+                    session: wake.session,
+                    stage: VerificationStage::Wake,
+                    outcome: VerificationOutcome::Wake,
+                }
+            } => event,
         }
     }
 
@@ -198,6 +288,16 @@ impl GitHub {
         events: &mpsc::UnboundedSender<Event>,
         http: &HttpFactory,
     ) -> Vec<ControlToShell> {
+        if event.stage == VerificationStage::Wake {
+            if !self.wake.is_some_and(|wake| {
+                wake.id == event.id && wake.stamp == event.stamp && wake.session == event.session
+            }) || event.stamp != self.machine.stamp()
+            {
+                return Vec::new();
+            }
+            self.wake = None;
+            return self.input(Input::Tick, event.session, jobs, events, http);
+        }
         if !self.verification.as_ref().is_some_and(|verification| {
             verification.id == event.id && verification.stamp == event.stamp
                 && verification.session == event.session
@@ -210,56 +310,89 @@ impl GitHub {
             .take()
             .expect("the completed operation matched");
         if !self.enabled
-            || !self.verify_loaded
-            || self.closing
+            || !self.verifies_loaded()
+            || (self.closing && !self.machine.rotating())
+            || self.rotation_stopped
             || verification.cancelled
             || verification.stamp != self.machine.stamp()
         {
-            return Vec::new();
+            return self.resume_suspended(jobs, events, http);
         }
-        match event.outcome {
+        let input = match event.outcome {
             VerificationOutcome::Built(Ok(client)) => {
-                let token = verification
-                    .token
+                let operation = verification
+                    .operation
                     .take()
-                    .expect("eligible construction owns its token");
-                verification.phase = VerificationPhase::Request(tokio::spawn(read_user(
+                    .expect("eligible construction owns its operation");
+                verification.phase = VerificationPhase::Request(tokio::spawn(execute(
                     verification.stamp,
                     self.machine.fence(),
-                    token,
+                    operation,
                     client,
+                    self.client_id
+                        .expect("configured operations have a client identifier"),
                 )));
                 self.verification = Some(verification);
-                Vec::new()
+                return Vec::new();
             }
-            VerificationOutcome::Built(Err(error)) => self.input(
-                Input::User {
-                    stamp: event.stamp,
-                    result: Err(ApiError::Http(error)),
-                },
-                event.session,
-                jobs,
-                events,
-                http,
-            ),
-            VerificationOutcome::User(result) => self.input(
-                Input::User {
-                    stamp: event.stamp,
-                    result,
-                },
-                event.session,
-                jobs,
-                events,
-                http,
-            ),
-            VerificationOutcome::Stopped => {
-                if event.session.is_some() && event.session == self.session {
-                    vec![ControlToShell::GitHubError(ErrorKey::RequestRefused.into())]
-                } else {
-                    Vec::new()
-                }
+            VerificationOutcome::Built(Err(error)) => {
+                verification.kind.failed(event.stamp, ApiError::Http(error))
             }
+            VerificationOutcome::User(result) => Input::User {
+                stamp: event.stamp,
+                result,
+            },
+            VerificationOutcome::Code(result) => Input::Code {
+                stamp: event.stamp,
+                result,
+            },
+            VerificationOutcome::Poll(result) => Input::Poll {
+                stamp: event.stamp,
+                result,
+            },
+            VerificationOutcome::Refreshed(result) => Input::Refreshed {
+                stamp: event.stamp,
+                result,
+            },
+            VerificationOutcome::Repositories(result) => Input::Repos {
+                generation: event.stamp.generation,
+                result,
+            },
+            VerificationOutcome::Stopped => Input::Stopped { stamp: event.stamp },
+            VerificationOutcome::Wake => return Vec::new(),
+        };
+        self.input(input, event.session, jobs, events, http)
+    }
+
+    fn automatic(&self) -> bool {
+        #[cfg(test)]
+        return matches!(self.execution, Execution::Automatic);
+        #[cfg(not(test))]
+        self.enabled
+    }
+
+    fn verifies_loaded(&self) -> bool {
+        #[cfg(test)]
+        return !matches!(self.execution, Execution::Manual);
+        #[cfg(not(test))]
+        self.enabled
+    }
+
+    fn resume_suspended(
+        &mut self,
+        jobs: Option<&Sender<Work>>,
+        events: &mpsc::UnboundedSender<Event>,
+        http: &HttpFactory,
+    ) -> Vec<ControlToShell> {
+        if !self.automatic() || self.verification.is_some() {
+            return Vec::new();
         }
+        let pending = std::mem::take(&mut self.suspended);
+        let effects = pending
+            .into_iter()
+            .filter_map(|(stamp, effect)| (stamp == self.machine.stamp()).then_some(effect))
+            .collect();
+        self.apply(effects, self.session, jobs, events, http)
     }
 
     pub(super) fn opened(&self) -> Vec<ControlToShell> {
@@ -280,7 +413,7 @@ impl GitHub {
             return;
         }
         self.session = None;
-        if self.enabled {
+        if self.enabled && self.machine.connecting() {
             self.input(Input::Op(GitHubOp::CancelConnect), None, jobs, events, http);
         }
         self.session = session;
@@ -294,8 +427,53 @@ impl GitHub {
     ) {
         self.closing = true;
         self.session(None, jobs, events, http);
+        self.wake = None;
+        if !self.machine.rotating() {
+            self.cancel_verification();
+            self.suspended.clear();
+        }
+    }
+
+    pub(super) fn rotating(&self) -> bool {
+        self.machine.rotating() && !self.rotation_stopped
+    }
+
+    pub(super) fn stop_rotation(&mut self) {
+        self.rotation_stopped = true;
         self.cancel_verification();
         self.suspended.clear();
+        self.wake = None;
+    }
+
+    pub(in crate::runtime) fn restore_default(&mut self, default: Option<DefaultRepo>) {
+        self.machine.restore_default(default);
+    }
+
+    pub(super) fn take_default(&mut self) -> Option<(u64, DefaultRepo)> {
+        self.defaults.take()
+    }
+
+    pub(super) fn op(
+        &mut self,
+        op: GitHubOp,
+        jobs: Option<&Sender<Work>>,
+        events: &mpsc::UnboundedSender<Event>,
+        http: &HttpFactory,
+    ) -> Vec<ControlToShell> {
+        if matches!(op, GitHubOp::Connect) && self.client_id.is_none() {
+            return vec![ControlToShell::GitHubError(
+                ErrorKey::AccountMisconfigured.into(),
+            )];
+        }
+        if !self.enabled || self.closing {
+            return vec![ControlToShell::GitHubError(
+                ErrorKey::GitHubUnavailable.into(),
+            )];
+        }
+        if matches!(op, GitHubOp::Connect | GitHubOp::RefreshRepos) && self.verification.is_some() {
+            return vec![ControlToShell::GitHubError(ErrorKey::RequestRefused.into())];
+        }
+        self.input(Input::Op(op), self.session, jobs, events, http)
     }
 
     pub(super) fn replied(
@@ -364,6 +542,7 @@ impl GitHub {
             .retain(|(stamp, effect)| !match (&input, effect) {
                 (Input::Code { stamp: done, .. }, Effect::RequestCode { .. })
                 | (Input::Poll { stamp: done, .. }, Effect::Poll { .. })
+                | (Input::Refreshed { stamp: done, .. }, Effect::RefreshToken { .. })
                 | (Input::User { stamp: done, .. }, Effect::ReadUser { .. }) => done == stamp,
                 (Input::Repos { generation, .. }, Effect::RefreshRepos { .. }) => {
                     *generation == stamp.generation
@@ -404,47 +583,43 @@ impl GitHub {
                 }
                 Effect::CancelAll => {
                     self.suspended.clear();
+                    self.wake = None;
+                    self.defaults = None;
                     self.cancel_verification();
                 }
-                Effect::ReadUser { stamp, token } => {
-                    if !self.closing {
-                        if self.verify_loaded && self.verification.is_none() {
-                            self.next_verification = self
-                                .next_verification
-                                .checked_add(1)
-                                .expect("verification identities never wrap");
-                            let build = Arc::clone(http);
-                            self.verification = Some(Verification {
-                                id: self.next_verification,
-                                stamp,
-                                session: origin,
-                                cancelled: false,
-                                token: Some(token),
-                                phase: VerificationPhase::Construction(
-                                    tokio::task::spawn_blocking(move || build()),
-                                ),
-                            });
-                        } else {
-                            self.suspended
-                                .push((stamp, Effect::ReadUser { stamp, token }));
-                        }
+                effect @ (Effect::ReadUser { .. }
+                | Effect::RequestCode { .. }
+                | Effect::Poll { .. }
+                | Effect::RefreshToken { .. }
+                | Effect::RefreshRepos { .. }) => {
+                    if !self.closing || (self.machine.rotating() && !self.rotation_stopped) {
+                        frames.extend(self.start_effect(effect, origin, jobs, events, http));
                     }
                 }
-                effect @ (Effect::RequestCode { stamp } | Effect::Poll { stamp, .. }) => {
-                    if !self.closing {
-                        self.suspended.push((stamp, effect));
+                Effect::Wake(at) if !self.closing => {
+                    if self.automatic() {
+                        self.next_verification = self
+                            .next_verification
+                            .checked_add(1)
+                            .expect("operation identities never wrap");
+                        self.wake = Some(Wake {
+                            id: self.next_verification,
+                            stamp: self.machine.stamp(),
+                            session: origin,
+                            at,
+                        });
+                    } else {
+                        self.suspended
+                            .push((self.machine.stamp(), Effect::Wake(at)));
                     }
                 }
-                effect @ (Effect::Wake(_) | Effect::SaveDefault(_)) => {
-                    if !self.closing {
-                        self.suspended.push((self.machine.stamp(), effect));
-                    }
+                Effect::SaveDefault {
+                    generation,
+                    default,
+                } if !self.closing => {
+                    self.defaults = Some((generation, default));
                 }
-                effect @ Effect::RefreshRepos { generation } => {
-                    if !self.closing {
-                        self.suspended.push((Stamp { generation }, effect));
-                    }
-                }
+                Effect::Wake(_) | Effect::SaveDefault { .. } => {}
                 Effect::View(view) => {
                     if self.enabled
                         && !self.closing
@@ -462,6 +637,58 @@ impl GitHub {
             }
         }
         frames
+    }
+
+    fn start_effect(
+        &mut self,
+        effect: Effect,
+        origin: Option<u64>,
+        jobs: Option<&Sender<Work>>,
+        events: &mpsc::UnboundedSender<Event>,
+        http: &HttpFactory,
+    ) -> Vec<ControlToShell> {
+        let user = matches!(effect, Effect::ReadUser { .. });
+        if self.verification.is_some() || !self.verifies_loaded() || (!user && !self.automatic()) {
+            self.suspended.push((self.machine.stamp(), effect));
+            return Vec::new();
+        }
+        let (stamp, operation) = match effect {
+            Effect::RequestCode { stamp } => (stamp, Operation::Code),
+            Effect::ReadUser { stamp, token } => (stamp, Operation::User(token)),
+            Effect::Poll { stamp, code } => (stamp, Operation::Poll(code)),
+            Effect::RefreshToken { stamp, token } => (stamp, Operation::Refresh(token)),
+            Effect::RefreshRepos { generation } => {
+                let Some(token) = self.machine.token() else {
+                    return self.input(
+                        Input::Repos {
+                            generation,
+                            result: Err(ApiError::Response),
+                        },
+                        origin,
+                        jobs,
+                        events,
+                        http,
+                    );
+                };
+                (Stamp { generation }, Operation::Repositories(token))
+            }
+            _ => unreachable!("only network effects are dispatched"),
+        };
+        self.next_verification = self
+            .next_verification
+            .checked_add(1)
+            .expect("operation identities never wrap");
+        let build = Arc::clone(http);
+        self.verification = Some(Verification {
+            id: self.next_verification,
+            stamp,
+            session: origin,
+            cancelled: false,
+            kind: operation.kind(),
+            operation: Some(operation),
+            phase: VerificationPhase::Construction(tokio::task::spawn_blocking(move || build())),
+        });
+        Vec::new()
     }
 
     fn submit(
@@ -519,11 +746,13 @@ impl GitHub {
     #[cfg(test)]
     pub(crate) fn enable(&mut self) {
         self.enabled = true;
+        self.client_id = Some("fixture-client");
+        self.execution = Execution::Manual;
     }
 
     #[cfg(test)]
     pub(crate) fn enable_verification(&mut self) {
-        self.verify_loaded = true;
+        self.execution = Execution::VerificationOnly;
     }
 
     #[cfg(test)]
@@ -561,6 +790,89 @@ impl GitHub {
     }
 }
 
+async fn next_request(owner: &mut Option<Verification>) -> VerificationEvent {
+    let Some(verification) = owner else {
+        return std::future::pending().await;
+    };
+    let (stage, outcome) = match &mut verification.phase {
+        VerificationPhase::Construction(task) => (
+            VerificationStage::Construction,
+            match task.await {
+                Ok(result) => VerificationOutcome::Built(result),
+                Err(_) => VerificationOutcome::Stopped,
+            },
+        ),
+        VerificationPhase::Request(task) => (
+            VerificationStage::Request,
+            match task.await {
+                Ok(Some(result)) => result,
+                Ok(None) | Err(_) => VerificationOutcome::Stopped,
+            },
+        ),
+        VerificationPhase::Completed(_) => return std::future::pending().await,
+    };
+    verification.phase = VerificationPhase::Completed(stage);
+    VerificationEvent {
+        id: verification.id,
+        stamp: verification.stamp,
+        session: verification.session,
+        stage,
+        outcome,
+    }
+}
+
+struct CurrentHttp {
+    http: SharedHttp,
+    fence: Arc<AtomicU64>,
+    generation: u64,
+}
+
+impl Http for CurrentHttp {
+    async fn execute(&self, request: Request) -> Result<Response, HttpError> {
+        if self.fence.load(Ordering::Acquire) != self.generation {
+            return Err(HttpError::Request);
+        }
+        self.http.execute(request).await
+    }
+}
+
+async fn execute(
+    stamp: Stamp,
+    fence: Arc<AtomicU64>,
+    operation: Operation,
+    http: SharedHttp,
+    client_id: &'static str,
+) -> Option<VerificationOutcome> {
+    if fence.load(Ordering::Acquire) != stamp.generation {
+        return None;
+    }
+    if let Operation::User(token) = operation {
+        return read_user(stamp, fence, token, http)
+            .await
+            .map(VerificationOutcome::User);
+    }
+    let http = CurrentHttp {
+        http,
+        fence,
+        generation: stamp.generation,
+    };
+    Some(match operation {
+        Operation::Code => {
+            VerificationOutcome::Code(api::request_device_code(&http, client_id).await)
+        }
+        Operation::Poll(code) => {
+            VerificationOutcome::Poll(api::poll_device_token(&http, client_id, &code).await)
+        }
+        Operation::Refresh(token) => {
+            VerificationOutcome::Refreshed(api::refresh_user_token(&http, client_id, &token).await)
+        }
+        Operation::Repositories(token) => {
+            VerificationOutcome::Repositories(repositories::fetch(&http, &token).await)
+        }
+        Operation::User(_) => unreachable!("user verification returned above"),
+    })
+}
+
 impl Accounts {
     pub(crate) fn github_session(&mut self, session: Option<u64>) {
         self.github
@@ -569,5 +881,62 @@ impl Accounts {
 
     pub(crate) fn github_opened(&self) -> Vec<ControlToShell> {
         self.github.opened()
+    }
+}
+
+impl Brain {
+    pub(in crate::runtime) fn github_op(
+        &mut self,
+        op: GitHubOp,
+        mut link: Option<&mut Link<'_, '_>>,
+    ) -> Result<(), Full> {
+        let frames = self.account.github.op(
+            op,
+            self.account.jobs.as_ref(),
+            &self.account.reads_tx,
+            &self.account.net.http,
+        );
+        if let Some((generation, default)) = self.account.github.take_default() {
+            self.settings_ops.push_back(settings::Queued {
+                change: settings::Change::GitHub(settings::GitHubWrite {
+                    generation,
+                    default,
+                }),
+                epoch: self.epoch,
+            });
+            self.pump_settings(link.as_deref_mut())?;
+        }
+        if let Some(link) = link {
+            for frame in frames {
+                link.control(&frame)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(in crate::runtime) fn github_default_written(
+        &mut self,
+        write: settings::GitHubWrite,
+        result: Result<(), ErrorKey>,
+        epoch: u64,
+        link: Option<&mut Link<'_, '_>>,
+    ) -> Result<(), Full> {
+        let frames = self.account.github.input(
+            Input::DefaultSaved {
+                generation: write.generation,
+                repo: write.default.repo,
+                saved: result.is_ok(),
+            },
+            Some(epoch),
+            self.account.jobs.as_ref(),
+            &self.account.reads_tx,
+            &self.account.net.http,
+        );
+        if let Some(link) = link {
+            for frame in frames {
+                link.control(&frame)?;
+            }
+        }
+        Ok(())
     }
 }
