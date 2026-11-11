@@ -15,7 +15,8 @@ fn four_live_scenes_release_a_middle_slot_and_adopt_a_fifth() {
         + kumochi_scene::SceneView::new(&layout, 0).resident_bytes()
         + kumochi_scene::Frame::new().resident_bytes()
         + size_of::<std::cell::RefCell<super::super::paint::Frames>>()
-        + 2 * size_of::<usize>();
+        + 2 * size_of::<usize>()
+        + super::super::Activation::BYTES;
     for id in 1..=4 {
         assert!(controls(&begin(&mut presenter, SceneId(id), now)).is_empty());
     }
