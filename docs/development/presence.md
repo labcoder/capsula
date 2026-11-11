@@ -9,6 +9,10 @@ dock's separate body proxy takes its input. Regions enables only the
 currently registered input windows. The [mode diagram and exit rules](input.md#overlay-pointer-ownership)
 cover the temporary Selecting mode; no production hold enters it yet.
 
+Every bound Windows surface must be created topmost. Both the shared GPUI `PopUp` options and
+the native dock proxy set `WS_EX_TOPMOST` at construction; new native bindings must preserve
+this precondition.
+
 The adapter restacks top-first as panels, dock/body proxy, regional input, drawing overlay,
 then dormant selection. Showing a drawing reapplies this order after its native placement,
 even when the input mode has not changed. A replacement host, including after clearing or

@@ -3,7 +3,8 @@ use std::sync::Mutex;
 use windows::Win32::Foundation::LPARAM;
 use windows::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, EnumWindows, IsWindowVisible, WS_EX_TOOLWINDOW, WS_POPUP,
+    CreateWindowExW, DestroyWindow, EnumWindows, IsWindowVisible, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP,
 };
 use windows::core::{BOOL, PCWSTR, w};
 
@@ -13,11 +14,12 @@ struct Hidden(HWND);
 
 impl Hidden {
     fn new() -> Self {
+        // Match GPUI PopUp windows, which are topmost from creation.
         // SAFETY: STATIC is built in; no parent, borrowed data, activation or visible style.
         Self(
             unsafe {
                 CreateWindowExW(
-                    WS_EX_TOOLWINDOW,
+                    WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
                     w!("STATIC"),
                     PCWSTR::null(),
                     WS_POPUP,
