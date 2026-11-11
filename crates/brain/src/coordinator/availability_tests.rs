@@ -356,26 +356,31 @@ fn a_draw_the_request_didnt_offer_commits_nothing() {
         core.handle(super::engine(super::engine_key(&core, R), draw_call())),
         Ok(Vec::new())
     );
-    let step = core
-        .handle(super::engine(super::engine_key(&core, R), delta("head")))
-        .expect("current");
-    assert_eq!(step, Vec::new(), "production draw deltas execute nothing");
-    core.handle(super::engine(super::engine_key(&core, R), TurnEvent::ToolCallReady {
-        call: super::call(), args: r#"{"records":[{"begin":{"v":1,"scene":"diagram","surface":"overlay","alt":"diagram"}},{"step":{"id":"s1"}},{"end":{}}]}"#.to_owned(),
-    })).expect("complete arguments");
-    let effects = core
-        .handle(super::engine(
-            super::engine_key(&core, R),
-            TurnEvent::Finished(Finish::Completed),
-        ))
-        .expect("round completed");
+    let args = r#"{"records":[{"begin":{"v":1,"scene":"diagram","surface":"overlay","alt":"diagram"}},{"step":{"id":"s1"}},{"end":{}}]}"#;
+    let mut effects = Vec::new();
+    for event in [
+        TurnEvent::ToolArgsDelta {
+            call: super::call(),
+            delta: args.to_owned(),
+        },
+        TurnEvent::ToolCallReady {
+            call: super::call(),
+            args: args.to_owned(),
+        },
+        TurnEvent::Finished(Finish::Completed),
+    ] {
+        effects.extend(
+            core.handle(super::engine(super::engine_key(&core, R), event))
+                .expect("current"),
+        );
+    }
     assert_eq!(
         effects
             .iter()
             .filter(|effect| matches!(effect, Effect::Store(StoreOp::Drawing { .. })))
             .count(),
         1,
-        "the offered complete call reaches the scene reducer"
+        "the offered call's closed records reach the scene reducer"
     );
 }
 
