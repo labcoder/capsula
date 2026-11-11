@@ -21,6 +21,7 @@ pub use three::ViewFrame;
 use three::ViewMotion;
 
 mod frame;
+mod pace;
 mod place;
 mod three;
 /// K̃ = (1 + K)/S(1) − 1 = 0.375891 rounded up: the normalised spring's largest overshoot.
