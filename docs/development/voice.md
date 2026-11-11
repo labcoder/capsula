@@ -842,3 +842,7 @@ transition, after checking the current ask and shutdown. The serving loop retain
 its worker-loss check before decoding. A prepared
 hold waiting on that load can admit the same owner immediately; Loaded never
 promises readiness that only a later serving-loop iteration will establish.
+
+Finalization controls check the existing hold deadline before changing audio or
+granting a drain/decode budget. A late matching stop still clears physical device
+debt, but neither it nor a late KeyUp can revive an expired input.

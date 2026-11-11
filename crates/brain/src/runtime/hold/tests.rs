@@ -179,6 +179,100 @@ async fn ordinary_admission_limits_refuse_decoded_transfer_without_a_turn() {
     Box::pin(admission_boundaries(AdmissionStage::Transfer)).await;
 }
 
+async fn expired_finalization(last: ControlToBrain) {
+    use crate::runtime::Recovery;
+    let scratch = Scratch::new("hold-expired-finalization");
+    let (mut brain, _release, mut decoded, _fetch) =
+        crate::runtime::tests::holds::input(&scratch, vec![21, -37], "not submitted").await;
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    link.recovery = Some(Recovery::new(&[], 1024));
+    recording(&mut brain);
+    brain
+        .hold_event(packet(KEY.gesture, 0, true, vec![21, -37]), &mut link)
+        .unwrap();
+    let stop_last = matches!(&last, ControlToBrain::VoiceHoldStopped { .. });
+    let first = if stop_last {
+        ControlToBrain::KeyUp {
+            gesture: KEY.gesture,
+            t_qpc: 1,
+            chunks: 1,
+        }
+    } else {
+        ControlToBrain::VoiceHoldStopped {
+            gesture: KEY.gesture,
+        }
+    };
+    brain.hold_control(&first, &mut link).unwrap();
+    assert_eq!(output.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    let owed = stop_last.then_some(KEY);
+    assert_eq!(brain.holds.debt, owed);
+    brain
+        .hold_control(
+            &ControlToBrain::VoiceHoldStopped {
+                gesture: GestureId(8),
+            },
+            &mut link,
+        )
+        .unwrap();
+    assert_eq!(brain.holds.debt, owed);
+    tokio::time::pause();
+    brain.holds.pending.as_mut().unwrap().deadline = Instant::now() + Duration::from_secs(1);
+    let (messages, mut controls) = mpsc::channel(1);
+    messages.try_send(last.clone()).unwrap();
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::select! {
+        biased;
+        Some(message) = controls.recv() => { brain.hold_control(&message, &mut link).unwrap(); }
+        _ = next(&mut brain.holds) => panic!("the core's ready control precedes its ready hold timer"),
+    }
+    let terminal = status(&mut output);
+    assert_eq!(terminal, HoldStatus::Failed(HoldFailure::TimedOut));
+    assert!(brain.holds.pending.is_none());
+    assert_eq!(brain.holds.debt, None);
+    assert_eq!(brain.coordinator.current_run(), None);
+    assert!(brain.round.is_none());
+    assert_eq!(decoded.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    brain.hold_control(&first, &mut link).unwrap();
+    brain.hold_control(&last, &mut link).unwrap();
+    assert_eq!(output.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    tokio::time::resume();
+    brain.close().await;
+    let store = crate::store::Store::open(&scratch.db()).unwrap();
+    assert_eq!(
+        store
+            .conn_for_tests()
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind = 'user'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn expired_hold_stop_ready_with_deadline_does_not_start_decode() {
+    Box::pin(expired_finalization(ControlToBrain::VoiceHoldStopped {
+        gesture: KEY.gesture,
+    }))
+    .await;
+}
+
+#[tokio::test]
+async fn expired_hold_key_up_after_stop_does_not_extend_the_deadline() {
+    Box::pin(expired_finalization(ControlToBrain::KeyUp {
+        gesture: KEY.gesture,
+        t_qpc: 1,
+        chunks: 1,
+    }))
+    .await;
+}
+
 fn recording(brain: &mut Brain) {
     let cancel = Arc::new(AtomicBool::new(false));
     let StoreOp::ReadHold(read) = brain

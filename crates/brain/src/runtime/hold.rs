@@ -320,6 +320,10 @@ impl Brain {
                 let Some(hold) = self.holds.pending.as_mut().filter(|hold| hold.key == key) else {
                     return Ok(true);
                 };
+                if Instant::now() >= hold.deadline {
+                    self.hold_end(HoldStatus::Failed(HoldFailure::TimedOut), link)?;
+                    return Ok(true);
+                }
                 let Some(audio) = &mut hold.audio else {
                     let status = if hold.ask.is_some() {
                         HoldStatus::Failed(HoldFailure::InvalidAudio)
