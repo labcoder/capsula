@@ -99,6 +99,10 @@ impl Presence {
         .detach();
     }
 
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "whether the scene is moving, as the frame reports it"
+    )]
     pub(super) fn scene_watchdog(
         &mut self,
         now: Instant,

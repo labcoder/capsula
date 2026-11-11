@@ -930,6 +930,10 @@ fn status_window(
 
 /// Opens a small nonactivating dock immediately and arms the keyboard, so Listening works
 /// from the first frame. The caller starts the brain link afterwards.
+#[expect(
+    clippy::too_many_lines,
+    reason = "startup creates the windows, the presenter and their owner in one fixed order"
+)]
 pub(crate) fn open(
     states: Receiver<LinkEvent>,
     link: LinkHandle,

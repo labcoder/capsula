@@ -161,39 +161,10 @@ impl Output<'_> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_u16_vertex_boundary_refuses_before_growing_scratch() {
-        let mut vertices = Vec::with_capacity(VERTICES);
-        let mut output = Output {
-            verts: &mut vertices,
-            path: None,
-            transform: Affine::default(),
-            count: 0,
-            mark: 0,
-            overflow: false,
-        };
-        let ((), counts) = crate::allocation::activity(|| {
-            for id in 0..65_536_u32 {
-                assert_eq!(
-                    output.position(lyon::math::point(0.0, 0.0)),
-                    Ok(VertexId(id))
-                );
-            }
-            assert_eq!(
-                output.position(lyon::math::point(0.0, 0.0)),
-                Err(GeometryBuilderError::TooManyVertices)
-            );
-        });
-        assert_eq!(counts, [0, 0]);
-        assert_eq!(vertices.len(), 65_536);
-        assert_eq!(vertices.capacity(), 65_536);
-    }
-}
-
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts of one dash walk: the contour closes, a dash is drawing, and it runs across a joint"
+)]
 struct Runs<'a> {
     points: &'a [Vec2],
     closed: bool,
@@ -314,5 +285,38 @@ impl<'a> Runs<'a> {
             self.active = false;
         }
         Ok((!run.is_empty()).then_some(self.final_contour))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_u16_vertex_boundary_refuses_before_growing_scratch() {
+        let mut vertices = Vec::with_capacity(VERTICES);
+        let mut output = Output {
+            verts: &mut vertices,
+            path: None,
+            transform: Affine::default(),
+            count: 0,
+            mark: 0,
+            overflow: false,
+        };
+        let ((), counts) = crate::allocation::activity(|| {
+            for id in 0..65_536_u32 {
+                assert_eq!(
+                    output.position(lyon::math::point(0.0, 0.0)),
+                    Ok(VertexId(id))
+                );
+            }
+            assert_eq!(
+                output.position(lyon::math::point(0.0, 0.0)),
+                Err(GeometryBuilderError::TooManyVertices)
+            );
+        });
+        assert_eq!(counts, [0, 0]);
+        assert_eq!(vertices.len(), 65_536);
+        assert_eq!(vertices.capacity(), 65_536);
     }
 }

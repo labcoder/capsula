@@ -102,6 +102,10 @@ impl Fonts {
         )
     }
 
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the scene label's bold flag, which picks the font slot"
+    )]
     fn select(&mut self, family: &SharedString, bold: bool) -> &mut FontSlot {
         if &self.0[0].font.family != family {
             for slot in &mut self.0 {
@@ -136,6 +140,10 @@ pub(super) struct Shaped {
 }
 
 impl LabelEntry {
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the scene label's bold flag, passed through"
+    )]
     fn new(handle: Handle, prim: usize, text: &str, bold: bool) -> Self {
         let (text, text_bytes) = if text.len() > 23 {
             let owned = Arc::<str>::from(text);
@@ -176,14 +184,9 @@ impl LabelEntry {
                 && shaped.scale == scale.to_bits()
         }) {
             self.shaped = None;
-            let id = match slot.id {
-                Some(id) => id,
-                None => {
-                    let id = shaper.resolve_font(&slot.font);
-                    slot.id = Some(id);
-                    id
-                }
-            };
+            let id = *slot
+                .id
+                .get_or_insert_with(|| shaper.resolve_font(&slot.font));
             let line_height = shaper.ascent(id, size).abs() + shaper.descent(id, size).abs();
             let runs = [TextRun {
                 len: self.text.len(),

@@ -21,7 +21,10 @@ use kumochi_scene::{
     geom::{Affine, Rect, Vec2},
 };
 
-const _: () = assert!(size_of::<PathVertex<Pixels>>() == 32);
+const _: () = assert!(
+    size_of::<PathVertex<Pixels>>() == 32,
+    "scene.md charges each handed-off path vertex at 32 bytes"
+);
 
 /// Why a primitive has no paths; carries no geometry or content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]

@@ -52,6 +52,10 @@ pub(super) struct PaintNotice {
 }
 
 impl PaintNotice {
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "whether this paint failed, folded into the one pending notice"
+    )]
     fn observe(
         &self,
         failed: bool,
@@ -172,7 +176,7 @@ impl Element for DrawingElement {
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         style: &mut Style,
-        _: &mut (),
+        (): &mut (),
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -237,6 +241,10 @@ impl Element for DrawingElement {
 }
 
 impl Presence {
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "whether the paint failed, as observe takes it"
+    )]
     fn paint_observed(
         &mut self,
         failed: bool,
@@ -651,6 +659,7 @@ fn label(
 }
 
 /// Shapes a label with the font and line height preparation measured it with, then paints it.
+#[expect(clippy::similar_names, reason = "the shaper and the label it shaped")]
 fn paint_text(
     item: &FrameItem,
     prim: &Prim,

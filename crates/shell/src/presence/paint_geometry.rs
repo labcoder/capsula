@@ -16,13 +16,16 @@ use super::{
     paint_stroke::Scratch,
 };
 
+/// A primitive's fill and stroke paths, each with its paint.
+pub(super) type PrimPaths = [Option<(Path<Pixels>, Paint)>; 2];
+
 pub(super) fn paths(
     scratch: &mut Scratch,
     prim: &Prim,
     transform: Affine,
     draw: f32,
     flow: f32,
-) -> Result<[Option<(Path<Pixels>, Paint)>; 2], BuildError> {
+) -> Result<PrimPaths, BuildError> {
     let mut paths = [None, None];
     match prim {
         Prim::Line {
@@ -141,6 +144,10 @@ impl Rounded {
     }
 }
 
+#[expect(
+    clippy::many_single_char_names,
+    reason = "a and b bound the outer edge, c and d the inner edge, and t the revealed fraction"
+)]
 fn sector(
     outer: Rounded,
     inner: Rounded,

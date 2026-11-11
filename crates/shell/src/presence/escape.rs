@@ -7,6 +7,10 @@ use crate::escape;
 impl Presence {
     /// One Esc press, from the hotkey, the typing panel or Stop. The local effect happens here,
     /// and only then is `Stop` or `ClearDrawing` queued for the brain, which nothing waits on.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one Esc press keeps its local decision and every effect of it in order"
+    )]
     pub(super) fn escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
         if self.presenter.input.selection().is_some() {
             self.end_selection(crate::presenter::overlay_input::ExitCause::Escape, cx);
