@@ -138,3 +138,70 @@ fn a_pending_first_paint_is_placed_and_a_stage_change_keeps_its_clock_pending() 
     );
     assert!(!presenter.begin_painted(ms(now, 2500)));
 }
+
+#[test]
+fn placement_preserves_an_empty_pending_slot_and_its_late_appearance_clamp() {
+    let (mut presenter, now) = live();
+    presenter.set_stage(stage());
+    begin(&mut presenter, LIVE, now);
+    let source = step(
+        r#"{"step":{"id":"delayed","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10],"enter":"fade","dur":800,"delay":200}}]}}"#,
+    );
+    let effects = commit(&mut presenter, LIVE, 0, source, now).expect("commit");
+    presenter
+        .completed(only_job(effects).run(&mut Shaper), now)
+        .expect("prepare");
+    presenter.advance(GENERATION, now).expect("activate");
+    assert_eq!(presenter.scenes[&LIVE].view.first_appearance(), Some(200));
+    assert!(!presenter.sample_at(now).0.visible);
+    assert!(!presenter.sample_at(ms(now, 100)).0.visible);
+    let frames = presenter.frames();
+    let epoch = frames.borrow().epoch(LIVE).expect("epoch");
+    presenter.set_stage(Rect {
+        origin: Vec2::new(20.0, 30.0),
+        size: Vec2::new(58.0, 58.0),
+    });
+    assert_eq!(frames.borrow().epoch(LIVE), Some(epoch));
+    assert_eq!(frames.borrow().sampled_ms(LIVE), Some(100));
+    assert_eq!(frames.borrow().painted(LIVE), None);
+    assert!(!presenter.begin_painted(ms(now, 150)));
+    assert!(presenter.sample_at(ms(now, 300)).0.visible);
+    assert_eq!(frames.borrow().sampled_ms(LIVE), Some(200));
+    frames.borrow_mut().shown = true;
+    let mut painted = Vec::new();
+    assert!(!frames.borrow().paint(|frame, _| {
+        painted.extend(
+            frame
+                .items()
+                .iter()
+                .map(|item| (item.transform, item.opacity)),
+        );
+        Ok::<_, ()>(())
+    }));
+    assert_eq!(
+        painted,
+        [(Affine::pose(1.0, 0.0, Vec2::new(44.0, 54.0)), 0.0)]
+    );
+    let observation = frames.borrow().painted(LIVE).expect("painted");
+    presenter.set_stage(stage());
+    assert_eq!(frames.borrow().epoch(LIVE), Some(epoch));
+    assert_eq!(frames.borrow().sampled_ms(LIVE), Some(200));
+    assert_eq!(frames.borrow().painted(LIVE), Some(observation));
+    assert!(presenter.begin_painted(ms(now, 400)));
+    presenter.sample_at(ms(now, 800));
+    painted.clear();
+    assert!(!frames.borrow().paint(|frame, _| {
+        painted.extend(
+            frame
+                .items()
+                .iter()
+                .map(|item| (item.transform, item.opacity)),
+        );
+        Ok::<_, ()>(())
+    }));
+    assert_eq!(
+        painted,
+        [(Affine::pose(2.0, 0.0, Vec2::new(290.0, 340.0)), 0.5)]
+    );
+    assert!(!presenter.begin_painted(ms(now, 900)));
+}
