@@ -684,6 +684,17 @@ fn recorded_desk_draws_without_a_version_draw_their_steps() {
 
 #[test]
 fn the_recorded_water_cycle_draws_without_a_diagram_container() {
+    struct Measure;
+    impl kumochi_scene::display::TextMeasure for Measure {
+        fn measure(
+            &mut self,
+            _: &str,
+            _: kumochi_scene::display::TextStyle,
+            _: Option<f32>,
+        ) -> Result<[f32; 2], kumochi_scene::display::MeasureError> {
+            Ok([80.0, 20.0])
+        }
+    }
     let args = include_str!("../../fixtures/responses/draw_water_cycle.json");
     let scratch = Scratch::new("water-cycle");
     let mut store = store(&scratch);
@@ -709,21 +720,10 @@ fn the_recorded_water_cycle_draws_without_a_diagram_container() {
     assert_prefix(&store, &["cycle"]);
     let recovery = store.drawing_scenes().expect("stored scene");
     let stored = &recovery.scenes[0];
-    struct Measure;
-    impl kumochi_scene::display::TextMeasure for Measure {
-        fn measure(
-            &mut self,
-            _: &str,
-            _: kumochi_scene::display::TextStyle,
-            _: Option<f32>,
-        ) -> Result<[f32; 2], kumochi_scene::display::MeasureError> {
-            Ok([80.0, 20.0])
-        }
-    }
     let (state, layout) = kumochi_scene::layout::recover(
         stored.header.begin.clone(),
         &stored.log,
-        Default::default(),
+        kumochi_scene::layout::SurfaceGeometry::default(),
         &std::sync::Arc::new(kumochi_scene::theme::Theme::default()),
         &mut Measure,
         &std::sync::atomic::AtomicBool::new(false),

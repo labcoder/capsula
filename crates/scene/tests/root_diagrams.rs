@@ -1,5 +1,5 @@
 //! Root membership, compiled edge ownership and authored-log replay.
-use kumochi_scene::layout::LayoutState;
+use kumochi_scene::layout::{LayoutState, SurfaceGeometry};
 use kumochi_scene::{Admission, Budget, ErrorCode, GlobalBudget, Record, SceneState, parse_record};
 use serde_json::{Value, json};
 
@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 mod scene_support;
 use scene_support::{id, new_scene, prepared};
 
-fn step(value: Value) -> kumochi_scene::Step {
+fn step(value: &Value) -> kumochi_scene::Step {
     let Record::Step(step) =
         parse_record(&serde_json::to_vec(&json!({"step":value})).expect("JSON"))
             .expect("typed step")
@@ -41,10 +41,10 @@ fn root_nodes_and_edges_prepare_and_replay_without_rewriting_authored_steps() {
     for name in ["a", "b", "link"] {
         assert_eq!(parent(&scene, &picture.after, name), None);
     }
-    assert_eq!(picture.step(), &step(value.clone()));
-    assert_eq!(scene.step(0), Some(&step(value.clone())));
+    assert_eq!(picture.step(), &step(&value));
+    assert_eq!(scene.step(0), Some(&step(&value)));
     assert!(matches!(
-        scene.admit(&step(value), &budget),
+        scene.admit(&step(&value), &budget),
         Ok(Admission::Duplicate)
     ));
     let continued = prepared(
@@ -86,14 +86,14 @@ fn omitted_edge_parents_use_all_expanded_and_existing_endpoints() {
         parent(&scene, &first.after, "g")
     );
     assert_eq!(parent(&scene, &first.after, "root"), None);
-    assert_eq!(scene.step(0), Some(&step(authored.clone())));
+    assert_eq!(scene.step(0), Some(&step(&authored)));
     let second = json!({"id":"second","put":[
         {"edge":{"id":"later","from":"a","to":"new"}},
         {"node":{"id":"new","in":"g","label":"New"}}
     ]});
     let next = prepared(&mut scene, &mut budget, &first.after, second.clone());
     assert_eq!(parent(&scene, &next.after, "later"), scene.handle(&id("g")));
-    let remove = step(json!({"id":"remove","remove":["g"]}));
+    let remove = step(&json!({"id":"remove","remove":["g"]}));
     assert_eq!(
         scene
             .admit(&remove, &budget)
@@ -101,9 +101,9 @@ fn omitted_edge_parents_use_all_expanded_and_existing_endpoints() {
             .code,
         ErrorCode::Orphans
     );
-    let mut explicit = second.clone();
+    let mut explicit = second;
     explicit["put"][0]["edge"]["in"] = json!("g");
-    let explicit = step(explicit);
+    let explicit = step(&explicit);
     assert_eq!(
         scene
             .admit(&explicit, &budget)
@@ -114,7 +114,7 @@ fn omitted_edge_parents_use_all_expanded_and_existing_endpoints() {
     let (mut replay, replay_before) = kumochi_scene::layout::recover(
         scene.header().clone(),
         scene.recovery_log(),
-        Default::default(),
+        SurfaceGeometry::default(),
         &std::sync::Arc::new(kumochi_scene::theme::Theme::default()),
         &mut scene_support::Measure,
         &std::sync::atomic::AtomicBool::new(false),
@@ -167,7 +167,7 @@ fn explicit_and_required_parents_and_missing_endpoints_stay_validated() {
         let scene = new_scene("invalid");
         let error = scene
             .admit(
-                &step(json!({"id":"bad","put":put})),
+                &step(&json!({"id":"bad","put":put})),
                 &GlobalBudget::default(),
             )
             .expect_err("invalid parent or endpoint");
@@ -195,7 +195,7 @@ fn root_node_and_edge_caps_include_continued_scenes_and_are_atomic() {
                 json!({"edge":{"id":format!("e{n}"),"from":"n","to":"n"}})
             });
         }
-        let first = step(json!({"id":"limit","put":put}));
+        let first = step(&json!({"id":"limit","put":put}));
         let Admission::New(admitted) = scene.admit(&first, &global).expect("exact root cap") else {
             panic!("new step")
         };
@@ -208,7 +208,7 @@ fn root_node_and_edge_caps_include_continued_scenes_and_are_atomic() {
         };
         let before = (scene.usage(), global.usage(), global.generation());
         let error = scene
-            .admit(&step(json!({"id":"over","put":[extra]})), &global)
+            .admit(&step(&json!({"id":"over","put":[extra]})), &global)
             .expect_err("one over root cap");
         assert_eq!(error.code, ErrorCode::OverBudget(budget));
         assert_eq!((scene.usage(), global.usage(), global.generation()), before);
