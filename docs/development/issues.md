@@ -227,13 +227,15 @@ decides first:
 | Current, every check passes | `Changed` into Preflight, or Filed for a confirmed candidate | `consumed`, `stage`, `version`, `approval` |
 
 The checks run in order:
-1. The stage takes the decision: File needs Draft or Failed, File anyway needs Unknown, and This
+1. The runtime reserved the one operation slot. Otherwise `NotAllowedNow`, with the current
+   revision consumed in the same transaction and no unowned Preflight.
+2. The stage takes the decision: File needs Draft or Failed, File anyway needs Unknown, and This
    is the issue needs Unknown with an unplaced candidate. Otherwise `NotAllowedNow`.
-2. The hash matches. Otherwise `ContentChanged`.
-3. The action has an account, and `Live` has a user with a nonzero id. Otherwise `NotConnected`.
-4. Their numeric ids are equal; logins don't count. Otherwise `OtherAccount`.
-5. The bound repository is listed. Otherwise `RepoNotListed`.
-6. File has no different retained draft with the same numeric account, repository, exact
+3. The hash matches. Otherwise `ContentChanged`.
+4. The action has an account, and `Live` has a user with a nonzero id. Otherwise `NotConnected`.
+5. Their numeric ids are equal; logins don't count. Otherwise `OtherAccount`.
+6. The bound repository is listed. Otherwise `RepoNotListed`.
+7. File has no different retained draft with the same numeric account, repository, exact
    title and normalized body in Preflight, Posting or Unknown, or dismissed with retained
    uncertainty. Otherwise `UnresolvedDraft` names that earlier draft. This check runs in the
    same transaction as approval consumption, not just when the new draft is created.

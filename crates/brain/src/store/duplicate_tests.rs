@@ -70,6 +70,7 @@ fn file(store: &mut Store, action: &Action, account: u64) -> Result<Answer, Stor
         action.approval.unwrap(),
         Decision::File,
         &Live {
+            capacity: true,
             account: Some(&account),
             repos: &repos,
         },

@@ -65,10 +65,83 @@ fn decide(store: &mut Store, action: &Action, decision: Decision) -> Result<Answ
     let (account, repos) = (user(7), [repo()]);
     let live = Live {
         account: Some(&account),
+        capacity: true,
         repos: &repos,
     };
     let approval = action.approval.expect("offered");
     store.consent(action.draft, &action.hash(), approval, decision, &live)
+}
+
+#[test]
+fn unavailable_capacity_consumes_consent_without_an_unowned_preflight_or_replay() {
+    for (failed, version, consumed, offered, admitted_version) in
+        [(false, 2, 1, 2, 3), (true, 4, 2, 3, 5)]
+    {
+        let scratch = Scratch::new("admission-capacity");
+        let mut store = opened(&scratch);
+        let owner = thread(&mut store);
+        let first = draft(&mut store, owner);
+        let first = if failed {
+            let sending = changed(decide(&mut store, &first, Decision::File));
+            changed(store.preflighted(first.draft, sending.version, Err(FailReason::Network)))
+        } else {
+            first
+        };
+        let (account, repos) = (user(7), [repo()]);
+        let mut live = Live {
+            capacity: false,
+            account: Some(&account),
+            repos: &repos,
+        };
+        let Answer::Refused(why, refused) = store
+            .consent(
+                first.draft,
+                &first.hash(),
+                first.approval.unwrap(),
+                Decision::File,
+                &live,
+            )
+            .unwrap()
+        else {
+            panic!("busy capacity must refuse durably")
+        };
+        assert_eq!(why, IssueRefused::NotAllowedNow);
+        let expected = Action {
+            version: StateVersion(version),
+            consumed: Some(ApprovalRev(consumed)),
+            approval: Some(ApprovalRev(offered)),
+            ..first.clone()
+        };
+        assert_eq!(refused, expected);
+        assert_eq!(store.action(first.draft).unwrap(), Some(expected.clone()));
+        let before = snapshot(&store.conn);
+        live.capacity = true;
+        let Answer::Unchanged(replayed) = store
+            .consent(
+                first.draft,
+                &first.hash(),
+                first.approval.unwrap(),
+                Decision::File,
+                &live,
+            )
+            .unwrap()
+        else {
+            panic!("a now-valid capacity cannot revive the used approval")
+        };
+        assert_eq!(replayed, expected);
+        assert_eq!(snapshot(&store.conn), before);
+        let admitted = changed(store.consent(
+            refused.draft,
+            &refused.hash(),
+            refused.approval.unwrap(),
+            Decision::File,
+            &live,
+        ));
+        assert_eq!(admitted.stage, Stage::Preflight { unresolved: None });
+        assert_eq!(admitted.version, StateVersion(admitted_version));
+        assert_eq!(admitted.consumed, Some(ApprovalRev(offered)));
+        assert_eq!(admitted.approval, None);
+    }
 }
 
 /// A draft whose first send ended uncertain: Unknown with mark A and one uncertain attempt.
@@ -371,7 +444,11 @@ fn consent_checks_in_order_and_uses_up_the_current_revision() {
     ];
     let mut current = first.clone();
     for (n, (hash, account, repos, why)) in (1_u64..).zip(refusals) {
-        let live = Live { account, repos };
+        let live = Live {
+            account,
+            repos,
+            capacity: true,
+        };
         let answer = store.consent(first.draft, &hash, ApprovalRev(n), Decision::File, &live);
         current = Action {
             version: StateVersion(n + 1),
@@ -385,6 +462,7 @@ fn consent_checks_in_order_and_uses_up_the_current_revision() {
         );
     }
     let ok = Live {
+        capacity: true,
         account: Some(&owner),
         repos: &listed,
     };
@@ -754,6 +832,7 @@ fn lookups_land_only_in_their_episode() {
     };
     let account = user(7);
     let unlisted = Live {
+        capacity: true,
         account: Some(&account),
         repos: &[],
     };
@@ -839,10 +918,10 @@ fn bind_reaches_every_live_draft_and_files_nothing() {
     let entered = changed(decide(&mut store, &sent, Decision::File));
     let failed = changed(store.preflighted(sent.draft, entered.version, Err(FailReason::Network)));
     let unresolved = unknown_once(&mut store, one);
-    let (seven, eight) = (user(7), user(8));
-    let listed = [repo(), chosen_repo.clone()];
+    let (seven, eight, listed) = (user(7), user(8), [repo(), chosen_repo.clone()]);
     let live = Live {
         account: Some(&seven),
+        capacity: true,
         repos: &listed,
     };
     let consent = |store: &mut Store, action: &Action| {

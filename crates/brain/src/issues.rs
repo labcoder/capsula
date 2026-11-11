@@ -111,6 +111,8 @@ pub enum Answer {
 
 /// What admission checks a decision against, from the GitHub connection as it stands.
 pub struct Live<'a> {
+    /// The runtime reserved the one operation slot before this admission.
+    pub capacity: bool,
     /// The verified connected user, from the device machine's `user()`.
     pub account: Option<&'a GitHubUser>,
     /// The repositories the connection lists.
@@ -206,6 +208,9 @@ impl Action {
             return Err(IssueRefused::StaleApproval);
         }
         self.consumed = Some(approval);
+        if !live.capacity {
+            return Err(IssueRefused::NotAllowedNow);
+        }
         let next = match (decision, &self.stage) {
             (Decision::File, Stage::Draft | Stage::Failed { .. }) => {
                 Stage::Preflight { unresolved: None }
@@ -480,6 +485,7 @@ impl fmt::Debug for Stage {
 impl fmt::Debug for Live<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Live")
+            .field("capacity", &self.capacity)
             .field("connected", &self.account.is_some())
             .field("repos", &self.repos.len())
             .finish()
