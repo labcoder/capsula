@@ -275,16 +275,23 @@ impl Config {
         if part == VoicePart::SpokenReplies && !voice.contains_key(TALK_BACK) {
             voice.insert(TALK_BACK.to_owned(), Value::Boolean(true));
         }
-        let names = voice
-            .entry(INSTALLED)
-            .or_insert_with(|| Value::Array(Vec::new()));
-        if !names.is_array() {
-            *names = Value::Array(Vec::new());
+        listed_add(voice, INSTALLED, part);
+        let view = view_of(&table, self.view.main_thread);
+        Ok(Pending { path, table, view })
+    }
+
+    /// Stages `part`'s removal: it leaves `installed` and joins `removing` in one write, and
+    /// every other name stays.
+    ///
+    /// # Errors
+    /// As [`Config::stage`].
+    pub(crate) fn stage_remove_intent(&self, part: VoicePart) -> Result<Pending, ConfigError> {
+        let (path, mut table) = self.editable()?;
+        let voice = voice_mut(&mut table);
+        if let Some(names) = voice.get_mut(INSTALLED).and_then(Value::as_array_mut) {
+            names.retain(|name| name.as_str() != Some(part.dir()));
         }
-        let names = names.as_array_mut().expect("installed holds an array");
-        if !names.iter().any(|name| name.as_str() == Some(part.dir())) {
-            names.push(Value::String(part.dir().to_owned()));
-        }
+        listed_add(voice, REMOVING, part);
         let view = view_of(&table, self.view.main_thread);
         Ok(Pending { path, table, view })
     }
@@ -328,6 +335,18 @@ fn write_replacing(path: &Path, text: &[u8]) -> io::Result<()> {
     file.sync_all()?;
     drop(file);
     crate::platform::replace_file(&temp, path)
+}
+
+/// Adds `part` to the voice table's `key` list once, starting a list where there's none.
+fn listed_add(voice: &mut Table, key: &str, part: VoicePart) {
+    let names = voice.entry(key).or_insert_with(|| Value::Array(Vec::new()));
+    if !names.is_array() {
+        *names = Value::Array(Vec::new());
+    }
+    let names = names.as_array_mut().expect("the list holds an array");
+    if !names.iter().any(|name| name.as_str() == Some(part.dir())) {
+        names.push(Value::String(part.dir().to_owned()));
+    }
 }
 
 /// The `[voice]` table, made one if the key is absent or isn't a table.

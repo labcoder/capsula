@@ -14,6 +14,7 @@ use crate::connections::account::Input as AccountInput;
 use crate::coordinator::Input;
 use crate::ipc;
 use crate::tap::Tap;
+use crate::voice::installer::Installer;
 
 pub(super) async fn read_control(
     pipe: &mut (impl AsyncRead + Unpin),
@@ -195,6 +196,11 @@ impl Brain {
         }
         if let ControlToBrain::Connection(op) = message {
             self.connection_op(op, Some(link))
+                .map_err(|Full| Ended::Lost)?;
+            return Ok(None);
+        }
+        if let ControlToBrain::KeyDown { .. } = message {
+            self.voice_op(Installer::reload_input, Some(link))
                 .map_err(|Full| Ended::Lost)?;
             return Ok(None);
         }

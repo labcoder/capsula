@@ -1,6 +1,8 @@
 use std::io;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, mpsc};
+use std::thread::{Scope, ScopedJoinHandle};
 
 use kumochi_protocol::frame::FrameError;
 
@@ -28,7 +30,11 @@ type Next = Option<(u64, SpeechRequest)>;
 /// Returns a framing or transport failure, never request contents.
 pub fn serve() -> Result<(), FrameError> {
     crate::platform::quiet_failures();
-    match std::panic::catch_unwind(AssertUnwindSafe(serve_requests)) {
+    fail_stop(serve_requests)
+}
+
+fn fail_stop<T>(work: impl FnOnce() -> T) -> T {
+    match std::panic::catch_unwind(AssertUnwindSafe(work)) {
         Ok(served) => served,
         Err(_) => std::process::abort(),
     }
@@ -36,24 +42,24 @@ pub fn serve() -> Result<(), FrameError> {
 
 fn serve_requests() -> Result<(), FrameError> {
     let mut input = io::stdin().lock();
-    let mut output = io::stdout().lock();
+    let output = Mutex::new(io::stdout());
     let mut next = read(&mut input)?;
     while let Some((id, request)) = next {
         next = match request {
             SpeechRequest::Load { natives, models } => {
-                loaded(&mut input, &mut output, id, &natives, &models, staging_root)?
+                loaded(&mut input, &output, id, &natives, &models, staging_root)?
             }
             SpeechRequest::Decode { .. } => {
-                reply(&mut output, id, &SpeechReply::NotLoaded)?;
+                send(&output, id, &SpeechReply::NotLoaded)?;
                 read(&mut input)?
             }
             SpeechRequest::Unload => {
-                reply(&mut output, id, &SpeechReply::Unloaded)?;
+                send(&output, id, &SpeechReply::Unloaded)?;
                 read(&mut input)?
             }
             #[cfg(debug_assertions)]
             SpeechRequest::Fault(fault) => {
-                inject(fault, &mut output, id)?;
+                inject(fault, &mut *output.lock().expect("worker output"), id)?;
                 read(&mut input)?
             }
         };
@@ -64,60 +70,164 @@ fn serve_requests() -> Result<(), FrameError> {
 /// Loads, answers, then serves decodes until the pipe closes or a request needs the model gone:
 /// an unload is answered after the natives are freed, and another load is handed back to run
 /// after them.
-fn loaded(
+fn loaded<W: io::Write + Send>(
     input: &mut impl io::Read,
-    output: &mut impl io::Write,
+    output: &Mutex<W>,
     id: u64,
     natives: &Path,
     models: &Path,
     root: impl FnOnce() -> Result<PathBuf, NativeError>,
 ) -> Result<Next, FrameError> {
-    let sherpa = match c_path(models)
-        .and_then(|_| root())
-        .and_then(|root| Sherpa::load(natives, &root))
-    {
+    loaded_with(input, output, id, models, || {
+        c_path(models)
+            .and_then(|_| root())
+            .and_then(|root| Sherpa::load(natives, &root))
+    })
+}
+
+fn loaded_with<W: io::Write + Send>(
+    input: &mut impl io::Read,
+    output: &Mutex<W>,
+    id: u64,
+    models: &Path,
+    load: impl FnOnce() -> Result<Sherpa, NativeError>,
+) -> Result<Next, FrameError> {
+    let sherpa = match load() {
         Ok(sherpa) => sherpa,
         Err(error) => {
-            reply(output, id, &SpeechReply::Failed(error))?;
+            send(output, id, &SpeechReply::Failed(error))?;
             return read(input);
         }
     };
-    let recognizer = match sherpa.recognizer(models) {
-        Ok(recognizer) => recognizer,
-        Err(error) => {
-            reply(output, id, &SpeechReply::Failed(error))?;
-            return read(input);
-        }
-    };
-    if let Err(error) = recognizer.decode(PREWARM_RATE, &PREWARM) {
-        reply(output, id, &SpeechReply::Failed(error))?;
+    let created = sherpa.recognizer(models);
+    if created.is_err() {
+        let error = created.map(drop).expect_err("recognizer creation failed");
+        drop(sherpa);
+        send(output, id, &SpeechReply::Failed(error))?;
         return read(input);
     }
-    reply(output, id, &SpeechReply::Loaded)?;
-    loop {
-        let Some((id, request)) = read(input)? else {
-            return Ok(None);
-        };
-        match request {
-            SpeechRequest::Decode { rate, pcm } => {
-                reply(output, id, &decode(&recognizer, rate, &pcm))?;
+    let recognizer = created.expect("recognizer creation succeeded");
+    if let Err(error) = recognizer.decode(PREWARM_RATE, &PREWARM) {
+        drop(recognizer);
+        drop(sherpa);
+        send(output, id, &SpeechReply::Failed(error))?;
+        return read(input);
+    }
+    send(output, id, &SpeechReply::Loaded)?;
+    let next = std::thread::scope(|scope| {
+        let mut slots = Slots::new(scope);
+        loop {
+            match read(input) {
+                Ok(Some((id, SpeechRequest::Decode { rate, pcm }))) => {
+                    let recognizer = &recognizer;
+                    if slots
+                        .start(move || send(output, id, &decode(recognizer, rate, &pcm)))
+                        .is_err()
+                    {
+                        send(output, id, &SpeechReply::Failed(NativeError::Decode))?;
+                    }
+                }
+                #[cfg(debug_assertions)]
+                Ok(Some((id, SpeechRequest::Fault(fault)))) => {
+                    if slots
+                        .start(move || {
+                            inject(fault, &mut *output.lock().expect("worker output"), id)
+                        })
+                        .is_err()
+                    {
+                        send(output, id, &SpeechReply::Failed(NativeError::Decode))?;
+                    }
+                }
+                next => {
+                    slots.drain();
+                    return next;
+                }
             }
-            SpeechRequest::Unload => {
-                drop(recognizer);
-                drop(sherpa);
-                reply(output, id, &SpeechReply::Unloaded)?;
-                return read(input);
-            }
-            #[cfg(debug_assertions)]
-            SpeechRequest::Fault(fault) => inject(fault, output, id)?,
-            load @ SpeechRequest::Load { .. } => {
-                drop(recognizer);
-                drop(sherpa);
-                return Ok(Some((id, load)));
-            }
+        }
+    });
+    drop(recognizer);
+    drop(sherpa);
+    match next? {
+        Some((id, SpeechRequest::Unload)) => {
+            send(output, id, &SpeechReply::Unloaded)?;
+            read(input)
+        }
+        next => Ok(next),
+    }
+}
+
+struct Slots<'scope, 'env> {
+    scope: &'scope Scope<'scope, 'env>,
+    running: [Option<ScopedJoinHandle<'scope, ()>>; 2],
+    free: mpsc::SyncSender<usize>,
+    freed: mpsc::Receiver<usize>,
+}
+
+impl<'scope, 'env> Slots<'scope, 'env> {
+    fn new(scope: &'scope Scope<'scope, 'env>) -> Self {
+        let (free, freed) = mpsc::sync_channel(2);
+        Self {
+            scope,
+            running: [None, None],
+            free,
+            freed,
+        }
+    }
+
+    fn start(
+        &mut self,
+        work: impl FnOnce() -> Result<(), FrameError> + Send + 'scope,
+    ) -> io::Result<()> {
+        let slot = self
+            .running
+            .iter()
+            .position(Option::is_none)
+            .unwrap_or_else(|| self.reap());
+        let free = self.free.clone();
+        self.running[slot] = Some(
+            std::thread::Builder::new()
+                .name("speech-decode".into())
+                .spawn_scoped(self.scope, move || {
+                    fail_stop(|| {
+                        if work().is_err() || free.send(slot).is_err() {
+                            std::process::abort();
+                        }
+                    });
+                })?,
+        );
+        Ok(())
+    }
+
+    fn reap(&mut self) -> usize {
+        let slot = self
+            .freed
+            .recv()
+            .expect("live decode slots publish completion");
+        if self.running[slot]
+            .take()
+            .expect("the completed slot is occupied")
+            .join()
+            .is_err()
+        {
+            std::process::abort();
+        }
+        slot
+    }
+
+    fn drain(&mut self) {
+        while self.running.iter().any(Option::is_some) {
+            self.reap();
         }
     }
 }
+
+fn send(output: &Mutex<impl io::Write>, id: u64, value: &SpeechReply) -> Result<(), FrameError> {
+    reply(&mut *output.lock().expect("worker output"), id, value)
+}
+
+#[cfg(test)]
+#[path = "worker_tests.rs"]
+mod tests;
 
 /// The audio is checked again here: the worker trusts no request.
 fn decode(recognizer: &Recognizer<'_>, rate: u32, pcm: &[u8]) -> SpeechReply {
@@ -170,65 +280,6 @@ fn inject(
                 Ok(()) => NativeError::Decode,
             };
             reply(output, id, &SpeechReply::Failed(missed))
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::ffi::OsString;
-    use std::os::windows::ffi::OsStringExt as _;
-    use std::path::Path;
-
-    use super::{NativeError, Speech, SpeechReply, SpeechRequest, loaded};
-    use crate::supervise::{Kind as _, read_request, write_message};
-
-    fn load_refusal(models: &Path) -> SpeechReply {
-        let mut queued = Vec::new();
-        write_message(&mut queued, 42, &SpeechRequest::Unload, Speech::MAX_REQUEST)
-            .expect("queued unload");
-        let mut input = queued.as_slice();
-        let mut output = Vec::new();
-        let next = loaded(&mut input, &mut output, 41, Path::new("\0"), models, || {
-            Err(NativeError::Unsafe)
-        })
-        .expect("load refusal and continuation");
-        assert!(
-            matches!(next, Some((42, SpeechRequest::Unload))),
-            "the next request survives the failed load"
-        );
-        assert!(input.is_empty(), "the queued request was consumed once");
-        let mut output = output.as_slice();
-        let (id, reply) = read_request::<SpeechReply>(&mut output, Speech::MAX_REPLY)
-            .expect("framed refusal")
-            .expect("one reply");
-        assert_eq!(id, 41, "the refusal answers the load");
-        assert!(output.is_empty(), "exactly one reply");
-        reply
-    }
-
-    #[test]
-    fn an_unrepresentable_model_path_is_refused_without_native_storage() {
-        let non_utf8 = OsString::from_wide(&[0xd800]);
-        for models in [
-            Path::new("\0"),
-            Path::new("models\0private"),
-            Path::new(&non_utf8),
-        ] {
-            assert_eq!(
-                load_refusal(models),
-                SpeechReply::Failed(NativeError::Input)
-            );
-        }
-    }
-
-    #[test]
-    fn representable_model_paths_keep_the_root_refusal() {
-        for models in ["", ".", "models", "modèles", "C:\\models\\音声"] {
-            assert_eq!(
-                load_refusal(Path::new(models)),
-                SpeechReply::Failed(NativeError::Unsafe)
-            );
         }
     }
 }

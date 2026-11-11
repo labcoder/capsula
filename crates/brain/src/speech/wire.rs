@@ -17,7 +17,7 @@ pub const MAX_PCM_BYTES: usize = 5_760_000;
 /// Why speech input didn't answer. No native text and no paths cross this boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum SpeechError {
-    /// The worker died, broke its protocol or missed a deadline, and its model went with it.
+    /// The worker died, broke its protocol or missed a deadline; this does not prove its exit.
     #[error("speech worker lost")]
     WorkerLost,
     /// A lost worker wasn't seen to exit, so nothing replaces it and speech input stays refused.

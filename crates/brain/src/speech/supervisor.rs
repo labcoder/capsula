@@ -3,13 +3,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tokio::time::Instant;
 
 use super::wire::{MAX_PCM_BYTES, SpeechError, SpeechReply, SpeechRequest, check_audio};
 use crate::platform::Job;
 use crate::platform::sherpa::{MAX_TRANSCRIPT_BYTES, NativeError};
-use crate::supervise::{self, Generation, Handle, Kind};
+use crate::supervise::{self, Completion, Dispatch, Exit, Generation, Handle, Kind, Retirement};
 
 /// The speech worker's kind for the shared supervisor.
 pub(super) struct Speech;
@@ -77,8 +77,8 @@ impl SpeechSupervisor {
     }
 }
 
-/// Requests and loss notifications; dropping the last handle stops the worker. A loss drops the
-/// model: the respawned worker has nothing loaded until the next [`SpeechHandle::load`].
+/// Requests and loss notifications; dropping the last handle stops the worker. A replacement has
+/// nothing loaded until the next [`SpeechHandle::load`]; a request failure alone proves no release.
 #[derive(Clone, Debug)]
 pub struct SpeechHandle {
     inner: Handle<Speech>,
@@ -90,22 +90,41 @@ impl SpeechHandle {
     /// Returns the generation of the worker that holds the model, which its loss names.
     ///
     /// # Errors
-    /// Returns `WorkerLost`, or the native failure.
+    /// Returns `WorkerLost`, `ExitUnconfirmed`, or the native failure.
     pub async fn load(&self, natives: PathBuf, models: PathBuf) -> Result<Generation, SpeechError> {
         let until = Instant::now() + self.deadlines.load;
-        match self
-            .send(SpeechRequest::Load { natives, models }, until)
-            .await?
-        {
-            (SpeechReply::Loaded, generation) => Ok(generation),
-            (other, _) => Err(refusal(&other)),
-        }
+        loaded(
+            self.inner
+                .request_resource(SpeechRequest::Load { natives, models }, until, None, None)
+                .await
+                .map_err(SpeechError::from)?,
+        )
+    }
+
+    pub(crate) async fn load_tracked(
+        &self,
+        natives: PathBuf,
+        models: PathBuf,
+        dispatch: watch::Sender<Dispatch>,
+    ) -> Result<Generation, SpeechError> {
+        let until = Instant::now() + self.deadlines.load;
+        loaded(
+            self.inner
+                .request_resource(
+                    SpeechRequest::Load { natives, models },
+                    until,
+                    None,
+                    Some(dispatch),
+                )
+                .await
+                .map_err(SpeechError::from)?,
+        )
     }
 
     /// Transcribes mono PCM at its capture rate. The audio is checked before anything is sent.
     ///
     /// # Errors
-    /// Returns `Input`, `WorkerLost`, `NotLoaded`, or the native failure.
+    /// Returns `Input`, `WorkerLost`, `ExitUnconfirmed`, `NotLoaded`, or the native failure.
     pub async fn decode(&self, rate: u32, samples: &[i16]) -> Result<String, SpeechError> {
         check_audio(rate, samples.len())?;
         let samples_ms = u64::try_from(samples.len()).map_err(|_| SpeechError::Input)? * 1000;
@@ -130,12 +149,36 @@ impl SpeechHandle {
     /// Drops the model and the natives in the worker.
     ///
     /// # Errors
-    /// Returns `WorkerLost`; the model is gone either way.
+    /// A failure does not prove the model has been freed.
     pub async fn unload(&self) -> Result<(), SpeechError> {
+        self.unload_generation().await.map(drop)
+    }
+
+    pub(crate) async fn unload_generation(&self) -> Result<Generation, SpeechError> {
         let until = Instant::now() + self.deadlines.unload;
-        match self.send(SpeechRequest::Unload, until).await?.0 {
-            SpeechReply::Unloaded => Ok(()),
-            other => Err(refusal(&other)),
+        match self.send(SpeechRequest::Unload, until).await? {
+            (SpeechReply::Unloaded, generation) => Ok(generation),
+            (other, _) => Err(refusal(&other)),
+        }
+    }
+
+    pub(crate) fn unload_owned(
+        &self,
+        generation: Generation,
+    ) -> impl std::future::Future<Output = Result<Generation, SpeechError>> + '_ {
+        let until = Instant::now() + self.deadlines.unload;
+        let request =
+            self.inner
+                .request_resource(SpeechRequest::Unload, until, Some(generation), None);
+        async move {
+            let reply = request.await.map_err(SpeechError::from)?;
+            if !matches!(reply.reply(), SpeechReply::Unloaded) {
+                return Err(refusal(reply.reply()));
+            }
+            reply
+                .handoff()
+                .map(|(_, generation)| generation)
+                .map_err(SpeechError::from)
         }
     }
 
@@ -157,6 +200,14 @@ impl SpeechHandle {
         self.inner.lost()
     }
 
+    pub(crate) fn exits(&self) -> broadcast::Receiver<Exit> {
+        self.inner.exits()
+    }
+
+    pub(crate) fn retirement(&self) -> Retirement {
+        self.inner.retirement()
+    }
+
     async fn send(
         &self,
         request: SpeechRequest,
@@ -168,6 +219,20 @@ impl SpeechHandle {
             .map_err(SpeechError::from)
     }
 }
+
+fn loaded(reply: Completion<SpeechReply>) -> Result<Generation, SpeechError> {
+    let result = match reply.reply() {
+        SpeechReply::Loaded => Ok(reply.generation()),
+        SpeechReply::Failed(error) => Err(SpeechError::Native(*error)),
+        other => return Err(refusal(other)),
+    };
+    reply.handoff().map_err(SpeechError::from)?;
+    result
+}
+
+#[cfg(test)]
+#[path = "supervisor_tests.rs"]
+mod tests;
 
 /// A reply that refuses the request. One that answers a different request breaks the worker's
 /// contract, which the caller sees as a loss.

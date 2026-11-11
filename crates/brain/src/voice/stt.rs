@@ -1,5 +1,5 @@
-//! Speech input's owner: one `voice-stt` thread that has the speech worker load Parakeet, decode
-//! and unload, so the coordinator never waits on that work. sherpa-onnx runs only in the worker
+//! Speech input's owner: one `voice-stt` thread that loads, schedules at most two decodes and
+//! unloads through the speech worker, so the coordinator never waits. sherpa-onnx runs only in the worker
 //! process (see `crate::speech`).
 //!
 //! The handle and the thread share one small state behind a mutex. Load, unload and shutdown set
@@ -11,17 +11,79 @@
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+pub(crate) use tests::held_for_runtime;
+
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
+use kumochi_protocol::message::SttUnload;
 use tokio::runtime::Handle;
 use tokio::sync::broadcast::{self, error::TryRecvError};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
 use super::{LoadEvent, Reports};
 use crate::speech::{SpeechError, SpeechHandle};
-use crate::supervise::Generation;
+use crate::supervise::{Dispatch, Exit, Generation, Retirement};
+
+#[cfg(test)]
+mod poll_cut;
+#[cfg(test)]
+mod receipt_tests;
+#[cfg(test)]
+pub(crate) use poll_cut::Cut;
+
+async fn released(
+    dispatch: &mut watch::Receiver<Dispatch>,
+    exits: &mut broadcast::Receiver<Exit>,
+    retirement: &Retirement,
+) -> Result<(), SpeechError> {
+    loop {
+        let state = *dispatch.borrow_and_update();
+        match state {
+            Dispatch::Pending => tokio::select! {
+                biased;
+                changed = dispatch.changed() => changed.map_err(|_| SpeechError::ExitUnconfirmed)?,
+                () = retirement.closed() => return Err(SpeechError::ExitUnconfirmed),
+            },
+            Dispatch::NotDispatched => return Ok(()),
+            Dispatch::Dispatched(generation) => {
+                return confirmed(exits, generation, retirement).await;
+            }
+        }
+    }
+}
+
+async fn confirmed(
+    exits: &mut broadcast::Receiver<Exit>,
+    generation: Generation,
+    retirement: &Retirement,
+) -> Result<(), SpeechError> {
+    let mut closed = retirement.request(generation).is_err();
+    loop {
+        let exit = if closed {
+            exits.try_recv().map_err(|_| SpeechError::ExitUnconfirmed)?
+        } else {
+            tokio::select! {
+                biased;
+                exit = exits.recv() => exit.map_err(|_| SpeechError::ExitUnconfirmed)?,
+                () = retirement.closed() => {
+                    closed = true;
+                    continue;
+                }
+            }
+        };
+        if exit.generation == generation {
+            return if exit.confirmed {
+                Ok(())
+            } else {
+                Err(SpeechError::ExitUnconfirmed)
+            };
+        }
+    }
+}
 
 /// One utterance to transcribe: mono PCM at its capture rate.
 pub(crate) struct Decode {
@@ -76,7 +138,7 @@ impl std::fmt::Debug for SttResult {
 pub(crate) struct SttBusy;
 
 /// What a loaded model can do; the real one asks the speech worker.
-pub(crate) trait Decoder {
+pub(crate) trait Decoder: Sync {
     fn decode(&self, rate: u32, samples: &[i16]) -> Result<String, SpeechError>;
 }
 
@@ -85,7 +147,7 @@ pub(crate) trait Decoder {
 enum Served {
     /// The model stopped being wanted, or the handle dropped.
     Released,
-    /// The worker, and the model with it, is gone.
+    /// The worker can no longer serve; its resources still need a release receipt.
     Lost,
 }
 
@@ -114,7 +176,19 @@ struct State {
     /// Set by the worker only while a loaded model serves `want`.
     ready: bool,
     waiting: Option<Decode>,
+    finished: [Option<SttResult>; 2],
+    #[cfg(test)]
+    decode_cut: Option<DecodeCut>,
+    unload_after: Option<Duration>,
+    idle_since: Instant,
     shutdown: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DecodeCut {
+    Spawn,
+    Delivery,
 }
 
 struct Control {
@@ -155,19 +229,71 @@ impl SttHandle {
         natives: PathBuf,
         reports: Reports,
     ) -> io::Result<Self> {
+        Self::spawn_adapter(
+            runtime,
+            speech,
+            natives,
+            reports,
+            #[cfg(test)]
+            None,
+        )
+    }
+
+    fn spawn_adapter(
+        runtime: Handle,
+        speech: SpeechHandle,
+        natives: PathBuf,
+        reports: Reports,
+        #[cfg(test)] mut cut: Option<poll_cut::Gate>,
+    ) -> io::Result<Self> {
         let losses = speech.lost();
         let wakes = speech.lost();
         let tasks = runtime.clone();
         let handle = Self::spawn_with(reports, losses, move |models, serve| {
-            let generation = runtime.block_on(speech.load(natives.clone(), models.to_owned()))?;
+            #[cfg(test)]
+            let _clock = cut.as_ref().map(|_| runtime.enter());
+            let mut exits = speech.exits();
+            let retirement = speech.retirement();
+            let (dispatch, mut receipt) = watch::channel(Dispatch::Pending);
+            let generation = match runtime.block_on({
+                let request = speech.load_tracked(natives.clone(), models.to_owned(), dispatch);
+                #[cfg(test)]
+                let request = poll_cut::hold(&mut cut, Cut::Load, request);
+                request
+            }) {
+                Ok(generation) => generation,
+                Err(error @ SpeechError::Native(_)) => return Err(error),
+                Err(_) => {
+                    runtime.block_on({
+                        let request = released(&mut receipt, &mut exits, &retirement);
+                        #[cfg(test)]
+                        let request = poll_cut::observe_wait(&mut cut, request);
+                        request
+                    })?;
+                    return Err(SpeechError::WorkerLost);
+                }
+            };
             let remote = Remote {
                 speech: &speech,
                 runtime: &runtime,
             };
-            if serve(generation, &remote) == Served::Lost {
-                return Err(SpeechError::WorkerLost);
+            if serve(generation, &remote) == Served::Released
+                && runtime.block_on({
+                    let request = speech.unload_owned(generation);
+                    #[cfg(test)]
+                    let request = poll_cut::hold(&mut cut, Cut::Unload, request);
+                    request
+                }) == Ok(generation)
+            {
+                return Ok(());
             }
-            runtime.block_on(speech.unload())
+            runtime.block_on({
+                let request = confirmed(&mut exits, generation, &retirement);
+                #[cfg(test)]
+                let request = poll_cut::observe_wait(&mut cut, request);
+                request
+            })?;
+            Err(SpeechError::WorkerLost)
         })?;
         tasks.spawn(wake_on_losses(Arc::clone(&handle.control), wakes));
         Ok(handle)
@@ -175,7 +301,8 @@ impl SttHandle {
 
     /// `engine` loads the models, hands the loaded decoder and the generation that loaded it to
     /// `serve` until it returns, then unloads before it returns. A loss reported by `serve` is
-    /// returned as an error. `losses` is the thread's own subscription to worker losses.
+    /// returned as an error after release is proved, or `ExitUnconfirmed` if it cannot be.
+    /// `losses` is the thread's own subscription to worker losses.
     fn spawn_with(
         reports: Reports,
         losses: broadcast::Receiver<Generation>,
@@ -192,6 +319,11 @@ impl SttHandle {
                 current: None,
                 ready: false,
                 waiting: None,
+                finished: [None, None],
+                #[cfg(test)]
+                decode_cut: None,
+                unload_after: None,
+                idle_since: Instant::now(),
                 shutdown: false,
             }),
             wake: Condvar::new(),
@@ -209,6 +341,17 @@ impl SttHandle {
     pub(crate) fn load(&self, models: PathBuf, ask: u64) {
         self.control
             .update(|state| state.want = Some((models, ask)));
+    }
+
+    /// Applies the configured idle policy without interrupting a load or decode.
+    pub(crate) fn set_unload(&self, policy: SttUnload) {
+        self.control.update(|state| {
+            state.unload_after = match policy {
+                SttUnload::Kept => None,
+                SttUnload::After15Min => Some(Duration::from_mins(15)),
+                SttUnload::After1Hour => Some(Duration::from_hours(1)),
+            };
+        });
     }
 
     /// Unloads `ask` only, never a newer ask. Never waits: a waiting decode gets `Stale`, and a
@@ -254,7 +397,13 @@ impl SttHandle {
 impl Drop for SttHandle {
     /// The thread finishes the request in flight, unloads and exits; this doesn't wait for it.
     fn drop(&mut self) {
-        self.control.update(|state| state.shutdown = true);
+        let waiting = self.control.update(|state| {
+            state.shutdown = true;
+            state.waiting.take()
+        });
+        if let Some(decode) = waiting {
+            decode.answer(SttResult::Stale);
+        }
     }
 }
 
@@ -322,6 +471,20 @@ fn run(
             served
         };
         let result = engine(&models, &mut serve);
+        if result == Err(SpeechError::ExitUnconfirmed) {
+            tracing::error!("speech input ownership remains unconfirmed");
+            let waiting = control.update(|state| {
+                state.ready = false;
+                if wants(state, ask) {
+                    state.want = None;
+                }
+                state.waiting.take()
+            });
+            if let Some(decode) = waiting {
+                decode.answer(SttResult::NotLoaded);
+            }
+            return;
+        }
         let event = match (result, ended) {
             (Ok(()), Some(event)) => event,
             (Err(SpeechError::WorkerLost), _) | (_, Some(LoadEvent::Lost)) => LoadEvent::Lost,
@@ -368,25 +531,219 @@ fn serve_decodes(
     decoder: &dyn Decoder,
     losses: &mut broadcast::Receiver<Generation>,
 ) -> Served {
-    loop {
-        let decode = match next_decode(control, ask, generation, losses) {
-            Ok(Some(decode)) => decode,
-            Ok(None) => return Served::Released,
-            Err(Lost) => return Served::Lost,
-        };
-        if decode.reply.is_closed() {
-            continue;
-        }
-        match decoder.decode(decode.rate, &decode.samples) {
-            Ok(text) => decode.answer(SttResult::Text(text)),
-            // A worker that answers `NotLoaded` here was replaced since the load.
-            Err(SpeechError::WorkerLost | SpeechError::NotLoaded) => {
-                decode.answer(SttResult::Failed(SpeechError::WorkerLost));
-                return Served::Lost;
+    std::thread::scope(|scope| {
+        let mut running: [Option<Running<'_>>; 2] = [None, None];
+        let mut failed = false;
+        let mut state = control.lock();
+        state.idle_since = Instant::now();
+        loop {
+            #[cfg(test)]
+            while state.decode_cut == Some(DecodeCut::Delivery) {
+                state = control.wait(state);
             }
-            Err(error) => decode.answer(SttResult::Failed(error)),
+            state = settle_decodes(
+                control,
+                state,
+                &mut running,
+                ask,
+                generation,
+                losses,
+                &mut failed,
+            );
+            let occupied = running.iter().filter(|task| task.is_some()).count();
+            if !state.ready {
+                if occupied == 0 {
+                    return if failed {
+                        Served::Lost
+                    } else {
+                        Served::Released
+                    };
+                }
+                state = control.wait(state);
+                continue;
+            }
+            let live = running
+                .iter()
+                .flatten()
+                .any(|task| task.reply.as_ref().is_some_and(|reply| !reply.is_closed()));
+            if occupied < 2
+                && !live
+                && let Some(decode) = state.waiting.take()
+            {
+                let slot = running
+                    .iter()
+                    .position(Option::is_none)
+                    .expect("a free slot");
+                #[cfg(test)]
+                let cut = state.decode_cut.take();
+                drop(state);
+                match spawn_decode(
+                    scope,
+                    control,
+                    decoder,
+                    slot,
+                    decode,
+                    #[cfg(test)]
+                    cut,
+                ) {
+                    Ok(task) => running[slot] = Some(task),
+                    Err(_) => failed = true,
+                }
+                state = control.lock();
+                continue;
+            }
+            let wait = if occupied == 0 {
+                match state.unload_after {
+                    None => None,
+                    Some(after) => {
+                        let Some(left) = after
+                            .checked_sub(state.idle_since.elapsed())
+                            .filter(|left| !left.is_zero())
+                        else {
+                            state.ready = false;
+                            state.want = None;
+                            return Served::Released;
+                        };
+                        Some(left)
+                    }
+                }
+            } else if occupied == 1 && live && state.waiting.is_some() {
+                Some(Duration::from_millis(10))
+            } else {
+                None
+            };
+            state = match wait {
+                Some(wait) => {
+                    control
+                        .wake
+                        .wait_timeout(state, wait)
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0
+                }
+                None => control.wait(state),
+            };
+        }
+    })
+}
+
+fn settle_decodes<'state>(
+    control: &'state Control,
+    mut state: MutexGuard<'state, State>,
+    running: &mut [Option<Running<'_>>; 2],
+    ask: u64,
+    generation: Generation,
+    losses: &mut broadcast::Receiver<Generation>,
+    failed: &mut bool,
+) -> MutexGuard<'state, State> {
+    *failed |= lost(losses, generation);
+    let active = running.iter().any(Option::is_some);
+    let mut completed = [None, None];
+    while state.finished.iter().any(Option::is_some) {
+        for (slot, entry) in running.iter_mut().enumerate() {
+            let Some(result) = state.finished[slot].take() else {
+                continue;
+            };
+            let task = entry.take().expect("a completion owns its slot");
+            drop(state);
+            let joined = task.thread.join();
+            state = control.lock();
+            *failed |= joined.is_err()
+                || matches!(
+                    result,
+                    SttResult::Failed(
+                        SpeechError::WorkerLost
+                            | SpeechError::ExitUnconfirmed
+                            | SpeechError::NotLoaded
+                    )
+                );
+            completed[slot] = Some((task.reply, result));
         }
     }
+    *failed |= lost(losses, generation);
+    if active && running.iter().all(Option::is_none) {
+        state.idle_since = Instant::now();
+    }
+    state.ready = !*failed && !state.shutdown && wants(&state, ask);
+    for (reply, result) in completed.into_iter().flatten() {
+        if let Some(reply) = reply {
+            reply
+                .send(if *failed {
+                    SttResult::Failed(SpeechError::WorkerLost)
+                } else {
+                    result
+                })
+                .ok();
+        }
+    }
+    if *failed {
+        for task in running.iter_mut().flatten() {
+            if let Some(reply) = task.reply.take() {
+                reply.send(SttResult::Failed(SpeechError::WorkerLost)).ok();
+            }
+        }
+        if let Some(decode) = state.waiting.take() {
+            decode.answer(SttResult::NotLoaded);
+        }
+    }
+    if state
+        .waiting
+        .as_ref()
+        .is_some_and(|decode| decode.reply.is_closed())
+    {
+        state.waiting = None;
+    }
+    state
+}
+
+fn spawn_decode<'scope, 'env>(
+    scope: &'scope std::thread::Scope<'scope, 'env>,
+    control: &'env Control,
+    decoder: &'env dyn Decoder,
+    slot: usize,
+    decode: Decode,
+    #[cfg(test)] cut: Option<DecodeCut>,
+) -> io::Result<Running<'scope>> {
+    #[cfg(test)]
+    if cut == Some(DecodeCut::Spawn) {
+        decode.answer(SttResult::Failed(SpeechError::WorkerLost));
+        return Err(io::Error::other("decode thread refused"));
+    }
+    let Decode {
+        rate,
+        samples,
+        reply,
+    } = decode;
+    let spawned = std::thread::Builder::new()
+        .name("voice-decode".into())
+        .spawn_scoped(scope, move || {
+            #[cfg(panic = "unwind")]
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                decoder.decode(rate, &samples)
+            }))
+            .unwrap_or(Err(SpeechError::WorkerLost));
+            #[cfg(not(panic = "unwind"))]
+            let result = decoder.decode(rate, &samples);
+            let result = match result {
+                Ok(text) => SttResult::Text(text),
+                Err(error) => SttResult::Failed(error),
+            };
+            control.update(|state| state.finished[slot] = Some(result));
+        });
+    match spawned {
+        Ok(thread) => Ok(Running {
+            reply: Some(reply),
+            thread,
+        }),
+        Err(error) => {
+            reply.send(SttResult::Failed(SpeechError::WorkerLost)).ok();
+            Err(error)
+        }
+    }
+}
+
+struct Running<'scope> {
+    reply: Option<oneshot::Sender<SttResult>>,
+    thread: std::thread::ScopedJoinHandle<'scope, ()>,
 }
 
 /// The models to load next with the ask they answer, or `None` on shutdown. A decode left
@@ -403,34 +760,6 @@ fn next_load(control: &Control) -> Option<(PathBuf, u64)> {
         }
         if let Some(decode) = state.waiting.take() {
             decode.answer(SttResult::NotLoaded);
-        }
-        state = control.wait(state);
-    }
-}
-
-/// The worker was lost while serving.
-struct Lost;
-
-/// The next decode while `ask` stays wanted, `None` once it isn't or on shutdown, or `Lost`.
-fn next_decode(
-    control: &Control,
-    ask: u64,
-    generation: Generation,
-    losses: &mut broadcast::Receiver<Generation>,
-) -> Result<Option<Decode>, Lost> {
-    let mut state = control.lock();
-    loop {
-        if lost(losses, generation) {
-            state.ready = false;
-            return Err(Lost);
-        }
-        let wanted = !state.shutdown && wants(&state, ask);
-        state.ready = wanted;
-        if !wanted {
-            return Ok(None);
-        }
-        if let Some(decode) = state.waiting.take() {
-            return Ok(Some(decode));
         }
         state = control.wait(state);
     }

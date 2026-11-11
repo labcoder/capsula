@@ -11,7 +11,7 @@ use tokio::task::{JoinError, JoinHandle};
 
 use super::{Brain, Full, Link};
 use crate::config::{ConfigError, Pending};
-use crate::platform::{self, Untrusted};
+use crate::voice::installer::{Folder, RemoveAnswer};
 
 /// The epoch of a change the brain makes itself. Connections count from 1, so a shell hears only
 /// the settled settings.
@@ -29,6 +29,8 @@ pub(super) enum Change {
 pub(super) enum VoiceWrite {
     /// Adds a part to `installed`, for the install with this token.
     Activate { part: VoicePart, token: u64 },
+    /// Moves a part from `installed` to `removing`, for the removal with this token.
+    RemoveIntent { part: VoicePart, token: u64 },
     /// A part's folder is gone, so its removal is finished.
     RemoveDone(VoicePart),
 }
@@ -46,6 +48,13 @@ pub(super) struct Write {
     epoch: u64,
     voice: Option<VoiceWrite>,
     handle: JoinHandle<(Pending, Result<(), ConfigError>)>,
+}
+
+#[cfg(test)]
+impl Write {
+    pub(super) fn diagnostics(&self) -> (Option<VoiceWrite>, bool) {
+        (self.voice, self.handle.is_finished())
+    }
 }
 
 /// What a held test write does once released.
@@ -154,9 +163,44 @@ impl Brain {
                     answered?;
                     continue;
                 }
+                Change::User(SettingsOp::RemoveVoice(part)) if self.voice.is_some() => {
+                    let (answer, before, effects) =
+                        self.voice_remove(part).expect("voice is attached");
+                    let outcome = match answer {
+                        RemoveAnswer::Intent { token } => {
+                            // The intent's write answers the op, in the op's place in the queue.
+                            self.settings_ops.push_front(Queued {
+                                change: Change::Voice(VoiceWrite::RemoveIntent { part, token }),
+                                epoch,
+                            });
+                            self.voice_apply(before, effects, link.as_deref_mut())?;
+                            continue;
+                        }
+                        RemoveAnswer::Accepted => Outcome::Accepted,
+                        RemoveAnswer::Refused => Outcome::Refused(ErrorKey::VoiceUnavailable),
+                    };
+                    let answered = self.settled(epoch, outcome, link.as_deref_mut());
+                    let link = if answered.is_ok() {
+                        link.as_deref_mut()
+                    } else {
+                        None
+                    };
+                    self.voice_apply(before, effects, link)?;
+                    answered?;
+                    continue;
+                }
                 Change::User(op) => (self.config.stage(op), None),
+                // A removal committed since the load: writing it would put the part back.
+                Change::Voice(VoiceWrite::Activate { part, token })
+                    if !self.voice_activating(part, token) =>
+                {
+                    continue;
+                }
                 Change::Voice(write @ VoiceWrite::Activate { part, .. }) => {
                     (self.config.stage_activate(part), Some(write))
+                }
+                Change::Voice(write @ VoiceWrite::RemoveIntent { part, .. }) => {
+                    (self.config.stage_remove_intent(part), Some(write))
                 }
                 Change::Voice(write @ VoiceWrite::RemoveDone(part)) => {
                     (self.config.stage_remove_done(part), Some(write))
@@ -199,7 +243,7 @@ impl Brain {
         let outcome = match written {
             Ok((pending, Ok(()))) => {
                 self.config.commit(pending);
-                self.spoken_replies();
+                self.voice_policy();
                 #[cfg(test)]
                 self.observer.send(super::Seen::SettingsCommitted).ok();
                 Outcome::Applied
@@ -239,13 +283,7 @@ impl Brain {
     pub(crate) fn finish_removals(&mut self, models: &Path) -> Vec<VoicePart> {
         let mut stuck = Vec::new();
         for part in self.config.removing() {
-            let deleted = match platform::hold_chain(models) {
-                Ok(_held) => platform::remove_tree(&models.join(part.dir())),
-                Err(Untrusted::Missing) => Ok(()),
-                Err(error) => Err(error),
-            };
-            if let Err(error) = deleted {
-                tracing::warn!(?part, ?error, "a removed voice part wasn't deleted");
+            if super::voice::delete(models, part) == Folder::Present {
                 stuck.push(part);
                 continue;
             }

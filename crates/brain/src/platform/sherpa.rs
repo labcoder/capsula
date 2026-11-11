@@ -211,6 +211,10 @@ pub(crate) struct Sherpa {
     _sherpa_dll: Option<Library>,
     _ort_dll: Option<Library>,
     _not_send: PhantomData<*const ()>,
+    #[cfg(test)]
+    _release: Option<tests::Release>,
+    #[cfg(test)]
+    fake: Option<std::sync::Arc<std::sync::Mutex<tests::Fake>>>,
 }
 
 impl Sherpa {
@@ -242,6 +246,10 @@ impl Sherpa {
             _sherpa_dll: Some(sherpa),
             _ort_dll: Some(ort),
             _not_send: PhantomData,
+            #[cfg(test)]
+            _release: None,
+            #[cfg(test)]
+            fake: None,
         };
         loaded.check_release()?;
         Ok(loaded)
@@ -282,20 +290,25 @@ impl Sherpa {
         model.provider = c"cpu".as_ptr();
         model.model_type = c"nemo_transducer".as_ptr();
         config.decoding_method = c"greedy_search".as_ptr();
+        #[cfg(not(test))]
         // SAFETY: `config` matches c-api.h's layout and every string it points to outlives the call.
         let raw = unsafe { (self.fns.create_recognizer)(&raw const config) };
+        #[cfg(test)]
+        let raw = tests::create_for(self, &config);
         let raw = NonNull::new(raw.cast_mut()).ok_or(NativeError::Create)?;
         Ok(Recognizer { sherpa: self, raw })
     }
 
     /// A table of test functions with no library behind it.
     #[cfg(test)]
-    fn with_fns(fns: Fns) -> Self {
+    fn with_fns(fns: Fns, fake: std::sync::Arc<std::sync::Mutex<tests::Fake>>) -> Self {
         Self {
             fns,
             _sherpa_dll: None,
             _ort_dll: None,
             _not_send: PhantomData,
+            _release: None,
+            fake: Some(fake),
         }
     }
 }
@@ -313,6 +326,11 @@ pub(crate) struct Recognizer<'s> {
     sherpa: &'s Sherpa,
     raw: NonNull<RawRecognizer>,
 }
+
+// SAFETY: sherpa af2d8d81/ORT 33ca9628 CPU NeMo greedy uses per-call streams and concurrent Run;
+// only the fixed Parakeet constructor without hotwords, ITN or homophone rules is supported.
+// the owner joins every borrow before destruction. Recheck pins, model, provider and normalizers.
+unsafe impl Sync for Recognizer<'_> {}
 
 impl Recognizer<'_> {
     /// Transcribes one utterance of mono PCM at its capture rate; sherpa-onnx resamples it.
