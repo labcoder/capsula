@@ -485,7 +485,11 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
         let fixed = fixed + super::super::super::paint_cache::FONT_FEATURE_BYTES;
         assert_eq!(
             this.presenter.residency(),
-            fixed + charges[0].prepared() + charges[1].prepared()
+            fixed
+                + charges[0].prepared()
+                + charges[1].prepared()
+                + charges[0].activation
+                + charges[1].activation
         );
         (data, controls, charges, fixed)
     });
@@ -540,7 +544,8 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
             let cleared = window.draw(app);
             allocation::checkpoint(6, 170);
             let quads = window.painted_quads();
-            assert_eq!(quads.len(), if survivor { 2 } else { 1 });
+            // Scripted Configure keeps the root's theme background; the survivor is off-window.
+            assert_eq!(quads.len(), 2);
             observation_allocation = [
                 quads.as_ptr().addr(),
                 quads.capacity() * std::mem::size_of_val(&quads[0]),
@@ -588,7 +593,7 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
             this.presenter.residency(),
             fixed
                 + if matches!(case, Case::C) {
-                    charges[1].prepared()
+                    charges[1].prepared() + charges[1].activation
                 } else {
                     0
                 }
@@ -647,9 +652,10 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
     });
     let held = charges[0].semantic
         + charges[0].prepared()
+        + charges[0].activation
         + if refused {
             if survivor {
-                charges[1].semantic + charges[1].prepared() + 80
+                charges[1].semantic + charges[1].prepared() + charges[1].activation + 80
             } else {
                 40
             }
@@ -694,7 +700,7 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
         assert!(inner.update(|app| h1.update(app, |_, _, _| ())).is_err());
     }
     owner.update(&mut inner, |this, _| {
-        fixtures::host_stale_begin(&mut this.presenter);
+        fixtures::host_stale_begin(&mut this.presenter, !refused);
     });
     assert_eq!(
         (observer.snapshot().entered, target.counts()),

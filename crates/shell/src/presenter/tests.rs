@@ -1963,6 +1963,7 @@ pub(crate) struct HostCharges {
     pub(crate) view: usize,
     pub(crate) frame: usize,
     pub(crate) cache: usize,
+    pub(crate) activation: usize,
 }
 
 impl HostCharges {
@@ -2031,6 +2032,7 @@ pub(crate) fn host_ledger(
             view,
             frame: scene.frame_bytes,
             cache: scene.cache_bytes,
+            activation: super::Activation::BYTES,
         };
         assert_eq!(scene.state.attributed_bytes(), charges[index].semantic);
     }
@@ -2056,7 +2058,11 @@ pub(crate) fn host_ledger(
     charges
 }
 
-pub(crate) fn host_stale_begin(presenter: &mut Presenter) {
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "whether the episode's link is still connected"
+)]
+pub(crate) fn host_stale_begin(presenter: &mut Presenter, connected: bool) {
     let effects = presenter
         .data(
             GENERATION,
@@ -2071,7 +2077,7 @@ pub(crate) fn host_stale_begin(presenter: &mut Presenter) {
             Instant::now(),
         )
         .expect("one late cleared-scene begin");
-    assert_eq!(credit(&effects), FRAME);
+    assert_eq!(credit(&effects), if connected { FRAME } else { 0 });
     assert!(controls(&effects).is_empty());
     assert!(jobs(effects).is_empty());
     assert!(!presenter.scenes.contains_key(&LIVE));
