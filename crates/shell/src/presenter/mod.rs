@@ -27,6 +27,7 @@
 //!   presenter owns them, so whichever path discards them, they drop on the dropper thread. Once the
 //!   dropper has stopped, intake and new work stop with it, and the watchdog fails what waits.
 
+mod activation;
 mod admit;
 mod measure;
 pub(crate) mod overlay_input;
@@ -63,9 +64,10 @@ use kumochi_scene::{
     theme::Theme,
 };
 
+use activation::Activation;
 use admit::Lane;
 pub(crate) use measure::Measure;
-pub(crate) use paint::{Frames, Sample};
+pub(crate) use paint::{Frames, Sample, SceneCache, Stage};
 pub(crate) use prepare::{AdmitJob, Completion, PrepareJob, RecoveryJob};
 use recovery::Phase;
 use scene::{Cut, Out, Ready, Running, Scene, Ticket};
@@ -124,10 +126,6 @@ pub(crate) enum Effect {
     /// Run on a background executor, then pass the answer to [`Presenter::completed`].
     Admit(AdmitJob),
     /// A consumption refused as busy can be retried now, before this scene admits again.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "B6d's activation owner is the production caller")
-    )]
     ConsumptionReady { scene: SceneId, index: u32 },
 }
 
@@ -154,6 +152,7 @@ pub(crate) struct Presenter {
     clear_after_recovery: bool,
     /// Runs up to this one were stopped: their steps reach the mirror and are never prepared.
     fenced: Option<RunId>,
+    stopped_begins: [Option<SceneId>; MAX_VISIBLE_SCENES],
     /// The newest cleared or removed ids, oldest first.
     // shortcut: tombstones assume one persisted database; add a store id before supporting live database wipes.
     cleared: VecDeque<SceneId>,
@@ -164,13 +163,15 @@ pub(crate) struct Presenter {
     refused: bool,
     /// Consumed steps their owners still hold, charged until each is dropped, across connections.
     returned: Arc<AtomicUsize>,
+    /// Stages each committed view's paint cache.
+    stage: Box<dyn Stage>,
     /// This presenter's dropper liveness in tests; `None` asks the process-wide dropper.
     #[cfg(test)]
     dropper: Option<bool>,
 }
 
 impl Presenter {
-    pub(crate) fn new(surface: SurfaceGeometry, theme: Arc<Theme>) -> Self {
+    pub(crate) fn new(surface: SurfaceGeometry, theme: Arc<Theme>, stage: Box<dyn Stage>) -> Self {
         Self {
             input: overlay_input::OverlayOwner::default(),
             surface,
@@ -186,11 +187,13 @@ impl Presenter {
             held_bytes: 0,
             clear_after_recovery: false,
             fenced: None,
+            stopped_begins: [None; MAX_VISIBLE_SCENES],
             cleared: VecDeque::new(),
             next_job: 0,
             slots: Arc::new(()),
             refused: false,
             returned: Arc::new(AtomicUsize::new(0)),
+            stage,
             #[cfg(test)]
             dropper: None,
         }
@@ -233,6 +236,7 @@ impl Presenter {
         self.held_bytes = 0;
         self.clear_after_recovery = false;
         self.fenced = None;
+        self.stopped_begins = [None; MAX_VISIBLE_SCENES];
         self.generation = None;
         self.assembler.disconnected();
     }
@@ -432,19 +436,63 @@ impl Presenter {
             .min()
     }
 
+    fn stop_membership(&self) -> Result<[Option<SceneId>; MAX_VISIBLE_SCENES], Broken> {
+        let mut visible = [None; MAX_VISIBLE_SCENES];
+        for (slot, id) in visible.iter_mut().zip(self.scenes.keys()) {
+            *slot = Some(*id);
+        }
+        for (frame, _) in &self.held {
+            match &**frame {
+                DataToShell::SceneBegin { scene, .. } if !self.cleared.contains(scene) => {
+                    if visible.contains(&Some(*scene)) {
+                        return Err(Broken::Order);
+                    }
+                    let slot = visible
+                        .iter_mut()
+                        .find(|slot| slot.is_none())
+                        .ok_or(Broken::Scenes)?;
+                    *slot = Some(*scene);
+                }
+                DataToShell::ScenesRemoved { scenes } => {
+                    for slot in &mut visible {
+                        if slot.is_some_and(|id| scenes.contains(&id)) {
+                            *slot = None;
+                        }
+                    }
+                }
+                DataToShell::SceneCutApplied { scene, cut, .. } if cut.activated == 0 => {
+                    for slot in &mut visible {
+                        if *slot == Some(*scene) {
+                            *slot = None;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(visible)
+    }
+
     /// The first Esc. Runs up to `run` are fenced, an incomplete recovery is cleared first, and
     /// the last effect is the `StopScenes` naming every known scene not cut since its last commit.
     /// # Errors
     /// [`Broken`] when a held frame applied after clearing recovery can't be mirrored.
     pub(crate) fn stop(&mut self, run: RunId, now: Instant) -> Result<Vec<Effect>, Broken> {
         let mut out = Out::default();
-        self.fenced = Some(self.fenced.map_or(run, |fenced| fenced.max(run)));
+        let run = self.fenced.map_or(run, |fenced| fenced.max(run));
+        self.fenced = Some(run);
         if self.recovery_incomplete() {
             self.abandon(now, &mut out)?;
         } else if !matches!(self.phase, Phase::Live) {
             out.credit(self.assembler.clear().credit);
         }
         out.flush();
+        let visible = self.stop_membership()?;
+        for pending in &mut self.stopped_begins {
+            if !visible.contains(pending) {
+                *pending = None;
+            }
+        }
         let mut cuts = Vec::new();
         for (id, scene) in &mut self.scenes {
             if scene.cut != Cut::Open {
@@ -454,12 +502,33 @@ impl Presenter {
             scene.skipping = true;
             scene.cut = Cut::Outstanding;
             scene.stopped_ms = scene.sampled_ms;
+            if visible.contains(&Some(*id)) {
+                cuts.push(SceneCut {
+                    scene: *id,
+                    cut: scene.cut_now(),
+                });
+            }
+        }
+        for id in visible.into_iter().flatten() {
+            if self.scenes.contains_key(&id) || self.stopped_begins.contains(&Some(id)) {
+                continue;
+            }
+            let pending = self
+                .stopped_begins
+                .iter_mut()
+                .find(|slot| slot.is_none())
+                .expect("pending held cuts are a subset of the four visible identities");
+            *pending = Some(id);
             cuts.push(SceneCut {
-                scene: *id,
-                cut: scene.cut_now(),
+                scene: id,
+                cut: StopCut {
+                    activated: 0,
+                    revealed: Bounded::default(),
+                },
             });
         }
         self.drain(now, &mut out)?;
+        out.flush();
         let cuts = SceneCuts::new(cuts).expect("four scenes within the global caps fit one Stop");
         out.effects
             .push(Effect::Control(ControlToBrain::StopScenes { run, cuts }));
@@ -470,6 +539,7 @@ impl Presenter {
     /// # Errors
     /// [`Broken`] when a held frame applied after clearing recovery can't be mirrored.
     pub(crate) fn clear(&mut self, now: Instant) -> Result<Vec<Effect>, Broken> {
+        self.stopped_begins = [None; MAX_VISIBLE_SCENES];
         let mut out = Out::default();
         if self.recovery_incomplete() {
             self.abandon(now, &mut out)?;
@@ -506,10 +576,12 @@ impl Presenter {
     /// Prepared geometry charged against [`MAX_RESIDENT_BYTES`]: what each scene retains with
     /// its view and frame, its prepared steps, and every consumed step still held.
     pub(crate) fn residency(&self) -> usize {
-        self.scenes
-            .values()
-            .map(Scene::residency)
-            .fold(self.returned.load(Ordering::Relaxed), usize::saturating_add)
+        self.scenes.values().map(Scene::residency).fold(
+            self.returned
+                .load(Ordering::Relaxed)
+                .saturating_add(self.stage.fixed_bytes()),
+            usize::saturating_add,
+        )
     }
 
     fn paint_work(&self) -> PaintWork {
@@ -581,20 +653,31 @@ impl Presenter {
                 let rest = LayoutState::new(&state);
                 let retained = rest.resident_bytes();
                 let view = SceneView::new(&rest, state.activated());
+                let activation = Activation::new(&state, now);
                 let frame = Frame::new();
-                let picture = retained + view.resident_bytes() + Frames::reservation(&frame);
+                let cache = self.stage.stage(&view);
+                let picture = retained
+                    + view.resident_bytes()
+                    + Frames::reservation(&frame)
+                    + cache.bytes()
+                    + Activation::BYTES;
                 if self.residency().saturating_add(picture) > MAX_RESIDENT_BYTES
                     || !(self.paint_work() + rest.paint_work()).within_limits()
                 {
                     let bytes = state.attributed_bytes().saturating_add(picture);
-                    drop(Deferred::new((state, rest, view, frame), bytes));
+                    drop(Deferred::new(
+                        (state, rest, view, frame, cache, activation),
+                        bytes,
+                    ));
                     self.forget(*scene, out);
                     return Ok(());
                 }
                 let bytes = state.attributed_bytes();
                 let state = SceneBinding::bind(Deferred::new(state, bytes), &mut self.global)
                     .map_err(|_| Broken::Scenes)?;
-                self.install(*scene, state, rest, retained, view, frame);
+                self.install(
+                    *scene, state, rest, retained, view, frame, cache, activation,
+                );
                 Ok(())
             }
             DataToShell::SceneCutApplied {
@@ -703,6 +786,7 @@ impl Presenter {
             .state
             .stop(cut, &mut self.global)
             .map_err(|_| Broken::Cut)?;
+        scene.activation.retain(scene.state.view());
         scene.cut = Cut::Applied;
         scene.skipping = false;
         let stopped = scene.stopped_ms.take();
@@ -724,14 +808,20 @@ impl Presenter {
             if let Some(at) = stopped {
                 view.carry_spin(&scene.view, at);
             }
+            let cache = self.stage.stage(&view);
+            let cache_bytes = cache.bytes();
             let old = (
                 std::mem::replace(&mut scene.rest, rest),
                 std::mem::replace(&mut scene.view, view),
+                self.frames.borrow_mut().replaced(id, cache),
             );
-            self.frames.borrow_mut().replaced(id);
-            drop(Deferred::new(old, scene.retained + scene.view_bytes));
+            drop(Deferred::new(
+                old,
+                scene.retained + scene.view_bytes + scene.cache_bytes,
+            ));
             scene.retained = scene.rest.resident_bytes();
             scene.view_bytes = scene.view.resident_bytes();
+            scene.cache_bytes = cache_bytes;
             scene.paint = scene.rest.paint_work();
             if self.residency() > MAX_RESIDENT_BYTES || !self.paint_work().within_limits() {
                 self.release(id);
@@ -884,6 +974,7 @@ impl Presenter {
                 }
                 scene.paint = paint;
                 scene.ready.push_back(Ready {
+                    run: running.run,
                     step: prepared,
                     full_after,
                 });
@@ -921,15 +1012,23 @@ impl Presenter {
             scene.halt();
             let bytes = scene.held();
             let Scene {
-                state, rest, view, ..
+                state,
+                rest,
+                view,
+                activation,
+                ..
             } = scene;
             state.release(&mut self.global).expect(BOUND);
             let frame = self.frames.borrow_mut().take(id);
-            drop(Deferred::new((rest, view, frame), bytes));
+            drop(Deferred::new((rest, view, frame, activation), bytes));
         }
     }
 
-    /// Adopts a bound scene and reserves its frame.
+    /// Adopts a bound scene and reserves its frame, with the cache staged from its view.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "adoption moves every owner of the new scene into place at once"
+    )]
     fn install(
         &mut self,
         id: SceneId,
@@ -938,10 +1037,22 @@ impl Presenter {
         retained: usize,
         view: SceneView,
         frame: Frame,
+        cache: Box<dyn SceneCache>,
+        activation: Activation,
     ) {
-        let frame = self.frames.borrow_mut().adopt(id, frame);
-        self.scenes
-            .insert(id, Scene::new(state, rest, retained, view, frame));
+        let cache_bytes = cache.bytes();
+        let frame = self.frames.borrow_mut().adopt(id, frame, cache);
+        let mut scene = Scene::new(state, rest, retained, view, frame, cache_bytes, activation);
+        if let Some(pending) = self
+            .stopped_begins
+            .iter_mut()
+            .find(|slot| **slot == Some(id))
+        {
+            *pending = None;
+            scene.cut = Cut::Outstanding;
+            scene.skipping = true;
+        }
+        self.scenes.insert(id, scene);
     }
 
     /// A scene the shell clears: the brain is told unless it is already known as gone.
@@ -953,6 +1064,11 @@ impl Presenter {
     }
 
     fn remember(&mut self, id: SceneId) {
+        for pending in &mut self.stopped_begins {
+            if *pending == Some(id) {
+                *pending = None;
+            }
+        }
         if !self.cleared.contains(&id) {
             self.cleared.push_back(id);
         }

@@ -68,9 +68,9 @@ impl Messages {
             KeyBinding::new("pagedown", LaterMessages, Some("ThreadMessages")),
         ]);
         let state = model.read(cx);
-        let count = state.events.len();
         let shown_thread = state.open;
         let rows = stored_rows(state, cx);
+        let count = rows.len();
         let ids = rows.iter().map(|row| row.id).collect();
         let messages = MessageList::new(count, ListAlignment::Bottom, px(0.0));
         messages.set_scroll_handler({
@@ -249,12 +249,25 @@ impl Render for Messages {
 }
 
 fn stored_rows(state: &Threads, cx: &App) -> Rc<[Row]> {
-    state
-        .events
-        .iter()
-        .rev()
-        .map(|event| {
-            row(
+    let mut rows: Vec<Row> = Vec::new();
+    let mut current_group = None;
+    for event in state.events.iter().rev() {
+        let group = match (event.kind, event.run) {
+            (PageEventKind::NoVisual { scene }, Some(run))
+                if run.0 != 0
+                    && event.text.is_empty()
+                    && !event.cut
+                    && scene.0 != 0
+                    && i64::try_from(scene.0).is_ok() =>
+            {
+                Some((run, scene))
+            }
+            _ => None,
+        };
+        if group.is_some() && group == current_group {
+            rows.last_mut().expect("a group has a row").id = ("event", event.id.0);
+        } else {
+            rows.push(row(
                 ("event", event.id.0),
                 event.run,
                 event.kind,
@@ -262,9 +275,11 @@ fn stored_rows(state: &Threads, cx: &App) -> Rc<[Row]> {
                 event.cut.then_some(Text::ThreadCut),
                 state,
                 cx,
-            )
-        })
-        .collect()
+            ));
+        }
+        current_group = group;
+    }
+    rows.into()
 }
 
 fn row(
@@ -283,7 +298,9 @@ fn row(
             kumochi_protocol::constants::DEFAULT_ASSISTANT_NAME,
             |settings| settings.assistant_name.as_str(),
         ))),
-        PageEventKind::SceneStep => Some(strings.get(Text::ThreadStep)),
+        PageEventKind::SceneStep | PageEventKind::NoVisual { .. } => {
+            Some(strings.get(Text::ThreadNoVisual))
+        }
         PageEventKind::Issue { .. } | PageEventKind::TaskDeleted => None,
     };
     let text = match kind {
@@ -334,7 +351,7 @@ mod tests {
         AppContext as _, Bounds, ListOffset, TestAppContext, WindowBounds, WindowOptions, point,
         size,
     };
-    use kumochi_protocol::message::{EventId, PageEvent, RunId};
+    use kumochi_protocol::message::{EventId, PageEvent, RunId, SceneId};
 
     fn event(id: u64) -> PageEvent {
         PageEvent {
@@ -342,6 +359,18 @@ mod tests {
             run: Some(RunId(1)),
             kind: PageEventKind::AssistantText,
             text: format!("message {id}"),
+            cut: false,
+        }
+    }
+
+    fn marker(id: u64, run: Option<RunId>, scene: u64) -> PageEvent {
+        PageEvent {
+            id: EventId(id),
+            run,
+            kind: PageEventKind::NoVisual {
+                scene: SceneId(scene),
+            },
+            text: String::new(),
             cut: false,
         }
     }
@@ -357,12 +386,20 @@ mod tests {
     fn open(
         cx: &mut TestAppContext,
     ) -> (Entity<Threads>, Entity<Messages>, gpui_kit::AnyWindowHandle) {
+        open_with_events(cx, Vec::new())
+    }
+
+    fn open_with_events(
+        cx: &mut TestAppContext,
+        events: Vec<PageEvent>,
+    ) -> (Entity<Threads>, Entity<Messages>, gpui_kit::AnyWindowHandle) {
         cx.update(|cx| {
             gpui_kit::init(cx);
             cx.set_global(Strings::english());
             let model = cx.new(|_| {
                 let mut state = Threads::chat();
                 state.open = Some(ThreadId(1));
+                state.events = events;
                 state
             });
             let mut view = None;
@@ -386,6 +423,139 @@ mod tests {
             .expect("window");
             (model, view.expect("messages"), window)
         })
+    }
+
+    #[gpui::test]
+    fn populated_history_starts_grouped_and_older_pages_keep_the_newest_group_key(
+        cx: &mut TestAppContext,
+    ) {
+        let (model, view, _) = open_with_events(
+            cx,
+            vec![
+                event(6),
+                marker(5, Some(RunId(1)), 1),
+                marker(4, Some(RunId(1)), 1),
+            ],
+        );
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.count, 2);
+            assert_eq!(view.list.item_count(), 2);
+            assert_eq!(view.ids, [("event", 5), ("event", 6)]);
+            assert!(!view.is_empty());
+        });
+        model.update(cx, |state, cx| {
+            state.events.extend([
+                marker(3, Some(RunId(1)), 1),
+                marker(2, Some(RunId(1)), 1),
+                event(1),
+            ]);
+            state.before = Some(EventId(1));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.count, 3);
+            assert_eq!(view.list.item_count(), 3);
+            assert_eq!(view.ids, [("event", 1), ("event", 5), ("event", 6)]);
+        });
+        model.read_with(cx, |state, _| {
+            assert_eq!(
+                state
+                    .events
+                    .iter()
+                    .map(|event| event.id.0)
+                    .collect::<Vec<_>>(),
+                [6, 5, 4, 3, 2, 1]
+            );
+            assert_eq!(state.before, Some(EventId(1)));
+        });
+    }
+
+    #[gpui::test]
+    fn unavailable_rows_only_group_adjacent_empty_trusted_markers(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Strings::english());
+            let sentinel = "private drawing text {unchanged} — 窓";
+            let run = Some(RunId(1));
+            let other = Some(RunId(2));
+            let max_scene = (1_u64 << 63) - 1;
+            let mut text = marker(7, other, 2);
+            text.text = sentinel.into();
+            let mut cut = marker(9, other, 2);
+            cut.cut = true;
+            let mut legacy = marker(13, other, 2);
+            legacy.kind = PageEventKind::SceneStep;
+            legacy.text = sentinel.into();
+            legacy.cut = true;
+            let mut empty_legacy = marker(14, other, 2);
+            empty_legacy.kind = PageEventKind::SceneStep;
+            let mut user = event(21);
+            user.kind = PageEventKind::User;
+            user.text = sentinel.into();
+            let mut state = Threads::chat();
+            state.events = vec![
+                marker(1, run, 1),
+                marker(2, run, 1),
+                marker(3, other, 1),
+                marker(4, other, 1),
+                marker(5, other, 2),
+                marker(6, other, 2),
+                text,
+                marker(8, other, 2),
+                cut,
+                marker(10, other, 2),
+                marker(11, None, 2),
+                marker(12, None, 2),
+                legacy,
+                empty_legacy,
+                marker(15, other, 2),
+                marker(16, other, 0),
+                marker(17, other, 0),
+                marker(18, other, 2),
+                marker(19, other, u64::MAX),
+                marker(20, other, u64::MAX),
+                user,
+                marker(22, other, max_scene),
+                marker(23, other, max_scene),
+                marker(24, other, max_scene + 1),
+                marker(25, other, max_scene + 1),
+                marker(26, Some(RunId(0)), 2),
+                marker(27, Some(RunId(0)), 2),
+            ];
+            state.events.reverse();
+            let raw = state.events.clone();
+            let rows = stored_rows(&state, cx);
+            assert_eq!(
+                rows.iter().map(|row| row.id.1).collect::<Vec<_>>(),
+                [
+                    2, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23, 24, 25,
+                    26, 27
+                ]
+            );
+            for row in rows.iter().filter(|row| row.id.1 != 21) {
+                assert_eq!(row.label.as_deref(), Some("Drawing unavailable in history"));
+                assert_eq!(
+                    row.text.as_ref(),
+                    if [7, 13].contains(&row.id.1) {
+                        sentinel
+                    } else {
+                        ""
+                    }
+                );
+                assert_eq!(
+                    row.cut.as_deref(),
+                    [9, 13]
+                        .contains(&row.id.1)
+                        .then_some("This message was shortened.")
+                );
+            }
+            assert_eq!(rows[17].label.as_deref(), Some("You"));
+            assert_eq!(rows[17].text.as_ref(), sentinel);
+            let debug = format!("{rows:?}");
+            assert!(!debug.contains(sentinel));
+            assert!(!debug.contains(&format!("{:?}", sentinel.as_bytes())));
+            assert_eq!(state.events, raw);
+        });
     }
 
     #[gpui::test]

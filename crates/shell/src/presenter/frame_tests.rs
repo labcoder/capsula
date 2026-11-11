@@ -1,14 +1,15 @@
 //! The overlay's frames: sampling at rest, the paint observation, and paint failure.
 
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 use kumochi_protocol::message::{DataToShell, RunId, SceneId};
 use kumochi_scene::{SceneView, Step};
 
-use super::super::paint::Sample;
+use super::super::{SceneCache, paint::Sample};
 use super::{
-    LIVE, Presenter, RUN, Shaper, acknowledge, begin, clear_drawing, commit_as, controls, data,
-    kept, live, only_job, recovering, rect, step,
+    LIVE, Presenter, Probed, RUN, Shaper, Witness, acknowledge, begin, bound_everywhere,
+    clear_drawing, commit_as, controls, data, drained, hold_dropper, kept, live, only_job,
+    recovering, rect, step,
 };
 
 fn pair() -> Step {
@@ -81,7 +82,7 @@ fn frames_paint_in_scene_order_whatever_order_they_recovered_in() {
     let (mut presenter, _) = recovered(vec![(SceneId(30), pair()), (SceneId(10), rect("r"))]);
     assert_eq!(sample(&mut presenter), FIRST);
     let mut items = Vec::new();
-    let failed = presenter.frames().borrow().paint(|frame| {
+    let failed = presenter.frames().borrow().paint(|frame, _| {
         items.push(frame.paint_items().count());
         Ok::<_, std::fmt::Error>(())
     });
@@ -94,7 +95,7 @@ fn only_a_shown_paint_is_observed_once_per_epoch_and_bound() {
     let (mut presenter, now) = recovered(vec![(LIVE, pair())]);
     sample(&mut presenter);
     let frames = presenter.frames();
-    let ok = |_: &kumochi_scene::Frame| Ok::<_, std::fmt::Error>(());
+    let ok = |_: &kumochi_scene::Frame, _: &mut dyn SceneCache| Ok::<_, std::fmt::Error>(());
     assert!(!frames.borrow().paint(ok));
     assert_eq!(frames.borrow().painted(LIVE), None, "a hidden overlay");
     assert!(!presenter.drawn());
@@ -130,12 +131,48 @@ fn only_a_shown_paint_is_observed_once_per_epoch_and_bound() {
 }
 
 #[test]
+fn recovery_and_a_replacing_cut_bind_caches_staged_from_their_new_views() {
+    let (mut presenter, now, job) = recovering(vec![(LIVE, pair())]);
+    presenter.stage = Box::new(Witness);
+    presenter
+        .completed(job.run(&mut Shaper), now)
+        .expect("recovered rests");
+    assert_eq!(sample(&mut presenter), FIRST);
+    assert!(bound_everywhere(&presenter), "the recovered view");
+    presenter.stop(RUN, now).expect("a stop at rest");
+    let revision = presenter.scenes[&LIVE].state.view().revision();
+    let effects = acknowledge(&mut presenter, LIVE, revision, kept(LIVE).cut, now).expect("cut");
+    assert!(controls(&effects).is_empty(), "the kept cut stays");
+    assert_eq!(sample(&mut presenter), FIRST, "the replacement view");
+    assert!(bound_everywhere(&presenter), "the cut's replacement view");
+}
+
+#[test]
+fn a_replacing_cut_sends_the_old_cache_to_the_dropper_with_its_rest_and_view() {
+    let probe = Arc::new(());
+    let (mut presenter, now, job) = recovering(vec![(LIVE, pair())]);
+    presenter.stage = Box::new(Probed(Arc::clone(&probe)));
+    presenter
+        .completed(job.run(&mut Shaper), now)
+        .expect("recovered rests");
+    assert_eq!(Arc::strong_count(&probe), 3, "probe, stage, cache");
+    presenter.stop(RUN, now).expect("a stop at rest");
+    let revision = presenter.scenes[&LIVE].state.view().revision();
+    let release = hold_dropper();
+    let effects = acknowledge(&mut presenter, LIVE, revision, kept(LIVE).cut, now).expect("cut");
+    assert!(controls(&effects).is_empty(), "the kept cut stays");
+    assert_eq!(Arc::strong_count(&probe), 4, "the new and the queued old");
+    drop(release);
+    assert!(drained(&probe, 3));
+}
+
+#[test]
 fn a_cut_that_changes_nothing_keeps_the_rest_view_and_paint_observation() {
     let (mut presenter, now) = recovered(vec![(LIVE, rect("r"))]);
     assert_eq!(sample(&mut presenter), FIRST);
     let frames = presenter.frames();
     frames.borrow_mut().shown = true;
-    assert!(!frames.borrow().paint(|_| Ok::<_, std::fmt::Error>(())));
+    assert!(!frames.borrow().paint(|_, _| Ok::<_, std::fmt::Error>(())));
     let seen = frames.borrow().painted(LIVE).expect("a shown paint");
     let cut = presenter.scenes[&LIVE].cut_now();
     presenter.stop(RUN, now).expect("a stop at rest");
@@ -156,6 +193,43 @@ fn a_cut_that_changes_nothing_keeps_the_rest_view_and_paint_observation() {
         .expect("prepared on the kept rest");
     assert!(controls(&effects).is_empty());
     assert_eq!(presenter.scenes[&LIVE].ready.len(), 1);
+}
+
+#[test]
+fn hiding_forgets_every_old_host_paint_without_discarding_sampled_geometry() {
+    let second = SceneId(21);
+    let (mut presenter, _) = recovered(vec![(LIVE, rect("r")), (second, pair())]);
+    assert_eq!(sample(&mut presenter), FIRST);
+    let frames = presenter.frames();
+    let paint = |_: &kumochi_scene::Frame, _: &mut dyn SceneCache| Ok::<_, std::fmt::Error>(());
+    frames.borrow_mut().shown = true;
+    assert!(!frames.borrow().paint(paint));
+    let seen = [LIVE, second].map(|scene| frames.borrow().painted(scene).expect("shown paint"));
+    assert_eq!(seen.map(|paint| paint.bound), [1, 1]);
+    assert!(frames.borrow_mut().acknowledge(LIVE, seen[0]));
+    frames.borrow_mut().hide();
+    assert!(!presenter.drawn());
+    for (scene, old) in [LIVE, second].into_iter().zip(seen) {
+        assert_eq!(frames.borrow().painted(scene), None);
+        assert!(!frames.borrow_mut().acknowledge(scene, old));
+    }
+    let mut counts = Vec::new();
+    assert!(!frames.borrow().paint(|frame, _| {
+        counts.push(frame.items().len());
+        Ok::<_, std::fmt::Error>(())
+    }));
+    assert_eq!(counts, [1, 2]);
+    assert_eq!(sample(&mut presenter), REST);
+    frames.borrow_mut().shown = true;
+    assert!(!frames.borrow().paint(paint));
+    for (scene, old) in [LIVE, second].into_iter().zip(seen) {
+        let new = frames.borrow().painted(scene).expect("fresh host paint");
+        assert_eq!(new.bound, 1);
+        assert_eq!(new.epoch, seen[0].epoch.max(seen[1].epoch) + 1);
+        assert!(!frames.borrow_mut().acknowledge(scene, old));
+        assert!(frames.borrow_mut().acknowledge(scene, new));
+        assert!(!frames.borrow_mut().acknowledge(scene, new));
+    }
 }
 
 #[test]
@@ -188,11 +262,11 @@ fn a_frame_that_fails_to_paint_paints_no_more_and_clears_its_scene_once() {
     let frames = presenter.frames();
     frames.borrow_mut().shown = true;
     let mut calls = 0;
-    assert!(frames.borrow().paint(|_| {
+    assert!(frames.borrow().paint(|_, _| {
         calls += 1;
         Err(std::fmt::Error)
     }));
-    assert!(!frames.borrow().paint(|_| {
+    assert!(!frames.borrow().paint(|_, _| {
         calls += 1;
         Ok::<_, std::fmt::Error>(())
     }));

@@ -18,6 +18,7 @@ mod drawing;
 mod inline;
 mod job;
 mod lease;
+mod provider_draw;
 mod run;
 mod scenes;
 mod speech;
@@ -119,10 +120,10 @@ pub enum Input {
         /// Indices of the steps whose entrance had finished.
         revealed: Vec<u32>,
     },
-    /// The engine running `run` produced something.
+    /// The engine answering an admitted build produced something.
     Engine {
-        /// The run it belongs to.
-        run: RunId,
+        /// The exact run, round and attempt that started this engine.
+        key: BuildKey,
         /// What it produced.
         event: TurnEvent,
     },
@@ -515,7 +516,8 @@ struct Run {
     compacted: Option<u32>,
     /// The draw call the engine's steps stream in, once it starts.
     draw: Option<run::DrawArgs>,
-    draw_calls: Vec<(crate::engines::CallId, crate::dispatch::LedgerKey)>,
+    draw_calls: Vec<provider_draw::DrawCall>,
+    provider_calls: Vec<crate::engines::CallId>,
     /// Why the run failed, for the shell.
     error: Option<UserError>,
     /// The run's tool calls, one entry per key.
@@ -783,7 +785,7 @@ impl Coordinator {
                     &mut effects,
                 );
             }
-            Input::Engine { run, event } => self.engine(run, event, &mut effects)?,
+            Input::Engine { key, event } => self.engine(key, event, &mut effects)?,
             Input::ContextBuilt(built) => self.context_built(built, &mut effects)?,
             Input::SendReady {
                 key: SendKey::Build(key),
@@ -884,6 +886,7 @@ impl Coordinator {
             Input::Retry => self.retry_now(&mut effects),
             input @ (Input::Delete { .. } | Input::Deleted { .. }) => {
                 self.deletion(&input, &mut effects)?;
+                self.provider_sources_changed(&mut effects);
             }
             Input::ThreadOp(op) => self.thread_op(op, &mut effects),
             Input::Engines(now) => self.available(now, &mut effects),
@@ -1058,6 +1061,7 @@ impl Coordinator {
             compacted: None,
             draw: None,
             draw_calls: Vec::new(),
+            provider_calls: Vec::new(),
             error: None,
             ledger: crate::dispatch::Ledger::default(),
             mcp: None,
@@ -1198,6 +1202,7 @@ impl Coordinator {
             speech::revoke(&mut run, crate::voice::reply::Revoker::Brain, effects);
         }
         self.drawing_closed(run.id, effects);
+        run.tools.drop_round();
         if run.turn_stored && outcome != RunEnd::Done {
             effects.push(Effect::CancelEngine { run: run.id });
         }

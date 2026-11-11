@@ -16,6 +16,12 @@ flowchart LR
 
 ## What a request holds
 
+The run engine pump stamps every event with the actual request's build key: run, round and
+attempt. The coordinator accepts it only for the current admitted build, including `Finished`.
+Canceling an old pump does not retract events already queued, so those events keep their old
+key. Store acknowledgements and send-lease settlement are independent inputs and still drain
+after their build stops; background jobs keep their separate job-keyed collector.
+
 | Part | Where it comes from |
 |---|---|
 | Model and effort | The run's snapshot: the thread's model choice, else the default model, read by the run's first build. The coordinator checks it against the catalog once, on that build's result, and fails the run with `ModelUnavailable` when the catalog doesn't list it (runs.md, "Availability"). The dev fixture needs none, and a real engine refuses a request without one. |

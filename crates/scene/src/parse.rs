@@ -1,12 +1,21 @@
 //! Strict JSON decoding without propagating parser diagnostic text.
 
-use crate::{ErrorCode, FieldPath, Record, StepError, limits::MAX_RECORD_BYTES};
+use crate::{ErrorCode, FieldPath, Record, StepError, limits::MAX_RECORD_BYTES, record::Surface};
 
 /// Parses the closed 2D draw-tool surface, excluding even null solid-only fields.
 /// # Errors
-/// Returns the first typed decoding failure or an unsupported 3D field.
+/// Returns the first typed decoding failure or an unsupported surface or 3D field.
 pub fn parse_draw_record(bytes: &[u8]) -> Result<Record, StepError> {
     let record = parse_record(bytes)?;
+    if let Record::Begin(begin) = &record
+        && begin.surface != Surface::Overlay
+    {
+        return Err(StepError {
+            step: None,
+            path: FieldPath::default().field("surface"),
+            code: ErrorCode::Unsupported,
+        });
+    }
     if let Record::Step(step) = &record {
         crate::refuse_three_dimensional(step)?;
         if !step.set.is_empty() {

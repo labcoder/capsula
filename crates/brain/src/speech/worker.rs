@@ -1,12 +1,12 @@
 use std::io;
 use std::panic::AssertUnwindSafe;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use kumochi_protocol::frame::FrameError;
 
 use super::supervisor::Speech;
 use super::wire::{SpeechReply, SpeechRequest, check_audio};
-use crate::platform::sherpa::{NativeError, Recognizer, Sherpa, staging_root};
+use crate::platform::sherpa::{NativeError, Recognizer, Sherpa, c_path, staging_root};
 use crate::supervise::{Kind as _, read_request, write_message};
 
 /// The warm-up decode at load: one second of silence at 16 kHz [S5].
@@ -41,7 +41,7 @@ fn serve_requests() -> Result<(), FrameError> {
     while let Some((id, request)) = next {
         next = match request {
             SpeechRequest::Load { natives, models } => {
-                loaded(&mut input, &mut output, id, &natives, &models)?
+                loaded(&mut input, &mut output, id, &natives, &models, staging_root)?
             }
             SpeechRequest::Decode { .. } => {
                 reply(&mut output, id, &SpeechReply::NotLoaded)?;
@@ -70,8 +70,12 @@ fn loaded(
     id: u64,
     natives: &Path,
     models: &Path,
+    root: impl FnOnce() -> Result<PathBuf, NativeError>,
 ) -> Result<Next, FrameError> {
-    let sherpa = match staging_root().and_then(|root| Sherpa::load(natives, &root)) {
+    let sherpa = match c_path(models)
+        .and_then(|_| root())
+        .and_then(|root| Sherpa::load(natives, &root))
+    {
         Ok(sherpa) => sherpa,
         Err(error) => {
             reply(output, id, &SpeechReply::Failed(error))?;
@@ -166,6 +170,65 @@ fn inject(
                 Ok(()) => NativeError::Decode,
             };
             reply(output, id, &SpeechReply::Failed(missed))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt as _;
+    use std::path::Path;
+
+    use super::{NativeError, Speech, SpeechReply, SpeechRequest, loaded};
+    use crate::supervise::{Kind as _, read_request, write_message};
+
+    fn load_refusal(models: &Path) -> SpeechReply {
+        let mut queued = Vec::new();
+        write_message(&mut queued, 42, &SpeechRequest::Unload, Speech::MAX_REQUEST)
+            .expect("queued unload");
+        let mut input = queued.as_slice();
+        let mut output = Vec::new();
+        let next = loaded(&mut input, &mut output, 41, Path::new("\0"), models, || {
+            Err(NativeError::Unsafe)
+        })
+        .expect("load refusal and continuation");
+        assert!(
+            matches!(next, Some((42, SpeechRequest::Unload))),
+            "the next request survives the failed load"
+        );
+        assert!(input.is_empty(), "the queued request was consumed once");
+        let mut output = output.as_slice();
+        let (id, reply) = read_request::<SpeechReply>(&mut output, Speech::MAX_REPLY)
+            .expect("framed refusal")
+            .expect("one reply");
+        assert_eq!(id, 41, "the refusal answers the load");
+        assert!(output.is_empty(), "exactly one reply");
+        reply
+    }
+
+    #[test]
+    fn an_unrepresentable_model_path_is_refused_without_native_storage() {
+        let non_utf8 = OsString::from_wide(&[0xd800]);
+        for models in [
+            Path::new("\0"),
+            Path::new("models\0private"),
+            Path::new(&non_utf8),
+        ] {
+            assert_eq!(
+                load_refusal(models),
+                SpeechReply::Failed(NativeError::Input)
+            );
+        }
+    }
+
+    #[test]
+    fn representable_model_paths_keep_the_root_refusal() {
+        for models in ["", ".", "models", "modèles", "C:\\models\\音声"] {
+            assert_eq!(
+                load_refusal(Path::new(models)),
+                SpeechReply::Failed(NativeError::Unsafe)
+            );
         }
     }
 }

@@ -108,7 +108,11 @@ fn retirement_meter_counts_queue_owners_and_semantic_state_only_once() {
         let semantic = 2 * size_of::<usize>()
             + size_of::<SceneState>()
             + scene.state.view().attributed_bytes();
-        let expected = semantic + scene.retained + scene.view_bytes + scene.frame_bytes;
+        let expected = semantic
+            + scene.retained
+            + scene.view_bytes
+            + scene.frame_bytes
+            + super::super::Activation::BYTES;
         settled();
         let release = hold_dropper();
         if disconnect {

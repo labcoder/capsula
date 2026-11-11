@@ -534,17 +534,22 @@ impl Frame {
     pub fn views(&self) -> &[ViewFrame] {
         self.view.as_slice()
     }
-    /// Ordinary geometry followed by edge-label chips and text, without allocation.
-    pub fn paint_items(&self) -> impl Iterator<Item = (&FrameItem, &[Prim])> {
+    /// Ordinary geometry followed by edge-label chips and text, without allocation, each with
+    /// the index of its first primitive in [`FrameItem::primitives`].
+    pub fn paint_items(&self) -> impl Iterator<Item = (&FrameItem, usize, &[Prim])> {
+        let labels = self.items.iter().map(|item| {
+            let start = item.label_start;
+            (item, start, &item.primitives[start..])
+        });
         self.items
             .iter()
-            .map(|item| (item, &item.primitives[..item.label_start]))
-            .chain(
-                self.items
-                    .iter()
-                    .map(|item| (item, &item.primitives[item.label_start..])),
-            )
-            .filter(|(_, primitives)| !primitives.is_empty())
+            .map(|item| (item, 0, &item.primitives[..item.label_start]))
+            .chain(labels)
+            .filter(|(_, _, primitives)| !primitives.is_empty())
+    }
+    /// The view generation this frame is bound to, once it has sampled one.
+    pub fn generation(&self) -> Option<&Arc<()>> {
+        self.generation.as_ref()
     }
     /// Releases shared geometry and the view binding while keeping the reserved capacity.
     /// It may free the last references to replaced primitives, so call it outside paint.
@@ -600,6 +605,11 @@ impl fmt::Debug for SceneView {
 /// transition drops it, it goes whole to the dropper.
 pub struct PreparedActivation(Deferred<(SceneView, Vec<Option<Live>>, Arc<()>)>);
 impl PreparedActivation {
+    /// The candidate view; installing it keeps its generation.
+    pub fn view(&self) -> &SceneView {
+        let (view, ..) = &*self.0;
+        view
+    }
     /// Requested bytes the installed view owns: its [`SceneView::resident_bytes`].
     pub fn resident_bytes(&self) -> usize {
         let (view, ..) = &*self.0;
@@ -641,6 +651,17 @@ impl SceneView {
     pub fn activated(&self) -> u32 {
         self.activated
     }
+    /// This view's generation: a frame that samples it binds to it, and paint state staged from
+    /// it holds it.
+    pub fn generation(&self) -> &Arc<()> {
+        &self.generation
+    }
+    /// Every object's primitives, shared with the frames sampled from this generation.
+    pub fn paint_sources(&self) -> impl Iterator<Item = (Handle, &[Prim])> {
+        self.nodes
+            .iter()
+            .map(|node| (node.handle, &node.primitives[..]))
+    }
     /// The activated layout, which a cut freezes.
     pub fn layout(&self) -> &LayoutState {
         &self.layout
@@ -673,7 +694,7 @@ impl SceneView {
         let installed = self
             .prepare_activation(&step, now, segment_ms)
             .and_then(|activation| self.install(activation, out));
-        let bytes = step.resident_bytes;
+        let bytes = step.owner_bytes();
         drop(Deferred::new(step, bytes));
         installed
     }

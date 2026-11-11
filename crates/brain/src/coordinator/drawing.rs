@@ -3,11 +3,90 @@
 use kumochi_protocol::message::{DataToShell, RunId, SceneId, StepRef, ThreadId};
 
 use super::{Coordinator, Effect, Stale, StoreOp, speech};
+use crate::dispatch::{self, Dispatch, LedgerKey, ToolError, ToolOutput};
 use crate::drawing::{Drawing, Input, Output};
 
 const MAX_RESULTS: usize = 64;
 
 impl Coordinator {
+    pub(super) fn drawing_call(
+        &mut self,
+        thread: ThreadId,
+        key: &LedgerKey,
+        draw: dispatch::DrawAction,
+        effects: &mut Vec<Effect>,
+    ) -> Dispatch {
+        let ended = Dispatch::Answered(ToolOutput::Error(ToolError::Ended));
+        if !self.drawing_available() {
+            self.drawn(key, ToolOutput::Error(ToolError::NotHere), effects);
+            return Dispatch::Committing;
+        }
+        let current = self.current.as_mut().expect("the resolved run is current");
+        let allocating = matches!(
+            draw,
+            dispatch::DrawAction::Complete(_) | dispatch::DrawAction::Start
+        );
+        if allocating
+            && current.draw_calls.len()
+                > usize::try_from(super::MAX_CALLS).expect("the call budget fits usize")
+        {
+            self.drawn(key, ToolOutput::Error(ToolError::TooLarge), effects);
+            return Dispatch::Committing;
+        }
+        let call = if allocating {
+            let call = crate::engines::CallId::new(&format!("draw-{}", current.draw_calls.len()))
+                .expect("a bounded host-generated ASCII id");
+            current.draw_calls.push(super::provider_draw::DrawCall {
+                call: call.clone(),
+                key: key.clone(),
+                provider: None,
+            });
+            call
+        } else {
+            let Some(call) = current
+                .draw_calls
+                .iter()
+                .find(|call| call.key == *key)
+                .map(|call| call.call.clone())
+            else {
+                return ended;
+            };
+            call
+        };
+        let input = match draw {
+            dispatch::DrawAction::Complete(Ok(draw)) => crate::drawing::Input::Call {
+                thread,
+                run: key.run,
+                call,
+                args: draw.args,
+            },
+            dispatch::DrawAction::Complete(Err(error)) => crate::drawing::Input::Rejected {
+                thread,
+                run: key.run,
+                call,
+                error,
+            },
+            dispatch::DrawAction::Start => return Dispatch::Committing,
+            dispatch::DrawAction::Record { index, bytes } => crate::drawing::Input::Record {
+                thread,
+                run: key.run,
+                call,
+                index,
+                bytes,
+            },
+            dispatch::DrawAction::Finish(error) => crate::drawing::Input::CallFinished {
+                thread,
+                run: key.run,
+                call,
+                error,
+            },
+        };
+        if self.drawing_input(input, effects).is_err() {
+            self.drawn(key, ToolOutput::Error(ToolError::Ended), effects);
+        }
+        Dispatch::Committing
+    }
+
     pub(crate) fn drawing_described(&mut self) {
         self.drawing_held.clear();
     }
@@ -174,19 +253,22 @@ impl Coordinator {
                 .current
                 .as_ref()
                 .filter(|run| run.id == end.run)
-                .and_then(|run| run.draw_calls.iter().find(|(call, _)| *call == end.call))
-                .map(|(_, key)| key.clone());
+                .and_then(|run| run.draw_calls.iter().find(|call| call.call == end.call))
+                .map(|call| call.key.clone());
             if let Some(key) = key {
                 if matches!(end.error, Some(crate::drawing::CallError::Store)) {
                     self.call_failed(&key, effects)
                         .expect("the associated drawing run is current");
                     continue;
                 }
-                self.drawn(
-                    &key,
-                    crate::dispatch::ToolOutput::Text(end.tool_text()),
-                    effects,
-                );
+                let result = self
+                    .current
+                    .as_mut()
+                    .and_then(|run| run.draw_calls.iter_mut().find(|call| call.call == end.call))
+                    .and_then(|call| call.ended(end));
+                if let Some((key, output)) = result {
+                    self.drawn(&key, output, effects);
+                }
             }
         }
     }

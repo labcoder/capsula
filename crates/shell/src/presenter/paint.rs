@@ -1,7 +1,9 @@
 //! The sampled frames the overlay paints: one reserved per adopted scene, kept beside the
-//! presenter on the UI thread so each frame's charge stays inside the residency cap.
+//! presenter on the UI thread so each frame's charge stays inside the residency cap. Each frame
+//! slot also owns its scene's paint cache, replaced only when the frame is.
 
 use std::{
+    any::Any,
     cell::{Cell, RefCell},
     rc::Rc,
 };
@@ -9,14 +11,36 @@ use std::{
 use kumochi_protocol::message::{MAX_VISIBLE_SCENES, SceneId};
 use kumochi_scene::{Frame, PreparedActivation, SceneView};
 
-use super::{Effect, Presenter, scene::Out};
+use super::{
+    Effect, Presenter,
+    scene::{Cut, Out, Scene},
+};
+
+/// A scene's retained paint state, staged from the view its frame samples. The presenter only
+/// charges, moves and retires it; the painter that staged it uses it.
+pub(crate) trait SceneCache: Any + Send {
+    /// Requested bytes it owns, fixed when it was staged.
+    fn bytes(&self) -> usize;
+}
+
+/// Stages a scene's paint cache from the view about to be committed. It never refuses: what it
+/// can't stage fails when it paints.
+pub(crate) trait Stage {
+    fn stage(&self, view: &SceneView) -> Box<dyn SceneCache>;
+    fn fixed_bytes(&self) -> usize;
+}
 
 pub(super) struct Slot {
     frame: Frame,
+    /// Staged from the view this frame samples; it goes wherever the frame goes.
+    cache: RefCell<Box<dyn SceneCache>>,
     /// Changes whenever the scene's view is replaced, so an older paint never counts.
     epoch: u64,
     /// The activated bound of the last sample at this epoch.
     sampled: Option<u32>,
+    sampled_ms: Option<u64>,
+    moving: bool,
+    wake: Option<u64>,
     /// The bound a shown overlay last painted at this epoch.
     painted: Cell<Option<u32>>,
     /// The painted bound already acknowledged at this epoch.
@@ -36,10 +60,6 @@ pub(crate) struct Sample {
 
 /// A bound a shown overlay painted, at the epoch of the view it sampled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "B6d's StepShown consumes this observation")
-)]
 pub(crate) struct Painted {
     pub(crate) epoch: u64,
     pub(crate) bound: u32,
@@ -56,11 +76,26 @@ pub(crate) struct Frames {
 }
 
 impl Frames {
+    pub(crate) fn hide(&mut self) {
+        self.shown = false;
+        let epoch = self.next_epoch();
+        for (_, slot) in self.slots.iter_mut().flatten() {
+            slot.epoch = epoch;
+            slot.painted.set(None);
+            slot.acknowledged = None;
+        }
+    }
+
     pub(super) fn reservation(frame: &Frame) -> usize {
         frame.resident_bytes() + size_of::<RefCell<Self>>() + 2 * size_of::<usize>()
     }
 
-    pub(super) fn adopt(&mut self, scene: SceneId, frame: Frame) -> usize {
+    pub(super) fn adopt(
+        &mut self,
+        scene: SceneId,
+        frame: Frame,
+        cache: Box<dyn SceneCache>,
+    ) -> usize {
         debug_assert!(
             self.slots.iter().flatten().all(|(id, _)| *id != scene),
             "each scene owns exactly one frame slot"
@@ -76,8 +111,12 @@ impl Frames {
             scene,
             Slot {
                 frame,
+                cache: RefCell::new(cache),
                 epoch,
                 sampled: None,
+                sampled_ms: None,
+                moving: false,
+                wake: None,
                 painted: Cell::new(None),
                 acknowledged: None,
                 failed: Cell::new(false),
@@ -89,34 +128,40 @@ impl Frames {
     }
 
     /// The scene's view was replaced while the caller still holds the old one, so clearing the
-    /// frame frees nothing here, and it binds to the new view on its next sample.
-    pub(super) fn replaced(&mut self, scene: SceneId) {
-        if let Some(frame) = self.reset(scene) {
-            frame.clear();
-        }
+    /// frame frees nothing here, and it binds to the new view, staged as `cache`, on its next
+    /// sample. Returns the old view's cache for the caller to retire with it.
+    pub(super) fn replaced(
+        &mut self,
+        scene: SceneId,
+        cache: Box<dyn SceneCache>,
+    ) -> Box<dyn SceneCache> {
+        let slot = self
+            .reset(scene)
+            .expect("each adopted scene has a frame slot");
+        slot.frame.clear();
+        std::mem::replace(slot.cache.get_mut(), cache)
     }
 
     /// Installs a staged activation into the scene's view with its own frame, which the view
-    /// clears while the outgoing objects still own the geometry; no earlier paint counts.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "B6d's activation owner is the production caller")
-    )]
+    /// clears while the outgoing objects still own the geometry; no earlier paint counts. Binds
+    /// `cache`, staged from the activation's view, and returns the outgoing one.
     pub(super) fn activate(
         &mut self,
         scene: SceneId,
         view: &mut SceneView,
         activation: PreparedActivation,
-    ) {
-        let frame = self
+        cache: Box<dyn SceneCache>,
+    ) -> Box<dyn SceneCache> {
+        let slot = self
             .reset(scene)
             .expect("each adopted scene has a frame slot");
-        view.install(activation, frame)
+        view.install(activation, &mut slot.frame)
             .expect("the presenter staged it from this view in the same update");
+        std::mem::replace(slot.cache.get_mut(), cache)
     }
 
     /// Starts a new epoch for the scene's frame, forgetting what was sampled and painted.
-    fn reset(&mut self, scene: SceneId) -> Option<&mut Frame> {
+    fn reset(&mut self, scene: SceneId) -> Option<&mut Slot> {
         let epoch = self.next_epoch();
         let (_, slot) = self
             .slots
@@ -125,10 +170,13 @@ impl Frames {
             .find(|(id, _)| *id == scene)?;
         slot.epoch = epoch;
         slot.sampled = None;
+        slot.sampled_ms = None;
+        slot.moving = false;
+        slot.wake = None;
         slot.painted.set(None);
         slot.acknowledged = None;
         // `failed` stays set: a paint failure is terminal and paint_failed clears the scene.
-        Some(&mut slot.frame)
+        Some(slot)
     }
 
     pub(super) fn take(&mut self, scene: SceneId) -> Option<Slot> {
@@ -154,14 +202,13 @@ impl Frames {
     /// releases the scene, so the frame goes to the dropper rather than being cleared here.
     pub(super) fn sample<'a>(
         &mut self,
-        views: impl Iterator<Item = (SceneId, &'a SceneView)>,
-        now_ms: u64,
+        views: impl Iterator<Item = (SceneId, &'a SceneView, u64)>,
     ) -> Result<Sample, SceneId> {
         let mut sample = Sample {
             visible: false,
             changed: std::mem::take(&mut self.removed),
         };
-        for (scene, view) in views {
+        for (scene, view, now_ms) in views {
             let (_, slot) = self
                 .slots
                 .iter_mut()
@@ -172,25 +219,36 @@ impl Frames {
                 return Err(scene);
             }
             let bound = Some(view.activated());
-            sample.changed |= slot.sampled != bound;
+            let moving = view.animating(now_ms);
+            let advanced = slot.sampled_ms.is_some_and(|before| now_ms > before);
+            sample.changed |= slot.sampled != bound
+                || advanced
+                    && (slot.moving || moving || slot.wake.is_some_and(|wake| wake <= now_ms));
             slot.sampled = bound;
+            slot.sampled_ms = Some(now_ms);
+            slot.moving = moving;
+            slot.wake = view.next_wake(now_ms);
             sample.visible |= !slot.frame.items().is_empty();
         }
         Ok(sample)
     }
 
-    /// Paints every frame in scene order; only the overlay's paint callback calls it. A shown
-    /// overlay records each sampled bound it painted. A frame that fails paints no more and
-    /// waits for [`Presenter::paint_failed`]. Whether a frame newly failed.
-    pub(crate) fn paint<E>(&self, mut paint: impl FnMut(&Frame) -> Result<(), E>) -> bool {
+    /// Paints every frame in scene order, each with its cache; only the overlay's paint callback
+    /// calls it. A shown overlay records each sampled bound it painted. A frame that fails paints
+    /// no more and waits for [`Presenter::paint_failed`]. Whether a frame newly failed.
+    pub(crate) fn paint<E>(
+        &self,
+        mut paint: impl FnMut(&Frame, &mut dyn SceneCache) -> Result<(), E>,
+    ) -> bool {
         let shown = self.shown;
         let mut failed = false;
         for (_, slot) in self.slots.iter().flatten() {
             if slot.failed.get() {
                 continue;
             }
-            match paint(&slot.frame) {
-                Ok(()) if shown => slot.painted.set(slot.sampled),
+            let result = paint(&slot.frame, &mut **slot.cache.borrow_mut());
+            match result {
+                Ok(()) if shown && !slot.frame.items().is_empty() => slot.painted.set(slot.sampled),
                 Ok(()) => {}
                 Err(_) => {
                     tracing::warn!("a drawing couldn't paint; clearing it");
@@ -203,12 +261,11 @@ impl Frames {
     }
 
     /// The bound a shown overlay last painted for `scene`, at its current epoch.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "B6d's StepShown consumes this observation")
-    )]
     pub(crate) fn painted(&self, scene: SceneId) -> Option<Painted> {
         let (_, slot) = self.slots.iter().flatten().find(|(id, _)| *id == scene)?;
+        if !self.shown || slot.failed.get() || slot.frame.items().is_empty() {
+            return None;
+        }
         Some(Painted {
             epoch: slot.epoch,
             bound: slot.painted.get()?,
@@ -217,11 +274,10 @@ impl Frames {
 
     /// Takes a paint observation once: false for an epoch the scene's view has left, or a bound
     /// already acknowledged at this epoch.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "B6d's StepShown consumes this observation")
-    )]
     pub(crate) fn acknowledge(&mut self, scene: SceneId, painted: Painted) -> bool {
+        if self.painted(scene) != Some(painted) {
+            return false;
+        }
         let Some((_, slot)) = self.slots.iter_mut().flatten().find(|(id, _)| *id == scene) else {
             return false;
         };
@@ -248,10 +304,21 @@ impl Frames {
         self.epoch
     }
 
-    #[cfg(test)]
     pub(super) fn epoch(&self, scene: SceneId) -> Option<u64> {
         let (_, slot) = self.slots.iter().flatten().find(|(id, _)| *id == scene)?;
         Some(slot.epoch)
+    }
+
+    pub(crate) fn observations(&self) -> [Option<(SceneId, u64, u32)>; MAX_VISIBLE_SCENES] {
+        self.slots.each_ref().map(|slot| {
+            let (scene, slot) = slot.as_ref()?;
+            let painted = self.painted(*scene)?;
+            (slot.acknowledged != Some(painted.bound)).then_some((
+                *scene,
+                painted.epoch,
+                painted.bound,
+            ))
+        })
     }
 
     #[cfg(test)]
@@ -275,15 +342,34 @@ impl Presenter {
 
     /// Samples every scene's view at `now_ms`. A scene whose frame its view refuses is
     /// cleared, as an over-cap adoption is.
+    #[cfg_attr(not(test), expect(dead_code, reason = "numeric sampler compatibility"))]
     pub(crate) fn sample(&mut self, now_ms: u64) -> (Sample, Vec<Effect>) {
+        self.sample_times(|_| now_ms)
+    }
+
+    pub(crate) fn sample_at(&mut self, now: std::time::Instant) -> (Sample, Vec<Effect>) {
+        self.sample_times(|scene| scene.activation.time(now))
+    }
+
+    fn sample_times(&mut self, time: impl Fn(&Scene) -> u64) -> (Sample, Vec<Effect>) {
         let mut out = Out::default();
         loop {
-            let views = self.scenes.iter().map(|(id, scene)| (*id, &scene.view));
-            let sampled = self.frames.borrow_mut().sample(views, now_ms);
+            let at = |scene: &Scene| {
+                if scene.cut == Cut::Outstanding {
+                    scene.stopped_ms.unwrap_or(0)
+                } else {
+                    time(scene)
+                }
+            };
+            let views = self
+                .scenes
+                .iter()
+                .map(|(id, scene)| (*id, &scene.view, at(scene)));
+            let sampled = self.frames.borrow_mut().sample(views);
             match sampled {
                 Ok(sample) => {
                     for scene in self.scenes.values_mut() {
-                        scene.sampled_ms = Some(now_ms);
+                        scene.sampled_ms = Some(at(scene));
                     }
                     return (sample, out.finish());
                 }
@@ -314,10 +400,11 @@ mod tests {
     #[test]
     fn four_slots_reuse_a_middle_release_and_take_all_once() {
         let mut frames = Frames::default();
+        let cache = || Box::new(super::super::tests::Charged(0));
         let expected =
             Frame::new().resident_bytes() + size_of::<RefCell<Frames>>() + 2 * size_of::<usize>();
         for id in 1..=4 {
-            assert_eq!(frames.adopt(SceneId(id), Frame::new()), expected);
+            assert_eq!(frames.adopt(SceneId(id), Frame::new(), cache()), expected);
         }
         assert_eq!(
             frames.ids(),
@@ -330,7 +417,7 @@ mod tests {
         );
         assert!(frames.take(SceneId(2)).is_some());
         assert!(frames.take(SceneId(2)).is_none());
-        assert_eq!(frames.adopt(SceneId(5), Frame::new()), expected);
+        assert_eq!(frames.adopt(SceneId(5), Frame::new(), cache()), expected);
         assert_eq!(
             frames.ids(),
             [

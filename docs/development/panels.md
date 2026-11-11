@@ -105,6 +105,14 @@ and nonblocking requests; `presence/thread_view.rs` composes the task list with 
   The messages are the user's turns, the stored answers and the drawing steps; a Stop's record
   of which steps stayed isn't listed, since the steps themselves are.
 
+Stored drawings show “Drawing unavailable in history” rather than an empty step or a
+reconstructed picture. Adjacent empty markers group only with the same known run and scene;
+text, cut notices and unknown metadata break groups. Presentation keeps the newest event id
+as each group's key, while raw events and pagination cursors stay intact. The list is sized
+from derived rows, including when it first opens with already loaded events. Grouping holds
+only its current adjacent group, not a scene cache. Reading history never restores, clears or
+invalidates the live overlay; typed visual replay remains separate work.
+
 `Messages` owns the message region's focus, scrollbar, page-navigation keys and measurement
 invalidation. Its Older messages callback retains the model it belongs to, so it never pages
 another surface's selected task. Moving the component out of Tasks does not change its layout

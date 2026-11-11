@@ -1,10 +1,11 @@
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
     DataToShell, EventId, MAX_PAGE_BYTES, MAX_PAGE_ROWS, PageEvent, PageEventKind, PageOf, RunId,
-    ThreadCursor, ThreadId, ThreadKind, ThreadRow,
+    SceneId, ThreadCursor, ThreadId, ThreadKind, ThreadRow,
 };
 use rusqlite::{Connection, Row, params};
 
+use super::drawing::MAX_BODY_BYTES;
 use super::threads::{choice_of, kind_of};
 use super::{StoreError, row_id};
 
@@ -278,7 +279,18 @@ impl Pages<'_> {
         let mut query = self
             .0
             .prepare(
-                "SELECT e.id, e.run, e.kind, substr(CAST(e.text AS BLOB), 1, ?4) FROM events e
+                "SELECT e.id, e.run, e.kind, substr(CAST(e.text AS BLOB), 1, ?4),
+                 CASE WHEN e.kind = 'scene_step' THEN
+                     CASE WHEN octet_length(e.body) <= ?5 THEN CASE WHEN json_valid(e.body)
+                         THEN CASE WHEN json_type(e.body, '$.scene') = 'integer'
+                             AND typeof(json_extract(e.body, '$.scene')) = 'integer'
+                         THEN (SELECT b.id FROM events b
+                             WHERE b.id = json_extract(e.body, '$.scene')
+                             AND b.id > 0 AND b.id < e.id AND b.thread = e.thread
+                             AND b.kind = 'scene_begin' AND b.body IS NOT NULL)
+                     END END END
+                 END
+             FROM events e
              JOIN threads t ON t.id = e.thread AND t.state = 'live'
              WHERE e.thread = ?1 AND (?2 IS NULL OR e.id < ?2)
              AND e.kind NOT IN ('scene_begin', 'scene_cleared', 'scene_cut', 'revealed',
@@ -292,7 +304,8 @@ impl Pages<'_> {
                     thread,
                     before.map(|id| bounded_id(id.0)),
                     i64::try_from(limit + 1).map_err(|_| StoreError::Read)?,
-                    i64::try_from(MAX_PAGE_BYTES).map_err(|_| StoreError::Read)?
+                    i64::try_from(MAX_PAGE_BYTES).map_err(|_| StoreError::Read)?,
+                    i64::try_from(MAX_BODY_BYTES).map_err(|_| StoreError::Read)?
                 ],
                 |row| {
                     let kind: String = row.get(2)?;
@@ -309,7 +322,12 @@ impl Pages<'_> {
                     let kind = match kind.as_str() {
                         "user" => PageEventKind::User,
                         "assistant_text" => PageEventKind::AssistantText,
-                        "scene_step" => PageEventKind::SceneStep,
+                        "scene_step" => row.get::<_, Option<i64>>(4)?.map_or(
+                            PageEventKind::SceneStep,
+                            |scene| PageEventKind::NoVisual {
+                                scene: SceneId(row_id(scene)),
+                            },
+                        ),
                         "task_deleted" => PageEventKind::TaskDeleted,
                         _ => return Err(rusqlite::Error::InvalidQuery),
                     };

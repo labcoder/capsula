@@ -429,8 +429,11 @@ fn a_first_step_queued_before_the_delete_settles_with_its_eviction() {
 fn drawn_in_t() -> Coordinator {
     let mut core = first_step_queued(&[]);
     core.handle(ack(0, "a")).expect("current");
-    core.handle(engine(R, TurnEvent::Finished(Finish::Completed)))
-        .expect("current");
+    core.handle(engine(
+        super::engine_key(&core, R),
+        TurnEvent::Finished(Finish::Completed),
+    ))
+    .expect("current");
     core.handle(Input::RunStored { run: R }).expect("ending");
     assert_eq!(visible_ids(&core), [S.0]);
     core
@@ -444,7 +447,7 @@ fn a_stop_held_on_the_threads_ending_run_settles_across_the_delete() {
             // The engine fails with the first step's write out, and the shell's Stop crosses it:
             // the selection waits on the ending run for that write.
             core.handle(engine(
-                R,
+                super::engine_key(&core, R),
                 TurnEvent::Finished(Finish::Failed(EngineFailure::Provider)),
             ))
             .expect("current");

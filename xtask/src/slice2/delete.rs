@@ -116,7 +116,7 @@ fn purge(
         let brain = case.start()?;
         let client = Client::connect()?;
         thread::sleep(PURGE_WAIT);
-        let running = store::files(&case.local, gone)?;
+        let running = store::live_files(&case.local, gone)?;
         client.quit()?;
         brain.exited()?;
         let purge_left = store::purge_files(&case.data())?;

@@ -87,6 +87,15 @@ SOFTWARE.
   windows stop waking every vblank and hidden windows open at their requested size. Each modified
   file says so in its first line; the changes are described in [docs/development/gpui-patch.md](docs/development/gpui-patch.md).
 
+## Retained wrapped-label painting
+
+`crates/shell/src/presence/overlay.rs` adapts the glyph traversal, aligned row origins and
+paint bounds from `gpui-pre` 0.3.10's `src/text_system/line.rs` (Zed GPUI,
+https://github.com/zed-industries/zed), licensed Apache-2.0. The adaptation uses its public
+layout/glyph APIs with one current color and no underline, strikethrough or background runs;
+hard lines continue to use GPUI's public layout painter. No dependency source is modified.
+The full Apache-2.0 license is included at `vendor/gpui-pre-windows/LICENSE-APACHE`.
+
 ## Voice models (downloaded on request, not in the repo)
 
 Kumochi downloads these only when the user installs voice. Pins and provenance are in

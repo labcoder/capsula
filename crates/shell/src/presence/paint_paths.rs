@@ -1,20 +1,30 @@
 //! Bounded tessellation of one prepared primitive into GPUI paths. lyon sees only prim
 //! coordinates, the ones the paint guard counted, and the finished triangles are then placed by
 //! the item transform. Dashes are walked in prim units with f64 arc length, every lyon build
-//! stays under `BUILD_VERTEX_LIMIT`, and a stroke's chunks merge into one path.
+//! stays under `BUILD_VERTEX_LIMIT`, and a stroke's chunks merge into one path. A `Prim::Fill`
+//! keeps its shape, so the paint cache tessellates it once per view with [`fill_triangles`] and
+//! each paint only [`placed`]s it.
 
+#[cfg(test)]
 use std::f64::consts::{FRAC_PI_2, PI};
 
 use gpui_kit::{
-    Bounds, FillOptions, FillRule, Path, PathBuilder, PathStyle, Pixels, Point, point, px,
+    Bounds, ContentMask, FillOptions, FillRule, Path, PathBuilder, PathStyle, PathVertex, Pixels,
+    Point, point, px,
+};
+#[cfg(test)]
+use kumochi_scene::display::{
+    BUILD_VERTEX_LIMIT, Contour, DASH, Paint, Prim, fallback_corner_segments,
 };
 use kumochi_scene::{
-    display::{
-        BUILD_VERTEX_LIMIT, Contour, DASH, FILL_VERTEX_LIMIT, OUTLINE_POINT_LIMIT, Paint, Prim,
-        corner_segments, fallback_corner_segments,
-    },
+    display::{FILL_VERTEX_LIMIT, OUTLINE_POINT_LIMIT, corner_segments},
     geom::{Affine, Rect, Vec2},
 };
+
+const _: () = assert!(
+    size_of::<PathVertex<Pixels>>() == 32,
+    "scene.md charges each handed-off path vertex at 32 bytes"
+);
 
 /// Why a primitive has no paths; carries no geometry or content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -34,6 +44,9 @@ pub(super) enum BuildError {
     /// GPUI couldn't shape or paint a label.
     #[error("a drawing label couldn't be shaped or painted")]
     Label,
+    /// The frame's view isn't the one its paint cache was staged from.
+    #[error("a drawing's paint cache belongs to another view")]
+    Stale,
 }
 
 /// One primitive's paths in world logical pixels, each with its prepared paint, built in full
@@ -49,6 +62,7 @@ pub(super) enum BuildError {
 ///
 /// # Errors
 /// [`BuildError`] when the primitive is text, exceeds its charge, or fails to tessellate.
+#[cfg(test)]
 pub(super) fn paths(
     prim: &Prim,
     transform: Affine,
@@ -125,14 +139,55 @@ pub(super) fn paths(
 
 /// Maps a prim-space path's triangles into world space and bounds them exactly. The renderer
 /// reads only their positions; their texture coordinates are the constant `build_path` set.
+#[cfg(test)]
 fn place(path: &mut Path<Pixels>, transform: Affine) {
     for vertex in &mut path.vertices {
-        let local = Vec2::new(
-            f32::from(vertex.xy_position.x),
-            f32::from(vertex.xy_position.y),
-        );
-        vertex.xy_position = pixel(transform.point(local));
+        vertex.xy_position = pixel(transform.point(local(vertex.xy_position)));
     }
+    bound(path);
+}
+
+/// A polygon's triangle corners in prim space, filled nonzero, for a
+/// paint cache to stage once per view; empty when it covers nothing.
+pub(super) fn fill_triangles(points: &[Vec2]) -> Result<Box<[Vec2]>, BuildError> {
+    let Some(path) = fill(&[points], FillRule::NonZero)? else {
+        return Ok(Box::default());
+    };
+    let corners = path.vertices.iter().map(|vertex| local(vertex.xy_position));
+    Ok(corners.collect())
+}
+
+/// Staged triangle corners placed by `transform` into one exactly sized path, with the
+/// vertices and bounds of the same fill built and placed per paint; none for an
+/// empty fill.
+pub(super) fn placed(
+    triangles: impl ExactSizeIterator<Item = Vec2>,
+    transform: Affine,
+) -> Option<Path<Pixels>> {
+    let mut triangles = triangles.peekable();
+    let mut path = Path::new(pixel(transform.point(*triangles.peek()?)));
+    path.vertices = Vec::with_capacity(triangles.len());
+    path.vertices
+        .extend(triangles.map(|corner| vertex(corner, transform)));
+    bound(&mut path);
+    super::paint_phase::handoff(&path);
+    Some(path)
+}
+
+pub(super) fn vertex(corner: Vec2, transform: Affine) -> PathVertex<Pixels> {
+    PathVertex {
+        xy_position: pixel(transform.point(corner)),
+        st_position: point(0.0, 1.0),
+        content_mask: ContentMask::default(),
+    }
+}
+
+fn local(at: Point<Pixels>) -> Vec2 {
+    Vec2::new(f32::from(at.x), f32::from(at.y))
+}
+
+/// Bounds a path's vertices exactly.
+pub(super) fn bound(path: &mut Path<Pixels>) {
     let Some(first) = path.vertices.first().map(|vertex| vertex.xy_position) else {
         return;
     };
@@ -170,6 +225,7 @@ fn fill(contours: &[&[Vec2]], rule: FillRule) -> Result<Option<Path<Pixels>>, Bu
 /// Strokes the first `draw` of a polyline's length; with `flow`, as `DASH` runs moved that many
 /// periods along it. Each segment visits at most `floor(length / period) + 2` dashes, the count
 /// the paint guard charged. A solid stroke walks as one dash longer than the whole line.
+#[cfg(test)]
 fn stroke(
     points: &[Vec2],
     contour: Contour,
@@ -244,6 +300,7 @@ fn stroke(
 }
 
 /// A stroke's runs, built in lyon chunks of at most `BUILD_VERTEX_LIMIT` vertices and merged.
+#[cfg(test)]
 struct Strokes {
     width: Pixels,
     builder: PathBuilder,
@@ -251,6 +308,7 @@ struct Strokes {
     merged: Option<Path<Pixels>>,
 }
 
+#[cfg(test)]
 impl Strokes {
     fn new(width: Pixels) -> Self {
         Self {
@@ -318,6 +376,7 @@ impl Strokes {
 /// The first `draw` of the band between two outlines of matching points, by the outer outline's
 /// length: one contour along the outer outline to the cut, across to the inner outline at the
 /// same fraction of the matching chord, and back. At most twice the outline points plus two.
+#[cfg(test)]
 fn sector(outer: &[Vec2], inner: &[Vec2], draw: f32) -> Result<Option<Path<Pixels>>, BuildError> {
     let outer_edges = outer.iter().zip(outer.iter().cycle().skip(1));
     let inner_edges = inner.iter().zip(inner.iter().cycle().skip(1));
@@ -346,7 +405,12 @@ fn sector(outer: &[Vec2], inner: &[Vec2], draw: f32) -> Result<Option<Path<Pixel
 /// the world radius. A scale past the charged one fails instead of coarsening a corner. Its
 /// outline is four corners of `segments + 1` points; a border's sector takes at most twice
 /// that plus two, the charged outline's `points` doubled.
-fn corners(rect: Rect, radius: f32, zoom: f32, charge: usize) -> Result<(f32, u32), BuildError> {
+pub(super) fn corners(
+    rect: Rect,
+    radius: f32,
+    zoom: f32,
+    charge: usize,
+) -> Result<(f32, u32), BuildError> {
     let radius = radius.clamp(0.0, (rect.size.x.min(rect.size.y) * 0.5).max(0.0));
     let segments = corner_segments(f64::from(radius) * f64::from(zoom));
     let points = segments
@@ -361,7 +425,8 @@ fn corners(rect: Rect, radius: f32, zoom: f32, charge: usize) -> Result<(f32, u3
 }
 
 /// Clockwise from the top edge, `segments` chords per corner.
-fn rounded(rect: Rect, radius: f32, segments: u32) -> Vec<Vec2> {
+#[cfg(test)]
+pub(super) fn rounded(rect: Rect, radius: f32, segments: u32) -> Vec<Vec2> {
     let near = rect.origin + Vec2::new(radius, radius);
     let far = rect.max() - Vec2::new(radius, radius);
     let step = FRAC_PI_2 / f64::from(segments.max(1));
@@ -381,7 +446,7 @@ fn rounded(rect: Rect, radius: f32, segments: u32) -> Vec<Vec2> {
     .collect()
 }
 
-fn length(a: Vec2, b: Vec2) -> f64 {
+pub(super) fn length(a: Vec2, b: Vec2) -> f64 {
     (f64::from(b.x) - f64::from(a.x)).hypot(f64::from(b.y) - f64::from(a.y))
 }
 
@@ -390,11 +455,11 @@ fn length(a: Vec2, b: Vec2) -> f64 {
     clippy::cast_possible_truncation,
     reason = "prim coordinates and their fractions are f32"
 )]
-fn narrow(value: f64) -> f32 {
+pub(super) fn narrow(value: f64) -> f32 {
     value as f32
 }
 
-fn pixel(at: Vec2) -> Point<Pixels> {
+pub(super) fn pixel(at: Vec2) -> Point<Pixels> {
     point(px(at.x), px(at.y))
 }
 

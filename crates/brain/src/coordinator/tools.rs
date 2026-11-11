@@ -33,11 +33,12 @@ pub struct RoundItems {
 }
 
 /// One of the round's calls: its tool, its arguments once ready, and its answer once it has one.
-struct Open {
-    call: CallId,
+pub(super) struct Open {
+    pub(super) call: CallId,
     name: ToolName,
     args: Option<String>,
     output: Option<ToolOutput>,
+    pub(super) provider: Option<super::provider_draw::ProviderDraw>,
 }
 
 /// A run's tool loop.
@@ -46,7 +47,7 @@ pub(super) struct Loop {
     /// Calls accepted across the run's rounds.
     calls: u32,
     /// This round's calls, in call order.
-    open: Vec<Open>,
+    pub(super) open: Vec<Open>,
     /// This round's calls went to the dispatcher; the round is stored once each is answered.
     dispatched: bool,
     /// This round's native items, with their output index.
@@ -89,6 +90,7 @@ impl Loop {
             name,
             args: None,
             output: None,
+            provider: None,
         });
         true
     }
@@ -132,15 +134,30 @@ impl Loop {
 
     /// Answers a dispatched call still waiting; false when none is.
     pub(super) fn answer(&mut self, call: &CallId, output: ToolOutput) -> bool {
+        let dispatched = self.dispatched;
         let waiting = self
             .open
             .iter_mut()
             .find(|open| open.call == *call && open.output.is_none());
-        let Some(open) = waiting.filter(|_| self.dispatched) else {
+        let Some(open) = waiting.filter(|open| {
+            dispatched
+                || open
+                    .provider
+                    .as_ref()
+                    .is_some_and(|provider| provider.registered)
+        }) else {
             return false;
         };
         open.output = Some(output);
         true
+    }
+
+    pub(super) fn provider_registered(&self, call: &CallId, key: Option<super::BuildKey>) -> bool {
+        self.open
+            .iter()
+            .find(|open| open.call == *call)
+            .and_then(|open| open.provider.as_ref())
+            .is_some_and(|provider| provider.registered && Some(provider.build) == key)
     }
 
     /// The round made calls the loop still has to answer.
@@ -193,6 +210,7 @@ impl Coordinator {
                 .tools
                 .open
                 .iter()
+                .filter(|open| open.provider.is_none())
                 .map(|open| (open.call.clone(), open.name, open.args.clone()))
                 .collect();
             for (call, name, args) in calls {
@@ -212,7 +230,6 @@ impl Coordinator {
                     .as_ref()
                     .is_some_and(super::admission::Build::admitted)
                 {
-                    current.tools.drop_round();
                     current.unstored.clear();
                     current.finishing = false;
                     return Ok(());
@@ -233,7 +250,9 @@ impl Coordinator {
     ) -> Result<(), Stale> {
         let pending = self.pending_deletes();
         let current = self.current(run)?;
-        if current.tools.open.iter().any(|open| open.output.is_none()) {
+        if (current.tools.calling() && !current.tools.dispatched)
+            || current.tools.open.iter().any(|open| open.output.is_none())
+        {
             return Ok(());
         }
         // A delete accepted while the calls were written reached what the build rendered: the
@@ -242,7 +261,6 @@ impl Coordinator {
             let voided = build.voided(build.sources());
             if !voided.is_empty() {
                 let key = build.key();
-                current.tools.drop_round();
                 current.unstored.clear();
                 effects.push(Effect::CancelEngine { run });
                 self.rebuild(key, &voided, &pending, effects);

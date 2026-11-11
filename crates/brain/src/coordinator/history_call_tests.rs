@@ -163,10 +163,16 @@ fn start_read(core: &mut Coordinator) -> crate::dispatch::ReadCall {
             args: r#"{"query":"needle"}"#.into(),
         },
     ] {
-        assert_eq!(core.handle(engine(R, event)), Ok(Vec::new()));
+        assert_eq!(
+            core.handle(engine(super::super::engine_key(core, R), event)),
+            Ok(Vec::new())
+        );
     }
     let effects = core
-        .handle(engine(R, TurnEvent::Finished(Finish::Completed)))
+        .handle(engine(
+            super::super::engine_key(core, R),
+            TurnEvent::Finished(Finish::Completed),
+        ))
         .unwrap();
     let [Effect::Store(StoreOp::ReadCall(call))] = effects.as_slice() else {
         panic!("one read, no commit: {effects:?}");

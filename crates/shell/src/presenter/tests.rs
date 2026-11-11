@@ -8,7 +8,7 @@ use kumochi_protocol::message::{
     SceneFailure, SceneHeader, SceneId, SceneSnapshotChunk,
 };
 use kumochi_scene::{
-    Handle, Record, SceneEvent, Step, StopCut,
+    Handle, Record, SceneEvent, SceneView, Step, StopCut,
     deferred::Deferred,
     display::{MeasureError, TextMeasure, TextStyle},
     layout::SurfaceGeometry,
@@ -17,12 +17,86 @@ use kumochi_scene::{
     theme::Theme,
 };
 
-use super::{AdmitJob, Broken, Completion, Effect, PrepareJob, Presenter, RecoveryJob};
+use super::{
+    AdmitJob, Broken, Completion, Effect, PrepareJob, Presenter, RecoveryJob, SceneCache, Stage,
+};
 
 const GENERATION: u64 = 1;
 const RUN: RunId = RunId(5);
 const LIVE: SceneId = SceneId(20);
 const FRAME: u32 = 40;
+
+/// Stages caches that hold nothing and charge the given bytes, for tests that never paint one.
+pub(crate) struct Charged(pub(crate) usize);
+
+impl Stage for Charged {
+    fn fixed_bytes(&self) -> usize {
+        0
+    }
+
+    fn stage(&self, _: &SceneView) -> Box<dyn SceneCache> {
+        Box::new(Charged(self.0))
+    }
+}
+
+impl SceneCache for Charged {
+    fn bytes(&self) -> usize {
+        self.0
+    }
+}
+
+/// Stages caches that keep the generation of the view they were staged from.
+struct Witness;
+
+struct Witnessed(Arc<()>);
+
+impl Stage for Witness {
+    fn fixed_bytes(&self) -> usize {
+        0
+    }
+
+    fn stage(&self, view: &SceneView) -> Box<dyn SceneCache> {
+        Box::new(Witnessed(Arc::clone(view.generation())))
+    }
+}
+
+impl SceneCache for Witnessed {
+    fn bytes(&self) -> usize {
+        0
+    }
+}
+
+/// Stages caches that each hold a clone of one probe, so its count shows where they live.
+struct Probed(Arc<()>);
+
+impl Stage for Probed {
+    fn fixed_bytes(&self) -> usize {
+        0
+    }
+
+    fn stage(&self, _: &SceneView) -> Box<dyn SceneCache> {
+        Box::new(Probed(Arc::clone(&self.0)))
+    }
+}
+
+impl SceneCache for Probed {
+    fn bytes(&self) -> usize {
+        0
+    }
+}
+
+/// Paints every frame, checking that its slot's cache was staged from the view the frame
+/// sampled; whether every frame passed.
+fn bound_everywhere(presenter: &Presenter) -> bool {
+    !presenter.frames.borrow().paint(|frame, cache| {
+        let cache: &dyn std::any::Any = cache;
+        let staged = cache.downcast_ref::<Witnessed>().map(|cache| &cache.0);
+        match (frame.generation(), staged) {
+            (Some(sampled), Some(staged)) if Arc::ptr_eq(sampled, staged) => Ok(()),
+            _ => Err(()),
+        }
+    })
+}
 
 #[path = "measure_tests.rs"]
 mod measurements;
@@ -50,6 +124,9 @@ mod paint_work;
 
 #[path = "stop_tests.rs"]
 mod stop;
+
+#[path = "activation_tests.rs"]
+mod activation;
 
 #[test]
 #[ignore = "manual quiet-Rez v1 mirror admission timing, not a CI latency assertion"]
@@ -238,7 +315,7 @@ fn presenter() -> Presenter {
     let surface = SurfaceGeometry::Overlay {
         logical_size: [1920.0, 1080.0],
     };
-    let mut presenter = Presenter::new(surface, Arc::new(Theme::default()));
+    let mut presenter = Presenter::new(surface, Arc::new(Theme::default()), Box::new(Charged(0)));
     presenter.connected(GENERATION);
     presenter
 }
@@ -759,6 +836,63 @@ fn recovering(steps: Vec<(SceneId, Step)>) -> (Presenter, Instant, RecoveryJob) 
         FRAME * u32::try_from(ids.len()).expect("four")
     );
     (presenter, now, recovery(effects))
+}
+
+pub(crate) fn painter_fixture(stage: Box<dyn Stage>) -> (Presenter, SceneId) {
+    let drawing = step(
+        r#"{"step":{"id":"draw","put":[{"shape":{"id":"triangle","kind":"polygon","points":[[0,0],[20,0],[0,20]],"fill":"blue"}},{"line":{"id":"edge","from":[30,0],"via":[[40,20]],"to":[50,0],"width":2,"dash":true}}]}}"#,
+    );
+    recovered_painter_fixture(stage, drawing)
+}
+
+pub(crate) fn table_painter_fixture(stage: Box<dyn Stage>) -> (Presenter, SceneId) {
+    use kumochi_scene::display::Prim;
+
+    let (presenter, scene) = recovered_painter_fixture(
+        stage,
+        step(
+            r#"{"step":{"id":"table","put":[{"table":{"id":"t","box":[0,0,100,80],"cols":["A"]}}]}}"#,
+        ),
+    );
+    let mut order = Vec::new();
+    assert!(!presenter.frames.borrow().paint(|frame, _| {
+        for (_, first, prims) in frame.paint_items() {
+            assert_eq!(first, 0);
+            order.push(
+                prims
+                    .iter()
+                    .map(|prim| match prim {
+                        Prim::Rect { .. } => 0,
+                        Prim::Text { .. } => 1,
+                        Prim::Line { .. } => 2,
+                        Prim::Fill { .. } => 3,
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        Ok::<_, ()>(())
+    }));
+    assert_eq!(
+        order,
+        [vec![0, 1, 2]],
+        "the real frame retains the table header's order"
+    );
+    (presenter, scene)
+}
+
+fn recovered_painter_fixture(stage: Box<dyn Stage>, drawing: Step) -> (Presenter, SceneId) {
+    let (mut presenter, now, job) = recovering(vec![(LIVE, drawing)]);
+    presenter.stage = stage;
+    assert!(
+        presenter
+            .completed(job.run(&mut Shaper), now)
+            .expect("a synthetic recovered drawing")
+            .is_empty()
+    );
+    let (sample, effects) = presenter.sample(0);
+    assert!(sample.visible);
+    assert!(effects.is_empty());
+    (presenter, LIVE)
 }
 
 fn kept(scene: SceneId) -> SceneCut {
@@ -1399,7 +1533,7 @@ fn rejected_undelivered_and_discarded_preparations_drop_on_the_dropper() {
     let surface = SurfaceGeometry::Overlay {
         logical_size: [1920.0, 1080.0],
     };
-    let mut presenter = Presenter::new(surface, Arc::clone(&theme));
+    let mut presenter = Presenter::new(surface, Arc::clone(&theme), Box::new(Charged(0)));
     let release = hold_dropper();
     presenter.connected(GENERATION);
     let now = Instant::now();
@@ -1466,7 +1600,11 @@ fn a_failed_weak_entity_update_retires_its_captured_completion(cx: &mut gpui_kit
     use std::{cell::Cell, rc::Rc};
 
     let theme = Arc::new(Theme::default());
-    let mut presenter = Presenter::new(SurfaceGeometry::default(), Arc::clone(&theme));
+    let mut presenter = Presenter::new(
+        SurfaceGeometry::default(),
+        Arc::clone(&theme),
+        Box::new(Charged(0)),
+    );
     presenter.connected(GENERATION);
     let now = Instant::now();
     presenter
@@ -1764,4 +1902,183 @@ fn recovery_answers_keep_their_payload_when_delivery_or_validation_is_lost() {
         drop(release);
         assert!(drained(&probe, 1));
     }
+}
+
+#[path = "../presence/overlay_recovery_recording_tests.rs"]
+pub(crate) mod recovery_recording;
+
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "whether the first host survives, as the recovery episode decides"
+)]
+pub(crate) fn host_recovery_fixture(stage: Box<dyn Stage>, survivor: bool) -> Presenter {
+    let mut presenter = Presenter::new(
+        SurfaceGeometry::Overlay {
+            logical_size: [1920.0, 1080.0],
+        },
+        Arc::new(Theme {
+            font_size: 15.03125,
+            ..Theme::default()
+        }),
+        stage,
+    );
+    presenter.connected(GENERATION);
+    let now = Instant::now();
+    let ids: &[SceneId] = if survivor {
+        &[LIVE, SceneId(21)]
+    } else {
+        &[LIVE]
+    };
+    assert!(described(&mut presenter, ids, now).is_empty());
+    let mut effects = data(&mut presenter, snapshot(LIVE, step(
+        r#"{"step":{"id":"table","put":[{"table":{"id":"t","box":[0,0,100,80],"cols":["A"]}}]}}"#,
+    )), now).expect("the recovered table chunk");
+    if survivor {
+        effects.extend(data(&mut presenter, snapshot(SceneId(21), step(
+            r#"{"step":{"id":"rect","put":[{"shape":{"id":"r","kind":"rect","box":[120,0,20,20],"fill":"blue"}}]}}"#,
+        )), now).expect("the recovered survivor chunk"));
+    }
+    assert_eq!(
+        credit(&effects),
+        FRAME * u32::try_from(ids.len()).expect("one or two scenes")
+    );
+    assert!(
+        presenter
+            .completed(recovery(effects).run(&mut Shaper), now)
+            .expect("the recovered batch")
+            .is_empty()
+    );
+    let (sample, effects) = presenter.sample(0);
+    assert!(sample.visible);
+    assert!(effects.is_empty());
+    assert!(!presenter.frames.borrow().shown);
+    assert_eq!(presenter.workers(), 0);
+    presenter
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct HostCharges {
+    pub(crate) semantic: usize,
+    pub(crate) rest: usize,
+    pub(crate) view: usize,
+    pub(crate) frame: usize,
+    pub(crate) cache: usize,
+    pub(crate) activation: usize,
+}
+
+impl HostCharges {
+    pub(crate) fn prepared(self) -> usize {
+        self.rest + self.view + self.frame + self.cache
+    }
+}
+
+pub(crate) fn host_ledger(
+    presenter: &Presenter,
+    ids: &[SceneId],
+    generation: Option<u64>,
+) -> [HostCharges; 2] {
+    assert_eq!(presenter.generation, generation);
+    assert!(matches!(
+        (&presenter.phase, generation),
+        (super::Phase::Live, Some(1)) | (super::Phase::Offline, None)
+    ));
+    assert_eq!(presenter.workers(), 0);
+    assert!(presenter.lane.is_none());
+    assert_eq!(
+        (
+            presenter.held.len(),
+            presenter.held.capacity(),
+            presenter.held_bytes
+        ),
+        (0, 0, 0)
+    );
+    assert_eq!(
+        presenter
+            .returned
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+    assert_eq!(presenter.scenes.len(), ids.len());
+    assert!(presenter.scenes.keys().copied().eq(ids.iter().copied()));
+    let mut charges = [HostCharges::default(); 2];
+    for (index, scene) in presenter.scenes.values().enumerate() {
+        assert_eq!(
+            (
+                scene.queue.len(),
+                scene.queue.capacity(),
+                scene.ready.len(),
+                scene.ready.capacity()
+            ),
+            (0, 0, 0, 0)
+        );
+        assert!(scene.running.is_none() && scene.pending_consumption.is_none());
+        assert_eq!(
+            (
+                scene.state.view().revision(),
+                scene.state.view().committed(),
+                scene.state.view().activated(),
+                scene.state.view().object_count()
+            ),
+            (1, 1, 1, 1)
+        );
+        let rest = scene.rest.resident_bytes();
+        let view = scene.view.resident_bytes();
+        assert_eq!((scene.retained, scene.view_bytes), (rest, view));
+        charges[index] = HostCharges {
+            semantic: 2 * size_of::<usize>()
+                + size_of::<kumochi_scene::SceneState>()
+                + scene.state.view().attributed_bytes(),
+            rest,
+            view,
+            frame: scene.frame_bytes,
+            cache: scene.cache_bytes,
+            activation: super::Activation::BYTES,
+        };
+        assert_eq!(scene.state.attributed_bytes(), charges[index].semantic);
+    }
+    assert!(
+        presenter
+            .frames
+            .borrow()
+            .ids()
+            .into_iter()
+            .flatten()
+            .eq(ids.iter().copied())
+    );
+    assert_eq!(
+        presenter.global.usage(),
+        kumochi_scene::budget::Usage {
+            objects: ids.len(),
+            segments: usize::from(ids.contains(&LIVE)) * 7
+                + usize::from(ids.contains(&SceneId(21))) * 29,
+            scenes: ids.len(),
+            ..kumochi_scene::budget::Usage::default()
+        }
+    );
+    charges
+}
+
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "whether the episode's link is still connected"
+)]
+pub(crate) fn host_stale_begin(presenter: &mut Presenter, connected: bool) {
+    let effects = presenter
+        .data(
+            GENERATION,
+            Deferred::new(
+                DataToShell::SceneBegin {
+                    scene: LIVE,
+                    header: header(),
+                },
+                0,
+            ),
+            FRAME,
+            Instant::now(),
+        )
+        .expect("one late cleared-scene begin");
+    assert_eq!(credit(&effects), if connected { FRAME } else { 0 });
+    assert!(controls(&effects).is_empty());
+    assert!(jobs(effects).is_empty());
+    assert!(!presenter.scenes.contains_key(&LIVE));
 }

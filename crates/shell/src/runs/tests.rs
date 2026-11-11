@@ -447,11 +447,12 @@ fn a_new_thread_lost_in_a_brain_crash_is_not_continued_and_an_answered_one_is() 
         })
         .expect("the run's context is built");
     let admitted = Input::ContextBuilt(ContextBuilt::own_thread(build));
+    let key = build.key;
     deliver(&mut runs, Some(&mut store), effects);
     let effects = brain.handle(admitted).expect("admitted");
     deliver(&mut runs, Some(&mut store), effects);
     let answer = Input::Engine {
-        run,
+        key,
         event: TurnEvent::TextDelta("answered".to_owned()),
     };
     let effects = brain.handle(answer).expect("text");

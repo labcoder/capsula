@@ -7,6 +7,10 @@ use crate::escape;
 impl Presence {
     /// One Esc press, from the hotkey, the typing panel or Stop. The local effect happens here,
     /// and only then is `Stop` or `ClearDrawing` queued for the brain, which nothing waits on.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one Esc press keeps its local decision and every effect of it in order"
+    )]
     pub(super) fn escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
         if self.presenter.input.selection().is_some() {
             self.end_selection(crate::presenter::overlay_input::ExitCause::Escape, cx);
@@ -44,7 +48,17 @@ impl Presence {
                     .update(cx, |kumo, cx| kumo.pull_event(Event::Escape, cx));
                 None
             }
-            Escape::Stop => self.runs.stop(),
+            Escape::Stop => {
+                if let Some(message) = self.runs.stop() {
+                    self.stop_run(message, cx);
+                } else if let Some(run) = self.presenter.stoppable_run()
+                    && self.presenter.live_work(std::time::Instant::now())
+                {
+                    let effects = self.presenter.stop(run, std::time::Instant::now());
+                    self.scene_effects(effects, cx);
+                }
+                None
+            }
             Escape::Clear => {
                 let effect = self.runs.clear();
                 self.grant(effect.credit);

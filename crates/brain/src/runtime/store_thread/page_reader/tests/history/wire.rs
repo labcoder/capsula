@@ -5,7 +5,7 @@ use crate::recall::Hit;
 use serde_json::json;
 use std::fmt::Write as _;
 
-fn wire(core: &mut Coordinator, name: &str, args: &str) -> Vec<Effect> {
+fn wire(core: &mut Coordinator, key: BuildKey, name: &str, args: &str) -> Vec<Effect> {
     let item = json!({"type":"function_call", "id":"fc-wire", "call_id":"wire", "name":name, "arguments":args});
     let mut added = item.clone();
     added["arguments"] = json!("");
@@ -31,7 +31,7 @@ fn wire(core: &mut Coordinator, name: &str, args: &str) -> Vec<Effect> {
             ended = true;
         }
         for event in events {
-            effects.extend(core.handle(Input::Engine { run: R, event }).unwrap());
+            effects.extend(core.handle(Input::Engine { key, event }).unwrap());
         }
     }
     assert!(ended);
@@ -43,13 +43,13 @@ fn wire(core: &mut Coordinator, name: &str, args: &str) -> Vec<Effect> {
     reason = "one fixture keeps wire, ledger and commit ordering assertions together"
 )]
 fn succeeds(thread: ThreadId, name: &str, args: &str, selection: Selection) {
-    let (scratch, running, mut core) = active_on(
+    let (scratch, running, mut core, key) = active_on(
         "history-wire-success",
         "wire-private-source-marker small",
         Prior::Empty,
         thread,
     );
-    let effects = wire(&mut core, name, args);
+    let effects = wire(&mut core, key, name, args);
     let [Effect::Store(StoreOp::ReadCall(call))] = effects.as_slice() else {
         panic!("wire must reach the bounded reader: {effects:?}");
     };
@@ -224,13 +224,13 @@ fn wire_unknown_and_unoffered_calls_cannot_read_commit_create_or_focus() {
         (MAIN, "focus", r#"{"task":2}"#, ToolError::NotHere),
         (SOURCE, "list_tasks", "{}", ToolError::NotHere),
     ] {
-        let (scratch, running, mut core) = active_on(
+        let (scratch, running, mut core, key) = active_on(
             "history-wire-refusal",
             "wire-private-source-marker small",
             Prior::Empty,
             thread,
         );
-        let effects = wire(&mut core, name, args);
+        let effects = wire(&mut core, key, name, args);
         let [Effect::Store(StoreOp::RoundItems(round))] = effects.as_slice() else {
             panic!("refusal only, no read or effect: {effects:?}")
         };

@@ -1,22 +1,48 @@
 //! The read-ahead window, eligibility deadlines and head-only consumption.
 
 use std::{
-    sync::{Arc, atomic::Ordering},
-    time::Instant,
+    sync::{Arc, atomic::Ordering, mpsc},
+    time::{Duration, Instant},
 };
 
 use kumochi_protocol::message::{ControlToBrain, DataToShell, RunId, SceneFailure, SceneId};
-use kumochi_scene::{DetachedCandidate, deferred::Deferred, limits::MAX_RESIDENT_BYTES};
+use kumochi_scene::{
+    DetachedCandidate, Frame, SceneState, SceneView,
+    deferred::{Deferred, Pending, pending},
+    layout::LayoutState,
+    limits::MAX_RESIDENT_BYTES,
+};
 
 use super::super::{scene::WINDOW, window::ConsumeError};
 use super::{
-    Completion, Effect, LIVE, PrepareJob, Presenter, RUN, Shaper, acknowledge, arrive, begin,
-    commit, commit_as, commit_frame, controls, drained, exhausted, failed, jobs, live, ms,
-    only_admission, only_job, recovering, rect, settle,
+    Charged, Completion, Effect, LIVE, PrepareJob, Presenter, Probed, RUN, Shaper, Witness,
+    acknowledge, arrive, begin, bound_everywhere, commit, commit_as, commit_frame, controls,
+    drained, exhausted, failed, hold_dropper, jobs, live, ms, only_admission, only_job, recovering,
+    rect, settle,
 };
 
 const FRAME_CACHE_METADATA_BYTES: usize =
-    size_of::<std::cell::RefCell<super::super::paint::Frames>>() + 2 * size_of::<usize>();
+    size_of::<std::cell::RefCell<super::super::paint::Frames>>()
+        + 2 * size_of::<usize>()
+        + super::super::Activation::BYTES;
+/// A scene's paint cache charge in the cap fixtures, and a different one staged later.
+const CACHE: usize = 4_099;
+const NEXT_CACHE: usize = 1_031;
+
+struct Seeded {
+    cache: usize,
+    fixed: usize,
+}
+
+impl super::super::Stage for Seeded {
+    fn stage(&self, _: &SceneView) -> Box<dyn super::super::SceneCache> {
+        Box::new(Charged(self.cache))
+    }
+
+    fn fixed_bytes(&self) -> usize {
+        self.fixed
+    }
+}
 
 fn answer(presenter: &mut Presenter, job: PrepareJob, at: Instant) -> Vec<Effect> {
     presenter
@@ -30,7 +56,13 @@ fn step(index: u32) -> kumochi_scene::Step {
 
 /// A live scene with `count` steps committed and prepared until its window is full or done.
 fn prepared(count: u32) -> (Presenter, Instant) {
+    charged(count, 0)
+}
+
+/// [`prepared`], with every paint cache staged from now on charging `cache` bytes.
+fn charged(count: u32, cache: usize) -> (Presenter, Instant) {
     let (mut presenter, now) = live();
+    presenter.stage = Box::new(Charged(cache));
     begin(&mut presenter, LIVE, now);
     let mut running = Vec::new();
     for index in 0..count {
@@ -95,6 +127,7 @@ fn shape(presenter: &Presenter) -> impl std::fmt::Debug + PartialEq + use<> {
         presenter.residency(),
         scene.view.activated(),
         scene.view_bytes,
+        scene.cache_bytes,
         presenter.frames.borrow().epoch(LIVE),
         scene.pending_consumption,
     )
@@ -218,7 +251,10 @@ fn a_scene_longer_than_the_window_is_consumed_through_its_end() {
         );
         assert_eq!(
             presenter.residency(),
-            scene.rest.resident_bytes() + scene.view_bytes + scene.frame_bytes,
+            scene.rest.resident_bytes()
+                + scene.view_bytes
+                + scene.frame_bytes
+                + super::super::Activation::BYTES,
             "{count} steps"
         );
     }
@@ -436,192 +472,304 @@ fn a_result_adopts_at_exactly_the_cap_and_fails_one_byte_over() {
 
 #[test]
 fn a_new_empty_rest_also_respects_returned_owners_at_the_cap() {
-    for over in [0, 1] {
-        let (mut presenter, now) = live();
-        let rest = kumochi_scene::layout::LayoutState::new(
-            &kumochi_scene::SceneState::begin(super::header().begin).expect("the header"),
-        );
-        let empty = rest.resident_bytes()
-            + kumochi_scene::SceneView::new(&rest, 0).resident_bytes()
-            + kumochi_scene::Frame::new().resident_bytes()
-            + FRAME_CACHE_METADATA_BYTES;
-        presenter
-            .returned
-            .store(MAX_RESIDENT_BYTES - empty + over, Ordering::Relaxed);
-        let before = (presenter.global.usage(), presenter.global.generation());
-        let effects = begin(&mut presenter, LIVE, now);
-        assert_eq!(
-            (presenter.global.usage(), presenter.global.generation()),
-            before
-        );
-        if over == 0 {
-            assert!(controls(&effects).is_empty());
-            assert_eq!(presenter.scenes.len(), 1);
-            assert_eq!(presenter.residency(), MAX_RESIDENT_BYTES);
-        } else {
+    for fixed in [0, 17_411] {
+        for over in [0, 1] {
+            let (mut presenter, now) = live();
+            let rest = kumochi_scene::layout::LayoutState::new(
+                &kumochi_scene::SceneState::begin(super::header().begin).expect("the header"),
+            );
+            let empty = rest.resident_bytes()
+                + kumochi_scene::SceneView::new(&rest, 0).resident_bytes()
+                + kumochi_scene::Frame::new().resident_bytes()
+                + FRAME_CACHE_METADATA_BYTES
+                + CACHE;
+            presenter.stage = Box::new(Seeded {
+                cache: CACHE,
+                fixed,
+            });
+            presenter
+                .returned
+                .store(MAX_RESIDENT_BYTES - empty - fixed + over, Ordering::Relaxed);
+            let before = (presenter.global.usage(), presenter.global.generation());
+            let effects = begin(&mut presenter, LIVE, now);
             assert_eq!(
-                controls(&effects),
-                [&ControlToBrain::ClearDrawing {
-                    scene_ids: vec![LIVE]
-                }]
+                (presenter.global.usage(), presenter.global.generation()),
+                before
             );
-            assert!(presenter.scenes.is_empty());
-            assert_eq!(presenter.residency(), MAX_RESIDENT_BYTES - empty + 1);
-        }
-        presenter.returned.store(0, Ordering::Relaxed);
-        if over == 1 {
-            assert!(controls(&begin(&mut presenter, LIVE, now)).is_empty());
-            assert!(
-                presenter.scenes.is_empty(),
-                "a later valid begin cannot undo failure"
-            );
-            assert_eq!(presenter.residency(), 0);
+            if over == 0 {
+                assert!(controls(&effects).is_empty());
+                assert_eq!(presenter.scenes.len(), 1);
+                assert_eq!(presenter.scenes[&LIVE].cache_bytes, CACHE);
+                assert_eq!(presenter.residency(), MAX_RESIDENT_BYTES);
+            } else {
+                assert_eq!(
+                    controls(&effects),
+                    [&ControlToBrain::ClearDrawing {
+                        scene_ids: vec![LIVE]
+                    }]
+                );
+                assert!(presenter.scenes.is_empty());
+                assert_eq!(presenter.residency(), MAX_RESIDENT_BYTES - empty + 1);
+            }
+            presenter.returned.store(0, Ordering::Relaxed);
+            if over == 1 {
+                assert!(controls(&begin(&mut presenter, LIVE, now)).is_empty());
+                assert!(
+                    presenter.scenes.is_empty(),
+                    "a later valid begin cannot undo failure"
+                );
+                assert_eq!(presenter.residency(), fixed);
+            }
         }
     }
 }
 
 #[test]
 fn recovery_checks_its_view_and_frame_at_the_cap() {
-    for over in [0, 1] {
-        let (mut presenter, now, job) = recovering(vec![(LIVE, rect("r"))]);
-        let done = job.run(&mut Shaper);
-        let Completion::Recovered { scenes, .. } = &done else {
-            panic!("a recovery answer");
-        };
-        let (state, rest) = scenes[0].1.as_ref().expect("the recovered scene");
-        let picture = scenes[0].2
-            + kumochi_scene::SceneView::new(rest, state.activated()).resident_bytes()
-            + kumochi_scene::Frame::new().resident_bytes()
-            + FRAME_CACHE_METADATA_BYTES;
-        let returned = MAX_RESIDENT_BYTES - picture + over;
-        presenter.returned.store(returned, Ordering::Relaxed);
-        let effects = presenter.completed(done, now).expect("recovery adoption");
-        if over == 0 {
-            assert!(controls(&effects).is_empty());
-            assert_eq!(presenter.scenes.len(), 1);
-            assert_eq!(presenter.residency(), MAX_RESIDENT_BYTES);
-        } else {
-            assert_eq!(
-                controls(&effects),
-                [&ControlToBrain::ClearDrawing {
-                    scene_ids: vec![LIVE],
-                }]
-            );
-            assert!(presenter.scenes.is_empty());
-            assert_eq!(presenter.residency(), returned);
-        }
-        presenter.returned.store(0, Ordering::Relaxed);
-        if over == 1 {
-            assert!(controls(&begin(&mut presenter, LIVE, now)).is_empty());
-            assert!(
-                presenter.scenes.is_empty(),
-                "a later valid begin cannot undo failure"
-            );
-            assert_eq!(presenter.residency(), 0);
+    for fixed in [0, 17_411] {
+        for over in [0, 1] {
+            let (mut presenter, now, job) = recovering(vec![(LIVE, rect("r"))]);
+            presenter.stage = Box::new(Seeded {
+                cache: CACHE,
+                fixed,
+            });
+            let done = job.run(&mut Shaper);
+            let Completion::Recovered { scenes, .. } = &done else {
+                panic!("a recovery answer");
+            };
+            let (state, rest) = scenes[0].1.as_ref().expect("the recovered scene");
+            let picture = scenes[0].2
+                + kumochi_scene::SceneView::new(rest, state.activated()).resident_bytes()
+                + kumochi_scene::Frame::new().resident_bytes()
+                + FRAME_CACHE_METADATA_BYTES
+                + CACHE;
+            let returned = MAX_RESIDENT_BYTES - picture - fixed + over;
+            presenter.returned.store(returned, Ordering::Relaxed);
+            let effects = presenter.completed(done, now).expect("recovery adoption");
+            if over == 0 {
+                assert!(controls(&effects).is_empty());
+                assert_eq!(presenter.scenes.len(), 1);
+                assert_eq!(presenter.scenes[&LIVE].cache_bytes, CACHE);
+                assert_eq!(presenter.residency(), MAX_RESIDENT_BYTES);
+            } else {
+                assert_eq!(
+                    controls(&effects),
+                    [&ControlToBrain::ClearDrawing {
+                        scene_ids: vec![LIVE],
+                    }]
+                );
+                assert!(presenter.scenes.is_empty());
+                assert_eq!(presenter.residency(), returned + fixed);
+            }
+            presenter.returned.store(0, Ordering::Relaxed);
+            if over == 1 {
+                assert!(controls(&begin(&mut presenter, LIVE, now)).is_empty());
+                assert!(
+                    presenter.scenes.is_empty(),
+                    "a later valid begin cannot undo failure"
+                );
+                assert_eq!(presenter.residency(), fixed);
+            }
         }
     }
 }
 
 #[test]
 fn a_kept_cut_checks_its_replacement_view_at_the_cap() {
-    for over in [0, 1] {
-        let (_reference, _, job) = recovering(vec![(LIVE, rect("r"))]);
-        let reference = job.run(&mut Shaper);
-        let Completion::Recovered { scenes, .. } = &reference else {
-            panic!("a one-object reference");
-        };
-        let (state, rest) = scenes[0].1.as_ref().expect("the reference rest");
-        let picture = scenes[0].2
-            + kumochi_scene::SceneView::new(rest, state.activated()).resident_bytes()
-            + kumochi_scene::Frame::new().resident_bytes()
-            + FRAME_CACHE_METADATA_BYTES;
-        let pair = super::step(
-            r#"{"step":{"id":"pair","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10]}},{"shape":{"id":"b","kind":"rect","box":[0,0,10,10]}}]}}"#,
-        );
-        let (mut presenter, now, job) = recovering(vec![(LIVE, pair)]);
-        presenter
-            .completed(job.run(&mut Shaper), now)
-            .expect("recovered rest");
-        assert!(
-            presenter.residency() > picture,
-            "the cut removes one object's storage"
-        );
-        presenter.stop(RUN, now).expect("a stop at rest");
-        let cut = super::kept(LIVE).cut;
-        let revision = presenter.scenes[&LIVE].state.view().revision();
-        let returned = MAX_RESIDENT_BYTES - picture + over;
-        presenter.returned.store(returned, Ordering::Relaxed);
-        let effects = acknowledge(&mut presenter, LIVE, revision, cut, now).expect("the cut");
-        if over == 0 {
-            assert!(controls(&effects).is_empty());
-            assert_eq!(presenter.scenes.len(), 1);
-            assert_eq!(presenter.residency(), MAX_RESIDENT_BYTES);
-        } else {
-            assert_eq!(
-                controls(&effects),
-                [&ControlToBrain::ClearDrawing {
-                    scene_ids: vec![LIVE],
-                }]
+    for fixed in [0, 17_411] {
+        for over in [0, 1] {
+            let (_reference, _, job) = recovering(vec![(LIVE, rect("r"))]);
+            let reference = job.run(&mut Shaper);
+            let Completion::Recovered { scenes, .. } = &reference else {
+                panic!("a one-object reference");
+            };
+            let (state, rest) = scenes[0].1.as_ref().expect("the reference rest");
+            let picture = scenes[0].2
+                + kumochi_scene::SceneView::new(rest, state.activated()).resident_bytes()
+                + kumochi_scene::Frame::new().resident_bytes()
+                + FRAME_CACHE_METADATA_BYTES
+                + NEXT_CACHE;
+            let pair = super::step(
+                r#"{"step":{"id":"pair","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10]}},{"shape":{"id":"b","kind":"rect","box":[0,0,10,10]}}]}}"#,
             );
-            assert!(presenter.scenes.is_empty());
-            assert_eq!(presenter.residency(), returned);
-        }
-        presenter.returned.store(0, Ordering::Relaxed);
-        if over == 1 {
-            assert!(controls(&begin(&mut presenter, LIVE, now)).is_empty());
+            let (mut presenter, now, job) = recovering(vec![(LIVE, pair)]);
+            presenter.stage = Box::new(Seeded {
+                cache: CACHE,
+                fixed,
+            });
+            presenter
+                .completed(job.run(&mut Shaper), now)
+                .expect("recovered rest");
             assert!(
-                presenter.scenes.is_empty(),
-                "a later valid begin cannot undo failure"
+                presenter.residency() > picture,
+                "the cut removes one object's storage"
             );
-            assert_eq!(presenter.residency(), 0);
+            presenter.stage = Box::new(Seeded {
+                cache: NEXT_CACHE,
+                fixed,
+            });
+            presenter.stop(RUN, now).expect("a stop at rest");
+            let cut = super::kept(LIVE).cut;
+            let revision = presenter.scenes[&LIVE].state.view().revision();
+            let returned = MAX_RESIDENT_BYTES - picture - fixed + over;
+            presenter.returned.store(returned, Ordering::Relaxed);
+            let effects = acknowledge(&mut presenter, LIVE, revision, cut, now).expect("the cut");
+            if over == 0 {
+                assert!(controls(&effects).is_empty());
+                assert_eq!(presenter.scenes.len(), 1);
+                assert_eq!(presenter.scenes[&LIVE].cache_bytes, NEXT_CACHE);
+                assert_eq!(presenter.residency(), MAX_RESIDENT_BYTES);
+            } else {
+                assert_eq!(
+                    controls(&effects),
+                    [&ControlToBrain::ClearDrawing {
+                        scene_ids: vec![LIVE],
+                    }]
+                );
+                assert!(presenter.scenes.is_empty());
+                assert_eq!(presenter.residency(), returned + fixed);
+            }
+            presenter.returned.store(0, Ordering::Relaxed);
+            if over == 1 {
+                assert!(controls(&begin(&mut presenter, LIVE, now)).is_empty());
+                assert!(
+                    presenter.scenes.is_empty(),
+                    "a later valid begin cannot undo failure"
+                );
+                assert_eq!(presenter.residency(), fixed);
+            }
         }
     }
 }
 
 #[test]
+fn a_new_scene_and_its_consumption_bind_caches_staged_from_their_views() {
+    let (mut presenter, now) = live();
+    presenter.stage = Box::new(Witness);
+    begin(&mut presenter, LIVE, now);
+    let (_, effects) = presenter.sample(0);
+    assert!(effects.is_empty());
+    assert!(bound_everywhere(&presenter), "the new scene's view");
+    let effects = commit(&mut presenter, LIVE, 0, step(0), now).expect("a step");
+    let mut running = jobs(effects);
+    while let Some(job) = running.pop() {
+        running.extend(jobs(answer(&mut presenter, job, now)));
+    }
+    let done = presenter
+        .consume_ready(LIVE, 0, now, 0, 0)
+        .expect("the head");
+    let (_, effects) = presenter.sample(0);
+    assert!(effects.is_empty());
+    assert!(bound_everywhere(&presenter), "the activated view");
+    drop(done);
+}
+
+#[test]
+fn every_outgoing_cache_waits_in_the_dropper() {
+    let probe = Arc::new(());
+    // The test's probe and the stage's own, plus one per cache alive or queued.
+    let caches = |count: usize| 2 + count;
+    let (mut presenter, now) = live();
+    presenter.stage = Box::new(Probed(Arc::clone(&probe)));
+    presenter
+        .returned
+        .store(MAX_RESIDENT_BYTES, Ordering::Relaxed);
+    let release = hold_dropper();
+    begin(&mut presenter, SceneId(21), now);
+    assert!(presenter.scenes.is_empty(), "a scene over the cap");
+    assert_eq!(Arc::strong_count(&probe), caches(1), "its staged cache");
+    drop(release);
+    assert!(drained(&probe, caches(0)));
+    presenter.returned.store(0, Ordering::Relaxed);
+    begin(&mut presenter, LIVE, now);
+    let effects = commit(&mut presenter, LIVE, 0, step(0), now).expect("a step");
+    let mut running = jobs(effects);
+    while let Some(job) = running.pop() {
+        running.extend(jobs(answer(&mut presenter, job, now)));
+    }
+    assert_eq!(Arc::strong_count(&probe), caches(1), "the scene's cache");
+    presenter
+        .returned
+        .store(MAX_RESIDENT_BYTES, Ordering::Relaxed);
+    let release = hold_dropper();
+    let refused = presenter.consume_ready(LIVE, 0, now, 0, 0);
+    assert_eq!(refused.err(), Some(ConsumeError::Residency));
+    assert_eq!(Arc::strong_count(&probe), caches(2), "the candidate's");
+    drop(release);
+    assert!(drained(&probe, caches(1)));
+    presenter.returned.store(0, Ordering::Relaxed);
+    let release = hold_dropper();
+    let done = presenter
+        .consume_ready(LIVE, 0, now, 0, 0)
+        .expect("the head");
+    assert_eq!(Arc::strong_count(&probe), caches(2), "the outgoing cache");
+    drop(release);
+    assert!(drained(&probe, caches(1)));
+    drop(done);
+    let release = hold_dropper();
+    presenter.clear(now).expect("a global clear");
+    assert_eq!(Arc::strong_count(&probe), caches(1), "the released scene's");
+    drop(release);
+    assert!(drained(&probe, caches(0)));
+}
+
+#[test]
 fn a_consumption_fits_at_exactly_the_cap_and_is_refused_one_byte_over() {
-    // The activated view's own charge, read from an identical scene after a real install.
-    let installed = {
-        let (mut presenter, now) = prepared(1);
-        let done = presenter
-            .consume_ready(LIVE, 0, now, 0, 0)
-            .expect("an identical head");
-        drop(done);
-        presenter.scenes[&LIVE].view.resident_bytes()
-    };
-    for over in [1, 0] {
-        let (mut presenter, now) = prepared(1);
-        let scene = &presenter.scenes[&LIVE];
-        assert!(
-            installed > scene.view_bytes,
-            "the activated view outweighs the empty one, so omitting it would admit one over"
-        );
-        let head = &scene.ready[0];
-        let outgoing = scene.retained + scene.view_bytes + head.step.resident_bytes;
-        let incoming = head.full_after + installed + head.step.attribution();
-        let after = presenter.residency() - outgoing + incoming;
-        presenter
-            .returned
-            .store(MAX_RESIDENT_BYTES - after + over, Ordering::Relaxed);
-        let stamp = probe(&presenter);
-        let before = shape(&presenter);
-        let result = presenter.consume_ready(LIVE, 0, now, 0, 0);
-        if over == 1 {
-            assert_eq!(result.expect_err("over the cap"), ConsumeError::Residency);
-            assert_eq!(shape(&presenter), before);
-            install(
-                &mut presenter,
-                stamp,
-                "refusal leaves the mutation stamp unchanged",
-            );
-        } else {
-            let done = result.expect("at the cap");
-            assert_eq!(presenter.residency(), MAX_RESIDENT_BYTES);
-            let scene = &presenter.scenes[&LIVE];
-            assert_eq!((scene.view.activated(), scene.view_bytes), (1, installed));
+    for fixed in [0, 17_411] {
+        // The activated view's own charge, read from an identical scene after a real install.
+        let installed = {
+            let (mut presenter, now) = prepared(1);
+            let done = presenter
+                .consume_ready(LIVE, 0, now, 0, 0)
+                .expect("an identical head");
             drop(done);
+            presenter.scenes[&LIVE].view.resident_bytes()
+        };
+        for over in [1, 0] {
+            let (mut presenter, now) = charged(1, CACHE);
+            let without_fixed = presenter.residency();
+            presenter.stage = Box::new(Seeded {
+                cache: NEXT_CACHE,
+                fixed,
+            });
+            assert_eq!(
+                presenter.residency(),
+                without_fixed + fixed,
+                "a fixed seed is charged once before consumption"
+            );
+            let scene = &presenter.scenes[&LIVE];
+            assert!(
+                installed > scene.view_bytes,
+                "the activated view outweighs the empty one, so omitting it would admit one over"
+            );
+            let head = &scene.ready[0];
+            let outgoing = scene.retained + scene.view_bytes + CACHE + head.step.resident_bytes;
+            let incoming = head.full_after + installed + NEXT_CACHE + head.step.attribution();
+            let after = presenter.residency() - outgoing + incoming;
+            presenter
+                .returned
+                .store(MAX_RESIDENT_BYTES - after + over, Ordering::Relaxed);
+            let stamp = probe(&presenter);
+            let before = shape(&presenter);
+            let result = presenter.consume_ready(LIVE, 0, now, 0, 0);
+            if over == 1 {
+                assert_eq!(result.expect_err("over the cap"), ConsumeError::Residency);
+                assert_eq!(shape(&presenter), before);
+                install(
+                    &mut presenter,
+                    stamp,
+                    "refusal leaves the mutation stamp unchanged",
+                );
+            } else {
+                let done = result.expect("at the cap");
+                assert_eq!(presenter.residency(), MAX_RESIDENT_BYTES);
+                let scene = &presenter.scenes[&LIVE];
+                assert_eq!((scene.view.activated(), scene.view_bytes), (1, installed));
+                assert_eq!(scene.cache_bytes, NEXT_CACHE);
+                drop(done);
+            }
+            presenter.returned.store(0, Ordering::Relaxed);
         }
-        presenter.returned.store(0, Ordering::Relaxed);
     }
 }
 
@@ -710,7 +858,7 @@ fn sampled_items(presenter: &mut Presenter, at: u64) -> usize {
     let (_, effects) = presenter.sample(at);
     assert!(effects.is_empty());
     let mut items = 0;
-    assert!(!presenter.frames.borrow().paint(|frame| {
+    assert!(!presenter.frames.borrow().paint(|frame, _| {
         items += frame.items().len();
         Ok::<_, std::fmt::Error>(())
     }));
@@ -808,7 +956,10 @@ fn a_stale_head_is_refused_before_retirement_with_nothing_changed() {
             scene.rest = unrelated;
             scene.retained = scene.rest.resident_bytes();
         }
-        presenter.frames.borrow_mut().replaced(LIVE);
+        presenter
+            .frames
+            .borrow_mut()
+            .replaced(LIVE, Box::new(Charged(0)));
         let epoch = presenter.frames.borrow().epoch(LIVE);
         let before = shape(&presenter);
         let refused = presenter
@@ -853,4 +1004,374 @@ fn returned_owners_stay_charged_across_view_replacement_and_disconnect() {
     assert_eq!(presenter.residency(), charges[1]);
     drop(second);
     assert_eq!(presenter.residency(), 0);
+}
+
+#[test]
+fn consumption_forwards_distinct_scene_time_and_narration_segment() {
+    let (mut presenter, now) = live();
+    begin(&mut presenter, LIVE, now);
+    let timed = super::step(
+        r#"{"step":{"id":"timed","say":"one two three four","put":[{"shape":{"id":"s","kind":"rect","box":[0,0,10,10]}},{"anim":{"target":"s","track":"x","ease":"linear","at_word":2,"keys":[[0,0],[1000,100]]}}]}}"#,
+    );
+    let job = only_job(commit(&mut presenter, LIVE, 0, timed, now).expect("step"));
+    assert!(answer(&mut presenter, job, now).is_empty());
+    let consumed = presenter
+        .consume_ready(LIVE, 0, now, 1000, 800)
+        .expect("timed head");
+    assert!(consumed.effects.expect("no successor").is_empty());
+    for (at, expected) in [(1399, 0.0), (1400, 0.0), (1650, 25.0)] {
+        let (_, effects) = presenter.sample(at);
+        assert!(effects.is_empty());
+        let mut x = None;
+        assert!(!presenter.frames.borrow().paint(|frame, _| {
+            assert_eq!(frame.items().len(), 1);
+            x = Some(frame.items()[0].transform.0[4]);
+            Ok::<_, std::fmt::Error>(())
+        }));
+        assert_eq!(x, Some(expected), "scene time {at}");
+    }
+}
+
+const PAIR: &str = r#"{"step":{"id":"pair","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10]}},{"shape":{"id":"b","kind":"rect","box":[0,0,10,10]}}]}}"#;
+const TRIPLE: &str = r#"{"step":{"id":"triple","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10]}},{"shape":{"id":"b","kind":"rect","box":[0,0,10,10]}},{"shape":{"id":"c","kind":"rect","box":[0,0,10,10]}}]}}"#;
+/// Recovered scenes in id order, each larger than the next.
+const RECOVERED: [SceneId; 3] = [SceneId(10), SceneId(11), SceneId(12)];
+
+fn queue(values: usize, bytes: usize) -> Pending {
+    Pending { values, bytes }
+}
+
+/// What `act` sends to the dropper, read behind a gate the dropper has already reached, so
+/// everything queued before it is destroyed and counted down first. The meter is process-wide,
+/// so only a meter run alone reads exact values.
+fn queued<T>(act: impl FnOnce() -> T) -> (Pending, T) {
+    struct Gate {
+        reached: mpsc::Sender<()>,
+        released: mpsc::Receiver<()>,
+    }
+    impl Drop for Gate {
+        fn drop(&mut self) {
+            let _reached = self.reached.send(());
+            let _released = self.released.recv();
+        }
+    }
+    kumochi_scene::deferred::start().expect("the dropper starts");
+    let (reached, at_gate) = mpsc::channel();
+    let (open, released) = mpsc::channel();
+    drop(Deferred::new(Gate { reached, released }, 0));
+    at_gate
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the dropper reaches the gate");
+    assert_eq!(pending(), queue(1, 0), "only the gate: run meters alone");
+    let value = act();
+    let after = pending();
+    drop(open);
+    (queue(after.values - 1, after.bytes), value)
+}
+
+/// A new empty scene's picture with a [`CACHE`]-byte cache, and its semantic state's charge.
+fn empty_scene() -> (usize, usize) {
+    let state = SceneState::begin(super::header().begin).expect("the header");
+    let rest = LayoutState::new(&state);
+    let picture = rest.resident_bytes()
+        + SceneView::new(&rest, 0).resident_bytes()
+        + Frame::new().resident_bytes()
+        + FRAME_CACHE_METADATA_BYTES
+        + CACHE;
+    (picture, state.attributed_bytes())
+}
+
+/// A scene with one step ready, its caches charging `cache` and, from its consumption on,
+/// `next`; with the residency that consumption leaves, held owners aside.
+fn ready_head(cache: usize, next: usize) -> (Presenter, Instant, usize) {
+    // The activated view's own charge, read from an identical scene after a real install.
+    let installed = {
+        let (mut presenter, now) = prepared(1);
+        let done = presenter
+            .consume_ready(LIVE, 0, now, 0, 0)
+            .expect("an identical head");
+        drop(done);
+        presenter.scenes[&LIVE].view.resident_bytes()
+    };
+    let (mut presenter, now) = charged(1, cache);
+    presenter.stage = Box::new(Charged(next));
+    let scene = &presenter.scenes[&LIVE];
+    let head = &scene.ready[0];
+    let outgoing = scene.retained + scene.view_bytes + cache + head.step.resident_bytes;
+    let incoming = head.full_after + installed + next + head.step.attribution();
+    let after = presenter.residency() - outgoing + incoming;
+    (presenter, now, after)
+}
+
+/// A recovered two-object scene stopped at rest, its caches charging `cache` and, from its kept
+/// cut on, `next`; with the picture of the one-object replacement the cut installs.
+fn stopped_pair(cache: usize, next: usize) -> (Presenter, Instant, usize) {
+    let (_reference, _, job) = recovering(vec![(LIVE, rect("r"))]);
+    let reference = job.run(&mut Shaper);
+    let Completion::Recovered { scenes, .. } = &reference else {
+        panic!("a one-object reference");
+    };
+    let (state, rest) = scenes[0].1.as_ref().expect("the reference rest");
+    let picture = scenes[0].2
+        + SceneView::new(rest, state.activated()).resident_bytes()
+        + Frame::new().resident_bytes()
+        + FRAME_CACHE_METADATA_BYTES
+        + next;
+    let (mut presenter, now, job) = recovering(vec![(LIVE, super::step(PAIR))]);
+    presenter.stage = Box::new(Charged(cache));
+    presenter
+        .completed(job.run(&mut Shaper), now)
+        .expect("recovered rest");
+    presenter.stage = Box::new(Charged(next));
+    presenter.stop(RUN, now).expect("a stop at rest");
+    (presenter, now, picture)
+}
+
+/// Three recovered scenes, each larger than the next by id, their caches charging [`CACHE`];
+/// with each one's picture, read from the answer before adoption.
+fn recovered_three() -> (Presenter, Instant, Completion, [usize; 3]) {
+    let steps = [super::step(TRIPLE), super::step(PAIR), rect("r")];
+    let (mut presenter, now, job) = recovering(RECOVERED.into_iter().zip(steps).collect());
+    presenter.stage = Box::new(Charged(CACHE));
+    let done = job.run(&mut Shaper);
+    let Completion::Recovered { scenes, .. } = &done else {
+        panic!("a recovery answer");
+    };
+    let pictures = RECOVERED.map(|id| {
+        let (_, recovered, retained) = scenes
+            .iter()
+            .find(|(scene, ..)| *scene == id)
+            .expect("every scene recovered");
+        let (state, rest) = recovered.as_ref().expect("a recovered rest");
+        retained
+            + SceneView::new(rest, state.activated()).resident_bytes()
+            + Frame::new().resident_bytes()
+            + FRAME_CACHE_METADATA_BYTES
+            + CACHE
+    });
+    assert!(
+        pictures[0] > pictures[1] && pictures[1] > pictures[2],
+        "each scene outweighs the next"
+    );
+    (presenter, now, done, pictures)
+}
+
+#[test]
+fn a_new_scene_with_no_held_owner_charges_exactly_its_picture() {
+    let (picture, _) = empty_scene();
+    let (mut presenter, now) = live();
+    presenter.stage = Box::new(Charged(CACHE));
+    assert!(controls(&begin(&mut presenter, LIVE, now)).is_empty());
+    assert_eq!(presenter.scenes[&LIVE].cache_bytes, CACHE);
+    assert_eq!(presenter.residency(), picture);
+}
+
+#[test]
+fn a_consumption_with_no_held_owner_charges_exactly_its_own_total() {
+    let (mut presenter, now, after) = ready_head(CACHE, NEXT_CACHE);
+    let done = presenter
+        .consume_ready(LIVE, 0, now, 0, 0)
+        .expect("no held owner");
+    assert_eq!(presenter.scenes[&LIVE].cache_bytes, NEXT_CACHE);
+    assert_eq!(presenter.residency(), after);
+    drop(done);
+}
+
+#[test]
+fn a_kept_cut_with_no_held_owner_charges_exactly_its_replacement() {
+    let (mut presenter, now, picture) = stopped_pair(CACHE, NEXT_CACHE);
+    let revision = presenter.scenes[&LIVE].state.view().revision();
+    let cut = super::kept(LIVE).cut;
+    let effects = acknowledge(&mut presenter, LIVE, revision, cut, now).expect("the cut");
+    assert!(controls(&effects).is_empty());
+    assert_eq!(presenter.scenes[&LIVE].cache_bytes, NEXT_CACHE);
+    assert_eq!(presenter.residency(), picture);
+}
+
+#[test]
+fn recovery_evicts_by_scene_id_after_adopting_and_evicted_scenes_never_paint() {
+    let clear = |evicted: &[usize]| ControlToBrain::ClearDrawing {
+        scene_ids: evicted.iter().map(|&index| RECOVERED[index]).collect(),
+    };
+    // No held owner keeps all three; at the cap only the middle scene is over, and one byte
+    // over the last one is too.
+    for (over, kept, clears) in [
+        (None, vec![0, 1, 2], vec![]),
+        (Some(0), vec![0, 2], vec![clear(&[1])]),
+        (Some(1), vec![0], vec![clear(&[1, 2])]),
+    ] {
+        let (mut presenter, now, done, pictures) = recovered_three();
+        let returned = over.map_or(0, |over| {
+            MAX_RESIDENT_BYTES - pictures[0] - pictures[2] + over
+        });
+        presenter.returned.store(returned, Ordering::Relaxed);
+        let effects = presenter.completed(done, now).expect("recovery adoption");
+        assert_eq!(
+            controls(&effects),
+            clears.iter().collect::<Vec<_>>(),
+            "{over:?} over"
+        );
+        let ids: Vec<_> = kept.iter().map(|&index| RECOVERED[index]).collect();
+        assert_eq!(presenter.scenes.keys().copied().collect::<Vec<_>>(), ids);
+        let held: usize = kept.iter().map(|&index| pictures[index]).sum();
+        assert_eq!(presenter.residency(), returned + held, "{over:?} over");
+        let (_, effects) = presenter.sample(0);
+        assert!(effects.is_empty());
+        let mut painted = Vec::new();
+        assert!(!presenter.frames.borrow().paint(|frame, _| {
+            painted.push(Arc::clone(frame.generation().expect("a sampled frame")));
+            Ok::<_, std::fmt::Error>(())
+        }));
+        let views: Vec<_> = ids
+            .iter()
+            .map(|id| Arc::clone(presenter.scenes[id].view.generation()))
+            .collect();
+        assert_eq!(painted.len(), views.len(), "only kept scenes paint");
+        assert!(
+            painted
+                .iter()
+                .zip(&views)
+                .all(|(painted, view)| Arc::ptr_eq(painted, view)),
+            "each painted frame samples a kept scene's view, in id order"
+        );
+        presenter.returned.store(0, Ordering::Relaxed);
+        let evicted: Vec<_> = RECOVERED
+            .into_iter()
+            .filter(|id| !presenter.scenes.contains_key(id))
+            .collect();
+        for id in evicted {
+            assert!(controls(&begin(&mut presenter, id, now)).is_empty());
+        }
+        assert_eq!(
+            presenter.scenes.len(),
+            kept.len(),
+            "a later valid begin cannot undo eviction"
+        );
+    }
+}
+
+#[test]
+#[ignore = "manual isolated queue-meter check; the process-wide dropper must have no other tests"]
+fn cache_meter_a_refused_new_scene_queues_one_tuple_with_its_cache_charge() {
+    let (picture, semantic) = empty_scene();
+    // The frame's own empty wrapper, and for a refusal the new scene's one owner tuple.
+    for (over, expected) in [(0, queue(1, 0)), (1, queue(2, semantic + picture))] {
+        let (mut presenter, now) = live();
+        presenter.stage = Box::new(Charged(CACHE));
+        presenter
+            .returned
+            .store(MAX_RESIDENT_BYTES - picture + over, Ordering::Relaxed);
+        let (sent, _) = queued(|| begin(&mut presenter, LIVE, now));
+        assert_eq!(sent, expected, "{over} over");
+        assert_eq!(presenter.scenes.len(), 1 - over);
+    }
+}
+
+#[test]
+#[ignore = "manual isolated queue-meter check; the process-wide dropper must have no other tests"]
+fn cache_meter_a_consumption_queues_its_refused_or_outgoing_cache_once() {
+    // Twins whose caches charge nothing queue every other owner the same.
+    let [real, free] = [(CACHE, NEXT_CACHE), (0, 0)].map(|(cache, next)| {
+        let (mut presenter, now, after) = ready_head(cache, next);
+        presenter
+            .returned
+            .store(MAX_RESIDENT_BYTES - after + 1, Ordering::Relaxed);
+        let (refused, result) = queued(|| presenter.consume_ready(LIVE, 0, now, 0, 0));
+        assert_eq!(result.err(), Some(ConsumeError::Residency));
+        presenter
+            .returned
+            .store(MAX_RESIDENT_BYTES - after, Ordering::Relaxed);
+        let (consumed, result) = queued(|| presenter.consume_ready(LIVE, 0, now, 0, 0));
+        drop(result.expect("at the cap"));
+        (refused, consumed)
+    });
+    let [(refused, consumed), (free_refused, free_consumed)] = [real, free];
+    assert_eq!(
+        free_refused.values, 2,
+        "the refused cache and the unused activation"
+    );
+    assert_eq!(
+        refused,
+        queue(2, free_refused.bytes + NEXT_CACHE),
+        "the refused cache, once"
+    );
+    assert_eq!(
+        consumed,
+        queue(free_consumed.values, free_consumed.bytes + CACHE),
+        "the outgoing cache, once"
+    );
+}
+
+#[test]
+#[ignore = "manual isolated queue-meter check; the process-wide dropper must have no other tests"]
+fn cache_meter_recovery_queues_its_answer_then_four_owners_per_evicted_scene() {
+    // Each scene's bound semantic state and held charge, read from a run that keeps all three.
+    let owners: [usize; 3] = {
+        let (mut presenter, now, done, pictures) = recovered_three();
+        presenter.completed(done, now).expect("recovery adoption");
+        std::array::from_fn(|index| {
+            let scene = &presenter.scenes[&RECOVERED[index]];
+            assert_eq!(scene.held(), pictures[index]);
+            scene.state.attributed_bytes() + pictures[index]
+        })
+    };
+    for (over, evicted) in [(0, vec![1]), (1, vec![1, 2])] {
+        let (mut presenter, now, done, pictures) = recovered_three();
+        let Completion::Recovered { scenes, .. } = &done else {
+            panic!("a recovery answer");
+        };
+        let answer = scenes.attribution();
+        let returned = MAX_RESIDENT_BYTES - pictures[0] - pictures[2] + over;
+        presenter.returned.store(returned, Ordering::Relaxed);
+        let (sent, effects) = queued(|| presenter.completed(done, now));
+        drop(effects.expect("recovery adoption"));
+        let evicted_owners: usize = evicted.iter().map(|&index| owners[index]).sum();
+        // Per evicted scene: its two halted queues, its bound state and its held owners.
+        assert_eq!(
+            sent,
+            queue(1 + 4 * evicted.len(), answer + evicted_owners),
+            "{over} over"
+        );
+    }
+}
+
+#[test]
+#[ignore = "manual isolated queue-meter check; the process-wide dropper must have no other tests"]
+fn cache_meter_a_kept_cut_queues_its_old_cache_then_evicts_its_installed_replacement() {
+    // Twins whose caches charge nothing queue every other owner the same.
+    let [real, free] = [(CACHE, NEXT_CACHE), (0, 0)].map(|(cache, next)| {
+        [0, 1].map(|over| {
+            let (mut presenter, now, picture) = stopped_pair(cache, next);
+            let revision = presenter.scenes[&LIVE].state.view().revision();
+            let cut = super::kept(LIVE).cut;
+            presenter
+                .returned
+                .store(MAX_RESIDENT_BYTES - picture + over, Ordering::Relaxed);
+            let (sent, effects) = queued(|| acknowledge(&mut presenter, LIVE, revision, cut, now));
+            drop(effects.expect("the cut"));
+            let owners = presenter.scenes.get(&LIVE).map(|scene| {
+                assert_eq!(scene.held(), picture);
+                scene.state.attributed_bytes() + picture
+            });
+            assert_eq!(owners.is_none(), over == 1, "{over} over");
+            (sent, owners)
+        })
+    });
+    let [(kept, Some(owners)), (evicted, None)] = real else {
+        panic!("the cut fits at the cap and is evicted one byte over");
+    };
+    let [(free_kept, _), (free_evicted, _)] = free;
+    // Two halted queues, the bound state and the installed replacement's owners.
+    assert_eq!(evicted, queue(kept.values + 4, kept.bytes + owners));
+    assert_eq!(
+        kept,
+        queue(free_kept.values, free_kept.bytes + CACHE),
+        "the old cache, once"
+    );
+    assert_eq!(evicted.values, free_evicted.values);
+    assert_eq!(
+        evicted.bytes,
+        free_evicted.bytes + CACHE + NEXT_CACHE,
+        "the old cache, then the installed one"
+    );
 }

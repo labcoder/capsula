@@ -13,8 +13,10 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use kumochi_protocol::constants::{BRAIN_EXE, SHELL_EXE};
+use windows::Wdk::System::Threading::{NtQueryInformationProcess, ProcessCommandLineInformation};
 use windows::Win32::Foundation::{
-    ERROR_NO_MORE_FILES, FILETIME, HANDLE, HWND, LPARAM, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
+    ERROR_NO_MORE_FILES, FILETIME, HANDLE, HLOCAL, HWND, LPARAM, LocalFree, UNICODE_STRING,
+    WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
 };
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
@@ -26,11 +28,14 @@ use windows::Win32::System::Threading::{
     WaitForSingleObject,
 };
 use windows::Win32::System::WindowsProgramming::{QueryProcessCycleTime, QueryThreadCycleTime};
+use windows::Win32::UI::Shell::CommandLineToArgvW;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, WM_CLOSE,
 };
-use windows::core::BOOL;
+use windows::core::{BOOL, PCWSTR};
 
+#[cfg(test)]
+mod command_line_tests;
 pub(crate) mod gate_capture;
 pub(crate) mod gate_pipe;
 pub(crate) mod input_session;
@@ -129,6 +134,92 @@ pub(crate) fn processes() -> Result<Vec<Entry>> {
         next = unsafe { Process32NextW(HANDLE(snapshot.as_raw_handle()), &raw mut entry) };
     }
     Ok(entries)
+}
+
+pub(crate) fn helper_role(pid: u32) -> Result<&'static str> {
+    command_role(&process_command_line(pid)?)
+}
+
+fn process_command_line(pid: u32) -> Result<Vec<u16>> {
+    let process = Process::open(pid)?;
+    anyhow::ensure!(
+        process.exit_code()?.is_none(),
+        "product helper already exited"
+    );
+    let mut buffer =
+        vec![0usize; (size_of::<UNICODE_STRING>() + 65_536).div_ceil(size_of::<usize>())];
+    let capacity = size_of_val(buffer.as_slice());
+    let mut written = 0;
+    // SAFETY: the live query handle and aligned writable buffer cover the supplied byte capacity.
+    let status = unsafe {
+        NtQueryInformationProcess(
+            HANDLE(process.handle.as_raw_handle()),
+            ProcessCommandLineInformation,
+            buffer.as_mut_ptr().cast(),
+            u32::try_from(capacity)?,
+            &raw mut written,
+        )
+    };
+    let written = usize::try_from(written)?;
+    anyhow::ensure!(
+        status.is_ok() && written >= size_of::<UNICODE_STRING>() && written <= capacity,
+        "product helper command-line query failed"
+    );
+    // SAFETY: the successful query initialized at least one aligned UNICODE_STRING in this buffer.
+    let header = unsafe { buffer.as_ptr().cast::<UNICODE_STRING>().read() };
+    let offset = header
+        .Buffer
+        .0
+        .addr()
+        .checked_sub(buffer.as_ptr().addr())
+        .context("invalid command-line buffer")?;
+    let length = usize::from(header.Length);
+    let end = offset
+        .checked_add(length)
+        .context("invalid command-line length")?;
+    anyhow::ensure!(
+        offset >= size_of::<UNICODE_STRING>()
+            && offset.is_multiple_of(2)
+            && length.is_multiple_of(2)
+            && end <= written,
+        "invalid command-line buffer"
+    );
+    // SAFETY: initialized usize storage is aligned for u16 and all u16 bit patterns are valid.
+    let units = unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u16>(), capacity / 2) };
+    let mut line = units[offset / 2..end / 2].to_vec();
+    anyhow::ensure!(
+        !line.contains(&0) && process.exit_code()?.is_none(),
+        "invalid or exited product helper command line"
+    );
+    line.push(0);
+    Ok(line)
+}
+
+fn command_role(line: &[u16]) -> Result<&'static str> {
+    anyhow::ensure!(line.last() == Some(&0), "unterminated helper command line");
+    let mut count = 0;
+    // SAFETY: the native reader supplies a live UTF-16 buffer with a terminating NUL.
+    let args = unsafe { CommandLineToArgvW(PCWSTR(line.as_ptr()), &raw mut count) };
+    anyhow::ensure!(!args.is_null(), "product helper argument parsing failed");
+    let role = if count == 2 {
+        // SAFETY: CommandLineToArgvW returned an allocation containing exactly two argument pointers.
+        let pointers = unsafe { std::slice::from_raw_parts(args, 2) };
+        // SAFETY: each returned argument points to a NUL-terminated string in the live allocation.
+        let argument = unsafe { pointers[1].as_wide() };
+        if "--screen".encode_utf16().eq(argument.iter().copied()) {
+            Some("screen-worker")
+        } else if "--speech".encode_utf16().eq(argument.iter().copied()) {
+            Some("speech-worker")
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    // SAFETY: this is the allocation returned by CommandLineToArgvW, freed once after its last use.
+    let freed = unsafe { LocalFree(Some(HLOCAL(args.cast()))) };
+    anyhow::ensure!(freed.0.is_null(), "helper argument cleanup failed");
+    role.context("unrecognized product helper role")
 }
 
 pub(crate) fn launch(

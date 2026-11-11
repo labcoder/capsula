@@ -2,7 +2,7 @@ use std::f32::consts::{FRAC_PI_4, TAU};
 
 use gpui_kit::{Path, PathBuilder, Pixels, Point, point, px};
 use kumochi_scene::{
-    Text,
+    Handle, Text,
     display::{
         BUILD_VERTEX_LIMIT, Contour, FILL_VERTEX_LIMIT, Paint, PaintWork, Prim, TextStyle,
         corner_segments, crossings,
@@ -11,6 +11,7 @@ use kumochi_scene::{
     record::{Align, Rgb},
 };
 
+use super::super::paint_cache::PaintScene;
 use super::{BuildError, Strokes, paths, rounded};
 
 fn ink() -> Paint {
@@ -911,4 +912,141 @@ fn a_pentagram_fills_its_centre_nonzero() {
     );
     assert!(covers(&path, Vec2::new(8.0, 0.0)), "a tip winds once");
     assert!(!covers(&path, Vec2::new(9.0, 9.0)), "outside the star");
+}
+
+/// The lyon logging child, as libtest names it.
+const LYON_LOGGING_CHILD: &str = "presence::paint_paths::tests::lyon_logging_child";
+
+/// Builds today's static fill, the same fill staged and placed by the paint cache, and the rect
+/// fallbacks (background, ring, sector) at sentinel coordinates, for a parent that set
+/// `LYON_FORCE_LOGGING` and reads everything this prints.
+#[test]
+#[ignore = "the child process of lyon_logging_is_compiled_out"]
+fn lyon_logging_child() {
+    let watchdog = std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(10));
+        std::process::exit(124);
+    });
+    drop(watchdog);
+    const {
+        assert!(
+            cfg!(debug_assertions),
+            "the child runs with the application's debug assertions on"
+        );
+    }
+    let at = |x: f32, y: f32| Vec2::new(4_321.25 + x, 4_321.25 + y);
+    let star = Prim::Fill {
+        points: (0..5_u8)
+            .map(|i| {
+                let angle = TAU * f32::from(i * 2 % 5) / 5.0;
+                at(angle.cos() * 10.0, angle.sin() * 10.0)
+            })
+            .collect(),
+        color: ink(),
+    };
+    let rect = Prim::Rect {
+        rect: Rect {
+            origin: at(0.0, 0.0),
+            size: Vec2::new(40.0, 24.0),
+        },
+        radius: 6.0,
+        fill: Some(ink()),
+        border: Some((ink(), 4.0)),
+    };
+    let turned = Affine::pose(1.0, 0.3, Vec2::new(0.0, 0.0));
+    let mut scratch = super::super::paint_stroke::Scratch::new();
+    let fallback = [1.0, 0.5].map(|draw| {
+        super::super::paint_geometry::paths(&mut scratch, &rect, turned, draw, 0.0)
+            .map(|paths| paths.into_iter().flatten().count())
+    });
+    assert_eq!(
+        fallback,
+        [Ok(2), Ok(2)],
+        "transient fallback keeps logging compiled out"
+    );
+    let built = [
+        paths(&star, Affine::default(), 1.0, 0.0),
+        paths(&rect, turned, 1.0, 0.0),
+        paths(&rect, turned, 0.5, 0.0),
+    ]
+    .map(|result| result.map(|list| list.len()));
+    assert_eq!(
+        built,
+        [Ok(1), Ok(2), Ok(2)],
+        "the star; the background and ring; the background and sector"
+    );
+    let handle = Handle::new(1, 0).expect("a handle");
+    let staged = PaintScene::of(handle, std::slice::from_ref(&star));
+    assert!(
+        matches!(staged.fill(handle, 0, turned), Ok(Some(_))),
+        "the star staged as the paint cache stages a view's fills"
+    );
+}
+
+/// Whether `line` is libtest's summary for exactly one passed test.
+fn one_passed(line: &str) -> bool {
+    let Some(rest) =
+        line.strip_prefix("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; ")
+    else {
+        return false;
+    };
+    let Some((filtered, time)) = rest.split_once(" filtered out; finished in ") else {
+        return false;
+    };
+    let Some((whole, fraction)) = time.strip_suffix('s').and_then(|time| time.split_once('.'))
+    else {
+        return false;
+    };
+    [filtered, whole, fraction]
+        .iter()
+        .all(|digits| !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+/// lyon's debug build prints every point it fills while `LYON_FORCE_LOGGING` is set. The
+/// workspace builds `lyon_tessellation` without debug assertions in supported profiles, so a debug
+/// child with the variable set writes libtest's own framing and nothing else.
+#[test]
+fn lyon_logging_is_compiled_out() {
+    use std::os::windows::process::CommandExt as _;
+
+    let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            LYON_LOGGING_CHILD,
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("LYON_FORCE_LOGGING", "1")
+        .creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0)
+        .output()
+        .expect("the child test process runs");
+    assert!(output.status.success(), "the child builds every fill");
+    assert!(
+        output.stderr.is_empty(),
+        "the child wrote {} bytes to stderr",
+        output.stderr.len()
+    );
+    let Ok(stdout) = String::from_utf8(output.stdout) else {
+        panic!("the child's stdout isn't UTF-8");
+    };
+    let name = format!("test {LYON_LOGGING_CHILD} ... ok");
+    let expected = ["", "running 1 test", name.as_str(), "", "", "", ""];
+    let lines: Vec<&str> = stdout.split('\n').collect();
+    let unexpected = lines
+        .iter()
+        .enumerate()
+        .filter(|&(index, line)| {
+            if index == 4 {
+                !one_passed(line)
+            } else {
+                expected.get(index) != Some(line)
+            }
+        })
+        .count();
+    assert_eq!(
+        (unexpected, lines.len()),
+        (0, expected.len()),
+        "unexpected child stdout lines, and the child's line count"
+    );
 }

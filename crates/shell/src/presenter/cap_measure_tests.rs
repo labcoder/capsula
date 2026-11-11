@@ -8,7 +8,7 @@ use kumochi_scene::{
     display::{MeasureError, TextMeasure, TextStyle},
 };
 
-use super::{LIVE, Shaper, begin, commit, controls, failed, live, only_job, step};
+use super::{Charged, LIVE, Shaper, begin, commit, controls, failed, live, only_job, step};
 
 pub(crate) fn drawing(iteration: usize, extra_labels: usize) -> Step {
     let source = format!(
@@ -256,7 +256,10 @@ fn window_residency(measure: &mut dyn TextMeasure) -> usize {
                 .consume_ready(id, index, now, 0, 0)
                 .expect("ready head");
             assert_eq!(consumed.step.step().index, index);
-            presenter.frames.borrow_mut().replaced(id);
+            presenter
+                .frames
+                .borrow_mut()
+                .replaced(id, Box::new(Charged(0)));
             let scene = presenter.scenes.get_mut(&id).expect("scene");
             scene.view = SceneView::new(&scene.rest, scene.state.view().activated());
             scene.view_bytes = scene.view.resident_bytes();
@@ -282,7 +285,7 @@ fn window_residency(measure: &mut dyn TextMeasure) -> usize {
         assert_eq!((scene.ready.len(), scene.queue.len()), (0, 0));
     }
     let mut items = 0;
-    assert!(!presenter.frames.borrow().paint(|frame| {
+    assert!(!presenter.frames.borrow().paint(|frame, _| {
         items += frame.items().len();
         Ok::<_, std::fmt::Error>(())
     }));
@@ -362,7 +365,7 @@ fn disposal_fixture() -> (super::Presenter, Instant) {
 fn the_disposal_fixture_really_retains_1500_objects_across_four_scenes() {
     let (mut presenter, now) = disposal_fixture();
     let mut items = 0;
-    assert!(!presenter.frames.borrow().paint(|frame| {
+    assert!(!presenter.frames.borrow().paint(|frame, _| {
         items += frame.items().len();
         Ok::<_, std::fmt::Error>(())
     }));

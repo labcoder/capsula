@@ -1,5 +1,5 @@
 use super::*;
-use crate::coordinator::{Coordinator, Effect};
+use crate::coordinator::{BuildKey, Coordinator, Effect};
 use crate::dispatch::{Caller, Dispatch, ToolError, ToolOutput};
 use crate::engines::{CallId, Finish, Opaque, ToolName, TurnEvent};
 use crate::recall::Selection;
@@ -13,9 +13,11 @@ const SOURCE: ThreadId = ThreadId(2);
 #[test]
 fn a_real_read_call_ends_its_stamp_wait_on_cancellation_and_deadline() {
     for expired in [false, true] {
-        let (_scratch, running, mut core) = active("history-stamp-ending", "small", Prior::Empty);
+        let (_scratch, running, mut core, key) =
+            active("history-stamp-ending", "small", Prior::Empty);
         let mut reads = calls(
             &mut core,
+            key,
             1,
             ToolName::ReadHistory,
             r#"{"task":2,"from":1,"to":1}"#,
@@ -47,7 +49,8 @@ fn a_real_read_call_ends_its_stamp_wait_on_cancellation_and_deadline() {
 
 #[test]
 fn actual_model_builds_refuse_create_and_focus_without_a_commit_or_tool_row() {
-    let (scratch, running, mut core) = active("history-offer-refusals", "small", Prior::Empty);
+    let (scratch, running, mut core, _key) =
+        active("history-offer-refusals", "small", Prior::Empty);
     for (name, id, args) in [
         (
             ToolName::CreateTask,
@@ -101,7 +104,7 @@ fn recorded(scratch: &Scratch) -> (i64, i64) {
     )
 }
 
-fn active(name: &str, text: &str, prior: Prior) -> (Scratch, Running, Coordinator) {
+fn active(name: &str, text: &str, prior: Prior) -> (Scratch, Running, Coordinator, BuildKey) {
     active_on(name, text, prior, MAIN)
 }
 
@@ -110,7 +113,7 @@ fn active_on(
     text: &str,
     prior: Prior,
     thread: ThreadId,
-) -> (Scratch, Running, Coordinator) {
+) -> (Scratch, Running, Coordinator, BuildKey) {
     let scratch = Scratch::new(name);
     let mut store = Store::open(&scratch.db()).unwrap();
     store.recover().unwrap();
@@ -139,6 +142,7 @@ fn active_on(
     let [Effect::Store(StoreOp::BuildContext(build))] = effects.as_slice() else {
         panic!("build: {effects:?}");
     };
+    let key = build.key;
     let mut build = build.clone();
     build.snapshot = Some(RunSnapshot {
         origin: if thread == MAIN {
@@ -169,11 +173,12 @@ fn active_on(
         }
     );
     core.handle(reply).unwrap();
-    (scratch, running, core)
+    (scratch, running, core, key)
 }
 
 fn calls(
     core: &mut Coordinator,
+    key: BuildKey,
     count: u32,
     name: ToolName,
     args: &str,
@@ -188,7 +193,7 @@ fn calls(
         let item = Opaque::new(serde_json::json!({ "type": "function_call", "call_id": call.as_str(), "name": wire, "arguments": args }).to_string().into_bytes()).unwrap();
         assert_eq!(
             core.handle(Input::Engine {
-                run: R,
+                key,
                 event: TurnEvent::OutputItem { index: n, item }
             }),
             Ok(Vec::new())
@@ -203,11 +208,11 @@ fn calls(
                 args: args.into(),
             },
         ] {
-            assert_eq!(core.handle(Input::Engine { run: R, event }), Ok(Vec::new()));
+            assert_eq!(core.handle(Input::Engine { key, event }), Ok(Vec::new()));
         }
     }
     core.handle(Input::Engine {
-        run: R,
+        key,
         event: TurnEvent::Finished(Finish::Completed),
     })
     .unwrap()
@@ -226,9 +231,11 @@ fn sixteen_real_reads_end_in_budget_without_dropping_results_or_failing_the_stor
         "界".repeat(14 * 1024),
         "\"\\\u{1}".repeat(14 * 1024),
     ] {
-        let (scratch, running, mut core) = active("history-sixteen-budget", &text, Prior::Empty);
+        let (scratch, running, mut core, key) =
+            active("history-sixteen-budget", &text, Prior::Empty);
         let reads = calls(
             &mut core,
+            key,
             16,
             ToolName::ReadHistory,
             r#"{"task":2,"from":1,"to":1}"#,
@@ -298,13 +305,13 @@ fn sixteen_real_reads_end_in_budget_without_dropping_results_or_failing_the_stor
 
 #[test]
 fn two_barriers_fence_late_success_after_a_calling_source_delete_without_a_tool_row() {
-    let (scratch, running, mut core) = active(
+    let (scratch, running, mut core, key) = active(
         "history-late-source-delete",
         "needle B private",
         Prior::Reference,
     );
     let args = r#"{"query":"nonmatching"}"#;
-    let mut reads = calls(&mut core, 1, ToolName::SearchHistory, args);
+    let mut reads = calls(&mut core, key, 1, ToolName::SearchHistory, args);
     let call = reads.pop().unwrap();
     let release_read = gate(&running.read_gates, |op| matches!(op, StoreOp::ReadCall(_)));
     let release_delete = gate(&running.gates, |op| matches!(op, StoreOp::Delete { .. }));

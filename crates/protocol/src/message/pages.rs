@@ -100,6 +100,11 @@ pub enum PageEventKind {
     },
     /// Kumo's note that a task was deleted. Its text is empty: the note keeps no title.
     TaskDeleted,
+    /// The stored drawing is not reconstructed in history; this is not a live scene failure.
+    NoVisual {
+        /// The scene identified by the stored step, not a provider call id.
+        scene: super::SceneId,
+    },
 }
 
 /// An event as the thread panel reads it.
@@ -132,6 +137,66 @@ impl fmt::Debug for PageEvent {
 mod tests {
     use super::*;
     use crate::message::{DataToBrain, DataToShell, Effort, ModelSlug, ThreadOp};
+
+    #[test]
+    fn history_unavailable_appends_its_tag_and_round_trips_a_bounded_page() {
+        use crate::frame::{self, Pipe};
+        use crate::message::{ControlToShell, DraftId, SceneId};
+
+        for (tag, kind) in [
+            PageEventKind::User,
+            PageEventKind::AssistantText,
+            PageEventKind::SceneStep,
+            PageEventKind::Issue { draft: DraftId(9) },
+            PageEventKind::TaskDeleted,
+            PageEventKind::NoVisual {
+                scene: SceneId(u64::MAX),
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(
+                usize::from(postcard::to_allocvec(&kind).expect("encodes")[0]),
+                tag
+            );
+        }
+        assert_eq!(
+            postcard::to_allocvec(&ControlToShell::NoVisual { run: RunId(1) })
+                .expect("legacy control")[0],
+            10
+        );
+        let page = DataToShell::Page {
+            request: u32::MAX,
+            thread: ThreadId(u64::MAX),
+            events: vec![
+                PageEvent {
+                    id: EventId(u64::MAX),
+                    run: Some(RunId(u64::MAX)),
+                    kind: PageEventKind::NoVisual {
+                        scene: SceneId(u64::MAX)
+                    },
+                    text: String::new(),
+                    cut: false,
+                };
+                crate::message::MAX_PAGE_ROWS
+            ],
+            before: Some(EventId(u64::MAX)),
+        };
+        let encoded = frame::encode(&page, Pipe::Data).expect("bounded Page frame");
+        assert_eq!(
+            encoded.len(),
+            frame::HEADER_LEN + 1 + 5 + 10 + 1 + 50 * 34 + 11
+        );
+        assert!(
+            encoded.len() <= crate::message::MAX_PAGE_BYTES,
+            "the new scene identity is charged within the page frame cap"
+        );
+        assert_eq!(
+            frame::read::<DataToShell>(&mut encoded.as_slice(), Pipe::Data).expect("decoded Page"),
+            Some(page)
+        );
+    }
 
     #[test]
     fn page_debug_never_contains_search_titles_or_text() {

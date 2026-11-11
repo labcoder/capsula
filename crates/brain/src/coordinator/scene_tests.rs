@@ -254,7 +254,8 @@ fn next_run_starts_clean(core: &mut Coordinator, effects: &mut Vec<Effect>) {
     };
     effects.extend(core.handle(turn).expect("a turn is never stale"));
     effects.extend(super::admit(core, next));
-    for input in [engine(next, draw_call()), engine(next, delta("z"))] {
+    let key = super::engine_key(core, next);
+    for input in [engine(key, draw_call()), engine(key, delta("z"))] {
         effects.extend(core.handle(input).expect("the new run is current"));
     }
     assert_eq!(written(effects), ["a", "z"], "b and c never leak");
@@ -505,8 +506,11 @@ fn a_scene_both_kept_and_cleared_counts_once_and_both_writes_retire() {
         draw_step(&mut core, R, label).expect("current");
         core.handle(ack(index, label)).expect("current");
     }
-    core.handle(engine(R, TurnEvent::Finished(Finish::Completed)))
-        .expect("current");
+    core.handle(engine(
+        super::engine_key(&core, R),
+        TurnEvent::Finished(Finish::Completed),
+    ))
+    .expect("current");
     core.handle(Input::RunStored { run: R }).expect("ending");
     let stop = Input::Stop {
         run: R,

@@ -46,7 +46,6 @@ impl Coordinator {
         {
             run.ledger.refused(&done.key, ToolError::Ended);
             if !voided.is_empty() {
-                run.tools.drop_round();
                 run.unstored.clear();
                 effects.push(Effect::CancelEngine { run: done.key.run });
                 self.rebuild(done.build, &voided, &pending, effects);
@@ -91,6 +90,16 @@ impl Coordinator {
         args: &[u8],
         effects: &mut Vec<Effect>,
     ) -> Dispatch {
+        self.tool_input(caller, tool, dispatch::CallInput::Complete(args), effects)
+    }
+
+    pub(super) fn tool_input(
+        &mut self,
+        caller: Caller,
+        tool: ToolName,
+        input: dispatch::CallInput<'_>,
+        effects: &mut Vec<Effect>,
+    ) -> Dispatch {
         let ended = Dispatch::Answered(ToolOutput::Error(ToolError::Ended));
         let pending = self.pending_deletes();
         let Some(thread) = self.current.as_ref().map(|current| current.thread) else {
@@ -114,12 +123,25 @@ impl Coordinator {
         let voided = build.voided(build.sources());
         if !voided.is_empty() {
             let key = build.key();
-            run.tools.drop_round();
             run.unstored.clear();
             effects.push(Effect::CancelEngine { run: key.run });
             self.rebuild(key, &voided, &pending, effects);
             return ended;
         }
+        if matches!(
+            input,
+            dispatch::CallInput::Draw(dispatch::DrawAction::Start)
+        ) && !self.drawing_available()
+        {
+            return Dispatch::Joined;
+        }
+        let run = self
+            .current(caller.run())
+            .expect("the resolved run remains current");
+        let build = run
+            .build
+            .as_ref()
+            .expect("the admitted build remains current");
         let mut ctx = RunCtx {
             build: build.key(),
             end: run.control.0.end,
@@ -132,48 +154,14 @@ impl Coordinator {
             mcp: run.mcp,
             ledger: &mut run.ledger,
         };
-        match dispatch::call(&mut ctx, caller, tool, args) {
+        match dispatch::call(&mut ctx, caller, tool, input) {
             Step::Answer(output) => Dispatch::Answered(output),
             Step::Join => Dispatch::Joined,
             Step::Read(call) => {
                 effects.push(Effect::Store(StoreOp::ReadCall(call)));
                 Dispatch::Committing
             }
-            Step::Screen { key, draw } => {
-                if !self.drawing_available() {
-                    self.drawn(&key, ToolOutput::Error(ToolError::NotHere), effects);
-                    return Dispatch::Committing;
-                }
-                let current = self.current.as_mut().expect("the resolved run is current");
-                if current.draw_calls.len()
-                    > usize::try_from(super::MAX_CALLS).expect("the call budget fits usize")
-                {
-                    self.drawn(&key, ToolOutput::Error(ToolError::TooLarge), effects);
-                    return Dispatch::Committing;
-                }
-                let call =
-                    crate::engines::CallId::new(&format!("draw-{}", current.draw_calls.len()))
-                        .expect("a bounded host-generated ASCII id");
-                current.draw_calls.push((call.clone(), key.clone()));
-                let input = match draw {
-                    Ok(draw) => crate::drawing::Input::Call {
-                        thread,
-                        run: key.run,
-                        call,
-                        args: draw.args,
-                    },
-                    Err(error) => crate::drawing::Input::Rejected {
-                        thread,
-                        run: key.run,
-                        call,
-                        error,
-                    },
-                };
-                if self.drawing_input(input, effects).is_err() {
-                    self.drawn(&key, ToolOutput::Error(ToolError::Ended), effects);
-                }
-                Dispatch::Committing
-            }
+            Step::Screen { key, draw } => self.drawing_call(thread, &key, draw, effects),
             Step::Commit(call) => {
                 // Advanced at dispatch: a candidate whose reserve never commits was never seen.
                 if let LocalWrite::CreateTask { thread, .. } = &call.write {
@@ -277,6 +265,17 @@ impl Coordinator {
 /// whose launch is no longer the authorized one gets nothing.
 fn deliver(run: &mut Run, answers: Vec<(Caller, ToolOutput)>) {
     for (caller, output) in answers {
+        if let Caller::Model { call, .. } = &caller
+            && run.provider_calls.contains(call)
+        {
+            if run
+                .tools
+                .provider_registered(call, run.build.as_ref().map(super::admission::Build::key))
+            {
+                run.tools.answer(call, output);
+            }
+            continue;
+        }
         let taken = match &caller {
             Caller::Model { call, .. } => run.tools.answer(call, output.clone()),
             Caller::Mcp { launch, .. } if run.mcp == Some(*launch) => false,

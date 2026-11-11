@@ -306,24 +306,49 @@ impl Presence {
 
     /// One frame callback: the pacer first, so a skipped frame does no animation work.
     fn frame(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if let Err(error) = self.frame_at(Instant::now(), window, cx) {
+            tracing::error!(%error, "scene frame update failed");
+        }
+    }
+
+    pub(super) fn frame_at(
+        &mut self,
+        now: Instant,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), super::OpenError> {
+        let mut updated = Ok(());
         let cap = self
             .settings
             .read(cx)
             .view()
             .map(|view| view.max_frame_rate)
             .unwrap_or_default();
-        let wanted = match self
-            .frames
-            .frame(Instant::now(), cap, window.refresh_interval(cx))
-        {
+        let wanted = match self.frames.frame(now, cap, window.refresh_interval(cx)) {
             None => true,
-            Some(dt) => self.kumo.update(cx, |kumo, cx| kumo.step(dt, window, cx)),
+            Some(dt) => {
+                let kumo = self.kumo.update(cx, |kumo, cx| kumo.step(dt, window, cx));
+                let scenes = self.draw_changed_at(now, cx);
+                let panel = if self.text_open() {
+                    super::EscapePanel::Open
+                } else {
+                    super::EscapePanel::Closed
+                };
+                let activity = Self::activity_at(&self.runs, panel, &self.presenter, now);
+                if self.activity.working != activity.working
+                    || self.activity.drawing != activity.drawing
+                {
+                    updated = self.runs_changed_in(Some(&mut *window), now, cx);
+                }
+                kumo || (scenes && updated.is_ok())
+            }
         };
         if wanted {
             on_next_frame(window, cx.weak_entity(), Self::frame);
         } else {
             self.frames.idle();
         }
+        updated
     }
 }
 

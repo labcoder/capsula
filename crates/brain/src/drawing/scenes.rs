@@ -45,6 +45,7 @@ impl Drawing {
             scene,
             admitted,
             step,
+            interrupted,
             ..
         } = write;
         let begun = matches!(scene, Pend::New(_));
@@ -53,6 +54,9 @@ impl Drawing {
                 let Some(at) = self.live(scene) else {
                     // Cleared meanwhile, but the step is durable, so it spends the run's budget.
                     self.drew(run, &call, scene, &step);
+                    if let Some(error) = interrupted {
+                        self.finish(run, &call, Some(error), out);
+                    }
                     return;
                 };
                 at
@@ -91,6 +95,9 @@ impl Drawing {
         self.drew(run, &call, scene, &step);
         if begun {
             self.began(thread, scene, out);
+        }
+        if let Some(error) = interrupted {
+            self.finish(run, &call, Some(error), out);
         }
     }
 

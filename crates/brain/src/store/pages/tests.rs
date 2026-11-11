@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use super::*;
+use crate::drawing::{Reply, Target, Write};
 use crate::store::{Cancel, EventKind, NewEvent, RunEnd, Store, Swap, purge};
 use crate::test_support::Scratch;
 
@@ -646,4 +647,516 @@ fn kumos_page_shows_a_deleted_tasks_note_beside_its_messages() {
         ]
     );
     assert_eq!(before, None);
+}
+
+fn typed_scene(store: &mut Store, thread: ThreadId, run: RunId) -> SceneId {
+    let header = serde_json::from_value(serde_json::json!({
+        "begin": {"v":1,"scene":"history","surface":"overlay","alt":"private drawing alt"},
+        "layout_version":1
+    }))
+    .expect("header");
+    let step = Arc::new(
+        serde_json::from_value(serde_json::json!({
+            "id":"first","say":"private drawing text",
+            "put":[{"shape":{"id":"box","kind":"rect","box":[0,0,10,10]}}]
+        }))
+        .expect("step"),
+    );
+    let Reply::Step(scene) = store
+        .drawing_write(&Write::Step {
+            thread,
+            run,
+            target: Target::New(header),
+            revision: 1,
+            layout_version: 1,
+            step,
+        })
+        .expect("typed write")
+    else {
+        panic!("step reply")
+    };
+    scene
+}
+
+fn history_event(id: u64, kind: PageEventKind, text: &str) -> PageEvent {
+    PageEvent {
+        id: EventId(id),
+        run: Some(RunId(1)),
+        kind,
+        text: text.to_owned(),
+        cut: false,
+    }
+}
+
+#[test]
+fn typed_history_keeps_exact_identity_neighboring_text_and_raw_cursor() {
+    let scratch = Scratch::new("pages-typed-history");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let (thread, run) = (ThreadId(1), RunId(1));
+    store
+        .begin_turn(thread, Some("title"), run, "oldest")
+        .expect("turn");
+    store
+        .append(
+            thread,
+            run,
+            &[NewEvent {
+                kind: EventKind::AssistantText,
+                text: Some("neighbor"),
+                body: None,
+            }],
+        )
+        .expect("neighbor");
+    let scene = typed_scene(&mut store, thread, run);
+    assert_eq!(scene, SceneId(3));
+    store
+        .append(
+            thread,
+            run,
+            &[NewEvent {
+                kind: EventKind::AssistantText,
+                text: Some("newer"),
+                body: None,
+            }; 48],
+        )
+        .expect("newer rows");
+
+    let reply = events(&store, thread, None);
+    let encoded = frame::encode(&reply, Pipe::Data).expect("frame");
+    assert!(encoded.len() <= MAX_PAGE_BYTES);
+    for private in ["private drawing alt", "private drawing text"] {
+        assert!(
+            !encoded
+                .windows(private.len())
+                .any(|bytes| bytes == private.as_bytes())
+        );
+    }
+    let DataToShell::Page {
+        request,
+        thread: returned,
+        events: rows,
+        before,
+    } = reply
+    else {
+        panic!("page")
+    };
+    assert_eq!(request, u32::MAX);
+    assert_eq!(returned, thread);
+    let mut expected: Vec<_> = (5..=52)
+        .rev()
+        .map(|id| history_event(id, PageEventKind::AssistantText, "newer"))
+        .collect();
+    expected.push(history_event(4, PageEventKind::NoVisual { scene }, ""));
+    expected.push(history_event(2, PageEventKind::AssistantText, "neighbor"));
+    assert_eq!(rows, expected);
+    assert_eq!(before, Some(EventId(2)));
+    let DataToShell::Page {
+        request,
+        thread: returned,
+        events: rows,
+        before,
+    } = events(&store, thread, before)
+    else {
+        panic!("continued page")
+    };
+    assert_eq!(request, u32::MAX);
+    assert_eq!(returned, thread);
+    assert_eq!(rows, [history_event(1, PageEventKind::User, "oldest")]);
+    assert_eq!(before, None);
+}
+
+#[test]
+fn unavailable_visual_metadata_is_row_local_without_coercing_scene_identity() {
+    let scratch = Scratch::new("pages-legacy-visuals");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let (thread, run) = (ThreadId(1), RunId(1));
+    store
+        .begin_turn(thread, Some("title"), run, "oldest")
+        .expect("turn");
+    let scene = typed_scene(&mut store, thread, run);
+    assert_eq!(scene, SceneId(2));
+    let bodies = [
+        None,
+        Some(""),
+        Some("{"),
+        Some("[]"),
+        Some("null"),
+        Some("2"),
+        Some("{}"),
+        Some(r#"{"scene":null}"#),
+        Some(r#"{"scene":true}"#),
+        Some(r#"{"scene":false}"#),
+        Some(r#"{"scene":"2"}"#),
+        Some(r#"{"scene":2.0}"#),
+        Some(r#"{"scene":2e0}"#),
+        Some(r#"{"scene":0}"#),
+        Some(r#"{"scene":-2}"#),
+        Some(r#"{"scene":9223372036854775808}"#),
+        Some(r#"{"scene":18446744073709551616}"#),
+        Some(r#"{"scene":-9223372036854775809}"#),
+        Some(r#"{"scene":1e400}"#),
+        Some(r#"{"scene":[2]}"#),
+        Some(r#"{"scene":{"id":2}}"#),
+        Some(r#"{"scene":1}"#),
+        Some(r#"{"scene":3}"#),
+        Some(r#"{"scene":999}"#),
+    ];
+    let mut expected = vec![
+        history_event(1, PageEventKind::User, "oldest"),
+        history_event(3, PageEventKind::NoVisual { scene }, ""),
+    ];
+    for (index, body) in bodies.into_iter().enumerate() {
+        store
+            .append(
+                thread,
+                run,
+                &[NewEvent {
+                    kind: EventKind::SceneStep,
+                    text: Some("legacy text"),
+                    body,
+                }],
+            )
+            .expect("legacy row");
+        expected.push(history_event(
+            4 + u64::try_from(index).expect("index"),
+            PageEventKind::SceneStep,
+            "legacy text",
+        ));
+    }
+    store
+        .append(
+            thread,
+            run,
+            &[NewEvent {
+                kind: EventKind::AssistantText,
+                text: Some("newest neighbor"),
+                body: Some("{"),
+            }],
+        )
+        .expect("neighbor");
+    expected.push(history_event(
+        28,
+        PageEventKind::AssistantText,
+        "newest neighbor",
+    ));
+    expected.reverse();
+    let DataToShell::Page {
+        request,
+        thread: returned,
+        events: rows,
+        before,
+    } = events(&store, thread, None)
+    else {
+        panic!("page")
+    };
+    assert_eq!(request, u32::MAX);
+    assert_eq!(returned, thread);
+    assert_eq!(rows, expected);
+    assert_eq!(before, None);
+}
+
+#[test]
+fn visual_identity_requires_an_earlier_typed_begin_in_the_same_thread() {
+    let scratch = Scratch::new("pages-visual-identity");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let (thread, run) = (ThreadId(1), RunId(1));
+    store
+        .begin_turn(thread, Some("title"), run, "oldest")
+        .expect("turn");
+    let scene = typed_scene(&mut store, thread, run);
+    assert_eq!(scene, SceneId(2));
+    store
+        .begin_turn(ThreadId(2), Some("other"), RunId(2), "other")
+        .expect("other turn");
+    assert_eq!(typed_scene(&mut store, ThreadId(2), RunId(2)), SceneId(5));
+    store
+        .append(
+            thread,
+            run,
+            &[
+                NewEvent {
+                    kind: EventKind::SceneBegin,
+                    text: None,
+                    body: None,
+                },
+                NewEvent {
+                    kind: EventKind::SceneStep,
+                    text: Some("future scene"),
+                    body: Some(r#"{"scene":9}"#),
+                },
+                NewEvent {
+                    kind: EventKind::SceneBegin,
+                    text: None,
+                    body: Some("{}"),
+                },
+                NewEvent {
+                    kind: EventKind::SceneStep,
+                    text: Some("other thread"),
+                    body: Some(r#"{"scene":5}"#),
+                },
+                NewEvent {
+                    kind: EventKind::SceneStep,
+                    text: Some("missing header"),
+                    body: Some(r#"{"scene":7}"#),
+                },
+                NewEvent {
+                    kind: EventKind::AssistantText,
+                    text: Some("neighbor"),
+                    body: None,
+                },
+            ],
+        )
+        .expect("unusable references");
+    let DataToShell::Page {
+        events: rows,
+        before,
+        ..
+    } = events(&store, thread, None)
+    else {
+        panic!("page")
+    };
+    assert_eq!(
+        rows,
+        [
+            history_event(12, PageEventKind::AssistantText, "neighbor"),
+            history_event(11, PageEventKind::SceneStep, "missing header"),
+            history_event(10, PageEventKind::SceneStep, "other thread"),
+            history_event(8, PageEventKind::SceneStep, "future scene"),
+            history_event(3, PageEventKind::NoVisual { scene }, ""),
+            history_event(1, PageEventKind::User, "oldest"),
+        ]
+    );
+    assert_eq!(before, None);
+}
+
+#[test]
+fn visual_metadata_accepts_exactly_eight_mib_but_not_one_byte_over() {
+    let scratch = Scratch::new("pages-visual-body-bound");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let (thread, run) = (ThreadId(1), RunId(1));
+    store
+        .begin_turn(thread, Some("title"), run, "oldest")
+        .expect("turn");
+    let scene = typed_scene(&mut store, thread, run);
+    assert_eq!(scene, SceneId(2));
+    let mut body = r#"{"scene":2,"padding":""#.to_owned();
+    let padding = 8 * 1024 * 1024 - body.len() - 2;
+    body.push_str(&"é".repeat(padding / 2));
+    body.push_str("\"}");
+    assert_eq!(body.len(), 8 * 1024 * 1024);
+    store
+        .append(
+            thread,
+            run,
+            &[NewEvent {
+                kind: EventKind::SceneStep,
+                text: Some("at cap"),
+                body: Some(&body),
+            }],
+        )
+        .expect("at cap");
+    body.push(' ');
+    assert_eq!(body.len(), 8 * 1024 * 1024 + 1);
+    store
+        .append(
+            thread,
+            run,
+            &[
+                NewEvent {
+                    kind: EventKind::SceneStep,
+                    text: Some("over cap"),
+                    body: Some(&body),
+                },
+                NewEvent {
+                    kind: EventKind::AssistantText,
+                    text: Some("neighbor"),
+                    body: None,
+                },
+            ],
+        )
+        .expect("over cap and neighbor");
+    let DataToShell::Page {
+        request,
+        thread: returned,
+        events: rows,
+        before,
+    } = events(&store, thread, None)
+    else {
+        panic!("page")
+    };
+    assert_eq!(request, u32::MAX);
+    assert_eq!(returned, thread);
+    assert_eq!(
+        rows,
+        [
+            history_event(6, PageEventKind::AssistantText, "neighbor"),
+            history_event(5, PageEventKind::SceneStep, "over cap"),
+            history_event(4, PageEventKind::NoVisual { scene }, "at cap"),
+            history_event(3, PageEventKind::NoVisual { scene }, ""),
+            history_event(1, PageEventKind::User, "oldest"),
+        ]
+    );
+    assert_eq!(before, None);
+}
+
+#[test]
+fn invalid_visual_metadata_in_the_fifty_first_row_keeps_the_page_and_cursor() {
+    let scratch = Scratch::new("pages-invalid-lookahead");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let (thread, run) = (ThreadId(1), RunId(1));
+    store
+        .begin_turn(thread, Some("title"), run, "oldest")
+        .expect("turn");
+    store
+        .append(
+            thread,
+            run,
+            &[NewEvent {
+                kind: EventKind::SceneStep,
+                text: Some("legacy text"),
+                body: Some("{"),
+            }],
+        )
+        .expect("malformed metadata");
+    store
+        .append(
+            thread,
+            run,
+            &[NewEvent {
+                kind: EventKind::AssistantText,
+                text: Some("newer"),
+                body: None,
+            }; 50],
+        )
+        .expect("newer rows");
+    let DataToShell::Page {
+        request,
+        thread: returned,
+        events: rows,
+        before,
+    } = events(&store, thread, None)
+    else {
+        panic!("page")
+    };
+    assert_eq!(request, u32::MAX);
+    assert_eq!(returned, thread);
+    assert_eq!(
+        rows,
+        (3..=52)
+            .rev()
+            .map(|id| history_event(id, PageEventKind::AssistantText, "newer"))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(before, Some(EventId(3)));
+    let DataToShell::Page {
+        events: rows,
+        before,
+        ..
+    } = events(&store, thread, before)
+    else {
+        panic!("continued page")
+    };
+    assert_eq!(
+        rows,
+        [
+            history_event(2, PageEventKind::SceneStep, "legacy text"),
+            history_event(1, PageEventKind::User, "oldest"),
+        ]
+    );
+    assert_eq!(before, None);
+}
+
+#[test]
+fn visual_markers_participate_in_the_full_encoded_page_budget_and_continuation() {
+    let scratch = Scratch::new("pages-visual-budget");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let (thread, run) = (ThreadId(1), RunId(1));
+    store
+        .begin_turn(thread, Some("title"), run, "oldest")
+        .expect("turn");
+    let base = 1_u64 << 56;
+    store
+        .conn
+        .execute(
+            "UPDATE sqlite_sequence SET seq = ?1 WHERE name = 'events'",
+            [bounded_id(base - 1)],
+        )
+        .expect("large scene identity");
+    let scene = typed_scene(&mut store, thread, run);
+    assert_eq!(scene, SceneId(base));
+    let body = format!(r#"{{"scene":{base}}}"#);
+    let text = "event".repeat(200);
+    store
+        .append(
+            thread,
+            run,
+            &[NewEvent {
+                kind: EventKind::SceneStep,
+                text: Some(&text),
+                body: Some(&body),
+            }; 53],
+        )
+        .expect("markers");
+    let reply = events(&store, thread, None);
+    assert!(frame::encode(&reply, Pipe::Data).expect("frame").len() <= 32 * 1024);
+    let DataToShell::Page {
+        request,
+        events: rows,
+        before,
+        ..
+    } = reply
+    else {
+        panic!("page")
+    };
+    assert_eq!(request, u32::MAX);
+    assert_eq!(rows.len(), 31);
+    assert_eq!(
+        rows,
+        (base + 24..=base + 54)
+            .rev()
+            .map(|id| history_event(id, PageEventKind::NoVisual { scene }, &text))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(before, Some(EventId(base + 24)));
+    let next = events(&store, thread, before);
+    assert!(
+        frame::encode(&next, Pipe::Data)
+            .expect("continued frame")
+            .len()
+            <= 32 * 1024
+    );
+    let DataToShell::Page {
+        events: more,
+        before,
+        ..
+    } = next
+    else {
+        panic!("continued page")
+    };
+    let mut expected: Vec<_> = (base + 2..=base + 23)
+        .rev()
+        .map(|id| history_event(id, PageEventKind::NoVisual { scene }, &text))
+        .collect();
+    expected.push(history_event(
+        base + 1,
+        PageEventKind::NoVisual { scene },
+        "",
+    ));
+    expected.push(history_event(1, PageEventKind::User, "oldest"));
+    assert_eq!(more, expected);
+    assert_eq!(before, None);
+    let mut one_more = rows;
+    one_more.push(more[0].clone());
+    let over = DataToShell::Page {
+        request,
+        thread,
+        before: Some(EventId(base + 23)),
+        events: one_more,
+    };
+    assert!(
+        frame::encode(&over, Pipe::Data)
+            .expect("one more frame")
+            .len()
+            > 32 * 1024
+    );
 }

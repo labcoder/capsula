@@ -678,6 +678,167 @@ fn model_write_results_are_accepted_without_ending_the_link() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one existing pipe connection checks no-op controls between text and scene frames"
+)]
+fn legacy_no_visual_controls_are_no_ops_before_more_valid_traffic() {
+    use kumochi_protocol::message::{SceneHeader, SceneId};
+    use kumochi_scene::{Record, parse_record};
+
+    let link = attended("no-visual-advisory");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    for run in [RunId(0), RunId(2), RunId(u64::MAX), RunId(2)] {
+        frame::write(
+            &mut &link.control,
+            &ControlToShell::NoVisual { run },
+            Pipe::Control,
+        )
+        .expect("legacy advisory");
+    }
+    frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control).expect("ping");
+    assert_eq!(
+        frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control).expect("pong"),
+        Some(ControlToBrain::Pong)
+    );
+    frame::write(
+        &mut &link.control,
+        &run_state(2, ThreadId(3), Phase::Answering),
+        Pipe::Control,
+    )
+    .expect("normal run state");
+    assert!(matches!(
+        next(&events),
+        LinkEvent::RunState {
+            run: RunId(2),
+            thread: ThreadId(3),
+            phase: Phase::Answering,
+            error: None
+        }
+    ));
+    let text = DataToShell::AssistantText {
+        run: RunId(2),
+        delta: "still connected".into(),
+    };
+    frame::write(&mut &*link.data, &text, Pipe::Data).expect("text frame");
+    let LinkEvent::Data {
+        generation,
+        message,
+        bytes,
+    } = next(&events)
+    else {
+        panic!("only the normal text event");
+    };
+    assert_eq!(generation, session.generation());
+    assert_eq!(message, text);
+    assert_eq!(
+        usize::try_from(bytes).expect("text frame size"),
+        frame::encode(&text, Pipe::Data)
+            .expect("text encoding")
+            .len()
+    );
+    session.grant(bytes);
+    assert_eq!(
+        frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).expect("text credit"),
+        Some(DataToBrain::Credit { bytes })
+    );
+    let Record::Begin(begin) =
+        parse_record(br#"{"begin":{"v":1,"scene":"diagram","surface":"overlay","alt":"diagram"}}"#)
+            .expect("typed begin")
+    else {
+        panic!("begin");
+    };
+    let Record::Step(step) = parse_record(br#"{"step":{"id":"s1"}}"#).expect("typed step") else {
+        panic!("step");
+    };
+    for sent in [
+        DataToShell::SceneBegin {
+            scene: SceneId(7),
+            header: SceneHeader {
+                begin,
+                layout_version: 1,
+            },
+        },
+        DataToShell::SceneStepCommit {
+            run: RunId(2),
+            scene: SceneId(7),
+            index: 0,
+            step,
+        },
+        DataToShell::SceneEnd {
+            run: RunId(2),
+            scene: SceneId(7),
+            complete: true,
+        },
+    ] {
+        frame::write(
+            &mut &link.control,
+            &ControlToShell::NoVisual { run: RunId(2) },
+            Pipe::Control,
+        )
+        .expect("repeated advisory");
+        frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control).expect("ping");
+        assert_eq!(
+            frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control).expect("pong"),
+            Some(ControlToBrain::Pong)
+        );
+        frame::write(&mut &*link.data, &sent, Pipe::Data).expect("scene frame");
+        let LinkEvent::SceneData {
+            generation,
+            frame: message,
+            bytes,
+        } = next(&events)
+        else {
+            panic!("normal typed scene event, with no advisory event");
+        };
+        assert_eq!(generation, session.generation());
+        assert_eq!(*message, sent);
+        assert_eq!(
+            usize::try_from(bytes).expect("size"),
+            frame::encode(&sent, Pipe::Data).expect("frame").len()
+        );
+        session.grant(bytes);
+        assert_eq!(
+            frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).expect("scene credit"),
+            Some(DataToBrain::Credit { bytes })
+        );
+    }
+    let end = DataToShell::RunEnd { run: RunId(2) };
+    frame::write(&mut &*link.data, &end, Pipe::Data).expect("ordinary run end");
+    let LinkEvent::Data { message, bytes, .. } = next(&events) else {
+        panic!("run end");
+    };
+    assert_eq!(message, end);
+    assert_eq!(
+        usize::try_from(bytes).expect("end frame size"),
+        frame::encode(&end, Pipe::Data).expect("end encoding").len()
+    );
+    session.grant(bytes);
+    assert_eq!(
+        frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).expect("end credit"),
+        Some(DataToBrain::Credit { bytes })
+    );
+    drop(link.control);
+    assert!(link.link.join().expect("joined"));
+}
+
+#[test]
+fn no_visual_cannot_replace_the_authenticated_welcome() {
+    let (control, shell_control) = pair("no-visual-before-welcome");
+    frame::write(
+        &mut &control,
+        &ControlToShell::NoVisual { run: RunId(2) },
+        Pipe::Control,
+    )
+    .expect("unexpected first frame");
+    assert!(matches!(
+        welcome(&shell_control),
+        Err(super::LinkError::Rejected)
+    ));
+}
+
+#[test]
 fn staged_issue_controls_keep_the_link_and_cards_return_exact_credit() {
     use kumochi_protocol::message::{
         ActionState, ContentHash, DraftId, GitHubView, IssueBody, IssueCard, IssueRefused,

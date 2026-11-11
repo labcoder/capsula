@@ -70,9 +70,42 @@ the cap. They're short or occasional, so they're left until a profile shows them
 
 ## The drawing overlay
 
-The dock and the drawing overlay are separate windows with separate loops. The dock's animation
-runs on presence's `FrameLoop`, as above. The overlay (`presence/overlay.rs`) has no loop yet:
-its drawings rest, so it repaints once when a drawing appears, changes or clears, and arms no
-`on_next_frame` callback. A resting drawing costs no frames. Moving drawings (B6) will ask a
-loop of their own for frames, paced by the same Max frame rate, only while a scene view says
-it is animating.
+The dock and drawing overlay are separate windows sharing Presence's one `FrameLoop` and
+pacer. Each accepted frame steps Kumo and samples scene views at their own absolute clocks;
+the pacer's capped delta never becomes a drawing's lifetime clock. Only changed samples
+invalidate the overlay. Either client can keep the loop alive, and it idles when neither
+wants motion. Unchanged frames do not refresh the conversation panels.
+
+Advance, retained-frame sampling, scene motion demand and future-wake selection use one
+sampled Instant per owner update. The shared callback carries that sampled motion demand
+through its final rest decision. A wake already due when its task registers runs immediately
+to catch up the retained sample; a newer clock query cannot discard an unsampled boundary.
+The final pose is sampled before the loop rests.
+
+First visibility can require a fallback Stop when global Esc registration is refused. The
+callback passes its current panel Window through the ordinary activity/escape/placement
+path rather than reopening that held window's handle. Panel visibility commits only after
+placement/configuration succeeds. A refusal ends the current drawing connection, cancels
+preparation and scene wakes, disconnects its runs and empties the overlay through its existing
+finite hide path; the original error still reaches the caller. Esc and Stop flags follow that
+terminal activity without reattempting placement. The failed activity transition is not
+retried by animation frames. Only Kumo's independent demand can retain a callback after
+that failure. Run/conversation changes refresh the typing view separately from frame-only
+activity changes, so a retained actionable notice is not cloned on each frame. Selection and
+pull cancellation keep their existing precedence. No retry loop or per-frame defer is added.
+
+A future scene start or delayed entrance at rest uses the existing scene watchdog task,
+armed to the earliest preparation/recovery deadline or scene wake. While views animate,
+the shared frame callback advances them instead of adding a second timer loop. Every
+change recomputes demand; Stop, clear, disconnect and stale worker answers cannot restart
+halted motion. A resting static drawing asks for no more frames.
+
+Scene wakes are checked absolute additions to the adoption origin, not a fresh `now` plus
+a rounded remaining duration. Fractional-millisecond samples therefore preserve the same
+deadline and timer while Kumo moves. Overflow supplies no representable deadline and never
+marks pending work complete; connection and deadline identities fence stale callbacks.
+
+A first successful shown/nonempty paint requests one coalesced weak-owner defer, so its
+acknowledgement does not depend on a later frame or input. This is not a presentation
+timestamp. The one-off callback, effect-deque and control-queue allocations require measured
+bounds separately from steady-state painting; unchanged paints never rearm the notification.

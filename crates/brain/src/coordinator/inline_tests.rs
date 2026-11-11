@@ -177,12 +177,18 @@ fn a_summary_too_large_for_the_turn_is_rewritten_under_the_run_then_built_again(
     let mut core = compacting();
     assert_eq!(core.handle(ready(2)), Ok(granted(2)));
     assert_eq!(
-        core.handle(engine(R, TurnEvent::TextDelta(" Short".to_owned()))),
+        core.handle(engine(
+            super::engine_key(&core, R),
+            TurnEvent::TextDelta(" Short".to_owned())
+        )),
         Ok(Vec::new()),
         "the summary's text never reaches the shell"
     );
     assert_eq!(
-        core.handle(engine(R, TurnEvent::Finished(Finish::Completed))),
+        core.handle(engine(
+            super::engine_key(&core, R),
+            TurnEvent::Finished(Finish::Completed)
+        )),
         Ok(vec![store_summary(2, "Short")])
     );
     assert_eq!(core.handle(stored(2)), Ok(vec![rebuilt(3)]));
@@ -199,11 +205,17 @@ fn an_escaped_answer_is_cut_to_the_bytes_its_item_may_add() {
     let mut core = compacting();
     assert_eq!(core.handle(ready(2)), Ok(granted(2)));
     assert_eq!(
-        core.handle(engine(R, TurnEvent::TextDelta("\"".repeat(60)))),
+        core.handle(engine(
+            super::engine_key(&core, R),
+            TurnEvent::TextDelta("\"".repeat(60))
+        )),
         Ok(Vec::new())
     );
     assert_eq!(
-        core.handle(engine(R, TurnEvent::Finished(Finish::Completed))),
+        core.handle(engine(
+            super::engine_key(&core, R),
+            TurnEvent::Finished(Finish::Completed)
+        )),
         Ok(vec![store_summary(2, &"\"".repeat(50))]),
         "60 quotes escape to 120 bytes; 50 take the whole allowance of 100"
     );
@@ -215,7 +227,10 @@ fn formatting_the_run_never_shows_the_summary_being_collected() {
     let mut core = compacting();
     assert_eq!(core.handle(ready(2)), Ok(granted(2)));
     assert_eq!(
-        core.handle(engine(R, TurnEvent::TextDelta(SENTINEL.to_owned()))),
+        core.handle(engine(
+            super::engine_key(&core, R),
+            TurnEvent::TextDelta(SENTINEL.to_owned())
+        )),
         Ok(Vec::new())
     );
     let shown = format!("{:?}", core.current);
@@ -235,7 +250,10 @@ fn formatting_the_run_never_shows_the_summary_being_collected() {
 fn an_empty_summary_or_nothing_to_rewrite_fails_the_run_on_its_budget() {
     let mut core = compacting();
     assert_eq!(
-        core.handle(engine(R, TurnEvent::Finished(Finish::Completed))),
+        core.handle(engine(
+            super::engine_key(&core, R),
+            TurnEvent::Finished(Finish::Completed)
+        )),
         Ok(ends_failed(Failure::Budget))
     );
     let mut core = fresh();
@@ -304,10 +322,16 @@ fn stop_or_a_replacement_leaves_a_held_summary_ack_stale() {
     for replace in [false, true] {
         let mut core = compacting();
         assert_eq!(core.handle(ready(2)), Ok(granted(2)));
-        core.handle(engine(R, TurnEvent::TextDelta("Short".to_owned())))
-            .expect("current");
+        core.handle(engine(
+            super::engine_key(&core, R),
+            TurnEvent::TextDelta("Short".to_owned()),
+        ))
+        .expect("current");
         assert_eq!(
-            core.handle(engine(R, TurnEvent::Finished(Finish::Completed))),
+            core.handle(engine(
+                super::engine_key(&core, R),
+                TurnEvent::Finished(Finish::Completed)
+            )),
             Ok(vec![store_summary(2, "Short")])
         );
         if replace {

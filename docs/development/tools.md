@@ -116,7 +116,7 @@ flowchart TD
 
 ## `draw`
 
-`draw { records }` accepts the scene v1 2D contract, with a 16 KiB complete-argument
+`draw { records }` offers and accepts the overlay-only scene v1 2D contract, with a 16 KiB complete-argument
 ceiling. Its description comes from `crates/brain/prompts/draw.md`. Responses sends
 `strict: false` specifically for this tool: optional scene fields remain optional.
 Fenced Mermaid text is not a tool call; diagrams use the Mermaid scene operation.
@@ -126,16 +126,52 @@ at `bc2dfaa` (2026-11-06). A test holds export growth below 32 KiB; exceeding it
 requires reviewing the request overhead. That is a review budget, not a provider
 limit, the history reread bound or the 16 KiB tool-argument ceiling.
 
-Before admission, the dispatcher tokenizes the entire envelope, decodes every record
-and rejects 3D views, solids, 3D tracks, three-component keys and any solid-only
+For complete calls, including MCP, the dispatcher tokenizes the entire envelope, decodes every record
+and rejects non-overlay `begin` surfaces, 3D views, solids, 3D tracks, three-component keys and any solid-only
 `set[].info` field, including null. The first typed failure returns its code, sanitized
 path and step id, spends the existing drawing rejection/repair budget, and admits no
 scene record. Its refusal stays final for the caller's key. Semantic admission still
 runs once in the drawing reducer; a semantic failure can retain earlier committed steps.
 
+An offered provider `draw` instead admits closed records while arguments stream. The same
+dispatcher checks the caller, offered tool and current admitted build before every handoff;
+the 2D record parser runs before the reducer's semantic admission. An open object has no effect.
+The 16 KiB argument ceiling and existing record, step, repair and global drawing budgets remain.
+Neither fixture trust nor another tool's side effects participate in this path.
+
+The round owns the bounded argument buffer/tokenizer; the run retains at most its charged
+call associations through settlement. Before argument identity is verified, one key has one
+writer and an independent complete retry cannot join it. Matching Ready bytes and whole typed
+validation bind the ordinary canonical hash, after which equal retries join/replay and changed
+arguments are refused. A semantic drawing failure stops new effects but retains its one result
+while bounded argument verification continues, so Ready before or after store acknowledgements
+produces the same identity. Malformed, typed, over-limit or changed tails use a noncanonical
+failure fingerprint and a final fixed refusal; they never upgrade to successful identity.
+Canonical validation still temporarily collects typed records; no extra collection is retained.
+
+Scene frames follow each durable step, independently of provider completion. Successful
+`SceneEnd` additionally requires Ready verification and a matching completed provider round;
+an `end` record alone is insufficient. Incomplete results keep the committed prefix. Result
+rows still commit separately and answer once on acknowledgement, without advancing the next
+round before the remaining native items and Finished arrive. Model replies require a current
+build's explicit verified registration; an old reply never falls into direct-call/MCP delivery.
+A retry of a noncanonical failure waits for that same fixed result while its row is pending;
+joining it is not a new refusal. A native-item-only round needs no tool dispatch to store.
+
+Build invalidation closes the old prefix owner before dropping its round. Stop, failure and
+interruption discard queued unsubmitted records but retain a submitted step's settlement owner.
+Its acknowledgement reconstructs the durable prefix, then emits an incomplete end unless the
+scene was cleared/deleted. Engine events, including Finished, are build-fenced; these accepted
+store acknowledgements and cleanup obligations are not. No painter or first-paint shortcut is
+introduced: only the shell's actual first paint produces `StepShown`.
+An interrupted reservation with no closed record settles an empty incomplete result through
+the same transaction, without inventing a scene or visual begin/end frames.
+
 If drawing recovery is unavailable, calls return the fixed `not available here`
 refusal instead of entering the reducer or failing the run as a store error. A valid
 call's refusal still waits for its result-row acknowledgement and stays final for its key.
+An unavailable provider stream verifies its bounded arguments without scene effects; only
+byte-matching, typed-valid Ready enters that ordinary durable-refusal path.
 
 The ledger holds callers in `Drawing` while the reducer writes. The coordinator assigns
 each handoff an internal call id, separate from the model/MCP id and launch, and keeps
@@ -150,10 +186,10 @@ separate transactions: committed steps may survive a crash before the result row
 but an interrupted run is not replayed as a fresh drawing. Stop, deletion, account
 loss and replacement retain the existing run fences and accepted-write cutoff.
 
-Production draw calls use the complete-call tool loop; argument deltas execute nothing.
-Only the explicitly trusted debug fixture retains newline-label placeholder drawing.
-Inline chat rendering, fenced-text conversion and production streamed scene intake
-are separate work.
+Provider draw calls use the closed-record path above; complete-call/MCP inputs retain
+whole-envelope preflight. Only the explicitly trusted debug fixture retains newline-label
+placeholder drawing. Typed history/inline visual replay and fenced-text conversion remain
+separate work.
 
 Before a separately authorized live schema check, `cargo xtask live account` can
 inspect Kumochi Dev's own non-secret account view with a zero-request inference

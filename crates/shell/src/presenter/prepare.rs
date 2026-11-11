@@ -113,11 +113,7 @@ impl PrepareJob {
             )
         });
         let full_after = result.as_ref().map_or(0, PreparedStep::retained_bytes);
-        let owner_bytes = result.as_ref().map_or(0, |prepared| {
-            full_after
-                .saturating_add(prepared.resident_bytes)
-                .saturating_add(prepared.original_bytes())
-        });
+        let owner_bytes = result.as_ref().map_or(0, PreparedStep::owner_bytes);
         result.attribute(owner_bytes);
         Completion::Prepared {
             id: self.id,

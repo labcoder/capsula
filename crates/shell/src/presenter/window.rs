@@ -1,8 +1,9 @@
 //! Activation of a scene's oldest prepared step, for the activation owner B6d adds.
 //!
-//! One call stages the head against the scene's view, checks the whole post-transition charge,
-//! then retires the semantic step and installs the rest, the view and a fresh frame epoch
-//! together. A refusal changes nothing, and anything staged for it goes to the dropper.
+//! One call stages the head against the scene's view, and its paint cache, checks the whole
+//! post-transition charge, then retires the semantic step and installs the rest, the view, its
+//! cache and a fresh frame epoch together. A refusal changes nothing, and anything staged for it
+//! goes to the dropper.
 
 use std::{
     sync::{
@@ -12,17 +13,13 @@ use std::{
     time::Instant,
 };
 
-use kumochi_protocol::message::SceneId;
+use kumochi_protocol::message::{RunId, SceneId};
 use kumochi_scene::{deferred::Deferred, layout::PreparedStep, limits::MAX_RESIDENT_BYTES};
 
 use super::{Broken, Effect, Out, Presenter, Ready};
 
 /// Why nothing was consumed; each leaves the presenter unchanged, except that `Busy` keeps the
 /// request.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "B6d's activation owner is the production caller")
-)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ConsumeError {
     /// No such scene is mirrored.
@@ -70,13 +67,11 @@ impl Drop for ConsumedStep {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "B6d's activation owner is the production caller")
-)]
 #[derive(Debug)]
 pub(crate) struct Consumed {
     pub(crate) step: ConsumedStep,
+    pub(crate) run: RunId,
+    pub(crate) epoch: u64,
     /// The steps its freed window position starts.
     pub(crate) effects: Result<Vec<Effect>, Broken>,
 }
@@ -88,10 +83,6 @@ impl Presenter {
     /// window position frees and held frames resume.
     /// # Errors
     /// [`ConsumeError`], with nothing changed.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "B6d's activation owner is the production caller")
-    )]
     pub(crate) fn consume_ready(
         &mut self,
         id: SceneId,
@@ -121,32 +112,56 @@ impl Presenter {
             .view
             .prepare_activation(&head.step, scene_time, segment_ms)
             .map_err(|_| ConsumeError::Stale)?;
+        let cache = self.stage.stage(activation.view());
+        let cache_bytes = cache.bytes();
         let bytes = head.step.attribution();
         let view_bytes = activation.resident_bytes();
         let outgoing = scene
             .retained
             .saturating_add(scene.view_bytes)
+            .saturating_add(scene.cache_bytes)
             .saturating_add(head.step.resident_bytes);
         let after = total
             .saturating_sub(outgoing)
             .saturating_add(head.full_after)
             .saturating_add(view_bytes)
+            .saturating_add(cache_bytes)
             .saturating_add(bytes);
         if after > MAX_RESIDENT_BYTES {
+            drop(Deferred::new(cache, cache_bytes));
             return Err(ConsumeError::Residency);
         }
         scene
             .state
             .retire(expected_index, &mut self.global)
             .expect("a prepared step was committed under this budget, and no admission reads it");
-        let Ready { step, full_after } = scene.ready.pop_front().expect("the head was just read");
+        let Ready {
+            run,
+            step,
+            full_after,
+        } = scene.ready.pop_front().expect("the head was just read");
         let old = std::mem::replace(&mut scene.rest, step.after.clone());
         drop(Deferred::new(old, scene.retained));
         scene.retained = full_after;
-        self.frames
+        let old = self
+            .frames
             .borrow_mut()
-            .activate(id, &mut scene.view, activation);
+            .activate(id, &mut scene.view, activation, cache);
+        drop(Deferred::new(old, scene.cache_bytes));
+        let epoch = self
+            .frames
+            .borrow()
+            .epoch(id)
+            .expect("an installed frame has an epoch");
+        scene.activation.install(
+            self.generation.expect("a scene belongs to a connection"),
+            run,
+            expected_index,
+            scene_time,
+            segment_ms,
+        );
         scene.view_bytes = view_bytes;
+        scene.cache_bytes = cache_bytes;
         scene.paint = scene
             .ready
             .iter()
@@ -162,6 +177,11 @@ impl Presenter {
         };
         let mut out = Out::default();
         let effects = self.pump_all(now, &mut out).map(|()| out.finish());
-        Ok(Consumed { step, effects })
+        Ok(Consumed {
+            step,
+            run,
+            epoch,
+            effects,
+        })
     }
 }

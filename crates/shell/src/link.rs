@@ -1039,6 +1039,7 @@ fn watch(
             // shortcut: B3a releases the exclusion lease on Capture*; nothing holds one yet.
             // Slice 7's PR 6 stops playback on SpeechRevoked; nothing plays yet. shortcut: nothing
             // shows the voice parts yet; the Settings voice section will read Voice.
+            // NoVisual is the legacy run-level advisory, consumed without changing state.
             Ok(Some(
                 ControlToShell::CaptureDone { .. }
                 | ControlToShell::CaptureFailed { .. }
@@ -1047,13 +1048,9 @@ fn watch(
                 | ControlToShell::IssueRefused { .. }
                 | ControlToShell::SpeechRevoked { .. }
                 | ControlToShell::ThreadModelSet { .. }
-                | ControlToShell::Voice(_),
+                | ControlToShell::Voice(_)
+                | ControlToShell::NoVisual { .. },
             )) => {}
-            // shortcut: B8 consumes NoVisual; B3 switches the production fixture to v1.
-            Ok(Some(ControlToShell::NoVisual { .. })) => {
-                tracing::warn!("scene v1 control before its consumer; ending the connection");
-                return;
-            }
             Ok(Some(ControlToShell::Welcome { .. } | ControlToShell::BuildMismatch { .. })) => {
                 tracing::warn!("the brain repeated its handshake; ending the connection");
                 return;

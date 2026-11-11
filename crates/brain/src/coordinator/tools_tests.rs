@@ -42,8 +42,11 @@ fn called(n: u32) -> [TurnEvent; 3] {
     ]
 }
 
-fn completed() -> Input {
-    engine(R, TurnEvent::Finished(Finish::Completed))
+fn completed(core: &Coordinator) -> Input {
+    engine(
+        super::engine_key(core, R),
+        TurnEvent::Finished(Finish::Completed),
+    )
 }
 
 fn round_items(round: u32, text: Option<&str>, items: Vec<Opaque>, calls: Vec<CallId>) -> Effect {
@@ -132,7 +135,7 @@ fn probed(word: &str) -> ToolOutput {
 
 /// The round's completion, which must send exactly one call's write; its acknowledgement.
 fn commits(core: &mut Coordinator) -> Input {
-    let effects = core.handle(completed()).expect("current");
+    let effects = core.handle(completed(core)).expect("current");
     let [Effect::Store(StoreOp::CommitCall(call))] = effects.as_slice() else {
         panic!("one write, not {effects:?}");
     };
@@ -146,7 +149,10 @@ fn commits(core: &mut Coordinator) -> Input {
 /// Plays each event of the current round, none of which may say anything.
 fn play(core: &mut Coordinator, events: impl IntoIterator<Item = TurnEvent>) {
     for event in events {
-        assert_eq!(core.handle(engine(R, event)), Ok(Vec::new()));
+        assert_eq!(
+            core.handle(engine(super::engine_key(core, R), event)),
+            Ok(Vec::new())
+        );
     }
 }
 
@@ -182,7 +188,10 @@ fn starts_round(effects: &[Effect], round: u32) -> bool {
 fn a_round_with_calls_is_stored_with_their_results_then_the_next_round_is_built() {
     let mut core = started();
     assert_eq!(
-        core.handle(engine(R, TurnEvent::TextDelta("a".to_owned()))),
+        core.handle(engine(
+            super::engine_key(&core, R),
+            TurnEvent::TextDelta("a".to_owned())
+        )),
         Ok(vec![state(R, T, Phase::Answering), text("a")])
     );
     play(&mut core, called(1));
@@ -205,7 +214,7 @@ fn a_round_with_calls_is_stored_with_their_results_then_the_next_round_is_built(
         ],
     );
     assert_eq!(
-        core.handle(completed()),
+        core.handle(completed(&core)),
         Ok(vec![round_items(
             1,
             Some("a"),
@@ -221,7 +230,7 @@ fn a_round_with_calls_is_stored_with_their_results_then_the_next_round_is_built(
     );
     assert!(starts_round(&next(&mut core, 1), 2));
     assert_eq!(
-        core.handle(completed()),
+        core.handle(completed(&core)),
         Ok(vec![end_run(None, None, RunEnd::Done)]),
         "a round with no calls and no items ends the run"
     );
@@ -245,7 +254,7 @@ fn anthropic_unoffered_name_gets_the_shared_unknown_tool_result() {
     let mut core = started();
     play(&mut core, mapper.take());
     assert_eq!(
-        core.handle(completed()),
+        core.handle(completed(&core)),
         Ok(vec![round_items(1, None, Vec::new(), vec![id(1)])])
     );
 }
@@ -253,8 +262,11 @@ fn anthropic_unoffered_name_gets_the_shared_unknown_tool_result() {
 #[test]
 fn a_last_round_with_items_is_stored_before_done() {
     let mut core = started();
-    core.handle(engine(R, TurnEvent::TextDelta("bye".to_owned())))
-        .expect("current");
+    core.handle(engine(
+        super::engine_key(&core, R),
+        TurnEvent::TextDelta("bye".to_owned()),
+    ))
+    .expect("current");
     play(
         &mut core,
         [TurnEvent::OutputItem {
@@ -263,7 +275,7 @@ fn a_last_round_with_items_is_stored_before_done() {
         }],
     );
     assert_eq!(
-        core.handle(completed()),
+        core.handle(completed(&core)),
         Ok(vec![round_items(
             1,
             Some("bye"),
@@ -293,7 +305,7 @@ fn the_ninth_round_is_refused_before_its_build() {
     for round in 1..MAX_ROUNDS {
         play(&mut core, called(round));
         assert_eq!(
-            core.handle(completed()),
+            core.handle(completed(&core)),
             Ok(vec![round_items(round, None, Vec::new(), vec![id(round)])])
         );
         assert!(starts_round(&next(&mut core, round), round + 1));
@@ -302,7 +314,7 @@ fn the_ninth_round_is_refused_before_its_build() {
     assert_eq!(sends, 8);
     play(&mut core, called(MAX_ROUNDS));
     assert_eq!(
-        core.handle(completed()),
+        core.handle(completed(&core)),
         Ok(ends_failed(Failure::Budget)),
         "no ninth build, so no ninth ask or send"
     );
@@ -314,7 +326,7 @@ fn the_seventeenth_call_fails_the_run_in_one_round_or_across_rounds() {
     for n in 1..=MAX_CALLS {
         assert_eq!(
             core.handle(engine(
-                R,
+                super::engine_key(&core, R),
                 TurnEvent::ToolCallStarted {
                     call: id(n),
                     name: ToolName::Unknown,
@@ -326,7 +338,7 @@ fn the_seventeenth_call_fails_the_run_in_one_round_or_across_rounds() {
     }
     assert_eq!(
         core.handle(engine(
-            R,
+            super::engine_key(&core, R),
             TurnEvent::ToolCallStarted {
                 call: id(17),
                 name: ToolName::Unknown,
@@ -339,11 +351,11 @@ fn the_seventeenth_call_fails_the_run_in_one_round_or_across_rounds() {
     for n in 1..=MAX_CALLS {
         play(&mut core, called(n));
     }
-    core.handle(completed()).expect("current");
+    core.handle(completed(&core)).expect("current");
     next(&mut core, 1);
     assert_eq!(
         core.handle(engine(
-            R,
+            super::engine_key(&core, R),
             TurnEvent::ToolCallStarted {
                 call: id(1),
                 name: ToolName::Unknown,
@@ -387,14 +399,14 @@ fn a_later_round_replays_a_finished_id_from_the_ledger_and_refuses_other_argumen
     assert!(starts_round(&next(&mut core, 1), 2));
     play(&mut core, probe(1, r#"{ "word" : "hi" }"#));
     assert_eq!(
-        core.handle(completed()),
+        core.handle(completed(&core)),
         Ok(vec![answered(2, None, vec![(id(1), probed("hi"))])]),
         "the stored answer, with no second write"
     );
     assert!(starts_round(&next(&mut core, 2), 3));
     play(&mut core, probe(1, r#"{"word":"other"}"#));
     assert_eq!(
-        core.handle(completed()),
+        core.handle(completed(&core)),
         Ok(vec![answered(
             3,
             None,
@@ -426,8 +438,11 @@ fn a_stop_while_a_calls_write_is_pending_stores_no_round() {
 #[test]
 fn a_response_from_a_build_a_delete_voided_is_dropped_and_its_round_built_again() {
     let mut core = probing(&[T, B]);
-    core.handle(engine(R, TurnEvent::TextDelta("from b".to_owned())))
-        .expect("current");
+    core.handle(engine(
+        super::engine_key(&core, R),
+        TurnEvent::TextDelta("from b".to_owned()),
+    ))
+    .expect("current");
     play(&mut core, probe(1, r#"{"word":"zqxfromtaskb"}"#));
     play(&mut core, probe(2, r#"{"word":"hi"}"#));
     assert_eq!(
@@ -439,7 +454,7 @@ fn a_response_from_a_build_a_delete_voided_is_dropped_and_its_round_built_again(
         Ok(vec![Effect::Store(StoreOp::Delete { thread: B })])
     );
     assert_eq!(
-        core.handle(completed()),
+        core.handle(completed(&core)),
         Ok(vec![Effect::CancelEngine { run: R }]),
         "no write, no round, and the rebuild waits for B"
     );
@@ -475,8 +490,11 @@ fn a_response_from_a_build_a_delete_voided_is_dropped_and_its_round_built_again(
 #[test]
 fn a_delete_while_a_calls_write_is_pending_drops_the_round_and_the_call_never_runs_again() {
     let mut core = probing(&[T, B]);
-    core.handle(engine(R, TurnEvent::TextDelta("from b".to_owned())))
-        .expect("current");
+    core.handle(engine(
+        super::engine_key(&core, R),
+        TurnEvent::TextDelta("from b".to_owned()),
+    ))
+    .expect("current");
     play(
         &mut core,
         [TurnEvent::OutputItem {
@@ -521,7 +539,7 @@ fn a_delete_while_a_calls_write_is_pending_drops_the_round_and_the_call_never_ru
     ));
     play(&mut core, probe(1, r#"{"word":"zqxfromtaskb"}"#));
     assert_eq!(
-        core.handle(completed()),
+        core.handle(completed(&core)),
         Ok(vec![answered(
             1,
             None,
@@ -536,7 +554,7 @@ fn a_round_with_two_committing_calls_is_stored_once_after_both_writes_in_call_or
     let mut core = probing(&[T]);
     play(&mut core, probe(1, r#"{"word":"one"}"#));
     play(&mut core, probe(2, r#"{"word":"two"}"#));
-    let effects = core.handle(completed()).expect("current");
+    let effects = core.handle(completed(&core)).expect("current");
     let [
         Effect::Store(StoreOp::CommitCall(first)),
         Effect::Store(StoreOp::CommitCall(second)),
@@ -596,7 +614,7 @@ fn a_refused_focus_completes_its_round_and_the_run_goes_on() {
             },
         ],
     );
-    let effects = core.handle(completed()).expect("current");
+    let effects = core.handle(completed(&core)).expect("current");
     let [Effect::Store(StoreOp::CommitCall(call))] = effects.as_slice() else {
         panic!("one write, not {effects:?}");
     };
@@ -623,7 +641,7 @@ fn a_call_must_be_new_and_its_arguments_follow_it() {
     play(&mut core, called(1));
     assert_eq!(
         core.handle(engine(
-            R,
+            super::engine_key(&core, R),
             TurnEvent::ToolCallStarted {
                 call: id(1),
                 name: ToolName::Unknown,
@@ -637,7 +655,7 @@ fn a_call_must_be_new_and_its_arguments_follow_it() {
     play(&mut core, called(1));
     assert_eq!(
         core.handle(engine(
-            R,
+            super::engine_key(&core, R),
             TurnEvent::ToolArgsDelta {
                 call: id(1),
                 delta: "more".to_owned(),
@@ -650,7 +668,7 @@ fn a_call_must_be_new_and_its_arguments_follow_it() {
     let mut core = started();
     play(&mut core, [called(1)[0].clone()]);
     assert_eq!(
-        core.handle(completed()),
+        core.handle(completed(&core)),
         Ok(ends_failed(Failure::Engine)),
         "a round can't complete with a call that never got ready"
     );
@@ -660,7 +678,7 @@ fn a_call_must_be_new_and_its_arguments_follow_it() {
 fn a_late_round_ack_only_lets_the_ended_run_be_written() {
     let mut core = started();
     play(&mut core, called(1));
-    core.handle(completed()).expect("current");
+    core.handle(completed(&core)).expect("current");
     assert_eq!(
         core.handle(Input::Stop {
             run: R,
@@ -686,7 +704,7 @@ fn a_late_round_ack_only_lets_the_ended_run_be_written() {
 
     let mut core = started();
     play(&mut core, called(1));
-    core.handle(completed()).expect("current");
+    core.handle(completed(&core)).expect("current");
     assert_eq!(
         core.handle(Input::Deadline { run: R }),
         Ok(vec![
@@ -709,7 +727,7 @@ fn a_late_round_ack_only_lets_the_ended_run_be_written() {
             item: item("message"),
         }],
     );
-    core.handle(completed()).expect("current");
+    core.handle(completed(&core)).expect("current");
     core.handle(Input::Stop {
         run: R,
         revealed: Vec::new(),
@@ -730,7 +748,7 @@ fn a_late_round_ack_only_lets_the_ended_run_be_written() {
 fn a_failed_round_write_fails_the_run_with_no_next_round() {
     let mut core = started();
     play(&mut core, called(1));
-    core.handle(completed()).expect("current");
+    core.handle(completed(&core)).expect("current");
     assert_eq!(
         core.handle(Input::StoreFailed { run: R }),
         Ok(ends_failed(Failure::Store))
@@ -745,9 +763,10 @@ fn a_failed_round_write_fails_the_run_with_no_next_round() {
 #[test]
 fn steps_are_stored_before_their_rounds_items() {
     let mut core = started();
-    core.handle(engine(R, draw_call())).expect("current");
+    core.handle(engine(super::engine_key(&core, R), draw_call()))
+        .expect("current");
     core.handle(engine(
-        R,
+        super::engine_key(&core, R),
         TurnEvent::ToolArgsDelta {
             call: super::call(),
             delta: "a\n".to_owned(),
@@ -762,7 +781,7 @@ fn steps_are_stored_before_their_rounds_items() {
         }]),
     );
     assert_eq!(
-        core.handle(completed()),
+        core.handle(completed(&core)),
         Ok(Vec::new()),
         "a's write is pending"
     );
@@ -777,9 +796,10 @@ fn steps_are_stored_before_their_rounds_items() {
     );
 
     let mut core = started();
-    core.handle(engine(R, draw_call())).expect("current");
+    core.handle(engine(super::engine_key(&core, R), draw_call()))
+        .expect("current");
     core.handle(engine(
-        R,
+        super::engine_key(&core, R),
         TurnEvent::ToolArgsDelta {
             call: super::call(),
             delta: "a\n".to_owned(),
@@ -787,7 +807,7 @@ fn steps_are_stored_before_their_rounds_items() {
     ))
     .expect("current");
     play(&mut core, called(1));
-    core.handle(completed()).expect("current");
+    core.handle(completed(&core)).expect("current");
     assert_eq!(
         core.handle(ack(0, "a")),
         Ok(vec![
@@ -809,7 +829,7 @@ fn a_rounds_items_fill_the_request_bound_and_no_more() {
     play(&mut core, [full(), full()]);
     assert_eq!(
         core.handle(engine(
-            R,
+            super::engine_key(&core, R),
             TurnEvent::OutputItem {
                 index: 2,
                 item: item("x"),

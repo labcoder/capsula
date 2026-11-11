@@ -34,7 +34,7 @@ use tokio::task::AbortHandle;
 
 use crate::context::compact::clean_summary;
 use crate::context::{ModelRequest, Origin};
-use crate::coordinator::{Input, JobKey, JobKind, JobOutput, LeaseId, SendKey};
+use crate::coordinator::{BuildKey, Input, JobKey, JobKind, JobOutput, LeaseId, SendKey};
 
 /// Events a round queues ahead of its pump; the coordinator's own queue does the buffering.
 const ROUND_QUEUE: usize = 1;
@@ -500,10 +500,12 @@ pub fn start(
     inputs: mpsc::Sender<Input>,
     gate: SendGate,
 ) -> Cancel {
-    let run = request.run;
+    let SendKey::Build(key) = request.key else {
+        unreachable!("a run engine answers a build, not a background job");
+    };
     let (events_tx, events) = mpsc::channel(ROUND_QUEUE);
     let round = engine.start(request, events_tx, gate);
-    Cancel(tokio::spawn(pump(run, round, events, inputs)).abort_handle())
+    Cancel(tokio::spawn(pump(key, round, events, inputs)).abort_handle())
 }
 
 /// Starts a background job's one round behind its own task, which takes the round's text and
@@ -575,7 +577,7 @@ async fn collect(
 
 /// Forwards one round's events, waiting while `inputs` is full, until the first `Finished`.
 async fn pump(
-    run: RunId,
+    key: BuildKey,
     mut round: Round,
     mut events: mpsc::Receiver<TurnEvent>,
     inputs: mpsc::Sender<Input>,
@@ -593,7 +595,7 @@ async fn pump(
             }
         };
         let finished = matches!(event, TurnEvent::Finished(_));
-        if inputs.send(Input::Engine { run, event }).await.is_err() || finished {
+        if inputs.send(Input::Engine { key, event }).await.is_err() || finished {
             return;
         }
     }
@@ -610,7 +612,7 @@ mod tests {
         Answer, Asks, CallId, Cancel, Engine, Finish, Opaque, Refused, Round, RunRequest, SendGate,
         SendLease, ToolName, TurnEvent, answer, start,
     };
-    use crate::coordinator::{Input, JobKey, JobKind, JobOutput, LeaseId};
+    use crate::coordinator::{Input, JobKey, JobKind, JobOutput, LeaseId, SendKey};
 
     /// What a test round does once its events are sent.
     #[derive(Clone, Copy, Debug)]
@@ -866,10 +868,10 @@ mod tests {
     async fn drain(received: &mut mpsc::Receiver<Input>) -> Vec<TurnEvent> {
         let mut events = Vec::new();
         while let Some(input) = received.recv().await {
-            let Input::Engine { run, event } = input else {
+            let Input::Engine { key, event } = input else {
                 panic!("only engine events");
             };
-            assert_eq!(run, RunId(7));
+            assert_eq!(SendKey::Build(key), request().key);
             events.push(event);
         }
         events
@@ -928,7 +930,10 @@ mod tests {
         assert_eq!(
             received.recv().await,
             Some(Input::Engine {
-                run: RunId(7),
+                key: match request().key {
+                    SendKey::Build(key) => key,
+                    SendKey::Job(_) => panic!("the fixture is a run request"),
+                },
                 event: text("so far")
             })
         );

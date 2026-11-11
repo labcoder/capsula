@@ -15,13 +15,23 @@ impl Presence {
         result: Result<Vec<Effect>, Broken>,
         cx: &mut Context<'_, Self>,
     ) {
+        if self.scene_effects_at(result, Instant::now(), cx) {
+            self.want_frames(cx);
+        }
+    }
+
+    pub(super) fn scene_effects_at(
+        &mut self,
+        result: Result<Vec<Effect>, Broken>,
+        now: Instant,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
         let effects = match result {
             Ok(effects) => effects,
             Err(error) => {
                 tracing::warn!(%error, "invalid scene stream; ending the connection");
                 self.end_scene_connection();
-                self.draw_changed(cx);
-                return;
+                return self.draw_changed_at(now, cx);
             }
         };
         for effect in effects {
@@ -35,8 +45,7 @@ impl Presence {
                     if !sent {
                         tracing::warn!("scene control queue unavailable; ending the connection");
                         self.end_scene_connection();
-                        self.draw_changed(cx);
-                        return;
+                        return self.draw_changed_at(now, cx);
                     }
                 }
                 Effect::Prepare(job) => {
@@ -48,11 +57,23 @@ impl Presence {
                 Effect::Admit(job) => {
                     Self::scene_worker(move |_| job.run(), cx);
                 }
-                Effect::ConsumptionReady { .. } => {}
+                Effect::ConsumptionReady { scene, index } => {
+                    if let Some(session) = &self.session {
+                        let effects = self.presenter.consumption_ready(
+                            session.generation(),
+                            scene,
+                            index,
+                            now,
+                        );
+                        self.scene_effects_at(effects, now, cx);
+                        if self.session.is_none() {
+                            return false;
+                        }
+                    }
+                }
             }
         }
-        self.scene_watchdog(cx);
-        self.draw_changed(cx);
+        self.draw_changed_at(now, cx)
     }
 
     fn scene_worker(
@@ -78,8 +99,18 @@ impl Presence {
         .detach();
     }
 
-    fn scene_watchdog(&mut self, cx: &mut Context<'_, Self>) {
-        let deadline = self.presenter.deadline();
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "whether the scene is moving, as the frame reports it"
+    )]
+    pub(super) fn scene_watchdog(
+        &mut self,
+        now: Instant,
+        moving: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let wake = (!moving).then(|| self.presenter.next_wake(now)).flatten();
+        let deadline = self.presenter.deadline().into_iter().chain(wake).min();
         if self.scene_deadline == deadline {
             return;
         }
@@ -88,12 +119,15 @@ impl Presence {
         let Some(deadline) = deadline else {
             return;
         };
+        let generation = self.session.as_ref().map(crate::link::Session::generation);
         self.scene_timer = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(deadline.saturating_duration_since(Instant::now()))
                 .await;
             let result = this.update(cx, |this, cx| {
-                if this.scene_deadline != Some(deadline) {
+                if this.scene_deadline != Some(deadline)
+                    || this.session.as_ref().map(crate::link::Session::generation) != generation
+                {
                     return Ok(());
                 }
                 this.scene_timer = None;
@@ -108,9 +142,9 @@ impl Presence {
         }));
     }
 
-    fn end_scene_connection(&mut self) {
-        if let Some(session) = &self.session {
-            self.link.end(session);
+    pub(super) fn end_scene_connection(&mut self) {
+        if let Some(session) = self.session.take() {
+            self.link.end(&session);
         }
         self.presenter.disconnected();
         self.scene_timer = None;
@@ -118,10 +152,15 @@ impl Presence {
     }
 
     pub(super) fn stop_run(&mut self, message: ControlToBrain, cx: &mut Context<'_, Self>) {
+        let now = Instant::now();
         if let ControlToBrain::Stop { run, .. } = message
-            && self.presenter.holds_scenes()
+            && (self.presenter.holds_scenes() || self.presenter.live_work(now))
         {
-            let effects = self.presenter.stop(run, Instant::now());
+            let run = self
+                .presenter
+                .stoppable_run()
+                .map_or(run, |live| live.max(run));
+            let effects = self.presenter.stop(run, now);
             self.scene_effects(effects, cx);
         } else {
             self.tell(message);

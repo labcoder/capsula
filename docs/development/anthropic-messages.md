@@ -80,7 +80,8 @@ Exact `draw` becomes Draw and every
 other bounded tool name becomes Unknown. The coordinator alone decides offers, charges
 calls and dispatches. Tool arguments use concatenated fragments, or the start object when
 there are none, ignoring empty argument fragments, and must be a complete JSON object
-before ToolCallReady.
+before ToolCallReady. A nonempty start object used this way is also queued as one
+ToolArgsDelta before ToolCallReady, so a streamed `draw` sees the bytes its Ready names.
 
 Thinking and redacted thinking become private Opaque items indexed in provider order;
 an absent initial signature waits for signature_delta, and thinking stopped without a

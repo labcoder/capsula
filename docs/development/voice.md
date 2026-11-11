@@ -519,9 +519,12 @@ flowchart LR
   Worker -.->|"stderr disconnected"| Null[" "]
 ```
 
-- **Requests.** `Load { natives, models }` stages the natives from `natives`, loads them, creates
-  the recognizer and runs one second of silence as a warm-up. A load while loaded drops the old
-  model first. `Decode { rate, pcm }` carries mono 16-bit little-endian PCM. `Unload` frees the
+- **Requests.** `Load { natives, models }` refuses a model-directory path that isn't UTF-8 or
+  contains NUL with `Native(Input)`, before asking for the protected staging root or loading
+  natives. Representable paths keep the existing staging and loader policy: stage from `natives`,
+  load, create the recognizer and run one second of silence as a warm-up. A load while loaded
+  drops the old model first, including when its replacement has an invalid path.
+  `Decode { rate, pcm }` carries mono 16-bit little-endian PCM. `Unload` frees the
   recognizer and then the natives. Without a model a decode is `NotLoaded`. Request and reply
   `Debug` show no audio, text or paths.
 - **Bounds** [guess]. The rate must be 8–48 kHz. An utterance is at most 60 s and at most
@@ -546,9 +549,15 @@ flowchart LR
 Debug builds take one-request fault fixtures: hang, exit, abort, a noncontinuable access violation
 raised with `RaiseException`, a garbage frame, a panic, and a C++ throw. `tests/speech.rs` checks
 each of the first six against the real worker. The running request and the one queued behind it
-both get `WorkerLost`, a loss is broadcast, and the next worker answers a load. The throw fixture
-is Rez-only. It builds a DLL with `cl /EHs` whose export throws `std::runtime_error` and calls it
-through the worker's boundary. The worker must end before the request's deadline, without
+both get `WorkerLost`, a loss is broadcast, and the next worker answers a real Load with exactly
+`Native(Input)` for a NUL-containing model path. That refusal reaches the worker without opening
+the protected native root, regardless of previously staged pins. The three default speech tests
+run their exact child fixtures with private log and temp directories and an explicit environment.
+Their child jobs, process and output waits are bounded; cleanup waits for zero active processes
+and closed output. An in-memory worker regression uses a root provider that can only refuse, so
+the missing-guard variant cannot obtain storage or load natives. The throw fixture remains
+ignored and Rez-only. It builds a DLL with `cl /EHs` whose export throws `std::runtime_error` and
+calls it through the worker's boundary. The worker must end before the request's deadline, without
 replying. A fresh worker must then load the real natives and Parakeet and decode.
 
 ### Checks on Rez

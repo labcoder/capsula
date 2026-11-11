@@ -15,12 +15,14 @@ path = "src/main.rs"
 async-channel = "2"
 kumochi-protocol.workspace = true
 kumochi-scene.workspace = true
+lyon = "=1.0.19"
 fluent-bundle.workspace = true
 gpui-kit.workspace = true
 # GPUI's own image type, for Kumo's frames; the same version GPUI already builds.
 image = { version = "0.25.10", default-features = false }
 keyring.workspace = true
 raw-window-handle = { version = "0.6", features = ["std"] }
+smallvec.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true

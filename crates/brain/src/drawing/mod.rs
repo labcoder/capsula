@@ -20,7 +20,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use kumochi_protocol::message::{RunId, SceneCuts, SceneId, ThreadId};
-use kumochi_scene::{Admitted, Begin, GlobalBudget, Record, SceneState, Step, StopCut, TokenError};
+use kumochi_scene::{Admitted, Begin, GlobalBudget, Record, SceneState, Step, StopCut};
 
 use crate::coordinator::{Effect, Stale, StoreOp};
 use crate::engines::CallId;
@@ -85,8 +85,8 @@ pub enum Input {
         run: RunId,
         /// The provider's call id.
         call: CallId,
-        /// The tokenizer's failure.
-        error: Option<TokenError>,
+        /// The terminal ingress failure, or an interruption that discards queued records.
+        error: Option<CallError>,
     },
     /// Cuts for every known visible scene, whichever runs committed its steps.
     /// An unseen, never-activated scene of `run` is cut to nothing after its write.
@@ -198,7 +198,7 @@ enum Job {
     Finish {
         run: RunId,
         call: CallId,
-        error: Option<TokenError>,
+        error: Option<CallError>,
     },
     Cut {
         scene: SceneId,
@@ -258,6 +258,7 @@ struct StepWait {
     step: Arc<Step>,
     /// Its thread was deleted: the answer changes nothing.
     fenced: bool,
+    interrupted: Option<CallError>,
 }
 
 /// The scene a pending step goes into.
@@ -411,7 +412,7 @@ impl Drawing {
                     self.enqueue(Job::ClearVisible, &mut out);
                 }
             }
-            Input::RunClosed { run } => self.close(run),
+            Input::RunClosed { run } => self.close(run, &mut out),
             Input::ThreadDeleted { thread } => self.deleted(thread, &mut out),
             Input::Written { serial, reply } => self.written(serial, reply, &mut out)?,
         }
@@ -596,7 +597,11 @@ impl Drawing {
             (Wait::Lookup { run, call, begin }, Ok(Reply::Lookup(found))) => {
                 self.looked_up(run, &call, *begin, found, out);
             }
-            (Wait::Step(write), Ok(_)) if write.fenced => {}
+            (Wait::Step(write), Ok(_)) if write.fenced => {
+                if let Some(error) = write.interrupted {
+                    self.finish(write.run, &write.call, Some(error), out);
+                }
+            }
             (Wait::Step(write), Ok(Reply::Step(id))) => self.stored(*write, id, out),
             (
                 Wait::Cut {
@@ -620,6 +625,9 @@ impl Drawing {
             (Wait::Lookup { run, call, .. }, _) => self.store_failed(run, &call, out),
             (Wait::Step(write), _) => self.store_failed(write.run, &write.call, out),
         }
+        let closed = self.closed;
+        self.calls.retain(|call| call.run > closed || !call.done);
+        self.runs.retain(|ledger| ledger.run > closed);
         Ok(())
     }
 
