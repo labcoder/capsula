@@ -34,6 +34,7 @@ struct Attempt {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Feedback {
     QueueFailed,
+    Unavailable,
     Refused(IssueRefused),
 }
 
@@ -284,6 +285,20 @@ impl Cards {
             });
             entry.feedback = request.is_none().then_some(Feedback::QueueFailed);
         }
+    }
+
+    pub(super) fn unavailable(&mut self, request: u64, draft: DraftId) {
+        let Some(entry) = self.entries.get_mut(&draft) else {
+            return;
+        };
+        let Some(attempt) = &mut entry.attempt else {
+            return;
+        };
+        if !attempt.pending || attempt.request != request {
+            return;
+        }
+        attempt.pending = false;
+        entry.feedback = Some(Feedback::Unavailable);
     }
 
     pub(super) fn refused(

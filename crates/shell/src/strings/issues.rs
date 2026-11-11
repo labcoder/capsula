@@ -4,8 +4,14 @@ use super::{FluentArgs, Strings};
 
 impl Strings {
     pub(crate) fn issue_feedback(&self, feedback: crate::threads::IssueFeedback) -> String {
-        let crate::threads::IssueFeedback::Refused(reason) = feedback else {
-            return self.get(super::Text::IssueQueueFailed);
+        let reason = match feedback {
+            crate::threads::IssueFeedback::QueueFailed => {
+                return self.get(super::Text::IssueQueueFailed);
+            }
+            crate::threads::IssueFeedback::Unavailable => {
+                return self.get(super::Text::IssueActionUnavailable);
+            }
+            crate::threads::IssueFeedback::Refused(reason) => reason,
         };
         let mut args = FluentArgs::new();
         args.set(
@@ -106,6 +112,19 @@ impl Strings {
 mod tests {
     use super::*;
     use kumochi_protocol::message::IssueUrl;
+
+    #[test]
+    fn terminal_storage_failure_copy_is_distinct_from_a_failed_enqueue() {
+        let strings = Strings::english();
+        assert_eq!(
+            strings.issue_feedback(crate::threads::IssueFeedback::Unavailable),
+            "This action couldn't be completed. Review the saved details before trying again."
+        );
+        assert_eq!(
+            strings.issue_feedback(crate::threads::IssueFeedback::QueueFailed),
+            "The action wasn't queued. Try again when connected."
+        );
+    }
 
     #[test]
     fn saved_status_copy_keeps_uncertain_candidates_and_confirmations_distinct() {

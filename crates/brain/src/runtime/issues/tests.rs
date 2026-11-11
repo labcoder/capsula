@@ -26,6 +26,8 @@ use zeroize::Zeroizing;
 mod authority;
 #[path = "tests/lifecycle.rs"]
 mod lifecycle;
+#[path = "tests/storage.rs"]
+mod storage;
 
 #[derive(Default)]
 struct FilingServer {

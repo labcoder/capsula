@@ -4,7 +4,7 @@ use std::{fmt, sync::Arc};
 
 use kumochi_protocol::{
     Secret,
-    message::{ControlToShell, Decision, FailReason, IssueOp, IssueRefused},
+    message::{ControlToShell, Decision, DraftId, FailReason, IssueOp, IssueRefused},
 };
 use tokio::{task::JoinHandle, time::Instant};
 
@@ -39,6 +39,7 @@ struct Reply {
     serial: u64,
     epoch: u64,
     request: u64,
+    draft: DraftId,
     forced: Option<IssueRefused>,
 }
 
@@ -71,6 +72,7 @@ struct Job {
     id: u64,
     epoch: u64,
     request: u64,
+    draft: DraftId,
     stamp: Stamp,
     check: bool,
     control: Arc<Control>,
@@ -168,6 +170,11 @@ impl Brain {
             return None;
         }
         let available = epoch == Some(self.epoch) && self.filing.job.is_none();
+        let draft = match op {
+            IssueOp::Consent { draft, .. }
+            | IssueOp::CheckAgain { draft }
+            | IssueOp::Discard { draft } => *draft,
+        };
         let (write, start, forced) = match op {
             IssueOp::Consent {
                 draft,
@@ -203,6 +210,7 @@ impl Brain {
                 serial,
                 epoch: self.epoch,
                 request,
+                draft,
                 forced,
             });
             return Some(vec![Effect::Store(StoreOp::Issue {
@@ -218,6 +226,7 @@ impl Brain {
             id: self.filing.serial(),
             epoch: self.epoch,
             request,
+            draft,
             stamp,
             check,
             control,
@@ -250,11 +259,12 @@ impl Brain {
         {
             let pending = self.filing.replies.remove(index);
             return reply.map_or_else(
-                |()| Vec::new(),
+                |()| self.issue_unavailable(pending.epoch, pending.request, pending.draft),
                 |answer| {
                     self.issue_notice(
                         pending.epoch,
                         Some(pending.request),
+                        pending.draft,
                         &answer,
                         pending.forced,
                     )
@@ -301,7 +311,7 @@ impl Brain {
                 self.filing.job = Some(job);
                 return vec![effect];
             }
-            return Vec::new();
+            return self.issue_unavailable(job.epoch, job.request, job.draft);
         };
         job.admission = None;
         let active = match (&answer, after) {
@@ -318,8 +328,13 @@ impl Brain {
         };
         let forced =
             (!active && matches!(after, AfterWrite::Read)).then_some(IssueRefused::NotAllowedNow);
-        let mut effects =
-            self.issue_notice(job.epoch, (!active).then_some(job.request), &answer, forced);
+        let mut effects = self.issue_notice(
+            job.epoch,
+            (!active).then_some(job.request),
+            job.draft,
+            &answer,
+            forced,
+        );
         if !active {
             return effects;
         }
@@ -343,6 +358,7 @@ impl Brain {
             effects.extend(self.issue_notice(
                 job.epoch,
                 Some(job.request),
+                job.draft,
                 &Answer::Unchanged(job.action.take().expect("the acknowledged action")),
                 Some(IssueRefused::NotConnected),
             ));
@@ -525,10 +541,21 @@ impl Brain {
         self.filing.write(job, AfterWrite::Cleanup, write)
     }
 
+    fn issue_unavailable(&self, epoch: u64, request: u64, draft: DraftId) -> Vec<Effect> {
+        if epoch != self.epoch {
+            return Vec::new();
+        }
+        vec![Effect::Control(ControlToShell::IssueUnavailable {
+            request,
+            draft,
+        })]
+    }
+
     fn issue_notice(
         &self,
         epoch: u64,
         request: Option<u64>,
+        draft: DraftId,
         answer: &Answer,
         forced: Option<IssueRefused>,
     ) -> Vec<Effect> {
@@ -538,7 +565,11 @@ impl Brain {
         let (action, reason) = match answer {
             Answer::Changed(action) | Answer::Unchanged(action) => (action, forced),
             Answer::Refused(reason, action) => (action, forced.or(Some(*reason))),
-            Answer::Gone => return Vec::new(),
+            Answer::Gone => {
+                return request.map_or_else(Vec::new, |request| {
+                    self.issue_unavailable(epoch, request, draft)
+                });
+            }
         };
         let mut effects = vec![Effect::Control(ControlToShell::ActionState {
             request,

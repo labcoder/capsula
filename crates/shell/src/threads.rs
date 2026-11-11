@@ -226,6 +226,10 @@ impl Threads {
         self.reads.borrow_mut().cards.submitted(draft, request);
     }
 
+    pub(crate) fn issue_unavailable(&mut self, request: u64, draft: DraftId) {
+        self.reads.borrow_mut().cards.unavailable(request, draft);
+    }
+
     pub(crate) fn issue_refused(
         &mut self,
         request: u64,

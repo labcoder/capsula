@@ -134,6 +134,7 @@ impl Tapped for ControlToShell {
             Self::GitHub(_) => "GitHub",
             Self::ActionState { .. } => "ActionState",
             Self::IssueRefused { .. } => "IssueRefused",
+            Self::IssueUnavailable { .. } => "IssueUnavailable",
             Self::ThreadModelSet { .. } => "ThreadModelSet",
             Self::Voice(_) => "Voice",
             Self::GitHubError(_) => "GitHubError",

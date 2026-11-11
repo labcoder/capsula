@@ -189,6 +189,23 @@ impl Presence {
                         self.chat.update(cx, |_, cx| cx.notify());
                     }
                 }
+                LinkEvent::IssueUnavailable {
+                    generation,
+                    request,
+                    draft,
+                } => {
+                    if self
+                        .session
+                        .as_ref()
+                        .is_some_and(|session| session.generation() == generation)
+                    {
+                        self.threads.update(cx, |model, cx| {
+                            model.issue_unavailable(request, draft);
+                            cx.notify();
+                        });
+                        self.chat.update(cx, |_, cx| cx.notify());
+                    }
+                }
                 LinkEvent::Focus {
                     generation,
                     run,

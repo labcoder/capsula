@@ -606,6 +606,13 @@ pub enum ControlToShell {
     },
     /// A GitHub connection error, independent of generic account errors.
     GitHubError(UserError),
+    /// An operation ended without an authoritative stored answer; no card state is implied.
+    IssueUnavailable {
+        /// The original shell operation identity.
+        request: u64,
+        /// The action whose operation could not complete.
+        draft: DraftId,
+    },
 }
 
 /// Shell to brain, on the data pipe.

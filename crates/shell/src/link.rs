@@ -121,6 +121,11 @@ pub(crate) enum LinkEvent {
         approval: Option<kumochi_protocol::message::ApprovalRev>,
         reason: kumochi_protocol::message::IssueRefused,
     },
+    IssueUnavailable {
+        generation: u64,
+        request: u64,
+        draft: kumochi_protocol::message::DraftId,
+    },
     /// A run's phase changed, from the control pipe.
     RunState {
         generation: u64,
@@ -923,6 +928,7 @@ fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
             | ControlToShell::GitHubError(_)
             | ControlToShell::ActionState { .. }
             | ControlToShell::IssueRefused { .. }
+            | ControlToShell::IssueUnavailable { .. }
             | ControlToShell::Connections(_)
             | ControlToShell::AnthropicKeyStage { .. }
             | ControlToShell::AnthropicKeyStageDone { .. }
@@ -1200,6 +1206,18 @@ fn watch(
                         version,
                         approval,
                         reason,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Ok(Some(ControlToShell::IssueUnavailable { request, draft })) => {
+                if events
+                    .send_blocking(LinkEvent::IssueUnavailable {
+                        generation,
+                        request,
+                        draft,
                     })
                     .is_err()
                 {

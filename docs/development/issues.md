@@ -274,15 +274,34 @@ the connection for reopening without erasing that durable answer. Result and com
 do not reuse the canceled admission scope: they settle an already admitted phase and cannot
 start another request.
 
+`IssueUnavailable { request, draft }` ends an attempt when its SQL operation cannot provide an
+authoritative answer, including a requested action that is gone. The shared reply site covers
+Discard, busy/offline File and Check again, and unsupported consent decisions; admitted reads
+and failed cleanup use the same terminal. It carries no state, version, approval or diagnostic.
+Only the matching pending session/request/draft is released. The shell preserves its last card
+and watermark, shows one fixed localized message, and schedules no read, consent or HTTP retry.
+Late and duplicate terminals cannot replace a completed or newer attempt's feedback.
+
 If initial Consent was interrupted before its transaction committed, the retained admission
 is revalidated by unscoped CancelledConsent. It shares normal validation, single-use approval
 consumption and the unresolved-draft guard, then records known-unsent Failed in the same
 transaction for a newly admitted Preflight. It constructs no client. A refusal or replay does
 not become a new send.
 
+If the approval write and this compensation both fail, neither transaction spends the approval:
+the saved Draft and its revision remain unchanged. It is usable only through another explicit
+confirmation after storage is available, not by replaying the old dialog or by receiving the
+terminal. If compensation commits, the old approval is spent and the known-unsent Failed action
+offers a new one. The terminal itself grants no consent in either case.
+
 Cancellation and POST handoff share an atomic fence. For File, expiry or loss before handoff is
 known-unsent Failed; afterward it is Unknown. Recovery uses GitHub's Date and presend exclusions,
 not a local-clock substitute or hidden reference in the issue body. Matches stay candidates.
+
+After POST handoff, result-save failure still attempts to persist Unknown. If that cleanup also
+fails, the durable Posting row remains unresolved and blocks an identical filing; startup
+recovery records Unknown when storage is writable. An unavailable terminal never restores
+approval on Posting, removes that guard, or dispatches a second POST.
 
 Shutdown cancels filing before closing the store writer, then drains its SQL acknowledgements
 and joins its network or client-construction owner. Missing the original quit deadline makes

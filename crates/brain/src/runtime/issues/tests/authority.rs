@@ -3,7 +3,10 @@ use crate::coordinator::{Effect, Input};
 use crate::issues::{Answer as IssueAnswer, WriteScope};
 use kumochi_protocol::message::FailReason;
 
-async fn posting_acknowledgement(brain: &mut Brain, action: &Action) -> (Input, WriteScope) {
+pub(super) async fn posting_acknowledgement(
+    brain: &mut Brain,
+    action: &Action,
+) -> (Input, WriteScope) {
     let mut observed = brain.observe();
     let release = brain.hold_store(|op| {
         matches!(

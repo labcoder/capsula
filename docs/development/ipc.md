@@ -513,6 +513,7 @@ display identity and grants no authority; Check again reuses RefreshRepos for GE
 | Control, brain to shell | `GitHub(GitHubView)` | Connection state; a connected view has a login, at most 200 repositories, truncation flag and optional default |
 | Control, brain to shell | `ActionState` | Optional final-ack `request`, `draft`, `version`, `state`, optional `approval` |
 | Control, brain to shell | `IssueRefused` | Original `request`, `draft`, authoritative `version` and optional `approval`, content-free `reason`; no stage/content change |
+| Control, brain to shell | `IssueUnavailable` | Original `request` and `draft` only; no authoritative stored answer is available |
 | Data, shell to brain | `IssueEdit` | `draft`, checked `title`, normalized `body`, optional `repo` |
 | Data, shell to brain | `IssueCards` | At most 16 draft ids; empty is valid |
 | Data, brain to shell | `IssueCard` | `draft`, `thread`, optional `repo` and `account`, `title`, `body`, `hash`, optional `approval`, `version`, `state` |
@@ -534,6 +535,18 @@ reads and unsolicited updates use `None`. Before a refusal, the brain sends auth
 ActionState with the same final request; the shell retains that request after acknowledgement
 to accept only the matching reason/version/approval. These metadata fields carry no issue
 content and stay off the tap payload allow-list.
+
+`IssueUnavailable` is appended at tag 26 under the same exact `BUILD_ID` pairing.
+Its maximum complete frame is 25 bytes: the four-byte header, one-byte tag and
+two ten-byte `u64` identities. The brain sends it when SQL cannot provide a
+terminal authoritative answer; it carries no version, approval, state or foreign
+error. The shell generation-fences it and releases only the matching currently
+pending request/draft in the shared history cache. Retained provenance after a
+final acknowledgement does not make a late error current; duplicates and stale
+errors are ignored. A matching error preserves the held card and watermark and
+shows one fixed localized message, distinct from an enqueue failure or refusal.
+It schedules no read, retry or network request. Controls become usable for a
+manual retry, and filing still requires a fresh real confirmation of saved details.
 
 P1 originally staged these messages without senders or action handlers. That staging baseline
 is superseded by the current account and saved-card paths above: it logged only the operation

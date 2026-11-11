@@ -41,6 +41,7 @@ async fn an_older_lookup_cannot_complete_a_new_job_in_the_same_uncertain_episode
         id: 20,
         epoch: brain.epoch,
         request: 202,
+        draft: action.draft,
         stamp: brain.account.github.machine().stamp(),
         check: true,
         control: Control::new(),

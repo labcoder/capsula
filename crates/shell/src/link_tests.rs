@@ -1137,6 +1137,10 @@ fn staged_issue_controls_keep_the_link_and_cards_return_exact_credit() {
             draft: DraftId(9),
             reason: IssueRefused::NotAllowedNow,
         },
+        ControlToShell::IssueUnavailable {
+            request: 8,
+            draft: DraftId(9),
+        },
         ControlToShell::Ping,
     ] {
         frame::write(&mut &link.control, &message, Pipe::Control).expect("written");
@@ -1188,6 +1192,16 @@ fn staged_issue_controls_keep_the_link_and_cards_return_exact_credit() {
             IssueRefused::NotAllowedNow
         )
     );
+    let LinkEvent::IssueUnavailable {
+        generation,
+        request,
+        draft,
+    } = next(&events)
+    else {
+        panic!("terminal storage failure reaches its session-fenced consumer");
+    };
+    assert_eq!(generation, session.generation());
+    assert_eq!((request, draft), (8, DraftId(9)));
     let card = DataToShell::IssueCard(IssueCard {
         draft: DraftId(9),
         thread: ThreadId(3),

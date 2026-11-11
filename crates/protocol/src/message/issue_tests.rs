@@ -469,6 +469,14 @@ fn largest_issue_and_connection_frames_fit_their_exact_budgets() {
         Pipe::Control,
         57,
     );
+    roundtrip(
+        &ControlToShell::IssueUnavailable {
+            request: u64::MAX,
+            draft: DraftId(u64::MAX),
+        },
+        Pipe::Control,
+        25,
+    );
     roundtrip(&DataToShell::IssueCard(card.clone()), Pipe::Data, 34261);
     roundtrip(
         &DataToBrain::IssueEdit {
@@ -668,6 +676,90 @@ fn issue_refusals_keep_exact_authoritative_metadata() {
         .unwrap(),
         serde_json::json!({"IssueRefused":{"request":128,"draft":2,"version":3,"approval":4,"reason":"NotAllowedNow"}})
     );
+}
+
+#[test]
+fn issue_unavailable_has_only_correlated_identity_and_round_trips_exact_wire_data() {
+    use crate::frame::{FrameError, read};
+    for (request, draft, payload) in [
+        (0, DraftId(0), vec![26, 0, 0]),
+        (128, DraftId(2), vec![26, 128, 1, 2]),
+        (
+            u64::MAX,
+            DraftId(u64::MAX),
+            vec![
+                26, 255, 255, 255, 255, 255, 255, 255, 255, 255, 1, 255, 255, 255, 255, 255, 255,
+                255, 255, 255, 1,
+            ],
+        ),
+    ] {
+        let message = ControlToShell::IssueUnavailable { request, draft };
+        let wire = encode(&message, Pipe::Control).unwrap();
+        assert_eq!(&wire[HEADER_LEN..], payload);
+        assert_eq!(
+            read::<ControlToShell>(&mut wire.as_slice(), Pipe::Control).unwrap(),
+            Some(message.clone())
+        );
+        let json = serde_json::json!({"IssueUnavailable":{"request":request,"draft":draft.0}});
+        assert_eq!(serde_json::to_value(&message).unwrap(), json);
+        assert_eq!(
+            serde_json::from_value::<ControlToShell>(json).unwrap(),
+            message
+        );
+        for length in 1..wire.len() {
+            assert!(matches!(
+                read::<ControlToShell>(&mut &wire[..length], Pipe::Control),
+                Err(FrameError::Truncated)
+            ));
+        }
+        for length in 0..payload.len() {
+            assert!(postcard::from_bytes::<ControlToShell>(&payload[..length]).is_err());
+        }
+        let record =
+            Record::of(Pipe::Control, Direction::ToShell, &message, payload.len()).unwrap();
+        assert_eq!(record.payload, None);
+        assert_eq!(
+            record.describe(),
+            format!("IssueUnavailable ({} bytes)", payload.len())
+        );
+    }
+    assert_eq!(
+        format!(
+            "{:?}",
+            ControlToShell::IssueUnavailable {
+                request: 128,
+                draft: DraftId(2)
+            }
+        ),
+        "IssueUnavailable { request: 128, draft: DraftId(2) }"
+    );
+}
+
+#[test]
+fn issue_unavailable_rejects_unknown_tags_overflow_missing_and_mistyped_identity() {
+    use crate::frame::{FrameError, read};
+    for payload in [
+        vec![27],
+        vec![26, 128, 128, 128, 128, 128, 128, 128, 128, 128, 2, 0],
+        vec![26, 0, 128, 128, 128, 128, 128, 128, 128, 128, 128, 2],
+    ] {
+        assert!(postcard::from_bytes::<ControlToShell>(&payload).is_err());
+        let mut wire = u32::try_from(payload.len()).unwrap().to_le_bytes().to_vec();
+        wire.extend(payload);
+        assert!(matches!(
+            read::<ControlToShell>(&mut wire.as_slice(), Pipe::Control),
+            Err(FrameError::Malformed(_))
+        ));
+    }
+    for json in [
+        r#"{"IssueUnavailable":{"draft":2}}"#,
+        r#"{"IssueUnavailable":{"request":1}}"#,
+        r#"{"IssueUnavailable":{"request":18446744073709551616,"draft":2}}"#,
+        r#"{"IssueUnavailable":{"request":1,"draft":18446744073709551616}}"#,
+        r#"{"IssueUnavailable":{"request":"1","draft":2}}"#,
+    ] {
+        assert!(serde_json::from_str::<ControlToShell>(json).is_err());
+    }
 }
 
 #[test]

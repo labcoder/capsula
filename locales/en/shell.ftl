@@ -71,6 +71,7 @@ issue-check-again = Check again
 issue-replacement = This saved destination or approval isn't usable. Dismiss this draft and ask for a replacement after connecting the intended account and repository. This draft won't be retargeted.
 issue-pending = Waiting for this action's result…
 issue-queue-failed = The action wasn't queued. Try again when connected.
+issue-action-unavailable = This action couldn't be completed. Review the saved details before trying again.
 issue-refusal =
     { $reason ->
         [approval] The approval changed. Review the current saved details before trying again.

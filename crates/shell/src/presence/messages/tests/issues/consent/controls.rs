@@ -23,6 +23,244 @@ fn deliver(f: &Fixture, events: Vec<LinkEvent>, cx: &mut TestAppContext) {
 #[gpui::test]
 #[expect(
     clippy::too_many_lines,
+    reason = "one rendered File failure scenario covers correlation, no replay and fresh manual confirmation"
+)]
+fn storage_error_preserves_cards_and_requires_fresh_manual_file_confirmation(
+    cx: &mut TestAppContext,
+) {
+    let f = fixture(cx, ActionState::Draft, "Literal saved body\n{ $repo }");
+    let expected = f.models[0].read_with(cx, |model, _| {
+        model.issue(DraftId(9)).unwrap().card().unwrap().clone()
+    });
+    open(&f, 0, cx);
+    confirm(&f, 0, cx);
+    assert_eq!(f.controls.try_recv().unwrap(), payload(1, 1));
+    for (generation, request, draft) in
+        [(2, 1, DraftId(9)), (1, 2, DraftId(9)), (1, 1, DraftId(10))]
+    {
+        deliver(
+            &f,
+            vec![LinkEvent::IssueUnavailable {
+                generation,
+                request,
+                draft,
+            }],
+            cx,
+        );
+        for model in &f.models {
+            model.read_with(cx, |model, _| {
+                let entry = model.issue(DraftId(9)).unwrap();
+                assert!(entry.pending());
+                assert_eq!(entry.feedback, None);
+                assert_eq!(entry.card(), Some(&expected));
+            });
+        }
+        assert!(f.controls.try_recv().is_err());
+        assert!(f.requests.try_recv().is_err());
+    }
+    deliver(
+        &f,
+        vec![LinkEvent::IssueUnavailable {
+            generation: 1,
+            request: 1,
+            draft: DraftId(9),
+        }],
+        cx,
+    );
+    for model in &f.models {
+        model.read_with(cx, |model, _| {
+            let entry = model.issue(DraftId(9)).unwrap();
+            assert!(!entry.pending());
+            assert!(!entry.loading());
+            assert_eq!(
+                entry.feedback,
+                Some(crate::threads::IssueFeedback::Unavailable)
+            );
+            assert_eq!(entry.card(), Some(&expected));
+        });
+    }
+    for (view, window) in &f.views {
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.rows[0].feedback.as_deref(), Some("This action couldn't be completed. Review the saved details before trying again."));
+            assert!(view.pending_issue.is_none());
+        });
+        let mut frame = gpui_kit::VisualTestContext::from_window(*window, cx);
+        assert!(frame.debug_bounds("issue-file-9").is_some());
+        assert!(!frame.update(WindowExt::has_active_dialog));
+    }
+    deliver(
+        &f,
+        vec![
+            LinkEvent::IssueUnavailable {
+                generation: 1,
+                request: 1,
+                draft: DraftId(9),
+            },
+            LinkEvent::GitHub {
+                generation: 1,
+                view: connected(),
+            },
+        ],
+        cx,
+    );
+    assert!(f.controls.try_recv().is_err());
+    assert!(f.requests.try_recv().is_err());
+    for (_, window) in &f.views {
+        let mut frame = gpui_kit::VisualTestContext::from_window(*window, cx);
+        assert!(!frame.update(WindowExt::has_active_dialog));
+    }
+    open(&f, 1, cx);
+    assert!(f.controls.try_recv().is_err());
+    cx.simulate_keystrokes(f.views[1].1, "escape");
+    cx.run_until_parked();
+    assert!(f.controls.try_recv().is_err());
+    open(&f, 1, cx);
+    confirm(&f, 1, cx);
+    assert_eq!(f.controls.try_recv().unwrap(), payload(2, 1));
+    deliver(
+        &f,
+        vec![LinkEvent::IssueUnavailable {
+            generation: 1,
+            request: 1,
+            draft: DraftId(9),
+        }],
+        cx,
+    );
+    for model in &f.models {
+        model.read_with(cx, |model, _| {
+            let entry = model.issue(DraftId(9)).unwrap();
+            assert!(entry.pending());
+            assert_eq!(entry.feedback, None);
+            assert_eq!(entry.card(), Some(&expected));
+        });
+    }
+    assert!(f.controls.try_recv().is_err());
+    assert!(f.requests.try_recv().is_err());
+}
+
+#[gpui::test]
+fn storage_error_allows_only_manual_check_or_dismiss_and_never_schedules_a_request(
+    cx: &mut TestAppContext,
+) {
+    for (selector, op) in [
+        ("issue-check-9", IssueOp::CheckAgain { draft: DraftId(9) }),
+        ("issue-dismiss-9", IssueOp::Discard { draft: DraftId(9) }),
+    ] {
+        let f = fixture(
+            cx,
+            ActionState::Unknown {
+                lookup: LookupResult::None,
+                maybe_duplicate: true,
+            },
+            "saved body",
+        );
+        let expected = f.models[0].read_with(cx, |model, _| {
+            model.issue(DraftId(9)).unwrap().card().unwrap().clone()
+        });
+        click(&f, 0, selector, cx);
+        assert_eq!(
+            f.controls.try_recv().unwrap(),
+            ControlToBrain::Issue {
+                request: 1,
+                op: op.clone()
+            }
+        );
+        deliver(
+            &f,
+            vec![LinkEvent::IssueUnavailable {
+                generation: 1,
+                request: 1,
+                draft: DraftId(9),
+            }],
+            cx,
+        );
+        for model in &f.models {
+            model.read_with(cx, |model, _| {
+                let entry = model.issue(DraftId(9)).unwrap();
+                assert!(!entry.pending());
+                assert_eq!(entry.card(), Some(&expected));
+            });
+        }
+        assert!(f.controls.try_recv().is_err());
+        assert!(f.requests.try_recv().is_err());
+        click(&f, 1, selector, cx);
+        assert_eq!(
+            f.controls.try_recv().unwrap(),
+            ControlToBrain::Issue { request: 2, op }
+        );
+        assert!(f.controls.try_recv().is_err());
+        assert!(f.requests.try_recv().is_err());
+    }
+}
+
+#[gpui::test]
+fn late_storage_error_cannot_overwrite_completed_attempt_feedback(cx: &mut TestAppContext) {
+    let f = fixture(cx, ActionState::Draft, "saved body");
+    open(&f, 0, cx);
+    confirm(&f, 0, cx);
+    assert_eq!(f.controls.try_recv().unwrap(), payload(1, 1));
+    deliver(
+        &f,
+        vec![
+            LinkEvent::ActionState {
+                generation: 1,
+                request: Some(1),
+                draft: DraftId(9),
+                version: StateVersion(1),
+                state: ActionState::Draft,
+                approval: Some(ApprovalRev(1)),
+            },
+            LinkEvent::IssueUnavailable {
+                generation: 1,
+                request: 1,
+                draft: DraftId(9),
+            },
+        ],
+        cx,
+    );
+    for model in &f.models {
+        model.read_with(cx, |model, _| {
+            let entry = model.issue(DraftId(9)).unwrap();
+            assert!(!entry.pending());
+            assert_eq!(entry.feedback, None);
+        });
+    }
+    deliver(
+        &f,
+        vec![
+            LinkEvent::IssueRefused {
+                generation: 1,
+                request: 1,
+                draft: DraftId(9),
+                version: StateVersion(1),
+                approval: Some(ApprovalRev(1)),
+                reason: IssueRefused::NotAllowedNow,
+            },
+            LinkEvent::IssueUnavailable {
+                generation: 1,
+                request: 1,
+                draft: DraftId(9),
+            },
+        ],
+        cx,
+    );
+    for model in &f.models {
+        model.read_with(cx, |model, _| {
+            assert_eq!(
+                model.issue(DraftId(9)).unwrap().feedback,
+                Some(crate::threads::IssueFeedback::Refused(
+                    IssueRefused::NotAllowedNow
+                ))
+            );
+        });
+    }
+    assert!(f.controls.try_recv().is_err());
+    assert!(f.requests.try_recv().is_err());
+}
+
+#[gpui::test]
+#[expect(
+    clippy::too_many_lines,
     reason = "one headless refusal and fresh-consent scenario for both retryable stages"
 )]
 fn unchanged_stage_refusal_keeps_correlation_and_a_fresh_attempt_uses_the_new_approval(
