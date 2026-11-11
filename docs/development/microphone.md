@@ -32,7 +32,9 @@ Forward audio on a separate nonblocking/cancellable link worker, not the UI thre
 After accepting this exact receipt and publishing the corresponding UI state,
 call `accept_running(Running) -> Result<(), MicError>`. The source discards native
 startup/backlog buffers until it observes an empty queue after collection was
-enabled; no startup/pre-roll samples enter the packetizer. Preparing and stopping
+enabled, then drops the first complete packet: it may straddle UI acceptance even
+though it was not yet available at the empty observation. Following packets begin
+after acceptance, so no startup/pre-roll samples enter the packetizer. Preparing and stopping
 must remain distinct from Listening. A late open/running result cannot reopen a
 released/cancelled gate.
 

@@ -266,6 +266,7 @@ fn read(
 ) -> Result<(), MicError> {
     let mut ready = false;
     let mut first = true;
+    let mut skip_startup = true;
     loop {
         let mode = token.mode(session, Instant::now())?;
         if mode == Mode::Release {
@@ -313,7 +314,8 @@ fn read(
         let bad = flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0.cast_unsigned() != 0
             || !first && flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0.cast_unsigned() != 0;
         let silent = flags & AUDCLNT_BUFFERFLAGS_SILENT.0.cast_unsigned() != 0;
-        let allowed = token.collecting(session) && ready;
+        let allowed =
+            post_start_packet(token.collecting(session), ready, &mut skip_startup, frames);
         let copied = match bytes {
             Some(n) if n <= raw.len() && !bad && allowed && (silent || !data.is_null()) => {
                 if silent {
@@ -352,5 +354,30 @@ fn read(
             packets.push(source.format.mono(frame)?, output)?;
         }
         raw[..copied].zeroize();
+    }
+}
+
+fn post_start_packet(live: bool, drained: bool, first: &mut bool, frames: u32) -> bool {
+    if !live || !drained || frames == 0 {
+        return false;
+    }
+    let allowed = !*first;
+    *first = false;
+    allowed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::post_start_packet;
+
+    #[test]
+    fn startup_discards_the_packet_that_may_straddle_collection_acceptance() {
+        let mut first = true;
+        assert!(!post_start_packet(false, false, &mut first, 7));
+        assert!(!post_start_packet(true, false, &mut first, 7));
+        assert!(!post_start_packet(true, true, &mut first, 0));
+        assert!(!post_start_packet(true, true, &mut first, 7));
+        assert!(post_start_packet(true, true, &mut first, 7));
+        assert!(!post_start_packet(false, true, &mut first, 7));
     }
 }
