@@ -592,6 +592,61 @@ fn mapper_changed_final_item_and_failure_after_valid_ready_never_complete_a_pref
 }
 
 #[test]
+fn a_messages_start_object_without_fragments_streams_before_ready_and_draws() {
+    let scratch = Scratch::new("provider-draw-messages-start");
+    let mut store = store(&scratch);
+    let mut core = offered(vec![T]);
+    let input: Value = serde_json::from_str(&format!("{PREFIX}{END}")).expect("a valid drawing");
+    let args = serde_json::to_string(&input).expect("the start object's bytes");
+    let mut mapper = crate::engines::anthropic::Mapper::default();
+    let mut reader = crate::connections::model::sse::Reader::default();
+    for event in [
+        json!({"type":"message_start","message":{"usage":{}}}),
+        json!({"type":"content_block_start","index":0,"content_block":{
+            "type":"tool_use","id":"messages","name":"draw","input":input
+        }}),
+        json!({"type":"content_block_stop","index":0}),
+    ] {
+        assert_eq!(
+            reader.feed(format!("data: {event}\n\n").as_bytes(), &mut |event| {
+                mapper.event(event);
+            }),
+            Ok(crate::connections::model::sse::Progress::More)
+        );
+    }
+    let events = mapper.take();
+    assert_eq!(
+        events,
+        [
+            TurnEvent::ToolCallStarted {
+                call: id("messages"),
+                name: crate::engines::ToolName::Draw,
+            },
+            TurnEvent::ToolArgsDelta {
+                call: id("messages"),
+                delta: args.clone(),
+            },
+            TurnEvent::ToolCallReady {
+                call: id("messages"),
+                args,
+            },
+        ]
+    );
+    let mut streamed = Vec::new();
+    for event in events {
+        streamed.extend(send(&mut core, event));
+    }
+    let mut effects = drain(&mut core, &mut store, streamed);
+    effects.extend(send(&mut core, TurnEvent::Finished(Finish::Completed)));
+    assert_eq!(ends(&effects), [true]);
+    assert_eq!(
+        result(&effects).output,
+        ToolOutput::Text("drawn: [s1]".into())
+    );
+    assert_prefix(&store, &["s1"]);
+}
+
+#[test]
 fn stop_settles_the_submitted_step_without_resurrecting_queued_records_or_content() {
     let scratch = Scratch::new("provider-draw-stop");
     let mut store = store(&scratch);

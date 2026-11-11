@@ -318,6 +318,7 @@ impl Mapper {
         };
         match old {
             Block::Tool { call, start, args } => {
+                let initial = args.is_none() && start != "{}";
                 let args = args.unwrap_or(start);
                 if !serde_json::from_str::<Value>(&args)
                     .map_err(|_| ())?
@@ -326,6 +327,12 @@ impl Mapper {
                     return Err(());
                 }
                 self.bytes -= retained;
+                if initial {
+                    self.queue(TurnEvent::ToolArgsDelta {
+                        call: call.clone(),
+                        delta: args.clone(),
+                    })?;
+                }
                 return self.queue(TurnEvent::ToolCallReady { call, args });
             }
             Block::Thinking { text, signature } => {
