@@ -9,14 +9,48 @@ use std::{
 
 use kumochi_protocol::message::{ControlToBrain, MAX_VISIBLE_SCENES, RunId, SceneId};
 use kumochi_scene::{
-    Preparation, SceneBinding, SceneEvent, SceneView, StopCut,
+    Frame, Preparation, SceneBinding, SceneEvent, SceneView, StopCut,
     deferred::Deferred,
     display::PaintWork,
     layout::{LayoutState, PreparedStep},
     text::Bounded,
 };
 
-use super::{Activation, Effect};
+use super::{Activation, Effect, Presenter, SceneCache};
+use kumochi_protocol::message::SceneId;
+
+impl Presenter {
+    /// Adopts a bound scene and reserves its frame, with the cache staged from its view.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "adoption moves every owner of the new scene into place at once"
+    )]
+    pub(super) fn install(
+        &mut self,
+        id: SceneId,
+        state: SceneBinding,
+        rest: LayoutState,
+        retained: usize,
+        view: SceneView,
+        frame: Frame,
+        cache: Box<dyn SceneCache>,
+        activation: Activation,
+    ) {
+        let cache_bytes = cache.bytes();
+        let frame = self.frames.borrow_mut().adopt(id, frame, cache);
+        let mut scene = Scene::new(state, rest, retained, view, frame, cache_bytes, activation);
+        if let Some(pending) = self
+            .stopped_begins
+            .iter_mut()
+            .find(|slot| **slot == Some(id))
+        {
+            *pending = None;
+            scene.cut = Cut::Outstanding;
+            scene.skipping = true;
+        }
+        self.scenes.insert(id, scene);
+    }
+}
 
 /// Read-ahead positions per scene: prepared results not yet consumed, plus the running one.
 pub(super) const WINDOW: usize = 8;

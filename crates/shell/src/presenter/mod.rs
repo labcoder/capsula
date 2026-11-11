@@ -1024,37 +1024,6 @@ impl Presenter {
         }
     }
 
-    /// Adopts a bound scene and reserves its frame, with the cache staged from its view.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "adoption moves every owner of the new scene into place at once"
-    )]
-    fn install(
-        &mut self,
-        id: SceneId,
-        state: SceneBinding,
-        rest: LayoutState,
-        retained: usize,
-        view: SceneView,
-        frame: Frame,
-        cache: Box<dyn SceneCache>,
-        activation: Activation,
-    ) {
-        let cache_bytes = cache.bytes();
-        let frame = self.frames.borrow_mut().adopt(id, frame, cache);
-        let mut scene = Scene::new(state, rest, retained, view, frame, cache_bytes, activation);
-        if let Some(pending) = self
-            .stopped_begins
-            .iter_mut()
-            .find(|slot| **slot == Some(id))
-        {
-            *pending = None;
-            scene.cut = Cut::Outstanding;
-            scene.skipping = true;
-        }
-        self.scenes.insert(id, scene);
-    }
-
     /// A scene the shell clears: the brain is told unless it is already known as gone.
     fn forget(&mut self, id: SceneId, out: &mut Out) {
         if !self.cleared.contains(&id) {
