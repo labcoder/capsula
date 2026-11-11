@@ -226,8 +226,9 @@ non-401 startup failure uses the same saved-but-unverified presentation.
 
 An access token schedules rotation one minute before expiry, or halfway through
 the remaining lifetime when less than two minutes remain. Every positive remaining
-lifetime has a positive delay. A pair already unusable when verification or its
-fresh-pair save completes ends in NeedsSignIn instead of starting another rotation.
+lifetime has a positive delay. An access token already unusable when restored-account
+verification or a successful fresh-pair save completes ends in NeedsSignIn. A fresh
+pair that expires during its identity check still gets its one credential save first.
 An expired stored pair found at startup still gets one automatic recovery; an
 expired fresh replacement cannot chain that recovery. The machine first advances
 its fence, revokes consumers and saves `refresh_sent=true` on the existing
