@@ -87,8 +87,8 @@ impl Phonon {
             return Err(TtsError::Load);
         }
         let phonon = Self(synth);
-        for frame in phonon.stream(WARM_UP)? {
-            frame?;
+        for frame in phonon.stream(WARM_UP).map_err(|_| TtsError::Load)? {
+            frame.map_err(|_| TtsError::Load)?;
         }
         Ok(phonon)
     }
@@ -99,9 +99,6 @@ impl Engine for Phonon {
         std::iter::Map<SpeechStream, fn(ptts::Result<Vec<f32>>) -> Result<Vec<f32>, TtsError>>;
 
     fn stream(&self, text: &str) -> Result<Self::Stream, TtsError> {
-        // shortcut: ptts starts this stream's two workers with std::thread::spawn, which panics,
-        // and so aborts a release brain, if the OS refuses a thread. Upgrade to fallible spawns
-        // that clean up the first worker, upstream or as a vendored patch, before release.
         let stream = self.0.stream(text).map_err(|_| TtsError::Synthesis)?;
         Ok(stream.map(|frame| frame.map_err(|_| TtsError::Synthesis)))
     }

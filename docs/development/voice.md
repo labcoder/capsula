@@ -102,8 +102,13 @@ flowchart LR
   `TOKENIZERS_PARALLELISM` (tokenizers). That's a granted exception until upstream takes explicit
   configuration. Nothing else is allowed: no network, no model hub or cache, and no other app's
   tokens or config.
-- **Worker threads:** each stream's two Phonon workers start with `std::thread::spawn`, so a
-  refused thread aborts a release brain. Fallible spawns are a follow-up before release.
+- **Worker threads:** the vendored `ptts` 0.6.0 patch uses fallible thread creation for the
+  decoder and backbone (and the single-worker inline path). The stream owns each worker as
+  soon as it starts. If the next worker cannot start, the failed spawn drops its captured
+  channel ends, then the partial stream closes PCM output and joins the decoder before
+  returning an error. No worker is detached on this path. Warm-up failures map to `TtsError::Load`;
+  request failures map to `TtsError::Synthesis`, without dependency error text. The owner can
+  accept a later Speak or unload normally. This does not change xn's permanent-pool guard.
 - **Logs:** the `ptts`, `xn`, `xn_gemm` and `tokenizers` targets are off at every level, since
   their messages can carry paths or text. Errors map to content-free `TtsError` values.
 
@@ -342,6 +347,22 @@ downloads. A destination that already matches the manifest is kept. Any other ex
 is a conflict: the task checks every destination before it links anything, and if one conflicts it
 links nothing, changes nothing and names the file, to be moved aside by hand. If a link fails
 partway, the links that run made are removed. Run it again after `cargo clean`.
+
+### Vendored worker-startup tests
+
+The vendored `ptts` package is not a product workspace member. Run its focused library
+regressions through its own manifest, with its declared development dependencies intact:
+
+```text
+cargo test --locked --offline --manifest-path vendor/ptts/Cargo.toml --lib worker_startup
+```
+
+Its empty workspace boundary selects `vendor/ptts/Cargo.lock`, restored unchanged from the
+published 0.6.0 package. Populate the locked dependency sources and registry metadata before
+running offline; `clap` and its derive dependencies are required even for this library filter.
+These tests use no models or audio. This standalone lock is upstream's snapshot, not the
+product lock, so its results do not replace validation of the brain's production dependency
+graph. Keep test artifacts in a separate target directory.
 
 ## Speech input
 

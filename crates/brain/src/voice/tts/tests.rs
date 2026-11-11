@@ -44,7 +44,7 @@ impl Drop for FakeStream {
 }
 
 struct Fake {
-    streams: Arc<Mutex<std_mpsc::Receiver<FakeStream>>>,
+    streams: Arc<Mutex<std_mpsc::Receiver<Result<FakeStream, TtsError>>>>,
     live: Arc<AtomicUsize>,
     drops: Arc<DropGate>,
 }
@@ -83,13 +83,13 @@ impl Engine for Fake {
             .lock()
             .expect("no test thread panicked holding it")
             .recv_timeout(WAIT)
-            .map_err(|_| TtsError::Synthesis)
+            .map_err(|_| TtsError::Synthesis)?
     }
 }
 
 struct Harness {
     handle: TtsHandle,
-    streams: std_mpsc::Sender<FakeStream>,
+    streams: std_mpsc::Sender<Result<FakeStream, TtsError>>,
     live: Arc<AtomicUsize>,
     loads: Arc<AtomicUsize>,
     reports: Mutex<UnboundedReceiver<LoadReport>>,
@@ -231,11 +231,11 @@ impl Harness {
         let (entered_tx, entered) = std_mpsc::channel();
         let (dropped_tx, dropped) = std_mpsc::channel();
         self.streams
-            .send(FakeStream {
+            .send(Ok(FakeStream {
                 frames: frames_rx,
                 entered: entered_tx,
                 dropped: dropped_tx,
-            })
+            }))
             .expect("the engine holds the queue");
         Script {
             frames,
@@ -435,6 +435,32 @@ fn a_synthesis_error_is_reported_once() {
     script.send(Err(TtsError::Synthesis));
     assert_eq!(harness.next(&mut events), Some(failed(TtsError::Synthesis)));
     assert_eq!(harness.next(&mut events), None);
+}
+
+#[test]
+fn a_stream_start_failure_leaves_the_owner_able_to_speak_and_unload() {
+    let harness = Harness::loaded();
+    harness.streams.send(Err(TtsError::Synthesis)).unwrap();
+    let mut events = harness.speak("hello", 8);
+    assert_eq!(harness.next(&mut events), Some(failed(TtsError::Synthesis)));
+    assert_eq!(harness.next(&mut events), None);
+
+    let script = harness.script();
+    let mut retry = harness.speak("hello again", 8);
+    script.send(Ok(vec![0.0; 4]));
+    drop(script.frames);
+    assert_eq!(harness.next(&mut retry), Some(pcm(vec![0; 4])));
+    assert_eq!(
+        harness.next(&mut retry),
+        Some(TtsEvent::Done {
+            segment: 7,
+            total: 4
+        })
+    );
+    assert_eq!(harness.next(&mut retry), None);
+    harness.handle.unload(1);
+    assert_eq!(harness.reports(1), [report(1, LoadEvent::Unloaded)]);
+    harness.wait_live(0);
 }
 
 #[test]
