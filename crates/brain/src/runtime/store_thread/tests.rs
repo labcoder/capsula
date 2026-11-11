@@ -47,6 +47,7 @@ fn spawn_with_room(
         gates: None,
         read_gates: None,
         checkpoint_gate: None,
+        after_close: None,
         pauses: None,
     };
     let thread = StoreThread::spawn(store, acks, schedule).expect("thread");
@@ -365,6 +366,50 @@ async fn a_held_model_write_answers_only_after_release() {
         replies.try_recv(),
         Err(mpsc::error::TryRecvError::Disconnected)
     );
+}
+
+#[tokio::test]
+async fn close_releases_the_reply_sender_before_post_close_cleanup_finishes() {
+    let scratch = Scratch::new("close-replies");
+    let store = Store::open(&scratch.db()).expect("store");
+    let (acks, mut replies) = mpsc::unbounded_channel();
+    let (reached, closed) = std_mpsc::channel();
+    let (release, wait) = std_mpsc::channel();
+    let worker = StoreThread::spawn(
+        store,
+        acks,
+        Schedule {
+            after_close: Some((reached, wait)),
+            ..Schedule::default()
+        },
+    )
+    .expect("worker");
+    tokio::time::timeout(PATIENCE, worker.close())
+        .await
+        .expect("close completes in time")
+        .expect("closed");
+    closed
+        .recv_timeout(PATIENCE)
+        .expect("worker holds after close");
+    assert_eq!(
+        replies.try_recv(),
+        Err(mpsc::error::TryRecvError::Disconnected)
+    );
+    release.send(()).expect("release post-close cleanup");
+}
+
+pub(super) fn after_close(gate: Option<(std_mpsc::Sender<()>, std_mpsc::Receiver<()>)>) {
+    if let Some((reached, release)) = gate
+        && reached.send(()).is_ok()
+    {
+        assert!(
+            matches!(
+                release.recv_timeout(PATIENCE),
+                Ok(()) | Err(std_mpsc::RecvTimeoutError::Disconnected)
+            ),
+            "post-close cleanup is released before the test deadline"
+        );
+    }
 }
 
 #[tokio::test]

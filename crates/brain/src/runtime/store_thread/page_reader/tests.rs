@@ -99,6 +99,7 @@ fn run_with(
         gates: Some(gates_heard),
         read_gates: Some(read_gates_heard),
         checkpoint_gate,
+        after_close: None,
         pauses,
     };
     Running {

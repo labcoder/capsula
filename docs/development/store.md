@@ -160,7 +160,10 @@ file. The swap holds both slots, their connections closed, from before its check
 store has reopened (below), so neither opens the old file. While the store is unavailable after a
 failed reopen, page reads fail and checkpoints wait. Closing the store lets queued ops and reads
 finish, then closes the reader, the helper and the store, in that order, so the store's
-connection is the last to close; nothing blocks the caller meanwhile. If the store thread
+connection is the last to close; nothing blocks the caller meanwhile. It releases its own
+acknowledgement sender before signalling close completion, so that worker cannot keep a reply
+receiver open during subsequent purge-file cleanup. Close still does not wait for that cleanup,
+and other producers can keep a shared input channel open. If the store thread
 panics, waiting reads fail and both side connections close for good.
 
 ## Deleting a thread
