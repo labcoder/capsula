@@ -1307,6 +1307,58 @@ fn a_late_first_paint_starts_the_entrance_from_its_initial_pose(cx: &mut gpui_ki
     assert_eq!(vsync_shown(&owner, cx), 0);
 }
 
+/// A step whose only object appears 200 ms in, reached by a wake that runs at 300 ms: the kept
+/// first sample is the object's initial pose at 200 ms, and its 800 ms entrance runs from the
+/// paint observed at 400 ms.
+#[gpui::test]
+fn a_late_appearance_wake_keeps_the_delayed_objects_initial_pose(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    use std::time::{Duration, Instant};
+    let origin = Instant::now()
+        .checked_sub(Duration::from_secs(2))
+        .expect("the monotonic clock is past its second second");
+    let at = |ms| origin + Duration::from_millis(ms);
+    let (owner, _controls) = callback_scene(
+        br#"{"step":{"id":"curve","put":[{"path":{"id":"parabola","d":"M 100 60 Q 170 230 240 260 Q 310 230 380 60","color":"blue","width":4,"enter":"draw","dur":800,"delay":200}}]}}"#,
+        origin,
+        cx,
+    );
+    let script = HostGuard::install(&[
+        Step(Operation::Configure, Outcome::Success),
+        Step(Operation::Show, Outcome::Success),
+    ]);
+    owner.update(cx, |this, cx| {
+        this.frames.idle();
+        assert!(!this.draw_changed_at(at(0), cx), "nothing has appeared");
+        assert!(
+            this.draw_changed_at(at(300), cx),
+            "the late appearance wake"
+        );
+        assert!(
+            !this
+                .presenter
+                .frames()
+                .borrow()
+                .paint(|_, _| Ok::<_, ()>(()))
+        );
+        assert!(this.presenter.begin_painted(at(400)));
+    });
+    script.finish();
+    assert_eq!(
+        retained_draw(&owner, cx),
+        [0.0],
+        "the first paint is the initial pose"
+    );
+    for (late, curve) in [(800, 0.875), (1200, 1.0)] {
+        owner.update(cx, |this, cx| {
+            this.draw_changed_at(at(late), cx);
+        });
+        assert_eq!(retained_draw(&owner, cx), [curve], "{late} ms");
+    }
+    close_callback_scene(&owner, cx);
+}
+
 #[gpui::test]
 fn the_last_kumo_callback_keeps_an_already_due_delayed_rectangle_wake(
     cx: &mut gpui_kit::TestAppContext,

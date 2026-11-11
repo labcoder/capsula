@@ -291,6 +291,65 @@ fn a_child_entrance_waits_for_its_delayed_parent_without_shortening() {
 }
 
 #[test]
+fn the_first_appearance_is_the_earliest_object_the_step_put_with_something_to_paint() {
+    let (mut scene, mut budget, mut view) = fresh();
+    activate(
+        &mut scene,
+        &mut budget,
+        &mut view,
+        json!({"id":"first","put":[rect("s")]}),
+        0,
+    );
+    assert_eq!(view.first_appearance(), Some(0));
+    activate(
+        &mut scene,
+        &mut budget,
+        &mut view,
+        json!({
+            "id":"delayed","say":"one two three four five six seven eight nine ten","put":[
+                {"diagram":{"id":"d","at_word":5,"delay":200}},
+                {"shape":{"id":"child","in":"d","kind":"rect","box":[0,0,8,8],"enter":"fade","dur":400}}
+            ]
+        }),
+        1000,
+    );
+    assert_eq!(
+        view.first_appearance(),
+        Some(3018),
+        "the child appears with its word-timed, delayed parent; the carried rectangle doesn't count"
+    );
+    assert_eq!(item(&view, 3017, "child"), None);
+    assert_eq!(opacity(&view, 3018, "child"), 0.0_f32.to_bits());
+    activate(
+        &mut scene,
+        &mut budget,
+        &mut view,
+        json!({"id":"moves","put":[{"anim":{"target":"s","track":"x","keys":[[0,0],[100,10]]}}]}),
+        4000,
+    );
+    assert_eq!(view.first_appearance(), None, "a track puts no object");
+
+    let (mut scene, mut budget, mut view) = fresh();
+    activate(
+        &mut scene,
+        &mut budget,
+        &mut view,
+        json!({"id":"group","put":[
+            {"diagram":{"id":"e","delay":100}},
+            {"shape":{"id":"inner","in":"e","kind":"rect","box":[0,0,8,8],"delay":300}}
+        ]}),
+        0,
+    );
+    assert_eq!(
+        view.first_appearance(),
+        Some(300),
+        "the diagram appears first but paints nothing"
+    );
+    assert!(sample(&view, 299).items().is_empty());
+    assert!(item(&view, 300, "inner").is_some());
+}
+
+#[test]
 fn frame_never_frees_geometry_replaced_by_an_activation() {
     let (mut scene, mut budget, mut view) = fresh();
     activate(

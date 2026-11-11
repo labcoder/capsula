@@ -87,9 +87,15 @@ conversation panels.
 
 A drawing's entrance starts at the overlay's first paint of its step, so a slow first paint,
 such as a cold overlay window's, doesn't spend the entrance off screen. Until then the step's
-first sample is kept and drawing frames leave it as it is. Observing the paint begins the
-entrance and rearms the drawing's loop, which may have rested meanwhile (scene.md, "Serialized
-activation and first-paint acknowledgement").
+first sample with something to paint is kept and drawing frames leave it as it is. When the
+step's objects appear only later, after a delay, a word offset or a delayed parent, that sample
+is taken at the first one's appearance even if its wake runs late, so it shows the object's
+initial pose. Observing the paint begins the entrance and rearms the drawing's loop, which may
+have rested meanwhile (scene.md, "Serialized activation and first-paint acknowledgement").
+The exception is a step activated before its predecessor's first paint: the predecessor keeps
+its staged clock, so it can first appear part-way through its entrance, and the paint begins
+only the newer step's entrance. A first paint that never comes has no timeout; the 60-second
+motion deadline bounds motion, not this wait.
 
 Advance, retained-frame sampling, scene motion demand and future-wake selection use one
 sampled Instant per owner update. The drawing's callback carries that sampled motion demand

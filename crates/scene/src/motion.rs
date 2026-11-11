@@ -864,6 +864,19 @@ impl SceneView {
         self.deadline = self.deadline.saturating_add(by);
     }
 
+    /// The earliest instant an object this view's step put appears with something to paint,
+    /// clipped to the deadline, or `None` if it put none; carried objects don't count. A host
+    /// whose first sample of the step had nothing to paint samples it no later than this, so a
+    /// late wake can't take the object's first picture part-way into its entrance.
+    pub fn first_appearance(&self) -> Option<u64> {
+        self.paint
+            .iter()
+            .map(|&index| &self.nodes[index])
+            .filter(|node| node.fresh)
+            .map(|node| node.timing.start.min(self.deadline))
+            .min()
+    }
+
     /// What retiring this view may free: its own bytes plus its layout's cached geometry, which
     /// it may hold last. Counted per holder, from the cache, so retirement walks nothing.
     fn attributed_bytes(&self) -> usize {

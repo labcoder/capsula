@@ -205,7 +205,9 @@ impl Frames {
     }
 
     /// Samples each view into its scene's frame at `now_ms`, outside paint. A frame keeping its
-    /// activation's first sample until it paints isn't sampled again.
+    /// activation's first sample until it paints isn't sampled again, and one still empty after
+    /// its first sample is sampled no later than its step's first appearance, which a late wake
+    /// would otherwise pass.
     ///
     /// # Errors
     /// The first scene whose frame its view refuses as bound to another view; the caller
@@ -229,6 +231,12 @@ impl Frames {
                 sample.visible = true;
                 continue;
             }
+            let now_ms = if slot.pending && slot.sampled_ms.is_some() {
+                view.first_appearance()
+                    .map_or(now_ms, |appears| appears.min(now_ms))
+            } else {
+                now_ms
+            };
             if view.frame(now_ms, &mut slot.frame).is_err() {
                 return Err(scene);
             }
