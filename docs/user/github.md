@@ -13,6 +13,10 @@ cannot be revived. The connection shows the verified account and repositories
 available to both you and the App. If none appear, check the App's installation
 and repository access, then refresh the list.
 
+Closing Settings stops a sign-in that has not finished. A sign-in that already
+completed stays connected and is shown when Settings opens again. Switching to
+your browser does not close Settings or cancel the sign-in.
+
 A failed or over-limit refresh does not offer a partial list for choosing a
 default. Check the App's repository access and try refreshing again.
 
@@ -30,6 +34,11 @@ The sign-in uses expiring access and refresh credentials stored only in the
 system credential store. Kumochi renews them before access expires. If renewal
 cannot be completed safely, or GitHub refuses the account, **Sign in again**
 starts a new device flow; an uncertain refresh is never sent twice.
+
+A saved account is checked and its repositories refreshed at startup and after
+renewal. The identity check allows 15 seconds; the complete repository refresh
+allows 60 seconds and at most 12 requests, with at most 200 repositories. Closing
+Settings does not cancel these background checks or renewal.
 
 **Sign out** stops local account use before removing the saved sign-in. If
 credential cleanup fails, the section explains the problem and offers a retry.

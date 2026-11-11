@@ -15,6 +15,18 @@ credential settlement, repository refresh, durable default selection and sign-ou
 Draft production, issue consent reception, IssueEdit and filing remain dormant;
 this account workflow grants no permission to send an issue.
 
+Settings retains the session of a Connect it successfully queued, including before
+the first view arrives. Every panel dismissal cancels that interactive attempt
+through the existing CancelConnect control, including verification and an admitted
+save. A full/closed cancellation queue keeps the send-failure state and ends that
+link so disconnect applies the same fence and queued compensation; the visible
+Cancel button instead stays retryable. Saved-account startup checks and automatic
+renewal have no panel-owned provenance and are not canceled by dismissal.
+Deactivation only updates focus: switching to the browser leaves Settings open.
+The brain's durable Connected transition is completion. A later CancelConnect is
+ignored and EOF preserves that credential, even if its view has not reached the
+shell; reopening Settings shows it and Sign out removes it.
+
 ## Shell snapshots
 
 The shell retains session-tagged GitHub snapshots in Settings. Replacement and
@@ -346,6 +358,13 @@ owned until joined.
 The adapter borrows the sender and creates no second credential worker or account
 cache. Numeric identity remains the machine's connected identity; fetched membership,
 Store admission and separately reviewed activation remain prerequisites to filing.
+
+Successful saved-account verification at startup and successful renewal both
+start a fresh complete repository traversal. Each identity request has its existing
+15-second request/body limit; each traversal shares 60 seconds and at most twelve
+requests, with at most two 100-row pages per resource and 200 unique repositories.
+These bounds apply to background refresh as well as the explicit Refresh command;
+they do not bound client construction or promise one combined startup deadline.
 
 GitHub records use the same credential thread, vault session lock and write-once
 generation names as other accounts. The record contains the checked `ghu_`/`ghr_` pair,
