@@ -49,6 +49,10 @@ impl HostGuard {
         Self(PhantomData)
     }
 
+    #[expect(
+        clippy::unused_self,
+        reason = "finishing consumes the guard that owns the host script"
+    )]
     fn finish(self) {
         let script = HOST
             .with(|host| host.borrow_mut().take())
@@ -62,7 +66,7 @@ impl HostGuard {
 
 impl Drop for HostGuard {
     fn drop(&mut self) {
-        HOST.with(|host| drop(host.borrow_mut().take()));
+        HOST.with(|host| *host.borrow_mut() = None);
     }
 }
 
@@ -164,6 +168,10 @@ impl Observer {
         Self(PhantomData)
     }
 
+    #[expect(
+        clippy::unused_self,
+        reason = "a snapshot reads the observation this guard installed"
+    )]
     fn snapshot(&self) -> Observation {
         OBSERVATION.with(|slot| slot.borrow().expect("the owned observer"))
     }
@@ -175,6 +183,10 @@ impl Drop for Observer {
     }
 }
 
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "the draw hook's painting flag, as the overlay passes it"
+)]
 pub(in crate::presence::overlay) fn draw_enter(host: u64, painting: bool) -> Option<u8> {
     OBSERVATION.with(|slot| {
         let mut slot = slot.borrow_mut();
@@ -279,6 +291,10 @@ fn the_draw_observer_bounds_entries_and_requires_a_normal_return() {
     assert!(OBSERVATION.with(|slot| slot.borrow().is_none()));
 }
 
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "whether the first host survives, as the episode case decides"
+)]
 fn prepared_geometry(
     presenter: &crate::presenter::Presenter,
     charges: &[crate::presenter::tests::HostCharges; 2],
@@ -391,11 +407,10 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
     use kumochi_scene::deferred;
     use std::sync::Arc;
     let (survivor, refused, pending) = match case {
-        Case::A => (false, false, 5),
+        Case::A | Case::E => (false, false, 5),
         Case::B => (false, true, 9),
         Case::C => (true, false, 5),
         Case::D => (true, true, 11),
-        Case::E => (false, false, 5),
     };
     deferred::start().expect("the actual dropper already runs");
     let (mut recorder, ui, inventory) = Recorder::prepare(100);
@@ -545,11 +560,8 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
         allocation::checkpoint(6, 163);
         h1
     });
-    let observed = observer.snapshot();
-    assert_eq!(
-        (observed.entered, observed.returned, observed.controls),
-        (1, 1, 1)
-    );
+    let seen = observer.snapshot();
+    assert_eq!((seen.entered, seen.returned, seen.controls), (1, 1, 1));
     assert_eq!(target.counts(), [1, 1, 1, 0]);
     assert_eq!(
         target.key(),
@@ -672,7 +684,7 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
                     .window()
                     .expect("surviving H1")
                     .drawing
-                    .update(cx, |_, cx| cx.notify())
+                    .update(cx, |_, cx| cx.notify());
             });
             h1.update(app, |_, window, app| window.draw(app).clear(app))
                 .expect("only a still-owned H1 is drawn");
@@ -682,7 +694,7 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
         assert!(inner.update(|app| h1.update(app, |_, _, _| ())).is_err());
     }
     owner.update(&mut inner, |this, _| {
-        fixtures::host_stale_begin(&mut this.presenter)
+        fixtures::host_stale_begin(&mut this.presenter);
     });
     assert_eq!(
         (observer.snapshot().entered, target.counts()),
@@ -697,7 +709,7 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
     assert_eq!(Arc::strong_count(&target), 1);
     drop(target);
     allocation::checkpoint(6, 169);
-    let observed = observer.snapshot();
+    let seen = observer.snapshot();
     drop(observer);
     script.finish();
     let dropper = recorder
@@ -705,12 +717,9 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
         .expect("all producers closed before matching Finish");
     let ui = ui.finish().expect("normal UI scope return");
     assert!(!ui.lost && !ui.overflow && !dropper.lost && !dropper.overflow);
-    assert_eq!(
-        (observed.entered, observed.returned, observed.controls),
-        (1, 1, 1)
-    );
+    assert_eq!((seen.entered, seen.returned, seen.controls), (1, 1, 1));
     assert!(
-        observed.draws[..usize::from(observed.len)]
+        seen.draws[..usize::from(seen.len)]
             .iter()
             .all(|draw| draw.is_some_and(|draw| draw.returned))
     );
@@ -778,10 +787,7 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
             .count(),
         1
     );
-    for (index, draw) in observed.draws[..usize::from(observed.len)]
-        .iter()
-        .enumerate()
-    {
+    for (index, draw) in seen.draws[..usize::from(seen.len)].iter().enumerate() {
         let draw = draw.expect("an actual root entry");
         let enter = boundary(128 + u8::try_from(index).expect("sixteen draws"));
         let returned = boundary(144 + u8::try_from(index).expect("sixteen draws"));
@@ -1143,7 +1149,9 @@ fn the_last_kumo_callback_keeps_an_already_due_delayed_rectangle_wake(
     cx: &mut gpui_kit::TestAppContext,
 ) {
     use std::time::{Duration, Instant};
-    let origin = Instant::now() - Duration::from_secs(1);
+    let origin = Instant::now()
+        .checked_sub(Duration::from_secs(1))
+        .expect("the monotonic clock is past its first second");
     let (owner, _controls) = callback_scene(br#"{"step":{"id":"delayed","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10],"enter":"none","delay":200}}]}}"#, origin, cx);
     let panel = owner.update(cx, |this, _| {
         this.text.as_mut().expect("typing owner").typing.open();
@@ -1179,7 +1187,7 @@ fn the_last_kumo_callback_keeps_an_already_due_delayed_rectangle_wake(
     });
     panel
         .update(cx, |_, window, cx| {
-            assert_eq!(window.simulate_next_frame(cx), 0)
+            assert_eq!(window.simulate_next_frame(cx), 0);
         })
         .expect("resting panel");
     close_callback_scene(&owner, cx);
@@ -1190,7 +1198,9 @@ fn a_penultimate_pose_keeps_one_callback_to_sample_the_final_pose_then_rests(
     cx: &mut gpui_kit::TestAppContext,
 ) {
     use std::time::{Duration, Instant};
-    let origin = Instant::now() - Duration::from_secs(1);
+    let origin = Instant::now()
+        .checked_sub(Duration::from_secs(1))
+        .expect("the monotonic clock is past its first second");
     let (owner, _controls) = callback_scene(br#"{"step":{"id":"motion","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10],"enter":"none"}},{"anim":{"target":"r","track":"x","ease":"linear","keys":[[0,0],[200,200]]}}]}}"#, origin, cx);
     let panel = owner.update(cx, |this, _| {
         this.text.as_mut().expect("typing owner").typing.open();
@@ -1205,14 +1215,14 @@ fn a_penultimate_pose_keeps_one_callback_to_sample_the_final_pose_then_rests(
             owner.update(cx, |this, cx| {
                 this.frame_at(origin + Duration::from_millis(199), window, cx)
                     .expect("penultimate sample");
-            })
+            });
         })
         .expect("held panel");
     script.finish();
     assert_eq!(retained_x(&owner, cx), [199.0]);
     panel
         .update(cx, |_, window, cx| {
-            assert_eq!(window.simulate_next_frame(cx), 1)
+            assert_eq!(window.simulate_next_frame(cx), 1);
         })
         .expect("final callback");
     assert_eq!(retained_x(&owner, cx), [200.0]);
@@ -1224,7 +1234,7 @@ fn a_penultimate_pose_keeps_one_callback_to_sample_the_final_pose_then_rests(
     });
     panel
         .update(cx, |_, window, cx| {
-            assert_eq!(window.simulate_next_frame(cx), 0)
+            assert_eq!(window.simulate_next_frame(cx), 0);
         })
         .expect("no periodic callbacks");
     close_callback_scene(&owner, cx);
@@ -1236,7 +1246,9 @@ fn first_visibility_places_refused_escape_stop_in_the_callbacks_held_panel(
 ) {
     use crate::presence::geometry::PanelVisibility;
     use std::time::{Duration, Instant};
-    let origin = Instant::now() - Duration::from_secs(1);
+    let origin = Instant::now()
+        .checked_sub(Duration::from_secs(1))
+        .expect("the monotonic clock is past its first second");
     let (owner, _controls) = callback_scene(br#"{"step":{"id":"first","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10],"enter":"none","delay":200}},{"anim":{"target":"r","track":"x","keys":[[0,0],[1000,100]]}}]}}"#, origin, cx);
     let panel = owner.read_with(cx, |this, _| this.panel_window);
     panel
@@ -1247,7 +1259,7 @@ fn first_visibility_places_refused_escape_stop_in_the_callbacks_held_panel(
                     .expect("invisible moving sample");
                 assert!(!this.activity.drawing);
                 assert!(!this.panel.read(cx).stop);
-            })
+            });
         })
         .expect("held panel");
     let script = HostGuard::install(&[
@@ -1256,7 +1268,7 @@ fn first_visibility_places_refused_escape_stop_in_the_callbacks_held_panel(
     ]);
     panel
         .update(cx, |_, window, cx| {
-            assert_eq!(window.simulate_next_frame(cx), 1)
+            assert_eq!(window.simulate_next_frame(cx), 1);
         })
         .expect("real first-visible callback");
     script.finish();
@@ -1322,7 +1334,9 @@ fn persistent_stop_configuration_refusal_retires_motion_with_an_actionable_notic
     use kumochi_protocol::message::{Action, ErrorArg, ErrorKey, GestureId, UserError};
     use std::time::{Duration, Instant};
 
-    let origin = Instant::now() - Duration::from_secs(1);
+    let origin = Instant::now()
+        .checked_sub(Duration::from_secs(1))
+        .expect("the monotonic clock is past its first second");
     let (owner, controls) = callback_scene(br#"{"step":{"id":"motion","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10],"enter":"none","delay":200}},{"anim":{"target":"r","track":"x","ease":"linear","keys":[[0,0],[1000,100]]}}]}}"#, origin, cx);
     let panel = owner.update(cx, |this, cx| {
         this.chat_notice.present(

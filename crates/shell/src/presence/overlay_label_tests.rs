@@ -189,7 +189,7 @@ fn the_selective_target_requires_cold_shape_and_rejects_disarmed_synthetic_use()
     };
     let ordinary_params = RenderGlyphParams {
         glyph_id: GlyphId(1),
-        ..params.clone()
+        ..params
     };
     assert_eq!(
         backend

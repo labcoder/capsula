@@ -357,7 +357,7 @@ fn retained_short_and_long_label_text_is_charged_once_and_freed() {
 #[gpui::test]
 fn retained_layouts_cover_hard_soft_and_long_lines(cx: &mut gpui_kit::TestAppContext) {
     cx.update(|cx| {
-        let shaper = gpui_kit::WindowTextSystem::new(Arc::clone(cx.text_system()));
+        let text_system = gpui_kit::WindowTextSystem::new(Arc::clone(cx.text_system()));
         let mut fonts = super::Fonts::new();
         let family = gpui_kit::SharedString::new_static(".SystemUIFont");
         for (text, wrap, lengths, widths, boundaries) in [
@@ -394,7 +394,7 @@ fn retained_layouts_cover_hard_soft_and_long_lines(cx: &mut gpui_kit::TestAppCon
                 .shape(
                     &mut fonts,
                     &family,
-                    &shaper,
+                    &text_system,
                     gpui_kit::px(10.0),
                     wrap.map(gpui_kit::px),
                     1.0,
@@ -442,7 +442,7 @@ fn retained_layout_keys_and_recreated_hosts_preserve_warm_storage(
 ) {
     cx.update(|cx| {
         use gpui_kit::{SharedString, WindowTextSystem, px};
-        let shaper = WindowTextSystem::new(Arc::clone(cx.text_system()));
+        let text_system = WindowTextSystem::new(Arc::clone(cx.text_system()));
         let mut fonts = super::Fonts::new();
         assert!(Arc::ptr_eq(
             &fonts.0[0].font.features.0,
@@ -456,17 +456,17 @@ fn retained_layout_keys_and_recreated_hosts_preserve_warm_storage(
             false,
         );
         entry
-            .shape(&mut fonts, &family, &shaper, px(10.0), None, 1.0)
+            .shape(&mut fonts, &family, &text_system, px(10.0), None, 1.0)
             .expect("cold shape");
         let mut bold = super::LabelEntry::new(Handle::new(1, 0).expect("handle"), 1, "bold", true);
-        bold.shape(&mut fonts, &family, &shaper, px(10.0), None, 1.0)
+        bold.shape(&mut fonts, &family, &text_system, px(10.0), None, 1.0)
             .expect("bold shape");
         assert!(fonts.0[1].id.is_some());
         let recreated = WindowTextSystem::new(Arc::clone(cx.text_system()));
-        for shaper in [&shaper, &recreated] {
+        for text_system in [&text_system, &recreated] {
             let ((), counts) = crate::allocation::activity(|| {
                 let shaped = entry
-                    .shape(&mut fonts, &family, shaper, px(10.0), None, 1.0)
+                    .shape(&mut fonts, &family, text_system, px(10.0), None, 1.0)
                     .expect("warm shape");
                 assert_eq!(
                     (shaped.font_gen, shaped.size, shaped.wrap, shaped.scale),
@@ -489,7 +489,14 @@ fn retained_layout_keys_and_recreated_hosts_preserve_warm_storage(
         ] {
             let ((), counts) = crate::allocation::activity(|| {
                 let shaped = entry
-                    .shape(&mut fonts, &family, &shaper, px(size), wrap.map(px), scale)
+                    .shape(
+                        &mut fonts,
+                        &family,
+                        &text_system,
+                        px(size),
+                        wrap.map(px),
+                        scale,
+                    )
                     .expect("changed key");
                 assert_eq!(
                     (shaped.font_gen, shaped.size, shaped.wrap, shaped.scale),

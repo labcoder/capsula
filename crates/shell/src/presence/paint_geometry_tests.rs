@@ -17,7 +17,9 @@ fn ink() -> Paint {
     Paint::from(Rgb::try_from(0x33_66_99).expect("RGB"))
 }
 
-fn geometry(path: &Path<Pixels>) -> (Vec<([f32; 2], [f32; 2])>, [f32; 4]) {
+type Segment = ([f32; 2], [f32; 2]);
+
+fn geometry(path: &Path<Pixels>) -> (Vec<Segment>, [f32; 4]) {
     let vertices = path
         .vertices
         .iter()
@@ -61,6 +63,10 @@ fn parity(scratch: &mut Scratch, prim: &Prim, transform: Affine, draw: f32, flow
     paint_phase::tests::assert_paths(&events, 1);
 }
 
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "the scene line's closed and dashed flags, as each case sets them"
+)]
 fn line(count: usize, closed: bool, dashed: bool) -> Prim {
     let points = (0..count)
         .map(|n| {
@@ -178,6 +184,10 @@ fn an_empty_stroke_has_no_handoff_or_other_allocation() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "the fixture puts the boundary exactly on an edge endpoint"
+)]
 fn exact_edge_and_chord_reveal_boundaries_match_on_both_sides() {
     let mut scratch = Scratch::new();
     for (rect, radius, boundary) in [
@@ -307,7 +317,7 @@ fn changing_geometry_matches_the_reference_over_the_charged_segments_and_off_gri
     let lower_zoom = |target: u16| {
         let (mut low, mut high) = (0.0_f32, 64.0_f32);
         for _ in 0..32 {
-            let middle = (low + high) * 0.5;
+            let middle = f32::midpoint(low, high);
             if kumochi_scene::display::corner_segments(20_000.0 * f64::from(middle))
                 < usize::from(target)
             {
@@ -325,7 +335,7 @@ fn changing_geometry_matches_the_reference_over_the_charged_segments_and_off_gri
         } else {
             lower_zoom(target + 1)
         };
-        let zoom = (lower + upper) * 0.5;
+        let zoom = f32::midpoint(lower, upper);
         let transform = Affine::pose(zoom, 0.0, Vec2::default());
         assert_eq!(
             kumochi_scene::display::corner_segments(

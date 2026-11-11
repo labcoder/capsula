@@ -1907,6 +1907,10 @@ fn recovery_answers_keep_their_payload_when_delivery_or_validation_is_lost() {
 #[path = "../presence/overlay_recovery_recording_tests.rs"]
 pub(crate) mod recovery_recording;
 
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "whether the first host survives, as the recovery episode decides"
+)]
 pub(crate) fn host_recovery_fixture(stage: Box<dyn Stage>, survivor: bool) -> Presenter {
     let mut presenter = Presenter::new(
         SurfaceGeometry::Overlay {

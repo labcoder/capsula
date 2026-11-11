@@ -423,6 +423,10 @@ fn a_scene_begun_behind_the_lane_at_stop_is_cut_once_by_the_brain() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one stop sequence over the held scenes and the later run"
+)]
 fn older_held_scenes_settle_under_the_newest_stop_without_losing_a_later_run() {
     let newest = RunId(6);
     let third = SceneId(22);

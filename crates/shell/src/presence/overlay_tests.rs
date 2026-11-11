@@ -168,7 +168,7 @@ fn a_static_first_paint_delivers_once_without_a_followup_frame_or_input(cx: &mut
                 .window()
                 .expect("shown host")
                 .drawing
-                .update(cx, |_, cx| cx.notify())
+                .update(cx, |_, cx| cx.notify());
         });
         visual.update(|window, cx| window.draw(cx).clear(cx));
         assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));

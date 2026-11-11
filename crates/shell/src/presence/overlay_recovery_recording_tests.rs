@@ -375,10 +375,8 @@ mod tests {
     use super::*;
 
     fn install(ui: PreparedRequests) -> LocalRequests {
-        match ui.install() {
-            Ok(local) => local,
-            Err(_) => panic!("a vacant UI recorder accepts prepared storage"),
-        }
+        ui.install()
+            .unwrap_or_else(|_| panic!("a vacant UI recorder accepts prepared storage"))
     }
 
     fn free_after_gate(record: &FinishedRequests, pointer: usize) -> allocation::Request {
@@ -540,9 +538,8 @@ mod tests {
         for _ in 0..8 {
             assert!(matches!(recorder.receive(), Err(Failure::Order)));
         }
-        let original = match recorder.finish() {
-            Err(error) => error,
-            Ok(_) => panic!("lost reply must invalidate matching Finish"),
+        let Err(original) = recorder.finish() else {
+            panic!("lost reply must invalidate matching Finish")
         };
         assert_eq!(original, Failure::ReplyLost);
         assert!(recorder.closed);
@@ -562,9 +559,8 @@ mod tests {
         drop(closed);
         let previous = std::mem::replace(&mut recorder.replies, receiver);
         drop(previous);
-        let original = match recorder.finish() {
-            Err(error) => error,
-            Ok(_) => panic!("no matching Finish can cross the closed channel"),
+        let Err(original) = recorder.finish() else {
+            panic!("no matching Finish can cross the closed channel")
         };
         let marker = Arc::new(());
         drop(Deferred::new(Arc::clone(&marker), 0));
