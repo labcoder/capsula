@@ -353,3 +353,178 @@ async fn an_expired_saved_account_rotates_once_and_commits_the_pair_before_becom
     assert!(!account.refresh_sent);
     assert!(account.credentials.expires_at_s > now + 28000);
 }
+
+fn save_default_account(scratch: &Scratch, store: &ObservedStore, id: u64) {
+    use crate::connections::clock::{Clock as _, SystemClock};
+    let now = SystemClock.unix_seconds().unwrap();
+    let value = json!({
+        "token":"ghu_default_race", "refresh":"ghr_default_race",
+        "expires_at_s":now + 28_800, "refresh_expires_at_s":now + 15_897_600,
+        "refresh_sent":false, "login":"offline-user", "id":id
+    });
+    let bytes: SecretBytes = Secret::new(Zeroizing::new(serde_json::to_vec(&value).unwrap()));
+    let mut vault = Vault::with_service(
+        store.store.clone(),
+        "github-owner-test",
+        &owner_lock(scratch),
+    )
+    .unwrap();
+    assert!(matches!(
+        vault.github(lane::Job::Save {
+            stamp: crate::connections::github::device::Stamp { generation: 0 },
+            fence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            account: record::decode(&bytes).unwrap(),
+        }),
+        lane::Reply::Saved { saved: true, .. }
+    ));
+}
+
+fn default_replies(id: u64) -> Vec<(RequestKind, Value)> {
+    vec![
+        (RequestKind::User, json!({"id":id,"login":"offline-user"})),
+        (
+            RequestKind::Installations,
+            json!({"total_count":1,"installations":[{"id":9}]}),
+        ),
+        (
+            RequestKind::Repositories,
+            json!({"total_count":2,"repositories":[
+                {"full_name":"offline-owner/old"}, {"full_name":"offline-owner/new"}
+            ]}),
+        ),
+    ]
+}
+
+async fn settle_default_account(accounts: &mut crate::runtime::account::Accounts) {
+    timeout(PATIENCE, async {
+        while accounts.github.pending() || accounts.github.verifying() {
+            let event = accounts.next().await;
+            accounts.handle(event);
+        }
+    })
+    .await
+    .unwrap();
+}
+
+fn displayed_default(brain: &Brain) -> Option<RepoName> {
+    let GitHubView::Connected { default, .. } = brain.account.github.machine().view(Instant::now())
+    else {
+        panic!("the checked account is connected");
+    };
+    default
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeps the held real write, renewal, disk reconciliation and account-switch proof together"
+)]
+async fn a_committed_default_survives_renewal_or_expiry_before_its_acknowledgment() {
+    use crate::connections::github::device::DefaultRepo;
+    for renew_before_ack in [true, false] {
+        let scratch = Scratch::new("github-default-renewal-race");
+        let store = ObservedStore::default();
+        save_default_account(&scratch, &store, 41);
+        let old = RepoName::new("offline-owner/old").unwrap();
+        let new = RepoName::new("offline-owner/new").unwrap();
+        let mut config = scratch.config();
+        let pending = config
+            .stage_github_default(&DefaultRepo {
+                account: 41,
+                repo: old.clone(),
+            })
+            .unwrap();
+        pending.write().unwrap();
+        config.commit(pending);
+        let mut replies = default_replies(41);
+        replies.push((RequestKind::Refresh, token_reply()));
+        replies.extend(default_replies(41));
+        let http = AccountHttp::new(replies);
+        let accounts = configured_accounts(&scratch, store.clone(), &http);
+        let mut brain = brain_with_github_owner(&scratch, accounts);
+        settle_default_account(&mut brain.account).await;
+        assert_eq!(displayed_default(&brain), Some(old));
+        let selecting = brain.account.github.machine().stamp();
+        let release = brain.hold_config_write();
+        brain
+            .github_op(GitHubOp::SetDefaultRepo(new.clone()), None)
+            .unwrap();
+        assert!(brain.config_write.is_some());
+        tokio::time::pause();
+        tokio::time::advance(if renew_before_ack {
+            Duration::from_mins(479)
+        } else {
+            Duration::from_hours(8)
+        })
+        .await;
+        tokio::time::resume();
+        if renew_before_ack {
+            let event = timeout(PATIENCE, brain.account.next()).await.unwrap();
+            assert!(matches!(
+                &event,
+                crate::runtime::account::Event::Verification(_)
+            ));
+            brain.account.handle(event);
+            assert_ne!(brain.account.github.machine().stamp(), selecting);
+        } else {
+            assert_eq!(brain.account.github.machine().user(), None);
+            assert_eq!(brain.account.github.machine().stamp(), selecting);
+        }
+        let (completed, written) = tokio::sync::oneshot::channel();
+        release
+            .send(crate::runtime::settings::Gate::WriteAndSignal(completed))
+            .unwrap();
+        assert!(timeout(PATIENCE, written).await.unwrap().unwrap());
+        let done = timeout(
+            PATIENCE,
+            crate::runtime::settings::written(&mut brain.config_write),
+        )
+        .await
+        .unwrap();
+        brain.settings_done(done, None).unwrap();
+        if !renew_before_ack {
+            let event = timeout(PATIENCE, brain.account.next()).await.unwrap();
+            assert!(matches!(
+                &event,
+                crate::runtime::account::Event::Verification(_)
+            ));
+            brain.account.handle(event);
+        }
+        settle_default_account(&mut brain.account).await;
+        let displayed = displayed_default(&brain);
+        let in_memory = brain.config.github_default().unwrap();
+        let on_disk = crate::config::Config::load(Some(scratch.dir().to_owned()), ThreadId(1))
+            .github_default()
+            .unwrap();
+        assert_eq!(
+            http.seen(),
+            [
+                RequestKind::User,
+                RequestKind::Installations,
+                RequestKind::Repositories,
+                RequestKind::Refresh,
+                RequestKind::User,
+                RequestKind::Installations,
+                RequestKind::Repositories
+            ]
+        );
+        brain.github_op(GitHubOp::SignOut, None).unwrap();
+        settle_default_account(&mut brain.account).await;
+        brain.close().await;
+        assert_eq!(displayed, Some(new.clone()));
+        assert_eq!((in_memory.account, &in_memory.repo), (41, &new));
+        assert_eq!((on_disk.account, &on_disk.repo), (41, &new));
+
+        save_default_account(&scratch, &store, 42);
+        let other_http = AccountHttp::new(default_replies(42));
+        let other = configured_accounts(&scratch, store.clone(), &other_http);
+        let mut other_brain = brain_with_github_owner(&scratch, other);
+        settle_default_account(&mut other_brain.account).await;
+        let inherited = displayed_default(&other_brain);
+        assert_eq!(other_brain.account.github.machine().user().unwrap().id, 42);
+        let retained = other_brain.config.github_default().unwrap();
+        assert_eq!((retained.account, retained.repo), (41, new));
+        other_brain.close().await;
+        assert_eq!(inherited, None);
+    }
+}

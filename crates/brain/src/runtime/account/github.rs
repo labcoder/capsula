@@ -921,6 +921,11 @@ impl Brain {
         epoch: u64,
         link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
+        if result.is_ok() {
+            self.account
+                .github
+                .restore_default(self.config.github_default());
+        }
         let frames = self.account.github.input(
             Input::DefaultSaved {
                 generation: write.generation,

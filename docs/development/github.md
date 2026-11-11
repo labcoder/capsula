@@ -239,9 +239,12 @@ GitHub's spelling. A failed refresh clears repository authority.
 The default is non-secret `[github] default_account`/`default_repo` metadata in
 config.toml. Its numeric account ID is stored as decimal text, so the whole u64
 range survives TOML. The existing ordered settings writer stages and replaces the
-file; the machine publishes a new default only after committed acknowledgment.
-A failed write keeps the old default, and another numeric account cannot inherit
-it. Selecting a default neither edits an explicitly bound draft nor files one.
+file. A successful write restores the machine's account-bound default metadata
+from committed Config even if renewal or expiry retired the selecting operation.
+Operation acknowledgment remains generation-fenced; display and use still require
+the current numeric account and complete repository membership. A failed write
+keeps the old default, and another numeric account cannot inherit it. Selecting a
+default neither edits an explicitly bound draft nor files one.
 
 The verification page is the protocol's VERIFICATION_URI constant. The API
 checks the reply against it; neither the view nor a brain effect carries a
