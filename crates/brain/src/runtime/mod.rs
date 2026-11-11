@@ -178,6 +178,7 @@ pub(crate) struct Brain {
     pump: Option<Pump>,
     /// The voice parts; none when there's no data folder for them.
     voice: Option<voice::Voice>,
+    holds: hold::Holds,
     /// The current run's drain stall timer: its run, epoch and deadline.
     drain: Option<(RunId, u32, Instant)>,
     /// When each revoked run's wait for the shell to go quiet ends.
@@ -306,6 +307,7 @@ impl Brain {
             deadline: None,
             pump: None,
             voice: None,
+            holds: hold::Holds::default(),
             drain: None,
             quiet: Vec::new(),
             retry_at: None,
@@ -353,9 +355,11 @@ impl Brain {
         };
         #[cfg(not(any(test, debug_assertions)))]
         let now = self.account.availability();
+        let input = Input::Engines(now);
+        self.hold_fence(&input);
         let effects = self
             .coordinator
-            .handle(Input::Engines(now))
+            .handle(input)
             .expect("availability is never stale");
         self.apply(effects, link)
     }
@@ -588,6 +592,7 @@ impl Brain {
     }
 
     fn handle(&mut self, input: Input) -> Option<Vec<Effect>> {
+        self.hold_fence(&input);
         if let Input::ScenesCleared { scenes, ok: true } = &input {
             self.crashes.cleared(scenes);
         }
@@ -620,6 +625,7 @@ impl Brain {
             .checked_add(1)
             .expect("connection epochs never wrap");
         self.coordinator.begin_session();
+        self.holds.opened();
         self.account.connections.stage_session(Some(self.epoch));
         self.account.github_session(Some(self.epoch));
         self.crashes.begin_session();
@@ -633,6 +639,7 @@ impl Brain {
         let ready = Notify::new();
         let room = Notify::new();
         let quit = Cell::new(None);
+        let pcm = self.holds.ingress();
 
         let control_reader = read_control(&mut control_in, &controls_tx, &quit);
         tokio::pin!(control_reader);
@@ -645,6 +652,7 @@ impl Brain {
                 &queue,
                 &ready,
                 self.epoch,
+                Some(&pcm),
             );
             let control_writer = write_control(&mut control_out, &mut out);
             let data_writer = write_data(&mut data_out, &queue, &ready, &room);
@@ -661,6 +669,7 @@ impl Brain {
                 ended = core => ended,
             }
         };
+        self.holds.lost();
         queue.borrow_mut().end_reads();
         if reading && quit.get().is_none() {
             #[cfg(test)]
@@ -756,6 +765,13 @@ impl Brain {
             return ended;
         }
         loop {
+            if !turns.is_empty() {
+                self.holds
+                    .invalidate(kumochi_protocol::message::HoldStatus::Cancelled);
+            }
+            if self.hold_voice_changed(&mut link).is_err() {
+                return Ended::Lost;
+            }
             if link.recovery.is_none() && self.coordinator.settled() {
                 let Ok(described) = self.describe(&mut link) else {
                     return Ended::Lost;
@@ -813,7 +829,21 @@ impl Brain {
                 }
                 Some(input) = self.inputs.recv() => input,
                 Some(input) = pages.recv() => input,
-                Some(input) = turns.recv(), if take_turns => input,
+                Some(input) = turns.recv(), if take_turns => {
+                    if self.hold_end(kumochi_protocol::message::HoldStatus::Cancelled, &mut link).is_err() {
+                        return Ended::Lost;
+                    }
+                    input
+                },
+                event = hold::next(&mut self.holds) => {
+                    if !turns.is_empty() && self.hold_end(kumochi_protocol::message::HoldStatus::Cancelled, &mut link).is_err() {
+                        return Ended::Lost;
+                    }
+                    if self.hold_event(event, &mut link).is_err() {
+                        return Ended::Lost;
+                    }
+                    continue;
+                }
                 Some(input) = self.engine_events.recv(), if take_engine => input,
                 () = room.notified(), if !take_engine => continue,
                 () = sleep_until(self.retry_at) => {
@@ -858,6 +888,12 @@ impl Brain {
                     }
                 }
             };
+            if let Input::HoldPrepared { key, result } = input {
+                if self.hold_prepared(key, result, &mut link).is_err() {
+                    return Ended::Lost;
+                }
+                continue;
+            }
             let Some(input) = self.admit_page(input, &mut link) else {
                 continue;
             };
@@ -1233,15 +1269,18 @@ async fn read_data(
     queue: &RefCell<DataQueue>,
     ready: &Notify,
     epoch: u64,
+    pcm: Option<&hold::Ingress>,
 ) -> Ended {
     loop {
         match ipc::read::<DataToBrain>(pipe, Pipe::Data).await {
             Ok(Some(DataToBrain::Hello(_))) => return Ended::Broken("Hello sent twice"),
-            Ok(Some(DataToBrain::MicPcm(chunk))) if chunk.check().is_err() => {
-                return Ended::Broken("a microphone chunk out of bounds");
+            Ok(Some(DataToBrain::MicPcm(mut chunk))) => {
+                if let Some(pcm) = pcm {
+                    pcm.push(chunk);
+                } else {
+                    zeroize::Zeroize::zeroize(&mut chunk.samples);
+                }
             }
-            // shortcut: slice 7's PR 5 buffers a hold's audio.
-            Ok(Some(DataToBrain::MicPcm(_))) => {}
             Ok(Some(message @ DataToBrain::IssueEdit { .. })) => {
                 tracing::debug!(op = message.op(), "issue data ignored");
             }

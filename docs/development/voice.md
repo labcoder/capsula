@@ -803,3 +803,29 @@ the bounded hold plus decode; explicit unload, removal and worker loss still
 invalidate that load. PCM transferred to STT is scrubbed when its owned decode
 ends or is refused, including a busy queue. Cancelling the result receiver fences
 delivery, not worker/native copies or physical retirement.
+
+### Voice-only held turns
+
+The runtime owns one pre-run hold, keyed by connection epoch and a monotonically
+consumed gesture number. Recognition captures defaults and queues a stamped
+target/model/deletion read through the existing store reader. Pinned admission
+is checked before microphone permission and through ordinary storage/build/send
+gates. Missing speech input fails without installing or downloading anything;
+an existing load can finish only while that same hold is live. Preparation uses
+the store read budget and loading the existing speech load budget.
+
+Microphone frames use an eight-packet queue. The data reader never waits on it:
+overflow terminally fails the matching gesture while credit still progresses.
+The source independently limits collection to 60 seconds. Brain permits the
+10-second startup allowance plus collection, then two seconds for remaining
+frames after both final count and physical stop. Neither deadline proves stop.
+Exact finalization moves nonempty PCM once to the existing STT owner. Nonblank
+text becomes ordinary deletable user history with Hold origin, not a typed/Ask
+watermark; blank results create no turn. No held-input path requests a screen.
+
+New typed/Ask input supersedes an unsubmitted hold. Target/model/default/connection
+changes and deletion fence admission before acceptance; selection cancellation
+is scoped to its gesture. Either pipe ending fences the old owner before grace
+controls drain. Only the matching authenticated physical-stop receipt clears
+admitted device debt, including during grace; failure, timeout or a new session
+cannot borrow uncertain ownership. A failed status write closes the connection.

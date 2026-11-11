@@ -33,7 +33,9 @@ use crate::voice::tts::{Engine, TtsError, TtsHandle};
 use crate::voice::{LoadEvent, Reports};
 
 /// Returns the owner's idle terminal report without applying it to the installer.
-async fn released_input(scratch: &Scratch) -> (Brain, std_mpsc::Sender<()>, Arc<HeldFetch>, Event) {
+pub(super) async fn released_input(
+    scratch: &Scratch,
+) -> (Brain, std_mpsc::Sender<()>, Arc<HeldFetch>, Event) {
     use crate::voice::installer::{Durable, Effect, Installer};
 
     std::fs::create_dir_all(scratch.dir()).expect("scratch folder");
@@ -445,9 +447,9 @@ async fn idle_policy_reaches_the_owner_only_after_settings_commit_and_installer_
 /// A fetch that has 3 of 9 bytes downloaded, then ends with the result the test sends, or as
 /// cancelled once cancelled. It counts the fetches begun and cancelled, and notifies each start.
 #[derive(Debug)]
-struct HeldFetch {
+pub(super) struct HeldFetch {
     results: tokio::sync::Mutex<mpsc::UnboundedReceiver<Result<(), DownloadError>>>,
-    begun: AtomicUsize,
+    pub(super) begun: AtomicUsize,
     cancelled: AtomicUsize,
     started: tokio::sync::Notify,
 }
@@ -484,7 +486,7 @@ impl Fetch for HeldFetch {
 /// Where a test sends how a held fetch ends.
 type Results = mpsc::UnboundedSender<Result<(), DownloadError>>;
 
-fn held_fetch() -> (Arc<HeldFetch>, Results) {
+pub(super) fn held_fetch() -> (Arc<HeldFetch>, Results) {
     let (results, held) = mpsc::unbounded_channel();
     let fetch = HeldFetch {
         results: tokio::sync::Mutex::new(held),

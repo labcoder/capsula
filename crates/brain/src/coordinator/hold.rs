@@ -108,15 +108,7 @@ impl Coordinator {
         snapshot: HoldSnapshot,
         text: Content,
     ) -> Result<Vec<Effect>, ()> {
-        if snapshot.cancel.load(Ordering::SeqCst)
-            || text.trim().is_empty()
-            || snapshot.thread.is_some() != snapshot.generation.is_some()
-            || snapshot
-                .thread
-                .is_some_and(|thread| self.deleting_thread(thread))
-            || self.connection() != Some(snapshot.defaults.connection)
-            || self.unlisted(snapshot.defaults.choice.as_ref()).is_some()
-        {
+        if text.trim().is_empty() || !self.admits_hold(&snapshot) {
             snapshot.cancel.store(true, Ordering::SeqCst);
             return Err(());
         }
@@ -134,6 +126,29 @@ impl Coordinator {
         self.retry_with(&mut effects);
         self.arm_retry(&mut effects);
         Ok(effects)
+    }
+
+    pub(crate) fn admits_hold(&self, snapshot: &HoldSnapshot) -> bool {
+        !(snapshot.cancel.load(Ordering::SeqCst)
+            || snapshot.thread.is_some() != snapshot.generation.is_some()
+            || snapshot
+                .thread
+                .is_some_and(|thread| self.deleting_thread(thread))
+            || self.connection() != Some(snapshot.defaults.connection)
+            || self.unlisted(snapshot.defaults.choice.as_ref()).is_some())
+    }
+
+    pub(crate) fn cancel_current_hold(&mut self) -> Vec<Effect> {
+        let key = self
+            .current
+            .as_ref()
+            .and_then(|run| run.hold.as_ref())
+            .map(|hold| hold.key);
+        key.map_or_else(Vec::new, |key| self.cancel_hold(key))
+    }
+
+    pub(crate) fn hold_availability_changes(&self, now: &super::Availability) -> bool {
+        now != &self.availability
     }
 
     /// Cancels only the real run transferred from this exact hold.
