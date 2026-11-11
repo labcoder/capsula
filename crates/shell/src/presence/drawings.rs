@@ -76,7 +76,7 @@ impl Presence {
             if self.activity.working != activity.working
                 || self.activity.drawing != activity.drawing
             {
-                updated = self.runs_changed_in(None, now, cx);
+                updated = self.runs_changed_at(now, cx);
             }
             scenes && updated.is_ok()
         };
