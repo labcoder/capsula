@@ -1420,11 +1420,13 @@ async fn idle_until(brain: &mut Brain, scratch: &Scratch, done: impl Fn(&toml::V
     let mut saved = None;
     let waited = tokio::time::timeout(super::PATIENCE, async {
         loop {
-            let disk = voice_on_disk(scratch);
-            let finished = done(&disk);
-            saved = Some(disk);
-            if finished {
-                break;
+            if brain.config_write.is_none() && brain.settings_ops.is_empty() {
+                let disk = voice_on_disk(scratch);
+                let finished = done(&disk);
+                saved = Some(disk);
+                if finished {
+                    break;
+                }
             }
             tokio::time::timeout(TICK, brain.idle())
                 .await
