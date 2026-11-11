@@ -9,7 +9,7 @@ use crate::connections::http_client::{Http, HttpError, Request, Response, Shared
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::{ControlToShell, ErrorKey, GitHubOp, RepoName};
 use std::sync::{
-    Arc,
+    Arc, Weak,
     atomic::{AtomicU64, Ordering},
     mpsc::Sender,
 };
@@ -17,7 +17,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-mod repositories;
+pub(in crate::runtime) mod repositories;
 
 #[cfg(test)]
 pub(in crate::runtime) mod draft_tests;
@@ -191,6 +191,7 @@ pub(crate) struct GitHub {
     rotation_stopped: bool,
     outstanding: usize,
     suspended: Vec<(Stamp, Effect)>,
+    issue: Option<Weak<crate::runtime::issues::transport::Control>>,
 }
 
 impl std::fmt::Debug for GitHub {
@@ -222,6 +223,7 @@ impl GitHub {
             rotation_stopped: false,
             outstanding: 0,
             suspended: Vec::new(),
+            issue: None,
         }
     }
 
@@ -416,6 +418,7 @@ impl GitHub {
             return;
         }
         self.session = None;
+        self.cancel_issue();
         if self.enabled && self.machine.connecting() {
             self.input(Input::Op(GitHubOp::CancelConnect), None, jobs, events, http);
         }
@@ -429,6 +432,7 @@ impl GitHub {
         http: &HttpFactory,
     ) {
         self.closing = true;
+        self.cancel_issue();
         self.session(None, jobs, events, http);
         self.wake = None;
         if !self.machine.rotating() {
@@ -450,6 +454,62 @@ impl GitHub {
 
     pub(in crate::runtime) fn restore_default(&mut self, default: Option<DefaultRepo>) {
         self.machine.restore_default(default);
+    }
+
+    pub(in crate::runtime) fn issue_snapshot(&self, capacity: bool) -> crate::issues::Snapshot {
+        let usable = self.enabled && !self.closing;
+        crate::issues::Snapshot {
+            capacity,
+            account: usable.then(|| self.machine.user().cloned()).flatten(),
+            repos: if usable {
+                self.machine.repositories().unwrap_or_default().to_vec()
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    pub(in crate::runtime) fn watch_issue(
+        &mut self,
+        control: &Arc<crate::runtime::issues::transport::Control>,
+    ) -> Stamp {
+        self.issue = Some(Arc::downgrade(control));
+        self.machine.stamp()
+    }
+
+    pub(in crate::runtime) fn issue_token(
+        &self,
+        stamp: Stamp,
+        action: &crate::issues::Action,
+    ) -> Option<Secret<GitHubToken>> {
+        if !self.enabled || self.closing || stamp != self.machine.stamp() {
+            return None;
+        }
+        let (token, _, _) = self.machine.issue_access(action.account.as_ref()?.id, action.repo.as_ref()?)?;
+        Some(token)
+    }
+
+    pub(in crate::runtime) fn issue_permit(
+        &self,
+        stamp: Stamp,
+        action: &crate::issues::Action,
+        user: &GitHubUser,
+        repos: &Repositories,
+    ) -> Option<(Secret<GitHubToken>, Instant, u64)> {
+        if !self.enabled || self.closing || stamp != self.machine.stamp()
+            || action.account.as_ref()?.id != user.id
+            || !repos.names.as_ref().contains(action.repo.as_ref()?)
+            || self.issue.as_ref()?.upgrade()?.cancelled()
+        {
+            return None;
+        }
+        self.machine.issue_access(user.id, action.repo.as_ref()?)
+    }
+
+    fn cancel_issue(&mut self) {
+        if let Some(control) = self.issue.take().and_then(|control| control.upgrade()) {
+            control.cancel();
+        }
     }
 
     pub(in crate::runtime) fn draft_binding(
@@ -564,6 +624,19 @@ impl GitHub {
     ) -> Vec<ControlToShell> {
         if !self.enabled {
             return Vec::new();
+        }
+        let current = match &input {
+            Input::Loaded { stamp, .. } | Input::Code { stamp, .. }
+            | Input::Poll { stamp, .. } | Input::Refreshed { stamp, .. }
+            | Input::User { stamp, .. } | Input::Saved { stamp, .. }
+            | Input::Stopped { stamp } => *stamp == self.machine.stamp(),
+            Input::Removed { generation, .. } | Input::Repos { generation, .. }
+            | Input::Unauthorized { generation } => *generation == self.machine.stamp().generation,
+            Input::DefaultSaved { .. } => false,
+            Input::Op(_) | Input::Tick => true,
+        };
+        if current {
+            self.cancel_issue();
         }
         self.suspended
             .retain(|(stamp, effect)| !match (&input, effect) {
@@ -901,6 +974,16 @@ async fn execute(
 }
 
 impl Accounts {
+    pub(in crate::runtime) fn issue_unauthorized(&mut self, stamp: Stamp) -> Vec<ControlToShell> {
+        self.github.input(
+            Input::Unauthorized { generation: stamp.generation },
+            self.github.session,
+            self.jobs.as_ref(),
+            &self.reads_tx,
+            &self.net.http,
+        )
+    }
+
     pub(crate) fn github_session(&mut self, session: Option<u64>) {
         self.github
             .session(session, self.jobs.as_ref(), &self.reads_tx, &self.net.http);

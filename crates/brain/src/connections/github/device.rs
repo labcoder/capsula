@@ -375,6 +375,24 @@ impl Machine {
         }
     }
 
+    pub(crate) fn issue_access(
+        &self,
+        account: u64,
+        repo: &RepoName,
+    ) -> Option<(Secret<GitHubToken>, Instant, u64)> {
+        if self.user()?.id != account || !self.repositories()?.contains(repo) {
+            return None;
+        }
+        let State::Connected(connected) = &self.state else {
+            return None;
+        };
+        Some((
+            connected.credentials.token.clone(),
+            self.token_end?,
+            connected.credentials.expires_at_s,
+        ))
+    }
+
     /// Complete repository authority for consumers in this generation.
     pub(crate) fn repositories(&self) -> Option<&[RepoName]> {
         self.user()?;

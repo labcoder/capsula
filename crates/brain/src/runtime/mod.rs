@@ -12,6 +12,7 @@ mod controls;
 mod data;
 #[cfg(test)]
 mod draw_stream_tests;
+mod issues;
 mod recovery;
 mod settings;
 mod store_thread;

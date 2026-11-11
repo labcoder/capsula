@@ -14,6 +14,9 @@ use sha2::{Digest as _, Sha256};
 
 use crate::connections::github::{api::GitHubUser, issues::CreateOutcome};
 
+mod io;
+pub use io::{Snapshot, Write};
+
 /// The most already-matching issue numbers a mark keeps (guess).
 pub const MAX_PRESEND: usize = 200;
 
@@ -98,6 +101,7 @@ pub struct Mark {
 }
 
 /// What an action op came to.
+#[derive(Clone, PartialEq, Eq)]
 pub enum Answer {
     /// Committed; the action as it now stands.
     Changed(Action),
@@ -120,7 +124,7 @@ pub struct Live<'a> {
 }
 
 /// A lookup's verdict on an action's uncertain attempts.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lookup {
     /// One match, placed after the mark.
     Placed(NonZeroU64),
@@ -321,6 +325,23 @@ impl Action {
             }
         }
         Some(Ok(()))
+    }
+
+    /// Ends an attempt whose transport handoff definitely never happened.
+    pub(crate) fn not_sent(
+        &mut self,
+        at: StateVersion,
+        reason: FailReason,
+    ) -> Result<(), IssueRefused> {
+        if self.version != at {
+            return Err(IssueRefused::NotAllowedNow);
+        }
+        let (Stage::Preflight { unresolved } | Stage::Posting { unresolved, .. }) = &self.stage
+        else {
+            return Err(IssueRefused::NotAllowedNow);
+        };
+        self.stage = Stage::unsent(unresolved.clone(), reason);
+        Ok(())
     }
 
     /// Ends the send dispatched at `at` that the runtime gave up on, as recovery would.

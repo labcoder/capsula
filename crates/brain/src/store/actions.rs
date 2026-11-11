@@ -12,6 +12,28 @@ use crate::connections::github::{api::GitHubUser, issues::CreateOutcome};
 use crate::issues::{Action, Answer, Live, Lookup, Mark, Stage};
 
 impl Store {
+    /// Executes one operation on the existing ordered store writer.
+    ///
+    /// # Errors
+    /// Returns a content-free store failure with no partial transaction acknowledged.
+    pub fn issue_write(&mut self, write: &crate::issues::Write) -> Result<Answer, StoreError> {
+        use crate::issues::Write;
+        match write {
+            Write::Read(draft) => Ok(self.action(*draft)?.map_or(Answer::Gone, Answer::Unchanged)),
+            Write::Consent { draft, hash, approval, decision, live } => {
+                self.consent(*draft, hash, *approval, *decision, &live.live())
+            }
+            Write::Preflighted { draft, at, result } => self.preflighted(*draft, *at, result.clone()),
+            Write::Posted { draft, at, outcome } => self.posted(*draft, *at, outcome),
+            Write::Interrupted { draft, at } => self.interrupted(*draft, *at),
+            Write::NotSent { draft, at, reason } => {
+                self.change(*draft, |action| Some(action.not_sent(*at, *reason)))
+            }
+            Write::LookedUp { draft, episode, lookup } => self.looked_up(*draft, *episode, *lookup),
+            Write::Discard(draft) => self.discard_draft(*draft),
+        }
+    }
+
     /// Stores a new draft in a live thread, with its first approval revision.
     ///
     /// # Errors

@@ -13,6 +13,13 @@ use crate::store::{Generation, RunEnd, SceneTarget, TitleSource};
 /// A store operation: a bounded side read, or a write in one transaction.
 #[derive(Clone, Debug, PartialEq)]
 pub enum StoreOp {
+    /// One issue-owner operation on the existing ordered store thread.
+    Issue {
+        /// The issue owner's outstanding operation identity.
+        serial: u64,
+        /// Typed data with content-free diagnostics.
+        write: crate::issues::Write,
+    },
     /// A v1 drawing read or durable transition; its arguments never enter logs.
     Drawing {
         /// The drawing reducer's outstanding operation identity.
@@ -169,7 +176,8 @@ impl StoreOp {
             | Self::EndRun { run, .. } => Some(*run),
             Self::CommitCall(call) => Some(call.key.run),
             Self::RoundItems(round) => Some(round.run),
-            Self::Drawing { .. }
+            Self::Issue { .. }
+            | Self::Drawing { .. }
             | Self::ReadPage { .. }
             | Self::ReadCards { .. }
             | Self::BuildContext(_)
@@ -189,6 +197,10 @@ impl StoreOp {
     /// Answers an operation that couldn't reach the store; a heard point has no answer.
     pub fn failed(&self) -> Option<Input> {
         Some(match self {
+            Self::Issue { serial, .. } => Input::IssueWritten {
+                serial: *serial,
+                reply: Err(()),
+            },
             Self::ReadCall(call) => Input::ReadFinished(crate::dispatch::ReadFinished {
                 key: call.key.clone(),
                 build: call.build,

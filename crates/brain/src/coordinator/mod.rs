@@ -65,6 +65,13 @@ const TITLE_CHARS: usize = 80;
 /// Something that happened, for the coordinator to act on.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Input {
+    /// The store answered an operation owned and routed by the runtime issue system.
+    IssueWritten {
+        /// The issue owner's outstanding operation identity.
+        serial: u64,
+        /// The durable action or a content-free store failure.
+        reply: Result<crate::issues::Answer, ()>,
+    },
     /// Fence a run immediately and apply scene-wide activated cuts in control-pipe order.
     StopScenes {
         /// The locally fenced run.
@@ -758,6 +765,7 @@ impl Coordinator {
     pub fn handle(&mut self, input: Input) -> Result<Vec<Effect>, Stale> {
         let mut effects = Vec::new();
         match input {
+            Input::IssueWritten { .. } => return Err(Stale),
             Input::StopScenes { run, .. } if run < self.session_start || run > self.last_run => {
                 return Err(Stale);
             }
