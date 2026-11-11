@@ -331,9 +331,6 @@ fn a_table_label_failure_keeps_its_quad_and_frees_the_unsubmitted_line(cx: &mut 
     assert_eq!(observed.get(), None);
     assert_eq!(refusals.load(Ordering::Relaxed), 0);
     armed.set(true);
-    window
-        .update(&mut visual, |_, _, cx| cx.notify())
-        .expect("the synthetic table window");
     let ((), events) = allocation::requests(16_384, || {
         visual.update(|window, cx| window.draw(cx).clear(cx));
     });

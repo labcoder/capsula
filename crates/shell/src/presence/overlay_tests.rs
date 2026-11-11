@@ -624,7 +624,6 @@ fn a_warm_real_element_draw_has_no_boxed_application_callback(cx: &mut TestAppCo
     visual.simulate_resize(size(px(100.0), px(100.0)));
     visual.run_until_parked();
     let ((), requests) = crate::allocation::requests(10_000, || {
-        overlay.drawing.update(&mut visual, |_, cx| cx.notify());
         visual.update(|window, cx| window.draw(cx).clear(cx));
     });
     assert_eq!(
@@ -876,7 +875,6 @@ fn a_warm_geometry_bearing_element_allocates_only_its_three_handoffs(cx: &mut Te
     visual.simulate_resize(size(px(100.0), px(100.0)));
     visual.run_until_parked();
     let ((), events) = crate::allocation::requests(16_384, || {
-        overlay.drawing.update(&mut visual, |_, cx| cx.notify());
         visual.update(|window, cx| window.draw(cx).clear(cx));
     });
     assert_eq!(
