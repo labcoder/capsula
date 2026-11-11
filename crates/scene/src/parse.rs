@@ -11,8 +11,11 @@ use crate::{
 /// Returns the first typed decoding failure or an unsupported surface or 3D field.
 pub fn parse_draw_record(bytes: &[u8]) -> Result<Record, StepError> {
     let record = match parse_record(bytes) {
-        Err(error) if error.code == ErrorCode::MissingField && error.path.as_str() == "v" => {
-            parse_record(&versioned(bytes).ok_or(error)?)?
+        Err(error)
+            if error.code == ErrorCode::MissingField
+                && matches!(error.path.as_str(), "v" | "surface") =>
+        {
+            parse_record(&draw_defaults(bytes).ok_or(error)?)?
         }
         record => record?,
     };
@@ -45,13 +48,14 @@ pub fn parse_draw_record(bytes: &[u8]) -> Result<Record, StepError> {
     Ok(record)
 }
 
-/// The draw tool supplies the only scene version when a model's begin omits it.
-fn versioned(bytes: &[u8]) -> Option<Vec<u8>> {
+/// The draw tool supplies its only version and surface when a model's begin omits them.
+fn draw_defaults(bytes: &[u8]) -> Option<Vec<u8>> {
     let mut record: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    record
-        .get_mut("begin")?
-        .as_object_mut()?
-        .insert("v".into(), u32::from(Version::V1).into());
+    let begin = record.get_mut("begin")?.as_object_mut()?;
+    begin
+        .entry("v")
+        .or_insert_with(|| u32::from(Version::V1).into());
+    begin.entry("surface").or_insert_with(|| "overlay".into());
     serde_json::to_vec(&record).ok()
 }
 

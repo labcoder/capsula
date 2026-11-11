@@ -104,6 +104,61 @@ fn the_draw_tool_supplies_the_only_version_when_a_begin_omits_it() {
 }
 
 #[test]
+fn the_draw_tool_defaults_only_omitted_begin_surface_and_version() {
+    let explicit = parse_record(br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":"a"}}"#)
+        .expect("explicit header");
+    for json in [
+        r#"{"begin":{"scene":"s","alt":"a"}}"#,
+        r#"{"begin":{"v":1,"scene":"s","alt":"a"}}"#,
+    ] {
+        assert_eq!(
+            parse_draw_record(json.as_bytes()).expect("draw defaults"),
+            explicit
+        );
+        assert_eq!(
+            parse_record(json.as_bytes())
+                .expect_err("generic parsing stays strict")
+                .code,
+            ErrorCode::MissingField
+        );
+    }
+    for (json, path, code) in [
+        (r#"{"begin":{"scene":"s"}}"#, "alt", ErrorCode::MissingField),
+        (
+            r#"{"begin":{"v":2,"scene":"s","alt":"a"}}"#,
+            "v",
+            ErrorCode::WrongVersion,
+        ),
+        (
+            r#"{"begin":{"scene":"s","surface":"inline","alt":"a"}}"#,
+            "surface",
+            ErrorCode::Unsupported,
+        ),
+        (
+            r#"{"begin":{"v":1,"scene":"s","surface":"inline","alt":"a"}}"#,
+            "surface",
+            ErrorCode::Unsupported,
+        ),
+    ] {
+        let error =
+            parse_draw_record(json.as_bytes()).expect_err("no content or explicit override");
+        assert_eq!((error.path.as_str(), error.code), (path, code));
+    }
+    for json in [
+        r#"{"begin":{"scene":"s","surface":null,"alt":"a"}}"#,
+        r#"{"begin":{"scene":"s","surface":"bad","alt":"a"}}"#,
+        r#"{"begin":{"v":null,"scene":"s","alt":"a"}}"#,
+        r#"{"begin":{"v":1,"scene":"s","alt":"a","alt":"b"}}"#,
+        r#"{"begin":{"v":1,"scene":"s","alt":"a"}"#,
+    ] {
+        assert!(
+            parse_draw_record(json.as_bytes()).is_err(),
+            "invalid input: {json}"
+        );
+    }
+}
+
+#[test]
 fn text_and_list_boundaries_are_not_truncated() {
     let accepted = Text::try_from("é".repeat(400));
     assert!(accepted.is_ok(), "400 Unicode scalars are legal");
