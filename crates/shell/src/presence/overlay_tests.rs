@@ -251,6 +251,8 @@ fn a_retired_hosts_queued_canvas_cannot_read_the_new_hosts_frames(cx: &mut TestA
         adapter.update(cx, |this, cx| {
             let handles = this.exclusion_handles();
             Gpui {
+                input: &this.presenter.input,
+                input_windows: &mut this.input_windows,
                 exclusion: &mut this.exclusion,
                 surfaces: super::super::exclusion::Windows {
                     native: &this.native,
@@ -277,6 +279,8 @@ fn a_retired_hosts_queued_canvas_cannot_read_the_new_hosts_frames(cx: &mut TestA
         adapter.update(cx, |this, cx| {
             let handles = this.exclusion_handles();
             let mut surface = Gpui {
+                input: &this.presenter.input,
+                input_windows: &mut this.input_windows,
                 exclusion: &mut this.exclusion,
                 surfaces: super::super::exclusion::Windows {
                     native: &this.native,
@@ -737,6 +741,8 @@ fn draw_once(frames: &Rc<RefCell<Frames>>, owner: WeakEntity<Presence>, cx: &mut
     adapter.update(cx, |this, cx| {
         let handles = this.exclusion_handles();
         Gpui {
+            input: &this.presenter.input,
+            input_windows: &mut this.input_windows,
             exclusion: &mut this.exclusion,
             surfaces: super::super::exclusion::Windows {
                 native: &this.native,

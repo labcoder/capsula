@@ -1,4 +1,7 @@
-//! Native input surfaces; macOS uses nonactivating `NSPanel`, `ignoresMouseEvents` and levels.
+//! Native input surfaces share one order, including the dock paint and drawing windows.
+//! A macOS adapter must bind each recreated drawing host before showing it, ignore mouse
+//! events over its entire bounds, never activate it, and restore the same layer order after
+//! every show or placement with nonactivating `NSPanel`, `ignoresMouseEvents` and levels.
 
 use std::collections::BTreeMap;
 
@@ -21,8 +24,8 @@ pub(crate) struct OverlayWindows {
     applied: Option<(OverlayInput, Regions)>,
 }
 
-// shortcut: B5 and B3b bind scene/selection surfaces; slice 5 binds its regional windows.
-#[expect(dead_code, reason = "B5, slice 5 and B3b bind additional surfaces")]
+// shortcut: slice 5 and B3b bind regional and selection surfaces.
+#[expect(dead_code, reason = "slice 5 and B3b bind additional surfaces")]
 impl OverlayWindows {
     pub(crate) fn proxy(&mut self, proxy: super::observer::ProxyHandle) {
         self.layers.entry(Layer::Dock).or_default().push(proxy.0);
@@ -30,7 +33,19 @@ impl OverlayWindows {
     }
 
     pub(crate) fn bind(&mut self, layer: Layer, window: &Window) -> Result<(), PresenceError> {
-        let hwnd = hwnd_of(window)?;
+        self.bind_hwnd(layer, hwnd_of(window)?)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn check_drawing(dock: &Window, drawing: &Window) -> Result<(), PresenceError> {
+        native_tests::drawing(hwnd_of(dock)?, hwnd_of(drawing)?);
+        Ok(())
+    }
+
+    fn bind_hwnd(&mut self, layer: Layer, hwnd: HWND) -> Result<(), PresenceError> {
+        if layer == Layer::Dock {
+            interactive(hwnd, false)?;
+        }
         for windows in self.layers.values_mut() {
             windows.retain(|hwnd| live(*hwnd));
         }
@@ -196,6 +211,10 @@ fn restack(hwnd: HWND, rect: Option<[i32; 4]>) -> Result<(), PresenceError> {
     unsafe { SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, width, height, flags) }?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "overlay_input_native_tests.rs"]
+mod native_tests;
 
 #[cfg(test)]
 mod tests {

@@ -33,8 +33,8 @@ use super::paint_geometry;
 use super::paint_paths::{self, BuildError};
 use super::paint_phase::{self, Phase};
 use super::paint_stroke::Scratch;
-use super::{OpenError, Presence, configure_surface, options, scaled};
-use crate::platform::{self, PresenceEvent, PresenceSurface};
+use super::{OpenError, Presence, options, scaled};
+use crate::platform::{self, PresenceEvent};
 use crate::presenter::{Frames, Sample};
 
 /// One overlay window and its root, opened hidden and closed once hidden again.
@@ -377,6 +377,8 @@ impl Presence {
         }
         let handles = self.exclusion_handles();
         let mut surface = Gpui {
+            input: &self.presenter.input,
+            input_windows: &mut self.input_windows,
             owner: cx.weak_entity(),
             exclusion: &mut self.exclusion,
             surfaces: super::exclusion::Windows {
@@ -397,6 +399,8 @@ impl Presence {
 
 /// The overlay's windows through GPUI's own open and close.
 struct Gpui<'a> {
+    input: &'a crate::presenter::overlay_input::OverlayOwner,
+    input_windows: &'a mut platform::OverlayWindows,
     exclusion: &'a mut super::exclusion::Exclusion<super::exclusion::Receipt>,
     surfaces: super::exclusion::Windows<'a>,
     owner: WeakEntity<Presence>,
@@ -424,7 +428,13 @@ impl Surface for Gpui<'_> {
                 {
                     return result;
                 }
-                configure_surface(window, PresenceSurface::Overlay, events, cx)
+                super::overlay_input::configure_drawing(
+                    window,
+                    events,
+                    self.input,
+                    self.input_windows,
+                    cx,
+                )
             },
         )
     }
@@ -442,7 +452,12 @@ impl Surface for Gpui<'_> {
         if let Some(result) = tests::recovery::native(tests::recovery::Operation::Show) {
             return result.map_err(OpenError::from);
         }
-        show(overlay.window, self.surfaces.cx)
+        super::overlay_input::show_drawing(
+            overlay.window,
+            self.input,
+            self.input_windows,
+            self.surfaces.cx,
+        )
     }
 
     fn repaint(&mut self, overlay: &Overlay) {

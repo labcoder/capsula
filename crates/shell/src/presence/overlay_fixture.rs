@@ -23,10 +23,8 @@ use kumochi_scene::{
 };
 
 use super::{
-    configure_surface, frame_rate::FrameLoop, line::on_next_frame, options, overlay,
-    paint_cache::PaintScene,
+    frame_rate::FrameLoop, line::on_next_frame, options, overlay, paint_cache::PaintScene,
 };
-use crate::platform::PresenceSurface;
 
 const LIFETIME: Duration = Duration::from_secs(60);
 /// Fixture-local motion runs only between these seconds; outside them nothing asks for frames.
@@ -291,6 +289,26 @@ fn run(mode: Mode) {
                 picture.epoch = Instant::now();
             }
             let (events, _receiver) = async_channel::unbounded();
+            let mut input_windows = crate::platform::OverlayWindows::default();
+            let input = crate::presenter::overlay_input::OverlayOwner::default();
+            let (dock, _) = gpui_kit::open_window(options(), cx, |_, cx| {
+                cx.new(|_| super::Dock::new())
+            })
+            .expect("fixture dock window");
+            dock.update(cx, |_, window, cx| {
+                super::overlay_input::configure_dock(
+                    window,
+                    events.clone(),
+                    &input,
+                    &mut input_windows,
+                    cx,
+                )?;
+                crate::platform::place_presence_window(window, [0, 0, 16, 16])?;
+                window.bounds_changed(cx);
+                Ok::<_, crate::platform::PresenceError>(())
+            })
+            .expect("fixture dock window")
+            .expect("configure the fixture dock through production setup");
             let (window, probe) = gpui_kit::open_window(options(), cx, |_, cx| {
                 cx.new(|_| Probe {
                     picture: shared,
@@ -308,11 +326,27 @@ fn run(mode: Mode) {
                         logical[1],
                         window.refresh_interval(cx).map(|interval| interval.as_nanos())
                     );
-                    configure_surface(window, PresenceSurface::Overlay, events, cx)
+                    super::overlay_input::configure_drawing(
+                        window,
+                        events,
+                        &input,
+                        &mut input_windows,
+                        cx,
+                    )
                 })
                 .expect("fixture window")
                 .expect("click-through fixture");
-            overlay::show(window, cx).expect("show the fixture without activation");
+            super::overlay_input::show_drawing(window, &input, &mut input_windows, cx)
+                .expect("show and restack the fixture without activation");
+            window
+                .update(cx, |_, drawing, cx| {
+                    dock.update(cx, |_, dock, _| {
+                        crate::platform::OverlayWindows::check_drawing(dock, drawing)
+                    })
+                    .expect("fixture dock stays open")
+                })
+                .expect("fixture drawing stays open")
+                .expect("native drawing styles and order follow production setup");
             probe.update(cx, |_, cx| cx.notify());
             if matches!(mode, Mode::Hide) {
                 let repaint = probe.clone();
