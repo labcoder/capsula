@@ -1,26 +1,44 @@
 # GitHub
 
+## Configuration and reachability
+
+Settings → Accounts contains the GitHub connection workflow. The public
+`GITHUB_CLIENT_ID` in `crates/protocol/src/constants.rs` is deliberately unset in
+every build. Until it names the registered application's client ID, Connect is
+refused without constructing HTTP or starting GitHub credential work. An App ID,
+another application's token or an environment variable is not a replacement.
+The GitHub App must enable device flow and have the required repository access.
+
+With a configured client, the runtime executes device sign-in, verification,
+credential settlement, repository refresh, durable default selection and sign-out.
+Draft production, issue consent reception, IssueEdit and filing remain dormant;
+this account workflow grants no permission to send an issue.
+
 ## Shell snapshots
 
 The shell retains session-tagged GitHub snapshots in Settings. Replacement and
 disconnect clear them; stale-session snapshots do not change them. Each accepted
 scope transition replaces a strong origin identity before observers run, so a
-batched loss and return cannot revive an earlier intent. Identical snapshots and
-truncation-only changes preserve that identity. Current repository membership
-must still be checked at activation, without treating a truncated list as proof
-that an unlisted repository is available.
+batched loss and return cannot revive an earlier intent. Identical snapshots preserve
+that identity. Settings callbacks have a separate identity, retired by every changed
+view or error; an incomplete-list transition therefore retires repository choices
+without changing the consent scope. Current repository membership must still be
+checked at activation, without treating a truncated list as proof that an unlisted
+repository is available.
 
-Live GitHub connection controls receive a fixed, tagged unavailable error. It
-reaches the current session's retained GitHub error state without inventing a
-connection snapshot or changing generic Accounts errors. An error followed by
-its authoritative view retains the error; a later superseding view may clear it.
+Live GitHub controls route only to the current account owner. Missing client
+configuration refuses Connect with AccountMisconfigured; other unavailable
+operations retain the tagged unavailable error. Errors reach the current session's
+GitHub state without changing generic Accounts errors. An error followed by its
+authoritative view retains the error; a later superseding view may clear it.
 Offline controls leave no reply owed to a replacement session. Full or closed
 control output ends the live connection instead of retrying the refusal.
 
-This is state delivery, not visible Settings behavior: connection controls and
-issue filing have no enabled production UI. No runtime GitHub owner, credential
-job, sign-in or network effect is activated. Verified numeric account authority
-and Store admission remain prerequisites for a future consent receiver.
+The Settings section uses this same model for commands, repository selection and
+the fixed verification-page Link. Browser activation rechecks the current session,
+origin and code deadline. Fixture windows never open a browser. Verified numeric
+account authority and Store admission remain prerequisites for a future issue
+consent receiver; a login in a snapshot is not that authority.
 
 ## The checked HTTP boundary
 
@@ -45,8 +63,8 @@ flowchart LR
 ```
 
 Each endpoint owns its credentials and payload, so methods and authentication
-cannot be mixed independently. Device endpoints accept only their typed form
-inputs and have no bearer. REST requests use the fixed product User-Agent,
+cannot be mixed independently. Device and refresh endpoints accept only their typed
+form inputs and have no bearer or client secret. REST requests use the fixed product User-Agent,
 `application/vnd.github+json`, API version `2026-03-10` and a checked `ghu_` bearer.
 Only issue creation carries JSON. Nonempty legacy form fields are refused.
 Every constructed GitHub URL is checked again for its exact host and path,
@@ -80,8 +98,9 @@ and [user installations and repositories](https://docs.github.com/en/rest/apps/i
 
 ## Typed device and account reads
 
-`connections/github/api.rs` provides five stateless calls: request a device code,
-poll once for a token, read the user, and read one installation or repository page.
+`connections/github/api.rs` provides six stateless calls: request a device code,
+poll once for a token, rotate a device-flow refresh token, read the user, and read
+one installation or repository page.
 Each injected `Http` future has an outer Tokio deadline equal to its transport
 deadline, 15 seconds for these calls. Dropping the
 API future drops the request future; no task or retry survives its caller.
@@ -92,17 +111,30 @@ Parsers reuse each endpoint's transport limit, so scripted clients get it too:
 and repository pages. A non-success status is refused before the size check, so a
 known 4xx with a huge body stays definite. Trailing data after the document fails.
 Known duplicate fields, invalid identifiers, missing or mistyped required values,
-and pages over 100 rows fail closed; unknown fields are ignored. These calls do
+and pages over 100 rows fail closed. Token replies reject unknown fields; other
+account reads ignore unknown fields. These calls do
 not follow Link headers or aggregate across pages or installations.
 
 Device replies must name the fixed verification page, contain a checked user
 code, and have positive lifetimes and intervals no greater than 900 seconds.
 Only a missing interval defaults to five seconds; null and malformed values fail.
-Token replies return a checked `ghu_` bearer whose `token_type` is exactly
-`bearer`, or a closed device-flow refusal when a 200 carries `error` and no token.
-Refresh credentials are parsed only as bounded zeroizing strings and then refused
-as `RefreshUnsupported`. Expiry fields without a refresh token are refused too,
-so an expiring sign-in cannot silently become a non-expiring one.
+Token replies require a complete expiring pair: a checked `ghu_` bearer, a checked
+`ghr_` refresh token, `bearer` token type, no nonempty scope, and positive returned
+lifetimes bounded locally to one day for access and 366 days for refresh. These are
+upper bounds, not exact service-contract integers. Each returned duration is added
+to request start, rounded down to Unix seconds, with checked arithmetic. The two
+expiries may be equal or refresh may expire first; persisted pairs retain positive
+expiries and bounded, overflow-safe spans without imposing their order.
+Non-expiring, partial, null, over-bound, overflowing, mixed-error and unsupported
+replies are refused. Device errors may use 200 or 400; only 200 can issue credentials.
+Refresh rejects a reused refresh credential and makes no automatic retry, including
+after a lost response.
+
+[GitHub's refresh contract](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens)
+explicitly exempts device-flow tokens from the client-secret requirement. The
+refresh form therefore contains only client ID, refresh grant type and refresh
+token. Both credentials stay in Secret/zeroizing storage, never config, logs or
+command lines.
 
 `ApiError` retains only closed kinds, numeric status and parsed metadata. Its
 shared definite-reason classification treats pre-dispatch/connect refusals as
@@ -111,7 +143,8 @@ An unusable but present Retry-After still makes 403 RateLimited, without inventi
 retry advice. API refusals cap usable Retry-After advice to one hour (3,600 seconds).
 Timeout, transport loss, redirects, malformed success and unexpected non-4xx
 statuses remain uncertain. Hand-written Debug never prints credentials, user
-codes, logins, repository names or provider text. These layers add no runtime caller.
+codes, logins, repository names or provider text. The account owner is the caller;
+the APIs themselves still own no session, task, timer or persistence.
 
 ## Single-attempt issue creation and exact matching
 
@@ -165,8 +198,8 @@ at its expiry even when a poll or identity read is outstanding. The API accepts
 device error bodies on 200 and RFC 8628's 400; only 200 can yield a bearer.
 The optional reply interval must be an integer from 1 to 900; null, duplicates
 and out-of-range values refuse the whole reply, including a token reply.
-Unknown codes and malformed replies end the attempt. Expiring token shapes
-remain unsupported. No retry wait is derived from REST rate metadata.
+Unknown codes and malformed replies end the attempt. No retry wait is derived
+from REST rate metadata.
 
 The approving identity is read before saving. During interactive sign-in, only a
 successful save produces Connected. Startup checks a loaded bearer with the same
@@ -175,11 +208,53 @@ out, including
 a failed durable removal. A clean SignedOut view has no cleanup warning. Connect
 is also permitted after a refused physical delete, because durable removal has
 already fenced the old credential; Running and NotDurable still block it.
-Repository defaults are displayed and accepted only by exact membership in the
-fetched list, preserving GitHub's spelling. `user()` returns the connected identity,
-including persisted fallback after a genuine startup API failure, without its
-bearer; issue admission takes the numeric id from it, never from a login, and
-still requires fetched membership.
+Repository defaults are displayed and accepted only by exact membership in a
+complete fetched list, preserving GitHub's spelling. A persisted identity may
+remain visible after a genuine startup API failure, but `user()`, bearer access
+and repository authority stay unavailable until fresh verification succeeds.
+A loaded identity cannot silently change numeric account ID; a renamed login
+with the same ID is valid. Expired access or current-generation 401 revokes use.
+
+Cancel during a restored identity check is not sign-out: it advances the fence,
+aborts and joins that request, and retains the saved credential without another
+request or renewal timer. The trailing wire variant `NotVerified { login }` has
+tag 6 and exposes only the saved login. It grants no bearer, repository, default
+selection or issue authority. Settings offers GET-only Check again through
+RefreshRepos, plus Sign out. Only a successful explicit recheck restores use;
+late success or failure from the canceled check cannot do so. A genuine
+non-401 startup failure uses the same saved-but-unverified presentation.
+
+An access token schedules rotation one minute before expiry, or halfway through
+the remaining lifetime when less than two minutes remain. Every positive remaining
+lifetime has a positive delay. An access token already unusable when restored-account
+verification or a successful fresh-pair save completes ends in NeedsSignIn. A fresh
+pair that expires during its identity check still gets its one credential save first.
+An expired stored pair found at startup still gets one automatic recovery; an
+expired fresh replacement cannot chain that recovery. The machine first advances
+its fence, revokes consumers and saves `refresh_sent=true` on the existing
+credential FIFO. Only that save's acknowledgment admits one refresh request. The
+returned pair is verified against the same numeric account and saved atomically
+with `refresh_sent=false` before Connected returns. Failed or lost rotation cannot
+resend the old refresh token. Restart with a spent marker or expired refresh
+credential shows NeedsSignIn instead. Explicit cancellation retires the rotation;
+an ordinary shell replacement may let it finish and save.
+
+Repository traversal shares one 60-second deadline and twelve-request limit across
+all installations, with at most two 100-row pages per resource and 200 unique
+repositories overall. Totals and page lengths must be consistent; duplicate
+installation IDs, incomplete pages, errors and bound exhaustion grant no partial
+authority. Names coalesce case-insensitively across installations while retaining
+GitHub's spelling. A failed refresh clears repository authority.
+
+The default is non-secret `[github] default_account`/`default_repo` metadata in
+config.toml. Its numeric account ID is stored as decimal text, so the whole u64
+range survives TOML. The existing ordered settings writer stages and replaces the
+file. A successful write restores the machine's account-bound default metadata
+from committed Config even if renewal or expiry retired the selecting operation.
+Operation acknowledgment remains generation-fenced; display and use still require
+the current numeric account and complete repository membership. A failed write
+keeps the old default, and another numeric account cannot inherit it. Selecting a
+default neither edits an explicitly bound draft nor files one.
 
 The verification page is the protocol's VERIFICATION_URI constant. The API
 checks the reply against it; neither the view nor a brain effect carries a
@@ -197,9 +272,17 @@ stateDiagram-v2
     Requesting --> Awaiting: checked challenge
     Awaiting --> Verifying: token
     Verifying --> Saving: approving identity
-    Verifying --> Connected: saved account checked or offline
+    Verifying --> Connected: saved account verified
+    Verifying --> NotVerified: cancel saved check or non-401 failure
+    NotVerified --> Verifying: explicit GET-only Check again
+    NotVerified --> SignedOut: Sign out
     Verifying --> NeedsSignIn: saved bearer refused
     Saving --> Connected: saved
+    Connected --> MarkingRefresh: access renewal due
+    Loading --> MarkingRefresh: access expired, refresh usable
+    MarkingRefresh --> Refreshing: spent marker saved
+    Refreshing --> Verifying: rotated pair
+    Refreshing --> NeedsSignIn: failed or lost result
     Connected --> NeedsSignIn: current-generation 401
     Requesting --> SignedOut: Cancel or failure
     Awaiting --> SignedOut: Cancel, expiry or failure
@@ -210,38 +293,39 @@ stateDiagram-v2
 
 ## Credential authority and lane
 
-Accounts owns a dormant device-machine adapter on the existing credential lane.
-Its production startup, effect dispatch and snapshot publication are explicitly
-disabled; the live GitHub control receiver still returns the tagged unavailable
-error. Ordinary account startup and its existing vault sweeps are unchanged.
-There is no enabled GitHub sign-in, default executor, consent receiver or UI.
+Accounts owns the device-machine adapter on the existing credential lane. A checked,
+configured client identifier enables startup, effect dispatch and snapshots. The
+deliberately unset product constant keeps Connect closed in current builds.
+Ordinary account startup and its existing vault sweeps are unchanged; there is no
+second account cache, credential worker or issue-consent receiver.
 
-The admitted offline fixture path loads only after the account worker opens its
+The owner loads only after the account worker opens its
 vault. Unavailable admission, a closed reply or an unavailable vault leaves the
 machine Loading, with no successful SignedOut snapshot. A genuine empty load and
 the exact cleanup outcome remain distinct. Loading is queried from the machine,
-not copied into another loaded flag. Credential-only admission stops at an owned,
-original-stamp ReadUser effect and never constructs HTTP. A separate production-off
-verification policy can execute that effect through the existing fixed user API;
-enabling it does not replay previously suspended work. Device authorization,
-repository, default and wake effects remain suspended with their original identity.
+not copied into another loaded flag. Device, poll, identity, refresh and repository
+effects each retain their original stamp. A retiring construction cannot be
+overwritten by a new operation. One independent stamped wake owns the current
+attempt deadline or token-renewal time. Credential-only unit fixtures can hold
+network work, but the configured production path dispatches it normally.
 
-One verification operation owns its client-construction or user-request handle,
-original stamp and load-origin session. Its token stays outside the blocking
+One network operation owns its client-construction or request handle,
+original stamp and origin session. Its credentials stay outside the blocking
 factory closure. The event loop joins the stored handle directly and retains
 operation identity until disposition. An already joined completion may be retired
 by cancellation; its later event is inert. A canceled construction is
 joined; a canceled request is aborted and joined. An old event cannot replace a
 new operation, and a retiring operation cannot be overwritten. The shared fence
-is checked inside the request task before the API is first polled.
+is checked inside the request task before the API is first polled and before
+each repository-page dispatch.
 
 A real successful response supplies the current numeric identity without resaving
 an already durable account. A real 401 means NeedsSignIn. Other genuine API/factory
-failures retain the existing persisted-identity fallback and closed error; that is
-not fresh verification or fetched repository authority. Cancellation and task
-failure never manufacture API transport failure or Connected fallback. Lifecycle
-loss leaves the machine unverified, without an implicit retry or a logged panic
-payload. Current authority may reach a replacement, but errors require the
+failures retain only the persisted display identity and closed error; that is
+not fresh verification or fetched repository authority. An owned task ending without
+an API result uses a separate terminal input, never a fabricated transport failure
+or Connected fallback. Late successful results cannot revive it. Current authority
+may reach a replacement, but errors require the
 matching nonempty load-origin session. Loaded verification survives ordinary EOF.
 
 Save and Remove enter the existing FIFO before any view/error is delivered.
@@ -253,15 +337,20 @@ credential replies and waits for the existing worker to release its vault lock,
 then joins any remaining canceled verification before returning. A running client
 factory is not made abortable by its handle; the API's 15-second request/body
 deadline does not bound construction or shutdown. No new wall-clock shutdown
-guarantee is made.
+guarantee is made. An admitted refresh and its save may finish until the existing
+shutdown refresh deadline. After it, either the committed successor or the old
+spent marker survives; no old refresh is replayed. Canceled network handles remain
+owned until joined.
 The adapter borrows the sender and creates no second credential worker or account
 cache. Numeric identity remains the machine's connected identity; fetched membership,
 Store admission and separately reviewed activation remain prerequisites to filing.
 
 GitHub records use the same credential thread, vault session lock and write-once
-generation names as other accounts. The record contains only a checked `ghu_`
-token, a checked login and a positive numeric user ID. JSON is limited to 2,048
-bytes; unknown or duplicate fields fail closed. Jobs and replies have content-free
+generation names as other accounts. The record contains the checked `ghu_`/`ghr_` pair,
+both absolute expiries, the single-use refresh marker, a checked login and a
+positive numeric user ID. JSON is limited to 2,048
+bytes; missing, unknown or duplicate fields fail closed. Old non-expiring records
+are not silently upgraded into valid credentials. Jobs and replies have content-free
 Debug output. A save checks the device machine's shared generation immediately
 before writing. Closing its reply receiver never stops the credential thread or
 discards a later removal; an admitted save finishes before that removal runs.

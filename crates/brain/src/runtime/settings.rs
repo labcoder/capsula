@@ -11,6 +11,7 @@ use tokio::task::{JoinError, JoinHandle};
 
 use super::{Brain, Full, Link};
 use crate::config::{ConfigError, Pending};
+use crate::connections::github::device::DefaultRepo;
 use crate::voice::installer::{Folder, RemoveAnswer};
 
 /// The epoch of a change the brain makes itself. Connections count from 1, so a shell hears only
@@ -22,6 +23,13 @@ pub(super) const BRAIN: u64 = 0;
 pub(super) enum Change {
     User(SettingsOp),
     Voice(VoiceWrite),
+    GitHub(GitHubWrite),
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct GitHubWrite {
+    pub(super) generation: u64,
+    pub(super) default: DefaultRepo,
 }
 
 /// A write the voice installer makes; its result goes back to the installer.
@@ -47,6 +55,7 @@ pub(super) struct Queued {
 pub(super) struct Write {
     epoch: u64,
     voice: Option<VoiceWrite>,
+    github: Option<GitHubWrite>,
     handle: JoinHandle<(Pending, Result<(), ConfigError>)>,
 }
 
@@ -81,6 +90,7 @@ enum Outcome {
 pub(super) type Written = (
     u64,
     Option<VoiceWrite>,
+    Option<GitHubWrite>,
     Result<(Pending, Result<(), ConfigError>), JoinError>,
 );
 
@@ -129,6 +139,35 @@ impl Brain {
         }
     }
 
+    fn start_settings_write(
+        &mut self,
+        pending: Pending,
+        epoch: u64,
+        voice: Option<VoiceWrite>,
+        github: Option<GitHubWrite>,
+    ) {
+        #[cfg(test)]
+        let gate = self.config_gate.take();
+        let handle = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            let completed = held(gate);
+            let written = pending.write();
+            #[cfg(test)]
+            if let Some(completed) = completed {
+                completed
+                    .send(written.is_ok())
+                    .expect("write completion is observed");
+            }
+            (pending, written)
+        });
+        self.config_write = Some(Write {
+            epoch,
+            voice,
+            github,
+            handle,
+        });
+    }
+
     /// Starts the next waiting settings change, unless a write is in flight. A refused one is
     /// settled at once with the settings unchanged.
     pub(super) fn pump_settings(
@@ -139,7 +178,7 @@ impl Brain {
             let Some(Queued { change, epoch }) = self.settings_ops.pop_front() else {
                 break;
             };
-            let (staged, voice) = match change {
+            let (staged, voice, github) = match change {
                 // Popped, so it applies even when its answer can't be sent; no Voice frame
                 // goes ahead of a missing answer.
                 Change::User(SettingsOp::InstallVoice(part)) if self.voice.is_some() => {
@@ -190,7 +229,7 @@ impl Brain {
                     answered?;
                     continue;
                 }
-                Change::User(op) => (self.config.stage(op), None),
+                Change::User(op) => (self.config.stage(op), None, None),
                 // A removal committed since the load: writing it would put the part back.
                 Change::Voice(VoiceWrite::Activate { part, token })
                     if !self.voice_activating(part, token) =>
@@ -198,39 +237,35 @@ impl Brain {
                     continue;
                 }
                 Change::Voice(write @ VoiceWrite::Activate { part, .. }) => {
-                    (self.config.stage_activate(part), Some(write))
+                    (self.config.stage_activate(part), Some(write), None)
                 }
                 Change::Voice(write @ VoiceWrite::RemoveIntent { part, .. }) => {
-                    (self.config.stage_remove_intent(part), Some(write))
+                    (self.config.stage_remove_intent(part), Some(write), None)
                 }
                 Change::Voice(write @ VoiceWrite::RemoveDone(part)) => {
-                    (self.config.stage_remove_done(part), Some(write))
+                    (self.config.stage_remove_done(part), Some(write), None)
                 }
+                Change::GitHub(write) => (
+                    self.config.stage_github_default(&write.default),
+                    None,
+                    Some(write),
+                ),
             };
             match staged {
                 Ok(pending) => {
-                    #[cfg(test)]
-                    let gate = self.config_gate.take();
-                    let handle = tokio::task::spawn_blocking(move || {
-                        #[cfg(test)]
-                        let completed = held(gate);
-                        let written = pending.write();
-                        #[cfg(test)]
-                        if let Some(completed) = completed {
-                            completed
-                                .send(written.is_ok())
-                                .expect("write completion is observed");
-                        }
-                        (pending, written)
-                    });
-                    self.config_write = Some(Write {
-                        epoch,
-                        voice,
-                        handle,
-                    });
+                    self.start_settings_write(pending, epoch, voice, github);
                 }
                 Err(error) => {
                     tracing::warn!(%error, "settings change refused");
+                    if let Some(write) = github {
+                        self.github_default_written(
+                            write,
+                            Err(error.key()),
+                            epoch,
+                            link.as_deref_mut(),
+                        )?;
+                        continue;
+                    }
                     if let Some(write) = voice {
                         self.voice_written(write, Err(error.key()), link.as_deref_mut())?;
                     }
@@ -244,7 +279,7 @@ impl Brain {
     /// The write in flight finished: its change becomes the settings only if it's on disk.
     pub(super) fn settings_done(
         &mut self,
-        (epoch, voice, written): Written,
+        (epoch, voice, github, written): Written,
         mut link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
         let outcome = match written {
@@ -277,6 +312,19 @@ impl Brain {
                 Outcome::Refused(ErrorKey::SettingsRefused)
             }
         };
+        if let Some(write) = github {
+            self.github_default_written(
+                write,
+                match outcome {
+                    Outcome::Applied => Ok(()),
+                    Outcome::Refused(key) => Err(key),
+                    Outcome::Accepted => Err(ErrorKey::SettingsRefused),
+                },
+                epoch,
+                link.as_deref_mut(),
+            )?;
+            return self.pump_settings(link);
+        }
         if let Some(write) = voice {
             let result = match outcome {
                 Outcome::Refused(key) => Err(key),
@@ -361,13 +409,14 @@ pub(super) async fn written(write: &mut Option<Write>) -> Written {
     let Some(Write {
         epoch,
         voice,
+        github,
         handle,
     }) = write.as_mut()
     else {
         return std::future::pending().await;
     };
-    let (epoch, voice) = (*epoch, *voice);
+    let (epoch, voice, github) = (*epoch, *voice, github.clone());
     let done = handle.await;
     *write = None;
-    (epoch, voice, done)
+    (epoch, voice, github, done)
 }

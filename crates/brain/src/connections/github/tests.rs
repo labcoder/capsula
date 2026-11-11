@@ -1,4 +1,4 @@
-use super::{ClientId, DeviceCodeValue, GitHubEndpoint, GitHubToken, Page};
+use super::{ClientId, DeviceCodeValue, GitHubEndpoint, GitHubToken, Page, RefreshToken};
 use crate::connections::http_client::{Endpoint, HttpError, Request, Response, ResponseMeta};
 use crate::test_support::SENTINEL;
 use kumochi_protocol::Secret;
@@ -7,6 +7,10 @@ use zeroize::Zeroizing;
 
 pub(super) fn token() -> Secret<GitHubToken> {
     Secret::new(GitHubToken::new(Zeroizing::new(format!("ghu_{SENTINEL}"))).unwrap())
+}
+
+pub(super) fn refresh() -> Secret<RefreshToken> {
+    Secret::new(RefreshToken::new(Zeroizing::new(format!("ghr_{SENTINEL}"))).unwrap())
 }
 
 pub(crate) fn endpoints() -> Vec<GitHubEndpoint> {
@@ -44,6 +48,10 @@ pub(crate) fn endpoints() -> Vec<GitHubEndpoint> {
             creator: GitHubLogin::new("owner").unwrap(),
             since_s: 1_709_251_199,
             page: Page::new(2).unwrap(),
+        },
+        GitHubEndpoint::RefreshToken {
+            client_id: ClientId::new(SENTINEL).unwrap(),
+            refresh: refresh(),
         },
     ]
 }
@@ -108,8 +116,42 @@ fn inputs_enforce_each_local_bound_without_normalizing() {
 }
 
 #[test]
+fn refresh_credentials_enforce_their_kind_and_exact_bounds_without_normalizing() {
+    for value in ["ghr_x".to_owned(), format!("ghr_{}", "x".repeat(251))] {
+        assert_eq!(
+            RefreshToken::new(Zeroizing::new(value.clone()))
+                .unwrap()
+                .as_str(),
+            value
+        );
+    }
+    for value in [
+        "",
+        "ghr_",
+        "ghu_x",
+        "gho_x",
+        "ghp_x",
+        " ghr_x",
+        "ghr_x ",
+        "ghr_a b",
+        "ghr_x\n",
+        "ghr_x\r",
+        "ghr_x\t",
+        "ghr_x\0",
+        "ghr_x\u{7f}",
+        "ghr_é",
+        &format!("ghr_{}", "x".repeat(252)),
+    ] {
+        assert_eq!(
+            RefreshToken::new(Zeroizing::new(value.to_owned())).unwrap_err(),
+            HttpError::Request
+        );
+    }
+}
+
+#[test]
 fn unrepresentable_since_and_zero_installation_are_refused() {
-    let mut issues = endpoints().pop().unwrap();
+    let mut issues = endpoints().remove(6);
     let GitHubEndpoint::Issues { since_s, .. } = &mut issues else {
         panic!("issue fixture")
     };
@@ -272,6 +314,7 @@ fn outermost_carriers_redact_credentials_content_form_names_and_request_id() {
     assert!(!text.contains(byte_list.trim_start_matches('[').trim_end_matches(']')));
     for text in [
         format!("{:?}", token().expose()),
+        format!("{:?}", refresh().expose()),
         format!(
             "{:?}",
             DeviceCodeValue::new(Zeroizing::new(SENTINEL.to_owned())).unwrap()

@@ -254,8 +254,9 @@ impl Brain {
         scenes: Vec<SceneState>,
         engine: Selected,
         config: Config,
-        account: Accounts,
+        mut account: Accounts,
     ) -> std::io::Result<Self> {
+        account.github.restore_default(config.github_default());
         #[cfg(any(test, debug_assertions))]
         let (engine, access, fixture) = match engine {
             Selected::Fixture(engine) => (engine, mpsc::unbounded_channel().1, true),

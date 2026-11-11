@@ -10,11 +10,13 @@ use std::path::{Path, PathBuf};
 
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
 use kumochi_protocol::message::{
-    AssistantName, DockPosition, ErrorKey, MaxFrameRate, ModelChoice, SettingsOp, SettingsView,
-    SttUnload, ThreadId, UserName,
+    AssistantName, DockPosition, ErrorKey, MaxFrameRate, ModelChoice, RepoName, SettingsOp,
+    SettingsView, SttUnload, ThreadId, UserName,
 };
 use kumochi_protocol::voice::VoicePart;
 use toml::{Table, Value};
+
+use crate::connections::github::device::DefaultRepo;
 
 const ASSISTANT_NAME: &str = "assistant_name";
 const USER_NAME: &str = "user_name";
@@ -22,6 +24,9 @@ const ONBOARDED: &str = "onboarded";
 const MAX_FRAME_RATE: &str = "max_frame_rate";
 const DEFAULT_MODEL: &str = "default_model";
 const CLAUDE_CODE: &str = "claude_code";
+const GITHUB: &str = "github";
+const DEFAULT_ACCOUNT: &str = "default_account";
+const DEFAULT_REPO: &str = "default_repo";
 const DOCK_POSITION: &str = "dock_position";
 const SHOW_IN_TASKBAR: &str = "show_in_taskbar";
 const VOICE: &str = "voice";
@@ -42,6 +47,9 @@ pub(crate) enum ConfigError {
     /// Writing the file failed; nothing changed.
     #[error("config.toml couldn't be written")]
     Write(#[source] io::Error),
+    /// A repository default must belong to a positive GitHub account ID.
+    #[error("github default account must be positive")]
+    InvalidGitHubAccount,
     /// A voice install, remove or cancel, which this build refuses until its installer lands.
     #[error("voice can't be installed or removed yet")]
     VoiceUnavailable,
@@ -52,7 +60,7 @@ impl ConfigError {
     pub(crate) fn key(&self) -> ErrorKey {
         match self {
             Self::Unreadable => ErrorKey::ConfigUnreadable,
-            Self::NoHome | Self::Write(_) => ErrorKey::SettingsRefused,
+            Self::NoHome | Self::Write(_) | Self::InvalidGitHubAccount => ErrorKey::SettingsRefused,
             Self::VoiceUnavailable => ErrorKey::VoiceUnavailable,
         }
     }
@@ -157,6 +165,49 @@ impl Config {
             },
             Some(_) => false,
         }
+    }
+
+    /// The saved repository and its account, only when both values are valid.
+    pub(crate) fn github_default(&self) -> Option<DefaultRepo> {
+        let github = self.table.as_ref().ok()?.get(GITHUB)?.as_table()?;
+        let account = github.get(DEFAULT_ACCOUNT)?.as_str()?;
+        if !account.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        let account = account.parse::<u64>().ok().filter(|id| *id != 0)?;
+        let repo = RepoName::new(github.get(DEFAULT_REPO)?.as_str()?).ok()?;
+        Some(DefaultRepo { account, repo })
+    }
+
+    /// Stages an account-bound repository default without publishing it.
+    ///
+    /// # Errors
+    /// As [`Config::stage`], or [`ConfigError::InvalidGitHubAccount`] for account zero.
+    pub(crate) fn stage_github_default(
+        &self,
+        default: &DefaultRepo,
+    ) -> Result<Pending, ConfigError> {
+        let (path, mut table) = self.editable()?;
+        if default.account == 0 {
+            return Err(ConfigError::InvalidGitHubAccount);
+        }
+        let github = table
+            .entry(GITHUB)
+            .or_insert_with(|| Value::Table(Table::new()));
+        if !github.is_table() {
+            *github = Value::Table(Table::new());
+        }
+        let github = github.as_table_mut().expect("the github key holds a table");
+        github.insert(
+            DEFAULT_ACCOUNT.to_owned(),
+            Value::String(default.account.to_string()),
+        );
+        github.insert(
+            DEFAULT_REPO.to_owned(),
+            Value::String(default.repo.as_str().to_owned()),
+        );
+        let view = view_of(&table, self.view.main_thread);
+        Ok(Pending { path, table, view })
     }
 
     /// Stages `op` on top of the current table, changing nothing yet.

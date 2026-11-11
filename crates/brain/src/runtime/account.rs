@@ -512,7 +512,7 @@ impl Accounts {
         self.catalog.cancel();
         self.connections.cancel();
         let settled = tokio::time::timeout_at(refresh_by, async {
-            while self.state.refresh_out() {
+            while self.state.refresh_out() || self.github.rotating() {
                 let input = self.next().await;
                 // No shell hears it: the brain is closing.
                 self.handle(input);
@@ -521,6 +521,7 @@ impl Accounts {
         .await;
         if settled.is_err() {
             tracing::warn!("a refresh is still out at shutdown; its token stays marked as sent");
+            self.github.stop_rotation();
         }
         // One the settling started.
         self.catalog.cancel();

@@ -3,6 +3,7 @@
 mod accounts;
 mod claude;
 mod general;
+mod github;
 mod voice;
 mod window;
 
@@ -10,11 +11,13 @@ pub(super) use window::SettingsPanel;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape, InputEvent, InputState};
+use gpui_kit::component::select::{SelectEvent, SelectState};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _, scroll::ScrollableElement as _};
 use gpui_kit::{
     AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
-    KeyBinding, ParentElement as _, Render, Styled as _, Subscription, WeakEntity, Window, div,
+    KeyBinding, ParentElement as _, Render, Styled as _, Subscription, Task, WeakEntity, Window,
+    div,
 };
 
 use super::{Presence, PresenceEvent, send};
@@ -31,6 +34,8 @@ pub(super) struct SettingsView {
     pub(super) fixture: bool,
     events: async_channel::Sender<PresenceEvent>,
     inputs: [Entity<InputState>; 2],
+    github_repos: Entity<SelectState<Vec<github::RepoChoice>>>,
+    github_expiry: Option<Task<()>>,
     focus: FocusHandle,
     editing: Option<Field>,
     tab: usize,
@@ -65,38 +70,26 @@ impl SettingsView {
                 input
             })
         });
-        let subscriptions = [Field::Assistant, Field::User]
+        let github_repos =
+            cx.new(|cx| SelectState::new(Vec::<github::RepoChoice>::new(), None, window, cx));
+        let mut subscriptions: Vec<_> = [Field::Assistant, Field::User]
             .into_iter()
             .zip(&inputs)
             .map(|(field, input)| {
                 cx.subscribe_in(input, window, move |view, input, event, window, cx| {
-                    match event {
-                        InputEvent::Focus => view.editing = Some(field),
-                        InputEvent::Change => {
-                            let value = input.read(cx).value();
-                            view.model.update(cx, |state, cx| {
-                                state.change(field, &value);
-                                cx.notify();
-                            });
-                        }
-                        InputEvent::PressEnter { shift: false, .. } | InputEvent::Blur => {
-                            if view.editing == Some(field) {
-                                view.editing = None;
-                            }
-                            let _gone = view
-                                .owner
-                                .update(cx, |owner, cx| owner.save_setting(field, cx));
-                            if matches!(event, InputEvent::PressEnter { .. }) {
-                                window.focus(&view.focus, cx);
-                            }
-                        }
-                        InputEvent::PressEnter { .. } => {}
-                    }
-                    cx.notify();
+                    view.name_input(field, input, event, window, cx);
                 })
             })
             .collect();
+        subscriptions.push(
+            cx.subscribe_in(&github_repos, window, |view, _, event, window, cx| {
+                if let SelectEvent::Confirm(Some(choice)) = event {
+                    view.choose_github_repo(choice, window, cx);
+                }
+            }),
+        );
         let watch = cx.observe_in(&model, window, |view, _, window, cx| {
+            view.sync_github(window, cx);
             let account = &view.model.read(cx).accounts;
             if view.confirmation.is_some_and(|generation| {
                 account.generation != Some(generation)
@@ -131,7 +124,7 @@ impl SettingsView {
                 .focus(window, cx);
             cx.notify();
         });
-        Self {
+        let mut view = Self {
             model,
             owner,
             confirmation: None,
@@ -139,6 +132,8 @@ impl SettingsView {
             fixture: false,
             events,
             inputs,
+            github_repos,
+            github_expiry: None,
             focus: cx.focus_handle().tab_stop(true),
             editing: None,
             tab: 0,
@@ -149,11 +144,46 @@ impl SettingsView {
             _watch: watch,
             _focus_lost: focus_lost,
             _display: display,
-        }
+        };
+        view.sync_github(window, cx);
+        view
     }
 
     pub(super) fn editing(&self) -> Option<Field> {
         self.editing
+    }
+
+    fn name_input(
+        &mut self,
+        field: Field,
+        input: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        match event {
+            InputEvent::Focus => self.editing = Some(field),
+            InputEvent::Change => {
+                let value = input.read(cx).value();
+                self.model.update(cx, |state, cx| {
+                    state.change(field, &value);
+                    cx.notify();
+                });
+            }
+            InputEvent::PressEnter { shift: false, .. } | InputEvent::Blur => {
+                if self.editing == Some(field) {
+                    self.editing = None;
+                }
+                let _gone = self
+                    .owner
+                    .update(cx, |owner, cx| owner.save_setting(field, cx));
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    window.focus(&self.focus, cx);
+                }
+            }
+            InputEvent::PressEnter { .. } => {}
+        }
+        cx.notify();
     }
 
     pub(super) fn select_tab(
@@ -291,6 +321,7 @@ impl Render for SettingsView {
                             .children((self.tab == 0).then(|| self.general(window, cx)))
                             .children((self.tab == 1).then(|| self.accounts(cx)))
                             .children((self.tab == 1).then(|| self.claude(cx)))
+                            .children((self.tab == 1).then(|| self.github(cx)))
                             .children((self.tab == 2).then(|| self.voice(cx))),
                     ),
             )

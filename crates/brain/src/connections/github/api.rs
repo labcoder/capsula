@@ -1,6 +1,10 @@
 //! Bounded, transient GitHub calls; no account state, retry loop or background request lives here.
 
-use std::{fmt, num::NonZeroU64};
+use std::{
+    fmt,
+    num::NonZeroU64,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use kumochi_protocol::{
     Secret,
@@ -9,7 +13,7 @@ use kumochi_protocol::{
 use serde::{Deserialize, de::DeserializeOwned};
 use zeroize::Zeroizing;
 
-use super::{ClientId, DeviceCodeValue, GitHubEndpoint, GitHubToken, Page};
+use super::{ClientId, DeviceCodeValue, GitHubEndpoint, GitHubToken, Page, RefreshToken};
 use crate::connections::http_client::{Endpoint, Http, HttpError, Request, Response, ResponseMeta};
 
 #[cfg(test)]
@@ -17,6 +21,11 @@ mod tests;
 
 /// Local ceiling for retry advice, not an automatic retry schedule.
 pub const MAX_RETRY_AFTER_S: u64 = 3600;
+
+/// Local upper bound of one day for a returned user access-token lifetime.
+pub const MAX_ACCESS_LIFETIME_S: u64 = 86_400;
+/// Local upper bound of 366 days for a returned rotating refresh-token lifetime.
+pub const MAX_REFRESH_LIFETIME_S: u64 = 31_622_400;
 
 /// Closed failures, without provider diagnostics or payloads.
 #[derive(Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -35,9 +44,6 @@ pub enum ApiError {
     /// An invalid, oversized or incomplete success payload.
     #[error("invalid github response")]
     Response,
-    /// Refresh or expiring-token support has not been enabled.
-    #[error("github refresh unsupported")]
-    RefreshUnsupported,
 }
 
 impl ApiError {
@@ -78,12 +84,12 @@ impl fmt::Debug for ApiError {
                 .field("meta", meta)
                 .finish(),
             Self::Response => f.write_str("Response"),
-            Self::RefreshUnsupported => f.write_str("RefreshUnsupported"),
         }
     }
 }
 
 /// A challenge credential and the bounded values displayed to the user.
+#[derive(Clone)]
 pub struct DeviceCode {
     /// Used only for polling this attempt.
     pub code: Secret<DeviceCodeValue>,
@@ -136,9 +142,10 @@ impl From<String> for TokenError {
 }
 
 /// One polling result; callers own scheduling and attempt generations.
+#[derive(Clone)]
 pub enum TokenReply {
-    /// A non-expiring, checked GitHub App user bearer.
-    Token(Secret<GitHubToken>),
+    /// Checked, expiring GitHub App user credentials.
+    Token(Tokens),
     /// A closed polling refusal.
     Error {
         /// Closed device-flow refusal.
@@ -146,6 +153,19 @@ pub enum TokenReply {
         /// A validated interval supplied by the provider.
         interval_s: Option<u16>,
     },
+}
+
+/// Rotating credentials with conservative Unix-second expiry times.
+#[derive(Clone)]
+pub struct Tokens {
+    /// A transient user bearer.
+    pub token: Secret<GitHubToken>,
+    /// A transient refresh credential issued through device flow.
+    pub refresh: Secret<RefreshToken>,
+    /// Access expiry measured from the request's start, rounded down.
+    pub expires_at_s: u64,
+    /// Refresh expiry measured from the same request start.
+    pub refresh_expires_at_s: u64,
 }
 
 /// The authenticated account, without provider profile text.
@@ -188,6 +208,11 @@ impl fmt::Debug for TokenReply {
                 .field("interval_s", interval_s)
                 .finish(),
         }
+    }
+}
+impl fmt::Debug for Tokens {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Tokens")
     }
 }
 impl fmt::Debug for GitHubUser {
@@ -238,9 +263,8 @@ fn default_interval() -> u16 {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TokenWire {
-    #[serde(default, deserialize_with = "present")]
-    interval: Option<u16>,
     #[serde(default, deserialize_with = "present")]
     access_token: Option<WireSecret>,
     #[serde(default, deserialize_with = "present")]
@@ -252,8 +276,70 @@ struct TokenWire {
     #[serde(default, deserialize_with = "present")]
     token_type: Option<String>,
     #[serde(default, deserialize_with = "present")]
+    scope: Option<String>,
+    #[serde(default, deserialize_with = "present")]
     error: Option<TokenError>,
+    #[serde(default, deserialize_with = "present")]
+    interval: Option<u16>,
+    #[serde(default, deserialize_with = "present")]
+    error_description: Option<Zeroizing<String>>,
+    #[serde(default, deserialize_with = "present")]
+    error_uri: Option<Zeroizing<String>>,
 }
+
+impl TokenWire {
+    fn reply(self, started_at_s: u64) -> Result<TokenReply, ApiError> {
+        if let Some(code) = self.error {
+            if self.access_token.is_some()
+                || self.refresh_token.is_some()
+                || self.expires_in.is_some()
+                || self.refresh_token_expires_in.is_some()
+                || self.token_type.is_some()
+                || self.scope.is_some()
+                || self
+                    .interval
+                    .is_some_and(|interval| !(1..=900).contains(&interval))
+            {
+                return Err(ApiError::Response);
+            }
+            return Ok(TokenReply::Error {
+                code,
+                interval_s: self.interval,
+            });
+        }
+        if self.token_type.as_deref() != Some("bearer")
+            || self.scope.as_deref().is_some_and(|scope| !scope.is_empty())
+            || self.interval.is_some()
+            || self.error_description.is_some()
+            || self.error_uri.is_some()
+        {
+            return Err(ApiError::Response);
+        }
+        let expires_in = self
+            .expires_in
+            .filter(|seconds| (1..=MAX_ACCESS_LIFETIME_S).contains(seconds))
+            .ok_or(ApiError::Response)?;
+        let refresh_token_expires_in = self
+            .refresh_token_expires_in
+            .filter(|seconds| (1..=MAX_REFRESH_LIFETIME_S).contains(seconds))
+            .ok_or(ApiError::Response)?;
+        let access_token = self.access_token.ok_or(ApiError::Response)?;
+        let refresh_token = self.refresh_token.ok_or(ApiError::Response)?;
+        Ok(TokenReply::Token(Tokens {
+            token: Secret::new(GitHubToken::new(access_token.0).map_err(|_| ApiError::Response)?),
+            refresh: Secret::new(
+                RefreshToken::new(refresh_token.0).map_err(|_| ApiError::Response)?,
+            ),
+            expires_at_s: started_at_s
+                .checked_add(expires_in)
+                .ok_or(ApiError::Response)?,
+            refresh_expires_at_s: started_at_s
+                .checked_add(refresh_token_expires_in)
+                .ok_or(ApiError::Response)?,
+        }))
+    }
+}
+
 fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     d: D,
 ) -> Result<Option<T>, D::Error> {
@@ -304,19 +390,23 @@ pub(super) fn parse<T: DeserializeOwned>(
     cap: usize,
 ) -> Result<T, ApiError> {
     if response.status != status {
-        let mut meta = response.meta;
-        meta.retry_after_s = meta
-            .retry_after_s
-            .map(|seconds| seconds.min(MAX_RETRY_AFTER_S));
-        return Err(ApiError::Refused {
-            status: response.status,
-            meta,
-        });
+        return Err(refusal(response));
     }
     if response.body.expose().len() > cap {
         return Err(ApiError::Response);
     }
     serde_json::from_slice(response.body.expose()).map_err(|_| ApiError::Response)
+}
+
+fn refusal(response: &Response) -> ApiError {
+    let mut meta = response.meta;
+    meta.retry_after_s = meta
+        .retry_after_s
+        .map(|seconds| seconds.min(MAX_RETRY_AFTER_S));
+    ApiError::Refused {
+        status: response.status,
+        meta,
+    }
 }
 
 /// One call, parsed under the same byte cap and deadline the transport uses for it.
@@ -362,7 +452,7 @@ pub async fn request_device_code(
 /// Poll once; callers own the documented interval and attempt lifecycle.
 ///
 /// # Errors
-/// Refuses refresh/expiry shapes, malformed replies and request failures.
+/// Refuses non-expiring or undocumented token shapes, malformed replies and request failures.
 pub async fn poll_device_token(
     http: &impl Http,
     client_id: &str,
@@ -372,36 +462,51 @@ pub async fn poll_device_token(
         client_id: ClientId::new(client_id)?,
         code: code.clone(),
     };
-    let cap = endpoint.body_limit();
-    let response = execute(http, endpoint).await?;
+    let (response, started_at_s) = token_response(http, endpoint, SystemTime::now).await?;
     let expected = if response.status == 400 { 400 } else { 200 };
-    let raw: TokenWire = parse(&response, expected, cap)?;
-    if raw
-        .interval
-        .is_some_and(|interval| !(1..=900).contains(&interval))
-    {
-        return Err(ApiError::Response);
+    let raw: TokenWire = parse(&response, expected, 4096)?;
+    match raw.reply(started_at_s)? {
+        TokenReply::Token(_) if response.status != 200 => Err(ApiError::Response),
+        reply => Ok(reply),
     }
-    if raw.refresh_token.is_some()
-        || raw.expires_in.is_some()
-        || raw.refresh_token_expires_in.is_some()
-    {
-        return Err(ApiError::RefreshUnsupported);
-    }
-    match (raw.access_token, raw.error) {
-        (Some(token), None)
-            if response.status == 200 && raw.token_type.as_deref() == Some("bearer") =>
-        {
-            Ok(TokenReply::Token(Secret::new(
-                GitHubToken::new(token.0).map_err(|_| ApiError::Response)?,
-            )))
+}
+
+/// Rotate device-flow credentials once, without a client secret or implicit retry.
+///
+/// # Errors
+/// Refuses provider errors, reused refresh credentials, undocumented shapes and failed requests.
+pub async fn refresh_user_token(
+    http: &impl Http,
+    client_id: &str,
+    refresh: &Secret<RefreshToken>,
+) -> Result<Tokens, ApiError> {
+    let endpoint = GitHubEndpoint::RefreshToken {
+        client_id: ClientId::new(client_id)?,
+        refresh: refresh.clone(),
+    };
+    let (response, started_at_s) = token_response(http, endpoint, SystemTime::now).await?;
+    let raw: TokenWire = parse(&response, 200, 4096)?;
+    match raw.reply(started_at_s)? {
+        TokenReply::Token(tokens) => {
+            if tokens.refresh.expose().as_str() == refresh.expose().as_str() {
+                return Err(ApiError::Response);
+            }
+            Ok(tokens)
         }
-        (None, Some(code)) => Ok(TokenReply::Error {
-            code,
-            interval_s: raw.interval,
-        }),
-        _ => Err(ApiError::Response),
+        TokenReply::Error { .. } => Err(refusal(&response)),
     }
+}
+
+async fn token_response(
+    http: &impl Http,
+    endpoint: GitHubEndpoint,
+    now: impl FnOnce() -> SystemTime,
+) -> Result<(Response, u64), ApiError> {
+    let started_at_s = now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ApiError::Response)?
+        .as_secs();
+    Ok((execute(http, endpoint).await?, started_at_s))
 }
 
 /// Read the authenticated account without retaining profile text.

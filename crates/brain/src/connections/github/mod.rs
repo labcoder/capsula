@@ -33,6 +33,10 @@ pub struct DeviceCodeValue(Zeroizing<String>);
 #[derive(Clone)]
 pub struct GitHubToken(Zeroizing<String>);
 
+/// A GitHub App refresh credential, kept in [`Secret`] by its owner.
+#[derive(Clone)]
+pub struct RefreshToken(Zeroizing<String>);
+
 impl ClientId {
     pub(super) fn as_str(&self) -> &str {
         &self.0
@@ -81,6 +85,24 @@ impl GitHubToken {
     }
 }
 
+impl RefreshToken {
+    pub(super) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Check the refresh-token prefix and the local printable 255-byte bound.
+    ///
+    /// # Errors
+    /// Refuses other credential kinds, empty suffixes and whitespace.
+    pub fn new(value: Zeroizing<String>) -> Result<Self, HttpError> {
+        bounded_ascii(&value, b'!'..=b'~')?;
+        if !value.starts_with("ghr_") || value.len() == 4 {
+            return Err(HttpError::Request);
+        }
+        Ok(Self(value))
+    }
+}
+
 fn bounded_ascii(value: &str, allowed: RangeInclusive<u8>) -> Result<(), HttpError> {
     if !(1..=255).contains(&value.len()) || !value.bytes().all(|b| allowed.contains(&b)) {
         return Err(HttpError::Request);
@@ -107,6 +129,14 @@ impl fmt::Debug for DeviceCodeValue {
 impl fmt::Debug for GitHubToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GitHubToken")
+            .field("bytes", &self.0.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for RefreshToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RefreshToken")
             .field("bytes", &self.0.len())
             .finish()
     }
@@ -142,6 +172,13 @@ pub enum GitHubEndpoint {
         client_id: ClientId,
         /// The challenge credential, never a user code.
         code: Secret<DeviceCodeValue>,
+    },
+    /// Rotate an expiring user credential originally issued through device flow.
+    RefreshToken {
+        /// The app that requested the original device challenge.
+        client_id: ClientId,
+        /// The configured account's transient refresh credential.
+        refresh: Secret<RefreshToken>,
     },
     /// Read the authenticated account.
     User {
@@ -193,6 +230,7 @@ impl fmt::Debug for GitHubEndpoint {
         f.write_str(match self {
             Self::DeviceCode { .. } => "GitHubEndpoint::DeviceCode",
             Self::AccessToken { .. } => "GitHubEndpoint::AccessToken",
+            Self::RefreshToken { .. } => "GitHubEndpoint::RefreshToken",
             Self::User { .. } => "GitHubEndpoint::User",
             Self::Installations { .. } => "GitHubEndpoint::Installations",
             Self::Repositories { .. } => "GitHubEndpoint::Repositories",
@@ -206,7 +244,9 @@ impl GitHubEndpoint {
     pub(super) fn url(&self) -> Result<Url, HttpError> {
         let (host, path) = match self {
             Self::DeviceCode { .. } => ("github.com", "/login/device/code".to_owned()),
-            Self::AccessToken { .. } => ("github.com", "/login/oauth/access_token".to_owned()),
+            Self::AccessToken { .. } | Self::RefreshToken { .. } => {
+                ("github.com", "/login/oauth/access_token".to_owned())
+            }
             Self::User { .. } => ("api.github.com", "/user".to_owned()),
             Self::Installations { .. } => ("api.github.com", "/user/installations".to_owned()),
             Self::Repositories { installation, .. } => {
@@ -255,7 +295,7 @@ impl GitHubEndpoint {
 
     pub(super) fn body_limit(&self) -> usize {
         match self {
-            Self::DeviceCode { .. } | Self::AccessToken { .. } => 4096,
+            Self::DeviceCode { .. } | Self::AccessToken { .. } | Self::RefreshToken { .. } => 4096,
             Self::User { .. } => 64 * 1024,
             _ => super::http_client::MAX_BODY_BYTES,
         }

@@ -1,7 +1,18 @@
 //! Offline machine tests with a paused clock.
 use super::*;
+use crate::connections::clock::FixedClock;
+use crate::connections::github::RefreshToken;
 use kumochi_protocol::message::UserCode;
 use zeroize::Zeroizing;
+
+mod authority;
+mod rotation;
+
+fn new_machine(default: Option<DefaultRepo>) -> Machine {
+    let mut machine = Machine::new(default);
+    machine.clock = Arc::new(FixedClock(1_000));
+    machine
+}
 
 #[test]
 fn loading_is_not_a_completed_empty_or_cleanup_load() {
@@ -11,13 +22,13 @@ fn loading_is_not_a_completed_empty_or_cleanup_load() {
         Err(Removed::Refused),
         Err(Removed::NotDurable),
     ] {
-        let mut machine = Machine::new(None);
+        let mut machine = new_machine(None);
         assert!(machine.is_loading());
         let stamp = machine.stamp();
         machine.on(Input::Loaded { stamp, result }, Instant::now());
         assert!(!machine.is_loading());
     }
-    let mut machine = Machine::new(None);
+    let mut machine = new_machine(None);
     machine.on(
         Input::Loaded {
             stamp: Stamp { generation: 9 },
@@ -30,6 +41,21 @@ fn loading_is_not_a_completed_empty_or_cleanup_load() {
 
 fn bearer() -> Secret<GitHubToken> {
     Secret::new(GitHubToken::new(Zeroizing::new("ghu_sentinel".to_owned())).unwrap())
+}
+fn tokens() -> Tokens {
+    Tokens {
+        token: bearer(),
+        refresh: Secret::new(RefreshToken::new(Zeroizing::new("ghr_sentinel".to_owned())).unwrap()),
+        expires_at_s: 4_600,
+        refresh_expires_at_s: 87_400,
+    }
+}
+fn account() -> Account {
+    Account {
+        credentials: tokens(),
+        user: user(),
+        refresh_sent: false,
+    }
 }
 fn user() -> GitHubUser {
     GitHubUser {
@@ -46,7 +72,7 @@ fn challenge(interval_s: u16, expires_in_s: u16) -> DeviceCode {
     }
 }
 fn empty() -> Machine {
-    let mut m = Machine::new(None);
+    let mut m = new_machine(None);
     m.on(
         Input::Loaded {
             stamp: m.stamp(),
@@ -75,7 +101,7 @@ fn saving(m: &mut Machine) -> Stamp {
     m.on(
         Input::Poll {
             stamp,
-            result: Ok(TokenReply::Token(bearer())),
+            result: Ok(TokenReply::Token(tokens())),
         },
         Instant::now(),
     );
@@ -208,7 +234,7 @@ async fn exact_deadline_and_pending_schedule_do_not_dispatch_early_or_twice() {
     m.on(
         Input::Poll {
             stamp,
-            result: Ok(TokenReply::Token(bearer())),
+            result: Ok(TokenReply::Token(tokens())),
         },
         Instant::now(),
     );
@@ -258,7 +284,7 @@ async fn every_terminal_code_has_a_key_and_later_valid_input_cannot_revive_it() 
         let effects = m.on(
             Input::Poll {
                 stamp,
-                result: Ok(TokenReply::Token(bearer())),
+                result: Ok(TokenReply::Token(tokens())),
             },
             Instant::now(),
         );
@@ -292,7 +318,7 @@ async fn sign_out_and_cancel_fence_every_live_attempt_and_all_late_completions()
                 m.on(
                     Input::Poll {
                         stamp,
-                        result: Ok(TokenReply::Token(bearer())),
+                        result: Ok(TokenReply::Token(tokens())),
                     },
                     Instant::now(),
                 );
@@ -320,7 +346,7 @@ async fn sign_out_and_cancel_fence_every_live_attempt_and_all_late_completions()
                 },
                 Input::Poll {
                     stamp,
-                    result: Ok(TokenReply::Token(bearer())),
+                    result: Ok(TokenReply::Token(tokens())),
                 },
                 Input::User {
                     stamp,
@@ -329,8 +355,9 @@ async fn sign_out_and_cancel_fence_every_live_attempt_and_all_late_completions()
                 Input::Saved { stamp, saved: true },
                 Input::Repos {
                     generation: stamp.generation,
-                    names: Bounded::new(vec![RepoName::new("owner/repo").unwrap()]).unwrap(),
-                    truncated: false,
+                    result: Ok(Repositories {
+                        names: Bounded::new(vec![RepoName::new("owner/repo").unwrap()]).unwrap(),
+                    }),
                 },
             ] {
                 let effects = m.on(late, Instant::now());
@@ -392,13 +419,17 @@ async fn removal_outcomes_and_same_process_retry_never_resume_a_connection() {
 async fn only_exact_fetched_repository_spelling_can_be_selected_or_restored() {
     let repo = RepoName::new("Owner/Repo").unwrap();
     let mut m = empty();
-    m.default = Some(RepoName::new("owner/repo").unwrap());
+    m.default = Some(DefaultRepo {
+        account: user().id,
+        repo: RepoName::new("owner/repo").unwrap(),
+    });
     connected(&mut m);
     m.on(
         Input::Repos {
             generation: m.stamp().generation,
-            names: Bounded::new(vec![repo.clone()]).unwrap(),
-            truncated: false,
+            result: Ok(Repositories {
+                names: Bounded::new(vec![repo.clone()]).unwrap(),
+            }),
         },
         Instant::now(),
     );
@@ -417,7 +448,23 @@ async fn only_exact_fetched_repository_spelling_can_be_selected_or_restored() {
         Input::Op(GitHubOp::SetDefaultRepo(repo.clone())),
         Instant::now(),
     );
-    assert!(matches!(&effects[0], Effect::SaveDefault(name) if name == &repo));
+    let generation = m.stamp().generation;
+    assert!(
+        matches!(&effects[0], Effect::SaveDefault { generation: g, default }
+        if *g == generation && default.account == user().id && default.repo == repo)
+    );
+    let GitHubView::Connected { default, .. } = m.view(Instant::now()) else {
+        panic!("connected")
+    };
+    assert_eq!(default, None, "staging is not a committed default");
+    m.on(
+        Input::DefaultSaved {
+            generation,
+            repo: repo.clone(),
+            saved: true,
+        },
+        Instant::now(),
+    );
     let GitHubView::Connected { default, .. } = m.view(Instant::now()) else {
         panic!("connected")
     };
@@ -438,15 +485,12 @@ async fn only_exact_fetched_repository_spelling_can_be_selected_or_restored() {
 
 #[tokio::test(start_paused = true)]
 async fn startup_401_drops_the_bearer_and_save_refusal_stays_final() {
-    let mut m = Machine::new(None);
+    let mut m = new_machine(None);
     let stamp = m.stamp();
     m.on(
         Input::Loaded {
             stamp,
-            result: Ok(Some(Account {
-                token: bearer(),
-                user: user(),
-            })),
+            result: Ok(Some(account())),
         },
         Instant::now(),
     );
@@ -492,14 +536,11 @@ fn outermost_carriers_and_attempt_do_not_print_secrets_or_byte_lists() {
     let stamp = Stamp { generation: 1 };
     let input = Input::Poll {
         stamp,
-        result: Ok(TokenReply::Token(bearer())),
+        result: Ok(TokenReply::Token(tokens())),
     };
     let effect = Effect::Save {
         stamp,
-        account: Account {
-            token: bearer(),
-            user: user(),
-        },
+        account: account(),
     };
     let now = Instant::now();
     let attempt = Attempt {
@@ -544,16 +585,13 @@ async fn cancel_and_expiry_during_a_save_queue_removal_behind_the_write() {
             }
         );
     }
-    let mut m = Machine::new(None);
+    let mut m = new_machine(None);
     let stamp = m.stamp();
     m.on(Input::Op(GitHubOp::SignOut), Instant::now());
     m.on(
         Input::Loaded {
             stamp,
-            result: Ok(Some(Account {
-                token: bearer(),
-                user: user(),
-            })),
+            result: Ok(Some(account())),
         },
         Instant::now(),
     );
@@ -569,7 +607,6 @@ async fn cancel_and_expiry_during_a_save_queue_removal_behind_the_write() {
 async fn invalid_api_result_ends_attempt_and_another_attempt_has_a_new_stamp() {
     for (failure, key) in [
         (ApiError::Response, ErrorKey::ResponseUnreadable),
-        (ApiError::RefreshUnsupported, ErrorKey::AccountMisconfigured),
         (
             ApiError::Http(crate::connections::http_client::HttpError::Timeout),
             ErrorKey::AccountOffline,
@@ -612,15 +649,15 @@ async fn startup_non_401_failure_keeps_the_saved_account_with_an_empty_refreshab
             meta: crate::connections::http_client::ResponseMeta::default(),
         },
     ] {
-        let mut m = Machine::new(Some(RepoName::new("owner/repo").unwrap()));
+        let mut m = new_machine(Some(DefaultRepo {
+            account: user().id,
+            repo: RepoName::new("owner/repo").unwrap(),
+        }));
         let stamp = m.stamp();
         m.on(
             Input::Loaded {
                 stamp,
-                result: Ok(Some(Account {
-                    token: bearer(),
-                    user: user(),
-                })),
+                result: Ok(Some(account())),
             },
             Instant::now(),
         );
@@ -638,17 +675,57 @@ async fn startup_non_401_failure_keeps_the_saved_account_with_an_empty_refreshab
         );
         assert_eq!(
             m.view(Instant::now()),
-            GitHubView::Connected {
+            GitHubView::NotVerified {
                 login: user().login,
-                repos: Bounded::default(),
-                truncated: false,
-                default: None
             }
         );
-        let effects = m.on(Input::Op(GitHubOp::RefreshRepos), Instant::now());
-        assert!(
-            matches!(effects[0], Effect::RefreshRepos { generation } if generation == m.stamp().generation)
+        assert_eq!(m.user(), None, "offline profile data is not authority");
+        assert!(m.token().is_none());
+        assert_eq!(m.repositories(), None);
+        m.on(
+            Input::Repos {
+                generation: m.stamp().generation,
+                result: Ok(Repositories {
+                    names: Bounded::new(vec![RepoName::new("owner/repo").unwrap()]).unwrap(),
+                }),
+            },
+            Instant::now(),
         );
+        assert_eq!(m.user(), None);
+        assert_eq!(
+            m.repositories(),
+            None,
+            "a listing cannot verify an offline identity"
+        );
+        let effects = m.on(Input::Op(GitHubOp::RefreshRepos), Instant::now());
+        assert!(matches!(effects[0], Effect::ReadUser { stamp, .. } if stamp == m.stamp()));
+        let stamp = m.stamp();
+        let effects = m.on(
+            Input::User {
+                stamp,
+                result: Ok(user()),
+            },
+            Instant::now(),
+        );
+        assert!(matches!(effects[0], Effect::RefreshRepos { generation }
+            if generation == m.stamp().generation));
+        assert_eq!(m.user(), Some(&user()));
+        assert_eq!(
+            m.repositories(),
+            None,
+            "fresh identity still needs a complete listing"
+        );
+        let repo = RepoName::new("owner/repo").unwrap();
+        m.on(
+            Input::Repos {
+                generation: m.stamp().generation,
+                result: Ok(Repositories {
+                    names: Bounded::new(vec![repo.clone()]).unwrap(),
+                }),
+            },
+            Instant::now(),
+        );
+        assert_eq!(m.repositories(), Some([repo].as_slice()));
     }
 }
 
@@ -672,7 +749,7 @@ fn verifying(m: &mut Machine) -> Stamp {
     m.on(
         Input::Poll {
             stamp,
-            result: Ok(TokenReply::Token(bearer())),
+            result: Ok(TokenReply::Token(tokens())),
         },
         Instant::now(),
     );
@@ -716,7 +793,7 @@ async fn sign_out_always_emits_cancel_then_current_generation_remove_then_view()
                     Instant::now(),
                 );
             }
-            7 => m = Machine::new(None),
+            7 => m = new_machine(None),
             _ => {}
         }
         let old = m.stamp().generation;
@@ -759,7 +836,7 @@ async fn stale_poll_cannot_supply_a_token_to_a_new_poll() {
         &mut m,
         Input::Poll {
             stamp: old,
-            result: Ok(TokenReply::Token(bearer())),
+            result: Ok(TokenReply::Token(tokens())),
         },
     );
 }
@@ -796,7 +873,7 @@ async fn stale_saved_cannot_publish_a_new_unsaved_account() {
 
 #[tokio::test(start_paused = true)]
 async fn stale_loaded_cannot_supply_an_account_to_a_new_load_epoch() {
-    let mut m = Machine::new(None);
+    let mut m = new_machine(None);
     let old = m.stamp();
     finish_attempt(&mut m);
     m.state = State::Loading;
@@ -804,10 +881,7 @@ async fn stale_loaded_cannot_supply_an_account_to_a_new_load_epoch() {
         &mut m,
         Input::Loaded {
             stamp: old,
-            result: Ok(Some(Account {
-                token: bearer(),
-                user: user(),
-            })),
+            result: Ok(Some(account())),
         },
     );
 }
@@ -833,8 +907,9 @@ async fn stale_repositories_cannot_replace_a_new_connections_list() {
         &mut m,
         Input::Repos {
             generation: old,
-            names: Bounded::new(vec![RepoName::new("old/repo").unwrap()]).unwrap(),
-            truncated: true,
+            result: Ok(Repositories {
+                names: Bounded::new(vec![RepoName::new("old/repo").unwrap()]).unwrap(),
+            }),
         },
     );
 }
@@ -864,10 +939,7 @@ fn assert_no_marker(text: &str) {
 
 #[tokio::test(start_paused = true)]
 async fn account_machine_removed_and_stamp_formats_do_not_expose_markers() {
-    let account = Account {
-        token: bearer(),
-        user: user(),
-    };
+    let account = account();
     assert_no_marker(&format!("{account:?}"));
     let mut m = empty();
     let stamp = polling(&mut m);
@@ -875,7 +947,7 @@ async fn account_machine_removed_and_stamp_formats_do_not_expose_markers() {
     m.on(
         Input::Poll {
             stamp,
-            result: Ok(TokenReply::Token(bearer())),
+            result: Ok(TokenReply::Token(tokens())),
         },
         Instant::now(),
     );
@@ -901,15 +973,12 @@ async fn account_machine_removed_and_stamp_formats_do_not_expose_markers() {
 
 #[tokio::test(start_paused = true)]
 async fn startup_success_refreshes_without_saving_the_already_durable_account() {
-    let mut m = Machine::new(None);
+    let mut m = new_machine(None);
     let stamp = m.stamp();
     m.on(
         Input::Loaded {
             stamp,
-            result: Ok(Some(Account {
-                token: bearer(),
-                user: user(),
-            })),
+            result: Ok(Some(account())),
         },
         Instant::now(),
     );
@@ -922,8 +991,10 @@ async fn startup_success_refreshes_without_saving_the_already_durable_account() 
     );
     assert!(matches!(effects.as_slice(), [
         Effect::RefreshRepos { generation },
+        Effect::Wake(at),
         Effect::View(GitHubView::Connected { .. })
-    ] if *generation == stamp.generation + 1));
+    ] if *generation == stamp.generation + 1
+        && *at == Instant::now() + Duration::from_mins(59)));
     assert_eq!(
         m.view(Instant::now()),
         GitHubView::Connected {
@@ -1041,15 +1112,12 @@ async fn the_connected_user_is_only_a_verified_connection() {
         id: 8,
         login: GitHubLogin::new("sentinel").unwrap(),
     };
-    let mut m = Machine::new(None);
+    let mut m = new_machine(None);
     let stamp = m.stamp();
     m.on(
         Input::Loaded {
             stamp,
-            result: Ok(Some(Account {
-                token: bearer(),
-                user: user(),
-            })),
+            result: Ok(Some(account())),
         },
         Instant::now(),
     );
@@ -1057,14 +1125,20 @@ async fn the_connected_user_is_only_a_verified_connection() {
     m.on(
         Input::User {
             stamp,
-            result: Ok(namesake.clone()),
+            result: Ok(namesake),
         },
         Instant::now(),
     );
     assert_eq!(
         m.user(),
-        Some(&namesake),
-        "the verified id, not the loaded one"
+        None,
+        "a namesake cannot replace the saved numeric identity"
+    );
+    assert_eq!(
+        m.view(Instant::now()),
+        GitHubView::NeedsSignIn {
+            login: user().login
+        }
     );
     m.on(
         Input::Unauthorized {

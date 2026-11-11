@@ -378,6 +378,11 @@ impl Client {
                 ("device_code", code.expose().as_str()),
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
             ]),
+            GitHubEndpoint::RefreshToken { client_id, refresh } => self.0.post(url).form(&[
+                ("client_id", client_id.as_str()),
+                ("grant_type", "refresh_token"),
+                ("refresh_token", refresh.expose().as_str()),
+            ]),
             GitHubEndpoint::CreateIssue { token, body, .. } => self
                 .0
                 .post(url)
@@ -402,7 +407,9 @@ impl Client {
         .timeout(endpoint.deadline());
         if matches!(
             endpoint,
-            GitHubEndpoint::DeviceCode { .. } | GitHubEndpoint::AccessToken { .. }
+            GitHubEndpoint::DeviceCode { .. }
+                | GitHubEndpoint::AccessToken { .. }
+                | GitHubEndpoint::RefreshToken { .. }
         ) {
             Ok(request.header(reqwest::header::ACCEPT, "application/json"))
         } else {
