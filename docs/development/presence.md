@@ -110,6 +110,13 @@ hidden-panel boundary and the overlay. Transparency, cross-process click-through
 focus and Alt-Tab behavior need desktop evidence; a style bit or unit test alone cannot certify
 them.
 
+The ignored five-second `presence::overlay_fixture::smoke_primary_overlay` test uses the
+production dock/drawing setup and drawing-show functions. It checks the real GPUI windows'
+pass-through styles, dock-above-drawing order and UI-thread activation before painting;
+run it only in an approved native window turn. Hidden adapter tests serialize their windows,
+take one owned-handle z-order snapshot per assertion batch and inspect only their own thread's
+activation, so ordinary desktop app switching does not invalidate them.
+
 ## The line and hit testing
 
 At rest the dock is a short line, 56 × 3 logical pixels, near the work area's edge

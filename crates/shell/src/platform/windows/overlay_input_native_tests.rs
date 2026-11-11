@@ -1,9 +1,13 @@
 use super::*;
+use std::sync::Mutex;
+use windows::Win32::Foundation::LPARAM;
+use windows::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, GW_HWNDPREV, GetForegroundWindow, GetWindow, IsWindowVisible,
-    WS_EX_TOOLWINDOW, WS_POPUP,
+    CreateWindowExW, DestroyWindow, EnumWindows, IsWindowVisible, WS_EX_TOOLWINDOW, WS_POPUP,
 };
-use windows::core::{PCWSTR, w};
+use windows::core::{BOOL, PCWSTR, w};
+
+static WINDOWS: Mutex<()> = Mutex::new(());
 
 struct Hidden(HWND);
 
@@ -45,28 +49,64 @@ impl Drop for Hidden {
     }
 }
 
-fn above(upper: &Hidden, lower: &Hidden) {
-    let mut next = lower.0;
-    loop {
-        // SAFETY: only reads z-order handles; never sends input or reads foreign content.
-        let previous = unsafe { GetWindow(next, GW_HWNDPREV) }.expect("an upper surface exists");
-        if previous == upper.0 {
-            return;
-        }
-        assert!(!previous.is_invalid(), "the expected surface must be above");
-        next = previous;
+fn order(expected: &[HWND]) {
+    struct Snapshot<'a> {
+        wanted: &'a [HWND],
+        found: Vec<HWND>,
     }
+    unsafe extern "system" fn collect(hwnd: HWND, value: LPARAM) -> BOOL {
+        // SAFETY: EnumWindows synchronously borrows this exclusive stack-owned snapshot.
+        let snapshot = unsafe {
+            &mut *std::ptr::with_exposed_provenance_mut::<Snapshot<'_>>(value.0.cast_unsigned())
+        };
+        if snapshot.wanted.contains(&hwnd) {
+            snapshot.found.push(hwnd);
+        }
+        BOOL::from(snapshot.found.len() != snapshot.wanted.len())
+    }
+    let mut snapshot = Snapshot {
+        wanted: expected,
+        found: Vec::with_capacity(expected.len()),
+    };
+    let pointer = (&raw mut snapshot).expose_provenance().cast_signed();
+    // SAFETY: one synchronous enumeration; collect only retains the fixture's own handles.
+    let result = unsafe { EnumWindows(Some(collect), LPARAM(pointer)) };
+    if snapshot.found.len() != expected.len() {
+        result.expect("enumerate the owned fixture windows");
+    }
+    assert_eq!(
+        snapshot.found, expected,
+        "owned surfaces must have this top-first order"
+    );
 }
 
 fn pass_through(surface: &Hidden) {
-    let flags = WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0 | WS_EX_NOACTIVATE.0;
-    assert_eq!(surface.style() & flags, flags);
+    paint_pass_through(surface.0);
     // SAFETY: reads visibility only; all fixture windows must remain hidden.
     assert!(!unsafe { IsWindowVisible(surface.0) }.as_bool());
 }
 
+fn paint_pass_through(hwnd: HWND) {
+    let flags = usize::try_from(WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0 | WS_EX_NOACTIVATE.0)
+        .expect("style flags fit in usize");
+    // SAFETY: the caller retains its live UI-thread fixture window.
+    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
+    assert_eq!(style.cast_unsigned() & flags, flags);
+}
+
+pub(super) fn drawing(dock: HWND, drawing: HWND) {
+    paint_pass_through(dock);
+    paint_pass_through(drawing);
+    order(&[dock, drawing]);
+    // SAFETY: reads only this fixture thread's activation state.
+    assert_eq!(unsafe { GetActiveWindow() }, HWND::default());
+}
+
 #[test]
 fn drawing_and_dock_paint_pass_through_without_disabling_the_dock_proxy() {
+    let _windows = WINDOWS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dock = Hidden::new();
     let proxy = Hidden::new();
     let drawing = Hidden::new();
@@ -84,12 +124,14 @@ fn drawing_and_dock_paint_pass_through_without_disabling_the_dock_proxy() {
         .configure(OverlayInput::PassThrough, &Regions::new())
         .unwrap();
     assert_eq!(proxy.style() & WS_EX_TRANSPARENT.0, 0);
-    above(&proxy, &dock);
-    above(&dock, &drawing);
+    order(&[proxy.0, dock.0, drawing.0]);
 }
 
 #[test]
 fn drawing_order_survives_panels_dock_moves_replacement_and_reconnection() {
+    let _windows = WINDOWS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for drawing_first in [true, false] {
         let panel = Hidden::new();
         let dock = Hidden::new();
@@ -103,8 +145,6 @@ fn drawing_order_survives_panels_dock_moves_replacement_and_reconnection() {
         windows.bind_hwnd(Layer::Selection, selection.0).unwrap();
         windows.regions.insert(RegionId(1), region.0);
         let regions = Regions::from([(RegionId(1), [0, 0, 16, 16])]);
-        // SAFETY: reads foreground without changing it.
-        let foreground = unsafe { GetForegroundWindow() };
         if drawing_first {
             windows.bind_hwnd(Layer::Overlay, drawing.0).unwrap();
             windows.configure(OverlayInput::Regions, &regions).unwrap();
@@ -139,23 +179,19 @@ fn drawing_order_survives_panels_dock_moves_replacement_and_reconnection() {
             windows.configure(OverlayInput::Regions, &regions).unwrap();
             pass_through(&drawing);
             pass_through(&dock);
-            above(&panel, &proxy);
-            above(&proxy, &dock);
-            above(&dock, &region);
-            above(&region, &drawing);
-            above(&drawing, &selection);
-            // SAFETY: reads foreground only; configuration must not activate a surface.
-            assert_eq!(unsafe { GetForegroundWindow() }, foreground, "{event}");
+            order(&[panel.0, proxy.0, dock.0, region.0, drawing.0, selection.0]);
+            // SAFETY: reads only this test thread's activation state.
+            assert_eq!(unsafe { GetActiveWindow() }, HWND::default(), "{event}");
         }
         windows
             .configure(OverlayInput::Selecting, &regions)
             .unwrap();
         pass_through(&drawing);
-        above(&selection, &panel);
+        order(&[selection.0, panel.0, proxy.0, dock.0, region.0, drawing.0]);
         windows
             .configure(OverlayInput::PassThrough, &Regions::new())
             .unwrap();
         pass_through(&drawing);
-        above(&drawing, &selection);
+        order(&[panel.0, proxy.0, dock.0, region.0, drawing.0, selection.0]);
     }
 }

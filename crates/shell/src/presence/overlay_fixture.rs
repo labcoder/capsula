@@ -291,6 +291,24 @@ fn run(mode: Mode) {
             let (events, _receiver) = async_channel::unbounded();
             let mut input_windows = crate::platform::OverlayWindows::default();
             let input = crate::presenter::overlay_input::OverlayOwner::default();
+            let (dock, _) = gpui_kit::open_window(options(), cx, |_, cx| {
+                cx.new(|_| super::Dock::new())
+            })
+            .expect("fixture dock window");
+            dock.update(cx, |_, window, cx| {
+                super::overlay_input::configure_dock(
+                    window,
+                    events.clone(),
+                    &input,
+                    &mut input_windows,
+                    cx,
+                )?;
+                crate::platform::place_presence_window(window, [0, 0, 16, 16])?;
+                window.bounds_changed(cx);
+                Ok::<_, crate::platform::PresenceError>(())
+            })
+            .expect("fixture dock window")
+            .expect("configure the fixture dock through production setup");
             let (window, probe) = gpui_kit::open_window(options(), cx, |_, cx| {
                 cx.new(|_| Probe {
                     picture: shared,
@@ -320,6 +338,15 @@ fn run(mode: Mode) {
                 .expect("click-through fixture");
             super::overlay_input::show_drawing(window, &input, &mut input_windows, cx)
                 .expect("show and restack the fixture without activation");
+            window
+                .update(cx, |_, drawing, cx| {
+                    dock.update(cx, |_, dock, _| {
+                        crate::platform::OverlayWindows::check_drawing(dock, drawing)
+                    })
+                    .expect("fixture dock stays open")
+                })
+                .expect("fixture drawing stays open")
+                .expect("native drawing styles and order follow production setup");
             probe.update(cx, |_, cx| cx.notify());
             if matches!(mode, Mode::Hide) {
                 let repaint = probe.clone();

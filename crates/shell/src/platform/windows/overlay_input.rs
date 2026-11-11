@@ -36,6 +36,12 @@ impl OverlayWindows {
         self.bind_hwnd(layer, hwnd_of(window)?)
     }
 
+    #[cfg(test)]
+    pub(crate) fn check_drawing(dock: &Window, drawing: &Window) -> Result<(), PresenceError> {
+        native_tests::drawing(hwnd_of(dock)?, hwnd_of(drawing)?);
+        Ok(())
+    }
+
     fn bind_hwnd(&mut self, layer: Layer, hwnd: HWND) -> Result<(), PresenceError> {
         if layer == Layer::Dock {
             interactive(hwnd, false)?;
