@@ -21,8 +21,8 @@ use tokio::time::{self, Instant};
 use url::{Host, Url};
 
 use crate::platform::{
-    Untrusted, check_model_final, create_model_dir, create_model_write, discard_model, model_final,
-    open_model_write, publish_model,
+    Untrusted, check_model_final, create_model_dir, create_model_write, discard_model,
+    hold_model_creation, model_final, open_model_write, publish_model,
 };
 
 const IDLE: Duration = Duration::from_secs(30);
@@ -235,12 +235,11 @@ impl Downloader {
         }
         let dir = self.models.join(first.part.dir());
         let mut held = create_model_dir(&self.models).map_err(path_error)?;
-        let root_creation =
-            crate::platform::hold_model_creation(&self.models).map_err(path_error)?;
+        let root_creation = hold_model_creation(&self.models).map_err(path_error)?;
         #[cfg(test)]
         crate::platform::paused(&self.models);
         held.extend(create_model_dir(&dir).map_err(path_error)?);
-        let part_creation = crate::platform::hold_model_creation(&dir).map_err(path_error)?;
+        let part_creation = hold_model_creation(&dir).map_err(path_error)?;
         #[cfg(test)]
         crate::platform::paused(&dir);
         let mut checked = Vec::new();
@@ -277,20 +276,7 @@ impl Downloader {
             missing += model.bytes - if length <= model.bytes { length } else { 0 };
             pending.push((model, path, partial, final_file, existing));
         }
-        let needed = missing + missing.div_ceil(10);
-        let available = {
-            #[cfg(test)]
-            if let Some(space) = self.space {
-                space
-            } else {
-                crate::platform::free_space(&self.models).map_err(|_| DownloadError::Io)?
-            }
-            #[cfg(not(test))]
-            crate::platform::free_space(&self.models).map_err(|_| DownloadError::Io)?
-        };
-        if available < needed {
-            return Err(DownloadError::NoSpace { needed });
-        }
+        self.check_space(missing)?;
         let mut ready = Vec::new();
         for (model, path, partial, final_file, existing) in pending {
             check_cancel(cancel)?;
@@ -329,6 +315,24 @@ impl Downloader {
             report.value.done = done;
         }
         report.finish().await;
+        Ok(())
+    }
+
+    fn check_space(&self, missing: u64) -> Result<(), DownloadError> {
+        let needed = missing + missing.div_ceil(10);
+        let available = {
+            #[cfg(test)]
+            if let Some(space) = self.space {
+                space
+            } else {
+                crate::platform::free_space(&self.models).map_err(|_| DownloadError::Io)?
+            }
+            #[cfg(not(test))]
+            crate::platform::free_space(&self.models).map_err(|_| DownloadError::Io)?
+        };
+        if available < needed {
+            return Err(DownloadError::NoSpace { needed });
+        }
         Ok(())
     }
 
