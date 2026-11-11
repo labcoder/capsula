@@ -1351,16 +1351,19 @@ async fn an_intent_held_past_quit_still_lands_on_disk() {
         None,
         "not written yet"
     );
-    gate.send(Gate::Write).expect("the write waits on the gate");
-    tokio::time::timeout(super::PATIENCE, async {
-        while voice_on_disk(&scratch).get("removing").is_none() {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the held write lands");
+    let (completed, written) = tokio::sync::oneshot::channel();
+    gate.send(Gate::WriteAndSignal(completed))
+        .expect("the write waits on the gate");
+    assert!(
+        tokio::time::timeout(super::PATIENCE, written)
+            .await
+            .expect("the held write lands")
+            .expect("the writer signals its result")
+    );
+    let saved = voice_on_disk(&scratch);
+    assert_eq!(saved["installed"], toml::Value::Array(Vec::new()));
     assert_eq!(
-        voice_on_disk(&scratch)["removing"],
+        saved["removing"],
         toml::Value::Array(vec!["spoken-replies".into()])
     );
 }

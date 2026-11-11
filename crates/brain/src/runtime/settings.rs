@@ -63,6 +63,7 @@ impl Write {
 pub(crate) enum Gate {
     /// Write as usual.
     Write,
+    WriteAndSignal(tokio::sync::oneshot::Sender<bool>),
     /// Panic with the test sentinel, as a bug in the write would.
     Panic,
 }
@@ -212,8 +213,14 @@ impl Brain {
                     let gate = self.config_gate.take();
                     let handle = tokio::task::spawn_blocking(move || {
                         #[cfg(test)]
-                        held(gate);
+                        let completed = held(gate);
                         let written = pending.write();
+                        #[cfg(test)]
+                        if let Some(completed) = completed {
+                            completed
+                                .send(written.is_ok())
+                                .expect("write completion is observed");
+                        }
                         (pending, written)
                     });
                     self.config_write = Some(Write {
@@ -339,11 +346,13 @@ impl Brain {
 
 /// Waits for a test to release a held write, panicking as a bug in the write would when asked.
 #[cfg(test)]
-fn held(gate: Option<std::sync::mpsc::Receiver<Gate>>) {
-    if let Some(gate) = gate
-        && let Ok(Gate::Panic) = gate.recv()
-    {
-        panic!("{}", crate::test_support::SENTINEL);
+fn held(
+    gate: Option<std::sync::mpsc::Receiver<Gate>>,
+) -> Option<tokio::sync::oneshot::Sender<bool>> {
+    match gate.and_then(|gate| gate.recv().ok()) {
+        Some(Gate::WriteAndSignal(completed)) => Some(completed),
+        Some(Gate::Panic) => panic!("{}", crate::test_support::SENTINEL),
+        Some(Gate::Write) | None => None,
     }
 }
 
