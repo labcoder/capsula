@@ -72,6 +72,8 @@ pub(crate) enum DownloadError {
     Io,
     #[error("model download cancelled")]
     Cancelled,
+    #[error("the speech model path is unsafe")]
+    ModelPath,
 }
 
 /// A part's fetch, as the installer starts it.
@@ -227,7 +229,7 @@ impl Downloader {
             return Err(DownloadError::Refused);
         }
         let dir = self.models.join(first.part.dir());
-        let held = create_model_dir(&dir).map_err(|_| DownloadError::Io)?;
+        let held = create_model_dir(&dir).map_err(path_error)?;
         let mut checked = Vec::new();
         for &model in files {
             check_cancel(cancel)?;
@@ -250,7 +252,7 @@ impl Downloader {
                     continue;
                 }
                 drop(file);
-                final_file = Some(open_model_write(&path).map_err(|_| DownloadError::Io)?);
+                final_file = Some(open_model_write(&path).map_err(path_error)?);
             }
             let length = if let Some(file) = &existing {
                 file.metadata().map_err(|_| DownloadError::Io)?.len()
@@ -282,7 +284,7 @@ impl Downloader {
             }
             let mut file = match existing {
                 Some(file) => file,
-                None => create_model_write(&partial).map_err(|_| DownloadError::Io)?,
+                None => create_model_write(&partial).map_err(path_error)?,
             };
             // `fetch_file` hashes the bytes already in the `.part` first.
             report.phase(FetchPhase::Verifying);
@@ -411,7 +413,14 @@ fn optional_file(opened: Result<File, Untrusted>) -> Result<Option<File>, Downlo
     match opened {
         Ok(file) => Ok(Some(file)),
         Err(Untrusted::Missing) => Ok(None),
-        Err(_) => Err(DownloadError::Io),
+        Err(error) => Err(path_error(error)),
+    }
+}
+
+fn path_error(error: Untrusted) -> DownloadError {
+    match error {
+        Untrusted::Reparse | Untrusted::Unsafe => DownloadError::ModelPath,
+        Untrusted::Missing | Untrusted::Io => DownloadError::Io,
     }
 }
 

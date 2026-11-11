@@ -278,8 +278,10 @@ impl Sherpa {
 
     /// Creates Parakeet's recognizer from the model files in `models`.
     pub(crate) fn recognizer(&self, models: &Path) -> Result<Recognizer<'_>, NativeError> {
-        let held =
-            super::ModelFiles::open(models, &MODEL_FILES).map_err(|_| NativeError::ModelPath)?;
+        let held = super::ModelFiles::open(models, &MODEL_FILES).map_err(|error| match error {
+            Untrusted::Reparse | Untrusted::Unsafe => NativeError::ModelPath,
+            error => untrusted(error),
+        })?;
         let [encoder, decoder, joiner, tokens] = MODEL_FILES.map(|name| c_path(&models.join(name)));
         let (encoder, decoder, joiner, tokens) = (encoder?, decoder?, joiner?, tokens?);
         // SAFETY: the struct holds only integers, floats and raw pointers, for which all-zero is

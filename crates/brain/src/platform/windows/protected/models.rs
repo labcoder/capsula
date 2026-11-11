@@ -127,3 +127,45 @@ pub(crate) fn publish_model(file: File, parent: &File, name: &OsStr) -> Result<(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::Scratch;
+    use std::io::Write as _;
+
+    #[test]
+    fn model_paths_publish_the_held_partial_without_replacing_an_unexpected_arrival() {
+        let scratch = Scratch::trusted("model-publication");
+        let held = create_model_dir(scratch.dir()).unwrap();
+        let parent = held.last().unwrap();
+        let source = scratch.dir().join("fixture.part");
+        let target = scratch.dir().join("fixture.bin");
+        let mut file = create_model_write(&source).unwrap();
+        file.write_all(b"verified").unwrap();
+        file.sync_all().unwrap();
+        assert_eq!(
+            std::fs::rename(&source, source.with_extension("moved"))
+                .map_err(|error| error.raw_os_error()),
+            Err(Some(32))
+        );
+        std::fs::write(&target, b"arrival").unwrap();
+        assert_eq!(
+            publish_model(file, parent, target.file_name().unwrap()),
+            Err(Untrusted::Io)
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"arrival");
+        assert_eq!(std::fs::read(&source).unwrap(), b"verified");
+        std::fs::remove_file(&target).unwrap();
+        let file = open_model_write(&source).unwrap();
+        assert_eq!(
+            publish_model(file, parent, target.file_name().unwrap()),
+            Ok(())
+        );
+        assert_eq!(std::fs::read(target).unwrap(), b"verified");
+        assert_eq!(
+            std::fs::symlink_metadata(source).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+    }
+}

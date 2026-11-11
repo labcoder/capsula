@@ -33,6 +33,54 @@ fn failed_absent(key: ErrorKey) -> PartState {
 }
 
 #[test]
+fn model_paths_have_one_actionable_failure_after_fetch_startup_and_load() {
+    for part in VoicePart::ALL {
+        let mut installer = fresh();
+        assert_eq!(installer.install(part), [fetch(part, 3)]);
+        assert_eq!(
+            installer.fetched(part, 3, Err(DownloadError::ModelPath)),
+            []
+        );
+        assert_eq!(
+            installer.parts[super::index(part)].state(),
+            failed_absent(ErrorKey::VoiceModelPath)
+        );
+
+        let (installer, effects) = Installer::start(
+            [Durable::Installed; 2],
+            [Err(ErrorKey::VoiceModelPath); 2],
+            [true; 2],
+            &[],
+        );
+        assert_eq!(effects, []);
+        assert_eq!(
+            installer.parts[super::index(part)].state(),
+            failed(ErrorKey::VoiceModelPath)
+        );
+
+        let mut installer = both_loading();
+        let ask = u64::try_from(super::index(part)).unwrap() + 1;
+        assert_eq!(
+            installer.reported(part, report(ask, LoadEvent::ModelPath)),
+            []
+        );
+        assert_eq!(
+            installer.parts[super::index(part)].state(),
+            failed(ErrorKey::VoiceModelPath)
+        );
+        assert_eq!(installer.reported(part, report(ask, LoadEvent::Loaded)), []);
+        assert_eq!(
+            installer.parts[super::index(part)].state(),
+            failed(ErrorKey::VoiceModelPath)
+        );
+        assert_eq!(
+            installer.remove(part, super::Folder::Present),
+            (super::RemoveAnswer::Intent { token: 3 }, vec![])
+        );
+    }
+}
+
+#[test]
 fn an_unavailable_owner_keeps_its_phase_and_models_and_cannot_be_revived_or_deleted() {
     use super::{Folder, RemoveAnswer, index};
 
@@ -99,7 +147,7 @@ fn an_unavailable_owner_keeps_its_phase_and_models_and_cannot_be_revived_or_dele
 fn both_loading() -> Installer {
     let (installer, loads) = Installer::start(
         [Durable::Installed, Durable::Installed],
-        [true, true],
+        [true, true].map(Ok),
         [true, true],
         &[],
     );
@@ -225,7 +273,7 @@ fn ineligible_key_down_never_queues_an_install_or_replays_after_removal() {
     ] {
         let (mut installer, _) = Installer::start(
             [durable, Durable::Absent],
-            [whole, true],
+            [whole, true].map(Ok),
             [available, true],
             &[],
         );
@@ -486,7 +534,7 @@ fn quit_does_not_reload_a_dormant_installed_model() {
 fn start_up_loads_each_whole_installed_part_and_nothing_else() {
     let (installer, loads) = Installer::start(
         [Durable::Installed, Durable::Absent],
-        [true, false],
+        [true, false].map(Ok),
         [true, true],
         &[],
     );
@@ -508,7 +556,7 @@ fn start_up_loads_each_whole_installed_part_and_nothing_else() {
 fn a_part_with_a_short_file_is_corrupt_and_never_loads() {
     let (mut installer, loads) = Installer::start(
         [Durable::Installed, Durable::Installed],
-        [false, true],
+        [false, true].map(Ok),
         [true, true],
         &[],
     );
@@ -537,7 +585,7 @@ fn a_part_with_a_short_file_is_corrupt_and_never_loads() {
 fn a_handle_that_didnt_start_is_a_load_failure_for_the_session() {
     let (mut installer, loads) = Installer::start(
         [Durable::Installed, Durable::Absent],
-        [true, true],
+        [true, true].map(Ok),
         [false, false],
         &[],
     );
@@ -559,7 +607,7 @@ fn a_handle_that_didnt_start_is_a_load_failure_for_the_session() {
 fn a_removal_whose_delete_failed_shows_a_storage_failure_and_never_loads() {
     let (installer, loads) = Installer::start(
         [Durable::Removing, Durable::Absent],
-        [true, true],
+        [true, true].map(Ok),
         [true, true],
         &[SpeechInput],
     );
@@ -658,7 +706,8 @@ fn an_older_asks_reports_after_a_reload_change_nothing() {
 
 /// Neither part installed, both handles started; the next token is 3.
 fn fresh() -> Installer {
-    let (installer, effects) = Installer::start([Durable::Absent; 2], [true; 2], [true; 2], &[]);
+    let (installer, effects) =
+        Installer::start([Durable::Absent; 2], [true; 2].map(Ok), [true; 2], &[]);
     assert_eq!(effects, []);
     installer
 }
@@ -987,7 +1036,7 @@ fn a_fresh_install_lost_twice_is_not_installed_and_a_retry_gets_a_new_reload() {
 fn a_retry_of_an_installed_part_is_ready_without_a_write() {
     let (mut installer, effects) = Installer::start(
         [Durable::Installed, Durable::Absent],
-        [false, true],
+        [false, true].map(Ok),
         [true, true],
         &[],
     );
@@ -1005,7 +1054,7 @@ fn a_retry_of_an_installed_part_is_ready_without_a_write() {
 fn a_removal_whose_last_write_fails_stays_removing_and_installs_nothing() {
     let (mut installer, effects) = Installer::start(
         [Durable::Removing, Durable::Absent],
-        [true, true],
+        [true, true].map(Ok),
         [true, true],
         &[],
     );
@@ -1034,7 +1083,7 @@ fn a_removal_whose_last_write_fails_stays_removing_and_installs_nothing() {
 fn an_install_during_a_removals_last_write_starts_once_it_commits() {
     let (mut installer, _) = Installer::start(
         [Durable::Removing, Durable::Absent],
-        [true, true],
+        [true, true].map(Ok),
         [true, true],
         &[],
     );

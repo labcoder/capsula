@@ -493,6 +493,9 @@ fn run(
         let event = match (result, ended) {
             (Ok(()), Some(event)) => event,
             (Err(SpeechError::WorkerLost), _) | (_, Some(LoadEvent::Lost)) => LoadEvent::Lost,
+            (Err(SpeechError::Native(crate::platform::sherpa::NativeError::ModelPath)), None) => {
+                LoadEvent::ModelPath
+            }
             (Err(error), None) => {
                 tracing::warn!(%error, "speech input failed to load");
                 LoadEvent::Failed
@@ -507,7 +510,10 @@ fn run(
             state.ready = false;
             state.current = None;
             reports.send(ask, event);
-            if !matches!(event, LoadEvent::Failed | LoadEvent::Lost) {
+            if !matches!(
+                event,
+                LoadEvent::Failed | LoadEvent::Lost | LoadEvent::ModelPath
+            ) {
                 return None;
             }
             if wants(state, ask) {

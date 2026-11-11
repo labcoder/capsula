@@ -57,7 +57,7 @@ async fn released_input(scratch: &Scratch) -> (Brain, std_mpsc::Sender<()>, Arc<
     );
     let (installed, effects) = Installer::start(
         [Durable::Installed, Durable::Absent],
-        [true; 2],
+        [true; 2].map(Ok),
         [true, false],
         &[],
     );
@@ -119,7 +119,7 @@ fn queued_control(output: &mut mpsc::Receiver<Vec<u8>>) -> ControlToShell {
 
 #[tokio::test]
 async fn connected_key_down_reloads_input_without_a_turn_or_settings_work() {
-    let scratch = Scratch::new("voice-key-down");
+    let scratch = Scratch::trusted("voice-key-down");
     let (mut brain, release, fetch, unloaded) = released_input(&scratch).await;
     brain.voice_event(unloaded, None).expect("idle state");
 
@@ -186,7 +186,7 @@ async fn connected_key_down_reloads_input_without_a_turn_or_settings_work() {
     assert_eq!(fetch.begun.load(Ordering::SeqCst), 0);
     brain.close().await;
 
-    let scratch = Scratch::new("voice-key-down-unconfigured");
+    let scratch = Scratch::trusted("voice-key-down-unconfigured");
     let mut brain = test_support::brain(&scratch, "");
     assert_eq!(
         brain.control_frame(key_down, 0, &mut link, &mut ping),
@@ -200,7 +200,7 @@ async fn connected_key_down_reloads_input_without_a_turn_or_settings_work() {
 
 #[tokio::test]
 async fn offline_and_early_key_downs_are_dropped_not_replayed_on_reconnect() {
-    let scratch = Scratch::new("voice-key-down-offline");
+    let scratch = Scratch::trusted("voice-key-down-offline");
     let (mut brain, release, fetch, unloaded) = released_input(&scratch).await;
     let (out, mut output) = mpsc::channel(8);
     let queue = RefCell::new(DataQueue::new(window()));
@@ -264,7 +264,7 @@ async fn offline_and_early_key_downs_are_dropped_not_replayed_on_reconnect() {
 #[tokio::test]
 async fn a_lost_reload_notification_keeps_the_started_load_without_retry() {
     for closed in [false, true] {
-        let scratch = Scratch::new("voice-key-down-notification");
+        let scratch = Scratch::trusted("voice-key-down-notification");
         let (mut brain, release, fetch, unloaded) = released_input(&scratch).await;
         brain.voice_event(unloaded, None).expect("idle state");
         let (out, mut output) = mpsc::channel(1);
@@ -350,7 +350,7 @@ async fn idle_policy_reaches_the_owner_only_after_settings_commit_and_installer_
     use std::time::Duration;
     use tokio::time::timeout;
 
-    let scratch = Scratch::new("voice-idle-policy-commit");
+    let scratch = Scratch::trusted("voice-idle-policy-commit");
     std::fs::create_dir_all(scratch.dir()).expect("scratch folder");
     std::fs::write(
         scratch.dir().join(CONFIG_FILE),
@@ -372,7 +372,7 @@ async fn idle_policy_reaches_the_owner_only_after_settings_commit_and_installer_
     );
     let (installed, effects) = Installer::start(
         [Durable::Installed, Durable::Absent],
-        [true; 2],
+        [true; 2].map(Ok),
         [true, false],
         &[],
     );
@@ -639,7 +639,7 @@ async fn spoke<S: AsyncRead + AsyncWrite>(shell: &mut Shell<S>) -> bool {
 
 #[tokio::test]
 async fn an_installed_part_loads_at_start_and_the_view_follows_it_after_the_account() {
-    let scratch = Scratch::new("voice-start");
+    let scratch = Scratch::trusted("voice-start");
     let (mut brain, release, loads, _) = attached(
         &scratch,
         "talk_back = true\ninstalled = [\"spoken-replies\"]",
@@ -674,7 +674,7 @@ async fn an_installed_part_loads_at_start_and_the_view_follows_it_after_the_acco
 
 #[tokio::test]
 async fn ready_spoken_replies_speak_only_once_talk_back_is_on() {
-    let scratch = Scratch::new("voice-talk-back");
+    let scratch = Scratch::trusted("voice-talk-back");
     let (mut brain, release, _, _) = attached(&scratch, "installed = [\"spoken-replies\"]", 0);
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
@@ -745,7 +745,7 @@ async fn ready_spoken_replies_speak_only_once_talk_back_is_on() {
 
 #[tokio::test]
 async fn a_part_with_a_short_file_is_corrupt_and_never_loads() {
-    let scratch = Scratch::new("voice-short");
+    let scratch = Scratch::trusted("voice-short");
     let (mut brain, _release, loads, _) = attached(
         &scratch,
         "talk_back = true\ninstalled = [\"spoken-replies\"]",
@@ -775,7 +775,7 @@ async fn a_part_with_a_short_file_is_corrupt_and_never_loads() {
 
 #[tokio::test]
 async fn an_install_fetches_loads_commits_and_then_speaks() {
-    let scratch = Scratch::new("voice-install");
+    let scratch = Scratch::trusted("voice-install");
     let (mut brain, release, loads, fetched) = attached(&scratch, "", 0);
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
@@ -818,7 +818,7 @@ async fn an_install_fetches_loads_commits_and_then_speaks() {
 
 #[tokio::test]
 async fn a_talk_back_choice_made_during_an_install_wins() {
-    let scratch = Scratch::new("voice-install-choice");
+    let scratch = Scratch::trusted("voice-install-choice");
     let (mut brain, release, _, fetched) = attached(&scratch, "", 0);
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
@@ -860,7 +860,7 @@ async fn a_talk_back_choice_made_during_an_install_wins() {
 
 #[tokio::test]
 async fn a_cancelled_install_goes_back_and_the_next_fetches_once_the_first_ends() {
-    let scratch = Scratch::new("voice-install-cancel");
+    let scratch = Scratch::trusted("voice-install-cancel");
     let (mut brain, _release, loads, fetched) = attached(&scratch, "", 0);
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
@@ -903,7 +903,7 @@ async fn a_cancelled_install_goes_back_and_the_next_fetches_once_the_first_ends(
 
 #[tokio::test]
 async fn a_removal_whose_last_write_fails_shows_a_storage_failure_and_fetches_nothing() {
-    let scratch = Scratch::new("voice-cleared-refused");
+    let scratch = Scratch::trusted("voice-cleared-refused");
     let root = TrustedScratch::new("voice-cleared-refused");
     std::fs::create_dir_all(scratch.dir()).expect("scratch folder");
     std::fs::write(
@@ -965,7 +965,7 @@ async fn a_removal_whose_last_write_fails_shows_a_storage_failure_and_fetches_no
 
 #[tokio::test]
 async fn a_report_that_came_before_a_connection_is_in_its_opening_view() {
-    let scratch = Scratch::new("voice-buffered");
+    let scratch = Scratch::trusted("voice-buffered");
     let models = seeded(
         &scratch,
         "talk_back = true\ninstalled = [\"spoken-replies\"]",
@@ -1031,7 +1031,7 @@ fn pump_full(brain: &mut Brain) {
 
 #[tokio::test]
 async fn an_install_whose_answer_finds_the_queue_full_still_fetches() {
-    let scratch = Scratch::new("voice-install-full");
+    let scratch = Scratch::trusted("voice-install-full");
     let (fetch, _results) = held_fetch();
     let (mut brain, _release, _) = attached_with(&scratch, "", 0, Arc::<HeldFetch>::clone(&fetch));
     let mut tap = Tap::from_env();
@@ -1046,7 +1046,7 @@ async fn an_install_whose_answer_finds_the_queue_full_still_fetches() {
 
 #[tokio::test]
 async fn a_cancel_whose_answer_finds_the_queue_full_still_cancels() {
-    let scratch = Scratch::new("voice-cancel-full");
+    let scratch = Scratch::trusted("voice-cancel-full");
     let (fetch, _results) = held_fetch();
     let (mut brain, _release, _) = attached_with(&scratch, "", 0, Arc::<HeldFetch>::clone(&fetch));
     let mut tap = Tap::from_env();
@@ -1073,7 +1073,7 @@ async fn a_cancel_whose_answer_finds_the_queue_full_still_cancels() {
 
 #[tokio::test]
 async fn quit_stops_the_running_fetch() {
-    let scratch = Scratch::new("voice-quit-fetch");
+    let scratch = Scratch::trusted("voice-quit-fetch");
     let (fetch, _results) = held_fetch();
     let (mut brain, _release, _) = attached_with(&scratch, "", 0, Arc::<HeldFetch>::clone(&fetch));
     let mut tap = Tap::from_env();
@@ -1093,7 +1093,7 @@ async fn quit_stops_the_running_fetch() {
 
 #[tokio::test]
 async fn quit_cancels_the_fetch_and_keeps_the_held_write() {
-    let scratch = Scratch::new("voice-quit-drain");
+    let scratch = Scratch::trusted("voice-quit-drain");
     let (fetch, _results) = held_fetch();
     let (mut brain, _release, _) = attached_with(&scratch, "", 0, Arc::<HeldFetch>::clone(&fetch));
     let mut tap = Tap::from_env();
@@ -1127,7 +1127,7 @@ async fn quit_cancels_the_fetch_and_keeps_the_held_write() {
 
 #[tokio::test]
 async fn an_install_queued_behind_a_write_never_fetches_after_quit() {
-    let scratch = Scratch::new("voice-quit-queued");
+    let scratch = Scratch::trusted("voice-quit-queued");
     let (fetch, _results) = held_fetch();
     let (mut brain, _release, _) = attached_with(&scratch, "", 0, Arc::<HeldFetch>::clone(&fetch));
     let mut tap = Tap::from_env();
@@ -1158,7 +1158,7 @@ async fn an_install_queued_behind_a_write_never_fetches_after_quit() {
 
 #[tokio::test]
 async fn an_install_finishes_while_no_shell_is_connected() {
-    let scratch = Scratch::new("voice-install-idle");
+    let scratch = Scratch::trusted("voice-install-idle");
     let (fetch, results) = held_fetch();
     let (mut brain, release, loads) =
         attached_with(&scratch, "", 0, Arc::<HeldFetch>::clone(&fetch));
@@ -1221,7 +1221,7 @@ fn remove() -> ControlToBrain {
 /// op's answer and changes nothing.
 #[tokio::test]
 async fn a_refused_removal_keeps_the_part_speaking_and_its_files() {
-    let scratch = Scratch::new("voice-remove-refused");
+    let scratch = Scratch::trusted("voice-remove-refused");
     let root = TrustedScratch::new("voice-remove-refused");
     let (mut brain, release, folder) = removable(&scratch, &root);
     let gate = brain.hold_config_write();
@@ -1260,7 +1260,7 @@ async fn a_refused_removal_keeps_the_part_speaking_and_its_files() {
 /// deleted and the removal written as finished.
 #[tokio::test]
 async fn a_removal_answers_with_its_intent_then_deletes_and_finishes() {
-    let scratch = Scratch::new("voice-remove");
+    let scratch = Scratch::trusted("voice-remove");
     let root = TrustedScratch::new("voice-remove");
     let (mut brain, release, folder) = removable(&scratch, &root);
     let ((control, data), mut shell) = duplex();
@@ -1304,7 +1304,7 @@ async fn a_removal_answers_with_its_intent_then_deletes_and_finishes() {
 /// Row 19: Quit lets a queued intent land and stops the removal there, so start-up finishes it.
 #[tokio::test]
 async fn quit_lands_a_held_intent_and_leaves_the_delete_to_start_up() {
-    let scratch = Scratch::new("voice-remove-quit");
+    let scratch = Scratch::trusted("voice-remove-quit");
     let root = TrustedScratch::new("voice-remove-quit");
     let (mut brain, _release, folder) = removable(&scratch, &root);
     let gate = brain.hold_config_write();
@@ -1333,7 +1333,7 @@ async fn quit_lands_a_held_intent_and_leaves_the_delete_to_start_up() {
 /// Row 19: an intent held past Quit's deadline still lands once released, and the file says so.
 #[tokio::test]
 async fn an_intent_held_past_quit_still_lands_on_disk() {
-    let scratch = Scratch::new("voice-remove-late");
+    let scratch = Scratch::trusted("voice-remove-late");
     let root = TrustedScratch::new("voice-remove-late");
     let (mut brain, _release, _) = removable(&scratch, &root);
     let gate = brain.hold_config_write();
@@ -1485,7 +1485,7 @@ fn timeout_diagnostics(brain: &Brain, saved: Option<&toml::Value>) -> String {
 
 #[tokio::test]
 async fn removal_diagnostics_exclude_paths_and_report_owner_counts() {
-    let scratch = Scratch::new("voice-diagnostics");
+    let scratch = Scratch::trusted("voice-diagnostics");
     let (fetch, _results) = held_fetch();
     let (brain, _release, _) =
         attached_at(&scratch, scratch.dir().join(test_support::SENTINEL), fetch);
@@ -1516,7 +1516,7 @@ const TICK: std::time::Duration = std::time::Duration::from_millis(10);
 /// doesn't come back in `installed` when the removal finishes.
 #[tokio::test]
 async fn an_activate_queued_behind_a_committed_removal_isnt_written() {
-    let scratch = Scratch::new("voice-remove-activate");
+    let scratch = Scratch::trusted("voice-remove-activate");
     let root = TrustedScratch::new("voice-remove-activate");
     let (mut brain, held, folder) = activate_behind_a_removal(&scratch, &root, None).await;
     held.send(Gate::Write).expect("the write waits on the gate");
@@ -1544,7 +1544,7 @@ async fn an_activate_queued_behind_a_committed_removal_isnt_written() {
 /// Behind a refused removal, the same Activate is written and the part is ready.
 #[tokio::test]
 async fn an_activate_queued_behind_a_refused_removal_still_lands() {
-    let scratch = Scratch::new("voice-remove-activate-refused");
+    let scratch = Scratch::trusted("voice-remove-activate-refused");
     let root = TrustedScratch::new("voice-remove-activate-refused");
     let (mut brain, held, folder) =
         activate_behind_a_removal(&scratch, &root, Some(Gate::Panic)).await;
@@ -1582,7 +1582,7 @@ async fn an_activate_queued_behind_a_refused_removal_still_lands() {
 
 #[tokio::test]
 async fn a_cancelled_native_load_keeps_its_files_until_its_owner_finishes() {
-    let scratch = Scratch::new("voice-cancel-load-remove");
+    let scratch = Scratch::trusted("voice-cancel-load-remove");
     let root = TrustedScratch::new("voice-cancel-load-remove");
     let models = seeded_at(&scratch, root.0.join("models"), "", 0);
     let folder = models.join(VoicePart::SpokenReplies.dir());
@@ -1658,7 +1658,7 @@ impl Fetch for RetiringFetch {
 
 #[tokio::test]
 async fn a_cancelled_fetch_keeps_its_files_until_its_task_finishes() {
-    let scratch = Scratch::new("voice-cancel-fetch-remove");
+    let scratch = Scratch::trusted("voice-cancel-fetch-remove");
     let root = TrustedScratch::new("voice-cancel-fetch-remove");
     let models = seeded_at(&scratch, root.0.join("models"), "", 0);
     let folder = models.join(VoicePart::SpokenReplies.dir());

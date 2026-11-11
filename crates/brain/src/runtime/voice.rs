@@ -20,6 +20,9 @@ use crate::voice::pump::Pump;
 use crate::voice::stt::SttHandle;
 use crate::voice::tts::TtsHandle;
 
+#[cfg(test)]
+mod path_tests;
+
 #[derive(Debug)]
 pub(crate) struct Voice {
     installer: Installer,
@@ -179,12 +182,22 @@ pub(super) fn delete(models: &Path, part: VoicePart) -> Folder {
 }
 
 /// Whether every file of `part` under `models` has its manifest size.
-fn whole(models: &Path, part: VoicePart) -> bool {
+fn whole(models: &Path, part: VoicePart) -> Result<bool, ErrorKey> {
     let dir = models.join(part.dir());
-    part.files().all(|file| {
-        std::fs::metadata(dir.join(file.name))
-            .is_ok_and(|metadata| metadata.is_file() && metadata.len() == file.bytes)
-    })
+    let manifest = part.files().collect::<Vec<_>>();
+    let names = manifest.iter().map(|file| file.name).collect::<Vec<_>>();
+    let held = match platform::ModelFiles::open(&dir, &names) {
+        Ok(held) => held,
+        Err(Untrusted::Missing) => return Ok(false),
+        Err(Untrusted::Reparse | Untrusted::Unsafe) => return Err(ErrorKey::VoiceModelPath),
+        Err(Untrusted::Io) => return Err(ErrorKey::VoiceStorage),
+    };
+    for (file, pin) in held.files.iter().zip(manifest) {
+        if file.metadata().map_err(|_| ErrorKey::VoiceStorage)?.len() != pin.bytes {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 impl Brain {
@@ -392,10 +405,9 @@ impl Brain {
     ) -> Option<(RemoveAnswer, VoiceView, Vec<Effect>)> {
         let voice = self.voice.as_mut()?;
         let before = voice.installer.view();
-        let folder = if voice.models.join(part.dir()).exists() {
-            Folder::Present
-        } else {
-            Folder::Missing
+        let folder = match platform::hold_chain(&voice.models.join(part.dir())) {
+            Err(Untrusted::Missing) => Folder::Missing,
+            Ok(_) | Err(_) => Folder::Present,
         };
         let (answer, effects) = voice.installer.remove(part, folder);
         Some((answer, before, effects))

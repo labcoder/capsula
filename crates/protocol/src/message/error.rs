@@ -98,6 +98,8 @@ pub enum ErrorKey {
     VoiceUnavailable,
     /// GitHub connection controls are unavailable in this build.
     GitHubUnavailable,
+    /// The speech model location isn't an ordinary trusted local path.
+    VoiceModelPath,
 }
 
 macro_rules! catalog {
@@ -160,6 +162,7 @@ impl ErrorKey {
         VoiceStorage,
         VoiceLoad,
         VoiceUnavailable,
+        VoiceModelPath,
 
         GitHubUnavailable,
     }

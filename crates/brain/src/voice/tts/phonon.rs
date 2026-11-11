@@ -80,8 +80,16 @@ pub(super) struct Phonon {
 
 impl Phonon {
     pub(super) fn load(dir: &Path) -> Result<Self, TtsError> {
-        let models = ModelFiles::open(dir, &[CONFIG, WEIGHTS, TOKENIZER, VOICE])
-            .map_err(|_| TtsError::ModelPath)?;
+        let models = ModelFiles::open(dir, &[CONFIG, WEIGHTS, TOKENIZER, VOICE]).map_err(
+            |error| match error {
+                crate::platform::Untrusted::Reparse | crate::platform::Untrusted::Unsafe => {
+                    TtsError::ModelPath
+                }
+                crate::platform::Untrusted::Missing | crate::platform::Untrusted::Io => {
+                    TtsError::Load
+                }
+            },
+        )?;
         pool()?;
         let config = read_config(dir.join(CONFIG)).map_err(|_| TtsError::Load)?;
         let synth = Synth::builder(config, dir.join(WEIGHTS), Lang::En)

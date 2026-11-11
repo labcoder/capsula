@@ -198,6 +198,22 @@ fn model_actions_send_only_the_existing_operation_and_never_invent_progress() {
             Retry,
             SettingsOp::InstallVoice(SpeechInput),
         ),
+        (
+            PartState::Failed {
+                key: ErrorKey::VoiceModelPath,
+                installed: true,
+            },
+            Retry,
+            SettingsOp::InstallVoice(SpeechInput),
+        ),
+        (
+            PartState::Failed {
+                key: ErrorKey::VoiceModelPath,
+                installed: false,
+            },
+            Retry,
+            SettingsOp::InstallVoice(SpeechInput),
+        ),
         (PartState::Verifying, Cancel, SettingsOp::CancelVoiceInstall),
         (
             PartState::Downloading { done: 1, total: 2 },

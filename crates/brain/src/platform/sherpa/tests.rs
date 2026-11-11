@@ -34,8 +34,8 @@ use windows_sys::Win32::System::SystemServices::IO_REPARSE_TAG_MOUNT_POINT;
 use super::super::windows::{dacl_sddl, final_path_matches, local_app_data};
 use super::abi::{LAYOUT, RawRecognizer, RawStream, RecognizerConfig, RecognizerResult};
 use super::{
-    Fns, MAX_TRANSCRIPT_BYTES, NATIVE_CLOSURE, NativeError, ORT, SHERPA, Sherpa, check_closure,
-    only_expected_added, sample_count, stage, verify,
+    Fns, MAX_TRANSCRIPT_BYTES, MODEL_FILES, NATIVE_CLOSURE, NativeError, ORT, SHERPA, Sherpa,
+    check_closure, only_expected_added, sample_count, stage, verify,
 };
 use crate::speech::SpeechSupervisor;
 use crate::test_support::Scratch;
@@ -652,6 +652,8 @@ fn model_paths_refuse_links_before_the_native_constructor_and_hold_ordinary_file
         std::fs::remove_file(path).unwrap();
         std::fs::write(models.dir().join(name), b"fixture").unwrap();
     }
+    std::fs::remove_file(models.dir().join(MODEL_FILES[0])).unwrap();
+    std::fs::hard_link(&victim, models.dir().join(MODEL_FILES[0])).unwrap();
     let recognizer = sherpa
         .recognizer(models.dir())
         .expect("ordinary owned models");
@@ -677,6 +679,7 @@ fn model_paths_refuse_links_before_the_native_constructor_and_hold_ordinary_file
         std::fs::read(models.dir().join(MODEL_FILES[0])).unwrap(),
         b"released"
     );
+    assert_eq!(std::fs::read(victim).unwrap(), b"released");
 }
 
 impl TrustedScratch {

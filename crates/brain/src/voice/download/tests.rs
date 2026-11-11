@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, TcpListener};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -234,7 +235,7 @@ async fn model_paths_refuse_a_redirected_installed_root_without_changing_bytes()
     fs::create_dir(&downloader.models).expect("empty junction");
     crate::platform::sherpa::tests::set_junction(&downloader.models, &actual)
         .expect("own local junction");
-    assert_eq!(fetch(&downloader).await.0, Err(DownloadError::Io));
+    assert_eq!(fetch(&downloader).await.0, Err(DownloadError::ModelPath));
     assert_eq!(fs::read(&pinned).unwrap(), b"abcdef");
     assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
 }
@@ -248,7 +249,7 @@ async fn model_paths_refuse_a_hard_linked_partial_without_changing_its_alias() {
     let partial = part_path(&downloader);
     fs::create_dir_all(partial.parent().unwrap()).unwrap();
     fs::hard_link(&victim, &partial).unwrap();
-    assert_eq!(fetch(&downloader).await.0, Err(DownloadError::Io));
+    assert_eq!(fetch(&downloader).await.0, Err(DownloadError::ModelPath));
     assert_eq!(fs::read(&victim).unwrap(), b"abc");
     assert_eq!(fs::read(&partial).unwrap(), b"abc");
     assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
@@ -258,6 +259,21 @@ enum LinkedFolder {
     Root,
     Part,
     Ancestor,
+}
+
+#[tokio::test]
+async fn model_paths_keep_verified_read_only_final_hardlinks_working() {
+    let server = Server::start(vec![]);
+    let (scratch, downloader) = server.downloader();
+    let original = scratch.dir().join("original");
+    seed(&original, b"abcdef");
+    let final_file = final_path(&downloader);
+    fs::create_dir_all(final_file.parent().unwrap()).unwrap();
+    fs::hard_link(&original, &final_file).unwrap();
+    assert_eq!(fetch(&downloader).await.0, Ok(()));
+    assert_eq!(fs::read(original).unwrap(), b"abcdef");
+    assert_eq!(fs::read(final_file).unwrap(), b"abcdef");
+    assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
 }
 
 async fn linked_folder_refused(location: LinkedFolder, symlink: bool) {
@@ -293,7 +309,7 @@ async fn linked_folder_refused(location: LinkedFolder, symlink: bool) {
         crate::platform::sherpa::tests::set_junction(&link, &actual).unwrap();
     }
     let target = fs::read_link(&link).unwrap();
-    assert_eq!(fetch(&downloader).await.0, Err(DownloadError::Io));
+    assert_eq!(fetch(&downloader).await.0, Err(DownloadError::ModelPath));
     assert_eq!(fs::read(pinned).unwrap(), b"abcdef");
     assert_eq!(fs::read_link(link).unwrap(), target);
     assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
@@ -346,7 +362,7 @@ async fn linked_file_refused(partial: bool, junction: bool) {
     };
     seed(&pinned, b"abcdef");
     let target = fs::read_link(&link).unwrap();
-    assert_eq!(fetch(&downloader).await.0, Err(DownloadError::Io));
+    assert_eq!(fetch(&downloader).await.0, Err(DownloadError::ModelPath));
     assert_eq!(fs::read(pinned).unwrap(), b"abcdef");
     assert_eq!(fs::read_link(link).unwrap(), target);
     assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
@@ -377,7 +393,7 @@ async fn model_paths_refuse_unc_without_contacting_it() {
     let server = Server::start(vec![]);
     let (_scratch, mut downloader) = server.downloader();
     downloader.models = PathBuf::from(r"\\127.0.0.1\model-test-must-not-be-contacted\models");
-    assert_eq!(fetch(&downloader).await.0, Err(DownloadError::Io));
+    assert_eq!(fetch(&downloader).await.0, Err(DownloadError::ModelPath));
     assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
 }
 
@@ -404,7 +420,7 @@ async fn model_paths_preflight_the_whole_attempt_before_removing_an_earlier_bad_
         downloader
             .fetch_files(&[&MODEL, &second], &progress, &cancel)
             .await,
-        Err(DownloadError::Io)
+        Err(DownloadError::ModelPath)
     );
     assert_eq!(fs::read(final_path(&downloader)).unwrap(), b"xxxxxx");
     assert_eq!(fs::read(partial).unwrap(), b"abc");

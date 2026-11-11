@@ -58,7 +58,7 @@ fn idle_release_and_a_fresh_installer_request_reload_without_fetching_or_stale_r
     for (policy, seconds) in [(SttUnload::After15Min, 900), (SttUnload::After1Hour, 3600)] {
         let (mut installer, effects) = Installer::start(
             [Durable::Installed, Durable::Absent],
-            [true; 2],
+            [true; 2].map(Ok),
             [true; 2],
             &[],
         );
@@ -431,7 +431,7 @@ fn an_unconfirmed_exit_keeps_its_physical_ask_and_cannot_acknowledge_unload() {
 
     let (mut installer, effects) = Installer::start(
         [Durable::Installed, Durable::Absent],
-        [true; 2],
+        [true; 2].map(Ok),
         [true; 2],
         &[],
     );
@@ -1082,6 +1082,25 @@ fn a_failed_load_leaves_it_unloaded_until_asked_again() {
     harness.handle.load("models".into(), 2);
     assert_eq!(harness.event(), Event::Loaded("models".into()));
     assert_eq!(harness.reports(1), [report(2, LoadEvent::Loaded)]);
+}
+
+#[tokio::test]
+async fn model_paths_speech_owner_reports_the_path_reason_after_release() {
+    let (reports, mut heard) = Reports::new();
+    let (_sender, losses) = broadcast::channel(4);
+    let handle = SttHandle::spawn_with(reports, losses, |_, _| {
+        Err(SpeechError::Native(NativeError::ModelPath))
+    })
+    .expect("owner starts");
+    handle.load("models".into(), 1);
+    assert_eq!(
+        tokio::time::timeout(WAIT, heard.recv()).await.unwrap(),
+        Some(report(1, LoadEvent::ModelPath))
+    );
+    let state = handle.control.lock();
+    assert_eq!(state.want, None);
+    assert_eq!(state.current, None);
+    assert!(!state.ready);
 }
 
 #[test]
