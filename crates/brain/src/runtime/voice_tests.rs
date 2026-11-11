@@ -447,7 +447,7 @@ async fn idle_policy_reaches_the_owner_only_after_settings_commit_and_installer_
 /// A fetch that has 3 of 9 bytes downloaded, then ends with the result the test sends, or as
 /// cancelled once cancelled. It counts the fetches begun and cancelled, and notifies each start.
 #[derive(Debug)]
-pub(super) struct HeldFetch {
+pub(in crate::runtime) struct HeldFetch {
     results: tokio::sync::Mutex<mpsc::UnboundedReceiver<Result<(), DownloadError>>>,
     pub(super) begun: AtomicUsize,
     cancelled: AtomicUsize,

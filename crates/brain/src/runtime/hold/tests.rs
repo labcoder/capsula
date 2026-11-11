@@ -12,6 +12,128 @@ const KEY: HoldKey = HoldKey {
     gesture: GestureId(9),
 };
 
+#[derive(Clone, Copy)]
+enum AdmissionStage {
+    Grant,
+    Transfer,
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the same four blocked states exercise grant and transfer"
+)]
+async fn admission_boundaries(stage: AdmissionStage) {
+    use crate::coordinator::Coordinator;
+    use crate::runtime::data::Owner;
+    use crate::runtime::{DATA_CAP, DEBT_WATERMARK, MAX_ENDING, Recovery, Seen};
+    use kumochi_protocol::message::{RunId, SceneId, ThreadId};
+    for blocked in 0..4 {
+        let scratch = Scratch::new("hold-admission-capacity");
+        let (mut brain, _release, mut decoded, _fetch) =
+            crate::runtime::tests::holds::input(&scratch, Vec::new(), "not submitted").await;
+        let mut observed = brain.observe();
+        let (out, mut output) = mpsc::channel(16);
+        let queue = RefCell::new(DataQueue::new(0));
+        let ready = Notify::new();
+        let mut tap = Tap::from_env();
+        let mut link = Link::new(&out, &queue, &ready, &mut tap);
+        link.recovery = Some(Recovery::new(&[], 1024));
+        recording(&mut brain);
+        match blocked {
+            0 => {
+                queue.borrow_mut().push(
+                    Owner::Marker,
+                    vec![0; DATA_CAP - size_of::<(Owner, Vec<u8>)>()],
+                );
+                assert_eq!(queue.borrow().bytes(), DATA_CAP);
+            }
+            1 => {
+                for turn in 1..=u32::try_from(MAX_ENDING + 1).unwrap() {
+                    brain
+                        .coordinator
+                        .handle(Input::Turn {
+                            turn,
+                            thread: None,
+                            text: "held writes".into(),
+                        })
+                        .unwrap();
+                }
+                assert_eq!(brain.coordinator.ending_runs(), MAX_ENDING);
+            }
+            2 => {
+                brain.coordinator.failed_drawings(
+                    (1..=u64::try_from(DEBT_WATERMARK).unwrap())
+                        .map(SceneId)
+                        .collect(),
+                );
+                assert_eq!(brain.coordinator.debt(), DEBT_WATERMARK);
+            }
+            _ => link.recovery = None,
+        }
+        let previous = brain.coordinator.current_run();
+        match stage {
+            AdmissionStage::Grant => {
+                let hold = brain.holds.pending.as_mut().unwrap();
+                hold.ask = None;
+                hold.audio = None;
+                brain.holds.debt = None;
+                brain.holds.gate.active.store(0, Ordering::SeqCst);
+                brain.hold_voice_changed(&mut link).unwrap();
+            }
+            AdmissionStage::Transfer => {
+                let (reply, receive) = oneshot::channel();
+                let hold = brain.holds.pending.as_mut().unwrap();
+                hold.audio = None;
+                hold.decode = Some(receive);
+                brain.holds.stopped(KEY);
+                reply
+                    .send(SttResult::Text("recognized words".into()))
+                    .unwrap();
+                let completed = next(&mut brain.holds).await;
+                brain.hold_event(completed, &mut link).unwrap();
+            }
+        }
+        assert_eq!(status(&mut output), HoldStatus::Failed(HoldFailure::Busy));
+        assert_eq!(output.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+        assert!(brain.holds.pending.is_none());
+        assert_eq!(brain.holds.debt, None);
+        assert_eq!(brain.coordinator.current_run(), previous);
+        assert!(brain.round.is_none());
+        assert_eq!(decoded.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+        while let Ok(event) = observed.try_recv() {
+            assert!(!matches!(
+                event,
+                Seen::StoreOpQueued(StoreOp::BeginTurn { .. })
+            ));
+        }
+        brain.coordinator =
+            Coordinator::ready_for_tests(ThreadId(1), ThreadId(1), RunId(0), Vec::new());
+        brain.close().await;
+        let store = crate::store::Store::open(&scratch.db()).unwrap();
+        assert_eq!(
+            store
+                .conn_for_tests()
+                .query_row(
+                    "SELECT count(*) FROM events WHERE kind = 'user'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+    }
+}
+
+#[tokio::test]
+async fn ordinary_admission_limits_refuse_before_microphone_grant() {
+    Box::pin(admission_boundaries(AdmissionStage::Grant)).await;
+}
+
+#[tokio::test]
+async fn ordinary_admission_limits_refuse_decoded_transfer_without_a_turn() {
+    Box::pin(admission_boundaries(AdmissionStage::Transfer)).await;
+}
+
 fn recording(brain: &mut Brain) {
     let cancel = Arc::new(AtomicBool::new(false));
     let StoreOp::ReadHold(read) = brain

@@ -422,6 +422,9 @@ impl Brain {
         if hold.snapshot.is_none() {
             return Ok(());
         }
+        if !self.admits_turn(link) {
+            return self.hold_end(HoldStatus::Failed(HoldFailure::Busy), link);
+        }
         let admitted = stt
             .ok_or(HoldFailure::NotLoaded)
             .and_then(SttHandle::admit_use);
@@ -549,6 +552,10 @@ impl Brain {
             Event::Decoded(_, SttResult::Text(text)) => {
                 if text.trim().is_empty() {
                     return self.hold_end(HoldStatus::Empty, link);
+                }
+                // shortcut: busy transfer discards the hold; retain its bounded cancellable owner until admission opens when queued voice is needed.
+                if !self.admits_turn(link) {
+                    return self.hold_end(HoldStatus::Failed(HoldFailure::Busy), link);
                 }
                 let Some(hold) = self.holds.take() else {
                     return Ok(());

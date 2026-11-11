@@ -20,7 +20,7 @@ use crate::voice::stt::held_for_runtime_checked;
 
 const G: GestureId = GestureId(17);
 
-async fn input(
+pub(in crate::runtime) async fn input(
     scratch: &Scratch,
     expected: Vec<i16>,
     text: &'static str,

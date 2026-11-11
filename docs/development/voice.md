@@ -829,3 +829,10 @@ is scoped to its gesture. Either pipe ending fences the old owner before grace
 controls drain. Only the matching authenticated physical-stop receipt clears
 admitted device debt, including during grace; failure, timeout or a new session
 cannot borrow uncertain ownership. A failed status write closes the connection.
+
+Held input uses the ordinary runtime turn-admission gate both before a microphone
+permit and before decoded text becomes a run: initial scene recovery must be
+described, outgoing data must be below its cap, and ending-run/cleanup debt must
+have room. A closed gate ends that hold once as Busy without storing words or
+starting a provider. PCM ingress, control processing and credit remain live;
+there is no second queue of recognized words waiting for capacity.

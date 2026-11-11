@@ -783,7 +783,7 @@ impl Brain {
             let deadline = self.deadline;
             let send_due = self.next_send_deadline();
             let take_engine = link.queue.borrow().bytes() < DATA_CAP;
-            let take_turns = described && take_engine && self.room_for_turns();
+            let take_turns = self.admits_turn(&link);
             let feed = take_engine && link.recovery.as_ref().is_some_and(Recovery::pending);
             let input = tokio::select! {
                 biased;
@@ -939,6 +939,10 @@ impl Brain {
     /// New turns wait while too many runs are ending or too many writes are owed.
     fn room_for_turns(&self) -> bool {
         self.coordinator.ending_runs() < MAX_ENDING && self.coordinator.debt() < DEBT_WATERMARK
+    }
+
+    fn admits_turn(&self, link: &Link<'_, '_>) -> bool {
+        link.recovery.is_some() && link.queue.borrow().bytes() < DATA_CAP && self.room_for_turns()
     }
 
     /// Sends `Scenes` for the settled visible set, and the recovery that sends their snapshots.
