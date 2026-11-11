@@ -42,8 +42,10 @@ impl Presence {
             },
         )
         .detach();
-        cx.subscribe(&kumo, |this, _, _: &WantsFrames, cx| this.want_frames(cx))
-            .detach();
+        cx.subscribe(&kumo, |this, _, _: &WantsFrames, cx| {
+            this.want_kumo_frames(cx);
+        })
+        .detach();
         cx.subscribe(&kumo, |this, _, changed: &PullChanged, cx| {
             if let PullChanged::Ended(drag, end) = *changed {
                 this.carry_ended(drag, end, cx);

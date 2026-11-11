@@ -1150,6 +1150,87 @@ fn close_callback_scene(
     });
 }
 
+fn retained_draw(
+    owner: &gpui_kit::Entity<crate::presence::Presence>,
+    cx: &gpui_kit::TestAppContext,
+) -> Vec<f32> {
+    owner.read_with(cx, |this, _| {
+        let mut draw = Vec::new();
+        assert!(!this.presenter.frames().borrow().paint(|frame, _| {
+            draw.extend(frame.items().iter().map(|item| item.draw));
+            Ok::<_, ()>(())
+        }));
+        draw
+    })
+}
+
+/// One vsync on each window the presence shows. Windows sends a hidden window no `WM_PAINT`,
+/// so a frame callback armed on one waits until it's shown again. Returns the callbacks run.
+fn vsync_shown(
+    owner: &gpui_kit::Entity<crate::presence::Presence>,
+    cx: &mut gpui_kit::TestAppContext,
+) -> usize {
+    use crate::presence::geometry::PanelVisibility;
+    let shown = owner.read_with(cx, |this, _| {
+        [
+            Some(this.dock_window),
+            (this.panel_visibility == PanelVisibility::Visible).then_some(this.panel_window),
+            this.overlay.window().map(|host| host.window),
+        ]
+    });
+    shown
+        .into_iter()
+        .flatten()
+        .map(|window| {
+            window
+                .update(cx, |_, window, cx| window.simulate_next_frame(cx))
+                .expect("a shown fixture window")
+        })
+        .sum()
+}
+
+/// The recorded run-8 call: a two-`Q` parabola drawn in over 800 ms, with axes and labels,
+/// asked for from the typing panel, which keeps the status panel hidden.
+#[gpui::test]
+fn the_recorded_graph_finishes_drawing_while_the_status_panel_is_hidden(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    use std::time::{Duration, Instant};
+    let origin = Instant::now()
+        .checked_sub(Duration::from_secs(2))
+        .expect("the monotonic clock is past its second second");
+    let (owner, _controls) = callback_scene(
+        r#"{"step":{"id":"axes_and_curve","put":[{"line":{"id":"x_axis","from":[40,260],"to":[440,260],"color":"muted","width":2}},{"line":{"id":"y_axis","from":[240,410],"to":[240,40],"color":"muted","width":2}},{"path":{"id":"parabola","d":"M 100 60 Q 170 230 240 260 Q 310 230 380 60","color":"blue","width":4,"enter":"draw","dur":800}},{"text":{"id":"graph_label","at":[240,20],"text":"y = x²","size":20,"bold":true,"align":"center","color":"fg"}},{"text":{"id":"x_label","at":[445,265],"text":"x","size":15,"color":"fg"}},{"text":{"id":"y_label","at":[246,40],"text":"y","size":15,"color":"fg"}},{"text":{"id":"origin_label","at":[224,280],"text":"0","size":13,"color":"muted"}}]}}"#.as_bytes(),
+        origin,
+        cx,
+    );
+    let script = HostGuard::install(&[
+        Step(Operation::Configure, Outcome::Success),
+        Step(Operation::Show, Outcome::Success),
+    ]);
+    owner.update(cx, |this, cx| {
+        this.text.as_mut().expect("typing owner").typing.open();
+        this.frames.idle();
+        assert!(this.draw_changed_at(origin + Duration::from_millis(255), cx));
+        this.want_frames(cx);
+    });
+    script.finish();
+    let first = retained_draw(&owner, cx);
+    assert_eq!(
+        first.len(),
+        7,
+        "every op is painted, the fg labels included"
+    );
+    assert!(
+        first[2] < 0.7,
+        "the recorded frame: the curve stops part-way, {first:?}"
+    );
+    assert_eq!(vsync_shown(&owner, cx), 1);
+    assert_eq!(retained_draw(&owner, cx), [1.0; 7]);
+    assert_eq!(vsync_shown(&owner, cx), 0);
+    close_callback_scene(&owner, cx);
+}
+
 #[gpui::test]
 fn the_last_kumo_callback_keeps_an_already_due_delayed_rectangle_wake(
     cx: &mut gpui_kit::TestAppContext,
@@ -1247,7 +1328,7 @@ fn a_penultimate_pose_keeps_one_callback_to_sample_the_final_pose_then_rests(
 }
 
 #[gpui::test]
-fn first_visibility_places_refused_escape_stop_in_the_callbacks_held_panel(
+fn first_visibility_places_refused_escape_stop_in_the_status_panel_from_a_dock_frame(
     cx: &mut gpui_kit::TestAppContext,
 ) {
     use crate::presence::geometry::PanelVisibility;
@@ -1256,27 +1337,25 @@ fn first_visibility_places_refused_escape_stop_in_the_callbacks_held_panel(
         .checked_sub(Duration::from_secs(1))
         .expect("the monotonic clock is past its first second");
     let (owner, _controls) = callback_scene(br#"{"step":{"id":"first","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10],"enter":"none","delay":200}},{"anim":{"target":"r","track":"x","keys":[[0,0],[1000,100]]}}]}}"#, origin, cx);
-    let panel = owner.read_with(cx, |this, _| this.panel_window);
-    panel
-        .update(cx, |_, window, cx| {
-            owner.update(cx, |this, cx| {
-                assert_eq!(this.panel_visibility, PanelVisibility::Hidden);
-                this.frame_at(origin + Duration::from_millis(199), window, cx)
-                    .expect("invisible moving sample");
-                assert!(!this.activity.drawing);
-                assert!(!this.panel.read(cx).stop);
-            });
-        })
-        .expect("held panel");
+    let dock = owner.read_with(cx, |this, _| this.dock_window);
+    dock.update(cx, |_, window, cx| {
+        owner.update(cx, |this, cx| {
+            assert_eq!(this.panel_visibility, PanelVisibility::Hidden);
+            this.frame_at(origin + Duration::from_millis(199), window, cx)
+                .expect("invisible moving sample");
+            assert!(!this.activity.drawing);
+            assert!(!this.panel.read(cx).stop);
+        });
+    })
+    .expect("held dock");
     let script = HostGuard::install(&[
         Step(Operation::Configure, Outcome::Success),
         Step(Operation::Show, Outcome::Success),
     ]);
-    panel
-        .update(cx, |_, window, cx| {
-            assert_eq!(window.simulate_next_frame(cx), 1);
-        })
-        .expect("real first-visible callback");
+    dock.update(cx, |_, window, cx| {
+        assert_eq!(window.simulate_next_frame(cx), 1);
+    })
+    .expect("real first-visible callback");
     script.finish();
     owner.read_with(cx, |this, cx| {
         assert!(this.escape_hold.shows_stop());
@@ -1344,7 +1423,7 @@ fn persistent_stop_configuration_refusal_retires_motion_with_an_actionable_notic
         .checked_sub(Duration::from_secs(1))
         .expect("the monotonic clock is past its first second");
     let (owner, controls) = callback_scene(br#"{"step":{"id":"motion","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10],"enter":"none","delay":200}},{"anim":{"target":"r","track":"x","ease":"linear","keys":[[0,0],[1000,100]]}}]}}"#, origin, cx);
-    let panel = owner.update(cx, |this, cx| {
+    let dock = owner.update(cx, |this, cx| {
         this.chat_notice.present(
             UserError::new(
                 ErrorKey::SignInNeeded,
@@ -1360,7 +1439,7 @@ fn persistent_stop_configuration_refusal_retires_motion_with_an_actionable_notic
             this.presenter.input.configure(&mut this.input_windows),
             Err(PresenceError::SelectionSurface)
         ));
-        this.panel_window
+        this.dock_window
     });
     let script = HostGuard::install(&[
         Step(Operation::Configure, Outcome::Success),
@@ -1368,56 +1447,54 @@ fn persistent_stop_configuration_refusal_retires_motion_with_an_actionable_notic
         Step(Operation::Hide, Outcome::Success),
         Step(Operation::Configure, Outcome::Success),
     ]);
-    panel
-        .update(cx, |_, window, cx| {
+    dock.update(cx, |_, window, cx| {
+        owner.update(cx, |this, cx| {
+            assert!(matches!(
+                this.frame_at(origin + Duration::from_millis(220), window, cx),
+                Err(crate::presence::OpenError::Native(
+                    PresenceError::SelectionSurface
+                ))
+            ));
+            assert!(this.session.is_none());
+            assert!(!this.presenter.holds_scenes());
+            assert_eq!(this.presenter.stoppable_run(), None);
+            assert!(!this.activity.working);
+            assert!(!this.activity.drawing);
+            assert_eq!(this.panel_visibility, PanelVisibility::Hidden);
+            assert!(!this.escape_hold.shows_stop());
+            assert!(!this.panel.read(cx).stop);
+            assert!(matches!(
+                this.overlay,
+                crate::presence::overlay_visibility::Visibility::Hidden(_)
+            ));
+            assert_eq!(this.scene_deadline, None);
+            assert!(this.scene_timer.is_none());
+        });
+        assert_eq!(window.simulate_next_frame(cx), 0);
+    })
+    .expect("held dock");
+    script.finish();
+    assert_eq!(retained_x(&owner, cx), Vec::<f32>::new());
+    for at in [240, 260, 280] {
+        dock.update(cx, |_, window, cx| {
             owner.update(cx, |this, cx| {
                 assert!(matches!(
-                    this.frame_at(origin + Duration::from_millis(220), window, cx),
-                    Err(crate::presence::OpenError::Native(
-                        PresenceError::SelectionSurface
-                    ))
+                    this.presenter.input.configure(&mut this.input_windows),
+                    Err(PresenceError::SelectionSurface)
                 ));
+                this.frame_at(origin + Duration::from_millis(at), window, cx)
+                    .expect("later frame cannot retry the failed operation");
+                let notice = this.chat_notice.shown().expect("notice remains retained");
+                assert_eq!(notice.error.args(), &[ErrorArg::Count(2)]);
+                assert_eq!(notice.error.actions(), &[Action::SignIn]);
                 assert!(this.session.is_none());
                 assert!(!this.presenter.holds_scenes());
-                assert_eq!(this.presenter.stoppable_run(), None);
-                assert!(!this.activity.working);
-                assert!(!this.activity.drawing);
-                assert_eq!(this.panel_visibility, PanelVisibility::Hidden);
-                assert!(!this.escape_hold.shows_stop());
-                assert!(!this.panel.read(cx).stop);
-                assert!(matches!(
-                    this.overlay,
-                    crate::presence::overlay_visibility::Visibility::Hidden(_)
-                ));
                 assert_eq!(this.scene_deadline, None);
                 assert!(this.scene_timer.is_none());
             });
             assert_eq!(window.simulate_next_frame(cx), 0);
         })
-        .expect("held current panel");
-    script.finish();
-    assert_eq!(retained_x(&owner, cx), Vec::<f32>::new());
-    for at in [240, 260, 280] {
-        panel
-            .update(cx, |_, window, cx| {
-                owner.update(cx, |this, cx| {
-                    assert!(matches!(
-                        this.presenter.input.configure(&mut this.input_windows),
-                        Err(PresenceError::SelectionSurface)
-                    ));
-                    this.frame_at(origin + Duration::from_millis(at), window, cx)
-                        .expect("later frame cannot retry the failed operation");
-                    let notice = this.chat_notice.shown().expect("notice remains retained");
-                    assert_eq!(notice.error.args(), &[ErrorArg::Count(2)]);
-                    assert_eq!(notice.error.actions(), &[Action::SignIn]);
-                    assert!(this.session.is_none());
-                    assert!(!this.presenter.holds_scenes());
-                    assert_eq!(this.scene_deadline, None);
-                    assert!(this.scene_timer.is_none());
-                });
-                assert_eq!(window.simulate_next_frame(cx), 0);
-            })
-            .expect("subsequent panel frame");
+        .expect("subsequent dock frame");
     }
     owner.update(cx, |this, cx| {
         assert!(this.frames.want(Instant::now()));

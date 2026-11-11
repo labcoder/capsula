@@ -2,11 +2,12 @@
 
 use std::time::Instant;
 
-use gpui_kit::Context;
 use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::{Context, Window};
 use kumochi_protocol::message::ControlToBrain;
 
-use super::Presence;
+use super::line::on_next_frame;
+use super::{EscapePanel, OpenError, Presence};
 use crate::presenter::{Broken, Completion, Effect, Measure};
 
 impl Presence {
@@ -18,6 +19,73 @@ impl Presence {
         if self.scene_effects_at(result, Instant::now(), cx) {
             self.want_frames(cx);
         }
+    }
+
+    /// Arms the drawing's frames on the dock's window, unless they're armed already. The dock
+    /// stays shown, but the status panel hides whenever the peek closes or the typing panel or
+    /// Settings is open, and Windows paints no hidden window: frames armed there would wait,
+    /// leaving a drawing at its first sample.
+    pub(super) fn want_frames(&mut self, cx: &mut Context<'_, Self>) {
+        if !self.frames.want(Instant::now()) {
+            return;
+        }
+        let owner = cx.weak_entity();
+        let armed = self
+            .dock_window
+            .update(cx, |_, window, _| on_next_frame(window, owner, Self::frame));
+        if let Err(error) = armed {
+            self.frames.idle();
+            tracing::warn!(%error, "can't animate the drawing");
+        }
+    }
+
+    /// One frame callback: the pacer first, so a skipped frame does no animation work.
+    fn frame(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if let Err(error) = self.frame_at(Instant::now(), window, cx) {
+            tracing::error!(%error, "scene frame update failed");
+        }
+    }
+
+    pub(super) fn frame_at(
+        &mut self,
+        now: Instant,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
+        let mut updated = Ok(());
+        let cap = self
+            .settings
+            .read(cx)
+            .view()
+            .map(|view| view.max_frame_rate)
+            .unwrap_or_default();
+        let wanted = if self
+            .frames
+            .frame(now, cap, window.refresh_interval(cx))
+            .is_none()
+        {
+            true
+        } else {
+            let scenes = self.draw_changed_at(now, cx);
+            let panel = if self.text_open() {
+                EscapePanel::Open
+            } else {
+                EscapePanel::Closed
+            };
+            let activity = Self::activity_at(&self.runs, panel, &self.presenter, now);
+            if self.activity.working != activity.working
+                || self.activity.drawing != activity.drawing
+            {
+                updated = self.runs_changed_in(None, now, cx);
+            }
+            scenes && updated.is_ok()
+        };
+        if wanted {
+            on_next_frame(window, cx.weak_entity(), Self::frame);
+        } else {
+            self.frames.idle();
+        }
+        updated
     }
 
     pub(super) fn scene_effects_at(

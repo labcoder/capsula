@@ -1685,8 +1685,9 @@ Presence advances ready heads before sampling. The consume transaction records t
 committer, and the charged returned guard drops before effect dispatch, even on a
 post-install pump error. Residency failure is terminal. Both numeric and Instant sampling
 use the same reserved frames; Outstanding cuts freeze each scene at its last sampled time.
-The shared frame loop supplies motion demand, and one existing watchdog tracks preparation,
-recovery and future scene wakes. Static rest has no polling timer or animation callback.
+The drawing's frame loop, on the dock's window, supplies motion demand, and one existing
+watchdog tracks preparation, recovery and future scene wakes. Static rest has no polling
+timer or animation callback.
 Advance, sample, demand and resting-wake selection share the same Instant, including
 nested effect dispatch. The frame callback retains that sampled demand until its rest
 decision, so a crossed endpoint or delayed appearance receives its catch-up sample even

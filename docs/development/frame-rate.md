@@ -70,33 +70,39 @@ the cap. They're short or occasional, so they're left until a profile shows them
 
 ## The drawing overlay
 
-The dock and drawing overlay are separate windows sharing Presence's one `FrameLoop` and
-pacer. Each accepted frame steps Kumo and samples scene views at their own absolute clocks;
-the pacer's capped delta never becomes a drawing's lifetime clock. Only changed samples
-invalidate the overlay. Either client can keep the loop alive, and it idles when neither
-wants motion. Unchanged frames do not refresh the conversation panels.
+Drawings and Kumo in the peek each have a `FrameLoop`, paced by the same cap. A drawing's
+frames come from the dock's window, which stays shown, and Kumo's from the peek's window.
+Windows sends a hidden window no `WM_PAINT`, so a frame callback armed on one waits until it's
+shown again. The status panel hides whenever the peek closes or the typing panel or Settings is
+open, so a drawing that took its frames from it stopped at its first sample (OSC-596). Kumo
+shades nothing while the peek is hidden, so its frames can wait there.
+
+Each accepted drawing frame samples scene views at their own absolute clocks; the pacer's
+capped delta never becomes a drawing's lifetime clock. Only changed samples invalidate the
+overlay. Each loop idles when its client wants no motion. Unchanged frames do not refresh the
+conversation panels.
 
 Advance, retained-frame sampling, scene motion demand and future-wake selection use one
-sampled Instant per owner update. The shared callback carries that sampled motion demand
+sampled Instant per owner update. The drawing's callback carries that sampled motion demand
 through its final rest decision. A wake already due when its task registers runs immediately
 to catch up the retained sample; a newer clock query cannot discard an unsampled boundary.
 The final pose is sampled before the loop rests.
 
 First visibility can require a fallback Stop when global Esc registration is refused. The
-callback passes its current panel Window through the ordinary activity/escape/placement
-path rather than reopening that held window's handle. Panel visibility commits only after
+drawing's callback holds the dock's window, so the ordinary activity/escape/placement path
+places the status panel through its own handle. Panel visibility commits only after
 placement/configuration succeeds. A refusal ends the current drawing connection, cancels
 preparation and scene wakes, disconnects its runs and empties the overlay through its existing
 finite hide path; the original error still reaches the caller. Esc and Stop flags follow that
 terminal activity without reattempting placement. The failed activity transition is not
-retried by animation frames. Only Kumo's independent demand can retain a callback after
-that failure. Run/conversation changes refresh the typing view separately from frame-only
+retried by animation frames: the drawing's loop rests, and Kumo's separate loop is
+unaffected. Run/conversation changes refresh the typing view separately from frame-only
 activity changes, so a retained actionable notice is not cloned on each frame. Selection and
 pull cancellation keep their existing precedence. No retry loop or per-frame defer is added.
 
 A future scene start or delayed entrance at rest uses the existing scene watchdog task,
 armed to the earliest preparation/recovery deadline or scene wake. While views animate,
-the shared frame callback advances them instead of adding a second timer loop. Every
+the drawing's frame callback advances them instead of adding a second timer loop. Every
 change recomputes demand; Stop, clear, disconnect and stale worker answers cannot restart
 halted motion. A resting static drawing asks for no more frames.
 

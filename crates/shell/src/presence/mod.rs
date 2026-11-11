@@ -156,8 +156,10 @@ struct Presence {
     /// Kumo in the peek.
     kumo: Entity<KumoView>,
     pull_dock: pull_dock::PullDock,
-    /// The one source of animation frames.
+    /// The drawing's frames, from the dock's window.
     frames: FrameLoop,
+    /// Kumo's frames, from the peek's window.
+    kumo_frames: FrameLoop,
     /// The drawing overlay's window, opened when a drawing first has something to paint.
     overlay: overlay_visibility::Visibility<overlay::Overlay>,
     /// Retries deletes the control queue had no room for.
@@ -986,6 +988,7 @@ pub(crate) fn open(
             kumo: kumo.clone(),
             pull_dock: pull_dock::PullDock::new(usize::try_from(mask[1]).unwrap_or(0)),
             frames: FrameLoop::default(),
+            kumo_frames: FrameLoop::default(),
             overlay: overlay_visibility::Visibility::Closed,
         }
     });
