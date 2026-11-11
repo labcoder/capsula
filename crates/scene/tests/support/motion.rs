@@ -6,12 +6,13 @@ fn capped_view(name: &str, count: usize, budget: &mut GlobalBudget) -> SceneView
     let enters = ["fade", "draw", "pop", "slide", "grow", "fly"];
     let mut scene = new_scene(name);
     let mut view = SceneView::new(&LayoutState::new(&scene), 0);
+    // A zero delay keeps each step's authored timing, so no default stagger spreads it out.
     activate(
         &mut scene,
         budget,
         &mut view,
         json!({"id":"groups","put":[
-            {"diagram":{"id":"g0","box":[0,0,260,300],"enter":"pop","dur":1000}},
+            {"diagram":{"id":"g0","box":[0,0,260,300],"enter":"pop","dur":1000,"delay":0}},
             {"diagram":{"id":"g1","in":"g0","box":[0,0,260,300],"enter":"grow","dur":1000}},
             {"diagram":{"id":"g2","in":"g1","box":[0,0,260,300],"dir":"down","enter":"slide","dur":1000}},
             {"node":{"id":"root","in":"g2","label":"Root","enter":"fly","dur":1000}},
@@ -27,7 +28,7 @@ fn capped_view(name: &str, count: usize, budget: &mut GlobalBudget) -> SceneView
         budget,
         view.layout(),
         json!({"id":"glide","put":[
-            {"node":{"id":"c","in":"g2","label":"C","enter":"fly","dur":1000}},
+            {"node":{"id":"c","in":"g2","label":"C","enter":"fly","dur":1000,"delay":0}},
             {"edge":{"id":"rc","in":"g2","from":"root","to":"c","flow":500,"enter":"draw","dur":1000}}
         ]}),
     );
@@ -40,7 +41,7 @@ fn capped_view(name: &str, count: usize, budget: &mut GlobalBudget) -> SceneView
             .map(|n| {
                 json!({"shape":{
                     "id":format!("s{n}"),"in":"g2","kind":"polygon","points":[[0,0],[8,0],[8,8],[0,8]],
-                    "enter":enters[n % enters.len()],"dur":1000
+                    "enter":enters[n % enters.len()],"dur":1000,"delay":0
                 }})
             })
             .collect();
@@ -108,6 +109,7 @@ pub(super) fn gliding_scene(
     let mut scene = new_scene(name);
     let mut view = SceneView::new(&LayoutState::new(&scene), 0);
     let groups = count / 2;
+    // A zero delay keeps each step's authored timing, so no default stagger spreads it out.
     for start in (0..groups).step_by(80) {
         let end = (start + 80).min(groups);
         let put: Vec<_> = (start..end)
@@ -119,7 +121,7 @@ pub(super) fn gliding_scene(
                 };
                 [
                     json!({"diagram":{"id":format!("g{index}"),"in":parent,"box":[0,0,1,1],
-                "enter":(["pop","grow","slide","fly"][index % 4]),"dur":1000}}),
+                "enter":(["pop","grow","slide","fly"][index % 4]),"dur":1000,"delay":0}}),
                     json!({"node":{"id":format!("n{index}"),"in":format!("g{index}"),"label":"Node",
                 "enter":(["fade","draw","pop","slide","grow","fly"][index % 6]),"dur":1000}}),
                 ]

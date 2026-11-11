@@ -882,6 +882,16 @@ impl SceneView {
             .min()
     }
 
+    /// When the last object this view's step put finishes entering, after parent gating and
+    /// clipped to the deadline, or `None` if it put none.
+    pub fn entrance_end(&self) -> Option<u64> {
+        self.nodes
+            .iter()
+            .filter(|node| node.fresh)
+            .map(|node| node.timing.end.min(self.deadline))
+            .max()
+    }
+
     /// What retiring this view may free: its own bytes plus its layout's cached geometry, which
     /// it may hold last. Counted per holder, from the cache, so retirement walks nothing.
     fn attributed_bytes(&self) -> usize {
@@ -1054,39 +1064,51 @@ fn paint_order(nodes: &[Node]) -> Vec<usize> {
     paint
 }
 
-/// Schedules every object this step puts: appear at its origin, then run its entrance.
+/// Schedules every object this step puts: appear at its origin plus its default pace, then run
+/// its entrance, a default one when it names none.
 fn births(
     step: &PreparedStep,
     origin: impl Fn(Option<u16>, Option<Ms>) -> u64,
 ) -> BTreeMap<Handle, Timing> {
-    let mut born = BTreeMap::new();
-    for op in &*step.run().put {
-        if let Some(visual) = object::visual(op)
-            && let Some(handle) = step.after.handle(visual.id)
-        {
-            let start = origin(at_word(op), visual.delay);
-            let enter = work::entrance(op).unwrap_or(Enter::None);
-            let dur = if enter == Enter::None {
-                0
-            } else {
-                visual.dur.map_or_else(|| default_duration(op), Ms::get)
-            };
+    let put: Vec<_> = step
+        .run()
+        .put
+        .iter()
+        .filter_map(|op| {
+            let visual = object::visual(op)?;
+            Some((op, step.after.handle(visual.id)?, visual))
+        })
+        .collect();
+    let authored: Vec<pace::Authored> = put
+        .iter()
+        .map(|(op, _, visual)| pace::Authored {
+            enter: work::entrance(op),
+            dur: visual.dur.map(Ms::get),
+            timed: visual.delay.is_some() || at_word(op).is_some(),
+            stroke: matches!(
+                visual.kind,
+                object::Kind::Line | object::Kind::Path | object::Kind::Edge | object::Kind::Series
+            ),
+            default_dur: default_duration(op),
+        })
+        .collect();
+    put.iter()
+        .zip(pace::pace(&authored))
+        .map(|((op, handle, visual), paced)| {
+            let start = origin(at_word(op), visual.delay).saturating_add(paced.offset);
             let flow = match op {
                 Op::Edge(edge) => edge.flow.map_or(0, Ms::get),
                 _ => 0,
             };
-            born.insert(
-                handle,
-                Timing {
-                    start,
-                    end: start.saturating_add(u64::from(dur)),
-                    enter,
-                    flow,
-                },
-            );
-        }
-    }
-    born
+            let timing = Timing {
+                start,
+                end: start.saturating_add(u64::from(paced.dur)),
+                enter: paced.enter,
+                flow,
+            };
+            (*handle, timing)
+        })
+        .collect()
 }
 
 /// The scene's prepared 3D view; a scene holds at most `MAX_VIEWS`, one.

@@ -4,14 +4,6 @@
 //! [`STEP_MS`] is compressed to fit. Pure rules over the step's objects in put order; activation
 //! turns them into each object's birth timing.
 
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "activation calls it in the wiring change, after the placement seam lands"
-    )
-)]
-
 use crate::record::Enter;
 
 /// How far through the previous object's entrance the next one starts: 60%.
