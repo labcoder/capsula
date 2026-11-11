@@ -1511,7 +1511,8 @@ fn write_data_frame(
 ) -> Result<(), FrameError> {
     let result = frame::encode_into(message, Pipe::Data, encoded)
         .and_then(|()| writer.write_all(encoded).map_err(FrameError::from));
-    encoded.zeroize();
+    encoded.as_mut_slice().zeroize();
+    encoded.clear();
     result
 }
 

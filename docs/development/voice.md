@@ -888,7 +888,10 @@ only unconfirmed source cleanup uses the microphone-active restart warning.
 When a late receipt confirms cleanup, its confirmed notice replaces that warning without
 reviving the terminal hold or transcribing its expired audio.
 
-The Shell data writer serializes into one caller-owned zeroizing buffer and scrubs its
-owned capacity after success, encoding refusal or a partial/failed write. Frame headers,
-payload caps, packet drop and credit ordering are unchanged. This does not erase bytes
+The Shell data writer serializes into one caller-owned zeroizing buffer and scrubs all
+bytes written into it after success, encoding refusal or a partial/failed write, then clears
+its length. Earlier frames' written bytes are already scrubbed; each frame's cleanup is
+proportional to that frame, not the retained capacity. Writer exit or unwinding scrubs the
+whole owned capacity. Frame headers, payload caps, packet drop and credit ordering are unchanged.
+This does not erase bytes
 already written to the pipe, allocator/OS copies or native speech-runtime storage.
