@@ -68,7 +68,7 @@ async fn a_failed_load_request_cannot_delete_or_reinstall_until_its_worker_exit_
     .expect("owner starts");
     let (mut installer, effects) = Installer::start(
         [Durable::Installed, Durable::Absent],
-        [true; 2],
+        [true; 2].map(Ok),
         [true; 2],
         &[],
     );

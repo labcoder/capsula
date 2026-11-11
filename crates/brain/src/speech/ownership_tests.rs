@@ -40,7 +40,7 @@ async fn late_valid_owner(cut: Cut) {
                 .expect("actual adapter starts");
         let (mut installer, effects) = Installer::start(
             [Durable::Installed, Durable::Absent],
-            [true; 2],
+            [true; 2].map(Ok),
             [true; 2],
             &[],
         );
@@ -248,7 +248,7 @@ async fn invalid_load_terminals_cause_real_retirement_and_one_delete_only_after_
             .expect("owner starts");
             let (mut installer, _) = Installer::start(
                 [Durable::Installed, Durable::Absent],
-                [true; 2],
+                [true; 2].map(Ok),
                 [true; 2],
                 &[],
             );
