@@ -42,6 +42,8 @@ pub(super) enum Mode {
     Animated,
     Capped,
     Hide,
+    /// Four copies of the animated picture, each item with its own paint cache, capped at 144.
+    FullRate,
 }
 
 /// A rounded bordered card with a label, a rounded rect the fixture turns, a translucent
@@ -68,7 +70,7 @@ pub(super) fn resting(
     };
     let step = match mode {
         Mode::Capped => crate::presenter::tests::cap_measurements::drawing(0, 40),
-        Mode::Dry | Mode::Rest | Mode::Animated | Mode::Hide => {
+        Mode::Dry | Mode::Rest | Mode::Animated | Mode::Hide | Mode::FullRate => {
             let Ok(Record::Step(step)) = parse_record(STEP.as_bytes()) else {
                 panic!("a step record");
             };
@@ -136,6 +138,7 @@ struct Picture {
 struct Probe {
     picture: Rc<RefCell<Picture>>,
     frames: FrameLoop,
+    rate: MaxFrameRate,
 }
 
 impl Probe {
@@ -144,7 +147,7 @@ impl Probe {
         let refresh = window.refresh_interval(cx);
         if self
             .frames
-            .frame(Instant::now(), MaxFrameRate::AUTOMATIC, refresh)
+            .frame(Instant::now(), self.rate, refresh)
             .is_some()
         {
             cx.notify();
@@ -220,11 +223,16 @@ impl Render for Probe {
     reason = "one bounded native probe and its content-free samples"
 )]
 fn run(mode: Mode) {
-    let animated = matches!(mode, Mode::Animated | Mode::Capped);
+    let animated = matches!(mode, Mode::Animated | Mode::Capped | Mode::FullRate);
     let lifetime = match mode {
         Mode::Dry => Duration::from_secs(5),
         Mode::Hide => Duration::from_secs(7),
-        Mode::Rest | Mode::Animated | Mode::Capped => LIFETIME,
+        Mode::Rest | Mode::Animated | Mode::Capped | Mode::FullRate => LIFETIME,
+    };
+    let rate = if matches!(mode, Mode::FullRate) {
+        MaxFrameRate::cap(144).expect("144 is a frame rate cap")
+    } else {
+        MaxFrameRate::AUTOMATIC
     };
     let timeout = std::thread::spawn(|| {
         std::thread::sleep(Duration::from_secs(120));
@@ -254,7 +262,18 @@ fn run(mode: Mode) {
                 cx.theme().font_family.clone(),
             );
             let logical = [f32::from(display.width), f32::from(display.height)];
-            let (items, work) = resting(&mut measure, logical, mode);
+            let (mut items, work) = resting(&mut measure, logical, mode);
+            if matches!(mode, Mode::FullRate) {
+                let one = std::mem::take(&mut items);
+                for offset in [(0.0, 0.0), (1100.0, 0.0), (0.0, 520.0), (1100.0, 520.0)] {
+                    items.extend(one.iter().map(|(item, prims)| {
+                        let mut item = item.clone();
+                        let offset = Vec2::new(offset.0, offset.1);
+                        item.transform = Affine::pose(1.0, 0.0, offset).compose(item.transform);
+                        (item, Arc::clone(prims))
+                    }));
+                }
+            }
             println!(
                 "overlay_fixture items={} dash={} fill={} outline={}",
                 items.len(),
@@ -276,6 +295,7 @@ fn run(mode: Mode) {
                 cx.new(|_| Probe {
                     picture: shared,
                     frames: FrameLoop::default(),
+                    rate,
                 })
             })
             .expect("fixture window");
@@ -361,7 +381,7 @@ fn run(mode: Mode) {
     }
     assert_eq!(between(END + 1.0, f32::MAX), 0, "no frames after motion");
     println!(
-        "diagnostic-only animated painter fixture={animated} fixed_seconds={} max_frame_rate=automatic backdrop=opaque_dark_theme_background; no conductor, activation, StepShown, connection, RSS or presentation claim",
+        "diagnostic-only animated painter fixture={animated} fixed_seconds={} max_frame_rate={rate:?} backdrop=opaque_dark_theme_background; no conductor, activation, StepShown, connection, RSS or presentation claim",
         lifetime.as_secs()
     );
 }
@@ -449,4 +469,10 @@ fn measure_primary_overlay_at_rest() {
 #[ignore = "manual quiet-Rez fixed 60 s diagnostic-only animated painter fixture, no input"]
 fn measure_primary_overlay_animated() {
     run(Mode::Animated);
+}
+
+#[test]
+#[ignore = "manual quiet-Rez fixed 60 s animated painter fixture, four copies at a 144 cap, no input"]
+fn measure_primary_overlay_animated_four_at_full_rate() {
+    run(Mode::FullRate);
 }
