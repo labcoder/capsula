@@ -103,7 +103,9 @@ The full Apache-2.0 license is included at `vendor/gpui-pre-windows/LICENSE-APAC
 - License: MIT OR Apache-2.0. Both full license texts are retained in `vendor/ptts/`.
 - Changes: `src/synth.rs` uses fallible stream-worker creation and the existing stream
   cleanup to close and join a partially started pipeline. Focused startup regressions are
-  included there. No model weights or native audio runtime are vendored.
+  included there. An empty workspace boundary supports standalone package tests, using the
+  unchanged `Cargo.lock` from the published package. No model weights or native audio runtime
+  are vendored.
 
 ## Voice models (downloaded on request, not in the repo)
 

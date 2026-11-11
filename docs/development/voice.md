@@ -348,6 +348,22 @@ is a conflict: the task checks every destination before it links anything, and i
 links nothing, changes nothing and names the file, to be moved aside by hand. If a link fails
 partway, the links that run made are removed. Run it again after `cargo clean`.
 
+### Vendored worker-startup tests
+
+The vendored `ptts` package is not a product workspace member. Run its focused library
+regressions through its own manifest, with its declared development dependencies intact:
+
+```text
+cargo test --locked --offline --manifest-path vendor/ptts/Cargo.toml --lib worker_startup
+```
+
+Its empty workspace boundary selects `vendor/ptts/Cargo.lock`, restored unchanged from the
+published 0.6.0 package. Populate the locked dependency sources and registry metadata before
+running offline; `clap` and its derive dependencies are required even for this library filter.
+These tests use no models or audio. This standalone lock is upstream's snapshot, not the
+product lock, so its results do not replace validation of the brain's production dependency
+graph. Keep test artifacts in a separate target directory.
+
 ## Speech input
 
 `platform::sherpa` runs Parakeet through sherpa-onnx's C API, loaded at run time. Everything it
