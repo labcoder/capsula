@@ -683,6 +683,102 @@ fn recorded_desk_draws_without_a_version_draw_their_steps() {
 }
 
 #[test]
+fn the_recorded_water_cycle_draws_without_a_diagram_container() {
+    struct Measure;
+    impl kumochi_scene::display::TextMeasure for Measure {
+        fn measure(
+            &mut self,
+            _: &str,
+            _: kumochi_scene::display::TextStyle,
+            _: Option<f32>,
+        ) -> Result<[f32; 2], kumochi_scene::display::MeasureError> {
+            Ok([80.0, 20.0])
+        }
+    }
+    let args = include_str!("../../fixtures/responses/draw_water_cycle.json");
+    let scratch = Scratch::new("water-cycle");
+    let mut store = store(&scratch);
+    let mut core = offered(vec![T]);
+    start(&mut core, "water-cycle");
+    let mut streamed = Vec::new();
+    let chars: Vec<char> = args.chars().collect();
+    for chunk in chars.chunks(48) {
+        streamed.extend(delta(
+            &mut core,
+            "water-cycle",
+            &chunk.iter().collect::<String>(),
+        ));
+    }
+    streamed.extend(ready(&mut core, "water-cycle", args));
+    let mut effects = drain(&mut core, &mut store, streamed);
+    effects.extend(send(&mut core, TurnEvent::Finished(Finish::Completed)));
+    assert_eq!(
+        result(&effects).output,
+        ToolOutput::Text("drawn: [cycle]".into())
+    );
+    assert_eq!(ends(&effects), [true]);
+    assert_prefix(&store, &["cycle"]);
+    let recovery = store.drawing_scenes().expect("stored scene");
+    let stored = &recovery.scenes[0];
+    let (state, layout) = kumochi_scene::layout::recover(
+        stored.header.begin.clone(),
+        &stored.log,
+        kumochi_scene::layout::SurfaceGeometry::default(),
+        &std::sync::Arc::new(kumochi_scene::theme::Theme::default()),
+        &mut Measure,
+        &std::sync::atomic::AtomicBool::new(false),
+        None,
+    )
+    .expect("stored authored records replay and prepare");
+    assert_eq!(state.object_count(), 8);
+    assert_eq!(layout.items().len(), 8);
+    assert!(
+        layout
+            .items()
+            .iter()
+            .all(|item| !item.primitives.is_empty())
+    );
+    let kumochi_scene::SceneEvent::Step { step, .. } = &stored.log[0] else {
+        panic!("step")
+    };
+    for op in step.put.iter() {
+        match op {
+            kumochi_scene::Op::Node(node) => assert_eq!(node.parent, None),
+            kumochi_scene::Op::Edge(edge) => assert_eq!(edge.parent, None),
+            _ => panic!("recorded node or edge"),
+        }
+    }
+}
+
+#[test]
+fn the_prompt_example_draws_two_steps_without_promising_an_overlay_canvas() {
+    let prompt = include_str!("../../prompts/draw.md");
+    assert!(
+        !prompt.contains("the size is its drawing canvas"),
+        "overlay size comes from the host"
+    );
+    let (_, example) = prompt.split_once("```json").expect("worked JSON example");
+    let (args, _) = example.split_once("```").expect("closed example");
+    let args = args.trim();
+    let envelope: Value = serde_json::from_str(args).expect("example JSON");
+    assert_eq!(envelope["records"][0]["begin"]["size"], json!([600, 360]));
+    let scratch = Scratch::new("prompt-example");
+    let mut store = store(&scratch);
+    let mut core = offered(vec![T]);
+    start(&mut core, "prompt-example");
+    let mut streamed = delta(&mut core, "prompt-example", args);
+    streamed.extend(ready(&mut core, "prompt-example", args));
+    let mut effects = drain(&mut core, &mut store, streamed);
+    effects.extend(send(&mut core, TurnEvent::Finished(Finish::Completed)));
+    assert_eq!(
+        result(&effects).output.json()["text"],
+        "drawn: [cycle, heat]"
+    );
+    assert_eq!(ends(&effects), [true]);
+    assert_prefix(&store, &["cycle", "heat"]);
+}
+
+#[test]
 fn a_refused_draw_logs_one_warning_with_only_its_code_and_field() {
     let logs = crate::test_support::Captured::default();
     let _logging = logs.install();

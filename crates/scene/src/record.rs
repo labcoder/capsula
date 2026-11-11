@@ -638,7 +638,7 @@ pub struct Diagram {
 pub struct Node {
     /// id.
     pub id: WireId,
-    /// parent.
+    /// Diagram id; omit for the scene root, which lays out its nodes as one diagram.
     #[serde(rename = "in")]
     pub parent: Option<WireId>,
     /// Delay after activation, in milliseconds.
@@ -667,7 +667,7 @@ pub struct Node {
 pub struct Edge {
     /// id.
     pub id: WireId,
-    /// parent.
+    /// Diagram id; omit to derive the endpoints' nearest common diagram, or the scene root.
     #[serde(rename = "in")]
     pub parent: Option<WireId>,
     /// Delay after activation, in milliseconds.
@@ -732,7 +732,7 @@ pub struct Table {
 pub struct Row {
     /// id.
     pub id: WireId,
-    /// parent.
+    /// Required table id; the table defines this row's columns.
     #[serde(rename = "in")]
     pub parent: Option<WireId>,
     /// Delay after activation, in milliseconds.
@@ -828,7 +828,7 @@ pub struct Chart {
 pub struct Series {
     /// id.
     pub id: WireId,
-    /// parent.
+    /// Required chart id; the chart defines this series' axes.
     #[serde(rename = "in")]
     pub parent: Option<WireId>,
     /// Delay after activation, in milliseconds.
@@ -877,7 +877,7 @@ pub struct Anim {
 #[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Mermaid {
-    /// parent.
+    /// Required diagram id containing the compiled flowchart.
     #[serde(rename = "in")]
     pub parent: WireId,
     /// src.

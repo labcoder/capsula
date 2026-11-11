@@ -43,10 +43,12 @@ tagged, for example:
 {"end":{}}
 ```
 
-The version, scene id, surface and alternative text are required. The draw tool is the one
-exception for the version: its schema leaves `v` optional and `parse_draw_record` supplies
-`"v":1` when a begin omits it, because 1 is the only version. Any other version is still
-refused, and stored and generic records keep an explicit `v`. Steps have a
+The version, scene id, surface and alternative text are required in generic records.
+The draw tool leaves `v` and `surface` optional: `parse_draw_record` supplies `"v":1`
+and `"surface":"overlay"` only when omitted, since these are its only supported values.
+Explicit invalid values are still refused; stored headers keep both fields explicit. A
+strict, single-begin envelope check runs before defaulting, so an early missing header field
+cannot hide duplicate outer keys during the JSON value round-trip. Steps have a
 required id, optional `say`, empty-by-default `put`, `set` and `remove` lists, and
 `start` defaulting to `"speech"`. `put` is bounded to 856 operations (600 objects
 plus 256 tracks); `set` and `remove` each allow at most 600 entries. Other starts are `"now"` and
@@ -541,13 +543,28 @@ A header-only chart is accepted and costs its one empty boxless root; it draws n
 An explicitly blank node label, quoted or unquoted, stays empty rather than falling
 back to its id. The node still occupies its normal shape and counts against the budget.
 
+Nodes without `in` belong to the scene root, which lays them out as one diagram.
+Edges without `in` take their endpoints' nearest common diagram, or the scene root
+when there is no common diagram. Admission resolves this after Mermaid expansion,
+using existing objects and every new endpoint regardless of put order; explicit
+parents must still match. Both compiled operations and object metadata use the
+resolved parent. New root node or edge growth checks the entire root group against
+the same 48-node and 96-edge caps as an explicit diagram, including continued scenes
+and pending versions. Stop can detach already admitted survivors from several
+containers into a larger root group; these remain chargeable, replayable and editable
+without new root growth. Further root growth still checks the whole group against
+both diagram caps. Detached rows and series do not acquire a new root container cap.
+Rows, series and Mermaid
+still require their table, chart and diagram parents respectively. Root fitting and
+placement do not change.
+
 The original `Step` remains authoritative for duplicate identity, `SceneState::step`,
 `PreparedStep::step` and recovery. A private executable step and slot-origin map drive
 admission, preparation and motion. Syntax errors name the original
 `put[i].mermaid.src`; generated-slot errors map there too, while root-target errors
 name `.mermaid.in` and shifted plain-operation errors retain their original indices.
 Whole-scene budget failures can still name the root. Replaying original records
-recompiles the same handles and private drawing facts without a wire-format change.
+recompiles the same handles, derived parents and private drawing facts without a wire-format change.
 
 Private group titles, reversed direction and link paint travel beside the executable
 step, not in new wire fields. A title is text on its group's own handle, so it is

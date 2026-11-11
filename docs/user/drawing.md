@@ -8,6 +8,10 @@ When Kumochi draws a 2D diagram, each step appears on screen once it is prepared
 that were on screen come back after Kumochi reconnects. If you stop a drawing, the parts that
 had already finished appearing stay on screen.
 
+Simple node-and-arrow diagrams do not need a separate container: their nodes belong to
+the scene itself, and each arrow follows the diagram shared by its endpoints. These
+diagrams have the same 48-node and 96-arrow limits as explicitly grouped diagrams.
+
 Drawings appear on the main display, over your other windows. They never take focus or catch
 clicks, so the app underneath keeps working. While one is on screen, Esc clears it
 (see [Esc](escape.md)). Any part of a drawing past the edges of the main display is cut off;

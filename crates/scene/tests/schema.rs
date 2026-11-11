@@ -61,6 +61,7 @@ fn every_two_dimensional_operation_and_mixed_form_fits_the_schema() {
         &json!({"begin": {"scene": "scene", "surface": "overlay", "alt": ""}})
     ));
     assert!(valid(&json!({"end": {}})));
+    assert!(valid(&json!({"begin": {"scene":"root", "alt":"diagram"}})));
     assert!(valid(
         &json!({"step": {"id": "s", "set": [{"target": "n", "text": "renamed", "color": "green"}], "remove": ["old"]}})
     ));

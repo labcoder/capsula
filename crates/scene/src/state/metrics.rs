@@ -11,7 +11,7 @@ use crate::{
         MAX_GLOBAL_DASH_PIECES, MAX_KEYS, MAX_LIVE_OBJECTS, MAX_MOVING_TRIANGLES, MAX_OBJECT_DEPTH,
         MAX_SOLIDS, MAX_TABLE_ROWS, MAX_TRACKS, MAX_TRIANGLES, MAX_VIEWS,
     },
-    record::{ChartKind, Point},
+    record::{ChartKind, Op, Point},
 };
 use std::collections::BTreeMap;
 
@@ -252,6 +252,7 @@ pub(super) fn freeze_detached(
 
 pub(super) fn charge<'a>(
     versions: impl IntoIterator<Item = (&'a WireId, &'a Object)>,
+    growth: Option<&Step>,
 ) -> Result<Usage, ErrorCode> {
     let mut objects = BTreeMap::<&WireId, Vec<&Object>>::new();
     for (id, object) in versions {
@@ -298,21 +299,7 @@ pub(super) fn charge<'a>(
             _ => {}
         }
     }
-    for (parent, counts) in &groups {
-        if parent.is_none() {
-            continue;
-        }
-        for (count, cap, budget) in [
-            (counts[0], MAX_DIAGRAM_NODES, Budget::DiagramNodes),
-            (counts[1], MAX_DIAGRAM_EDGES, Budget::DiagramEdges),
-            (counts[2], MAX_TABLE_ROWS, Budget::TableCells),
-            (counts[3], MAX_CHART_SERIES, Budget::ChartMarks),
-        ] {
-            if count > cap {
-                return Err(ErrorCode::OverBudget(budget));
-            }
-        }
-    }
+    check_groups(groups, growth)?;
     for (actual, cap, budget) in [
         (usage.views, MAX_VIEWS, Budget::Views),
         (usage.solids, MAX_SOLIDS, Budget::Solids),
@@ -335,6 +322,40 @@ pub(super) fn charge<'a>(
         return Err(ErrorCode::OverBudget(Budget::Keys));
     }
     Ok(usage)
+}
+
+fn check_groups(
+    groups: BTreeMap<Option<&WireId>, [usize; 4]>,
+    growth: Option<&Step>,
+) -> Result<(), ErrorCode> {
+    let root_growth = growth.is_some_and(|step| {
+        step.put.iter().any(|op| {
+            matches!(op, Op::Node(node) if node.parent.is_none())
+                || matches!(op, Op::Edge(edge) if edge.parent.is_none())
+        })
+    });
+    for (parent, counts) in groups {
+        let caps = [
+            (counts[0], MAX_DIAGRAM_NODES, Budget::DiagramNodes),
+            (counts[1], MAX_DIAGRAM_EDGES, Budget::DiagramEdges),
+            (counts[2], MAX_TABLE_ROWS, Budget::TableCells),
+            (counts[3], MAX_CHART_SERIES, Budget::ChartMarks),
+        ];
+        let caps = if parent.is_none() {
+            if !root_growth {
+                continue;
+            }
+            &caps[..2]
+        } else {
+            &caps[..]
+        };
+        for &(count, cap, budget) in caps {
+            if count > cap {
+                return Err(ErrorCode::OverBudget(budget));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn point(point: &Point, index: usize) -> [f64; 2] {

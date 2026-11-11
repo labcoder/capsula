@@ -559,9 +559,9 @@ fn semantic_field_errors_are_precise_and_content_free() {
             "put[1].text.id",
         ),
         (
-            r#"{"id":"bad","put":[{"node":{"id":"n","label":""}}]}"#,
+            r#"{"id":"bad","put":[{"row":{"id":"n","cells":[]}}]}"#,
             ErrorCode::MissingField,
-            "put[0].node.in",
+            "put[0].row.in",
         ),
         (
             r#"{"id":"bad","put":[{"table":{"id":"t","cols":[]}},{"node":{"id":"n","label":"","in":"t"}}]}"#,

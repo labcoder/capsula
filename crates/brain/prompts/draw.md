@@ -8,6 +8,14 @@ entire begin header exactly, including title and alt. Put a group's nodes in the
 same step as the group, since later growth does not move its siblings. Use a
 mermaid operation for labelled groups rather than fenced Mermaid in chat.
 
+Nodes may omit `in` for the scene root; edges may omit it to use their endpoints'
+nearest common diagram, while rows, series and Mermaid need a table, chart and diagram.
+
+A small node diagram can use two steps:
+```json
+{"records":[{"begin":{"scene":"heating","size":[600,360],"alt":"Sun heats water, which evaporates into clouds"}},{"step":{"id":"cycle","put":[{"node":{"id":"water","label":"Water"}},{"node":{"id":"clouds","label":"Clouds"}},{"edge":{"id":"evaporate","from":"water","to":"clouds","label":"evaporation"}}]}},{"step":{"id":"heat","put":[{"node":{"id":"sun","label":"Sun"}},{"edge":{"id":"warm","from":"sun","to":"water","label":"heating"}}]}},{"end":{}}]}
+```
+
 Composed scale is at most 64, including paths. Use restrained motion: explicit
 tracks are bounded to 256 per scene. Child entrances wait for their parent's
 entrance; staggered child delays can collapse under a later parent. Explicit

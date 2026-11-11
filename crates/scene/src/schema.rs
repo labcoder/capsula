@@ -22,13 +22,13 @@ struct Envelope {
     records: Bounded<Record, { MAX_STEPS + 2 }>,
 }
 
-/// JSON Schema for a complete 2D draw envelope, using scene's JSON field forms. A begin's `v`
-/// is optional here because the draw tool supplies the only version.
+/// JSON Schema for a complete 2D draw envelope, using scene's JSON field forms.
+/// A begin's version and surface are optional because the draw tool supplies its only values.
 #[must_use]
 pub fn draw_schema() -> serde_json::Value {
     let mut schema = schemars::schema_for!(Envelope).to_value();
     if let Some(required) = schema["$defs"]["Begin"]["required"].as_array_mut() {
-        required.retain(|field| field != "v");
+        required.retain(|field| field != "v" && field != "surface");
     }
     schema
 }

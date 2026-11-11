@@ -104,6 +104,94 @@ fn the_draw_tool_supplies_the_only_version_when_a_begin_omits_it() {
 }
 
 #[test]
+fn the_draw_tool_defaults_only_omitted_begin_surface_and_version() {
+    let explicit = parse_record(br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":"a"}}"#)
+        .expect("explicit header");
+    for json in [
+        r#"{"begin":{"scene":"s","alt":"a"}}"#,
+        r#"{"begin":{"v":1,"scene":"s","alt":"a"}}"#,
+    ] {
+        assert_eq!(
+            parse_draw_record(json.as_bytes()).expect("draw defaults"),
+            explicit
+        );
+        assert_eq!(
+            parse_record(json.as_bytes())
+                .expect_err("generic parsing stays strict")
+                .code,
+            ErrorCode::MissingField
+        );
+    }
+    for (json, path, code) in [
+        (r#"{"begin":{"scene":"s"}}"#, "alt", ErrorCode::MissingField),
+        (
+            r#"{"begin":{"v":2,"scene":"s","alt":"a"}}"#,
+            "v",
+            ErrorCode::WrongVersion,
+        ),
+        (
+            r#"{"begin":{"scene":"s","surface":"inline","alt":"a"}}"#,
+            "surface",
+            ErrorCode::Unsupported,
+        ),
+        (
+            r#"{"begin":{"v":1,"scene":"s","surface":"inline","alt":"a"}}"#,
+            "surface",
+            ErrorCode::Unsupported,
+        ),
+    ] {
+        let error =
+            parse_draw_record(json.as_bytes()).expect_err("no content or explicit override");
+        assert_eq!((error.path.as_str(), error.code), (path, code));
+    }
+    for (json, path, code) in [
+        (
+            r#"{"begin":{"scene":"s","surface":null,"alt":"a"}}"#,
+            "surface",
+            ErrorCode::Malformed,
+        ),
+        (
+            r#"{"begin":{"scene":"s","surface":"bad","alt":"a"}}"#,
+            "surface",
+            ErrorCode::OutOfRange,
+        ),
+        (
+            r#"{"begin":{"v":null,"scene":"s","alt":"a"}}"#,
+            "v",
+            ErrorCode::Malformed,
+        ),
+        (
+            r#"{"begin":{"v":1,"scene":"s","alt":"a","alt":"b"}}"#,
+            "",
+            ErrorCode::DuplicateKey,
+        ),
+        (
+            r#"{"begin":{"v":1,"scene":"s","alt":"a"}"#,
+            "",
+            ErrorCode::Malformed,
+        ),
+    ] {
+        let error = parse_draw_record(json.as_bytes()).expect_err("invalid header");
+        assert_eq!((error.path.as_str(), error.code), (path, code), "{json}");
+    }
+}
+
+#[test]
+fn draw_defaults_reject_duplicate_outer_begins_instead_of_picking_the_last() {
+    for json in [
+        r#"{"begin":{"v":1,"scene":"first","alt":"a"},"begin":{"v":1,"scene":"second","surface":"overlay","alt":"b"}}"#,
+        r#"{"begin":{"scene":"first","surface":"overlay","alt":"a"},"begin":{"v":1,"scene":"second","surface":"overlay","alt":"b"}}"#,
+        r#"{"begin":{"scene":"first","alt":"a"},"begin":{"v":1,"scene":"second","surface":"overlay","alt":"b"}}"#,
+    ] {
+        let error = parse_draw_record(json.as_bytes()).expect_err("duplicate outer begin");
+        assert_eq!(
+            (error.code, error.path.as_str()),
+            (ErrorCode::DuplicateKey, "")
+        );
+    }
+}
+
+#[test]
 fn text_and_list_boundaries_are_not_truncated() {
     let accepted = Text::try_from("é".repeat(400));
     assert!(accepted.is_ok(), "400 Unicode scalars are legal");
