@@ -144,16 +144,49 @@ fn the_draw_tool_defaults_only_omitted_begin_surface_and_version() {
             parse_draw_record(json.as_bytes()).expect_err("no content or explicit override");
         assert_eq!((error.path.as_str(), error.code), (path, code));
     }
-    for json in [
-        r#"{"begin":{"scene":"s","surface":null,"alt":"a"}}"#,
-        r#"{"begin":{"scene":"s","surface":"bad","alt":"a"}}"#,
-        r#"{"begin":{"v":null,"scene":"s","alt":"a"}}"#,
-        r#"{"begin":{"v":1,"scene":"s","alt":"a","alt":"b"}}"#,
-        r#"{"begin":{"v":1,"scene":"s","alt":"a"}"#,
+    for (json, path, code) in [
+        (
+            r#"{"begin":{"scene":"s","surface":null,"alt":"a"}}"#,
+            "surface",
+            ErrorCode::Malformed,
+        ),
+        (
+            r#"{"begin":{"scene":"s","surface":"bad","alt":"a"}}"#,
+            "surface",
+            ErrorCode::OutOfRange,
+        ),
+        (
+            r#"{"begin":{"v":null,"scene":"s","alt":"a"}}"#,
+            "v",
+            ErrorCode::Malformed,
+        ),
+        (
+            r#"{"begin":{"v":1,"scene":"s","alt":"a","alt":"b"}}"#,
+            "",
+            ErrorCode::DuplicateKey,
+        ),
+        (
+            r#"{"begin":{"v":1,"scene":"s","alt":"a"}"#,
+            "",
+            ErrorCode::Malformed,
+        ),
     ] {
-        assert!(
-            parse_draw_record(json.as_bytes()).is_err(),
-            "invalid input: {json}"
+        let error = parse_draw_record(json.as_bytes()).expect_err("invalid header");
+        assert_eq!((error.path.as_str(), error.code), (path, code), "{json}");
+    }
+}
+
+#[test]
+fn draw_defaults_reject_duplicate_outer_begins_instead_of_picking_the_last() {
+    for json in [
+        r#"{"begin":{"v":1,"scene":"first","alt":"a"},"begin":{"v":1,"scene":"second","surface":"overlay","alt":"b"}}"#,
+        r#"{"begin":{"scene":"first","surface":"overlay","alt":"a"},"begin":{"v":1,"scene":"second","surface":"overlay","alt":"b"}}"#,
+        r#"{"begin":{"scene":"first","alt":"a"},"begin":{"v":1,"scene":"second","surface":"overlay","alt":"b"}}"#,
+    ] {
+        let error = parse_draw_record(json.as_bytes()).expect_err("duplicate outer begin");
+        assert_eq!(
+            (error.code, error.path.as_str()),
+            (ErrorCode::DuplicateKey, "")
         );
     }
 }

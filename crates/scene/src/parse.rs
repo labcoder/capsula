@@ -15,7 +15,7 @@ pub fn parse_draw_record(bytes: &[u8]) -> Result<Record, StepError> {
             if error.code == ErrorCode::MissingField
                 && matches!(error.path.as_str(), "v" | "surface") =>
         {
-            parse_record(&draw_defaults(bytes).ok_or(error)?)?
+            parse_record(&draw_defaults(bytes)?)?
         }
         record => record?,
     };
@@ -49,20 +49,33 @@ pub fn parse_draw_record(bytes: &[u8]) -> Result<Record, StepError> {
 }
 
 /// The draw tool supplies its only version and surface when a model's begin omits them.
-fn draw_defaults(bytes: &[u8]) -> Option<Vec<u8>> {
-    let mut record: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    let begin = record.get_mut("begin")?.as_object_mut()?;
+fn draw_defaults(bytes: &[u8]) -> Result<Vec<u8>, StepError> {
+    let mut record: DrawBeginEnvelope = decode(bytes)?;
+    let begin = record
+        .begin
+        .as_object_mut()
+        .ok_or_else(|| StepError::new(ErrorCode::Malformed))?;
     begin
         .entry("v")
         .or_insert_with(|| u32::from(Version::V1).into());
     begin.entry("surface").or_insert_with(|| "overlay".into());
-    serde_json::to_vec(&record).ok()
+    serde_json::to_vec(&record).map_err(|_| StepError::new(ErrorCode::Malformed))
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct DrawBeginEnvelope {
+    begin: serde_json::Value,
 }
 
 /// Parses one closed record, never echoing drawing content in diagnostics.
 /// # Errors
 /// Returns a bounded path and code for invalid syntax, fields or values.
 pub fn parse_record(bytes: &[u8]) -> Result<Record, StepError> {
+    decode(bytes)
+}
+
+fn decode<'de, T: serde::Deserialize<'de>>(bytes: &'de [u8]) -> Result<T, StepError> {
     if bytes.len() > MAX_RECORD_BYTES {
         return Err(StepError::new(ErrorCode::TooLong));
     }

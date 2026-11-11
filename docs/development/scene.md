@@ -46,7 +46,9 @@ tagged, for example:
 The version, scene id, surface and alternative text are required in generic records.
 The draw tool leaves `v` and `surface` optional: `parse_draw_record` supplies `"v":1`
 and `"surface":"overlay"` only when omitted, since these are its only supported values.
-Explicit invalid values are still refused; stored headers keep both fields explicit. Steps have a
+Explicit invalid values are still refused; stored headers keep both fields explicit. A
+strict, single-begin envelope check runs before defaulting, so an early missing header field
+cannot hide duplicate outer keys during the JSON value round-trip. Steps have a
 required id, optional `say`, empty-by-default `put`, `set` and `remove` lists, and
 `start` defaulting to `"speech"`. `put` is bounded to 856 operations (600 objects
 plus 256 tracks); `set` and `remove` each allow at most 600 entries. Other starts are `"now"` and
