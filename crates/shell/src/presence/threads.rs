@@ -76,6 +76,7 @@ impl Presence {
     }
 
     pub(super) fn select_thread(&mut self, thread: Option<ThreadId>, cx: &mut Context<'_, Self>) {
+        self.cancel_voice(cx);
         self.threads.update(cx, |state, cx| {
             state.select(thread);
             cx.notify();
@@ -84,6 +85,7 @@ impl Presence {
     }
 
     pub(super) fn switch_thread(&mut self, row: &ThreadRow, cx: &mut Context<'_, Self>) {
+        self.cancel_voice(cx);
         if self.runs.select_row(row) {
             self.select_thread(Some(row.id), cx);
             self.refresh_conversation(cx);
@@ -91,6 +93,7 @@ impl Presence {
     }
 
     pub(super) fn back_to_kumo(&mut self, cx: &mut Context<'_, Self>) {
+        self.cancel_voice(cx);
         self.runs.back_to_kumo();
         let main = self
             .threads
@@ -103,6 +106,7 @@ impl Presence {
     }
 
     pub(super) fn new_thread(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        self.cancel_voice(cx);
         if !self.runs.select_thread(None) {
             return Ok(());
         }

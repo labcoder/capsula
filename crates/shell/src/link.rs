@@ -7,6 +7,7 @@
 //! Connecting starts the brain when no brain pipe answers, authenticates with the capability
 //! from Credential Manager, and checks that the pipe's server is the brain beside the shell.
 
+use std::fmt;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -20,13 +21,17 @@ use kumochi_protocol::constants::BRAIN_EXE;
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
     AccountView, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain, DataToShell,
-    Deleted, GitHubView, Hello, Incarnation, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase, RunId,
-    RunOrigin, SceneDescriptor, SceneDescriptorV1, SettingsView, ThreadId, UserError,
+    Deleted, GestureId, GitHubView, Hello, HoldStatus, Incarnation, MAX_PENDING_TURNS,
+    MAX_VISIBLE_SCENES, Phase, RunId, RunOrigin, SceneDescriptor, SceneDescriptorV1, SettingsOp,
+    SettingsView, ThreadId, ThreadOp, UserError,
 };
+use kumochi_protocol::voice::VoicePart;
 
 use kumochi_scene::deferred::Deferred;
+use zeroize::Zeroize;
 
 use crate::credential::{self, CredentialError};
+use crate::platform::microphone::CollectionGate;
 use crate::platform::{self, PipeClient};
 
 /// How long one connection attempt may take, starting the brain included.
@@ -61,8 +66,12 @@ pub(crate) enum LinkState {
 
 /// What the link tells the UI thread, in the order it happened. Nothing from the brain comes
 /// before `Connected`, and none of a connection's messages after its next state.
-#[derive(Debug)]
 pub(crate) enum LinkEvent {
+    VoiceHold {
+        generation: u64,
+        gesture: GestureId,
+        status: HoldStatus,
+    },
     CaptureDone {
         generation: u64,
         capture_for: kumochi_protocol::message::CaptureFor,
@@ -167,14 +176,27 @@ pub(crate) enum LinkEvent {
     },
 }
 
+impl fmt::Debug for LinkEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "LinkEvent({:?})", std::mem::discriminant(self))
+    }
+}
+
 /// Link events applied in one update at most [guess]: a fast stream is applied in batches
 /// rather than one UI update per frame.
 const EVENT_BATCH: usize = 256;
 
-#[derive(Debug)]
 pub(crate) enum Batch {
     Plain(Vec<LinkEvent>),
     Scene(Deferred<Vec<LinkEvent>>),
+}
+
+impl fmt::Debug for Batch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Batch")
+            .field("events", &self.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl std::ops::Deref for Batch {
@@ -237,6 +259,7 @@ pub(crate) fn batch(first: LinkEvent, rest: &Receiver<LinkEvent>) -> Batch {
 /// reaches the next.
 #[derive(Clone, Debug)]
 pub(crate) struct Session {
+    alive: Arc<AtomicBool>,
     /// Counts connections in this shell; the brain's incarnation can't, since the same brain may
     /// be reconnected to.
     generation: u64,
@@ -246,6 +269,10 @@ pub(crate) struct Session {
 }
 
 impl Session {
+    pub(crate) fn alive(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.alive)
+    }
+
     pub(crate) fn generation(&self) -> u64 {
         self.generation
     }
@@ -273,6 +300,15 @@ struct Credit {
     bytes: AtomicU32,
     /// The data writer's queue, weak so a session the UI still holds keeps no writer alive.
     wake: WeakSender<DataOut>,
+}
+
+#[derive(Clone)]
+struct EndSession(Arc<AtomicBool>);
+
+impl Drop for EndSession {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 /// Why a connection attempt failed.
@@ -309,11 +345,24 @@ struct Connection {
 }
 
 /// What the data writer sends.
-#[derive(Debug)]
 enum DataOut {
     Submit(DataToBrain),
     /// Credit is waiting in the connection's [`Credit`].
     Credit,
+}
+
+impl Drop for DataOut {
+    fn drop(&mut self) {
+        if let Self::Submit(DataToBrain::MicPcm(packet)) = self {
+            packet.samples.zeroize();
+        }
+    }
+}
+
+impl fmt::Debug for DataOut {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "DataOut({:?})", std::mem::discriminant(self))
+    }
 }
 
 /// Where the UI's messages go while connected.
@@ -374,6 +423,10 @@ fn queue_on(
 /// What the UI thread and the link thread share.
 #[derive(Debug, Default)]
 struct Shared {
+    microphone: CollectionGate,
+    input: AtomicU32,
+    choice: AtomicU64,
+    escaped_input: AtomicBool,
     /// Set once the user chose Quit, so a closing brain isn't restarted.
     quitting: AtomicBool,
     /// The control pipe while connected, so Quit can bound its writes.
@@ -387,13 +440,24 @@ struct Shared {
 }
 
 impl Shared {
+    fn revoke_input(&self) -> Option<GestureId> {
+        let gesture = GestureId(self.input.swap(0, Ordering::AcqRel));
+        if gesture.0 == 0 {
+            return None;
+        }
+        self.microphone.cancel(gesture);
+        Some(gesture)
+    }
+
     /// Uses the outbox if it's still `session`'s connection's.
     fn outbox<T>(&self, session: &Session, use_it: impl FnOnce(&Outbox) -> T) -> Option<T> {
         self.outbox
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
-            .filter(|outbox| outbox.generation == session.generation)
+            .filter(|outbox| {
+                outbox.generation == session.generation && session.alive.load(Ordering::Acquire)
+            })
             .map(use_it)
     }
 
@@ -428,9 +492,55 @@ pub(crate) struct LinkHandle {
 }
 
 impl LinkHandle {
+    pub(crate) fn microphone_gate(&self) -> CollectionGate {
+        self.shared.microphone.clone()
+    }
+    pub(crate) fn choice_revision(&self) -> u64 {
+        self.shared.choice.load(Ordering::Acquire)
+    }
+    pub(crate) fn link_generation(&self) -> u64 {
+        self.shared.generations.load(Ordering::Acquire)
+    }
+    pub(crate) fn track_input(&self, gesture: GestureId) {
+        self.shared.input.store(gesture.0, Ordering::Release);
+    }
+    pub(crate) fn input_is(&self, gesture: GestureId) -> bool {
+        gesture.0 != 0 && self.shared.input.load(Ordering::Acquire) == gesture.0
+    }
+    pub(crate) fn clear_input(&self, gesture: GestureId) {
+        let input = &self.shared.input;
+        let _changed = input.compare_exchange(gesture.0, 0, Ordering::AcqRel, Ordering::Acquire);
+    }
+    pub(crate) fn take_input_escape(&self) -> bool {
+        self.shared.escaped_input.swap(false, Ordering::AcqRel)
+    }
+    pub(crate) fn mark_input_escape(&self) {
+        self.shared.escaped_input.store(true, Ordering::Release);
+    }
+    pub(crate) fn cancel_input(&self) -> bool {
+        let shared = &self.shared;
+        let Some(gesture) = shared.revoke_input() else {
+            return false;
+        };
+        let cancel = ControlToBrain::GestureCancel { gesture };
+        #[cfg(test)]
+        if let Some(recording) = &self.control_recording {
+            let _queued = recording.try_send(cancel);
+            return true;
+        }
+        let outbox = shared.outbox.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(outbox) = outbox.as_ref()
+            && outbox.control.try_send(cancel).is_err()
+        {
+            outbox.pipe.abort();
+        }
+        true
+    }
+
     /// Marks Quit, so the link starts no brain from here on. Cheap enough for the UI thread.
     /// Returns false when Quit was already under way.
     pub(crate) fn begin_quit(&self) -> bool {
+        self.cancel_input();
         let first = !self.shared.quitting.swap(true, Ordering::SeqCst);
         // Wakes a link waiting for Retry, so it sees Quit and ends.
         let _woken = self.retry.try_send(());
@@ -475,6 +585,7 @@ impl LinkHandle {
     /// Holds a delete the user confirmed until [`LinkHandle::settle_delete`]; it's sent by
     /// [`LinkHandle::send_deletes`], and by Quit.
     pub(crate) fn delete(&self, thread: ThreadId) {
+        self.cancel_input();
         self.shared.deletes().push(Held {
             thread,
             sent_on: None,
@@ -507,12 +618,55 @@ impl LinkHandle {
     /// Queues a control message for `session`'s brain. False once that connection has ended, or
     /// when the brain has stopped reading. Never blocks.
     pub(crate) fn send_control(&self, session: &Session, message: ControlToBrain) -> bool {
+        if !session.alive.load(Ordering::Acquire) {
+            return false;
+        }
+        let shared = &self.shared;
+        let mutation = matches!(
+            &message,
+            ControlToBrain::ThreadOp(ThreadOp::SetModel { .. })
+                | ControlToBrain::Settings(
+                    SettingsOp::SetDefaultModel(_)
+                        | SettingsOp::RemoveVoice(VoicePart::SpeechInput)
+                )
+                | ControlToBrain::AccountOp(_)
+                | ControlToBrain::Connection(_)
+        );
+        let send = |out: &Sender<ControlToBrain>| {
+            if mutation {
+                let cancelled = shared.revoke_input();
+                let choice = &shared.choice;
+                let revision = choice.fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+                    old.checked_add(1)
+                });
+                if revision.is_err()
+                    || cancelled.is_some_and(|gesture| {
+                        out.try_send(ControlToBrain::GestureCancel { gesture })
+                            .is_err()
+                    })
+                {
+                    return false;
+                }
+            }
+            out.try_send(message).is_ok()
+        };
         #[cfg(test)]
         if let Some(recording) = &self.control_recording {
-            return recording.try_send(message).is_ok();
+            let queued = send(recording);
+            if !queued && mutation {
+                session.alive.store(false, Ordering::Release);
+            }
+            return queued;
         }
-        self.shared
-            .outbox(session, |outbox| outbox.control.try_send(message).is_ok())
+        shared
+            .outbox(session, |outbox| {
+                let queued = send(&outbox.control);
+                if !queued && mutation {
+                    session.alive.store(false, Ordering::Release);
+                    outbox.pipe.abort();
+                }
+                queued
+            })
             .unwrap_or(false)
     }
 
@@ -526,27 +680,40 @@ impl LinkHandle {
             recording.close();
         }
         self.shared.outbox(session, |outbox| outbox.pipe.abort());
+        session.alive.store(false, Ordering::Release);
     }
 
     /// Queues a typed turn or a page request for `session`'s brain, like
     /// [`LinkHandle::send_control`]. A turn is counted once queued; one past the count ends the
     /// connection instead.
     pub(crate) fn send_data(&self, session: &Session, message: DataToBrain) -> bool {
+        let out = DataOut::Submit(message);
+        if !session.alive.load(Ordering::Acquire) {
+            return false;
+        }
         #[cfg(test)]
         if let Some(recording) = &self.recording {
-            return recording.try_send(message).is_ok();
+            let mut out = out;
+            let DataOut::Submit(message) = &mut out else {
+                return false;
+            };
+            return recording
+                .try_send(std::mem::replace(message, DataToBrain::Credit { bytes: 0 }))
+                .map_err(|error| DataOut::Submit(error.into_inner()))
+                .is_ok();
         }
         self.shared
             .outbox(session, |outbox| {
                 let turn = matches!(
-                    message,
-                    DataToBrain::TextSubmit { .. } | DataToBrain::AskAbout { .. }
+                    &out,
+                    DataOut::Submit(DataToBrain::TextSubmit { .. } | DataToBrain::AskAbout { .. })
                 );
                 if turn && outbox.submits.load(Ordering::SeqCst) == u32::MAX {
+                    session.alive.store(false, Ordering::Release);
                     outbox.pipe.abort();
                     return false;
                 }
-                let queued = outbox.data.try_send(DataOut::Submit(message)).is_ok();
+                let queued = outbox.data.try_send(out).is_ok();
                 if queued && turn {
                     outbox.submits.fetch_add(1, Ordering::SeqCst);
                 }
@@ -597,6 +764,7 @@ impl Session {
     pub(crate) fn detached(generation: u64, incarnation: Incarnation) -> Self {
         let (wake, _sleeping) = async_channel::bounded::<DataOut>(1);
         Self {
+            alive: Arc::new(AtomicBool::new(true)),
             generation,
             credit: Arc::new(Credit {
                 bytes: AtomicU32::new(0),
@@ -732,6 +900,10 @@ impl Link {
 
     /// Serves one connection until it ends: starts the writers, says Connected, then reads data
     /// on its own thread and control here. False when the UI has gone.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one connection keeps its scoped readers and writers together"
+    )]
     fn attend(&self, connection: Connection, events: &Sender<LinkEvent>) -> bool {
         let Connection {
             control,
@@ -751,6 +923,7 @@ impl Link {
             return false;
         };
         let generation = previous + 1;
+        let ended = EndSession(Arc::new(AtomicBool::new(true)));
         let credit = Arc::new(Credit {
             bytes: AtomicU32::new(0),
             wake: data_out.downgrade(),
@@ -758,12 +931,20 @@ impl Link {
         let mut helpers = Vec::new();
         let spawned = spawn_helper("link-control-writer", &mut helpers, {
             let control = Arc::clone(&control);
-            move || write_control(&control, &control_queue)
+            let ended = ended.clone();
+            move || {
+                let _ended = ended;
+                write_control(&control, &control_queue);
+            }
         })
         .and_then(|()| {
             spawn_helper("link-data-writer", &mut helpers, {
                 let (data, credit) = (Arc::clone(&data), Arc::clone(&credit));
-                move || write_data(&data, &data_queue, &credit)
+                let ended = ended.clone();
+                move || {
+                    let _ended = ended;
+                    write_data(&data, &data_queue, &credit);
+                }
             })
         });
         *self
@@ -790,6 +971,7 @@ impl Link {
         }
         let open = events
             .send_blocking(LinkEvent::Connected(Session {
+                alive: Arc::clone(&ended.0),
                 generation,
                 credit,
                 incarnation,
@@ -800,14 +982,19 @@ impl Link {
             spawn_helper("link-data-reader", &mut helpers, {
                 let (data, control, events) =
                     (Arc::clone(&data), Arc::clone(&control), events.clone());
-                move || read_data(&data, &control, &events, generation)
+                let ended = ended.clone();
+                move || {
+                    let _ended = ended;
+                    read_data(&data, &control, &events, generation);
+                }
             })
         });
         match read {
-            Ok(()) if open => watch(&control, &control_out, events, generation),
+            Ok(()) if open => watch(&control, &control_out, events, generation, &self.shared),
             Ok(()) => {}
             Err(error) => tracing::error!(%error, "can't start the link's threads"),
         }
+        drop(ended);
         *self
             .shared
             .outbox
@@ -972,6 +1159,7 @@ fn watch(
     out: &Sender<ControlToBrain>,
     events: &Sender<LinkEvent>,
     generation: u64,
+    shared: &Shared,
 ) {
     loop {
         match frame::read::<ControlToShell>(&mut &*control, Pipe::Control) {
@@ -1111,7 +1299,27 @@ fn watch(
                     return;
                 }
             }
-            Ok(Some(ControlToShell::VoiceHoldStatus { .. })) => {}
+            Ok(Some(ControlToShell::VoiceHoldStatus { gesture, status })) => {
+                if generation == shared.generations.load(Ordering::Acquire)
+                    && matches!(
+                        status,
+                        HoldStatus::Empty | HoldStatus::Cancelled | HoldStatus::Failed(_)
+                    )
+                {
+                    shared.microphone.cancel(gesture);
+                    let input = &shared.input;
+                    let _cleared =
+                        input.compare_exchange(gesture.0, 0, Ordering::AcqRel, Ordering::Acquire);
+                }
+                let event = LinkEvent::VoiceHold {
+                    generation,
+                    gesture,
+                    status,
+                };
+                if events.send_blocking(event).is_err() {
+                    return;
+                }
+            }
             Ok(Some(
                 reply @ (ControlToShell::AnthropicKeyStage { .. }
                 | ControlToShell::AnthropicKeyStageDone { .. }),
@@ -1276,10 +1484,11 @@ fn write_control(control: &PipeClient, queue: &Receiver<ControlToBrain>) {
 /// queue closes or the pipe fails.
 fn write_data(data: &PipeClient, queue: &Receiver<DataOut>, credit: &Credit) {
     while let Ok(out) = queue.recv_blocking() {
-        let submitted = match out {
-            DataOut::Submit(message) => frame::write(&mut &*data, &message, Pipe::Data),
+        let submitted = match &out {
+            DataOut::Submit(message) => frame::write(&mut &*data, message, Pipe::Data),
             DataOut::Credit => Ok(()),
         };
+        drop(out);
         let bytes = credit.bytes.swap(0, Ordering::SeqCst);
         let credited = if bytes > 0 {
             frame::write(&mut &*data, &DataToBrain::Credit { bytes }, Pipe::Data)

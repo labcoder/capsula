@@ -45,6 +45,7 @@ impl Fence {
         let cancelled = matches!(
             event,
             Event::Reset
+                | Event::Escape
                 | Event::Key {
                     key: Key::Other(_),
                     ..
@@ -81,7 +82,7 @@ impl Fence {
                 _ => None,
             };
         }
-        if matches!(event, Event::Reset) {
+        if matches!(event, Event::Reset | Event::Escape) {
             self.gate.cancel_current();
             if !intents
                 .iter()

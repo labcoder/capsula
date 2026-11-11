@@ -12,6 +12,11 @@ impl Presence {
         reason = "one Esc press keeps its local decision and every effect of it in order"
     )]
     pub(super) fn escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        let input_escape = self.link.take_input_escape();
+        if input_escape || self.voice_working() {
+            self.cancel_voice(cx);
+            return Ok(());
+        }
         if self.presenter.input.selection().is_some() {
             self.end_selection(crate::presenter::overlay_input::ExitCause::Escape, cx);
             return Ok(());

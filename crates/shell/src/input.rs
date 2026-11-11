@@ -32,6 +32,7 @@ pub(crate) enum Event {
     Key { key: Key, edge: Edge },
     Deadline,
     Reset,
+    Escape,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +96,7 @@ impl Gesture {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn handle(&mut self, event: Event, now: Instant) -> [Option<Effect>; 3] {
         let effects = self.recognize(event, now);
         if self.legacy_hold {
@@ -112,7 +114,7 @@ impl Gesture {
     }
 
     fn recognize(&mut self, event: Event, now: Instant) -> [Option<Effect>; 3] {
-        if matches!(event, Event::Reset) {
+        if matches!(event, Event::Reset | Event::Escape) {
             let effects = self.cancel();
             self.reset();
             return effects;

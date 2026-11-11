@@ -389,6 +389,10 @@ pub(in crate::platform) fn copy_batch(
     }
 }
 
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "the predicates fence one native startup packet"
+)]
 fn post_start_packet(live: bool, drained: bool, first: &mut bool, frames: u32) -> bool {
     if !live || !drained || frames == 0 {
         return false;

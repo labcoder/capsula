@@ -91,7 +91,7 @@ impl fmt::Debug for Packetizer {
         f.debug_struct("Packetizer")
             .field("count", &self.count)
             .field("held_samples", &self.held.len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -135,6 +135,10 @@ impl Packetizer {
         Ok(self.count)
     }
 
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the argument supplies MicPcm's wire last bit"
+    )]
     fn emit(&mut self, last: bool, output: &Sender<MicPcm>) -> Result<(), MicError> {
         if self.count >= MAX_HOLD_CHUNKS {
             self.clear();

@@ -34,12 +34,20 @@ fn state(runs: &mut Runs, run: u64, thread: u64, gesture: u32, phase: Phase) -> 
     )
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the expected control has the reducer's optional type"
+)]
 fn cancel(gesture: u32) -> Option<ControlToBrain> {
     Some(ControlToBrain::GestureCancel {
         gesture: GestureId(gesture),
     })
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the expected control has the reducer's optional type"
+)]
 fn stop(run: u64) -> Option<ControlToBrain> {
     Some(ControlToBrain::Stop {
         run: RunId(run),

@@ -3,6 +3,37 @@ use async_channel::Sender;
 use kumochi_protocol::message::MAX_HOLD_CHUNKS;
 
 #[test]
+fn dropping_an_owner_drains_its_committed_unforwarded_queue() {
+    let gate = CollectionGate::default();
+    let generation = gate.arm(GestureId(1)).unwrap();
+    let owner = MicOwner::start_with(
+        generation,
+        Arc::new(AtomicBool::new(true)),
+        |_, _, _, pcm| {
+            pcm.try_send(MicPcm {
+                gesture: GestureId(1),
+                seq: 0,
+                rate: 8_000,
+                last: true,
+                samples: vec![17, -93, 405],
+            })
+            .unwrap();
+            Ok(Finalization::Released { packets: 1 })
+        },
+    )
+    .unwrap();
+    let pending = owner.pcm.clone();
+    assert_eq!(
+        owner.completion.recv_blocking().unwrap(),
+        Ok(Finalization::Released { packets: 1 })
+    );
+    assert_eq!(pending.len(), 1);
+    drop(owner);
+    assert_eq!(pending.try_recv(), Err(async_channel::TryRecvError::Closed));
+    assert_eq!(gate.arm(GestureId(2)).unwrap_err(), MicError::Stale);
+}
+
+#[test]
 fn native_batch_commit_rejects_revocation_after_authorization() {
     use crate::platform::windows::microphone::copy_batch;
     use std::sync::atomic::AtomicU64;
@@ -59,6 +90,10 @@ fn native_batch_commit_rejects_revocation_after_authorization() {
     assert_eq!(raw, [17, 99, 240, 31]);
 }
 
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "a fake worker must finish within this test's bound"
+)]
 fn receipt(owner: &mut MicOwner) -> Result<StopReceipt, MicError> {
     let until = Instant::now() + Duration::from_secs(2);
     loop {
@@ -471,7 +506,7 @@ fn only_successful_matching_join_allows_a_new_generation() {
     owner.stop(StopReason::Release);
     assert_eq!(gate.arm(GestureId(8)).unwrap_err(), MicError::Stale);
     assert_eq!(
-        owner.joined(Ok(Ok(Finalization::Released { packets: 2 }))),
+        owner.joined(&Ok(Ok(Finalization::Released { packets: 2 }))),
         Ok(StopReceipt {
             gesture: GestureId(7),
             finalization: Finalization::Released { packets: 2 }
@@ -490,11 +525,11 @@ fn only_successful_matching_join_allows_a_new_generation() {
 
     let (gate, owner, _, _) = prepared();
     assert_eq!(
-        owner.joined(Ok(Err(MicError::Unconfirmed))),
+        owner.joined(&Ok(Err(MicError::Unconfirmed))),
         Err(MicError::Unconfirmed)
     );
     assert_eq!(gate.arm(GestureId(8)).unwrap_err(), MicError::Stale);
-    assert_eq!(owner.joined(Err(Box::new(()))), Err(MicError::Unconfirmed));
+    assert_eq!(owner.joined(&Err(Box::new(()))), Err(MicError::Unconfirmed));
     assert_eq!(gate.arm(GestureId(8)).unwrap_err(), MicError::Stale);
 }
 
@@ -515,7 +550,7 @@ fn cancel_upgrades_release_and_scrubs_reachable_queued_audio() {
     owner.stop(StopReason::Cancel);
     owner.stop(StopReason::Release);
     assert_eq!(
-        owner.joined(Ok(Ok(Finalization::Released { packets: 1 }))),
+        owner.joined(&Ok(Ok(Finalization::Released { packets: 1 }))),
         Ok(StopReceipt {
             gesture: GestureId(7),
             finalization: Finalization::Discarded(MicError::Cancelled)

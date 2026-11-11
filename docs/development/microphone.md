@@ -38,15 +38,16 @@ after acceptance, so no startup/pre-roll samples enter the packetizer. Preparing
 must remain distinct from Listening. A late open/running result cannot reopen a
 released/cancelled gate.
 
-`stop(StopReason::Release | StopReason::Cancel)` is an idempotent request, never a
-physical receipt. `try_receipt(&mut self) -> Option<Result<StopReceipt, MicError>>`
-polls completion without waiting on the UI; a reaper joins the source off-UI before
+The native gate's release and `stop(StopReason::Cancel)` are idempotent requests, never
+physical receipts. `receipt(&mut self).await -> Result<StopReceipt, MicError>` awaits
+the reaper without blocking the UI; the reaper joins the source off-UI before
 publishing completion. Each completion/error is consumed once. A successful receipt contains the
 gesture and either `Released { packets }` or `Discarded(MicError)`. Only after native
 stop, interface destruction and thread join may the matching generation retire.
 A failed stop/buffer release or worker panic returns `Unconfirmed`, leaves the gate
 unavailable, and forbids another arm. Dropping an owner requests cancel but cannot
-replace a join receipt. The caller must retain it through cleanup.
+replace a join receipt. Drop also drains and scrubs reachable queued PCM. The caller retains
+the owner through cleanup; the nonblocking polling/explicit-release helpers are test-only.
 
 Normal release freezes collection immediately, stops the device, finalizes the
 already-packetized samples and reports only the successfully queued packet count.
@@ -69,7 +70,10 @@ actual source stop/join before releasing ownership. Polling waits last at most o
 calls themselves cannot be forcibly interrupted safely. An outstanding native
 call keeps ownership unconfirmed, never authorizes replacement, and its eventual
 return must recheck the generation/permit before collecting. There is no new
-drain deadline in this source and no timeout advertised as successful teardown.
+drain deadline in this source and no timeout advertised as successful teardown. Presence
+observes that same gate at the existing polling interval. After revocation or normal release,
+the two-second drain allowance only bounds when it warns that cleanup is unavailable; it
+does not retire a generation, send a stop receipt or abandon the outstanding source owner.
 
 PCM is mono i16 at the pinned native rate, sequenced from zero. The packetizer
 retains one full 20 ms packet until a later sample proves it nonfinal. Release

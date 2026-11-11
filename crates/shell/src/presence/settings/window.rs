@@ -30,6 +30,7 @@ impl Presence {
         intent: crate::settings::SpeechInputIntent,
         cx: &mut Context<'_, Self>,
     ) {
+        self.cancel_voice(cx);
         let (link, session) = (&self.link, &self.session);
         self.settings.update(cx, |state, cx| {
             state.send_speech_input(
@@ -99,6 +100,7 @@ impl Presence {
         op: kumochi_protocol::message::ConnectionOp,
         cx: &mut Context<'_, Self>,
     ) {
+        self.cancel_voice(cx);
         let (link, session) = (&self.link, &self.session);
         self.settings.update(cx, |state, cx| {
             state.claude.send(op, |op| {
@@ -168,6 +170,7 @@ impl Presence {
         })
     }
     pub(in crate::presence) fn account_op(&mut self, op: AccountOp, cx: &mut Context<'_, Self>) {
+        self.cancel_voice(cx);
         let (link, session) = (&self.link, &self.session);
         self.settings.update(cx, |state, cx| {
             let _sent = state.accounts.send(op, |op| {

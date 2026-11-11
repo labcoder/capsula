@@ -1,7 +1,6 @@
 //! Carries keyboard gestures from the native Raw Input callback into the presence owner.
 //!
-//! The callback reduces the gesture itself; production holds and Listening remain disabled.
-//! Double-tap effects then reach the
+//! The callback closes collection authority before deferred UI work. Effects then reach the
 //! owner through `update_window`, which only tries to borrow the app. If GPUI is already
 //! borrowed, because a nested message loop dispatched this callback, effects wait in order
 //! with their original times and are retried until they apply or the owner is gone, instead of
@@ -13,11 +12,21 @@ use std::time::Duration;
 
 use gpui_kit::{AnyWindowHandle, App, AppContext as _, AsyncApp, WeakEntity};
 
-use super::Presence;
-use crate::input::{Effect, Gesture};
-use crate::platform::{Deliver, EventTime};
+use super::{Presence, voice::Stamp};
+use crate::input::{
+    Edge, Event, Gesture, Key,
+    hold::{Delivery, Fence, Intent},
+};
+use crate::link::LinkHandle;
+use crate::platform::{Deliver, EventTime, performance_counter};
+use kumochi_protocol::message::ThreadId;
 
-type Effects = [Option<Effect>; 3];
+struct Pending {
+    delivery: Delivery,
+    at: EventTime,
+    stamp: Stamp,
+    qpc: u64,
+}
 
 /// How long a busy app is waited for between retries.
 const RETRY: Duration = Duration::from_millis(1);
@@ -29,21 +38,27 @@ enum Applied {
 }
 
 /// Builds the native callback. `dock` is always open, so it anchors the app borrow.
+#[expect(
+    clippy::too_many_lines,
+    reason = "native revocation and ordered deferred delivery share one owner"
+)]
 pub(super) fn deliver(
     gesture: Rc<Cell<Gesture>>,
     dock: AnyWindowHandle,
     owner: WeakEntity<Presence>,
+    link: LinkHandle,
+    target: Rc<Cell<(Option<ThreadId>, u64)>>,
     cx: &mut App,
 ) -> Deliver {
-    let (deferred, pending) = async_channel::unbounded::<(Effects, EventTime)>();
+    let (deferred, pending) = async_channel::unbounded::<Pending>();
     // Queued plus in flight, so a newer effect never overtakes one still being retried.
     let backlog = Rc::new(Cell::new(0_usize));
     let waiting = (owner.clone(), Rc::clone(&backlog));
     cx.spawn(async move |cx| {
         let (owner, backlog) = waiting;
-        while let Ok((effects, at)) = pending.recv().await {
+        while let Ok(pending) = pending.recv().await {
             loop {
-                match apply(cx, dock, &owner, effects, at) {
+                match apply(cx, dock, &owner, &pending) {
                     Applied::Yes => break,
                     Applied::Gone => return,
                     Applied::Busy => cx.background_executor().timer(RETRY).await,
@@ -54,23 +69,91 @@ pub(super) fn deliver(
     })
     .detach();
     let async_cx = cx.to_async();
+    let fence = std::cell::RefCell::new(Fence::new(link.microphone_gate()));
+    let escaped = Cell::new(false);
+    let escape_down = Cell::new(false);
     Box::new(move |event, at| {
+        let Ok(qpc) = u64::try_from(performance_counter()) else {
+            link.cancel_input();
+            let mut state = gesture.get();
+            let _cancelled = fence
+                .borrow_mut()
+                .reduce(&mut state, Event::Reset, at.instant);
+            gesture.set(state);
+            return None;
+        };
+        if event == Event::Reset {
+            escaped.set(false);
+            escape_down.set(false);
+        }
+        if let Event::Key {
+            key: Key::Other(1),
+            edge,
+        } = event
+        {
+            if edge == Edge::Down && !escape_down.replace(true) {
+                escaped.set(link.cancel_input());
+            } else if edge == Edge::Up {
+                escape_down.set(false);
+            }
+        }
+        if event == Event::Escape && (escaped.replace(false) || link.cancel_input()) {
+            link.mark_input_escape();
+        }
         let mut state = gesture.get();
-        let effects = state.handle(event, at.instant);
+        let delivery = fence.borrow_mut().reduce(&mut state, event, at.instant);
         gesture.set(state);
-        if effects.iter().all(Option::is_none) {
+        for intent in delivery.intents.iter().flatten() {
+            match intent {
+                Intent::Recognized {
+                    gesture,
+                    generation: Ok(_),
+                    ..
+                } => {
+                    link.cancel_input();
+                    link.track_input(*gesture);
+                }
+                Intent::End {
+                    cancelled: true, ..
+                } => {
+                    link.cancel_input();
+                }
+                _ => {}
+            }
+        }
+        if delivery
+            .effects
+            .iter()
+            .any(|e| matches!(e, Some(crate::input::Effect::OpenInput)))
+        {
+            link.cancel_input();
+        }
+        if delivery.effects.iter().all(Option::is_none)
+            && delivery.intents.iter().all(Option::is_none)
+        {
             return state.deadline();
         }
+        let pending = Pending {
+            delivery,
+            at,
+            qpc,
+            stamp: Stamp {
+                target: target.get(),
+                session: link.link_generation(),
+                choice: link.choice_revision(),
+            },
+        };
         if backlog.get() == 0
             && matches!(
-                apply(&mut async_cx.clone(), dock, &owner, effects, at),
+                apply(&mut async_cx.clone(), dock, &owner, &pending),
                 Applied::Yes
             )
         {
             return state.deadline();
         }
         backlog.set(backlog.get() + 1);
-        if deferred.try_send((effects, at)).is_err() {
+        if deferred.try_send(pending).is_err() {
+            link.cancel_input();
             backlog.set(backlog.get() - 1);
             tracing::debug!("presence closed; gesture effects dropped");
         }
@@ -83,12 +166,16 @@ fn apply(
     cx: &mut AsyncApp,
     dock: AnyWindowHandle,
     owner: &WeakEntity<Presence>,
-    effects: Effects,
-    at: EventTime,
+    pending: &Pending,
 ) -> Applied {
     let result = cx.update_window(dock, |_, window, app| {
         owner
-            .update(app, |this, cx| this.apply_effects(effects, at, window, cx))
+            .update(app, |this, cx| {
+                this.apply_effects(pending.delivery.effects, pending.at, window, cx);
+                for intent in pending.delivery.intents.iter().flatten().cloned() {
+                    this.voice_intent(intent, pending.stamp, pending.qpc, cx);
+                }
+            })
             .is_ok()
     });
     match result {

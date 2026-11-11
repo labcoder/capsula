@@ -31,6 +31,7 @@ impl Presence {
         for event in events.drain(..) {
             if let LinkEvent::RunState { generation, .. }
             | LinkEvent::TurnRefused { generation, .. }
+            | LinkEvent::VoiceHold { generation, .. }
             | LinkEvent::CaptureDone { generation, .. }
             | LinkEvent::CaptureFailed { generation, .. } = &event
                 && self
@@ -42,11 +43,13 @@ impl Presence {
             }
             match event {
                 LinkEvent::State(state) => {
+                    self.cancel_voice(cx);
                     self.revoke_exclusion(cx);
                     self.session = None;
                     self.link_state(state, cx);
                 }
                 LinkEvent::Connected(session) => {
+                    self.cancel_voice(cx);
                     self.settings.update(cx, |state, cx| {
                         state.github.disconnected();
                         cx.notify();
@@ -71,6 +74,11 @@ impl Presence {
                         cx,
                     );
                 }
+                LinkEvent::VoiceHold {
+                    generation,
+                    gesture,
+                    status,
+                } => self.voice_status(generation, gesture, status, cx),
                 LinkEvent::Voice {
                     generation,
                     speech_input,
@@ -239,6 +247,7 @@ impl Presence {
         cx: &mut Context<'_, Self>,
     ) {
         let (applied, notice) = self.runs.apply_run_state(run, thread, phase, error, origin);
+        self.voice_run(origin, phase, &applied, cx);
         diagnostics::record(cx, format_args!("run phase={phase:?}"));
         if let Some(restore) = applied.restore
             && let Some(text) = &self.text

@@ -1,6 +1,6 @@
 # Runs and the coordinator
 
-A **run** is one user turn: in slice 2 a typed message, later a voice hold or an ask-about. The
+A **run** is one user turn: a typed message, a voice hold or an ask-about. The
 brain's **coordinator** (`crates/brain/src/coordinator/`) is its core loop, written sans I/O: it
 takes inputs and returns effects, and the systems around it (the store, the engine, the pipes,
 timers) do the work and report back. So the order of Esc, late completions and interruption is
@@ -88,8 +88,11 @@ deleted submissions retain their own metadata until their response; a cancelled 
 first state owes exactly one Stop for its own run. A delayed state after an explicit switch
 still answers its own turn but doesn't move input. Esc cancels work, not the target or
 revision. Settings updates replace names and the main id without changing the input draft,
-keyboard focus, viewed history, target or revision. This correlation does not admit voice
-holds, capture audio or promote transcripts into turns.
+keyboard focus, viewed history, target or revision. Voice uses a separate metadata-only
+pending hold keyed by gesture, captured target/revision and current session, not the typed
+queue or its watermark. Only its matching visible Hold-origin first state can bind New;
+Thinking stays cancellable and Answering returns to ordinary Runs. Source admission and
+transcription remain in the [voice owner](voice.md#voice-only-held-turns).
 
 ## Typed drawing admission
 

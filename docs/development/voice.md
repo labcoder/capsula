@@ -846,3 +846,19 @@ promises readiness that only a later serving-loop iteration will establish.
 Finalization controls check the existing hold deadline before changing audio or
 granting a drain/decode budget. A late matching stop still clears physical device
 debt, but neither it nor a late KeyUp can revive an expired input.
+
+Shell installs the native gesture fence before GPUI deferral and retains one metadata-only
+handoff through admitted source start, physical receipt/count and the matching Hold-origin
+run. Per-session liveness closes at either pipe edge. Accepted target/model/account/speech
+mutations revoke logical input before enqueue, with a monotonic choice revision to detect
+changes away and back. PCM wrappers scrub rejected or dropped queued packets and never count
+as typed submissions. Local status, source finalization and ordinary chat are not a second
+transcript store or retry queue.
+
+Preparing/loading, Listening, stopping, transcribing and thinking reuse the existing dock,
+status and text views, with localized accessible status text. Only matching live Admitted
+opens the source; Listening precedes acceptance of that source's Running receipt. Thinking
+opens the ordinary answer panel without activation or injected focus input. Answering hands
+off to ordinary Runs. Explicit typed input cancels and drains the pending hold before its
+first submit attempt. Cancellation keeps a recording owner until true completion; an
+unconfirmed source remains unavailable rather than claiming stopped or allowing replacement.

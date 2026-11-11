@@ -1,4 +1,4 @@
-# Voice downloads
+# Voice
 
 Voice runs locally after its optional models are installed. The two parts download separately:
 
@@ -34,5 +34,24 @@ Only that status establishes whether a model is ready or unloaded.
 
 Tab and Shift+Tab reach the labeled controls; Enter or Space activates a focused model button.
 These are explicit Settings actions; opening the tab or reconnecting does not start setup.
-The tab does not remove models, open the microphone or control spoken replies. Hold-triggered
-speech and its automatic reload are not connected yet.
+The tab does not remove models, open the microphone or control spoken replies.
+
+## Hold to speak
+
+Hold **left Ctrl + left Alt** and wait for **Listening** before speaking. Preparing or loading
+is not recording permission. Releasing either key stops collection, transcribes locally and
+sends nonblank words once through normal chat, using the captured target, model and connection.
+An installed but idle-unloaded speech model can reload while the same hold is still down.
+Missing models, an unavailable connection or a busy turn are refused without recording.
+
+The dock/status panel shows preparing, listening, stopping, transcribing and thinking.
+The answer opens in the existing chat panel without taking focus from your app. Empty speech
+creates no message. Recognized words become ordinary deletable chat history; raw audio is not
+saved. Nothing captures or sends your screen for this gesture.
+
+Esc, another key, a target/model/connection change, deletion or a new typed submission cancels
+pending voice input. Changing foreground apps alone does not cancel a global hold. Release
+before Listening cancels rather than submitting startup audio. The source has a 60-second cap.
+If microphone cleanup cannot be confirmed, input stays unavailable and another recording is
+refused; a timeout never means the microphone was released. Follow the restart warning if it
+stays active. A system-default-device change does not migrate an already-open microphone.

@@ -52,6 +52,9 @@ mod text;
 mod thread_selection;
 mod thread_view;
 mod threads;
+mod voice;
+#[cfg(test)]
+mod voice_wiring_tests;
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -64,8 +67,9 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
 };
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, Global, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Task, WeakEntity, Window,
+    AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, Global,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Task, WeakEntity, Window,
     WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point, px, size,
 };
 use kumochi_protocol::constants;
@@ -134,6 +138,7 @@ struct Presence {
     state: LinkState,
     /// The canonical gesture; the Raw Input callback reduces it before GPUI sees anything.
     gesture: Rc<Cell<Gesture>>,
+    voice: voice::Voice,
     /// What `runs` and the typing panel last made Esc see.
     activity: Activity,
     runs: Runs,
@@ -296,17 +301,23 @@ impl Presence {
         self.line.contains(point) || self.layout.panel_contains(point, panel)
     }
 
-    /// Keeps hold presentation off, and the settings notice in the status panel.
+    /// Follows confirmed microphone collection and the settings notice in the status panel.
     // shortcut: the line carries no notice, so the offline and settings notices show only in the status panel; B2b's peek shows them by the line.
     fn refresh_dock(&self, cx: &mut Context<'_, Self>) {
+        let listening = self.voice.status == Some(Text::HoldListening);
         let was_listening = self.dock.update(cx, |dock, cx| {
             cx.notify();
-            std::mem::replace(&mut dock.listening, false)
+            std::mem::replace(&mut dock.listening, listening)
         });
-        if was_listening {
+        if was_listening != listening {
             let motion = kumo_view::motion(cx);
+            let mood = if listening {
+                Mood::Listening
+            } else {
+                Mood::Idle
+            };
             self.kumo
-                .update(cx, |kumo, cx| kumo.set_mood(Mood::Idle, motion, cx));
+                .update(cx, |kumo, cx| kumo.set_mood(mood, motion, cx));
         }
         let notice = self
             .settings
@@ -317,8 +328,9 @@ impl Presence {
             })
             .or(self.settings.read(cx).native_taskbar_notice);
         self.panel.update(cx, |panel, cx| {
-            if panel.notice != notice {
+            if panel.notice != notice || panel.voice != self.voice.status {
                 panel.notice = notice;
+                panel.voice = self.voice.status;
                 cx.notify();
             }
         });
@@ -394,10 +406,11 @@ impl Presence {
         } else {
             EscapePanel::Closed
         };
-        let activity = Activity {
+        let mut activity = Activity {
             pulling: self.kumo.read(cx).pull_live(),
             ..Self::activity_at(&self.runs, panel, &self.presenter, now)
         };
+        activity.working |= self.voice_working();
         if activity == self.activity {
             return Ok(());
         }
@@ -437,7 +450,8 @@ impl Presence {
     }
 
     fn sync_escape_state(&mut self, cx: &mut Context<'_, Self>) -> bool {
-        let wanted = self.activity.holds_global_escape() || self.escape_fixture;
+        let wanted =
+            self.activity.holds_global_escape() || self.voice_working() || self.escape_fixture;
         if wanted {
             let native = &self.native;
             self.escape_hold.acquire(|| native.register_escape());
@@ -537,6 +551,7 @@ impl Presence {
             }
             PresenceEvent::Retry => {
                 if self.state == LinkState::Failed {
+                    self.cancel_voice(cx);
                     self.link.retry();
                 }
             }
@@ -573,6 +588,7 @@ impl Presence {
     }
 
     fn quit(&mut self, cx: &mut Context<'_, Self>) {
+        self.cancel_voice(cx);
         if !self.link.begin_quit() {
             return;
         }
@@ -615,6 +631,22 @@ impl Presence {
     }
 }
 
+impl Drop for Presence {
+    fn drop(&mut self) {
+        self.link.cancel_input();
+        self.runs.cancel_hold();
+        if let Some(message) = self.runs.take_hold_cancel()
+            && let Some(session) = &self.session
+            && !self.link.send_control(session, message)
+        {
+            self.link.end(session);
+        }
+        if let Some(session) = &self.session {
+            self.link.end(session);
+        }
+    }
+}
+
 #[expect(
     clippy::cast_possible_truncation,
     clippy::as_conversions,
@@ -627,6 +659,7 @@ fn scaled(value: f32, scale: f32) -> i32 {
 struct Panel {
     kumo: Entity<KumoView>,
     state: LinkState,
+    voice: Option<Text>,
     /// A settings notice the dock line can't show.
     notice: Option<Text>,
     /// Shown only when Esc is wanted globally but Windows refused it.
@@ -636,8 +669,13 @@ struct Panel {
 }
 
 impl Render for Panel {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one status panel keeps its controls and accessible status together"
+    )]
     fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let strings = cx.global::<Strings>();
+        let status = strings.get(self.voice.unwrap_or_else(|| status_text(self.state)));
         let chat_owner = self.threads.clone();
         let threads_owner = self.threads.clone();
         let settings_owner = self.threads.clone();
@@ -681,7 +719,14 @@ impl Render for Panel {
                             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                             .child(constants::DISPLAY_NAME),
                     )
-                    .child(div().text_sm().child(strings.get(status_text(self.state))))
+                    .child(
+                        div()
+                            .id("presence-status")
+                            .role(gpui_kit::Role::Status)
+                            .aria_label(status.clone())
+                            .text_sm()
+                            .child(status),
+                    )
                     .children(
                         self.notice
                             .map(|notice| div().text_sm().child(strings.get(notice))),
@@ -863,6 +908,7 @@ fn status_window(
         cx.new(|_| Panel {
             kumo,
             state: LinkState::Connecting,
+            voice: None,
             notice: None,
             stop: false,
             events: panel_events,
@@ -880,7 +926,7 @@ fn status_window(
     Ok((panel_window, panel))
 }
 
-/// Opens a small nonactivating dock and arms double-tap typing; holds and Listening stay off.
+/// Opens a small nonactivating dock and arms typing and admitted voice holds.
 /// The caller starts the brain link afterwards.
 #[expect(
     clippy::too_many_lines,
@@ -965,6 +1011,7 @@ pub(crate) fn open(
             session: None,
             state: LinkState::Connecting,
             gesture: Rc::clone(&gesture),
+            voice: voice::Voice::default(),
             activity: Activity::default(),
             runs: Runs::default(),
             presenter,
@@ -998,7 +1045,11 @@ pub(crate) fn open(
     let position = flags.position();
     owner.update(cx, |this, cx| this.position(position, cx))?;
     owner.update(cx, |this, cx| this.observe(position, cx))?;
-    let deliver = gesture::deliver(gesture, dock_window, owner.downgrade(), cx);
+    let (link, target) = {
+        let this = owner.read(cx);
+        (this.link.clone(), Rc::clone(&this.voice.target))
+    };
+    let deliver = gesture::deliver(gesture, dock_window, owner.downgrade(), link, target, cx);
     owner.update(cx, |this, _| this.native.arm_keyboard(deliver))?;
     owner.update(cx, Presence::sync_escape)?;
     schedule_diagnostic_launch(&owner, flags, cx);

@@ -9,7 +9,7 @@
 //! (`src/host/wasapi/stream.rs:825`) calls `try_emit_error`, which acquires a
 //! mutex with `try_lock` at `src/host/error_emit.rs:29`. That is nonblocking,
 //! but still violates the no-lock contract, including borrowed error paths.
-//! CoreAudio input calls the same helper at `src/host/coreaudio/macos/device.rs:781`.
+//! `CoreAudio` input calls the same helper at `src/host/coreaudio/macos/device.rs:781`.
 
 mod pcm;
 #[cfg(test)]
@@ -28,7 +28,7 @@ use zeroize::Zeroize;
 
 pub(super) use pcm::{Format, Packetizer, Sample};
 
-pub(super) const POLL: Duration = Duration::from_millis(20);
+pub(crate) const POLL: Duration = Duration::from_millis(20);
 const PCM_QUEUE: usize = 4;
 
 /// The existing 60-second hold limit, independent of sample delivery.
@@ -149,6 +149,10 @@ impl Generation {
         self.gesture
     }
 
+    pub(crate) fn retired(&self) -> bool {
+        self.gate.load(Ordering::Acquire) == (u64::from(self.gesture.0) << 3 | RETIRED)
+    }
+
     fn advance(&self, from: u64, to: u64) -> Result<(), MicError> {
         let key = u64::from(self.gesture.0) << 3;
         self.gate
@@ -195,7 +199,7 @@ impl Generation {
         }
     }
 
-    pub(super) fn running(&self) -> Result<(), MicError> {
+    pub(crate) fn running(&self) -> Result<(), MicError> {
         self.advance(OPENING, RUNNING)
     }
 }
@@ -215,6 +219,7 @@ pub(crate) enum Finalization {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StopReason {
+    #[cfg(test)]
     Release,
     Cancel,
 }
@@ -269,10 +274,15 @@ impl MicOwner {
         generation: Generation,
         session: Arc<AtomicBool>,
     ) -> Result<Self, MicError> {
+        if cfg!(test) {
+            return Self::start_with(generation, session, |_, _, _, _| {
+                Ok(Finalization::Discarded(MicError::Unavailable))
+            });
+        }
         Self::start_with(generation, session, super::windows::microphone::capture)
     }
 
-    fn start_with(
+    pub(crate) fn start_with(
         generation: Generation,
         session: Arc<AtomicBool>,
         capture: impl FnOnce(
@@ -317,20 +327,17 @@ impl MicOwner {
                     cleanup.keep = matches!(result, Ok(Finalization::Released { .. }));
                     result
                 });
-                let result = match worker {
-                    Ok(worker) => {
-                        while !worker.is_finished() {
-                            if watch.mode(&watch_permit, Instant::now()).is_err() {
-                                worker.thread().unpark();
-                            }
-                            thread::park_timeout(POLL);
+                let result = if let Ok(worker) = worker {
+                    while !worker.is_finished() {
+                        if watch.mode(&watch_permit, Instant::now()).is_err() {
+                            worker.thread().unpark();
                         }
-                        worker.join().unwrap_or(Err(MicError::Unconfirmed))
+                        thread::park_timeout(POLL);
                     }
-                    Err(_) => {
-                        watch.cancel();
-                        Ok(Finalization::Discarded(MicError::Unavailable))
-                    }
+                    worker.join().unwrap_or(Err(MicError::Unconfirmed))
+                } else {
+                    watch.cancel();
+                    Ok(Finalization::Discarded(MicError::Unavailable))
                 };
                 if completed.try_send(result).is_err() {
                     watch.cancel();
@@ -365,8 +372,9 @@ impl MicOwner {
     /// The native edge should already have closed the gate; this is idempotent.
     pub(crate) fn stop(&self, reason: StopReason) {
         match reason {
+            #[cfg(test)]
             StopReason::Release => {
-                transition(&self.generation.gate, self.generation.gesture, RELEASED)
+                transition(&self.generation.gate, self.generation.gesture, RELEASED);
             }
             StopReason::Cancel => self.generation.cancel(),
         }
@@ -376,6 +384,7 @@ impl MicOwner {
     }
 
     /// Nonblocking polling; an error leaves the generation unavailable, not retired.
+    #[cfg(test)]
     pub(crate) fn try_receipt(&mut self) -> Option<Result<StopReceipt, MicError>> {
         if self.reported {
             return None;
@@ -383,7 +392,7 @@ impl MicOwner {
         match self.completion.try_recv() {
             Ok(result) => {
                 self.reported = true;
-                Some(self.joined(Ok(result)))
+                Some(self.joined(&Ok(result)))
             }
             Err(async_channel::TryRecvError::Empty) => None,
             Err(async_channel::TryRecvError::Closed) => {
@@ -394,40 +403,53 @@ impl MicOwner {
         }
     }
 
+    pub(crate) async fn receipt(&mut self) -> Result<StopReceipt, MicError> {
+        if self.reported {
+            return Err(MicError::Stale);
+        }
+        self.reported = true;
+        let result = self
+            .completion
+            .recv()
+            .await
+            .unwrap_or(Err(MicError::Unconfirmed));
+        self.joined(&Ok(result))
+    }
+
     fn joined(
         &self,
-        result: thread::Result<Result<Finalization, MicError>>,
+        result: &thread::Result<Result<Finalization, MicError>>,
     ) -> Result<StopReceipt, MicError> {
-        match result {
-            Ok(Ok(mut finalization)) => {
-                if matches!(finalization, Finalization::Released { .. }) {
-                    match self.generation.mode(&self.session, Instant::now()) {
-                        Ok(Mode::Release) => {}
-                        Err(error) => finalization = Finalization::Discarded(error),
-                        _ => finalization = Finalization::Discarded(MicError::Cancelled),
-                    }
-                }
-                if matches!(finalization, Finalization::Discarded(_)) {
-                    while let Ok(mut packet) = self.pcm.try_recv() {
-                        packet.samples.zeroize();
-                    }
-                }
-                transition(&self.generation.gate, self.generation.gesture, RETIRED);
-                Ok(StopReceipt {
-                    gesture: self.generation.gesture,
-                    finalization,
-                })
-            }
-            _ => {
-                self.generation.cancel();
-                Err(MicError::Unconfirmed)
+        let Ok(Ok(finalization)) = result else {
+            self.generation.cancel();
+            return Err(MicError::Unconfirmed);
+        };
+        let mut finalization = *finalization;
+        if matches!(finalization, Finalization::Released { .. }) {
+            match self.generation.mode(&self.session, Instant::now()) {
+                Ok(Mode::Release) => {}
+                Err(error) => finalization = Finalization::Discarded(error),
+                _ => finalization = Finalization::Discarded(MicError::Cancelled),
             }
         }
+        if matches!(finalization, Finalization::Discarded(_)) {
+            while let Ok(mut packet) = self.pcm.try_recv() {
+                packet.samples.zeroize();
+            }
+        }
+        transition(&self.generation.gate, self.generation.gesture, RETIRED);
+        Ok(StopReceipt {
+            gesture: self.generation.gesture,
+            finalization,
+        })
     }
 }
 
 impl Drop for MicOwner {
     fn drop(&mut self) {
         self.stop(StopReason::Cancel);
+        while let Ok(mut packet) = self.pcm.try_recv() {
+            packet.samples.zeroize();
+        }
     }
 }

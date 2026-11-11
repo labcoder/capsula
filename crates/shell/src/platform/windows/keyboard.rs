@@ -23,7 +23,7 @@ use windows::Win32::UI::Input::{
 use windows::Win32::UI::WindowsAndMessaging::{
     EVENT_SYSTEM_DESKTOPSWITCH, GIDC_REMOVAL, KillTimer, PBT_APMSUSPEND, PostMessageW,
     RI_KEY_BREAK, RI_KEY_E0, RI_KEY_E1, SetTimer, WINEVENT_OUTOFCONTEXT, WM_APP, WM_INPUT,
-    WM_INPUT_DEVICE_CHANGE, WM_POWERBROADCAST, WM_TIMER, WM_WTSSESSION_CHANGE,
+    WM_INPUT_DEVICE_CHANGE, WM_NCDESTROY, WM_POWERBROADCAST, WM_TIMER, WM_WTSSESSION_CHANGE,
 };
 
 use super::presence::{PresenceError, struct_size};
@@ -79,6 +79,7 @@ impl Keys {
             instant: Instant::now(),
         };
         let event = match message {
+            _ if EscapeHotkey::fired(message, wparam) => Event::Escape,
             WM_INPUT => match read_key(lparam) {
                 Some(event) => event,
                 None => return false,
@@ -92,7 +93,7 @@ impl Keys {
             WM_INPUT_DEVICE_CHANGE if wparam.0 == usize::try_from(GIDC_REMOVAL).unwrap_or(0) => {
                 Event::Reset
             }
-            WM_WTSSESSION_CHANGE | DESKTOP_SWITCHED => Event::Reset,
+            WM_WTSSESSION_CHANGE | DESKTOP_SWITCHED | WM_NCDESTROY => Event::Reset,
             WM_POWERBROADCAST if wparam.0 == usize::try_from(PBT_APMSUSPEND).unwrap_or(0) => {
                 Event::Reset
             }
@@ -190,6 +191,14 @@ fn watch(hwnd: HWND, keys: &Keys) -> Result<(), PresenceError> {
 
 /// Stops what `arm` started, before the proxy window goes away.
 pub(super) fn disarm(hwnd: HWND, keys: &Keys) {
+    if let Some(deliver) = keys.deliver.get() {
+        deliver(
+            Event::Reset,
+            EventTime {
+                instant: Instant::now(),
+            },
+        );
+    }
     keys.disarm(hwnd);
     if let Some(hook) = keys.desktop.take() {
         // SAFETY: the hook was set on this thread by `arm` and is removed once.
