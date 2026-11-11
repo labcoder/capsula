@@ -425,6 +425,23 @@ async fn a_closed_exit_subscription_does_not_release_a_dispatched_load() {
 
 #[test]
 fn an_unconfirmed_exit_keeps_its_physical_ask_and_cannot_acknowledge_unload() {
+    use crate::voice::installer::{Durable, Effect, Folder, Installer, RemoveAnswer};
+    use kumochi_protocol::message::PartState;
+    use kumochi_protocol::voice::VoicePart::SpeechInput;
+
+    let (mut installer, effects) = Installer::start(
+        [Durable::Installed, Durable::Absent],
+        [true; 2],
+        [true; 2],
+        &[],
+    );
+    assert_eq!(
+        effects,
+        [Effect::Load {
+            part: SpeechInput,
+            ask: 1
+        }]
+    );
     let (reports, mut observed) = Reports::new();
     let (started, start) = mpsc::channel();
     let (release, leave) = mpsc::channel();
@@ -438,13 +455,31 @@ fn an_unconfirmed_exit_keeps_its_physical_ask_and_cannot_acknowledge_unload() {
         Err(SpeechError::ExitUnconfirmed)
     })
     .expect("owner starts");
-    handle.load(PathBuf::from("models"), 71);
+    handle.load(PathBuf::from("models"), 1);
     assert_eq!(start.recv_timeout(WAIT).expect("load starts"), Event::Lost);
-    handle.control.update(|state| state.shutdown = true);
     release.send(()).expect("fail load");
     assert_eq!(exit.recv_timeout(WAIT).expect("owner ended"), Event::Exited);
-    handle.unload(71);
-    assert_eq!(handle.control.lock().current, Some(71));
+    let fatal = observed
+        .try_recv()
+        .expect("fatal owner report precedes exit");
+    assert_eq!(fatal, report(1, LoadEvent::Unavailable));
+    assert_eq!(installer.reported(SpeechInput, fatal), []);
+    assert_eq!(installer.view().speech_input, PartState::Unavailable);
+    assert!(!installer.ready(SpeechInput));
+    assert_eq!(installer.install(SpeechInput), []);
+    assert_eq!(installer.reload_input(), []);
+    assert_eq!(
+        installer.remove(SpeechInput, Folder::Present),
+        (RemoveAnswer::Refused, vec![])
+    );
+    handle.load(PathBuf::from("newer-models"), 2);
+    handle.unload(1);
+    handle.unload(2);
+    assert_eq!(handle.control.lock().current, Some(1));
+    assert_eq!(
+        handle.control.lock().want.as_ref().map(|(_, ask)| *ask),
+        Some(1)
+    );
     assert!(matches!(
         observed.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty)

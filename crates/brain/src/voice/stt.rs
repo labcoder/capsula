@@ -339,8 +339,11 @@ impl SttHandle {
     /// Loads `models` for `ask`, replacing any earlier ask: a model served for another ask is
     /// torn down after its running decode, and the new one is loaded.
     pub(crate) fn load(&self, models: PathBuf, ask: u64) {
-        self.control
-            .update(|state| state.want = Some((models, ask)));
+        self.control.update(|state| {
+            if !state.shutdown {
+                state.want = Some((models, ask));
+            }
+        });
     }
 
     /// Applies the configured idle policy without interrupting a load or decode.
@@ -359,6 +362,9 @@ impl SttHandle {
     /// freed; an ask the thread doesn't have is reported `Unloaded` at once.
     pub(crate) fn unload(&self, ask: u64) {
         let waiting = self.control.update(|state| {
+            if state.shutdown {
+                return None;
+            }
             // Sent under the lock, so the thread's own report for `ask` can't come before it.
             if state.current != Some(ask) {
                 self.reports.send(ask, LoadEvent::Unloaded);
@@ -475,9 +481,8 @@ fn run(
             tracing::error!("speech input ownership remains unconfirmed");
             let waiting = control.update(|state| {
                 state.ready = false;
-                if wants(state, ask) {
-                    state.want = None;
-                }
+                state.shutdown = true;
+                reports.send(ask, LoadEvent::Unavailable);
                 state.waiting.take()
             });
             if let Some(decode) = waiting {

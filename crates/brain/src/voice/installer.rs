@@ -273,13 +273,14 @@ impl Installer {
     /// Whether the Activate write for `token` may still be made: a removal since takes it away.
     pub(crate) fn activating(&self, part: VoicePart, token: u64) -> bool {
         let entry = &self.parts[index(part)];
-        entry.token == token && matches!(entry.phase, Phase::Committing { .. })
+        entry.available && entry.token == token && matches!(entry.phase, Phase::Committing { .. })
     }
 
     /// Whether `part` is loaded with its install committed. A removal intent still being
     /// written changes nothing yet.
     pub(crate) fn ready(&self, part: VoicePart) -> bool {
-        matches!(self.parts[index(part)].shown(), Phase::Ready { .. })
+        let entry = &self.parts[index(part)];
+        entry.available && matches!(entry.shown(), Phase::Ready { .. })
     }
 
     /// A connected key-down reloads only installed, idle-unloaded input; it never queues a fetch.
@@ -301,6 +302,9 @@ impl Installer {
     /// removal: an install waits for it to finish, and one after a failed removal first retries
     /// its delete and `RemoveDone`.
     pub(crate) fn install(&mut self, part: VoicePart) -> Vec<Effect> {
+        if !self.parts[index(part)].available {
+            return self.take();
+        }
         if self.parts[index(part)].phase == Phase::Unloaded {
             if self.quitting {
                 return self.take();
@@ -348,6 +352,9 @@ impl Installer {
     /// Answered accepted with no write.
     pub(crate) fn cancel(&mut self) -> Vec<Effect> {
         for (index, part) in VoicePart::ALL.into_iter().enumerate() {
+            if !self.parts[index].available {
+                continue;
+            }
             if let Phase::Loading {
                 prior: Some(Rest::Unloaded),
                 ask,
@@ -383,6 +390,10 @@ impl Installer {
         part: VoicePart,
         folder: Folder,
     ) -> (RemoveAnswer, Vec<Effect>) {
+        let entry = &self.parts[index(part)];
+        if !entry.available && !entry.models.is_empty() {
+            return (RemoveAnswer::Refused, self.take());
+        }
         let token = self.token();
         let entry = &mut self.parts[index(part)];
         if let Phase::Queued { prior } = entry.phase {
@@ -445,6 +456,10 @@ impl Installer {
             self.fetching = None;
         }
         let entry = &mut self.parts[index(part)];
+        if !entry.available {
+            self.advance();
+            return self.take();
+        }
         if entry.hold(token, Held::Fetched(result)) {
             self.advance();
             return self.take();
@@ -477,6 +492,19 @@ impl Installer {
     pub(crate) fn reported(&mut self, part: VoicePart, report: LoadReport) -> Vec<Effect> {
         let LoadReport { ask, event } = report;
         let entry = &mut self.parts[index(part)];
+        if event == LoadEvent::Unavailable {
+            if entry.models.contains(&ask) {
+                entry.available = false;
+                entry.install_after = false;
+                if self.fetching.is_some_and(|(fetched, _)| fetched == part) {
+                    self.effects.push(Effect::CancelFetch);
+                }
+            }
+            return self.take();
+        }
+        if !entry.available {
+            return self.take();
+        }
         if event != LoadEvent::Loaded {
             entry.models.retain(|&model| model != ask);
         }
@@ -537,6 +565,9 @@ impl Installer {
         }
         if result.is_ok() {
             entry.durable = Durable::Installed;
+        }
+        if !entry.available {
+            return self.take();
         }
         if entry.hold(token, Held::Activated(result)) {
             return self.take();
@@ -705,7 +736,7 @@ impl Installer {
         let next = VoicePart::ALL
             .into_iter()
             .zip(&mut self.parts)
-            .filter(|(_, entry)| matches!(entry.phase, Phase::Queued { .. }))
+            .filter(|(_, entry)| entry.available && matches!(entry.phase, Phase::Queued { .. }))
             .min_by_key(|(_, entry)| entry.token);
         if let Some((part, entry)) = next
             && let Phase::Queued { prior } = entry.phase
@@ -787,6 +818,9 @@ impl Entry {
     }
 
     fn state(&self) -> PartState {
+        if !self.available && !self.models.is_empty() {
+            return PartState::Unavailable;
+        }
         match self.shown() {
             Phase::Idle | Phase::Intent | Phase::Draining | Phase::Deleting | Phase::Clearing => {
                 PartState::NotInstalled

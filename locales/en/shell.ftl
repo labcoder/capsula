@@ -179,6 +179,7 @@ voice-downloading = Downloading speech input…
 voice-loading = Loading or stopping speech input…
 voice-ready = Installed · ready
 voice-unloaded = Installed · unloaded
+voice-restart-required = Speech input unavailable. Restart the app.
 voice-installed-failed = Installed · speech input unavailable
 voice-not-installed-failed = Not installed · speech input unavailable
 voice-default-model = Parakeet TDT 0.6B v3 · int8

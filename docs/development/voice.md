@@ -676,6 +676,9 @@ flowchart LR
   not another kill path, and removal stays draining until matching physical confirmation.
   If the supervisor's retirement lane closes while a handle keeps the exit broadcast alive,
   speech input drains a queued matching exit or fails `ExitUnconfirmed`, retaining its ask.
+  A fatal unconfirmed exit publishes `Unavailable` before the owner ends. The installer keeps
+  its ask and model obligations, refuses further setup or removal, and Settings asks for a
+  restart. This outcome is not a release receipt; late ordinary reports cannot revive it.
   The composed ownership tests use a private per-owner, test-only caller-poll cut in the actual
   STT adapter. They poll the real request through admission, observe its completion waker before
   advancing the original deadline, then resume that same future. The test owner enters its

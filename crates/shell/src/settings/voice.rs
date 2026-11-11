@@ -52,7 +52,7 @@ impl Settings {
             PartState::Verifying | PartState::Downloading { .. } | PartState::Loading => {
                 SpeechInputAction::Cancel
             }
-            PartState::Ready => return None,
+            PartState::Ready | PartState::Unavailable => return None,
         };
         Some(SpeechInputIntent {
             generation: self.speech_generation?,
@@ -122,6 +122,7 @@ impl Settings {
             Some(PartState::Loading) => Text::VoiceLoading,
             Some(PartState::Ready) => Text::VoiceReady,
             Some(PartState::Unloaded) => Text::VoiceUnloaded,
+            Some(PartState::Unavailable) => Text::VoiceRestartRequired,
             Some(PartState::Failed {
                 installed: true, ..
             }) => Text::VoiceInstalledFailed,

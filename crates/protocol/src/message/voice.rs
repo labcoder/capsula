@@ -113,6 +113,8 @@ pub enum PartState {
         /// Whether the part is still installed.
         installed: bool,
     },
+    /// The owner stopped without confirmed release; restart is required.
+    Unavailable,
 }
 
 /// Why a voice frame was refused. It carries no audio or text.

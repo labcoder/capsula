@@ -32,6 +32,69 @@ fn failed_absent(key: ErrorKey) -> PartState {
     }
 }
 
+#[test]
+fn an_unavailable_owner_keeps_its_phase_and_models_and_cannot_be_revived_or_deleted() {
+    use super::{Folder, RemoveAnswer, index};
+
+    for stage in 0..4 {
+        let mut installer = both_loading();
+        if stage > 0 {
+            assert_eq!(
+                installer.reported(SpeechInput, report(1, LoadEvent::Loaded)),
+                []
+            );
+        }
+        if stage > 1 {
+            assert_eq!(
+                installer.remove(SpeechInput, Folder::Present),
+                (RemoveAnswer::Intent { token: 3 }, vec![])
+            );
+        }
+        if stage > 2 {
+            assert_eq!(
+                installer.intended(SpeechInput, 3, Ok(())),
+                [Effect::Unload {
+                    part: SpeechInput,
+                    ask: 1
+                }]
+            );
+        }
+        let phase = installer.parts[index(SpeechInput)].phase;
+        let token = installer.parts[index(SpeechInput)].token;
+        assert_eq!(
+            installer.reported(SpeechInput, report(99, LoadEvent::Unavailable)),
+            []
+        );
+        assert!(installer.parts[index(SpeechInput)].available);
+        assert_eq!(
+            installer.reported(SpeechInput, report(1, LoadEvent::Unavailable)),
+            []
+        );
+        assert_eq!(installer.view().speech_input, PartState::Unavailable);
+        assert!(!installer.ready(SpeechInput));
+        assert_eq!(installer.install(SpeechInput), []);
+        assert_eq!(installer.reload_input(), []);
+        assert_eq!(installer.cancel(), []);
+        for event in [
+            LoadEvent::Loaded,
+            LoadEvent::Lost,
+            LoadEvent::Unloaded,
+            LoadEvent::Failed,
+        ] {
+            assert_eq!(installer.reported(SpeechInput, report(1, event)), []);
+            assert_eq!(installer.view().speech_input, PartState::Unavailable);
+        }
+        assert_eq!(
+            installer.remove(SpeechInput, Folder::Present),
+            (RemoveAnswer::Refused, vec![])
+        );
+        let entry = &installer.parts[index(SpeechInput)];
+        assert_eq!(entry.models, [1]);
+        assert_eq!(entry.phase, phase);
+        assert_eq!(entry.token, token);
+    }
+}
+
 /// Both parts installed, whole and with their handles; each is loading.
 fn both_loading() -> Installer {
     let (installer, loads) = Installer::start(

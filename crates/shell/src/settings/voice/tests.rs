@@ -27,6 +27,23 @@ fn connected() -> Settings {
 }
 
 #[test]
+fn an_unavailable_owner_shows_restart_and_revokes_the_previous_setup_action() {
+    let mut state = connected();
+    assert!(state.receive_speech_input(Some(7), 7, PartState::Loading));
+    let pending = state.speech_input_intent().expect("cancel while loading");
+    assert!(state.receive_speech_input(Some(7), 7, PartState::Unavailable));
+    assert_eq!(state.speech_input_status(), Text::VoiceRestartRequired);
+    assert_eq!(state.speech_input_intent(), None);
+    assert!(!state.send_speech_input(pending, Some(7), |_| panic!(
+        "dead owner must not receive setup"
+    )));
+    assert_eq!(
+        crate::strings::Strings::english().get(state.speech_input_status()),
+        "Speech input unavailable. Restart the app."
+    );
+}
+
+#[test]
 fn idle_choice_waits_for_its_fifo_answer_and_does_not_complete_another_setting() {
     let mut state = connected();
     assert!(state.send_assistant(AssistantName::new("Cloud").expect("valid"), |_| true));
