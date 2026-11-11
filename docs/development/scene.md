@@ -43,7 +43,10 @@ tagged, for example:
 {"end":{}}
 ```
 
-The version, scene id, surface and alternative text are required. Steps have a
+The version, scene id, surface and alternative text are required. The draw tool is the one
+exception for the version: its schema leaves `v` optional and `parse_draw_record` supplies
+`"v":1` when a begin omits it, because 1 is the only version. Any other version is still
+refused, and stored and generic records keep an explicit `v`. Steps have a
 required id, optional `say`, empty-by-default `put`, `set` and `remove` lists, and
 `start` defaulting to `"speech"`. `put` is bounded to 856 operations (600 objects
 plus 256 tracks); `set` and `remove` each allow at most 600 entries. Other starts are `"now"` and

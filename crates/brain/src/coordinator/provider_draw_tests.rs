@@ -647,6 +647,42 @@ fn a_messages_start_object_without_fragments_streams_before_ready_and_draws() {
 }
 
 #[test]
+fn recorded_desk_draws_without_a_version_draw_their_steps() {
+    for (name, args, step) in [
+        (
+            "desk-1",
+            include_str!("../../fixtures/responses/draw_y_squared_1.json"),
+            "plot",
+        ),
+        (
+            "desk-2",
+            include_str!("../../fixtures/responses/draw_y_squared_2.json"),
+            "graph",
+        ),
+    ] {
+        let scratch = Scratch::new(name);
+        let mut store = store(&scratch);
+        let mut core = offered(vec![T]);
+        start(&mut core, name);
+        let chars: Vec<char> = args.chars().collect();
+        let mut streamed = Vec::new();
+        for chunk in chars.chunks(48) {
+            streamed.extend(delta(&mut core, name, &chunk.iter().collect::<String>()));
+        }
+        streamed.extend(ready(&mut core, name, args));
+        let mut effects = drain(&mut core, &mut store, streamed);
+        effects.extend(send(&mut core, TurnEvent::Finished(Finish::Completed)));
+        assert_eq!(
+            result(&effects).output.json()["text"],
+            format!("drawn: [{step}]"),
+            "{name}"
+        );
+        assert_eq!(ends(&effects), [true], "{name}");
+        assert_prefix(&store, &[step]);
+    }
+}
+
+#[test]
 fn stop_settles_the_submitted_step_without_resurrecting_queued_records_or_content() {
     let scratch = Scratch::new("provider-draw-stop");
     let mut store = store(&scratch);
