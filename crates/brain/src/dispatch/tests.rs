@@ -501,6 +501,7 @@ fn history_is_kumo_only_and_model_only() {
         names(Origin::Kumo, Route::Model),
         [
             "draw",
+            "draft_issue",
             "create_task",
             "focus",
             "search_history",
@@ -513,7 +514,14 @@ fn history_is_kumo_only_and_model_only() {
     assert_eq!(names(Origin::Kumo, Route::Mcp(L1)), ["draw", "probe"]);
     assert_eq!(
         names(Origin::Task(T), Route::Model),
-        ["draw", "focus", "search_history", "read_history", "probe"]
+        [
+            "draw",
+            "draft_issue",
+            "focus",
+            "search_history",
+            "read_history",
+            "probe"
+        ]
     );
 }
 

@@ -105,11 +105,17 @@ fn activation_offers_exact_ordered_model_schemas_and_no_mcp_history() {
     for (origin, names) in [
         (
             Origin::Kumo,
-            vec!["draw", "search_history", "read_history", "list_tasks"],
+            vec![
+                "draw",
+                "draft_issue",
+                "search_history",
+                "read_history",
+                "list_tasks",
+            ],
         ),
         (
             Origin::Task(ThreadId(2)),
-            vec!["draw", "search_history", "read_history"],
+            vec!["draw", "draft_issue", "search_history", "read_history"],
         ),
     ] {
         assert_eq!(

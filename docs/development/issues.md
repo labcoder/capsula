@@ -12,9 +12,18 @@ duplicate ledger key, oversized output or any other write failure rolls back the
 and approval too. The dispatcher answers replays with the original result, without another draft;
 only a committed call notifies the real history path to refresh its card.
 
-The dispatcher retains its 16-KiB whole-argument limit, even though `IssueBody` separately permits
-32 KiB. Local storage is not sending authority. The confirmation and remote filing handoff below
-remain dormant until their runtime and shell activation is implemented.
+The dispatcher retains its 16-KiB whole-argument limit, including JSON keys, escaping and
+whitespace, even though `IssueBody` separately permits 32 KiB. New authoring rejects Unicode
+17.0 format and default-ignorable characters in either title or body, including bidi
+overrides/isolates, zero-width joiners, fillers, variation selectors and hidden tags. Refusal is
+fixed and content-free; nothing is silently stripped or changed after consent. Ordinary
+non-ASCII letters, combining accents and visible symbols remain allowed. The Unicode data
+notice is in `THIRD-PARTY-NOTICES.md`.
+
+The preview stays literal text. GitHub will interpret visible mentions, links and Markdown
+if the user later files it; there is no screenshot, attachment or hidden body addition. Local
+storage is not sending authority. The confirmation and remote filing handoff below remain
+dormant until their runtime and shell activation is implemented.
 
 An issue the model drafts becomes a durable action: a row in the store's `actions` table that
 only the user's consent may move toward GitHub. The stages and what a card shows are in

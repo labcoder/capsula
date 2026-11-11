@@ -916,7 +916,13 @@ impl Coordinator {
             Input::CallCommitted { key, outcome, then } => match outcome {
                 crate::dispatch::Committed::Done => {
                     // The task exists whether or not its run is still current.
-                    let refresh = matches!(then, Some(crate::dispatch::Then::Created { .. } | crate::dispatch::Then::IssueDrafted));
+                    let refresh = matches!(
+                        then,
+                        Some(
+                            crate::dispatch::Then::Created { .. }
+                                | crate::dispatch::Then::IssueDrafted
+                        )
+                    );
                     if refresh {
                         effects.push(Effect::Control(ControlToShell::ThreadsChanged));
                     }

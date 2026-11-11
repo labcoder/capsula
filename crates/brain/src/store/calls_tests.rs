@@ -551,7 +551,7 @@ fn a_ledger_failure_after_action_and_event_insertion_rolls_back_all_three() {
         .unwrap_err();
     assert!(matches!(error, StoreError::Call));
     assert_eq!(super::actions_tests::snapshot(&store.conn), before);
-    assert_eq!(draft_events(&store.conn), []);
+    assert_eq!(draft_events(&store.conn), Vec::<Value>::new());
     assert_eq!(rows(&store.conn), []);
     assert!(!format!("{error:?} {error}").contains("private-ledger-boundary-sentinel"));
     store
@@ -592,7 +592,7 @@ fn draft_output_bounds_commit_or_roll_back_the_complete_transaction() {
         } else {
             assert!(matches!(result, Err(StoreError::Call)));
             assert_eq!(super::actions_tests::snapshot(&store.conn), before);
-            assert_eq!(draft_events(&store.conn), []);
+            assert_eq!(draft_events(&store.conn), Vec::<Value>::new());
             assert_eq!(rows(&store.conn), []);
         }
     }

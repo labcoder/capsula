@@ -14,8 +14,8 @@
 )]
 
 mod create_task;
-mod draw;
 mod draft_issue;
+mod draw;
 mod focus;
 mod history;
 mod ledger;
@@ -304,7 +304,12 @@ impl fmt::Debug for LocalWrite {
                 .field("title", title)
                 .field("focus", focus)
                 .finish(),
-            Self::DraftIssue { title, body, repo, account } => f
+            Self::DraftIssue {
+                title,
+                body,
+                repo,
+                account,
+            } => f
                 .debug_struct("DraftIssue")
                 .field("title_bytes", &title.as_str().len())
                 .field("body_bytes", &body.as_str().len())
