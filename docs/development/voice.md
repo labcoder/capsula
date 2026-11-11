@@ -840,6 +840,11 @@ controls drain. Only the matching authenticated physical-stop receipt clears
 admitted device debt, including during grace; failure, timeout or a new session
 cannot borrow uncertain ownership. A failed status write closes the connection.
 
+Known limit: losing a connection during an admitted hold can retain device debt across
+reconnect even after the Shell stops. Later holds then remain unavailable until Kumochi
+restarts. Recovery needs authenticated peer-lifetime and receipt proof, not a timeout,
+single-instance lock or new connection.
+
 Held input uses the ordinary runtime turn-admission gate both before a microphone
 permit and before decoded text becomes a run: initial scene recovery must be
 described, outgoing data must be below its cap, and ending-run/cleanup debt must

@@ -63,6 +63,7 @@ impl Ingress {
 pub(super) struct Holds {
     high: u32,
     pending: Option<Hold>,
+    // shortcut: a lost admitted connection retains debt until restart; add authenticated peer-lifetime recovery next.
     debt: Option<HoldKey>,
     gate: Arc<Gate>,
     send: mpsc::Sender<Packet>,
