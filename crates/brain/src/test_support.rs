@@ -25,6 +25,14 @@ use crate::store::Store;
 pub(crate) struct Scratch(PathBuf);
 
 impl Scratch {
+    pub(crate) fn trusted(name: &str) -> Self {
+        let mut scratch = Self::new(name);
+        scratch.0 = crate::platform::local_app_data()
+            .expect("local application data")
+            .join(scratch.0.file_name().expect("a scratch name"));
+        scratch
+    }
+
     pub(crate) fn new(name: &str) -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);

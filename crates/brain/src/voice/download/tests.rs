@@ -155,7 +155,7 @@ impl Server {
     }
 
     fn downloader(&self) -> (Scratch, Downloader) {
-        let scratch = Scratch::new("voice");
+        let scratch = Scratch::trusted("voice");
         let models = scratch.db().with_file_name("models");
         let downloader = Downloader::for_test(
             models,
@@ -221,6 +221,36 @@ async fn fetch(downloader: &Downloader) -> (Result<(), DownloadError>, Progress)
         .await;
     let value = *progress.borrow();
     (result, value)
+}
+
+#[tokio::test]
+async fn model_paths_refuse_a_redirected_installed_root_without_changing_bytes() {
+    let server = Server::start(vec![]);
+    let (scratch, downloader) = server.downloader();
+    let actual = scratch.dir().join("actual");
+    let pinned = actual.join(MODEL.part.dir()).join(MODEL.name);
+    seed(&pinned, b"abcdef");
+    fs::create_dir(&downloader.models).expect("empty junction");
+    crate::platform::sherpa::tests::set_junction(&downloader.models, &actual)
+        .expect("own local junction");
+    assert_eq!(fetch(&downloader).await.0, Err(DownloadError::Io));
+    assert_eq!(fs::read(&pinned).unwrap(), b"abcdef");
+    assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn model_paths_refuse_a_hard_linked_partial_without_changing_its_alias() {
+    let server = Server::start(vec![Reply::full()]);
+    let (scratch, downloader) = server.downloader();
+    let victim = scratch.dir().join("original");
+    seed(&victim, b"abc");
+    let partial = part_path(&downloader);
+    fs::create_dir_all(partial.parent().unwrap()).unwrap();
+    fs::hard_link(&victim, &partial).unwrap();
+    assert_eq!(fetch(&downloader).await.0, Err(DownloadError::Io));
+    assert_eq!(fs::read(&victim).unwrap(), b"abc");
+    assert_eq!(fs::read(&partial).unwrap(), b"abc");
+    assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

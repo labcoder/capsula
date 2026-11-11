@@ -948,6 +948,19 @@ mod tests {
     use super::{Kind, Security, Trusted, Untrusted, this_user, trusted_security};
 
     #[test]
+    fn the_default_local_app_data_chain_passes_the_existing_boundary() {
+        let known = super::local_app_data().expect("local application data");
+        let held = super::hold_chain(&known).expect("ordinary default profile chain");
+        assert!(!held.is_empty());
+        let configured = std::env::var_os("LOCALAPPDATA").expect("default local application data");
+        assert!(
+            !super::hold_chain(std::path::Path::new(&configured))
+                .expect("ordinary configured profile chain")
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn only_an_owner_in_the_trusted_set_is_trusted() {
         let user = this_user();
         let judged = |owner: &str| {
