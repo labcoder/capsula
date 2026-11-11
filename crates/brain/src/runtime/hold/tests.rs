@@ -47,6 +47,10 @@ fn recording(brain: &mut Brain) {
         .store(KEY.gesture.0, Ordering::SeqCst);
 }
 
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "the fixture supplies the protocol's last bit"
+)]
 fn packet(gesture: GestureId, seq: u32, last: bool, samples: Vec<i16>) -> Event {
     Event::Packet(Packet(MicPcm {
         gesture,

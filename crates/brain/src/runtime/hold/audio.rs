@@ -163,6 +163,10 @@ mod tests {
     use super::*;
     use kumochi_protocol::message::GestureId;
 
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the fixture supplies the protocol's last bit"
+    )]
     fn packet(rate: u32, seq: u32, last: bool, samples: Vec<i16>) -> MicPcm {
         MicPcm {
             gesture: GestureId(1),
@@ -240,7 +244,7 @@ mod tests {
                     audio.push(&packet(16_000, 0, false, vec![1; 320])).unwrap();
                     audio.push(&packet(
                         if fault == 1 { 16_000 } else { 8_000 },
-                        if fault == 1 { 0 } else { 1 },
+                        u32::from(fault != 1),
                         true,
                         vec![2],
                     ))

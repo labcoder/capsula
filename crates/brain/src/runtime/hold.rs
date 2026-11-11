@@ -18,7 +18,7 @@ use zeroize::Zeroize as _;
 
 use super::{Brain, Effect, Full, Input, Link, Origin};
 use crate::coordinator::{HoldKey, HoldSnapshot};
-use crate::voice::stt::{Decode, SttResult};
+use crate::voice::stt::{Decode, SttHandle, SttResult};
 
 #[derive(Debug, Default)]
 struct Gate {
@@ -424,7 +424,7 @@ impl Brain {
         }
         let admitted = stt
             .ok_or(HoldFailure::NotLoaded)
-            .and_then(|stt| stt.admit_use());
+            .and_then(SttHandle::admit_use);
         let ask = match admitted {
             Ok(ask) => ask,
             Err(failure) => return self.hold_end(HoldStatus::Failed(failure), link),
@@ -477,12 +477,11 @@ impl Brain {
             samples,
             reply,
         };
-        let result = match self.hold_voice().1 {
-            Some(stt) => stt.decode_for(ask, decode),
-            None => {
-                decode.discard();
-                Err(HoldFailure::NotLoaded)
-            }
+        let result = if let Some(stt) = self.hold_voice().1 {
+            stt.decode_for(ask, decode)
+        } else {
+            decode.discard();
+            Err(HoldFailure::NotLoaded)
         };
         if let Err(failure) = result {
             return self.hold_end(HoldStatus::Failed(failure), link);

@@ -185,6 +185,7 @@ impl Brain {
 
     /// Starts the next waiting settings change, unless a write is in flight. A refused one is
     /// settled at once with the settings unchanged.
+    #[expect(clippy::too_many_lines, reason = "one ordered settings write pump")]
     pub(super) fn pump_settings(
         &mut self,
         mut link: Option<&mut Link<'_, '_>>,

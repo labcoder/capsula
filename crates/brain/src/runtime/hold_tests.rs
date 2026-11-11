@@ -47,7 +47,7 @@ async fn input(
         &[],
         (Some(stt), None),
         [heard, tts],
-        fetch.clone(),
+        Arc::<super::voice::HeldFetch>::clone(&fetch),
     );
     let (installed, effects) = Installer::start(
         [Durable::Installed, Durable::Absent],
@@ -117,6 +117,10 @@ async fn opened(shell: &mut Shell<tokio::io::DuplexStream>) {
     }
 }
 
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "the fixture supplies the protocol's last bit"
+)]
 async fn packet(
     shell: &mut Shell<tokio::io::DuplexStream>,
     rate: u32,
@@ -495,11 +499,9 @@ async fn loading_waits_only_for_the_same_held_gesture_and_never_fetches() {
             .await;
         status(&mut shell, HoldStatus::Cancelled).await;
         release.send(()).unwrap();
-        loop {
-            match shell.control().await {
-                Some(ControlToShell::Voice(view)) if view.speech_input == PartState::Ready => break,
-                other => panic!("expected completed local load, got {other:?}"),
-            }
+        match shell.control().await {
+            Some(ControlToShell::Voice(view)) if view.speech_input == PartState::Ready => {}
+            other => panic!("expected completed local load, got {other:?}"),
         }
         let fresh = GestureId(18);
         shell

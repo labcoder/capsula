@@ -132,7 +132,7 @@ fn preparation_refuses_pending_delete_unavailable_or_cancelled_without_revival()
             0 => cancel.store(true, Ordering::SeqCst),
             1 => {
                 core.availability =
-                    Availability::Unavailable(super::super::availability::sign_in_needed())
+                    Availability::Unavailable(super::super::availability::sign_in_needed());
             }
             2 => {
                 core.handle(Input::Delete {
@@ -182,7 +182,7 @@ fn stale_cancel_connection_pending_delete_and_unread_target_create_no_turn() {
                     connection: ConnectionTag(0),
                     models: Vec::new(),
                     trusted_draw: false,
-                })
+                });
             }
             _ => unreachable!(),
         }

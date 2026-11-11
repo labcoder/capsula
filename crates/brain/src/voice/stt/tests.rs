@@ -24,10 +24,11 @@ fn admitted_use_is_current_ready_not_busy_and_refreshes_the_existing_idle_clock(
         HOLD_DRAIN_TIMEOUT_MS, HOLD_START_TIMEOUT_MS, HoldFailure, MAX_HOLD_CHUNKS,
     };
     let harness = Harness::loaded();
-    harness
-        .handle
-        .control
-        .update(|state| state.idle_since = Instant::now() - Duration::from_secs(899));
+    harness.handle.control.update(|state| {
+        state.idle_since = Instant::now()
+            .checked_sub(Duration::from_secs(899))
+            .unwrap();
+    });
     let admitted_at = Instant::now();
     assert_eq!(harness.handle.admit_use(), Ok(1));
     assert!(harness.handle.control.lock().idle_since >= admitted_at);

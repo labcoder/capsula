@@ -424,7 +424,7 @@ pub enum ControlToBrain {
         /// The Shell selection revision, including changes away and back.
         selection: u64,
     },
-    /// The source generation physically stopped and joined; never inferred from KeyUp or EOF.
+    /// The source generation physically stopped and joined; never inferred from `KeyUp` or EOF.
     VoiceHoldStopped {
         /// The generation whose stop completed.
         gesture: GestureId,

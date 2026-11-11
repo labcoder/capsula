@@ -641,7 +641,7 @@ fn serve_decodes(
                 let cut = state.decode_cut.take();
                 state.decoding += 1;
                 drop(state);
-                match spawn_decode(
+                if let Ok(task) = spawn_decode(
                     scope,
                     control,
                     decoder,
@@ -650,11 +650,10 @@ fn serve_decodes(
                     #[cfg(test)]
                     cut,
                 ) {
-                    Ok(task) => running[slot] = Some(task),
-                    Err(_) => {
-                        control.update(|state| state.decoding -= 1);
-                        failed = true;
-                    }
+                    running[slot] = Some(task);
+                } else {
+                    control.update(|state| state.decoding -= 1);
+                    failed = true;
                 }
                 state = control.lock();
                 continue;
