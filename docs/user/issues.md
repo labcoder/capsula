@@ -1,5 +1,8 @@
 # Saved GitHub issues
 
+This build cannot create a saved issue yet. Local draft creation is dormant; the
+cards described here only show issue records that are already in the store.
+
 When a saved issue appears in a task or chat history, its card shows the saved
 title, body, repository and bound account. The bound account is part of the
 saved record, not proof that the account is still signed in.

@@ -1,5 +1,9 @@
 # Issue actions
 
+Local draft creation is dormant too: there is no production tool or UI entry point
+to create one. A user cannot yet create a saved issue; the history path only reads
+compatible records that already exist.
+
 An issue the model drafts becomes a durable action: a row in the store's `actions` table that
 only the user's consent may move toward GitHub. The stages and what a card shows are in
 `crates/brain/src/issues.rs`, the rows in `crates/brain/src/store/actions.rs`. Neither sends a
