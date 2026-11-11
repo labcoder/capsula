@@ -22,7 +22,7 @@ fn transform(presenter: &Presenter) -> Affine {
         .view
         .frame(60_000, &mut frame)
         .expect("frame");
-    assert_eq!(frame.items().len(), 1);
+    assert_eq!(frame.items().len(), 1, "the fixture keeps its only shape");
     frame.items()[0].transform
 }
 

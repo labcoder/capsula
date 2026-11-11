@@ -81,8 +81,15 @@ fn prepared(
 }
 
 fn assert_graph_placement(frame: &Frame, expected: Affine) {
-    assert_eq!(frame.items().len(), 7);
-    assert!(frame.items().iter().all(|item| item.transform == expected));
+    assert_eq!(
+        frame.items().len(),
+        7,
+        "the recorded graph keeps every item"
+    );
+    assert!(
+        frame.items().iter().all(|item| item.transform == expected),
+        "every recorded graph item uses the fitted transform"
+    );
 }
 
 #[test]

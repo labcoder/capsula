@@ -21,10 +21,6 @@ impl TextMeasure for NoText {
 
 #[test]
 #[ignore = "release CPU timing on a quiet machine with no concurrent builds"]
-#[expect(
-    clippy::print_stdout,
-    reason = "the ignored benchmark reports only synthetic workload counts and timings"
-)]
 fn measure_prepare_canvas_curves() {
     let Record::Begin(header) =
         parse_record(br#"{"begin":{"v":1,"scene":"curves","surface":"overlay","alt":""}}"#)

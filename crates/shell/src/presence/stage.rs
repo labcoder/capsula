@@ -10,9 +10,8 @@ const MARGIN: f32 = 32.0;
 
 pub(super) fn watch_displays(owner: WeakEntity<Presence>, cx: &App) -> Subscription {
     cx.observe_displays(move |_, cx| {
-        match owner.update(cx, |presence, cx| presence.display_changed(cx)) {
-            Ok(Ok(())) => {}
-            _ => tracing::warn!("can't update drawing geometry after the display changed"),
+        if !matches!(owner.update(cx, Presence::display_changed), Ok(Ok(()))) {
+            tracing::warn!("can't update drawing geometry after the display changed");
         }
     })
 }
@@ -65,10 +64,7 @@ impl Presence {
             .set_stage(stage(area, self.layout, self.scale, panel))
         {
             cx.defer(move |cx| {
-                if owner
-                    .update(cx, |presence, cx| presence.want_frames(cx))
-                    .is_err()
-                {
+                if owner.update(cx, Presence::want_frames).is_err() {
                     tracing::debug!("drawing stage owner closed");
                 }
             });
@@ -145,11 +141,14 @@ mod tests {
 
     fn transforms(presence: &Presence, count: usize) -> Vec<kumochi_scene::geom::Affine> {
         let mut transforms = Vec::new();
-        assert!(!presence.presenter.frames().borrow().paint(|frame, _| {
-            transforms.extend(frame.items().iter().map(|item| item.transform));
-            Ok::<_, ()>(())
-        }));
-        assert_eq!(transforms.len(), count);
+        assert!(
+            !presence.presenter.frames().borrow().paint(|frame, _| {
+                transforms.extend(frame.items().iter().map(|item| item.transform));
+                Ok::<_, ()>(())
+            }),
+            "retained fixture frames paint successfully"
+        );
+        assert_eq!(transforms.len(), count, "all fixture items remain present");
         transforms
     }
 
