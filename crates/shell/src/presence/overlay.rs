@@ -33,8 +33,8 @@ use super::paint_geometry;
 use super::paint_paths::{self, BuildError};
 use super::paint_phase::{self, Phase};
 use super::paint_stroke::Scratch;
-use super::{OpenError, Presence, configure_surface, options, scaled};
-use crate::platform::{self, PresenceEvent, PresenceSurface};
+use super::{OpenError, Presence, options, scaled};
+use crate::platform::{self, PresenceEvent};
 use crate::presenter::{Frames, Sample};
 
 /// One overlay window and its root, opened hidden and closed once hidden again.
@@ -428,10 +428,13 @@ impl Surface for Gpui<'_> {
                 {
                     return result;
                 }
-                configure_surface(window, PresenceSurface::Overlay, events, cx)?;
-                self.input_windows
-                    .bind(crate::presenter::overlay_input::Layer::Overlay, window)?;
-                self.input.configure(self.input_windows)
+                super::overlay_input::configure_drawing(
+                    window,
+                    events,
+                    self.input,
+                    self.input_windows,
+                    cx,
+                )
             },
         )
     }
@@ -449,9 +452,12 @@ impl Surface for Gpui<'_> {
         if let Some(result) = tests::recovery::native(tests::recovery::Operation::Show) {
             return result.map_err(OpenError::from);
         }
-        show(overlay.window, self.surfaces.cx)?;
-        self.input.configure(self.input_windows)?;
-        Ok(())
+        super::overlay_input::show_drawing(
+            overlay.window,
+            self.input,
+            self.input_windows,
+            self.surfaces.cx,
+        )
     }
 
     fn repaint(&mut self, overlay: &Overlay) {

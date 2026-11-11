@@ -1,9 +1,46 @@
-//! Selection endings restore native input before notifying the future picker.
+//! Paint surfaces share native input setup; selection endings restore it before notifying the picker.
 
-use gpui_kit::{Context, EventEmitter};
+use async_channel::Sender;
+use gpui_kit::{App, Context, EventEmitter, Window};
 
 use super::{OpenError, Presence};
-use crate::presenter::overlay_input::{Effect, ExitCause};
+use crate::platform::{self, PresenceEvent, PresenceSurface};
+use crate::presenter::overlay_input::{Effect, ExitCause, Layer, OverlayOwner};
+
+pub(super) fn configure_dock(
+    window: &mut Window,
+    events: Sender<PresenceEvent>,
+    input: &OverlayOwner,
+    windows: &mut platform::OverlayWindows,
+    cx: &mut App,
+) -> Result<(), platform::PresenceError> {
+    super::configure_surface(window, PresenceSurface::Overlay, events, cx)?;
+    windows.bind(Layer::Dock, window)?;
+    input.configure(windows)
+}
+
+pub(super) fn configure_drawing(
+    window: &mut Window,
+    events: Sender<PresenceEvent>,
+    input: &OverlayOwner,
+    windows: &mut platform::OverlayWindows,
+    cx: &mut App,
+) -> Result<(), platform::PresenceError> {
+    super::configure_surface(window, PresenceSurface::Overlay, events, cx)?;
+    windows.bind(Layer::Overlay, window)?;
+    input.configure(windows)
+}
+
+pub(super) fn show_drawing(
+    window: gpui_kit::AnyWindowHandle,
+    input: &OverlayOwner,
+    windows: &mut platform::OverlayWindows,
+    cx: &mut App,
+) -> Result<(), OpenError> {
+    super::overlay::show(window, cx)?;
+    input.configure(windows)?;
+    Ok(())
+}
 
 impl EventEmitter<Effect> for Presence {}
 

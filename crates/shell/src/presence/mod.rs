@@ -911,9 +911,7 @@ pub(crate) fn open(
     let input = crate::presenter::overlay_input::OverlayOwner::default();
     let scale = dock_window
         .update(cx, |_, window, cx| {
-            configure_surface(window, PresenceSurface::Overlay, events.clone(), cx)?;
-            input_windows.bind(crate::presenter::overlay_input::Layer::Dock, window)?;
-            input.configure(&mut input_windows)?;
+            overlay_input::configure_dock(window, events.clone(), &input, &mut input_windows, cx)?;
             Ok::<_, platform::PresenceError>(window.scale_factor())
         })
         .map_err(|error| OpenError::Gpui(error.into()))??;

@@ -23,10 +23,8 @@ use kumochi_scene::{
 };
 
 use super::{
-    configure_surface, frame_rate::FrameLoop, line::on_next_frame, options, overlay,
-    paint_cache::PaintScene,
+    frame_rate::FrameLoop, line::on_next_frame, options, overlay, paint_cache::PaintScene,
 };
-use crate::platform::PresenceSurface;
 
 const LIFETIME: Duration = Duration::from_secs(60);
 /// Fixture-local motion runs only between these seconds; outside them nothing asks for frames.
@@ -310,17 +308,18 @@ fn run(mode: Mode) {
                         logical[1],
                         window.refresh_interval(cx).map(|interval| interval.as_nanos())
                     );
-                    configure_surface(window, PresenceSurface::Overlay, events, cx)?;
-                    input_windows
-                        .bind(crate::presenter::overlay_input::Layer::Overlay, window)?;
-                    input.configure(&mut input_windows)
+                    super::overlay_input::configure_drawing(
+                        window,
+                        events,
+                        &input,
+                        &mut input_windows,
+                        cx,
+                    )
                 })
                 .expect("fixture window")
                 .expect("click-through fixture");
-            overlay::show(window, cx).expect("show the fixture without activation");
-            input
-                .configure(&mut input_windows)
-                .expect("restack the drawing fixture");
+            super::overlay_input::show_drawing(window, &input, &mut input_windows, cx)
+                .expect("show and restack the fixture without activation");
             probe.update(cx, |_, cx| cx.notify());
             if matches!(mode, Mode::Hide) {
                 let repaint = probe.clone();
