@@ -775,6 +775,10 @@ receipt must agree; control and PCM may arrive in either order. Zero input uses
 count zero without inventing a terminal sample. Validation never waits on queue
 capacity.
 
+Malformed framing or a repeated terminal permanently closes that accumulator and
+scrubs its owned buffers. Successful PCM transfer is single-use: later input is
+rejected and a second take returns no value.
+
 Normalization runs off the capture path, incrementally through the existing sinc
 resampler into at most 960,000 mono 16 kHz i16 samples: 1,920,000 bytes, not a
 60-second 192 kHz raw recording. Scratch holds one packet and bounded kernel history.
