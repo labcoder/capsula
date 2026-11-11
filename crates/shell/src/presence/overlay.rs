@@ -377,6 +377,8 @@ impl Presence {
         }
         let handles = self.exclusion_handles();
         let mut surface = Gpui {
+            input: &self.presenter.input,
+            input_windows: &mut self.input_windows,
             owner: cx.weak_entity(),
             exclusion: &mut self.exclusion,
             surfaces: super::exclusion::Windows {
@@ -397,6 +399,8 @@ impl Presence {
 
 /// The overlay's windows through GPUI's own open and close.
 struct Gpui<'a> {
+    input: &'a crate::presenter::overlay_input::OverlayOwner,
+    input_windows: &'a mut platform::OverlayWindows,
     exclusion: &'a mut super::exclusion::Exclusion<super::exclusion::Receipt>,
     surfaces: super::exclusion::Windows<'a>,
     owner: WeakEntity<Presence>,
@@ -424,7 +428,10 @@ impl Surface for Gpui<'_> {
                 {
                     return result;
                 }
-                configure_surface(window, PresenceSurface::Overlay, events, cx)
+                configure_surface(window, PresenceSurface::Overlay, events, cx)?;
+                self.input_windows
+                    .bind(crate::presenter::overlay_input::Layer::Overlay, window)?;
+                self.input.configure(self.input_windows)
             },
         )
     }
@@ -442,7 +449,9 @@ impl Surface for Gpui<'_> {
         if let Some(result) = tests::recovery::native(tests::recovery::Operation::Show) {
             return result.map_err(OpenError::from);
         }
-        show(overlay.window, self.surfaces.cx)
+        show(overlay.window, self.surfaces.cx)?;
+        self.input.configure(self.input_windows)?;
+        Ok(())
     }
 
     fn repaint(&mut self, overlay: &Overlay) {

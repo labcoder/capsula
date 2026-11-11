@@ -1,18 +1,25 @@
 # Presence and native surfaces
 
 Overlay hit testing belongs to the presenter's `OverlayOwner`, not to a view. The native
-`OverlayWindows` adapter binds the existing dock overlay and body proxy, plus panels; B5,
-slice 5 and B3b attach their visual, regional and selection surfaces through the same seam.
-PassThrough and Regions leave the visual overlay click-through. Regions enables only the
+`OverlayWindows` adapter binds the dock paint window and body proxy in the Dock layer,
+panels in Panels, and every newly created drawing host in Overlay before it can be shown.
+Regional and selection surfaces attach through the same seam. The dock paint and drawing
+windows pass mouse input through their entire bounds, including painted pixels; only the
+dock's separate body proxy takes its input. Regions enables only the
 currently registered input windows. The [mode diagram and exit rules](input.md#overlay-pointer-ownership)
 cover the temporary Selecting mode; no production hold enters it yet.
 
-The adapter restacks top-first as panels, dock/body proxy, regional input, visual overlay.
-Selecting puts its surface above those groups, then drops it back on exit. Every restack uses
+The adapter restacks top-first as panels, dock/body proxy, regional input, drawing overlay,
+then dormant selection. Showing a drawing reapplies this order after its native placement,
+even when the input mode has not changed. A replacement host, including after clearing or
+reconnecting, binds and configures again while hidden. Selecting puts its surface above those
+groups, then drops it back on exit. Every restack uses
 `SWP_NOACTIVATE`, and every non-panel surface keeps `WS_EX_NOACTIVATE`; only the existing
 explicit panel activation path can take foreground. GPUI cannot express cross-process regional
 click-through or these Win32 restacks. The macOS equivalent is nonactivating `NSPanel`,
-`ignoresMouseEvents` and window levels; it is not implemented or verified here.
+`ignoresMouseEvents` and window levels: it must ignore mouse events over the entire drawing,
+never activate it, and restore this order after every show or placement. It is not implemented
+or verified here.
 
 The shell owns the dock, status panel, typing panel and tray on GPUI's UI thread. The dock opens
 and the keyboard is armed before the brain link starts connecting; [input.md](input.md) covers

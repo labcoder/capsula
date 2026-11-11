@@ -790,7 +790,10 @@ one is its hole. Content past the primary display's edges is clipped by the over
 never moved, scaled or fitted; the only bound is |coordinate| ≤ 20,000 after composition.
 Geometry builds before any of its item's primitives paint; a geometry or label failure clears
 the scene instead of silently skipping it. The overlay is transparent and click-through, covers
-only the primary display from logical origin, and holds Esc only while shown.
+only the primary display from logical origin, and holds Esc only while shown. Its real drawing
+window binds to the shared input adapter before showing: all pixels pass mouse input through,
+and native placement is followed by restacking below panels, the dock and regional input,
+above dormant selection. Recreated hosts follow the same path; drawings never take focus.
 
 Fills paint from a cache. When the presenter commits a view, `presence::paint_cache` stages its
 `PaintScene`: each `Prim::Fill` of the view's objects is tessellated once in prim space by the

@@ -912,7 +912,7 @@ pub(crate) fn open(
     let scale = dock_window
         .update(cx, |_, window, cx| {
             configure_surface(window, PresenceSurface::Overlay, events.clone(), cx)?;
-            input_windows.bind(crate::presenter::overlay_input::Layer::Overlay, window)?;
+            input_windows.bind(crate::presenter::overlay_input::Layer::Dock, window)?;
             input.configure(&mut input_windows)?;
             Ok::<_, platform::PresenceError>(window.scale_factor())
         })

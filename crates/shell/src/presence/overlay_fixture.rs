@@ -291,6 +291,8 @@ fn run(mode: Mode) {
                 picture.epoch = Instant::now();
             }
             let (events, _receiver) = async_channel::unbounded();
+            let mut input_windows = crate::platform::OverlayWindows::default();
+            let input = crate::presenter::overlay_input::OverlayOwner::default();
             let (window, probe) = gpui_kit::open_window(options(), cx, |_, cx| {
                 cx.new(|_| Probe {
                     picture: shared,
@@ -308,11 +310,17 @@ fn run(mode: Mode) {
                         logical[1],
                         window.refresh_interval(cx).map(|interval| interval.as_nanos())
                     );
-                    configure_surface(window, PresenceSurface::Overlay, events, cx)
+                    configure_surface(window, PresenceSurface::Overlay, events, cx)?;
+                    input_windows
+                        .bind(crate::presenter::overlay_input::Layer::Overlay, window)?;
+                    input.configure(&mut input_windows)
                 })
                 .expect("fixture window")
                 .expect("click-through fixture");
             overlay::show(window, cx).expect("show the fixture without activation");
+            input
+                .configure(&mut input_windows)
+                .expect("restack the drawing fixture");
             probe.update(cx, |_, cx| cx.notify());
             if matches!(mode, Mode::Hide) {
                 let repaint = probe.clone();
