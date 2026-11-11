@@ -23,7 +23,6 @@ use crate::voice::tts::TtsHandle;
 #[cfg(test)]
 mod path_tests;
 
-#[derive(Debug)]
 pub(crate) struct Voice {
     installer: Installer,
     models: PathBuf,
@@ -37,6 +36,16 @@ pub(crate) struct Voice {
     deletes: [Option<Deleting>; 2],
     /// What the coordinator was last told about spoken replies.
     spoken: bool,
+}
+
+impl std::fmt::Debug for Voice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Voice")
+            .field("view", &self.installer.view())
+            .field("fetching", &self.fetch.is_some())
+            .field("spoken", &self.spoken)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug)]

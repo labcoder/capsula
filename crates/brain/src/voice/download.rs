@@ -87,8 +87,13 @@ pub(crate) trait Fetch: Send + Sync + std::fmt::Debug {
 }
 
 /// Fetches into its models folder with a downloader made for each fetch, so start-up builds none.
-#[derive(Debug)]
 pub(crate) struct Online(pub(crate) PathBuf);
+
+impl std::fmt::Debug for Online {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Online").finish_non_exhaustive()
+    }
+}
 
 impl Fetch for Online {
     fn fetch<'a>(

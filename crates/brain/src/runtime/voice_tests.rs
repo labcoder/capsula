@@ -1484,6 +1484,18 @@ fn timeout_diagnostics(brain: &Brain, saved: Option<&toml::Value>) -> String {
 }
 
 #[tokio::test]
+async fn model_review_debug_excludes_paths_through_outer_carriers() {
+    let scratch = Scratch::trusted("voice-debug-path");
+    let models = scratch.dir().join(test_support::SENTINEL);
+    let fetcher: Arc<dyn Fetch> = Arc::new(crate::voice::download::Online(models.clone()));
+    let (brain, _release, _) = attached_at(&scratch, models, Arc::clone(&fetcher));
+    let debug = format!("{brain:?} {fetcher:?}");
+    assert!(!debug.contains(test_support::SENTINEL));
+    assert!(!debug.contains(&format!("{:?}", test_support::SENTINEL.as_bytes())));
+    brain.close().await;
+}
+
+#[tokio::test]
 async fn removal_diagnostics_exclude_paths_and_report_owner_counts() {
     let scratch = Scratch::trusted("voice-diagnostics");
     let (fetch, _results) = held_fetch();
