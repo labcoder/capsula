@@ -766,3 +766,19 @@ binary's profile folder), the header (`SHERPA_INCLUDE`), the models (`VOICE_MODE
 - `measure_parakeet` runs the layout check, then times load and release-to-text decodes through
   the owner and the release `kumochid --speech` at 16, 44.1 and 48 kHz, with WER against S5's
   reference transcripts.
+
+### Held input normalization
+
+The hold accumulator accepts only contiguous, unique native-rate packets. One
+KeyUp count, one nonempty last packet at count−1 and the matching physical-stop
+receipt must agree; control and PCM may arrive in either order. Zero input uses
+count zero without inventing a terminal sample. Validation never waits on queue
+capacity.
+
+Normalization runs off the capture path, incrementally through the existing sinc
+resampler into at most 960,000 mono 16 kHz i16 samples: 1,920,000 bytes, not a
+60-second 192 kHz raw recording. Scratch holds one packet and bounded kernel history.
+Owned accumulator/scratch and resampler history are scrubbed on drop. Scheduling
+moves the normalized vector to STT; cancelling its receiver fences the result,
+not audio already owned by an in-flight decode. STT's serialization/worker copies
+and native inference allocations remain part of the unmeasured end-to-end peak.

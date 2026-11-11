@@ -8,6 +8,7 @@ mod tests;
 
 use std::f64::consts::PI;
 use std::sync::LazyLock;
+use zeroize::Zeroize;
 
 /// Zero crossings of the kernel on each side.
 const ZEROS: u32 = 16;
@@ -47,6 +48,12 @@ pub(crate) struct Resampler {
     /// Input samples taken and output samples made.
     taken: u64,
     made: u64,
+}
+
+impl Drop for Resampler {
+    fn drop(&mut self) {
+        self.history.zeroize();
+    }
 }
 
 impl Resampler {
