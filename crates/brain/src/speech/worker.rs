@@ -189,14 +189,9 @@ mod tests {
             .expect("queued unload");
         let mut input = queued.as_slice();
         let mut output = Vec::new();
-        let next = loaded(
-            &mut input,
-            &mut output,
-            41,
-            Path::new("\0"),
-            models,
-            || Err(NativeError::Unsafe),
-        )
+        let next = loaded(&mut input, &mut output, 41, Path::new("\0"), models, || {
+            Err(NativeError::Unsafe)
+        })
         .expect("load refusal and continuation");
         assert!(
             matches!(next, Some((42, SpeechRequest::Unload))),
@@ -220,7 +215,10 @@ mod tests {
             Path::new("models\0private"),
             Path::new(&non_utf8),
         ] {
-            assert_eq!(load_refusal(models), SpeechReply::Failed(NativeError::Input));
+            assert_eq!(
+                load_refusal(models),
+                SpeechReply::Failed(NativeError::Input)
+            );
         }
     }
 

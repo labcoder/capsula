@@ -40,8 +40,8 @@ fn drain(pipe: impl io::Read + Send + 'static) -> io::Result<mpsc::Receiver<io::
 }
 
 fn fixture_completion(result: io::Result<u32>, readers_started: bool) -> Result<(), String> {
-    let code = result
-        .map_err(|error| format!("speech fixture operation failed ({:?})", error.kind()))?;
+    let code =
+        result.map_err(|error| format!("speech fixture operation failed ({:?})", error.kind()))?;
     if code != 0 {
         return Err(format!("speech fixture exited with code {code}"));
     }
@@ -53,7 +53,10 @@ fn fixture_completion(result: io::Result<u32>, readers_started: bool) -> Result<
 
 #[test]
 fn a_startup_failure_is_not_replaced_by_missing_readers() {
-    let failure = io::Error::new(io::ErrorKind::PermissionDenied, "private startup error marker");
+    let failure = io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "private startup error marker",
+    );
     assert_eq!(
         fixture_completion(Err(failure), false),
         Err("speech fixture operation failed (PermissionDenied)".into())
@@ -97,12 +100,14 @@ fn run_fixture(fixture: &str) {
             jobs: &[&job],
         })?;
         drop(child.stdin.take());
-        stdout = Some(drain(child.stdout.take().ok_or_else(|| {
-            io::Error::other("fixture stdout missing")
-        })?)?);
-        stderr = Some(drain(child.stderr.take().ok_or_else(|| {
-            io::Error::other("fixture stderr missing")
-        })?)?);
+        stdout =
+            Some(drain(child.stdout.take().ok_or_else(|| {
+                io::Error::other("fixture stdout missing")
+            })?)?);
+        stderr =
+            Some(drain(child.stderr.take().ok_or_else(|| {
+                io::Error::other("fixture stderr missing")
+            })?)?);
         if !child.process.exits_within(FIXTURE_PATIENCE)? {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -114,8 +119,8 @@ fn run_fixture(fixture: &str) {
     let stopped = job.terminate();
     let stdout = stdout.map(|receive| receive.recv_timeout(OUTPUT_PATIENCE));
     let stderr = stderr.map(|receive| receive.recv_timeout(OUTPUT_PATIENCE));
-    let drained = stdout.as_ref().is_none_or(Result::is_ok)
-        && stderr.as_ref().is_none_or(Result::is_ok);
+    let drained =
+        stdout.as_ref().is_none_or(Result::is_ok) && stderr.as_ref().is_none_or(Result::is_ok);
     let cleanup = if stopped.is_ok() && drained {
         std::fs::remove_dir_all(&dir)
     } else {
