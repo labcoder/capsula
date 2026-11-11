@@ -15,6 +15,10 @@ pub const MIN_RATE: u32 = 8_000;
 pub const MAX_RATE: u32 = 192_000;
 /// The most chunks one hold sends: 60 s of 20 ms chunks [guess].
 pub const MAX_HOLD_CHUNKS: u32 = 3_000;
+/// Unmeasured open/start upper bound, generous for Bluetooth; revisit after native review.
+pub const HOLD_START_TIMEOUT_MS: u32 = 10_000;
+/// Unmeasured final-audio drain upper bound; revisit after native review, never a stop receipt.
+pub const HOLD_DRAIN_TIMEOUT_MS: u32 = 2_000;
 /// The longest single segment [guess].
 pub const MAX_SEGMENT_SECONDS: u32 = 30;
 /// Queued but unplayed audio across a run, on both sides [guess].
@@ -57,6 +61,44 @@ pub struct SegmentId(pub u32);
 /// The shell's output device generation; PCM resampled for another one is dropped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutputGeneration(pub u32);
+
+/// One voice-only hold's admission or terminal outcome; never audio or recognized words.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HoldStatus {
+    /// The exact hold may open input; collection still waits for its running/UI receipt.
+    Admitted,
+    /// Local speech input is loading; there is no recording permit yet.
+    Loading,
+    /// Counted audio and a physical source-stop receipt admitted local decoding.
+    Transcribing,
+    /// No recognized words; nothing was stored or sent.
+    Empty,
+    /// The input was terminally cancelled.
+    Cancelled,
+    /// The input failed; later data cannot revive it.
+    Failed(HoldFailure),
+}
+
+/// Fixed voice-input failures, safe in status frames, errors and diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HoldFailure {
+    /// Speech input is not installed or loaded.
+    NotLoaded,
+    /// Another input or decode still owns the bounded slot.
+    Busy,
+    /// An owner or its cleanup is unavailable; a restart may be needed.
+    Unavailable,
+    /// The framing, rate, sequence or final count disagrees.
+    InvalidAudio,
+    /// The hold exceeded the existing audio bound.
+    TooLong,
+    /// An existing hold or decode deadline ended the input.
+    TimedOut,
+    /// The pinned target, model or connection no longer matches.
+    ChoiceChanged,
+    /// Local speech recognition failed without recognized text.
+    DecodeFailed,
+}
 
 /// A committed step: its scene and its lifetime index there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

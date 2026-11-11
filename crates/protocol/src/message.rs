@@ -59,7 +59,8 @@ pub use threads::{
     ThreadTitle,
 };
 pub use voice::{
-    Cursor, MAX_AHEAD_SEGMENTS, MAX_HOLD_CHUNKS, MAX_MIC_SAMPLES, MAX_RATE, MAX_SAY_BYTES,
+    Cursor, HOLD_DRAIN_TIMEOUT_MS, HOLD_START_TIMEOUT_MS, HoldFailure, HoldStatus,
+    MAX_AHEAD_SEGMENTS, MAX_HOLD_CHUNKS, MAX_MIC_SAMPLES, MAX_RATE, MAX_SAY_BYTES,
     MAX_SEGMENT_SECONDS, MAX_SEGMENTS_PER_RUN, MAX_SPEECH_SAMPLES, MAX_TRANSCRIPT_BYTES,
     MAX_UNPLAYED_SECONDS, MIN_RATE, MicPcm, OutputGeneration, PROGRESS_INTERVAL_MS, PartState,
     SegmentId, SpeechPcm, StepRef, Transcript, VoiceBound, VoiceView, check_rate,
@@ -414,6 +415,20 @@ pub enum ControlToBrain {
     GitHub(GitHubOp),
     /// Consent or another explicit issue-card action.
     Issue(IssueOp),
+    /// A recognized voice-only hold, without screen capture or an exclusion lease.
+    VoiceHoldRecognized {
+        /// The checked connection-local gesture.
+        gesture: GestureId,
+        /// The exact target, or New when absent; no thread is stored by this request.
+        thread: Option<ThreadId>,
+        /// The Shell selection revision, including changes away and back.
+        selection: u64,
+    },
+    /// The source generation physically stopped and joined; never inferred from KeyUp or EOF.
+    VoiceHoldStopped {
+        /// The generation whose stop completed.
+        gesture: GestureId,
+    },
 }
 
 /// What a thread's delete came to.
@@ -593,6 +608,13 @@ pub enum ControlToShell {
     },
     /// A GitHub connection error, independent of generic account errors.
     GitHubError(UserError),
+    /// Voice-only input authority/status, scoped to this connection and gesture.
+    VoiceHoldStatus {
+        /// The hold this status belongs to.
+        gesture: GestureId,
+        /// Admission or a content-free outcome; it cannot itself claim a running microphone.
+        status: HoldStatus,
+    },
 }
 
 /// Shell to brain, on the data pipe.

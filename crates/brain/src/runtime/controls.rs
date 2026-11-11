@@ -80,6 +80,8 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
         })),
         // shortcut: B2a admits holds and consumes focus hints and exclusion lease changes.
         message @ (ControlToBrain::HoldRecognized { .. }
+        | ControlToBrain::VoiceHoldRecognized { .. }
+        | ControlToBrain::VoiceHoldStopped { .. }
         | ControlToBrain::KeyDown { .. }
         | ControlToBrain::KeyUp { .. }
         | ControlToBrain::GestureCancel { .. }

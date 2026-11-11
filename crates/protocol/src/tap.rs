@@ -68,6 +68,8 @@ impl Tapped for ControlToBrain {
             Self::AudioOutput { .. } => "AudioOutput",
             Self::GitHub(_) => "GitHub",
             Self::Issue(_) => "Issue",
+            Self::VoiceHoldRecognized { .. } => "VoiceHoldRecognized",
+            Self::VoiceHoldStopped { .. } => "VoiceHoldStopped",
         }
     }
 
@@ -137,6 +139,7 @@ impl Tapped for ControlToShell {
             Self::ThreadModelSet { .. } => "ThreadModelSet",
             Self::Voice(_) => "Voice",
             Self::GitHubError(_) => "GitHubError",
+            Self::VoiceHoldStatus { .. } => "VoiceHoldStatus",
         }
     }
 

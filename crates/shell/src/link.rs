@@ -918,6 +918,7 @@ fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
             | ControlToShell::AnthropicKeyStage { .. }
             | ControlToShell::AnthropicKeyStageDone { .. }
             | ControlToShell::SpeechRevoked { .. }
+            | ControlToShell::VoiceHoldStatus { .. }
             | ControlToShell::Voice(_),
         ) => Err(LinkError::Rejected),
         Some(ControlToShell::BuildMismatch { brain_build }) => {
@@ -1110,6 +1111,7 @@ fn watch(
                     return;
                 }
             }
+            Ok(Some(ControlToShell::VoiceHoldStatus { .. })) => {}
             Ok(Some(
                 reply @ (ControlToShell::AnthropicKeyStage { .. }
                 | ControlToShell::AnthropicKeyStageDone { .. }),

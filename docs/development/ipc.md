@@ -1,5 +1,16 @@
 # The pipes and the handshake
 
+## Voice-only hold messages
+
+`VoiceHoldRecognized` carries a connection-local gesture, exact thread/New target and
+selection revision without screen authority. `VoiceHoldStatus::Admitted` grants input
+preparation, not Listening: collection also needs the matching running/UI receipt.
+`VoiceHoldStopped` means that source generation physically stopped and joined; KeyUp,
+cancel, EOF and deadlines are not substitutes. These appended messages preserve old tags
+and remain payload-redacted in the pipe tap. Existing `MicPcm` and KeyUp shapes stay unchanged.
+The provisional 10-second startup and 2-second final-PCM drain bounds are unmeasured;
+expiry is terminal but never releases an unconfirmed device owner.
+
 ## Anthropic paste metadata
 
 The build-id handshake rejects mixed binaries before decoding connection work.
