@@ -5,6 +5,14 @@ contain only a title, body and optional repository; the dispatcher supplies the 
 conversation and any account metadata. There is no model-supplied thread, account or approval,
 and MCP drafting is not enabled. Creating a draft grants no consent and sends no HTTP request.
 
+Before the store write, the account owner supplies binding metadata only while its verified
+numeric user, access lifetime and complete repository listing remain current. An explicit
+repository must exactly match that listing or the call receives a fixed refusal; it is never
+replaced with a default. Without complete authority, its proposal remains unbound and no default
+is applied. Otherwise, a missing repository uses only the committed configuration default for
+that same numeric account, still present in the listing. A pending or merely displayed default
+cannot select the destination. These metadata do not grant later sending authority.
+
 The store inserts the draft, its first approval, its `draft` event and the tool-call ledger result
 in one transaction. Admission requires the call's run to remain active in the same live thread.
 Missing, ended, mismatched or deleting owners return `Committed::Failed` without writes. A

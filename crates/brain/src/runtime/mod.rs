@@ -1022,6 +1022,30 @@ impl Brain {
                 Effect::Store(mut op) => {
                     self.claude.deleting(&op);
                     self.seed_op(&mut op);
+                    if let StoreOp::CommitCall(call) = &mut op
+                        && let crate::dispatch::LocalWrite::DraftIssue { repo, account, .. } =
+                            &mut call.write
+                    {
+                        match self
+                            .account
+                            .github
+                            .draft_binding(repo.as_ref(), self.config.github_default())
+                        {
+                            Ok(binding) => (*repo, *account) = binding,
+                            Err(error) => {
+                                let sent = self
+                                    .inputs_tx
+                                    .send(Input::CallCommitted {
+                                        key: call.key.clone(),
+                                        outcome: crate::dispatch::Committed::Refused(error),
+                                        then: call.then,
+                                    })
+                                    .is_ok();
+                                debug_assert!(sent, "the brain holds its own receiver");
+                                continue;
+                            }
+                        }
+                    }
                     #[cfg(test)]
                     self.observer.send(Seen::StoreOpQueued(op.clone())).ok();
                     let failure = op.failed();

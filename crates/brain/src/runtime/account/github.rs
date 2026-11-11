@@ -7,7 +7,7 @@ use crate::connections::github::{
 };
 use crate::connections::http_client::{Http, HttpError, Request, Response, SharedHttp};
 use kumochi_protocol::Secret;
-use kumochi_protocol::message::{ControlToShell, ErrorKey, GitHubOp};
+use kumochi_protocol::message::{ControlToShell, ErrorKey, GitHubOp, RepoName};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -18,6 +18,9 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 mod repositories;
+
+#[cfg(test)]
+pub(in crate::runtime) mod draft_tests;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum VerificationStage {
@@ -447,6 +450,30 @@ impl GitHub {
 
     pub(in crate::runtime) fn restore_default(&mut self, default: Option<DefaultRepo>) {
         self.machine.restore_default(default);
+    }
+
+    pub(in crate::runtime) fn draft_binding(
+        &self,
+        proposed: Option<&RepoName>,
+        default: Option<DefaultRepo>,
+    ) -> Result<(Option<RepoName>, Option<GitHubUser>), crate::dispatch::ToolError> {
+        if !self.enabled || self.closing {
+            return Ok((proposed.cloned(), None));
+        }
+        let (Some(user), Some(repos)) = (self.machine.user(), self.machine.repositories()) else {
+            return Ok((proposed.cloned(), None));
+        };
+        let repo = if let Some(proposed) = proposed {
+            if !repos.contains(proposed) {
+                return Err(crate::dispatch::ToolError::NotHere);
+            }
+            Some(proposed.clone())
+        } else {
+            default
+                .filter(|default| default.account == user.id && repos.contains(&default.repo))
+                .map(|default| default.repo)
+        };
+        Ok((repo, Some(user.clone())))
     }
 
     pub(super) fn take_default(&mut self) -> Option<(u64, DefaultRepo)> {
