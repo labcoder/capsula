@@ -103,7 +103,7 @@ fn seed(scratch: &Scratch, [label, info, alt]: [&str; 3], choice: &ModelChoice) 
 }
 
 /// `stamp` reads as `YYYY-MM-DD HH:MM`.
-fn assert_minute(stamp: &str) {
+pub(super) fn assert_minute(stamp: &str) {
     assert_eq!(stamp.len(), 16, "YYYY-MM-DD HH:MM");
     assert!(
         stamp.char_indices().all(|(at, c)| match at {

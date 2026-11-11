@@ -3,8 +3,8 @@ use std::sync::atomic::Ordering;
 
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
-    ControlToBrain, ControlToShell, DataToBrain, GestureId, HoldFailure, HoldStatus, MicPcm,
-    RunOrigin,
+    ConnectionKind, ControlToBrain, ControlToShell, DataToBrain, DataToShell, Effort, GestureId,
+    HoldFailure, HoldStatus, MicPcm, ModelChoice, ModelSlug, RunOrigin, ThreadId,
 };
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::mpsc;
@@ -19,6 +19,40 @@ use crate::voice::installer::{Durable, Installer};
 use crate::voice::stt::held_for_runtime_checked;
 
 const G: GestureId = GestureId(17);
+
+struct Requested(mpsc::UnboundedSender<crate::engines::RunRequest>);
+
+impl std::fmt::Debug for Requested {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Requested")
+    }
+}
+
+impl crate::engines::Engine for Requested {
+    fn start(
+        &self,
+        request: crate::engines::RunRequest,
+        events: mpsc::Sender<crate::engines::TurnEvent>,
+        gate: crate::engines::SendGate,
+    ) -> crate::engines::Round {
+        let seen = self.0.clone();
+        Box::pin(async move {
+            let crate::engines::Answer::Grant(lease) = gate.ask().await else {
+                return;
+            };
+            seen.send(request).unwrap();
+            for event in [
+                crate::engines::TurnEvent::TextDelta("selected answer".into()),
+                crate::engines::TurnEvent::Finished(crate::engines::Finish::Completed),
+            ] {
+                if events.send(event).await.is_err() {
+                    return;
+                }
+            }
+            drop(lease);
+        })
+    }
+}
 
 pub(in crate::runtime) type InputVoice = (
     Brain,
@@ -190,11 +224,31 @@ async fn exact_ordered_pcm_and_independent_resampling_tail_reach_one_real_hold_r
             }
             let (mut brain, release, mut decoded, fetch) =
                 input(&scratch, expected, "recognized sentinel").await;
+            let choice = ModelChoice {
+                model: ModelSlug::new("voice-selected").unwrap(),
+                effort: Effort::High,
+                connection: ConnectionKind::ChatGpt,
+            };
+            assert!(
+                Store::open(&scratch.db())
+                    .unwrap()
+                    .set_model(ThreadId(1), &choice)
+                    .unwrap()
+            );
+            let (seen, mut requests) = mpsc::unbounded_channel();
+            brain.engine = Box::new(Requested(seen));
             let ((control, data), mut shell) = duplex();
             let mut tap = Tap::from_env();
             let client = async {
                 opened(&mut shell).await;
-                recognize(&mut shell).await;
+                shell
+                    .send(&ControlToBrain::VoiceHoldRecognized {
+                        gesture: G,
+                        thread: Some(ThreadId(1)),
+                        selection: 4,
+                    })
+                    .await;
+                status(&mut shell, HoldStatus::Admitted).await;
                 let chunks = if resampled { 1 } else { 2 };
                 if controls_first {
                     release_source(&mut shell, chunks).await;
@@ -218,12 +272,41 @@ async fn exact_ordered_pcm_and_independent_resampling_tail_reach_one_real_hold_r
                     }
                     other => panic!("expected authentic hold run, got {other:?}"),
                 };
-                assert_eq!(shell.read_to_end(run).await, "selected answer".len());
+                assert_eq!(
+                    shell.data().await,
+                    DataToShell::AssistantText {
+                        run,
+                        delta: "selected answer".into()
+                    }
+                );
+                shell.credit("selected answer".len() + 64).await;
+                assert_eq!(shell.data().await, DataToShell::RunEnd { run });
                 drop(shell);
             };
             let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
             assert_eq!(ended, Ended::Lost);
             assert_eq!(fetch.begun.load(Ordering::SeqCst), 0);
+            let request = requests.try_recv().unwrap();
+            assert_eq!(request.thread, ThreadId(1));
+            assert_eq!(request.request.choice, Some(choice));
+            let sent_users: Vec<_> = request
+                .request
+                .input
+                .iter()
+                .filter_map(|item| match item {
+                    crate::context::InputItem::Message {
+                        role: crate::context::Role::User,
+                        text,
+                    } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(sent_users.len(), 1);
+            let minute = sent_users[0]
+                .strip_prefix("recognized sentinel\n\nLocal time: ")
+                .unwrap();
+            super::asks::assert_minute(minute);
+            assert!(requests.is_empty());
             brain.close().await;
             assert_eq!(users(&scratch), ["recognized sentinel"]);
         }
