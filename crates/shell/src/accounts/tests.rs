@@ -485,6 +485,7 @@ fn settings_and_request_errors_do_not_replace_or_extend_an_account_error() {
         ErrorKey::AccountRefused,
         ErrorKey::RequestRefused,
         ErrorKey::ResponseUnreadable,
+        ErrorKey::GitHubUnavailable,
     ] {
         accounts.error(&error(key, vec![Action::Retry]));
         assert_eq!(accounts.error, Some(failure.clone()));

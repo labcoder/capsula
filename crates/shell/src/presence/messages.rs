@@ -8,8 +8,14 @@ use gpui_kit::{
     ListAlignment, ListState as MessageList, ParentElement as _, Pixels, Render, SharedString,
     Styled as _, Subscription, WeakEntity, Window, div, list, px,
 };
-use kumochi_protocol::message::{PageEventKind, RunId, ThreadId};
+use kumochi_protocol::message::{ActionState, PageEventKind, RunId, ThreadId};
 use std::rc::Rc;
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "issue confirmation remains dormant")
+)]
+mod consent;
 
 use super::Presence;
 use crate::runs::Shown;
@@ -20,6 +26,8 @@ gpui_kit::actions!(thread_messages, [EarlierMessages, LaterMessages]);
 
 pub(super) struct Messages {
     model: Entity<Threads>,
+    owner: WeakEntity<Presence>,
+    pending_issue: Option<consent::Pending>,
     list: MessageList,
     focus: FocusHandle,
     shown_thread: Option<ThreadId>,
@@ -32,15 +40,20 @@ pub(super) struct Messages {
     live_row: Option<RunId>,
     proven: Option<RunId>,
     _watch: Subscription,
+    github_watch: Option<Subscription>,
+    _activation_watch: Subscription,
+    _visibility_watch: Subscription,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct Row {
     id: (&'static str, u64),
     run: Option<RunId>,
     assistant: bool,
     label: Option<SharedString>,
     text: SharedString,
+    details: Option<SharedString>,
+    warning: Option<SharedString>,
     cut: Option<SharedString>,
 }
 
@@ -75,18 +88,62 @@ impl Messages {
         let messages = MessageList::new(count, ListAlignment::Bottom, px(0.0));
         messages.set_scroll_handler({
             let model = model.clone();
+            let owner = owner.clone();
             move |event, _, cx| {
                 if event.visible_range.start == 0 {
                     older(&model, &owner, cx);
                 }
             }
         });
-        let watch = cx.observe(&model, |view, model, cx| {
-            view.rows = stored_rows(model.read(cx), cx);
+        let watch = cx.observe_in(&model, window, |view, model, window, cx| {
+            view.dismiss_stale_issue(window, cx);
+            let rows = stored_rows(model.read(cx), cx);
+            let prefix = view
+                .rows
+                .iter()
+                .zip(rows.iter())
+                .take_while(|(before, after)| before.id == after.id)
+                .count();
+            let head = view.rows.iter().enumerate().zip(rows.iter()).take(prefix);
+            let tail = view
+                .rows
+                .iter()
+                .enumerate()
+                .skip(prefix)
+                .rev()
+                .zip(rows.iter().skip(prefix).rev())
+                .take_while(|((_, before), after)| before.id == after.id);
+            for ((ix, before), after) in head.chain(tail) {
+                if before != after {
+                    view.list.remeasure_items(ix..ix + 1);
+                }
+            }
+            view.rows = rows;
             view.sync(cx);
         });
+        cx.defer_in(window, |view, window, cx| {
+            view.github_watch = view.owner.upgrade().map(|owner| {
+                let settings = owner.read(cx).settings.clone();
+                cx.observe_in(&settings, window, |view, _, window, cx| {
+                    view.dismiss_stale_issue(window, cx);
+                })
+            });
+        });
+        let activation_watch = cx.observe_window_activation(window, |view, window, cx| {
+            if !window.is_window_active() {
+                view.retire_issue(window, cx);
+            }
+        });
+        let visibility_watch =
+            cx.observe_window_visibility(window, |view, visibility, window, cx| {
+                if !visibility.is_visible() {
+                    view.retire_issue(window, cx);
+                }
+            });
         Self {
             model,
+            owner,
+            pending_issue: None,
             list: messages,
             focus: cx.focus_handle().tab_stop(true),
             shown_thread,
@@ -99,6 +156,9 @@ impl Messages {
             live_row: None,
             proven: None,
             _watch: watch,
+            github_watch: None,
+            _activation_watch: activation_watch,
+            _visibility_watch: visibility_watch,
         }
     }
 
@@ -292,6 +352,60 @@ fn row(
     cx: &App,
 ) -> Row {
     let strings = cx.global::<Strings>();
+    if let PageEventKind::Issue { draft } = kind {
+        let issue = state.issue(draft);
+        let current = issue.as_ref().and_then(|entry| entry.state());
+        let card = issue.as_ref().and_then(|entry| entry.card());
+        let loading = issue.as_ref().is_some_and(|entry| entry.loading());
+        let status = current.map_or_else(
+            || {
+                strings.get(if loading {
+                    Text::IssueLoading
+                } else {
+                    Text::IssueUnavailable
+                })
+            },
+            |state| strings.issue_status(state),
+        );
+        let details = card.map_or_else(
+            || {
+                strings.get(if loading {
+                    Text::IssueDetailsLoading
+                } else {
+                    Text::IssueDetailsUnavailable
+                })
+            },
+            |card| strings.issue_details(card),
+        );
+        let warning = matches!(
+            current,
+            Some(
+                ActionState::Filed {
+                    maybe_duplicate: true,
+                    ..
+                } | ActionState::Unknown {
+                    maybe_duplicate: true,
+                    ..
+                }
+            )
+        );
+        return Row {
+            id,
+            run,
+            assistant: false,
+            label: Some(status.into()),
+            text: strings
+                .issue_title(card.map_or(text, |card| card.title.as_str()))
+                .into(),
+            details: Some(format!("{details}\n\n{}", strings.get(Text::IssueReadOnly)).into()),
+            warning: warning.then(|| strings.get(Text::IssueDuplicate).into()),
+            cut: if card.is_none() {
+                cut.map(|text| strings.get(text).into())
+            } else {
+                None
+            },
+        };
+    }
     let label = match kind {
         PageEventKind::User => Some(strings.get(Text::ThreadUser)),
         PageEventKind::AssistantText => Some(strings.assistant(state.settings.as_ref().map_or(
@@ -304,7 +418,6 @@ fn row(
         PageEventKind::Issue { .. } | PageEventKind::TaskDeleted => None,
     };
     let text = match kind {
-        PageEventKind::Issue { .. } => strings.issue_draft(text),
         PageEventKind::TaskDeleted => strings.get(Text::ThreadDeleted),
         _ => text.to_owned(),
     };
@@ -314,7 +427,17 @@ fn row(
         assistant: kind == PageEventKind::AssistantText,
         label: label.map(Into::into),
         text: text.into(),
+        details: None,
+        warning: None,
         cut: cut.map(|text| strings.get(text).into()),
+    }
+}
+
+fn message_text(row: &Row, field: &'static str, value: SharedString) -> gpui_kit::Text {
+    if row.details.is_some() {
+        gpui_kit::Text::new(field.into(), value)
+    } else {
+        gpui_kit::Text::new_inaccessible(value)
     }
 }
 
@@ -332,9 +455,24 @@ fn message(row: &Row, cx: &App) -> gpui_kit::AnyElement {
             div()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
-                .child(label)
+                .child(message_text(row, "issue-status", label))
         }))
-        .child(div().text_sm().child(row.text.clone()))
+        .child(
+            div()
+                .text_sm()
+                .child(message_text(row, "issue-title", row.text.clone())),
+        )
+        .children(row.warning.clone().map(|warning| {
+            div()
+                .text_sm()
+                .text_color(cx.theme().foreground)
+                .child(message_text(row, "issue-warning", warning))
+        }))
+        .children(row.details.clone().map(|details| {
+            div()
+                .text_sm()
+                .child(message_text(row, "issue-details", details))
+        }))
         .children(row.cut.clone().map(|notice| {
             div()
                 .text_xs()
@@ -347,6 +485,7 @@ fn message(row: &Row, cx: &App) -> gpui_kit::AnyElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod issues;
     use gpui_kit::{
         AppContext as _, Bounds, ListOffset, TestAppContext, WindowBounds, WindowOptions, point,
         size,

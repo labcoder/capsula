@@ -17,6 +17,34 @@ use super::{Activity, EscapePanel, Presence, Runs, test_fixture};
 use crate::link::{Batch, LinkEvent, Session};
 use crate::presenter::{Effect, Presenter};
 
+#[gpui::test]
+fn exhausted_page_ids_close_the_actual_link_not_only_the_view_models(cx: &mut TestAppContext) {
+    use crate::link::tests::{attended, connected, next, patient};
+    let link = attended("page-exhaustion");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    let owner = test_fixture::presence(cx);
+    owner.update(cx, |owner, cx| {
+        owner.link = link.handle;
+        owner.session = Some(session);
+        owner.threads.update(cx, |state, _| {
+            state.connected();
+            state.show();
+            state.exhaust_for_tests();
+        });
+        owner.request_pages(cx);
+    });
+    let end = Instant::now() + std::time::Duration::from_secs(5);
+    while !link.link.is_finished() && Instant::now() < end {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(
+        link.link.is_finished(),
+        "exhaustion must close the live session"
+    );
+    assert!(link.link.join().unwrap());
+}
+
 fn mirrored_presenter() -> Presenter {
     deferred::start().expect("the dropper starts before intake");
     let mut presenter = Presenter::new(
@@ -483,6 +511,14 @@ fn actual_page_batches_route_to_one_history_and_grant_current_session_credit_onc
         owner
             .link_events(
                 Batch::Plain(vec![
+                    page(
+                        ids[3],
+                        ThreadId(3),
+                        103,
+                        "old session before terminal",
+                        31,
+                        0,
+                    ),
                     page(ids[3], ThreadId(3), 9, "focused", 11, 1),
                     page(997, ThreadId(3), 99, "unsolicited", 13, 1),
                     page(ids[1], ThreadId(2), 7, "browsed", 17, 1),

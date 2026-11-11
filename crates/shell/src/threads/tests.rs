@@ -1,6 +1,571 @@
 use super::*;
 use kumochi_protocol::message::{PageEventKind, RunId, ThreadKind};
 
+fn issue_page(request: u32, thread: u64) -> DataToShell {
+    DataToShell::Page {
+        request,
+        thread: ThreadId(thread),
+        events: vec![PageEvent {
+            id: EventId(9),
+            run: None,
+            kind: PageEventKind::Issue { draft: DraftId(9) },
+            text: "title".into(),
+            cut: false,
+        }],
+        before: None,
+    }
+}
+
+fn full_issue(
+    request: u32,
+    version: u64,
+    state: kumochi_protocol::message::ActionState,
+) -> DataToShell {
+    use kumochi_protocol::message::{ContentHash, IssueBody, IssueCard, IssueTitle, StateVersion};
+    DataToShell::IssueCardRead {
+        request,
+        card: IssueCard {
+            draft: DraftId(9),
+            thread: ThreadId(3),
+            repo: None,
+            account: None,
+            title: IssueTitle::new("private-card-marker").unwrap(),
+            body: IssueBody::new("private-card-marker").unwrap(),
+            hash: ContentHash([7; 32]),
+            approval: None,
+            version: StateVersion(version),
+            state,
+        },
+    }
+}
+
+#[test]
+fn displayed_issue_pages_use_one_shared_watermarked_card_and_terminal_pacing() {
+    use kumochi_protocol::message::{ActionState, IssueCardsStatus, StateVersion};
+    let (mut browse, mut chat) = Threads::pair();
+    browse.connected();
+    browse.show_for(Some(ThreadId(3)));
+    chat.connected();
+    chat.show_for(Some(ThreadId(3)));
+    assert_eq!(
+        browse.requests().iter().map(request_id).collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(
+        chat.requests().iter().map(request_id).collect::<Vec<_>>(),
+        [3, 4]
+    );
+    browse.apply(issue_page(2, 3));
+    assert_eq!(
+        browse.requests(),
+        [DataToBrain::IssueCardsRequest {
+            request: 5,
+            drafts: Bounded::new(vec![DraftId(9)]).unwrap()
+        }]
+    );
+    chat.apply(issue_page(4, 3));
+    assert_eq!(chat.requests(), []);
+    browse.action_state(DraftId(9), StateVersion(2), ActionState::Sending, None);
+    browse.apply(full_issue(5, 1, ActionState::Draft));
+    assert!(
+        browse.reads.borrow().cards.entries[&DraftId(9)]
+            .full
+            .is_none()
+    );
+    browse.apply(DataToShell::IssueCardsDone {
+        request: 5,
+        status: IssueCardsStatus::Failed,
+    });
+    assert_eq!(
+        browse.requests(),
+        [DataToBrain::IssueCardsRequest {
+            request: 6,
+            drafts: Bounded::new(vec![DraftId(9)]).unwrap()
+        }]
+    );
+    browse.apply(full_issue(6, 2, ActionState::Sending));
+    assert_eq!(
+        chat.reads.borrow().cards.entries[&DraftId(9)]
+            .full
+            .as_ref()
+            .unwrap()
+            .version,
+        StateVersion(2)
+    );
+    assert_eq!(
+        chat.reads.borrow().cards.entries[&DraftId(9)]
+            .full
+            .as_ref()
+            .unwrap()
+            .state,
+        ActionState::Sending
+    );
+    assert!(browse.reads.borrow().pending.contains(&(6, View::Browse)));
+    let debug = format!("{:?}", browse.reads.borrow().cards);
+    assert!(!debug.contains("private-card-marker"));
+    assert!(!debug.contains(&format!("{:?}", b"private-card-marker")));
+    browse.action_state(DraftId(9), StateVersion(1), ActionState::Draft, None);
+    assert_eq!(
+        browse.reads.borrow().cards.entries[&DraftId(9)]
+            .mark
+            .as_ref()
+            .unwrap()
+            .version,
+        StateVersion(2)
+    );
+    browse.action_state(DraftId(9), StateVersion(2), ActionState::Draft, None);
+    assert!(browse.cards_broken());
+    browse.apply(full_issue(6, 3, ActionState::Draft));
+    assert_eq!(
+        browse.reads.borrow().cards.entries[&DraftId(9)]
+            .full
+            .as_ref()
+            .unwrap()
+            .version,
+        StateVersion(2)
+    );
+    assert_eq!(browse.requests(), []);
+    browse.hide();
+    assert_eq!(chat.reads.borrow().cards.entries.len(), 1);
+    chat.hide();
+    assert_eq!(browse.reads.borrow().cards.entries.len(), 0);
+    browse.apply(full_issue(6, 4, ActionState::Draft));
+    assert_eq!(browse.reads.borrow().cards.entries.len(), 0);
+    browse.disconnected();
+    chat.disconnected();
+    browse.connected();
+    browse.show_for(Some(ThreadId(3)));
+    assert_eq!(browse.reads.borrow().cards.entries.len(), 0);
+}
+
+#[test]
+fn equal_version_hydration_keeps_authority_and_a_conflicting_card_is_terminal() {
+    use kumochi_protocol::message::{ActionState, ApprovalRev, StateVersion};
+    let mut state = Threads::default();
+    state.connected();
+    state.show_for(Some(ThreadId(3)));
+    assert_eq!(
+        state.requests().iter().map(request_id).collect::<Vec<_>>(),
+        [1, 2]
+    );
+    state.apply(issue_page(2, 3));
+    assert_eq!(
+        state.requests().iter().map(request_id).collect::<Vec<_>>(),
+        [3]
+    );
+    state.action_state(
+        DraftId(9),
+        StateVersion(4),
+        ActionState::Draft,
+        Some(ApprovalRev(8)),
+    );
+    state.apply(full_issue(3, 4, ActionState::Draft));
+    {
+        let reads = state.reads.borrow();
+        let card = reads.cards.entries[&DraftId(9)].full.as_ref().unwrap();
+        assert_eq!(card.approval, Some(ApprovalRev(8)));
+        assert_eq!(card.title.as_str(), "private-card-marker");
+        assert_eq!(card.hash.0, [7; 32]);
+    }
+    state.apply(full_issue(3, 4, ActionState::Sending));
+    assert!(state.cards_broken());
+    state.apply(full_issue(3, 5, ActionState::Draft));
+    assert_eq!(
+        state.reads.borrow().cards.entries[&DraftId(9)]
+            .full
+            .as_ref()
+            .unwrap()
+            .version,
+        StateVersion(4)
+    );
+    assert_eq!(state.requests(), []);
+}
+
+#[test]
+fn eviction_and_failed_reads_do_not_revive_cards_or_create_retry_loops() {
+    use kumochi_protocol::message::{ActionState, IssueCardsStatus, StateVersion};
+    let mut state = Threads::default();
+    state.connected();
+    state.show_for(Some(ThreadId(3)));
+    assert_eq!(
+        state.requests().iter().map(request_id).collect::<Vec<_>>(),
+        [1, 2]
+    );
+    state.apply(issue_page(2, 3));
+    assert_eq!(
+        state.requests(),
+        [DataToBrain::IssueCardsRequest {
+            request: 3,
+            drafts: Bounded::new(vec![DraftId(9)]).unwrap()
+        }]
+    );
+    state.select(Some(ThreadId(3)));
+    assert_eq!(state.reads.borrow().cards.entries.len(), 0);
+    assert_eq!(
+        state.requests().iter().map(request_id).collect::<Vec<_>>(),
+        [4]
+    );
+    state.apply(issue_page(4, 3));
+    assert_eq!(state.requests(), []);
+    state.apply(full_issue(3, 99, ActionState::Draft));
+    assert!(
+        state.reads.borrow().cards.entries[&DraftId(9)]
+            .full
+            .is_none()
+    );
+    state.apply(DataToShell::IssueCardsDone {
+        request: 3,
+        status: IssueCardsStatus::Complete,
+    });
+    assert_eq!(
+        state.requests(),
+        [DataToBrain::IssueCardsRequest {
+            request: 5,
+            drafts: Bounded::new(vec![DraftId(9)]).unwrap()
+        }]
+    );
+    state.apply(DataToShell::IssueCardsDone {
+        request: 5,
+        status: IssueCardsStatus::Failed,
+    });
+    assert_eq!(state.requests(), []);
+    for id in 100..1100 {
+        state.action_state(DraftId(id), StateVersion(1), ActionState::Draft, None);
+    }
+    assert_eq!(state.reads.borrow().cards.entries.len(), 1);
+    assert_eq!(
+        state.requests().iter().map(request_id).collect::<Vec<_>>(),
+        [6]
+    );
+    assert_eq!(state.requests(), []);
+    state.apply(DataToShell::PageFailed { request: 6 });
+    assert_eq!(state.requests(), []);
+    state.hide();
+    assert_eq!(state.reads.borrow().cards.entries.len(), 0);
+    state.apply(full_issue(5, 100, ActionState::Draft));
+    assert_eq!(state.reads.borrow().cards.entries.len(), 0);
+}
+
+#[test]
+fn issue_readers_share_authority_but_require_current_display_ownership() {
+    use kumochi_protocol::message::{ActionState, IssueCardsStatus, LookupResult, StateVersion};
+    let (mut browse, mut chat) = Threads::pair();
+    browse.connected();
+    browse.show_for(Some(ThreadId(3)));
+    chat.connected();
+    chat.show_for(Some(ThreadId(4)));
+    assert_eq!(
+        browse.requests().iter().map(request_id).collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(
+        chat.requests().iter().map(request_id).collect::<Vec<_>>(),
+        [3, 4]
+    );
+    browse.apply(issue_page(2, 3));
+    assert_eq!(
+        browse.requests().iter().map(request_id).collect::<Vec<_>>(),
+        [5]
+    );
+    assert!(browse.issue(DraftId(9)).unwrap().loading());
+    assert!(chat.issue(DraftId(9)).is_none());
+    assert!(browse.issue(DraftId(999)).is_none());
+    browse.apply(full_issue(5, 1, ActionState::Draft));
+    assert_eq!(
+        browse
+            .issue(DraftId(9))
+            .unwrap()
+            .card()
+            .unwrap()
+            .body
+            .as_str(),
+        "private-card-marker"
+    );
+    browse.action_state(
+        DraftId(9),
+        StateVersion(2),
+        ActionState::Unknown {
+            lookup: LookupResult::None,
+            maybe_duplicate: true,
+        },
+        None,
+    );
+    assert!(browse.issue(DraftId(9)).unwrap().card().is_none());
+    browse.apply(DataToShell::IssueCardsDone {
+        request: 5,
+        status: IssueCardsStatus::Complete,
+    });
+    assert_eq!(
+        browse.requests().iter().map(request_id).collect::<Vec<_>>(),
+        [6]
+    );
+    browse.apply(DataToShell::IssueCardsDone {
+        request: 6,
+        status: IssueCardsStatus::Failed,
+    });
+    {
+        let issue = browse.issue(DraftId(9)).unwrap();
+        assert!(!issue.loading());
+        assert_eq!(
+            issue.state(),
+            Some(&ActionState::Unknown {
+                lookup: LookupResult::None,
+                maybe_duplicate: true,
+            })
+        );
+        assert!(issue.card().is_none());
+    }
+    assert_eq!(browse.requests(), []);
+    browse.disconnected();
+    assert!(browse.issue(DraftId(9)).is_none());
+}
+
+#[test]
+fn unknown_issue_repair_replaces_queued_older_read_when_shared_admission_is_full() {
+    use kumochi_protocol::message::{ActionState, IssueCardsStatus, StateVersion};
+    let (mut browse, mut chat) = Threads::pair();
+    browse.connected();
+    browse.show_for(Some(ThreadId(3)));
+    chat.connected();
+    chat.show_for(Some(ThreadId(4)));
+    assert_eq!(
+        browse.requests().iter().map(request_id).collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(
+        chat.requests().iter().map(request_id).collect::<Vec<_>>(),
+        [3, 4]
+    );
+    browse.apply(DataToShell::Page {
+        request: 2,
+        thread: ThreadId(3),
+        events: vec![PageEvent {
+            id: EventId(9),
+            run: None,
+            kind: PageEventKind::Issue { draft: DraftId(9) },
+            text: "title".into(),
+            cut: false,
+        }],
+        before: Some(EventId(8)),
+    });
+    assert_eq!(
+        browse.requests(),
+        [DataToBrain::IssueCardsRequest {
+            request: 5,
+            drafts: Bounded::new(vec![DraftId(9)]).unwrap()
+        }]
+    );
+    assert_eq!(browse.reads.borrow().pending.len(), 4);
+    browse.older_events();
+    assert_eq!(browse.requests(), []);
+    assert_eq!(browse.event_needed, Some(Read::More));
+    browse.action_state(DraftId(999), StateVersion(1), ActionState::Draft, None);
+    assert_eq!(browse.requests(), []);
+    assert_eq!(chat.requests(), []);
+    browse.apply(DataToShell::IssueCardsDone {
+        request: 5,
+        status: IssueCardsStatus::Complete,
+    });
+    assert_eq!(
+        browse.requests(),
+        [DataToBrain::PageRequest {
+            request: 6,
+            page: PageOf::Events {
+                thread: ThreadId(3),
+                before: None
+            }
+        }]
+    );
+}
+
+#[test]
+fn displayed_ids_are_deduplicated_and_batched_at_sixteen_without_another_scheduler() {
+    let mut state = Threads::default();
+    state.connected();
+    state.show_for(Some(ThreadId(3)));
+    assert_eq!(
+        state.requests().iter().map(request_id).collect::<Vec<_>>(),
+        [1, 2]
+    );
+    let mut events: Vec<_> = (1..=17)
+        .map(|id| PageEvent {
+            id: EventId(id),
+            run: None,
+            kind: PageEventKind::Issue { draft: DraftId(id) },
+            text: "title".into(),
+            cut: false,
+        })
+        .collect();
+    events.insert(1, events[0].clone());
+    state.apply(DataToShell::Page {
+        request: 2,
+        thread: ThreadId(3),
+        events,
+        before: None,
+    });
+    assert_eq!(
+        state.requests(),
+        [
+            DataToBrain::IssueCardsRequest {
+                request: 3,
+                drafts: Bounded::new((1..=16).map(DraftId).collect()).unwrap()
+            },
+            DataToBrain::IssueCardsRequest {
+                request: 4,
+                drafts: Bounded::new(vec![DraftId(17)]).unwrap()
+            },
+        ]
+    );
+    assert_eq!(state.requests(), []);
+    assert_eq!(state.reads.borrow().cards.entries.len(), 17);
+}
+
+#[test]
+fn cards_and_pages_share_capacity_but_only_their_matching_terminals_release_it() {
+    use kumochi_protocol::message::IssueCardsStatus;
+    let (mut browse, mut chat) = Threads::pair();
+    browse.connected();
+    browse.show();
+    chat.connected();
+    chat.show();
+    assert_eq!(
+        browse.requests().iter().map(request_id).collect::<Vec<_>>(),
+        [1]
+    );
+    assert_eq!(
+        chat.requests().iter().map(request_id).collect::<Vec<_>>(),
+        [2]
+    );
+    assert_eq!(
+        browse.card_request(Bounded::default()),
+        Some(DataToBrain::IssueCardsRequest {
+            request: 3,
+            drafts: Bounded::default()
+        })
+    );
+    assert_eq!(
+        chat.card_request(Bounded::default()),
+        Some(DataToBrain::IssueCardsRequest {
+            request: 4,
+            drafts: Bounded::default()
+        })
+    );
+    assert_eq!(browse.card_request(Bounded::default()), None);
+    browse.apply(DataToShell::IssueCardsDone {
+        request: 1,
+        status: IssueCardsStatus::Complete,
+    });
+    browse.apply(DataToShell::PageFailed { request: 3 });
+    chat.apply(DataToShell::IssueCardsDone {
+        request: 3,
+        status: IssueCardsStatus::Failed,
+    });
+    assert_eq!(
+        browse.reads.borrow().pending,
+        [
+            (1, View::Browse),
+            (2, View::Chat),
+            (3, View::Browse),
+            (4, View::Chat)
+        ]
+    );
+    browse.apply(DataToShell::IssueCardsDone {
+        request: 3,
+        status: IssueCardsStatus::Failed,
+    });
+    assert_eq!(
+        browse.card_request(Bounded::default()),
+        Some(DataToBrain::IssueCardsRequest {
+            request: 5,
+            drafts: Bounded::default()
+        })
+    );
+    browse.apply(DataToShell::IssueCardsDone {
+        request: 3,
+        status: IssueCardsStatus::Complete,
+    });
+    assert_eq!(browse.card_request(Bounded::default()), None);
+    chat.disconnected();
+    browse.disconnected();
+    browse.connected();
+    browse.show();
+    browse.apply(DataToShell::IssueCardsDone {
+        request: 5,
+        status: IssueCardsStatus::Complete,
+    });
+    assert_eq!(
+        browse.card_request(Bounded::default()),
+        Some(DataToBrain::IssueCardsRequest {
+            request: 6,
+            drafts: Bounded::default()
+        })
+    );
+}
+
+#[test]
+fn terminal_kind_must_match_before_either_pending_page_slot_is_released() {
+    for events_first in [false, true] {
+        let mut state = Threads::default();
+        state.connected();
+        state.show_for(Some(ThreadId(3)));
+        let requests = state.requests();
+        assert_eq!(requests.iter().map(request_id).collect::<Vec<_>>(), [1, 2]);
+        state.apply(reply(2, &[99], None));
+        state.apply(DataToShell::Page {
+            request: 1,
+            thread: ThreadId(3),
+            events: vec![event(99)],
+            before: None,
+        });
+        assert_eq!(
+            state.reads.borrow().pending,
+            [(1, View::Browse), (2, View::Browse)]
+        );
+        assert_eq!(state.list_pending.map(|pending| pending.request), Some(1));
+        assert_eq!(state.event_pending.map(|pending| pending.request), Some(2));
+        assert_eq!(state.rows, []);
+        assert_eq!(state.events, []);
+        assert!(!state.listed);
+        assert!(!state.loaded);
+        assert_eq!(state.requests(), []);
+        let mut terminals = vec![
+            reply(1, &[3], None),
+            DataToShell::Page {
+                request: 2,
+                thread: ThreadId(3),
+                events: vec![event(42)],
+                before: None,
+            },
+        ];
+        if events_first {
+            terminals.reverse();
+        }
+        for terminal in &terminals {
+            state.apply(terminal.clone());
+        }
+        assert_eq!(state.reads.borrow().pending, []);
+        assert_eq!(state.list_pending.map(|pending| pending.request), None);
+        assert_eq!(state.event_pending.map(|pending| pending.request), None);
+        assert_eq!(state.rows, [row(3)]);
+        assert_eq!(state.events, [event(42)]);
+        assert!(state.listed);
+        assert!(state.loaded);
+        state.refresh();
+        assert_eq!(state.requests(), [list_request(3)]);
+        for terminal in terminals {
+            state.apply(terminal);
+        }
+        state.apply(DataToShell::PageFailed { request: 2 });
+        assert_eq!(state.reads.borrow().pending, [(3, View::Browse)]);
+        assert!(!state.failed);
+        state.apply(DataToShell::PageFailed { request: 3 });
+        state.apply(DataToShell::PageFailed { request: 3 });
+        assert_eq!(state.reads.borrow().pending, []);
+        assert!(state.failed);
+        assert_eq!(state.requests(), []);
+    }
+}
+
 #[test]
 fn only_a_repair_issued_after_committed_done_proves_the_stored_answer() {
     let mut state = Threads::chat();
@@ -132,59 +697,82 @@ fn chat_follows_the_input_target_not_the_browsed_task() {
 
 #[test]
 fn panel_and_chat_allocate_disjoint_ids_through_hide_and_reconnect() {
-    for (mut state, first, second, reopened, reconnected) in [
-        (Threads::default(), 2, 4, [6, 8], [10, 12]),
-        (Threads::chat(), 1, 3, [5, 7], [9, 11]),
-    ] {
+    let (mut panel, mut chat) = Threads::pair();
+    for state in [&mut panel, &mut chat] {
         state.show_for(Some(ThreadId(3)));
         state.connected();
-        let requests = state.requests();
-        assert_eq!(
-            requests.iter().map(request_id).collect::<Vec<_>>(),
-            [first, second]
-        );
-        assert!(state.owns_request(first));
-        assert!(!state.owns_request(first + 1));
-        state.hide();
+    }
+    let panel_requests = panel.requests();
+    let chat_requests = chat.requests();
+    assert_eq!(
+        panel_requests.iter().map(request_id).collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(
+        chat_requests.iter().map(request_id).collect::<Vec<_>>(),
+        [3, 4]
+    );
+    for request in 1..=4 {
+        assert_eq!(panel.owns_request(request), request <= 2);
+        assert_eq!(chat.owns_request(request), request >= 3);
+    }
+    panel.hide();
+    chat.hide();
+    for (state, requests) in [(&mut panel, panel_requests), (&mut chat, chat_requests)] {
         for request in requests {
             state.apply(DataToShell::PageFailed {
                 request: request_id(&request),
             });
         }
         state.show_for(Some(ThreadId(3)));
-        assert_eq!(
-            state.requests().iter().map(request_id).collect::<Vec<_>>(),
-            reopened
-        );
-        state.disconnected();
-        state.connected();
-        assert_eq!(
-            state.requests().iter().map(request_id).collect::<Vec<_>>(),
-            reconnected
-        );
     }
+    assert_eq!(
+        panel.requests().iter().map(request_id).collect::<Vec<_>>(),
+        [5, 6]
+    );
+    assert_eq!(
+        chat.requests().iter().map(request_id).collect::<Vec<_>>(),
+        [7, 8]
+    );
+    panel.disconnected();
+    chat.disconnected();
+    panel.connected();
+    chat.connected();
+    assert_eq!(
+        panel.requests().iter().map(request_id).collect::<Vec<_>>(),
+        [9, 10]
+    );
+    assert_eq!(
+        chat.requests().iter().map(request_id).collect::<Vec<_>>(),
+        [11, 12]
+    );
 }
 
 #[test]
 fn request_wrap_preserves_both_owners_parity() {
-    let panel = Threads {
-        counter: u32::MAX - 3,
-        ..Threads::default()
-    };
-    let mut chat = Threads::chat();
-    chat.counter = u32::MAX - 2;
-    for (mut state, expected) in [(panel, [u32::MAX - 1, 0]), (chat, [u32::MAX, 1])] {
-        state.show_for(Some(ThreadId(3)));
-        state.connected();
-        assert_eq!(
-            state.requests().iter().map(request_id).collect::<Vec<_>>(),
-            expected
-        );
-        for request in expected {
-            assert!(state.owns_request(request));
-            assert!(!state.owns_request(request ^ 1));
-        }
-    }
+    let (mut panel, mut chat) = Threads::pair();
+    panel.reads.borrow_mut().counter = u32::MAX - 1;
+    panel.show_for(Some(ThreadId(3)));
+    chat.show_for(Some(ThreadId(3)));
+    panel.connected();
+    chat.connected();
+    assert_eq!(
+        panel.requests().iter().map(request_id).collect::<Vec<_>>(),
+        [u32::MAX]
+    );
+    assert_eq!(chat.requests(), []);
+    assert!(panel.exhausted());
+    assert!(chat.exhausted());
+    assert!(panel.owns_request(u32::MAX));
+    assert!(!chat.owns_request(u32::MAX));
+    assert!(!panel.owns_request(0));
+    panel.disconnected();
+    chat.disconnected();
+    panel.connected();
+    assert_eq!(
+        panel.requests().iter().map(request_id).collect::<Vec<_>>(),
+        [1, 2]
+    );
 }
 
 #[test]
@@ -195,7 +783,7 @@ fn reopening_the_same_focus_reads_first_not_older_events() {
     let requests = state.requests();
     state.apply(reply(request_id(&requests[0]), &[3], None));
     state.apply(DataToShell::Page {
-        request: 3,
+        request: 2,
         thread: ThreadId(3),
         events: vec![event(8)],
         before: Some(EventId(8)),
@@ -213,9 +801,9 @@ fn reopening_the_same_focus_reads_first_not_older_events() {
     assert_eq!(
         state.requests(),
         [
-            list_request(5),
+            list_request(3),
             DataToBrain::PageRequest {
-                request: 7,
+                request: 4,
                 page: PageOf::Events {
                     thread: ThreadId(3),
                     before: None
@@ -227,8 +815,7 @@ fn reopening_the_same_focus_reads_first_not_older_events() {
 
 #[test]
 fn both_reducers_hold_exactly_four_slots_until_their_stale_pages_land() {
-    let mut panel = Threads::default();
-    let mut chat = Threads::chat();
+    let (mut panel, mut chat) = Threads::pair();
     panel.connected();
     chat.connected();
     panel.show_for(Some(ThreadId(3)));
@@ -237,11 +824,11 @@ fn both_reducers_hold_exactly_four_slots_until_their_stale_pages_land() {
     let chat_requests = chat.requests();
     assert_eq!(
         panel_requests.iter().map(request_id).collect::<Vec<_>>(),
-        [2, 4]
+        [1, 2]
     );
     assert_eq!(
         chat_requests.iter().map(request_id).collect::<Vec<_>>(),
-        [1, 3]
+        [3, 4]
     );
     panel.search("panel search");
     chat.search("chat search");
@@ -251,7 +838,7 @@ fn both_reducers_hold_exactly_four_slots_until_their_stale_pages_land() {
     chat.changed();
     assert_eq!(panel.requests(), []);
     assert_eq!(chat.requests(), []);
-    for (request, thread) in [(4, ThreadId(3)), (3, ThreadId(3))] {
+    for (request, thread) in [(2, ThreadId(3)), (4, ThreadId(3))] {
         let owner = if panel.owns_request(request) {
             &mut panel
         } else {
@@ -266,22 +853,22 @@ fn both_reducers_hold_exactly_four_slots_until_their_stale_pages_land() {
         assert_eq!(owner.events, []);
         assert!(!owner.loaded);
     }
-    panel.apply(reply(2, &[99], None));
-    chat.apply(reply(1, &[99], None));
+    panel.apply(reply(1, &[99], None));
+    chat.apply(reply(3, &[99], None));
     assert_eq!(panel.rows, []);
     assert_eq!(chat.rows, []);
     assert_eq!(
         panel.requests(),
         [
             DataToBrain::PageRequest {
-                request: 6,
+                request: 5,
                 page: PageOf::Threads {
                     search: Some("panel search".to_owned()),
                     after: None
                 }
             },
             DataToBrain::PageRequest {
-                request: 8,
+                request: 6,
                 page: PageOf::Events {
                     thread: ThreadId(2),
                     before: None
@@ -293,14 +880,14 @@ fn both_reducers_hold_exactly_four_slots_until_their_stale_pages_land() {
         chat.requests(),
         [
             DataToBrain::PageRequest {
-                request: 5,
+                request: 7,
                 page: PageOf::Threads {
                     search: Some("chat search".to_owned()),
                     after: None
                 }
             },
             DataToBrain::PageRequest {
-                request: 7,
+                request: 8,
                 page: PageOf::Events {
                     thread: ThreadId(1),
                     before: None
@@ -392,7 +979,7 @@ fn a_rename_keeps_the_confirmed_title_until_its_original_page_is_read() {
     assert_eq!(
         reread,
         DataToBrain::PageRequest {
-            request: 6,
+            request: 3,
             page: PageOf::Threads {
                 search: None,
                 after: cursor
@@ -461,7 +1048,7 @@ fn a_delete_during_a_rename_rereads_the_offpage_title_without_resurrecting_the_d
     assert_eq!(
         state.requests(),
         [DataToBrain::PageRequest {
-            request: 8,
+            request: 4,
             page: PageOf::Threads {
                 search: None,
                 after: Some(ThreadCursor {
@@ -473,14 +1060,14 @@ fn a_delete_during_a_rename_rereads_the_offpage_title_without_resurrecting_the_d
         }]
     );
     state.apply(DataToShell::ThreadList {
-        request: 8,
+        request: 4,
         threads: vec![renamed.clone()],
         next: None,
     });
     assert_eq!(state.row(ThreadId(1)), Some(&renamed));
     assert_eq!(state.rows, [row(3), row(2), renamed.clone()]);
-    assert_eq!(state.requests(), [list_request(10)]);
-    state.apply(reply(10, &[3, 2], None));
+    assert_eq!(state.requests(), [list_request(5)]);
+    state.apply(reply(5, &[3, 2], None));
     assert_eq!(state.rows, [row(3), row(2), renamed]);
     assert_eq!(state.row(ThreadId(0)), None);
     assert_eq!(state.requests(), []);
@@ -499,14 +1086,14 @@ fn a_search_before_delete_does_not_requeue_an_old_rename_cursor() {
     assert_eq!(
         state.requests(),
         [DataToBrain::PageRequest {
-            request: 8,
+            request: 4,
             page: PageOf::Threads {
                 search: Some("new query".to_owned()),
                 after: None,
             },
         }]
     );
-    state.apply(reply(8, &[8], None));
+    state.apply(reply(4, &[8], None));
     assert_eq!(state.rows, [row(8)]);
     assert_eq!(state.requests(), []);
 }
@@ -520,8 +1107,8 @@ fn a_refresh_after_delete_discards_the_old_rename_cursor() {
     state.refresh();
     state.apply(reply(request_id(&old), &[1, 0], None));
     assert_eq!(state.row(ThreadId(0)), None);
-    assert_eq!(state.requests(), [list_request(8)]);
-    state.apply(reply(8, &[3, 2], None));
+    assert_eq!(state.requests(), [list_request(4)]);
+    state.apply(reply(4, &[3, 2], None));
     assert_eq!(state.rows, [row(3), row(2)]);
     assert_eq!(state.requests(), []);
 }
@@ -538,8 +1125,8 @@ fn hiding_after_delete_discards_the_old_rename_cursor() {
     assert!(state.reread.is_empty());
     assert_eq!(state.requests(), []);
     state.show();
-    assert_eq!(state.requests(), [list_request(8)]);
-    state.apply(reply(8, &[3, 2], None));
+    assert_eq!(state.requests(), [list_request(4)]);
+    state.apply(reply(4, &[3, 2], None));
     assert_eq!(state.rows, [row(3), row(2)]);
     assert_eq!(state.requests(), []);
 }
@@ -556,8 +1143,8 @@ fn a_delete_while_hidden_does_not_requeue_an_old_rename_cursor() {
     assert!(state.reread.is_empty());
     assert_eq!(state.requests(), []);
     state.show();
-    assert_eq!(state.requests(), [list_request(8)]);
-    state.apply(reply(8, &[3, 2], None));
+    assert_eq!(state.requests(), [list_request(4)]);
+    state.apply(reply(4, &[3, 2], None));
     assert_eq!(state.rows, [row(3), row(2)]);
     assert_eq!(state.requests(), []);
 }
@@ -685,10 +1272,11 @@ fn event(id: u64) -> PageEvent {
 }
 
 fn request_id(request: &DataToBrain) -> u32 {
-    let DataToBrain::PageRequest { request, .. } = request else {
-        panic!("page request")
-    };
-    *request
+    match request {
+        DataToBrain::PageRequest { request, .. }
+        | DataToBrain::IssueCardsRequest { request, .. } => *request,
+        _ => panic!("page or issue card request"),
+    }
 }
 
 fn reply(request: u32, ids: &[u64], next: Option<u64>) -> DataToShell {
@@ -768,7 +1356,7 @@ fn superseded_search_replies_are_dropped_without_releasing_another_slot() {
     assert_eq!(
         request[0],
         DataToBrain::PageRequest {
-            request: first + 2,
+            request: first + 1,
             page: PageOf::Threads {
                 search: Some("new query".to_owned()),
                 after: None
@@ -777,7 +1365,7 @@ fn superseded_search_replies_are_dropped_without_releasing_another_slot() {
     );
     state.apply(reply(first, &[3], None));
     assert!(state.rows.is_empty());
-    state.apply(reply(first + 2, &[2], None));
+    state.apply(reply(first + 1, &[2], None));
     assert_eq!(state.rows, vec![row(2)]);
 }
 
@@ -805,7 +1393,7 @@ fn loading_more_sends_each_cursor_only_once_until_answered() {
     assert_eq!(
         requests[0],
         DataToBrain::PageRequest {
-            request: 4,
+            request: 2,
             page: PageOf::Threads {
                 search: None,
                 after: state.next
@@ -814,7 +1402,7 @@ fn loading_more_sends_each_cursor_only_once_until_answered() {
     );
     state.more_threads();
     assert!(state.requests().is_empty());
-    state.apply(reply(4, &[1], None));
+    state.apply(reply(2, &[1], None));
     assert_eq!(state.rows, vec![row(3), row(2), row(1)]);
     state.more_threads();
     assert!(state.requests().is_empty());
@@ -834,7 +1422,7 @@ fn reconnect_rereads_both_first_pages_with_new_request_ids() {
     assert_eq!(
         requests[0],
         DataToBrain::PageRequest {
-            request: old + 2,
+            request: old + 1,
             page: PageOf::Threads {
                 search: None,
                 after: None
@@ -844,7 +1432,7 @@ fn reconnect_rereads_both_first_pages_with_new_request_ids() {
     assert_eq!(
         requests[1],
         DataToBrain::PageRequest {
-            request: old + 4,
+            request: old + 2,
             page: PageOf::Events {
                 thread: ThreadId(2),
                 before: None
@@ -1047,7 +1635,7 @@ fn older_events_continue_once_and_an_empty_first_page_marks_the_thread_gone() {
     assert_eq!(
         requests[0],
         DataToBrain::PageRequest {
-            request: first + 2,
+            request: first + 1,
             page: PageOf::Events {
                 thread: ThreadId(3),
                 before: Some(EventId(4))
@@ -1057,7 +1645,7 @@ fn older_events_continue_once_and_an_empty_first_page_marks_the_thread_gone() {
     state.older_events();
     assert!(state.requests().is_empty());
     state.apply(DataToShell::Page {
-        request: first + 2,
+        request: first + 1,
         thread: ThreadId(3),
         events: vec![event(3)],
         before: None,
@@ -1173,8 +1761,8 @@ fn nothing_is_read_while_the_panel_is_closed() {
     state.run_state(ThreadId(4));
     assert_eq!(state.requests(), Vec::new());
     state.show();
-    assert_eq!(state.requests(), vec![list_request(2)]);
-    state.apply(reply(2, &[4], None));
+    assert_eq!(state.requests(), vec![list_request(1)]);
+    state.apply(reply(1, &[4], None));
     state.select(Some(ThreadId(4)));
     state.hide();
     state.run_state(ThreadId(5));
@@ -1221,7 +1809,7 @@ fn a_failed_read_frees_its_slot_and_shows_until_a_page_lands() {
 fn a_dropped_page_still_earns_its_whole_credit() {
     let mut state = loaded();
     let unsolicited = DataToShell::Page {
-        request: 99,
+        request: 49,
         thread: ThreadId(3),
         events: vec![event(4)],
         before: None,
@@ -1229,7 +1817,7 @@ fn a_dropped_page_still_earns_its_whole_credit() {
     assert_eq!(state.receive(unsolicited, 321), 321);
     assert!(state.events.is_empty());
     assert_eq!(
-        state.receive(DataToShell::PageFailed { request: 98 }, 17),
+        state.receive(DataToShell::PageFailed { request: 49 }, 17),
         17
     );
     assert!(!state.failed);
@@ -1246,7 +1834,7 @@ fn a_superseded_event_read_that_fails_frees_its_slot_without_the_error() {
     assert_eq!(
         state.requests(),
         vec![DataToBrain::PageRequest {
-            request: old + 2,
+            request: old + 1,
             page: PageOf::Events {
                 thread: ThreadId(2),
                 before: None,
@@ -1260,14 +1848,14 @@ fn a_replaced_search_that_fails_frees_its_slot_without_the_error() {
     let mut state = Threads::default();
     state.show();
     state.connected();
-    assert_eq!(state.requests(), vec![list_request(2)]);
+    assert_eq!(state.requests(), vec![list_request(1)]);
     state.search("new query");
-    state.apply(DataToShell::PageFailed { request: 2 });
+    state.apply(DataToShell::PageFailed { request: 1 });
     assert!(!state.failed);
     assert_eq!(
         state.requests(),
         vec![DataToBrain::PageRequest {
-            request: 4,
+            request: 2,
             page: PageOf::Threads {
                 search: Some("new query".to_owned()),
                 after: None,

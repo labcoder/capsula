@@ -776,6 +776,8 @@ impl Runs {
             }
             DataToShell::RunEnd { run } => self.end(run, |live| live.data_ended = true),
             DataToShell::IssueCard(_)
+            | DataToShell::IssueCardRead { .. }
+            | DataToShell::IssueCardsDone { .. }
             | DataToShell::ThreadList { .. }
             | DataToShell::Page { .. }
             | DataToShell::PageFailed { .. }
@@ -860,7 +862,10 @@ fn run_of(message: &DataToShell) -> Option<RunId> {
             // shortcut: Presence consumes v1 frames through Presenter first; B3 removes placeholder routing.
             None
         }
-        DataToShell::Models { .. } | DataToShell::IssueCard(_) => None,
+        DataToShell::Models { .. }
+        | DataToShell::IssueCard(_)
+        | DataToShell::IssueCardRead { .. }
+        | DataToShell::IssueCardsDone { .. } => None,
     }
 }
 

@@ -1,16 +1,50 @@
 //! The threads panel's page state, independent of GPUI and the connection transport.
 
 use std::collections::{HashMap, VecDeque};
+use std::{cell::RefCell, rc::Rc};
 
 use kumochi_protocol::constants;
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
-    DataToBrain, DataToShell, EventId, PageEvent, PageOf, RunId, SettingsView, ThreadCursor,
-    ThreadId, ThreadKind, ThreadRow,
+    DataToBrain, DataToShell, DraftId, EventId, MAX_ISSUE_CARDS, PageEvent, PageOf, RunId,
+    SettingsView, ThreadCursor, ThreadId, ThreadKind, ThreadRow,
 };
+use kumochi_scene::text::Bounded;
 
+mod cards;
 #[cfg(test)]
 mod tests;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum View {
+    #[default]
+    Browse,
+    Chat,
+}
+
+#[derive(Debug, Default)]
+struct Reads {
+    counter: u32,
+    pending: Vec<(u32, View)>,
+    cards: cards::Cards,
+    issue_confirmations: [Option<(DraftId, std::rc::Weak<std::cell::Cell<bool>>)>; 2],
+    exhausted: bool,
+}
+
+impl Reads {
+    fn admit(&mut self, view: View) -> Option<u32> {
+        if self.pending.len() == kumochi_protocol::message::MAX_PENDING_PAGES {
+            return None;
+        }
+        let Some(request) = self.counter.checked_add(1) else {
+            self.exhausted = true;
+            return None;
+        };
+        self.counter = request;
+        self.pending.push((request, view));
+        Some(request)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Read {
@@ -67,7 +101,8 @@ pub(crate) struct Threads {
     /// Pages are read only while the panel is shown.
     shown: bool,
     search: Option<String>,
-    counter: u32,
+    reads: Rc<RefCell<Reads>>,
+    view: View,
     list_revision: u64,
     event_revision: u64,
     list_pending: Option<Pending>,
@@ -95,15 +130,119 @@ impl std::fmt::Debug for Threads {
 }
 
 impl Threads {
+    pub(crate) fn begin_issue_confirmation(
+        &mut self,
+        draft: DraftId,
+        live: &Rc<std::cell::Cell<bool>>,
+    ) {
+        self.retire_issue_confirmation();
+        self.reads.borrow_mut().issue_confirmations[match self.view {
+            View::Browse => 0,
+            View::Chat => 1,
+        }] = Some((draft, Rc::downgrade(live)));
+    }
+
+    pub(crate) fn retire_issue_confirmation(&mut self) {
+        if let Some((_, live)) = self.reads.borrow_mut().issue_confirmations[match self.view {
+            View::Browse => 0,
+            View::Chat => 1,
+        }]
+        .take()
+            && let Some(live) = live.upgrade()
+        {
+            live.set(false);
+        }
+    }
+
+    pub(crate) fn card_request(
+        &mut self,
+        drafts: Bounded<DraftId, MAX_ISSUE_CARDS>,
+    ) -> Option<DataToBrain> {
+        if !self.connected || !self.shown || self.cards_broken() {
+            return None;
+        }
+        let mut reads = self.reads.borrow_mut();
+        let request = reads.admit(self.view)?;
+        reads.cards.start(request, &drafts);
+        for (draft, live) in reads.issue_confirmations.iter().flatten() {
+            if drafts.contains(draft)
+                && let Some(live) = live.upgrade()
+            {
+                live.set(false);
+            }
+        }
+        Some(DataToBrain::IssueCardsRequest { request, drafts })
+    }
     pub(crate) fn chat() -> Self {
         Self {
-            counter: u32::MAX,
+            view: View::Chat,
             ..Self::default()
         }
     }
 
+    pub(crate) fn pair() -> (Self, Self) {
+        let browse = Self::default();
+        let chat = Self {
+            reads: Rc::clone(&browse.reads),
+            ..Self::chat()
+        };
+        (browse, chat)
+    }
+
+    pub(crate) fn exhausted(&self) -> bool {
+        self.reads.borrow().exhausted
+    }
+
+    pub(crate) fn cards_broken(&self) -> bool {
+        self.reads.borrow().cards.broken
+    }
+
+    pub(crate) fn issue(&self, draft: DraftId) -> Option<std::cell::Ref<'_, cards::Entry>> {
+        if !self.connected || !self.shown || self.cards_broken() {
+            return None;
+        }
+        std::cell::Ref::filter_map(self.reads.borrow(), |reads| {
+            reads.cards.entry(self.view, draft)
+        })
+        .ok()
+    }
+
+    pub(crate) fn action_state(
+        &mut self,
+        draft: DraftId,
+        version: kumochi_protocol::message::StateVersion,
+        state: kumochi_protocol::message::ActionState,
+        approval: Option<kumochi_protocol::message::ApprovalRev>,
+    ) {
+        self.reads
+            .borrow_mut()
+            .cards
+            .state(draft, version, state, approval);
+    }
+
+    fn sync_cards(&mut self) {
+        let thread = self.open.filter(|_| self.connected && self.shown);
+        let mut ids = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        if thread.is_some() && self.loaded {
+            for event in &self.events {
+                if let kumochi_protocol::message::PageEventKind::Issue { draft } = event.kind
+                    && seen.insert(draft)
+                {
+                    ids.push(draft);
+                }
+            }
+        }
+        self.reads.borrow_mut().cards.shown(self.view, thread, ids);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn exhaust_for_tests(&mut self) {
+        self.reads.borrow_mut().counter = u32::MAX;
+    }
+
     pub(crate) fn owns_request(&self, request: u32) -> bool {
-        request % 2 == self.counter % 2
+        self.reads.borrow().pending.contains(&(request, self.view))
     }
 
     pub(crate) fn selected_index(&self) -> Option<usize> {
@@ -152,6 +291,7 @@ impl Threads {
     }
 
     pub(crate) fn connected(&mut self) {
+        self.retire_issue_confirmation();
         self.connected = true;
         self.proven = None;
         self.settled = None;
@@ -159,12 +299,14 @@ impl Threads {
         self.event_revision = self.event_revision.wrapping_add(1);
         self.event_needed = self.open.map(|_| Read::First);
         self.loaded = false;
+        self.sync_cards();
     }
 
     /// The panel opened: reads start again, from a fresh first page.
     pub(crate) fn show(&mut self) {
         self.shown = true;
         self.refresh();
+        self.sync_cards();
     }
 
     pub(crate) fn show_for(&mut self, thread: Option<ThreadId>) {
@@ -189,6 +331,20 @@ impl Threads {
     }
 
     pub(crate) fn disconnected(&mut self) {
+        self.retire_issue_confirmation();
+        let mut reads = self.reads.borrow_mut();
+        reads.pending.clear();
+        for (_, live) in reads.issue_confirmations.iter().flatten() {
+            if let Some(live) = live.upgrade() {
+                live.set(false);
+            }
+        }
+        reads.cards.clear();
+        if reads.exhausted {
+            reads.counter = 0;
+            reads.exhausted = false;
+        }
+        drop(reads);
         self.connected = false;
         self.proven = None;
         self.settled = None;
@@ -249,6 +405,7 @@ impl Threads {
     }
 
     pub(crate) fn select(&mut self, thread: Option<ThreadId>) {
+        self.retire_issue_confirmation();
         self.open = thread;
         self.proven = None;
         self.settled = None;
@@ -257,6 +414,7 @@ impl Threads {
         self.loaded = false;
         self.event_revision = self.event_revision.wrapping_add(1);
         self.event_needed = thread.map(|_| Read::First);
+        self.sync_cards();
     }
 
     /// `thread` was hidden or removed: its row, its open messages and every read in flight
@@ -347,19 +505,31 @@ impl Threads {
     /// Marks requests in flight before handing them to the nonblocking sender. A failed send
     /// disconnects this state; changing a query or selection never frees an unanswered slot.
     pub(crate) fn requests(&mut self) -> Vec<DataToBrain> {
-        if !self.connected || !self.shown {
+        if !self.connected || !self.shown || self.cards_broken() {
             return Vec::new();
+        }
+        if self.reads.borrow_mut().cards.take_refresh(self.view)
+            && self.open.is_some()
+            && self.event_needed != Some(Read::First)
+        {
+            self.event_needed = Some(Read::Repair);
         }
         let mut requests = Vec::new();
         if self.list_pending.is_none()
             && self.deferred_search.is_none()
             && let Some(read) = self
                 .reread
-                .pop_front()
+                .front()
+                .copied()
                 .map(Read::Renamed)
-                .or_else(|| self.list_needed.take())
+                .or(self.list_needed)
+            && let Some(request) = self.reads.borrow_mut().admit(self.view)
         {
-            let request = self.number();
+            if matches!(read, Read::Renamed(_)) {
+                self.reread.pop_front();
+            } else {
+                self.list_needed = None;
+            }
             let after = match read {
                 Read::More => self.next,
                 Read::Renamed(after) => after,
@@ -383,9 +553,10 @@ impl Threads {
         }
         if self.event_pending.is_none()
             && let Some(thread) = self.open
-            && let Some(read) = self.event_needed.take()
+            && let Some(read) = self.event_needed
+            && let Some(request) = self.reads.borrow_mut().admit(self.view)
         {
-            let request = self.number();
+            self.event_needed = None;
             self.event_pending = Some(Pending {
                 request,
                 revision: self.event_revision,
@@ -410,6 +581,17 @@ impl Threads {
                 },
             });
         }
+        loop {
+            let ids = self.reads.borrow().cards.wanted(self.view);
+            if ids.is_empty() {
+                break;
+            }
+            let drafts = Bounded::new(ids).expect("card selection is bounded to sixteen");
+            let Some(request) = self.card_request(drafts) else {
+                break;
+            };
+            requests.push(request);
+        }
         requests
     }
 
@@ -420,7 +602,43 @@ impl Threads {
         bytes
     }
 
+    #[expect(clippy::too_many_lines, reason = "one wire-frame dispatcher")]
     pub(crate) fn apply(&mut self, message: DataToShell) {
+        if let DataToShell::IssueCardRead { request, card } = message {
+            self.reads.borrow_mut().cards.full(request, card);
+            return;
+        }
+        if let DataToShell::IssueCardsDone { request, .. } = &message {
+            let mut reads = self.reads.borrow_mut();
+            if reads.pending.contains(&(*request, self.view)) && reads.cards.pending(*request) {
+                reads.pending.retain(|(id, _)| id != request);
+                reads.cards.done(*request);
+            }
+            return;
+        }
+        if let DataToShell::ThreadList { request, .. }
+        | DataToShell::Page { request, .. }
+        | DataToShell::PageFailed { request } = &message
+        {
+            let pending = match &message {
+                DataToShell::ThreadList { .. } => self.list_pending,
+                DataToShell::Page { .. } => self.event_pending,
+                DataToShell::PageFailed { .. } => self
+                    .list_pending
+                    .filter(|pending| pending.request == *request)
+                    .or(self.event_pending),
+                _ => None,
+            };
+            if !self.owns_request(*request)
+                || pending.is_none_or(|pending| pending.request != *request)
+            {
+                return;
+            }
+            self.reads
+                .borrow_mut()
+                .pending
+                .retain(|(id, _)| id != request);
+        }
         match message {
             DataToShell::ThreadList {
                 request,
@@ -478,6 +696,8 @@ impl Threads {
             }
             DataToShell::PageFailed { request } => self.read_failed(request),
             DataToShell::IssueCard(_)
+            | DataToShell::IssueCardRead { .. }
+            | DataToShell::IssueCardsDone { .. }
             | DataToShell::AssistantText { .. }
             | DataToShell::StepCommit { .. }
             | DataToShell::RunEnd { .. }
@@ -495,6 +715,7 @@ impl Threads {
                 // shortcut: Presence consumes v1 frames through Presenter first; B3 removes placeholder routing.
             }
         }
+        self.sync_cards();
     }
 
     fn apply_list(&mut self, request: u32, threads: Vec<ThreadRow>, next: Option<ThreadCursor>) {
@@ -579,11 +800,6 @@ impl Threads {
             return;
         };
         self.failed |= current;
-    }
-
-    fn number(&mut self) -> u32 {
-        self.counter = self.counter.wrapping_add(2);
-        self.counter
     }
 }
 

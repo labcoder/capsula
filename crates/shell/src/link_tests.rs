@@ -220,7 +220,7 @@ fn page_frames_decode_on_their_session_and_earn_exact_credit_when_applied_or_dro
         Some(request)
     );
     let list = DataToShell::ThreadList {
-        request: 2,
+        request: 1,
         threads: vec![ThreadRow {
             id: ThreadId(3),
             title: "a private title".to_owned(),
@@ -302,16 +302,16 @@ fn pair(label: &str) -> (PipeClient, PipeClient) {
 }
 
 /// A connection the link attends on its own thread, and the brain's ends of its pipes.
-struct Attended {
-    handle: LinkHandle,
-    events: Receiver<LinkEvent>,
+pub(crate) struct Attended {
+    pub(crate) handle: LinkHandle,
+    pub(crate) events: Receiver<LinkEvent>,
     control: PipeClient,
     data: Arc<PipeClient>,
     /// Returns whether the UI was still there when the connection ended.
-    link: JoinHandle<bool>,
+    pub(crate) link: JoinHandle<bool>,
 }
 
-fn attended(label: &str) -> Attended {
+pub(crate) fn attended(label: &str) -> Attended {
     let (control, shell_control) = pair(&format!("{label}-control"));
     let (data, shell_data) = pair(&format!("{label}-data"));
     control.set_timeout(Some(PATIENCE));
@@ -568,7 +568,7 @@ fn a_full_batch_leaves_the_next_event_queued() {
 }
 
 /// The link's events with a timeout on each.
-fn patient(events: Receiver<LinkEvent>) -> mpsc::Receiver<LinkEvent> {
+pub(crate) fn patient(events: Receiver<LinkEvent>) -> mpsc::Receiver<LinkEvent> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         while let Ok(event) = events.recv_blocking() {
@@ -580,11 +580,11 @@ fn patient(events: Receiver<LinkEvent>) -> mpsc::Receiver<LinkEvent> {
     receiver
 }
 
-fn next(events: &mpsc::Receiver<LinkEvent>) -> LinkEvent {
+pub(crate) fn next(events: &mpsc::Receiver<LinkEvent>) -> LinkEvent {
     events.recv_timeout(PATIENCE).expect("an event in time")
 }
 
-fn connected(event: LinkEvent) -> Session {
+pub(crate) fn connected(event: LinkEvent) -> Session {
     let LinkEvent::Connected(session) = event else {
         panic!("Connected first, got {event:?}");
     };
@@ -868,6 +868,26 @@ fn staged_issue_controls_keep_the_link_and_cards_return_exact_credit() {
         frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control).expect("read"),
         Some(ControlToBrain::Pong)
     );
+    let LinkEvent::GitHub { generation, view } = next(&events) else {
+        panic!("GitHub view reaches its session-fenced consumer");
+    };
+    assert_eq!(generation, session.generation());
+    assert_eq!(view, kumochi_protocol::message::GitHubView::Requesting);
+    let LinkEvent::ActionState {
+        generation,
+        draft,
+        version,
+        state,
+        approval,
+    } = next(&events)
+    else {
+        panic!("action notification");
+    };
+    assert_eq!(generation, session.generation());
+    assert_eq!(
+        (draft, version, state, approval),
+        (DraftId(9), StateVersion(1), ActionState::Draft, None)
+    );
     let card = DataToShell::IssueCard(IssueCard {
         draft: DraftId(9),
         thread: ThreadId(3),
@@ -904,6 +924,71 @@ fn staged_issue_controls_keep_the_link_and_cards_return_exact_credit() {
     );
     drop(link.control);
     assert!(link.link.join().expect("joined"));
+}
+
+#[test]
+fn github_errors_keep_their_session_and_do_not_replace_generic_account_errors() {
+    use kumochi_protocol::message::{Action, ErrorArg};
+    let link = attended("github-errors");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    let timeout = UserError::new(
+        ErrorKey::SignInTimedOut,
+        vec![ErrorArg::Seconds(5)],
+        vec![Action::Retry],
+    )
+    .unwrap();
+    for message in [
+        ControlToShell::GitHubError(ErrorKey::GitHubUnavailable.into()),
+        ControlToShell::Error(ErrorKey::AccountOffline.into()),
+        ControlToShell::GitHubError(timeout.clone()),
+        ControlToShell::Ping,
+    ] {
+        frame::write(&mut &link.control, &message, Pipe::Control).unwrap();
+    }
+    let LinkEvent::GitHubError { generation, error } = next(&events) else {
+        panic!("tagged refusal")
+    };
+    assert_eq!(generation, session.generation());
+    assert_eq!(error, ErrorKey::GitHubUnavailable.into());
+    let LinkEvent::Error { generation, error } = next(&events) else {
+        panic!("generic account error")
+    };
+    assert_eq!(generation, session.generation());
+    assert_eq!(error, ErrorKey::AccountOffline.into());
+    let LinkEvent::GitHubError { generation, error } = next(&events) else {
+        panic!("tagged existing error")
+    };
+    assert_eq!(generation, session.generation());
+    assert_eq!(error, timeout);
+    assert_eq!(
+        frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control).unwrap(),
+        Some(ControlToBrain::Pong)
+    );
+    assert_eq!(session.granted(), 0);
+    drop(link.control);
+    assert!(link.link.join().unwrap());
+    assert_eq!(
+        frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn a_github_error_cannot_replace_the_initial_welcome() {
+    let (control, shell_control) = pair("github-error-before-welcome");
+    control.set_timeout(Some(PATIENCE));
+    shell_control.set_timeout(Some(PATIENCE));
+    frame::write(
+        &mut &control,
+        &ControlToShell::GitHubError(ErrorKey::GitHubUnavailable.into()),
+        Pipe::Control,
+    )
+    .unwrap();
+    assert!(matches!(
+        welcome(&shell_control),
+        Err(super::LinkError::Rejected)
+    ));
 }
 
 #[test]

@@ -89,6 +89,9 @@ impl Presence {
             model.update(cx, |state, cx| {
                 if state.deleting != deleting || state.deletes_full != full {
                     state.deleting.clone_from(&deleting);
+                    if state.open.is_some_and(|thread| deleting.contains(&thread)) {
+                        state.retire_issue_confirmation();
+                    }
                     state.deletes_full = full;
                     cx.notify();
                 }

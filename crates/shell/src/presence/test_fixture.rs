@@ -51,6 +51,7 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             events: events.clone(),
             threads: None,
         });
+        let (threads, chat) = Threads::pair();
         let presence = cx.new(|cx| Presence {
             input_windows: platform::OverlayWindows::default(),
             native,
@@ -62,8 +63,8 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             thread_panel: None,
             settings_panel: None,
             settings: cx.new(|_| Settings::default()),
-            threads: cx.new(|_| Threads::default()),
-            chat: cx.new(|_| Threads::chat()),
+            threads: cx.new(|_| threads),
+            chat: cx.new(|_| chat),
             chat_notice: crate::chat_notice::ChatNotice::default(),
             events,
             events_in,
