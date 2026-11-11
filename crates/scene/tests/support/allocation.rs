@@ -98,7 +98,7 @@ pub(super) fn requests<T>(capacity: usize, run: impl FnOnce() -> T) -> (T, Vec<R
         assert!(
             slot.replace(Some(record)).is_none(),
             "request scopes cannot nest"
-        )
+        );
     });
     let guard = Recording;
     let value = run();

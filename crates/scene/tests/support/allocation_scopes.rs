@@ -169,10 +169,9 @@ mod tests {
     use super::*;
 
     fn installed(prepared: PreparedRequests) -> LocalRequests {
-        match prepared.install() {
-            Ok(local) => local,
-            Err(_) => panic!("a vacant recorder accepts prepared storage"),
-        }
+        prepared
+            .install()
+            .unwrap_or_else(|_| panic!("a vacant recorder accepts prepared storage"))
     }
 
     #[test]
@@ -212,7 +211,7 @@ mod tests {
         assert_eq!(refused.reason, ScopeFailure::Active);
         assert_eq!(TAG.with(Cell::get), 1);
         assert!(!RECORD_LOST.with(Cell::get));
-        let (_, counts, bytes) = super::super::usage(|| {
+        let ((), counts, bytes) = super::super::usage(|| {
             drop(std::hint::black_box(vec![0_u8; 73].into_boxed_slice()));
         });
         let finished = local.finish().expect("the installed scope detaches");
