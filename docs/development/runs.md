@@ -109,8 +109,9 @@ is omitted whole and cleared durably before the remaining scenes are described. 
 that drains or discards drawing work rechecks run completion, including clear and deletion.
 Quit drains in-flight typed writes, supersedes failed cut debt with its clear and waits for
 the clear acknowledgement within the existing deadline; an unconfirmed clear is incomplete.
-During staging, a v1 recovery is sent only when typed scenes exist; the production
-fixture and an empty placeholder-only recovery remain legacy until B3 switches both ends.
+A v1 recovery (`ScenesV1`) is sent when typed scenes exist. Otherwise the legacy `Scenes`
+list is sent, and only the trusted debug fixture's newline-label placeholder steps can fill
+it ("The fixture engine").
 
 ## Asking about a part
 
@@ -171,11 +172,17 @@ sequenceDiagram
   C->>E: StartEngine (RunRequest)
   E-->>C: TextDelta
   C->>S: RunState Answering, AssistantText
-  E-->>C: ToolCallStarted (draw), ToolArgsDelta (one closed line)
-  C->>DB: CommitStep (text so far and the step)
-  DB-->>C: StepStored
-  C->>S: StepCommit
+  E-->>C: ToolCallStarted (draw), ToolArgsDelta (a closed record)
+  C->>DB: Drawing (the step's transaction)
+  DB-->>C: DrawingWritten
+  C->>S: SceneBegin, SceneStepCommit
   E-->>C: ToolCallReady, Finished (Completed)
+  C->>S: SceneEnd (complete)
+  C->>DB: CommitCall (the draw result)
+  DB-->>C: CallCommitted
+  C->>DB: RoundItems (text, items, results)
+  DB-->>C: RoundStored
+  Note over C,E: the next round is built from the store and started; one with no calls ends the run
   C->>DB: EndRun (remaining text, done)
   DB-->>C: RunStored
   C->>S: RunState Done

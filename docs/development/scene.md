@@ -812,8 +812,9 @@ Presenter samples outside paint into its four reserved frames. The paint callbac
 cache and frames immutably, records observations/failure flags through UI-thread cells, and
 defers any failure back to Presenter
 after releasing the borrow. Replacement invalidates old observations; removal/disconnect
-retires frame ownership with its scene and hides an empty overlay. Resting B5 views request no
-animation frames. B5 neither activates live steps nor emits StepShown; B6 consumes that seam.
+retires frame ownership with its scene and hides an empty overlay. Resting views request no
+animation frames. Live steps activate and acknowledge their first paint as "Serialized
+activation and first-paint acknowledgement" describes.
 
 The overlay lifecycle keeps native visibility separate from paint eligibility. A successful
 hide closes the old GPUI window and opens a fresh hidden replacement; a refused hide keeps
@@ -827,13 +828,13 @@ host's frames. Hiding advances paint epochs and forgets paint/ack observations w
 sampled geometry. Notifications are repaint requests, not evidence that a blank frame was
 presented; the composed-frame proof is a separate guarded native run.
 
-The approved B6 paint-cache boundary is planned, not yet implemented by this B5 painter.
+The paint cache implements the approved B6 paint-cache boundary.
 After warm-up it separates three lines: exactly zero application-internal allocations;
 exactly one application handoff allocation per `paint_path`, of exactly 32 bytes per
 vertex; and GPUI-internal allocations, which are reported rather than asserted. Draw,
 flow, transforms and text-scale tests keep off-grid values without rounding, quantizing
 or precomputing frames. GPUI consumes the handoff Vec, so the callback as a whole is not
-allocation-free. The planned cache reuses the already-locked lyon 1.0.23 tessellator;
+allocation-free. The cache reuses the locked lyon_tessellation 1.0.23 tessellator;
 GPUI's PathBuilder creates a new tessellator and buffers on every call.
 
 The 64 MiB allowance remains application-owned bytes only. GPUI-owned allocations are
@@ -1321,7 +1322,7 @@ flowchart LR
 
 The host must call `deferred::start()` once before intake, and refuse intake when it
 fails. The brain starts the dropper before its runtime and intake; the shell starts it
-before the link. Startup fails closed if it cannot start. v1 remains off.
+before the link. Startup fails closed if it cannot start.
 Until startup, and on the dropper itself,
 values drop in place, so tests and nested
 values behave as before. `running()` turns false once the dropper thread has died,

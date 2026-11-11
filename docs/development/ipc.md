@@ -526,9 +526,10 @@ registration; P1 invents neither.
 
 ## Scene v1 wire contract
 
-The v1 messages are staged alongside the labelled placeholder protocol. B2 builds the brain
-path and B4 the shell path with direct test inputs; B3 switches production fixtures, removes
-the placeholder at both ends and deletes its development-only store rows. The brain accepts
+Production drawing uses the v1 messages: drawing calls commit typed steps through the
+reducer and send `SceneBegin` and `SceneStepCommit` ([tools](tools.md), "`draw`"). Only the
+trusted debug fixture's newline-label route still uses the labelled placeholder messages
+above. The brain accepts
 `StopScenes`, `StepShown` and `StepFailed`; the shell consumes v1 data and `ScenesV1` through
 its presenter. The legacy run-only `NoVisual` control is an authenticated no-op: it never
 clears a scene, adds a call result or ends the connection. Before Welcome it remains invalid.
@@ -591,10 +592,10 @@ another run's in-flight work.
 Every accepted cut receives `SceneCutApplied`, including a cut that changes nothing and adds
 no recovery-log entry, so the shell can release its outstanding-cut hold.
 
-Before B6 supplies a conductor, B4 can cut only at its current activation (zero for a fresh
-scene, or the recovered bound) and sends no `StepShown`; pending removals stay conservatively
-charged. Only v1 scenes send v1 cuts during staging. After B3 and before B5/B6 paints, development
-builds have no visible drawings. Drawings are intended to remain until Esc; a fifth overlay
+A cut applies the scene's current activation (zero for a fresh scene, or the recovered
+bound); pending removals stay conservatively charged. Only v1 scenes send v1 cuts. Live
+activation and `StepShown` follow [scene](scene.md), "Serialized activation and first-paint
+acknowledgement". Drawings are intended to remain until Esc; a fifth overlay
 scene retires the oldest first and leaves it in history. That is the recommended default while
 the owner's retention question remains open.
 
