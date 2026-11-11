@@ -754,15 +754,13 @@ fn cleared(presenter: &mut Presenter) -> Vec<Vec<SceneId>> {
 #[gpui::test]
 fn the_real_canvas_paints_a_cache_staged_from_its_frame_s_view(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let mut presenter = begun(Box::new(Stager(size_of::<Stager>())));
+    let (mut presenter, scene) =
+        crate::presenter::tests::painter_fixture(Box::new(Stager(size_of::<Stager>())));
     let frames = presenter.frames();
     draw_once(&frames, WeakEntity::new_invalid(), cx);
     assert_eq!(
-        frames
-            .borrow()
-            .painted(TWINNED)
-            .map(|painted| painted.bound),
-        Some(0),
+        frames.borrow().painted(scene).map(|painted| painted.bound),
+        Some(1),
         "the canvas painted the sampled bound"
     );
     assert_eq!(cleared(&mut presenter), Vec::<Vec<SceneId>>::new());
