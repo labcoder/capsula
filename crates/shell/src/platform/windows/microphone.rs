@@ -318,18 +318,24 @@ fn read(
             post_start_packet(token.collecting(session), ready, &mut skip_startup, frames);
         let copied = match bytes {
             Some(n) if n <= raw.len() && !bad && allowed && (silent || !data.is_null()) => {
-                if silent {
-                    raw[..n].fill(if source.format.sample == Sample::U8 {
+                let borrowed = if silent {
+                    None
+                } else {
+                    // SAFETY: WASAPI owns at least frames * block_align readable bytes until ReleaseBuffer.
+                    Some(unsafe { std::slice::from_raw_parts(data, n) })
+                };
+                copy_batch(
+                    &mut raw[..n],
+                    borrowed,
+                    if source.format.sample == Sample::U8 {
                         128
                     } else {
                         0
-                    });
-                } else {
-                    // SAFETY: WASAPI owns at least frames * block_align readable bytes until ReleaseBuffer.
-                    let borrowed = unsafe { std::slice::from_raw_parts(data, n) };
-                    raw[..n].copy_from_slice(borrowed);
-                }
-                n
+                    },
+                    || token.collecting(session),
+                    #[cfg(test)]
+                    || {},
+                )
             }
             _ => 0,
         };
@@ -354,6 +360,32 @@ fn read(
             packets.push(source.format.mono(frame)?, output)?;
         }
         raw[..copied].zeroize();
+    }
+}
+
+pub(in crate::platform) fn copy_batch(
+    raw: &mut [u8],
+    borrowed: Option<&[u8]>,
+    silence: u8,
+    mut authorized: impl FnMut() -> bool,
+    #[cfg(test)] after_authorized: impl FnOnce(),
+) -> usize {
+    if !authorized() {
+        return 0;
+    }
+    #[cfg(test)]
+    after_authorized();
+    if let Some(borrowed) = borrowed {
+        raw.copy_from_slice(borrowed);
+    } else {
+        raw.fill(silence);
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    if authorized() {
+        raw.len()
+    } else {
+        raw.zeroize();
+        0
     }
 }
 

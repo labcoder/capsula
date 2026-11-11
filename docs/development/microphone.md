@@ -80,6 +80,11 @@ packetizer holds one, and raw storage holds at most 3,840 frames in the supporte
 format (at most 30,720 bytes). A native packet exceeding that bound fails instead
 of growing storage. No 60-second native-rate accumulator exists in Shell.
 
+Maximum application raw/packet storage is approximately 75 KiB: 30,720 raw
+bytes, 30,720 bytes in four queued packets, a 7,680-byte retained packet and
+a 7,680-byte replacement during emission. This excludes metadata, allocator
+overhead, native WASAPI buffers and audio already transferred to the link.
+
 Raw storage, retained samples and reachable queued packets are zeroized on
 discard. A packet already transferred to the link/Brain belongs to that owner and
 must be fenced/cleared there; cancellation cannot erase someone else's copies.
@@ -109,9 +114,15 @@ While a native buffer is held, application work is bounded byte copying/filling,
 integer checks and atomic gate/permit reads only. Raw HRESULT vtable calls avoid
 constructing allocating COM errors on acquisition/release paths. No channel,
 conversion, packet allocation, mutex or foreign error formatting runs there.
-After returning the native buffer, recheck authority/deadline before packetization.
-Cancellation discards scratch; normal release may finish samples copied while
-collection was still admitted. Discontinuity (apart from WASAPI's undefined
+Each batch is staged, then committed only after a post-copy collection check,
+ordered after the copy by a compiler fence. Generation/permit revocation,
+including normal Release, and the monotonic cutoff reject and scrub the staged
+batch before packetization. These authorities never reopen for that generation,
+so a passing post-copy check linearizes admission before any later revocation.
+No sample copied after the revoking edge is admitted. A racing copy may touch
+temporary scratch after that edge; the edge never waits for it, and rejected
+scratch is scrubbed. Normal release may finish a batch committed before the edge.
+Discontinuity (apart from WASAPI's undefined
 first-buffer flag), timestamp failure and endpoint loss fail closed. Failed
 native release or teardown never becomes a successful stop receipt.
 
@@ -123,6 +134,9 @@ a fake delayed source. They never open/enumerate audio devices.
 They cover delayed open/running revocation, release-to-cancel upgrade, session
 loss, callback-free cutoff, one-start/one-receipt ownership, exact framing and
 sample order, queue/hold limits, conversions and outer-carrier redaction.
+An offline barrier also pauses the actual batch copy/commit helper after its
+authorization check, revokes release/cancel/session/cutoff, then resumes and
+asserts zero admitted bytes and scrubbed scratch.
 
 Compilation, native permissions/device/rate/stop behavior and hot-path allocation,
 latency and memory measurements still require their separately approved checks.

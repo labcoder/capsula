@@ -2,6 +2,63 @@ use super::*;
 use async_channel::Sender;
 use kumochi_protocol::message::MAX_HOLD_CHUNKS;
 
+#[test]
+fn native_batch_commit_rejects_revocation_after_authorization() {
+    use crate::platform::windows::microphone::copy_batch;
+    use std::sync::atomic::AtomicU64;
+
+    for cause in 0..4 {
+        let at = Instant::now();
+        let gate = CollectionGate::default();
+        let generation = gate.arm_at(GestureId(1), at).unwrap();
+        generation.advance(ARMED, OPENING).unwrap();
+        generation.advance(OPENING, RUNNING).unwrap();
+        generation.advance(RUNNING, COLLECTING).unwrap();
+        let session = Arc::new(AtomicBool::new(true));
+        let elapsed = Arc::new(AtomicU64::new(0));
+        let permit = Arc::clone(&session);
+        let clock = Arc::clone(&elapsed);
+        let (checked, authorized) = std::sync::mpsc::channel();
+        let (resume, resumed) = std::sync::mpsc::channel();
+        thread::scope(|scope| {
+            let copy = scope.spawn(move || {
+                let mut raw = [7; 4];
+                let copied = copy_batch(
+                    &mut raw,
+                    Some(&[17, 99, 240, 31]),
+                    0,
+                    || {
+                        generation.mode(
+                            &permit,
+                            at + Duration::from_millis(clock.load(Ordering::Acquire)),
+                        ) == Ok(Mode::Collecting)
+                    },
+                    || {
+                        checked.send(()).unwrap();
+                        resumed.recv_timeout(Duration::from_secs(2)).unwrap();
+                    },
+                );
+                (copied, raw)
+            });
+            authorized.recv_timeout(Duration::from_secs(2)).unwrap();
+            match cause {
+                0 => gate.release(GestureId(1)),
+                1 => gate.cancel(GestureId(1)),
+                2 => session.store(false, Ordering::Release),
+                _ => elapsed.store(60_000, Ordering::Release),
+            }
+            resume.send(()).unwrap();
+            assert_eq!(copy.join().unwrap(), (0, [0; 4]));
+        });
+    }
+    let mut raw = [0; 4];
+    assert_eq!(
+        copy_batch(&mut raw, Some(&[17, 99, 240, 31]), 0, || true, || {}),
+        4
+    );
+    assert_eq!(raw, [17, 99, 240, 31]);
+}
+
 fn receipt(owner: &mut MicOwner) -> Result<StopReceipt, MicError> {
     let until = Instant::now() + Duration::from_secs(2);
     loop {
