@@ -91,6 +91,14 @@ impl Activation {
         });
     }
 
+    /// Moves step `index`'s segment end with its entrance, which began `by` ms after staging.
+    pub(super) fn delay(&mut self, index: u32, by: u64) {
+        let slot = usize::try_from(index).expect("a validated lifetime index fits usize");
+        if let Some(end) = &mut self.ends[slot] {
+            *end = end.saturating_add(by);
+        }
+    }
+
     pub(super) fn halt(&mut self) {
         self.installed = None;
     }
@@ -215,6 +223,27 @@ impl Presenter {
             Err(_) => self.fail(id, run, index, SceneFailure::Validation, out),
         }
         Ok(())
+    }
+
+    /// Begins each open scene's activation whose kept first sample a shown overlay has painted,
+    /// observed at `now`: what its step put starts that much later, so its entrance runs from
+    /// the paint. Whether any began.
+    pub(crate) fn begin_painted(&mut self, now: Instant) -> bool {
+        let mut began = false;
+        for (id, scene) in &mut self.scenes {
+            let Some(kept) = self.frames.borrow_mut().begin(*id) else {
+                continue;
+            };
+            if scene.cut == Cut::Open && !scene.skipping {
+                let by = scene.activation.time(now).saturating_sub(kept);
+                scene.view.delay_entrance(by);
+                scene
+                    .activation
+                    .delay(scene.view.activated().saturating_sub(1), by);
+                began = true;
+            }
+        }
+        began
     }
 
     /// Takes only fixed numeric observations, outside paint; delivery belongs to the caller.

@@ -967,6 +967,10 @@ Each child's entrance starts no earlier than its parent's start, retaining its o
 duration, so delayed diagrams do not hide their children's entrances.
 Explicit tracks retain their step-relative clocks, so a track may finish while a
 delayed parent still hides its target; only entrances are shifted.
+`delay_entrance(by)` starts what the view's own step put `by` ms later: its objects'
+appearances and entrances, its tracks and glides, a newly put view's spin, and the
+deadline. Carried tracks and earlier objects keep their times. A host calls it once, when
+it observes the activation's first paint.
 
 After painting at `t`, request another frame when `animating(t)` is true, otherwise
 wake at `next_wake(t)`. This paints the final frame without continuously polling
@@ -1702,6 +1706,17 @@ current host and connection, then `take_shown` revalidates the current epoch, ac
 and installed once-state. A refused control ends the connection. Hidden, empty, failed,
 revoked or superseded observations cannot acknowledge; visibility-only epoch changes never
 reset an already acknowledged activation. Skipped semantic retirement fabricates no paint.
+
+An entrance starts at its first paint, not at consumption. A newly activated frame keeps its
+first sample with something to paint until a shown overlay paints it, and later samples leave
+it unchanged. The callback then calls `begin_painted` with its observation instant: the step's
+objects, tracks, spin, deadline and segment end move by the time since the kept sample, so the
+entrance runs its authored duration from the observed paint. Other scenes, carried tracks and
+the scene clock keep their times. The callback samples at that instant and rearms the drawing's
+frames if anything moves, since the staged clock may have run out first. Stop latches the kept
+sample's time, so Esc before the first paint reveals only what that sample finished; a cut,
+clear, newer activation or disconnect drops the pending start with its frame epoch. A step
+activated before its predecessor's first paint begins only its own entrance.
 
 The callback does not poll or rearm from unchanged paints. Its Box, effect-deque growth,
 control serialization/outbox work and retained owner state remain application costs requiring

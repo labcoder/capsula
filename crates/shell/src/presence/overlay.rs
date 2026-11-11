@@ -322,6 +322,14 @@ impl Presence {
                     break;
                 }
             }
+            let now = Instant::now();
+            // The drawing's loop may have rested while its first paint was outstanding.
+            if self.session.is_some()
+                && self.presenter.begin_painted(now)
+                && self.draw_changed_at(now, cx)
+            {
+                self.want_frames(cx);
+            }
         }
         let result = self.runs_changed(cx);
         #[cfg(test)]

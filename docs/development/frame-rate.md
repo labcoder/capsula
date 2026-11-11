@@ -82,6 +82,12 @@ capped delta never becomes a drawing's lifetime clock. Only changed samples inva
 overlay. Each loop idles when its client wants no motion. Unchanged frames do not refresh the
 conversation panels.
 
+A drawing's entrance starts at the overlay's first paint of its step, so a slow first paint,
+such as a cold overlay window's, doesn't spend the entrance off screen. Until then the step's
+first sample is kept and drawing frames leave it as it is. Observing the paint begins the
+entrance and rearms the drawing's loop, which may have rested meanwhile (scene.md, "Serialized
+activation and first-paint acknowledgement").
+
 Advance, retained-frame sampling, scene motion demand and future-wake selection use one
 sampled Instant per owner update. The drawing's callback carries that sampled motion demand
 through its final rest decision. A wake already due when its task registers runs immediately

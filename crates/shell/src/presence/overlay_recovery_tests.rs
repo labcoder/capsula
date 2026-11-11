@@ -1212,23 +1212,99 @@ fn the_recorded_graph_finishes_drawing_while_the_status_panel_is_hidden(
         this.text.as_mut().expect("typing owner").typing.open();
         this.frames.idle();
         assert!(this.draw_changed_at(origin + Duration::from_millis(255), cx));
+        assert!(
+            !this
+                .presenter
+                .frames()
+                .borrow()
+                .paint(|_, _| Ok::<_, ()>(()))
+        );
+        assert!(
+            this.presenter
+                .begin_painted(origin + Duration::from_millis(255)),
+            "the recorded first frame paints at 255 ms"
+        );
         this.want_frames(cx);
     });
     script.finish();
-    let first = retained_draw(&owner, cx);
     assert_eq!(
-        first.len(),
-        7,
-        "every op is painted, the fg labels included"
-    );
-    assert!(
-        first[2] < 0.7,
-        "the recorded frame: the curve stops part-way, {first:?}"
+        retained_draw(&owner, cx),
+        [1.0, 1.0, 0.683_830_8, 1.0, 1.0, 1.0, 1.0],
+        "the recorded first frame, the fg labels included"
     );
     assert_eq!(vsync_shown(&owner, cx), 1);
     assert_eq!(retained_draw(&owner, cx), [1.0; 7]);
     assert_eq!(vsync_shown(&owner, cx), 0);
     close_callback_scene(&owner, cx);
+}
+
+/// A first paint that lands after the step's activation clock has run out: dock frames keep its
+/// first sample, and the curve draws its authored 800 ms from the first frame after that paint.
+#[gpui::test]
+fn a_late_first_paint_starts_the_entrance_from_its_initial_pose(cx: &mut gpui_kit::TestAppContext) {
+    use kumochi_protocol::message::{ControlToBrain, RunId};
+    use std::time::{Duration, Instant};
+    let origin = Instant::now()
+        .checked_sub(Duration::from_secs(2))
+        .expect("the monotonic clock is past its second second");
+    let at = |ms| origin + Duration::from_millis(ms);
+    let (owner, controls) = callback_scene(
+        br#"{"step":{"id":"curve","put":[{"path":{"id":"parabola","d":"M 100 60 Q 170 230 240 260 Q 310 230 380 60","color":"blue","width":4,"enter":"draw","dur":800}}]}}"#,
+        origin,
+        cx,
+    );
+    let script = HostGuard::install(&[
+        Step(Operation::Configure, Outcome::Success),
+        Step(Operation::Show, Outcome::Success),
+    ]);
+    let before = Instant::now();
+    owner.update(cx, |this, cx| {
+        this.frames.idle();
+        assert!(this.draw_changed_at(at(0), cx));
+        assert!(this.draw_changed_at(at(300), cx));
+        assert!(
+            !this.draw_changed_at(at(900), cx),
+            "the activation's own clock has run out"
+        );
+    });
+    let after = Instant::now();
+    script.finish();
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::StepShown {
+            run: RunId(6),
+            scene: super::TWINNED,
+            index: 0,
+        })
+    );
+    assert_eq!(
+        retained_draw(&owner, cx),
+        [0.0],
+        "the first paint is the initial pose"
+    );
+    let end = owner.update(cx, |this, _| {
+        assert!(
+            !this.frames.want(Instant::now()),
+            "the paint woke the drawing's frames"
+        );
+        this.presenter.next_wake(after).expect("the entrance's end")
+    });
+    assert!(
+        before + Duration::from_millis(799) < end && end <= after + Duration::from_millis(800),
+        "the entrance ends 800 ms after its observed first paint"
+    );
+    let start = end
+        .checked_sub(Duration::from_millis(800))
+        .expect("the entrance starts after the monotonic clock's origin");
+    for (late, curve) in [(400, 0.875), (600, 0.984_375), (800, 1.0)] {
+        owner.update(cx, |this, cx| {
+            this.draw_changed_at(start + Duration::from_millis(late), cx);
+        });
+        assert_eq!(retained_draw(&owner, cx), [curve], "{late} ms into it");
+    }
+    close_callback_scene(&owner, cx);
+    assert_eq!(vsync_shown(&owner, cx), 1, "the frame the paint armed");
+    assert_eq!(vsync_shown(&owner, cx), 0);
 }
 
 #[gpui::test]
@@ -1302,6 +1378,17 @@ fn a_penultimate_pose_keeps_one_callback_to_sample_the_final_pose_then_rests(
             owner.update(cx, |this, cx| {
                 this.frame_at(origin + Duration::from_millis(199), window, cx)
                     .expect("penultimate sample");
+                assert!(
+                    !this
+                        .presenter
+                        .frames()
+                        .borrow()
+                        .paint(|_, _| Ok::<_, ()>(()))
+                );
+                assert!(
+                    this.presenter
+                        .begin_painted(origin + Duration::from_millis(199))
+                );
             });
         })
         .expect("held panel");

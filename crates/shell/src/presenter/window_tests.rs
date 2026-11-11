@@ -1019,6 +1019,8 @@ fn consumption_forwards_distinct_scene_time_and_narration_segment() {
         .consume_ready(LIVE, 0, now, 1000, 800)
         .expect("timed head");
     assert!(consumed.effects.expect("no successor").is_empty());
+    presenter.sample(1000);
+    super::paint_shown(&mut presenter, super::ms(now, 1000));
     for (at, expected) in [(1399, 0.0), (1400, 0.0), (1650, 25.0)] {
         let (_, effects) = presenter.sample(at);
         assert!(effects.is_empty());

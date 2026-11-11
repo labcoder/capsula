@@ -278,6 +278,8 @@ struct Live {
     ease: Ease,
     plays: u32,
     yoyo: bool,
+    /// Started by the step this view activated, so [`SceneView::delay_entrance`] moves it.
+    fresh: bool,
 }
 impl Live {
     fn new(anim: &Anim, target: Handle, origin: u64, theme: &Theme) -> Self {
@@ -293,6 +295,7 @@ impl Live {
             ease: anim.ease,
             plays: plays(anim),
             yoyo: anim.yoyo,
+            fresh: true,
         }
     }
     /// Requested bytes of this holder's key array allocation: the Arc header and the keys,
@@ -376,6 +379,8 @@ struct Node {
     opacity: f32,
     inherited: f32,
     timing: Timing,
+    /// Put by the step this view activated, so [`SceneView::delay_entrance`] moves its timing.
+    fresh: bool,
     owners: [Option<usize>; 10],
 }
 
@@ -435,6 +440,7 @@ fn build_nodes(layout: &LayoutState, timing: impl Fn(&Item) -> Timing) -> Vec<No
                 opacity: item.opacity,
                 inherited,
                 timing: timing(item),
+                fresh: false,
                 owners: [None; 10],
             }
         })
@@ -744,6 +750,7 @@ impl SceneView {
                 ease: Ease::InOut,
                 plays: 1,
                 yoyo: false,
+                fresh: true,
             })
             .collect();
         let mut candidates = self.carried(now, &recolored);
@@ -778,8 +785,9 @@ impl SceneView {
         });
         let mut starts: Vec<u64> = Vec::with_capacity(nodes.len());
         for node in &mut nodes {
+            node.fresh = born.contains_key(&node.handle);
             if let Some(parent) = node.parent
-                && born.contains_key(&node.handle)
+                && node.fresh
             {
                 let wait = starts[parent].saturating_sub(node.timing.start);
                 node.timing.start = node.timing.start.saturating_add(wait);
@@ -838,6 +846,24 @@ impl SceneView {
         Ok(())
     }
 
+    /// Starts what this view's step put `by` ms later than it was staged: its objects' appearances
+    /// and entrances, its tracks and glides, a newly put view's spin and the motion deadline. A
+    /// host that painted the activation late begins it there. Carried tracks and earlier objects
+    /// keep their times.
+    pub fn delay_entrance(&mut self, by: u64) {
+        for node in self.nodes.iter_mut().filter(|node| node.fresh) {
+            node.timing.start = node.timing.start.saturating_add(by);
+            node.timing.end = node.timing.end.saturating_add(by);
+        }
+        for live in self.tracks.iter_mut().filter(|live| live.fresh) {
+            live.origin = live.origin.saturating_add(by);
+        }
+        if let Some(view) = &mut self.view {
+            view.delay(by);
+        }
+        self.deadline = self.deadline.saturating_add(by);
+    }
+
     /// What retiring this view may free: its own bytes plus its layout's cached geometry, which
     /// it may hold last. Counted per holder, from the cache, so retirement walks nothing.
     fn attributed_bytes(&self) -> usize {
@@ -854,7 +880,10 @@ impl SceneView {
                 live.end().min(deadline) > now
                     && (live.track != Track::Color || !recolored.contains(&live.target))
             })
-            .cloned()
+            .map(|live| Live {
+                fresh: false,
+                ..live.clone()
+            })
             .collect()
     }
 
@@ -1307,6 +1336,7 @@ mod tests {
             ease,
             plays,
             yoyo: false,
+            fresh: false,
         }
     }
 

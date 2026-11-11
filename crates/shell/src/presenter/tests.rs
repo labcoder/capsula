@@ -532,6 +532,13 @@ fn ms(now: Instant, millis: u64) -> Instant {
     now + Duration::from_millis(millis)
 }
 
+/// A shown overlay paints every frame, and that paint is observed at `at`.
+fn paint_shown(presenter: &mut Presenter, at: Instant) {
+    presenter.frames.borrow_mut().shown = true;
+    assert!(!presenter.frames.borrow().paint(|_, _| Ok::<_, ()>(())));
+    presenter.begin_painted(at);
+}
+
 /// A live scene whose first step is preparing.
 pub(crate) fn preparing() -> (Presenter, Instant, PrepareJob) {
     preparing_for(GENERATION, Box::new(Charged(0)))
