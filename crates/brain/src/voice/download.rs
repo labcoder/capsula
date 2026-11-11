@@ -278,16 +278,21 @@ impl Downloader {
         if available < needed {
             return Err(DownloadError::NoSpace { needed });
         }
-        report.value.done = done;
-        report.sender.send_replace(report.value);
+        let mut ready = Vec::new();
         for (model, path, partial, final_file, existing) in pending {
-            if let Some(file) = final_file {
-                discard_model(file).map_err(|_| DownloadError::Io)?;
-            }
-            let mut file = match existing {
+            check_cancel(cancel)?;
+            let file = match existing {
                 Some(file) => file,
                 None => create_model_write(&partial).map_err(path_error)?,
             };
+            ready.push((model, path, final_file, file));
+        }
+        report.value.done = done;
+        report.sender.send_replace(report.value);
+        for (model, path, final_file, mut file) in ready {
+            if let Some(file) = final_file {
+                discard_model(file).map_err(|_| DownloadError::Io)?;
+            }
             // `fetch_file` hashes the bytes already in the `.part` first.
             report.phase(FetchPhase::Verifying);
             let result = self.fetch_file(model, &mut file, &mut report, cancel).await;

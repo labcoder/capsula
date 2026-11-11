@@ -51,6 +51,8 @@ remain supported for the development installer, with writers and rebinding exclu
 Both model constructors hold their checked parents and model files until the loaded engine is
 destroyed. These storage guarantees are the platform adapter contract; model policy has no OS
 conditionals. Intentional linked-folder relocation is not supported.
+Installation opens or creates every needed partial before discarding any invalid final, so a
+later acquisition refusal leaves the existing files intact.
 Drive-letter network mappings are refused before opening their root; local drives still pass
 the existing held-chain ownership, permission and resolved-path checks.
 Start-up inspects sizes through the same checked file handles. A refused path becomes the

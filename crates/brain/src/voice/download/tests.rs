@@ -262,6 +262,42 @@ enum LinkedFolder {
 }
 
 #[tokio::test]
+async fn model_review_acquisition_refusal_preserves_an_earlier_invalid_final() {
+    let server = Server::start(vec![Reply::full()]);
+    let (_scratch, downloader) = server.downloader();
+    let target = final_path(&downloader);
+    seed(&target, b"xxxxxx");
+    let second = ModelFile {
+        name: "second.bin",
+        ..MODEL
+    };
+    let blocker = target.with_file_name("second.bin.part");
+    let create = blocker.clone();
+    crate::platform::pause_after_check(
+        target.clone(),
+        Box::new(move || {
+            fs::create_dir(&create).unwrap();
+            fs::write(create.join("sentinel"), b"keep").unwrap();
+        }),
+    );
+    let (_cancel, receiver) = watch::channel(false);
+    let (progress, _) = watch::channel(Progress {
+        phase: FetchPhase::Verifying,
+        done: 0,
+        total: 0,
+    });
+    assert_eq!(
+        downloader
+            .fetch_files(&[&MODEL, &second], &progress, &receiver)
+            .await,
+        Err(DownloadError::Io)
+    );
+    assert_eq!(fs::read(target).unwrap(), b"xxxxxx");
+    assert_eq!(fs::read(blocker.join("sentinel")).unwrap(), b"keep");
+    assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn model_review_h2_preserves_a_replacement_between_hash_and_discard() {
     let server = Server::start(vec![Reply::full()]);
     let (scratch, downloader) = server.downloader();
