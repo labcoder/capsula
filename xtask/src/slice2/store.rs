@@ -3,7 +3,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, ensure};
+use kumochi_protocol::constants::{DATA_DIR, SESSION_LOCK};
 use kumochi_protocol::message::ThreadId;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _};
@@ -89,6 +90,18 @@ pub(super) fn rows(conn: &Connection, marker: &str) -> Result<Rows> {
 /// Every file under `root` whose raw bytes hold `marker` as UTF-8, ignoring ASCII case, and
 /// how many files were read.
 pub(super) fn files(root: &Path, marker: &str) -> Result<(usize, Vec<PathBuf>)> {
+    scan_files(root, marker, None)
+}
+
+pub(super) fn live_files(root: &Path, marker: &str) -> Result<(usize, Vec<PathBuf>)> {
+    scan_files(root, marker, Some(&root.join(DATA_DIR).join(SESSION_LOCK)))
+}
+
+fn scan_files(
+    root: &Path,
+    marker: &str,
+    held_lock: Option<&Path>,
+) -> Result<(usize, Vec<PathBuf>)> {
     let marker = marker.to_ascii_lowercase();
     let mut read = 0;
     let mut hits = Vec::new();
@@ -96,6 +109,15 @@ pub(super) fn files(root: &Path, marker: &str) -> Result<(usize, Vec<PathBuf>)> 
     while let Some(folder) = folders.pop() {
         for entry in fs::read_dir(&folder)? {
             let path = entry?.path();
+            if held_lock == Some(path.as_path()) {
+                let metadata = fs::symlink_metadata(&path)?;
+                ensure!(
+                    metadata.is_file() && metadata.len() == 0,
+                    "the held account-session lock must be an empty regular file"
+                );
+                read += 1;
+                continue;
+            }
             if path.is_dir() {
                 folders.push(path);
                 continue;
@@ -134,7 +156,67 @@ fn contains(haystack: &[u8], lower: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::contains;
+    use std::fs::{self, OpenOptions};
+
+    use kumochi_protocol::constants::{DATA_DIR, SESSION_LOCK};
+
+    use super::{contains, files, live_files};
+
+    #[test]
+    fn only_the_known_empty_lock_is_checked_by_metadata_while_held() {
+        let root = crate::scratch::dir("live-deletion-scan");
+        let data = root.join(DATA_DIR);
+        fs::create_dir(&data).expect("data folder");
+        let path = data.join(SESSION_LOCK);
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("lock file");
+        lock.try_lock().expect("exclusive real lock");
+        let content = data.join("content.txt");
+        fs::write(&content, "capsgate-kept").expect("fixture content");
+        assert_eq!(
+            live_files(&root, "capsgate").expect("live scan"),
+            (2, vec![content.clone()])
+        );
+        assert!(
+            files(&root, "capsgate").is_err(),
+            "the after-quit byte scanner must still read the held lock"
+        );
+        drop(lock);
+        assert_eq!(
+            files(&root, "capsgate").expect("released scan"),
+            (2, vec![content])
+        );
+        fs::write(&path, "capsgate").expect("nonempty lock fixture");
+        assert!(
+            live_files(&root, "capsgate").is_err(),
+            "a nonempty lock cannot be exempted"
+        );
+        fs::remove_file(&path).expect("remove lock file");
+        fs::create_dir(&path).expect("directory in place of lock");
+        assert!(
+            live_files(&root, "capsgate").is_err(),
+            "a directory cannot be exempted"
+        );
+        fs::remove_dir(&path).expect("remove directory");
+        let other = data.join("another.lock");
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&other)
+            .expect("other lock");
+        lock.try_lock().expect("other exclusive lock");
+        assert!(
+            live_files(&root, "capsgate").is_err(),
+            "all other read failures remain fatal"
+        );
+        drop(lock);
+        fs::remove_dir_all(root).expect("remove scratch");
+    }
 
     #[test]
     fn a_marker_is_found_in_any_ascii_case_and_only_whole() {
