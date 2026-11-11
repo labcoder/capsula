@@ -296,23 +296,71 @@ fn measure(
 }
 
 fn track(shell_pid: u32, tracked: &mut Vec<(&'static str, Process)>) -> Result<()> {
-    tracked.push(("shell", Process::open(shell_pid)?));
     let entries = platform::processes()?;
+    let mut opened = entries
+        .iter()
+        .map(|entry| Ok((entry.pid, Process::open(entry.pid)?)))
+        .collect::<Result<Vec<_>>>()?;
+    let tree = process_tree(shell_pid, &entries, platform::helper_role)?;
+    for (role, pid) in tree {
+        let at = opened
+            .iter()
+            .position(|(opened_pid, _)| *opened_pid == pid)
+            .context("product process disappeared from the startup set")?;
+        tracked.push((role, opened.swap_remove(at).1));
+    }
+    Ok(())
+}
+
+fn process_tree(
+    shell_pid: u32,
+    entries: &[platform::Entry],
+    identify: impl Fn(u32) -> Result<&'static str>,
+) -> Result<[(&'static str, u32); 4]> {
+    ensure!(
+        entries.len() == 4,
+        "product process set changed during startup; refusing a contaminated measurement"
+    );
+    ensure!(
+        entries
+            .iter()
+            .any(|entry| entry.pid == shell_pid && entry.shell),
+        "the launched shell is missing"
+    );
     let brain = entries
         .iter()
         .find(|entry| !entry.shell && entry.parent == shell_pid)
         .context("shell did not start a brain within the 30s settle period")?;
-    tracked.push(("brain", Process::open(brain.pid)?));
-    let worker = entries
+    let mut tree = [
+        ("shell", shell_pid),
+        ("brain", brain.pid),
+        ("screen-worker", 0),
+        ("speech-worker", 0),
+    ];
+    for entry in entries
         .iter()
-        .find(|entry| !entry.shell && entry.parent == brain.pid)
-        .context("brain did not start a screen worker within the 30s settle period")?;
-    tracked.push(("screen-worker", Process::open(worker.pid)?));
+        .filter(|entry| !entry.shell && entry.parent == brain.pid)
+    {
+        let at = match identify(entry.pid)? {
+            "screen-worker" => 2,
+            "speech-worker" => 3,
+            _ => bail!("unexpected product helper role"),
+        };
+        ensure!(tree[at].1 == 0, "duplicate product helper role");
+        tree[at].1 = entry.pid;
+    }
     ensure!(
-        entries.len() == 3,
-        "product process set changed during startup; refusing a contaminated measurement"
+        tree.iter().all(|(_, pid)| *pid != 0) && unchanged(entries, &tree.map(|(_, pid)| pid)),
+        "product helpers do not form the expected four-process tree"
     );
-    Ok(())
+    Ok(tree)
+}
+
+fn unchanged(entries: &[platform::Entry], expected: &[u32]) -> bool {
+    entries.len() == expected.len()
+        && expected
+            .iter()
+            .all(|pid| entries.iter().filter(|entry| entry.pid == *pid).count() == 1)
 }
 
 fn interval(
@@ -335,10 +383,13 @@ fn interval(
     let wall = start.elapsed();
     let final_entries = platform::processes()?;
     ensure!(
-        final_entries.len() == 3
-            && final_entries
+        unchanged(
+            &final_entries,
+            &tracked
                 .iter()
-                .all(|entry| tracked.iter().any(|(_, process)| process.pid == entry.pid)),
+                .map(|(_, process)| process.pid)
+                .collect::<Vec<_>>()
+        ),
         "product process set changed during measurement"
     );
     println!(
@@ -405,10 +456,10 @@ fn wait_for_exit(child: &mut Child, tracked: &[(&str, Process)], deadline: Insta
             }
             ensure!(status.success(), "shell exited unsuccessfully: {status}");
             for ((role, process), code) in tracked.iter().zip(&codes) {
-                if *role == "screen-worker" {
+                if matches!(*role, "screen-worker" | "speech-worker") {
                     ensure!(
                         *code == Some(1),
-                        "screen worker pid {} exit {code:?}; expected job termination code 1",
+                        "{role} pid {} exit {code:?}; expected job termination code 1",
                         process.pid
                     );
                 } else {
@@ -497,9 +548,97 @@ fn cycle_percent(cycles: u64, rate: f64, wall: Duration) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Workload, cycle_percent, options, percent, settled_paints};
+    use super::{
+        Workload, cycle_percent, options, percent, process_tree, settled_paints, unchanged,
+    };
+    use crate::platform::Entry;
     use std::path::PathBuf;
     use std::time::Duration;
+
+    fn helper(pid: u32, parent: u32) -> Entry {
+        Entry {
+            pid,
+            parent,
+            shell: false,
+        }
+    }
+
+    #[test]
+    fn both_helpers_are_identified_independently_of_enumeration_order() {
+        let mut entries = vec![
+            helper(40, 20),
+            helper(20, 10),
+            Entry {
+                pid: 10,
+                parent: 1,
+                shell: true,
+            },
+            helper(30, 20),
+        ];
+        let identify = |pid| match pid {
+            30 => Ok("screen-worker"),
+            40 => Ok("speech-worker"),
+            _ => anyhow::bail!("unknown fixture helper"),
+        };
+        assert_eq!(
+            process_tree(10, &entries, identify).expect("four-process tree"),
+            [
+                ("shell", 10),
+                ("brain", 20),
+                ("screen-worker", 30),
+                ("speech-worker", 40)
+            ]
+        );
+        entries.reverse();
+        assert_eq!(
+            process_tree(10, &entries, identify).expect("reordered tree"),
+            [
+                ("shell", 10),
+                ("brain", 20),
+                ("screen-worker", 30),
+                ("speech-worker", 40)
+            ]
+        );
+        assert!(
+            unchanged(&entries, &[10, 20, 30, 40]),
+            "all four PIDs remain"
+        );
+        assert!(
+            !unchanged(&entries, &[10, 20, 30, 41]),
+            "a replacement cannot pass"
+        );
+        assert!(
+            process_tree(10, &entries, |_| Ok("screen-worker")).is_err(),
+            "duplicate roles fail"
+        );
+        assert!(
+            process_tree(10, &entries, |_| Ok("unknown")).is_err(),
+            "unknown helpers fail"
+        );
+        assert!(
+            process_tree(10, &entries[..3], identify).is_err(),
+            "missing helpers fail"
+        );
+        entries.push(helper(50, 1));
+        assert!(
+            process_tree(10, &entries, identify).is_err(),
+            "foreign extra processes fail"
+        );
+        assert!(
+            !unchanged(&entries, &[10, 20, 30, 40]),
+            "an extra PID cannot pass"
+        );
+        entries.pop();
+        entries
+            .iter_mut()
+            .find(|entry| entry.pid == 40)
+            .expect("speech")
+            .parent = 1;
+        assert!(
+            process_tree(10, &entries, identify).is_err(),
+            "a helper owned by another parent fails"
+        );
+    }
 
     #[test]
     fn baseline_and_duration_options_combine_in_either_order() {
