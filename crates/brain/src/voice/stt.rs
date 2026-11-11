@@ -13,16 +13,19 @@ mod tests;
 
 #[cfg(test)]
 pub(crate) use tests::held_for_runtime;
+#[cfg(test)]
+pub(crate) use tests::held_for_runtime_checked;
 
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::message::SttUnload;
+use kumochi_protocol::message::{HoldFailure, SttUnload};
 use tokio::runtime::Handle;
 use tokio::sync::broadcast::{self, error::TryRecvError};
 use tokio::sync::{oneshot, watch};
+use zeroize::{Zeroize as _, Zeroizing};
 
 use super::{LoadEvent, Reports};
 use crate::speech::{SpeechError, SpeechHandle};
@@ -94,8 +97,13 @@ pub(crate) struct Decode {
 
 impl Decode {
     /// A receiver that went away doesn't need the answer.
-    fn answer(self, result: SttResult) {
+    fn answer(mut self, result: SttResult) {
+        self.samples.zeroize();
         self.reply.send(result).ok();
+    }
+
+    pub(crate) fn discard(mut self) {
+        self.samples.zeroize();
     }
 }
 
@@ -175,6 +183,7 @@ struct State {
     current: Option<u64>,
     /// Set by the worker only while a loaded model serves `want`.
     ready: bool,
+    decoding: usize,
     waiting: Option<Decode>,
     finished: [Option<SttResult>; 2],
     #[cfg(test)]
@@ -221,6 +230,47 @@ pub(crate) struct SttHandle {
 }
 
 impl SttHandle {
+    pub(crate) fn admit_use(&self) -> Result<u64, HoldFailure> {
+        self.control.update(|state| {
+            let ask = state.current.ok_or(HoldFailure::NotLoaded)?;
+            if state.shutdown || !state.ready || !wants(state, ask) {
+                return Err(HoldFailure::NotLoaded);
+            }
+            if state.waiting.is_some() || state.decoding != 0 {
+                return Err(HoldFailure::Busy);
+            }
+            state.idle_since = Instant::now();
+            Ok(ask)
+        })
+    }
+
+    pub(crate) fn current_use(&self, ask: u64) -> bool {
+        let state = self.control.lock();
+        !state.shutdown && state.ready && state.current == Some(ask) && wants(&state, ask)
+    }
+
+    pub(crate) fn decode_for(&self, ask: u64, mut decode: Decode) -> Result<(), HoldFailure> {
+        self.control.update(|state| {
+            let failure = if state.shutdown
+                || !state.ready
+                || state.current != Some(ask)
+                || !wants(state, ask)
+            {
+                Some(HoldFailure::NotLoaded)
+            } else if state.waiting.is_some() || state.decoding != 0 {
+                Some(HoldFailure::Busy)
+            } else {
+                None
+            };
+            if let Some(failure) = failure {
+                decode.samples.zeroize();
+                return Err(failure);
+            }
+            state.waiting = Some(decode);
+            Ok(())
+        })
+    }
+
     /// Starts the owner thread, which has `speech` stage the natives from `natives` and load the
     /// models when asked to load. `runtime` carries the worker's requests.
     pub(crate) fn spawn(
@@ -318,6 +368,7 @@ impl SttHandle {
                 want: None,
                 current: None,
                 ready: false,
+                decoding: 0,
                 waiting: None,
                 finished: [None, None],
                 #[cfg(test)]
@@ -388,6 +439,7 @@ impl SttHandle {
                 return Ok(Some(decode));
             }
             if state.waiting.is_some() {
+                decode.discard();
                 return Err(SttBusy);
             }
             state.waiting = Some(decode);
@@ -587,6 +639,7 @@ fn serve_decodes(
                     .expect("a free slot");
                 #[cfg(test)]
                 let cut = state.decode_cut.take();
+                state.decoding += 1;
                 drop(state);
                 match spawn_decode(
                     scope,
@@ -598,7 +651,10 @@ fn serve_decodes(
                     cut,
                 ) {
                     Ok(task) => running[slot] = Some(task),
-                    Err(_) => failed = true,
+                    Err(_) => {
+                        control.update(|state| state.decoding -= 1);
+                        failed = true;
+                    }
                 }
                 state = control.lock();
                 continue;
@@ -658,6 +714,7 @@ fn settle_decodes<'state>(
             drop(state);
             let joined = task.thread.join();
             state = control.lock();
+            state.decoding -= 1;
             *failed |= joined.is_err()
                 || matches!(
                     result,
@@ -700,8 +757,9 @@ fn settle_decodes<'state>(
         .waiting
         .as_ref()
         .is_some_and(|decode| decode.reply.is_closed())
+        && let Some(decode) = state.waiting.take()
     {
-        state.waiting = None;
+        decode.answer(SttResult::Stale);
     }
     state
 }
@@ -724,6 +782,7 @@ fn spawn_decode<'scope, 'env>(
         samples,
         reply,
     } = decode;
+    let samples = Zeroizing::new(samples);
     let spawned = std::thread::Builder::new()
         .name("voice-decode".into())
         .spawn_scoped(scope, move || {

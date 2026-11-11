@@ -796,3 +796,10 @@ metadata and allocator overhead also count. Scheduling moves the normalized
 vector to STT; cancelling its receiver fences the result, not audio already owned
 by an in-flight decode. STT's serialization/worker copies and native inference
 allocations remain part of the unmeasured end-to-end peak.
+
+Held decode admission reuses the STT owner's current ready load and busy tracking,
+resetting its existing idle clock. The shortest 15-minute idle interval exceeds
+the bounded hold plus decode; explicit unload, removal and worker loss still
+invalidate that load. PCM transferred to STT is scrubbed when its owned decode
+ends or is refused, including a busy queue. Cancelling the result receiver fences
+delivery, not worker/native copies or physical retirement.
