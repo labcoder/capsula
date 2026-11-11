@@ -135,7 +135,7 @@ fn probed(word: &str) -> ToolOutput {
 
 /// The round's completion, which must send exactly one call's write; its acknowledgement.
 fn commits(core: &mut Coordinator) -> Input {
-    let effects = core.handle(completed(&core)).expect("current");
+    let effects = core.handle(completed(core)).expect("current");
     let [Effect::Store(StoreOp::CommitCall(call))] = effects.as_slice() else {
         panic!("one write, not {effects:?}");
     };

@@ -169,6 +169,10 @@ async fn pumped(request: crate::engines::RunRequest, key: BuildKey) -> Vec<Input
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one generation race across the replaced and current builds"
+)]
 async fn replaced_build_events_cannot_change_or_finish_the_current_round() {
     let scratch = Scratch::new("engine-build-admission");
     let mut store = store(&scratch);
@@ -359,6 +363,10 @@ fn unavailable_drawing_returns_a_fixed_durable_refusal_without_failing_the_run()
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the scene commits and the result write share one schedule"
+)]
 fn an_offered_draw_uses_real_scene_commits_then_waits_for_its_result_write() {
     let scratch = Scratch::new("draw-tool-order");
     let mut store = store(&scratch);
@@ -742,6 +750,10 @@ fn source_deletion_rebuilds_an_items_only_round_held_by_drawing_without_finishin
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one replacement race spans both rounds and their acknowledgements"
+)]
 fn a_late_drawing_result_cannot_answer_a_replacement_round_twice() {
     let scratch = Scratch::new("draw-tool-replacement");
     let mut store = store(&scratch);

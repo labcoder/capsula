@@ -39,6 +39,10 @@ fn drain(pipe: impl io::Read + Send + 'static) -> io::Result<mpsc::Receiver<io::
     Ok(receive)
 }
 
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "a completion pairs the exit result with whether the readers started"
+)]
 fn fixture_completion(result: io::Result<u32>, readers_started: bool) -> Result<(), String> {
     let code =
         result.map_err(|error| format!("speech fixture operation failed ({:?})", error.kind()))?;

@@ -69,7 +69,7 @@ fn run_done(core: &mut Coordinator, thread: Option<ThreadId>, run: RunId) -> Vec
     .expect("a turn is never stale");
     admit(core, run);
     core.handle(engine(
-        super::engine_key(&core, run),
+        super::engine_key(core, run),
         TurnEvent::Finished(Finish::Completed),
     ))
     .expect("current");

@@ -555,15 +555,14 @@ fn mapper_changed_final_item_and_failure_after_valid_ready_never_complete_a_pref
                 Ok(crate::connections::model::sse::Progress::More)
             );
         }
-        let mapped = mapper.take();
+        let tail = mapper.take();
         assert_eq!(
-            mapped
-                .iter()
+            tail.iter()
                 .filter(|event| matches!(event, TurnEvent::ToolCallReady { .. }))
                 .count(),
             usize::from(!changed)
         );
-        for event in mapped {
+        for event in tail {
             assert_eq!(send(&mut core, event), Vec::new());
         }
         let failure = mapper
