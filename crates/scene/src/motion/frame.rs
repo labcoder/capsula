@@ -104,7 +104,7 @@ impl SceneView {
                 handle: node.handle,
                 primitives: Arc::clone(&node.primitives),
                 label_start: node.label_start,
-                transform: world.transform,
+                transform: self.placement.transform.compose(world.transform),
                 opacity: world.opacity,
                 draw: world.draw,
                 color: world.color,

@@ -117,7 +117,7 @@ fn measure_dense_scene_append_and_cut_at_lifetime_cap() {
 fn header(name: &str) -> SceneHeader {
     serde_json::from_value(serde_json::json!({
         "begin": {"v":1,"scene":name,"surface":"overlay","alt":"privatealt"},
-        "layout_version":1
+        "layout_version":2
     }))
     .expect("header")
 }
@@ -144,7 +144,7 @@ fn write(
         run: ids.1,
         target,
         revision,
-        layout_version: 1,
+        layout_version: 2,
         step,
     })
 }
@@ -467,7 +467,7 @@ fn a_bad_scene_is_left_out_while_the_other_three_recover() {
     type Rewrite = fn(&str) -> String;
     let rewrites: [(&str, Rewrite); 10] = [
         ("scene_begin", |body| {
-            body.replace(r#""layout_version":1"#, r#""layout_version":2"#)
+            body.replace(r#""layout_version":2"#, r#""layout_version":1"#)
         }),
         ("scene_begin", |_| "{".to_owned()),
         ("scene_begin", |_| " ".repeat(MAX_BODY_BYTES + 1)),

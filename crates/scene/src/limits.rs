@@ -26,6 +26,15 @@ pub const MAX_COORD: f32 = 20_000.0;
 pub(crate) const CHART_LABEL_INSET: f32 = 12.0;
 /// Maximum composed scale, including objects whose dimensions are measured later.
 pub const MAX_COMPOSED_SCALE: f32 = 64.0;
+/// Largest host-side enlargement reserved by curve preparation.
+pub const MAX_PRESENTATION_SCALE: f32 = 2.0;
+
+pub(crate) fn presentation_scale(surface: crate::record::Surface) -> f32 {
+    match surface {
+        crate::record::Surface::Overlay => MAX_PRESENTATION_SCALE,
+        crate::record::Surface::Inline => 1.0,
+    }
+}
 /// Maximum nodes in one diagram.
 pub const MAX_DIAGRAM_NODES: usize = 48;
 /// Maximum edges in one diagram.

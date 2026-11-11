@@ -1587,7 +1587,7 @@ fn wide(scene: u64) -> StoredScene {
         thread: THREAD,
         header: SceneHeader {
             begin,
-            layout_version: 1,
+            layout_version: 2,
         },
         log,
     }
@@ -1624,7 +1624,7 @@ fn a_snapshot_leaves_out_a_scene_the_shell_would_refuse_and_keeps_the_rest() {
     drawing.scenes.push(Held {
         scene: SceneId(9),
         thread: THREAD,
-        layout_version: 1,
+        layout_version: 2,
         state: SceneState::begin(begin).expect("a valid header"),
         committers: Vec::new(),
         gone: false,
@@ -1649,7 +1649,7 @@ fn a_snapshot_leaves_out_a_scene_the_shell_would_refuse_and_keeps_the_rest() {
         drawing.scenes.push(Held {
             scene: SceneId(id),
             thread: THREAD,
-            layout_version: 1,
+            layout_version: 2,
             state,
             committers: vec![None],
             gone: false,
@@ -1787,7 +1787,7 @@ fn debug_and_display_never_carry_drawing_content() {
     };
     let header = SceneHeader {
         begin,
-        layout_version: 1,
+        layout_version: 2,
     };
     let writes = [
         Write::Lookup {
@@ -1799,7 +1799,7 @@ fn debug_and_display_never_carry_drawing_content() {
             run: RunId(1),
             target: Target::New(header.clone()),
             revision: 1,
-            layout_version: 1,
+            layout_version: 2,
             step: Arc::new(step),
         },
     ];

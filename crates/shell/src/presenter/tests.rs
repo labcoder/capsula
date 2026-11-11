@@ -128,6 +128,9 @@ mod stop;
 #[path = "activation_tests.rs"]
 mod activation;
 
+#[path = "placement_tests.rs"]
+mod placement;
+
 #[test]
 #[ignore = "manual quiet-Rez v1 mirror admission timing, not a CI latency assertion"]
 #[expect(
@@ -287,7 +290,7 @@ fn header() -> SceneHeader {
     };
     SceneHeader {
         begin,
-        layout_version: 1,
+        layout_version: super::LAYOUT_VERSION,
     }
 }
 

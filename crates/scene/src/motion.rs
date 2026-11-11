@@ -21,6 +21,7 @@ pub use three::ViewFrame;
 use three::ViewMotion;
 
 mod frame;
+mod place;
 mod three;
 /// K̃ = (1 + K)/S(1) − 1 = 0.375891 rounded up: the normalised spring's largest overshoot.
 pub(crate) const SPRING_OVERSHOOT: f32 = 0.3759;
@@ -594,6 +595,7 @@ pub struct SceneView {
     /// The scene's 3D view, if any.
     view: Option<ViewMotion>,
     generation: Arc<()>,
+    placement: place::Placement,
 }
 impl fmt::Debug for SceneView {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -651,6 +653,7 @@ impl SceneView {
             tracks: Vec::new(),
             view: view(at_rest).map(|geometry| ViewMotion::new(geometry, None, None)),
             generation: Arc::new(()),
+            placement: place::Placement::default(),
         }
     }
     /// The revision a host `StopCut` must name.
@@ -809,6 +812,7 @@ impl SceneView {
             tracks,
             view,
             generation: Arc::new(()),
+            placement: self.placement.for_layout(&step.after),
         };
         let bytes =
             view.attributed_bytes() + retired_bytes(&superseded) + crate::layout::heap::ARC_HEADER;

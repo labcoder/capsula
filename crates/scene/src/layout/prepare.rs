@@ -318,7 +318,7 @@ pub fn prepare(
         Arc::make_mut(object.motion.get_or_insert_with(Arc::default)).insert(property, motion);
     }
     after.prune_extras();
-    validate_bounds(&after)?;
+    after.presentation_scale = validate_bounds(&after)?;
     after.grow_content()?;
     for primitive in after
         .objects
@@ -759,7 +759,7 @@ fn update_group_bounds(state: &mut LayoutState) {
     }
 }
 
-fn validate_bounds(state: &LayoutState) -> Result<(), PrepareError> {
+fn validate_bounds(state: &LayoutState) -> Result<f32, PrepareError> {
     let mut objects = BTreeMap::new();
     for (id, placed) in &state.objects {
         let parent = placed
@@ -769,16 +769,7 @@ fn validate_bounds(state: &LayoutState) -> Result<(), PrepareError> {
             .cloned();
         let matrix = placed.item.transform.0;
         let scale = matrix[0].hypot(matrix[1]);
-        let mut bounds = placed.item.bounds;
-        for primitive in &*placed.item.primitives {
-            match primitive {
-                Prim::Rect { rect, .. } => bounds = bounds.union(*rect),
-                Prim::Line { points, .. } | Prim::Fill { points, .. } => {
-                    bounds = bounds.union(super::primitives::point_bounds(points)?);
-                }
-                Prim::Text { .. } => {}
-            }
-        }
+        let bounds = super::place::local_bounds(&placed.item)?;
         let enter = work::entrance(&placed.source);
         let extent = if matches!(&*placed.source, Op::Diagram(_))
             && enter.is_none_or(|enter| enter == Enter::None)
@@ -818,7 +809,16 @@ fn validate_bounds(state: &LayoutState) -> Result<(), PrepareError> {
             },
         );
     }
-    crate::state::metrics::validate_transforms(&objects)?;
+    let maximum = crate::state::metrics::validate_transforms(&objects)?
+        .map(|(handle, scale)| {
+            let source = &state.objects[&state.handles[&handle]].source;
+            scale
+                * match &**source {
+                    Op::Path(path) => path.scale.map_or(1.0, crate::Finite::get),
+                    _ => 1.0,
+                }
+        })
+        .fold(1.0, f32::max);
     for object in state
         .objects
         .values()
@@ -826,7 +826,9 @@ fn validate_bounds(state: &LayoutState) -> Result<(), PrepareError> {
     {
         state.world_bounds(object)?;
     }
-    Ok(())
+    Ok(state
+        .presentation_limit
+        .min(crate::limits::MAX_COMPOSED_SCALE / maximum))
 }
 
 /// Bytes of `items`' geometry that `shared` doesn't already hold, each allocation once with its

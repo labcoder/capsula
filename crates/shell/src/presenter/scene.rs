@@ -17,7 +17,6 @@ use kumochi_scene::{
 };
 
 use super::{Activation, Effect, Presenter, SceneCache};
-use kumochi_protocol::message::SceneId;
 
 impl Presenter {
     /// Adopts a bound scene and reserves its frame, with the cache staged from its view.

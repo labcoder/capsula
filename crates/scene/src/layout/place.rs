@@ -1,6 +1,9 @@
 //! Canvas extents and presentation transforms, computed only at lifecycle transitions.
 use super::{LayoutState, PrepareError};
-use crate::geom::{Affine, Rect, Vec2};
+use crate::{
+    display::{Item, Prim},
+    geom::{Affine, Rect, Vec2},
+};
 
 const CONTENT_PADDING: f32 = 24.0;
 
@@ -16,6 +19,11 @@ pub fn place(extent: Rect, stage: Rect, max_scale: f32) -> Affine {
 }
 
 impl LayoutState {
+    /// Maximum presentation scale the prepared geometry and paint envelope can support.
+    pub fn presentation_scale(&self) -> f32 {
+        self.presentation_scale
+    }
+
     /// Canvas or growing world-space content bounds used for presentation.
     pub fn fit_extent(&self) -> Rect {
         let Some(content) = self
@@ -40,9 +48,25 @@ impl LayoutState {
             .values()
             .filter(|object| !object.item.primitives.is_empty())
         {
-            let bounds = self.world_bounds(object)?;
+            let bounds = self
+                .resting_transform(object.item.handle)?
+                .bounds(local_bounds(&object.item)?);
             self.content = Some(self.content.map_or(bounds, |content| content.union(bounds)));
         }
         Ok(())
     }
+}
+
+pub(super) fn local_bounds(item: &Item) -> Result<Rect, PrepareError> {
+    let mut bounds = item.bounds;
+    for primitive in &*item.primitives {
+        match primitive {
+            Prim::Rect { rect, .. } => bounds = bounds.union(*rect),
+            Prim::Line { points, .. } | Prim::Fill { points, .. } => {
+                bounds = bounds.union(super::primitives::point_bounds(points)?);
+            }
+            Prim::Text { .. } => {}
+        }
+    }
+    Ok(bounds)
 }

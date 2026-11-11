@@ -64,11 +64,45 @@ root, anonymous-group and edge ids.
 Ids contain 1–40 ASCII letters, digits, underscores, dots or hyphens. Host handles
 are a separate, opaque `u32` identity.
 
-Points are logical pixels of the inline scene's `size` or the overlay display.
+Points are logical pixels of the drawing's canvas, not of the overlay display.
 Anchors are `[x,y]` or `{"ref":"object-id"}`. Coordinates must be finite and
 within ±20,000. Chart data uses finite f64 values instead of coordinate-bounded
 numbers. Composed transforms and domain-specific ranges are admission checks.
 Screen/capture anchors are absent, not ignored.
+
+### Canvas and overlay placement
+
+Overlay preparation uses `begin.size`, or a 960×600 default canvas. Inline preparation
+keeps its host-width default. Diagram fitting, charts, tables and callouts use that canvas;
+the display size and the free stage are not preparation inputs.
+
+`LayoutState` retains a growing union of prepared primitive bounds in scene-world space,
+including ancestor transforms and final track values. A declared canvas is the fit extent,
+grown by content that overflows it. Without a declared canvas, the content has 24 logical
+pixels of padding on each side. Empty or zero-sized content falls back to the canvas.
+Stop rebuilds the extent from survivors; recovery replays the same preparation and cuts.
+
+The shell chooses the largest free band around the dock and its maximum status panel in
+the primary display's work area, inset by 32 logical pixels. It converts physical work-area
+and dock bounds using the window scale. Dock placement and GPUI display-change events
+refresh the stage. Activation, step installation, Stop and recovery also read the work area
+fresh before placing their views; ordinary animation frames do not poll it.
+Work-area-only changes wait for the next placement; add a work-area notification through
+the presence adapter. Per-display overlays are not implemented.
+
+`layout::place` centers the fit extent in the host-supplied stage with a uniform scale,
+at most 2× and with no lower fit floor. The remaining 64× composed-scale envelope can
+lower that cap. `SceneView` retains the placement independently of its animation clock;
+activation, step installation, Stop, recovery and stage changes all install it before
+sampling. Stage changes and growing steps snap, without preparing again. Only final 2D
+frame-item transforms receive the placement, never ancestor accumulators or 3D/input
+coordinates. Sampling adds one affine composition per painted item and no allocation or lock.
+Translation preserves shaped labels; a scale change invalidates their shaping key once,
+as bounded transition work rather than recurring animation work.
+
+The stored layout version is **2**. Version-1 visible scenes are skipped and durably cleared
+by the existing recovery path after upgrading, rather than reinterpreted with new coordinates.
+The drawing record version remains 1; this does not migrate or delete conversation history.
 
 ### The 2D tool contract
 
@@ -660,8 +694,10 @@ zero-period flow and duplicate same-step (target, property) tracks fail with `Ou
 The private SVG walker accepts M/L/H/V/Q/C/Z, absolute or relative, including implicit
 repetitions. It validates coordinates and counts commands before vertices exist.
 Quadratic and cubic second differences determine power-of-two subdivision counts at
-0.25 logical-pixel tolerance after conservative composed scale bounds. Preparation uses
-the same walker and subdivision function when producing vertices. Procedural curves,
+0.25 logical-pixel tolerance after conservative composed scale bounds. SVG admission and
+preparation reserve up to a further 2× presentation scale for overlays, capped at composed scale 64;
+the extra subdivisions count against segment, dash and prepared paint-work budgets.
+Preparation uses the same walker and subdivision function when producing vertices. Procedural curves,
 rounded rectangles, ellipses, cylinder caps, pie arcs and chart axes have shared
 segment reservations in `path.rs`; generated output must stay within them.
 
@@ -803,8 +839,9 @@ using native quads for upright complete rectangles and paths for rotated or reve
 Labels use the preparation font and stay upright at their transformed anchors (OSC-217).
 Fills use the nonzero rule, as SVG and Canvas do, so a self-crossing polygon such as a
 pentagram fills its centre; a border ring fills its two nested outlines even-odd, so the inner
-one is its hole. Content past the primary display's edges is clipped by the overlay window,
-never moved, scaled or fitted; the only bound is |coordinate| ≤ 20,000 after composition.
+one is its hole. Overlay drawings are fitted and centered in the free stage as described
+above; the primary-display overlay window remains the final clip. Model-world coordinates
+remain bounded to ±20,000 before presentation.
 Geometry builds before any of its item's primitives paint; a geometry or label failure clears
 the scene instead of silently skipping it. The overlay is transparent and click-through, covers
 only the primary display from logical origin, and holds Esc only while shown. Its real drawing
@@ -1136,8 +1173,8 @@ edge; check clipping with the native painter before expanding routing or the fit
 Every edge whose endpoints still exist is recomputed, even after its last labelled
 partner is removed, so a formerly bowed singleton straightens. Its prepared flow
 axis is retained beside its endpoint anchors rather than read again from the host
-default. The Presenter currently holds one SurfaceGeometry for its lifetime, so a
-changed host default is not a shell-supported transition. Cut-detached edges with
+default. The Presenter keeps the canvas geometry and diagram flow fixed; a changed
+presentation stage only re-places the prepared drawing. Cut-detached edges with
 a nonidentity absorbed transform keep their frozen curves even when both endpoints
 survive; an identity-transform cut can still renumber surviving self-loop lanes.
 Arrowhead primitives are regenerated from the current head style and final tangent,

@@ -129,6 +129,7 @@ impl Presence {
                     Self::scene_worker(move |_| job.run(), cx);
                 }
                 Effect::ConsumptionReady { scene, index } => {
+                    self.place_drawings(cx.weak_entity(), cx);
                     if let Some(session) = &self.session {
                         let effects = self.presenter.consumption_ready(
                             session.generation(),
@@ -159,6 +160,7 @@ impl Presence {
         cx.spawn(async move |this, cx| {
             let done = task.await;
             let result = this.update(cx, |this, cx| {
+                this.place_drawings(cx.weak_entity(), cx);
                 let effects = this.presenter.completed(done, Instant::now());
                 this.scene_effects(effects, cx);
                 this.runs_changed(cx)
@@ -231,6 +233,7 @@ impl Presence {
                 .presenter
                 .stoppable_run()
                 .map_or(run, |live| live.max(run));
+            self.place_drawings(cx.weak_entity(), cx);
             let effects = self.presenter.stop(run, now);
             self.scene_effects(effects, cx);
         } else {

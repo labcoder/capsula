@@ -700,7 +700,7 @@ fn begun_at(stage: Box<dyn Stage>, now: Instant) -> Presenter {
     };
     let header = SceneHeader {
         begin,
-        layout_version: 1,
+        layout_version: 2,
     };
     let frame = DataToShell::SceneBegin {
         scene: TWINNED,

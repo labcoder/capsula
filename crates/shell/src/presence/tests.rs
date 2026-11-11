@@ -76,7 +76,7 @@ fn mirrored_presenter() -> Presenter {
                     scene: SceneId(1),
                     header: SceneHeader {
                         begin,
-                        layout_version: 1,
+                        layout_version: 2,
                     },
                 },
                 100,

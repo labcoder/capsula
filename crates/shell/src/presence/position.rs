@@ -69,12 +69,11 @@ impl Presence {
         Ok(())
     }
 
-    fn place_position(
+    pub(super) fn place_position(
         &mut self,
         position: Position,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
-        // shortcut: work-area changes need another position choice; add a monitor watcher later.
         let area = platform::work_area()?;
         // Moving the anchor invalidates a live selection's screen-space input geometry.
         self.end_selection(

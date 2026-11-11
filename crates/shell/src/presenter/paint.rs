@@ -169,7 +169,7 @@ impl Frames {
     }
 
     /// Starts a new epoch for the scene's frame, forgetting what was sampled and painted.
-    fn reset(&mut self, scene: SceneId) -> Option<&mut Slot> {
+    pub(super) fn reset(&mut self, scene: SceneId) -> Option<&mut Slot> {
         let epoch = self.next_epoch();
         let (_, slot) = self
             .slots

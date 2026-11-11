@@ -2,11 +2,65 @@
 use kumochi_scene::geom::{Rect, Vec2};
 
 use super::geometry::Layout;
+use super::{OpenError, Position, Presence, overlay, overlay_visibility::Visibility};
+use gpui_kit::{App, Context, Subscription, WeakEntity};
 
 const MARGIN: f32 = 32.0;
 
+pub(super) fn watch_displays(owner: WeakEntity<Presence>, cx: &App) -> Subscription {
+    cx.observe_displays(move |_, cx| {
+        match owner.update(cx, |presence, cx| presence.display_changed(cx)) {
+            Ok(Ok(())) => {}
+            _ => tracing::warn!("can't update drawing geometry after the display changed"),
+        }
+    })
+}
+
+impl Presence {
+    fn display_changed(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        self.scale = self
+            .dock_window
+            .update(cx, |_, window, _| window.scale_factor())
+            .map_err(|error| OpenError::Gpui(error.into()))?;
+        if let Some(position) = self
+            .line
+            .position_index()
+            .and_then(|index| Position::ALL.get(index))
+            .copied()
+        {
+            self.place_position(position, cx)?;
+        }
+        if let Visibility::Shown(surface) = &self.overlay {
+            overlay::show(surface.window, cx)?;
+        }
+        self.want_frames(cx);
+        Ok(())
+    }
+
+    pub(super) fn place_drawings(&mut self, owner: WeakEntity<Self>, cx: &mut App) {
+        let Ok(area) = crate::platform::work_area() else {
+            tracing::warn!("can't refresh the drawing stage");
+            return;
+        };
+        if self
+            .presenter
+            .set_stage(stage(area, self.layout, self.scale))
+        {
+            cx.defer(move |cx| {
+                if owner
+                    .update(cx, |presence, cx| presence.want_frames(cx))
+                    .is_err()
+                {
+                    tracing::debug!("drawing stage owner closed");
+                }
+            });
+        }
+    }
+}
+
 #[expect(
     clippy::cast_precision_loss,
+    clippy::as_conversions,
     reason = "desktop pixel coordinates fit f32 precision"
 )]
 fn logical([x, y, w, h]: [i32; 4], scale: f32) -> Rect {
@@ -16,6 +70,7 @@ fn logical([x, y, w, h]: [i32; 4], scale: f32) -> Rect {
     }
 }
 
+// shortcut: work-area-only changes wait for the next placement; add a work-area notification through the presence adapter.
 pub(super) fn stage(area: [i32; 4], layout: Layout, scale: f32) -> Rect {
     let area = logical(area, scale);
     let occupied = logical(layout.dock, scale).union(logical(layout.panel, scale));
@@ -74,7 +129,7 @@ mod tests {
             stage([0, 0, 2560, 1400], layout, 1.0),
             Rect {
                 origin: Vec2::new(32.0, 180.0),
-                size: Vec2::new(2496.0, 1220.0 - 32.0),
+                size: Vec2::new(2496.0, 1188.0),
             }
         );
     }

@@ -106,6 +106,7 @@ struct PresenceApp {
 impl Global for PresenceApp {}
 
 struct Presence {
+    _display_watch: Option<gpui_kit::Subscription>,
     exclusion: exclusion::Exclusion<exclusion::Receipt>,
     exclusion_timer: Option<Task<()>>,
     #[cfg(test)]
@@ -892,7 +893,7 @@ pub(crate) fn open(
     let kumo = cx.new(|_| KumoView::new());
     let (panel_window, panel) = status_window(&events, kumo.clone(), &mut input_windows, cx)?;
     let gesture = Rc::new(Cell::new(Gesture::default()));
-    let default_canvas = [960.0, 600.0];
+    let default_canvas = kumochi_scene::layout::DEFAULT_CANVAS;
     kumochi_scene::deferred::start().map_err(OpenError::Dropper)?;
     let paint_scratch = Rc::new(std::cell::RefCell::new(paint_stroke::Scratch::new()));
     let stage = paint_cache::Stager::new(&paint_scratch);
@@ -908,6 +909,7 @@ pub(crate) fn open(
     let owner = cx.new(|cx| {
         listen(states, event_changes.clone(), cx);
         Presence {
+            _display_watch: Some(stage::watch_displays(cx.weak_entity(), cx)),
             exclusion: exclusion::Exclusion::default(),
             exclusion_timer: None,
             #[cfg(test)]

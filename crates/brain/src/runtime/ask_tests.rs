@@ -72,7 +72,7 @@ fn seed(scratch: &Scratch, [label, info, alt]: [&str; 3], choice: &ModelChoice) 
     store
         .begin_turn(T, Some("task"), RunId(1), "T-HISTORY earlier")
         .expect("turn");
-    let header = serde_json::from_value(serde_json::json!({"begin":{"v":1,"scene":"car","surface":"overlay","alt":alt},"layout_version":1})).expect("header");
+    let header = serde_json::from_value(serde_json::json!({"begin":{"v":1,"scene":"car","surface":"overlay","alt":alt},"layout_version":2})).expect("header");
     let step = serde_json::from_value(serde_json::json!({"id":"s1","put":[{"view3d":{"id":"v"}},
         {"solid":{"in":"v","id":"a","shape":"box","size":[2,2,2],"label":label,"info":info}}]}))
     .expect("typed step");
@@ -82,7 +82,7 @@ fn seed(scratch: &Scratch, [label, info, alt]: [&str; 3], choice: &ModelChoice) 
             run: RunId(1),
             target: Target::New(header),
             revision: 1,
-            layout_version: 1,
+            layout_version: 2,
             step: Arc::new(step),
         })
         .expect("step")

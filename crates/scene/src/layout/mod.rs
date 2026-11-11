@@ -27,6 +27,9 @@ pub use state::LayoutState;
 pub(crate) use state::Rest;
 use std::sync::Arc;
 
+/// Overlay layout dimensions when the drawing does not declare a canvas.
+pub const DEFAULT_CANVAS: [f32; 2] = [960.0, 600.0];
+
 /// Host geometry supplied for this rendering, not persisted drawing coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SurfaceGeometry {

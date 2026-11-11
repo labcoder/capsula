@@ -720,7 +720,7 @@ fn kumos_page_shows_a_deleted_tasks_note_beside_its_messages() {
 fn typed_scene(store: &mut Store, thread: ThreadId, run: RunId) -> SceneId {
     let header = serde_json::from_value(serde_json::json!({
         "begin": {"v":1,"scene":"history","surface":"overlay","alt":"private drawing alt"},
-        "layout_version":1
+        "layout_version":2
     }))
     .expect("header");
     let step = Arc::new(
@@ -736,7 +736,7 @@ fn typed_scene(store: &mut Store, thread: ThreadId, run: RunId) -> SceneId {
             run,
             target: Target::New(header),
             revision: 1,
-            layout_version: 1,
+            layout_version: 2,
             step,
         })
         .expect("typed write")
