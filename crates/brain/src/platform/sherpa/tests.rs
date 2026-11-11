@@ -671,7 +671,7 @@ fn model_paths_refuse_links_before_the_native_constructor_and_hold_ordinary_file
     assert_eq!(
         std::fs::rename(models.dir(), models.dir().with_extension("moved"))
             .map_err(|error| error.raw_os_error()),
-        Err(Some(32))
+        Err(Some(5))
     );
     drop(recognizer);
     std::fs::write(models.dir().join(MODEL_FILES[0]), b"released").unwrap();

@@ -207,7 +207,9 @@ mod tests {
         let file = open_model_write(&source).unwrap();
         assert_eq!(
             publish_model(file, parent, target.file_name().unwrap()),
-            Ok(())
+            Ok(()),
+            "publication OS code: {:?}",
+            std::io::Error::last_os_error().raw_os_error(),
         );
         assert_eq!(std::fs::read(target).unwrap(), b"verified");
         assert_eq!(
