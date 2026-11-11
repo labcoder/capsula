@@ -77,13 +77,21 @@ fn detached(kind: &str) -> (SceneState, GlobalBudget, usize) {
         )
         .expect("bounded cut"),
     };
-    assert_eq!(scene.stop(&cut, &mut global), Ok(StopOutcome::Kept));
-    assert_eq!(scene.object_count(), 2 * count);
+    assert_eq!(
+        scene.stop(&cut, &mut global),
+        Ok(StopOutcome::Kept),
+        "{kind} cut"
+    );
+    assert_eq!(scene.object_count(), 2 * count, "{kind} survivor count");
     let cut_layout = picture.after.cut(&scene).expect("detached layout");
     let replay = SceneState::replay(scene.header().clone(), scene.recovery_log())
         .expect("old cut log replays");
-    assert_eq!(replay.recovery_log(), scene.recovery_log());
-    assert_eq!(replay.usage(), scene.usage());
+    assert_eq!(
+        replay.recovery_log(),
+        scene.recovery_log(),
+        "{kind} authored log"
+    );
+    assert_eq!(replay.usage(), scene.usage(), "{kind} replay usage");
     let (mut recovered, layout) = recover(
         scene.header().clone(),
         scene.recovery_log(),
@@ -94,18 +102,26 @@ fn detached(kind: &str) -> (SceneState, GlobalBudget, usize) {
         None,
     )
     .expect("recovery prepares old cut");
-    assert_eq!(layout.items(), cut_layout.items());
+    assert_eq!(layout.items(), cut_layout.items(), "{kind} replay layout");
     let next = prepared(&mut scene, &mut global, &cut_layout, json!({"id":"next"}));
-    assert_eq!(next.after.items(), cut_layout.items());
+    assert_eq!(
+        next.after.items(),
+        cut_layout.items(),
+        "{kind} no-op layout"
+    );
     scene.retire(1, &mut global).expect("continuation retires");
-    assert_eq!(global.usage(), scene.usage());
+    assert_eq!(global.usage(), scene.usage(), "{kind} retired usage");
     let recovered_next = prepared(
         &mut recovered,
         &mut GlobalBudget::default(),
         &layout,
         json!({"id":"next"}),
     );
-    assert_eq!(recovered_next.after.items(), next.after.items());
+    assert_eq!(
+        recovered_next.after.items(),
+        next.after.items(),
+        "{kind} replay continuation"
+    );
     (scene, global, 2 * count)
 }
 
