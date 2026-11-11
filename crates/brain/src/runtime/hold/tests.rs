@@ -70,23 +70,69 @@ async fn hold_to_talk_off_refuses_before_admission() {
 #[tokio::test]
 async fn queued_and_in_flight_hold_to_talk_off_block_before_the_save_commits() {
     use crate::runtime::settings::{Change, Gate, Queued};
-    let scratch = Scratch::new("hold-disable-save");
-    let mut brain = test_support::brain(&scratch, "");
-    assert!(brain.hold_to_talk_enabled());
-    let release = brain.hold_config_write();
-    brain.settings_ops.push_back(Queued {
-        change: Change::User(SettingsOp::SetHoldToTalk(false)),
-        epoch: 0,
-    });
-    assert!(!brain.hold_to_talk_enabled());
-    brain.pump_settings(None).unwrap();
-    assert!(brain.config.view().hold_to_talk);
-    assert!(!brain.hold_to_talk_enabled());
-    release.send(Gate::Write).unwrap();
-    brain.drain_settings().await;
-    assert!(!brain.config.view().hold_to_talk);
-    assert!(!brain.hold_to_talk_enabled());
-    brain.close().await;
+    for [first, second] in [[false, true], [true, false]] {
+        let scratch = Scratch::new("hold-disable-save");
+        let (mut brain, _release, _decoded, _fetch) =
+            crate::runtime::tests::holds::input(&scratch, Vec::new(), "not submitted").await;
+        assert!(brain.hold_to_talk_enabled());
+        let release = brain.hold_config_write();
+        brain.settings_ops.push_back(Queued {
+            change: Change::User(SettingsOp::SetHoldToTalk(first)),
+            epoch: 0,
+        });
+        assert_eq!(brain.hold_to_talk_enabled(), first);
+        brain.pump_settings(None).unwrap();
+        assert!(brain.config.view().hold_to_talk);
+        brain.settings_ops.push_back(Queued {
+            change: Change::User(SettingsOp::SetHoldToTalk(second)),
+            epoch: 0,
+        });
+        let finish = brain.hold_config_write();
+        let mut release = Some(release);
+        let (out, mut output) = mpsc::channel(8);
+        let queue = RefCell::new(DataQueue::new(0));
+        let ready = Notify::new();
+        let mut tap = Tap::from_env();
+        let mut link = Link::new(&out, &queue, &ready, &mut tap);
+        for phase in 0..2 {
+            assert!(!brain.hold_to_talk_enabled());
+            let gesture = GestureId(phase + 1);
+            brain
+                .hold_control(
+                    &ControlToBrain::VoiceHoldRecognized {
+                        gesture,
+                        thread: None,
+                        selection: 1,
+                    },
+                    &mut link,
+                )
+                .unwrap();
+            let bytes = output.try_recv().unwrap();
+            assert_eq!(
+                kumochi_protocol::frame::decode::<ControlToShell>(
+                    &bytes[kumochi_protocol::frame::HEADER_LEN..]
+                )
+                .unwrap(),
+                ControlToShell::VoiceHoldStatus {
+                    gesture,
+                    status: HoldStatus::Failed(HoldFailure::NotLoaded)
+                }
+            );
+            assert!(brain.holds.pending.is_none());
+            assert_eq!(brain.coordinator.current_run(), None);
+            if phase == 0 {
+                release.take().unwrap().send(Gate::Write).unwrap();
+                let done = super::super::settings::written(&mut brain.config_write).await;
+                brain.settings_done(done, None).unwrap();
+            }
+        }
+        finish.send(Gate::Write).unwrap();
+        brain.drain_settings().await;
+        assert_eq!(brain.config.view().hold_to_talk, second);
+        assert_eq!(brain.hold_to_talk_enabled(), second);
+        assert_eq!(output.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+        brain.close().await;
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -881,6 +927,10 @@ async fn cancel_model_default_and_unload_changes_are_terminal_before_their_handl
         (
             ControlToBrain::Settings(SettingsOp::SetDefaultModel(choice.clone())),
             HoldStatus::Failed(HoldFailure::ChoiceChanged),
+        ),
+        (
+            ControlToBrain::Settings(SettingsOp::SetHoldToTalk(false)),
+            HoldStatus::Failed(HoldFailure::NotLoaded),
         ),
         (
             ControlToBrain::ThreadOp(ThreadOp::SetModel { thread, choice }),

@@ -188,6 +188,7 @@ fn recorded_choice_mutations_cancel_before_queueing_and_away_back_still_changes_
         connection: ConnectionKind::ChatGpt,
     };
     let mutations = [
+        ControlToBrain::Settings(SettingsOp::SetHoldToTalk(false)),
         ControlToBrain::Settings(SettingsOp::SetDefaultModel(choice("away"))),
         ControlToBrain::Settings(SettingsOp::SetDefaultModel(choice("original"))),
         ControlToBrain::ThreadOp(ThreadOp::SetModel {
@@ -225,7 +226,7 @@ fn recorded_choice_mutations_cancel_before_queueing_and_away_back_still_changes_
     );
     assert_eq!(queue.try_recv(), Err(async_channel::TryRecvError::Empty));
     assert!(link.send_control(&session, ControlToBrain::Pong));
-    assert_eq!(link.choice_revision(), captured + 6);
+    assert_eq!(link.choice_revision(), captured + 7);
 }
 
 #[test]
