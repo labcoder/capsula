@@ -1,8 +1,20 @@
 # Issue actions
 
-Local draft creation is dormant too: there is no production tool or UI entry point
-to create one. A user cannot yet create a saved issue; the history path only reads
-compatible records that already exist.
+The model's `draft_issue` tool creates a local draft for user review. Its checked arguments
+contain only a title, body and optional repository; the dispatcher supplies the caller's
+conversation and any account metadata. There is no model-supplied thread, account or approval,
+and MCP drafting is not enabled. Creating a draft grants no consent and sends no HTTP request.
+
+The store inserts the draft, its first approval, its `draft` event and the tool-call ledger result
+in one transaction. Admission requires the call's run to remain active in the same live thread.
+Missing, ended, mismatched or deleting owners return `Committed::Failed` without writes. A
+duplicate ledger key, oversized output or any other write failure rolls back the action, event
+and approval too. The dispatcher answers replays with the original result, without another draft;
+only a committed call notifies the real history path to refresh its card.
+
+The dispatcher retains its 16-KiB whole-argument limit, even though `IssueBody` separately permits
+32 KiB. Local storage is not sending authority. The confirmation and remote filing handoff below
+remain dormant until their runtime and shell activation is implemented.
 
 An issue the model drafts becomes a durable action: a row in the store's `actions` table that
 only the user's consent may move toward GitHub. The stages and what a card shows are in

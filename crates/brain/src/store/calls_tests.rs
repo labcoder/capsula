@@ -1,12 +1,18 @@
 //! The ledger's one write: atomic with the call's own write, live threads only, and purged.
 
-use kumochi_protocol::message::{Deleted, RunId, ThreadId, ThreadTitle};
+use kumochi_protocol::message::{
+    Deleted, IssueBody, IssueTitle, RepoName, RunId, ThreadId, ThreadTitle,
+};
 use rusqlite::{Connection, OptionalExtension as _, params};
+use serde_json::{Value, json};
 
 use super::{Store, StoreError};
-use crate::dispatch::{CommitCall, Committed, LedgerKey, LocalWrite, Route, ToolError, ToolOutput};
-use crate::store::RunEnd;
-use crate::test_support::Scratch;
+use crate::connections::github::api::GitHubUser;
+use crate::dispatch::{
+    CommitCall, Committed, LedgerKey, LocalWrite, Route, Then, ToolError, ToolOutput,
+};
+use crate::store::{Interruption, RunEnd};
+use crate::test_support::{SENTINEL, Scratch};
 
 fn opened(scratch: &Scratch) -> Store {
     let mut store = Store::open(&scratch.db()).expect("store");
@@ -345,4 +351,355 @@ fn a_reservation_with_no_row_behind_it_survives_a_purge_and_a_reopen() {
         .begin_turn(next, Some("After"), RunId(last_run.0 + 1), "ask")
         .expect("allocated");
     assert!(next.0 > reserved.0);
+}
+
+fn drafting(thread: ThreadId, run: RunId, call: &str) -> CommitCall {
+    let mut draft = renaming(thread, run, call);
+    draft.tool = "draft_issue";
+    draft.hash = [9; 32];
+    draft.write = LocalWrite::DraftIssue {
+        title: IssueTitle::new("  Local café  ").unwrap(),
+        body: IssueBody::new("first\r\n\tcafé\r\n").unwrap(),
+        repo: Some(RepoName::new("owner/repo").unwrap()),
+        account: Some(GitHubUser {
+            id: u64::MAX,
+            login: kumochi_protocol::message::GitHubLogin::new("owner").unwrap(),
+        }),
+    };
+    draft.output = ToolOutput::Text("Local draft saved for user review.".to_owned());
+    draft.then = Some(Then::IssueDrafted);
+    draft
+}
+
+fn draft_events(conn: &Connection) -> Vec<Value> {
+    conn.prepare(
+        "SELECT json_array(thread, run, kind, text, body) FROM events
+         WHERE kind IN ('draft', 'action') ORDER BY id",
+    )
+    .unwrap()
+    .query_map([], |row| row.get::<_, String>(0))
+    .unwrap()
+    .map(|row| serde_json::from_str(&row.unwrap()).unwrap())
+    .collect()
+}
+
+#[test]
+fn a_draft_call_commits_exact_normalized_action_event_and_ledger_contents() {
+    let scratch = Scratch::new("calls-draft-content");
+    let mut store = opened(&scratch);
+    let (thread, run) = task(&mut store);
+    task(&mut store);
+    let call = drafting(thread, run, "draft-1");
+    assert_eq!(store.commit_call(&call).unwrap(), Committed::Done);
+    drop(store);
+    let conn = Connection::open(scratch.db()).unwrap();
+    let action: String = conn
+        .query_row(
+            "SELECT json_array(id, thread, version, stage, repo, account_id, account_login,
+         title, body, approval, consumed, uncertain) FROM actions",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&action).unwrap(),
+        json!([
+            1,
+            thread.0,
+            1,
+            "{\"kind\":\"draft\"}",
+            "owner/repo",
+            "18446744073709551615",
+            "owner",
+            "  Local café  ",
+            "first\n\tcafé\n",
+            1,
+            null,
+            0
+        ])
+    );
+    let (actions, approval) = super::actions_tests::snapshot(&conn);
+    assert_eq!(actions.len(), 1);
+    assert_eq!(approval, 1);
+    assert_eq!(
+        draft_events(&conn),
+        [json!([
+            thread.0,
+            null,
+            "draft",
+            "  Local café  ",
+            "{\"draft\":1}"
+        ])]
+    );
+    assert_eq!(
+        rows(&conn),
+        [(
+            "model".to_owned(),
+            "draft-1".to_owned(),
+            r#"{"text":"Local draft saved for user review."}"#.to_owned(),
+        )]
+    );
+    let ledger: String = conn
+        .query_row(
+            "SELECT json_array(run, thread, route, call, tool, hex(hash), result) FROM tool_calls",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&ledger).unwrap(),
+        json!([
+            run.0,
+            thread.0,
+            "model",
+            "draft-1",
+            "draft_issue",
+            "09".repeat(32),
+            "{\"text\":\"Local draft saved for user review.\"}"
+        ])
+    );
+    assert_eq!(title(&conn, thread), "Before");
+}
+
+#[test]
+fn an_unbound_draft_uses_only_its_callers_thread_and_stays_unbound() {
+    let scratch = Scratch::new("calls-draft-unbound");
+    let mut store = opened(&scratch);
+    let (thread, run) = task(&mut store);
+    let mut call = drafting(thread, run, "unbound");
+    let LocalWrite::DraftIssue { repo, account, .. } = &mut call.write else {
+        panic!("draft fixture");
+    };
+    *repo = None;
+    *account = None;
+    assert_eq!(store.commit_call(&call).unwrap(), Committed::Done);
+    let action = store
+        .action(kumochi_protocol::message::DraftId(1))
+        .unwrap()
+        .unwrap();
+    assert_eq!(action.thread, thread);
+    assert_eq!(action.repo, None);
+    assert_eq!(action.account, None);
+    assert_eq!(action.stage, crate::issues::Stage::Draft);
+    assert_eq!(
+        action.approval,
+        Some(kumochi_protocol::message::ApprovalRev(1))
+    );
+    assert_eq!(action.consumed, None);
+    assert_eq!(action.uncertain, 0);
+    assert_eq!(draft_events(&store.conn).len(), 1);
+    assert_eq!(rows(&store.conn).len(), 1);
+}
+
+#[test]
+fn duplicate_draft_keys_never_create_a_second_action_event_or_result() {
+    let scratch = Scratch::new("calls-draft-duplicate");
+    let mut store = opened(&scratch);
+    let (thread, run) = task(&mut store);
+    let first = drafting(thread, run, "once");
+    assert_eq!(store.commit_call(&first).unwrap(), Committed::Done);
+    let before = super::actions_tests::snapshot(&store.conn);
+    let events = draft_events(&store.conn);
+    let ledger = rows(&store.conn);
+    let mut changed = first.clone();
+    let LocalWrite::DraftIssue { title, body, .. } = &mut changed.write else {
+        panic!("draft fixture");
+    };
+    *title = IssueTitle::new("replacement must not persist").unwrap();
+    *body = IssueBody::new("different body").unwrap();
+    for duplicate in [&first, &changed] {
+        assert!(matches!(
+            store.commit_call(duplicate),
+            Err(StoreError::Call)
+        ));
+        assert_eq!(super::actions_tests::snapshot(&store.conn), before);
+        assert_eq!(draft_events(&store.conn), events);
+        assert_eq!(rows(&store.conn), ledger);
+    }
+    assert_eq!(before.0.len(), 1);
+    assert_eq!(before.1, 1);
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        ledger,
+        [(
+            "model".to_owned(),
+            "once".to_owned(),
+            r#"{"text":"Local draft saved for user review."}"#.to_owned(),
+        )]
+    );
+}
+
+#[test]
+fn a_ledger_failure_after_action_and_event_insertion_rolls_back_all_three() {
+    let scratch = Scratch::new("calls-draft-trigger");
+    let mut store = opened(&scratch);
+    let (thread, run) = task(&mut store);
+    store
+        .conn
+        .execute_batch(
+            "CREATE TEMP TRIGGER reject_draft_ledger BEFORE INSERT ON tool_calls
+         WHEN new.tool = 'draft_issue'
+         AND (SELECT count(*) FROM actions) = 1
+         AND (SELECT count(*) FROM events WHERE kind = 'draft') = 1
+         AND (SELECT last FROM approval_mark WHERE id = 1) = 1
+         BEGIN SELECT RAISE(ABORT, 'private-ledger-boundary-sentinel'); END;",
+        )
+        .unwrap();
+    let before = super::actions_tests::snapshot(&store.conn);
+    let error = store
+        .commit_call(&drafting(thread, run, "blocked"))
+        .unwrap_err();
+    assert!(matches!(error, StoreError::Call));
+    assert_eq!(super::actions_tests::snapshot(&store.conn), before);
+    assert_eq!(draft_events(&store.conn), []);
+    assert_eq!(rows(&store.conn), []);
+    assert!(!format!("{error:?} {error}").contains("private-ledger-boundary-sentinel"));
+    store
+        .conn
+        .execute_batch("DROP TRIGGER reject_draft_ledger")
+        .unwrap();
+    assert_eq!(
+        store
+            .commit_call(&drafting(thread, run, "after-trigger"))
+            .unwrap(),
+        Committed::Done
+    );
+    let (actions, approval) = super::actions_tests::snapshot(&store.conn);
+    assert_eq!(actions.len(), 1);
+    assert_eq!(approval, 1);
+    assert_eq!(draft_events(&store.conn).len(), 1);
+    assert_eq!(rows(&store.conn).len(), 1);
+}
+
+#[test]
+fn draft_output_bounds_commit_or_roll_back_the_complete_transaction() {
+    for length in [65_536, 65_537] {
+        let scratch = Scratch::new("calls-draft-output");
+        let mut store = opened(&scratch);
+        let (thread, run) = task(&mut store);
+        let mut call = drafting(thread, run, "output");
+        call.output = ToolOutput::Text("x".repeat(length - 11));
+        assert_eq!(call.output.stored().len(), length);
+        let before = super::actions_tests::snapshot(&store.conn);
+        let result = store.commit_call(&call);
+        if length == 65_536 {
+            assert_eq!(result.unwrap(), Committed::Done);
+            let (actions, approval) = super::actions_tests::snapshot(&store.conn);
+            assert_eq!(actions.len(), 1);
+            assert_eq!(approval, 1);
+            assert_eq!(draft_events(&store.conn).len(), 1);
+            assert_eq!(rows(&store.conn).len(), 1);
+        } else {
+            assert!(matches!(result, Err(StoreError::Call)));
+            assert_eq!(super::actions_tests::snapshot(&store.conn), before);
+            assert_eq!(draft_events(&store.conn), []);
+            assert_eq!(rows(&store.conn), []);
+        }
+    }
+}
+
+#[test]
+fn draft_admission_requires_the_matching_active_run_and_live_thread() {
+    for case in [
+        "missing run",
+        "missing thread",
+        "wrong run",
+        "wrong thread",
+        "done run",
+        "canceled run",
+        "deleting thread",
+        "deleted thread",
+        "large run",
+        "large thread",
+    ] {
+        let scratch = Scratch::new("calls-draft-owner");
+        let mut store = opened(&scratch);
+        let (thread, run) = task(&mut store);
+        let (other, other_run) = task(&mut store);
+        let mut call = drafting(thread, run, "lost-owner");
+        match case {
+            "missing run" => call.key.run = RunId(other_run.0 + 1),
+            "missing thread" => call.thread = ThreadId(other.0 + 1),
+            "wrong run" => call.key.run = other_run,
+            "wrong thread" => call.thread = other,
+            "done run" => store.end_run(thread, run, &[], RunEnd::Done).unwrap(),
+            "canceled run" => store
+                .end_run(thread, run, &[], RunEnd::Interrupted(Interruption::Stop))
+                .unwrap(),
+            "deleting thread" => {
+                store.begin_delete(thread).unwrap();
+            }
+            "deleted thread" => assert_eq!(store.delete(thread).outcome, Deleted::Removed),
+            "large run" => call.key.run = RunId(u64::MAX),
+            "large thread" => call.thread = ThreadId(u64::MAX),
+            _ => unreachable!(),
+        }
+        let before = super::actions_tests::snapshot(&store.conn);
+        let events = draft_events(&store.conn);
+        let ledger = rows(&store.conn);
+        assert_eq!(
+            store.commit_call(&call).unwrap(),
+            Committed::Failed,
+            "{case}"
+        );
+        assert_eq!(
+            super::actions_tests::snapshot(&store.conn),
+            before,
+            "{case}"
+        );
+        assert_eq!(draft_events(&store.conn), events, "{case}");
+        assert_eq!(rows(&store.conn), ledger, "{case}");
+        assert_eq!(
+            store
+                .commit_call(&drafting(other, other_run, "after-refusal"))
+                .unwrap(),
+            Committed::Done,
+            "{case}"
+        );
+        assert_eq!(super::actions_tests::snapshot(&store.conn).0.len(), 1);
+        assert_eq!(draft_events(&store.conn).len(), 1);
+        assert_eq!(rows(&store.conn).len(), 1);
+    }
+}
+
+#[test]
+fn a_non_draft_call_keeps_its_existing_ended_run_behavior() {
+    let scratch = Scratch::new("calls-existing-ended");
+    let mut store = opened(&scratch);
+    let (thread, run) = task(&mut store);
+    store.end_run(thread, run, &[], RunEnd::Done).unwrap();
+    assert_eq!(
+        store.commit_call(&renaming(thread, run, "legacy")).unwrap(),
+        Committed::Done
+    );
+    assert_eq!(title(&store.conn, thread), "After");
+    assert_eq!(
+        rows(&store.conn),
+        [(
+            "model".to_owned(),
+            "legacy".to_owned(),
+            r#"{"text":"probed"}"#.to_owned(),
+        )]
+    );
+}
+
+#[test]
+fn outer_commit_call_debug_redacts_draft_content_as_text_and_byte_lists() {
+    let mut call = drafting(ThreadId(1), RunId(1), SENTINEL);
+    call.tool = SENTINEL;
+    call.write = LocalWrite::DraftIssue {
+        title: IssueTitle::new(SENTINEL).unwrap(),
+        body: IssueBody::new(SENTINEL).unwrap(),
+        repo: Some(RepoName::new(&format!("{SENTINEL}/{SENTINEL}")).unwrap()),
+        account: Some(GitHubUser {
+            id: 7,
+            login: kumochi_protocol::message::GitHubLogin::new(SENTINEL).unwrap(),
+        }),
+    };
+    call.output = ToolOutput::Text(SENTINEL.to_owned());
+    let debug = format!("{:?}", Ok::<_, StoreError>(call));
+    let byte_list = format!("{:?}", SENTINEL.as_bytes());
+    assert!(!debug.contains(SENTINEL));
+    assert!(!debug.contains(&byte_list));
+    assert!(!debug.contains(byte_list.trim_start_matches('[').trim_end_matches(']')));
 }

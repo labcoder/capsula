@@ -11,6 +11,7 @@ impl Store {
     /// Applies a call's write and records it in the ledger, in one transaction, while its run's
     /// thread is live. `Failed`, with nothing written, when the thread is being deleted or gone;
     /// `Refused`, with nothing written, when the write's own check fails.
+    /// Draft creation also requires the matching run to remain active in that thread.
     ///
     /// # Errors
     /// [`StoreError::Call`], with no SQLite text, when SQLite fails, the key is already
@@ -47,8 +48,16 @@ impl Store {
     }
 
     fn record_call(&mut self, call: &CommitCall) -> Result<Committed, StoreError> {
-        let thread = sql_id(call.thread.0, StoreError::NoThread)?;
-        let run = sql_id(call.key.run.0, StoreError::NoThread)?;
+        let (thread, run) = match (
+            sql_id(call.thread.0, StoreError::NoThread),
+            sql_id(call.key.run.0, StoreError::NoThread),
+        ) {
+            (Ok(thread), Ok(run)) => (thread, run),
+            _ if matches!(&call.write, LocalWrite::DraftIssue { .. }) => {
+                return Ok(Committed::Failed);
+            }
+            (Err(error), _) | (_, Err(error)) => return Err(error),
+        };
         let tx = self.conn.transaction()?;
         match &call.write {
             LocalWrite::None => {}
@@ -77,6 +86,33 @@ impl Store {
                     "INSERT INTO threads (id, title, title_source, created_ms, updated_ms)
                      VALUES (?1, ?2, 'model', ?3, ?3)",
                     params![sql_id(task.0, StoreError::StaleId)?, title.as_str(), now],
+                )?;
+            }
+            LocalWrite::DraftIssue {
+                title,
+                body,
+                repo,
+                account,
+            } => {
+                let active = tx
+                    .query_row(
+                        "SELECT 1 FROM runs r JOIN threads t ON t.id = r.thread
+                         WHERE r.id = ?1 AND r.thread = ?2 AND r.state = 'active'
+                         AND t.state = 'live'",
+                        params![run, thread],
+                        |_| Ok(()),
+                    )
+                    .optional()?;
+                if active.is_none() {
+                    return Ok(Committed::Failed);
+                }
+                super::actions::insert_draft(
+                    &tx,
+                    thread,
+                    title,
+                    body,
+                    repo.as_ref(),
+                    account.as_ref(),
                 )?;
             }
             #[cfg(test)]

@@ -211,7 +211,7 @@ fn quiet(error: impl Into<StoreError>) -> StoreError {
     }
 }
 
-fn insert_draft(
+pub(super) fn insert_draft(
     tx: &Connection,
     thread: i64,
     title: &IssueTitle,

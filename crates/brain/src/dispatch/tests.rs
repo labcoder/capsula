@@ -11,6 +11,8 @@ use crate::bridge::{CallKey, LaunchId};
 use crate::context::{HistoryRef, Origin};
 use crate::engines::{CallId, ToolName};
 
+mod draft_issue;
+
 const R: RunId = RunId(10);
 const T: ThreadId = ThreadId(4);
 const KUMO: ThreadId = ThreadId(1);
