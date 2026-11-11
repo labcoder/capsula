@@ -11,7 +11,7 @@ mermaid operation for labelled groups rather than fenced Mermaid in chat.
 Nodes may omit `in` for the scene root; edges may omit it to use their endpoints'
 nearest common diagram, while rows, series and Mermaid need a table, chart and diagram.
 
-A small node diagram can use two steps (the size is its drawing canvas):
+A small node diagram can use two steps:
 ```json
 {"records":[{"begin":{"scene":"heating","size":[600,360],"alt":"Sun heats water, which evaporates into clouds"}},{"step":{"id":"cycle","put":[{"node":{"id":"water","label":"Water"}},{"node":{"id":"clouds","label":"Clouds"}},{"edge":{"id":"evaporate","from":"water","to":"clouds","label":"evaporation"}}]}},{"step":{"id":"heat","put":[{"node":{"id":"sun","label":"Sun"}},{"edge":{"id":"warm","from":"sun","to":"water","label":"heating"}}]}},{"end":{}}]}
 ```

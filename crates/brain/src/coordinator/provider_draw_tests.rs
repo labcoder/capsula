@@ -751,6 +751,34 @@ fn the_recorded_water_cycle_draws_without_a_diagram_container() {
 }
 
 #[test]
+fn the_prompt_example_draws_two_steps_without_promising_an_overlay_canvas() {
+    let prompt = include_str!("../../prompts/draw.md");
+    assert!(
+        !prompt.contains("the size is its drawing canvas"),
+        "overlay size comes from the host"
+    );
+    let (_, example) = prompt.split_once("```json").expect("worked JSON example");
+    let (args, _) = example.split_once("```").expect("closed example");
+    let args = args.trim();
+    let envelope: Value = serde_json::from_str(args).expect("example JSON");
+    assert_eq!(envelope["records"][0]["begin"]["size"], json!([600, 360]));
+    let scratch = Scratch::new("prompt-example");
+    let mut store = store(&scratch);
+    let mut core = offered(vec![T]);
+    start(&mut core, "prompt-example");
+    let mut streamed = delta(&mut core, "prompt-example", args);
+    streamed.extend(ready(&mut core, "prompt-example", args));
+    let mut effects = drain(&mut core, &mut store, streamed);
+    effects.extend(send(&mut core, TurnEvent::Finished(Finish::Completed)));
+    assert_eq!(
+        result(&effects).output.json()["text"],
+        "drawn: [cycle, heat]"
+    );
+    assert_eq!(ends(&effects), [true]);
+    assert_prefix(&store, &["cycle", "heat"]);
+}
+
+#[test]
 fn a_refused_draw_logs_one_warning_with_only_its_code_and_field() {
     let logs = crate::test_support::Captured::default();
     let _logging = logs.install();
