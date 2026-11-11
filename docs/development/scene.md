@@ -546,8 +546,13 @@ Edges without `in` take their endpoints' nearest common diagram, or the scene ro
 when there is no common diagram. Admission resolves this after Mermaid expansion,
 using existing objects and every new endpoint regardless of put order; explicit
 parents must still match. Both compiled operations and object metadata use the
-resolved parent. The root group has the same 48-node and 96-edge caps as an explicit
-diagram, including continued scenes and pending versions. Rows, series and Mermaid
+resolved parent. New root node or edge growth checks the entire root group against
+the same 48-node and 96-edge caps as an explicit diagram, including continued scenes
+and pending versions. Stop can detach already admitted survivors from several
+containers into a larger root group; these remain chargeable, replayable and editable
+without new root growth. Further root growth still checks the whole group against
+both diagram caps. Detached rows and series do not acquire a new root container cap.
+Rows, series and Mermaid
 still require their table, chart and diagram parents respectively. Root fitting and
 placement do not change.
 

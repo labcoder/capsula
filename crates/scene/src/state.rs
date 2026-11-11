@@ -393,6 +393,7 @@ impl SceneState {
             self.objects
                 .iter()
                 .chain(self.pending().map(|(id, object)| (id, object))),
+            None,
         )
         .expect("retirement and cuts only reduce previously checked charges")
     }
@@ -668,7 +669,7 @@ impl SceneState {
         let usage = if cut.activated == 0 {
             Usage::default()
         } else {
-            metrics::charge(after.iter()).map_err(StepError::new)?
+            metrics::charge(after.iter(), None).map_err(StepError::new)?
         };
         global
             .check(self.bound_usage(), usage)

@@ -234,6 +234,7 @@ impl SceneState {
                 .iter()
                 .chain(self.pending().map(|(id, object)| (id, object)))
                 .chain(changed.iter()),
+            Some(step),
         )
         .map_err(|code| fail(FieldPath::default(), code))?;
         if let Some(global) = global {
