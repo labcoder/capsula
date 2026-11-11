@@ -261,6 +261,16 @@ enum LinkedFolder {
     Ancestor,
 }
 
+enum LinkKind {
+    Junction,
+    Symlink,
+}
+
+enum LinkedFile {
+    Final,
+    Partial,
+}
+
 #[tokio::test]
 async fn model_paths_keep_verified_read_only_final_hardlinks_working() {
     let server = Server::start(vec![]);
@@ -276,7 +286,7 @@ async fn model_paths_keep_verified_read_only_final_hardlinks_working() {
     assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
 }
 
-async fn linked_folder_refused(location: LinkedFolder, symlink: bool) {
+async fn linked_folder_refused(location: LinkedFolder, kind: LinkKind) {
     let server = Server::start(vec![]);
     let (scratch, mut downloader) = server.downloader();
     let actual = scratch.dir().join("actual");
@@ -302,7 +312,7 @@ async fn linked_folder_refused(location: LinkedFolder, symlink: bool) {
     };
     seed(&pinned, b"abcdef");
     fs::create_dir_all(link.parent().unwrap()).unwrap();
-    if symlink {
+    if matches!(kind, LinkKind::Symlink) {
         crate::platform::test_symlink_dir(&actual, &link).expect("own directory symlink");
     } else {
         fs::create_dir(&link).unwrap();
@@ -317,40 +327,39 @@ async fn linked_folder_refused(location: LinkedFolder, symlink: bool) {
 
 #[tokio::test]
 async fn model_paths_refuse_a_part_junction() {
-    linked_folder_refused(LinkedFolder::Part, false).await;
+    linked_folder_refused(LinkedFolder::Part, LinkKind::Junction).await;
 }
 
 #[tokio::test]
 async fn model_paths_refuse_an_ancestor_junction() {
-    linked_folder_refused(LinkedFolder::Ancestor, false).await;
+    linked_folder_refused(LinkedFolder::Ancestor, LinkKind::Junction).await;
 }
 
 #[tokio::test]
 async fn model_paths_refuse_a_root_symlink() {
-    linked_folder_refused(LinkedFolder::Root, true).await;
+    linked_folder_refused(LinkedFolder::Root, LinkKind::Symlink).await;
 }
 
 #[tokio::test]
 async fn model_paths_refuse_a_part_symlink() {
-    linked_folder_refused(LinkedFolder::Part, true).await;
+    linked_folder_refused(LinkedFolder::Part, LinkKind::Symlink).await;
 }
 
 #[tokio::test]
 async fn model_paths_refuse_an_ancestor_symlink() {
-    linked_folder_refused(LinkedFolder::Ancestor, true).await;
+    linked_folder_refused(LinkedFolder::Ancestor, LinkKind::Symlink).await;
 }
 
-async fn linked_file_refused(partial: bool, junction: bool) {
+async fn linked_file_refused(location: LinkedFile, kind: LinkKind) {
     let server = Server::start(vec![Reply::full()]);
     let (scratch, downloader) = server.downloader();
     let victim = scratch.dir().join("original");
-    let link = if partial {
-        part_path(&downloader)
-    } else {
-        final_path(&downloader)
+    let link = match location {
+        LinkedFile::Partial => part_path(&downloader),
+        LinkedFile::Final => final_path(&downloader),
     };
     fs::create_dir_all(link.parent().unwrap()).unwrap();
-    let pinned = if junction {
+    let pinned = if matches!(kind, LinkKind::Junction) {
         fs::create_dir(&victim).unwrap();
         fs::create_dir(&link).unwrap();
         crate::platform::sherpa::tests::set_junction(&link, &victim).unwrap();
@@ -370,22 +379,22 @@ async fn linked_file_refused(partial: bool, junction: bool) {
 
 #[tokio::test]
 async fn model_paths_refuse_a_final_symlink() {
-    linked_file_refused(false, false).await;
+    linked_file_refused(LinkedFile::Final, LinkKind::Symlink).await;
 }
 
 #[tokio::test]
 async fn model_paths_refuse_a_partial_symlink() {
-    linked_file_refused(true, false).await;
+    linked_file_refused(LinkedFile::Partial, LinkKind::Symlink).await;
 }
 
 #[tokio::test]
 async fn model_paths_refuse_a_final_junction() {
-    linked_file_refused(false, true).await;
+    linked_file_refused(LinkedFile::Final, LinkKind::Junction).await;
 }
 
 #[tokio::test]
 async fn model_paths_refuse_a_partial_junction() {
-    linked_file_refused(true, true).await;
+    linked_file_refused(LinkedFile::Partial, LinkKind::Junction).await;
 }
 
 #[tokio::test]

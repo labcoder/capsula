@@ -139,9 +139,8 @@ pub(crate) fn publish_model(file: File, parent: &File, target: &Path) -> Result<
     unsafe { info.write(header) };
     let destination = buffer
         .as_mut_ptr()
-        .cast::<u8>()
-        .wrapping_add(offset)
-        .cast::<u16>();
+        .cast::<u16>()
+        .wrapping_add(offset / size_of::<u16>());
     // SAFETY: the buffer has room for the name and its already-zero terminator.
     unsafe { std::ptr::copy_nonoverlapping(name.as_ptr(), destination, name.len()) };
     // SAFETY: the live buffer holds the sized rename record; both handles remain open.
@@ -156,6 +155,7 @@ pub(crate) fn publish_model(file: File, parent: &File, target: &Path) -> Result<
     if renamed == 0 {
         return Err(Untrusted::Io);
     }
+    drop(file);
     Ok(())
 }
 

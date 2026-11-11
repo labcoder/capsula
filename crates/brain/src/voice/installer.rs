@@ -546,7 +546,7 @@ impl Installer {
                 LoadEvent::Lost,
             ) if current == ask => self.lost(part),
             (Phase::Loading { ask: current, .. }, LoadEvent::ModelPath) if current == ask => {
-                entry.phase = Phase::Failed(ErrorKey::VoiceModelPath)
+                entry.phase = Phase::Failed(ErrorKey::VoiceModelPath);
             }
             (
                 Phase::Loading { ask: current, .. },
