@@ -1,7 +1,7 @@
 //! Placement follows the presenter's real install, cut, recovery and resample paths.
 use super::{
-    GENERATION, LIVE, Presenter, RUN, Shaper, acknowledge, begin, commit, kept, live, only_job,
-    recovering, rect,
+    GENERATION, LIVE, Presenter, RUN, Shaper, acknowledge, begin, commit, kept, live, ms, only_job,
+    recovering, rect, step,
 };
 use kumochi_scene::{
     Frame,
@@ -78,4 +78,63 @@ fn recovery_uses_the_latest_stage_and_a_stage_change_repaints_without_preparing(
     assert!(Arc::ptr_eq(&scene.rest.items()[0].primitives, &primitives));
     assert_eq!(scene.rest.revision(), revision);
     assert_eq!(presenter.workers(), 0);
+}
+
+#[test]
+fn a_pending_first_paint_is_placed_and_a_stage_change_keeps_its_clock_pending() {
+    let (mut presenter, now) = live();
+    presenter.set_stage(stage());
+    begin(&mut presenter, LIVE, now);
+    let source = step(
+        r#"{"step":{"id":"fade","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10],"enter":"fade","dur":800}}]}}"#,
+    );
+    let effects = commit(&mut presenter, LIVE, 0, source, now).expect("commit");
+    presenter
+        .completed(only_job(effects).run(&mut Shaper), now)
+        .expect("prepare");
+    presenter.advance(GENERATION, now).expect("activate");
+    assert_eq!(
+        transform(&presenter),
+        Affine::pose(2.0, 0.0, Vec2::new(290.0, 340.0))
+    );
+    presenter.sample_at(now);
+    presenter.sample_at(ms(now, 2000));
+    presenter.set_stage(Rect {
+        origin: Vec2::new(20.0, 30.0),
+        size: Vec2::new(58.0, 58.0),
+    });
+    assert!(presenter.sample_at(ms(now, 2000)).0.changed);
+    let frames = presenter.frames();
+    frames.borrow_mut().shown = true;
+    let mut painted = Vec::new();
+    assert!(!frames.borrow().paint(|frame, _| {
+        painted.extend(
+            frame
+                .items()
+                .iter()
+                .map(|item| (item.transform, item.opacity)),
+        );
+        Ok::<_, ()>(())
+    }));
+    let placed = Affine::pose(1.0, 0.0, Vec2::new(44.0, 54.0));
+    assert_eq!(painted, [(placed, 0.0)]);
+    presenter.set_stage(stage());
+    assert!(presenter.sample_at(ms(now, 2000)).0.changed);
+    assert!(presenter.begin_painted(ms(now, 2000)));
+    presenter.sample_at(ms(now, 2400));
+    painted.clear();
+    assert!(!frames.borrow().paint(|frame, _| {
+        painted.extend(
+            frame
+                .items()
+                .iter()
+                .map(|item| (item.transform, item.opacity)),
+        );
+        Ok::<_, ()>(())
+    }));
+    assert_eq!(
+        painted,
+        [(Affine::pose(2.0, 0.0, Vec2::new(290.0, 340.0)), 0.5)]
+    );
+    assert!(!presenter.begin_painted(ms(now, 2500)));
 }

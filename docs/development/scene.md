@@ -99,6 +99,9 @@ frame-item transforms receive the placement, never ancestor accumulators or 3D/i
 coordinates. Sampling adds one affine composition per painted item and no allocation or lock.
 Translation preserves shaped labels; a scale change invalidates their shaping key once,
 as bounded transition work rather than recurring animation work.
+A placement change re-samples the kept pose but preserves its frame epoch, paint observation
+and pending-start timestamp. A drawing waiting for its first paint is already placed, and
+moving it does not advance or restart that entrance.
 
 The stored layout version is **2**. Version-1 visible scenes are skipped and durably cleared
 by the existing recovery path after upgrading, rather than reinterpreted with new coordinates.

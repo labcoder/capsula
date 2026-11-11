@@ -41,9 +41,7 @@ impl Presenter {
         let mut frames = self.frames.borrow_mut();
         for (id, scene) in &mut self.scenes {
             scene.view.set_stage(stage);
-            frames
-                .reset(*id)
-                .expect("each adopted scene has a frame slot");
+            frames.reposition(*id, &scene.view);
         }
         true
     }
