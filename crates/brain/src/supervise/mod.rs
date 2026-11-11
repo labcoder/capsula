@@ -11,7 +11,13 @@
 //! [`WorkerLost::ExitUnconfirmed`]. A request gets one reply, or a bounded stream of them ending in
 //! the kind's terminal reply.
 
+mod resource;
 mod wire;
+
+#[cfg(test)]
+pub(crate) mod fixture;
+
+pub(crate) use resource::{Completion, Retirement};
 
 #[cfg(test)]
 mod stream_tests;
@@ -28,7 +34,7 @@ use std::time::Duration;
 use kumochi_protocol::frame::{self, Pipe};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use self::wire::{Assembly, Frame};
@@ -93,6 +99,46 @@ pub(crate) struct Exit {
     pub(crate) confirmed: bool,
 }
 
+/// Whether one command could have reached a worker, independent of its caller's deadline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Dispatch {
+    Pending,
+    NotDispatched,
+    Dispatched(Generation),
+}
+
+/// Only a command owns this after admission to the queue. Dropping an unhanded command
+/// definitively discards its body; dropping the caller's future does neither.
+struct Dispatching(Option<watch::Sender<Dispatch>>);
+
+impl Dispatching {
+    fn dispatched(&self, generation: Generation) {
+        if let Some(dispatch) = &self.0 {
+            dispatch.send_if_modified(|state| {
+                if *state != Dispatch::Pending {
+                    return false;
+                }
+                *state = Dispatch::Dispatched(generation);
+                true
+            });
+        }
+    }
+}
+
+impl Drop for Dispatching {
+    fn drop(&mut self) {
+        if let Some(dispatch) = &self.0 {
+            dispatch.send_if_modified(|state| {
+                if *state != Dispatch::Pending {
+                    return false;
+                }
+                *state = Dispatch::NotDispatched;
+                true
+            });
+        }
+    }
+}
+
 /// What a supervisor tells every handle.
 #[derive(Clone)]
 struct Notices {
@@ -115,6 +161,7 @@ fn failure(fatal: &AtomicBool) -> WorkerLost {
 pub(crate) struct Handle<K: Kind> {
     commands: mpsc::Sender<Command<K>>,
     notices: Notices,
+    retirement: Retirement,
 }
 
 impl<K: Kind> Clone for Handle<K> {
@@ -122,6 +169,7 @@ impl<K: Kind> Clone for Handle<K> {
         Self {
             commands: self.commands.clone(),
             notices: self.notices.clone(),
+            retirement: self.retirement.clone(),
         }
     }
 }
@@ -144,6 +192,7 @@ struct Command<K: Kind> {
 enum Destination<K: Kind> {
     /// `request`: one terminal reply; an intermediate reply is malformed.
     Single(Answer<K>),
+    Resource(Box<resource::Destination<K::Reply>>),
     /// `request_stream`: every reply, while its reader keeps up.
     Stream(mpsc::Sender<(K::Reply, Generation)>),
     /// A stream that closed or fell behind: replies are dropped until the terminal one or the
@@ -155,6 +204,7 @@ impl<K: Kind> Destination<K> {
     fn is_closed(&self) -> bool {
         match self {
             Self::Single(answer) => answer.is_closed(),
+            Self::Resource(answer) => answer.is_closed(),
             Self::Stream(stages) => stages.is_closed(),
             Self::Discard => true,
         }
@@ -163,11 +213,12 @@ impl<K: Kind> Destination<K> {
     /// Hands on one whole reply and says whether it was the terminal one.
     fn deliver(&mut self, reply: K::Reply, generation: Generation) -> Result<bool, WorkerLost> {
         let terminal = K::is_terminal(&reply);
-        if matches!(self, Self::Single(_)) && !terminal {
+        if matches!(self, Self::Single(_) | Self::Resource(_)) && !terminal {
             return Err(WorkerLost::Lost);
         }
         match std::mem::replace(self, Self::Discard) {
             Self::Single(answer) => complete::<K>(answer, Ok((reply, generation))),
+            Self::Resource(answer) => answer.deliver(reply, generation),
             Self::Stream(stages) => {
                 if stages.try_send((reply, generation)).is_ok() {
                     *self = Self::Stream(stages);
@@ -182,29 +233,57 @@ impl<K: Kind> Destination<K> {
 
     /// A stream's reader sees its sender close as the loss.
     fn fail(self) {
-        if let Self::Single(answer) = self {
-            complete::<K>(answer, Err(WorkerLost::Lost));
+        match self {
+            Self::Single(answer) => complete::<K>(answer, Err(WorkerLost::Lost)),
+            Self::Resource(answer) => answer.fail(),
+            Self::Stream(_) | Self::Discard => {}
+        }
+    }
+
+    fn matches(&self, generation: Generation) -> bool {
+        match self {
+            Self::Resource(answer) => answer.matches(generation),
+            _ => true,
+        }
+    }
+
+    fn dispatched(&mut self, generation: Generation) {
+        if let Self::Resource(answer) = self {
+            answer.dispatched(generation);
         }
     }
 }
 
 impl<K: Kind> Handle<K> {
-    fn new(commands: mpsc::Sender<Command<K>>) -> Self {
-        Self {
-            commands,
-            notices: Notices {
-                losses: broadcast::channel(QUEUE).0,
-                exits: broadcast::channel(QUEUE).0,
-                fatal: Arc::default(),
+    fn new(commands: mpsc::Sender<Command<K>>) -> (Self, resource::Intents) {
+        let (retirement, intents) = Retirement::channel();
+        (
+            Self {
+                commands,
+                retirement,
+                notices: Notices {
+                    losses: broadcast::channel(QUEUE).0,
+                    exits: broadcast::channel(QUEUE).0,
+                    fatal: Arc::default(),
+                },
             },
-        }
+            intents,
+        )
+    }
+
+    pub(crate) fn retirement(&self) -> Retirement {
+        self.retirement.clone()
     }
 
     /// Subscribes before issuing work. Each lost generation's exit is reported once, just before
     /// its loss.
-    #[cfg_attr(not(test), expect(dead_code, reason = "A6b2's release waits on it"))]
     pub(crate) fn exits(&self) -> broadcast::Receiver<Exit> {
         self.notices.exits.subscribe()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_exits(&self) -> broadcast::Sender<Exit> {
+        self.notices.exits.clone()
     }
 
     /// Submits one request, answered by `until` or not at all. `until` is absolute: it covers
@@ -232,6 +311,48 @@ impl<K: Kind> Handle<K> {
             .await
             .map_err(|_| lost())?
             .unwrap_or_else(|_| Err(lost()))
+    }
+
+    /// Tracks actual dispatch after the reply deadline too. Only the supervisor's definitive
+    /// discard permits `NotDispatched`; a closed receiver still showing `Pending` proves nothing.
+    #[cfg(test)]
+    pub(crate) async fn request_tracked(
+        &self,
+        body: K::Request,
+        until: Instant,
+        dispatch: watch::Sender<Dispatch>,
+    ) -> Result<(K::Reply, Generation), WorkerLost> {
+        self.request_resource(body, until, None, Some(dispatch))
+            .await?
+            .handoff()
+    }
+
+    pub(crate) fn request_resource(
+        &self,
+        body: K::Request,
+        until: Instant,
+        expected: Option<Generation>,
+        dispatch: Option<watch::Sender<Dispatch>>,
+    ) -> impl std::future::Future<Output = Result<Completion<K::Reply>, WorkerLost>> + '_ {
+        let (answer, reply) =
+            resource::Destination::new(expected, until, self.retirement(), dispatch);
+        async move {
+            let lost = || failure(&self.notices.fatal);
+            if lost() == WorkerLost::ExitUnconfirmed {
+                return Err(WorkerLost::ExitUnconfirmed);
+            }
+            self.commands
+                .try_send(Command {
+                    body,
+                    until,
+                    answer: Destination::Resource(Box::new(answer)),
+                })
+                .map_err(|_| lost())?;
+            tokio::time::timeout_at(until, reply)
+                .await
+                .map_err(|_| lost())?
+                .unwrap_or_else(|_| Err(lost()))
+        }
     }
 
     /// Submits one streamed request under the same absolute `until`, which no reply extends.
@@ -321,12 +442,14 @@ impl<K: Kind> std::fmt::Debug for ReplyStream<K> {
 pub(crate) fn start<K: Kind>(exe: PathBuf, jobs: Arc<Job>) -> io::Result<Handle<K>> {
     let worker = Worker::<K>::spawn(&exe, &jobs)?;
     let (commands, receive) = mpsc::channel(QUEUE);
-    let handle = Handle::new(commands);
+    let (handle, intents) = Handle::new(commands);
     drop(tokio::spawn(run(
         move || Worker::<K>::spawn(&exe, &jobs),
         worker,
         receive,
         handle.notices.clone(),
+        intents,
+        Generation(0),
     )));
     Ok(handle)
 }
@@ -341,18 +464,38 @@ type Played<K> = mpsc::Receiver<(<K as Kind>::Request, Answer<K>)>;
 pub(crate) fn detached<K: Kind>() -> (Handle<K>, Played<K>) {
     let (commands, mut receive) = mpsc::channel::<Command<K>>(QUEUE);
     let (forward, requests) = mpsc::channel(QUEUE);
+    let (handle, intents) = Handle::new(commands);
     drop(tokio::spawn(async move {
-        while let Some(command) = receive.recv().await {
+        let _intents = intents;
+        while let Some(mut command) = receive.recv().await {
             // shortcut: a stream is dropped here, so it ends lost; A6b's fake worker plays streams.
-            let Destination::Single(answer) = command.answer else {
-                continue;
-            };
+            match command.answer {
+                Destination::Single(answer) => {
+                    if forward.send((command.body, answer)).await.is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                Destination::Resource(ref mut answer) => answer.dispatched(Generation(0)),
+                Destination::Stream(_) | Destination::Discard => continue,
+            }
+            let (answer, reply) = oneshot::channel();
             if forward.send((command.body, answer)).await.is_err() {
                 return;
             }
+            drop(tokio::spawn(async move {
+                match reply.await {
+                    Ok(Ok((reply, generation))) => {
+                        if command.answer.deliver(reply, generation).is_err() {
+                            tracing::debug!("malformed detached reply");
+                        }
+                    }
+                    _ => command.answer.fail(),
+                }
+            }));
         }
     }));
-    (Handle::new(commands), requests)
+    (handle, requests)
 }
 
 struct Worker<K: Kind> {
@@ -476,6 +619,7 @@ async fn confirm_exit<K: Kind>(
 /// Why a worker generation ended; content-free, for the log only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LossReason {
+    Retired,
     /// A request passed its deadline.
     Deadline,
     /// A reply broke the wire contract.
@@ -498,7 +642,7 @@ struct Pending<K: Kind> {
 impl<K: Kind> Pending<K> {
     fn new(until: Instant, answer: Destination<K>) -> Self {
         let bytes = match answer {
-            Destination::Single(_) => K::MAX_REPLY,
+            Destination::Single(_) | Destination::Resource(_) => K::MAX_REPLY,
             Destination::Stream(_) | Destination::Discard => MAX_STREAM_BYTES,
         };
         Self {
@@ -566,9 +710,17 @@ async fn serve<K: Kind>(
     commands: &mut mpsc::Receiver<Command<K>>,
     id: &mut u64,
     generation: Generation,
+    intents: &mut resource::Intents,
 ) -> Option<LossReason> {
     let mut pending: BTreeMap<u64, Pending<K>> = BTreeMap::new();
+    let mut retirement_open = true;
     let reason = loop {
+        if commands.is_closed() {
+            break None;
+        }
+        if *intents.borrow_and_update() == Some(generation) {
+            break Some(LossReason::Retired);
+        }
         let until = pending
             .values()
             .map(|p| p.until)
@@ -577,27 +729,33 @@ async fn serve<K: Kind>(
         let lost = tokio::select! {
             biased;
             () = tokio::time::sleep_until(until), if !pending.is_empty() => Some(LossReason::Deadline),
+            changed = intents.changed(), if retirement_open => {
+                retirement_open = changed.is_ok();
+                None
+            },
             reply = reads.recv() => match reply.flatten() {
                 Some(reply) => accept(&mut pending, reply, generation).err().map(|_| LossReason::Malformed),
                 None => Some(LossReason::Ended),
             },
             command = commands.recv() => {
-                let command = command?;
+                let Some(mut command) = command else { break None; };
                 if command.answer.is_closed() { continue; }
-                if pending.len() == QUEUE || command.until <= Instant::now() { command.answer.fail(); continue; }
-                *id = id.checked_add(1)?;
+                if pending.len() == QUEUE || command.until <= Instant::now() || !command.answer.matches(generation) { command.answer.fail(); continue; }
+                let Some(next) = id.checked_add(1) else { break None; };
+                *id = next;
+                command.answer.dispatched(generation);
                 pending.insert(*id, Pending::new(command.until, command.answer));
                 writes.try_send((*id, command.body)).err().map(|_| LossReason::Unwritable)
             }
         };
         if let Some(reason) = lost {
-            break reason;
+            break Some(reason);
         }
     };
     for (_, item) in pending {
         item.answer.fail();
     }
-    Some(reason)
+    reason
 }
 
 async fn run<K: Kind>(
@@ -605,22 +763,21 @@ async fn run<K: Kind>(
     mut worker: Worker<K>,
     mut commands: mpsc::Receiver<Command<K>>,
     notices: Notices,
+    mut intents: resource::Intents,
+    mut generation: Generation,
 ) {
-    let mut generation = Generation(0);
     let mut history = VecDeque::new();
     let mut id = 0_u64;
     loop {
-        let Some(reason) = serve(
+        let reason = serve(
             &mut worker.reads,
             &worker.writes,
             &mut commands,
             &mut id,
             generation,
+            &mut intents,
         )
-        .await
-        else {
-            return;
-        };
+        .await;
         tracing::warn!(kind = K::NAME, ?reason, "worker lost");
         let process = worker.process.take();
         drop(worker);
@@ -634,9 +791,12 @@ async fn run<K: Kind>(
         let confirmed = confirm_exit::<K>(exited, generation, &notices).await;
         // A worker that may still run is never joined by another. With every handle gone, a
         // respawn would only land in a closing job.
-        if !confirmed || commands.is_closed() {
+        if !confirmed || commands.is_closed() || reason.is_none() {
             return;
         }
+        let Some(next_generation) = generation.0.checked_add(1).map(Generation) else {
+            return;
+        };
         loop {
             let delay = backoff(&mut history, Instant::now());
             let resume = Instant::now() + delay;
@@ -658,7 +818,7 @@ async fn run<K: Kind>(
                         "worker respawned"
                     );
                     worker = next;
-                    generation = Generation(generation.0 + 1);
+                    generation = next_generation;
                     break;
                 }
                 Ok(Err(error)) => {

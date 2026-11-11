@@ -15,9 +15,15 @@ pub(crate) struct RawFrame {
     bgra: Vec<u8>,
     filled: [u32; 2],
     valid: Option<FrameMeta>,
+    #[cfg(test)]
+    audit: Option<std::sync::mpsc::Sender<Vec<u8>>>,
 }
 
 impl RawFrame {
+    #[cfg(test)]
+    pub(super) fn audit(&mut self, audit: std::sync::mpsc::Sender<Vec<u8>>) {
+        self.audit = Some(audit);
+    }
     /// Drops the held image and returns exactly `width * height * 4` bytes to fill.
     /// This write-only capture seam invalidates the image before lending its buffer.
     ///
@@ -31,6 +37,9 @@ impl RawFrame {
         self.valid = None;
         self.filled = [0; 2];
         let len = byte_len([width, height]).ok_or(Refusal::Invalid)?;
+        if len > self.bgra.capacity() {
+            self.release();
+        }
         self.bgra.resize(len, 0);
         self.filled = [width, height];
         Ok(&mut self.bgra)
@@ -40,12 +49,7 @@ impl RawFrame {
         self.valid = None;
     }
 
-    /// Zeroes and frees the buffer, so a dropped, retired or expired capture leaves no pixels in
-    /// the worker. Only a replacement capture reuses the allocation.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "A6b2's Drop, Retire and expiry release")
-    )]
+    /// Zeroes and frees the current allocation. Replacement may reuse equal or smaller storage.
     pub(super) fn release(&mut self) {
         drop(self.scrubbed());
     }
@@ -58,6 +62,10 @@ impl RawFrame {
         let capacity = self.bgra.capacity();
         self.bgra.resize(capacity, 0);
         self.bgra.as_mut_slice().zeroize();
+        #[cfg(test)]
+        if let Some(audit) = &self.audit {
+            let _sent = audit.send(self.bgra.clone());
+        }
         std::mem::take(&mut self.bgra)
     }
 
@@ -87,6 +95,12 @@ impl RawFrame {
     #[cfg(test)]
     pub(super) fn allocation(&self) -> (*const u8, usize) {
         (self.bgra.as_ptr(), self.bgra.capacity())
+    }
+}
+
+impl Drop for RawFrame {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 

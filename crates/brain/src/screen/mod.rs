@@ -1,5 +1,10 @@
 //! Killable screen work, isolated from the brain's async runtime.
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "A6b2b activates the alternate worker")
+)]
+mod actor;
 mod capture;
 #[cfg_attr(
     not(any(test, windows)),
@@ -13,6 +18,11 @@ mod frame;
     expect(dead_code, reason = "A3 and A6 populate shared capture masks")
 )]
 mod mask;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "A6b2b activates the capture producer")
+)]
+mod native;
 #[cfg_attr(not(test), expect(dead_code, reason = "A6 connects regional OCR"))]
 pub(crate) mod ocr;
 mod reader;

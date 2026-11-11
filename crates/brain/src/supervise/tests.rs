@@ -6,6 +6,12 @@ use std::task::{Context, Poll, Waker};
 use super::wire::CHUNK;
 use super::*;
 
+#[path = "dispatch_tests.rs"]
+mod dispatch;
+
+#[path = "resource_tests.rs"]
+mod resources;
+
 /// A kind with small requests and string replies, never started.
 struct Test;
 
@@ -46,9 +52,14 @@ fn pending(id: u64) -> (BTreeMap<u64, Pending<Test>>, Reply) {
     )
 }
 
-fn handle() -> (Handle<Test>, mpsc::Receiver<Command<Test>>) {
+fn handle() -> (
+    Handle<Test>,
+    mpsc::Receiver<Command<Test>>,
+    resource::Intents,
+) {
     let (commands, receive) = mpsc::channel(QUEUE);
-    (Handle::new(commands), receive)
+    let (handle, intents) = Handle::new(commands);
+    (handle, receive, intents)
 }
 
 #[test]
@@ -194,7 +205,7 @@ fn the_worker_reads_whole_requests_and_refuses_broken_ones() {
 
 #[tokio::test]
 async fn request_queue_accepts_sixteen_and_refuses_seventeen() {
-    let (handle, mut receive) = handle();
+    let (handle, mut receive, _intents) = handle();
     let until = Instant::now() + Duration::from_secs(60);
     let mut requests = Vec::new();
     let mut context = Context::from_waker(Waker::noop());
@@ -219,7 +230,7 @@ async fn request_queue_accepts_sixteen_and_refuses_seventeen() {
 
 #[tokio::test(start_paused = true)]
 async fn a_request_queued_behind_a_held_respawn_keeps_its_deadline() {
-    let (handle, mut receive) = handle();
+    let (handle, mut receive, _intents) = handle();
     let mut request =
         Box::pin(handle.request(vec![], Instant::now() + Duration::from_millis(1500)));
     let mut context = Context::from_waker(Waker::noop());
@@ -379,8 +390,15 @@ async fn confirming() -> Confirming {
             .take()
             .ok_or_else(|| io::Error::other("one replacement"))
     };
-    let (handle, receive) = handle();
-    let running = tokio::spawn(run(spawn, first, receive, handle.notices.clone()));
+    let (handle, receive, intents) = handle();
+    let running = tokio::spawn(run(
+        spawn,
+        first,
+        receive,
+        handle.notices.clone(),
+        intents,
+        Generation(0),
+    ));
     lose.send(None).await.expect("the supervisor reads");
     let asked = tokio::task::spawn_blocking(move || asks.recv_timeout(Duration::from_secs(5)));
     assert_eq!(asked.await.expect("joined"), Ok(EXIT_CONFIRMATION));
@@ -491,7 +509,7 @@ impl std::task::Wake for Peek {
 
 #[tokio::test]
 async fn whoever_a_loss_wakes_already_sees_that_losss_exit() {
-    let (handle, _commands) = handle();
+    let (handle, _commands, _intents) = handle();
     let peek = Arc::new(Peek(Mutex::new((handle.exits(), None))));
     let waker = Waker::from(Arc::clone(&peek));
     let mut losses = handle.lost();

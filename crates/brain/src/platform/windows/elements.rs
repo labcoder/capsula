@@ -157,7 +157,7 @@ fn snapshot(window: HWND, expected: Option<u32>) -> Result<TopWindow, SourceErro
     })
 }
 
-fn foreground() -> Option<TopWindow> {
+pub(super) fn foreground() -> Option<TopWindow> {
     // SAFETY: the call returns an opaque handle and reads no window contents.
     let window = unsafe { GetForegroundWindow() };
     // SAFETY: Windows validates the opaque foreground handle, including null.

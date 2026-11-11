@@ -536,6 +536,35 @@ fn later() -> Instant {
 }
 
 #[test]
+fn a_gone_listener_disposes_the_source_and_cannot_accept_another_walk() {
+    struct Gone(mpsc::Sender<()>);
+    impl Drop for Gone {
+        fn drop(&mut self) {
+            self.0.send(()).expect("test listens");
+        }
+    }
+    let (dropped, drops) = mpsc::channel();
+    let guard = Gone(dropped);
+    let mut reader = waking(
+        move |_| {
+            let _keep = &guard;
+            props("listener_gone")
+        },
+        || false,
+    );
+    assert!(reader.begin(job(50, later(), masks(50))).is_ok());
+    drops
+        .recv_timeout(Duration::from_secs(5))
+        .expect("closed listener ends the source");
+    let completed = reader.poll().expect("the slot is still taken").unwrap();
+    assert_busy(&completed, 50, true);
+    let Err(refused) = reader.begin(job(51, later(), masks(51))) else {
+        panic!("a walk was admitted without a listener");
+    };
+    assert_busy(&refused, 51, true);
+}
+
+#[test]
 fn a_pending_walk_never_blocks_poll_and_a_dropped_wake_keeps_its_completion() {
     let (listener, woken) = mpsc::sync_channel(1);
     listener.try_send(()).unwrap();
