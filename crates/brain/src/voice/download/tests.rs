@@ -261,6 +261,30 @@ enum LinkedFolder {
     Ancestor,
 }
 
+#[tokio::test]
+async fn model_review_h2_preserves_a_replacement_between_hash_and_discard() {
+    let server = Server::start(vec![Reply::full()]);
+    let (scratch, downloader) = server.downloader();
+    let target = final_path(&downloader);
+    seed(&target, b"xxxxxx");
+    let replacement = scratch.dir().join("replacement");
+    seed(&replacement, b"abcdef");
+    let attempted = Arc::new(std::sync::Mutex::new(None));
+    let result = Arc::clone(&attempted);
+    let (from, to) = (replacement.clone(), target.clone());
+    crate::platform::pause_after_check(
+        target.clone(),
+        Box::new(move || {
+            *result.lock().unwrap() =
+                Some(fs::rename(from, to).map_err(|error| error.raw_os_error()));
+        }),
+    );
+    assert_eq!(fetch(&downloader).await.0, Ok(()));
+    assert_eq!(*attempted.lock().unwrap(), Some(Err(Some(32))));
+    assert_eq!(fs::read(replacement).unwrap(), b"abcdef");
+    assert_eq!(fs::read(target).unwrap(), b"abcdef");
+}
+
 enum LinkKind {
     Junction,
     Symlink,

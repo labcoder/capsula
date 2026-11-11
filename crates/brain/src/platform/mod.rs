@@ -63,15 +63,15 @@ pub use windows::{
 };
 #[cfg(all(test, windows))]
 pub(crate) use windows::{
-    DaclEntry, dacl_entries, dacl_sddl, pause_after_check, set_dacl, this_user,
+    DaclEntry, dacl_entries, dacl_sddl, pause_after_check, paused, set_dacl, this_user,
 };
 #[cfg(windows)]
 pub use windows::{Launch, Spawned, Stdio, spawn};
 #[cfg(windows)]
 pub(crate) use windows::{
-    Untrusted, create_model_dir, create_model_write, discard_model, hold_chain, local_app_data,
-    mark, marker, model_file, open_model_write, owner_only_dir, private_tree, profile_dir,
-    publish_model, remove_tree, unmark, validate_model_path,
+    Untrusted, check_model_final, create_model_dir, create_model_write, discard_model, hold_chain,
+    local_app_data, mark, marker, model_file, model_final, open_model_write, owner_only_dir,
+    private_tree, profile_dir, publish_model, remove_tree, unmark, validate_model_path,
 };
 #[cfg(windows)]
 pub use windows::{managed_presence, system_env};

@@ -21,8 +21,8 @@ use tokio::time::{self, Instant};
 use url::{Host, Url};
 
 use crate::platform::{
-    Untrusted, create_model_dir, create_model_write, discard_model, model_file, open_model_write,
-    publish_model,
+    Untrusted, check_model_final, create_model_dir, create_model_write, discard_model, model_final,
+    open_model_write, publish_model,
 };
 
 const IDLE: Duration = Duration::from_secs(30);
@@ -235,7 +235,7 @@ impl Downloader {
             check_cancel(cancel)?;
             let path = dir.join(model.name);
             let partial = dir.join(format!("{}.part", model.name));
-            let final_file = optional_file(model_file(&path))?;
+            let final_file = optional_file(model_final(&path))?;
             let existing = optional_file(open_model_write(&partial))?;
             checked.push((model, path, partial, final_file, existing));
         }
@@ -251,8 +251,10 @@ impl Downloader {
                     done += model.bytes;
                     continue;
                 }
-                drop(file);
-                final_file = Some(open_model_write(&path).map_err(path_error)?);
+                #[cfg(test)]
+                crate::platform::paused(&path);
+                check_model_final(&file, &path).map_err(path_error)?;
+                final_file = Some(file);
             }
             let length = if let Some(file) = &existing {
                 file.metadata().map_err(|_| DownloadError::Io)?.len()

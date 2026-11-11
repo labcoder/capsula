@@ -40,6 +40,8 @@ port 443 without userinfo, on `huggingface.co` or a subdomain of `hf.co`; IP lit
 Signed CDN queries never enter diagnostics.
 
 Existing final files are size- and SHA-256-checked; a bad final is removed before any request.
+Inspection retains delete access on that same handle, so only the file actually hashed can be
+discarded; an invalid final with another hard-link name is refused before deletion.
 Before changing any existing file, the entire attempt checks the physical local folder chain,
 every final and every partial. Junctions, symbolic links, redirected ancestors and network paths
 are refused without cleanup or writes through them. Writable partials must have one name and

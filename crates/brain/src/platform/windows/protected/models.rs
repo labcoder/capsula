@@ -14,7 +14,8 @@ use windows_sys::Win32::System::WindowsProgramming::{
 };
 
 use super::{
-    Kind, Untrusted, check_marker, delete_on_close, hold_chain, hold_file, open, owner_only_dir,
+    Kind, Trusted, Untrusted, check, check_marker, delete_on_close, hold_chain, hold_file, open,
+    owner_only_dir,
 };
 
 pub(crate) fn validate_model_path(path: &Path) -> Result<(), Untrusted> {
@@ -82,6 +83,19 @@ pub(crate) fn model_file(path: &Path) -> Result<File, Untrusted> {
 
 pub(crate) fn open_model_write(path: &Path) -> Result<File, Untrusted> {
     checked_write(open(path, Kind::File, FILE_GENERIC_WRITE | DELETE)?, path)
+}
+
+pub(crate) fn model_final(path: &Path) -> Result<File, Untrusted> {
+    let file = open(path, Kind::File, DELETE)?;
+    check(&file, path, Kind::File, &Trusted::new()?)?;
+    if !file.metadata().map_err(|_| Untrusted::Io)?.is_file() {
+        return Err(Untrusted::Unsafe);
+    }
+    Ok(file)
+}
+
+pub(crate) fn check_model_final(file: &File, path: &Path) -> Result<(), Untrusted> {
+    check_marker(file, path)
 }
 
 pub(crate) fn create_model_write(path: &Path) -> Result<File, Untrusted> {
