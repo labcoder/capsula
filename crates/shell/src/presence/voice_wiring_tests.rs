@@ -1,9 +1,11 @@
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::Instant;
 
 use gpui_kit::{Entity, TestAppContext};
 use kumochi_protocol::message::{
-    ControlToBrain, DataToBrain, GestureId, HoldFailure, HoldStatus, Incarnation, ScreenChoice,
-    ThreadId,
+    ControlToBrain, DataToBrain, GestureId, HoldFailure, HoldStatus, Incarnation, PartState,
+    ScreenChoice, ThreadId,
 };
 
 use super::{Presence, test_fixture, voice::Stamp};
@@ -109,6 +111,37 @@ fn a_pre_run_failure_clears_only_its_matching_hold(cx: &mut TestAppContext) {
             })
         );
     });
+}
+
+#[gpui::test]
+fn not_loaded_distinguishes_missing_and_unloaded_without_opening_microphone(
+    cx: &mut TestAppContext,
+) {
+    for (state, expected) in [
+        (PartState::Unloaded, Text::VoiceUnloaded),
+        (PartState::NotInstalled, Text::VoiceNotInstalled),
+    ] {
+        let (owner, data, _controls) = ready(cx);
+        let starts = Rc::new(Cell::new(0));
+        let attempts = Rc::clone(&starts);
+        let (_token, _) = hold(&owner, 1, cx);
+        owner.update(cx, |owner, cx| {
+            owner.voice.start = Some(Box::new(move |_, _| {
+                attempts.set(attempts.get() + 1);
+                Err(crate::platform::microphone::MicError::Unavailable)
+            }));
+            owner.settings.update(cx, |settings, _| {
+                assert!(settings.receive_speech_input(Some(1), 1, state));
+            });
+        });
+        status(&owner, 1, 1, HoldStatus::Failed(HoldFailure::NotLoaded), cx);
+        owner.read_with(cx, |owner, _| {
+            assert_eq!(owner.voice.status, Some(expected));
+            assert!(owner.voice.pending.is_none());
+        });
+        assert_eq!(starts.get(), 0);
+        assert!(data.is_empty());
+    }
 }
 
 #[gpui::test]

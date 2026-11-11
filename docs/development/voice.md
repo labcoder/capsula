@@ -810,8 +810,9 @@ The runtime owns one pre-run hold, keyed by connection epoch and a monotonically
 consumed gesture number. Recognition captures defaults and queues a stamped
 target/model/deletion read through the existing store reader. Pinned admission
 is checked before microphone permission and through ordinary storage/build/send
-gates. Missing speech input fails without installing or downloading anything;
-an existing load can finish only while that same hold is live. Preparation uses
+gates. Missing speech input fails without installing or downloading anything.
+The Shell distinguishes missing and unloaded models from its received speech-input state.
+An existing load can finish only while that same hold is live. Preparation uses
 the store read budget and loading the existing speech load budget.
 
 Microphone frames use an eight-packet queue. The data reader never waits on it:

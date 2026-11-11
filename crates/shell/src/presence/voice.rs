@@ -359,7 +359,10 @@ impl Presence {
             HoldStatus::Cancelled => self.end_voice(Text::HoldCancelled, cx),
             HoldStatus::Failed(reason) => self.end_voice(
                 match reason {
-                    HoldFailure::NotLoaded => Text::VoiceUnloaded,
+                    HoldFailure::NotLoaded => match self.settings.read(cx).speech_input_status() {
+                        text @ (Text::VoiceNotInstalled | Text::VoiceUnloaded) => text,
+                        _ => Text::VoiceStatusUnknown,
+                    },
                     HoldFailure::Busy => Text::TurnBusy,
                     HoldFailure::Unavailable => Text::HoldUnavailable,
                     _ => Text::HoldFailed,
