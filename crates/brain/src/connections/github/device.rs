@@ -510,8 +510,7 @@ impl Machine {
         let Some(remaining) =
             self.remaining(account.credentials.expires_at_s, MAX_ACCESS_LIFETIME_S)
         else {
-            self.state = State::Connected(account);
-            self.start_refresh(effects);
+            self.needs_sign_in(account.user.login, effects);
             return;
         };
         self.advance();

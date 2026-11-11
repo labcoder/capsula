@@ -205,6 +205,94 @@ fn rotated_tokens() -> Tokens {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_fresh_pair_expiring_during_save_ends_without_another_automatic_rotation() {
+    for (rotated, overdue_s) in [(false, 0), (false, 1), (true, 0), (true, 1)] {
+        let (mut m, stamp, expiry) = if rotated {
+            let (mut m, stamp) = saving_rotation().await;
+            dispatch_refresh(&mut m, stamp);
+            let mut fresh = rotated_tokens();
+            fresh.expires_at_s = 4_541;
+            m.on(
+                Input::Refreshed {
+                    stamp,
+                    result: Ok(fresh),
+                },
+                Instant::now(),
+            );
+            (m, stamp, 4_541)
+        } else {
+            let mut m = empty();
+            let stamp = begin(&mut m, 5, 900);
+            tokio::time::advance(Duration::from_secs(5)).await;
+            m.on(Input::Tick, Instant::now());
+            let mut fresh = tokens();
+            fresh.expires_at_s = 1_001;
+            m.on(
+                Input::Poll {
+                    stamp,
+                    result: Ok(TokenReply::Token(fresh)),
+                },
+                Instant::now(),
+            );
+            (m, stamp, 1_001)
+        };
+        let effects = m.on(
+            Input::User {
+                stamp,
+                result: Ok(user()),
+            },
+            Instant::now(),
+        );
+        assert!(matches!(effects.as_slice(), [
+            Effect::Save { stamp: saving, account },
+            Effect::View(GitHubView::Requesting),
+        ] if *saving == stamp
+            && account.user == user()
+            && account.credentials.expires_at_s == expiry
+            && !account.refresh_sent));
+        assert_eq!(m.user(), None);
+        tokio::time::advance(Duration::from_secs(1 + overdue_s)).await;
+        m.clock = Arc::new(FixedClock(expiry + overdue_s));
+        let effects = m.on(Input::Saved { stamp, saved: true }, Instant::now());
+        assert!(matches!(effects.as_slice(), [
+            Effect::CancelAll,
+            Effect::View(GitHubView::NeedsSignIn { login }),
+        ] if *login == user().login));
+        let terminal = m.stamp();
+        assert_eq!(terminal.generation, stamp.generation + 1);
+        assert_eq!(m.fence().load(Ordering::Acquire), terminal.generation);
+        tokio::time::advance(Duration::from_hours(1)).await;
+        for owner in [stamp, terminal] {
+            for late in [
+                Input::Tick,
+                Input::Saved {
+                    stamp: owner,
+                    saved: true,
+                },
+                Input::Refreshed {
+                    stamp: owner,
+                    result: Ok(rotated_tokens()),
+                },
+                Input::User {
+                    stamp: owner,
+                    result: Ok(user()),
+                },
+            ] {
+                let effects = m.on(late, Instant::now());
+                assert!(matches!(effects.as_slice(), [
+                    Effect::View(GitHubView::NeedsSignIn { login }),
+                ] if *login == user().login));
+                assert_eq!(m.stamp(), terminal);
+            }
+        }
+        assert_eq!(m.user(), None);
+        assert!(m.token().is_none());
+        assert_eq!(m.repositories(), None);
+        assert!(!m.rotating());
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn refresh_is_due_at_minus_sixty_and_is_single_use_across_acknowledgments_and_restart() {
     let mut m = empty();
     connected(&mut m);
