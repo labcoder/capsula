@@ -213,6 +213,7 @@ fn brain_with_github_owner(scratch: &Scratch, account: crate::runtime::account::
 }
 
 #[tokio::test]
+#[cfg(not(debug_assertions))]
 async fn production_off_is_observed_before_account_startup_and_survives_all_sessions() {
     let scratch = Scratch::new("github-owner-production-off");
     let store = ObservedStore::default();
@@ -225,7 +226,19 @@ async fn production_off_is_observed_before_account_startup_and_survives_all_sess
         Err(crate::connections::http_client::HttpError::Configuration)
     });
     net.launcher = Arc::new(RejectLaunch(Arc::clone(&attempts)));
-    let accounts = owner_accounts(&scratch, store.clone(), net);
+    let lock = owner_lock(&scratch);
+    let saved = store.clone();
+    let worker = crate::connections::account::Worker::new(
+        Box::new(move || {
+            crate::connections::vault::Vault::with_service(
+                saved.clone(),
+                "github-owner-test",
+                &lock,
+            )
+        }),
+        Arc::new(crate::connections::clock::SystemClock),
+    );
+    let accounts = crate::runtime::account::Accounts::spawn(worker, net).unwrap();
     assert_eq!(store.reads.load(Ordering::SeqCst), 0);
     assert_eq!(store.writes.load(Ordering::SeqCst), 0);
     let mut brain = brain_with_github_owner(&scratch, accounts);

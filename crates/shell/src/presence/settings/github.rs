@@ -52,6 +52,10 @@ impl gpui_kit::component::select::SelectItem for RepoChoice {
 
 #[cfg(debug_assertions)]
 fn configured(view: &SettingsView) -> bool {
+    #[cfg(test)]
+    if let Some(configured) = view.github_configured {
+        return configured;
+    }
     kumochi_protocol::constants::GITHUB_CLIENT_ID.is_some() || view.fixture
 }
 

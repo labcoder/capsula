@@ -9,6 +9,7 @@ use kumochi_scene::text::Bounded;
 enum AppConfiguration {
     Product,
     Fixture,
+    Unconfigured,
 }
 
 fn open(
@@ -25,6 +26,8 @@ fn open(
     let controls = view.update(cx, |view, cx| {
         view.owner = owner.downgrade();
         view.fixture = matches!(configuration, AppConfiguration::Fixture);
+        view.github_configured =
+            matches!(configuration, AppConfiguration::Unconfigured).then_some(false);
         view.tab = 1;
         owner.update(cx, |owner, _| {
             owner.settings = view.model.clone();
@@ -108,9 +111,8 @@ fn sent(controls: &async_channel::Receiver<ControlToBrain>, expected: &GitHubOp)
 }
 
 #[gpui::test]
-#[cfg(not(debug_assertions))]
 fn an_unconfigured_build_explains_the_missing_app_and_cannot_send_connect(cx: &mut TestAppContext) {
-    let (window, _, owner, controls) = open(cx, AppConfiguration::Product);
+    let (window, _, owner, controls) = open(cx, AppConfiguration::Unconfigured);
     receive(&owner, GitHubView::SignedOut { cleanup: None }, cx);
     let mut frame = VisualTestContext::from_window(window, cx);
     assert!(frame.debug_bounds("github-configuration").is_some());

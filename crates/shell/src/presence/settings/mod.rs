@@ -32,6 +32,8 @@ pub(super) struct SettingsView {
     pub(super) confirmation: Option<u64>,
     #[cfg(debug_assertions)]
     pub(super) fixture: bool,
+    #[cfg(test)]
+    github_configured: Option<bool>,
     events: async_channel::Sender<PresenceEvent>,
     inputs: [Entity<InputState>; 2],
     github_repos: Entity<SelectState<Vec<github::RepoChoice>>>,
@@ -130,6 +132,8 @@ impl SettingsView {
             confirmation: None,
             #[cfg(debug_assertions)]
             fixture: false,
+            #[cfg(test)]
+            github_configured: None,
             events,
             inputs,
             github_repos,
