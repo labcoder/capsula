@@ -82,7 +82,7 @@ issue-refusal =
         [thread] This draft's thread is no longer available.
        *[unresolved] An earlier matching draft has an uncertain outcome. Resolve that draft before filing a replacement.
     }
-issue-consent-consequence = Confirming asks to file this exact saved issue using the bound GitHub account and repository. A queued decision does not mean an issue was filed.
+issue-consent-consequence = Confirming asks to file this exact saved issue using the bound GitHub account and repository. GitHub will interpret mentions, links and Markdown in this text. A queued decision does not mean an issue was filed.
 issue-consent-cancel = Cancel
 issue-consent-confirm = File issue
 issue-duplicate = More than one issue may exist on GitHub.

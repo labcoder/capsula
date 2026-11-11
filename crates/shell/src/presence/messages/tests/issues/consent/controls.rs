@@ -1,7 +1,7 @@
 use super::*;
 use kumochi_protocol::message::{IssueRefused, IssueUrl};
 
-fn click(f: &Fixture, at: usize, selector: &str, cx: &mut TestAppContext) {
+fn click(f: &Fixture, at: usize, selector: &'static str, cx: &mut TestAppContext) {
     f.views[at]
         .1
         .update(cx, |_, window, _| window.activate_window())
@@ -15,7 +15,7 @@ fn click(f: &Fixture, at: usize, selector: &str, cx: &mut TestAppContext) {
 
 fn deliver(f: &Fixture, events: Vec<LinkEvent>, cx: &mut TestAppContext) {
     f.owner.update(cx, |owner, cx| {
-        owner.link_events(Batch::Plain(events), cx).unwrap()
+        owner.link_events(Batch::Plain(events), cx).unwrap();
     });
     cx.run_until_parked();
 }
@@ -35,7 +35,7 @@ fn unchanged_stage_refusal_keeps_correlation_and_a_fresh_attempt_uses_the_new_ap
         assert_eq!(f.controls.try_recv().unwrap(), payload(1, 1));
         for model in &f.models {
             model.read_with(cx, |model, _| {
-                assert!(model.issue(DraftId(9)).unwrap().pending())
+                assert!(model.issue(DraftId(9)).unwrap().pending());
             });
         }
         deliver(
@@ -114,7 +114,7 @@ fn unchanged_stage_refusal_keeps_correlation_and_a_fresh_attempt_uses_the_new_ap
             assert_eq!(
                 view.rows[0].feedback.as_deref(),
                 Some("Waiting for this action's result…")
-            )
+            );
         });
         let mut stale = Vec::new();
         for (generation, request, draft, version, approval) in [
@@ -354,7 +354,7 @@ fn navigating_away_and_back_never_reuses_an_operation_request(cx: &mut TestAppCo
         model.show_for(Some(ThreadId(1)));
         cx.notify();
     });
-    f.owner.update(cx, |owner, cx| owner.request_pages(cx));
+    f.owner.update(cx, Presence::request_pages);
     assert_eq!(
         f.requests.try_recv().unwrap(),
         DataToBrain::PageRequest {

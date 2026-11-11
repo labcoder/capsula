@@ -380,7 +380,7 @@ pub(super) fn controls(
                     .disabled(pending)
                     .on_click(move |_, window, cx| {
                         let _gone = view.update(cx, |view, cx| {
-                            view.issue_action(IssueOp::CheckAgain { draft }, window, cx)
+                            view.issue_action(IssueOp::CheckAgain { draft }, window, cx);
                         });
                     }),
             );
@@ -394,7 +394,7 @@ pub(super) fn controls(
                 .disabled(pending)
                 .on_click(move |_, window, cx| {
                     let _gone = view.update(cx, |view, cx| {
-                        view.issue_action(IssueOp::Discard { draft }, window, cx)
+                        view.issue_action(IssueOp::Discard { draft }, window, cx);
                     });
                 }),
         );
@@ -406,7 +406,7 @@ pub(super) fn controls(
             controls = controls.child(div().debug_selector(|| "issue-replacement".into()).child(
                 gpui_kit::Text::new(
                     "issue-replacement".into(),
-                    strings.get(Text::IssueReplacement),
+                    strings.get(Text::IssueReplacement).into(),
                 ),
             ));
         }

@@ -1108,6 +1108,10 @@ fn no_visual_cannot_replace_the_authenticated_welcome() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one wire scenario covers state/refusal ordering and exact card credit"
+)]
 fn staged_issue_controls_keep_the_link_and_cards_return_exact_credit() {
     use kumochi_protocol::message::{
         ActionState, ContentHash, DraftId, GitHubView, IssueBody, IssueCard, IssueRefused,

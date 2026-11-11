@@ -22,6 +22,11 @@ use serde_json::json;
 use std::num::NonZeroU64;
 use zeroize::Zeroizing;
 
+#[path = "tests/authority.rs"]
+mod authority;
+#[path = "tests/lifecycle.rs"]
+mod lifecycle;
+
 #[derive(Default)]
 struct FilingServer {
     factories: AtomicUsize,

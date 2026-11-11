@@ -847,6 +847,11 @@ impl GitHub {
     }
 
     #[cfg(test)]
+    pub(crate) fn machine_mut(&mut self) -> &mut Machine {
+        &mut self.machine
+    }
+
+    #[cfg(test)]
     pub(crate) fn suspended(&self) -> &[(Stamp, Effect)] {
         &self.suspended
     }

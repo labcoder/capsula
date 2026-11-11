@@ -656,7 +656,7 @@ fn hydrated_maximum_preview_keeps_exact_semantics_keyboard_scroll_and_private_de
         let entry = view.model.read(cx).issue(DraftId(9)).unwrap();
         let preview = crate::presence::messages::consent::Preview::new(entry.card().unwrap(), cx);
         let expected = ["Issue: saved title".to_owned(), format!("Repository: o/r\nBound account: octo\n\n{body}"),
-            "Confirming asks to file this exact saved issue using the bound GitHub account and repository. A queued decision does not mean an issue was filed.".to_owned()];
+            "Confirming asks to file this exact saved issue using the bound GitHub account and repository. GitHub will interpret mentions, links and Markdown in this text. A queued decision does not mean an issue was filed.".to_owned()];
         for ((text, expected), id) in preview.texts().into_iter().zip(&expected).zip(["issue-preview-title", "issue-preview-details", "issue-preview-consequence"]) {
             assert_eq!(text.id(), Some(&gpui_kit::ElementId::from(id)));
             assert_eq!(text.a11y_role(), Some(gpui_kit::Role::Label));

@@ -30,19 +30,17 @@ notice is in `THIRD-PARTY-NOTICES.md`.
 
 The preview stays literal text. GitHub will interpret visible mentions, links and Markdown
 if the user later files it; there is no screenshot, attachment or hidden body addition. Local
-storage is not sending authority. The confirmation and remote filing handoff below remain
-dormant until their runtime and shell activation is implemented.
+storage is not sending authority. Only the explicit confirmation below may start remote filing.
 
 An issue the model drafts becomes a durable action: a row in the store's `actions` table that
 only the user's consent may move toward GitHub. The stages and what a card shows are in
 `crates/brain/src/issues.rs`, the rows in `crates/brain/src/store/actions.rs`. Neither sends a
 request.
 
-## Dormant confirmation handoff
+## Confirmation handoff
 
-Production history stays read-only: File is not a button, action or keyboard
-command while the runtime ignores Issue controls. The offline fixture alone
-exercises the dormant opener. It uses the shared Cancel-first confirmation with
+Draft and Failed cards with a usable bound connection offer File issue. It uses the shared
+Cancel-first confirmation with
 plain semantic text and a focusable, keyboard-scrollable full-content preview.
 The preview comes from the current full card, including its bound account and
 repository, never from the repository default or the abbreviated history row.
@@ -59,9 +57,11 @@ stale state and a full queue cannot replay it on a later valid snapshot.
 An explicit confirmation emits only the existing File consent operation. It does
 not mark Sending or Filed, certify numeric account identity, admit a send or
 resolve Unknown. The store still owns numeric-account/hash/approval admission and
-durable single-use consumption, including refusals. Two surfaces may independently
-hand off the same revision; that is not two remote admissions or exactly-once
-delivery. Native rendering, input and accessibility remain separate gates.
+durable single-use consumption, including refusals. Both histories share pending-operation
+feedback, admitted only after the control queues successfully. App-lifetime request identities
+correlate final acknowledgements and refusals even when the state/version is unchanged.
+Progress never finishes an attempt; stale session/request/version/approval feedback cannot
+replace its result. This is not an exactly-once delivery guarantee.
 
 ## Authoritative card batches
 
@@ -110,7 +110,7 @@ unowned cards and watermarks; outstanding tickets remain until their terminal. L
 recreate them. Reconnect clears the session cache and re-pages before registering ids again.
 P8 consumes this same model; there is no second presentation cache or automatic File action.
 
-## Read-only history presentation
+## Saved-card presentation
 
 Browse and chat use the same virtualized message rows to show saved issue cards.
 The view borrows only ids owned by its displayed pages from the shared cache;
@@ -123,9 +123,10 @@ loop. Disconnect, eviction and protocol failure remove access to cached content.
 Unknown lookup candidates stay unconfirmed, absence is not proof of no issue,
 and a definite failure means this attempt created no issue, not that nothing was
 sent. Filed confirmation and duplicate warnings remain independent. Saved URLs
-are plain text; the rows contain no editing, consent, File, resend or browser
-action. Every issue row identifies the view as read-only. This presentation
-does not connect the dormant write coordinator or turn saved approval into consent.
+are plain text and do not open a browser. Saved content remains read-only. Draft and Failed
+offer the confirmation above; Unknown offers only GET-only Check again. Dismiss is available
+for all three states and preserves uncertainty. Unusable bindings offer replacement guidance,
+never retargeting. File anyway, candidate confirmation and IssueEdit are refused at ingress.
 
 Card data and matching terminals notify both histories, while only the request
 owner applies the frame and returns credit. Retained row text is derived on model
@@ -140,12 +141,12 @@ their stable field ids sit under the event row without adding focus targets.
 
 | Stage | Meaning | Offers a decision |
 |---|---|---|
-| `draft` | Editable, waiting for consent | Yes |
+| `draft` | Saved locally, waiting for consent | Yes |
 | `preflight` | Admitted; the pre-send lookup runs and nothing has been sent | No |
 | `posting` | The create request may have been sent | No |
 | `filed` | The issue exists | No |
 | `failed` | No issue was created; a retry needs fresh consent | Yes |
-| `unknown` | An attempt may have created an issue, so only File anyway sends again | Yes |
+| `unknown` | An attempt may have created an issue; Check again never resends | Check again or Dismiss |
 | `discarded` | Dismissed | No |
 
 A mark records when an attempt's preflight began and up to 200 matching issue numbers that
@@ -171,9 +172,7 @@ stateDiagram-v2
   Failed --> Draft: edit, bind
   Draft --> Preflight: File
   Failed --> Preflight: File
-  Unknown --> Preflight: File anyway
-  Unknown --> Filed: This is the issue, lookup placed
-  Unknown --> Unknown: lookup inconclusive
+  Unknown --> Unknown: GET-only lookup, candidates remain unconfirmed
   Preflight --> Posting: preflight ok
   Preflight --> Failed: refused or interrupted, nothing unresolved
   Preflight --> Unknown: refused or interrupted, an earlier attempt unresolved
@@ -185,9 +184,10 @@ stateDiagram-v2
   Unknown --> Discarded: discard
 ```
 
-A restart follows the interrupted edges. Nothing here sends: the runtime runs the preflight and
-the create and reports their outcomes through the completions below. That wiring and the network
-are separate work.
+A restart follows the interrupted edges. The runtime owns preflight and the single create
+request and reports their outcomes through the completions below. The component state machine
+also supports legacy File anyway and candidate confirmation transitions, but this runtime
+does not admit them and never turns a lookup candidate into Filed.
 
 ## Approvals and versions
 
@@ -247,8 +247,8 @@ fresh revision/version. Dismissal does not erase uncertainty or let a new call k
 Hiding a thread for deletion does not bypass the guard while its rows remain. Completing
 history deletion removes those rows, including this local evidence; no separate fingerprint
 or content survives deletion for duplicate detection.
-Every return to Draft, Failed or Unknown offers a new revision, so each send that could duplicate
-an issue needs a fresh File anyway.
+Every return to Draft, Failed or Unknown offers a new revision. Only Draft and Failed can
+receive another File confirmation in the activated flow; Unknown never resends.
 
 The hash is SHA-256 of `{"repo":…,"account":…,"title":…,"body":…}` in that order, with the
 account as its numeric id. It covers no screenshot, since the card shows none.
@@ -259,6 +259,12 @@ revision. Unresolved actions are skipped, and bind never files.
 
 ## Sending
 
+One reserved owner covers consent, client construction, authority/preflight GETs, durable
+Posting, a fresh account-owner permit, the single POST and its durable result. The provisional
+60-second absolute deadline and 16-request cap cover all phases without renewal or refunds.
+The final permit checks the current numeric identity, expiry, complete repository authority
+and exact destination again. Only a real matching-generation 401 invalidates the account.
+
 Admission, recovery reads and the transition to Posting share the operation's original
 cancellation and deadline on the ordered store writer. A scoped SQLite progress handler
 interrupts long statements; lock waits are disabled and cancellation is checked again before
@@ -267,6 +273,16 @@ acknowledged success even if cancellation arrives at completion. A restoration f
 the connection for reopening without erasing that durable answer. Result and compensation writes
 do not reuse the canceled admission scope: they settle an already admitted phase and cannot
 start another request.
+
+If initial Consent was interrupted before its transaction committed, the retained admission
+is revalidated by unscoped CancelledConsent. It shares normal validation, single-use approval
+consumption and the unresolved-draft guard, then records known-unsent Failed in the same
+transaction for a newly admitted Preflight. It constructs no client. A refusal or replay does
+not become a new send.
+
+Cancellation and POST handoff share an atomic fence. For File, expiry or loss before handoff is
+known-unsent Failed; afterward it is Unknown. Recovery uses GitHub's Date and presend exclusions,
+not a local-clock substitute or hidden reference in the issue body. Matches stay candidates.
 
 Shutdown cancels filing before closing the store writer, then drains its SQL acknowledgements
 and joins its network or client-construction owner. Missing the original quit deadline makes
@@ -278,8 +294,9 @@ version read later. At any other version, earlier or later, or in another stage,
 answers `Refused(NotAllowedNow)` and writes nothing.
 
 - `preflighted(at, result)`: a mark enters Posting, and a refusal means nothing was sent.
-- `posted(at, outcome)` takes P3b's `CreateOutcome` unchanged. Created files; Definite means
-  nothing was sent; Uncertain, or Created with number 0, adds an uncertain attempt.
+- `posted(at, outcome)` takes `CreateOutcome` unchanged. Created files; Definite means
+  this attempt created no issue, not that nothing was sent. Uncertain, or Created with number 0,
+  adds an uncertain attempt.
 - `interrupted(at)` ends a send the runtime gave up on, by the recovery rule. Whichever of it and
   the send's own completion commits first wins, so a late Created leaves the action Unknown.
 

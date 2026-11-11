@@ -332,6 +332,11 @@ impl Machine {
         self.stamp
     }
 
+    #[cfg(test)]
+    pub(crate) fn clock_for_test(&mut self, clock: Arc<dyn Clock>) {
+        self.clock = clock;
+    }
+
     pub(crate) fn is_loading(&self) -> bool {
         matches!(self.state, State::Loading)
     }

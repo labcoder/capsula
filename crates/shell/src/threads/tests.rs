@@ -40,6 +40,10 @@ fn full_issue(
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one shared-cache scenario covers watermarks, hydration and terminal pacing"
+)]
 fn displayed_issue_pages_use_one_shared_watermarked_card_and_terminal_pacing() {
     use kumochi_protocol::message::{ActionState, IssueCardsStatus, StateVersion};
     let (mut browse, mut chat) = Threads::pair();

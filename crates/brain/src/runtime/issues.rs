@@ -24,6 +24,10 @@ pub(in crate::runtime) mod transport;
 use network::{Failure, Prepared};
 use transport::{BoundedHttp, Control};
 
+#[cfg(test)]
+#[path = "issues/owner_tests.rs"]
+mod owner_tests;
+
 #[derive(Default)]
 pub(super) struct Filing {
     next: u64,
@@ -233,6 +237,10 @@ impl Brain {
         Some(vec![effect])
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one acknowledgement router retains entering-phase ownership and compensation"
+    )]
     pub(super) fn issue_written(&mut self, serial: u64, reply: Result<Answer, ()>) -> Vec<Effect> {
         if let Some(index) = self
             .filing

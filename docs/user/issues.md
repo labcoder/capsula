@@ -1,7 +1,8 @@
 # Saved GitHub issues
 
-This build cannot create a saved issue yet. Local draft creation is dormant; the
-cards described here only show issue records that are already in the store.
+Ask Kumochi to draft an issue to save it locally for review. Drafting does not
+file anything on GitHub. Filing requires your own GitHub connection and the
+explicit confirmation below; no screenshot or attachment is sent.
 
 When a saved issue appears in a task or chat history, its card shows the saved
 title, body, repository and bound account. The bound account is part of the
@@ -21,7 +22,8 @@ For a draft or definite failure with a usable bound account, repository and
 approval, **File issue…** opens a literal preview of the saved destination,
 title and body. **Cancel** is focused first. **File issue** sends only the
 exact approval you reviewed, while that same history window is active and
-visible. A queued action is not proof that GitHub created an issue. A definite
+visible. GitHub will interpret mentions, links and Markdown in the saved text.
+A queued action is not proof that GitHub created an issue. A definite
 failure requires a new confirmation before another filing attempt.
 
 **Dismiss** removes a draft, definite failure or uncertain action from further
