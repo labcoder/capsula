@@ -7,6 +7,8 @@ use gpui_kit::{App, Context, Subscription, WeakEntity};
 
 /// Clearance from the work-area edges and the occupied dock/panel footprint.
 const MARGIN: f32 = 32.0;
+/// Smallest usable drawing band after clearance, in logical pixels.
+const MIN_STAGE_SIZE: Vec2 = Vec2::new(240.0, 160.0);
 
 pub(super) fn watch_displays(owner: WeakEntity<Presence>, cx: &App) -> Subscription {
     cx.observe_displays(move |_, cx| {
@@ -87,10 +89,21 @@ fn logical([x, y, w, h]: [i32; 4], scale: f32) -> Rect {
 // shortcut: work-area-only changes wait for the next placement; add a work-area notification through the presence adapter.
 fn stage(area: [i32; 4], layout: Layout, scale: f32, panel: Option<[i32; 4]>) -> Rect {
     let area = logical(area, scale);
-    let mut occupied = logical(layout.dock, scale).union(logical(layout.panel, scale));
-    if let Some(panel) = panel {
-        occupied = occupied.union(logical(panel, scale));
+    let peek = logical(layout.dock, scale).union(logical(layout.panel, scale));
+    let occupied = panel.map_or(peek, |panel| peek.union(logical(panel, scale)));
+    if let Some(stage) = free_stage(area, occupied) {
+        return stage;
     }
+    // shortcut: on a display too small for both, an open panel can cover a drawing and its entrance can play unseen; hold the entrance until a usable stage exists.
+    if panel.is_some()
+        && let Some(stage) = free_stage(area, peek)
+    {
+        return stage;
+    }
+    inset(area)
+}
+
+fn free_stage(area: Rect, occupied: Rect) -> Option<Rect> {
     let a = area.origin;
     let b = area.max();
     let left = occupied.origin.x.clamp(a.x, b.x);
@@ -115,22 +128,28 @@ fn stage(area: [i32; 4], layout: Layout, scale: f32, panel: Option<[i32; 4]>) ->
             size: Vec2::new(b.x - right, area.size.y),
         },
     ];
-    let mut best = Rect::default();
+    let mut best: Option<(f32, Rect)> = None;
     for band in bands {
-        if band.size.x * band.size.y > best.size.x * best.size.y {
-            best = band;
+        let stage = inset(band);
+        let band_area = band.size.x * band.size.y;
+        if stage.size.x >= MIN_STAGE_SIZE.x
+            && stage.size.y >= MIN_STAGE_SIZE.y
+            && best.is_none_or(|(best_area, _)| band_area > best_area)
+        {
+            best = Some((band_area, stage));
         }
     }
-    if best.size.x <= 0.0 || best.size.y <= 0.0 {
-        best = area;
-    }
+    best.map(|(_, stage)| stage)
+}
+
+fn inset(band: Rect) -> Rect {
     let inset = Vec2::new(
-        MARGIN.min((best.size.x - 1.0).max(0.0) * 0.5),
-        MARGIN.min((best.size.y - 1.0).max(0.0) * 0.5),
+        MARGIN.min((band.size.x - 1.0).max(0.0) * 0.5),
+        MARGIN.min((band.size.y - 1.0).max(0.0) * 0.5),
     );
     Rect {
-        origin: best.origin + inset,
-        size: best.size - inset * 2.0,
+        origin: band.origin + inset,
+        size: band.size - inset * 2.0,
     }
 }
 
@@ -319,6 +338,77 @@ mod tests {
     }
 
     #[test]
+    fn a_full_panel_falls_back_to_the_dock_and_peek_stage() {
+        let area = [0, 0, 640, 480];
+        let layout = Position::TopCenter.layout(area, [58, 21], [380, 124], 0);
+        let panel = layout.anchored_panel(area, [768, 544]);
+        assert_eq!(panel, [0, 0, 640, 480]);
+        assert_eq!(
+            stage(area, layout, 1.0, Some(panel)),
+            Rect {
+                origin: Vec2::new(32.0, 177.0),
+                size: Vec2::new(576.0, 271.0),
+            }
+        );
+    }
+
+    #[test]
+    fn a_larger_raw_sliver_yields_to_a_usable_side_band() {
+        let area = [0, 0, 1376, 788];
+        let layout = Position::TopCenter.layout(area, [58, 21], [380, 124], 0);
+        let panel = layout.anchored_panel(area, [768, 544]);
+        assert_eq!(panel, [304, 21, 768, 544]);
+        assert_eq!(
+            stage(area, layout, 1.0, Some(panel)),
+            Rect {
+                origin: Vec2::new(32.0, 32.0),
+                size: Vec2::new(240.0, 724.0),
+            }
+        );
+    }
+
+    #[test]
+    fn the_inset_minimum_is_inclusive_in_both_dimensions() {
+        for (position, area, origin, size) in [
+            (
+                Position::TopCenter,
+                [0, 0, 800, 789],
+                [32.0, 597.0],
+                [736.0, 160.0],
+            ),
+            (
+                Position::TopCenter,
+                [0, 0, 800, 788],
+                [32.0, 177.0],
+                [736.0, 579.0],
+            ),
+            (
+                Position::TopRight,
+                [0, 0, 1072, 640],
+                [32.0, 32.0],
+                [240.0, 576.0],
+            ),
+            (
+                Position::TopRight,
+                [0, 0, 1071, 640],
+                [32.0, 177.0],
+                [1007.0, 431.0],
+            ),
+        ] {
+            let layout = position.layout(area, [58, 21], [380, 124], 0);
+            let panel = layout.anchored_panel(area, [768, 544]);
+            assert_eq!(
+                stage(area, layout, 1.0, Some(panel)),
+                Rect {
+                    origin: Vec2::new(origin[0], origin[1]),
+                    size: Vec2::new(size[0], size[1])
+                },
+                "{area:?} at {position:?}",
+            );
+        }
+    }
+
+    #[test]
     fn every_anchor_keeps_a_nonempty_stage_clear_of_the_footprint() {
         let area = [0, 0, 1200, 800];
         for position in Position::ALL {
@@ -330,9 +420,16 @@ mod tests {
             assert!(stage.origin.x >= 32.0 && stage.origin.y >= 32.0);
             assert!(stage.max().x <= 1168.0 && stage.max().y <= 768.0);
         }
-        let layout = Position::Center.layout([0, 0, 20, 10], [100, 24], [380, 124], 0);
+    }
+
+    #[test]
+    fn tiny_desktops_use_the_documented_last_resort() {
+        let area = [0, 0, 20, 10];
+        let layout = Position::Center.layout(area, [100, 24], [380, 124], 0);
+        let occupied = logical(layout.dock, 1.0).union(logical(layout.panel, 1.0));
+        assert_eq!(free_stage(logical(area, 1.0), occupied), None);
         assert_eq!(
-            stage([0, 0, 20, 10], layout, 1.0, None),
+            stage(area, layout, 1.0, None),
             Rect {
                 origin: Vec2::new(9.5, 4.5),
                 size: Vec2::new(1.0, 1.0)

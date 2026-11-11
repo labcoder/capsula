@@ -28,8 +28,11 @@ the previous input again.
 
 `presence::stage` unions the accepted dock layout, the status peek's minimum reservation
 and the accepted bounds of the visible typing, Threads or Settings panel. It chooses the
-largest-area free band below, above, left or right, in that tie order, with a
-32-logical-pixel inset. Opening or closing a panel updates placement before the next paint;
+largest-area usable band below, above, left or right, in that tie order, with a
+32-logical-pixel inset and at least 240×160 logical pixels left after the inset. If no band
+is usable, it retries with only the dock and peek reserved, then uses the inset work area
+as a last resort. On a display too small for both, an open panel can cover a drawing and
+its entrance can play unseen. Opening or closing a panel updates placement before the next paint;
 when the dock lands, panels re-anchor before the stage is recomputed. The typing panel
 retains its accepted size when re-anchored, like Threads and Settings.
 A retained GPUI display observer refreshes the dock's scale and anchor,

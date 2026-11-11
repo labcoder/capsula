@@ -18,8 +18,10 @@ clicks, so the app underneath keeps working. While one is on screen, Esc clears 
 shrinks it to fit, or enlarges it up to twice its canvas size when there is room. A drawing
 uses its declared canvas, or its content bounds when no canvas size was given. Moving the
 dock, opening or closing a typing, Threads or Settings panel, or changing the display
-re-places the drawing immediately, without redrawing its steps. The free area stays clear
-of the open panel and reserves room for the smaller status peek even when it is hidden.
+re-places the drawing immediately, without redrawing its steps. When there is room, the free
+area stays clear of the open panel and reserves room for the smaller status peek even when
+it is hidden. On a display too small for both, an open panel can cover a drawing and its
+entrance can play unseen.
 
 This update changes how drawing coordinates are laid out. Drawings left on screen by an
 older version are cleared on reconnect; conversation history is kept.

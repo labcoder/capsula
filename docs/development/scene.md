@@ -83,9 +83,11 @@ pixels of padding on each side. Empty or zero-sized content falls back to the ca
 Stop rebuilds the extent from survivors; recovery replays the same preparation and cuts.
 
 The shell reserves the dock, a minimum status peek and whichever typing, Threads or Settings
-panel is visible. It chooses the largest-area free band below, above, left or right, in
-that tie order, in the primary display's work area, inset by 32 logical pixels. Physical
-work-area, dock and accepted panel bounds use the window scale. Panel open/close,
+panel is visible. It chooses the largest-area usable band below, above, left or right, in
+that tie order, in the primary display's work area, inset by 32 logical pixels. Usable bands
+retain at least 240×160 logical pixels; the small-display fallback is described in
+[presence.md](presence.md). Physical work-area, dock and accepted panel bounds use the window
+scale. Panel open/close,
 dock placement (after re-anchoring panels) and GPUI display-change events refresh the
 stage before repaint. Activation, step installation, Stop and recovery also read the work area
 fresh before placing their views; ordinary animation frames do not poll it.
