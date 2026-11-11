@@ -159,7 +159,8 @@ flowchart LR
   without its line. An overlay that won't hide is left empty. A proxy that won't hide has its
   mask emptied instead, and if that's refused too the shell quits with a logged error rather
   than leave a band taking clicks. The dock comes back on the next position choice; a display
-  change doesn't bring it back yet, under the display limitation (OSC-188). The surfaces sit behind a small `Surfaces` trait, so
+  change doesn't bring it back yet, under the display limitation (OSC-188). Drawing frames come from the dock's
+  window, so drawings stop moving while it's hidden (frame-rate.md). The surfaces sit behind a small `Surfaces` trait, so
   the tests run every failure against a fake desktop. Windows may not report the mask moving
   under a still pointer, so the owner rechecks hover after the dock moves.
 - **Painting.** The dock window is the click-through overlay, placed once per accepted

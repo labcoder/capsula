@@ -104,6 +104,7 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             kumo,
             pull_dock: pull_dock::PullDock::new(1),
             frames: FrameLoop::default(),
+            kumo_frames: FrameLoop::default(),
             overlay: super::overlay_visibility::Visibility::Closed,
             delete_retry: None,
             error: None,

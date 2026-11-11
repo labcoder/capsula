@@ -6,7 +6,7 @@ use kumochi_scene::{Step, limits::MAX_RESIDENT_BYTES, record::Start};
 use super::super::{activation::Shown, scene::Cut};
 use super::{
     GENERATION, LIVE, Presenter, RUN, Shaper, acknowledge, arrive, begin, commit_as, commit_frame,
-    controls, jobs, live, ms, only_admission, only_job, recovering, rect, step,
+    controls, jobs, live, ms, only_admission, only_job, paint_shown, recovering, rect, step,
 };
 
 fn prepared(steps: &[(RunId, Step)]) -> (Presenter, Instant) {
@@ -392,6 +392,7 @@ fn same_bound_motion_and_skipped_delayed_endpoints_invalidate_once_then_rest() {
             changed,
             "at {at}"
         );
+        paint_shown(&mut presenter, ms(now, at));
         let mut actual = None;
         assert!(!presenter.frames.borrow().paint(|frame, _| {
             actual = Some(frame.items()[0].transform.0[4]);
@@ -409,6 +410,7 @@ fn same_bound_motion_and_skipped_delayed_endpoints_invalidate_once_then_rest() {
     )]);
     presenter.advance(GENERATION, now).expect("activate");
     presenter.sample_at(now);
+    paint_shown(&mut presenter, now);
     assert!(
         presenter.sample_at(ms(now, 300)).0.changed,
         "crossed a whole delayed interval"

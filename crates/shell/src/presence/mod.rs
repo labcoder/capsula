@@ -156,8 +156,10 @@ struct Presence {
     /// Kumo in the peek.
     kumo: Entity<KumoView>,
     pull_dock: pull_dock::PullDock,
-    /// The one source of animation frames.
+    /// The drawing's frames, from the dock's window.
     frames: FrameLoop,
+    /// Kumo's frames, from the peek's window.
+    kumo_frames: FrameLoop,
     /// The drawing overlay's window, opened when a drawing first has something to paint.
     overlay: overlay_visibility::Visibility<overlay::Overlay>,
     /// Retries deletes the control queue had no room for.
@@ -183,16 +185,6 @@ impl Presence {
         trigger_qpc: Option<i64>,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
-        self.set_panel_in(visibility, trigger_qpc, None, cx)
-    }
-
-    fn set_panel_in(
-        &mut self,
-        visibility: PanelVisibility,
-        trigger_qpc: Option<i64>,
-        current: Option<&mut Window>,
-        cx: &mut Context<'_, Self>,
-    ) -> Result<(), OpenError> {
         observer::hover(cx, visibility, trigger_qpc);
         let bounds = self.layout.panel;
         let place = |window: &mut Window, cx: &mut App| {
@@ -204,13 +196,9 @@ impl Presence {
             window.bounds_changed(cx);
             Ok::<_, platform::PresenceError>(())
         };
-        if let Some(window) = current {
-            place(window, cx)?;
-        } else {
-            self.panel_window
-                .update(cx, |_, window, cx| place(window, cx))
-                .map_err(|error| OpenError::Gpui(error.into()))??;
-        }
+        self.panel_window
+            .update(cx, |_, window, cx| place(window, cx))
+            .map_err(|error| OpenError::Gpui(error.into()))??;
         self.presenter.input.configure(&mut self.input_windows)?;
         if visibility != self.panel_visibility {
             let motion = kumo_view::motion(cx);
@@ -233,15 +221,6 @@ impl Presence {
         entered_qpc: Option<i64>,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
-        self.pointer_moved_in(entered_qpc, None, cx)
-    }
-
-    fn pointer_moved_in(
-        &mut self,
-        entered_qpc: Option<i64>,
-        current: Option<&mut Window>,
-        cx: &mut Context<'_, Self>,
-    ) -> Result<(), OpenError> {
         let owner = self.panel_owner(cx);
         let visibility = if owner != panels::Owner::Pointer {
             panels::pointer(self.panel_visibility, owner)
@@ -251,7 +230,7 @@ impl Presence {
             panels::pointer(self.panel_visibility, owner)
         };
         if visibility != self.panel_visibility {
-            self.set_panel_in(visibility, entered_qpc, current, cx)?;
+            self.set_panel_from(visibility, entered_qpc, cx)?;
         }
         if owner != panels::Owner::Pointer {
             self.pointer_settle = None;
@@ -380,12 +359,11 @@ impl Presence {
     /// changed, and shows the newest run.
     fn runs_changed(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
         self.refresh_conversation(cx);
-        self.runs_changed_in(None, Instant::now(), cx)
+        self.runs_changed_at(Instant::now(), cx)
     }
 
-    fn runs_changed_in(
+    fn runs_changed_at(
         &mut self,
-        current: Option<&mut Window>,
         now: Instant,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
@@ -402,7 +380,7 @@ impl Presence {
             return Ok(());
         }
         self.activity = activity;
-        if let Err(error) = self.sync_escape_in(current, cx) {
+        if let Err(error) = self.sync_escape(cx) {
             self.end_scene_connection();
             self.runs.disconnected();
             self.draw_changed_at(now, cx);
@@ -419,19 +397,11 @@ impl Presence {
     /// Holds or releases global Esc to match what's moving, showing Stop at once if Windows
     /// refuses, in the status panel and in an open typing panel.
     fn sync_escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
-        self.sync_escape_in(None, cx)
-    }
-
-    fn sync_escape_in(
-        &mut self,
-        current: Option<&mut Window>,
-        cx: &mut Context<'_, Self>,
-    ) -> Result<(), OpenError> {
         let changed = self.sync_escape_state(cx);
         if changed
             || panels::pointer(self.panel_visibility, self.panel_owner(cx)) != self.panel_visibility
         {
-            self.pointer_moved_in(None, current, cx)?;
+            self.pointer_moved(None, cx)?;
         }
         Ok(())
     }
@@ -986,6 +956,7 @@ pub(crate) fn open(
             kumo: kumo.clone(),
             pull_dock: pull_dock::PullDock::new(usize::try_from(mask[1]).unwrap_or(0)),
             frames: FrameLoop::default(),
+            kumo_frames: FrameLoop::default(),
             overlay: overlay_visibility::Visibility::Closed,
         }
     });

@@ -25,6 +25,8 @@ pub(super) struct Spin {
     degrees_per_s: f64,
     start: u64,
     held: Option<u64>,
+    /// Put by this view's activation, so a late first paint delays it.
+    fresh: bool,
 }
 impl Spin {
     /// When the turn stops: its 15 s end, a hold or the scene deadline, whichever comes first.
@@ -66,12 +68,16 @@ impl ViewMotion {
     ) -> Self {
         let same = previous.filter(|previous| previous.geometry.handle == geometry.handle);
         let spin = match (same, now) {
-            (Some(previous), _) => previous.spin,
+            (Some(previous), _) => previous.spin.map(|spin| Spin {
+                fresh: false,
+                ..spin
+            }),
             (_, Some(now)) => match &*geometry.source {
                 Op::View3d(view) => view.spin.map(|spin| Spin {
                     degrees_per_s: f64::from(spin.get()),
                     start: now,
                     held: None,
+                    fresh: true,
                 }),
                 _ => None,
             },
@@ -87,6 +93,13 @@ impl ViewMotion {
     /// Requested bytes of the owner array; the geometry belongs to the layout.
     pub(super) fn bytes(&self) -> usize {
         size_of_val(&*self.owners)
+    }
+
+    /// Starts a spin this view's activation put `by` ms later.
+    pub(super) fn delay(&mut self, by: u64) {
+        if let Some(spin) = self.spin.as_mut().filter(|spin| spin.fresh) {
+            spin.start = spin.start.saturating_add(by);
+        }
     }
 
     /// Poses every solid at `now` into `out` without allocating. Each property takes its owner's
