@@ -559,11 +559,19 @@ fn reconnect_snapshot_supersedes_frames_held_for_a_pending_delete() {
 #[test]
 fn coordinator_debug_does_not_format_frames_held_for_deletion() {
     let core = deletion_before_ack();
-    assert_eq!(core.drawing_held.len(), 2);
+    assert_eq!(core.drawing_held.len(), 3);
+    assert!(matches!(
+        core.drawing_held[2].1,
+        DataToShell::SceneEnd {
+            complete: false,
+            ..
+        }
+    ));
     let debug = format!("{core:?}");
-    assert!(debug.contains("drawing_held: 2"));
+    assert!(debug.contains("drawing_held: 3"));
     assert!(!debug.contains("SceneBegin"));
     assert!(!debug.contains("SceneStepCommit"));
+    assert!(!debug.contains("SceneEnd"));
 }
 
 #[test]

@@ -581,7 +581,7 @@ fn a_closed_run_s_queued_records_never_reach_the_store_but_its_written_step_comm
         "its first step is in the store"
     );
     let out = reply(&mut drawing, &out, Ok(store.answer(&write)));
-    assert_eq!(trace(&out), ["begin 1", "step 1#0"]);
+    assert_eq!(trace(&out), ["begin 1", "step 1#0", "end 1 false"]);
     assert!(drawing.settled(), "step b never went out");
     assert!(!drawing.pending_for(RunId(1)), "nothing of the run is left");
 
@@ -807,7 +807,10 @@ fn a_stop_during_a_step_write_sends_the_step_before_the_cut() {
     let write = sent(&out).expect("the step").1;
     let answered = reply(&mut drawing, &out, Ok(store.answer(&write)));
     let out = store.settle(&mut drawing, answered);
-    assert_eq!(trace(&out), ["step 1#1", "write cut 1@2:1", "cut 1@2:1"]);
+    assert_eq!(
+        trace(&out),
+        ["step 1#1", "end 1 false", "write cut 1@2:1", "cut 1@2:1"]
+    );
     assert_eq!(drawing.scenes[0].state.committed(), 1);
 }
 
@@ -836,6 +839,7 @@ fn a_stop_before_a_new_scene_reached_the_shell_cuts_it_to_nothing() {
         [
             "begin 1",
             "step 1#0",
+            "end 1 false",
             "write cut 1@1:0",
             "cut 1@1:0",
             "clear 1"
