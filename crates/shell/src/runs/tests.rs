@@ -1,7 +1,7 @@
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{
     ControlToBrain, DataToBrain, DataToShell, ErrorKey, Incarnation, MAX_PENDING_TURNS, Phase,
-    RunId, SceneDescriptor, SceneId, Step, ThreadId, UserError,
+    RunId, RunOrigin, SceneDescriptor, SceneId, Step, ThreadId, UserError,
 };
 
 use kumochi_brain::coordinator::{
@@ -17,6 +17,186 @@ use crate::escape::{Activity, Escape, Panel, decide};
 
 /// Every data frame in these tests is this size on the pipe.
 const BYTES: u32 = 10;
+
+#[test]
+fn unowned_runs_show_and_stop_without_taking_pending_text_or_focus() {
+    use kumochi_protocol::message::GestureId;
+
+    for unowned in [
+        None,
+        Some(RunOrigin::Hold {
+            gesture: GestureId(7),
+        }),
+        Some(RunOrigin::Typed { turn: 99 }),
+    ] {
+        let mut runs = answering(1);
+        assert!(runs.select_thread(None));
+        submit(&mut runs, "keep this typed draft");
+        assert_eq!(data(&mut runs, text(40, "unowned answer")), 0);
+        let applied = runs.apply_state(RunId(40), ThreadId(9), Phase::Listening, unowned);
+        assert_eq!(applied.credit, BYTES);
+        assert!(applied.visible);
+        assert_eq!(applied.stop, None);
+        assert_eq!(applied.restore, None);
+        assert_eq!(runs.submitted.len(), 1);
+        assert_eq!(runs.submitted[0].turn, 1);
+        assert_eq!(runs.submitted[0].thread, None);
+        assert_eq!(
+            runs.submitted[0].text.as_deref(),
+            Some("keep this typed draft")
+        );
+        assert_eq!(runs.live.expect("unowned live run").typed, None);
+        assert_eq!(shown_text(&runs), Some((RunId(40), "unowned answer")));
+        assert_eq!(runs.target(), Target::New);
+        assert!(!runs.focus(RunId(40), ThreadId(9)));
+        assert_eq!(runs.stop(), Some(stop(40)));
+        assert_eq!(runs.cancelled, 1);
+        assert_eq!(runs.stop(), None);
+    }
+}
+
+#[test]
+fn interleaved_origins_bind_only_their_turn_and_restore_that_text_once() {
+    use kumochi_protocol::message::GestureId;
+
+    let mut runs = answering(1);
+    submit(&mut runs, "older");
+    assert!(runs.select_thread(None));
+    submit(&mut runs, "new task text");
+    runs.apply_state(
+        RunId(10),
+        ThreadId(9),
+        Phase::Listening,
+        Some(RunOrigin::Hold {
+            gesture: GestureId(1),
+        }),
+    );
+    assert_eq!(runs.submitted.len(), 2);
+    assert_eq!(runs.kept(), [13]);
+    assert_eq!(runs.target(), Target::New);
+    assert!(!runs.focus(RunId(10), ThreadId(9)));
+
+    runs.apply_state(
+        RunId(11),
+        ThreadId(22),
+        Phase::Thinking,
+        Some(RunOrigin::Typed { turn: 2 }),
+    );
+    assert_eq!(runs.target(), Target::Task(ThreadId(22)));
+    assert_eq!(runs.submitted.len(), 1);
+    assert_eq!(runs.submitted[0].turn, 1);
+    assert_eq!(runs.submitted[0].thread, Some(ThreadId(1)));
+    assert_eq!(
+        runs.named.as_ref().map(|(_, submitted)| submitted.turn),
+        Some(2)
+    );
+    assert_eq!(runs.kept(), [13]);
+    runs.apply_state(
+        RunId(11),
+        ThreadId(22),
+        Phase::Thinking,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
+    runs.refused(1, None);
+    runs.refused(99, Some(ThreadId(1)));
+    assert_eq!(runs.submitted.len(), 1);
+    runs.refused(1, Some(ThreadId(1)));
+    runs.refused(1, Some(ThreadId(1)));
+    assert!(runs.submitted.is_empty());
+    assert_eq!(runs.kept(), [13]);
+
+    let (applied, _) = runs.apply_run_state(
+        RunId(11),
+        ThreadId(22),
+        Phase::Failed,
+        Some(ErrorKey::SessionEnded.into()),
+        None,
+    );
+    assert_eq!(applied.restore.as_deref(), Some("new task text"));
+    let (duplicate, _) = runs.apply_run_state(
+        RunId(11),
+        ThreadId(22),
+        Phase::Failed,
+        Some(ErrorKey::SessionEnded.into()),
+        None,
+    );
+    assert_eq!(duplicate.restore, None);
+    assert!(runs.working(), "the data ending is still owed");
+    assert_eq!(data(&mut runs, end(11)), BYTES);
+    assert!(!runs.working());
+}
+
+#[test]
+fn newer_keyed_answers_never_borrow_older_cancelled_or_deleted_prefixes() {
+    use kumochi_protocol::message::Deleted;
+
+    for refusal in [false, true] {
+        let mut runs = answering(1);
+        submit(&mut runs, "cancelled older turn");
+        assert_eq!(runs.stop(), Some(stop(1)));
+        assert!(runs.confirm_delete(ThreadId(9)));
+        assert_eq!(runs.deleted(ThreadId(9), Deleted::Removed, None), 0);
+        submit(&mut runs, "newer turn");
+        if refusal {
+            runs.refused(2, Some(ThreadId(1)));
+        } else {
+            let applied = runs.apply_state(
+                RunId(20),
+                ThreadId(1),
+                Phase::Thinking,
+                Some(RunOrigin::Typed { turn: 2 }),
+            );
+            assert_eq!(applied.stop, None);
+            assert!(applied.visible);
+        }
+        assert_eq!(runs.submitted.len(), 1);
+        assert_eq!(runs.submitted[0].turn, 1);
+        assert_eq!(runs.submitted[0].thread, Some(ThreadId(1)));
+        assert_eq!(runs.cancelled, 1);
+        assert_eq!(runs.gone, [(ThreadId(9), 1)]);
+        runs.refused(2, Some(ThreadId(1)));
+        runs.refused(1, Some(ThreadId(9)));
+        assert_eq!(runs.cancelled, 1);
+        assert!(runs.holds(ThreadId(9)));
+
+        assert_eq!(data(&mut runs, text(21, "cancelled late output")), 0);
+        assert_eq!(
+            runs.apply_state(
+                RunId(21),
+                ThreadId(1),
+                Phase::Thinking,
+                Some(RunOrigin::Typed { turn: 1 })
+            ),
+            Applied {
+                stop: Some(stop(21)),
+                credit: BYTES,
+                visible: false,
+                restore: None
+            },
+        );
+        assert!(runs.submitted.is_empty());
+        assert_eq!(runs.cancelled, 0);
+        assert!(!runs.holds(ThreadId(9)));
+        assert_eq!(
+            runs.apply_state(
+                RunId(21),
+                ThreadId(1),
+                Phase::Thinking,
+                Some(RunOrigin::Typed { turn: 1 })
+            )
+            .stop,
+            None
+        );
+        assert_eq!(
+            runs.apply_state(RunId(21), ThreadId(1), Phase::Interrupted, None)
+                .stop,
+            None
+        );
+        assert_eq!(data(&mut runs, end(21)), BYTES);
+        assert!(!runs.working());
+        assert_eq!(runs.stop(), None);
+    }
+}
 
 #[test]
 fn switching_a_cached_main_row_before_settings_keeps_kumo_symbolic() {
@@ -92,7 +272,12 @@ fn a_non_durable_task_and_a_deleted_focus_fall_back_to_kumo() {
     runs.settings(ThreadId(1));
     runs.select_thread(None);
     submit(&mut runs, "task");
-    runs.apply_state(RunId(1), ThreadId(9), Phase::Thinking);
+    runs.apply_state(
+        RunId(1),
+        ThreadId(9),
+        Phase::Thinking,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
     assert_eq!(runs.target(), Target::Task(ThreadId(9)));
     let revision = runs.revision();
     runs.disconnected();
@@ -122,18 +307,18 @@ fn only_the_first_terminal_state_can_mark_a_live_answer_committed() {
         for data_first in [false, true] {
             let mut runs = Runs::default();
             runs.settings(ThreadId(1));
-            runs.apply_state(RunId(1), ThreadId(1), Phase::Answering);
+            runs.apply_state(RunId(1), ThreadId(1), Phase::Answering, None);
             data(&mut runs, text(1, "kept"));
             if data_first {
                 data(&mut runs, DataToShell::RunEnd { run: RunId(1) });
             }
-            runs.apply_state(RunId(1), ThreadId(1), phase);
+            runs.apply_state(RunId(1), ThreadId(1), phase, None);
             assert_eq!(
                 runs.shown().map(|shown| (shown.done, shown.text.as_str())),
                 Some((phase == Phase::Done, "kept"))
             );
-            runs.apply_state(RunId(1), ThreadId(1), Phase::Answering);
-            runs.apply_state(RunId(1), ThreadId(1), Phase::Done);
+            runs.apply_state(RunId(1), ThreadId(1), Phase::Answering, None);
+            runs.apply_state(RunId(1), ThreadId(1), Phase::Done, None);
             assert_eq!(
                 runs.shown().map(|shown| (shown.done, shown.text.as_str())),
                 Some((phase == Phase::Done, "kept"))
@@ -151,7 +336,7 @@ fn streamed_cut_is_explicit_and_connection_changes_remove_live_thread_ownership(
     runs.met(Incarnation(1));
     runs.connected(1);
     runs.settings(ThreadId(1));
-    runs.apply_state(RunId(1), ThreadId(1), Phase::Answering);
+    runs.apply_state(RunId(1), ThreadId(1), Phase::Answering, None);
     data(&mut runs, text(1, &"é".repeat(TEXT_KEPT / 2)));
     assert_eq!(
         runs.shown().map(|shown| (shown.cut, shown.text.len())),
@@ -166,7 +351,7 @@ fn streamed_cut_is_explicit_and_connection_changes_remove_live_thread_ownership(
     assert_eq!(runs.shown().map(|shown| shown.cut), Some(true));
     runs.met(Incarnation(2));
     assert_eq!(runs.shown().and_then(|shown| shown.thread), None);
-    runs.apply_state(RunId(2), ThreadId(1), Phase::Answering);
+    runs.apply_state(RunId(2), ThreadId(1), Phase::Answering, None);
     data(&mut runs, text(2, "fresh"));
     assert_eq!(
         runs.shown().map(|shown| (shown.cut, shown.thread)),
@@ -184,7 +369,12 @@ fn a_late_answer_belongs_to_its_turn_not_the_manually_switched_focus() {
     submit(&mut runs, "for kumo");
     runs.select_thread(Some(ThreadId(9)));
     let revision = runs.revision();
-    runs.apply_state(RunId(1), ThreadId(1), Phase::Answering);
+    runs.apply_state(
+        RunId(1),
+        ThreadId(1),
+        Phase::Answering,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
     data(&mut runs, text(1, "Kumo's answer"));
     assert_eq!(
         runs.shown(),
@@ -220,9 +410,14 @@ fn three_queued_turns_a_switch_and_esc_never_move_focus_on_late_states() {
     assert_eq!(runs.target(), Target::New);
     assert_eq!(runs.revision(), 2);
     assert_eq!(runs.stop(), None);
-    for run in 1..=3 {
+    for (run, thread, turn) in [(1, 1, 1), (2, 9, 2), (3, 9, 3)] {
         assert_eq!(
-            runs.apply_state(RunId(run), ThreadId(run), Phase::Thinking),
+            runs.apply_state(
+                RunId(run),
+                ThreadId(thread),
+                Phase::Thinking,
+                Some(RunOrigin::Typed { turn })
+            ),
             Applied {
                 stop: Some(stop(run)),
                 credit: 0,
@@ -243,7 +438,7 @@ fn an_unsolicited_state_never_adopts_and_a_switch_to_main_normalizes_to_kumo() {
     runs.settings(ThreadId(1));
     runs.select_thread(None);
     let revision = runs.revision();
-    runs.apply_state(RunId(1), ThreadId(9), Phase::Thinking);
+    runs.apply_state(RunId(1), ThreadId(9), Phase::Thinking, None);
     assert_eq!(runs.target(), Target::New);
     assert_eq!(runs.revision(), revision);
     runs.select_thread(Some(ThreadId(1)));
@@ -257,7 +452,7 @@ fn an_unsolicited_state_never_adopts_and_a_switch_to_main_normalizes_to_kumo() {
 fn selecting_and_starting_a_new_thread_only_change_the_next_turn() {
     let mut runs = answering(5);
     runs.select_thread(Some(ThreadId(9)));
-    runs.apply_state(RunId(5), ThreadId(1), Phase::Answering);
+    runs.apply_state(RunId(5), ThreadId(1), Phase::Answering, None);
     let mut sent = Vec::new();
     runs.submit("continue", |turn| {
         sent.push(turn);
@@ -311,17 +506,27 @@ fn a_new_brain_reusing_a_run_id_is_shown_afresh_and_the_same_brain_keeps_its_fen
     runs.connected(1);
     runs.settings(ThreadId(1));
     submit(&mut runs, "first");
-    state(&mut runs, 5, Phase::Thinking);
+    state(
+        &mut runs,
+        5,
+        Phase::Thinking,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
     data(&mut runs, step(5, 0));
     data(&mut runs, text(5, "old"));
-    state(&mut runs, 5, Phase::Done);
+    state(&mut runs, 5, Phase::Done, None);
     data(&mut runs, end(5));
     runs.disconnected();
     runs.met(Incarnation(2));
     runs.connected(2);
     runs.settings(ThreadId(1));
     submit(&mut runs, "after a crash before the turn was stored");
-    state(&mut runs, 5, Phase::Thinking);
+    state(
+        &mut runs,
+        5,
+        Phase::Thinking,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
     data(&mut runs, text(5, "new"));
     assert_eq!(runs.shown().map(|shown| shown.text.as_str()), Some("new"));
     assert!(
@@ -333,7 +538,12 @@ fn a_new_brain_reusing_a_run_id_is_shown_afresh_and_the_same_brain_keeps_its_fen
     runs.connected(3);
     runs.settings(ThreadId(1));
     submit(&mut runs, "same brain");
-    state(&mut runs, 5, Phase::Thinking);
+    state(
+        &mut runs,
+        5,
+        Phase::Thinking,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
     data(&mut runs, text(5, " stale"));
     assert_eq!(
         runs.shown().map(|shown| shown.text.as_str()),
@@ -360,9 +570,13 @@ fn deliver(runs: &mut Runs, mut store: Option<&mut Store>, effects: Vec<BrainEff
                 }
             }
             BrainEffect::Control(ControlToShell::RunState {
-                run, thread, phase, ..
+                run,
+                thread,
+                phase,
+                origin,
+                ..
             }) => {
-                runs.apply_state(run, thread, phase);
+                runs.apply_state(run, thread, phase, origin);
             }
             BrainEffect::Data(message) => {
                 runs.apply_data(message, BYTES);
@@ -491,14 +705,24 @@ fn an_unanswered_old_turn_cannot_override_a_new_thread_choice() {
     runs.settings(ThreadId(1));
     submit(&mut runs, "old pending turn");
     runs.select_thread(None);
-    runs.apply_state(RunId(1), ThreadId(11), Phase::Thinking);
+    runs.apply_state(
+        RunId(1),
+        ThreadId(1),
+        Phase::Thinking,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
     let mut sent = Vec::new();
     runs.submit("new thread turn", |turn| {
         sent.push(turn);
         true
     })
     .expect("sent");
-    runs.apply_state(RunId(2), ThreadId(22), Phase::Thinking);
+    runs.apply_state(
+        RunId(2),
+        ThreadId(22),
+        Phase::Thinking,
+        Some(RunOrigin::Typed { turn: 2 }),
+    );
     runs.submit("continue new thread", |turn| {
         sent.push(turn);
         true
@@ -552,8 +776,8 @@ fn stop(run: u64) -> ControlToBrain {
     }
 }
 
-fn state(runs: &mut Runs, run: u64, phase: Phase) -> Applied {
-    runs.apply_state(RunId(run), ThreadId(1), phase)
+fn state(runs: &mut Runs, run: u64, phase: Phase, origin: Option<RunOrigin>) -> Applied {
+    runs.apply_state(RunId(run), ThreadId(1), phase, origin)
 }
 
 fn data(runs: &mut Runs, message: DataToShell) -> u32 {
@@ -565,11 +789,12 @@ fn data(runs: &mut Runs, message: DataToShell) -> u32 {
 #[test]
 fn a_failure_applied_after_esc_is_not_shown() {
     let signed_out = || Some(UserError::from(ErrorKey::SignInNeeded));
-    let failed =
-        |runs: &mut Runs| runs.apply_run_state(RunId(1), ThreadId(1), Phase::Failed, signed_out());
+    let failed = |runs: &mut Runs, origin| {
+        runs.apply_run_state(RunId(1), ThreadId(1), Phase::Failed, signed_out(), origin)
+    };
     let mut runs = answering(1);
     assert_eq!(runs.stop(), Some(stop(1)));
-    assert_eq!(failed(&mut runs).1, None, "Esc stopped the named run");
+    assert_eq!(failed(&mut runs, None).1, None, "Esc stopped the named run");
 
     let mut runs = Runs::default();
     runs.connected(1);
@@ -578,7 +803,7 @@ fn a_failure_applied_after_esc_is_not_shown() {
     submit(&mut runs, "unnamed");
     assert_eq!(runs.stop(), None);
     assert_eq!(
-        failed(&mut runs),
+        failed(&mut runs, Some(RunOrigin::Typed { turn: 1 })),
         (
             Applied {
                 stop: Some(stop(1)),
@@ -592,7 +817,11 @@ fn a_failure_applied_after_esc_is_not_shown() {
     );
 
     let mut runs = answering(1);
-    assert_eq!(failed(&mut runs).1, signed_out(), "nothing fenced it off");
+    assert_eq!(
+        failed(&mut runs, None).1,
+        signed_out(),
+        "nothing fenced it off"
+    );
 }
 
 fn submit(runs: &mut Runs, typed: &str) {
@@ -605,7 +834,7 @@ fn answering(run: u64) -> Runs {
     runs.connected(1);
     runs.settings(ThreadId(1));
     runs.apply_scenes(&[]).expect("valid");
-    state(&mut runs, run, Phase::Answering);
+    state(&mut runs, run, Phase::Answering, None);
     runs
 }
 
@@ -649,7 +878,7 @@ fn a_fenced_run_s_messages_are_dropped_when_applied() {
         "dropped, still credited"
     );
     data(&mut runs, step(5, 0));
-    state(&mut runs, 5, Phase::Answering);
+    state(&mut runs, 5, Phase::Answering, None);
     assert!(!runs.working());
     assert_eq!(runs.shown().expect("shown").text, "kept ");
     assert!(indices(&runs).is_empty());
@@ -660,7 +889,7 @@ fn clear_drops_the_drawing_and_keeps_late_steps_out() {
     let mut runs = answering(5);
     data(&mut runs, text(5, "words"));
     data(&mut runs, step(5, 0));
-    state(&mut runs, 5, Phase::Done);
+    state(&mut runs, 5, Phase::Done, None);
     data(&mut runs, end(5));
     assert!(!runs.working());
     assert_eq!(
@@ -681,7 +910,7 @@ fn clear_drops_the_drawing_and_keeps_late_steps_out() {
         Some((RunId(5), "words")),
         "the text stays"
     );
-    state(&mut runs, 6, Phase::Thinking);
+    state(&mut runs, 6, Phase::Thinking, None);
     data(&mut runs, step(6, 0));
     assert_eq!(indices(&runs), vec![0], "a newer run draws again");
 }
@@ -690,7 +919,7 @@ fn clear_drops_the_drawing_and_keeps_late_steps_out() {
 fn a_newer_run_takes_over_the_view_and_older_data_is_dropped() {
     let mut runs = answering(5);
     data(&mut runs, text(5, "old"));
-    state(&mut runs, 6, Phase::Thinking);
+    state(&mut runs, 6, Phase::Thinking, None);
     data(&mut runs, text(6, "new"));
     data(&mut runs, text(5, " late"));
     assert_eq!(shown_text(&runs), Some((RunId(6), "new")));
@@ -708,7 +937,12 @@ fn data_before_its_run_state_is_held_until_the_state_names_it() {
         "held, credit withheld"
     );
     assert!(runs.shown().is_none());
-    let applied = state(&mut runs, 3, Phase::Answering);
+    let applied = state(
+        &mut runs,
+        3,
+        Phase::Answering,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
     assert_eq!(
         applied,
         Applied {
@@ -734,7 +968,12 @@ fn esc_cancels_a_turn_whose_run_isnt_named_yet() {
     submit(&mut runs, "b");
     assert!(runs.working(), "a turn after Esc isn't cancelled");
     assert_eq!(data(&mut runs, text(1, "a's early text")), 0);
-    let applied = state(&mut runs, 1, Phase::Thinking);
+    let applied = state(
+        &mut runs,
+        1,
+        Phase::Thinking,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
     assert_eq!(
         applied,
         Applied {
@@ -748,10 +987,18 @@ fn esc_cancels_a_turn_whose_run_isnt_named_yet() {
     assert_eq!(runs.submitted.len(), 1, "a used exactly one slot");
     data(&mut runs, text(1, "more"));
     data(&mut runs, step(1, 0));
-    assert_eq!(state(&mut runs, 1, Phase::Interrupted), Applied::default());
+    assert_eq!(
+        state(&mut runs, 1, Phase::Interrupted, None),
+        Applied::default()
+    );
     assert!(runs.shown().is_none());
     assert_eq!(
-        state(&mut runs, 2, Phase::Thinking),
+        state(
+            &mut runs,
+            2,
+            Phase::Thinking,
+            Some(RunOrigin::Typed { turn: 2 })
+        ),
         Applied {
             stop: None,
             credit: 0,
@@ -771,14 +1018,24 @@ fn esc_stops_the_known_run_and_cancels_the_turn_queued_behind_it() {
     runs.connected(1);
     runs.settings(ThreadId(1));
     submit(&mut runs, "first");
-    state(&mut runs, 4, Phase::Answering);
+    state(
+        &mut runs,
+        4,
+        Phase::Answering,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
     data(&mut runs, text(4, "shown"));
     submit(&mut runs, "a");
     assert_eq!(runs.stop(), Some(stop(4)));
     submit(&mut runs, "b");
     assert_eq!(data(&mut runs, text(5, "a's text")), 0);
     assert_eq!(
-        state(&mut runs, 5, Phase::Thinking),
+        state(
+            &mut runs,
+            5,
+            Phase::Thinking,
+            Some(RunOrigin::Typed { turn: 2 })
+        ),
         Applied {
             stop: Some(stop(5)),
             credit: BYTES,
@@ -787,10 +1044,18 @@ fn esc_stops_the_known_run_and_cancels_the_turn_queued_behind_it() {
         },
         "exactly one Stop names a's run"
     );
-    assert_eq!(state(&mut runs, 5, Phase::Answering), Applied::default());
+    assert_eq!(
+        state(&mut runs, 5, Phase::Answering, None),
+        Applied::default()
+    );
     assert_eq!(shown_text(&runs), Some((RunId(4), "shown")));
     assert_eq!(runs.submitted.len(), 1);
-    state(&mut runs, 6, Phase::Thinking);
+    state(
+        &mut runs,
+        6,
+        Phase::Thinking,
+        Some(RunOrigin::Typed { turn: 3 }),
+    );
     data(&mut runs, text(6, "b"));
     assert_eq!(shown_text(&runs), Some((RunId(6), "b")));
     assert!(runs.working());
@@ -800,7 +1065,7 @@ fn esc_stops_the_known_run_and_cancels_the_turn_queued_behind_it() {
 fn a_run_stays_stoppable_until_its_data_has_drained() {
     let mut runs = answering(5);
     data(&mut runs, text(5, "seen"));
-    state(&mut runs, 5, Phase::Done);
+    state(&mut runs, 5, Phase::Done, None);
     assert!(runs.working(), "its data hasn't ended");
     assert_eq!(
         runs.stop(),
@@ -822,7 +1087,7 @@ fn a_run_settles_whichever_ending_arrives_first() {
     let mut runs = answering(5);
     data(&mut runs, end(5));
     assert!(runs.working(), "its state hasn't ended");
-    state(&mut runs, 5, Phase::Done);
+    state(&mut runs, 5, Phase::Done, None);
     assert!(!runs.working());
     assert_eq!(runs.stop(), None);
 }
@@ -830,7 +1095,7 @@ fn a_run_settles_whichever_ending_arrives_first() {
 #[test]
 fn a_terminal_state_first_waits_for_run_end_to_settle() {
     let mut runs = answering(5);
-    state(&mut runs, 5, Phase::Done);
+    state(&mut runs, 5, Phase::Done, None);
     assert!(runs.working(), "its data hasn't ended");
     data(&mut runs, end(5));
     assert!(!runs.working());
@@ -850,7 +1115,12 @@ fn a_reconnect_forgets_turns_esc_cancelled_and_their_held_data() {
     runs.settings(ThreadId(1));
     submit(&mut runs, "b");
     assert_eq!(
-        state(&mut runs, 2, Phase::Answering),
+        state(
+            &mut runs,
+            2,
+            Phase::Answering,
+            Some(RunOrigin::Typed { turn: 1 })
+        ),
         Applied {
             stop: None,
             credit: 0,
@@ -885,7 +1155,7 @@ fn press(runs: &mut Runs) -> (Escape, Option<ControlToBrain>) {
 fn esc_stops_then_clears_then_dismisses_with_a_cancelled_turn_pending() {
     let mut runs = answering(4);
     data(&mut runs, step(4, 0));
-    state(&mut runs, 4, Phase::Done);
+    state(&mut runs, 4, Phase::Done, None);
     data(&mut runs, end(4));
     submit(&mut runs, "a");
     assert_eq!(press(&mut runs), (Escape::Stop, None), "a is cancelled");
@@ -901,7 +1171,12 @@ fn esc_stops_then_clears_then_dismisses_with_a_cancelled_turn_pending() {
     );
     assert_eq!(press(&mut runs), (Escape::Dismiss, None));
     assert_eq!(
-        state(&mut runs, 5, Phase::Thinking),
+        state(
+            &mut runs,
+            5,
+            Phase::Thinking,
+            Some(RunOrigin::Typed { turn: 1 })
+        ),
         Applied {
             stop: Some(stop(5)),
             credit: 0,
@@ -916,8 +1191,8 @@ fn esc_stops_then_clears_then_dismisses_with_a_cancelled_turn_pending() {
 #[test]
 fn an_older_run_ending_never_settles_a_newer_one() {
     let mut runs = answering(5);
-    state(&mut runs, 6, Phase::Thinking);
-    state(&mut runs, 5, Phase::Interrupted);
+    state(&mut runs, 6, Phase::Thinking, None);
+    state(&mut runs, 5, Phase::Interrupted, None);
     data(&mut runs, end(5));
     assert!(runs.working());
     assert_eq!(runs.stop(), Some(stop(6)));
@@ -956,7 +1231,12 @@ fn a_second_new_task_turn_waits_then_joins_the_first_task_without_reselection() 
     assert_eq!(runs.target(), Target::New);
     assert_eq!(runs.revision(), revision);
 
-    runs.apply_state(RunId(1), ThreadId(11), Phase::Thinking);
+    runs.apply_state(
+        RunId(1),
+        ThreadId(11),
+        Phase::Thinking,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
     assert_eq!(runs.target(), Target::Task(ThreadId(11)));
     assert!(runs.submitted.is_empty());
     assert_eq!(runs.revision(), revision);
@@ -998,9 +1278,19 @@ fn only_a_newer_run_sets_the_next_turn_s_thread() {
         })
         .expect("sent");
     }
-    runs.apply_state(RunId(1), ThreadId(11), Phase::Thinking);
-    runs.apply_state(RunId(2), ThreadId(22), Phase::Thinking);
-    runs.apply_state(RunId(1), ThreadId(11), Phase::Done);
+    runs.apply_state(
+        RunId(1),
+        ThreadId(11),
+        Phase::Thinking,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
+    runs.apply_state(
+        RunId(2),
+        ThreadId(22),
+        Phase::Thinking,
+        Some(RunOrigin::Typed { turn: 2 }),
+    );
+    runs.apply_state(RunId(1), ThreadId(11), Phase::Done, None);
     runs.submit("third", |turn| {
         sent.push(turn);
         true
@@ -1040,10 +1330,20 @@ fn a_fenced_older_run_s_late_failure_keeps_the_thread() {
     submit(&mut runs, "one");
     runs.select_thread(None);
     submit(&mut runs, "two");
-    runs.apply_state(RunId(1), ThreadId(11), Phase::Thinking);
+    runs.apply_state(
+        RunId(1),
+        ThreadId(11),
+        Phase::Thinking,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
     runs.stop();
-    runs.apply_state(RunId(2), ThreadId(22), Phase::Thinking);
-    runs.apply_state(RunId(1), ThreadId(11), Phase::Failed);
+    runs.apply_state(
+        RunId(2),
+        ThreadId(22),
+        Phase::Thinking,
+        Some(RunOrigin::Typed { turn: 2 }),
+    );
+    runs.apply_state(RunId(1), ThreadId(11), Phase::Failed, None);
     let mut sent = None;
     runs.submit("third", |turn| {
         sent = Some(turn);
@@ -1076,7 +1376,12 @@ fn submits_stay_under_the_brain_s_turn_cap() {
     }
     assert_eq!(runs.submit("again", send), Err(Refused::Busy));
     assert_eq!(sends.get(), 63, "a refused turn never reaches the sender");
-    runs.apply_state(RunId(1), ThreadId(1), Phase::Thinking);
+    runs.apply_state(
+        RunId(1),
+        ThreadId(1),
+        Phase::Thinking,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
     assert_eq!(runs.submit("again", send), Ok(()));
     assert_eq!(sends.get(), 64);
 }
@@ -1175,7 +1480,7 @@ fn a_lost_brain_fences_what_it_knew_and_forgets_unanswered_turns() {
     runs.connected(1);
     runs.settings(ThreadId(1));
     assert_eq!(
-        state(&mut runs, 6, Phase::Answering).credit,
+        state(&mut runs, 6, Phase::Answering, None).credit,
         0,
         "held data went with it"
     );
@@ -1205,7 +1510,12 @@ fn esc_stops_a_run_moving_during_recovery_before_it_clears() {
     };
     assert_eq!(runs.apply_snapshot(1, chunk), Ok(BYTES));
     submit(&mut runs, "new turn");
-    state(&mut runs, 5, Phase::Answering);
+    state(
+        &mut runs,
+        5,
+        Phase::Answering,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
     assert!(runs.drawing(), "the recovery is still receiving");
     assert_eq!(press(&mut runs), (Escape::Stop, Some(stop(5))));
     assert_eq!(

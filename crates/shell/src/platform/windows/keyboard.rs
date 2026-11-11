@@ -26,7 +26,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_INPUT_DEVICE_CHANGE, WM_POWERBROADCAST, WM_TIMER, WM_WTSSESSION_CHANGE,
 };
 
-use super::presence::{PresenceError, performance_counter, struct_size};
+use super::presence::{PresenceError, struct_size};
 use crate::input::{Edge, Event, Key};
 
 /// The proxy's only timer: the gesture's next one-shot deadline.
@@ -45,12 +45,10 @@ thread_local! {
     static PROXY: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
 }
 
-/// When the native callback that carried an event began, on both clocks: `instant` for the
-/// gesture, `qpc` for joining diagnostics to `PresentMon`.
+/// When the native callback that carried an event began, for gesture timing.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct EventTime {
     pub(crate) instant: Instant,
-    pub(crate) qpc: i64,
 }
 
 /// Reduces one gesture event at its callback time and returns the next deadline to arm.
@@ -76,10 +74,9 @@ impl Keys {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> bool {
-        // Stamped first, so measurements start at callback entry.
+        // Stamped first, so gesture timing starts at callback entry.
         let at = EventTime {
             instant: Instant::now(),
-            qpc: performance_counter(),
         };
         let event = match message {
             WM_INPUT => match read_key(lparam) {

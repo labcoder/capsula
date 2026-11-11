@@ -13,8 +13,8 @@ use std::fmt;
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{
     Action, Content, ControlToBrain, DataToBrain, DataToShell, Deleted, ErrorKey, Incarnation,
-    MAX_PENDING_DELETES, MAX_PENDING_TURNS, Phase, RunId, SceneDescriptor, SceneId, ThreadId,
-    ThreadKind, ThreadRow, UserError,
+    MAX_PENDING_DELETES, MAX_PENDING_TURNS, Phase, RunId, RunOrigin, SceneDescriptor, SceneId,
+    ThreadId, ThreadKind, ThreadRow, UserError,
 };
 
 #[cfg(test)]
@@ -149,7 +149,7 @@ pub(crate) struct Runs {
     live: Option<Live>,
     /// The highest run Esc stopped; anything of it or older is dropped when applied.
     fence: RunId,
-    /// The highest run any `RunState` named: each new one answers the oldest pending turn.
+    /// The highest run any `RunState` named; only its first state can bind a typed turn.
     answered: RunId,
     /// Turns sent and not answered yet.
     submitted: VecDeque<Submitted>,
@@ -560,20 +560,30 @@ impl Runs {
         credit
     }
 
-    /// The brain refused the oldest pending turn before giving it a run. It settles only the
+    /// The brain refused the identified pending turn before giving it a run. It settles only the
     /// counts: nothing is shown, stopped, fenced or targeted.
-    pub(crate) fn refused(&mut self) {
-        if self.submitted.pop_front().is_none() {
+    pub(crate) fn refused(&mut self, turn: u32, thread: Option<ThreadId>) {
+        let Some(at) = self
+            .submitted
+            .iter()
+            .position(|submitted| submitted.turn == turn && submitted.thread == thread)
+        else {
             return;
+        };
+        if self.submitted.remove(at).is_some() {
+            self.answered_one(at);
         }
-        self.answered_one();
-        self.cancelled = self.cancelled.saturating_sub(1);
     }
 
-    /// One pending turn was answered: every `gone` entry waits on one fewer.
-    fn answered_one(&mut self) {
+    /// Only prefixes containing the removed pending entry wait on one fewer.
+    fn answered_one(&mut self, at: usize) {
+        if at < self.cancelled {
+            self.cancelled -= 1;
+        }
         for (_, waiting) in &mut self.gone {
-            *waiting -= 1;
+            if at < *waiting {
+                *waiting -= 1;
+            }
         }
         self.gone.retain(|(_, waiting)| *waiting > 0);
     }
@@ -615,7 +625,7 @@ impl Runs {
         self.drawing.disconnected();
     }
 
-    /// A `RunState`. A run newer than any before answers the oldest pending turn exactly once,
+    /// A `RunState`. A run newer than any before answers only its matching typed turn once,
     /// fenced or not, and is fenced before any of its output is applied if Esc cancelled that
     /// turn. Only a pending turn at the current revision can adopt a New target's thread.
     /// A `RunState` with the brain's reason: what applying it asks, and the notice to show, which
@@ -628,15 +638,22 @@ impl Runs {
         thread: ThreadId,
         phase: Phase,
         error: Option<UserError>,
+        origin: Option<RunOrigin>,
     ) -> (Applied, Option<UserError>) {
-        let applied = self.apply(run, thread, phase, error.as_ref());
+        let applied = self.apply(run, thread, phase, error.as_ref(), origin);
         let notice = error.filter(|_| applied.visible);
         (applied, notice)
     }
 
     #[cfg(test)]
-    pub(crate) fn apply_state(&mut self, run: RunId, thread: ThreadId, phase: Phase) -> Applied {
-        self.apply(run, thread, phase, None)
+    pub(crate) fn apply_state(
+        &mut self,
+        run: RunId,
+        thread: ThreadId,
+        phase: Phase,
+        origin: Option<RunOrigin>,
+    ) -> Applied {
+        self.apply(run, thread, phase, None, origin)
     }
 
     fn apply(
@@ -645,6 +662,7 @@ impl Runs {
         thread: ThreadId,
         phase: Phase,
         error: Option<&UserError>,
+        origin: Option<RunOrigin>,
     ) -> Applied {
         let mut applied = Applied::default();
         if run > self.answered {
@@ -655,27 +673,35 @@ impl Runs {
                 self.fence = self.fence.max(run);
             }
             let mut typed = None;
-            if let Some(mut submitted) = self.submitted.pop_front() {
+            if let Some(RunOrigin::Typed { turn }) = origin
+                && let Some(at) = self.submitted.iter().position(|submitted| {
+                    submitted.turn == turn && submitted.thread.is_none_or(|owner| owner == thread)
+                })
+                && let Some(mut submitted) = self.submitted.remove(at)
+            {
                 typed = Some((submitted.turn, submitted.revision));
-                if submitted.revision == self.revision && self.target == Target::New && !deleted {
+                if submitted.thread.is_none()
+                    && submitted.revision == self.revision
+                    && self.target == Target::New
+                    && !deleted
+                {
                     self.target = if Some(thread) == self.main {
                         Target::Kumo
                     } else {
                         Target::Task(thread)
                     };
                 }
-                self.answered_one();
-                if self.cancelled > 0 {
-                    self.cancelled -= 1;
+                let cancelled = at < self.cancelled;
+                self.answered_one(at);
+                if cancelled {
                     self.fence = self.fence.max(run);
                     applied.stop = Some(ControlToBrain::Stop {
                         run,
                         revealed: Vec::new(),
                     });
                 }
-                // A New target's turn belongs to the thread its run names; any other must match.
-                let owned = *submitted.thread.get_or_insert(thread) == thread;
-                self.named = (owned && run > self.fence).then_some((run, submitted));
+                submitted.thread = Some(thread);
+                self.named = (run > self.fence).then_some((run, submitted));
             }
             if run > self.fence {
                 self.live = Some(Live {

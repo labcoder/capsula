@@ -15,12 +15,12 @@ mod windows;
 pub(crate) use windows::test_pair;
 #[cfg(windows)]
 pub(crate) use windows::{
-    Capture, Deliver, EscapeHotkey, EventTime, Foreground, HostWatch, MaskUpdate, OverlayWindows,
+    Affinity, Deliver, EscapeHotkey, EventTime, Foreground, HostWatch, MaskUpdate, OverlayWindows,
     PipeClient, PresenceError, PresenceEvent, PresenceLabels, PresenceNative, PresenceSurface,
     ProxyHandle, ProxyNote, activate_presence_window, client_origin, configure_presence_window,
-    cursor_position, data_dir, hide_presence_window, host_at, launch_detached, performance_counter,
-    performance_frequency, place_presence_window, restore_foreground, session_id, set_capture,
-    watch_host, window_handle, work_area,
+    cursor_position, data_dir, exclude_window, hide_presence_window, host_at, launch_detached,
+    performance_counter, performance_frequency, place_presence_window, restore_foreground,
+    restore_window_affinity, session_id, watch_host, window_affinity, window_handle, work_area,
 };
 
 /// The most owned `[left, right)` column spans one hit-mask row holds: two shapes, each with

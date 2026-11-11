@@ -4,13 +4,15 @@ use std::collections::VecDeque;
 use std::fmt;
 
 use kumochi_protocol::message::{
-    AssistantName, DockPosition, ErrorKey, MaxFrameRate, NameError, SettingsOp, SettingsView,
-    UserError, UserName,
+    AssistantName, DockPosition, ErrorKey, MaxFrameRate, NameError, PartState, SettingsOp,
+    SettingsView, SttUnload, UserError, UserName,
 };
 
 use crate::strings::Text;
 
 mod dock;
+mod voice;
+pub(crate) use voice::{SpeechInputAction, SpeechInputIntent};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Field {
@@ -77,6 +79,8 @@ enum Slot {
     FrameRate(MaxFrameRate),
     Dock(DockPosition),
     Taskbar(TaskbarChoice),
+    SttUnload(SttUnload),
+    SpeechInput(SpeechInputAction),
 }
 
 impl Slot {
@@ -85,7 +89,9 @@ impl Slot {
             (Self::Name(one), Self::Name(other)) => one == other,
             (Self::FrameRate(_), Self::FrameRate(_))
             | (Self::Dock(_), Self::Dock(_))
-            | (Self::Taskbar(_), Self::Taskbar(_)) => true,
+            | (Self::Taskbar(_), Self::Taskbar(_))
+            | (Self::SttUnload(_), Self::SttUnload(_))
+            | (Self::SpeechInput(_), Self::SpeechInput(_)) => true,
             _ => false,
         }
     }
@@ -93,7 +99,11 @@ impl Slot {
     fn field(self) -> Option<Field> {
         match self {
             Self::Name(field) => Some(field),
-            Self::FrameRate(_) | Self::Dock(_) | Self::Taskbar(_) => None,
+            Self::FrameRate(_)
+            | Self::Dock(_)
+            | Self::Taskbar(_)
+            | Self::SttUnload(_)
+            | Self::SpeechInput(_) => None,
         }
     }
 }
@@ -132,6 +142,12 @@ pub(crate) struct Settings {
     user: FieldState,
     pending: VecDeque<Pending>,
     offline_position: Option<DockIntent>,
+    speech_input: Option<PartState>,
+    speech_generation: Option<u64>,
+    speech_error: Option<UserError>,
+    speech_send_failed: bool,
+    stt_error: Option<UserError>,
+    stt_send_failed: bool,
 }
 
 impl fmt::Debug for Settings {
@@ -189,6 +205,12 @@ impl Settings {
             return None;
         }
         let pending = self.pending.pop_front()?;
+        if !pending.failed && matches!(pending.slot, Slot::SttUnload(_)) {
+            self.stt_error = None;
+        }
+        if !pending.failed && matches!(pending.slot, Slot::SpeechInput(_)) {
+            self.speech_error = None;
+        }
         if !pending.failed
             && self
                 .notice_slot
@@ -345,7 +367,11 @@ impl Settings {
             .rev()
             .find_map(|pending| match pending.slot {
                 Slot::FrameRate(rate) => Some(rate),
-                Slot::Name(_) | Slot::Dock(_) | Slot::Taskbar(_) => None,
+                Slot::Name(_)
+                | Slot::Dock(_)
+                | Slot::Taskbar(_)
+                | Slot::SttUnload(_)
+                | Slot::SpeechInput(_) => None,
             });
         queued.or(self.view.as_ref().map(|view| view.max_frame_rate))
     }
@@ -454,6 +480,12 @@ impl Settings {
         self.notice_slot?;
         let pending = self.pending.front_mut()?;
         pending.failed = true;
+        if matches!(pending.slot, Slot::SttUnload(_)) {
+            self.stt_error = Some(error.clone());
+        }
+        if matches!(pending.slot, Slot::SpeechInput(_)) {
+            self.speech_error = Some(error.clone());
+        }
         let field = pending.slot.field()?;
         self.field_mut(field).error = Some(Error::Brain(error));
         Some(field)
@@ -469,6 +501,11 @@ impl Settings {
             });
         }
         self.view = None;
+        self.speech_input = None;
+        self.speech_generation = None;
+        self.speech_error = None;
+        self.speech_send_failed = false;
+        self.stt_send_failed = false;
         self.pending.clear();
         self.assistant.saving = false;
         self.user.saving = false;

@@ -9,6 +9,11 @@ pub(crate) mod diagnostics;
 pub(crate) mod drag;
 mod drawings;
 mod escape;
+#[expect(
+    clippy::as_conversions,
+    reason = "seven fixed semantic slot discriminants index the fixed receipt array"
+)]
+mod exclusion;
 mod frame_rate;
 mod geometry;
 mod gesture;
@@ -70,8 +75,8 @@ use crate::input::{Effect, Gesture};
 use crate::link::{LinkEvent, LinkHandle, LinkState, Session};
 use crate::platform::input::{Input, input};
 use crate::platform::{
-    self, Capture, EscapeHotkey, EventTime, Foreground, PresenceEvent, PresenceLabels,
-    PresenceNative, PresenceSurface,
+    self, EscapeHotkey, EventTime, Foreground, PresenceEvent, PresenceLabels, PresenceNative,
+    PresenceSurface,
 };
 use crate::runs::Runs;
 use crate::settings::Settings;
@@ -100,6 +105,10 @@ struct PresenceApp {
 impl Global for PresenceApp {}
 
 struct Presence {
+    exclusion: exclusion::Exclusion<exclusion::Receipt>,
+    exclusion_timer: Option<Task<()>>,
+    #[cfg(test)]
+    exclusion_fixture: Option<Rc<std::cell::RefCell<exclusion::Fixture>>>,
     input_windows: platform::OverlayWindows,
     native: PresenceNative,
     dock_window: AnyWindowHandle,
@@ -287,23 +296,17 @@ impl Presence {
         self.line.contains(point) || self.layout.panel_contains(point, panel)
     }
 
-    /// Shows Listening on the line, and the settings notice in the status panel.
+    /// Keeps hold presentation off, and the settings notice in the status panel.
     // shortcut: the line carries no notice, so the offline and settings notices show only in the status panel; B2b's peek shows them by the line.
     fn refresh_dock(&self, cx: &mut Context<'_, Self>) {
-        let listening = self.gesture.get().listening();
         let was_listening = self.dock.update(cx, |dock, cx| {
             cx.notify();
-            std::mem::replace(&mut dock.listening, listening)
+            std::mem::replace(&mut dock.listening, false)
         });
-        if listening != was_listening {
-            let mood = if listening {
-                Mood::Listening
-            } else {
-                Mood::Idle
-            };
+        if was_listening {
             let motion = kumo_view::motion(cx);
             self.kumo
-                .update(cx, |kumo, cx| kumo.set_mood(mood, motion, cx));
+                .update(cx, |kumo, cx| kumo.set_mood(Mood::Idle, motion, cx));
         }
         let notice = self
             .settings
@@ -326,29 +329,16 @@ impl Presence {
         &mut self,
         effects: [Option<Effect>; 3],
         at: EventTime,
-        dock: &mut Window,
+        _dock: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
         for effect in effects.into_iter().flatten() {
             match effect {
-                Effect::Listening => {
-                    self.refresh_dock(cx);
-                    // A deferred Listening the press already outran shows nothing, so isn't timed.
-                    if self.gesture.get().listening() {
-                        let applied_us = at.instant.elapsed().as_micros();
-                        let start_qpc = at.qpc;
-                        diagnostics::record(
-                            cx,
-                            format_args!("listening applied_us={applied_us} start_qpc={start_qpc}"),
-                        );
-                    }
-                }
                 Effect::Resting => {
                     self.refresh_dock(cx);
                     diagnostics::record(cx, format_args!("resting"));
                 }
-                Effect::HoldStarted => self.set_capture(Capture::Excluded, dock, cx),
-                Effect::HoldEnded => self.set_capture(Capture::Allowed, dock, cx),
+                Effect::Listening | Effect::HoldStarted | Effect::HoldEnded => continue,
                 Effect::OpenInput => {
                     if let Err(error) = self.open_text(cx) {
                         tracing::error!(%error, "can't open the typing panel");
@@ -361,47 +351,6 @@ impl Presence {
                     dock.pending_paint.follow(effect, &gesture, at.instant);
                 });
             }
-        }
-    }
-
-    /// Hides every Kumochi surface from capture before the hold is announced, and shows them
-    /// again when it ends. Slice 6 captures and slice 7 sends `HoldRecognized` after this.
-    fn set_capture(&self, capture: Capture, dock: &Window, cx: &mut Context<'_, Self>) {
-        let mut all = true;
-        if let Err(error) = platform::set_capture(dock, capture) {
-            tracing::warn!(%error, "can't change the dock's capture exclusion");
-            all = false;
-        }
-        if let Err(error) = self.native.set_capture(capture) {
-            tracing::warn!(%error, "can't change the dock proxy's capture exclusion");
-            all = false;
-        }
-        let text = self.text.as_ref().map(|text| text.window);
-        let threads = self.thread_panel.as_ref().map(|panel| panel.window);
-        let settings = self.settings_panel.as_ref().map(|panel| panel.window);
-        let drawing = self.overlay.window().map(|overlay| overlay.window);
-        for window in [Some(self.panel_window), text, threads, settings, drawing]
-            .into_iter()
-            .flatten()
-        {
-            match window.update(cx, |_, window, _| platform::set_capture(window, capture)) {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    tracing::warn!(%error, "can't change a panel's capture exclusion");
-                    all = false;
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "a panel is gone");
-                    all = false;
-                }
-            }
-        }
-        match capture {
-            Capture::Excluded => {
-                tracing::info!("hold recognized after capture exclusion");
-                diagnostics::record(cx, format_args!("hold excluded={all}"));
-            }
-            Capture::Allowed => diagnostics::record(cx, format_args!("hold ended restored={all}")),
         }
     }
 
@@ -627,6 +576,7 @@ impl Presence {
         if !self.link.begin_quit() {
             return;
         }
+        self.revoke_exclusion(cx);
         self.end_pull(cx);
         self.end_selection(
             crate::presenter::overlay_input::ExitCause::WindowDestroyed,
@@ -828,6 +778,8 @@ fn status_text(state: LinkState) -> Text {
 /// A native surface or GPUI window couldn't be initialized or placed.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum OpenError {
+    #[error(transparent)]
+    Exclusion(#[from] exclusion::Error),
     #[error("GPUI couldn't create or update a presence surface")]
     Gpui(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error(transparent)]
@@ -928,11 +880,11 @@ fn status_window(
     Ok((panel_window, panel))
 }
 
-/// Opens a small nonactivating dock immediately and arms the keyboard, so Listening works
-/// from the first frame. The caller starts the brain link afterwards.
+/// Opens a small nonactivating dock and arms double-tap typing; holds and Listening stay off.
+/// The caller starts the brain link afterwards.
 #[expect(
     clippy::too_many_lines,
-    reason = "startup creates the windows, the presenter and their owner in one fixed order"
+    reason = "constructs one presence owner and wires its windows in lifecycle order"
 )]
 pub(crate) fn open(
     states: Receiver<LinkEvent>,
@@ -991,6 +943,10 @@ pub(crate) fn open(
     let owner = cx.new(|cx| {
         listen(states, event_changes.clone(), cx);
         Presence {
+            exclusion: exclusion::Exclusion::default(),
+            exclusion_timer: None,
+            #[cfg(test)]
+            exclusion_fixture: None,
             input_windows,
             native,
             dock_window,

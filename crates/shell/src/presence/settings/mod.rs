@@ -3,6 +3,7 @@
 mod accounts;
 mod claude;
 mod general;
+mod voice;
 mod window;
 
 pub(super) use window::SettingsPanel;
@@ -20,6 +21,8 @@ use super::{Presence, PresenceEvent, send};
 use crate::settings::{Field, Settings};
 use crate::strings::{Strings, Text};
 
+gpui_kit::actions!(settings, [NextTab, PreviousTab]);
+
 pub(super) struct SettingsView {
     pub(super) model: Entity<Settings>,
     pub(super) owner: WeakEntity<Presence>,
@@ -36,6 +39,7 @@ pub(super) struct SettingsView {
     pub(super) stop: bool,
     _events: Vec<Subscription>,
     _watch: Subscription,
+    _focus_lost: Subscription,
     /// Redraws the effective rate when the window's display or its refresh changes.
     _display: Subscription,
 }
@@ -48,7 +52,11 @@ impl SettingsView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Self {
-        cx.bind_keys([KeyBinding::new("escape", Escape, Some("SettingsPanel"))]);
+        cx.bind_keys([
+            KeyBinding::new("escape", Escape, Some("SettingsPanel")),
+            KeyBinding::new("ctrl-tab", NextTab, Some("SettingsPanel")),
+            KeyBinding::new("ctrl-shift-tab", PreviousTab, Some("SettingsPanel")),
+        ]);
         let inputs = [Field::Assistant, Field::User].map(|field| {
             cx.new(|cx| {
                 let mut input = InputState::new(window, cx);
@@ -116,6 +124,13 @@ impl SettingsView {
         });
         let view = cx.entity_id();
         let display = window.observe_window_display(move |_, cx| cx.notify(view));
+        let focus_lost = cx.on_focus_lost(window, |view, window, cx| {
+            window
+                .focus_lost_restore_target(cx)
+                .unwrap_or_else(|| view.focus.clone())
+                .focus(window, cx);
+            cx.notify();
+        });
         Self {
             model,
             owner,
@@ -132,6 +147,7 @@ impl SettingsView {
             stop: false,
             _events: subscriptions,
             _watch: watch,
+            _focus_lost: focus_lost,
             _display: display,
         }
     }
@@ -199,12 +215,22 @@ impl Render for SettingsView {
             .flex_col()
             .rounded_lg()
             .border_1()
-            .border_color(cx.theme().border)
+            .border_color(if self.focus.is_focused(window) {
+                cx.theme().ring
+            } else {
+                cx.theme().border
+            })
             .bg(cx.theme().popover)
             .text_color(cx.theme().popover_foreground)
             .key_context("SettingsPanel")
             .track_focus(&self.focus)
             .on_action(move |_: &Escape, _, _| send(&events, PresenceEvent::Escape))
+            .on_action(cx.listener(|view, _: &NextTab, window, cx| {
+                view.select_tab((view.tab + 1) % 3, window, cx);
+            }))
+            .on_action(cx.listener(|view, _: &PreviousTab, window, cx| {
+                view.select_tab((view.tab + 2) % 3, window, cx);
+            }))
             .child(
                 div()
                     .p_4()
@@ -234,6 +260,12 @@ impl Render for SettingsView {
                         .selected_index(self.tab)
                         .child(Tab::new().label(strings.get(Text::General)))
                         .child(Tab::new().label(strings.get(Text::Accounts)))
+                        .child({
+                            let tab = Tab::new().label(strings.get(Text::Voice));
+                            #[cfg(test)]
+                            let tab = tab.debug_selector(|| "settings-voice-tab".into());
+                            tab
+                        })
                         .on_click(cx.listener(|view, tab, window, cx| {
                             view.dock_notice = None;
                             view.taskbar_notice = None;
@@ -258,7 +290,8 @@ impl Render for SettingsView {
                             .gap_4()
                             .children((self.tab == 0).then(|| self.general(window, cx)))
                             .children((self.tab == 1).then(|| self.accounts(cx)))
-                            .children((self.tab == 1).then(|| self.claude(cx))),
+                            .children((self.tab == 1).then(|| self.claude(cx)))
+                            .children((self.tab == 2).then(|| self.voice(cx))),
                     ),
             )
             .children(self.stop.then(|| {

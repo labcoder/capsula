@@ -7,7 +7,7 @@ use async_channel::Receiver;
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
     ControlToBrain, ControlToShell, DataToBrain, DataToShell, Deleted, ErrorKey, Incarnation,
-    Phase, RunId, ThreadId, UserError,
+    Phase, RunId, RunOrigin, ThreadId, UserError,
 };
 
 use super::{Connection, Link, LinkEvent, LinkHandle, Session, Shared, start, welcome};
@@ -17,6 +17,224 @@ use crate::threads::Threads;
 use kumochi_protocol::message::{
     EventId, PageEvent, PageEventKind, PageOf, ThreadCursor, ThreadKind, ThreadRow,
 };
+
+#[test]
+fn correlation_keys_cross_real_control_frames_into_the_runs_owner() {
+    use kumochi_protocol::message::GestureId;
+
+    let link = attended("run-correlation");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    let mut runs = ready_runs(&session);
+    runs.submit("older", |_| true).expect("first turn");
+    runs.submit("second", |_| true).expect("second turn");
+    for (run, phase, origin) in [
+        (
+            10,
+            Phase::Listening,
+            RunOrigin::Hold {
+                gesture: GestureId(7),
+            },
+        ),
+        (11, Phase::Thinking, RunOrigin::Typed { turn: 2 }),
+    ] {
+        frame::write(
+            &mut &link.control,
+            &run_state(run, ThreadId(1), phase, Some(origin)),
+            Pipe::Control,
+        )
+        .expect("state written");
+        let LinkEvent::RunState {
+            generation,
+            run: received_run,
+            thread,
+            phase: received_phase,
+            error,
+            origin: received_origin,
+        } = next(&events)
+        else {
+            panic!("identified run state");
+        };
+        assert_eq!(generation, session.generation());
+        assert_eq!(received_run, RunId(run));
+        assert_eq!(thread, ThreadId(1));
+        assert_eq!(received_phase, phase);
+        assert_eq!(error, None);
+        assert_eq!(received_origin, Some(origin));
+        let applied = runs.apply_state(received_run, thread, received_phase, received_origin);
+        assert!(applied.visible);
+        assert_eq!(applied.stop, None);
+        assert_eq!(runs.kept(), [6]);
+    }
+    frame::write(
+        &mut &link.control,
+        &ControlToShell::TurnRefused {
+            turn: 1,
+            thread: Some(ThreadId(1)),
+        },
+        Pipe::Control,
+    )
+    .expect("refusal written");
+    let LinkEvent::TurnRefused {
+        generation,
+        turn,
+        thread,
+    } = next(&events)
+    else {
+        panic!("identified refusal");
+    };
+    assert_eq!(generation, session.generation());
+    assert_eq!(turn, 1);
+    assert_eq!(thread, Some(ThreadId(1)));
+    runs.refused(turn, thread);
+    let (applied, _) = runs.apply_run_state(
+        RunId(11),
+        ThreadId(1),
+        Phase::Failed,
+        Some(ErrorKey::SessionEnded.into()),
+        None,
+    );
+    assert_eq!(applied.restore.as_deref(), Some("second"));
+    assert_eq!(runs.kept(), Vec::<usize>::new());
+    drop(link.control);
+    assert!(link.link.join().expect("joined"));
+}
+
+#[test]
+fn voice_status_crosses_the_real_control_pipe_with_its_connection_generation() {
+    use kumochi_protocol::message::{PartState, VoiceView};
+
+    let link = attended("voice-status");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    for speech_input in [
+        PartState::Ready,
+        PartState::Unloaded,
+        PartState::NotInstalled,
+    ] {
+        frame::write(
+            &mut &link.control,
+            &ControlToShell::Voice(VoiceView {
+                speech_input,
+                spoken_replies: PartState::NotInstalled,
+            }),
+            Pipe::Control,
+        )
+        .expect("voice written");
+        let LinkEvent::Voice {
+            generation,
+            speech_input: received,
+        } = next(&events)
+        else {
+            panic!("voice status");
+        };
+        assert_eq!(generation, session.generation());
+        assert_eq!(received, speech_input);
+    }
+    drop(link.control);
+    assert!(link.link.join().expect("joined"));
+}
+
+#[test]
+fn capture_terminals_cross_the_real_control_pipe_with_reader_generation() {
+    use kumochi_protocol::message::{CaptureFailure, CaptureFor, GestureId};
+    let link = attended("capture-terminals");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    for capture_for in [CaptureFor::Gesture(GestureId(7)), CaptureFor::Turn(7)] {
+        frame::write(
+            &mut &link.control,
+            &ControlToShell::CaptureDone { capture_for },
+            Pipe::Control,
+        )
+        .expect("done written");
+        let LinkEvent::CaptureDone {
+            generation,
+            capture_for: received,
+        } = next(&events)
+        else {
+            panic!("capture done");
+        };
+        assert_eq!(generation, session.generation());
+        assert_eq!(received, capture_for);
+        for reason in [
+            CaptureFailure::ExclusionUnavailable,
+            CaptureFailure::Cancelled,
+            CaptureFailure::Unavailable,
+        ] {
+            frame::write(
+                &mut &link.control,
+                &ControlToShell::CaptureFailed {
+                    capture_for,
+                    reason,
+                },
+                Pipe::Control,
+            )
+            .expect("failure written");
+            let LinkEvent::CaptureFailed {
+                generation,
+                capture_for: received,
+                reason: category,
+            } = next(&events)
+            else {
+                panic!("capture failed");
+            };
+            assert_eq!(generation, session.generation());
+            assert_eq!(received, capture_for);
+            assert_eq!(category, reason);
+        }
+    }
+    drop(link.control);
+    assert!(link.link.join().expect("joined"));
+}
+
+#[test]
+fn lapse_notification_is_only_session_fenced_bounded_queue_acceptance() {
+    use kumochi_protocol::message::LeaseGeneration;
+    let (_brain, pipe) = pair("lapse-outbox");
+    let link = LinkHandle::detached();
+    let session = Session::detached(7, Incarnation(1));
+    let (control, received) = async_channel::bounded(1);
+    let (data, _data_received) = async_channel::bounded(1);
+    *link.shared.outbox.lock().expect("outbox lock") = Some(super::Outbox {
+        generation: 7,
+        control,
+        data,
+        pipe: Arc::new(pipe),
+        submits: std::sync::atomic::AtomicU32::new(0),
+    });
+    assert!(link.send_control(&session, ControlToBrain::Pong));
+    assert!(!link.send_control(
+        &session,
+        ControlToBrain::ExclusionLapsed {
+            lease: LeaseGeneration(1)
+        }
+    ));
+    assert_eq!(
+        received.try_recv().expect("original queue item"),
+        ControlToBrain::Pong
+    );
+    let old = Session::detached(6, Incarnation(1));
+    assert!(!link.send_control(
+        &old,
+        ControlToBrain::ExclusionLapsed {
+            lease: LeaseGeneration(1)
+        }
+    ));
+    assert!(received.is_empty());
+    assert!(link.send_control(
+        &session,
+        ControlToBrain::ExclusionLapsed {
+            lease: LeaseGeneration(1)
+        }
+    ));
+    assert_eq!(
+        received.try_recv().expect("queued notification"),
+        ControlToBrain::ExclusionLapsed {
+            lease: LeaseGeneration(1)
+        }
+    );
+}
 
 #[test]
 #[expect(
@@ -312,6 +530,10 @@ pub(crate) struct Attended {
 }
 
 pub(crate) fn attended(label: &str) -> Attended {
+    attended_from(label, 0)
+}
+
+fn attended_from(label: &str, previous_generation: u64) -> Attended {
     let (control, shell_control) = pair(&format!("{label}-control"));
     let (data, shell_data) = pair(&format!("{label}-data"));
     control.set_timeout(Some(PATIENCE));
@@ -320,7 +542,10 @@ pub(crate) fn attended(label: &str) -> Attended {
     let link = Link {
         brain: PathBuf::new(),
         session: 0,
-        shared: Arc::new(Shared::default()),
+        shared: Arc::new(Shared {
+            generations: std::sync::atomic::AtomicU64::new(previous_generation),
+            ..Shared::default()
+        }),
     };
     let (handle, start) = start(link, sender);
     let connection = Connection {
@@ -336,6 +561,35 @@ pub(crate) fn attended(label: &str) -> Attended {
         data: Arc::new(data),
         link,
     }
+}
+
+#[test]
+fn the_last_reader_generation_is_usable_but_exhaustion_never_wraps() {
+    let link = attended_from("last-generation", u64::MAX - 1);
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    assert_eq!(session.generation(), u64::MAX);
+    drop(link.control);
+    assert!(link.link.join().expect("last session joined"));
+
+    let link = attended_from("exhausted-generation", u64::MAX);
+    let events = patient(link.events);
+    assert!(matches!(
+        next(&events),
+        LinkEvent::State(super::LinkState::Failed)
+    ));
+    assert!(!link.link.join().expect("exhausted session joined"));
+    assert_eq!(
+        link.handle
+            .shared
+            .generations
+            .load(std::sync::atomic::Ordering::SeqCst),
+        u64::MAX
+    );
+    assert!(!link.handle.send_control(
+        &Session::detached(u64::MAX, Incarnation(1)),
+        ControlToBrain::Pong
+    ));
 }
 
 #[test]
@@ -619,7 +873,7 @@ fn nothing_from_the_brain_comes_before_connected_and_frames_carry_their_size() {
 fn pings_are_answered_and_run_states_passed_on() {
     let link = attended("ping");
     let events = patient(link.events);
-    let _session = connected(next(&events));
+    let session = connected(next(&events));
     frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control).expect("ping");
     let pong = frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control);
     assert_eq!(pong.expect("read"), Some(ControlToBrain::Pong));
@@ -634,11 +888,13 @@ fn pings_are_answered_and_run_states_passed_on() {
     assert!(matches!(
         next(&events),
         LinkEvent::RunState {
+            generation,
+            origin: None,
             run: RunId(2),
             thread: ThreadId(3),
             phase: Phase::Failed,
             error: Some(error),
-        } if error.key() == ErrorKey::SignInNeeded
+        } if generation == session.generation() && error.key() == ErrorKey::SignInNeeded
     ));
     drop(link.control);
     assert!(link.link.join().expect("joined"));
@@ -1254,8 +1510,12 @@ fn an_ended_connection_s_sends_and_credit_never_reach_the_next() {
 fn apply(runs: &mut Runs, handle: &LinkHandle, event: LinkEvent) -> u32 {
     match event {
         LinkEvent::RunState {
-            run, thread, phase, ..
-        } => runs.apply_state(run, thread, phase).credit,
+            run,
+            thread,
+            phase,
+            origin,
+            ..
+        } => runs.apply_state(run, thread, phase, origin).credit,
         LinkEvent::Data { message, bytes, .. } => runs.apply_data(message, bytes),
         LinkEvent::ThreadDeleted {
             thread,
@@ -1266,8 +1526,8 @@ fn apply(runs: &mut Runs, handle: &LinkHandle, event: LinkEvent) -> u32 {
             handle.settle_delete(thread);
             credit
         }
-        LinkEvent::TurnRefused => {
-            runs.refused();
+        LinkEvent::TurnRefused { turn, thread, .. } => {
+            runs.refused(turn, thread);
             0
         }
         other => panic!("unexpected {other:?}"),
@@ -1372,7 +1632,7 @@ fn a_delete_counts_the_turns_queued_before_it_and_runs_settle_the_brain_s_answer
         "held for its run's state"
     );
     let answers = [
-        run_state(1, u, Phase::Thinking),
+        run_state(1, u, Phase::Thinking, Some(RunOrigin::Typed { turn: 1 })),
         ControlToShell::ThreadDeleted {
             thread: t,
             outcome: Deleted::Hidden,
@@ -1382,7 +1642,7 @@ fn a_delete_counts_the_turns_queued_before_it_and_runs_settle_the_brain_s_answer
             turn: 2,
             thread: Some(t),
         },
-        run_state(1, u, Phase::Done),
+        run_state(1, u, Phase::Done, None),
     ];
     let mut credit = Vec::new();
     for answer in answers {
@@ -1504,6 +1764,7 @@ fn a_delete_answered_before_a_new_brain_never_fences_the_new_brain_s_runs() {
     );
 
     // The new brain numbers its runs afresh, so its run 4 isn't the deleted thread's.
+    assert!(runs.select_thread(Some(u)));
     runs.submit("next", |turn| handle.send_data(&b, turn))
         .expect("queued");
     assert_eq!(
@@ -1511,13 +1772,13 @@ fn a_delete_answered_before_a_new_brain_never_fences_the_new_brain_s_runs() {
         Some(DataToBrain::TextSubmit {
             turn: 1,
             screen: kumochi_protocol::message::ScreenChoice::None,
-            thread: Some(ThreadId(1)),
+            thread: Some(u),
             text: "next".into(),
         })
     );
     frame::write(
         &mut &b_control,
-        &run_state(4, u, Phase::Answering),
+        &run_state(4, u, Phase::Answering, Some(RunOrigin::Typed { turn: 1 })),
         Pipe::Control,
     )
     .expect("written");
@@ -1539,10 +1800,14 @@ fn a_delete_answered_before_a_new_brain_never_fences_the_new_brain_s_runs() {
     assert!(link.join().expect("joined"));
 }
 
-fn run_state(run: u64, thread: ThreadId, phase: Phase) -> ControlToShell {
+fn run_state(
+    run: u64,
+    thread: ThreadId,
+    phase: Phase,
+    origin: Option<RunOrigin>,
+) -> ControlToShell {
     ControlToShell::RunState {
-        origin: (phase == Phase::Thinking)
-            .then_some(kumochi_protocol::message::RunOrigin::Typed { turn: 1 }),
+        origin,
         run: RunId(run),
         thread,
         phase,

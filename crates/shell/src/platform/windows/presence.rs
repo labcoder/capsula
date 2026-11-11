@@ -44,7 +44,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_THICKFRAME,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowThreadProcessId, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
+    GetWindowDisplayAffinity, GetWindowThreadProcessId, SetWindowDisplayAffinity,
+    WDA_EXCLUDEFROMCAPTURE, WINDOW_DISPLAY_AFFINITY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     WM_CANCELMODE, WM_CAPTURECHANGED, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_RBUTTONDOWN,
@@ -172,6 +173,8 @@ pub(crate) enum PresenceError {
 struct Hover {
     events: Sender<PresenceEvent>,
     inside: Cell<bool>,
+    destroyed: Rc<Cell<bool>>,
+    pointer: bool,
 }
 
 impl Hover {
@@ -179,6 +182,8 @@ impl Hover {
         Self {
             events,
             inside: Cell::new(false),
+            destroyed: Rc::new(Cell::new(false)),
+            pointer: true,
         }
     }
 
@@ -398,8 +403,27 @@ impl PresenceNative {
     ///
     /// # Errors
     /// Fails when Windows refuses the affinity.
-    pub(crate) fn set_capture(&self, capture: Capture) -> Result<(), PresenceError> {
-        set_affinity(self.hwnd, capture)
+    pub(crate) fn affinity(&self) -> Result<Affinity, PresenceError> {
+        snapshot_affinity(self.hwnd, Rc::clone(&self.state().hover.destroyed))
+    }
+
+    pub(crate) fn exclude(&self, prior: &Affinity) -> Result<(), PresenceError> {
+        prior.apply(
+            self.hwnd,
+            &self.state().hover.destroyed,
+            WDA_EXCLUDEFROMCAPTURE,
+        )
+    }
+
+    pub(crate) fn restore_affinity(&self, prior: &Affinity) -> Result<(), PresenceError> {
+        if prior.gone() {
+            return Ok(());
+        }
+        prior.apply(
+            self.hwnd,
+            &self.state().hover.destroyed,
+            WINDOW_DISPLAY_AFFINITY(prior.value),
+        )
     }
 
     /// `--gate-observer` only: stamps frame completions, harness repaint requests and tagged
@@ -489,6 +513,8 @@ impl Drop for PresenceNative {
             // SAFETY: `hwnd` was created by this thread and nothing else destroys it.
             if let Err(error) = unsafe { DestroyWindow(self.hwnd) } {
                 tracing::warn!(%error, "can't destroy the dock proxy");
+            } else {
+                self.state().hover.destroyed.set(true);
             }
         }
         // SAFETY: consumes this owner's original Rc::into_raw reference after detaching the window.
@@ -580,19 +606,22 @@ pub(crate) fn configure_presence_window(
     } {
         tracing::debug!(%error, "can't remove DWM corner rounding");
     }
-    if surface == PresenceSurface::Text {
-        return Ok(());
-    }
-    subclass_hover(hwnd, events)
+    subclass_hover(hwnd, events, surface)
 }
 
 /// Installs `hover_subclass` on `hwnd` once, sending to `events`.
-fn subclass_hover(hwnd: HWND, events: Sender<PresenceEvent>) -> Result<(), PresenceError> {
+fn subclass_hover(
+    hwnd: HWND,
+    events: Sender<PresenceEvent>,
+    surface: PresenceSurface,
+) -> Result<(), PresenceError> {
     // SAFETY: `hwnd` is live; this only asks whether our subclass is installed.
     if unsafe { GetWindowSubclass(hwnd, Some(hover_subclass), HOVER_SUBCLASS_ID, None) }.as_bool() {
         return Ok(());
     }
-    let hover = Box::into_raw(Box::new(Hover::new(events)));
+    let mut hover = Hover::new(events);
+    hover.pointer = surface != PresenceSurface::Text;
+    let hover = Box::into_raw(Box::new(hover));
     // SAFETY: `hwnd` is live; the subclass owns `hover` and frees it on WM_NCDESTROY.
     let installed = unsafe {
         SetWindowSubclass(
@@ -644,29 +673,86 @@ fn hide(hwnd: HWND) -> windows::core::Result<()> {
     unsafe { SetWindowPos(hwnd, None, 0, 0, 0, 0, flags) }
 }
 
-/// Whether screenshots and recordings may show a presence window.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Capture {
-    Excluded,
-    Allowed,
+#[derive(Debug)]
+pub(crate) struct Affinity {
+    value: u32,
+    destroyed: Rc<Cell<bool>>,
 }
 
-/// Keeps a presence window out of screenshots and recordings, or lets it back in.
-///
-/// # Errors
-/// Fails when the window has no Win32 handle or Windows refuses the affinity.
-pub(crate) fn set_capture(window: &Window, capture: Capture) -> Result<(), PresenceError> {
-    set_affinity(hwnd_of(window)?, capture)
+impl Affinity {
+    pub(crate) fn gone(&self) -> bool {
+        self.destroyed.get()
+    }
+
+    fn apply(
+        &self,
+        hwnd: HWND,
+        life: &Rc<Cell<bool>>,
+        value: WINDOW_DISPLAY_AFFINITY,
+    ) -> Result<(), PresenceError> {
+        if self.gone() || !Rc::ptr_eq(&self.destroyed, life) || hwnd.is_invalid() {
+            return Err(PresenceError::NotWin32);
+        }
+        // SAFETY: the live owner's destruction witness matches this receipt on the UI thread.
+        unsafe { SetWindowDisplayAffinity(hwnd, value) }?;
+        Ok(())
+    }
 }
 
-fn set_affinity(hwnd: HWND, capture: Capture) -> Result<(), PresenceError> {
-    let affinity = match capture {
-        Capture::Excluded => WDA_EXCLUDEFROMCAPTURE,
-        Capture::Allowed => WDA_NONE,
-    };
-    // SAFETY: `hwnd` is this thread's live top-level window.
-    unsafe { SetWindowDisplayAffinity(hwnd, affinity) }?;
-    Ok(())
+fn snapshot_affinity(hwnd: HWND, destroyed: Rc<Cell<bool>>) -> Result<Affinity, PresenceError> {
+    if hwnd.is_invalid() || destroyed.get() {
+        return Err(PresenceError::NotWin32);
+    }
+    let mut value = 0;
+    // SAFETY: the current owner supplies its live window and writable DWORD.
+    unsafe { GetWindowDisplayAffinity(hwnd, &raw mut value) }?;
+    Ok(Affinity { value, destroyed })
+}
+
+fn window_life(hwnd: HWND) -> Result<Rc<Cell<bool>>, PresenceError> {
+    let mut data = 0;
+    // SAFETY: the current GPUI Window owns hwnd; only this module installs this subclass/id.
+    if !unsafe {
+        GetWindowSubclass(
+            hwnd,
+            Some(hover_subclass),
+            HOVER_SUBCLASS_ID,
+            Some(&raw mut data),
+        )
+    }
+    .as_bool()
+    {
+        return Err(PresenceError::Subclass);
+    }
+    let hover = std::ptr::with_exposed_provenance::<Hover>(data);
+    // SAFETY: the installed subclass owns this Hover until this UI thread dispatches WM_NCDESTROY.
+    let hover = unsafe { hover.as_ref() }.ok_or(PresenceError::Subclass)?;
+    Ok(Rc::clone(&hover.destroyed))
+}
+
+pub(crate) fn window_affinity(window: &Window) -> Result<Affinity, PresenceError> {
+    let hwnd = hwnd_of(window)?;
+    snapshot_affinity(hwnd, window_life(hwnd)?)
+}
+
+pub(crate) fn exclude_window(window: &Window, prior: &Affinity) -> Result<(), PresenceError> {
+    let hwnd = hwnd_of(window)?;
+    prior.apply(hwnd, &window_life(hwnd)?, WDA_EXCLUDEFROMCAPTURE)
+}
+
+pub(crate) fn restore_window_affinity(
+    window: &Window,
+    prior: &Affinity,
+) -> Result<(), PresenceError> {
+    if prior.gone() {
+        return Ok(());
+    }
+    let hwnd = hwnd_of(window)?;
+    prior.apply(
+        hwnd,
+        &window_life(hwnd)?,
+        WINDOW_DISPLAY_AFFINITY(prior.value),
+    )
 }
 
 /// The window that was in front before Kumochi activated one of its own, with its process, so
@@ -974,6 +1060,9 @@ unsafe extern "system" fn proxy_proc(
         unsafe { Rc::increment_strong_count(state) };
         // SAFETY: consumes the strong reference added immediately above, not the owner's reference.
         let state = unsafe { Rc::from_raw(state) };
+        if message == WM_NCDESTROY {
+            state.hover.destroyed.set(true);
+        }
         if state.keys.on_message(hwnd, message, wparam, lparam) {
             return LRESULT(0);
         }
@@ -1068,6 +1157,11 @@ unsafe extern "system" fn hover_subclass(
     // SAFETY: `data` is the Hover boxed in `configure_presence_window`, freed only on
     // WM_NCDESTROY. Called only before `forward`, which can destroy the window.
     let events = || unsafe { hover.as_ref() }.map(|hover| &hover.events);
+    // SAFETY: the subclass owns Hover until WM_NCDESTROY; no native call has run yet.
+    let pointer = unsafe { hover.as_ref() }.is_some_and(|hover| hover.pointer);
+    if !pointer && message != WM_NCDESTROY {
+        return forward();
+    }
     match message {
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE.try_into().unwrap_or(isize::MAX)),
         WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN => {
@@ -1104,6 +1198,10 @@ unsafe extern "system" fn hover_subclass(
             }
         }
         WM_NCDESTROY => {
+            // SAFETY: the subclass owns Hover until this final destruction message.
+            if let Some(hover) = unsafe { hover.as_ref() } {
+                hover.destroyed.set(true);
+            }
             // SAFETY: on the window's thread, during destruction, for this subclass. A failed
             // removal leaves a subclass on a window that is going away.
             let _removed = unsafe { RemoveWindowSubclass(hwnd, Some(hover_subclass), id) };
@@ -1125,7 +1223,8 @@ mod tests {
     };
 
     use super::{
-        PresenceEvent, focus_input, hide, input, proxy_proc, signed_words, subclass_hover,
+        PresenceEvent, PresenceSurface, focus_input, hide, input, proxy_proc, signed_words,
+        subclass_hover,
     };
     use kumochi_protocol::constants::FOCUS_INPUT_MARKER;
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -1196,7 +1295,7 @@ mod tests {
         let stub = unsafe { SetWindowSubclass(hwnd, Some(nested_releases), 1, destroy) };
         assert!(stub.as_bool());
         let (events, received) = async_channel::unbounded();
-        subclass_hover(hwnd, events).unwrap();
+        subclass_hover(hwnd, events, PresenceSurface::Overlay).unwrap();
         (hwnd, received)
     }
 

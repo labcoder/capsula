@@ -53,6 +53,9 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
         });
         let (threads, chat) = Threads::pair();
         let presence = cx.new(|cx| Presence {
+            exclusion: super::exclusion::Exclusion::default(),
+            exclusion_timer: None,
+            exclusion_fixture: None,
             input_windows: platform::OverlayWindows::default(),
             native,
             dock_window,

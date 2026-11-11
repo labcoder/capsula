@@ -1,7 +1,7 @@
 use gpui_kit::{Entity, Focusable as _, TestAppContext};
 use kumochi_protocol::message::{
     AccountOp, AccountView, Action, ControlToBrain, DataToBrain, ErrorKey, Incarnation, Phase,
-    RunId, ScreenChoice, ThreadId, UserError,
+    RunId, RunOrigin, ScreenChoice, ThreadId, UserError,
 };
 
 use super::Source;
@@ -54,15 +54,257 @@ fn receive(owner: &Entity<Presence>, events: Vec<LinkEvent>, cx: &mut TestAppCon
     });
 }
 
-fn retry_failure(thread: u64) -> Vec<LinkEvent> {
+#[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one reconnect flow checks every stale-key side effect before current-session recovery"
+)]
+fn old_connection_keys_cannot_touch_reused_turns_after_either_reconnect(cx: &mut TestAppContext) {
+    use crate::escape::Activity;
+    use crate::link::LinkState;
+    use crate::runs::Target;
+    use kumochi_protocol::message::{DataToShell, Deleted, PageOf};
+
+    for (incarnation, run) in [(Incarnation(1), RunId(2)), (Incarnation(2), RunId(1))] {
+        let (owner, data, control) = ready(cx);
+        owner.update(cx, |owner, _| {
+            owner
+                .runs
+                .submit("old connection", |_| true)
+                .expect("old turn");
+        });
+        receive(
+            &owner,
+            vec![LinkEvent::RunState {
+                generation: 1,
+                run: RunId(1),
+                thread: ThreadId(1),
+                phase: Phase::Thinking,
+                error: None,
+                origin: Some(RunOrigin::Typed { turn: 1 }),
+            }],
+            cx,
+        );
+        receive(
+            &owner,
+            vec![
+                LinkEvent::State(LinkState::Reconnecting),
+                LinkEvent::Connected(Session::detached(2, incarnation)),
+            ],
+            cx,
+        );
+        owner.update(cx, |owner, _| {
+            owner.runs.settings(ThreadId(1));
+            owner
+                .runs
+                .apply_scenes(&[])
+                .expect("new connection membership");
+            assert!(owner.runs.select_thread(None));
+            owner
+                .runs
+                .submit("new session text", |_| true)
+                .expect("reused turn 1");
+            assert!(owner.runs.confirm_delete(ThreadId(9)));
+            assert_eq!(owner.runs.deleted(ThreadId(9), Deleted::Removed, None), 0);
+            assert_eq!(owner.runs.apply_data(DataToShell::RunEnd { run }, 17), 0);
+        });
+        draft(&owner, "", cx);
+        while data.try_recv().is_ok() {}
+        while control.try_recv().is_ok() {}
+        owner.update(cx, |owner, cx| {
+            owner.text.as_mut().expect("typing fixture").typing.open();
+            owner.chat.update(cx, |chat, cx| {
+                chat.show_for(None);
+                cx.notify();
+            });
+            assert!(owner.text_open());
+            let chat = owner.chat.read(cx);
+            assert_eq!(chat.open, None);
+            assert!(chat.listing(), "a shown normal history read is waiting");
+            assert!(!chat.reading());
+            assert_eq!(owner.activity, Activity::default());
+            let view = owner.text.as_ref().expect("typing fixture").view.read(cx);
+            assert_eq!(
+                (view.target, view.stop, view.retry),
+                (Target::Kumo, false, false)
+            );
+            assert_eq!(view.recovery, None);
+            assert_eq!(view.notice, None);
+        });
+        receive(
+            &owner,
+            vec![
+                LinkEvent::TurnRefused {
+                    generation: 1,
+                    turn: 1,
+                    thread: None,
+                },
+                LinkEvent::RunState {
+                    generation: 1,
+                    run,
+                    thread: ThreadId(7),
+                    phase: Phase::Failed,
+                    error: Some(ErrorKey::SessionEnded.into()),
+                    origin: Some(RunOrigin::Typed { turn: 1 }),
+                },
+            ],
+            cx,
+        );
+        owner.read_with(cx, |owner, cx| {
+            assert_eq!(owner.runs.kept(), [16]);
+            assert_eq!(owner.runs.target(), Target::New);
+            assert!(owner.runs.holds(ThreadId(9)));
+            assert_eq!(owner.chat_notice.shown(), None);
+            assert_eq!(owner.session.as_ref().map(Session::granted), Some(0));
+            assert!(owner.text_open());
+            assert_eq!(owner.activity, Activity::default());
+            assert_eq!(owner.chat.read(cx).open, None);
+            assert!(owner.chat.read(cx).listing());
+            assert!(!owner.chat.read(cx).reading());
+            let view = owner.text.as_ref().expect("typing fixture").view.read(cx);
+            assert_eq!(
+                (view.target, view.stop, view.retry),
+                (Target::Kumo, false, false)
+            );
+            assert_eq!(view.recovery, None);
+            assert_eq!(view.notice, None);
+            assert_eq!(
+                owner
+                    .text
+                    .as_ref()
+                    .expect("typing fixture")
+                    .input
+                    .read(cx)
+                    .value()
+                    .as_ref(),
+                ""
+            );
+        });
+        assert!(
+            data.is_empty(),
+            "no history/delete work for old-generation events"
+        );
+        assert!(control.is_empty(), "no Stop for old-generation events");
+
+        receive(
+            &owner,
+            vec![LinkEvent::TurnRefused {
+                generation: 2,
+                turn: 99,
+                thread: None,
+            }],
+            cx,
+        );
+        assert_eq!(
+            data.try_recv()
+                .expect("current event permits the waiting history read"),
+            DataToBrain::PageRequest {
+                request: 1,
+                page: PageOf::Threads {
+                    search: None,
+                    after: None
+                },
+            }
+        );
+        assert!(data.is_empty(), "exactly one waiting history request");
+        assert!(control.is_empty());
+        owner.read_with(cx, |owner, cx| {
+            assert_eq!(owner.runs.kept(), [16]);
+            assert_eq!(owner.runs.target(), Target::New);
+            assert!(owner.runs.holds(ThreadId(9)));
+            assert_eq!(owner.session.as_ref().map(Session::granted), Some(0));
+            assert_eq!(
+                owner.activity,
+                Activity {
+                    working: true,
+                    ..Activity::default()
+                }
+            );
+            let view = owner.text.as_ref().expect("typing fixture").view.read(cx);
+            assert_eq!(
+                (view.target, view.stop, view.retry),
+                (Target::New, false, false)
+            );
+            assert_eq!(view.recovery, None);
+            assert_eq!(view.notice, None);
+        });
+
+        receive(
+            &owner,
+            vec![LinkEvent::RunState {
+                generation: 2,
+                run,
+                thread: ThreadId(7),
+                phase: Phase::Failed,
+                error: Some(ErrorKey::SessionEnded.into()),
+                origin: Some(RunOrigin::Typed { turn: 1 }),
+            }],
+            cx,
+        );
+        owner.read_with(cx, |owner, cx| {
+            assert_eq!(owner.runs.kept(), Vec::<usize>::new());
+            assert_eq!(owner.runs.target(), Target::Task(ThreadId(7)));
+            assert!(!owner.runs.holds(ThreadId(9)));
+            assert!(
+                !owner.runs.working(),
+                "both state and held RunEnd have completed"
+            );
+            assert_eq!(owner.session.as_ref().map(Session::granted), Some(17));
+            assert_eq!(
+                owner
+                    .text
+                    .as_ref()
+                    .expect("typing fixture")
+                    .input
+                    .read(cx)
+                    .value()
+                    .as_ref(),
+                "new session text"
+            );
+        });
+        draft(&owner, "leave this newer draft", cx);
+        receive(
+            &owner,
+            vec![LinkEvent::RunState {
+                generation: 2,
+                run,
+                thread: ThreadId(7),
+                phase: Phase::Failed,
+                error: Some(ErrorKey::SessionEnded.into()),
+                origin: None,
+            }],
+            cx,
+        );
+        owner.read_with(cx, |owner, cx| {
+            assert_eq!(owner.session.as_ref().map(Session::granted), Some(17));
+            assert_eq!(
+                owner
+                    .text
+                    .as_ref()
+                    .expect("typing fixture")
+                    .input
+                    .read(cx)
+                    .value()
+                    .as_ref(),
+                "leave this newer draft"
+            );
+        });
+    }
+}
+
+fn retry_failure(thread: u64, turn: u32) -> Vec<LinkEvent> {
     vec![
         LinkEvent::RunState {
+            generation: 1,
+            origin: Some(RunOrigin::Typed { turn }),
             run: RunId(1),
             thread: ThreadId(thread),
             phase: Phase::Answering,
             error: None,
         },
         LinkEvent::RunState {
+            generation: 1,
+            origin: None,
             run: RunId(1),
             thread: ThreadId(thread),
             phase: Phase::Failed,
@@ -108,7 +350,7 @@ fn recovery_buttons_follow_live_drafts_and_dispatch_then_dismiss_the_named_failu
             text: "button retry".into(),
         }
     );
-    receive(&owner, retry_failure(9), cx);
+    receive(&owner, retry_failure(9, 1), cx);
     cx.run_until_parked();
     {
         let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
@@ -135,6 +377,8 @@ fn recovery_buttons_follow_live_drafts_and_dispatch_then_dismiss_the_named_failu
     receive(
         &owner,
         vec![LinkEvent::RunState {
+            generation: 1,
+            origin: Some(RunOrigin::Typed { turn: 2 }),
             run: RunId(2),
             thread: ThreadId(9),
             phase: Phase::Failed,
@@ -184,7 +428,7 @@ fn settings_only_waiting_changes_disable_and_reenable_the_retained_run_retry(
             text: "settings-only retry".into(),
         }
     );
-    receive(&owner, retry_failure(1), cx);
+    receive(&owner, retry_failure(1, 1), cx);
     cx.run_until_parked();
     let (window, settings) = owner.read_with(cx, |owner, _| {
         (
@@ -332,7 +576,7 @@ fn keyboard_recovery_returns_composer(control: RecoveryControl, cx: &mut TestApp
             text: "keyboard retry".into(),
         }
     );
-    receive(&owner, retry_failure(1), cx);
+    receive(&owner, retry_failure(1, 1), cx);
     let (window, input, received) = owner.update(cx, |owner, cx| {
         let text = owner.text.as_ref().expect("typing fixture");
         text.view.update(cx, |view, cx| {
@@ -408,7 +652,7 @@ fn retry_dispatches_the_exact_named_turn_once_including_new_adoption(cx: &mut Te
                 text: "retry café ✓".into(),
             }
         );
-        receive(&owner, retry_failure(9), cx);
+        receive(&owner, retry_failure(9, 1), cx);
         owner.update(cx, |owner, cx| {
             assert_eq!(
                 owner
@@ -469,7 +713,7 @@ fn retry_rechecks_owner_declared_action_and_draft_then_consumes_a_refusal(cx: &m
                 text: "original".into(),
             }
         );
-        receive(&owner, retry_failure(1), cx);
+        receive(&owner, retry_failure(1, 1), cx);
         owner.update(cx, |owner, cx| {
             owner
                 .recover(Source::Run(RunId(2)), Action::Retry, cx)
@@ -852,6 +1096,8 @@ fn actual_history_older_sends_the_exact_cursor_and_keeps_the_draft(cx: &mut Test
 
 fn renewal_run() -> LinkEvent {
     LinkEvent::RunState {
+        generation: 1,
+        origin: None,
         run: RunId(1),
         thread: ThreadId(1),
         phase: Phase::Failed,
@@ -913,6 +1159,8 @@ fn an_accepted_run_retry_starts_the_next_renewal_incident(cx: &mut TestAppContex
         &owner,
         vec![
             LinkEvent::RunState {
+                generation: 1,
+                origin: Some(RunOrigin::Typed { turn: 1 }),
                 run: RunId(1),
                 thread: ThreadId(1),
                 phase: Phase::Answering,
@@ -1027,7 +1275,7 @@ fn a_run_retry_waits_for_account_admission_and_uses_up_a_refused_attempt(cx: &mu
             text: "saved failed turn".into(),
         }
     );
-    receive(&owner, retry_failure(1), cx);
+    receive(&owner, retry_failure(1, 1), cx);
     owner.update(cx, |owner, cx| {
         owner.account_op(AccountOp::SignIn, cx);
         owner
@@ -1090,6 +1338,8 @@ fn actual_escape_stops_then_clears_then_dismisses_without_changing_the_draft(
     receive(
         &owner,
         vec![LinkEvent::RunState {
+            generation: 1,
+            origin: Some(RunOrigin::Typed { turn: 1 }),
             run: RunId(1),
             thread: ThreadId(1),
             phase: Phase::Answering,
@@ -1152,6 +1402,8 @@ fn renewal_uses_one_run_owned_surface_and_a_delayed_frame_cannot_restore_the_ban
         receive(
             &owner,
             vec![LinkEvent::RunState {
+                generation: 1,
+                origin: Some(RunOrigin::Typed { turn: 1 }),
                 run: RunId(1),
                 thread: ThreadId(1),
                 phase: Phase::Answering,

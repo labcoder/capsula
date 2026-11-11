@@ -150,7 +150,7 @@ mod tests {
     use crate::input::{Edge, Effect, Event, Gesture, Key};
 
     fn listening(at: Instant) -> Gesture {
-        let mut gesture = Gesture::default();
+        let mut gesture = Gesture::legacy_hold_fixture();
         for key in [Key::LeftControl, Key::LeftAlt] {
             gesture.handle(
                 Event::Key {

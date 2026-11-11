@@ -21,7 +21,7 @@ use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
     AccountView, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain, DataToShell,
     Deleted, GitHubView, Hello, Incarnation, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase, RunId,
-    SceneDescriptor, SceneDescriptorV1, SettingsView, ThreadId, UserError,
+    RunOrigin, SceneDescriptor, SceneDescriptorV1, SettingsView, ThreadId, UserError,
 };
 
 use kumochi_scene::deferred::Deferred;
@@ -63,6 +63,15 @@ pub(crate) enum LinkState {
 /// before `Connected`, and none of a connection's messages after its next state.
 #[derive(Debug)]
 pub(crate) enum LinkEvent {
+    CaptureDone {
+        generation: u64,
+        capture_for: kumochi_protocol::message::CaptureFor,
+    },
+    CaptureFailed {
+        generation: u64,
+        capture_for: kumochi_protocol::message::CaptureFor,
+        reason: kumochi_protocol::message::CaptureFailure,
+    },
     KeyStage {
         generation: u64,
         reply: ControlToShell,
@@ -79,6 +88,10 @@ pub(crate) enum LinkEvent {
     Account {
         generation: u64,
         view: AccountView,
+    },
+    Voice {
+        generation: u64,
+        speech_input: kumochi_protocol::message::PartState,
     },
     Connections {
         generation: u64,
@@ -101,10 +114,12 @@ pub(crate) enum LinkEvent {
     },
     /// A run's phase changed, from the control pipe.
     RunState {
+        generation: u64,
         run: RunId,
         thread: ThreadId,
         phase: Phase,
         error: Option<UserError>,
+        origin: Option<RunOrigin>,
     },
     /// A data frame, with its size on the pipe, header included, for the credit it earns once
     /// the UI has taken it, and the generation of the connection it came on.
@@ -131,8 +146,12 @@ pub(crate) enum LinkEvent {
         outcome: Deleted,
         last_run: Option<RunId>,
     },
-    /// The brain refused the oldest unanswered turn, from the control pipe.
-    TurnRefused,
+    /// The brain refused this connection's identified turn, from the control pipe.
+    TurnRefused {
+        generation: u64,
+        turn: u32,
+        thread: Option<ThreadId>,
+    },
     /// The brain changed a listed thread, from the control pipe.
     ThreadsChanged,
     /// A run asked to move the typed input, from connection `generation`'s control pipe.
@@ -709,7 +728,17 @@ impl Link {
         } = connection;
         let (control_out, control_queue) = async_channel::bounded(CONTROL_QUEUE);
         let (data_out, data_queue) = async_channel::bounded(DATA_QUEUE);
-        let generation = self.shared.generations.fetch_add(1, Ordering::SeqCst) + 1;
+        let Ok(previous) =
+            self.shared
+                .generations
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                    value.checked_add(1)
+                })
+        else {
+            let _notified = events.send_blocking(LinkEvent::State(LinkState::Failed));
+            return false;
+        };
+        let generation = previous + 1;
         let credit = Arc::new(Credit {
             bytes: AtomicU32::new(0),
             wake: data_out.downgrade(),
@@ -951,19 +980,32 @@ fn watch(
                     return;
                 }
             }
+            Ok(Some(ControlToShell::Voice(view))) => {
+                if events
+                    .send_blocking(LinkEvent::Voice {
+                        generation,
+                        speech_input: view.speech_input,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             Ok(Some(ControlToShell::RunState {
                 run,
                 thread,
                 phase,
                 error,
-                ..
+                origin,
             })) => {
                 if events
                     .send_blocking(LinkEvent::RunState {
+                        generation,
                         run,
                         thread,
                         phase,
                         error,
+                        origin,
                     })
                     .is_err()
                 {
@@ -997,8 +1039,15 @@ fn watch(
                     return;
                 }
             }
-            Ok(Some(ControlToShell::TurnRefused { .. })) => {
-                if events.send_blocking(LinkEvent::TurnRefused).is_err() {
+            Ok(Some(ControlToShell::TurnRefused { turn, thread })) => {
+                if events
+                    .send_blocking(LinkEvent::TurnRefused {
+                        generation,
+                        turn,
+                        thread,
+                    })
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -1087,17 +1136,37 @@ fn watch(
                     return;
                 }
             }
-            // shortcut: B3a releases the exclusion lease on Capture*; nothing holds one yet.
-            // Slice 7's PR 6 stops playback on SpeechRevoked; nothing plays yet. shortcut: nothing
-            // shows the voice parts yet; the Settings voice section will read Voice.
-            // NoVisual is the legacy run-level advisory, consumed without changing state.
+            Ok(Some(ControlToShell::CaptureDone { capture_for })) => {
+                if events
+                    .send_blocking(LinkEvent::CaptureDone {
+                        generation,
+                        capture_for,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Ok(Some(ControlToShell::CaptureFailed {
+                capture_for,
+                reason,
+            })) => {
+                if events
+                    .send_blocking(LinkEvent::CaptureFailed {
+                        generation,
+                        capture_for,
+                        reason,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            // Slice 7's PR 6 stops playback on SpeechRevoked; nothing plays yet.
             Ok(Some(
-                ControlToShell::CaptureDone { .. }
-                | ControlToShell::CaptureFailed { .. }
-                | ControlToShell::IssueRefused { .. }
+                ControlToShell::IssueRefused { .. }
                 | ControlToShell::SpeechRevoked { .. }
                 | ControlToShell::ThreadModelSet { .. }
-                | ControlToShell::Voice(_)
                 | ControlToShell::NoVisual { .. },
             )) => {}
             Ok(Some(ControlToShell::Welcome { .. } | ControlToShell::BuildMismatch { .. })) => {

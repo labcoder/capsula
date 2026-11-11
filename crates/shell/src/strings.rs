@@ -125,6 +125,30 @@ pub(crate) enum Text {
     GitHubCredentials,
     GitHubRefused,
     GitHubUnavailable,
+    Voice,
+    SpeechInput,
+    VoiceIdlePolicy,
+    VoiceKept,
+    Voice15Minutes,
+    Voice1Hour,
+    VoiceIdleHelp,
+    VoiceStatusUnknown,
+    VoiceNotInstalled,
+    VoiceVerifying,
+    VoiceDownloading,
+    VoiceLoading,
+    VoiceReady,
+    VoiceUnloaded,
+    VoiceInstalledFailed,
+    VoiceNotInstalledFailed,
+    VoiceDefaultModel,
+    VoiceInstallModel,
+    VoiceRetryModel,
+    VoiceLoadModel,
+    VoiceCancelSetup,
+    VoiceCancelHelp,
+    VoiceCancelAccessible,
+    VoiceRequestPending,
     AssistantName,
     UserName,
     UserNameHelp,
@@ -333,6 +357,30 @@ impl Text {
         GitHubCredentials,
         GitHubRefused,
         GitHubUnavailable,
+        Voice,
+        SpeechInput,
+        VoiceIdlePolicy,
+        VoiceKept,
+        Voice15Minutes,
+        Voice1Hour,
+        VoiceIdleHelp,
+        VoiceStatusUnknown,
+        VoiceNotInstalled,
+        VoiceVerifying,
+        VoiceDownloading,
+        VoiceLoading,
+        VoiceReady,
+        VoiceUnloaded,
+        VoiceInstalledFailed,
+        VoiceNotInstalledFailed,
+        VoiceDefaultModel,
+        VoiceInstallModel,
+        VoiceRetryModel,
+        VoiceLoadModel,
+        VoiceCancelSetup,
+        VoiceCancelHelp,
+        VoiceCancelAccessible,
+        VoiceRequestPending,
         AssistantName,
         UserName,
         UserNameHelp,
@@ -544,6 +592,30 @@ impl Text {
             Self::GitHubCredentials => "github-credentials",
             Self::GitHubRefused => "github-refused",
             Self::GitHubUnavailable => "github-unavailable",
+            Self::Voice => "settings-voice",
+            Self::SpeechInput => "voice-speech-input",
+            Self::VoiceIdlePolicy => "voice-idle-policy",
+            Self::VoiceKept => "voice-idle-kept",
+            Self::Voice15Minutes => "voice-idle-15m",
+            Self::Voice1Hour => "voice-idle-1h",
+            Self::VoiceIdleHelp => "voice-idle-help",
+            Self::VoiceStatusUnknown => "voice-status-unknown",
+            Self::VoiceNotInstalled => "voice-not-installed",
+            Self::VoiceVerifying => "voice-verifying",
+            Self::VoiceDownloading => "voice-downloading",
+            Self::VoiceLoading => "voice-loading",
+            Self::VoiceReady => "voice-ready",
+            Self::VoiceUnloaded => "voice-unloaded",
+            Self::VoiceInstalledFailed => "voice-installed-failed",
+            Self::VoiceNotInstalledFailed => "voice-not-installed-failed",
+            Self::VoiceDefaultModel => "voice-default-model",
+            Self::VoiceInstallModel => "voice-install-model",
+            Self::VoiceRetryModel => "voice-retry-model",
+            Self::VoiceLoadModel => "voice-load-model",
+            Self::VoiceCancelSetup => "voice-cancel-setup",
+            Self::VoiceCancelHelp => "voice-cancel-help",
+            Self::VoiceCancelAccessible => "voice-cancel-accessible",
+            Self::VoiceRequestPending => "voice-request-pending",
             Self::AssistantName => "settings-assistant-name",
             Self::UserName => "settings-user-name",
             Self::UserNameHelp => "settings-user-name-help",
@@ -832,6 +904,23 @@ mod tests {
             );
         }
         assert_eq!(strings.get(Text::Connected), "Ready");
+    }
+
+    #[test]
+    fn cancellation_scope_is_available_in_the_buttons_accessible_name() {
+        let strings = Strings::english();
+        assert_eq!(
+            strings.error(&ErrorKey::VoiceLoad.into()),
+            "Voice couldn't start."
+        );
+        assert_eq!(
+            strings.get(Text::VoiceCancelHelp),
+            "Applies to pending setup for all voice features. Some loading or finishing work cannot be stopped. Installed files are kept."
+        );
+        assert_eq!(
+            strings.get(Text::VoiceCancelAccessible),
+            "Cancel voice setup. Applies to pending setup for all voice features. Some loading or finishing work cannot be stopped. Installed files are kept."
+        );
     }
 
     #[test]

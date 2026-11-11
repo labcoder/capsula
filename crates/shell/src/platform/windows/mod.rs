@@ -28,9 +28,9 @@ pub(crate) use overlay_input::OverlayWindows;
 pub(crate) use pipe::test_pair;
 pub(crate) use pipe::{PipeClient, session_id};
 pub(crate) use presence::{
-    Capture, Foreground, PresenceError, PresenceEvent, PresenceLabels, PresenceNative,
+    Affinity, Foreground, PresenceError, PresenceEvent, PresenceLabels, PresenceNative,
     PresenceSurface, activate_presence_window, configure_presence_window, cursor_position,
-    hide_presence_window, performance_counter, place_presence_window, restore_foreground,
-    set_capture, work_area,
+    exclude_window, hide_presence_window, performance_counter, place_presence_window,
+    restore_foreground, restore_window_affinity, window_affinity, work_area,
 };
 pub(crate) use process::launch_detached;

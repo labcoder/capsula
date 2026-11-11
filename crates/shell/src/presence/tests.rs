@@ -2,7 +2,8 @@ use std::{sync::Arc, time::Instant};
 
 use gpui_kit::TestAppContext;
 use kumochi_protocol::message::{
-    DataToShell, ErrorKey, Incarnation, Phase, RunId, SceneHeader, SceneId, ThreadId, UserError,
+    DataToShell, ErrorKey, Incarnation, Phase, RunId, RunOrigin, SceneHeader, SceneId, ThreadId,
+    UserError,
 };
 use kumochi_scene::{
     Record,
@@ -365,6 +366,8 @@ fn a_completed_visible_turn_and_its_reopened_first_page_both_replace_the_preview
             .link_events(
                 Batch::Plain(vec![
                     LinkEvent::RunState {
+                        generation: 1,
+                        origin: Some(RunOrigin::Typed { turn: 1 }),
                         run: RunId(1),
                         thread: ThreadId(1),
                         phase: Phase::Answering,
@@ -389,6 +392,8 @@ fn a_completed_visible_turn_and_its_reopened_first_page_both_replace_the_preview
             .link_events(
                 Batch::Plain(vec![
                     LinkEvent::RunState {
+                        generation: 1,
+                        origin: None,
                         run: RunId(1),
                         thread: ThreadId(1),
                         phase: Phase::Done,
@@ -442,9 +447,11 @@ fn stored_answer_is_visible(
 
 /// A reconnect failure as the first state naming `run`, then the run's last data frame, as the
 /// link delivers them in one batch.
-fn reconnect_failure(run: u32) -> Batch {
+fn reconnect_failure(run: u32, turn: u32) -> Batch {
     Batch::Plain(vec![
         LinkEvent::RunState {
+            generation: 1,
+            origin: Some(RunOrigin::Typed { turn }),
             run: RunId(run.into()),
             thread: ThreadId(1),
             phase: Phase::Failed,
@@ -665,15 +672,16 @@ fn a_reconnect_failure_restores_its_turn_only_into_an_empty_composer(cx: &mut Te
         (text.window, text.input.clone())
     });
     // The run, the turn typed for it, the composer when it fails, and the composer after.
-    for (run, typed, draft, after) in [
+    for (run, turn, typed, draft, after) in [
         (
+            1,
             1,
             "Exact draft: café ✓ 日本語",
             "",
             "Exact draft: café ✓ 日本語",
         ),
-        (2, "older failed turn", "newer draft", "newer draft"),
-        (3, "older failed turn", " ", " "),
+        (2, 2, "older failed turn", "newer draft", "newer draft"),
+        (3, 3, "older failed turn", " ", " "),
     ] {
         presence.update(cx, |this, _| {
             this.runs.submit(typed, |_| true).expect("sent");
@@ -684,7 +692,7 @@ fn a_reconnect_failure_restores_its_turn_only_into_an_empty_composer(cx: &mut Te
             })
             .expect("live typing window");
         presence.update(cx, |this, cx| {
-            this.link_events(reconnect_failure(run), cx)
+            this.link_events(reconnect_failure(run, turn), cx)
                 .expect("the batch applies");
         });
         assert_eq!(
