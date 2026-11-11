@@ -69,6 +69,41 @@ fn strict_records() {
     );
 }
 #[test]
+fn the_draw_tool_supplies_the_only_version_when_a_begin_omits_it() {
+    let unversioned = br#"{"begin":{"scene":"s","surface":"overlay","alt":"a"}}"#;
+    let missing = parse_record(unversioned).expect_err("the generic contract keeps v required");
+    assert_eq!(
+        (missing.path.as_str(), missing.code),
+        ("v", ErrorCode::MissingField)
+    );
+    assert_eq!(
+        parse_draw_record(unversioned).expect("the draw tool supplies v"),
+        parse_record(br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":"a"}}"#)
+            .expect("an explicit version")
+    );
+    for (json, path, code) in [
+        (
+            r#"{"begin":{"v":2,"scene":"s","surface":"overlay","alt":"a"}}"#,
+            "v",
+            ErrorCode::WrongVersion,
+        ),
+        (
+            r#"{"begin":{"scene":"s","surface":"overlay"}}"#,
+            "alt",
+            ErrorCode::MissingField,
+        ),
+        (
+            r#"{"begin":{"scene":"s","surface":"inline","alt":"a"}}"#,
+            "surface",
+            ErrorCode::Unsupported,
+        ),
+    ] {
+        let error = parse_draw_record(json.as_bytes()).expect_err("still refused");
+        assert_eq!((error.path.as_str(), error.code), (path, code), "{json}");
+    }
+}
+
+#[test]
 fn text_and_list_boundaries_are_not_truncated() {
     let accepted = Text::try_from("é".repeat(400));
     assert!(accepted.is_ok(), "400 Unicode scalars are legal");

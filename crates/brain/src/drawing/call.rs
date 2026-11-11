@@ -9,7 +9,7 @@ use kumochi_protocol::message::{
 };
 use kumochi_scene::{
     Admission, Begin, Budget, CallState, ErrorCode, FieldPath, Record, SceneState, Step, StepError,
-    TokenError, Tokenizer, WireId, parse_record,
+    TokenError, Tokenizer, WireId, parse_draw_record,
 };
 use serde::Deserialize;
 
@@ -334,7 +334,7 @@ impl Drawing {
             self.enqueue(job, out);
             return;
         }
-        let job = match parse_record(bytes) {
+        let job = match parse_draw_record(bytes) {
             Ok(record) => Job::Record {
                 run,
                 call: id,

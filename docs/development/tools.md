@@ -177,7 +177,9 @@ The ledger holds callers in `Drawing` while the reducer writes. The coordinator 
 each handoff an internal call id, separate from the model/MCP id and launch, and keeps
 the association in that run. Every `CallEnd`, including immediate refusal, write
 completion and preparation failure, settles through `drawing_output`; a fixture with
-no associated caller answers nobody. There is no session-level result buffer.
+no associated caller answers nobody. There is no session-level result buffer. An incomplete
+end the user didn't stop logs one warning there: its code and, for a refused record, the
+schema field path, never an id or anything else the model sent.
 
 A preflight refusal is recorded in the in-memory ledger. An executed call's actual
 committed-prefix result becomes `Running`, then one `CommitCall(LocalWrite::None)`.

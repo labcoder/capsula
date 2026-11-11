@@ -1,12 +1,21 @@
 //! Strict JSON decoding without propagating parser diagnostic text.
 
-use crate::{ErrorCode, FieldPath, Record, StepError, limits::MAX_RECORD_BYTES, record::Surface};
+use crate::{
+    ErrorCode, FieldPath, Record, StepError,
+    limits::MAX_RECORD_BYTES,
+    record::{Surface, Version},
+};
 
 /// Parses the closed 2D draw-tool surface, excluding even null solid-only fields.
 /// # Errors
 /// Returns the first typed decoding failure or an unsupported surface or 3D field.
 pub fn parse_draw_record(bytes: &[u8]) -> Result<Record, StepError> {
-    let record = parse_record(bytes)?;
+    let record = match parse_record(bytes) {
+        Err(error) if error.code == ErrorCode::MissingField && error.path.as_str() == "v" => {
+            parse_record(&versioned(bytes).ok_or(error)?)?
+        }
+        record => record?,
+    };
     if let Record::Begin(begin) = &record
         && begin.surface != Surface::Overlay
     {
@@ -34,6 +43,16 @@ pub fn parse_draw_record(bytes: &[u8]) -> Result<Record, StepError> {
         }
     }
     Ok(record)
+}
+
+/// The draw tool supplies the only scene version when a model's begin omits it.
+fn versioned(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut record: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    record
+        .get_mut("begin")?
+        .as_object_mut()?
+        .insert("v".into(), u32::from(Version::V1).into());
+    serde_json::to_vec(&record).ok()
 }
 
 /// Parses one closed record, never echoing drawing content in diagnostics.

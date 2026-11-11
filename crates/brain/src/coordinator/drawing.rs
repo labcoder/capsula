@@ -249,6 +249,14 @@ impl Coordinator {
             }
         }
         for end in output.calls {
+            // Codes and schema field paths only: the model's ids stay in its tool result.
+            match &end.error {
+                Some(crate::drawing::CallError::Step(error)) => {
+                    tracing::warn!(code = %error.code, field = %error.path, "draw call refused");
+                }
+                Some(crate::drawing::CallError::Interrupted) | None => {}
+                Some(error) => tracing::warn!(code = %error, "draw call stopped"),
+            }
             let key = self
                 .current
                 .as_ref()

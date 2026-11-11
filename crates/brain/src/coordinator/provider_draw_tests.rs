@@ -647,6 +647,69 @@ fn a_messages_start_object_without_fragments_streams_before_ready_and_draws() {
 }
 
 #[test]
+fn recorded_desk_draws_without_a_version_draw_their_steps() {
+    for (name, args, step) in [
+        (
+            "desk-1",
+            include_str!("../../fixtures/responses/draw_y_squared_1.json"),
+            "plot",
+        ),
+        (
+            "desk-2",
+            include_str!("../../fixtures/responses/draw_y_squared_2.json"),
+            "graph",
+        ),
+    ] {
+        let scratch = Scratch::new(name);
+        let mut store = store(&scratch);
+        let mut core = offered(vec![T]);
+        start(&mut core, name);
+        let chars: Vec<char> = args.chars().collect();
+        let mut streamed = Vec::new();
+        for chunk in chars.chunks(48) {
+            streamed.extend(delta(&mut core, name, &chunk.iter().collect::<String>()));
+        }
+        streamed.extend(ready(&mut core, name, args));
+        let mut effects = drain(&mut core, &mut store, streamed);
+        effects.extend(send(&mut core, TurnEvent::Finished(Finish::Completed)));
+        assert_eq!(
+            result(&effects).output.json()["text"],
+            format!("drawn: [{step}]"),
+            "{name}"
+        );
+        assert_eq!(ends(&effects), [true], "{name}");
+        assert_prefix(&store, &[step]);
+    }
+}
+
+#[test]
+fn a_refused_draw_logs_one_warning_with_only_its_code_and_field() {
+    let logs = crate::test_support::Captured::default();
+    let _logging = logs.install();
+    let mut core = offered(vec![T]);
+    let inline = PREFIX.replace("\"surface\":\"overlay\"", "\"surface\":\"inline\"");
+    start(&mut core, "inline");
+    let refused = result(&delta(&mut core, "inline", &inline));
+    assert_eq!(
+        refused.output,
+        ToolOutput::Text("drawn: []; stopped: surface: scene.Unsupported".into())
+    );
+    let text = logs.text();
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("draw call"))
+        .filter_map(|line| line.split_once(' '))
+        .map(|(_, line)| line.trim_start())
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "WARN kumochi_brain::coordinator::drawing: draw call refused code=scene.Unsupported field=surface"
+        ]
+    );
+}
+
+#[test]
 fn stop_settles_the_submitted_step_without_resurrecting_queued_records_or_content() {
     let scratch = Scratch::new("provider-draw-stop");
     let mut store = store(&scratch);
