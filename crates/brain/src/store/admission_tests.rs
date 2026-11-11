@@ -80,6 +80,209 @@ fn unknown_once(store: &mut Store, thread: ThreadId) -> Action {
 }
 
 #[test]
+fn filed_duplicate_risk_keeps_created_and_placement_provenance_separate() {
+    let scratch = Scratch::new("filed-duplicate-risk");
+    let mut store = opened(&scratch);
+    let owner = thread(&mut store);
+    for (count, warning) in [(0, false), (1, true), (2, true)] {
+        let action = draft(&mut store, owner);
+        seed(&store, action.draft, &posting(A), count);
+        let filed = changed(store.posted(action.draft, action.version, &created(7)));
+        assert_eq!(filed.uncertain, count);
+        assert_eq!(
+            filed.state(),
+            ActionState::Filed {
+                number: 7,
+                url: url(7),
+                confirmed_by_user: false,
+                maybe_duplicate: warning
+            }
+        );
+    }
+    for (count, warning) in [(1, false), (2, true)] {
+        for confirm in [false, true] {
+            let action = draft(&mut store, owner);
+            seed(&store, action.draft, &unknown(r#""Pending""#), count);
+            let filed = if confirm {
+                let unplaced =
+                    changed(store.looked_up(action.draft, count, Lookup::Unplaced(issue(7))));
+                changed(decide(&mut store, &unplaced, Decision::ThisIsTheIssue))
+            } else {
+                changed(store.looked_up(action.draft, count, Lookup::Placed(issue(7))))
+            };
+            assert_eq!(filed.uncertain, count);
+            assert_eq!(
+                filed.state(),
+                ActionState::Filed {
+                    number: 7,
+                    url: url(7),
+                    confirmed_by_user: confirm,
+                    maybe_duplicate: warning
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn legacy_filed_flags_do_not_erase_retained_uncertainty() {
+    let scratch = Scratch::new("legacy-filed-risk");
+    let mut store = opened(&scratch);
+    let owner = thread(&mut store);
+    for confirmed in [false, true] {
+        for (count, warning) in [(0, false), (1, false), (2, true)] {
+            let action = draft(&mut store, owner);
+            let json = format!(r#"{{"kind":"filed","number":7,"confirmed":{confirmed}}}"#);
+            seed(&store, action.draft, &json, count);
+            let read = store.action(action.draft).unwrap().unwrap();
+            assert_eq!(serde_json::to_string(&read.stage).unwrap(), json);
+            assert_eq!(read.uncertain, count);
+            assert_eq!(
+                read.state(),
+                ActionState::Filed {
+                    number: 7,
+                    url: url(7),
+                    confirmed_by_user: confirmed,
+                    maybe_duplicate: warning
+                }
+            );
+        }
+    }
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one restart scenario, read top to bottom"
+)]
+#[expect(clippy::disallowed_methods, reason = "spawns while holding spawn_lock")]
+fn filed_flags_and_card_values_survive_a_child_restart() {
+    const CHILD_DB: &str = "ISSUE_CARDS_RESTART_DB";
+    if let Some(path) = std::env::var_os(CHILD_DB) {
+        let mut store = Store::open(&std::path::PathBuf::from(path)).unwrap();
+        store.recover().unwrap();
+        let batch = crate::coordinator::Cards::new(
+            crate::coordinator::PageKey::for_tests(1, 7),
+            &kumochi_scene::text::Bounded::new((1..=7).map(DraftId).collect()).unwrap(),
+        );
+        let read = crate::store::context::Snapshot::begin(&store.conn).unwrap();
+        let cards = read.cards(&batch).unwrap();
+        read.end().unwrap();
+        assert_eq!(cards.len(), 7);
+        for (at, row) in cards.iter().enumerate() {
+            assert_eq!(row.card.draft, DraftId(u64::try_from(at).unwrap() + 1));
+            assert_eq!(row.card.thread, ThreadId(1));
+            assert_eq!(row.card.title, title("T"));
+            assert_eq!(row.card.body, body("B"));
+            assert_eq!(
+                row.card.hash.0,
+                <[u8; 32]>::from(Sha256::digest(
+                    br#"{"repo":"octo/repo","account":7,"title":"T","body":"B"}"#
+                ))
+            );
+        }
+        for (row, (confirmed, warning, count)) in cards[..4].iter().zip([
+            (false, false, 1),
+            (true, false, 1),
+            (false, true, 1),
+            (true, true, 2),
+        ]) {
+            assert_eq!(row.card.version, StateVersion(1));
+            assert_eq!(row.card.approval, None);
+            assert_eq!(
+                row.card.state,
+                ActionState::Filed {
+                    number: 7,
+                    url: url(7),
+                    confirmed_by_user: confirmed,
+                    maybe_duplicate: warning
+                }
+            );
+            assert_eq!(
+                store.action(row.card.draft).unwrap().unwrap().uncertain,
+                count
+            );
+        }
+        for (row, (version, approval, state)) in cards[4..].iter().zip([
+            (1, 5, ActionState::Draft),
+            (3, 7, ActionState::Failed(FailReason::Interrupted)),
+            (
+                4,
+                9,
+                ActionState::Unknown {
+                    lookup: LookupResult::Pending,
+                    maybe_duplicate: false,
+                },
+            ),
+        ]) {
+            assert_eq!(row.card.version, StateVersion(version));
+            assert_eq!(row.card.approval, Some(ApprovalRev(approval)));
+            assert_eq!(row.card.state, state);
+        }
+        return;
+    }
+    let scratch = Scratch::new("filed-child-restart");
+    let mut store = opened(&scratch);
+    let owner = store.main_thread().unwrap();
+    for (confirmed, warning, count) in [
+        (false, false, 1),
+        (true, false, 1),
+        (false, true, 1),
+        (true, true, 2),
+    ] {
+        let action = draft(&mut store, owner);
+        let stage = if warning {
+            format!(
+                r#"{{"kind":"filed","number":7,"confirmed":{confirmed},"maybe_duplicate":true}}"#
+            )
+        } else {
+            format!(r#"{{"kind":"filed","number":7,"confirmed":{confirmed}}}"#)
+        };
+        seed(&store, action.draft, &stage, count);
+    }
+    let editable = draft(&mut store, owner);
+    assert_eq!(editable.draft, DraftId(5));
+    let failed = draft(&mut store, owner);
+    let preflight = changed(decide(&mut store, &failed, Decision::File));
+    changed(store.preflighted(
+        failed.draft,
+        preflight.version,
+        Err(FailReason::Interrupted),
+    ));
+    assert_eq!(unknown_once(&mut store, owner).draft, DraftId(7));
+    drop(store);
+    let mut child = {
+        let _spawning = crate::platform::spawn_lock();
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "store::admission_tests::filed_flags_and_card_values_survive_a_child_restart",
+            ])
+            .env(CHILD_DB, scratch.db())
+            .spawn()
+            .unwrap()
+    };
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        if std::time::Instant::now() >= end {
+            if child.kill().is_err() {
+                assert!(
+                    child.try_wait().unwrap().is_some(),
+                    "restart child could not be stopped"
+                );
+            }
+            child.wait().unwrap();
+            panic!("restart child exceeded its deadline");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[test]
 fn the_hash_binds_exactly_repository_account_title_and_body() {
     let scratch = Scratch::new("admission-hash");
     let mut store = opened(&scratch);
@@ -272,7 +475,8 @@ fn completions_land_only_at_their_dispatch_version() {
         ActionState::Filed {
             number: 7,
             url: url(7),
-            confirmed_by_user: false
+            confirmed_by_user: false,
+            maybe_duplicate: false
         }
     );
     refused_unwritten(&mut store, IssueRefused::NotAllowedNow, |store| {
@@ -375,6 +579,7 @@ fn each_completion_takes_only_its_stage() {
                     Stage::Filed {
                         number: issue(7),
                         confirmed: false,
+                        maybe_duplicate: false,
                     },
                     1,
                 )),
@@ -493,6 +698,7 @@ fn file_anyway_keeps_the_earliest_unresolved_mark() {
             Stage::Filed {
                 number: issue(9),
                 confirmed: false,
+                maybe_duplicate: true,
             },
             4,
         ),
@@ -584,7 +790,8 @@ fn lookups_land_only_in_their_episode() {
         ActionState::Filed {
             number: 8,
             url: url(8),
-            confirmed_by_user: true
+            confirmed_by_user: true,
+            maybe_duplicate: false
         }
     );
     refused_unwritten(&mut store, IssueRefused::NotAllowedNow, |store| {
@@ -595,6 +802,7 @@ fn lookups_land_only_in_their_episode() {
     let expected = Stage::Filed {
         number: issue(9),
         confirmed: false,
+        maybe_duplicate: false,
     };
     assert_eq!((filed.stage, filed.uncertain), (expected, 1));
     let dropped = unknown_once(&mut store, thread).draft;

@@ -619,6 +619,7 @@ impl Brain {
             .expect("connection epochs never wrap");
         self.coordinator.begin_session();
         self.account.connections.stage_session(Some(self.epoch));
+        self.account.github_session(Some(self.epoch));
         self.crashes.begin_session();
         let (mut control_in, mut control_out) = tokio::io::split(control);
         let (mut data_in, mut data_out) = tokio::io::split(data);
@@ -658,6 +659,7 @@ impl Brain {
                 ended = core => ended,
             }
         };
+        queue.borrow_mut().end_reads();
         if reading && quit.get().is_none() {
             #[cfg(test)]
             self.observer.send(Seen::Grace).ok();
@@ -686,6 +688,7 @@ impl Brain {
         };
         self.offline(Input::ShellLost);
         self.account.connections.stage_session(None);
+        self.account.github_session(None);
         self.deadline = None;
         self.drain = None;
         self.quiet.clear();
@@ -697,9 +700,21 @@ impl Brain {
     /// it awaits a pipe, the store or an engine. Control and store replies are always taken.
     /// A page read from an older connection is dropped, and one that arrives while the data
     /// queue is full is held until it has room; any other input passes.
-    fn admit_page(&mut self, input: Input, link: &mut Link<'_, '_>) -> Option<Input> {
-        if let Input::PageRead { epoch, .. } = &input {
-            if *epoch != self.epoch {
+    fn admit_page(&mut self, mut input: Input, link: &mut Link<'_, '_>) -> Option<Input> {
+        if let Input::CardsRead { cards, reply } = &mut input {
+            if cards.key.epoch != self.epoch || !link.queue.borrow().accepts_cards(cards) {
+                return None;
+            }
+            if let Ok(rows) = reply {
+                rows.retain(crate::coordinator::CardRead::live);
+            }
+            if link.queue.borrow().bytes() >= DATA_CAP {
+                link.held_pages.push_back(input);
+                return None;
+            }
+        }
+        if let Input::PageRead { key, .. } = &input {
+            if key.epoch != self.epoch || !link.queue.borrow().accepts_page(key) {
                 return None;
             }
             if link.queue.borrow().bytes() >= DATA_CAP {
@@ -867,6 +882,9 @@ impl Brain {
         self.pump_settings(Some(link)).map_err(|Full| Ended::Lost)?;
         self.account_input(AccountInput::Connected, Some(link))
             .map_err(|Full| Ended::Lost)?;
+        for frame in self.account.github_opened() {
+            link.control(&frame).map_err(|Full| Ended::Lost)?;
+        }
         let connected = self.account.connections.connected();
         link.control(&self.composed(&connected))
             .map_err(|Full| Ended::Lost)?;
@@ -989,6 +1007,7 @@ impl Brain {
     /// shell's control queue is full nothing more goes to the shell, but every store, engine and
     /// timer effect still applies, since the coordinator counts them as done; then it fails, as
     /// it does when the shell broke the protocol.
+    #[expect(clippy::too_many_lines, reason = "one short arm per runtime effect")]
     fn apply(
         &mut self,
         effects: Vec<Effect>,
@@ -1017,6 +1036,26 @@ impl Brain {
                     {
                         full = true;
                         link = None;
+                    }
+                }
+                Effect::Page { key, reply } => {
+                    if let Some(shell) = link.as_deref_mut() {
+                        let frame = frame::encode(&reply, Pipe::Data).map_err(|_| Full);
+                        match frame {
+                            Ok(frame) => {
+                                shell.queue.borrow_mut().push_page(&key, frame);
+                                shell.ready.notify_one();
+                            }
+                            Err(_) => full = true,
+                        }
+                    }
+                }
+                Effect::Cards { cards, reply } => {
+                    if let Some(shell) = link.as_deref_mut() {
+                        if !shell.queue.borrow_mut().push_cards(&cards, reply) {
+                            full = true;
+                        }
+                        shell.ready.notify_one();
                     }
                 }
                 Effect::Data(message) => {
@@ -1201,24 +1240,35 @@ async fn read_data(
             }
             // shortcut: slice 7's PR 5 buffers a hold's audio.
             Ok(Some(DataToBrain::MicPcm(_))) => {}
-            Ok(Some(
-                message @ (DataToBrain::IssueEdit { .. } | DataToBrain::IssueCards { .. }),
-            )) => {
+            Ok(Some(message @ DataToBrain::IssueEdit { .. })) => {
                 tracing::debug!(op = message.op(), "issue data ignored");
             }
             Ok(Some(DataToBrain::Credit { bytes })) => {
                 queue.borrow_mut().grant(bytes);
                 ready.notify_one();
             }
-            Ok(Some(DataToBrain::PageRequest { request, page })) => {
-                if !queue.borrow_mut().admit_page() {
-                    return Ended::Broken("too many unanswered page requests");
+            Ok(Some(DataToBrain::IssueCards { .. })) => {
+                return Ended::Broken("uncorrelated card request");
+            }
+            Ok(Some(DataToBrain::IssueCardsRequest { request, drafts })) => {
+                let Some(cards) = queue.borrow_mut().admit_cards(epoch, request, &drafts) else {
+                    return Ended::Broken("too many unanswered read requests");
+                };
+                ready.notify_one();
+                match pages.try_send(Input::ReadCards { cards }) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) => {
+                        return Ended::Broken("too many unanswered read requests");
+                    }
+                    Err(TrySendError::Closed(_)) => return Ended::Lost,
                 }
-                match pages.try_send(Input::ReadPage {
-                    epoch,
-                    request,
-                    page,
-                }) {
+            }
+            Ok(Some(DataToBrain::PageRequest { request, page })) => {
+                let Some(key) = queue.borrow_mut().admit_page(epoch, request) else {
+                    return Ended::Broken("too many unanswered page requests");
+                };
+                ready.notify_one();
+                match pages.try_send(Input::ReadPage { key, page }) {
                     Ok(()) => {}
                     Err(TrySendError::Full(_)) => {
                         return Ended::Broken("too many unanswered page requests");
@@ -1279,16 +1329,55 @@ async fn write_data(
     ready: &Notify,
     room: &Notify,
 ) -> Ended {
+    let mut ticks = tokio::time::interval(crate::recall::control::POLL);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
+        if queue.borrow().reads_ended() {
+            return Ended::Lost;
+        }
+        let before = queue.borrow().bytes();
         let next = queue.borrow_mut().pop(Instant::now().into_std());
+        if next.is_none() && queue.borrow().bytes() < before {
+            room.notify_one();
+        }
         let Some(frame) = next else {
-            ready.notified().await;
+            tokio::select! {
+                () = ready.notified() => {},
+                _ = ticks.tick(), if queue.borrow().has_reads() => {},
+            }
             continue;
         };
         room.notify_one();
-        if let Err(error) = pipe.write_all(&frame).await {
-            tracing::warn!(%error, "data pipe failed");
-            return Ended::Lost;
+        let writing = pipe.write_all(&frame);
+        tokio::pin!(writing);
+        loop {
+            tokio::select! {
+                biased;
+                _ = ticks.tick(), if queue.borrow().has_reads() => {
+                    if queue.borrow().reads_ended() {
+                        return Ended::Lost;
+                    }
+                }
+                result = std::future::poll_fn(|cx| {
+                    if queue.borrow().reads_ended() {
+                        return std::task::Poll::Ready(None);
+                    }
+                    std::future::Future::poll(writing.as_mut(), cx).map(Some)
+                }) => {
+                    let Some(result) = result else {
+                        return Ended::Lost;
+                    };
+                    if let Err(error) = result {
+                        tracing::warn!(%error, "data pipe failed");
+                        return Ended::Lost;
+                    }
+                    if queue.borrow().reads_ended() {
+                        return Ended::Lost;
+                    }
+                    break;
+                }
+                () = ready.notified() => {},
+            }
         }
         queue.borrow_mut().wrote();
     }
@@ -1353,7 +1442,9 @@ impl<'a, 't> Link<'a, 't> {
             | DataToShell::SpeechPcm(SpeechPcm { run, .. }) => Owner::Run(*run),
             DataToShell::ThreadList { .. }
             | DataToShell::Page { .. }
-            | DataToShell::PageFailed { .. } => Owner::Page,
+            | DataToShell::PageFailed { .. }
+            | DataToShell::IssueCardRead { .. }
+            | DataToShell::IssueCardsDone { .. } => return Err(Full),
             DataToShell::ScenesRemoved { .. }
             | DataToShell::Models { .. }
             | DataToShell::IssueCard(_) => Owner::Marker,

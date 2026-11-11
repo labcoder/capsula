@@ -23,6 +23,295 @@ fn threads() -> PageOf {
     }
 }
 
+#[tokio::test]
+async fn admission_cancel_and_deadline_end_idle_credit_and_partial_writes() {
+    for deadline in [false, true] {
+        for phase in 0..3 {
+            let queue = RefCell::new(DataQueue::new(if phase == 1 { 0 } else { 100 }));
+            let key = queue.borrow_mut().admit_page(1, 7).unwrap();
+            if phase != 0 {
+                queue.borrow_mut().push_page(&key, vec![9; 16]);
+            }
+            if phase == 2 {
+                queue
+                    .borrow_mut()
+                    .push(crate::runtime::Owner::Marker, vec![8; 4]);
+            }
+            let ready = Notify::new();
+            let room = Notify::new();
+            let (mut pipe, mut client) = tokio::io::duplex(1);
+            let writer = super::super::write_data(&mut pipe, &queue, &ready, &room);
+            let stop = async {
+                if phase == 2 {
+                    let mut first = [0];
+                    client.read_exact(&mut first).await.unwrap();
+                    assert_eq!(first, [9]);
+                } else {
+                    tokio::task::yield_now().await;
+                }
+                if deadline {
+                    *key.control.test.time.lock().unwrap() = Some(key.control.end);
+                } else {
+                    key.control.cancel();
+                }
+            };
+            let (ended, ()) = timeout(PATIENCE, async { tokio::join!(writer, stop) })
+                .await
+                .unwrap();
+            assert_eq!(ended, Ended::Lost, "phase={phase}, deadline={deadline}");
+            assert!(!queue.borrow().accepts_page(&key));
+            drop(pipe);
+            let mut remaining = Vec::new();
+            client.read_to_end(&mut remaining).await.unwrap();
+            if phase == 2 {
+                assert!(remaining.len() <= 1);
+                assert!(remaining.iter().all(|byte| *byte == 9));
+                assert_eq!(queue.borrow().frames_for_tests(), 1);
+            } else {
+                assert_eq!(remaining, Vec::<u8>::new());
+            }
+        }
+    }
+}
+
+fn resumed_page_write_stops_before_the_next_tick(
+    stop: impl FnOnce(&crate::recall::control::Control),
+) {
+    use std::future::Future as _;
+    use std::pin::Pin;
+    use std::rc::Rc;
+    use std::task::{Context, Poll, Waker};
+
+    struct Gated {
+        open: Rc<Cell<bool>>,
+        bytes: Rc<RefCell<Vec<u8>>>,
+    }
+
+    impl AsyncWrite for Gated {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            let mut written = self.bytes.borrow_mut();
+            if written.is_empty() {
+                written.push(bytes[0]);
+                Poll::Ready(Ok(1))
+            } else if self.open.get() {
+                written.extend_from_slice(bytes);
+                Poll::Ready(Ok(bytes.len()))
+            } else {
+                Poll::Pending
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    let queue = RefCell::new(DataQueue::new(100));
+    let key = queue.borrow_mut().admit_page(1, 7).unwrap();
+    queue.borrow_mut().push_page(&key, vec![9; 16]);
+    queue
+        .borrow_mut()
+        .push(crate::runtime::Owner::Marker, vec![8; 4]);
+    let open = Rc::new(Cell::new(false));
+    let bytes = Rc::new(RefCell::new(Vec::new()));
+    let mut pipe = Gated {
+        open: Rc::clone(&open),
+        bytes: Rc::clone(&bytes),
+    };
+    let (ready, room) = (Notify::new(), Notify::new());
+    let writer = super::super::write_data(&mut pipe, &queue, &ready, &room);
+    tokio::pin!(writer);
+    let mut context = Context::from_waker(Waker::noop());
+    assert_eq!(writer.as_mut().poll(&mut context), Poll::Pending);
+    assert_eq!(*bytes.borrow(), [9]);
+    stop(&key.control);
+    open.set(true);
+    assert_eq!(writer.as_mut().poll(&mut context), Poll::Ready(Ended::Lost));
+    assert_eq!(*bytes.borrow(), [9]);
+    assert_eq!(queue.borrow().frames_for_tests(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelled_page_write_cannot_resume_before_the_next_tick() {
+    resumed_page_write_stops_before_the_next_tick(crate::recall::control::Control::cancel);
+}
+
+#[tokio::test(start_paused = true)]
+async fn expired_page_write_cannot_resume_before_the_next_tick() {
+    resumed_page_write_stops_before_the_next_tick(|control| {
+        *control.test.time.lock().unwrap() = Some(control.end);
+    });
+}
+
+#[test]
+fn outer_page_carriers_never_print_search_or_page_content() {
+    let marker = "private-page-lifecycle-marker";
+    let key = crate::coordinator::PageKey::for_tests(1, 7);
+    let op = StoreOp::ReadPage {
+        key: key.clone(),
+        page: PageOf::Threads {
+            search: Some(marker.into()),
+            after: None,
+        },
+    };
+    let reply = DataToShell::Page {
+        request: 7,
+        thread: ThreadId(1),
+        events: vec![kumochi_protocol::message::PageEvent {
+            id: kumochi_protocol::message::EventId(1),
+            run: None,
+            kind: kumochi_protocol::message::PageEventKind::User,
+            text: marker.into(),
+            cut: false,
+        }],
+        before: None,
+    };
+    let input = Input::PageRead {
+        key: key.clone(),
+        reply: reply.clone(),
+    };
+    let mut queue = DataQueue::new(100);
+    let admitted = queue.admit_page(1, 7).unwrap();
+    queue.push_page(&admitted, marker.as_bytes().to_vec());
+    let effect = Effect::Page { key, reply };
+    let debug = format!("{op:?} {input:?} {effect:?} {queue:?}");
+    assert!(!debug.contains(marker));
+    assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
+}
+
+#[tokio::test]
+async fn admission_wakes_a_writer_already_blocked_on_an_older_frame() {
+    let queue = RefCell::new(DataQueue::new(100));
+    queue
+        .borrow_mut()
+        .push(crate::runtime::Owner::Marker, vec![9; 16]);
+    let ready = Notify::new();
+    let room = Notify::new();
+    let (mut pipe, mut client) = tokio::io::duplex(1);
+    let writer = super::super::write_data(&mut pipe, &queue, &ready, &room);
+    let admit = async {
+        let mut byte = [0];
+        client.read_exact(&mut byte).await.unwrap();
+        assert_eq!(byte, [9]);
+        let key = queue.borrow_mut().admit_page(1, 7).unwrap();
+        key.control.cancel();
+        ready.notify_one();
+    };
+    let (ended, ()) = timeout(PATIENCE, async { tokio::join!(writer, admit) })
+        .await
+        .unwrap();
+    assert_eq!(ended, Ended::Lost);
+}
+
+#[tokio::test]
+async fn session_eof_cancels_a_page_still_waiting_at_the_store_barrier() {
+    let scratch = Scratch::new("page-session-end");
+    let mut brain = test_support::brain(&scratch, "");
+    let mut seen = brain.observe();
+    let release = brain.hold_store(|op| matches!(op, StoreOp::BeginTurn { .. }));
+    assert!(brain.store.as_ref().unwrap().send(StoreOp::BeginTurn {
+        thread: ThreadId(2),
+        title: Some("task".into()),
+        run: RunId(1),
+        text: "text".into(),
+    }));
+    while !matches!(
+        seen.recv().await,
+        Some(crate::runtime::Seen::StoreOpStarted(
+            StoreOp::BeginTurn { .. }
+        ))
+    ) {}
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        request(&mut shell, 7, threads()).await;
+        let key = loop {
+            if let Some(crate::runtime::Seen::StoreOpStarted(StoreOp::ReadPage { key, .. })) =
+                seen.recv().await
+            {
+                break key;
+            }
+        };
+        while seen.recv().await != Some(crate::runtime::Seen::ReadWaiting) {}
+        drop(shell);
+        key
+    };
+    let (ended, key) = timeout(PATIENCE, async {
+        tokio::join!(brain.serve(control, data, &mut tap), client)
+    })
+    .await
+    .unwrap();
+    assert_eq!(ended, Ended::Lost);
+    assert_eq!(key.control.check(), Err(crate::recall::Error::Ended));
+    release.send(()).unwrap();
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn held_page_output_retains_its_original_admission_end_and_owner() {
+    for deadline in [false, true] {
+        let scratch = Scratch::new("page-held-end");
+        let mut brain = test_support::brain(&scratch, "");
+        let mut seen = brain.observe();
+        let queue = exhausted_queue();
+        queue
+            .borrow_mut()
+            .push(crate::runtime::Owner::Run(RunId(99)), vec![0; DATA_CAP]);
+        let key = queue.borrow_mut().admit_page(0, 7).unwrap();
+        let ready = Notify::new();
+        let room = Notify::new();
+        let (out, _control) = mpsc::channel(64);
+        let (_controls_tx, mut controls) = mpsc::channel(64);
+        let (_turns_tx, mut turns) = mpsc::channel(MAX_PENDING_TURNS);
+        let (pages_tx, mut pages) = mpsc::channel(MAX_PENDING_PAGES);
+        pages_tx
+            .try_send(Input::ReadPage {
+                key: key.clone(),
+                page: threads(),
+            })
+            .unwrap();
+        let mut tap = Tap::from_env();
+        let core = brain.core(
+            &mut controls,
+            &mut turns,
+            &mut pages,
+            &room,
+            Link::new(&out, &queue, &ready, &mut tap),
+        );
+        let (mut output, _client) = tokio::io::duplex(1);
+        let writer = super::super::write_data(&mut output, &queue, &ready, &room);
+        let stop = async {
+            while seen.recv().await != Some(crate::runtime::Seen::PageHeld) {}
+            assert_eq!(queue.borrow().frames_for_tests(), 1);
+            assert_eq!(key.control.check(), Ok(()));
+            if deadline {
+                *key.control.test.time.lock().unwrap() = Some(key.control.end);
+            } else {
+                key.control.cancel();
+            }
+        };
+        let serving = async {
+            tokio::select! { ended = core => ended, ended = writer => ended }
+        };
+        let (ended, ()) = timeout(PATIENCE, async { tokio::join!(serving, stop) })
+            .await
+            .unwrap();
+        assert_eq!(ended, Ended::Lost);
+        assert!(queue.borrow().has_reads());
+        queue.borrow_mut().end_reads();
+        assert_eq!(key.control.check(), Err(crate::recall::Error::Ended));
+        brain.close().await;
+    }
+}
+
 async fn queue_turn(turns: &mpsc::Sender<crate::runtime::Turn>, turn: u32, text: &str) {
     let turn = crate::coordinator::Input::Turn {
         turn,
@@ -83,13 +372,11 @@ fn page_forwarding_leaves_the_current_run_and_its_pending_writes_alone() {
     let page = threads();
     assert_eq!(
         coordinator.handle(Input::ReadPage {
-            epoch: 1,
-            request: 3,
+            key: crate::coordinator::PageKey::for_tests(1, 3),
             page: page.clone()
         }),
         Ok(vec![Effect::Store(StoreOp::ReadPage {
-            epoch: 1,
-            request: 3,
+            key: crate::coordinator::PageKey::for_tests(1, 3),
             page
         })])
     );
@@ -100,11 +387,13 @@ fn page_forwarding_leaves_the_current_run_and_its_pending_writes_alone() {
     };
     assert_eq!(
         coordinator.handle(Input::PageRead {
-            epoch: 1,
-            request: 3,
+            key: crate::coordinator::PageKey::for_tests(1, 3),
             reply: reply.clone()
         }),
-        Ok(vec![Effect::Data(reply)])
+        Ok(vec![Effect::Page {
+            key: crate::coordinator::PageKey::for_tests(1, 3),
+            reply
+        }])
     );
     assert_eq!(coordinator.current_run(), Some(RunId(1)));
     assert_eq!(coordinator.ending_runs(), 0);
@@ -145,9 +434,6 @@ async fn staged_issue_data_is_dropped_without_blocking_credit() {
                 body: IssueBody::new("Private details").expect("body"),
                 repo: None,
             },
-            DataToBrain::IssueCards {
-                drafts: kumochi_scene::text::Bounded::new(vec![DraftId(9)]).expect("one id"),
-            },
             DataToBrain::Credit { bytes: 17 },
         ] {
             let bytes = frame::encode(&message, Pipe::Data).expect("frame");
@@ -168,6 +454,183 @@ async fn staged_issue_data_is_dropped_without_blocking_credit() {
         queue.borrow_mut().pop(std::time::Instant::now()),
         Some(vec![7; 17])
     );
+}
+
+#[tokio::test]
+async fn uncorrelated_cards_are_a_protocol_error_not_an_ignored_read() {
+    let queue = exhausted_queue();
+    let ready = Notify::new();
+    let (turns, _turns) = mpsc::channel(1);
+    let (pages, mut requests) = mpsc::channel(1);
+    let (mut input, mut shell) = tokio::io::duplex(DUPLEX_BUFFER);
+    let reader = super::super::read_data(&mut input, &turns, &pages, &queue, &ready, 1);
+    let writer = async {
+        let bytes = frame::encode(
+            &DataToBrain::IssueCards {
+                drafts: kumochi_scene::text::Bounded::default(),
+            },
+            Pipe::Data,
+        )
+        .unwrap();
+        shell.write_all(&bytes).await.unwrap();
+    };
+    let (ended, ()) = timeout(PATIENCE, async { tokio::join!(reader, writer) })
+        .await
+        .unwrap();
+    assert_eq!(ended, Ended::Broken("uncorrelated card request"));
+    assert_eq!(requests.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    assert!(!queue.borrow().has_reads());
+}
+
+#[tokio::test]
+async fn correlated_card_admission_never_holds_up_credit() {
+    use kumochi_protocol::message::DraftId;
+    let queue = exhausted_queue();
+    let ready = Notify::new();
+    let (turns, _turns) = mpsc::channel(1);
+    let (pages, mut requests) = mpsc::channel(1);
+    let (mut input, mut shell) = tokio::io::duplex(DUPLEX_BUFFER);
+    let reader = super::super::read_data(&mut input, &turns, &pages, &queue, &ready, 3);
+    let writer = async {
+        for message in [
+            DataToBrain::IssueCardsRequest {
+                request: 7,
+                drafts: kumochi_scene::text::Bounded::new(vec![DraftId(9); 16]).unwrap(),
+            },
+            DataToBrain::Credit { bytes: 17 },
+        ] {
+            shell
+                .write_all(&frame::encode(&message, Pipe::Data).unwrap())
+                .await
+                .unwrap();
+        }
+        shell.shutdown().await.unwrap();
+    };
+    let (ended, ()) = timeout(PATIENCE, async { tokio::join!(reader, writer) })
+        .await
+        .unwrap();
+    assert_eq!(ended, Ended::Lost);
+    let Input::ReadCards { cards } = requests.try_recv().unwrap() else {
+        panic!("card read");
+    };
+    assert_eq!(cards.key.request, 7);
+    assert_eq!(cards.key.epoch, 3);
+    assert_eq!(
+        cards
+            .sources
+            .iter()
+            .map(|source| source.draft)
+            .collect::<Vec<_>>(),
+        [DraftId(9)]
+    );
+    queue
+        .borrow_mut()
+        .push(crate::runtime::Owner::Marker, vec![7; 17]);
+    assert_eq!(
+        queue.borrow_mut().pop(std::time::Instant::now()),
+        Some(vec![7; 17])
+    );
+    queue.borrow_mut().wrote();
+    assert!(queue.borrow().has_reads());
+    queue.borrow_mut().end_reads();
+    assert_eq!(cards.key.control.check(), Err(crate::recall::Error::Ended));
+}
+
+#[tokio::test]
+async fn deleted_card_content_is_removed_before_a_completion_is_held() {
+    use kumochi_protocol::message::{
+        ActionState, ContentHash, DraftId, IssueBody, IssueCard, IssueTitle, StateVersion,
+    };
+    use std::sync::Arc;
+    let scratch = Scratch::new("card-held-prune");
+    let mut brain = test_support::brain(&scratch, "");
+    let queue = exhausted_queue();
+    queue
+        .borrow_mut()
+        .push(crate::runtime::Owner::Marker, vec![0; DATA_CAP]);
+    let cards = queue
+        .borrow_mut()
+        .admit_cards(
+            brain.epoch,
+            7,
+            &kumochi_scene::text::Bounded::new(vec![DraftId(9)]).unwrap(),
+        )
+        .unwrap();
+    let source = Arc::clone(&cards.sources[0]);
+    assert!(source.bind(ThreadId(2), crate::store::Generation(0)));
+    let row = crate::coordinator::CardRead {
+        card: IssueCard {
+            draft: DraftId(9),
+            thread: ThreadId(2),
+            repo: None,
+            account: None,
+            title: IssueTitle::new("private-card-marker").unwrap(),
+            body: IssueBody::new("private-card-marker").unwrap(),
+            hash: ContentHash([0; 32]),
+            approval: None,
+            version: StateVersion(1),
+            state: ActionState::Draft,
+        },
+        generation: crate::store::Generation(0),
+        source: Arc::clone(&source),
+    };
+    source.delete();
+    let (out, _control) = mpsc::channel(64);
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    assert_eq!(
+        brain.admit_page(
+            Input::CardsRead {
+                cards,
+                reply: Ok(vec![row])
+            },
+            &mut link
+        ),
+        None
+    );
+    let Some(Input::CardsRead {
+        reply: Ok(rows), ..
+    }) = link.held_pages.pop_front()
+    else {
+        panic!("held batch");
+    };
+    assert_eq!(rows, []);
+    assert!(queue.borrow().has_reads());
+    drop(link);
+    queue.borrow_mut().end_reads();
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn a_repeated_active_page_id_breaks_before_a_second_read_is_forwarded() {
+    let queue = RefCell::new(DataQueue::new(window()));
+    let ready = Notify::new();
+    let (turns_tx, _turns) = mpsc::channel(1);
+    let (pages_tx, mut pages) = mpsc::channel(MAX_PENDING_PAGES);
+    let (mut input, mut client) = tokio::io::duplex(DUPLEX_BUFFER);
+    let reader = super::super::read_data(&mut input, &turns_tx, &pages_tx, &queue, &ready, 9);
+    let send = async {
+        let request = DataToBrain::PageRequest {
+            request: 7,
+            page: threads(),
+        };
+        let bytes = frame::encode(&request, Pipe::Data).unwrap();
+        client.write_all(&bytes).await.unwrap();
+        client.write_all(&bytes).await.unwrap();
+    };
+    let (ended, ()) = timeout(PATIENCE, async { tokio::join!(reader, send) })
+        .await
+        .unwrap();
+    assert_eq!(ended, Ended::Broken("too many unanswered page requests"));
+    let Input::ReadPage { key, page } = pages.try_recv().unwrap() else {
+        panic!("one page")
+    };
+    assert_eq!((key.epoch, key.request, key.token), (9, 7, 1));
+    assert_eq!(page, threads());
+    assert_eq!(pages.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    queue.borrow_mut().end_reads();
+    assert_eq!(key.control.check(), Err(crate::recall::Error::Ended));
 }
 
 #[tokio::test]
@@ -224,10 +687,6 @@ async fn a_fifth_unanswered_page_breaks_the_connection_even_after_reads_finish()
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one connection's credit, stop and reply sequence"
-)]
 async fn a_page_waits_for_credit_and_is_not_revoked_by_a_matching_run_id() {
     let scratch = Scratch::new("page-credit");
     let mut brain = test_support::brain(&scratch, "5000 text later");
@@ -243,11 +702,10 @@ async fn a_page_waits_for_credit_and_is_not_revoked_by_a_matching_run_id() {
     let core = brain.core(&mut controls, &mut turns, &mut pages, &room, link);
     let writer = super::super::write_data(&mut output, &queue, &ready, &room);
     let client = async {
-        assert!(queue.borrow_mut().admit_page());
+        let key = queue.borrow_mut().admit_page(0, 7).expect("admitted");
         pages_tx
             .send(Input::ReadPage {
-                epoch: 0,
-                request: 7,
+                key,
                 page: PageOf::Events {
                     thread: ThreadId(1),
                     before: None,
@@ -389,13 +847,9 @@ async fn a_fixture_finishes_in_order_while_both_pages_wait_for_credit_and_a_late
                 },
             ),
         ] {
-            assert!(queue.borrow_mut().admit_page());
+            let key = queue.borrow_mut().admit_page(0, request).expect("admitted");
             pages_tx
-                .send(Input::ReadPage {
-                    epoch: 0,
-                    request,
-                    page,
-                })
+                .send(Input::ReadPage { key, page })
                 .await
                 .expect("request");
         }
@@ -515,6 +969,8 @@ async fn read_pages_and_text(
             | DataToShell::SceneEnd { .. }
             | DataToShell::Models { .. }
             | DataToShell::IssueCard(_)
+            | DataToShell::IssueCardRead { .. }
+            | DataToShell::IssueCardsDone { .. }
             | DataToShell::Transcript(_)
             | DataToShell::SegmentQueued { .. }
             | DataToShell::SpeechPcm(_)) => {
@@ -546,8 +1002,7 @@ async fn old_connection_page_success_and_failure_cannot_reach_a_new_connection()
         brain
             .inputs_tx
             .send(Input::PageRead {
-                epoch: 1,
-                request: 7,
+                key: crate::coordinator::PageKey::for_tests(1, 7),
                 reply,
             })
             .expect("late completion");
@@ -620,11 +1075,10 @@ async fn a_reply_that_lands_while_the_queue_is_full_waits_for_room() {
     let link = Link::new(&out, &queue, &ready, &mut tap);
     let core = brain.core(&mut controls, &mut turns, &mut pages, &room, link);
     let client = async {
-        assert!(queue.borrow_mut().admit_page());
+        let key = queue.borrow_mut().admit_page(0, 7).expect("admitted");
         pages_tx
             .send(Input::ReadPage {
-                epoch: 0,
-                request: 7,
+                key,
                 page: threads(),
             })
             .await

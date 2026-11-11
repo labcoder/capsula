@@ -13,6 +13,15 @@ pub const MAX_ISSUE_BODY_BYTES: usize = 32 * 1024;
 /// The most cards requested in one frame (guess).
 pub const MAX_ISSUE_CARDS: usize = 16;
 
+/// Whether a correlated card read completed; earlier delivered cards remain valid on failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IssueCardsStatus {
+    /// Every requested id was read or skipped as missing/deleted.
+    Complete,
+    /// The read failed without a content-bearing error.
+    Failed,
+}
+
 checked_text!(IssueTitle, title, "An untrimmed, one-line issue title.");
 checked_text!(IssueUrl, issue_url, "A canonical GitHub issue URL.");
 
@@ -219,6 +228,8 @@ pub enum ActionState {
         url: IssueUrl,
         /// The user explicitly confirmed an unplaced candidate.
         confirmed_by_user: bool,
+        /// Retained duplicate-risk evidence; false is not an exactly-once guarantee.
+        maybe_duplicate: bool,
     },
     /// A definite failure; a retry requires fresh consent.
     Failed(FailReason),

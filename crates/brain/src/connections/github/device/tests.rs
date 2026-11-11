@@ -3,6 +3,31 @@ use super::*;
 use kumochi_protocol::message::UserCode;
 use zeroize::Zeroizing;
 
+#[test]
+fn loading_is_not_a_completed_empty_or_cleanup_load() {
+    for result in [
+        Ok(None),
+        Err(Removed::Clean),
+        Err(Removed::Refused),
+        Err(Removed::NotDurable),
+    ] {
+        let mut machine = Machine::new(None);
+        assert!(machine.is_loading());
+        let stamp = machine.stamp();
+        machine.on(Input::Loaded { stamp, result }, Instant::now());
+        assert!(!machine.is_loading());
+    }
+    let mut machine = Machine::new(None);
+    machine.on(
+        Input::Loaded {
+            stamp: Stamp { generation: 9 },
+            result: Ok(None),
+        },
+        Instant::now(),
+    );
+    assert!(machine.is_loading());
+}
+
 fn bearer() -> Secret<GitHubToken> {
     Secret::new(GitHubToken::new(Zeroizing::new("ghu_sentinel".to_owned())).unwrap())
 }

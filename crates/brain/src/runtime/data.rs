@@ -2,9 +2,20 @@
 //! grants, so a shell that stops reading can't make the brain send without bound.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::message::{MAX_PENDING_PAGES, RunId, SceneId};
+use crate::coordinator::{CardRead, Cards, PageKey};
+use crate::recall::control::{CancelOnDrop, Control, READ_TIME};
+use kumochi_protocol::message::{
+    DataToShell, DraftId, IssueCardsStatus, MAX_ISSUE_CARDS, MAX_PENDING_PAGES, RunId, SceneId,
+    ThreadId,
+};
+use kumochi_scene::text::Bounded;
+
+#[cfg(test)]
+#[path = "card_queue_tests.rs"]
+mod card_tests;
 
 /// How long the shell may leave the queue blocked on credit before the run ends as
 /// `view_stalled` (architecture v1 §3.2) [guess].
@@ -18,7 +29,16 @@ pub(crate) enum Owner {
     /// A run's output, which a Stop or a replacement drops.
     Run(RunId),
     /// A page reply, which counts against the unanswered page requests until it's written.
-    Page,
+    Page(u64),
+    /// One card's snapshot owner, distinct from its batch terminal.
+    Card {
+        token: u64,
+        draft: DraftId,
+        thread: ThreadId,
+        generation: crate::store::Generation,
+    },
+    /// Only this frame releases a card batch.
+    CardsDone(u64),
     /// A scene's snapshot or v1 live frame: Stop never drops it, but a scene clear does.
     Scene(SceneId),
     /// A frame nothing revokes: a deleted thread's `ScenesRemoved`, one per delete, or the model
@@ -26,11 +46,11 @@ pub(crate) enum Owner {
     Marker,
 }
 
-#[derive(Debug)]
 pub(crate) struct DataQueue {
     frames: VecDeque<(Owner, Vec<u8>)>,
-    pending_pages: usize,
-    writing_page: bool,
+    pages: Vec<Admitted>,
+    token: u64,
+    writing: Option<Owner>,
     /// The memory the queued frames hold.
     bytes: usize,
     credit: usize,
@@ -39,13 +59,33 @@ pub(crate) struct DataQueue {
     waiting_since: Option<Instant>,
 }
 
+impl std::fmt::Debug for DataQueue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DataQueue")
+            .field("frames", &self.frames.len())
+            .field("pages", &self.pages.len())
+            .field("bytes", &self.bytes)
+            .field("credit", &self.credit)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
+struct Admitted {
+    key: PageKey,
+    _owner: CancelOnDrop,
+    queued: bool,
+    cards: Option<Arc<Cards>>,
+}
+
 impl DataQueue {
     /// A queue that may send `window` bytes before the first grant.
     pub(crate) fn new(window: usize) -> Self {
         Self {
             frames: VecDeque::new(),
-            pending_pages: 0,
-            writing_page: false,
+            pages: Vec::new(),
+            token: 0,
+            writing: None,
             bytes: 0,
             credit: window,
             window,
@@ -58,12 +98,162 @@ impl DataQueue {
         self.frames.push_back((owner, frame));
     }
 
-    pub(crate) fn admit_page(&mut self) -> bool {
-        if self.pending_pages == MAX_PENDING_PAGES {
+    pub(crate) fn admit_page(&mut self, epoch: u64, request: u32) -> Option<PageKey> {
+        if self.pages.len() == MAX_PENDING_PAGES
+            || self.pages.iter().any(|page| page.key.request == request)
+        {
+            return None;
+        }
+        self.token = self.token.checked_add(1)?;
+        let control = Control::new(Instant::now() + READ_TIME);
+        let key = PageKey {
+            epoch,
+            request,
+            token: self.token,
+            control: control.clone(),
+        };
+        self.pages.push(Admitted {
+            key: key.clone(),
+            _owner: CancelOnDrop(control),
+            queued: false,
+            cards: None,
+        });
+        Some(key)
+    }
+
+    pub(crate) fn accepts_page(&self, key: &PageKey) -> bool {
+        self.pages.iter().any(|page| {
+            page.cards.is_none()
+                && page.key == *key
+                && !page.queued
+                && page.key.control.check().is_ok()
+        })
+    }
+
+    pub(crate) fn admit_cards(
+        &mut self,
+        epoch: u64,
+        request: u32,
+        drafts: &Bounded<DraftId, MAX_ISSUE_CARDS>,
+    ) -> Option<Arc<Cards>> {
+        let key = self.admit_page(epoch, request)?;
+        let cards = Arc::new(Cards::new(key, drafts));
+        self.pages.last_mut()?.cards = Some(Arc::clone(&cards));
+        Some(cards)
+    }
+
+    pub(crate) fn accepts_cards(&self, cards: &Cards) -> bool {
+        self.pages.iter().any(|page| {
+            page.key == cards.key
+                && !page.queued
+                && page.key.control.check().is_ok()
+                && page
+                    .cards
+                    .as_ref()
+                    .is_some_and(|owned| std::ptr::eq(owned.as_ref(), cards))
+        })
+    }
+
+    pub(crate) fn push_cards(&mut self, cards: &Cards, reply: Result<Vec<CardRead>, ()>) -> bool {
+        if !self.accepts_cards(cards) {
+            return true;
+        }
+        if reply
+            .as_ref()
+            .is_ok_and(|rows| rows.len() > cards.sources.len())
+        {
             return false;
         }
-        self.pending_pages += 1;
+        let request = cards.key.request;
+        let status = if reply.is_ok() {
+            IssueCardsStatus::Complete
+        } else {
+            IssueCardsStatus::Failed
+        };
+        let mut frames = Vec::new();
+        for read in reply.unwrap_or_default() {
+            if !read.live() {
+                continue;
+            }
+            let owner = Owner::Card {
+                token: cards.key.token,
+                draft: read.card.draft,
+                thread: read.card.thread,
+                generation: read.generation,
+            };
+            let Ok(frame) = kumochi_protocol::frame::encode(
+                &DataToShell::IssueCardRead {
+                    request,
+                    card: read.card,
+                },
+                kumochi_protocol::frame::Pipe::Data,
+            ) else {
+                return false;
+            };
+            frames.push((owner, frame));
+        }
+        let Ok(terminal) = kumochi_protocol::frame::encode(
+            &DataToShell::IssueCardsDone { request, status },
+            kumochi_protocol::frame::Pipe::Data,
+        ) else {
+            return false;
+        };
+        self.pages
+            .iter_mut()
+            .find(|page| page.key == cards.key)
+            .expect("the admitted card batch exists")
+            .queued = true;
+        for (owner, frame) in frames {
+            self.push(owner, frame);
+        }
+        self.push(Owner::CardsDone(cards.key.token), terminal);
         true
+    }
+
+    fn live_card(&self, owner: Owner) -> bool {
+        let Owner::Card {
+            token,
+            draft,
+            thread,
+            generation,
+        } = owner
+        else {
+            return true;
+        };
+        self.pages
+            .iter()
+            .filter_map(|page| page.cards.as_ref())
+            .find(|cards| cards.key.token == token)
+            .and_then(|cards| cards.sources.iter().find(|source| source.draft == draft))
+            .is_some_and(|source| source.live(thread, generation))
+    }
+
+    pub(crate) fn push_page(&mut self, key: &PageKey, frame: Vec<u8>) {
+        if !self.accepts_page(key) {
+            return;
+        }
+        self.pages
+            .iter_mut()
+            .find(|page| page.key == *key)
+            .expect("the admitted page exists")
+            .queued = true;
+        self.push(Owner::Page(key.token), frame);
+    }
+
+    pub(crate) fn reads_ended(&self) -> bool {
+        self.writing.is_some_and(|owner| !self.live_card(owner))
+            || self
+                .pages
+                .iter()
+                .any(|page| page.key.control.check().is_err())
+    }
+
+    pub(crate) fn end_reads(&mut self) {
+        self.pages.clear();
+    }
+
+    pub(crate) fn has_reads(&self) -> bool {
+        !self.pages.is_empty()
     }
 
     /// The memory the queued frames hold, for pausing what feeds the queue.
@@ -103,6 +293,14 @@ impl DataQueue {
 
     /// The next frame, if the credit covers it. Call [`DataQueue::wrote`] once it's written.
     pub(crate) fn pop(&mut self, now: Instant) -> Option<Vec<u8>> {
+        while self
+            .frames
+            .front()
+            .is_some_and(|(owner, _)| !self.live_card(*owner))
+        {
+            let (_, frame) = self.frames.pop_front()?;
+            self.bytes -= frame.len() + ENTRY;
+        }
         let len = self.frames.front()?.1.len();
         self.waiting_since.get_or_insert(now);
         if len > self.credit {
@@ -110,18 +308,14 @@ impl DataQueue {
         }
         self.credit -= len;
         self.bytes -= len + ENTRY;
-        self.writing_page = self
-            .frames
-            .front()
-            .is_some_and(|(owner, _)| *owner == Owner::Page);
+        self.writing = self.frames.front().map(|(owner, _)| *owner);
         self.frames.pop_front().map(|(_, frame)| frame)
     }
 
     /// The frame from the last [`DataQueue::pop`] reached the pipe: progress.
     pub(crate) fn wrote(&mut self) {
-        if self.writing_page {
-            self.pending_pages -= 1;
-            self.writing_page = false;
+        if let Some(Owner::Page(token) | Owner::CardsDone(token)) = self.writing.take() {
+            self.pages.retain(|page| page.key.token != token);
         }
         self.waiting_since = None;
     }
@@ -211,22 +405,73 @@ mod tests {
     #[test]
     fn page_admission_is_released_only_when_its_reply_finishes_writing() {
         let mut queue = DataQueue::new(100);
-        for _ in 0..kumochi_protocol::message::MAX_PENDING_PAGES {
-            assert!(queue.admit_page());
+        for request in
+            0..u32::try_from(kumochi_protocol::message::MAX_PENDING_PAGES).expect("small")
+        {
+            assert!(queue.admit_page(0, request).is_some());
         }
-        assert!(!queue.admit_page());
-        queue.push(Owner::Page, vec![1]);
+        assert!(queue.admit_page(0, 9).is_none());
+        queue.push(Owner::Page(1), vec![1]);
         queue.push(A, vec![2]);
         queue.revoke(RunId(1));
         assert_eq!(queue.pop(Instant::now()), Some(vec![1]));
         assert!(
-            !queue.admit_page(),
+            queue.admit_page(0, 9).is_none(),
             "a write still in progress isn't answered"
         );
         queue.wrote();
-        assert!(queue.admit_page());
-        assert!(!queue.admit_page());
+        assert!(queue.admit_page(0, 9).is_some());
+        assert!(queue.admit_page(0, 9).is_none());
         assert_eq!(queue.pop(Instant::now()), None);
+    }
+
+    #[test]
+    fn page_identity_collision_exhaustion_and_terminal_ownership_fail_closed() {
+        let mut queue = DataQueue::new(100);
+        let admitted = Instant::now();
+        let key = queue.admit_page(8, 7).unwrap();
+        assert_eq!(queue.admit_page(8, 7), None);
+        assert!(key.control.end >= admitted + super::READ_TIME);
+        assert!(key.control.end <= Instant::now() + super::READ_TIME);
+        let mut stale = key.clone();
+        stale.epoch = 7;
+        assert!(!queue.accepts_page(&stale));
+        stale = key.clone();
+        stale.token += 1;
+        assert!(!queue.accepts_page(&stale));
+        queue.push_page(&key, vec![1]);
+        queue.push_page(&key, vec![2]);
+        assert_eq!(queue.frames_for_tests(), 1);
+        assert_eq!(queue.pop(Instant::now()), Some(vec![1]));
+        assert_eq!(key.control.check(), Ok(()));
+        assert_eq!(queue.admit_page(8, 7), None);
+        queue.wrote();
+        assert_eq!(key.control.check(), Err(crate::recall::Error::Ended));
+        assert_eq!(queue.pages.len(), 0);
+        queue.wrote();
+        assert_eq!(queue.pages.len(), 0);
+        queue.token = u64::MAX;
+        assert_eq!(queue.admit_page(8, 9), None);
+        assert_eq!(queue.admit_page(8, 10), None);
+    }
+
+    #[test]
+    fn cancelled_pages_cannot_revive_and_session_teardown_cancels_every_owner() {
+        let mut queue = DataQueue::new(100);
+        let first = queue.admit_page(3, 1).unwrap();
+        let second = queue.admit_page(3, 2).unwrap();
+        first.control.cancel();
+        queue.push_page(&first, vec![1]);
+        assert_eq!(queue.frames_for_tests(), 0);
+        assert!(queue.reads_ended());
+        queue.end_reads();
+        assert_eq!(second.control.check(), Err(crate::recall::Error::Ended));
+        let current = queue.admit_page(4, 1).unwrap();
+        queue.push_page(&first, vec![2]);
+        assert!(queue.accepts_page(&current));
+        assert_eq!(queue.frames_for_tests(), 0);
+        drop(queue);
+        assert_eq!(current.control.check(), Err(crate::recall::Error::Ended));
     }
 
     #[test]
@@ -235,7 +480,7 @@ mod tests {
         queue.push(Owner::Scene(SceneId(1)), vec![1; 3]);
         queue.push(Owner::Scene(SceneId(2)), vec![2]);
         queue.push(A, vec![3]);
-        queue.push(Owner::Page, vec![4]);
+        queue.push(Owner::Page(1), vec![4]);
         queue.push(Owner::Scene(SceneId(1)), vec![5]);
         queue.revoke_scenes(&[SceneId(1), SceneId(9)]);
         assert_eq!(queue.bytes(), 3 * (1 + ENTRY));
@@ -246,17 +491,19 @@ mod tests {
     #[test]
     fn a_snapshot_chunk_is_never_revoked_and_never_answers_a_page() {
         let mut queue = DataQueue::new(100);
-        assert!(queue.admit_page());
+        assert!(queue.admit_page(0, 9).is_some());
         queue.push(Owner::Scene(SceneId(1)), vec![1]);
         queue.push(A, vec![2]);
         queue.revoke(RunId(1));
         assert_eq!(queue.pop(Instant::now()), Some(vec![1]));
         queue.wrote();
-        for _ in 1..kumochi_protocol::message::MAX_PENDING_PAGES {
-            assert!(queue.admit_page());
+        for request in
+            1..u32::try_from(kumochi_protocol::message::MAX_PENDING_PAGES).expect("small")
+        {
+            assert!(queue.admit_page(0, request).is_some());
         }
         assert!(
-            !queue.admit_page(),
+            queue.admit_page(0, 9).is_none(),
             "the chunk didn't release the page's slot"
         );
         assert_eq!(

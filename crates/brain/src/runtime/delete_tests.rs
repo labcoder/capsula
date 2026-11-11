@@ -249,12 +249,12 @@ async fn answer_before_the_resend(outcome: Deleted) {
 
 #[tokio::test]
 async fn an_answer_before_the_resend_consumes_it() {
-    answer_before_the_resend(Deleted::Removed).await;
+    Box::pin(answer_before_the_resend(Deleted::Removed)).await;
 }
 
 #[tokio::test]
 async fn a_crossed_answer_that_hid_nothing_consumes_the_resend() {
-    answer_before_the_resend(Deleted::NotHidden).await;
+    Box::pin(answer_before_the_resend(Deleted::NotHidden)).await;
 }
 
 #[tokio::test]
@@ -620,20 +620,20 @@ async fn cross_pipe(read: Read) {
 
 #[tokio::test]
 async fn a_turn_sent_before_a_pending_delete_is_refused() {
-    cross_pipe(Read::Pending).await;
+    Box::pin(cross_pipe(Read::Pending)).await;
 }
 
 #[tokio::test]
 async fn a_turn_sent_before_a_removal_is_refused_by_the_fence() {
-    cross_pipe(Read::Removed).await;
+    Box::pin(cross_pipe(Read::Removed)).await;
 }
 
 #[tokio::test]
 async fn a_turn_sent_before_a_hide_is_refused_by_the_fence() {
-    cross_pipe(Read::Hidden).await;
+    Box::pin(cross_pipe(Read::Hidden)).await;
 }
 
 #[tokio::test]
 async fn a_turn_sent_before_a_delete_that_hid_nothing_runs() {
-    cross_pipe(Read::NotHidden).await;
+    Box::pin(cross_pipe(Read::NotHidden)).await;
 }

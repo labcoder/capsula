@@ -6,13 +6,6 @@ use std::{
     sync::{Arc, atomic::AtomicU64},
 };
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the next P3b layer submits runtime credential jobs"
-    )
-)]
 pub(crate) enum Job {
     Load {
         stamp: Stamp,
@@ -35,13 +28,6 @@ pub(crate) enum LoadError {
     Cleanup(Removed),
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the next P3b layer consumes runtime credential replies"
-    )
-)]
 pub(crate) enum Reply {
     Loaded {
         stamp: Stamp,

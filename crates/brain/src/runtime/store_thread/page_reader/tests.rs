@@ -18,6 +18,39 @@ use crate::test_support::Scratch;
 
 mod history;
 
+#[test]
+fn card_reads_keep_the_original_cancel_deadline_and_fixed_failure() {
+    for deadline in [false, true] {
+        let scratch = Scratch::new("card-read-ended");
+        let mut store = Store::open(&scratch.db()).unwrap();
+        store.recover().unwrap();
+        let running = run(store, None);
+        let key = crate::coordinator::PageKey::for_tests(1, 7);
+        if deadline {
+            *key.control.test.time.lock().unwrap() = Some(key.control.end);
+        } else {
+            key.control.cancel();
+        }
+        let cards = Arc::new(crate::coordinator::Cards::new(
+            key,
+            &kumochi_scene::text::Bounded::default(),
+        ));
+        let end = cards.key.control.end;
+        assert!(running.thread.send(StoreOp::ReadCards {
+            cards: Arc::clone(&cards)
+        }));
+        assert_eq!(
+            running.ack(),
+            Input::CardsRead {
+                cards: Arc::clone(&cards),
+                reply: Err(())
+            }
+        );
+        assert_eq!(cards.key.control.end, end);
+        running.thread.close().blocking_recv().unwrap();
+    }
+}
+
 /// Forwards a tokio channel to one a test can wait on with a timeout.
 fn forward<T: Send + 'static>(mut from: mpsc::UnboundedReceiver<T>) -> std_mpsc::Receiver<T> {
     let (to, out) = std_mpsc::channel();
@@ -119,12 +152,233 @@ fn turn(id: u64) -> StoreOp {
 
 fn threads(request: u32) -> StoreOp {
     StoreOp::ReadPage {
-        epoch: 1,
-        request,
+        key: crate::coordinator::PageKey::for_tests(1, request),
         page: PageOf::Threads {
             search: None,
             after: None,
         },
+    }
+}
+
+#[test]
+fn admitted_pages_keep_their_end_while_queued_and_at_the_writer_barrier() {
+    for queued in [false, true] {
+        for deadline in [false, true] {
+            let scratch = Scratch::new("page-admission-end");
+            let mut store = Store::open(&scratch.db()).unwrap();
+            store.recover().unwrap();
+            let running = run(store, None);
+            let release = if queued {
+                let release = gate(&running.read_gates, is_read);
+                assert!(running.thread.send(threads(1)));
+                running.saw(|seen| *seen == Seen::ReadHeld);
+                release
+            } else {
+                let release = gate(&running.gates, is_turn);
+                assert!(running.thread.send(turn(2)));
+                running.saw(|seen| matches!(seen, Seen::StoreOpStarted(op) if is_turn(op)));
+                release
+            };
+            let key = crate::coordinator::PageKey::for_tests(1, 2);
+            let end = key.control.end;
+            assert!(running.thread.send(StoreOp::ReadPage {
+                key: key.clone(),
+                page: PageOf::Threads {
+                    search: None,
+                    after: None
+                },
+            }));
+            if !queued {
+                running.saw(|seen| *seen == Seen::ReadWaiting);
+            }
+            if deadline {
+                *key.control.test.time.lock().unwrap() = Some(end);
+            } else {
+                key.control.cancel();
+            }
+            if queued {
+                release.send(()).unwrap();
+                assert_eq!(listed(running.ack()), [ThreadId(1)]);
+            }
+            let failed = running.ack();
+            assert_eq!(
+                failed,
+                Input::PageRead {
+                    key: key.clone(),
+                    reply: DataToShell::PageFailed { request: 2 }
+                }
+            );
+            let Input::PageRead { key: completed, .. } = failed else {
+                unreachable!()
+            };
+            assert_eq!(completed.control.end, end);
+            if !queued {
+                release.send(()).unwrap();
+                assert_eq!(running.ack(), Input::TurnStored { run: RunId(2) });
+            }
+            running.thread.close().blocking_recv().unwrap();
+        }
+    }
+}
+
+#[test]
+fn admitted_page_sql_uses_the_existing_scoped_handler() {
+    for deadline in [false, true] {
+        let scratch = Scratch::new("page-sql-end");
+        let mut store = Store::open(&scratch.db()).unwrap();
+        store.recover().unwrap();
+        for id in 2..=101 {
+            with_thread(&mut store, id);
+        }
+        let key = crate::coordinator::PageKey::for_tests(1, 7);
+        let (entered, heard) = std_mpsc::channel();
+        let (release, held) = std_mpsc::channel();
+        *key.control.test.gate.lock().unwrap() = Some(crate::recall::control::tests::Gate {
+            entered,
+            release: held,
+        });
+        let running = run(store, None);
+        assert!(running.thread.send(StoreOp::ReadPage {
+            key: key.clone(),
+            page: PageOf::Threads {
+                search: None,
+                after: None
+            },
+        }));
+        heard.recv_timeout(PATIENCE).unwrap();
+        if deadline {
+            *key.control.test.time.lock().unwrap() = Some(key.control.end);
+        } else {
+            key.control.cancel();
+        }
+        release.send(()).unwrap();
+        assert_eq!(
+            running.ack(),
+            Input::PageRead {
+                key,
+                reply: DataToShell::PageFailed { request: 7 }
+            }
+        );
+        running.thread.close().blocking_recv().unwrap();
+    }
+}
+
+#[test]
+fn page_handler_install_and_cleanup_failures_never_return_partial_success() {
+    for fault in 1..=3 {
+        let scratch = Scratch::new("page-handler-failure");
+        let mut store = Store::open(&scratch.db()).unwrap();
+        store.recover().unwrap();
+        let running = run(store, None);
+        let key = crate::coordinator::PageKey::for_tests(1, 7);
+        key.control
+            .test
+            .fault
+            .store(fault, std::sync::atomic::Ordering::SeqCst);
+        assert!(running.thread.send(StoreOp::ReadPage {
+            key: key.clone(),
+            page: PageOf::Threads {
+                search: None,
+                after: None
+            },
+        }));
+        assert_eq!(
+            running.ack(),
+            Input::PageRead {
+                key,
+                reply: DataToShell::PageFailed { request: 7 }
+            }
+        );
+        assert!(running.thread.send(threads(8)));
+        assert_eq!(listed(running.ack()), [ThreadId(1)]);
+        running.thread.close().blocking_recv().unwrap();
+    }
+}
+
+#[test]
+fn admitted_page_side_slot_and_swap_waits_observe_cancel_eof_and_end() {
+    for swapping in [false, true] {
+        for cause in 0..3 {
+            let scratch = Scratch::new("page-side-end");
+            let mut store = Store::open(&scratch.db()).unwrap();
+            store.recover().unwrap();
+            let side = store.side();
+            let (entered, heard) = std_mpsc::channel();
+            let (release, held) = std_mpsc::channel();
+            let holding = if swapping {
+                side.begin_swap();
+                None
+            } else {
+                let side = Arc::clone(&side);
+                let worker = std::thread::spawn(move || {
+                    side.read(|_| {
+                        entered.send(()).unwrap();
+                        held.recv_timeout(PATIENCE * 2).unwrap();
+                        Ok(())
+                    })
+                });
+                heard.recv_timeout(PATIENCE).unwrap();
+                Some(worker)
+            };
+            let running = run(store, None);
+            let key = crate::coordinator::PageKey::for_tests(1, 7);
+            if cause == 0 {
+                *key.control.test.time.lock().unwrap() = Some(std::time::Instant::now());
+            }
+            assert!(running.thread.send(StoreOp::ReadPage {
+                key: key.clone(),
+                page: PageOf::Threads {
+                    search: None,
+                    after: None
+                },
+            }));
+            let until = std::time::Instant::now() + PATIENCE;
+            while !key
+                .control
+                .test
+                .waiting
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                assert!(std::time::Instant::now() < until);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            eprintln!("page Side wait reached: swapping={swapping}, cause={cause}");
+            let closing = match cause {
+                0 => {
+                    key.control.cancel();
+                    eprintln!("page Side cancellation issued: swapping={swapping}");
+                    None
+                }
+                1 => {
+                    let side = Arc::clone(&side);
+                    Some(std::thread::spawn(move || side.close()))
+                }
+                2 => {
+                    *key.control.test.time.lock().unwrap() = Some(key.control.end);
+                    None
+                }
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                running.ack(),
+                Input::PageRead {
+                    key,
+                    reply: DataToShell::PageFailed { request: 7 }
+                }
+            );
+            if swapping {
+                side.end_swap();
+            } else {
+                release.send(()).unwrap();
+            }
+            if let Some(worker) = holding {
+                worker.join().unwrap().unwrap();
+            }
+            if let Some(worker) = closing {
+                worker.join().unwrap();
+            }
+            running.thread.close().blocking_recv().unwrap();
+        }
     }
 }
 
@@ -421,8 +675,7 @@ fn reads_fail_while_the_store_cant_reopen_and_work_once_it_does() {
     assert_eq!(
         running.ack(),
         Input::PageRead {
-            epoch: 1,
-            request: 1,
+            key: crate::coordinator::PageKey::for_tests(1, 1),
             reply: DataToShell::PageFailed { request: 1 },
         }
     );

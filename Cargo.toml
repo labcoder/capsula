@@ -5,7 +5,7 @@ members = ["crates/protocol", "crates/scene", "crates/brain", "crates/shell", "x
 exclude = ["vendor"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.98"
 license = "AGPL-3.0-only"

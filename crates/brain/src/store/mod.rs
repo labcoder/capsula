@@ -14,6 +14,7 @@ mod admission_tests;
 mod calls;
 #[cfg(test)]
 mod calls_tests;
+mod cards;
 pub(crate) mod context;
 mod drawing;
 mod heard;
@@ -43,6 +44,7 @@ use kumochi_protocol::message::{Deleted, RunId, ThreadId};
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
 
 pub use drawing::DrawingRecovery;
+#[cfg(test)]
 pub(crate) use pages::Pages;
 pub use purge::{Cancel, Copied, Leftovers, Owed, Swap};
 #[cfg(test)]
@@ -620,6 +622,7 @@ impl Store {
                 params![now_ms()],
             )?;
         }
+        self.side.delete_cards(&tx, thread)?;
         tx.commit()?;
         Ok(Generation(generation))
     }

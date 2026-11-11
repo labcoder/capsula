@@ -10,6 +10,39 @@ use crate::message::{
 const NAME: &str = "Zqxassistant";
 const USER: &str = "Zqxuser";
 
+#[test]
+fn github_refusal_is_content_free_while_its_repository_request_remains_redacted() {
+    use crate::message::{ErrorKey, GitHubOp, RepoName};
+    let marker = "sentinel/private-repository";
+    let request = ControlToBrain::GitHub(GitHubOp::SetDefaultRepo(RepoName::new(marker).unwrap()));
+    let refusal = ControlToShell::GitHubError(ErrorKey::GitHubUnavailable.into());
+    let records = [
+        record(Direction::ToBrain, &request),
+        record(Direction::ToShell, &refusal),
+    ];
+    assert_eq!(records[0].payload, None);
+    assert_eq!(records[1].payload, Some(vec![25, 42, 0, 0]));
+    let file = recording(&records);
+    assert!(!contains(&file, marker.as_bytes()));
+    let mut reader = &file[MAGIC.len()..];
+    assert_eq!(read(&mut reader).unwrap(), Some(records[0].clone()));
+    assert_eq!(read(&mut reader).unwrap(), Some(records[1].clone()));
+    assert_eq!(read(&mut reader).unwrap(), None);
+    let mut out = Vec::new();
+    assert_eq!(dump(&mut file.as_slice(), &mut out).unwrap(), 2);
+    let out = String::from_utf8(out).unwrap();
+    assert_eq!(
+        out,
+        format!(
+            "    0 Control shell -> brain  GitHub ({} bytes)\n    1 Control brain -> shell  GitHubError(UserError {{ key: GitHubUnavailable, args: [], actions: [] }})\n2 frames\n",
+            wire_len(&request, Pipe::Control)
+        )
+    );
+    let debug = format!("{request:?} {refusal:?} {records:?} {out}");
+    assert!(!debug.contains(marker));
+    assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
+}
+
 fn wire_len(message: &impl Tapped, pipe: Pipe) -> usize {
     encode(message, pipe).expect("encodes").len() - HEADER_LEN
 }

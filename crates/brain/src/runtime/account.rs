@@ -39,20 +39,14 @@ use super::connections::{ConnectionEvent, Connections};
 use super::{Brain, Full, Link, settings};
 use crate::coordinator::Input as CoreInput;
 
+pub(super) mod github;
 #[cfg(test)]
-mod github_tests;
+pub(super) mod github_tests;
 
 #[derive(Debug)]
 pub(super) enum Work {
     Stage(super::connections::StageWork),
     Account(Job),
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the next P3b layer submits runtime credential jobs"
-        )
-    )]
     GitHub {
         job: crate::connections::github::lane::Job,
         reply: oneshot::Sender<crate::connections::github::lane::Reply>,
@@ -87,6 +81,11 @@ impl std::fmt::Debug for Net {
 /// What the account system hears: its machine's input, or the end of a catalog read.
 #[derive(Debug)]
 pub(crate) enum Event {
+    Verification(github::VerificationEvent),
+    GitHub {
+        session: Option<u64>,
+        reply: crate::connections::github::lane::Reply,
+    },
     Connection(ConnectionEvent),
     Machine(Input),
     /// The read started under `epoch` ended: the models, or what to tell the user, if anything.
@@ -147,6 +146,7 @@ impl Catalog {
 /// The account machine, the credential thread and the tasks it started.
 #[derive(Debug)]
 pub(crate) struct Accounts {
+    pub(super) github: github::GitHub,
     state: AccountState,
     pub(super) jobs: Option<std_mpsc::Sender<Work>>,
     /// Fires once the credential thread has dropped the vault and its session lock.
@@ -185,6 +185,7 @@ impl Accounts {
         let (jobs, released) = spawn(worker, loaded_tx, events_tx.clone(), reads_tx.clone())?;
         let salt = getrandom::u64().map_err(std::io::Error::other)?;
         let mut accounts = Self {
+            github: github::GitHub::new(),
             state,
             jobs: Some(jobs),
             released: Some(released),
@@ -207,6 +208,9 @@ impl Accounts {
         // No shell is connected yet: only the work it starts matters, not what it would say.
         accounts.handle(done);
         accounts.start_key(key);
+        accounts
+            .github
+            .start(accounts.jobs.as_ref(), &accounts.reads_tx);
         Ok(accounts)
     }
 
@@ -217,6 +221,7 @@ impl Accounts {
                 Event::Machine(input.expect("the account system holds a sender"))
             }
             Some(read) = self.reads.recv() => read,
+            verified = self.github.next_verification() => Event::Verification(verified),
         }
     }
 
@@ -257,6 +262,23 @@ impl Accounts {
     /// account becomes usable, and again on Retry or a connection while no read succeeded.
     pub(crate) fn handle(&mut self, event: impl Into<Event>) -> Vec<ControlToShell> {
         let input = match event.into() {
+            Event::Verification(verified) => {
+                return self.github.verified(
+                    verified,
+                    self.jobs.as_ref(),
+                    &self.reads_tx,
+                    &self.net.http,
+                );
+            }
+            Event::GitHub { session, reply } => {
+                return self.github.replied(
+                    session,
+                    reply,
+                    self.jobs.as_ref(),
+                    &self.reads_tx,
+                    &self.net.http,
+                );
+            }
             Event::Connection(event) => return self.connection_event(event),
             Event::Machine(input) => input,
             Event::Read { epoch, result } => return self.read_ended(epoch, result),
@@ -482,6 +504,8 @@ impl Accounts {
     /// dispatched are dropped: a pending flag they would have cleared stays set, and the next
     /// start counts it as uncertainty.
     pub(crate) async fn close(&mut self, deadline: Instant, refresh_by: Instant) {
+        self.github
+            .stop(self.jobs.as_ref(), &self.reads_tx, &self.net.http);
         if let Some(listener) = self.listener.take() {
             listener.abort();
         }
@@ -500,17 +524,23 @@ impl Accounts {
         }
         // One the settling started.
         self.catalog.cancel();
+        while self.github.pending() {
+            let input = self.next().await;
+            self.handle(input);
+        }
         self.jobs = None;
-        let Some(mut released) = self.released.take() else {
-            return;
-        };
-        if tokio::time::timeout_at(deadline, &mut released)
-            .await
-            .is_err()
+        if let Some(mut released) = self.released.take()
+            && tokio::time::timeout_at(deadline, &mut released)
+                .await
+                .is_err()
         {
             // It can't be aborted, and the instance capability is deleted next, so it ends first.
             tracing::warn!("a credential job is still running at the deadline; waiting for it");
             released.await.ok();
+        }
+        while self.github.verifying() {
+            let verified = self.github.next_verification().await;
+            self.handle(Event::Verification(verified));
         }
     }
 }

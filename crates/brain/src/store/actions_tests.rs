@@ -136,6 +136,121 @@ fn constraint(result: &rusqlite::Result<usize>) -> bool {
         if error.code == ErrorCode::ConstraintViolation)
 }
 
+fn issue_events(store: &Store) -> Vec<(String, String, String)> {
+    store
+        .conn
+        .prepare("SELECT kind, text, body FROM events WHERE kind IN ('draft','action') ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn issue_events_share_action_and_approval_commits_but_not_noops_or_replays() {
+    let scratch = Scratch::new("issue-event-transactions");
+    let mut store = opened(&scratch);
+    let owner = thread(&mut store);
+    let created = store
+        .create_draft(owner, &title("title"), &body("private body"), None, None)
+        .unwrap();
+    assert_eq!(
+        issue_events(&store),
+        [("draft".into(), "title".into(), "{\"draft\":1}".into())]
+    );
+    assert!(matches!(
+        store.edit_draft(created.draft, &title("title"), &body("private body"), None),
+        Ok(Answer::Unchanged(_))
+    ));
+    assert_eq!(issue_events(&store).len(), 1);
+    let disconnected = Live {
+        account: None,
+        repos: &[],
+    };
+    assert!(matches!(
+        store.consent(
+            created.draft,
+            &created.hash(),
+            created.approval.unwrap(),
+            Decision::File,
+            &disconnected
+        ),
+        Ok(Answer::Refused(IssueRefused::NotConnected, _))
+    ));
+    assert_eq!(
+        issue_events(&store),
+        [
+            ("draft".into(), "title".into(), "{\"draft\":1}".into()),
+            ("action".into(), "title".into(), "{\"draft\":1}".into())
+        ]
+    );
+    assert!(matches!(
+        store.consent(
+            created.draft,
+            &created.hash(),
+            created.approval.unwrap(),
+            Decision::File,
+            &disconnected
+        ),
+        Ok(Answer::Unchanged(_))
+    ));
+    assert!(matches!(store.discard_draft(DraftId(99)), Ok(Answer::Gone)));
+    assert_eq!(issue_events(&store).len(), 2);
+    let before = snapshot(&store.conn);
+    let events = issue_events(&store);
+    store.conn.execute_batch("CREATE TEMP TRIGGER reject_issue_event BEFORE INSERT ON events WHEN new.kind IN ('draft','action') BEGIN SELECT RAISE(ABORT,'event failure'); END;").unwrap();
+    assert!(matches!(
+        store.edit_draft(created.draft, &title("changed"), &body("other"), None),
+        Err(StoreError::Issue)
+    ));
+    assert!(matches!(
+        store.create_draft(owner, &title("new"), &body("body"), None, None),
+        Err(StoreError::Issue)
+    ));
+    assert_eq!(snapshot(&store.conn), before);
+    assert_eq!(issue_events(&store), events);
+}
+
+#[test]
+fn recovery_events_copy_titles_in_sql_and_rollback_the_entire_send_batch() {
+    let scratch = Scratch::new("issue-recovery-events");
+    let mut store = opened(&scratch);
+    let owner = thread(&mut store);
+    let first = draft(&mut store, owner).draft;
+    let second = draft(&mut store, owner).draft;
+    seed(&store, first, &posting(A), 0);
+    seed(&store, second, &posting(A), 0);
+    store
+        .conn
+        .execute(
+            "UPDATE actions SET body = 'invalid\rbody' WHERE id = ?1",
+            [sql(first.0)],
+        )
+        .unwrap();
+    let before = snapshot(&store.conn);
+    let events = issue_events(&store);
+    store.conn.execute_batch("CREATE TEMP TRIGGER reject_second_event BEFORE INSERT ON events WHEN new.kind = 'action' AND json_extract(new.body,'$.draft') = 2 BEGIN SELECT RAISE(ABORT,'second event'); END;").unwrap();
+    assert!(matches!(store.recover(), Err(StoreError::Issue)));
+    assert_eq!(snapshot(&store.conn), before);
+    assert_eq!(issue_events(&store), events);
+    store
+        .conn
+        .execute_batch("DROP TRIGGER reject_second_event")
+        .unwrap();
+    assert_eq!(store.recover().unwrap().unknown_sends, 2);
+    assert_eq!(
+        issue_events(&store)
+            .iter()
+            .map(|row| row.0.as_str())
+            .collect::<Vec<_>>(),
+        ["draft", "draft", "action", "action"]
+    );
+    assert!(matches!(store.action(first), Err(StoreError::Issue)));
+    assert_eq!(store.recover().unwrap().unknown_sends, 0);
+    assert_eq!(issue_events(&store).len(), 4);
+}
+
 #[test]
 fn version_six_upgrades_with_its_rows_and_an_unused_mark() {
     let scratch = Scratch::new("actions-v6");
@@ -789,7 +904,8 @@ fn every_action_that_loads_can_render() {
         ActionState::Filed {
             number: u64::MAX,
             url: IssueUrl::new(&url).expect("a checked URL"),
-            confirmed_by_user: true
+            confirmed_by_user: true,
+            maybe_duplicate: false
         }
     );
     let unbound = [

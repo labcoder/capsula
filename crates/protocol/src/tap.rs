@@ -136,6 +136,7 @@ impl Tapped for ControlToShell {
             Self::IssueRefused { .. } => "IssueRefused",
             Self::ThreadModelSet { .. } => "ThreadModelSet",
             Self::Voice(_) => "Voice",
+            Self::GitHubError(_) => "GitHubError",
         }
     }
 
@@ -161,6 +162,7 @@ impl Tapped for ControlToShell {
                 }
                 | Self::TurnRefused { thread: _, turn: _ }
                 | Self::Error(_)
+                | Self::GitHubError(_)
                 | Self::ThreadsChanged
                 | Self::Focus { run: _, thread: _ }
                 // Versions, states and content-free reasons only.
@@ -187,6 +189,7 @@ impl Tapped for DataToBrain {
             Self::MicPcm(_) => "MicPcm",
             Self::IssueEdit { .. } => "IssueEdit",
             Self::IssueCards { .. } => "IssueCards",
+            Self::IssueCardsRequest { .. } => "IssueCardsRequest",
             Self::AskAbout { .. } => "AskAbout",
         }
     }
@@ -218,6 +221,8 @@ impl Tapped for DataToShell {
             Self::SegmentQueued { .. } => "SegmentQueued",
             Self::SpeechPcm(_) => "SpeechPcm",
             Self::IssueCard(_) => "IssueCard",
+            Self::IssueCardRead { .. } => "IssueCardRead",
+            Self::IssueCardsDone { .. } => "IssueCardsDone",
         }
     }
 

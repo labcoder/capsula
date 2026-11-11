@@ -369,6 +369,7 @@ fn failed(error: &StoreError) -> Attempt {
 
 #[derive(Debug)]
 pub(crate) struct StoreThread {
+    card_side: Arc<Side>,
     ops: mpsc::Sender<StoreOp>,
     reads: mpsc::Sender<Read>,
     /// Ops other than reads queued so far; a read waits until that many have finished.
@@ -387,6 +388,7 @@ impl StoreThread {
         let (ops_tx, ops) = mpsc::channel::<StoreOp>();
         let (reads_tx, reads) = mpsc::channel();
         let (finished, done) = oneshot::channel();
+        let card_side = store.side();
         // Made first, so a failed start below stops whatever already started.
         let exit = Exit {
             side: store.side(),
@@ -473,6 +475,7 @@ impl StoreThread {
                 }
             })?;
         Ok(Self {
+            card_side,
             ops: ops_tx,
             reads: reads_tx,
             accepted: AtomicU64::new(0),
@@ -483,10 +486,16 @@ impl StoreThread {
     /// Queues an operation, a page read or a context build with the page reader. False when the thread has gone,
     /// which only a panic there causes.
     pub(crate) fn send(&self, op: StoreOp) -> bool {
+        if let StoreOp::ReadCards { cards } = &op
+            && self.card_side.register_cards(cards).is_err()
+        {
+            return false;
+        }
         if matches!(
             op,
             StoreOp::ReadPage { .. }
                 | StoreOp::ReadCall(_)
+                | StoreOp::ReadCards { .. }
                 | StoreOp::BuildContext(_)
                 | StoreOp::ReadJob(_)
                 | StoreOp::CompactContext(_)
@@ -527,6 +536,7 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
         }
         StoreOp::ReadPage { .. }
         | StoreOp::ReadCall(_)
+        | StoreOp::ReadCards { .. }
         | StoreOp::BuildContext(_)
         | StoreOp::ReadJob(_)
         | StoreOp::CompactContext(_) => {
