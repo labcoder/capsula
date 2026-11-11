@@ -564,7 +564,25 @@ fn unavailable_history_drops_stale_pages_without_crediting_a_replacement_session
         owner.chat.update(cx, |state, _| {
             state.connected();
             state.show_for(Some(ThreadId(1)));
-            assert_eq!(state.requests().len(), 2);
+            assert_eq!(
+                state.requests(),
+                vec![
+                    DataToBrain::PageRequest {
+                        request: 1,
+                        page: PageOf::Threads {
+                            search: None,
+                            after: None,
+                        },
+                    },
+                    DataToBrain::PageRequest {
+                        request: 2,
+                        page: PageOf::Events {
+                            thread: ThreadId(1),
+                            before: None,
+                        },
+                    },
+                ]
+            );
             state.select(Some(ThreadId(2)));
         });
         let marker = |id| PageEvent {
@@ -587,8 +605,8 @@ fn unavailable_history_drops_stale_pages_without_crediting_a_replacement_session
         owner
             .link_events(
                 Batch::Plain(vec![
-                    page(3, ThreadId(1), 1, 29, vec![marker(99)]),
-                    page(3, ThreadId(1), 2, 11, vec![marker(99)]),
+                    page(2, ThreadId(1), 1, 29, vec![marker(99)]),
+                    page(2, ThreadId(1), 2, 11, vec![marker(99)]),
                     page(997, ThreadId(2), 2, 13, vec![marker(99)]),
                 ]),
                 cx,
@@ -603,7 +621,7 @@ fn unavailable_history_drops_stale_pages_without_crediting_a_replacement_session
         assert_eq!(
             requests.try_recv(),
             Ok(DataToBrain::PageRequest {
-                request: 5,
+                request: 3,
                 page: PageOf::Events {
                     thread: ThreadId(2),
                     before: None,
@@ -614,9 +632,9 @@ fn unavailable_history_drops_stale_pages_without_crediting_a_replacement_session
         owner
             .link_events(
                 Batch::Plain(vec![
-                    page(5, ThreadId(2), 1, 31, vec![marker(99)]),
-                    page(5, ThreadId(2), 2, 17, vec![marker(9), marker(8)]),
-                    page(3, ThreadId(2), 2, 19, vec![marker(99)]),
+                    page(3, ThreadId(2), 1, 31, vec![marker(99)]),
+                    page(3, ThreadId(2), 2, 17, vec![marker(9), marker(8)]),
+                    page(2, ThreadId(2), 2, 19, vec![marker(99)]),
                 ]),
                 cx,
             )
