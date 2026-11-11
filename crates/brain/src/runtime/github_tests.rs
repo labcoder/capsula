@@ -52,6 +52,10 @@ impl crate::connections::oauth::Launcher for RejectLaunch {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one wire scenario checks live refusal, offline replay and absence of credential or HTTP work"
+)]
 async fn live_refusals_and_offline_controls_never_start_work_or_change_approval() {
     let scratch = Scratch::new("github-refusal");
     let (action, before) = {
@@ -93,6 +97,26 @@ async fn live_refusals_and_offline_controls_never_start_work_or_change_approval(
     let client = async {
         assert!(shell.scenes().await.is_empty());
         shell.send(&issue).await;
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::ActionState {
+                request: Some(1),
+                draft: action.draft,
+                version: kumochi_protocol::message::StateVersion(2),
+                state: kumochi_protocol::message::ActionState::Draft,
+                approval: Some(kumochi_protocol::message::ApprovalRev(2)),
+            })
+        );
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::IssueRefused {
+                request: 1,
+                draft: action.draft,
+                version: kumochi_protocol::message::StateVersion(2),
+                approval: Some(kumochi_protocol::message::ApprovalRev(2)),
+                reason: kumochi_protocol::message::IssueRefused::NotConnected,
+            })
+        );
         for op in operations() {
             let error = if op == GitHubOp::Connect {
                 ErrorKey::AccountMisconfigured
