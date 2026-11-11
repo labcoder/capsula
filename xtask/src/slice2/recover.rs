@@ -12,7 +12,7 @@ use kumochi_protocol::message::{
 };
 
 use super::brain::Case;
-use super::client::{Client, Frame};
+use super::client::{Client, Frame, Seen};
 use super::{PATIENCE, Row, ended, run_end, store, turn};
 
 pub(super) fn kill(folder: &Path) -> Result<Row> {
@@ -182,7 +182,7 @@ struct Applied {
 
 impl Applied {
     /// Starts a connection's record, checking `named` is `scenes` of the fixture's drawings.
-    fn new(named: Vec<SceneDescriptor>, scenes: usize) -> Self {
+    fn new(named: Vec<SceneDescriptor>, scenes: usize, earlier: &[Seen]) -> Self {
         let mut failures = Vec::new();
         let unique: BTreeSet<SceneId> = named.iter().map(|descriptor| descriptor.scene).collect();
         if unique.len() != scenes || named.len() != scenes {
@@ -196,7 +196,7 @@ impl Applied {
                 ));
             }
         }
-        Self {
+        let mut applied = Self {
             pending: unique
                 .into_iter()
                 .map(|scene| (scene, Vec::new()))
@@ -204,7 +204,11 @@ impl Applied {
             named,
             failures,
             ..Self::default()
+        };
+        for seen in earlier {
+            applied.apply(&seen.frame);
         }
+        applied
     }
 
     fn clear(&mut self, scene: SceneId) {
@@ -315,7 +319,7 @@ impl Applied {
 /// Takes `Scenes` and one chunk, sends `Stop` for `last` and clears the second scene, then
 /// takes the rest.
 fn recover(client: &mut Client, last: RunId, label: &str) -> Result<Applied> {
-    let mut applied = Applied::new(scenes(client)?, DRAWINGS);
+    let mut applied = scenes(client, DRAWINGS)?;
     if applied.named.len() != DRAWINGS {
         bail!(
             "{} scenes named, not the {DRAWINGS} drawn",
@@ -356,7 +360,7 @@ fn recover(client: &mut Client, last: RunId, label: &str) -> Result<Applied> {
 
 /// Takes `Scenes` and every chunk it names, expecting `kept` unchanged.
 fn settle(client: &mut Client, kept: &[SceneDescriptor], label: &str) -> Result<Applied> {
-    let mut applied = Applied::new(scenes(client)?, kept.len());
+    let mut applied = scenes(client, kept.len())?;
     if applied.named != kept {
         applied.failures.push(format!(
             "the next connection named {:?}, not {kept:?}",
@@ -364,7 +368,7 @@ fn settle(client: &mut Client, kept: &[SceneDescriptor], label: &str) -> Result<
         ));
     }
     let wanted = applied.named.len();
-    if wanted > 0 {
+    if applied.installed.len() < wanted {
         client.until(PATIENCE, |seen| {
             applied.apply(&seen.frame);
             (applied.installed.len() == wanted).then_some(())
@@ -375,19 +379,26 @@ fn settle(client: &mut Client, kept: &[SceneDescriptor], label: &str) -> Result<
     Ok(applied)
 }
 
-fn scenes(client: &mut Client) -> Result<Vec<SceneDescriptor>> {
-    client.until(PATIENCE, |seen| match &seen.frame {
+fn scenes(client: &mut Client, expected: usize) -> Result<Applied> {
+    let start = client.log.len();
+    let named = client.until(PATIENCE, |seen| match &seen.frame {
         Frame::Control(ControlToShell::Scenes { scenes }) => Some(scenes.clone()),
         _ => None,
-    })
+    })?;
+    Ok(Applied::new(named, expected, &client.log[start..]))
 }
 
 #[cfg(test)]
 mod tests {
-    use kumochi_protocol::message::{DataToShell, MAX_STEPS, SceneDescriptor, SceneId, Step};
+    use std::collections::BTreeMap;
+    use std::time::Instant;
+
+    use kumochi_protocol::message::{
+        ControlToShell, DataToShell, MAX_STEPS, SceneDescriptor, SceneId, Step,
+    };
 
     use super::Applied;
-    use crate::slice2::client::Frame;
+    use crate::slice2::client::{Frame, Seen};
 
     /// The fixture's whole drawing: every one of its steps committed.
     const WHOLE: u32 = 64;
@@ -434,7 +445,87 @@ mod tests {
                 })
                 .collect(),
             scenes.len(),
+            &[],
         )
+    }
+
+    #[test]
+    fn snapshots_before_scenes_and_split_around_it_install_all_three_exact_drawings() {
+        for before in [3, 2] {
+            let named = vec![
+                SceneDescriptor {
+                    scene: SceneId(1),
+                    revision: WHOLE,
+                    committed: WHOLE,
+                },
+                SceneDescriptor {
+                    scene: SceneId(2),
+                    revision: WHOLE,
+                    committed: WHOLE,
+                },
+                SceneDescriptor {
+                    scene: SceneId(3),
+                    revision: WHOLE,
+                    committed: WHOLE,
+                },
+            ];
+            let mut frames = vec![
+                last(chunk(1, MAX_STEPS, "s")),
+                last(chunk(2, MAX_STEPS, "s")),
+                last(chunk(3, MAX_STEPS, "s")),
+            ];
+            frames.insert(
+                before,
+                Frame::Control(ControlToShell::Scenes {
+                    scenes: named.clone(),
+                }),
+            );
+            let seen: Vec<Seen> = frames
+                .into_iter()
+                .map(|frame| Seen {
+                    at: Instant::now(),
+                    frame,
+                })
+                .collect();
+            let mut applied = Applied::new(named, 3, &seen[..=before]);
+            for next in &seen[before + 1..] {
+                applied.apply(&next.frame);
+            }
+            applied.expect(&[SceneId(1), SceneId(2), SceneId(3)], "s", "reconnected");
+            assert!(applied.failures.is_empty(), "{:?}", applied.failures);
+            assert_eq!(
+                applied.installed,
+                BTreeMap::from([
+                    (
+                        SceneId(1),
+                        vec![
+                            Step {
+                                label: "s".to_owned()
+                            };
+                            MAX_STEPS
+                        ]
+                    ),
+                    (
+                        SceneId(2),
+                        vec![
+                            Step {
+                                label: "s".to_owned()
+                            };
+                            MAX_STEPS
+                        ]
+                    ),
+                    (
+                        SceneId(3),
+                        vec![
+                            Step {
+                                label: "s".to_owned()
+                            };
+                            MAX_STEPS
+                        ]
+                    ),
+                ])
+            );
+        }
     }
 
     #[test]
