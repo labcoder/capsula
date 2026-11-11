@@ -2,6 +2,8 @@ use super::*;
 
 #[path = "github_tests/activation.rs"]
 mod activation;
+#[path = "github_tests/dismissal.rs"]
+mod dismissal;
 use kumochi_protocol::message::{
     Decision, ErrorKey, GitHubOp, IssueBody, IssueOp, IssueTitle, RepoName,
 };

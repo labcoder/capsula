@@ -38,6 +38,7 @@ pub(super) struct SettingsView {
     inputs: [Entity<InputState>; 2],
     github_repos: Entity<SelectState<Vec<github::RepoChoice>>>,
     github_expiry: Option<Task<()>>,
+    github_interactive: Option<u64>,
     focus: FocusHandle,
     editing: Option<Field>,
     tab: usize,
@@ -138,6 +139,7 @@ impl SettingsView {
             inputs,
             github_repos,
             github_expiry: None,
+            github_interactive: None,
             focus: cx.focus_handle().tab_stop(true),
             editing: None,
             tab: 0,
@@ -274,6 +276,7 @@ impl Render for SettingsView {
                     .child(div().text_lg().child(strings.get(Text::Settings)))
                     .child(
                         Button::new("close-settings")
+                            .debug_selector(|| "close-settings".into())
                             .ghost()
                             .label(strings.get(Text::CloseSettings))
                             .on_click(move |_, _, cx| {

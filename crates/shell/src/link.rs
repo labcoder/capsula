@@ -519,6 +519,12 @@ impl LinkHandle {
     /// Ends `session`'s connection, as a malformed frame does, so the link reconnects. Nothing
     /// happens once that connection has ended. Never blocks.
     pub(crate) fn end(&self, session: &Session) {
+        #[cfg(test)]
+        if let Some(recording) = &self.control_recording
+            && recording.capacity().is_some()
+        {
+            recording.close();
+        }
         self.shared.outbox(session, |outbox| outbox.pipe.abort());
     }
 
@@ -574,6 +580,12 @@ impl LinkHandle {
 
     pub(crate) fn record_controls(&mut self) -> Receiver<ControlToBrain> {
         let (sender, receiver) = async_channel::unbounded();
+        self.control_recording = Some(sender);
+        receiver
+    }
+
+    pub(crate) fn record_controls_bounded(&mut self) -> Receiver<ControlToBrain> {
+        let (sender, receiver) = async_channel::bounded(CONTROL_QUEUE);
         self.control_recording = Some(sender);
         receiver
     }

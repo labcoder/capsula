@@ -3,6 +3,227 @@ use gpui_kit::{AppContext as _, TestAppContext, WindowOptions};
 use super::{SettingsPanel, SettingsView};
 use crate::presence::test_fixture;
 
+use crate::link::{Batch, LinkEvent, Session};
+use crate::presence::Presence;
+use gpui_kit::{AnyWindowHandle, Entity, VisualTestContext, px, size};
+use kumochi_protocol::message::{ControlToBrain, GitHubOp, GitHubView, Incarnation, UserCode};
+use kumochi_scene::text::Bounded;
+
+fn github_panel(
+    cx: &mut TestAppContext,
+) -> (
+    AnyWindowHandle,
+    Entity<Presence>,
+    async_channel::Receiver<ControlToBrain>,
+) {
+    let owner = test_fixture::presence(cx);
+    let (window, view) = super::super::general::tests::open(cx);
+    let settings_view = view.clone();
+    let controls = view.update(cx, |view, cx| {
+        view.owner = owner.downgrade();
+        view.tab = 1;
+        owner.update(cx, |owner, _| {
+            view.events = owner.events.clone();
+            owner.settings = view.model.clone();
+            owner.session = Some(Session::detached(7, Incarnation(1)));
+            owner.settings_panel = Some(SettingsPanel {
+                window,
+                view: settings_view.clone(),
+                visible: true,
+                focused: true,
+                bounds: [0; 4],
+                previous: None,
+                activation: None,
+            });
+            owner.link.record_controls()
+        })
+    });
+    {
+        let mut frame = VisualTestContext::from_window(window, cx);
+        frame.simulate_resize(size(px(768.), px(1600.)));
+        frame.update(|window, cx| view.update(cx, |view, cx| view.focus(window, cx)));
+    }
+    receive_github(&owner, GitHubView::SignedOut { cleanup: None }, cx);
+    (window, owner, controls)
+}
+
+fn receive_github(owner: &Entity<Presence>, view: GitHubView, cx: &mut TestAppContext) {
+    owner.update(cx, |owner, cx| {
+        owner
+            .link_events(
+                Batch::Plain(vec![LinkEvent::GitHub {
+                    generation: 7,
+                    view,
+                }]),
+                cx,
+            )
+            .expect("current GitHub snapshot");
+    });
+    cx.run_until_parked();
+}
+
+fn click_github(window: AnyWindowHandle, selector: &'static str, cx: &mut TestAppContext) {
+    let mut frame = VisualTestContext::from_window(window, cx);
+    frame.run_until_parked();
+    frame.update(|window, cx| window.draw(cx).clear(cx));
+    let bounds = frame
+        .debug_bounds(selector)
+        .expect("production Settings control");
+    frame.simulate_click(bounds.center(), gpui_kit::Modifiers::default());
+    frame.run_until_parked();
+}
+
+fn start_github(
+    window: AnyWindowHandle,
+    controls: &async_channel::Receiver<ControlToBrain>,
+    cx: &mut TestAppContext,
+) {
+    click_github(window, "github-connect", cx);
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::GitHub(GitHubOp::Connect))
+    );
+}
+
+fn challenge() -> GitHubView {
+    GitHubView::AwaitingUser {
+        user_code: UserCode::new("ABCD-EFGH").unwrap(),
+        expires_in_s: 900,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Dismissal {
+    Escape,
+    Close,
+}
+
+fn dismiss_challenge(dismissal: Dismissal, cx: &mut TestAppContext) {
+    let (window, owner, controls) = github_panel(cx);
+    start_github(window, &controls, cx);
+    receive_github(&owner, challenge(), cx);
+    if matches!(dismissal, Dismissal::Close) {
+        click_github(window, "close-settings", cx);
+    } else {
+        {
+            let mut frame = VisualTestContext::from_window(window, cx);
+            frame.simulate_keystrokes("escape");
+        }
+        owner.update(cx, |owner, cx| {
+            let event = owner
+                .events_in
+                .try_recv()
+                .expect("the production Escape action");
+            assert!(matches!(event, crate::presence::PresenceEvent::Escape));
+            owner.on_event(event, cx).expect("Escape dismissal");
+        });
+        cx.run_until_parked();
+    }
+    assert!(!owner.read_with(cx, |owner, _| owner.settings_open()));
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::GitHub(GitHubOp::CancelConnect))
+    );
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+}
+
+#[gpui::test]
+fn escape_dismissal_cancels_the_displayed_interactive_challenge(cx: &mut TestAppContext) {
+    dismiss_challenge(Dismissal::Escape, cx);
+}
+
+#[gpui::test]
+fn close_dismissal_cancels_the_displayed_interactive_challenge(cx: &mut TestAppContext) {
+    dismiss_challenge(Dismissal::Close, cx);
+}
+
+#[gpui::test]
+fn dismissal_cancels_connect_before_the_first_view(cx: &mut TestAppContext) {
+    let (window, owner, controls) = github_panel(cx);
+    start_github(window, &controls, cx);
+    click_github(window, "close-settings", cx);
+    assert!(!owner.read_with(cx, |owner, _| owner.settings_open()));
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::GitHub(GitHubOp::CancelConnect))
+    );
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+}
+
+#[gpui::test]
+fn dismissal_never_cancels_background_verification_or_renewal(cx: &mut TestAppContext) {
+    for renewing in [false, true] {
+        let (window, owner, controls) = github_panel(cx);
+        if renewing {
+            receive_github(
+                &owner,
+                GitHubView::Connected {
+                    login: kumochi_protocol::message::GitHubLogin::new("saved-owner").unwrap(),
+                    repos: Bounded::default(),
+                    default: None,
+                    truncated: false,
+                },
+                cx,
+            );
+        }
+        receive_github(&owner, GitHubView::Requesting, cx);
+        click_github(window, "close-settings", cx);
+        assert!(!owner.read_with(cx, |owner, _| owner.settings_open()));
+        assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+    }
+}
+
+#[gpui::test]
+fn dismissal_preserves_an_interactive_sign_in_that_has_completed(cx: &mut TestAppContext) {
+    let (window, owner, controls) = github_panel(cx);
+    start_github(window, &controls, cx);
+    receive_github(
+        &owner,
+        GitHubView::Connected {
+            login: kumochi_protocol::message::GitHubLogin::new("saved-owner").unwrap(),
+            repos: Bounded::default(),
+            default: None,
+            truncated: false,
+        },
+        cx,
+    );
+    click_github(window, "close-settings", cx);
+    assert!(!owner.read_with(cx, |owner, _| owner.settings_open()));
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+    assert!(!controls.is_closed());
+}
+
+#[gpui::test]
+fn dismissal_with_a_full_control_queue_keeps_the_error_and_ends_the_link(cx: &mut TestAppContext) {
+    let (window, owner, controls) = github_panel(cx);
+    start_github(window, &controls, cx);
+    receive_github(&owner, challenge(), cx);
+    let controls = owner.update(cx, |owner, _| {
+        let controls = owner.link.record_controls_bounded();
+        let session = owner.session.as_ref().unwrap();
+        assert_eq!(controls.capacity(), Some(64));
+        for _ in 0..64 {
+            assert!(owner.link.send_control(session, ControlToBrain::Pong));
+        }
+        assert!(controls.is_full());
+        controls
+    });
+    click_github(window, "github-cancel", cx);
+    assert!(owner.read_with(cx, |owner, _| owner.settings_open()));
+    assert!(
+        !controls.is_closed(),
+        "the visible Cancel button remains retryable"
+    );
+    assert!(owner.read_with(cx, |owner, cx| owner.settings.read(cx).github.send_failed));
+    click_github(window, "close-settings", cx);
+    assert!(!owner.read_with(cx, |owner, _| owner.settings_open()));
+    assert!(
+        controls.is_closed(),
+        "the visibility fallback ends the stalled connection"
+    );
+    assert!(owner.read_with(cx, |owner, cx| owner.settings.read(cx).github.send_failed));
+}
+
 #[gpui::test]
 fn recovery_settings_clicks_open_the_exact_tab_through_the_hidden_panel_path(
     cx: &mut TestAppContext,

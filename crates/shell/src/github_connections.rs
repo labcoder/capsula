@@ -137,6 +137,12 @@ impl GitHubConnections {
             return false;
         }
         let settled = match &self.waiting {
+            Some(GitHubOp::Connect) => matches!(
+                view,
+                GitHubView::Requesting
+                    | GitHubView::AwaitingUser { .. }
+                    | GitHubView::Connected { .. }
+            ),
             Some(GitHubOp::SetDefaultRepo(repo)) => !matches!(
                 &view,
                 GitHubView::Connected { default, .. } if default.as_ref() != Some(repo)
@@ -242,6 +248,9 @@ impl GitHubConnections {
         }
         if self.waiting == Some(GitHubOp::CancelConnect) {
             return false;
+        }
+        if self.waiting == Some(GitHubOp::Connect) && *op == GitHubOp::CancelConnect {
+            return true;
         }
         match &self.view {
             None => false,

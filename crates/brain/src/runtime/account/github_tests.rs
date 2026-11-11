@@ -376,6 +376,18 @@ fn device_challenge() -> DeviceCode {
 }
 
 pub(crate) async fn saving_owner(accounts: &mut Accounts) -> Stamp {
+    let stamp = verifying_owner(accounts).await;
+    drive(
+        accounts,
+        GitHubInput::User {
+            stamp,
+            result: Ok(checked_account().user),
+        },
+    );
+    stamp
+}
+
+pub(crate) async fn verifying_owner(accounts: &mut Accounts) -> Stamp {
     tokio::time::pause();
     let stamp = accounts.github.machine().stamp();
     if accounts.github.machine().is_loading() {
@@ -411,13 +423,6 @@ pub(crate) async fn saving_owner(accounts: &mut Accounts) -> Stamp {
         GitHubInput::Poll {
             stamp,
             result: Ok(TokenReply::Token(checked_account().credentials)),
-        },
-    );
-    drive(
-        accounts,
-        GitHubInput::User {
-            stamp,
-            result: Ok(checked_account().user),
         },
     );
     tokio::time::resume();
