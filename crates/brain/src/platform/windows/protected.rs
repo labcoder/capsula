@@ -54,6 +54,12 @@ use windows_sys::Win32::UI::Shell::{
 
 use super::pipe::user_sid;
 
+mod models;
+pub(crate) use models::{
+    create_model_dir, create_model_write, discard_model, model_file, open_model_write,
+    publish_model,
+};
+
 /// Why a path can't be trusted. It carries no path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum Untrusted {

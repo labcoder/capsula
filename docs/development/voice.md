@@ -40,6 +40,16 @@ port 443 without userinfo, on `huggingface.co` or a subdomain of `hf.co`; IP lit
 Signed CDN queries never enter diagnostics.
 
 Existing final files are size- and SHA-256-checked; a bad final is removed before any request.
+Before changing any existing file, the entire attempt checks the physical local folder chain,
+every final and every partial. Junctions, symbolic links, redirected ancestors and network paths
+are refused without cleanup or writes through them. Writable partials must have one name and
+stay open exclusively across hashing, resets and writes; publication renames that checked handle
+relative to its held parent, without replacing an unexpected arrival. Read-only final hardlinks
+remain supported for the development installer, with writers and rebinding excluded while held.
+Both model constructors hold their checked parents and model files until the loaded engine is
+destroyed. These storage guarantees are the platform adapter contract; model policy has no OS
+conditionals. Intentional linked-folder relocation is not supported.
+
 Free space must cover the remaining bytes plus 10%, rounded up. An exclusively locked `.part`
 is rehashed before a Range request. A valid 206 appends; 200 replaces the prefix. A bad range
 or 416 restarts once. The manifest bounds the stream, even without Content-Length; a 200 with

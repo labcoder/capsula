@@ -15,7 +15,12 @@ use ptts::preprocess::Lang;
 use ptts::synth::{DeviceKind, Quant, SpeechStream, Synth};
 use xn::threadpool::PoolConfig;
 
+use crate::platform::ModelFiles;
+
 use super::{CONFIG, Engine, SAMPLE_RATE, TOKENIZER, TtsError, VOICE, WEIGHTS};
+
+#[cfg(test)]
+mod tests;
 
 const POOL_WIDTH: usize = 8;
 const WARM_UP: &str = "Hi.";
@@ -68,10 +73,15 @@ pub(super) fn start_pool(
     Ok(())
 }
 
-pub(super) struct Phonon(Synth);
+pub(super) struct Phonon {
+    synth: Synth,
+    _models: ModelFiles,
+}
 
 impl Phonon {
     pub(super) fn load(dir: &Path) -> Result<Self, TtsError> {
+        let models = ModelFiles::open(dir, &[CONFIG, WEIGHTS, TOKENIZER, VOICE])
+            .map_err(|_| TtsError::ModelPath)?;
         pool()?;
         let config = read_config(dir.join(CONFIG)).map_err(|_| TtsError::Load)?;
         let synth = Synth::builder(config, dir.join(WEIGHTS), Lang::En)
@@ -86,7 +96,10 @@ impl Phonon {
         if synth.sample_rate() != SAMPLE_RATE {
             return Err(TtsError::Load);
         }
-        let phonon = Self(synth);
+        let phonon = Self {
+            synth,
+            _models: models,
+        };
         for frame in phonon.stream(WARM_UP).map_err(|_| TtsError::Load)? {
             frame.map_err(|_| TtsError::Load)?;
         }
@@ -99,7 +112,7 @@ impl Engine for Phonon {
         std::iter::Map<SpeechStream, fn(ptts::Result<Vec<f32>>) -> Result<Vec<f32>, TtsError>>;
 
     fn stream(&self, text: &str) -> Result<Self::Stream, TtsError> {
-        let stream = self.0.stream(text).map_err(|_| TtsError::Synthesis)?;
+        let stream = self.synth.stream(text).map_err(|_| TtsError::Synthesis)?;
         Ok(stream.map(|frame| frame.map_err(|_| TtsError::Synthesis)))
     }
 }

@@ -3,10 +3,10 @@
 #[cfg(test)]
 mod tests;
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::File;
 use std::future::Future;
 use std::io::{Read, Seek, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,6 +19,11 @@ use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tokio::time::{self, Instant};
 use url::{Host, Url};
+
+use crate::platform::{
+    Untrusted, create_model_dir, create_model_write, discard_model, model_file, open_model_write,
+    publish_model,
+};
 
 const IDLE: Duration = Duration::from_secs(30);
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
@@ -215,15 +220,29 @@ impl Downloader {
             },
         };
         report.sender.send_replace(report.value);
+        let Some(first) = files.first() else {
+            return Ok(());
+        };
+        if files.iter().any(|model| model.part != first.part) {
+            return Err(DownloadError::Refused);
+        }
+        let dir = self.models.join(first.part.dir());
+        let held = create_model_dir(&dir).map_err(|_| DownloadError::Io)?;
+        let mut checked = Vec::new();
+        for &model in files {
+            check_cancel(cancel)?;
+            let path = dir.join(model.name);
+            let partial = dir.join(format!("{}.part", model.name));
+            let final_file = optional_file(model_file(&path))?;
+            let existing = optional_file(open_model_write(&partial))?;
+            checked.push((model, path, partial, final_file, existing));
+        }
         let mut pending = Vec::new();
         let mut done = 0;
         let mut missing = 0;
-        for &model in files {
+        for (model, path, partial, mut final_file, existing) in checked {
             check_cancel(cancel)?;
-            let dir = self.models.join(model.part.dir());
-            fs::create_dir_all(&dir).map_err(|_| DownloadError::Io)?;
-            let path = dir.join(model.name);
-            if let Some(mut file) = open_existing(&path)? {
+            if let Some(mut file) = final_file.take() {
                 if file.metadata().map_err(|_| DownloadError::Io)?.len() == model.bytes
                     && hash_matches(hash_file(&mut file, cancel).await?.0, model.sha256)
                 {
@@ -231,18 +250,15 @@ impl Downloader {
                     continue;
                 }
                 drop(file);
-                fs::remove_file(&path).map_err(|_| DownloadError::Io)?;
+                final_file = Some(open_model_write(&path).map_err(|_| DownloadError::Io)?);
             }
-            let partial = dir.join(format!("{}.part", model.name));
-            let existing = open_existing(&partial)?;
             let length = if let Some(file) = &existing {
-                file.try_lock().map_err(|_| DownloadError::Io)?;
                 file.metadata().map_err(|_| DownloadError::Io)?.len()
             } else {
                 0
             };
             missing += model.bytes - if length <= model.bytes { length } else { 0 };
-            pending.push((model, path, partial, existing));
+            pending.push((model, path, partial, final_file, existing));
         }
         let needed = missing + missing.div_ceil(10);
         let available = {
@@ -260,20 +276,30 @@ impl Downloader {
         }
         report.value.done = done;
         report.sender.send_replace(report.value);
-        for (model, path, partial, existing) in pending {
+        for (model, path, partial, final_file, existing) in pending {
+            if let Some(file) = final_file {
+                discard_model(file).map_err(|_| DownloadError::Io)?;
+            }
+            let mut file = match existing {
+                Some(file) => file,
+                None => create_model_write(&partial).map_err(|_| DownloadError::Io)?,
+            };
             // `fetch_file` hashes the bytes already in the `.part` first.
             report.phase(FetchPhase::Verifying);
-            let result = self
-                .fetch_file(model, &partial, existing, &mut report, cancel)
-                .await;
+            let result = self.fetch_file(model, &mut file, &mut report, cancel).await;
             if let Err(error) = result {
                 if matches!(error, DownloadError::Size | DownloadError::Hash) {
-                    fs::remove_file(&partial).map_err(|_| DownloadError::Io)?;
+                    discard_model(file).map_err(|_| DownloadError::Io)?;
                 }
-                tracing::warn!(file = model.name, ?error, "voice download stopped");
+                tracing::warn!(?error, "voice download stopped");
                 return Err(error);
             }
-            crate::platform::replace_file(&partial, &path).map_err(|_| DownloadError::Io)?;
+            publish_model(
+                file,
+                held.last().expect("the model directory is held"),
+                path.file_name().expect("a model filename"),
+            )
+            .map_err(|_| DownloadError::Io)?;
             done += model.bytes;
             report.value.done = done;
         }
@@ -284,22 +310,14 @@ impl Downloader {
     async fn fetch_file(
         &self,
         model: &ModelFile,
-        partial: &Path,
-        existing: Option<File>,
+        file: &mut File,
         report: &mut Reporter<'_>,
         cancel: &watch::Receiver<bool>,
     ) -> Result<(), DownloadError> {
-        let mut file = if let Some(file) = existing {
-            file
-        } else {
-            locked_file(partial)?
-        };
         if file.metadata().map_err(|_| DownloadError::Io)?.len() > model.bytes {
-            drop(file);
-            fs::remove_file(partial).map_err(|_| DownloadError::Io)?;
-            file = locked_file(partial)?;
+            file.set_len(0).map_err(|_| DownloadError::Io)?;
         }
-        let (mut hash, mut offset) = hash_file(&mut file, cancel).await?;
+        let (mut hash, mut offset) = hash_file(file, cancel).await?;
         if offset == model.bytes {
             if !hash_matches(hash, model.sha256) {
                 return Err(DownloadError::Hash);
@@ -334,9 +352,8 @@ impl Downloader {
                 if restarted {
                     return Err(DownloadError::Refused);
                 }
-                drop(file);
-                fs::remove_file(partial).map_err(|_| DownloadError::Io)?;
-                file = locked_file(partial)?;
+                file.set_len(0).map_err(|_| DownloadError::Io)?;
+                file.rewind().map_err(|_| DownloadError::Io)?;
                 offset = 0;
                 hash = Sha256::new();
                 restarted = true;
@@ -390,24 +407,12 @@ impl Downloader {
     }
 }
 
-fn open_existing(path: &Path) -> Result<Option<File>, DownloadError> {
-    match OpenOptions::new().read(true).write(true).open(path) {
+fn optional_file(opened: Result<File, Untrusted>) -> Result<Option<File>, DownloadError> {
+    match opened {
         Ok(file) => Ok(Some(file)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(Untrusted::Missing) => Ok(None),
         Err(_) => Err(DownloadError::Io),
     }
-}
-
-fn locked_file(path: &Path) -> Result<File, DownloadError> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .map_err(|_| DownloadError::Io)?;
-    file.try_lock().map_err(|_| DownloadError::Io)?;
-    Ok(file)
 }
 
 async fn hash_file(

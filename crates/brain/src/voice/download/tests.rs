@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, TcpListener};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -253,6 +254,164 @@ async fn model_paths_refuse_a_hard_linked_partial_without_changing_its_alias() {
     assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
 }
 
+enum LinkedFolder {
+    Root,
+    Part,
+    Ancestor,
+}
+
+async fn linked_folder_refused(location: LinkedFolder, symlink: bool) {
+    let server = Server::start(vec![]);
+    let (scratch, mut downloader) = server.downloader();
+    let actual = scratch.dir().join("actual");
+    let (link, pinned) = match location {
+        LinkedFolder::Root => (
+            downloader.models.clone(),
+            actual.join(MODEL.part.dir()).join(MODEL.name),
+        ),
+        LinkedFolder::Part => (
+            downloader.models.join(MODEL.part.dir()),
+            actual.join(MODEL.name),
+        ),
+        LinkedFolder::Ancestor => {
+            downloader.models = scratch.dir().join("redirected").join("models");
+            (
+                scratch.dir().join("redirected"),
+                actual
+                    .join("models")
+                    .join(MODEL.part.dir())
+                    .join(MODEL.name),
+            )
+        }
+    };
+    seed(&pinned, b"abcdef");
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    if symlink {
+        crate::platform::test_symlink_dir(&actual, &link).expect("own directory symlink");
+    } else {
+        fs::create_dir(&link).unwrap();
+        crate::platform::sherpa::tests::set_junction(&link, &actual).unwrap();
+    }
+    let target = fs::read_link(&link).unwrap();
+    assert_eq!(fetch(&downloader).await.0, Err(DownloadError::Io));
+    assert_eq!(fs::read(pinned).unwrap(), b"abcdef");
+    assert_eq!(fs::read_link(link).unwrap(), target);
+    assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn model_paths_refuse_a_part_junction() {
+    linked_folder_refused(LinkedFolder::Part, false).await;
+}
+
+#[tokio::test]
+async fn model_paths_refuse_an_ancestor_junction() {
+    linked_folder_refused(LinkedFolder::Ancestor, false).await;
+}
+
+#[tokio::test]
+async fn model_paths_refuse_a_root_symlink() {
+    linked_folder_refused(LinkedFolder::Root, true).await;
+}
+
+#[tokio::test]
+async fn model_paths_refuse_a_part_symlink() {
+    linked_folder_refused(LinkedFolder::Part, true).await;
+}
+
+#[tokio::test]
+async fn model_paths_refuse_an_ancestor_symlink() {
+    linked_folder_refused(LinkedFolder::Ancestor, true).await;
+}
+
+async fn linked_file_refused(partial: bool, junction: bool) {
+    let server = Server::start(vec![Reply::full()]);
+    let (scratch, downloader) = server.downloader();
+    let victim = scratch.dir().join("original");
+    let link = if partial {
+        part_path(&downloader)
+    } else {
+        final_path(&downloader)
+    };
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    let pinned = if junction {
+        fs::create_dir(&victim).unwrap();
+        fs::create_dir(&link).unwrap();
+        crate::platform::sherpa::tests::set_junction(&link, &victim).unwrap();
+        victim.join("sentinel")
+    } else {
+        seed(&victim, b"abcdef");
+        crate::platform::test_symlink_file(&victim, &link).expect("own file symlink");
+        victim
+    };
+    seed(&pinned, b"abcdef");
+    let target = fs::read_link(&link).unwrap();
+    assert_eq!(fetch(&downloader).await.0, Err(DownloadError::Io));
+    assert_eq!(fs::read(pinned).unwrap(), b"abcdef");
+    assert_eq!(fs::read_link(link).unwrap(), target);
+    assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn model_paths_refuse_a_final_symlink() {
+    linked_file_refused(false, false).await;
+}
+
+#[tokio::test]
+async fn model_paths_refuse_a_partial_symlink() {
+    linked_file_refused(true, false).await;
+}
+
+#[tokio::test]
+async fn model_paths_refuse_a_final_junction() {
+    linked_file_refused(false, true).await;
+}
+
+#[tokio::test]
+async fn model_paths_refuse_a_partial_junction() {
+    linked_file_refused(true, true).await;
+}
+
+#[tokio::test]
+async fn model_paths_refuse_unc_without_contacting_it() {
+    let server = Server::start(vec![]);
+    let (_scratch, mut downloader) = server.downloader();
+    downloader.models = PathBuf::from(r"\\127.0.0.1\model-test-must-not-be-contacted\models");
+    assert_eq!(fetch(&downloader).await.0, Err(DownloadError::Io));
+    assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn model_paths_preflight_the_whole_attempt_before_removing_an_earlier_bad_final() {
+    let server = Server::start(vec![]);
+    let (scratch, downloader) = server.downloader();
+    seed(&final_path(&downloader), b"xxxxxx");
+    let second = ModelFile {
+        name: "second.bin",
+        ..MODEL
+    };
+    let victim = scratch.dir().join("second-original");
+    seed(&victim, b"abc");
+    let partial = part_path(&downloader).with_file_name("second.bin.part");
+    fs::hard_link(&victim, &partial).unwrap();
+    let (_, cancel) = watch::channel(false);
+    let (progress, _) = watch::channel(Progress {
+        phase: FetchPhase::Verifying,
+        done: 0,
+        total: 12,
+    });
+    assert_eq!(
+        downloader
+            .fetch_files(&[&MODEL, &second], &progress, &cancel)
+            .await,
+        Err(DownloadError::Io)
+    );
+    assert_eq!(fs::read(final_path(&downloader)).unwrap(), b"xxxxxx");
+    assert_eq!(fs::read(partial).unwrap(), b"abc");
+    assert_eq!(fs::read(victim).unwrap(), b"abc");
+    assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test]
 async fn sizes_exact_over_short_empty_and_missing_length() {
     for (wire, expected, kept) in [
@@ -499,7 +658,7 @@ async fn existing_files_crash_partials_and_exclusive_lock() {
     );
     fs::remove_file(final_path(&downloader)).expect("valid voice fixture");
     seed(&part_path(&downloader), b"abc");
-    let lock = locked_file(&part_path(&downloader)).expect("valid voice fixture");
+    let lock = open_model_write(&part_path(&downloader)).expect("valid voice fixture");
     assert_eq!(
         fetch(&downloader).await.0,
         Err(DownloadError::Io),

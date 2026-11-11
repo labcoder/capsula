@@ -6,8 +6,16 @@ pub mod credential;
 pub use windows::{WindowProbe, WindowSample, WindowSession};
 
 mod connected_shell;
+mod model_files;
 mod session_lock;
 mod trust_roots;
+
+pub(crate) use model_files::ModelFiles;
+
+#[cfg(all(test, windows))]
+pub(crate) use std::os::windows::fs::{
+    symlink_dir as test_symlink_dir, symlink_file as test_symlink_file,
+};
 
 pub(crate) use connected_shell::connected_shell_pid;
 #[cfg(windows)]
@@ -61,8 +69,9 @@ pub(crate) use windows::{
 pub use windows::{Launch, Spawned, Stdio, spawn};
 #[cfg(windows)]
 pub(crate) use windows::{
-    Untrusted, hold_chain, local_app_data, mark, marker, owner_only_dir, private_tree, profile_dir,
-    remove_tree, unmark,
+    Untrusted, create_model_dir, create_model_write, discard_model, hold_chain, local_app_data,
+    mark, marker, model_file, open_model_write, owner_only_dir, private_tree, profile_dir,
+    publish_model, remove_tree, unmark,
 };
 #[cfg(windows)]
 pub use windows::{managed_presence, system_env};

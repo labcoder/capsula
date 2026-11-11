@@ -51,8 +51,9 @@ pub(crate) use protected::{
     DaclEntry, dacl_entries, dacl_sddl, pause_after_check, set_dacl, this_user,
 };
 pub(crate) use protected::{
-    Untrusted, hold_chain, hold_file, local_app_data, mark, marker, owner_only_dir, private_tree,
-    profile_dir, remove_tree, unmark,
+    Untrusted, create_model_dir, create_model_write, discard_model, hold_chain, hold_file,
+    local_app_data, mark, marker, model_file, open_model_write, owner_only_dir, private_tree,
+    profile_dir, publish_model, remove_tree, unmark,
 };
 pub use root_store::trust_roots;
 pub use spawn::{Launch, Spawned, Stdio, spawn};

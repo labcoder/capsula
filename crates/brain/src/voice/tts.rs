@@ -42,6 +42,8 @@ pub(crate) enum TtsError {
     Text,
     #[error("spoken replies failed to load")]
     Load,
+    #[error("the speech model path is unsafe")]
+    ModelPath,
     #[error("speech synthesis failed")]
     Synthesis,
     #[error("speech synthesis produced an invalid sample")]
