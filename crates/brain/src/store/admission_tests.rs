@@ -830,7 +830,7 @@ fn bind_reaches_every_live_draft_and_files_nothing() {
     let (one, two) = (thread(&mut store), thread(&mut store));
     let chosen_repo = RepoName::new("octo/chosen").expect("repo");
     let bare = store
-        .create_draft(one, &title("T"), &body("B"), None, None)
+        .create_draft(one, &title("unbound"), &body("B"), None, None)
         .expect("draft");
     let chosen = store
         .create_draft(two, &title("T"), &body("B"), Some(&chosen_repo), None)

@@ -265,6 +265,11 @@ pub enum IssueRefused {
     NotAllowedNow,
     /// The thread was deleted or changed generation.
     ThreadGone,
+    /// Another exact local draft has an unresolved attempt that may create an issue.
+    UnresolvedDraft {
+        /// The earlier draft whose uncertainty must not be bypassed.
+        draft: DraftId,
+    },
 }
 
 /// The exact content and current consent binding displayed on one card.

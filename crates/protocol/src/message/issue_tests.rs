@@ -6,6 +6,59 @@ use crate::frame::{HEADER_LEN, Pipe, encode};
 use crate::tap::{Direction, Record, Tapped, write};
 
 #[test]
+fn an_unresolved_draft_refusal_appends_tag_seven_and_round_trips_its_identity() {
+    use crate::frame::{FrameError, read};
+    assert_eq!(
+        postcard::to_allocvec(&IssueRefused::ThreadGone).unwrap(),
+        [6]
+    );
+    let reason = IssueRefused::UnresolvedDraft {
+        draft: DraftId(128),
+    };
+    assert_eq!(postcard::to_allocvec(&reason).unwrap(), [7, 128, 1]);
+    let json = serde_json::json!({"UnresolvedDraft":{"draft":128}});
+    assert_eq!(serde_json::to_value(reason).unwrap(), json);
+    assert_eq!(
+        serde_json::from_value::<IssueRefused>(json).unwrap(),
+        reason
+    );
+    let message = ControlToShell::IssueRefused {
+        draft: DraftId(2),
+        reason,
+    };
+    let wire = encode(&message, Pipe::Control).unwrap();
+    assert_eq!(wire.len(), 9);
+    assert_eq!(
+        read::<ControlToShell>(&mut wire.as_slice(), Pipe::Control).unwrap(),
+        Some(message)
+    );
+    for length in 1..wire.len() {
+        assert!(matches!(
+            read::<ControlToShell>(&mut &wire[..length], Pipe::Control),
+            Err(FrameError::Truncated)
+        ));
+    }
+    let largest = IssueRefused::UnresolvedDraft {
+        draft: DraftId(u64::MAX),
+    };
+    let mut expected = vec![7];
+    expected.extend([255; 9]);
+    expected.push(1);
+    assert_eq!(postcard::to_allocvec(&largest).unwrap(), expected);
+    assert_eq!(
+        postcard::from_bytes::<IssueRefused>(&expected).unwrap(),
+        largest
+    );
+    assert!(postcard::from_bytes::<IssueRefused>(&[8]).is_err());
+    assert!(
+        serde_json::from_str::<IssueRefused>(
+            r#"{"UnresolvedDraft":{"draft":18446744073709551616}}"#
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn an_unchecked_saved_account_appends_tag_six_and_unknown_tag_seven_is_refused() {
     use crate::frame::{FrameError, read};
     let login = GitHubLogin::new("saved").unwrap();

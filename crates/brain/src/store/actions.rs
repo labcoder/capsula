@@ -55,6 +55,7 @@ impl Store {
     }
 
     /// Applies the user's decision, checked against `live` (docs/development/issues.md#consent).
+    /// File cannot bypass an exact unresolved attempt in another local draft.
     ///
     /// # Errors
     /// [`StoreError::Issue`] when the write fails, with nothing written.
@@ -66,8 +67,46 @@ impl Store {
         decision: Decision,
         live: &Live<'_>,
     ) -> Result<Answer, StoreError> {
-        self.change(draft, |action| {
-            Some(action.consent(hash, approval, decision, live))
+        let Ok(id) = i64::try_from(draft.0) else {
+            return Ok(Answer::Gone);
+        };
+        self.action_tx(|tx| {
+            change_row(tx, id, |action| {
+                let before = action.stage.clone();
+                let consent = action.consent(hash, approval, decision, live);
+                if decision != Decision::File || consent.is_err() || action.stage == before {
+                    return Some(consent);
+                }
+                let account = action.account.as_ref()?;
+                let repo = action.repo.as_ref()?;
+                let other: Option<i64> = tx
+                    .query_row(
+                        "SELECT a.id FROM actions a
+                     WHERE a.id <> ?1
+                     AND a.account_id = ?2 AND a.repo = ?3 AND a.title = ?4 AND a.body = ?5
+                     AND (json_extract(a.stage, '$.kind') IN ('preflight', 'posting', 'unknown')
+                          OR (json_extract(a.stage, '$.kind') = 'discarded' AND a.uncertain > 0))
+                     ORDER BY a.id LIMIT 1",
+                        params![
+                            id,
+                            account.id.to_string(),
+                            repo.as_str(),
+                            action.title.as_str(),
+                            action.body.as_str()
+                        ],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .ok()?;
+                if let Some(other) = other {
+                    let draft = u64::try_from(other).ok().filter(|id| *id != 0)?;
+                    action.stage = before;
+                    return Some(Err(IssueRefused::UnresolvedDraft {
+                        draft: DraftId(draft),
+                    }));
+                }
+                Some(consent)
+            })
         })
     }
 

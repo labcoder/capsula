@@ -233,9 +233,18 @@ The checks run in order:
 3. The action has an account, and `Live` has a user with a nonzero id. Otherwise `NotConnected`.
 4. Their numeric ids are equal; logins don't count. Otherwise `OtherAccount`.
 5. The bound repository is listed. Otherwise `RepoNotListed`.
+6. File has no different retained draft with the same numeric account, repository, exact
+   title and normalized body in Preflight, Posting or Unknown, or dismissed with retained
+   uncertainty. Otherwise `UnresolvedDraft` names that earlier draft. This check runs in the
+   same transaction as approval consumption, not just when the new draft is created.
 
 A refusal never changes stage, content or binding. Because the refused revision is used up, a
 stale click can't file once its cause is fixed, and a double click on a sending card is a no-op.
+An unresolved-draft refusal leaves the earlier action untouched and gives the refused draft a
+fresh revision/version. Dismissal does not erase uncertainty or let a new call key bypass it.
+Hiding a thread for deletion does not bypass the guard while its rows remain. Completing
+history deletion removes those rows, including this local evidence; no separate fingerprint
+or content survives deletion for duplicate detection.
 Every return to Draft, Failed or Unknown offers a new revision, so each send that could duplicate
 an issue needs a fresh File anyway.
 

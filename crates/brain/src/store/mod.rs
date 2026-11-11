@@ -17,6 +17,8 @@ mod calls_tests;
 mod cards;
 pub(crate) mod context;
 mod drawing;
+#[cfg(test)]
+mod duplicate_tests;
 mod heard;
 #[cfg(test)]
 mod heard_tests;
