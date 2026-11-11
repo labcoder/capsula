@@ -71,7 +71,10 @@ pub(crate) fn decode(bytes: &SecretBytes) -> Result<Account, VaultError> {
 }
 
 fn valid_expiry(access: u64, refresh: u64) -> bool {
-    access > 0 && refresh > access && refresh - access <= super::api::REFRESH_LIFETIME_S
+    access > 0
+        && refresh > 0
+        && access.saturating_sub(refresh) <= super::api::MAX_ACCESS_LIFETIME_S
+        && refresh.saturating_sub(access) <= super::api::MAX_REFRESH_LIFETIME_S
 }
 
 #[cfg(test)]
@@ -231,6 +234,14 @@ mod tests {
                     "{field}"
                 );
             }
+            let overflow = String::from_utf8(VALID.to_vec()).unwrap().replace(
+                &format!("\"{field}\":{}", valid()[field]),
+                &format!("\"{field}\":18446744073709551616"),
+            );
+            assert!(matches!(
+                decode(&bytes(overflow.as_bytes())),
+                Err(VaultError::Unreadable)
+            ));
         }
         for bad in [json!(0), json!("false"), json!({})] {
             let mut value = valid();
@@ -240,14 +251,15 @@ mod tests {
     }
 
     #[test]
-    fn expiry_order_and_distance_are_checked_on_read_and_write_without_overflow() {
+    fn positive_expiries_and_bounded_spans_are_checked_without_imposing_order_or_overflow() {
         for (access, refresh) in [
             (0, 1),
             (1, 0),
-            (1, 1),
-            (2, 1),
-            (1, 15_897_602),
+            (0, 0),
+            (1, 31_622_402),
+            (86_402, 1),
             (1, u64::MAX),
+            (u64::MAX, 1),
         ] {
             let mut value = valid();
             value["expires_at_s"] = json!(access);
@@ -258,7 +270,17 @@ mod tests {
             account.credentials.refresh_expires_at_s = refresh;
             assert!(matches!(encode(&account), Err(VaultError::Unreadable)));
         }
-        for (access, refresh) in [(1, 2), (1, 15_897_601), (u64::MAX - 1, u64::MAX)] {
+        for (access, refresh) in [
+            (1, 1),
+            (2, 1),
+            (1, 2),
+            (1, 15_897_601),
+            (1, 31_622_401),
+            (86_401, 1),
+            (u64::MAX - 1, u64::MAX),
+            (u64::MAX, u64::MAX - 1),
+            (u64::MAX, u64::MAX),
+        ] {
             let mut value = valid();
             value["expires_at_s"] = json!(access);
             value["refresh_expires_at_s"] = json!(refresh);

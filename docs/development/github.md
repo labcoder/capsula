@@ -119,12 +119,16 @@ Device replies must name the fixed verification page, contain a checked user
 code, and have positive lifetimes and intervals no greater than 900 seconds.
 Only a missing interval defaults to five seconds; null and malformed values fail.
 Token replies require a complete expiring pair: a checked `ghu_` bearer, a checked
-`ghr_` refresh token, `bearer` token type, no nonempty scope, and the documented
-28,800/15,897,600-second lifetimes. Expiry is measured conservatively from request
-start, rounded down to Unix seconds, with checked arithmetic. Non-expiring, partial,
-null, mixed-error and unsupported replies are refused. Device errors may use 200
-or 400; only 200 can issue credentials. Refresh rejects a reused refresh credential
-and makes no automatic retry, including after a lost response.
+`ghr_` refresh token, `bearer` token type, no nonempty scope, and positive returned
+lifetimes bounded locally to one day for access and 366 days for refresh. These are
+upper bounds, not exact service-contract integers. Each returned duration is added
+to request start, rounded down to Unix seconds, with checked arithmetic. The two
+expiries may be equal or refresh may expire first; persisted pairs retain positive
+expiries and bounded, overflow-safe spans without imposing their order.
+Non-expiring, partial, null, over-bound, overflowing, mixed-error and unsupported
+replies are refused. Device errors may use 200 or 400; only 200 can issue credentials.
+Refresh rejects a reused refresh credential and makes no automatic retry, including
+after a lost response.
 
 [GitHub's refresh contract](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens)
 explicitly exempts device-flow tokens from the client-secret requirement. The
@@ -220,8 +224,11 @@ RefreshRepos, plus Sign out. Only a successful explicit recheck restores use;
 late success or failure from the canceled check cannot do so. A genuine
 non-401 startup failure uses the same saved-but-unverified presentation.
 
-An access token schedules rotation one minute before expiry. The machine first
-advances its fence, revokes consumers and saves `refresh_sent=true` on the existing
+An access token schedules rotation one minute before expiry, or halfway through
+the remaining lifetime when less than two minutes remain. Every positive remaining
+lifetime has a positive delay, so a short-lived pair cannot cause an immediate
+rotation loop. The machine first advances its fence, revokes consumers and saves
+`refresh_sent=true` on the existing
 credential FIFO. Only that save's acknowledgment admits one refresh request. The
 returned pair is verified against the same numeric account and saved atomically
 with `refresh_sent=false` before Connected returns. Failed or lost rotation cannot

@@ -3,8 +3,8 @@
 use super::{
     DeviceCodeValue, GitHubToken,
     api::{
-        ACCESS_LIFETIME_S, ApiError, DeviceCode, GitHubUser, REFRESH_LIFETIME_S, TokenError,
-        TokenReply, Tokens,
+        ApiError, DeviceCode, GitHubUser, MAX_ACCESS_LIFETIME_S, MAX_REFRESH_LIFETIME_S,
+        TokenError, TokenReply, Tokens,
     },
 };
 use crate::connections::clock::{Clock, SystemClock};
@@ -352,7 +352,7 @@ impl Machine {
                 if self.verified
                     && self.token_end.is_some_and(|end| Instant::now() < end)
                     && self
-                        .remaining(account.credentials.expires_at_s, ACCESS_LIFETIME_S)
+                        .remaining(account.credentials.expires_at_s, MAX_ACCESS_LIFETIME_S)
                         .is_some() =>
             {
                 Some(&account.user)
@@ -507,7 +507,8 @@ impl Machine {
     }
 
     fn connected(&mut self, account: Account, now: Instant, effects: &mut Vec<Effect>) {
-        let Some(remaining) = self.remaining(account.credentials.expires_at_s, ACCESS_LIFETIME_S)
+        let Some(remaining) =
+            self.remaining(account.credentials.expires_at_s, MAX_ACCESS_LIFETIME_S)
         else {
             self.state = State::Connected(account);
             self.start_refresh(effects);
@@ -515,7 +516,7 @@ impl Machine {
         };
         self.advance();
         self.token_end = Some(now + remaining);
-        self.refresh_due = Some(now + remaining.saturating_sub(REFRESH_LEAD));
+        self.refresh_due = Some(now + remaining.saturating_sub(REFRESH_LEAD.min(remaining / 2)));
         self.verified = true;
         self.state = State::Connected(account);
         effects.push(Effect::RefreshRepos {
@@ -538,7 +539,10 @@ impl Machine {
         };
         if account.refresh_sent
             || self
-                .remaining(account.credentials.refresh_expires_at_s, REFRESH_LIFETIME_S)
+                .remaining(
+                    account.credentials.refresh_expires_at_s,
+                    MAX_REFRESH_LIFETIME_S,
+                )
                 .is_none()
         {
             self.needs_sign_in(account.user.login, effects);
@@ -624,13 +628,13 @@ impl Machine {
                             || self
                                 .remaining(
                                     account.credentials.refresh_expires_at_s,
-                                    REFRESH_LIFETIME_S,
+                                    MAX_REFRESH_LIFETIME_S,
                                 )
                                 .is_none()
                         {
                             self.needs_sign_in(account.user.login, &mut effects);
                         } else if self
-                            .remaining(account.credentials.expires_at_s, ACCESS_LIFETIME_S)
+                            .remaining(account.credentials.expires_at_s, MAX_ACCESS_LIFETIME_S)
                             .is_none()
                         {
                             self.state = State::Connected(account);

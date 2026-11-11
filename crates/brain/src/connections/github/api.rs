@@ -22,10 +22,10 @@ mod tests;
 /// Local ceiling for retry advice, not an automatic retry schedule.
 pub const MAX_RETRY_AFTER_S: u64 = 3600;
 
-/// GitHub's documented eight-hour user access-token lifetime.
-pub const ACCESS_LIFETIME_S: u64 = 28_800;
-/// GitHub's documented six-month rotating refresh-token lifetime.
-pub const REFRESH_LIFETIME_S: u64 = 15_897_600;
+/// Local upper bound of one day for a returned user access-token lifetime.
+pub const MAX_ACCESS_LIFETIME_S: u64 = 86_400;
+/// Local upper bound of 366 days for a returned rotating refresh-token lifetime.
+pub const MAX_REFRESH_LIFETIME_S: u64 = 31_622_400;
 
 /// Closed failures, without provider diagnostics or payloads.
 #[derive(Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -309,14 +309,20 @@ impl TokenWire {
         }
         if self.token_type.as_deref() != Some("bearer")
             || self.scope.as_deref().is_some_and(|scope| !scope.is_empty())
-            || self.expires_in != Some(ACCESS_LIFETIME_S)
-            || self.refresh_token_expires_in != Some(REFRESH_LIFETIME_S)
             || self.interval.is_some()
             || self.error_description.is_some()
             || self.error_uri.is_some()
         {
             return Err(ApiError::Response);
         }
+        let expires_in = self
+            .expires_in
+            .filter(|seconds| (1..=MAX_ACCESS_LIFETIME_S).contains(seconds))
+            .ok_or(ApiError::Response)?;
+        let refresh_token_expires_in = self
+            .refresh_token_expires_in
+            .filter(|seconds| (1..=MAX_REFRESH_LIFETIME_S).contains(seconds))
+            .ok_or(ApiError::Response)?;
         let access_token = self.access_token.ok_or(ApiError::Response)?;
         let refresh_token = self.refresh_token.ok_or(ApiError::Response)?;
         Ok(TokenReply::Token(Tokens {
@@ -325,10 +331,10 @@ impl TokenWire {
                 RefreshToken::new(refresh_token.0).map_err(|_| ApiError::Response)?,
             ),
             expires_at_s: started_at_s
-                .checked_add(ACCESS_LIFETIME_S)
+                .checked_add(expires_in)
                 .ok_or(ApiError::Response)?,
             refresh_expires_at_s: started_at_s
-                .checked_add(REFRESH_LIFETIME_S)
+                .checked_add(refresh_token_expires_in)
                 .ok_or(ApiError::Response)?,
         }))
     }

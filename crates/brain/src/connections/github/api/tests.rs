@@ -560,7 +560,7 @@ async fn token_reply_maps_only_closed_codes_and_checks_the_bearer() {
 }
 
 #[tokio::test]
-async fn only_complete_documented_expiring_credentials_are_accepted() {
+async fn only_complete_bounded_expiring_credentials_are_accepted() {
     for call in [Call::Token, Call::Refresh] {
         assert_eq!(
             invoke(
@@ -571,11 +571,8 @@ async fn only_complete_documented_expiring_credentials_are_accepted() {
             Err(ApiError::Response)
         );
         for (field, values) in [
-            ("expires_in", vec![0, 1, 28_799, 28_801, u64::MAX]),
-            (
-                "refresh_token_expires_in",
-                vec![0, 1, 15_897_599, 15_897_601, u64::MAX],
-            ),
+            ("expires_in", vec![0, 86_401, u64::MAX]),
+            ("refresh_token_expires_in", vec![0, 31_622_401, u64::MAX]),
         ] {
             for value in values {
                 let mut body = valid(call);
@@ -619,6 +616,50 @@ async fn only_complete_documented_expiring_credentials_are_accepted() {
                 body["scope"] = json!(scope);
             }
             assert_eq!(invoke(&Script::json(&body), call).await, Ok(()));
+        }
+    }
+}
+
+#[tokio::test]
+async fn returned_lifetimes_allow_shorter_longer_equal_and_refresh_first_expiries() {
+    for (access, refresh, access_end, refresh_end) in [
+        (1, 1, 1001, 1001),
+        (1, 2, 1001, 1002),
+        (123, 7, 1123, 1007),
+        (28_799, 15_897_599, 29_799, 15_898_599),
+        (28_801, 15_897_601, 29_801, 15_898_601),
+        (86_400, 31_622_400, 87_400, 31_623_400),
+        (86_400, 1, 87_400, 1001),
+        (1, 31_622_400, 1001, 31_623_400),
+    ] {
+        for call in [Call::Token, Call::Refresh] {
+            let mut value = valid(call);
+            value["expires_in"] = json!(access);
+            value["refresh_token_expires_in"] = json!(refresh);
+            let raw: TokenWire = serde_json::from_value(value.clone()).unwrap();
+            let TokenReply::Token(tokens) = raw.reply(1000).unwrap() else {
+                panic!("bounded expiring pair");
+            };
+            assert_eq!(tokens.expires_at_s, access_end);
+            assert_eq!(tokens.refresh_expires_at_s, refresh_end);
+            assert_eq!(invoke(&Script::json(&value), call).await, Ok(()));
+        }
+    }
+}
+
+#[tokio::test]
+async fn lifetime_integer_overflow_is_refused_by_both_token_requests() {
+    for call in [Call::Token, Call::Refresh] {
+        for field in ["expires_in", "refresh_token_expires_in"] {
+            let value = valid(call);
+            let body = serde_json::to_string(&value).unwrap().replace(
+                &format!("\"{field}\":{}", value[field]),
+                &format!("\"{field}\":18446744073709551616"),
+            );
+            assert_eq!(
+                invoke(&Script::bytes(body.into_bytes()), call).await,
+                Err(ApiError::Response)
+            );
         }
     }
 }
@@ -741,6 +782,29 @@ fn expiry_addition_refuses_each_overflow_and_accepts_the_last_representable_pair
         panic!("last expiring pair")
     };
     assert_eq!(tokens.expires_at_s, u64::MAX - 15_868_800);
+    assert_eq!(tokens.refresh_expires_at_s, u64::MAX);
+}
+
+#[test]
+fn each_returned_upper_bound_checks_its_own_expiry_addition() {
+    for (access, refresh, start) in [
+        (86_400, 1, u64::MAX - 86_400 + 1),
+        (1, 31_622_400, u64::MAX - 31_622_400 + 1),
+    ] {
+        let mut value = bearer();
+        value["expires_in"] = json!(access);
+        value["refresh_token_expires_in"] = json!(refresh);
+        let raw: TokenWire = serde_json::from_value(value).unwrap();
+        assert_eq!(raw.reply(start).unwrap_err(), ApiError::Response);
+    }
+    let mut value = bearer();
+    value["expires_in"] = json!(86_400);
+    value["refresh_token_expires_in"] = json!(31_622_400);
+    let raw: TokenWire = serde_json::from_value(value).unwrap();
+    let TokenReply::Token(tokens) = raw.reply(u64::MAX - 31_622_400).unwrap() else {
+        panic!("last bounded expiring pair");
+    };
+    assert_eq!(tokens.expires_at_s, u64::MAX - 31_536_000);
     assert_eq!(tokens.refresh_expires_at_s, u64::MAX);
 }
 

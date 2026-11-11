@@ -129,6 +129,59 @@ async fn saving_rotation() -> (Machine, Stamp) {
     (m, stamp)
 }
 
+#[tokio::test(start_paused = true)]
+async fn short_lifetimes_schedule_a_positive_delay_before_expiry_without_immediate_rotation() {
+    for (lifetime, delay_ms) in [
+        (1, 500),
+        (2, 1000),
+        (59, 29_500),
+        (60, 30_000),
+        (61, 30_500),
+        (120, 60_000),
+        (121, 61_000),
+    ] {
+        let mut m = new_machine(None);
+        let mut saved = account();
+        saved.credentials.expires_at_s = 1000 + lifetime;
+        let now = Instant::now();
+        let stamp = m.stamp();
+        m.on(
+            Input::Loaded {
+                stamp,
+                result: Ok(Some(saved)),
+            },
+            now,
+        );
+        let effects = m.on(
+            Input::User {
+                stamp,
+                result: Ok(user()),
+            },
+            now,
+        );
+        let connected = m.stamp();
+        let delay = Duration::from_millis(delay_ms);
+        assert!(matches!(effects.as_slice(), [
+            Effect::RefreshRepos { generation },
+            Effect::Wake(at),
+            Effect::View(GitHubView::Connected { .. }),
+        ] if *generation == connected.generation
+            && *at == now + delay
+            && *at > now
+            && *at < now + Duration::from_secs(lifetime)));
+        assert_eq!(m.user(), Some(&user()));
+        stale(&mut m, Input::Tick);
+        tokio::time::advance(delay.checked_sub(Duration::from_nanos(1)).unwrap()).await;
+        m.clock = Arc::new(FixedClock(1000 + delay.as_secs()));
+        stale(&mut m, Input::Tick);
+        assert_eq!(m.stamp(), connected);
+        tokio::time::advance(Duration::from_nanos(1)).await;
+        let (rotating, _) = marker(&mut m);
+        assert_eq!(rotating.generation, connected.generation + 1);
+        stale(&mut m, Input::Tick);
+    }
+}
+
 fn dispatch_refresh(m: &mut Machine, stamp: Stamp) {
     let effects = m.on(Input::Saved { stamp, saved: true }, Instant::now());
     assert!(matches!(effects.as_slice(), [
@@ -410,6 +463,8 @@ async fn a_failed_refresh_is_terminal_and_stale_success_cannot_supply_a_pair() {
             },
             Instant::now(),
         );
+        tokio::time::advance(Duration::from_secs(30)).await;
+        m.clock = Arc::new(FixedClock(4_570));
         let (newer, _) = marker(&mut m);
         dispatch_refresh(&mut m, newer);
         assert_ne!(newer, stamp);
