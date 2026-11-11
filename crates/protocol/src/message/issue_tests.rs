@@ -23,11 +23,14 @@ fn an_unresolved_draft_refusal_appends_tag_seven_and_round_trips_its_identity() 
         reason
     );
     let message = ControlToShell::IssueRefused {
+        request: 128,
         draft: DraftId(2),
+        version: StateVersion(3),
+        approval: Some(ApprovalRev(4)),
         reason,
     };
     let wire = encode(&message, Pipe::Control).unwrap();
-    assert_eq!(wire.len(), 9);
+    assert_eq!(wire, [10, 0, 0, 0, 19, 128, 1, 2, 3, 1, 4, 7, 128, 1]);
     assert_eq!(
         read::<ControlToShell>(&mut wire.as_slice(), Pipe::Control).unwrap(),
         Some(message)
@@ -420,6 +423,19 @@ fn roundtrip<T: Serialize + DeserializeOwned + std::fmt::Debug + PartialEq>(
 fn largest_issue_and_connection_frames_fit_their_exact_budgets() {
     let card = card();
     roundtrip(
+        &ControlToBrain::Issue {
+            request: u64::MAX,
+            op: IssueOp::Consent {
+                draft: card.draft,
+                hash: card.hash,
+                approval: card.approval.unwrap(),
+                decision: Decision::File,
+            },
+        },
+        Pipe::Control,
+        69,
+    );
+    roundtrip(
         &ControlToShell::GitHub(GitHubView::Connected {
             login: card.account.clone().expect("account"),
             repos: Bounded::new(vec![longest_repo(); 200]).expect("200 repos"),
@@ -431,21 +447,27 @@ fn largest_issue_and_connection_frames_fit_their_exact_budgets() {
     );
     roundtrip(
         &ControlToShell::ActionState {
+            request: Some(u64::MAX),
             draft: card.draft,
             version: card.version,
             state: card.state.clone(),
             approval: card.approval,
         },
         Pipe::Control,
-        238,
+        249,
     );
     roundtrip(
         &ControlToShell::IssueRefused {
+            request: u64::MAX,
             draft: card.draft,
-            reason: IssueRefused::ThreadGone,
+            version: card.version,
+            approval: card.approval,
+            reason: IssueRefused::UnresolvedDraft {
+                draft: DraftId(u64::MAX),
+            },
         },
         Pipe::Control,
-        16,
+        57,
     );
     roundtrip(&DataToShell::IssueCard(card.clone()), Pipe::Data, 34261);
     roundtrip(
@@ -457,6 +479,194 @@ fn largest_issue_and_connection_frames_fit_their_exact_budgets() {
         },
         Pipe::Data,
         33955,
+    );
+}
+
+#[test]
+fn issue_operation_identity_preserves_inner_tags_and_exact_wire_fields() {
+    use crate::frame::{FrameError, read};
+    let mut consent = vec![0, 2];
+    consent.extend([91; 32]);
+    consent.extend([3, 0]);
+    for (op, inner) in [
+        (
+            IssueOp::Consent {
+                draft: DraftId(2),
+                hash: ContentHash([91; 32]),
+                approval: ApprovalRev(3),
+                decision: Decision::File,
+            },
+            consent,
+        ),
+        (IssueOp::Discard { draft: DraftId(2) }, vec![1, 2]),
+        (IssueOp::CheckAgain { draft: DraftId(2) }, vec![2, 2]),
+    ] {
+        for (request, identity) in [
+            (0, vec![0]),
+            (
+                u64::MAX,
+                vec![255, 255, 255, 255, 255, 255, 255, 255, 255, 1],
+            ),
+        ] {
+            let message = ControlToBrain::Issue {
+                request,
+                op: op.clone(),
+            };
+            let mut expected = vec![25];
+            expected.extend(identity);
+            expected.extend(&inner);
+            let wire = encode(&message, Pipe::Control).unwrap();
+            assert_eq!(&wire[HEADER_LEN..], expected);
+            assert_eq!(
+                read::<ControlToBrain>(&mut wire.as_slice(), Pipe::Control).unwrap(),
+                Some(message.clone())
+            );
+            assert_eq!(
+                serde_json::from_value::<ControlToBrain>(serde_json::to_value(&message).unwrap())
+                    .unwrap(),
+                message
+            );
+            for length in 1..wire.len() {
+                assert!(matches!(
+                    read::<ControlToBrain>(&mut &wire[..length], Pipe::Control),
+                    Err(FrameError::Truncated)
+                ));
+            }
+            assert!(!format!("{message:?}").contains(&format!("{:?}", [91; 32])));
+        }
+    }
+    assert_eq!(
+        serde_json::to_value(ControlToBrain::Issue {
+            request: 128,
+            op: IssueOp::Discard { draft: DraftId(2) }
+        })
+        .unwrap(),
+        serde_json::json!({"Issue":{"request":128,"op":{"Discard":{"draft":2}}}})
+    );
+}
+
+#[test]
+fn issue_operation_unknown_tags_and_overflow_are_rejected_without_changing_decisions() {
+    for decision in [Decision::FileAnyway, Decision::ThisIsTheIssue] {
+        let message = ControlToBrain::Issue {
+            request: 1,
+            op: IssueOp::Consent {
+                draft: DraftId(2),
+                hash: ContentHash([91; 32]),
+                approval: ApprovalRev(3),
+                decision,
+            },
+        };
+        assert_eq!(
+            postcard::from_bytes::<ControlToBrain>(&postcard::to_allocvec(&message).unwrap())
+                .unwrap(),
+            message
+        );
+    }
+    assert!(postcard::from_bytes::<ControlToBrain>(&[25, 0, 3]).is_err());
+    let mut unknown_decision = vec![25, 0, 0, 2];
+    unknown_decision.extend([91; 32]);
+    unknown_decision.extend([3, 3]);
+    assert!(postcard::from_bytes::<ControlToBrain>(&unknown_decision).is_err());
+    let mut overflow = vec![25];
+    overflow.extend([128; 10]);
+    overflow.extend([1, 2]);
+    assert!(postcard::from_bytes::<ControlToBrain>(&overflow).is_err());
+    assert!(
+        serde_json::from_str::<ControlToBrain>(
+            r#"{"Issue":{"request":18446744073709551616,"op":{"Discard":{"draft":2}}}}"#
+        )
+        .is_err()
+    );
+    assert!(
+        serde_json::from_str::<ControlToBrain>(r#"{"Issue":{"request":1,"op":"Unknown"}}"#)
+            .is_err()
+    );
+}
+
+#[test]
+fn action_acknowledgements_keep_exact_authoritative_metadata() {
+    use crate::frame::{FrameError, read};
+    for (request, identity) in [(None, vec![0]), (Some(128), vec![1, 128, 1])] {
+        let message = ControlToShell::ActionState {
+            request,
+            draft: DraftId(2),
+            version: StateVersion(3),
+            state: ActionState::Draft,
+            approval: Some(ApprovalRev(4)),
+        };
+        let mut expected = vec![18];
+        expected.extend(identity);
+        expected.extend([2, 3, 0, 1, 4]);
+        let wire = encode(&message, Pipe::Control).unwrap();
+        assert_eq!(&wire[HEADER_LEN..], expected);
+        assert_eq!(
+            read::<ControlToShell>(&mut wire.as_slice(), Pipe::Control).unwrap(),
+            Some(message.clone())
+        );
+        assert_eq!(
+            serde_json::from_value::<ControlToShell>(serde_json::to_value(&message).unwrap())
+                .unwrap(),
+            message
+        );
+        for length in 1..wire.len() {
+            assert!(matches!(
+                read::<ControlToShell>(&mut &wire[..length], Pipe::Control),
+                Err(FrameError::Truncated)
+            ));
+        }
+    }
+    assert!(postcard::from_bytes::<ControlToShell>(&[18, 2]).is_err());
+}
+
+#[test]
+fn issue_refusals_keep_exact_authoritative_metadata() {
+    use crate::frame::{FrameError, read};
+    for (approval, ending) in [(None, vec![0, 5]), (Some(ApprovalRev(4)), vec![1, 4, 5])] {
+        let message = ControlToShell::IssueRefused {
+            request: 128,
+            draft: DraftId(2),
+            version: StateVersion(3),
+            approval,
+            reason: IssueRefused::NotAllowedNow,
+        };
+        let mut expected = vec![19, 128, 1, 2, 3];
+        expected.extend(ending);
+        let wire = encode(&message, Pipe::Control).unwrap();
+        assert_eq!(&wire[HEADER_LEN..], expected);
+        assert_eq!(
+            read::<ControlToShell>(&mut wire.as_slice(), Pipe::Control).unwrap(),
+            Some(message.clone())
+        );
+        assert_eq!(
+            serde_json::from_value::<ControlToShell>(serde_json::to_value(&message).unwrap())
+                .unwrap(),
+            message
+        );
+        for length in 1..wire.len() {
+            assert!(matches!(
+                read::<ControlToShell>(&mut &wire[..length], Pipe::Control),
+                Err(FrameError::Truncated)
+            ));
+        }
+        let mut unknown = wire;
+        *unknown.last_mut().unwrap() = 8;
+        assert!(matches!(
+            read::<ControlToShell>(&mut unknown.as_slice(), Pipe::Control),
+            Err(FrameError::Malformed(_))
+        ));
+    }
+    assert!(postcard::from_bytes::<ControlToShell>(&[19, 1, 2, 3, 2]).is_err());
+    assert_eq!(
+        serde_json::to_value(ControlToShell::IssueRefused {
+            request: 128,
+            draft: DraftId(2),
+            version: StateVersion(3),
+            approval: Some(ApprovalRev(4)),
+            reason: IssueRefused::NotAllowedNow,
+        })
+        .unwrap(),
+        serde_json::json!({"IssueRefused":{"request":128,"draft":2,"version":3,"approval":4,"reason":"NotAllowedNow"}})
     );
 }
 
@@ -581,18 +791,22 @@ fn outer_wire_carriers_and_tap_never_format_issue_or_device_content() {
         &markers,
     );
     private(
-        &ControlToBrain::Issue(IssueOp::Consent {
-            draft: card.draft,
-            hash: card.hash,
-            approval: card.approval.expect("approval"),
-            decision: Decision::File,
-        }),
+        &ControlToBrain::Issue {
+            request: u64::MAX,
+            op: IssueOp::Consent {
+                draft: card.draft,
+                hash: card.hash,
+                approval: card.approval.expect("approval"),
+                decision: Decision::File,
+            },
+        },
         Pipe::Control,
         Direction::ToBrain,
         &markers,
     );
     private(
         &ControlToShell::ActionState {
+            request: Some(u64::MAX),
             draft: card.draft,
             version: card.version,
             state: card.state.clone(),
@@ -604,7 +818,10 @@ fn outer_wire_carriers_and_tap_never_format_issue_or_device_content() {
     );
     private(
         &ControlToShell::IssueRefused {
+            request: u64::MAX,
             draft: card.draft,
+            version: card.version,
+            approval: card.approval,
             reason: IssueRefused::ContentChanged,
         },
         Pipe::Control,

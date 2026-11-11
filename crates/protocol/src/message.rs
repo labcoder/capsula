@@ -413,7 +413,12 @@ pub enum ControlToBrain {
     /// The user's operation on Kumochi's GitHub connection.
     GitHub(GitHubOp),
     /// Consent or another explicit issue-card action.
-    Issue(IssueOp),
+    Issue {
+        /// The shell's connection-lifetime operation identity.
+        request: u64,
+        /// The content-bound operation.
+        op: IssueOp,
+    },
 }
 
 /// What a thread's delete came to.
@@ -540,6 +545,8 @@ pub enum ControlToShell {
     GitHub(GitHubView),
     /// A versioned action transition, independent of data-pipe delivery.
     ActionState {
+        /// The completed operation, absent for progress or unsolicited state.
+        request: Option<u64>,
         /// The action.
         draft: DraftId,
         /// Its monotonic presentation version.
@@ -551,8 +558,14 @@ pub enum ControlToShell {
     },
     /// A refused operation; it never changes the card's state.
     IssueRefused {
+        /// The original shell operation identity.
+        request: u64,
         /// The action whose operation was refused.
         draft: DraftId,
+        /// The authoritative presentation version.
+        version: StateVersion,
+        /// The authoritative current approval.
+        approval: Option<ApprovalRev>,
         /// A content-free refusal.
         reason: IssueRefused,
     },

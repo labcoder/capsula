@@ -4,6 +4,8 @@ use super::*;
 mod activation;
 #[path = "github_tests/dismissal.rs"]
 mod dismissal;
+#[path = "issues/tests.rs"]
+mod filing;
 use kumochi_protocol::message::{
     Decision, ErrorKey, GitHubOp, IssueBody, IssueOp, IssueTitle, RepoName,
 };
@@ -77,12 +79,15 @@ async fn live_refusals_and_offline_controls_never_start_work_or_change_approval(
         Err(crate::connections::http_client::HttpError::Configuration)
     });
     brain.account.net.launcher = Arc::new(RejectLaunch(Arc::clone(&attempts)));
-    let issue = ControlToBrain::Issue(IssueOp::Consent {
-        draft: action.draft,
-        hash: action.hash(),
-        approval: action.approval.unwrap(),
-        decision: Decision::File,
-    });
+    let issue = ControlToBrain::Issue {
+        request: 1,
+        op: IssueOp::Consent {
+            draft: action.draft,
+            hash: action.hash(),
+            approval: action.approval.unwrap(),
+            decision: Decision::File,
+        },
+    };
     let mut tap = Tap::from_env();
     let ((control, data), mut shell) = duplex();
     let client = async {

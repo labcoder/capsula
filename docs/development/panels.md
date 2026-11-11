@@ -203,12 +203,27 @@ clears the open thread, and requests needed meanwhile wait until it opens again.
 
 ## Ordering and repair
 
-Issue events render read-only saved cards in the same message list in browse and
-chat, using the [shared issue cache](issues.md#read-only-history-presentation).
+Issue events render saved cards in the same message list in browse and
+chat, using the [shared issue cache](issues.md).
 The title-only event remains visible while details load or are unavailable;
 status, content and duplicate warnings update without changing the event id.
 Saved URLs are text, not actions. The existing focus, PageUp/PageDown and scroll
-anchor behavior remain the navigation path; no card-specific controls are added.
+anchor behavior remain the navigation path. Draft and definite-failure cards
+open the existing cancel-first confirmation only with a current approval and
+exactly matching verified account and repository. Dismiss is available for
+Draft, Failed and Unknown; only Unknown offers GET-only Check again. An unusable
+binding explains replacement rather than silently selecting the new default.
+
+`Presence` owns a checked monotonic `u64` operation counter for the app lifetime,
+so closing or replacing either history cannot reuse an identity. The displayed
+card cache shares pending state and the last submitted request across both
+views. Only a successful control enqueue admits pending; a failed queue leaves
+visible retry feedback. Progress `ActionState { request: None }` does not
+release it. A matching final acknowledgement releases pending even at an
+unchanged version, without losing correlation for the following refusal.
+Refusal feedback requires the last request and authoritative version/approval;
+both frame kinds pass the session generation fence in Presence. A new attempt
+replaces feedback, and disconnect drops the shared card state.
 
 The live list uses `(updated_ms DESC, id DESC)` keyset paging. A thread that isn't updated
 appears exactly once, in order. A thread updated between pages moves above the cursor and is

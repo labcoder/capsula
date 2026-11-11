@@ -107,10 +107,19 @@ pub(crate) enum LinkEvent {
     },
     ActionState {
         generation: u64,
+        request: Option<u64>,
         draft: kumochi_protocol::message::DraftId,
         version: kumochi_protocol::message::StateVersion,
         state: kumochi_protocol::message::ActionState,
         approval: Option<kumochi_protocol::message::ApprovalRev>,
+    },
+    IssueRefused {
+        generation: u64,
+        request: u64,
+        draft: kumochi_protocol::message::DraftId,
+        version: kumochi_protocol::message::StateVersion,
+        approval: Option<kumochi_protocol::message::ApprovalRev>,
+        reason: kumochi_protocol::message::IssueRefused,
     },
     /// A run's phase changed, from the control pipe.
     RunState {
@@ -1130,6 +1139,7 @@ fn watch(
                 }
             }
             Ok(Some(ControlToShell::ActionState {
+                request,
                 draft,
                 version,
                 state,
@@ -1138,6 +1148,7 @@ fn watch(
                 if events
                     .send_blocking(LinkEvent::ActionState {
                         generation,
+                        request,
                         draft,
                         version,
                         state,
@@ -1174,10 +1185,30 @@ fn watch(
                     return;
                 }
             }
+            Ok(Some(ControlToShell::IssueRefused {
+                request,
+                draft,
+                version,
+                approval,
+                reason,
+            })) => {
+                if events
+                    .send_blocking(LinkEvent::IssueRefused {
+                        generation,
+                        request,
+                        draft,
+                        version,
+                        approval,
+                        reason,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             // Slice 7's PR 6 stops playback on SpeechRevoked; nothing plays yet.
             Ok(Some(
-                ControlToShell::IssueRefused { .. }
-                | ControlToShell::SpeechRevoked { .. }
+                ControlToShell::SpeechRevoked { .. }
                 | ControlToShell::ThreadModelSet { .. }
                 | ControlToShell::NoVisual { .. },
             )) => {}

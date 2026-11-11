@@ -1,5 +1,7 @@
 use super::*;
 use crate::confirmation;
+use gpui_kit::component::Disableable as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::{AppContext as _, ScrollHandle, StatefulInteractiveElement as _};
 use kumochi_protocol::message::{
     ApprovalRev, ContentHash, ControlToBrain, Decision, DraftId, GitHubOp, GitHubView, IssueCard,
@@ -115,44 +117,24 @@ impl Render for Preview {
 }
 
 impl Messages {
-    fn eligible_issue<'a>(&'a self, draft: DraftId, cx: &'a App) -> Option<Ref<'a, IssueCard>> {
-        let owner = self.owner.upgrade()?;
-        let owner = owner.read(cx);
-        let generation = owner.session.as_ref()?.generation();
-        let github = &owner.settings.read(cx).github;
-        if github.generation != Some(generation)
-            || github.error.is_some()
-            || !github.allows(Some(generation), &GitHubOp::RefreshRepos)
-        {
-            return None;
-        }
-        let (login, repos) = match github.view.as_ref()? {
-            GitHubView::Connected { login, repos, .. } => (login, repos),
-            GitHubView::SignedOut { .. }
-            | GitHubView::Requesting
-            | GitHubView::AwaitingUser { .. }
-            | GitHubView::NotInstalled { .. }
-            | GitHubView::NeedsSignIn { .. }
-            | GitHubView::NotVerified { .. } => return None,
-        };
+    fn current_issue<'a>(&'a self, draft: DraftId, cx: &'a App) -> Option<Ref<'a, IssueCard>> {
         let model = self.model.read(cx);
         let entry = model.issue(draft)?;
-        if entry.loading() || !model.loaded {
+        if entry.loading() || entry.pending() || !model.loaded {
             return None;
         }
         let card = entry.card()?;
-        if model.open != Some(card.thread)
-            || model.deleting.contains(&card.thread)
-            || card.approval.is_none()
-            || !matches!(card.state, ActionState::Draft | ActionState::Failed(_))
-            || card.account.as_ref() != Some(login)
-            || !card.repo.as_ref().is_some_and(|repo| repos.contains(repo))
-        {
+        if model.open != Some(card.thread) || model.deleting.contains(&card.thread) {
             return None;
         }
         Some(Ref::map(entry, |entry| {
             entry.card().expect("the full card was checked")
         }))
+    }
+
+    fn eligible_issue<'a>(&'a self, draft: DraftId, cx: &'a App) -> Option<Ref<'a, IssueCard>> {
+        let card = self.current_issue(draft, cx)?;
+        fileable(&card, &self.owner, cx).then_some(card)
     }
 
     fn matches_issue(&self, pending: &Pending, cx: &App) -> bool {
@@ -212,21 +194,42 @@ impl Messages {
             return false;
         }
         self.owner
-            .update(cx, |owner, _| {
-                owner.session.as_ref().is_some_and(|session| {
-                    session.generation() == pending.generation
-                        && owner.link.send_control(
-                            session,
-                            ControlToBrain::Issue(IssueOp::Consent {
-                                draft: pending.draft,
-                                hash: pending.hash,
-                                approval: pending.approval,
-                                decision: Decision::File,
-                            }),
-                        )
-                })
+            .update(cx, |owner, cx| {
+                owner.send_issue(
+                    IssueOp::Consent {
+                        draft: pending.draft,
+                        hash: pending.hash,
+                        approval: pending.approval,
+                        decision: Decision::File,
+                    },
+                    cx,
+                )
             })
             .unwrap_or(false)
+    }
+
+    fn issue_action(&mut self, op: IssueOp, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if !window.is_window_active() || !window.is_visible() {
+            return;
+        }
+        let draft = match op {
+            IssueOp::Discard { draft } | IssueOp::CheckAgain { draft } => draft,
+            IssueOp::Consent { .. } => return,
+        };
+        let Some(card) = self.current_issue(draft, cx) else {
+            return;
+        };
+        if !matches!(
+            card.state,
+            ActionState::Draft | ActionState::Failed(_) | ActionState::Unknown { .. }
+        ) || (matches!(op, IssueOp::CheckAgain { .. })
+            && !matches!(card.state, ActionState::Unknown { .. }))
+        {
+            return;
+        }
+        drop(card);
+        self.retire_issue(window, cx);
+        let _gone = self.owner.update(cx, |owner, cx| owner.send_issue(op, cx));
     }
 
     pub(super) fn open_issue_confirmation(
@@ -299,5 +302,138 @@ impl Messages {
             dialog,
         });
         true
+    }
+}
+
+fn fileable(card: &IssueCard, owner: &WeakEntity<Presence>, cx: &App) -> bool {
+    card.approval.is_some()
+        && matches!(card.state, ActionState::Draft | ActionState::Failed(_))
+        && bound_to_connection(card, owner, cx)
+}
+
+fn bound_to_connection(card: &IssueCard, owner: &WeakEntity<Presence>, cx: &App) -> bool {
+    let Some(owner) = owner.upgrade() else {
+        return false;
+    };
+    let owner = owner.read(cx);
+    let Some(generation) = owner.session.as_ref().map(crate::link::Session::generation) else {
+        return false;
+    };
+    let github = &owner.settings.read(cx).github;
+    github.generation == Some(generation)
+        && github.error.is_none()
+        && github.allows(Some(generation), &GitHubOp::RefreshRepos)
+        && matches!(github.view.as_ref(), Some(GitHubView::Connected { login, repos, .. })
+            if card.account.as_ref() == Some(login)
+                && card.repo.as_ref().is_some_and(|repo| repos.contains(repo)))
+}
+
+pub(super) fn controls(
+    draft: DraftId,
+    model: &Threads,
+    owner: &WeakEntity<Presence>,
+    view: &WeakEntity<Messages>,
+    cx: &App,
+) -> gpui_kit::AnyElement {
+    let Some(entry) = model.issue(draft) else {
+        return div().into_any_element();
+    };
+    let Some(card) = entry.card().filter(|card| {
+        model.loaded
+            && model.open == Some(card.thread)
+            && !model.deleting.contains(&card.thread)
+            && !entry.loading()
+    }) else {
+        return div().into_any_element();
+    };
+    let actionable = matches!(
+        card.state,
+        ActionState::Draft | ActionState::Failed(_) | ActionState::Unknown { .. }
+    );
+    let file = fileable(card, owner, cx);
+    let pending = entry.pending();
+    let strings = cx.global::<Strings>();
+    let mut controls = div().flex().flex_col().gap_2();
+    if actionable {
+        let mut buttons = div().flex().gap_2();
+        if file {
+            let view = view.clone();
+            buttons = buttons.child(
+                Button::new(("issue-file", draft.0))
+                    .debug_selector(move || format!("issue-file-{}", draft.0))
+                    .label(strings.get(Text::IssueConsentOpen))
+                    .disabled(pending)
+                    .on_click(move |_, window, cx| {
+                        let _gone = view.update(cx, |view, cx| {
+                            view.open_issue_confirmation(draft, window, cx)
+                        });
+                    }),
+            );
+        }
+        if matches!(card.state, ActionState::Unknown { .. }) {
+            let view = view.clone();
+            buttons = buttons.child(
+                Button::new(("issue-check", draft.0))
+                    .debug_selector(move || format!("issue-check-{}", draft.0))
+                    .label(strings.get(Text::IssueCheckAgain))
+                    .outline()
+                    .disabled(pending)
+                    .on_click(move |_, window, cx| {
+                        let _gone = view.update(cx, |view, cx| {
+                            view.issue_action(IssueOp::CheckAgain { draft }, window, cx)
+                        });
+                    }),
+            );
+        }
+        let view = view.clone();
+        buttons = buttons.child(
+            Button::new(("issue-dismiss", draft.0))
+                .debug_selector(move || format!("issue-dismiss-{}", draft.0))
+                .label(strings.get(Text::IssueDismiss))
+                .ghost()
+                .disabled(pending)
+                .on_click(move |_, window, cx| {
+                    let _gone = view.update(cx, |view, cx| {
+                        view.issue_action(IssueOp::Discard { draft }, window, cx)
+                    });
+                }),
+        );
+        controls = controls.child(buttons);
+        if !pending
+            && ((!file && !matches!(card.state, ActionState::Unknown { .. }))
+                || !bound_to_connection(card, owner, cx))
+        {
+            controls = controls.child(div().debug_selector(|| "issue-replacement".into()).child(
+                gpui_kit::Text::new(
+                    "issue-replacement".into(),
+                    strings.get(Text::IssueReplacement),
+                ),
+            ));
+        }
+    }
+    controls.into_any_element()
+}
+
+impl Presence {
+    fn send_issue(&mut self, op: IssueOp, cx: &mut Context<'_, Self>) -> bool {
+        let draft = match op {
+            IssueOp::Consent { draft, .. }
+            | IssueOp::Discard { draft }
+            | IssueOp::CheckAgain { draft } => draft,
+        };
+        let request = self.issue_request.checked_add(1);
+        let queued = request.is_some_and(|request| {
+            self.issue_request = request;
+            self.session.as_ref().is_some_and(|session| {
+                self.link
+                    .send_control(session, ControlToBrain::Issue { request, op })
+            })
+        });
+        self.threads.update(cx, |model, cx| {
+            model.issue_submitted(draft, request.filter(|_| queued));
+            cx.notify();
+        });
+        self.chat.update(cx, |_, cx| cx.notify());
+        queued
     }
 }

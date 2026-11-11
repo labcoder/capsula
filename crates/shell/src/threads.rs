@@ -12,6 +12,7 @@ use kumochi_protocol::message::{
 use kumochi_scene::text::Bounded;
 
 mod cards;
+pub(crate) use cards::Feedback as IssueFeedback;
 #[cfg(test)]
 mod tests;
 
@@ -213,11 +214,30 @@ impl Threads {
         version: kumochi_protocol::message::StateVersion,
         state: kumochi_protocol::message::ActionState,
         approval: Option<kumochi_protocol::message::ApprovalRev>,
+        request: Option<u64>,
     ) {
         self.reads
             .borrow_mut()
             .cards
-            .state(draft, version, state, approval);
+            .state(draft, version, state, approval, request);
+    }
+
+    pub(crate) fn issue_submitted(&mut self, draft: DraftId, request: Option<u64>) {
+        self.reads.borrow_mut().cards.submitted(draft, request);
+    }
+
+    pub(crate) fn issue_refused(
+        &mut self,
+        request: u64,
+        draft: DraftId,
+        version: kumochi_protocol::message::StateVersion,
+        approval: Option<kumochi_protocol::message::ApprovalRev>,
+        reason: kumochi_protocol::message::IssueRefused,
+    ) {
+        self.reads
+            .borrow_mut()
+            .cards
+            .refused(request, draft, version, approval, reason);
     }
 
     fn sync_cards(&mut self) {

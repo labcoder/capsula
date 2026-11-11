@@ -67,7 +67,7 @@ impl Tapped for ControlToBrain {
             Self::SegmentPlayed { .. } => "SegmentPlayed",
             Self::AudioOutput { .. } => "AudioOutput",
             Self::GitHub(_) => "GitHub",
-            Self::Issue(_) => "Issue",
+            Self::Issue { .. } => "Issue",
         }
     }
 

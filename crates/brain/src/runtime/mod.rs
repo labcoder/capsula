@@ -408,9 +408,9 @@ impl Brain {
     /// the next start, as after a crash.
     pub(crate) async fn quit(mut self, deadline: Instant) -> Quit {
         self.offline(Input::ShellLost);
-        self.finish_filing().await;
         self.voice_quit();
         self.pump_settings_offline();
+        let filing_in_time = self.finish_filing(deadline).await;
         #[cfg(test)]
         self.observer.send(Seen::QuitDraining).ok();
         let mut undeleted = self.coordinator.refused_delete();
@@ -466,7 +466,7 @@ impl Brain {
         self.account
             .close(deadline, Instant::now() + REFRESH_WAIT)
             .await;
-        if cleared && !undeleted {
+        if cleared && !undeleted && filing_in_time {
             Quit::Complete
         } else {
             tracing::warn!(
@@ -478,12 +478,14 @@ impl Brain {
     }
 
     /// Lets runs that ended reach the store, then lets its queued writes finish. Each wait is
-    /// bounded, so a hung store can't hold the brain open. At the next start, runs still active in
-    /// the store become `failed(crash)`; committed outcomes stay, and uncommitted work may be lost.
+    /// bounded except for an unabortable issue phase, whose owner must settle before the writer
+    /// closes. At the next start, runs still active in the store become `failed(crash)`;
+    /// committed outcomes stay, and uncommitted work may be lost.
     pub(crate) async fn close(mut self) {
         let deadline = Instant::now() + close_wait();
         self.voice_quit();
         self.pump_settings_offline();
+        self.finish_filing(deadline).await;
         let settled = tokio::time::timeout(close_wait(), async {
             while self.coordinator.ending_runs() > 0 {
                 let Some(input) = self.inputs.recv().await else {

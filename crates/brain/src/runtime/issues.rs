@@ -28,7 +28,14 @@ use transport::{BoundedHttp, Control};
 pub(super) struct Filing {
     next: u64,
     job: Option<Job>,
-    replies: Vec<(u64, u64, Option<IssueRefused>)>,
+    replies: Vec<Reply>,
+}
+
+struct Reply {
+    serial: u64,
+    epoch: u64,
+    request: u64,
+    forced: Option<IssueRefused>,
 }
 
 impl fmt::Debug for Filing {
@@ -59,9 +66,11 @@ enum Phase {
 struct Job {
     id: u64,
     epoch: u64,
+    request: u64,
     stamp: Stamp,
     check: bool,
     control: Arc<Control>,
+    admission: Option<Write>,
     action: Option<Action>,
     token: Option<Secret<GitHubToken>>,
     prepared: Option<Prepared>,
@@ -145,7 +154,12 @@ impl Filing {
 }
 
 impl Brain {
-    pub(super) fn issue_op(&mut self, op: &IssueOp, epoch: Option<u64>) -> Option<Vec<Effect>> {
+    pub(super) fn issue_op(
+        &mut self,
+        request: u64,
+        op: &IssueOp,
+        epoch: Option<u64>,
+    ) -> Option<Vec<Effect>> {
         if self.filing.replies.len() >= super::CONTROL_QUEUE {
             return None;
         }
@@ -181,7 +195,12 @@ impl Brain {
         };
         if !start {
             let serial = self.filing.serial();
-            self.filing.replies.push((serial, self.epoch, forced));
+            self.filing.replies.push(Reply {
+                serial,
+                epoch: self.epoch,
+                request,
+                forced,
+            });
             return Some(vec![Effect::Store(StoreOp::Issue {
                 serial,
                 write,
@@ -194,9 +213,11 @@ impl Brain {
         let mut job = Job {
             id: self.filing.serial(),
             epoch: self.epoch,
+            request,
             stamp,
             check,
             control,
+            admission: (!check).then(|| write.clone()),
             action: None,
             token: None,
             prepared: None,
@@ -217,12 +238,19 @@ impl Brain {
             .filing
             .replies
             .iter()
-            .position(|(waiting, _, _)| *waiting == serial)
+            .position(|pending| pending.serial == serial)
         {
-            let (_, epoch, forced) = self.filing.replies.remove(index);
+            let pending = self.filing.replies.remove(index);
             return reply.map_or_else(
                 |()| Vec::new(),
-                |answer| self.issue_notice(epoch, &answer, forced),
+                |answer| {
+                    self.issue_notice(
+                        pending.epoch,
+                        Some(pending.request),
+                        &answer,
+                        pending.forced,
+                    )
+                },
             );
         }
         let Some(mut job) = self.filing.job.take() else {
@@ -241,6 +269,25 @@ impl Brain {
             return Vec::new();
         }
         let Ok(answer) = reply else {
+            if matches!(after, AfterWrite::Admission)
+                && let Some(Write::Consent {
+                    draft,
+                    hash,
+                    approval,
+                    live,
+                    ..
+                }) = job.admission.take()
+            {
+                let write = Write::CancelledConsent {
+                    draft,
+                    hash,
+                    approval,
+                    live,
+                };
+                let effect = self.filing.write(&mut job, AfterWrite::Cleanup, write);
+                self.filing.job = Some(job);
+                return vec![effect];
+            }
             if matches!(after, AfterWrite::Result | AfterWrite::Posting) {
                 let effect = self.issue_interrupted(&mut job);
                 self.filing.job = Some(job);
@@ -248,7 +295,7 @@ impl Brain {
             }
             return Vec::new();
         };
-        let mut effects = self.issue_notice(job.epoch, &answer, None);
+        job.admission = None;
         let active = match (&answer, after) {
             (Answer::Changed(action), AfterWrite::Admission) => {
                 matches!(action.stage, Stage::Preflight { .. })
@@ -261,14 +308,11 @@ impl Brain {
             }
             _ => false,
         };
+        let forced =
+            (!active && matches!(after, AfterWrite::Read)).then_some(IssueRefused::NotAllowedNow);
+        let mut effects =
+            self.issue_notice(job.epoch, (!active).then_some(job.request), &answer, forced);
         if !active {
-            if matches!(after, AfterWrite::Read) {
-                effects.extend(self.issue_notice(
-                    job.epoch,
-                    &answer,
-                    Some(IssueRefused::NotAllowedNow),
-                ));
-            }
             return effects;
         }
         let action = match answer {
@@ -290,6 +334,7 @@ impl Brain {
         } else if job.check {
             effects.extend(self.issue_notice(
                 job.epoch,
+                Some(job.request),
                 &Answer::Unchanged(job.action.take().expect("the acknowledged action")),
                 Some(IssueRefused::NotConnected),
             ));
@@ -475,6 +520,7 @@ impl Brain {
     fn issue_notice(
         &self,
         epoch: u64,
+        request: Option<u64>,
         answer: &Answer,
         forced: Option<IssueRefused>,
     ) -> Vec<Effect> {
@@ -487,6 +533,7 @@ impl Brain {
             Answer::Gone => return Vec::new(),
         };
         let mut effects = vec![Effect::Control(ControlToShell::ActionState {
+            request,
             draft: action.draft,
             version: action.version,
             state: action.state(),
@@ -494,15 +541,33 @@ impl Brain {
         })];
         if let Some(reason) = reason {
             effects.push(Effect::Control(ControlToShell::IssueRefused {
+                request: request.expect("a refusal settles its operation"),
                 draft: action.draft,
+                version: action.version,
+                approval: action.approval,
                 reason,
             }));
         }
         effects
     }
 
-    pub(super) async fn finish_filing(&mut self) {
+    pub(super) async fn finish_filing(&mut self, deadline: Instant) -> bool {
+        if !self.filing.pending() {
+            return true;
+        }
         self.filing.cancel();
+        let in_time = tokio::time::timeout_at(deadline, self.drain_filing())
+            .await
+            .is_ok()
+            && Instant::now() <= deadline;
+        if !in_time {
+            tracing::warn!("an issue phase remains at the shutdown deadline; retaining its owner");
+            self.drain_filing().await;
+        }
+        in_time
+    }
+
+    async fn drain_filing(&mut self) {
         while self.filing.pending() {
             let effects = tokio::select! {
                 Some(input) = self.inputs.recv() => self.handle(input).unwrap_or_default(),

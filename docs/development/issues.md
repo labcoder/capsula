@@ -268,6 +268,11 @@ the connection for reopening without erasing that durable answer. Result and com
 do not reuse the canceled admission scope: they settle an already admitted phase and cannot
 start another request.
 
+Shutdown cancels filing before closing the store writer, then drains its SQL acknowledgements
+and joins its network or client-construction owner. Missing the original quit deadline makes
+quit incomplete. An unabortable constructor or admitted settlement remains owned until it
+finishes, as credential work does; shutdown never detaches it or starts a replacement request.
+
 The runtime calls each completion with the version of the answer that entered its phase, never a
 version read later. At any other version, earlier or later, or in another stage, a completion
 answers `Refused(NotAllowedNow)` and writes nothing.

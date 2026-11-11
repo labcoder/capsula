@@ -17,6 +17,25 @@ saved record, not proof that the account is still signed in.
 Details show as loading while a read is pending, or unavailable when they cannot
 be read in this view. Unavailable does not prove the issue was deleted.
 
-These cards are read-only. They do not edit, file, retry or confirm an issue,
-and their saved URLs do not open a browser. Scroll or use PageUp and PageDown
-in the history as usual.
+For a draft or definite failure with a usable bound account, repository and
+approval, **File issue…** opens a literal preview of the saved destination,
+title and body. **Cancel** is focused first. **File issue** sends only the
+exact approval you reviewed, while that same history window is active and
+visible. A queued action is not proof that GitHub created an issue. A definite
+failure requires a new confirmation before another filing attempt.
+
+**Dismiss** removes a draft, definite failure or uncertain action from further
+filing without deleting any remote issue. If a saved destination is unusable,
+dismiss the draft and ask for a replacement after connecting the intended
+account and repository. Changing the default repository never retargets it.
+
+Only **Outcome unknown** offers **Check again**. It looks for the existing
+issue with GET requests and never resends it. Busy and disconnected responses
+remain visible and allow another check; there is no “file anyway” or candidate
+confirmation action. Dismissal preserves the warning that an issue may exist.
+
+Pending actions disable duplicate controls across both histories. Queue failures
+stay visible and retryable. A reply from an earlier attempt or connection cannot
+replace the current attempt's feedback. Cards do not edit saved content, and
+their saved URLs do not open a browser. Scroll or use PageUp and PageDown in the
+history as usual.

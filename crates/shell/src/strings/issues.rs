@@ -1,8 +1,29 @@
-use kumochi_protocol::message::{ActionState, FailReason, IssueCard, LookupResult};
+use kumochi_protocol::message::{ActionState, FailReason, IssueCard, IssueRefused, LookupResult};
 
 use super::{FluentArgs, Strings};
 
 impl Strings {
+    pub(crate) fn issue_feedback(&self, feedback: crate::threads::IssueFeedback) -> String {
+        let crate::threads::IssueFeedback::Refused(reason) = feedback else {
+            return self.get(super::Text::IssueQueueFailed);
+        };
+        let mut args = FluentArgs::new();
+        args.set(
+            "reason",
+            match reason {
+                IssueRefused::StaleApproval => "approval",
+                IssueRefused::ContentChanged => "content",
+                IssueRefused::NotConnected => "connection",
+                IssueRefused::OtherAccount => "account",
+                IssueRefused::RepoNotListed => "repository",
+                IssueRefused::NotAllowedNow => "busy",
+                IssueRefused::ThreadGone => "thread",
+                IssueRefused::UnresolvedDraft { .. } => "unresolved",
+            },
+        );
+        self.format("issue-refusal", Some(&args))
+    }
+
     pub(crate) fn issue_status(&self, state: &ActionState) -> String {
         let mut args = FluentArgs::new();
         let id = match state {

@@ -86,6 +86,17 @@ pub enum Write {
         /// Current authority and the reserved capacity.
         live: Snapshot,
     },
+    /// Revalidate canceled File consent and atomically record its known-unsent failure.
+    CancelledConsent {
+        /// The action.
+        draft: DraftId,
+        /// The original displayed content binding.
+        hash: ContentHash,
+        /// The original single-use revision.
+        approval: ApprovalRev,
+        /// Authority and capacity captured at the original admission.
+        live: Snapshot,
+    },
     /// Save preflight evidence before any create can be dispatched.
     Preflighted {
         /// The action.
@@ -148,6 +159,7 @@ impl fmt::Debug for Write {
         f.write_str(match self {
             Self::Read(_) => "IssueRead",
             Self::Consent { .. } => "IssueConsent",
+            Self::CancelledConsent { .. } => "IssueCancelledConsent",
             Self::Preflighted { .. } => "IssuePreflighted",
             Self::Posted { .. } => "IssuePosted",
             Self::Interrupted { .. } => "IssueInterrupted",

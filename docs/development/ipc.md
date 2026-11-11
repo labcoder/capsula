@@ -499,19 +499,20 @@ owns account binding, content hashes, approval revisions and monotonic state ver
 shell will own presentation and pending edits.
 
 Current connection controls route to the configured [GitHub account owner](github.md).
-The unset public client ID refuses Connect without starting account work. Issue consent,
-discard/check commands and IssueEdit remain dormant; displayed saved cards use the bounded
-history/card reader described in [issue actions](issues.md). None of those reads grants consent.
+The unset public client ID refuses Connect without starting account work. Saved issue cards
+activate explicit File consent, Dismiss and Unknown-only GET-only Check again; IssueEdit,
+FileAnyway and ThisIsTheIssue remain refused. Cards use the bounded history/card reader
+described in [issue actions](issues.md). None of those reads grants consent.
 `GitHubView::NotVerified { login }` is appended at tag 6. It carries only the saved
 display identity and grants no authority; Check again reuses RefreshRepos for GET-only verification.
 
 | Pipe and direction | Message | Fields |
 | --- | --- | --- |
 | Control, shell to brain | `GitHub(GitHubOp)` | Connect, cancel, sign out, retry cleanup, set default repository or refresh repositories |
-| Control, shell to brain | `Issue(IssueOp)` | Consent (`draft`, `hash`, `approval`, `decision`), discard or check again |
+| Control, shell to brain | `Issue { request, op }` | Connection-unique `u64` request and unchanged IssueOp: consent (`draft`, `hash`, `approval`, `decision`), discard or check again |
 | Control, brain to shell | `GitHub(GitHubView)` | Connection state; a connected view has a login, at most 200 repositories, truncation flag and optional default |
-| Control, brain to shell | `ActionState` | `draft`, `version`, `state`, optional `approval` |
-| Control, brain to shell | `IssueRefused` | `draft`, content-free `reason`; no state change |
+| Control, brain to shell | `ActionState` | Optional final-ack `request`, `draft`, `version`, `state`, optional `approval` |
+| Control, brain to shell | `IssueRefused` | Original `request`, `draft`, authoritative `version` and optional `approval`, content-free `reason`; no stage/content change |
 | Data, shell to brain | `IssueEdit` | `draft`, checked `title`, normalized `body`, optional `repo` |
 | Data, shell to brain | `IssueCards` | At most 16 draft ids; empty is valid |
 | Data, brain to shell | `IssueCard` | `draft`, `thread`, optional `repo` and `account`, `title`, `body`, `hash`, optional `approval`, `version`, `state` |
@@ -522,6 +523,17 @@ CRLF normalization; wire decoding refuses CR. Issue URLs allow only canonical
 `https://github.com/{owner}/{repo}/issues/{number}` URLs with a positive number. Checked
 repository and login values compare byte for byte. A card fits the 256 KiB data cap and the
 bounded repository view fits the 64 KiB control cap.
+
+The correlated Issue, ActionState and IssueRefused shapes retain their existing enum tags
+(25, 18 and 19). This is a paired-build wire change: the exact `BUILD_ID` handshake rejects
+mixed binaries, as for earlier shape changes; there is no independent protocol number.
+The largest correlated consent is 69 bytes including its frame header; the largest
+ActionState is 249 bytes and IssueRefused is 57 bytes. `Some(request)` on ActionState
+acknowledges the final outcome, including an unchanged GET result. Progress, initial lookup
+reads and unsolicited updates use `None`. Before a refusal, the brain sends authoritative
+ActionState with the same final request; the shell retains that request after acknowledgement
+to accept only the matching reason/version/approval. These metadata fields carry no issue
+content and stay off the tap payload allow-list.
 
 P1 originally staged these messages without senders or action handlers. That staging baseline
 is superseded by the current account and saved-card paths above: it logged only the operation

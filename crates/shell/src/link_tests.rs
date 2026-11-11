@@ -1120,12 +1120,16 @@ fn staged_issue_controls_keep_the_link_and_cards_return_exact_credit() {
     for message in [
         ControlToShell::GitHub(GitHubView::Requesting),
         ControlToShell::ActionState {
+            request: None,
             draft: DraftId(9),
             version: StateVersion(1),
             state: ActionState::Draft,
             approval: None,
         },
         ControlToShell::IssueRefused {
+            request: 7,
+            version: StateVersion(1),
+            approval: None,
             draft: DraftId(9),
             reason: IssueRefused::NotAllowedNow,
         },
@@ -1143,6 +1147,7 @@ fn staged_issue_controls_keep_the_link_and_cards_return_exact_credit() {
     assert_eq!(generation, session.generation());
     assert_eq!(view, kumochi_protocol::message::GitHubView::Requesting);
     let LinkEvent::ActionState {
+        request,
         generation,
         draft,
         version,
@@ -1154,8 +1159,30 @@ fn staged_issue_controls_keep_the_link_and_cards_return_exact_credit() {
     };
     assert_eq!(generation, session.generation());
     assert_eq!(
-        (draft, version, state, approval),
-        (DraftId(9), StateVersion(1), ActionState::Draft, None)
+        (draft, version, state, approval, request),
+        (DraftId(9), StateVersion(1), ActionState::Draft, None, None)
+    );
+    let LinkEvent::IssueRefused {
+        generation,
+        request,
+        draft,
+        version,
+        approval,
+        reason,
+    } = next(&events)
+    else {
+        panic!("correlated refusal reaches its session-fenced consumer");
+    };
+    assert_eq!(generation, session.generation());
+    assert_eq!(
+        (request, draft, version, approval, reason),
+        (
+            7,
+            DraftId(9),
+            StateVersion(1),
+            None,
+            IssueRefused::NotAllowedNow
+        )
     );
     let card = DataToShell::IssueCard(IssueCard {
         draft: DraftId(9),

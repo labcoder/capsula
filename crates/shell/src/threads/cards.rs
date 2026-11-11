@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 
 use kumochi_protocol::message::{
-    ActionState, ApprovalRev, DraftId, IssueCard, MAX_ISSUE_CARDS, StateVersion, ThreadId,
+    ActionState, ApprovalRev, DraftId, IssueCard, IssueRefused, MAX_ISSUE_CARDS, StateVersion,
+    ThreadId,
 };
 
 use super::View;
@@ -21,9 +22,26 @@ pub(crate) struct Entry {
     pub(super) full: Option<IssueCard>,
     needed: bool,
     flight: Option<u32>,
+    attempt: Option<Attempt>,
+    pub(crate) feedback: Option<Feedback>,
+}
+
+struct Attempt {
+    request: u64,
+    pending: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Feedback {
+    QueueFailed,
+    Refused(IssueRefused),
 }
 
 impl Entry {
+    pub(crate) fn pending(&self) -> bool {
+        self.attempt.as_ref().is_some_and(|attempt| attempt.pending)
+    }
+
     pub(crate) fn state(&self) -> Option<&ActionState> {
         self.mark.as_ref().map(|mark| &mark.state)
     }
@@ -96,6 +114,8 @@ impl Cards {
                     full: None,
                     needed: true,
                     flight: None,
+                    attempt: None,
+                    feedback: None,
                 });
                 if entry.thread != thread {
                     self.broken = true;
@@ -209,6 +229,7 @@ impl Cards {
         version: StateVersion,
         state: ActionState,
         approval: Option<ApprovalRev>,
+        request: Option<u64>,
     ) {
         if self.broken {
             return;
@@ -232,10 +253,20 @@ impl Cards {
             if version == mark.version {
                 if state != mark.state || approval != mark.approval {
                     self.broken = true;
+                } else if let Some(attempt) = &mut entry.attempt
+                    && Some(attempt.request) == request
+                {
+                    attempt.pending = false;
                 }
                 return;
             }
         }
+        if let Some(attempt) = &mut entry.attempt
+            && Some(attempt.request) == request
+        {
+            attempt.pending = false;
+        }
+        entry.feedback = None;
         entry.mark = Some(Watermark {
             version,
             state,
@@ -243,6 +274,44 @@ impl Cards {
         });
         entry.full = None;
         entry.needed = true;
+    }
+
+    pub(super) fn submitted(&mut self, draft: DraftId, request: Option<u64>) {
+        if let Some(entry) = self.entries.get_mut(&draft) {
+            entry.attempt = request.map(|request| Attempt {
+                request,
+                pending: true,
+            });
+            entry.feedback = request.is_none().then_some(Feedback::QueueFailed);
+        }
+    }
+
+    pub(super) fn refused(
+        &mut self,
+        request: u64,
+        draft: DraftId,
+        version: StateVersion,
+        approval: Option<ApprovalRev>,
+        reason: IssueRefused,
+    ) {
+        let Some(entry) = self.entries.get_mut(&draft) else {
+            return;
+        };
+        if entry
+            .attempt
+            .as_ref()
+            .is_none_or(|attempt| attempt.request != request)
+            || entry
+                .mark
+                .as_ref()
+                .is_none_or(|mark| mark.version != version || mark.approval != approval)
+        {
+            return;
+        }
+        if let Some(attempt) = &mut entry.attempt {
+            attempt.pending = false;
+        }
+        entry.feedback = Some(Feedback::Refused(reason));
     }
 
     pub(super) fn take_refresh(&mut self, view: View) -> bool {

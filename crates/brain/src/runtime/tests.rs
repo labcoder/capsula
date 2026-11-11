@@ -184,7 +184,10 @@ fn staged_github_and_issue_controls_do_not_admit_or_change_a_run() {
 
     for message in [
         ControlToBrain::GitHub(GitHubOp::Connect),
-        ControlToBrain::Issue(IssueOp::Discard { draft: DraftId(9) }),
+        ControlToBrain::Issue {
+            request: 1,
+            op: IssueOp::Discard { draft: DraftId(9) },
+        },
     ] {
         assert_eq!(super::controls::control_input(message), Ok(None));
     }

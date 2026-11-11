@@ -65,7 +65,13 @@ fn displayed_issue_pages_use_one_shared_watermarked_card_and_terminal_pacing() {
     );
     chat.apply(issue_page(4, 3));
     assert_eq!(chat.requests(), []);
-    browse.action_state(DraftId(9), StateVersion(2), ActionState::Sending, None);
+    browse.action_state(
+        DraftId(9),
+        StateVersion(2),
+        ActionState::Sending,
+        None,
+        None,
+    );
     browse.apply(full_issue(5, 1, ActionState::Draft));
     assert!(
         browse.reads.borrow().cards.entries[&DraftId(9)]
@@ -104,7 +110,7 @@ fn displayed_issue_pages_use_one_shared_watermarked_card_and_terminal_pacing() {
     let debug = format!("{:?}", browse.reads.borrow().cards);
     assert!(!debug.contains("private-card-marker"));
     assert!(!debug.contains(&format!("{:?}", b"private-card-marker")));
-    browse.action_state(DraftId(9), StateVersion(1), ActionState::Draft, None);
+    browse.action_state(DraftId(9), StateVersion(1), ActionState::Draft, None, None);
     assert_eq!(
         browse.reads.borrow().cards.entries[&DraftId(9)]
             .mark
@@ -113,7 +119,7 @@ fn displayed_issue_pages_use_one_shared_watermarked_card_and_terminal_pacing() {
             .version,
         StateVersion(2)
     );
-    browse.action_state(DraftId(9), StateVersion(2), ActionState::Draft, None);
+    browse.action_state(DraftId(9), StateVersion(2), ActionState::Draft, None, None);
     assert!(browse.cards_broken());
     browse.apply(full_issue(6, 3, ActionState::Draft));
     assert_eq!(
@@ -158,6 +164,7 @@ fn equal_version_hydration_keeps_authority_and_a_conflicting_card_is_terminal() 
         StateVersion(4),
         ActionState::Draft,
         Some(ApprovalRev(8)),
+        None,
     );
     state.apply(full_issue(3, 4, ActionState::Draft));
     {
@@ -230,7 +237,7 @@ fn eviction_and_failed_reads_do_not_revive_cards_or_create_retry_loops() {
     });
     assert_eq!(state.requests(), []);
     for id in 100..1100 {
-        state.action_state(DraftId(id), StateVersion(1), ActionState::Draft, None);
+        state.action_state(DraftId(id), StateVersion(1), ActionState::Draft, None, None);
     }
     assert_eq!(state.reads.borrow().cards.entries.len(), 1);
     assert_eq!(
@@ -288,6 +295,7 @@ fn issue_readers_share_authority_but_require_current_display_ownership() {
             lookup: LookupResult::None,
             maybe_duplicate: true,
         },
+        None,
         None,
     );
     assert!(browse.issue(DraftId(9)).unwrap().card().is_none());
@@ -359,7 +367,13 @@ fn unknown_issue_repair_replaces_queued_older_read_when_shared_admission_is_full
     browse.older_events();
     assert_eq!(browse.requests(), []);
     assert_eq!(browse.event_needed, Some(Read::More));
-    browse.action_state(DraftId(999), StateVersion(1), ActionState::Draft, None);
+    browse.action_state(
+        DraftId(999),
+        StateVersion(1),
+        ActionState::Draft,
+        None,
+        None,
+    );
     assert_eq!(browse.requests(), []);
     assert_eq!(chat.requests(), []);
     browse.apply(DataToShell::IssueCardsDone {

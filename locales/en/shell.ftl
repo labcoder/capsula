@@ -58,14 +58,30 @@ thread-assistant = { $assistant }
 thread-no-visual = Drawing unavailable in history
 thread-issue-title = Issue: { $title }
 
-# Saved issue cards are read-only; these states never authorize a send.
+# Saved issue states never authorize a send without explicit confirmation.
 issue-loading = Loading saved issue
 issue-unavailable = Saved issue unavailable
 issue-details-loading = Loading saved details…
 issue-details-unavailable = The saved details aren't available in this view.
-issue-read-only = This saved issue is read-only here. Filing and changes aren't available.
+issue-read-only = Saved details stay unchanged. Filing requires your explicit confirmation.
 issue-consent-title = File this issue on GitHub?
 issue-consent-open = File issue…
+issue-dismiss = Dismiss
+issue-check-again = Check again
+issue-replacement = This saved destination or approval isn't usable. Dismiss this draft and ask for a replacement after connecting the intended account and repository. This draft won't be retargeted.
+issue-pending = Waiting for this action's result…
+issue-queue-failed = The action wasn't queued. Try again when connected.
+issue-refusal =
+    { $reason ->
+        [approval] The approval changed. Review the current saved details before trying again.
+        [content] The saved details changed. Review them before trying again.
+        [connection] GitHub isn't connected. Reconnect before trying again.
+        [account] This draft belongs to another account. Dismiss it and ask for a replacement; it won't be retargeted.
+        [repository] This draft's repository isn't available. Dismiss it and ask for a replacement; it won't be retargeted.
+        [busy] This action isn't available right now. Try again after the current work finishes.
+        [thread] This draft's thread is no longer available.
+       *[unresolved] An earlier matching draft has an uncertain outcome. Resolve that draft before filing a replacement.
+    }
 issue-consent-consequence = Confirming asks to file this exact saved issue using the bound GitHub account and repository. A queued decision does not mean an issue was filed.
 issue-consent-cancel = Cancel
 issue-consent-confirm = File issue

@@ -71,6 +71,28 @@ impl Store {
                 decision,
                 live,
             } => self.consent(*draft, hash, *approval, *decision, &live.live()),
+            Write::CancelledConsent {
+                draft,
+                hash,
+                approval,
+                live,
+            } => {
+                let Ok(id) = i64::try_from(draft.0) else {
+                    return Ok(Answer::Gone);
+                };
+                self.action_tx(|tx| {
+                    match consent_row(tx, id, hash, *approval, Decision::File, &live.live())? {
+                        Answer::Changed(action)
+                            if matches!(action.stage, Stage::Preflight { .. }) =>
+                        {
+                            change_row(tx, id, |current| {
+                                Some(current.not_sent(action.version, FailReason::Interrupted))
+                            })
+                        }
+                        answer => Ok(answer),
+                    }
+                })
+            }
             Write::Preflighted { draft, at, result } => {
                 self.preflighted(*draft, *at, result.clone())
             }
@@ -146,44 +168,7 @@ impl Store {
         let Ok(id) = i64::try_from(draft.0) else {
             return Ok(Answer::Gone);
         };
-        self.action_tx(|tx| {
-            change_row(tx, id, |action| {
-                let before = action.stage.clone();
-                let consent = action.consent(hash, approval, decision, live);
-                if decision != Decision::File || consent.is_err() || action.stage == before {
-                    return Some(consent);
-                }
-                let account = action.account.as_ref()?;
-                let repo = action.repo.as_ref()?;
-                let other: Option<i64> = tx
-                    .query_row(
-                        "SELECT a.id FROM actions a
-                     WHERE a.id <> ?1
-                     AND a.account_id = ?2 AND a.repo = ?3 AND a.title = ?4 AND a.body = ?5
-                     AND (json_extract(a.stage, '$.kind') IN ('preflight', 'posting', 'unknown')
-                          OR (json_extract(a.stage, '$.kind') = 'discarded' AND a.uncertain > 0))
-                     ORDER BY a.id LIMIT 1",
-                        params![
-                            id,
-                            account.id.to_string(),
-                            repo.as_str(),
-                            action.title.as_str(),
-                            action.body.as_str()
-                        ],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                    .ok()?;
-                if let Some(other) = other {
-                    let draft = u64::try_from(other).ok().filter(|id| *id != 0)?;
-                    action.stage = before;
-                    return Some(Err(IssueRefused::UnresolvedDraft {
-                        draft: DraftId(draft),
-                    }));
-                }
-                Some(consent)
-            })
-        })
+        self.action_tx(|tx| consent_row(tx, id, hash, approval, decision, live))
     }
 
     /// Binds the account, and the repository where none is chosen, to every Draft and Failed
@@ -377,6 +362,52 @@ fn event(tx: &Connection, id: i64, kind: &str) -> Result<(), StoreError> {
     } else {
         Err(StoreError::Issue)
     }
+}
+
+fn consent_row(
+    tx: &Connection,
+    id: i64,
+    hash: &ContentHash,
+    approval: ApprovalRev,
+    decision: Decision,
+    live: &Live<'_>,
+) -> Result<Answer, StoreError> {
+    change_row(tx, id, |action| {
+        let before = action.stage.clone();
+        let consent = action.consent(hash, approval, decision, live);
+        if decision != Decision::File || consent.is_err() || action.stage == before {
+            return Some(consent);
+        }
+        let account = action.account.as_ref()?;
+        let repo = action.repo.as_ref()?;
+        let other: Option<i64> = tx
+            .query_row(
+                "SELECT a.id FROM actions a
+                     WHERE a.id <> ?1
+                     AND a.account_id = ?2 AND a.repo = ?3 AND a.title = ?4 AND a.body = ?5
+                     AND (json_extract(a.stage, '$.kind') IN ('preflight', 'posting', 'unknown')
+                          OR (json_extract(a.stage, '$.kind') = 'discarded' AND a.uncertain > 0))
+                     ORDER BY a.id LIMIT 1",
+                params![
+                    id,
+                    account.id.to_string(),
+                    repo.as_str(),
+                    action.title.as_str(),
+                    action.body.as_str()
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .ok()?;
+        if let Some(other) = other {
+            let draft = u64::try_from(other).ok().filter(|id| *id != 0)?;
+            action.stage = before;
+            return Some(Err(IssueRefused::UnresolvedDraft {
+                draft: DraftId(draft),
+            }));
+        }
+        Some(consent)
+    })
 }
 
 /// Applies a transition to the live row `id` and writes only a change. A refusal that used up the

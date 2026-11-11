@@ -133,6 +133,7 @@ struct Presence {
     link: LinkHandle,
     /// The connection the UI last applied `Connected` for, until its next state.
     session: Option<Session>,
+    issue_request: u64,
     state: LinkState,
     /// The canonical gesture; the Raw Input callback reduces it before GPUI sees anything.
     gesture: Rc<Cell<Gesture>>,
@@ -932,6 +933,7 @@ pub(crate) fn open(
             carry: carry::Carry::default(),
             link,
             session: None,
+            issue_request: 0,
             state: LinkState::Connecting,
             gesture: Rc::clone(&gesture),
             activity: Activity::default(),

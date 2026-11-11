@@ -114,7 +114,7 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
             segment,
             samples,
         }),
-        message @ (ControlToBrain::GitHub(_) | ControlToBrain::Issue(_)) => {
+        message @ (ControlToBrain::GitHub(_) | ControlToBrain::Issue { .. }) => {
             tracing::debug!(op = message.op(), "github or issue control ignored");
             None
         }
@@ -133,8 +133,8 @@ impl Brain {
     /// Applies a control frame with no shell to tell, as `serve` does once the core has gone.
     pub(super) fn control_offline(&mut self, message: ControlToBrain, len: usize, tap: &mut Tap) {
         tap.record(Pipe::Control, Direction::ToBrain, &message, len);
-        if let ControlToBrain::Issue(op) = message {
-            if let Some(effects) = self.issue_op(&op, None) {
+        if let ControlToBrain::Issue { request, op } = message {
+            if let Some(effects) = self.issue_op(request, &op, None) {
                 self.apply(effects, None)
                     .expect("offline issue effects cannot fill a shell queue");
             }
@@ -179,8 +179,10 @@ impl Brain {
         if message == ControlToBrain::Pong {
             *ping_sent = None;
         }
-        if let ControlToBrain::Issue(op) = message {
-            let effects = self.issue_op(&op, Some(self.epoch)).ok_or(Ended::Lost)?;
+        if let ControlToBrain::Issue { request, op } = message {
+            let effects = self
+                .issue_op(request, &op, Some(self.epoch))
+                .ok_or(Ended::Lost)?;
             self.apply(effects, Some(link))?;
             return Ok(None);
         }

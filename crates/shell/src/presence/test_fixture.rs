@@ -75,6 +75,7 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             carry: super::carry::Carry::default(),
             link: LinkHandle::detached(),
             session: None,
+            issue_request: 0,
             state: LinkState::Connecting,
             gesture: Rc::new(Cell::new(Gesture::default())),
             activity: Activity::default(),

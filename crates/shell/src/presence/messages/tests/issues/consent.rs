@@ -8,6 +8,8 @@ use kumochi_protocol::message::{
 };
 use kumochi_scene::text::Bounded;
 
+mod controls;
+
 struct Fixture {
     owner: Entity<Presence>,
     models: [Entity<Threads>; 2],
@@ -19,27 +21,8 @@ struct Fixture {
 struct ConsentFrame(Entity<Messages>);
 
 impl Render for ConsentFrame {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let view = self.0.clone();
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .debug_selector(|| "dormant-issue-opener".into())
-                    .child(
-                        gpui_kit::component::button::Button::new("dormant-issue-opener")
-                            .label(cx.global::<Strings>().get(Text::IssueConsentOpen))
-                            .on_click(move |_, window, cx| {
-                                view.update(cx, |view, cx| {
-                                    let _opened =
-                                        view.open_issue_confirmation(DraftId(9), window, cx);
-                                });
-                            }),
-                    ),
-            )
-            .child(self.0.clone())
+    fn render(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> impl IntoElement {
+        div().size_full().flex().flex_col().child(self.0.clone())
     }
 }
 
@@ -191,20 +174,23 @@ fn open(f: &Fixture, at: usize, cx: &mut TestAppContext) {
     cx.run_until_parked();
     {
         let mut frame = gpui_kit::VisualTestContext::from_window(*window, cx);
-        let point = frame.debug_bounds("dormant-issue-opener").unwrap().center();
+        let point = frame.debug_bounds("issue-file-9").unwrap().center();
         frame.simulate_click(point, gpui_kit::Modifiers::default());
     }
     cx.run_until_parked();
     assert!(view.read_with(cx, |view, _| view.pending_issue.is_some()));
 }
 
-fn payload(approval: u64) -> ControlToBrain {
-    ControlToBrain::Issue(IssueOp::Consent {
-        draft: DraftId(9),
-        hash: ContentHash([7; 32]),
-        approval: ApprovalRev(approval),
-        decision: Decision::File,
-    })
+fn payload(request: u64, approval: u64) -> ControlToBrain {
+    ControlToBrain::Issue {
+        request,
+        op: IssueOp::Consent {
+            draft: DraftId(9),
+            hash: ContentHash([7; 32]),
+            approval: ApprovalRev(approval),
+            decision: Decision::File,
+        },
+    }
 }
 
 fn confirm(f: &Fixture, at: usize, cx: &mut TestAppContext) {
@@ -220,7 +206,7 @@ fn draft_and_definite_failure_emit_only_the_exact_decision_and_never_a_remote_ou
         let f = fixture(cx, state.clone(), "saved body");
         open(&f, 0, cx);
         confirm(&f, 0, cx);
-        assert_eq!(f.controls.try_recv().unwrap(), payload(1));
+        assert_eq!(f.controls.try_recv().unwrap(), payload(1, 1));
         cx.simulate_keystrokes(f.views[0].1, "enter space enter");
         assert!(f.controls.try_recv().is_err());
         for model in &f.models {
@@ -228,9 +214,24 @@ fn draft_and_definite_failure_emit_only_the_exact_decision_and_never_a_remote_ou
                 assert_eq!(model.issue(DraftId(9)).unwrap().state(), Some(&state));
             });
         }
+        f.owner.update(cx, |owner, cx| {
+            owner
+                .link_events(
+                    Batch::Plain(vec![LinkEvent::ActionState {
+                        generation: 1,
+                        request: Some(1),
+                        draft: DraftId(9),
+                        version: StateVersion(1),
+                        state: state.clone(),
+                        approval: Some(ApprovalRev(1)),
+                    }]),
+                    cx,
+                )
+                .unwrap();
+        });
         open(&f, 1, cx);
         confirm(&f, 1, cx);
-        assert_eq!(f.controls.try_recv().unwrap(), payload(1));
+        assert_eq!(f.controls.try_recv().unwrap(), payload(2, 1));
         assert!(f.controls.try_recv().is_err());
     }
 }
@@ -277,7 +278,7 @@ fn cancel_escape_immediate_and_held_enter_do_not_consume_the_backend_approval(
     let button = frame.debug_bounds("confirmation-danger").unwrap().center();
     frame.simulate_click(button, gpui_kit::Modifiers::default());
     frame.run_until_parked();
-    assert_eq!(f.controls.try_recv().unwrap(), payload(1));
+    assert_eq!(f.controls.try_recv().unwrap(), payload(1, 1));
     frame.simulate_click(button, gpui_kit::Modifiers::default());
     assert!(f.controls.try_recv().is_err());
 }
@@ -320,7 +321,7 @@ fn a_batched_scope_loss_and_same_return_rejects_focused_confirm_before_observers
     cx.run_until_parked();
     open(&f, 0, cx);
     confirm(&f, 0, cx);
-    assert_eq!(f.controls.try_recv().unwrap(), payload(1));
+    assert_eq!(f.controls.try_recv().unwrap(), payload(1, 1));
     assert!(f.controls.try_recv().is_err());
 }
 
@@ -360,8 +361,7 @@ fn an_unverified_saved_login_rejects_focused_consent_and_cannot_open_a_new_confi
         assert!(!window.has_active_dialog(cx));
         window.draw(cx).clear(cx);
     });
-    let bounds = frame.debug_bounds("dormant-issue-opener").unwrap();
-    frame.simulate_click(bounds.center(), gpui_kit::Modifiers::default());
+    assert!(frame.debug_bounds("issue-file-9").is_none());
     frame.run_until_parked();
     frame.update(|window, cx| {
         assert!(!window.has_active_dialog(cx));
@@ -421,7 +421,7 @@ fn hide_and_selection_loss_return_cannot_borrow_the_peers_retained_full_card(
         cx.run_until_parked();
         open(&f, 0, cx);
         confirm(&f, 0, cx);
-        assert_eq!(f.controls.try_recv().unwrap(), payload(1));
+        assert_eq!(f.controls.try_recv().unwrap(), payload(1, 1));
     }
 }
 
@@ -437,6 +437,7 @@ fn a_peer_state_update_invalidates_stale_consent_without_duplicate_hydration_or_
             owner
                 .link_events(
                     Batch::Plain(vec![LinkEvent::ActionState {
+                        request: None,
                         generation: 1,
                         draft: DraftId(9),
                         version: StateVersion(2),
@@ -503,7 +504,7 @@ fn a_peer_state_update_invalidates_stale_consent_without_duplicate_hydration_or_
     cx.run_until_parked();
     open(&f, 1, cx);
     confirm(&f, 1, cx);
-    assert_eq!(f.controls.try_recv().unwrap(), payload(2));
+    assert_eq!(f.controls.try_recv().unwrap(), payload(1, 2));
     f.owner.read_with(cx, |owner, _| {
         assert_eq!(owner.session.as_ref().unwrap().granted(), 72);
     });
@@ -608,6 +609,22 @@ fn queue_refusal_is_not_replayed_by_later_valid_input(cx: &mut TestAppContext) {
     open(&f, 0, cx);
     f.controls.close();
     confirm(&f, 0, cx);
+    for model in &f.models {
+        model.read_with(cx, |model, _| {
+            let entry = model.issue(DraftId(9)).unwrap();
+            assert!(!entry.pending());
+            assert_eq!(
+                entry.feedback,
+                Some(crate::threads::IssueFeedback::QueueFailed)
+            );
+        });
+    }
+    f.views[0].0.read_with(cx, |view, _| {
+        assert_eq!(
+            view.rows[0].feedback.as_deref(),
+            Some("The action wasn't queued. Try again when connected.")
+        );
+    });
     let controls = f.owner.update(cx, |owner, _| owner.link.record_controls());
     f.owner.update(cx, |owner, cx| {
         owner
@@ -624,7 +641,7 @@ fn queue_refusal_is_not_replayed_by_later_valid_input(cx: &mut TestAppContext) {
     assert!(controls.try_recv().is_err());
     open(&f, 0, cx);
     confirm(&f, 0, cx);
-    assert_eq!(controls.try_recv().unwrap(), payload(1));
+    assert_eq!(controls.try_recv().unwrap(), payload(2, 1));
     assert!(controls.try_recv().is_err());
 }
 
@@ -674,7 +691,7 @@ fn hydrated_maximum_preview_keeps_exact_semantics_keyboard_scroll_and_private_de
     assert!(f.controls.try_recv().is_err());
     let mut frame = gpui_kit::VisualTestContext::from_window(f.views[0].1, cx);
     assert!(frame.debug_bounds("confirmation-danger").is_none());
-    assert!(frame.debug_bounds("issue-file").is_none());
+    assert!(frame.debug_bounds("issue-file-9").is_some());
 }
 
 #[gpui::test]
@@ -705,6 +722,7 @@ fn loading_missing_broken_session_and_wrong_login_fail_closed(cx: &mut TestAppCo
                         StateVersion(2),
                         ActionState::Draft,
                         Some(ApprovalRev(2)),
+                        None,
                     );
                 }
                 assert_eq!(
@@ -790,9 +808,7 @@ fn a_rejected_open_leaves_no_pending_intent_and_does_not_close_a_different_dialo
 }
 
 #[gpui::test]
-fn the_ordinary_history_has_no_file_command_even_with_an_eligible_saved_card(
-    cx: &mut TestAppContext,
-) {
+fn the_ordinary_history_opens_the_real_confirmation_before_any_send(cx: &mut TestAppContext) {
     let f = fixture(cx, ActionState::Draft, "saved body");
     let window = cx.update(|cx| {
         let (window, _) = gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
@@ -804,11 +820,16 @@ fn the_ordinary_history_has_no_file_command_even_with_an_eligible_saved_card(
         window
     });
     cx.run_until_parked();
-    cx.simulate_keystrokes(window, "tab enter space");
     let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
-    assert!(frame.debug_bounds("dormant-issue-opener").is_none());
+    let opener = frame.debug_bounds("issue-file-9").unwrap().center();
     assert!(frame.debug_bounds("confirmation-danger").is_none());
     assert!(!frame.update(WindowExt::has_active_dialog));
+    frame.update(|window, _| window.activate_window());
+    frame.run_until_parked();
+    frame.simulate_click(opener, gpui_kit::Modifiers::default());
+    frame.run_until_parked();
+    assert!(frame.debug_bounds("confirmation-danger").is_some());
+    assert!(frame.update(WindowExt::has_active_dialog));
     assert!(f.controls.try_recv().is_err());
 }
 
@@ -868,7 +889,7 @@ fn a_coalesced_peer_hydration_cannot_revive_an_old_confirmation(cx: &mut TestApp
     cx.run_until_parked();
     open(&f, 0, cx);
     confirm(&f, 0, cx);
-    assert_eq!(f.controls.try_recv().unwrap(), payload(1));
+    assert_eq!(f.controls.try_recv().unwrap(), payload(1, 1));
     f.owner.read_with(cx, |owner, _| {
         assert_eq!(owner.session.as_ref().unwrap().granted(), 72);
     });
@@ -899,7 +920,7 @@ fn losing_the_window_retires_consent_instead_of_reviving_on_activation(cx: &mut 
     );
     open(&f, 0, cx);
     confirm(&f, 0, cx);
-    assert_eq!(f.controls.try_recv().unwrap(), payload(1));
+    assert_eq!(f.controls.try_recv().unwrap(), payload(1, 1));
 }
 
 #[gpui::test]

@@ -150,6 +150,7 @@ impl Presence {
                 }
                 LinkEvent::ActionState {
                     generation,
+                    request,
                     draft,
                     version,
                     state,
@@ -161,11 +162,31 @@ impl Presence {
                         .is_some_and(|session| session.generation() == generation)
                     {
                         self.threads.update(cx, |model, cx| {
-                            model.action_state(draft, version, state, approval);
+                            model.action_state(draft, version, state, approval, request);
                             cx.notify();
                         });
                         self.chat.update(cx, |_, cx| cx.notify());
                         self.request_pages(cx);
+                    }
+                }
+                LinkEvent::IssueRefused {
+                    generation,
+                    request,
+                    draft,
+                    version,
+                    approval,
+                    reason,
+                } => {
+                    if self
+                        .session
+                        .as_ref()
+                        .is_some_and(|session| session.generation() == generation)
+                    {
+                        self.threads.update(cx, |model, cx| {
+                            model.issue_refused(request, draft, version, approval, reason);
+                            cx.notify();
+                        });
+                        self.chat.update(cx, |_, cx| cx.notify());
                     }
                 }
                 LinkEvent::Focus {
