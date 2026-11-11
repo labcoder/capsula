@@ -1,4 +1,3 @@
-use std::ffi::OsStr;
 use std::fs::File;
 use std::os::windows::ffi::OsStrExt as _;
 use std::os::windows::fs::OpenOptionsExt as _;
@@ -111,7 +110,12 @@ pub(crate) fn discard_model(file: File) -> Result<(), Untrusted> {
     Ok(())
 }
 
-pub(crate) fn publish_model(file: File, parent: &File, name: &OsStr) -> Result<(), Untrusted> {
+pub(crate) fn publish_model(file: File, parent: &File, target: &Path) -> Result<(), Untrusted> {
+    validate_model_path(target)?;
+    if !super::same_final_path(parent, target.parent().ok_or(Untrusted::Unsafe)?)? {
+        return Err(Untrusted::Reparse);
+    }
+    let name = target.file_name().ok_or(Untrusted::Unsafe)?;
     if !matches!(
         Path::new(name).components().next(),
         Some(Component::Normal(_))
@@ -122,13 +126,12 @@ pub(crate) fn publish_model(file: File, parent: &File, name: &OsStr) -> Result<(
     {
         return Err(Untrusted::Unsafe);
     }
-    let name: Vec<u16> = name.encode_wide().collect();
+    let name: Vec<u16> = target.as_os_str().encode_wide().collect();
     let offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
     let size = (offset + (name.len() + 1) * size_of::<u16>()).max(size_of::<FILE_RENAME_INFO>());
     let mut buffer = vec![0_u64; size.div_ceil(size_of::<u64>())];
     let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
     let header = FILE_RENAME_INFO {
-        RootDirectory: parent.as_raw_handle(),
         FileNameLength: u32::try_from(name.len() * size_of::<u16>()).map_err(|_| Untrusted::Io)?,
         ..FILE_RENAME_INFO::default()
     };
@@ -196,17 +199,28 @@ mod tests {
                 .map_err(|error| error.raw_os_error()),
             Err(Some(32))
         );
-        std::fs::write(&target, b"arrival").unwrap();
+        let other = scratch.dir().join("other");
+        std::fs::create_dir(&other).unwrap();
         assert_eq!(
-            publish_model(file, parent, target.file_name().unwrap()),
-            Err(Untrusted::Io)
+            publish_model(file, parent, &other.join("fixture.bin")),
+            Err(Untrusted::Reparse)
         );
+        assert_eq!(std::fs::read(&source).unwrap(), b"verified");
+        assert_eq!(
+            std::fs::symlink_metadata(other.join("fixture.bin"))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        let file = open_model_write(&source).unwrap();
+        std::fs::write(&target, b"arrival").unwrap();
+        assert_eq!(publish_model(file, parent, &target), Err(Untrusted::Io));
         assert_eq!(std::fs::read(&target).unwrap(), b"arrival");
         assert_eq!(std::fs::read(&source).unwrap(), b"verified");
         std::fs::remove_file(&target).unwrap();
         let file = open_model_write(&source).unwrap();
         assert_eq!(
-            publish_model(file, parent, target.file_name().unwrap()),
+            publish_model(file, parent, &target),
             Ok(()),
             "publication OS code: {:?}",
             std::io::Error::last_os_error().raw_os_error(),

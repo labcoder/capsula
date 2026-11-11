@@ -128,6 +128,7 @@ fn an_unavailable_owner_keeps_its_phase_and_models_and_cannot_be_revived_or_dele
             LoadEvent::Lost,
             LoadEvent::Unloaded,
             LoadEvent::Failed,
+            LoadEvent::ModelPath,
         ] {
             assert_eq!(installer.reported(SpeechInput, report(1, event)), []);
             assert_eq!(installer.view().speech_input, PartState::Unavailable);

@@ -299,7 +299,7 @@ impl Downloader {
             publish_model(
                 file,
                 held.last().expect("the model directory is held"),
-                path.file_name().expect("a model filename"),
+                &path,
             )
             .map_err(|_| DownloadError::Io)?;
             done += model.bytes;

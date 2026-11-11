@@ -44,7 +44,7 @@ Before changing any existing file, the entire attempt checks the physical local 
 every final and every partial. Junctions, symbolic links, redirected ancestors and network paths
 are refused without cleanup or writes through them. Writable partials must have one name and
 stay open exclusively across hashing, resets and writes; publication renames that checked handle
-relative to its held parent, without replacing an unexpected arrival. Read-only final hardlinks
+into its held parent, without replacing an unexpected arrival. Read-only final hardlinks
 remain supported for the development installer, with writers and rebinding excluded while held.
 Both model constructors hold their checked parents and model files until the loaded engine is
 destroyed. These storage guarantees are the platform adapter contract; model policy has no OS
