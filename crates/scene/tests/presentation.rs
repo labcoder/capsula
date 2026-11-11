@@ -45,7 +45,7 @@ fn header(size: Option<[f32; 2]>) -> Begin {
     header
 }
 
-fn picture(header: Begin, put: serde_json::Value) -> LayoutState {
+fn picture(header: Begin, put: &serde_json::Value) -> LayoutState {
     let mut scene = SceneState::begin(header).expect("scene");
     let before = LayoutState::new(&scene);
     let mut budget = GlobalBudget::default();
@@ -55,16 +55,16 @@ fn picture(header: Begin, put: serde_json::Value) -> LayoutState {
     else {
         panic!("step")
     };
-    prepared(&mut scene, &mut budget, before, step).after
+    prepared(&mut scene, &mut budget, before, &step).after
 }
 
 fn prepared(
     scene: &mut SceneState,
     budget: &mut GlobalBudget,
     before: LayoutState,
-    step: kumochi_scene::Step,
+    step: &kumochi_scene::Step,
 ) -> PreparedStep {
-    let Admission::New(candidate) = scene.admit(&step, budget).expect("admit") else {
+    let Admission::New(candidate) = scene.admit(step, budget).expect("admit") else {
         panic!("new")
     };
     let ticket = scene.commit(candidate, budget).expect("commit").preparation;
@@ -78,6 +78,11 @@ fn prepared(
     )
     .expect("input");
     prepare(input, &mut Measure, &AtomicBool::new(false)).expect("prepare")
+}
+
+fn assert_graph_placement(frame: &Frame, expected: Affine) {
+    assert_eq!(frame.items().len(), 7);
+    assert!(frame.items().iter().all(|item| item.transform == expected));
 }
 
 #[test]
@@ -102,14 +107,13 @@ fn recorded_graph_stays_centered_through_activation_stop_recovery_and_stage_chan
     else {
         panic!("step")
     };
-    let step = prepared(&mut scene, &mut budget, before, step);
+    let step = prepared(&mut scene, &mut budget, before, &step);
     assert_eq!(step.after.fit_extent(), rect(16.0, -14.0, 473.0, 448.0));
     let mut frame = Frame::new();
     view.activate(step, 0, 800, &mut frame).expect("activate");
     view.frame(1000, &mut frame).expect("sample");
     let expected = Affine::pose(2.0, 0.0, Vec2::new(775.0, 354.0));
-    assert_eq!(frame.items().len(), 7);
-    assert!(frame.items().iter().all(|item| item.transform == expected));
+    assert_graph_placement(&frame, expected);
     let ((), activity) = allocation::activity(|| {
         for now in [0, 100, 400, 800, 1000, 60_000] {
             view.frame(now, &mut frame).expect("placed frame");
@@ -130,13 +134,7 @@ fn recorded_graph_stays_centered_through_activation_stop_recovery_and_stage_chan
     stopped.set_stage(stage);
     let mut rest_frame = Frame::new();
     stopped.frame(0, &mut rest_frame).expect("stopped frame");
-    assert_eq!(rest_frame.items().len(), 7);
-    assert!(
-        rest_frame
-            .items()
-            .iter()
-            .all(|item| item.transform == expected)
-    );
+    assert_graph_placement(&rest_frame, expected);
     let (replayed, recovered) = recover(
         begin,
         scene.recovery_log(),
@@ -155,13 +153,7 @@ fn recorded_graph_stays_centered_through_activation_stop_recovery_and_stage_chan
     recovered_view
         .frame(0, &mut recovered_frame)
         .expect("recovered frame");
-    assert_eq!(recovered_frame.items().len(), 7);
-    assert!(
-        recovered_frame
-            .items()
-            .iter()
-            .all(|item| item.transform == expected)
-    );
+    assert_graph_placement(&recovered_frame, expected);
     let sources: Vec<_> = recovered
         .items()
         .iter()
@@ -174,12 +166,9 @@ fn recorded_graph_stays_centered_through_activation_stop_recovery_and_stage_chan
     recovered_view
         .frame(0, &mut recovered_frame)
         .expect("new stage");
-    assert_eq!(recovered_frame.items().len(), 7);
-    assert!(
-        recovered_frame
-            .items()
-            .iter()
-            .all(|item| item.transform == Affine::pose(1.0, 0.0, Vec2::new(-6.0, 34.0)))
+    assert_graph_placement(
+        &recovered_frame,
+        Affine::pose(1.0, 0.0, Vec2::new(-6.0, 34.0)),
     );
     assert_eq!(recovered_view.layout().items().len(), sources.len());
     assert!(
@@ -224,7 +213,7 @@ fn placement_centers_and_caps_upscaling_but_has_no_lower_floor() {
 fn overlay_layout_uses_the_authored_canvas_instead_of_the_host_size() {
     let layout = picture(
         header(Some([320.0, 200.0])),
-        json!([{"chart":{"id":"c","kind":"bar"}}]),
+        &json!([{"chart":{"id":"c","kind":"bar"}}]),
     );
     let bounds = layout
         .bounds(&"c".to_owned().try_into().expect("id"))
@@ -238,7 +227,7 @@ fn overlay_layout_uses_the_authored_canvas_instead_of_the_host_size() {
 fn world_extent_includes_ancestor_and_rest_transforms_with_padding() {
     let layout = picture(
         header(None),
-        json!([
+        &json!([
             {"diagram":{"id":"d","box":[100,200,100,100]}},
             {"shape":{"id":"r","in":"d","kind":"rect","box":[10,20,20,30]}},
             {"anim":{"target":"d","track":"pos","keys":[[0,[0,0]],[100,[50,60]]]}}
@@ -272,13 +261,13 @@ fn world_extent_includes_ancestor_and_rest_transforms_with_padding() {
 #[test]
 fn empty_content_falls_back_to_the_canvas() {
     assert_eq!(
-        picture(header(None), json!([])).fit_extent(),
+        picture(header(None), &json!([])).fit_extent(),
         rect(0.0, 0.0, 960.0, 600.0)
     );
     assert_eq!(
         picture(
             header(None),
-            json!([{"line":{"id":"line","from":[10,20],"to":[30,20]}}])
+            &json!([{"line":{"id":"line","from":[10,20],"to":[30,20]}}])
         )
         .fit_extent(),
         rect(0.0, 0.0, 960.0, 600.0),
@@ -290,7 +279,7 @@ fn overflow_grows_a_declared_canvas_instead_of_clipping_to_it() {
     assert_eq!(
         picture(
             header(Some([100.0, 100.0])),
-            json!([{"line":{"id":"line","from":[90,90],"to":[120,150]}}])
+            &json!([{"line":{"id":"line","from":[90,90],"to":[120,150]}}])
         )
         .fit_extent(),
         rect(0.0, 0.0, 120.0, 150.0),
@@ -327,7 +316,7 @@ fn axis_aligned_strokes_grow_the_declared_canvas_before_fitting() {
     ] {
         let layout = picture(
             header(Some([100.0, 100.0])),
-            json!([{"line":{"id":"line","from":from,"to":to}}]),
+            &json!([{"line":{"id":"line","from":from,"to":to}}]),
         );
         assert_eq!(layout.fit_extent(), extent, "stroke {from:?} to {to:?}");
         let actual = place(layout.fit_extent(), rect(0.0, 0.0, 100.0, 100.0), 2.0);
@@ -358,8 +347,8 @@ fn presentation_respects_the_remaining_composed_scale_envelope() {
         ]),
         json!([{"path":{"id":"p","d":"M0 0 Q1 1 2 0","scale":64}}]),
     ] {
-        let layout = picture(header(None), put);
-        assert_eq!(layout.presentation_scale(), 1.0);
+        let layout = picture(header(None), &put);
+        assert_eq!(layout.presentation_scale().to_bits(), 1.0_f32.to_bits());
     }
 }
 
@@ -367,7 +356,7 @@ fn presentation_respects_the_remaining_composed_scale_envelope() {
 fn curve_subdivision_reserves_the_presentation_scale() {
     let layout = picture(
         header(None),
-        json!([{"path":{"id":"p","d":"M0 0 Q4 8 8 0"}}]),
+        &json!([{"path":{"id":"p","d":"M0 0 Q4 8 8 0"}}]),
     );
     let items = layout.items();
     let kumochi_scene::display::Prim::Line { points, .. } = &items[0].primitives[0] else {
@@ -388,7 +377,7 @@ fn a_growing_step_replaces_the_fit_once_and_removal_does_not_shrink_it() {
         (
             r#"{"step":{"id":"first","put":[{"shape":{"id":"a","kind":"rect","box":[0,0,10,10]}}]}}"#,
             rect(-24.0, -24.0, 58.0, 58.0),
-            2.0,
+            2.0_f32,
         ),
         (
             r#"{"step":{"id":"grow","put":[{"shape":{"id":"b","kind":"rect","box":[100,0,10,10]}}]}}"#,
@@ -404,11 +393,11 @@ fn a_growing_step_replaces_the_fit_once_and_removal_does_not_shrink_it() {
         let Record::Step(step) = parse_record(source.as_bytes()).expect("step") else {
             panic!("step")
         };
-        let step = prepared(&mut scene, &mut budget, layout, step);
+        let step = prepared(&mut scene, &mut budget, layout, &step);
         assert_eq!(step.after.fit_extent(), extent);
         layout = step.after.clone();
         view.activate(step, 0, 800, &mut frame).expect("activate");
         view.frame(0, &mut frame).expect("frame");
-        assert_eq!(frame.items()[0].transform.0[0], scale);
+        assert_eq!(frame.items()[0].transform.0[0].to_bits(), scale.to_bits());
     }
 }
