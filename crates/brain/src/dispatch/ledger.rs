@@ -155,6 +155,10 @@ impl Ledger {
         true
     }
 
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "whether the stream was canonical; a noncanonical binding is terminal"
+    )]
     pub(crate) fn bind_stream(&mut self, key: &LedgerKey, hash: [u8; 32], canonical: bool) {
         let id = (key.route, key.call.clone());
         match self.entries.remove(&id) {

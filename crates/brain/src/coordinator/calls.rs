@@ -161,7 +161,7 @@ impl Coordinator {
                 effects.push(Effect::Store(StoreOp::ReadCall(call)));
                 Dispatch::Committing
             }
-            Step::Screen { key, draw } => self.drawing_call(thread, key, draw, effects),
+            Step::Screen { key, draw } => self.drawing_call(thread, &key, draw, effects),
             Step::Commit(call) => {
                 // Advanced at dispatch: a candidate whose reserve never commits was never seen.
                 if let LocalWrite::CreateTask { thread, .. } = &call.write {

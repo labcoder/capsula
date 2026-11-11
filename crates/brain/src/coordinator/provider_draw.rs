@@ -113,14 +113,14 @@ impl Coordinator {
     pub(super) fn provider_started(
         &mut self,
         build: BuildKey,
-        call: CallId,
+        call: &CallId,
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
         let run = self.current(build.run)?;
         if !run.tools.open(call.clone(), ToolName::Draw) {
             return self.fail(build.run, crate::store::Failure::Engine, effects);
         }
-        if !run.provider_calls.contains(&call) {
+        if !run.provider_calls.contains(call) {
             run.provider_calls.push(call.clone());
         }
         let before = run.draw_calls.len();
@@ -156,7 +156,7 @@ impl Coordinator {
             .tools
             .open
             .iter_mut()
-            .find(|open| open.call == call)
+            .find(|open| open.call == *call)
             .expect("the call was opened");
         open.provider = Some(ProviderDraw {
             build,
@@ -167,7 +167,7 @@ impl Coordinator {
             registered,
         });
         if let Dispatch::Answered(output) = dispatch {
-            run.tools.answer(&call, output);
+            run.tools.answer(call, output);
         }
         Ok(())
     }
@@ -282,15 +282,15 @@ impl Coordinator {
                 return self.fail(run, crate::store::Failure::Engine, effects);
             }
             p.ready = true;
-            let validation = if p.raw != args.as_bytes() {
-                Err(CallError::Token(TokenError::Malformed { at: p.raw.len() }))
-            } else {
+            let validation = if p.raw == args.as_bytes() {
                 p.tokenizer
                     .finish()
                     .map_err(CallError::Token)
                     .and_then(|()| {
                         crate::dispatch::validate_draw(args.as_bytes()).map(|draw| draw.hash)
                     })
+            } else {
+                Err(CallError::Token(TokenError::Malformed { at: p.raw.len() }))
             };
             (p.owner, validation)
         };
@@ -495,16 +495,15 @@ impl Coordinator {
             })
             .unwrap_or_default();
         for call in calls {
-            if let Some(current) = &mut self.current {
-                if let Some(p) = current
+            if let Some(current) = &mut self.current
+                && let Some(p) = current
                     .tools
                     .open
                     .iter_mut()
                     .find(|open| open.call == call)
                     .and_then(|open| open.provider.as_mut())
-                {
-                    p.registered = false;
-                }
+            {
+                p.registered = false;
             }
             if self
                 .provider_invalid(run, &call, CallError::Interrupted, effects)

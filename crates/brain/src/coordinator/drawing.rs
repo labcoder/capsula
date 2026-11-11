@@ -12,13 +12,13 @@ impl Coordinator {
     pub(super) fn drawing_call(
         &mut self,
         thread: ThreadId,
-        key: LedgerKey,
+        key: &LedgerKey,
         draw: dispatch::DrawAction,
         effects: &mut Vec<Effect>,
     ) -> Dispatch {
         let ended = Dispatch::Answered(ToolOutput::Error(ToolError::Ended));
         if !self.drawing_available() {
-            self.drawn(&key, ToolOutput::Error(ToolError::NotHere), effects);
+            self.drawn(key, ToolOutput::Error(ToolError::NotHere), effects);
             return Dispatch::Committing;
         }
         let current = self.current.as_mut().expect("the resolved run is current");
@@ -30,7 +30,7 @@ impl Coordinator {
             && current.draw_calls.len()
                 > usize::try_from(super::MAX_CALLS).expect("the call budget fits usize")
         {
-            self.drawn(&key, ToolOutput::Error(ToolError::TooLarge), effects);
+            self.drawn(key, ToolOutput::Error(ToolError::TooLarge), effects);
             return Dispatch::Committing;
         }
         let call = if allocating {
@@ -46,7 +46,7 @@ impl Coordinator {
             let Some(call) = current
                 .draw_calls
                 .iter()
-                .find(|call| call.key == key)
+                .find(|call| call.key == *key)
                 .map(|call| call.call.clone())
             else {
                 return ended;
@@ -82,7 +82,7 @@ impl Coordinator {
             },
         };
         if self.drawing_input(input, effects).is_err() {
-            self.drawn(&key, ToolOutput::Error(ToolError::Ended), effects);
+            self.drawn(key, ToolOutput::Error(ToolError::Ended), effects);
         }
         Dispatch::Committing
     }

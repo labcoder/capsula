@@ -37,6 +37,10 @@ impl fmt::Debug for DrawArgs {
 }
 
 impl Coordinator {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one router for every engine event behind the build fence"
+    )]
     pub(super) fn engine(
         &mut self,
         key: BuildKey,
@@ -111,7 +115,7 @@ impl Coordinator {
                     .as_ref()
                     .is_some_and(|build| build.offered().contains(&ToolName::Draw)) =>
             {
-                self.provider_started(key, call, effects)?;
+                self.provider_started(key, &call, effects)?;
             }
             // Every other call goes to the dispatcher when its round ends.
             TurnEvent::ToolCallStarted { call, name } => {
