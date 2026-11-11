@@ -811,6 +811,9 @@ persists its separate `SetHoldToTalk` operation; changing the idle policy leaves
 The Brain refuses held input and key-down reloads while it is off or an off save is queued
 or in flight. The Shell also checks its received choice before disrupting local panels;
 switching off revokes current input, and switching on waits for the saved answer.
+Before closing a panel or discarding typed recovery, Shell also requires speech input to be
+ready, loading or idle-unloaded. Other received states show their own notice without taking
+Esc, opening a source or changing local drafts and errors. Brain remains the admission authority.
 
 The runtime owns one pre-run hold, keyed by connection epoch and a monotonically
 consumed gesture number. Recognition captures defaults and queues a stamped

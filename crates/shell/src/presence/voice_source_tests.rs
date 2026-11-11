@@ -33,6 +33,131 @@ fn chord(deliver: &Deliver, edge: Edge, at: Instant) {
 }
 
 #[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one refused-state flow checks retained surfaces, recovery and recording authority"
+)]
+fn rejected_speech_states_preserve_typing_recovery_and_local_notices(cx: &mut TestAppContext) {
+    use kumochi_protocol::message::{ErrorKey, PartState};
+    for (state, notice) in [
+        (Some(PartState::NotInstalled), Text::VoiceNotInstalled),
+        (Some(PartState::Verifying), Text::VoiceVerifying),
+        (
+            Some(PartState::Downloading { done: 1, total: 2 }),
+            Text::VoiceDownloading,
+        ),
+        (
+            Some(PartState::Failed {
+                key: ErrorKey::VoiceLoad,
+                installed: false,
+            }),
+            Text::VoiceNotInstalledFailed,
+        ),
+        (Some(PartState::Unavailable), Text::VoiceRestartRequired),
+        (None, Text::VoiceStatusUnknown),
+    ] {
+        let (owner, data, controls) = ready(cx);
+        let starts = Rc::new(Cell::new(0));
+        let attempts = Rc::clone(&starts);
+        owner.update(cx, |owner, cx| {
+            owner.runs.apply_scenes(&[]).unwrap();
+            owner.runs.submit("recoverable typed", |_| true).unwrap();
+            let text = owner.text.as_mut().unwrap();
+            text.typing.open();
+            text.window
+                .update(cx, |_, window, cx| {
+                    text.input
+                        .update(cx, |input, cx| input.set_value("unsent draft", window, cx));
+                })
+                .unwrap();
+            owner.settings.update(cx, |settings, _| {
+                let saved = settings.view().unwrap().clone();
+                settings.disconnected();
+                settings.set_view(saved, crate::settings::Update::Unsolicited);
+                if let Some(state) = state {
+                    settings.receive_speech_input(Some(1), 1, state);
+                }
+            });
+            owner.error = Some("existing error".into());
+            owner.refusal = Some(Text::TurnBusy);
+            owner.chat_notice.present(
+                ErrorKey::SettingsRefused.into(),
+                crate::chat_notice::Source::Settings(None),
+            );
+            owner.voice.start = Some(Box::new(move |_, _| {
+                attempts.set(attempts.get() + 1);
+                Err(MicError::Unavailable)
+            }));
+            assert!(!owner.escape_hold.shows_stop());
+        });
+        let deliver = native(&owner, cx);
+        let at = Instant::now();
+        cx.update(|_| {
+            chord(&deliver, Edge::Down, at);
+            deliver(
+                Event::Deadline,
+                EventTime {
+                    instant: at + Duration::from_millis(300),
+                },
+            );
+        });
+        cx.run_until_parked();
+        owner.read_with(cx, |owner, _| {
+            assert!(
+                !owner.escape_hold.shows_stop(),
+                "before status: {:?}, voice={}, fixture={}",
+                owner.activity,
+                owner.voice_working(),
+                owner.escape_fixture
+            );
+        });
+        status(&owner, 1, 1, HoldStatus::Admitted, cx);
+        owner.read_with(cx, |owner, cx| {
+            assert!(owner.text_open());
+            assert_eq!(
+                owner
+                    .text
+                    .as_ref()
+                    .unwrap()
+                    .input
+                    .read(cx)
+                    .value()
+                    .to_string(),
+                "unsent draft"
+            );
+            assert_eq!(owner.runs.kept(), [17]);
+            assert_eq!(
+                owner.error.as_ref().map(AsRef::as_ref),
+                Some("existing error")
+            );
+            assert_eq!(
+                owner.chat_notice.shown().map(|notice| notice.error.key()),
+                Some(ErrorKey::SettingsRefused)
+            );
+            assert_eq!(owner.refusal, Some(Text::TurnBusy));
+            assert_eq!(owner.voice.status, Some(notice));
+            assert!(owner.voice.pending.is_none());
+            assert!(
+                !owner.escape_hold.shows_stop(),
+                "after status: {:?}, voice={}, fixture={}",
+                owner.activity,
+                owner.voice_working(),
+                owner.escape_fixture
+            );
+        });
+        assert_eq!(starts.get(), 0);
+        assert!(data.is_empty());
+        assert_eq!(
+            controls.try_recv().unwrap(),
+            ControlToBrain::VoiceHoldStopped {
+                gesture: GestureId(1)
+            }
+        );
+        assert!(controls.is_empty());
+    }
+}
+
+#[gpui::test]
 fn hold_to_talk_off_keeps_typing_and_never_warms_or_opens_a_source(cx: &mut TestAppContext) {
     let (owner, data, controls) = ready(cx);
     let starts = Rc::new(Cell::new(0));

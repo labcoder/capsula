@@ -28,6 +28,17 @@ fn connected() -> Settings {
 }
 
 #[test]
+fn ready_loading_and_unloaded_input_permit_a_deliberate_hold() {
+    let mut state = connected();
+    for input in [PartState::Ready, PartState::Loading, PartState::Unloaded] {
+        assert!(state.receive_speech_input(Some(7), 7, input));
+        assert_eq!(state.hold_to_talk_notice(), None);
+    }
+    state.disconnected();
+    assert_eq!(state.hold_to_talk_notice(), Some(Text::VoiceStatusUnknown));
+}
+
+#[test]
 fn hold_to_talk_waits_for_its_own_answer_and_refusal_restores_the_saved_choice() {
     let mut state = connected();
     assert!(state.hold_to_talk_enabled());

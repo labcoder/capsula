@@ -29,6 +29,20 @@ pub(crate) struct SpeechInputIntent {
 }
 
 impl Settings {
+    pub(crate) fn hold_to_talk_notice(&self) -> Option<Text> {
+        if !self.hold_to_talk_enabled() {
+            return Some(if self.view.is_some() {
+                Text::HoldDisabled
+            } else {
+                Text::VoiceStatusUnknown
+            });
+        }
+        match self.speech_input {
+            Some(PartState::Ready | PartState::Loading | PartState::Unloaded) => None,
+            _ => Some(self.speech_input_status()),
+        }
+    }
+
     pub(crate) fn hold_to_talk_enabled(&self) -> bool {
         self.view.as_ref().is_some_and(|view| view.hold_to_talk)
             && self.hold_to_talk_choice() != Some(false)

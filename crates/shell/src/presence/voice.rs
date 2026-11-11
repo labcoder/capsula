@@ -214,7 +214,7 @@ impl Presence {
     ) {
         match intent {
             Intent::Warm(gesture) => {
-                if !self.settings.read(cx).hold_to_talk_enabled() {
+                if self.settings.read(cx).hold_to_talk_notice().is_some() {
                     return;
                 }
                 if let Some(session) = self
@@ -269,19 +269,16 @@ impl Presence {
             self.voice_notice(Text::HoldUnavailable, cx);
             return;
         };
-        if !self.settings.read(cx).hold_to_talk_enabled() {
+        if let Some(notice) = self.settings.read(cx).hold_to_talk_notice() {
             if let Some(session) = &self.session {
                 self.unused_voice(&token, session);
             } else if token.discard_unstarted().is_err() {
                 self.link.microphone_gate().cancel(gesture);
             }
             self.link.clear_input(gesture);
-            let notice = if self.settings.read(cx).view().is_some() {
-                Text::HoldDisabled
-            } else {
-                Text::VoiceStatusUnknown
-            };
-            self.voice_notice(notice, cx);
+            self.voice.status = Some(notice);
+            self.refresh_dock(cx);
+            self.refresh_conversation(cx);
             return;
         }
         if self.voice.pending.is_some() {
