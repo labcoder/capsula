@@ -214,7 +214,7 @@ impl Installer {
     /// it; hash at start once load failures point there.
     pub(crate) fn start(
         durable: [Durable; 2],
-        whole: [bool; 2],
+        whole: [Result<bool, ErrorKey>; 2],
         available: [bool; 2],
         stuck: &[VoicePart],
     ) -> (Self, Vec<Effect>) {
@@ -245,10 +245,11 @@ impl Installer {
             entry.phase = match (entry.durable, entry.available, whole[index]) {
                 (Durable::Removing, _, _) if stuck.contains(&part) => Phase::Cleanup,
                 (Durable::Removing, _, _) => Phase::Clearing,
+                (_, _, Err(key)) => Phase::Failed(key),
                 (Durable::Absent, true, _) => Phase::Idle,
                 (_, false, _) => Phase::Failed(ErrorKey::VoiceLoad),
-                (Durable::Installed, true, false) => Phase::Failed(ErrorKey::VoiceCorrupt),
-                (Durable::Installed, true, true) => {
+                (Durable::Installed, true, Ok(false)) => Phase::Failed(ErrorKey::VoiceCorrupt),
+                (Durable::Installed, true, Ok(true)) => {
                     entry.models.push(token);
                     installer.effects.push(Effect::Load { part, ask: token });
                     Phase::Loading {
@@ -515,7 +516,11 @@ impl Installer {
             (Phase::Draining, _) => self.drained(part),
             (
                 Phase::Unloading { ask: current },
-                LoadEvent::Unloaded | LoadEvent::Discarded | LoadEvent::Failed | LoadEvent::Lost,
+                LoadEvent::Unloaded
+                | LoadEvent::Discarded
+                | LoadEvent::Failed
+                | LoadEvent::Lost
+                | LoadEvent::ModelPath,
             ) if current == ask => entry.phase = Phase::Unloaded,
             (Phase::Ready { ask: current }, LoadEvent::Unloaded)
                 if part == VoicePart::SpeechInput && current == ask =>
@@ -540,6 +545,9 @@ impl Installer {
                 Phase::Loading { ask: current, .. } | Phase::Ready { ask: current },
                 LoadEvent::Lost,
             ) if current == ask => self.lost(part),
+            (Phase::Loading { ask: current, .. }, LoadEvent::ModelPath) if current == ask => {
+                entry.phase = Phase::Failed(ErrorKey::VoiceModelPath);
+            }
             (
                 Phase::Loading { ask: current, .. },
                 LoadEvent::Failed | LoadEvent::Discarded | LoadEvent::Unloaded,
@@ -863,5 +871,6 @@ fn fetch_key(error: DownloadError) -> ErrorKey {
         | DownloadError::Cancelled => ErrorKey::VoiceDownload,
         DownloadError::Size | DownloadError::Hash => ErrorKey::VoiceCorrupt,
         DownloadError::Io => ErrorKey::VoiceStorage,
+        DownloadError::ModelPath => ErrorKey::VoiceModelPath,
     }
 }

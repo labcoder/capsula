@@ -50,8 +50,12 @@ fn tagged_github_refusal_appends_wire_tags_and_keeps_error_validation() {
         postcard::to_allocvec(&ErrorKey::VoiceUnavailable).unwrap(),
         [41]
     );
+    assert_eq!(
+        postcard::to_allocvec(&ErrorKey::VoiceModelPath).unwrap(),
+        [43]
+    );
     let mut unknown = wire;
-    unknown[5] = 43;
+    unknown[5] = 44;
     assert!(matches!(
         read::<ControlToShell>(&mut unknown.as_slice(), Pipe::Control),
         Err(FrameError::Malformed(_))

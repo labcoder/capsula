@@ -20,7 +20,9 @@ use crate::voice::pump::Pump;
 use crate::voice::stt::SttHandle;
 use crate::voice::tts::TtsHandle;
 
-#[derive(Debug)]
+#[cfg(test)]
+mod path_tests;
+
 pub(crate) struct Voice {
     installer: Installer,
     models: PathBuf,
@@ -34,6 +36,16 @@ pub(crate) struct Voice {
     deletes: [Option<Deleting>; 2],
     /// What the coordinator was last told about spoken replies.
     spoken: bool,
+}
+
+impl std::fmt::Debug for Voice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Voice")
+            .field("view", &self.installer.view())
+            .field("fetching", &self.fetch.is_some())
+            .field("spoken", &self.spoken)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug)]
@@ -164,11 +176,12 @@ async fn deleted(delete: &mut Option<Deleting>) -> Option<Folder> {
 /// never follow a reparse point, so a junction on the way, or a folder someone else could change,
 /// deletes nothing. A folder that's already gone counts as deleted. It blocks.
 pub(super) fn delete(models: &Path, part: VoicePart) -> Folder {
-    let deleted = match platform::hold_chain(models) {
-        Ok(_held) => platform::remove_tree(&models.join(part.dir())),
-        Err(Untrusted::Missing) => Ok(()),
-        Err(error) => Err(error),
-    };
+    let deleted =
+        match platform::validate_model_path(models).and_then(|()| platform::hold_chain(models)) {
+            Ok(_held) => platform::remove_model_tree(&models.join(part.dir())),
+            Err(Untrusted::Missing) => Ok(()),
+            Err(error) => Err(error),
+        };
     match deleted {
         Ok(()) => Folder::Missing,
         Err(error) => {
@@ -179,12 +192,22 @@ pub(super) fn delete(models: &Path, part: VoicePart) -> Folder {
 }
 
 /// Whether every file of `part` under `models` has its manifest size.
-fn whole(models: &Path, part: VoicePart) -> bool {
+fn whole(models: &Path, part: VoicePart) -> Result<bool, ErrorKey> {
     let dir = models.join(part.dir());
-    part.files().all(|file| {
-        std::fs::metadata(dir.join(file.name))
-            .is_ok_and(|metadata| metadata.is_file() && metadata.len() == file.bytes)
-    })
+    let manifest = part.files().collect::<Vec<_>>();
+    let names = manifest.iter().map(|file| file.name).collect::<Vec<_>>();
+    let held = match platform::ModelFiles::open(&dir, &names) {
+        Ok(held) => held,
+        Err(Untrusted::Missing) => return Ok(false),
+        Err(Untrusted::Reparse | Untrusted::Unsafe) => return Err(ErrorKey::VoiceModelPath),
+        Err(Untrusted::Io) => return Err(ErrorKey::VoiceStorage),
+    };
+    for (file, pin) in held.files.iter().zip(manifest) {
+        if file.metadata().map_err(|_| ErrorKey::VoiceStorage)?.len() != pin.bytes {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 impl Brain {
@@ -392,10 +415,11 @@ impl Brain {
     ) -> Option<(RemoveAnswer, VoiceView, Vec<Effect>)> {
         let voice = self.voice.as_mut()?;
         let before = voice.installer.view();
-        let folder = if voice.models.join(part.dir()).exists() {
-            Folder::Present
-        } else {
-            Folder::Missing
+        let folder = match platform::validate_model_path(&voice.models)
+            .and_then(|()| platform::hold_chain(&voice.models.join(part.dir())))
+        {
+            Err(Untrusted::Missing) => Folder::Missing,
+            Ok(_) | Err(_) => Folder::Present,
         };
         let (answer, effects) = voice.installer.remove(part, folder);
         Some((answer, before, effects))

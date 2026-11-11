@@ -488,6 +488,16 @@ fn nothing_speaks_before_a_successful_load() {
 }
 
 #[test]
+fn model_paths_spoken_reply_owner_reports_the_path_reason_without_retrying() {
+    let failing = Harness::new(Err(TtsError::ModelPath));
+    failing.handle.load("models".into(), 1);
+    assert_eq!(failing.reports(1), [report(1, LoadEvent::ModelPath)]);
+    let mut events = failing.speak("hello", 4);
+    assert_eq!(failing.next(&mut events), Some(failed(TtsError::NotLoaded)));
+    assert_eq!(failing.loads.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn a_speak_that_arrives_during_a_load_waits_for_its_outcome() {
     let (started, loading) = std_mpsc::channel();
     let (release, released) = std_mpsc::channel();

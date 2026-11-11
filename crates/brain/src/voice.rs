@@ -26,6 +26,8 @@ pub(crate) enum LoadEvent {
     Lost,
     /// The owner stopped without proof that its model was released.
     Unavailable,
+    /// The model path was refused before construction; no model remains held.
+    ModelPath,
 }
 
 /// One ask's outcome, as an owner thread reports it.

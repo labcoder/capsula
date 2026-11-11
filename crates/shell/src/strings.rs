@@ -871,6 +871,7 @@ const fn error_id(key: ErrorKey) -> &'static str {
         ErrorKey::VoiceStorage => "error-voice-storage",
         ErrorKey::VoiceLoad => "error-voice-load",
         ErrorKey::VoiceUnavailable => "error-voice-unavailable",
+        ErrorKey::VoiceModelPath => "error-voice-model-path",
         ErrorKey::GitHubUnavailable => "github-unavailable",
     }
 }
@@ -880,6 +881,15 @@ mod tests {
     use super::{Strings, Text, error_id};
     use fluent_bundle::{FluentBundle, FluentResource};
     use kumochi_protocol::message::{ErrorArg, ErrorKey, UserError};
+
+    #[test]
+    fn model_paths_explain_the_local_folder_requirement_without_a_path() {
+        let strings = Strings::english();
+        assert_eq!(
+            strings.error(&ErrorKey::VoiceModelPath.into()),
+            "The speech model folder goes through a link or network location, or has unsafe permissions. Use an ordinary local folder."
+        );
+    }
 
     #[test]
     fn the_taskbar_label_uses_the_product_name() {

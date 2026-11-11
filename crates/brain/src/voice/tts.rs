@@ -42,6 +42,8 @@ pub(crate) enum TtsError {
     Text,
     #[error("spoken replies failed to load")]
     Load,
+    #[error("the speech model path is unsafe")]
+    ModelPath,
     #[error("speech synthesis failed")]
     Synthesis,
     #[error("speech synthesis produced an invalid sample")]
@@ -288,6 +290,7 @@ impl Owner {
                         rejected => {
                             let event = match rejected {
                                 Ok(_) => LoadEvent::Discarded,
+                                Err(TtsError::ModelPath) => LoadEvent::ModelPath,
                                 Err(_) => LoadEvent::Failed,
                             };
                             // The model drops while its ask is still current, so nothing
@@ -295,7 +298,9 @@ impl Owner {
                             drop(rejected);
                             self.control.update(|state| {
                                 state.current = None;
-                                if event == LoadEvent::Failed && wants(state, ask) {
+                                if matches!(event, LoadEvent::Failed | LoadEvent::ModelPath)
+                                    && wants(state, ask)
+                                {
                                     state.want = None;
                                 }
                                 self.reports.send(ask, event);

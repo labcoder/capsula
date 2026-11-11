@@ -111,6 +111,9 @@ pub enum NativeError {
     /// The transcript is too long or isn't UTF-8.
     #[error("the transcript is too long or isn't UTF-8")]
     Text,
+    /// The model folder or a model file isn't an ordinary trusted local path.
+    #[error("the speech model path is unsafe")]
+    ModelPath,
 }
 
 type CreateRecognizer =
@@ -275,6 +278,10 @@ impl Sherpa {
 
     /// Creates Parakeet's recognizer from the model files in `models`.
     pub(crate) fn recognizer(&self, models: &Path) -> Result<Recognizer<'_>, NativeError> {
+        let held = super::ModelFiles::open(models, &MODEL_FILES).map_err(|error| match error {
+            Untrusted::Reparse | Untrusted::Unsafe => NativeError::ModelPath,
+            error => untrusted(error),
+        })?;
         let [encoder, decoder, joiner, tokens] = MODEL_FILES.map(|name| c_path(&models.join(name)));
         let (encoder, decoder, joiner, tokens) = (encoder?, decoder?, joiner?, tokens?);
         // SAFETY: the struct holds only integers, floats and raw pointers, for which all-zero is
@@ -296,7 +303,11 @@ impl Sherpa {
         #[cfg(test)]
         let raw = tests::create_for(self, &config);
         let raw = NonNull::new(raw.cast_mut()).ok_or(NativeError::Create)?;
-        Ok(Recognizer { sherpa: self, raw })
+        Ok(Recognizer {
+            sherpa: self,
+            raw,
+            _models: held,
+        })
     }
 
     /// A table of test functions with no library behind it.
@@ -325,6 +336,7 @@ pub(crate) fn c_path(path: &Path) -> Result<CString, NativeError> {
 pub(crate) struct Recognizer<'s> {
     sherpa: &'s Sherpa,
     raw: NonNull<RawRecognizer>,
+    _models: super::ModelFiles,
 }
 
 // SAFETY: sherpa af2d8d81/ORT 33ca9628 CPU NeMo greedy uses per-call streams and concurrent Run;

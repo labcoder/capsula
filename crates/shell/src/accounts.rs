@@ -80,6 +80,7 @@ impl Accounts {
             | ErrorKey::VoiceStorage
             | ErrorKey::VoiceLoad
             | ErrorKey::VoiceUnavailable
+            | ErrorKey::VoiceModelPath
             | ErrorKey::GitHubUnavailable => {}
             ErrorKey::SignInTimedOut
             | ErrorKey::SignInFailed

@@ -56,8 +56,9 @@ fn failed_load_releases_before_receipt(failure: Failure, expected: &[&str]) {
         events: events.clone(),
         leave: next,
     };
+    let models = crate::platform::sherpa::tests::model_fixture();
     let worker = std::thread::spawn(move || {
-        loaded_with(&mut input, &output, 17, Path::new(r"C:\models"), || {
+        loaded_with(&mut input, &output, 17, models.dir(), || {
             Ok(failed_load(failure, events, leave))
         })
     });
@@ -172,24 +173,19 @@ fn native_slots_reuse_the_finished_call_and_frame_whole_replies_before_draining(
             writing,
         });
         let input = native_requests(ending);
+        let models = crate::platform::sherpa::tests::model_fixture();
         let worker = std::thread::spawn(move || {
             let gates = [(2, first_gate), (3, second_gate), (4, third_gate)].into();
             let reply_gates = [(2, first_reply_gate), (4, third_reply_gate)].into();
-            loaded_with(
-                &mut input.as_slice(),
-                &output,
-                17,
-                Path::new("models"),
-                || {
-                    Ok(crate::platform::sherpa::tests::parallel_load(
-                        gates,
-                        reply_gates,
-                        started,
-                        events,
-                        resource_gate,
-                    ))
-                },
-            )
+            loaded_with(&mut input.as_slice(), &output, 17, models.dir(), || {
+                Ok(crate::platform::sherpa::tests::parallel_load(
+                    gates,
+                    reply_gates,
+                    started,
+                    events,
+                    resource_gate,
+                ))
+            })
         });
         assert_eq!(observed.recv_timeout(WAIT).expect("warmup"), 16_000);
         assert_eq!(acknowledgments.recv_timeout(WAIT).expect("loaded"), 17);

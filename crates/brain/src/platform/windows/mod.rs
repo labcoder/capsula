@@ -48,11 +48,13 @@ pub use process::launch_detached;
 pub(super) use protected::final_path_matches;
 #[cfg(test)]
 pub(crate) use protected::{
-    DaclEntry, dacl_entries, dacl_sddl, pause_after_check, set_dacl, this_user,
+    DaclEntry, dacl_entries, dacl_sddl, pause_after_check, paused, set_dacl, this_user,
 };
 pub(crate) use protected::{
-    Untrusted, hold_chain, hold_file, local_app_data, mark, marker, owner_only_dir, private_tree,
-    profile_dir, remove_tree, unmark,
+    Untrusted, check_model_final, create_model_dir, create_model_write, discard_model, hold_chain,
+    hold_file, hold_model_creation, local_app_data, mark, marker, model_file, model_final,
+    open_model_write, owner_only_dir, private_tree, profile_dir, publish_model, remove_model_tree,
+    remove_tree, unmark, validate_model_path,
 };
 pub use root_store::trust_roots;
 pub use spawn::{Launch, Spawned, Stdio, spawn};

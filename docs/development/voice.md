@@ -40,6 +40,35 @@ port 443 without userinfo, on `huggingface.co` or a subdomain of `hf.co`; IP lit
 Signed CDN queries never enter diagnostics.
 
 Existing final files are size- and SHA-256-checked; a bad final is removed before any request.
+Inspection retains delete access on that same handle, so only the file actually hashed can be
+discarded; an invalid final with another hard-link name is refused before deletion.
+Before changing any existing file, the entire attempt checks the physical local folder chain,
+every final and every partial. Junctions, symbolic links, redirected ancestors and network paths
+are refused without cleanup or writes through them. Writable partials must have one name and
+stay open exclusively across hashing, resets and writes; publication renames that checked handle
+into its held parent, without replacing an unexpected arrival. Read-only final hardlinks
+remain supported for the development installer, with writers and rebinding excluded while held.
+Both model constructors hold their checked parents and model files until the loaded engine is
+destroyed. These storage guarantees are the platform adapter contract; model policy has no OS
+conditionals. Intentional linked-folder relocation is not supported.
+Installation opens or creates every needed partial before discarding any invalid final, so a
+later acquisition refusal leaves the existing files intact.
+It denies write sharing on the owned model root and part directory through partial acquisition,
+including while empty. These directory guards then close before publication; the checked partial
+handles stay held. The shared primitive's threat boundary still applies: medium-integrity code
+running as this user can already change the brain, so it isn't defended against here.
+The runtime voice and online-fetch diagnostics omit model paths and nested content, including
+when the brain is formatted for debugging.
+Drive-letter network mappings are refused before opening their root; local drives still pass
+the existing held-chain ownership, permission and resolved-path checks.
+Start-up inspects sizes through the same checked file handles. A refused path becomes the
+existing `Failed` state with `VoiceModelPath`, including constructor failures reported by either
+owner; Settings explains that the model folder must be an ordinary local folder. This is not the
+restart-only `Unavailable` state: no model remains held after a path refusal.
+Removal preflights and retains every model-tree entry before deleting any of them. An unsafe
+descendant refuses the whole removal without deleting safe siblings; unrelated staging cleanup
+retains its existing behavior.
+
 Free space must cover the remaining bytes plus 10%, rounded up. An exclusively locked `.part`
 is rehashed before a Range request. A valid 206 appends; 200 replaces the prefix. A bad range
 or 416 restarts once. The manifest bounds the stream, even without Content-Length; a 200 with

@@ -34,8 +34,8 @@ use windows_sys::Win32::System::SystemServices::IO_REPARSE_TAG_MOUNT_POINT;
 use super::super::windows::{dacl_sddl, final_path_matches, local_app_data};
 use super::abi::{LAYOUT, RawRecognizer, RawStream, RecognizerConfig, RecognizerResult};
 use super::{
-    Fns, MAX_TRANSCRIPT_BYTES, NATIVE_CLOSURE, NativeError, ORT, SHERPA, Sherpa, check_closure,
-    only_expected_added, sample_count, stage, verify,
+    Fns, MAX_TRANSCRIPT_BYTES, MODEL_FILES, NATIVE_CLOSURE, NativeError, ORT, SHERPA, Sherpa,
+    check_closure, only_expected_added, sample_count, stage, verify,
 };
 use crate::speech::SpeechSupervisor;
 use crate::test_support::Scratch;
@@ -364,7 +364,8 @@ fn shared_recognizer_streams_use_independent_fixture_state_and_release_in_order(
         fake.text_mode = TextMode::Samples;
         fake.expected_peak = Some(2);
     });
-    let recognizer = sherpa.recognizer(Path::new("models")).expect("recognizer");
+    let models = model_fixture();
+    let recognizer = sherpa.recognizer(models.dir()).expect("recognizer");
     std::thread::scope(|scope| {
         let recognizer = &recognizer;
         let first = scope.spawn(move || recognizer.decode(16_000, &[1]));
@@ -382,8 +383,9 @@ fn shared_recognizer_streams_use_independent_fixture_state_and_release_in_order(
             2
         );
         let other = self::sherpa(Some(b"other fixture"));
+        let other_models = model_fixture();
         let other_recognizer = other
-            .recognizer(Path::new("other-models"))
+            .recognizer(other_models.dir())
             .expect("other recognizer");
         assert_eq!(
             other_recognizer.decode(16_000, &[3]),
@@ -422,7 +424,8 @@ fn shared_recognizer_streams_use_independent_fixture_state_and_release_in_order(
 #[test]
 fn a_decode_converts_once_and_drops_result_stream_then_recognizer() {
     let sherpa = sherpa(Some(b"hello world"));
-    let recognizer = sherpa.recognizer(Path::new(r"C:\models")).expect("created");
+    let models = model_fixture();
+    let recognizer = sherpa.recognizer(models.dir()).expect("created");
     assert_eq!(
         recognizer.decode(44_100, &[0, 16_384, -32_768, i16::MAX]),
         Ok("hello world".to_owned())
@@ -450,11 +453,17 @@ fn a_decode_converts_once_and_drops_result_stream_then_recognizer() {
 #[test]
 fn the_recognizer_gets_parakeet_on_eight_cpu_threads() {
     let sherpa = sherpa(None);
-    drop(sherpa.recognizer(Path::new(r"C:\models")).expect("created"));
+    let models = model_fixture();
+    drop(sherpa.recognizer(models.dir()).expect("created"));
     assert_eq!(
         fake(&sherpa, |fake| fake.config.clone()),
         Some((
-            r"C:\models\encoder.int8.onnx".to_owned(),
+            models
+                .dir()
+                .join("encoder.int8.onnx")
+                .to_str()
+                .unwrap()
+                .to_owned(),
             8,
             "cpu".to_owned(),
             "nemo_transducer".to_owned(),
@@ -467,8 +476,9 @@ fn the_recognizer_gets_parakeet_on_eight_cpu_threads() {
 fn a_null_recognizer_is_create_and_nothing_is_destroyed() {
     let sherpa = sherpa(None);
     fake(&sherpa, |fake| fake.null_recognizer = true);
+    let models = model_fixture();
     assert_eq!(
-        sherpa.recognizer(Path::new("models")).err(),
+        sherpa.recognizer(models.dir()).err(),
         Some(NativeError::Create)
     );
     assert_eq!(calls(&sherpa), ["create recognizer"]);
@@ -509,7 +519,8 @@ fn null_native_returns_fail_and_destroy_every_object_once() {
     ];
     for (setup, error, expected) in cases {
         let sherpa = sherpa(Some(b"unused"));
-        let recognizer = sherpa.recognizer(Path::new("models")).expect("created");
+        let models = model_fixture();
+        let recognizer = sherpa.recognizer(models.dir()).expect("created");
         fake(&sherpa, setup);
         assert_eq!(recognizer.decode(16_000, &[1]), Err(error));
         drop(recognizer);
@@ -532,7 +543,8 @@ fn transcript_text_is_bounded_and_utf8_and_still_destroyed() {
     ];
     for (text, want) in cases {
         let sherpa = sherpa(Some(text));
-        let recognizer = sherpa.recognizer(Path::new("models")).expect("created");
+        let models = model_fixture();
+        let recognizer = sherpa.recognizer(models.dir()).expect("created");
         assert_eq!(recognizer.decode(16_000, &[1]), want);
         assert_eq!(
             calls(&sherpa)
@@ -548,7 +560,8 @@ fn transcript_text_is_bounded_and_utf8_and_still_destroyed() {
 #[test]
 fn bad_input_is_refused_before_any_stream() {
     let sherpa = sherpa(Some(b"x"));
-    let recognizer = sherpa.recognizer(Path::new("models")).expect("created");
+    let models = model_fixture();
+    let recognizer = sherpa.recognizer(models.dir()).expect("created");
     assert_eq!(recognizer.decode(0, &[1]), Err(NativeError::Input));
     assert_eq!(recognizer.decode(u32::MAX, &[1]), Err(NativeError::Input));
     assert_eq!(recognizer.decode(16_000, &[]), Err(NativeError::Input));
@@ -601,6 +614,73 @@ fn the_verified_handle_refuses_writers() {
 /// folder won't do: on Rez it grants other accounts write access, which the checks refuse, and
 /// on CI it's spelled with 8.3 short names.
 pub(crate) struct TrustedScratch(pub(crate) PathBuf);
+
+pub(crate) fn model_fixture() -> Scratch {
+    let scratch = Scratch::trusted("speech-models");
+    std::fs::create_dir_all(scratch.dir()).unwrap();
+    for name in MODEL_FILES {
+        std::fs::write(scratch.dir().join(name), b"fixture").unwrap();
+    }
+    scratch
+}
+
+#[test]
+fn model_paths_refuse_links_before_the_native_constructor_and_hold_ordinary_files() {
+    let models = model_fixture();
+    let sherpa = sherpa(Some(b""));
+    let linked = models.dir().join("linked");
+    std::fs::create_dir(&linked).unwrap();
+    set_junction(&linked, models.dir()).unwrap();
+    assert_eq!(
+        sherpa.recognizer(&linked).err(),
+        Some(NativeError::ModelPath)
+    );
+    assert_eq!(calls(&sherpa), Vec::<&str>::new());
+    std::fs::remove_dir(&linked).unwrap();
+    let victim = models.dir().join("original");
+    std::fs::write(&victim, b"fixture").unwrap();
+    for name in MODEL_FILES {
+        let path = models.dir().join(name);
+        std::fs::remove_file(&path).unwrap();
+        crate::platform::test_symlink_file(&victim, &path).expect("own model symlink");
+        assert_eq!(
+            sherpa.recognizer(models.dir()).err(),
+            Some(NativeError::ModelPath)
+        );
+        assert_eq!(calls(&sherpa), Vec::<&str>::new());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"fixture");
+        std::fs::remove_file(path).unwrap();
+        std::fs::write(models.dir().join(name), b"fixture").unwrap();
+    }
+    std::fs::remove_file(models.dir().join(MODEL_FILES[0])).unwrap();
+    std::fs::hard_link(&victim, models.dir().join(MODEL_FILES[0])).unwrap();
+    let recognizer = sherpa
+        .recognizer(models.dir())
+        .expect("ordinary owned models");
+    assert_eq!(recognizer.decode(16_000, &[1]), Ok(String::new()));
+    for name in MODEL_FILES {
+        assert_eq!(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(models.dir().join(name))
+                .map(drop)
+                .map_err(|error| error.raw_os_error()),
+            Err(Some(32)),
+        );
+    }
+    assert_eq!(
+        std::fs::rename(models.dir(), models.dir().with_extension("moved"))
+            .map_err(|error| error.raw_os_error()),
+        Err(Some(5))
+    );
+    drop(recognizer);
+    std::fs::write(models.dir().join(MODEL_FILES[0]), b"released").unwrap();
+    assert_eq!(
+        std::fs::read(models.dir().join(MODEL_FILES[0])).unwrap(),
+        b"released"
+    );
+    assert_eq!(std::fs::read(victim).unwrap(), b"released");
+}
 
 impl TrustedScratch {
     pub(crate) fn new(name: &str) -> Self {

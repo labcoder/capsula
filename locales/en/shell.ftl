@@ -355,4 +355,5 @@ error-voice-download = Voice couldn't be downloaded. Check your connection and t
 error-voice-corrupt = A voice file didn't match what Kumochi expected, so it wasn't used.
 error-voice-storage = Kumochi couldn't read, write or delete its voice files.
 error-voice-load = Voice couldn't start.
+error-voice-model-path = The speech model folder goes through a link or network location, or has unsafe permissions. Use an ordinary local folder.
 error-voice-unavailable = Voice can't be installed or removed right now.

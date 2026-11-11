@@ -25,10 +25,21 @@ use crate::store::Store;
 pub(crate) struct Scratch(PathBuf);
 
 impl Scratch {
+    pub(crate) fn trusted(name: &str) -> Self {
+        Self::under(
+            &crate::platform::local_app_data().expect("local application data"),
+            name,
+        )
+    }
+
     pub(crate) fn new(name: &str) -> Self {
+        Self::under(&std::env::temp_dir(), name)
+    }
+
+    fn under(base: &Path, name: &str) -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
+        let dir = base.join(format!(
             "{}-store-{}-{name}-{n}",
             constants::OBJECT_PREFIX,
             std::process::id()

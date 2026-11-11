@@ -54,6 +54,13 @@ use windows_sys::Win32::UI::Shell::{
 
 use super::pipe::user_sid;
 
+mod models;
+pub(crate) use models::{
+    check_model_final, create_model_dir, create_model_write, discard_model, hold_model_creation,
+    model_file, model_final, open_model_write, publish_model, remove_model_tree,
+    validate_model_path,
+};
+
 /// Why a path can't be trusted. It carries no path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum Untrusted {
@@ -414,7 +421,7 @@ pub(crate) fn pause_after_check(path: PathBuf, hook: Box<dyn FnOnce() + Send>) {
 }
 
 #[cfg(test)]
-fn paused(path: &Path) {
+pub(crate) fn paused(path: &Path) {
     let hook = {
         let mut pauses = PAUSES
             .lock()
@@ -946,6 +953,22 @@ fn mapped(mut mask: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{Kind, Security, Trusted, Untrusted, this_user, trusted_security};
+
+    #[test]
+    fn the_default_local_app_data_chain_passes_the_existing_boundary() {
+        let known = super::local_app_data().expect("local application data");
+        super::models::validate_model_path(&known).expect("ordinary local profile drive");
+        let held = super::hold_chain(&known).expect("ordinary default profile chain");
+        assert!(!held.is_empty());
+        let configured = std::env::var_os("LOCALAPPDATA").expect("default local application data");
+        super::models::validate_model_path(std::path::Path::new(&configured))
+            .expect("ordinary configured profile drive");
+        assert!(
+            !super::hold_chain(std::path::Path::new(&configured))
+                .expect("ordinary configured profile chain")
+                .is_empty()
+        );
+    }
 
     #[test]
     fn only_an_owner_in_the_trusted_set_is_trusted() {
