@@ -781,8 +781,18 @@ rejected and a second take returns no value.
 
 Normalization runs off the capture path, incrementally through the existing sinc
 resampler into at most 960,000 mono 16 kHz i16 samples: 1,920,000 bytes, not a
-60-second 192 kHz raw recording. Scratch holds one packet and bounded kernel history.
-Owned accumulator/scratch and resampler history are scrubbed on drop. Scheduling
-moves the normalized vector to STT; cancelling its receiver fences the result,
-not audio already owned by an in-flight decode. STT's serialization/worker copies
-and native inference allocations remain part of the unmeasured end-to-end peak.
+60-second 192 kHz raw recording. The two 3,840-element f32 scratch vectors add
+30,720 bytes. Before its first private sample, the hold reserves resampler history
+for one maximum packet plus both kernel wings (at most 4,246 f32 elements,
+16,984 bytes for 192→16 kHz); legal packets and final padding do not reallocate it.
+The shared 2,049-element f64 kernel table adds 16,392 bytes, not per utterance.
+
+Failure/drop zeroizes owned accumulator/scratch capacity and the reserved history
+allocation. Successful transfer moves normalized PCM intact and zeroizes the
+remaining scratch/history. This does not erase incoming frames,
+allocator/OS copies, buffers transferred to other owners or native inference state.
+These payload figures are not the full peak: ingress/link queues, transport,
+metadata and allocator overhead also count. Scheduling moves the normalized
+vector to STT; cancelling its receiver fences the result, not audio already owned
+by an in-flight decode. STT's serialization/worker copies and native inference
+allocations remain part of the unmeasured end-to-end peak.

@@ -78,6 +78,12 @@ impl Resampler {
         }
     }
 
+    /// Reserves a whole packet and retained kernel before the first private sample.
+    pub(crate) fn reserve_input(&mut self, maximum: usize) {
+        let reach = usize::try_from(self.reach).expect("a bounded kernel");
+        self.history.reserve(maximum + reach);
+    }
+
     /// Takes more input and appends every output sample it completes.
     pub(crate) fn push(&mut self, input: &[f32], out: &mut Vec<f32>) {
         if self.from == self.to {

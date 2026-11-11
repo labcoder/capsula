@@ -61,7 +61,11 @@ impl Audio {
         }
         if self.rate.is_none() {
             self.rate = Some(chunk.rate);
-            self.resampler = (chunk.rate != RATE).then(|| Resampler::new(chunk.rate, RATE));
+            self.resampler = (chunk.rate != RATE).then(|| {
+                let mut resampler = Resampler::new(chunk.rate, RATE);
+                resampler.reserve_input(MAX_MIC_SAMPLES);
+                resampler
+            });
         }
         if let Some(resampler) = &mut self.resampler {
             self.raw.clear();
