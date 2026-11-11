@@ -175,9 +175,9 @@ sequenceDiagram
 
 Each model has at most one unanswered request for the task list and one for events. Together
 they can occupy all four of the brain's page slots; another page consumer must share this cap,
-not add a fifth request. Tasks allocates even request ids (starting at 2), and chat allocates odd
-ids (starting at 1). Each sequence advances by two, including wrapping, and is retained across
-hide and reconnect. Presence routes each reply by parity to exactly one model and returns that
+not add a fifth request. One shared allocator hands out nonwrapping ids starting at 1 and records
+each pending request's target model. Exhaustion ends the connection before an id can be reused.
+Presence routes each reply by pending ownership to exactly one model and returns that
 frame's data credit once, whether the model applies it or drops it. Changing the
 query or open thread invalidates its pending reply but does not free its slot: the replacement
 waits until that reply is taken. Request ids are checked when replies are applied. Closing the
@@ -196,6 +196,13 @@ Pages are read only while the panel is shown. Opening it reads the first list pa
 clears the open thread, and requests needed meanwhile wait until it opens again.
 
 ## Ordering and repair
+
+Issue events render read-only saved cards in the same message list in browse and
+chat, using the [shared issue cache](issues.md#read-only-history-presentation).
+The title-only event remains visible while details load or are unavailable;
+status, content and duplicate warnings update without changing the event id.
+Saved URLs are text, not actions. The existing focus, PageUp/PageDown and scroll
+anchor behavior remain the navigation path; no card-specific controls are added.
 
 The live list uses `(updated_ms DESC, id DESC)` keyset paging. A thread that isn't updated
 appears exactly once, in order. A thread updated between pages moves above the cursor and is

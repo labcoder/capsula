@@ -1,5 +1,27 @@
 # GitHub
 
+## Shell snapshots
+
+The shell retains session-tagged GitHub snapshots in Settings. Replacement and
+disconnect clear them; stale-session snapshots do not change them. Each accepted
+scope transition replaces a strong origin identity before observers run, so a
+batched loss and return cannot revive an earlier intent. Identical snapshots and
+truncation-only changes preserve that identity. Current repository membership
+must still be checked at activation, without treating a truncated list as proof
+that an unlisted repository is available.
+
+Live GitHub connection controls receive a fixed, tagged unavailable error. It
+reaches the current session's retained GitHub error state without inventing a
+connection snapshot or changing generic Accounts errors. An error followed by
+its authoritative view retains the error; a later superseding view may clear it.
+Offline controls leave no reply owed to a replacement session. Full or closed
+control output ends the live connection instead of retrying the refusal.
+
+This is state delivery, not visible Settings behavior: connection controls and
+issue filing have no enabled production UI. No runtime GitHub owner, credential
+job, sign-in or network effect is activated. Verified numeric account authority
+and Store admission remain prerequisites for a future consent receiver.
+
 ## The checked HTTP boundary
 
 GitHub uses the account HTTP client: manual OS trust roots, HTTPS, no proxies, no
@@ -146,16 +168,18 @@ and out-of-range values refuse the whole reply, including a token reply.
 Unknown codes and malformed replies end the attempt. Expiring token shapes
 remain unsupported. No retry wait is derived from REST rate metadata.
 
-The approving identity is read before saving. Only a successful save produces
-Connected. Startup checks a loaded bearer with the same user endpoint; a 401
-drops it and shows NeedsSignIn. Cleanup outcomes remain signed out, including
+The approving identity is read before saving. During interactive sign-in, only a
+successful save produces Connected. Startup checks a loaded bearer with the same
+user endpoint; a 401 drops it and shows NeedsSignIn. Cleanup outcomes remain signed
+out, including
 a failed durable removal. A clean SignedOut view has no cleanup warning. Connect
 is also permitted after a refused physical delete, because durable removal has
 already fenced the old credential; Running and NotDurable still block it.
 Repository defaults are displayed and accepted only by exact membership in the
-fetched list, preserving GitHub's spelling. `user()` returns the verified user,
-without its bearer, only while Connected; issue admission takes the numeric id
-from it, never from a login.
+fetched list, preserving GitHub's spelling. `user()` returns the connected identity,
+including persisted fallback after a genuine startup API failure, without its
+bearer; issue admission takes the numeric id from it, never from a login, and
+still requires fetched membership.
 
 The verification page is the protocol's VERIFICATION_URI constant. The API
 checks the reply against it; neither the view nor a brain effect carries a
@@ -185,6 +209,54 @@ stateDiagram-v2
 ```
 
 ## Credential authority and lane
+
+Accounts owns a dormant device-machine adapter on the existing credential lane.
+Its production startup, effect dispatch and snapshot publication are explicitly
+disabled; the live GitHub control receiver still returns the tagged unavailable
+error. Ordinary account startup and its existing vault sweeps are unchanged.
+There is no enabled GitHub sign-in, default executor, consent receiver or UI.
+
+The admitted offline fixture path loads only after the account worker opens its
+vault. Unavailable admission, a closed reply or an unavailable vault leaves the
+machine Loading, with no successful SignedOut snapshot. A genuine empty load and
+the exact cleanup outcome remain distinct. Loading is queried from the machine,
+not copied into another loaded flag. Credential-only admission stops at an owned,
+original-stamp ReadUser effect and never constructs HTTP. A separate production-off
+verification policy can execute that effect through the existing fixed user API;
+enabling it does not replay previously suspended work. Device authorization,
+repository, default and wake effects remain suspended with their original identity.
+
+One verification operation owns its client-construction or user-request handle,
+original stamp and load-origin session. Its token stays outside the blocking
+factory closure. The event loop joins the stored handle directly and retains
+operation identity until disposition. An already joined completion may be retired
+by cancellation; its later event is inert. A canceled construction is
+joined; a canceled request is aborted and joined. An old event cannot replace a
+new operation, and a retiring operation cannot be overwritten. The shared fence
+is checked inside the request task before the API is first polled.
+
+A real successful response supplies the current numeric identity without resaving
+an already durable account. A real 401 means NeedsSignIn. Other genuine API/factory
+failures retain the existing persisted-identity fallback and closed error; that is
+not fresh verification or fetched repository authority. Cancellation and task
+failure never manufacture API transport failure or Connected fallback. Lifecycle
+loss leaves the machine unverified, without an implicit retry or a logged panic
+payload. Current authority may reach a replacement, but errors require the
+matching nonempty load-origin session. Loaded verification survives ordinary EOF.
+
+Save and Remove enter the existing FIFO before any view/error is delivered.
+Interactive cancellation clears suspended work, not admitted credential jobs or
+their reply settlement. Shell loss cancels an attempt rather than signing out an
+already connected account. A replacement gets the current non-Loading view, not
+an old error. Shutdown admits compensation before dropping the job sender, settles
+credential replies and waits for the existing worker to release its vault lock,
+then joins any remaining canceled verification before returning. A running client
+factory is not made abortable by its handle; the API's 15-second request/body
+deadline does not bound construction or shutdown. No new wall-clock shutdown
+guarantee is made.
+The adapter borrows the sender and creates no second credential worker or account
+cache. Numeric identity remains the machine's connected identity; fetched membership,
+Store admission and separately reviewed activation remain prerequisites to filing.
 
 GitHub records use the same credential thread, vault session lock and write-once
 generation names as other accounts. The record contains only a checked `ghu_`

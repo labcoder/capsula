@@ -149,8 +149,9 @@ flowchart LR
   `TextSubmit`s of up to 256 KiB each wait ahead of the core, and one more ends the connection
   as broken. Separately, at most four page requests may remain unanswered [guess], counting
   replies waiting on credit or a blocked write; a fifth breaks the connection. Pages are at most
-  50 rows and 32 KiB per encoded frame [guess]. The shell keeps only one request per list, two
-  total. Their frames use at most 64 KiB plus bounded queue metadata, so pages alone cannot
+  50 rows and 32 KiB per encoded frame [guess]. Browse and chat share four identified admissions;
+  only a complete terminal write releases one. Their frames use at most 128 KiB plus bounded
+  queue metadata, so pages alone cannot
   stop turn admission. See [panels](panels.md) for continuations, repair, and stale replies.
 - shortcut: the control queue reserves no slots for urgent frames and doesn't coalesce
   `RunState`, so a burst can fill it and end the connection even with a slow but healthy shell;
@@ -373,7 +374,7 @@ page request, `Stop` or grant meant for a connection that has ended does nothing
 | Channel | Bound | When it's full |
 |---|---|---|
 | Control out | 64 messages [guess] | The send fails; the shell sends only `Stop`, `ClearDrawing`, `Pong`, `DeleteThread` and `Quitting`; a delete is tried again |
-| Data out | 64 turns plus 8 for pages and credit | Not reached: the shell refuses a turn first and keeps at most two page requests unanswered |
+| Data out | 64 turns plus 8 for pages and credit | Not reached: the shell refuses a turn first and keeps at most four page requests unanswered |
 | Brain to UI | unbounded, one channel in arrival order | The link thread never waits on the UI |
 
 - **Credit** for a data frame is granted once the UI thread has taken it, applied or dropped by
@@ -385,6 +386,21 @@ page request, `Stop` or grant meant for a connection that has ended does nothing
   otherwise. Since withheld credit stops the brain, its credit window bounds what's held.
 - **Pages.** Each list has one request in flight. A superseded query or closed thread drops its
   reply when applied, but still earns credit. Page frames are never held for a RunState.
+  Both thread models share one checked request-id allocator and four pending target slots.
+  Superseding a view retains its slot until its matching terminal; old-session frames cannot
+  release current slots. Exhaustion or a failed send ends the actual connection. Brain admission
+  rejects active id collisions and retains one cancellation owner and absolute two-second end
+  through the reader, held output, credit wait and write. No phase renews the budget. Cancellation
+  or expiry is checked before every resumed write poll, with the timer waking stalled writes;
+  this cannot interrupt an executing write syscall. It closes the connection if delivery cannot
+  finish; a partial frame is never abandoned while continuing the stream. Session teardown cancels
+  every remaining admitted read. Correlated `IssueCardsRequest` batches use the same allocator,
+  cap and budget. `IssueCardRead` never releases admission; only its matching `IssueCardsDone`
+  does. Deleting unsent cards preserves that terminal even when none remain. Old uncorrelated
+  `IssueCards` is a protocol error; appended variants preserve all earlier enum indices.
+  Displayed issue ids schedule those real card reads through the same four-slot registry.
+  Session-fenced ActionState notifications update the one shared version watermark; unknown
+  ids only coalesce an owner-page reread. Equal-version state contradictions end the connection.
 - **Turns.** The shell keeps at most 63 turns unanswered; a 64th is refused until a new run's
   first `RunState` answers one. The brain's queue holds 64, so the shell never sends the turn
   that would end the connection. It refuses blank turns, which the brain would refuse too, and turns

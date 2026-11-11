@@ -124,7 +124,7 @@ rows read as `thread` and `words` with no model:
 The [threads panel](panels.md) reads bounded thread, ranked search, and newest-first event pages
 on the page reader: a thread beside the store thread with its own read-only, query-only
 connection (`temp_store=MEMORY` too). So a long search never holds up a write queued behind
-it. Each read is one autocommit statement, finished before returning, so no snapshot outlives it.
+it. Each read uses one snapshot transaction, finished before returning, so no snapshot outlives it.
 Reads neither stop the purge's copy nor postpone it: a page request never reaches the store
 thread's queue, so it doesn't reset the quiet deadline an owed purge waits for.
 
@@ -132,7 +132,10 @@ A read waits until the store thread has finished every op queued before it, fail
 ones included, so it sees the thread a turn just created. Ops queued after it may show too: a
 delete can overtake an older read, which the shell's revision fences already handle. The reply
 goes back on the brain's input channel as before, so the epoch fence and held-page limits are
-unchanged.
+unchanged. Admission creates one two-second absolute end and cancellation owner. The queued
+read, accepted-write barrier, side-slot/swap admission and scoped SQLite query share that end.
+SQLite checks cooperatively every 1,000 instructions, with no busy wait during the query; handler
+or timeout cleanup failure discards the side connection. Session loss cancels queued reads too.
 
 Commits never checkpoint. After every op and every read, the checkpoint helper, a thread with its
 own read-write connection, runs a passive checkpoint, which never waits on the writer or a
