@@ -18,6 +18,12 @@ const WAIT: Duration = Duration::from_secs(5);
 
 mod concurrent;
 
+pub(crate) fn hold_before_serving(handle: &SttHandle) -> impl FnOnce() + use<> {
+    let control = Arc::clone(&handle.control);
+    control.update(|state| state.decode_cut = Some(super::DecodeCut::Delivery));
+    move || control.update(|state| state.decode_cut = None)
+}
+
 #[test]
 fn admitted_use_is_current_ready_not_busy_and_refreshes_the_existing_idle_clock() {
     use kumochi_protocol::message::{

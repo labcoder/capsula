@@ -130,6 +130,51 @@ async fn ordinary_admission_limits_refuse_before_microphone_grant() {
 }
 
 #[tokio::test]
+async fn prepared_hold_across_loading_is_admitted_before_first_serve_iteration() {
+    use crate::runtime::{Recovery, voice};
+    use kumochi_protocol::message::PartState;
+    let scratch = Scratch::new("hold-loaded-ready");
+    let (mut brain, release, _decoded, _fetch) =
+        crate::runtime::tests::holds::loading_input(&scratch, Vec::new(), "unused");
+    let resume = crate::voice::stt::hold_before_serving(brain.hold_voice().1.unwrap());
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    link.recovery = Some(Recovery::new(&[], 1024));
+    recording(&mut brain);
+    let hold = brain.holds.pending.as_mut().unwrap();
+    hold.ask = None;
+    hold.audio = None;
+    brain.holds.debt = None;
+    brain.holds.gate.active.store(0, Ordering::SeqCst);
+    brain.hold_voice_changed(&mut link).unwrap();
+    assert_eq!(output.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    release.send(()).unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(5), voice::next(&mut brain.voice))
+        .await
+        .unwrap();
+    brain.voice_event(event, Some(&mut link)).unwrap();
+    let grant = status(&mut output);
+    let bytes = output.try_recv().unwrap();
+    let view = kumochi_protocol::frame::decode::<ControlToShell>(
+        &bytes[kumochi_protocol::frame::HEADER_LEN..],
+    )
+    .unwrap();
+    let ask = brain.holds.pending.as_ref().and_then(|hold| hold.ask);
+    brain.hold_voice_changed(&mut link).unwrap();
+    let more = output.try_recv();
+    resume();
+    brain.holds.lost();
+    brain.close().await;
+    assert_eq!(grant, HoldStatus::Admitted);
+    assert!(matches!(view, ControlToShell::Voice(view) if view.speech_input == PartState::Ready));
+    assert_eq!(ask, Some(1));
+    assert_eq!(more, Err(mpsc::error::TryRecvError::Empty));
+}
+
+#[tokio::test]
 async fn ordinary_admission_limits_refuse_decoded_transfer_without_a_turn() {
     Box::pin(admission_boundaries(AdmissionStage::Transfer)).await;
 }

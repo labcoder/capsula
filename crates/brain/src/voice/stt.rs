@@ -15,6 +15,8 @@ mod tests;
 pub(crate) use tests::held_for_runtime;
 #[cfg(test)]
 pub(crate) use tests::held_for_runtime_checked;
+#[cfg(test)]
+pub(crate) use tests::hold_before_serving;
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -511,8 +513,9 @@ fn run(
         let mut serve = |generation: Generation, decoder: &dyn Decoder| {
             // Every command sent during the load is in the state now; only the newest ask is kept.
             let kept = control.update(|state| {
-                let kept = wants(state, ask);
-                if kept {
+                let kept = !state.shutdown && state.current == Some(ask) && wants(state, ask);
+                state.ready = kept;
+                if state.ready {
                     reports.send(ask, LoadEvent::Loaded);
                 }
                 kept

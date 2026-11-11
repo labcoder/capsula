@@ -836,3 +836,9 @@ described, outgoing data must be below its cap, and ending-run/cleanup debt must
 have room. A closed gate ends that hold once as Busy without storing words or
 starting a provider. PCM ingress, control processing and credit remain live;
 there is no second queue of recognized words waiting for capacity.
+
+The STT owner publishes serving-ready before Loaded in the same mutex-protected
+transition, after checking the current ask and shutdown. The serving loop retains
+its worker-loss check before decoding. A prepared
+hold waiting on that load can admit the same owner immediately; Loaded never
+promises readiness that only a later serving-loop iteration will establish.

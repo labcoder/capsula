@@ -20,16 +20,32 @@ use crate::voice::stt::held_for_runtime_checked;
 
 const G: GestureId = GestureId(17);
 
-pub(in crate::runtime) async fn input(
-    scratch: &Scratch,
-    expected: Vec<i16>,
-    text: &'static str,
-) -> (
+pub(in crate::runtime) type InputVoice = (
     Brain,
     std::sync::mpsc::Sender<()>,
     mpsc::UnboundedReceiver<()>,
     Arc<super::voice::HeldFetch>,
-) {
+);
+
+pub(in crate::runtime) async fn input(
+    scratch: &Scratch,
+    expected: Vec<i16>,
+    text: &'static str,
+) -> InputVoice {
+    let (mut brain, release, heard_decode, fetch) = loading_input(scratch, expected, text);
+    release.send(()).unwrap();
+    let event = tokio::time::timeout(super::PATIENCE, voice::next(&mut brain.voice))
+        .await
+        .unwrap();
+    brain.voice_event(event, None).unwrap();
+    (brain, release, heard_decode, fetch)
+}
+
+pub(in crate::runtime) fn loading_input(
+    scratch: &Scratch,
+    expected: Vec<i16>,
+    text: &'static str,
+) -> InputVoice {
     let mut brain = test_support::brain(scratch, "0 text selected answer");
     let (release, held) = std::sync::mpsc::channel();
     let (began, heard_decode) = mpsc::unbounded_channel();
@@ -64,11 +80,6 @@ pub(in crate::runtime) async fn input(
             None,
         )
         .unwrap();
-    release.send(()).unwrap();
-    let event = tokio::time::timeout(super::PATIENCE, voice::next(&mut brain.voice))
-        .await
-        .unwrap();
-    brain.voice_event(event, None).unwrap();
     (brain, release, heard_decode, fetch)
 }
 
