@@ -77,21 +77,18 @@ impl Presence {
         let Some(RunOrigin::Hold { gesture }) = origin else {
             return;
         };
-        if !applied.visible
-            || self
-                .voice
-                .pending
-                .as_ref()
-                .is_none_or(|hold| hold.token.gesture() != gesture || hold.terminal.is_some())
-        {
+        if !applied.visible {
             return;
         }
-        if self
+        let Some(hold) = self
             .voice
             .pending
             .as_ref()
-            .is_some_and(|hold| !matches!(hold.source, Source::Sent))
-        {
+            .filter(|hold| hold.token.gesture() == gesture && hold.terminal.is_none())
+        else {
+            return;
+        };
+        if !matches!(hold.source, Source::Sent) {
             self.end_voice(Text::HoldUnavailable, cx);
             if let Some(session) = &self.session {
                 self.link.end(session);
@@ -283,18 +280,18 @@ impl Presence {
                 }
             }
             Intent::End { gesture, cancelled } => {
-                if self
+                let Some(hold) = self
                     .voice
                     .pending
-                    .as_ref()
-                    .is_none_or(|h| h.token.gesture() != gesture)
-                {
+                    .as_mut()
+                    .filter(|hold| hold.token.gesture() == gesture)
+                else {
                     return;
-                }
+                };
                 if cancelled || self.voice.status != Some(Text::HoldListening) {
                     self.end_voice(Text::HoldCancelled, cx);
                 } else {
-                    self.voice.pending.as_mut().expect("matching hold").released = Some(qpc);
+                    hold.released = Some(qpc);
                     self.voice_notice(Text::HoldStopping, cx);
                     self.finish_voice();
                 }
@@ -341,9 +338,7 @@ impl Presence {
             return;
         }
         match status {
-            HoldStatus::Admitted
-                if matches!(hold.source, Source::Waiting) && hold.terminal.is_none() =>
-            {
+            HoldStatus::Admitted if matches!(hold.source, Source::Waiting) => {
                 self.open_microphone(cx);
             }
             HoldStatus::Admitted => {}
