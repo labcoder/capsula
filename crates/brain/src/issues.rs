@@ -15,7 +15,7 @@ use sha2::{Digest as _, Sha256};
 use crate::connections::github::{api::GitHubUser, issues::CreateOutcome};
 
 mod io;
-pub use io::{Snapshot, Write};
+pub use io::{Snapshot, Write, WriteScope};
 
 /// The most already-matching issue numbers a mark keeps (guess).
 pub const MAX_PRESEND: usize = 200;

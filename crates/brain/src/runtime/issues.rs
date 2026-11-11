@@ -108,7 +108,9 @@ impl Filing {
     fn write(&mut self, job: &mut Job, after: AfterWrite, write: Write) -> Effect {
         let serial = self.serial();
         job.phase = Phase::Store { serial, after };
-        Effect::Store(StoreOp::Issue { serial, write })
+        let scope = matches!(after, AfterWrite::Admission | AfterWrite::Read | AfterWrite::Posting)
+            .then(|| job.control.scope().clone());
+        Effect::Store(StoreOp::Issue { serial, write, scope })
     }
 }
 
@@ -130,7 +132,7 @@ impl Brain {
         if !start {
             let serial = self.filing.serial();
             self.filing.replies.push((serial, self.epoch, forced));
-            return Some(vec![Effect::Store(StoreOp::Issue { serial, write })]);
+            return Some(vec![Effect::Store(StoreOp::Issue { serial, write, scope: None })]);
         }
         let check = matches!(write, Write::Read(_));
         let control = Control::new();

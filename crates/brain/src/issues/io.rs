@@ -1,6 +1,9 @@
 //! Typed issue operations for the existing store thread; filing policy stays in the runtime.
 
 use std::fmt;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+
+use tokio::time::Instant;
 
 use kumochi_protocol::message::{
     ApprovalRev, ContentHash, Decision, DraftId, FailReason, RepoName, StateVersion,
@@ -8,6 +11,35 @@ use kumochi_protocol::message::{
 
 use super::{Live, Lookup, Mark};
 use crate::connections::github::{api::GitHubUser, issues::CreateOutcome};
+
+/// The original operation deadline and shared cancellation for an admitted SQL phase.
+#[derive(Clone, Debug)]
+pub struct WriteScope {
+    deadline: Instant,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl PartialEq for WriteScope {
+    fn eq(&self, other: &Self) -> bool {
+        self.deadline == other.deadline && Arc::ptr_eq(&self.cancelled, &other.cancelled)
+    }
+}
+
+impl Eq for WriteScope {}
+
+impl WriteScope {
+    pub(crate) fn new(deadline: Instant) -> Self {
+        Self { deadline, cancelled: Arc::new(AtomicBool::new(false)) }
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn stopped(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire) || Instant::now() >= self.deadline
+    }
+}
 
 /// Owned account metadata captured when the runtime reserves or refuses an operation slot.
 #[derive(Clone, PartialEq, Eq)]

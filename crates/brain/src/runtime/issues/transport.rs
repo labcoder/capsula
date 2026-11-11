@@ -21,6 +21,7 @@ const HANDED: u8 = 2;
 
 pub(in crate::runtime) struct Control {
     deadline: Instant,
+    scope: crate::issues::WriteScope,
     state: AtomicU8,
     requests: AtomicUsize,
     server_date: AtomicU64,
@@ -29,8 +30,10 @@ pub(in crate::runtime) struct Control {
 
 impl Control {
     pub(in crate::runtime) fn new() -> Arc<Self> {
+        let deadline = Instant::now() + FILING_DEADLINE;
         Arc::new(Self {
-            deadline: Instant::now() + FILING_DEADLINE,
+            deadline,
+            scope: crate::issues::WriteScope::new(deadline),
             state: AtomicU8::new(0),
             requests: AtomicUsize::new(0),
             server_date: AtomicU64::new(0),
@@ -44,8 +47,13 @@ impl Control {
 
     pub(in crate::runtime) fn cancel(&self) -> bool {
         let before = self.state.fetch_or(STOPPED, Ordering::AcqRel);
+        self.scope.cancel();
         self.stopped.notify_waiters();
         before & HANDED != 0
+    }
+
+    pub(super) fn scope(&self) -> &crate::issues::WriteScope {
+        &self.scope
     }
 
     pub(in crate::runtime) fn cancelled(&self) -> bool {

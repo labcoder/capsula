@@ -19,6 +19,8 @@ pub enum StoreOp {
         serial: u64,
         /// Typed data with content-free diagnostics.
         write: crate::issues::Write,
+        /// The admitted operation's original cancellation and deadline, if it may advance.
+        scope: Option<crate::issues::WriteScope>,
     },
     /// A v1 drawing read or durable transition; its arguments never enter logs.
     Drawing {

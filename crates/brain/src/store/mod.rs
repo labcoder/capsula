@@ -294,6 +294,7 @@ pub struct Recovered {
 #[derive(Debug)]
 pub struct Store {
     conn: Connection,
+    issue_scope: Option<crate::issues::WriteScope>,
     path: PathBuf,
     /// Mirrors the `purge_pending` row, read only from an open file.
     purge_pending: bool,
@@ -334,6 +335,7 @@ impl Store {
         let purge_pending = owes(&conn)?;
         Ok(Self {
             conn,
+            issue_scope: None,
             path: path.to_owned(),
             purge_pending,
             serving: true,
