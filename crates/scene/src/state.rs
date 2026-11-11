@@ -163,6 +163,7 @@ struct Candidate {
     /// What commit adds to `SceneState::history_bytes`.
     history_bytes: usize,
     preparation_bytes: usize,
+    original_bytes: usize,
 }
 impl fmt::Debug for Admitted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -201,6 +202,7 @@ pub struct Preparation {
     /// Views this step changes; only preparation reads them.
     pub(crate) views: Vec<ViewUpdate>,
     retained_bytes: usize,
+    pub(crate) original_bytes: usize,
 }
 impl fmt::Debug for Preparation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -706,9 +708,10 @@ impl SceneState {
                             .then_some((object.handle, path.composed_scale))
                     })
                     .collect();
+                let original_bytes = heap::ARC_HEADER + heap::step_bytes(original);
                 Candidate {
-                    preparation_bytes: 2 * heap::ARC_HEADER
-                        + heap::step_bytes(original)
+                    preparation_bytes: heap::ARC_HEADER
+                        + original_bytes
                         + heap::compiled_bytes(original, &expansion.run)
                         + heap::extras_bytes(std::iter::empty(), [&expansion.extras])
                         + heap::btree::<Handle, f32>(path_scales.len())
@@ -718,8 +721,8 @@ impl SceneState {
                         + ids
                         + records_bytes(&removed)
                         + records_bytes(&changed)
-                        + heap::ARC_HEADER
-                        + heap::step_bytes(original),
+                        + original_bytes,
+                    original_bytes,
                     step: Arc::clone(original),
                     run: Arc::clone(&expansion.run),
                     extras: Arc::clone(&expansion.extras),
@@ -792,6 +795,7 @@ impl SceneState {
             after_bytes,
             history_bytes,
             preparation_bytes,
+            original_bytes,
         } = *local.candidate.into_inner();
         let preparation = Preparation {
             owner: Arc::clone(&self.identity),
@@ -804,6 +808,7 @@ impl SceneState {
             canvas_size: self.header.size.map(|size| size.map(crate::Finite::get)),
             views,
             retained_bytes: preparation_bytes,
+            original_bytes,
         };
         self.step_ids.insert(step.id.clone(), revision);
         self.steps.insert(

@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use super::{EventKind, Store, StoreError, insert_event, insert_events, now_ms, row_id, sql_id};
 use crate::drawing::{LAYOUT_VERSION, Reply, StoredScene, Target, Write};
 
-const MAX_BODY_BYTES: usize = 256 * limits::MAX_RECORD_BYTES;
+pub(super) const MAX_BODY_BYTES: usize = 256 * limits::MAX_RECORD_BYTES;
 
 /// The newest uncleared typed scenes of live threads, newest first. A durable cut to nothing
 /// hides its scene even when the clear after it never landed. `octet_length` of the bare column

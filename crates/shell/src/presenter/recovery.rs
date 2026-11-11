@@ -171,19 +171,24 @@ impl Presenter {
         });
         drop(rejected);
         for (scene, state, rest, retained) in adopted {
+            let activation = super::Activation::new(&state, now);
             let view = SceneView::new(&rest, state.activated());
             let frame = Frame::new();
+            let cache = self.stage.stage(&view);
             let bytes = state.attributed_bytes();
             let state =
                 SceneBinding::bind(Deferred::new(state, bytes), &mut self.global).expect(BOUND);
-            self.install(scene, state, rest, retained, view, frame);
+            self.install(scene, state, rest, retained, view, frame, cache, activation);
         }
         for (scene, ..) in recovery.scenes {
             if !self.scenes.contains_key(&scene) {
                 self.forget(scene, out);
             }
         }
-        let mut total = self.returned.load(Ordering::Relaxed);
+        let mut total = self
+            .returned
+            .load(Ordering::Relaxed)
+            .saturating_add(self.stage.fixed_bytes());
         let mut paint = PaintWork::default();
         let over: Vec<_> = self
             .scenes

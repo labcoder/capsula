@@ -1429,7 +1429,7 @@ fn four_views_reach_the_legal_caps_without_frame_allocations() {
                     std::hint::black_box(
                         frame
                             .paint_items()
-                            .map(|(_, primitives)| primitives.len())
+                            .map(|(_, _, primitives)| primitives.len())
                             .sum::<usize>(),
                     );
                 }

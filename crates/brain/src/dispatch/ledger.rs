@@ -26,15 +26,20 @@ enum Entry {
     Reserved {
         waiting: Vec<Caller>,
     },
+    Streaming {
+        waiting: Vec<Caller>,
+    },
     Drawing {
         hash: [u8; 32],
         waiting: Vec<Caller>,
+        terminal: bool,
     },
     /// The call's write is in the store; `waiting` are answered when it's acknowledged.
     Running {
         hash: [u8; 32],
         output: ToolOutput,
         waiting: Vec<Caller>,
+        terminal: bool,
     },
     /// The call committed.
     Done {
@@ -65,6 +70,20 @@ impl Ledger {
             *entry = Entry::Refused(ToolOutput::Error(error.into()));
         }
         Some(match entry {
+            Entry::Streaming { .. } => Step::Answer(ToolOutput::Error(ToolError::Reused)),
+            Entry::Drawing {
+                waiting,
+                terminal: true,
+                ..
+            }
+            | Entry::Running {
+                waiting,
+                terminal: true,
+                ..
+            } => {
+                waiting.push(caller);
+                Step::Join
+            }
             Entry::Reading { call, .. } if rehash(name, args) != Some(call.hash) => {
                 Step::Answer(ToolOutput::Error(ToolError::Reused))
             }
@@ -86,7 +105,7 @@ impl Ledger {
         })
     }
 
-    pub(super) fn refuse(&mut self, key: &LedgerKey, error: ToolError) {
+    pub(crate) fn refuse(&mut self, key: &LedgerKey, error: ToolError) {
         self.entries.insert(
             (key.route, key.call.clone()),
             Entry::Refused(ToolOutput::Error(error)),
@@ -106,7 +125,48 @@ impl Ledger {
         let id = (key.route, key.call.clone());
         match self.entries.remove(&id) {
             Some(Entry::Reserved { waiting }) => {
-                self.entries.insert(id, Entry::Drawing { hash, waiting });
+                self.entries.insert(
+                    id,
+                    Entry::Drawing {
+                        hash,
+                        waiting,
+                        terminal: false,
+                    },
+                );
+            }
+            Some(other) => {
+                self.entries.insert(id, other);
+            }
+            None => {}
+        }
+    }
+
+    pub(super) fn start_draw(&mut self, key: &LedgerKey, caller: Caller) -> bool {
+        let id = (key.route, key.call.clone());
+        if self.entries.contains_key(&id) {
+            return false;
+        }
+        self.entries.insert(
+            id,
+            Entry::Streaming {
+                waiting: vec![caller],
+            },
+        );
+        true
+    }
+
+    pub(crate) fn bind_stream(&mut self, key: &LedgerKey, hash: [u8; 32], canonical: bool) {
+        let id = (key.route, key.call.clone());
+        match self.entries.remove(&id) {
+            Some(Entry::Streaming { waiting }) => {
+                self.entries.insert(
+                    id,
+                    Entry::Drawing {
+                        hash,
+                        waiting,
+                        terminal: !canonical,
+                    },
+                );
             }
             Some(other) => {
                 self.entries.insert(id, other);
@@ -126,13 +186,18 @@ impl Ledger {
                 self.entries.insert(id, Entry::Refused(output));
                 Drawn::Refused(answers)
             }
-            Some(Entry::Drawing { hash, waiting }) => {
+            Some(Entry::Drawing {
+                hash,
+                waiting,
+                terminal,
+            }) => {
                 self.entries.insert(
                     id,
                     Entry::Running {
                         hash,
                         output,
                         waiting,
+                        terminal,
                     },
                 );
                 Drawn::Commit(hash)
@@ -181,6 +246,7 @@ impl Ledger {
                 hash: call.hash,
                 output: output.clone(),
                 waiting,
+                terminal: false,
             },
         );
         Some(super::CommitCall {
@@ -208,6 +274,7 @@ impl Ledger {
                 hash,
                 output,
                 waiting,
+                terminal: false,
             },
         );
     }
@@ -221,12 +288,20 @@ impl Ledger {
                 hash,
                 output,
                 waiting,
+                terminal,
             }) => {
                 let answers = waiting
                     .into_iter()
                     .map(|caller| (caller, output.clone()))
                     .collect();
-                self.entries.insert(id, Entry::Done { hash, output });
+                self.entries.insert(
+                    id,
+                    if terminal {
+                        Entry::Refused(output)
+                    } else {
+                        Entry::Done { hash, output }
+                    },
+                );
                 Some(answers)
             }
             Some(other) => {
@@ -259,7 +334,10 @@ impl Ledger {
     pub(crate) fn failed(&mut self, key: &LedgerKey) {
         let id = (key.route, key.call.clone());
         if let Some(
-            entry @ (Entry::Reserved { .. } | Entry::Drawing { .. } | Entry::Running { .. }),
+            entry @ (Entry::Reserved { .. }
+            | Entry::Streaming { .. }
+            | Entry::Drawing { .. }
+            | Entry::Running { .. }),
         ) = self.entries.get_mut(&id)
         {
             *entry = Entry::Refused(ToolOutput::Error(ToolError::Ended));

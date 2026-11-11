@@ -9,6 +9,9 @@ use crate::engines::{CallId, Finish, TurnEvent};
 use crate::store::Store;
 use crate::test_support::Scratch;
 
+#[path = "provider_draw_tests.rs"]
+mod provider_stream;
+
 fn id(name: &str) -> CallId {
     CallId::new(name).expect("ASCII fixture")
 }
@@ -105,6 +108,208 @@ fn call(core: &mut Coordinator, name: &str, args: &[u8]) -> (Dispatch, Vec<Effec
     (dispatch, effects)
 }
 
+fn admitted_request(
+    core: &mut Coordinator,
+    effects: &[Effect],
+    sources: Vec<ThreadId>,
+) -> (BuildKey, crate::engines::RunRequest) {
+    let key = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Store(StoreOp::BuildContext(build)) => Some(build.key),
+            _ => None,
+        })
+        .expect("an actual context build");
+    let effects = core.handle(built(key, sources)).expect("admitted");
+    let [Effect::StartEngine { request }] = effects.as_slice() else {
+        panic!("admission starts one engine");
+    };
+    (key, request.clone())
+}
+
+async fn pumped(request: crate::engines::RunRequest, key: BuildKey) -> Vec<Input> {
+    let fixture = crate::engines::fixture::Fixture::parse("0 text before\n0 text after")
+        .expect("text-only fixture");
+    let (inputs, mut received) = tokio::sync::mpsc::channel(4);
+    let gate = crate::engines::SendGate::closed(request.key);
+    let _cancel = crate::engines::start(&fixture, request, inputs, gate);
+    let events = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut events = Vec::new();
+        while let Some(input) = received.recv().await {
+            events.push(input);
+        }
+        events
+    })
+    .await
+    .expect("the fixture pump closes");
+    assert_eq!(
+        events,
+        [
+            Input::Engine {
+                key,
+                event: TurnEvent::TextDelta("before".into()),
+            },
+            Input::Engine {
+                key,
+                event: TurnEvent::TextDelta("after".into()),
+            },
+            Input::Engine {
+                key,
+                event: TurnEvent::Finished(Finish::Completed),
+            },
+        ]
+    );
+    events
+}
+
+#[tokio::test]
+async fn replaced_build_events_cannot_change_or_finish_the_current_round() {
+    let scratch = Scratch::new("engine-build-admission");
+    let mut store = store(&scratch);
+    let mut core = fresh();
+    core.handle(Input::Turn {
+        turn: 1,
+        thread: None,
+        text: "hi".into(),
+    })
+    .expect("turn");
+    let building = core.handle(Input::TurnStored { run: R }).expect("stored");
+    let source = ThreadId(8);
+    let (first, first_request) = admitted_request(&mut core, &building, vec![T, source]);
+    for event in [
+        TurnEvent::ToolCallStarted {
+            call: id("advance"),
+            name: crate::engines::ToolName::Unknown,
+        },
+        TurnEvent::ToolCallReady {
+            call: id("advance"),
+            args: "{}".into(),
+        },
+    ] {
+        assert_eq!(
+            core.handle(Input::Engine { key: first, event }),
+            Ok(Vec::new())
+        );
+    }
+    let effects = core
+        .handle(Input::Engine {
+            key: first,
+            event: TurnEvent::Finished(Finish::Completed),
+        })
+        .expect("the first round completes its call");
+    let [Effect::Store(StoreOp::RoundItems(round))] = effects.as_slice() else {
+        panic!("one round write");
+    };
+    store
+        .append_round(
+            (round.thread, round.run),
+            round.connection,
+            round.text.as_deref(),
+            &round.items,
+            &round.calls,
+        )
+        .expect("durable round");
+    let building = core
+        .handle(Input::RoundStored {
+            run: R,
+            round: round.round,
+        })
+        .expect("the stored call starts another round");
+    let (old, old_request) = admitted_request(&mut core, &building, vec![T, source]);
+    assert_eq!(old.run, first.run);
+    assert_eq!(old.round, first.round + 1);
+    for input in pumped(first_request, first).await {
+        assert_eq!(core.handle(input), Err(super::Stale));
+    }
+    let mut queued = pumped(old_request, old).await.into_iter();
+    let effects = core
+        .handle(queued.next().expect("first text"))
+        .expect("current");
+    let text: Vec<_> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Data(DataToShell::AssistantText { run, delta }) => Some((*run, delta.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, [(R, "before")]);
+    let effects = core
+        .handle(Input::Delete {
+            thread: source,
+            after_turns: 1,
+            resend: false,
+        })
+        .expect("delete accepted");
+    assert!(effects.contains(&Effect::Store(StoreOp::Delete { thread: source })));
+    let effects = core
+        .handle(Input::SendReady {
+            key: crate::coordinator::SendKey::Build(old),
+            hold: None,
+        })
+        .expect("the exposed build waits for deletion");
+    assert!(effects.contains(&Effect::Rebuild(crate::coordinator::SendKey::Build(old))));
+    assert_eq!(super::engine_key(&core, R), old);
+    assert!(!core.current.as_ref().expect("retained run").started());
+    let before = format!("{:?}", core.current);
+    for input in queued {
+        assert_eq!(core.handle(input), Err(super::Stale));
+        assert_eq!(format!("{:?}", core.current), before);
+    }
+    let building = core
+        .handle(Input::Deleted {
+            thread: source,
+            outcome: kumochi_protocol::message::Deleted::Hidden,
+            last_run: None,
+        })
+        .expect("deletion releases the replacement build");
+    let (new, new_request) = admitted_request(&mut core, &building, vec![T]);
+    assert_eq!(new.run, old.run);
+    assert_eq!(new.round, old.round);
+    assert_ne!(new.attempt, old.attempt);
+    for key in [first, old] {
+        for event in [
+            TurnEvent::TextDelta("stale-prefix".into()),
+            TurnEvent::ToolCallStarted {
+                call: id("stale"),
+                name: crate::engines::ToolName::Draw,
+            },
+            TurnEvent::Finished(Finish::Completed),
+            TurnEvent::Finished(Finish::Truncated),
+            TurnEvent::Finished(Finish::Failed(crate::engines::EngineFailure::Provider)),
+        ] {
+            assert_eq!(core.handle(Input::Engine { key, event }), Err(super::Stale));
+            assert_eq!(super::engine_key(&core, R), new);
+            assert!(
+                core.current
+                    .as_ref()
+                    .expect("replacement")
+                    .draw_calls
+                    .is_empty()
+            );
+        }
+    }
+    let mut queued = pumped(new_request, new).await.into_iter();
+    for expected in ["before", "after"] {
+        let effects = core
+            .handle(queued.next().expect("current text"))
+            .expect("the actual replacement key is accepted");
+        let text: Vec<_> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Data(DataToShell::AssistantText { run, delta }) => {
+                    Some((*run, delta.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, [(R, expected)]);
+    }
+    core.handle(queued.next().expect("current finish"))
+        .expect("the actual replacement can finish");
+    assert_eq!(core.current_run(), None);
+    assert_eq!(core.ending_runs(), 1);
+}
+
 #[test]
 fn unavailable_drawing_returns_a_fixed_durable_refusal_without_failing_the_run() {
     let scratch = Scratch::new("draw-unavailable");
@@ -153,28 +358,44 @@ fn an_offered_draw_uses_real_scene_commits_then_waits_for_its_result_write() {
     let mut store = store(&scratch);
     let mut core = offered(vec![T]);
     let args = String::from_utf8(args(None)).expect("JSON");
-    for event in [
-        TurnEvent::ToolCallStarted {
-            call: id("model"),
-            name: crate::engines::ToolName::Draw,
-        },
-        TurnEvent::ToolArgsDelta {
-            call: id("model"),
-            delta: args.clone(),
-        },
-        TurnEvent::ToolCallReady {
-            call: id("model"),
-            args,
-        },
-    ] {
-        assert_eq!(core.handle(Input::Engine { run: R, event }), Ok(Vec::new()));
-    }
+    let key = super::engine_key(&core, R);
+    assert_eq!(
+        core.handle(Input::Engine {
+            key,
+            event: TurnEvent::ToolCallStarted {
+                call: id("model"),
+                name: crate::engines::ToolName::Draw,
+            }
+        }),
+        Ok(Vec::new())
+    );
     let lookup = core
         .handle(Input::Engine {
-            run: R,
+            key,
+            event: TurnEvent::ToolArgsDelta {
+                call: id("model"),
+                delta: args.clone(),
+            },
+        })
+        .expect("a closed record starts intake before completion");
+    assert_eq!(
+        core.handle(Input::Engine {
+            key,
+            event: TurnEvent::ToolCallReady {
+                call: id("model"),
+                args,
+            }
+        }),
+        Ok(Vec::new())
+    );
+    assert_eq!(
+        core.handle(Input::Engine {
+            key,
             event: TurnEvent::Finished(Finish::Completed),
         })
-        .expect("round done");
+        .expect("round done"),
+        Vec::new()
+    );
     let first = write(&mut core, &mut store, &lookup);
     let second = write(&mut core, &mut store, &first);
     assert_eq!(
@@ -213,6 +434,10 @@ fn an_offered_draw_uses_real_scene_commits_then_waits_for_its_result_write() {
         !last
             .iter()
             .any(|effect| matches!(effect, Effect::Store(StoreOp::RoundItems(_))))
+    );
+    assert_eq!(
+        store.commit_call(&result).expect("durable result row"),
+        Committed::Done
     );
     let ack = Input::CallCommitted {
         key: result.key,
@@ -403,12 +628,12 @@ fn model_and_mcp_ids_and_two_launches_never_share_a_reducer_call() {
     assert_eq!(
         calls
             .iter()
-            .map(|(call, _)| call.as_str())
+            .map(|call| call.call.as_str())
             .collect::<Vec<_>>(),
         ["draw-0", "draw-1", "draw-2"]
     );
     assert_eq!(
-        calls.iter().map(|(_, key)| key.route).collect::<Vec<_>>(),
+        calls.iter().map(|call| call.key.route).collect::<Vec<_>>(),
         [
             crate::dispatch::Route::Model,
             crate::dispatch::Route::Mcp(crate::bridge::LaunchId(1)),
@@ -432,7 +657,7 @@ fn source_deletion_rebuilds_an_items_only_round_held_by_drawing_without_finishin
         }))
         .expect("pending drawing");
     core.handle(Input::Engine {
-        run: R,
+        key: super::engine_key(&core, R),
         event: TurnEvent::OutputItem {
             index: 0,
             item: crate::engines::Opaque::new(br#"{"type":"reasoning","id":"old"}"#.to_vec())
@@ -442,7 +667,7 @@ fn source_deletion_rebuilds_an_items_only_round_held_by_drawing_without_finishin
     .expect("native item");
     assert_eq!(
         core.handle(Input::Engine {
-            run: R,
+            key: super::engine_key(&core, R),
             event: TurnEvent::Finished(Finish::Completed)
         }),
         Ok(Vec::new())
@@ -477,15 +702,11 @@ fn source_deletion_rebuilds_an_items_only_round_held_by_drawing_without_finishin
             _ => None,
         })
         .expect("replacement build");
-    let crate::coordinator::Availability::Ready(ready) = &mut core.availability else {
-        panic!("ready");
-    };
-    ready.trusted_draw = true;
     core.handle(built(key, vec![T]))
         .expect("replacement admitted");
     assert_eq!(
         core.handle(Input::Engine {
-            run: R,
+            key: super::engine_key(&core, R),
             event: TurnEvent::TextDelta("replacement".into())
         }),
         Ok(vec![
@@ -495,7 +716,7 @@ fn source_deletion_rebuilds_an_items_only_round_held_by_drawing_without_finishin
     );
     let completed = core
         .handle(Input::Engine {
-            run: R,
+            key: super::engine_key(&core, R),
             event: TurnEvent::Finished(Finish::Completed),
         })
         .expect("replacement finishes");
@@ -520,31 +741,37 @@ fn a_late_drawing_result_cannot_answer_a_replacement_round_twice() {
     let mut store = store(&scratch);
     let source = ThreadId(2);
     let mut core = offered(vec![T, source]);
+    let mut lookup = Vec::new();
     for event in [
         TurnEvent::ToolCallStarted {
             call: id("old"),
             name: crate::engines::ToolName::Draw,
+        },
+        TurnEvent::ToolArgsDelta {
+            call: id("old"),
+            delta: String::from_utf8(args(None)).expect("JSON"),
         },
         TurnEvent::ToolCallReady {
             call: id("old"),
             args: String::from_utf8(args(None)).expect("JSON"),
         },
     ] {
-        core.handle(Input::Engine { run: R, event })
-            .expect("call event");
+        lookup.extend(
+            core.handle(Input::Engine {
+                key: super::engine_key(&core, R),
+                event,
+            })
+            .expect("call event"),
+        );
     }
-    let lookup = core
-        .handle(Input::Engine {
-            run: R,
+    assert_eq!(
+        core.handle(Input::Engine {
+            key: super::engine_key(&core, R),
             event: TurnEvent::Finished(Finish::Completed),
         })
-        .expect("pending drawing");
-    core.handle(Input::Delete {
-        thread: source,
-        after_turns: 1,
-        resend: false,
-    })
-    .expect("delete accepted");
+        .expect("pending drawing"),
+        Vec::new()
+    );
     let first = write(&mut core, &mut store, &lookup);
     let second = write(&mut core, &mut store, &first);
     let last = write(&mut core, &mut store, &second);
@@ -555,6 +782,16 @@ fn a_late_drawing_result_cannot_answer_a_replacement_round_twice() {
             _ => None,
         })
         .expect("old result write");
+    core.handle(Input::Delete {
+        thread: source,
+        after_turns: 1,
+        resend: false,
+    })
+    .expect("delete accepted while the actual result is pending");
+    assert_eq!(
+        store.commit_call(old).expect("old result INSERT"),
+        Committed::Done
+    );
     let ack = Input::CallCommitted {
         key: old.key.clone(),
         outcome: Committed::Done,
@@ -581,22 +818,18 @@ fn a_late_drawing_result_cannot_answer_a_replacement_round_twice() {
             _ => None,
         })
         .expect("replacement build");
-    let crate::coordinator::Availability::Ready(ready) = &mut core.availability else {
-        panic!("ready");
-    };
-    ready.trusted_draw = true;
     core.handle(built(key, vec![T]))
         .expect("replacement admitted");
     assert_eq!(core.handle(ack.clone()), Ok(Vec::new()));
     core.handle(Input::Engine {
-        run: R,
+        key: super::engine_key(&core, R),
         event: TurnEvent::TextDelta("replacement".into()),
     })
     .expect("replacement accepts text");
     assert_eq!(core.handle(ack), Ok(Vec::new()));
     let completed = core
         .handle(Input::Engine {
-            run: R,
+            key: super::engine_key(&core, R),
             event: TurnEvent::Finished(Finish::Completed),
         })
         .expect("replacement completes");
@@ -801,5 +1034,98 @@ fn sixty_six_records_complete_and_the_sixty_seventh_keeps_the_durable_prefix() {
             call(&mut core, "bounded", &bytes),
             (Dispatch::Answered(expected), Vec::new())
         );
+    }
+}
+
+#[test]
+fn an_inline_begin_is_refused_before_scene_writes_on_model_and_mcp_routes() {
+    let launch = crate::bridge::LaunchId(1);
+    let inline = serde_json::to_vec(&json!({"records":[
+        {"begin":{"v":1,"scene":"diagram","surface":"inline","alt":"diagram"}},
+        {"step":{"id":"s1","put":[{"shape":{"id":"a","kind":"rect","box":[0,0,10,10]}}]}},
+        {"end":{}}
+    ]}))
+    .expect("fixture");
+    let expected = ToolOutput::Text("drawn: []; stopped: surface: scene.Unsupported".into());
+    let repaired = ToolOutput::Text("drawn: [s1, s2]".into());
+    let caller = |is_mcp, name: &str| {
+        if is_mcp {
+            Caller::Mcp {
+                run: R,
+                launch,
+                key: crate::bridge::CallKey(name.into()),
+            }
+        } else {
+            Caller::Model {
+                run: R,
+                call: id(name),
+            }
+        }
+    };
+    let invoke = |core: &mut Coordinator, caller: Caller, bytes: &[u8]| {
+        let mut effects = Vec::new();
+        (
+            core.tool_call(caller, crate::engines::ToolName::Draw, bytes, &mut effects),
+            effects,
+        )
+    };
+    for (label, is_mcp, route) in [
+        ("model", false, crate::dispatch::Route::Model),
+        ("mcp", true, crate::dispatch::Route::Mcp(launch)),
+    ] {
+        let refused_caller = caller(is_mcp, "inline");
+        let repair_caller = caller(is_mcp, "overlay");
+        let scratch = Scratch::new(&format!("draw-tool-inline-{label}"));
+        let mut store = store(&scratch);
+        let mut core = offered(vec![T]);
+        core.current.as_mut().expect("run").mcp = Some(launch);
+        let (dispatch, effects) = invoke(&mut core, refused_caller.clone(), &inline);
+        assert_eq!(dispatch, Dispatch::Committing);
+        assert_eq!(effects, Vec::new());
+        assert!(pending(&effects).is_none());
+        assert!(store.drawing_scenes().expect("no scene").scenes.is_empty());
+        assert!(core.drawing.snapshot().scenes.is_empty());
+        assert_eq!(
+            core.current.as_ref().expect("run").answered,
+            vec![(refused_caller.clone(), expected.clone())]
+        );
+        assert_eq!(
+            invoke(&mut core, refused_caller.clone(), &args(None)),
+            (Dispatch::Answered(expected.clone()), Vec::new())
+        );
+        let (dispatch, lookup) = invoke(&mut core, repair_caller.clone(), &args(None));
+        assert_eq!(dispatch, Dispatch::Committing);
+        let first = write(&mut core, &mut store, &lookup);
+        let second = write(&mut core, &mut store, &first);
+        let last = write(&mut core, &mut store, &second);
+        let result = last
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Store(StoreOp::CommitCall(call)) => Some(call),
+                _ => None,
+            })
+            .expect("ledger write");
+        assert_eq!(result.key.route, route);
+        assert_eq!(result.output, repaired);
+        assert_eq!(
+            store.commit_call(result).expect("durable repair result"),
+            Committed::Done
+        );
+        assert_eq!(
+            core.handle(Input::CallCommitted {
+                key: result.key.clone(),
+                outcome: Committed::Done,
+                then: None,
+            }),
+            Ok(Vec::new())
+        );
+        assert_eq!(
+            core.current.as_ref().expect("run").answered,
+            vec![
+                (refused_caller, expected.clone()),
+                (repair_caller, repaired.clone()),
+            ]
+        );
+        assert_eq!(store.drawing_scenes().expect("one scene").scenes.len(), 1);
     }
 }

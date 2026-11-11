@@ -303,7 +303,7 @@ impl Sherpa {
 /// Paths reach sherpa-onnx as UTF-8.
 // shortcut: a non-UTF-8 models path is refused, and non-ASCII paths are untested; test them
 // before speech input ships to a user whose profile folder isn't ASCII.
-fn c_path(path: &Path) -> Result<CString, NativeError> {
+pub(crate) fn c_path(path: &Path) -> Result<CString, NativeError> {
     let path = path.to_str().ok_or(NativeError::Input)?;
     CString::new(path).map_err(|_| NativeError::Input)
 }

@@ -23,8 +23,13 @@ mod overlay;
 #[cfg(test)]
 mod overlay_fixture;
 mod overlay_input;
+mod overlay_visibility;
 mod paint;
+mod paint_cache;
+mod paint_geometry;
 mod paint_paths;
+mod paint_phase;
+mod paint_stroke;
 #[cfg(test)]
 mod paint_work_fixture;
 mod panels;
@@ -124,6 +129,8 @@ struct Presence {
     activity: Activity,
     runs: Runs,
     presenter: crate::presenter::Presenter,
+    paint_scratch: Rc<std::cell::RefCell<paint_stroke::Scratch>>,
+    paint_notice: Rc<overlay::PaintNotice>,
     scene_timer: Option<Task<()>>,
     scene_deadline: Option<Instant>,
     escape_hold: EscapeHold<EscapeHotkey>,
@@ -142,8 +149,8 @@ struct Presence {
     pull_dock: pull_dock::PullDock,
     /// The one source of animation frames.
     frames: FrameLoop,
-    /// The drawing overlay, once a drawing first had something to paint.
-    overlay: Option<overlay::Overlay>,
+    /// The drawing overlay's window, opened when a drawing first has something to paint.
+    overlay: overlay_visibility::Visibility<overlay::Overlay>,
     /// Retries deletes the control queue had no room for.
     delete_retry: Option<Task<()>>,
     /// The brain's last error, until a turn is sent or its field's retry succeeds.
@@ -167,18 +174,35 @@ impl Presence {
         trigger_qpc: Option<i64>,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
+        self.set_panel_in(visibility, trigger_qpc, None, cx)
+    }
+
+    fn set_panel_in(
+        &mut self,
+        visibility: PanelVisibility,
+        trigger_qpc: Option<i64>,
+        current: Option<&mut Window>,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
         observer::hover(cx, visibility, trigger_qpc);
-        self.panel_window
-            .update(cx, |_, window, cx| {
-                if visibility == PanelVisibility::Visible {
-                    platform::place_presence_window(window, self.layout.panel)?;
-                } else {
-                    platform::hide_presence_window(window)?;
-                }
-                window.bounds_changed(cx);
-                Ok::<_, platform::PresenceError>(())
-            })
-            .map_err(|error| OpenError::Gpui(error.into()))??;
+        let bounds = self.layout.panel;
+        let place = |window: &mut Window, cx: &mut App| {
+            if visibility == PanelVisibility::Visible {
+                platform::place_presence_window(window, bounds)?;
+            } else {
+                platform::hide_presence_window(window)?;
+            }
+            window.bounds_changed(cx);
+            Ok::<_, platform::PresenceError>(())
+        };
+        if let Some(window) = current {
+            place(window, cx)?;
+        } else {
+            self.panel_window
+                .update(cx, |_, window, cx| place(window, cx))
+                .map_err(|error| OpenError::Gpui(error.into()))??;
+        }
+        self.presenter.input.configure(&mut self.input_windows)?;
         if visibility != self.panel_visibility {
             let motion = kumo_view::motion(cx);
             self.kumo.update(cx, |kumo, cx| match visibility {
@@ -187,7 +211,6 @@ impl Presence {
             });
         }
         self.panel_visibility = visibility;
-        self.presenter.input.configure(&mut self.input_windows)?;
         Ok(())
     }
 
@@ -201,15 +224,27 @@ impl Presence {
         entered_qpc: Option<i64>,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
-        let visibility = if self.line.contains(platform::cursor_position()?) {
-            panels::over_line(self.panel_owner(cx))
+        self.pointer_moved_in(entered_qpc, None, cx)
+    }
+
+    fn pointer_moved_in(
+        &mut self,
+        entered_qpc: Option<i64>,
+        current: Option<&mut Window>,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
+        let owner = self.panel_owner(cx);
+        let visibility = if owner != panels::Owner::Pointer {
+            panels::pointer(self.panel_visibility, owner)
+        } else if self.line.contains(platform::cursor_position()?) {
+            panels::over_line(owner)
         } else {
-            panels::pointer(self.panel_visibility, self.panel_owner(cx))
+            panels::pointer(self.panel_visibility, owner)
         };
         if visibility != self.panel_visibility {
-            self.set_panel_from(visibility, entered_qpc, cx)?;
+            self.set_panel_in(visibility, entered_qpc, current, cx)?;
         }
-        if self.panel_owner(cx) != panels::Owner::Pointer {
+        if owner != panels::Owner::Pointer {
             self.pointer_settle = None;
             return Ok(());
         }
@@ -344,7 +379,7 @@ impl Presence {
         let text = self.text.as_ref().map(|text| text.window);
         let threads = self.thread_panel.as_ref().map(|panel| panel.window);
         let settings = self.settings_panel.as_ref().map(|panel| panel.window);
-        let drawing = self.overlay.as_ref().map(|overlay| overlay.window);
+        let drawing = self.overlay.window().map(|overlay| overlay.window);
         for window in [Some(self.panel_window), text, threads, settings, drawing]
             .into_iter()
             .flatten()
@@ -375,8 +410,17 @@ impl Presence {
         panel: EscapePanel,
         presenter: &crate::presenter::Presenter,
     ) -> Activity {
+        Self::activity_at(runs, panel, presenter, Instant::now())
+    }
+
+    fn activity_at(
+        runs: &Runs,
+        panel: EscapePanel,
+        presenter: &crate::presenter::Presenter,
+        now: Instant,
+    ) -> Activity {
         Activity {
-            working: runs.working(),
+            working: runs.working() || presenter.live_work(now),
             speaking: false,
             drawing: (runs.drawing() && matches!(panel, EscapePanel::Open)) || presenter.drawn(),
             pulling: false,
@@ -387,6 +431,15 @@ impl Presence {
     /// changed, and shows the newest run.
     fn runs_changed(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
         self.refresh_conversation(cx);
+        self.runs_changed_in(None, Instant::now(), cx)
+    }
+
+    fn runs_changed_in(
+        &mut self,
+        current: Option<&mut Window>,
+        now: Instant,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
         let panel = if self.text_open() {
             EscapePanel::Open
         } else {
@@ -394,18 +447,47 @@ impl Presence {
         };
         let activity = Activity {
             pulling: self.kumo.read(cx).pull_live(),
-            ..Self::activity(&self.runs, panel, &self.presenter)
+            ..Self::activity_at(&self.runs, panel, &self.presenter, now)
         };
         if activity == self.activity {
             return Ok(());
         }
         self.activity = activity;
-        self.sync_escape(cx)
+        if let Err(error) = self.sync_escape_in(current, cx) {
+            self.end_scene_connection();
+            self.runs.disconnected();
+            self.draw_changed_at(now, cx);
+            self.activity = Activity {
+                pulling: activity.pulling,
+                ..Self::activity_at(&self.runs, panel, &self.presenter, now)
+            };
+            self.sync_escape_state(cx);
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Holds or releases global Esc to match what's moving, showing Stop at once if Windows
     /// refuses, in the status panel and in an open typing panel.
     fn sync_escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        self.sync_escape_in(None, cx)
+    }
+
+    fn sync_escape_in(
+        &mut self,
+        current: Option<&mut Window>,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
+        let changed = self.sync_escape_state(cx);
+        if changed
+            || panels::pointer(self.panel_visibility, self.panel_owner(cx)) != self.panel_visibility
+        {
+            self.pointer_moved_in(None, current, cx)?;
+        }
+        Ok(())
+    }
+
+    fn sync_escape_state(&mut self, cx: &mut Context<'_, Self>) -> bool {
         let wanted = self.activity.holds_global_escape() || self.escape_fixture;
         if wanted {
             let native = &self.native;
@@ -445,10 +527,7 @@ impl Presence {
                 cx.notify();
             });
         }
-        if changed {
-            self.pointer_changed(cx)?;
-        }
-        Ok(())
+        changed
     }
 
     /// `--gate-observer` only: starts observing the proxy and records where everything is.
@@ -894,9 +973,14 @@ pub(crate) fn open(
         [display_size.width.into(), display_size.height.into()]
     });
     kumochi_scene::deferred::start().map_err(OpenError::Dropper)?;
+    let paint_scratch = Rc::new(std::cell::RefCell::new(paint_stroke::Scratch::new()));
+    let stage = paint_cache::Stager::new(&paint_scratch);
     let mut presenter = crate::presenter::Presenter::new(
         kumochi_scene::layout::SurfaceGeometry::Overlay { logical_size },
         std::sync::Arc::new(kumochi_scene::theme::Theme::default()),
+        Box::new(paint_cache::Stager(
+            stage.0 + size_of::<overlay::PaintNotice>() + 2 * size_of::<usize>(),
+        )),
     );
     presenter.input = input;
     let events_in = event_changes.clone();
@@ -926,6 +1010,8 @@ pub(crate) fn open(
             activity: Activity::default(),
             runs: Runs::default(),
             presenter,
+            paint_scratch,
+            paint_notice: Rc::default(),
             scene_timer: None,
             scene_deadline: None,
             escape_hold: EscapeHold::default(),
@@ -942,7 +1028,7 @@ pub(crate) fn open(
             kumo: kumo.clone(),
             pull_dock: pull_dock::PullDock::new(usize::try_from(mask[1]).unwrap_or(0)),
             frames: FrameLoop::default(),
-            overlay: None,
+            overlay: overlay_visibility::Visibility::Closed,
         }
     });
     owner.update(cx, |this, cx| {

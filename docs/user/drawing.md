@@ -1,8 +1,12 @@
 # Drawings
 
-New drawings from Kumochi stay switched off while their checks are finished. What you can
-already see are drawings that come back after Kumochi reconnects, or what's left of one after
-you stop it.
+Conversation history shows **Drawing unavailable in history** for stored drawing steps.
+It keeps surrounding text, but does not reconstruct the picture there. This message does
+not mean a drawing still visible on screen has failed, and reading history does not change it.
+
+When Kumochi draws a 2D diagram, each step appears on screen once it is prepared, and drawings
+that were on screen come back after Kumochi reconnects. If you stop a drawing, the parts that
+had already finished appearing stay on screen.
 
 Drawings appear on the main display, over your other windows. They never take focus or catch
 clicks, so the app underneath keeps working. While one is on screen, Esc clears it

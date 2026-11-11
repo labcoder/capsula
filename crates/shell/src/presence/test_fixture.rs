@@ -74,11 +74,18 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             gesture: Rc::new(Cell::new(Gesture::default())),
             activity: Activity::default(),
             runs: Runs::default(),
+            paint_scratch: Rc::new(std::cell::RefCell::new(super::paint_stroke::Scratch::new())),
+            paint_notice: Rc::default(),
             presenter: Presenter::new(
                 SurfaceGeometry::Overlay {
                     logical_size: [1920.0, 1080.0],
                 },
                 Arc::new(Theme::default()),
+                Box::new(super::paint_cache::Stager(
+                    size_of::<super::paint_cache::Stager>()
+                        + size_of::<super::overlay::PaintNotice>()
+                        + 2 * size_of::<usize>(),
+                )),
             ),
             scene_timer: None,
             scene_deadline: None,
@@ -93,7 +100,7 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             kumo,
             pull_dock: pull_dock::PullDock::new(1),
             frames: FrameLoop::default(),
-            overlay: None,
+            overlay: super::overlay_visibility::Visibility::Closed,
             delete_retry: None,
             error: None,
             refusal: None,

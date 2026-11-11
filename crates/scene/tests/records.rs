@@ -1,6 +1,6 @@
 //! Scene-format behavior and privacy regressions.
 use kumochi_scene::record::{Anchor, Cell, Color, KeyValue, Point, Start};
-use kumochi_scene::{ErrorCode, Finite, StepError, Text, WireId, parse_record};
+use kumochi_scene::{ErrorCode, Finite, StepError, Text, WireId, parse_draw_record, parse_record};
 use serde::{Serialize, de::DeserializeOwned};
 
 fn round_trip<T: Serialize + DeserializeOwned + PartialEq>(value: &T) {
@@ -57,6 +57,16 @@ fn strict_records() {
     let missing = error(r#"{"begin":{"v":1,"scene":"s","surface":"overlay"}}"#);
     assert_eq!(missing.code, ErrorCode::MissingField);
     assert_eq!(missing.path.as_str(), "alt");
+    let inline = br#"{"begin":{"v":1,"scene":"s","surface":"inline","alt":""}}"#;
+    assert!(parse_record(inline).is_ok());
+    let unsupported = parse_draw_record(inline).expect_err("draw tool rejects inline begin");
+    assert_eq!(unsupported.step, None);
+    assert_eq!(unsupported.code, ErrorCode::Unsupported);
+    assert_eq!(unsupported.path.as_str(), "surface");
+    assert_eq!(unsupported.tool_text(), "surface: scene.Unsupported");
+    assert!(
+        parse_draw_record(br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":""}}"#).is_ok()
+    );
 }
 #[test]
 fn text_and_list_boundaries_are_not_truncated() {

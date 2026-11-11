@@ -33,6 +33,7 @@ use crate::bridge::{CallKey, LaunchId};
 use crate::context::{HistoryRef, Origin, ToolSchema};
 use crate::engines::{CallId, ToolName};
 
+pub(crate) use draw::{record as validate_draw_record, validate as validate_draw};
 pub use history::{ReadCall, ReadFinished};
 pub(crate) use ledger::{Drawn, Ledger};
 
@@ -374,10 +375,57 @@ pub(crate) enum Step {
     Join,
     Commit(CommitCall),
     Read(ReadCall),
-    Screen {
-        key: LedgerKey,
-        draw: Result<draw::DrawArgs, crate::drawing::CallError>,
-    },
+    Screen { key: LedgerKey, draw: DrawAction },
+}
+
+pub(crate) enum CallInput<'a> {
+    Complete(&'a [u8]),
+    Draw(DrawAction),
+}
+
+impl<'a> From<&'a [u8]> for CallInput<'a> {
+    fn from(bytes: &'a [u8]) -> Self {
+        Self::Complete(bytes)
+    }
+}
+
+impl<'a, const N: usize> From<&'a [u8; N]> for CallInput<'a> {
+    fn from(bytes: &'a [u8; N]) -> Self {
+        Self::Complete(bytes)
+    }
+}
+
+impl<'a> From<&'a Vec<u8>> for CallInput<'a> {
+    fn from(bytes: &'a Vec<u8>) -> Self {
+        Self::Complete(bytes)
+    }
+}
+
+pub(crate) enum DrawAction {
+    Complete(Result<draw::DrawArgs, crate::drawing::CallError>),
+    Start,
+    Record { index: u32, bytes: Vec<u8> },
+    Finish(Option<crate::drawing::CallError>),
+}
+
+impl fmt::Debug for DrawAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Complete(_) => "CompleteDraw",
+            Self::Start => "StartDraw",
+            Self::Record { .. } => "DrawRecord",
+            Self::Finish(_) => "FinishDraw",
+        })
+    }
+}
+
+impl fmt::Debug for CallInput<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Complete(bytes) => f.debug_tuple("CompleteCall").field(&bytes.len()).finish(),
+            Self::Draw(action) => action.fmt(f),
+        }
+    }
 }
 
 /// The run a call resolved to, borrowed from the coordinator's current run.
@@ -518,7 +566,26 @@ fn parse<A: DeserializeOwned + Serialize>(
 
 /// Dispatches `caller`'s call in the run it resolved to (B4). An existing entry for its key
 /// always decides, so a retry never changes a refused, running or finished call.
-pub(crate) fn call(run: &mut RunCtx<'_>, caller: Caller, name: ToolName, args: &[u8]) -> Step {
+pub(crate) fn call<'a>(
+    run: &mut RunCtx<'_>,
+    caller: Caller,
+    name: ToolName,
+    input: impl Into<CallInput<'a>>,
+) -> Step {
+    let args = match input.into() {
+        CallInput::Complete(args) => args,
+        CallInput::Draw(action) => {
+            if !matches!(caller, Caller::Model { .. }) || name != ToolName::Draw {
+                return Step::Answer(ToolOutput::Error(ToolError::NotHere));
+            }
+            if let Err(error) = permitted(run, &caller, name)
+                .and_then(|_| run.control.check().map_err(ToolError::from))
+            {
+                return Step::Answer(ToolOutput::Error(error));
+            }
+            return draw::stream(run.ledger, caller, action);
+        }
+    };
     if let Caller::Mcp { launch, .. } = &caller
         && run.mcp != Some(*launch)
     {
@@ -552,7 +619,10 @@ pub(crate) fn call(run: &mut RunCtx<'_>, caller: Caller, name: ToolName, args: &
             if let Ok(draw) = &draw {
                 run.ledger.bind_draw(&key, draw.hash);
             }
-            Step::Screen { key, draw }
+            Step::Screen {
+                key,
+                draw: DrawAction::Complete(draw),
+            }
         }
         Ok((
             tool,
@@ -591,12 +661,11 @@ pub(crate) fn call(run: &mut RunCtx<'_>, caller: Caller, name: ToolName, args: &
 }
 
 /// A key's first call: every check before its effect.
-fn first(
+fn permitted(
     run: &RunCtx<'_>,
     caller: &Caller,
     name: ToolName,
-    args: &[u8],
-) -> Result<(&'static Tool, Prepared), ToolError> {
+) -> Result<&'static Tool, ToolError> {
     let tool = tool(name).ok_or(ToolError::Unknown)?;
     let offered = match caller {
         Caller::Model { .. } => run.offered.contains(&name),
@@ -605,6 +674,16 @@ fn first(
     if !offered || (tool.kumo_only && run.reach != Origin::Kumo) {
         return Err(ToolError::NotHere);
     }
+    Ok(tool)
+}
+
+fn first(
+    run: &RunCtx<'_>,
+    caller: &Caller,
+    name: ToolName,
+    args: &[u8],
+) -> Result<(&'static Tool, Prepared), ToolError> {
+    let tool = permitted(run, caller, name)?;
     if args.len() > MAX_ARGS {
         return Err(ToolError::TooLarge);
     }

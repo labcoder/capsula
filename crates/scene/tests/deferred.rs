@@ -107,6 +107,7 @@ fn discarded_values_are_destroyed_and_metered_on_the_dropper() {
     frozen_series_data_stays_attributed();
     activation_retires_settled_recolored_and_superseded_tracks();
     a_discarded_stage_frees_nothing_on_the_ui_thread();
+    a_stale_activation_attributes_its_whole_step_owner();
 }
 
 fn drain() {
@@ -519,6 +520,56 @@ fn a_discarded_stage_frees_nothing_on_the_ui_thread() {
     assert!(
         deferred::pending().bytes >= layout_bytes,
         "the queued stage attributes its whole shared layout, not only the candidate view"
+    );
+    release.send(()).expect("the dropper gate waits");
+    drain();
+}
+
+fn a_stale_activation_attributes_its_whole_step_owner() {
+    let (mut scene, mut budget, first) = populated();
+    let next = prepared(
+        &mut scene,
+        &mut budget,
+        &first.after,
+        json!({"id":"quiet","say":"narration ".repeat(30)}),
+    );
+    let (copy, _, [allocated, released]) =
+        allocation::usage(|| std::sync::Arc::new(next.step().clone()));
+    let original = allocated - released;
+    drop(copy);
+    assert_eq!(
+        next.original_bytes(),
+        original,
+        "the cached original charge matches the independent allocator oracle"
+    );
+    let expected = next.after.resident_bytes() + next.resident_bytes + original;
+    assert!(
+        expected > next.resident_bytes,
+        "shared layout and original input are more than the marginal charge"
+    );
+    drop((first, scene));
+    let foreign = new_scene("foreign");
+    let mut view = SceneView::new(&LayoutState::new(&foreign), 0);
+    let mut frame = Frame::new();
+    drain();
+    let (release, released) = mpsc::channel();
+    drop(Deferred::new(Gate(released), 0));
+    assert!(
+        matches!(
+            view.activate(next, 1000, 800, &mut frame),
+            Err(kumochi_scene::layout::PrepareError::Stale)
+        ),
+        "a foreign view cannot activate this prepared predecessor"
+    );
+    assert_eq!(
+        (view.activated(), frame.items().len()),
+        (0, 0),
+        "refusal leaves the target view and caller frame untouched"
+    );
+    assert_eq!(
+        deferred::pending().bytes,
+        expected,
+        "the stale wrapper retains shared geometry and its original narration record"
     );
     release.send(()).expect("the dropper gate waits");
     drain();

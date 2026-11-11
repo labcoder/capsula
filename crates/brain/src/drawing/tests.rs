@@ -74,6 +74,167 @@ fn stop_cuts_every_visible_scene_and_acknowledges_three_no_ops_without_logging_t
     assert_eq!(drawing.snapshot().scenes.len(), 4);
 }
 
+#[test]
+fn a_covering_stop_durably_cuts_older_held_scenes_before_a_later_continuation() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    store.run(
+        &mut drawing,
+        call(4, "a4", args("a", &[text("a1", "x"), text("a2", "y")])),
+    );
+    store.run(&mut drawing, Input::RunClosed { run: RunId(4) });
+    store.run(&mut drawing, call(5, "b5", args("b", &[text("b1", "b")])));
+    store.run(&mut drawing, Input::RunClosed { run: RunId(5) });
+    store.run(&mut drawing, call(6, "c6", args("c", &[text("c1", "c")])));
+    store.run(&mut drawing, Input::RunClosed { run: RunId(6) });
+    let cuts = SceneCuts::new(vec![
+        SceneCut {
+            scene: SceneId(1),
+            cut: cut(1, vec![Handle::new(1, 0).expect("literal x")]),
+        },
+        SceneCut {
+            scene: SceneId(2),
+            cut: cut(0, vec![]),
+        },
+        SceneCut {
+            scene: SceneId(3),
+            cut: cut(0, vec![]),
+        },
+    ])
+    .expect("three held scenes");
+    let mut out = drawing
+        .handle(Input::StopScenes {
+            run: RunId(6),
+            cuts,
+        })
+        .expect("covering Stop");
+    assert_eq!(trace(&out), ["write cut 1@2:1"]);
+    let later = drawing
+        .handle(call(7, "a7", args("a", &[text("a3", "z")])))
+        .expect("later run");
+    assert_eq!(trace(&later), Vec::<String>::new());
+    merge(&mut out, later);
+    let out = store.settle(&mut drawing, out);
+    assert_eq!(
+        trace(&out),
+        [
+            "write cut 1@2:1",
+            "cut 1@2:1",
+            "write cut 2@1:0",
+            "cut 2@1:0",
+            "clear 2",
+            "write cut 3@1:0",
+            "cut 3@1:0",
+            "clear 3",
+            "write step 3",
+            "step 1#2",
+            "end 1 true",
+        ]
+    );
+    assert_eq!(store.cleared, [SceneId(2), SceneId(3)]);
+    assert_eq!(
+        store
+            .scenes
+            .iter()
+            .map(|scene| scene
+                .log
+                .iter()
+                .map(|event| match event {
+                    SceneEvent::Step { revision, .. } => (*revision, None),
+                    SceneEvent::Stop(cut) => (0, Some(cut.activated)),
+                })
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>(),
+        [
+            vec![(1, None), (2, None), (0, Some(1)), (3, None)],
+            vec![(1, None), (0, Some(0))],
+            vec![(1, None), (0, Some(0))],
+        ]
+    );
+    let state = &drawing.scenes[0].state;
+    assert_eq!(state.revision(), 3);
+    assert_eq!(state.committed(), 2);
+    assert_eq!(state.handle(&wire("y")), None);
+    assert_eq!(state.step(2).map(|step| &step.id), Some(&wire("a3")));
+    let (recovered, skipped) = Drawing::recover(store.visible());
+    assert_eq!(skipped, Vec::<SceneId>::new());
+    assert_eq!(
+        recovered
+            .snapshot()
+            .scenes
+            .iter()
+            .map(|scene| scene.scene)
+            .collect::<Vec<_>>(),
+        [SceneId(1)]
+    );
+}
+
+#[test]
+fn a_second_clear_supersedes_pending_covering_cuts_without_cutting_a_later_scene() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    store.run(&mut drawing, call(5, "b5", args("b", &[text("b1", "b")])));
+    store.run(&mut drawing, call(6, "c6", args("c", &[text("c1", "c")])));
+    let cuts = SceneCuts::new(vec![
+        SceneCut {
+            scene: SceneId(1),
+            cut: cut(0, vec![]),
+        },
+        SceneCut {
+            scene: SceneId(2),
+            cut: cut(0, vec![]),
+        },
+    ])
+    .expect("two held scenes");
+    let out = drawing
+        .handle(Input::StopScenes {
+            run: RunId(6),
+            cuts,
+        })
+        .expect("Stop");
+    assert_eq!(trace(&out), ["write cut 1@1:0"]);
+    let clear = store.run(
+        &mut drawing,
+        Input::Clear {
+            scenes: vec![SceneId(1), SceneId(2)],
+        },
+    );
+    assert_eq!(trace(&clear), ["revoke 1,2", "clear 1,2"]);
+    let out = store.settle(&mut drawing, out);
+    assert_eq!(trace(&out), ["write cut 1@1:0"]);
+    assert_eq!(store.cleared, [SceneId(1), SceneId(2)]);
+    let again = store.run(
+        &mut drawing,
+        Input::Clear {
+            scenes: vec![SceneId(1), SceneId(2)],
+        },
+    );
+    assert_eq!(trace(&again), Vec::<String>::new());
+    assert_eq!(store.cleared, [SceneId(1), SceneId(2)]);
+    let out = store.run(&mut drawing, call(7, "d7", args("d", &[text("d1", "d")])));
+    assert_eq!(
+        trace(&out),
+        [
+            "lookup",
+            "write step 1",
+            "begin 3",
+            "step 3#0",
+            "end 3 true"
+        ]
+    );
+    let (recovered, skipped) = Drawing::recover(store.visible());
+    assert_eq!(skipped, Vec::<SceneId>::new());
+    assert_eq!(
+        recovered
+            .snapshot()
+            .scenes
+            .iter()
+            .map(|scene| scene.scene)
+            .collect::<Vec<_>>(),
+        [SceneId(3)]
+    );
+}
+
 fn wire(id: &str) -> WireId {
     id.to_owned().try_into().expect("a valid id")
 }

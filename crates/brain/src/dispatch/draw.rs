@@ -9,15 +9,43 @@ use super::{Prepared, Tool};
 use crate::drawing::CallError;
 use crate::engines::ToolName;
 
+pub(super) fn stream(
+    ledger: &mut super::Ledger,
+    caller: super::Caller,
+    action: super::DrawAction,
+) -> super::Step {
+    let key = caller.key();
+    match &action {
+        super::DrawAction::Start if !ledger.start_draw(&key, caller) => return super::Step::Join,
+        super::DrawAction::Record { bytes, .. } if record(bytes).is_err() => {
+            return super::Step::Answer(super::ToolOutput::Error(super::ToolError::Invalid));
+        }
+        super::DrawAction::Complete(_) => {
+            return super::Step::Answer(super::ToolOutput::Error(super::ToolError::Invalid));
+        }
+        _ => {}
+    }
+    super::Step::Screen { key, draw: action }
+}
+
 pub(super) const DRAW: Tool = Tool {
     name: ToolName::Draw,
     wire: "draw",
     description: include_str!("../../prompts/draw.md"),
     kumo_only: false,
     mcp: true,
-    parameters: kumochi_scene::draw_schema,
+    parameters,
     prepare: |args| Ok(Prepared::Draw(validate(args))),
 };
+
+fn parameters() -> serde_json::Value {
+    let mut schema = kumochi_scene::draw_schema();
+    schema["$defs"]["Surface"] = serde_json::json!({
+        "type": "string",
+        "const": "overlay",
+    });
+    schema
+}
 
 pub(crate) struct DrawArgs {
     pub(crate) hash: [u8; 32],
@@ -32,19 +60,12 @@ impl fmt::Debug for DrawArgs {
     }
 }
 
-fn validate(args: &[u8]) -> Result<DrawArgs, CallError> {
+pub(crate) fn validate(args: &[u8]) -> Result<DrawArgs, CallError> {
     let mut tokenizer = Tokenizer::new();
     let mut rest = args;
     let mut records = Vec::new();
     while let Some(record) = tokenizer.next(&mut rest).map_err(CallError::Token)? {
-        let parsed = parse_draw_record(record.bytes).map_err(|mut error| {
-            if error.step.is_none() {
-                error.step = serde_json::from_slice::<Named>(record.bytes)
-                    .ok()
-                    .map(|named| named.step.id);
-            }
-            CallError::Step(error)
-        })?;
+        let parsed = self::record(record.bytes)?;
         records.push(parsed);
     }
     tokenizer.finish().map_err(CallError::Token)?;
@@ -56,6 +77,17 @@ fn validate(args: &[u8]) -> Result<DrawArgs, CallError> {
     Ok(DrawArgs {
         hash: hash.finalize().into(),
         args: args.to_vec(),
+    })
+}
+
+pub(crate) fn record(bytes: &[u8]) -> Result<kumochi_scene::Record, CallError> {
+    parse_draw_record(bytes).map_err(|mut error| {
+        if error.step.is_none() {
+            error.step = serde_json::from_slice::<Named>(bytes)
+                .ok()
+                .map(|named| named.step.id);
+        }
+        CallError::Step(error)
     })
 }
 
@@ -94,7 +126,7 @@ mod tests {
                 route: crate::dispatch::Route::Model,
                 call: marker.into(),
             },
-            draw: Ok(draw),
+            draw: super::super::DrawAction::Complete(Ok(draw)),
         };
         let shown = format!("{action:?}");
         assert!(!shown.contains(marker));
@@ -153,6 +185,62 @@ mod tests {
                 error.step.as_ref().map(kumochi_scene::WireId::as_str),
                 Some("s3")
             );
+        }
+    }
+
+    #[test]
+    fn offered_draw_schema_and_record_gate_restrict_surface_to_overlay() {
+        let generic = kumochi_scene::draw_schema();
+        let generic_surface = serde_json::to_string(&generic["$defs"]["Surface"]).expect("JSON");
+        assert!(generic_surface.contains("\"overlay\""));
+        assert!(generic_surface.contains("\"inline\""));
+        for offered in [
+            super::super::model_schemas(crate::context::Origin::Kumo),
+            super::super::mcp_schemas(crate::context::Origin::Kumo),
+        ] {
+            let draw = offered
+                .iter()
+                .find(|tool| tool.name == "draw")
+                .expect("offered draw tool");
+            assert_eq!(
+                draw.parameters["$defs"]["Begin"]["properties"]["surface"]["$ref"],
+                json!("#/$defs/Surface")
+            );
+            assert_eq!(
+                draw.parameters["$defs"]["Surface"],
+                json!({"type": "string", "const": "overlay"})
+            );
+            assert!(
+                !serde_json::to_string(&draw.parameters)
+                    .expect("JSON")
+                    .contains("\"inline\"")
+            );
+            let mut expected = generic.clone();
+            expected["$defs"]["Surface"] = json!({"type": "string", "const": "overlay"});
+            assert_eq!(draw.parameters, expected);
+        }
+        let overlay = br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":"a"}}"#.as_slice();
+        assert!(record(overlay).is_ok());
+        assert!(
+            validate(
+                br#"{"records":[{"begin":{"v":1,"scene":"s","surface":"overlay","alt":"a"}},{"end":{}}]}"#
+            )
+            .is_ok()
+        );
+        for check in [
+            record(br#"{"begin":{"v":1,"scene":"s","surface":"inline","alt":"a"}}"#).err(),
+            validate(
+                br#"{"records":[{"begin":{"v":1,"scene":"s","surface":"inline","alt":"a"}},{"end":{}}]}"#,
+            )
+            .err(),
+        ] {
+            let Some(CallError::Step(error)) = check else {
+                panic!("unsupported inline surface");
+            };
+            assert_eq!(error.step, None);
+            assert_eq!(error.path.as_str(), "surface");
+            assert_eq!(error.code, kumochi_scene::ErrorCode::Unsupported);
+            assert_eq!(error.tool_text(), "surface: scene.Unsupported");
         }
     }
 
@@ -221,7 +309,10 @@ mod tests {
                     mcp: None,
                     ledger: &mut ledger,
                 };
-                let Step::Screen { draw: Ok(draw), .. } = call(
+                let Step::Screen {
+                    draw: super::super::DrawAction::Complete(Ok(draw)),
+                    ..
+                } = call(
                     &mut ctx,
                     Caller::Model {
                         run,
@@ -229,7 +320,8 @@ mod tests {
                     },
                     ToolName::Draw,
                     args,
-                ) else {
+                )
+                else {
                     panic!("valid complete draw");
                 };
                 draw.args

@@ -44,7 +44,17 @@ impl Presence {
                     .update(cx, |kumo, cx| kumo.pull_event(Event::Escape, cx));
                 None
             }
-            Escape::Stop => self.runs.stop(),
+            Escape::Stop => {
+                if let Some(message) = self.runs.stop() {
+                    self.stop_run(message, cx);
+                } else if let Some(run) = self.presenter.stoppable_run()
+                    && self.presenter.live_work(std::time::Instant::now())
+                {
+                    let effects = self.presenter.stop(run, std::time::Instant::now());
+                    self.scene_effects(effects, cx);
+                }
+                None
+            }
             Escape::Clear => {
                 let effect = self.runs.clear();
                 self.grant(effect.credit);

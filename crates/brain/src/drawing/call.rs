@@ -44,6 +44,9 @@ pub enum CallError {
     /// The shell couldn't prepare a step of the call's scene.
     #[error("drawing.PreparationFailed")]
     Failed,
+    /// The owner stopped; submitted writes still settle without accepting queued records.
+    #[error("drawing.Interrupted")]
+    Interrupted,
 }
 
 /// A call that ended: the steps it drew and, unless it completed, why the rest didn't.
@@ -85,7 +88,7 @@ impl CallEnd {
 
 /// One draw call of an open run.
 pub(super) struct Call {
-    run: RunId,
+    pub(super) run: RunId,
     id: CallId,
     thread: ThreadId,
     guard: CallState,
@@ -98,7 +101,7 @@ pub(super) struct Call {
     /// A record didn't parse or was past [`MAX_CALL_RECORDS`]: later ones are skipped unparsed.
     refused: bool,
     /// It ended; kept so a repeat of it changes nothing.
-    done: bool,
+    pub(super) done: bool,
 }
 
 /// The scene a call draws in.
@@ -113,7 +116,7 @@ enum Bound {
 
 /// One open run's draw budgets.
 pub(super) struct RunLedger {
-    run: RunId,
+    pub(super) run: RunId,
     calls: usize,
     steps: usize,
     rejected: u8,
@@ -215,9 +218,21 @@ impl Drawing {
         thread: ThreadId,
         run: RunId,
         id: CallId,
-        error: Option<TokenError>,
+        error: Option<CallError>,
         out: &mut Output,
     ) -> Result<(), Stale> {
+        if matches!(error, Some(CallError::Interrupted)) {
+            if !self
+                .calls
+                .iter()
+                .any(|call| call.run == run && call.id == id)
+                && self.call_at(thread, run, &id, out)?.is_none()
+            {
+                return Ok(());
+            }
+            self.interrupt(run, &id, out);
+            return Ok(());
+        }
         if self.finishing(run, &id) {
             return Err(Stale);
         }
@@ -294,7 +309,9 @@ impl Drawing {
 
     /// The call's arguments already ended and wait in the queue, so nothing more of it counts.
     fn finishing(&self, run: RunId, id: &CallId) -> bool {
-        self.queue.iter().any(|job| {
+        self.pending.as_ref().is_some_and(|pending| matches!(&pending.wait,
+            Wait::Step(write) if write.run == run && write.call == *id && write.interrupted.is_some()
+        )) || self.queue.iter().any(|job| {
             matches!(job, Job::Finish { run: owner, call, .. } if *owner == run && call == id)
         })
     }
@@ -532,6 +549,7 @@ impl Drawing {
             admitted,
             step,
             fenced: false,
+            interrupted: None,
         };
         self.write(Wait::Step(Box::new(wait)), write, out);
         Ok(())
@@ -586,14 +604,14 @@ impl Drawing {
         &mut self,
         run: RunId,
         id: &CallId,
-        error: Option<TokenError>,
+        error: Option<CallError>,
         out: &mut Output,
     ) {
         let Some(at) = self.open_call(run, id) else {
             return;
         };
         let ended = match error {
-            Some(error) => Err(CallError::Token(error)),
+            Some(error) => Err(error),
             None => self.calls[at].guard.finish().map_err(CallError::Step),
         };
         match ended {
@@ -670,10 +688,62 @@ impl Drawing {
     }
 
     /// The run ended: its calls and queued records go; this and every earlier run is stale.
-    pub(super) fn close(&mut self, run: RunId) {
+    pub(super) fn interrupt(&mut self, run: RunId, id: &CallId, out: &mut Output) {
+        let error = self
+            .queue
+            .iter()
+            .find_map(|job| match job {
+                Job::Finish {
+                    run: owner,
+                    call,
+                    error: Some(error),
+                }
+                | Job::Reject {
+                    run: owner,
+                    call,
+                    error,
+                } if *owner == run && call == id => Some(error.clone()),
+                _ => None,
+            })
+            .unwrap_or(CallError::Interrupted);
+        self.queue.retain(|job| {
+            !matches!(job,
+                Job::Record { run: owner, call, .. } | Job::Reject { run: owner, call, .. }
+                | Job::Finish { run: owner, call, .. } if *owner == run && call == id
+            )
+        });
+        let Some(at) = self.open_call(run, id) else {
+            return;
+        };
+        self.calls[at].refused = true;
+        if let Some(super::Pending {
+            wait: Wait::Step(write),
+            ..
+        }) = &mut self.pending
+            && write.run == run
+            && write.call == *id
+        {
+            if write.interrupted.is_none() {
+                write.interrupted = Some(error);
+            }
+            return;
+        }
+        self.end(at, Some(error), out);
+    }
+
+    pub(super) fn close(&mut self, run: RunId, out: &mut Output) {
         self.closed = self.closed.max(run);
         let closed = self.closed;
-        self.calls.retain(|call| call.run > closed);
+        let calls: Vec<_> = self
+            .calls
+            .iter()
+            .filter(|call| call.run <= closed && !call.done)
+            .map(|call| (call.run, call.id.clone()))
+            .collect();
+        for (run, id) in calls {
+            self.interrupt(run, &id, out);
+        }
+        self.calls.retain(|call| call.run > closed || !call.done);
         self.runs.retain(|ledger| ledger.run > closed);
         self.queue.retain(|job| match job {
             Job::Record { run, .. } | Job::Reject { run, .. } | Job::Finish { run, .. } => {

@@ -43,7 +43,7 @@ fn sixty_five_fixture_calls_across_runs_retain_no_session_outcomes() {
         );
         let effects = core
             .handle(Input::Engine {
-                run,
+                key: super::engine_key(&core, run),
                 event: TurnEvent::Finished(Finish::Completed),
             })
             .expect("completed round");
@@ -210,8 +210,11 @@ fn a_round_completed_behind_a_drawing_still_answers_its_calls() {
         },
         TurnEvent::Finished(Finish::Completed),
     ] {
-        core.handle(Input::Engine { run: R, event })
-            .expect("current");
+        core.handle(Input::Engine {
+            key: super::engine_key(&core, R),
+            event,
+        })
+        .expect("current");
     }
     let first = commit(&mut core, &mut store, &lookup);
     let second = commit(&mut core, &mut store, &first);
@@ -242,7 +245,7 @@ fn provider_completion_waits_for_the_accepted_drawing_prefix() {
     let first = commit(&mut core, &mut store, &lookup);
     let completed = core
         .handle(Input::Engine {
-            run: R,
+            key: super::engine_key(&core, R),
             event: TurnEvent::Finished(Finish::Completed),
         })
         .expect("provider finished");
@@ -329,7 +332,7 @@ fn a_legacy_ack_cannot_finish_a_run_whose_typed_prefix_is_still_being_stored() {
     let lookup = draw(&mut core);
     let first = commit(&mut core, &mut store, &lookup);
     core.handle(Input::Engine {
-        run: R,
+        key: super::engine_key(&core, R),
         event: TurnEvent::Finished(Finish::Completed),
     })
     .expect("provider done");
@@ -665,7 +668,7 @@ fn clearing_cut_debt_finishes_a_provider_completed_run_without_another_drawing_a
     let second = commit(&mut core, &mut store, &first);
     commit(&mut core, &mut store, &second);
     core.handle(Input::Engine {
-        run: R,
+        key: super::engine_key(&core, R),
         event: TurnEvent::Finished(Finish::Completed),
     })
     .expect("first run finished");
@@ -717,7 +720,7 @@ fn clearing_cut_debt_finishes_a_provider_completed_run_without_another_drawing_a
     }))
     .expect("queued finish");
     core.handle(Input::Engine {
-        run: next,
+        key: super::engine_key(&core, next),
         event: TurnEvent::Finished(Finish::Completed),
     })
     .expect("provider complete");

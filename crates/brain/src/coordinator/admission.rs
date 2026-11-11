@@ -31,7 +31,8 @@ pub struct BuildKey {
 #[derive(Clone, Debug)]
 pub struct BuildContext {
     pub(crate) control: crate::recall::control::Control,
-    pub(crate) key: BuildKey,
+    /// The pipeline-assigned identity of the context being built.
+    pub key: BuildKey,
     pub(crate) thread: ThreadId,
     pub(crate) origin: Origin,
     /// What the run read when it started. The runtime fills it in for the run's first build from
@@ -313,9 +314,11 @@ impl Coordinator {
         pending: &BTreeSet<ThreadId>,
         effects: &mut Vec<Effect>,
     ) {
+        self.close_provider_round(key.run, effects);
         let Some(current) = self.current.as_mut() else {
             return;
         };
+        current.tools.drop_round();
         current.finishing = false;
         let Some(build) = current.build.as_mut() else {
             return;

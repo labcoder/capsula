@@ -502,7 +502,8 @@ pub enum ControlToShell {
         /// At most four descriptors; each full recovery log has its own advertised length.
         scenes: kumochi_scene::text::Bounded<SceneDescriptorV1, MAX_VISIBLE_SCENES>,
     },
-    /// A requested drawing never produced a visual outcome; separate from preparation errors.
+    /// A legacy run-level advisory, consumed without changing scenes or ending the connection.
+    /// History availability is carried by [`PageEventKind::NoVisual`] in its requested page.
     NoVisual {
         /// The run that requested a drawing.
         run: RunId,

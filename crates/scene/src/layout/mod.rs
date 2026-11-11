@@ -181,15 +181,21 @@ impl PreparedStep {
     pub fn retained_bytes(&self) -> usize {
         self.retained_bytes
     }
+    /// Cached per-holder retirement estimate, including the full layout and original record.
+    pub fn owner_bytes(&self) -> usize {
+        self.retained_bytes
+            .saturating_add(self.resident_bytes)
+            .saturating_add(self.original_bytes())
+    }
     /// Original committed input, exactly as the model sent it.
     pub fn step(&self) -> &crate::Step {
         &self.ticket.step
     }
 
     /// Requested bytes of the original record and its Arc, even when the run aliases it.
-    /// Walks the record; compute on the worker before returning ownership that can outlive its log.
+    /// Admission computes this once before ownership can outlive the scene's log.
     pub fn original_bytes(&self) -> usize {
-        heap::ARC_HEADER + heap::step_bytes(&self.ticket.step)
+        self.ticket.original_bytes
     }
     /// Compiled input for entrance and explicit-track compilation in A7; the original unless
     /// it held Mermaid.

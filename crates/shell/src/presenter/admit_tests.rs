@@ -4,7 +4,8 @@
 use std::sync::{Arc, mpsc};
 
 use kumochi_protocol::message::{
-    DATA_WINDOW, DataToShell, RunId, SceneCut, SceneDescriptorV1, SceneFailure, SceneId,
+    ControlToBrain, DATA_WINDOW, DataToShell, RunId, SceneCut, SceneCuts, SceneDescriptorV1,
+    SceneFailure, SceneId,
 };
 use kumochi_scene::{
     SceneEvent, budget::Usage, deferred::Deferred, limits::MAX_GLOBAL_LIVE_OBJECTS, text::Bounded,
@@ -345,8 +346,7 @@ fn a_stop_before_or_during_admission_installs_the_step_unprepared_and_its_cut_ap
     }
 }
 
-/// The brain cuts a stopped run's never-activated scenes that the Stop did not name, so a scene
-/// begun behind the lane gets exactly that one cut, never a second one from the shell.
+/// A fenced held begin settles explicitly, even if the brain's unseen sweep names another run.
 #[test]
 fn a_scene_begun_behind_the_lane_at_stop_is_cut_once_by_the_brain() {
     let (mut presenter, now) = live();
@@ -373,7 +373,16 @@ fn a_scene_begun_behind_the_lane_at_stop_is_cut_once_by_the_brain() {
         scene: LIVE,
         cut: zero_cut(),
     };
-    assert_eq!(controls(&stopped), [&stop_scenes(vec![named])]);
+    assert_eq!(
+        controls(&stopped),
+        [&stop_scenes(vec![
+            named,
+            SceneCut {
+                scene: OTHER,
+                cut: zero_cut(),
+            }
+        ])]
+    );
     let effects = presenter
         .completed(admission.run(), ms(now, 2))
         .expect("the admission");
@@ -384,10 +393,13 @@ fn a_scene_begun_behind_the_lane_at_stop_is_cut_once_by_the_brain() {
         .completed(admission.run(), ms(now, 3))
         .expect("the held scene's admission");
     assert_eq!(credit(&effects), FRAME);
-    assert!(controls(&effects).is_empty(), "the brain owns this cut");
+    assert!(
+        controls(&effects).is_empty(),
+        "the original Stop already named this scene"
+    );
     assert!(jobs(effects).is_empty(), "a fenced step is never prepared");
     let other = &presenter.scenes[&OTHER];
-    assert_eq!((other.cut, other.skipping), (Cut::Open, true));
+    assert_eq!((other.cut, other.skipping), (Cut::Outstanding, true));
     for scene in [LIVE, OTHER] {
         let effects =
             acknowledge(&mut presenter, scene, 1, zero_cut(), ms(now, 4)).expect("the cut");
@@ -408,6 +420,344 @@ fn a_scene_begun_behind_the_lane_at_stop_is_cut_once_by_the_brain() {
     let effects =
         commit_as(&mut presenter, later, fresh, 0, rect("q"), ms(now, 6)).expect("a new run");
     assert_eq!(only_job(effects).scene(), fresh);
+}
+
+#[test]
+fn older_held_scenes_settle_under_the_newest_stop_without_losing_a_later_run() {
+    let newest = RunId(6);
+    let third = SceneId(22);
+    let fresh = SceneId(23);
+    let (mut presenter, now) = live();
+    begin(&mut presenter, LIVE, now);
+    let admission = only_admission(
+        arrive(&mut presenter, commit_frame(LIVE, 0, rect("a")), now).expect("A admission"),
+    );
+    for (scene, run, id) in [(OTHER, RUN, "b"), (third, newest, "c")] {
+        assert!(
+            arrive(
+                &mut presenter,
+                DataToShell::SceneBegin {
+                    scene,
+                    header: header()
+                },
+                now
+            )
+            .expect("held begin")
+            .is_empty()
+        );
+        assert!(
+            arrive(
+                &mut presenter,
+                DataToShell::SceneStepCommit {
+                    run,
+                    scene,
+                    index: 0,
+                    step: rect(id)
+                },
+                now
+            )
+            .expect("held commit")
+            .is_empty()
+        );
+    }
+    assert_eq!(presenter.held.len(), 4);
+    assert_eq!(presenter.held_bytes, 4 * FRAME);
+    let effects = presenter.stop(newest, ms(now, 1)).expect("covering Stop");
+    assert_eq!(
+        controls(&effects),
+        [&ControlToBrain::StopScenes {
+            run: newest,
+            cuts: SceneCuts::new(
+                [LIVE, OTHER, third]
+                    .map(|scene| SceneCut {
+                        scene,
+                        cut: zero_cut()
+                    })
+                    .to_vec()
+            )
+            .expect("three scenes"),
+        }]
+    );
+    assert_eq!(presenter.fenced, Some(newest));
+    assert_eq!(presenter.workers(), 1);
+    let repeated = presenter
+        .stop(RUN, ms(now, 1))
+        .expect("older duplicate Stop before drain");
+    assert_eq!(
+        controls(&repeated),
+        [&ControlToBrain::StopScenes {
+            run: newest,
+            cuts: SceneCuts::default()
+        }]
+    );
+    let effects = presenter
+        .completed(admission.run(), ms(now, 2))
+        .expect("fenced A");
+    assert_eq!(credit(&effects), 2 * FRAME);
+    assert!(controls(&effects).is_empty());
+    let admission = only_admission(effects);
+    let effects = presenter
+        .completed(admission.run(), ms(now, 3))
+        .expect("fenced older B");
+    assert!(
+        controls(&effects).is_empty(),
+        "older B was named before any later run"
+    );
+    assert_eq!(credit(&effects), 2 * FRAME);
+    assert_eq!(
+        (
+            presenter.scenes[&OTHER].cut,
+            presenter.scenes[&OTHER].skipping
+        ),
+        (Cut::Outstanding, true)
+    );
+    let admission = only_admission(effects);
+    let effects = presenter
+        .completed(admission.run(), ms(now, 4))
+        .expect("fenced newer C");
+    assert!(
+        controls(&effects).is_empty(),
+        "C has no duplicate explicit or unseen cut"
+    );
+    assert_eq!(credit(&effects), FRAME);
+    assert!(jobs(effects).is_empty());
+    assert_eq!(presenter.workers(), 0);
+    assert_eq!(presenter.deadline(), None);
+    assert!(presenter.held.is_empty());
+    assert_eq!(presenter.held_bytes, 0);
+    for scene in [LIVE, OTHER, third] {
+        let held = &presenter.scenes[&scene];
+        assert_eq!(
+            (
+                held.cut,
+                held.skipping,
+                held.state.view().revision(),
+                held.state.view().activated()
+            ),
+            (Cut::Outstanding, true, 1, 0)
+        );
+        assert!(held.ready.is_empty());
+    }
+    let repeated = presenter.stop(newest, ms(now, 4)).expect("duplicate Stop");
+    assert_eq!(
+        controls(&repeated),
+        [&ControlToBrain::StopScenes {
+            run: newest,
+            cuts: SceneCuts::default()
+        }]
+    );
+    begin(&mut presenter, fresh, ms(now, 5));
+    let later = only_job(
+        commit_as(
+            &mut presenter,
+            RunId(7),
+            fresh,
+            0,
+            rect("later"),
+            ms(now, 5),
+        )
+        .expect("valid later run"),
+    );
+    for scene in [LIVE, OTHER, third] {
+        let effects = acknowledge(&mut presenter, scene, 1, zero_cut(), ms(now, 6))
+            .expect("FIFO cut settlement");
+        assert_eq!(credit(&effects), FRAME);
+        assert!(controls(&effects).is_empty());
+    }
+    assert_eq!(
+        presenter.scenes.keys().copied().collect::<Vec<_>>(),
+        [fresh]
+    );
+    assert_eq!(
+        presenter.workers(),
+        1,
+        "older cuts do not cancel the later worker"
+    );
+    assert!(
+        presenter
+            .completed(later.run(&mut Shaper), ms(now, 6))
+            .expect("later prepared")
+            .is_empty()
+    );
+    assert_eq!(presenter.scenes[&fresh].ready.len(), 1);
+    let late = acknowledge(&mut presenter, OTHER, 1, zero_cut(), ms(now, 7))
+        .expect("duplicate old acknowledgement");
+    assert!(controls(&late).is_empty());
+    assert_eq!(presenter.scenes[&fresh].ready.len(), 1);
+    let effects = presenter.clear(ms(now, 8)).expect("clear later scene");
+    assert_eq!(controls(&effects), [&clear_drawing(vec![fresh])]);
+    assert_eq!(presenter.residency(), 0);
+    assert_eq!(presenter.global.usage(), Usage::default());
+}
+
+#[test]
+fn second_clear_cancels_a_held_scenes_admission_and_late_cut_cannot_restore_it() {
+    let third = SceneId(22);
+    let newest = RunId(6);
+    let (mut presenter, now) = live();
+    begin(&mut presenter, LIVE, now);
+    let admission = only_admission(
+        arrive(&mut presenter, commit_frame(LIVE, 0, rect("a")), now).expect("A admission"),
+    );
+    for (scene, run, id) in [(OTHER, RUN, "b"), (third, newest, "c")] {
+        arrive(
+            &mut presenter,
+            DataToShell::SceneBegin {
+                scene,
+                header: header(),
+            },
+            now,
+        )
+        .expect("held begin");
+        arrive(
+            &mut presenter,
+            DataToShell::SceneStepCommit {
+                run,
+                scene,
+                index: 0,
+                step: rect(id),
+            },
+            now,
+        )
+        .expect("held commit");
+    }
+    presenter.stop(newest, ms(now, 1)).expect("first Stop");
+    let admission = only_admission(presenter.completed(admission.run(), ms(now, 2)).expect("A"));
+    let effects = presenter
+        .completed(admission.run(), ms(now, 3))
+        .expect("older B");
+    assert!(controls(&effects).is_empty());
+    assert_eq!(presenter.scenes[&OTHER].cut, Cut::Outstanding);
+    let late = only_admission(effects);
+    assert_eq!(presenter.workers(), 1);
+    let effects = presenter.clear(ms(now, 4)).expect("second clear");
+    assert_eq!(
+        controls(&effects),
+        [&clear_drawing(vec![LIVE, OTHER, third])]
+    );
+    assert_eq!(
+        credit(&effects),
+        FRAME,
+        "C's in-flight credit is returned once"
+    );
+    assert_eq!(presenter.residency(), 0);
+    assert_eq!(presenter.workers(), 1, "cancel is not worker completion");
+    let effects = presenter
+        .completed(late.run(), ms(now, 5))
+        .expect("late canceled admission");
+    assert_eq!(credit(&effects), 0);
+    assert!(controls(&effects).is_empty());
+    assert!(jobs(effects).is_empty());
+    assert_eq!(presenter.workers(), 0);
+    for scene in [LIVE, OTHER, third] {
+        let effects =
+            acknowledge(&mut presenter, scene, 1, zero_cut(), ms(now, 6)).expect("late cut");
+        assert_eq!(credit(&effects), FRAME);
+        assert!(controls(&effects).is_empty());
+    }
+    assert!(!presenter.holds_scenes());
+    assert_eq!(presenter.global.usage(), Usage::default());
+}
+
+#[test]
+fn stop_projects_held_removals_and_replacements_within_the_four_scene_bound() {
+    let old = [LIVE, OTHER, SceneId(22), SceneId(23)];
+    let replacement = SceneId(24);
+    let (mut presenter, now) = live();
+    for scene in old {
+        begin(&mut presenter, scene, now);
+    }
+    let admission = only_admission(
+        arrive(&mut presenter, commit_frame(LIVE, 0, rect("a")), now).expect("admission"),
+    );
+    arrive(
+        &mut presenter,
+        DataToShell::ScenesRemoved {
+            scenes: vec![OTHER],
+        },
+        now,
+    )
+    .expect("held removal");
+    arrive(
+        &mut presenter,
+        DataToShell::SceneBegin {
+            scene: replacement,
+            header: header(),
+        },
+        now,
+    )
+    .expect("held replacement");
+    let effects = presenter
+        .stop(RUN, ms(now, 1))
+        .expect("four identities after FIFO removal");
+    assert_eq!(
+        controls(&effects),
+        [&stop_scenes(
+            [LIVE, SceneId(22), SceneId(23), replacement]
+                .map(|scene| SceneCut {
+                    scene,
+                    cut: zero_cut()
+                })
+                .to_vec()
+        )]
+    );
+    assert!(matches!(
+        effects.last(),
+        Some(Effect::Control(ControlToBrain::StopScenes { .. }))
+    ));
+    let effects = presenter
+        .completed(admission.run(), ms(now, 2))
+        .expect("admitted before removal");
+    assert_eq!(credit(&effects), 3 * FRAME);
+    assert!(controls(&effects).is_empty());
+    assert!(jobs(effects).is_empty());
+    assert!(!presenter.scenes.contains_key(&OTHER));
+    assert_eq!(
+        presenter.scenes[&replacement].cut,
+        Cut::Outstanding,
+        "a held header already names a durable brain scene"
+    );
+    let cleared = presenter.clear(ms(now, 3)).expect("clear every survivor");
+    assert_eq!(
+        controls(&cleared),
+        [&clear_drawing(vec![
+            LIVE,
+            SceneId(22),
+            SceneId(23),
+            replacement
+        ])]
+    );
+    assert_eq!(presenter.residency(), 0);
+
+    let (mut presenter, now) = live();
+    for scene in old {
+        begin(&mut presenter, scene, now);
+    }
+    let admission = only_admission(
+        arrive(&mut presenter, commit_frame(LIVE, 0, rect("a")), now).expect("admission"),
+    );
+    arrive(
+        &mut presenter,
+        DataToShell::SceneBegin {
+            scene: replacement,
+            header: header(),
+        },
+        now,
+    )
+    .expect("held fifth scene");
+    assert!(matches!(
+        presenter.stop(RUN, ms(now, 1)),
+        Err(Broken::Scenes)
+    ));
+    presenter.disconnected();
+    assert!(
+        presenter
+            .completed(admission.run(), ms(now, 2))
+            .expect("late answer")
+            .is_empty()
+    );
+    assert_eq!(presenter.workers(), 0);
+    assert_eq!(presenter.residency(), 0);
 }
 
 #[test]

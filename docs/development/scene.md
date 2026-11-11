@@ -2,8 +2,10 @@
 
 `kumochi-scene` is the shared, synchronous drawing format. It depends on neither
 GPUI nor tokio. The brain parses model JSON; the shell decodes the same validated
-types from postcard. The brain's drawing reducer owns canonical scene state; preparation is
-synchronous and host-independent, and rendering is not wired yet.
+types from postcard. The brain's drawing reducer owns canonical scene state; in this source, the shell presenter
+mirrors committed scenes, prepares layouts on workers and paints activated 2D views on the
+overlay window, while live/native/performance validation and final acceptance remain separate
+gates.
 
 ```mermaid
 flowchart LR
@@ -18,6 +20,13 @@ flowchart LR
 ```
 
 ## Records
+
+The brain's provider path uses the existing cursor tokenizer and public 2D `parse_draw_record`
+gate for each closed record, then the drawing reducer's order/semantic admission and store FIFO.
+Complete-call/MCP typed preflight stays whole-envelope. A committed provider prefix can outlive
+a malformed tail or interrupted owner; it is not evidence of whole-call success. Interrupted
+submitted steps retain their own acknowledgement/scene-state owner, distinct from deletion's
+discard fence. See `tools.md` for argument identity, result delivery and completion ordering.
 
 A drawing call is `{"records":[begin, step, ..., end]}`. Each record is externally
 tagged, for example:
@@ -721,6 +730,17 @@ the counts depends on display, pose or reveal, and sums saturate.
   composed scale, and 4(n + 1) + 1 points. Filled rects add them to the fill counts, bordered
   rects to the outline counts. The painter must refuse a pose that needs more pieces.
 
+lyon_tessellation's debug tessellator prints every point it fills to stdout when
+`LYON_FORCE_LOGGING` is set (`fill.rs:77-95`, `:563-566`), and `set_logging(false)` can't turn
+that off. So the workspace builds lyon_tessellation without debug assertions in dev/test
+and release/bench:
+`[profile.dev.package.lyon_tessellation]` and `[profile.release.package.lyon_tessellation]` set
+`debug-assertions = false`, test inherits dev and bench inherits release. The application keeps
+its own debug assertions; lyon's internal `debug_assert!` checks go, as in release.
+`lyon_logging_is_compiled_out` runs the static fill, the paint cache's staging of it and the rect
+fallbacks in a debug child with the variable set, and accepts only libtest's own framing on
+stdout and nothing on stderr.
+
 D1 uses GPUI's native source-over blending per triangle, not isolated item opacity. A translucent
 item draws darker where its own triangles overlap, including self-crossing strokes, some sharp
 joins and merged chunks. Merging chunks gives one path and draw order; it does not isolate their
@@ -769,12 +789,60 @@ Geometry builds before any of its item's primitives paint; a geometry or label f
 the scene instead of silently skipping it. The overlay is transparent and click-through, covers
 only the primary display from logical origin, and holds Esc only while shown.
 
+Fills paint from a cache. When the presenter commits a view, `presence::paint_cache` stages its
+`PaintScene`: each `Prim::Fill` of the view's objects is tessellated once in prim space by the
+`fill()` the per-paint build used, and kept as triangle corners, or as the refusal lyon or
+`FILL_VERTEX_LIMIT` gave. A paint only places those corners by the item's transform into one
+exactly sized path, with the vertices and bounds the per-paint build gave; rects, lines and
+labels still build per paint. The cache sits in the view's frame slot beside the frame and holds
+the view's generation. It paints only a frame bound to that generation: any other pairing fails
+as `Stale` through the terminal paint-failure path, and paint never restages. Its charge (the
+boxed cache, its entries and its corners) is fixed when it's staged and counted in the scene's
+residency; the boxed stage owns no bytes.
+
+| Transition | Stages from | Checked by | Outgoing cache |
+|---|---|---|---|
+| Begin | the new view | the precheck, cache included | over the cap: deferred with the candidate |
+| Recovery | each adopted view | the after-adoption walk | an evicted scene's goes with its slot |
+| Kept cut | the replacement view | the post-replacement check | deferred with the old rest and view |
+| Consumption | the candidate view | `outgoing` and `after` | deferred; refused: the candidate's |
+| Release, disconnect | — | — | deferred with its slot |
+
 Presenter samples outside paint into its four reserved frames. The paint callback borrows the
 cache and frames immutably, records observations/failure flags through UI-thread cells, and
 defers any failure back to Presenter
 after releasing the borrow. Replacement invalidates old observations; removal/disconnect
 retires frame ownership with its scene and hides an empty overlay. Resting B5 views request no
 animation frames. B5 neither activates live steps nor emits StepShown; B6 consumes that seam.
+
+The overlay lifecycle keeps native visibility separate from paint eligibility. A successful
+hide closes the old GPUI window and opens a fresh hidden replacement; a refused hide keeps
+an empty, click-through host without Esc, paint acknowledgement or retry demand. The next
+show retires that uncertain host before opening another. A refused show is also uncertain,
+never trusted as a hidden window. Close/open failures fail the visible update closed.
+If configuration or capture affinity fails after creation, the new hidden host is removed
+before the error returns.
+Each window has its own revocable painting gate: an old queued canvas cannot read another
+host's frames. Hiding advances paint epochs and forgets paint/ack observations while keeping
+sampled geometry. Notifications are repaint requests, not evidence that a blank frame was
+presented; the composed-frame proof is a separate guarded native run.
+
+The approved B6 paint-cache boundary is planned, not yet implemented by this B5 painter.
+After warm-up it separates three lines: exactly zero application-internal allocations;
+exactly one application handoff allocation per `paint_path`, of exactly 32 bytes per
+vertex; and GPUI-internal allocations, which are reported rather than asserted. Draw,
+flow, transforms and text-scale tests keep off-grid values without rounding, quantizing
+or precomputing frames. GPUI consumes the handoff Vec, so the callback as a whole is not
+allocation-free. The planned cache reuses the already-locked lyon 1.0.23 tessellator;
+GPUI's PathBuilder creates a new tessellator and buffers on every call.
+
+The 64 MiB allowance remains application-owned bytes only. GPUI-owned allocations are
+reported even when the application retains them: one shaped result per label within
+scene limits, including every WrappedLine (one per hard line) and its full payload,
+sized from public capacities in TestAppContext and on Rez. Exact-size glyph atlas
+growth remains a GPUI gap, with no quantization or
+vendor change: repeated text-scale and hide/re-show runs must report private/GPU memory
+growth per second, whether it plateaus, and whether recreating the window releases it.
 
 A kept cut that changes nothing, because its Stop adds no log entry and keeps the activated bound,
 isn't a replacement when the view was `at_rest` at the Stop: the presenter keeps that scene's
@@ -855,6 +923,10 @@ charge is cached, not recomputed at staging or install: preparation computes the
 layout once on its worker as `PreparedStep::retained_bytes()`, which the shell also uses as the
 rest's charge, and `SceneView::new` computes its at-rest layout once. A candidate dropped
 uninstalled goes to the dropper whole, so a refused host transition frees nothing on UI.
+The owned `activate` wrapper queues its step with `PreparedStep::owner_bytes()`: the cached
+full layout, marginal/private state and original input record, even after the semantic log
+is gone. Admission caches the original record's bytes once, so neither this wrapper nor
+the shell's worker attribution walks that record on UI.
 Activation may allocate or free; `frame` does neither and takes no locks. A `Frame` reserves
 space for the per-scene object cap and reuses it. Its items share immutable primitive
 Arcs, so the host must clear the frame outside paint when clearing its scene or
@@ -1453,13 +1525,72 @@ share the unchanged 64 MiB allowance. An over-cap answer fails with `Residency` 
 waiting indefinitely for bytes. Clearing, removal and disconnect release the presenter's
 ownership but cannot release a result still held by its caller. Each mirrored scene also
 reserves a resting view and a frame inside this allowance: the view's cloned layout index,
-node/paint/track storage and generation, plus both frame buffers. Fixed four-slot cache
+node/paint/track storage and generation, plus both frame buffers, and the frame's paint cache
+as staged. The paint cache also reserves its largest item's pending primitive descriptors;
+geometry is assembled completely before that item's paths or quads are submitted. A geometry
+refusal clears the pending handoffs without painting any of that item. A later label failure
+keeps the earlier-painted behavior, but drains and frees all remaining handoffs.
+
+One presence-owned stroke scratch survives overlay-host recreation and is shared serially
+across scenes. Its vertex and run capacities and the stage holder are a fixed residency seed,
+charged once alongside returned owners, not once per scene. Strokes count and replay the same
+dash/reveal walk into one exactly sized path handoff. Static fills still use staged triangles.
+Changing rect backgrounds, rings and reveal sectors retain the narrow transient lyon-fill
+allocation exception; their events are generated without contour lists, and neither the
+tessellator nor its output buffers survive that build. Text is copied once into sorted,
+generation-bound label entries at staging. Short shared strings stay inline; longer strings
+share an owned Arc except for the pinned string type's static whitespace optimization.
+Staging records whether the supplied Arc is retained, so static whitespace is not charged
+as heap storage. The cache charges the boxed entries and retained string payloads
+alongside its unchanged fill/pending storage. The shared scratch also retains normal/bold
+font slots and one shared features payload, charged once through the fixed seed.
+
+Each label retains GPUI's returned SmallVec of WrappedLine values. Its geometry key is the
+font-slot generation, transformed size/wrap width and host scale. A family change resets the
+two font IDs and advances both generations; size/wrap/scale changes replace only affected
+label layouts. A new committed view restages its immutable text/bold choices. Color, opacity,
+alignment and origin use the retained geometry without copying text or reshaping it. Host
+recreation within the same app keeps the shared scratch and valid layouts; a stale view
+cannot borrow another generation's cache.
+
+Hard lines paint the public LineLayout with a stack decoration run. Soft rows traverse the
+pinned public glyph/wrap data in one path, retaining GPUI alignment, content masking, emoji
+and opacity behavior. Wrapped-text native pixel parity is still a required validation gate.
+GPUI-built line/layout/decorations, wrapping spills, glyph/run buffers and the sprite atlas
+are framework ownership, disclosed separately rather than added to or subtracted from the
+fixed scene charge. That charge is not a whole-heap/RSS or retained-peak claim. Allocation
+recording must include invalidation and retirement; shape/atlas scopes do not waive the
+ordinary steady-state application limits or bounded one-off recovery policy.
+
+The drawing element holds handles inline rather
+than boxing canvas callbacks. These storage changes do not change Stop, frame generations,
+input or the terminal paint-failure policy.
+
+Test-only bounded traces record allocation and free identities across render, layout,
+prepaint, paint and the deferred owner callback as App work. Narrow GPUI and changing-fill
+scopes restore that phase; application arguments stay in App. Geometry assertions match
+each actual handoff to its allocation lifetime and check fill lifetimes within each build,
+without subtracting aggregate allocation counts.
+
+In this source, the live-owner terminal callback (`paint_observed`, checkpoints `160..161`)
+records retirement (`Case::A`..`Case::E`), control refusal (`Case::B`, `Case::D`), host
+recreation (`Case::A`, `Case::B`, `Case::D`) and panel/typing entity state plus `cx.notify()`
+updates (`Case::A`, `Case::B`, `Case::D`, `Case::E`) as one-off `App` recovery work while
+post-recovery steady-state draws (`166..167`) remain zero-extra-App-allocation. However, the
+existing headless fixture does not render or paint a mounted visible status or typing panel
+inside `160..161`, deferred frees occur later on the `scene-dropper` thread after the hold
+gate releases (`241..242`), and process-wide heap/RSS, real-font/atlas retention, recovery
+latency, real Win32 HWND/DWM/capture-exclusion behavior and native Rez before-and-after
+measurements remain unmeasured; a `160..161` count alone does not close the recovery or
+acceptance gates.
+
+Fixed four-slot cache
 metadata is conservatively charged in full to each scene, rather than adding an unmetered
 index allocation. Begin, recovery and acknowledged-cut adoption check the combined charge.
 Replacement clears a frame only while its old view still owns the geometry; release and
-disconnect defer the frame with its rest and view. This storage layer adds no painting or
-activation. Cancelled workers keep their slots until their answer is applied or dropped.
-Cancellation never claims to kill a thread.
+disconnect defer the frame with its rest and view; serialized activation and first-paint
+acknowledgement are wired below. Cancelled workers keep their slots until their answer is
+applied or dropped. Cancellation never claims to kill a thread.
 
 The ignored native eight-window residency fixture replaces each consumed rest with a fresh
 resting view and includes the reserved frames. It retains the previous consumption owner
@@ -1473,8 +1604,9 @@ These are allowance checks, not before/after performance comparisons or heap bou
 Private `consume_ready(scene, expected_index, now, scene_time, segment_ms)` accepts only the
 ready head and activates it in one transaction. It checks the scene, index and Busy first,
 then validates the head against the semantic state and rest, stages the activated view from
-the current view and the borrowed step, and checks the whole post-transition charge: the
-other scenes, returned owners, the head's full rest, the candidate view and the new owner.
+the current view and the borrowed step, and its paint cache, and checks the whole
+post-transition charge: the other scenes, returned owners, the head's full rest, the candidate
+view and cache, and the new owner.
 Exactly 64 MiB fits. Only then does it retire the step semantically, install the rest and the
 view, start a new frame epoch so no earlier paint counts, update every charge and free one
 window position, before scheduling successors. It returns the protected charged owner plus
@@ -1483,8 +1615,9 @@ results, stale heads and insufficient residency leave every bound, epoch and cha
 and the staged candidate goes to the dropper. While the scene's admission is in the lane,
 including its worker-slot wait, a valid request returns Busy and records one pending request;
 a different index is out of order and never replaces it. Returning the read offers a
-wake/retry point before the next admission for that scene. No production caller consumes
-yet: B6d owns the conductor, its scene clock and `StepShown`.
+wake/retry point before the next admission for that scene. Presence handles the exact
+`ConsumptionReady` notification before subsequent admission effects and consumes through
+the activation owner; Busy is not polled.
 Both fresh arrivals and already-held commits wait behind the pending request, even when
 the lane and held queue were empty at arrival.
 A Residency refusal instead fails without waiting for bytes; the activation caller must
@@ -1502,15 +1635,59 @@ scenes clear and late answers cannot restore them. Stop clears incomplete recove
 then cuts every known v1 scene at its activated bound. Cuts remain held until the data-pipe
 acknowledgement reaches the exact final committed revision. One new commit permits one new
 effective cut; stale acknowledgements for removed scenes do nothing.
-Stop also covers a scene whose begin is still held behind admission: the brain's
-unseen-scene job cuts unnamed, unactivated scenes from that run. Their acknowledgements
-stay FIFO behind the held commits, so the shell does not send a second cancelled cut.
+Stop also covers scenes whose begins are held behind admission. It projects existing FIFO
+membership, removals and zero-cut acknowledgements into four fixed slots, then names those
+scenes with zero-activation cuts in its original covering-token `StopScenes`. This includes
+older runs: the brain's unnamed-scene sweep covers only the named run and cannot substitute
+for these explicit cuts. Four fixed pending identities mark eventual FIFO adoptions as
+Outstanding/skipping, without another cut. Clear, removal and disconnect revoke the intent.
+The brain durably wrote the first step before sending `SceneBegin`; no recovered run is
+guessed. Repeated Stops preserve the greatest covering token, and later work stays after
+the original cuts rather than being cut by a delayed follow-up Stop.
 Clear intent made while scenes are mirrored survives brain restarts because scene ids are
 durable event ids; membership
 that still names a locally cleared scene causes its idempotent clear to be sent again.
 
-No fresh scene activates and no `StepShown` is sent yet. Production still uses placeholders
-until B3 switches both ends; B6 supplies painting and activation.
+### Serialized activation and first-paint acknowledgement
+
+Each scene owns one adoption clock, 64 fixed lifetime segment-end slots and its installed
+generation/run/index/once-state. Recovery seeds only kept activated anchors at zero and
+does not invent a live run. Continuations preserve the origin and surviving anchors. Now
+still follows predecessor activation; Speech waits for its synthetic segment end; After
+uses the named kept segment's end plus its offset. Actual late activation sets the end,
+with saturating `u64` arithmetic rather than wire-duration or frame-delta limits.
+
+Presence advances ready heads before sampling. The consume transaction records the actual
+committer, and the charged returned guard drops before effect dispatch, even on a
+post-install pump error. Residency failure is terminal. Both numeric and Instant sampling
+use the same reserved frames; Outstanding cuts freeze each scene at its last sampled time.
+The shared frame loop supplies motion demand, and one existing watchdog tracks preparation,
+recovery and future scene wakes. Static rest has no polling timer or animation callback.
+Advance, sample, demand and resting-wake selection share the same Instant, including
+nested effect dispatch. The frame callback retains that sampled demand until its rest
+decision, so a crossed endpoint or delayed appearance receives its catch-up sample even
+if registration happens after the boundary. Absolute origin-based wake identity and checked
+overflow handling remain unchanged.
+
+Paint records only fixed scene/epoch/bound numbers, after successful shown/nonempty painting.
+A persistent owner-held pending flag coalesces one weak-owner `App::defer`, kept through
+hide, cut and reconnect until that callback clears it. No step or content is captured.
+Outside paint and the Frames borrow, the callback processes failures first, verifies the
+current host and connection, then `take_shown` revalidates the current epoch, activated bound
+and installed once-state. A refused control ends the connection. Hidden, empty, failed,
+revoked or superseded observations cannot acknowledge; visibility-only epoch changes never
+reset an already acknowledged activation. Skipped semantic retirement fabricates no paint.
+
+The callback does not poll or rearm from unchanged paints. Its Box, effect-deque growth,
+control serialization/outbox work and retained owner state remain application costs requiring
+explicit measurement and bounds, not framework/cold exclusions. This CPU paint observation
+does not prove native visibility or presentation under occlusion.
+
+Live current-connection preparation and synthetic motion retain their actual Stop token
+after provider Done and paint acknowledgement. Esc keeps selection and pull cancellation
+precedence, but invokes Presenter Stop even if the placeholder `Runs::stop` returns None;
+the next focused Esc clears through the existing scene path. Halting revokes live identity,
+not physical worker ownership: late answers must still release their real slots and payloads.
 
 ## Incremental drawing input
 
@@ -1539,11 +1716,12 @@ resynchronization, and trailing non-whitespace after the envelope fails. Earlier
 records may already have been emitted, so callers retain their committed prefix.
 Tokenizer and closed-record Debug formatting never prints buffered bytes.
 
-`parse_draw_record` adds the tool's closed 2D ingress to `parse_record`: it uses the
-shared runtime 3D refusal predicate and rejects a present `set[].info`, even null.
-The general scene decoder remains capable of reading stored 3D records. Complete
-draw-tool calls preflight every record before sending any of them to admission;
-the tokenizer's general streamed-prefix behavior above is unchanged.
+`parse_draw_record` adds the tool's closed 2D ingress to `parse_record`: it rejects
+non-overlay `begin` surfaces, uses the shared runtime 3D refusal predicate, and rejects a
+present `set[].info`, even null. The general scene decoder remains capable of reading
+inline and stored 3D records. Complete draw-tool calls preflight every record before
+sending any of them to admission; the tokenizer's general streamed-prefix behavior above is
+unchanged.
 
 ### Tokenizer measurement method
 

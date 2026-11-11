@@ -530,7 +530,8 @@ The v1 messages are staged alongside the labelled placeholder protocol. B2 build
 path and B4 the shell path with direct test inputs; B3 switches production fixtures, removes
 the placeholder at both ends and deletes its development-only store rows. The brain accepts
 `StopScenes`, `StepShown` and `StepFailed`; the shell consumes v1 data and `ScenesV1` through
-its presenter. `NoVisual` still ends the connection until B8 supplies its consumer.
+its presenter. The legacy run-only `NoVisual` control is an authenticated no-op: it never
+clears a scene, adds a call result or ends the connection. Before Welcome it remains invalid.
 These variants are appended; the handshake
 tags and bytes do not change. Mixed builds still fail their build-id handshake.
 
@@ -539,11 +540,23 @@ tags and bytes do not change. Mixed builds still fail their build-id handshake.
 | Control, shell to brain | `StopScenes { run, cuts }` | Fence the run and apply each scene's activated revision and finished handles. A scene can span runs. |
 | Control, shell to brain | `StepShown`, `StepFailed` | First paint containing a lifetime step index, or a content-free preparation failure with its scene-wide cut. Control order keeps these observations ahead of later Stop cuts. |
 | Control, brain to shell | `ScenesV1` | Authoritative visible membership and each scene's lifetime revision, retained count and full log-entry count. |
-| Control, brain to shell | `NoVisual` | The requested drawing had no visual outcome; preparation errors are reported separately. |
+| Control, brain to shell | `NoVisual` | Legacy run-level advisory, consumed without changing state. |
 | Data, brain to shell | `SceneBegin`, `SceneStepCommit` | An immutable typed header/layout version, then original typed steps after durable commit. |
 | Data, brain to shell | `SceneSnapshotV1` | Complete ordered original steps and effective cuts, packed as whole events. Chunk zero alone carries the header. |
 | Data, brain to shell | `SceneCutApplied` | Authoritative cut, after every step committed before it; the last committed revision is included for a cheap consistency check. |
 | Data, brain to shell | `SceneEnd` | A call completed or ended incomplete; already committed history remains. |
+
+History does not reconstruct typed visuals. A stored step with usable bounded scene metadata
+is returned in its ordinary `Page` as `PageEventKind::NoVisual { scene }`, with its original
+event/run identity, text and cursor. Missing or unusable visual metadata stays an ungrouped
+legacy `SceneStep`; either kind is explained as unavailable **in history**, not as a failure
+of a currently visible scene. The body-size guard runs before JSON inspection; no geometry
+or scene log is loaded. Only actual query/read failures and unknown event kinds fail the page.
+Raw 50-row/32 KiB page limits, continuation and credit accounting are unchanged.
+
+The new page kind is appended at tag 5; existing kind tags and the control's tag 10 are
+unchanged. Old readers cannot decode the new kind. The capability-first exact `BUILD_ID`
+handshake rejects mixed committed builds; this is paired-build compatibility, not negotiation.
 
 `SceneStepCommit` and `StepShown` indices are zero-based lifetime indices; scene revisions and `StopCut.activated`
 are one-based bounds. They are not dense indices into the kept steps. The per-run 64-step

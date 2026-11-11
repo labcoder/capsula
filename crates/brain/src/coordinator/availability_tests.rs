@@ -323,13 +323,16 @@ fn a_draw_the_request_didnt_offer_commits_nothing() {
         },
     ] {
         assert_eq!(
-            core.handle(super::engine(R, event)),
+            core.handle(super::engine(super::engine_key(&core, R), event)),
             Ok(Vec::new()),
             "no draw state is kept, so no step follows"
         );
     }
     assert_eq!(
-        core.handle(super::engine(R, TurnEvent::Finished(Finish::Completed))),
+        core.handle(super::engine(
+            super::engine_key(&core, R),
+            TurnEvent::Finished(Finish::Completed)
+        )),
         Ok(vec![Effect::Store(StoreOp::RoundItems(RoundItems {
             thread: T,
             run: R,
@@ -349,16 +352,22 @@ fn a_draw_the_request_didnt_offer_commits_nothing() {
     core.handle(Input::TurnStored { run: R }).expect("current");
     core.handle(built(Some("m"), vec![draw_tool()]))
         .expect("current");
-    assert_eq!(core.handle(super::engine(R, draw_call())), Ok(Vec::new()));
+    assert_eq!(
+        core.handle(super::engine(super::engine_key(&core, R), draw_call())),
+        Ok(Vec::new())
+    );
     let step = core
-        .handle(super::engine(R, delta("head")))
+        .handle(super::engine(super::engine_key(&core, R), delta("head")))
         .expect("current");
     assert_eq!(step, Vec::new(), "production draw deltas execute nothing");
-    core.handle(super::engine(R, TurnEvent::ToolCallReady {
+    core.handle(super::engine(super::engine_key(&core, R), TurnEvent::ToolCallReady {
         call: super::call(), args: r#"{"records":[{"begin":{"v":1,"scene":"diagram","surface":"overlay","alt":"diagram"}},{"step":{"id":"s1"}},{"end":{}}]}"#.to_owned(),
     })).expect("complete arguments");
     let effects = core
-        .handle(super::engine(R, TurnEvent::Finished(Finish::Completed)))
+        .handle(super::engine(
+            super::engine_key(&core, R),
+            TurnEvent::Finished(Finish::Completed),
+        ))
         .expect("round completed");
     assert_eq!(
         effects
@@ -422,7 +431,7 @@ fn an_access_failure_keeps_the_accounts_own_reason() {
         let finish = Finish::Failed(EngineFailure::Access(Some(reason(key, Action::Retry))));
         assert_eq!(
             core.handle(Input::Engine {
-                run: R,
+                key: super::engine_key(&core, R),
                 event: TurnEvent::Finished(finish),
             }),
             Ok(failed(Some(reason(key, Action::Retry)))),

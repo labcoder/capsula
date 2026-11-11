@@ -1049,11 +1049,7 @@ fn watch(
                 | ControlToShell::ThreadModelSet { .. }
                 | ControlToShell::Voice(_),
             )) => {}
-            // shortcut: B8 consumes NoVisual; B3 switches the production fixture to v1.
-            Ok(Some(ControlToShell::NoVisual { .. })) => {
-                tracing::warn!("scene v1 control before its consumer; ending the connection");
-                return;
-            }
+            Ok(Some(ControlToShell::NoVisual { .. })) => {}
             Ok(Some(ControlToShell::Welcome { .. } | ControlToShell::BuildMismatch { .. })) => {
                 tracing::warn!("the brain repeated its handshake; ending the connection");
                 return;

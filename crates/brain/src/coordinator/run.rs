@@ -9,8 +9,8 @@ use kumochi_protocol::message::{
 };
 
 use super::{
-    Coordinator, Effect, MAX_DELTA, MAX_TEXT, Notify, Run, Stale, StoreOp, admission, run_state,
-    unstored,
+    BuildKey, Coordinator, Effect, MAX_DELTA, MAX_TEXT, Notify, Run, Stale, StoreOp, admission,
+    run_state, unstored,
 };
 use crate::engines::{CallId, Finish, ToolName, TurnEvent};
 use crate::store::{Failure, Interruption, RunEnd, SceneTarget};
@@ -39,11 +39,19 @@ impl fmt::Debug for DrawArgs {
 impl Coordinator {
     pub(super) fn engine(
         &mut self,
-        run: RunId,
+        key: BuildKey,
         event: TurnEvent,
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
-        let drawing_pending = self.drawing.pending_for(run);
+        let run = key.run;
+        if !self
+            .current(run)?
+            .build
+            .as_ref()
+            .is_some_and(|build| build.key() == key && build.admitted())
+        {
+            return Err(Stale);
+        }
         let trusted_draw = self.trusted_draw();
         let current = self.current(run)?;
         // The engine hasn't started before its turn is stored, and has nothing more after Done.
@@ -57,6 +65,19 @@ impl Coordinator {
         {
             return self.compact_event(run, event, effects);
         }
+        if matches!(event, TurnEvent::Finished(Finish::Completed)) && current.tools.all_ready() {
+            self.provider_finished(run, effects)?;
+            if !self
+                .current(run)?
+                .build
+                .as_ref()
+                .is_some_and(|build| build.key() == key && build.admitted())
+            {
+                return Ok(());
+            }
+        }
+        let drawing_pending = self.drawing.pending_for(run);
+        let current = self.current(run)?;
         match event {
             TurnEvent::TextDelta(delta) => self.text(run, &delta, effects)?,
             // Charged before anything of the call is kept (D13-M2).
@@ -81,6 +102,17 @@ impl Coordinator {
                     ready: false,
                 });
             }
+            TurnEvent::ToolCallStarted {
+                call,
+                name: ToolName::Draw,
+            } if !trusted_draw
+                && current
+                    .build
+                    .as_ref()
+                    .is_some_and(|build| build.offered().contains(&ToolName::Draw)) =>
+            {
+                self.provider_started(key, call, effects)?;
+            }
             // Every other call goes to the dispatcher when its round ends.
             TurnEvent::ToolCallStarted { call, name } => {
                 if current.draw.as_ref().is_some_and(|draw| draw.call == call)
@@ -89,9 +121,27 @@ impl Coordinator {
                     self.fail(run, Failure::Engine, effects)?;
                 }
             }
+            TurnEvent::ToolArgsDelta { call, delta }
+                if current
+                    .tools
+                    .open
+                    .iter()
+                    .any(|open| open.call == call && open.provider.is_some()) =>
+            {
+                self.provider_delta(run, &call, &delta, effects)?;
+            }
             TurnEvent::ToolArgsDelta { call, .. } if current.tools.takes(&call) => {}
             TurnEvent::ToolArgsDelta { call, delta } => {
                 self.draw_delta(run, &call, &delta, effects)?;
+            }
+            TurnEvent::ToolCallReady { call, args }
+                if current
+                    .tools
+                    .open
+                    .iter()
+                    .any(|open| open.call == call && open.provider.is_some()) =>
+            {
+                self.provider_ready(run, &call, &args, effects)?;
             }
             TurnEvent::ToolCallReady { call, args } if current.tools.takes(&call) => {
                 current.tools.ready(&call, args);

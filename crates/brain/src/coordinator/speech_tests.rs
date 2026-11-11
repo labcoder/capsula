@@ -19,13 +19,19 @@ const WINDOW: u64 = 480_000;
 const SEG: SegmentId = SegmentId(0);
 
 fn say(core: &mut Coordinator, delta: &str) -> Vec<Effect> {
-    core.handle(engine(R, TurnEvent::TextDelta(delta.to_owned())))
-        .expect("current")
+    core.handle(engine(
+        super::engine_key(core, R),
+        TurnEvent::TextDelta(delta.to_owned()),
+    ))
+    .expect("current")
 }
 
 fn finish(core: &mut Coordinator) -> Vec<Effect> {
-    core.handle(engine(R, TurnEvent::Finished(Finish::Completed)))
-        .expect("current")
+    core.handle(engine(
+        super::engine_key(core, R),
+        TurnEvent::Finished(Finish::Completed),
+    ))
+    .expect("current")
 }
 
 fn tts(made: Synthesized) -> Input {

@@ -68,8 +68,11 @@ fn run_done(core: &mut Coordinator, thread: Option<ThreadId>, run: RunId) -> Vec
     })
     .expect("a turn is never stale");
     admit(core, run);
-    core.handle(engine(run, TurnEvent::Finished(Finish::Completed)))
-        .expect("current");
+    core.handle(engine(
+        super::engine_key(&core, run),
+        TurnEvent::Finished(Finish::Completed),
+    ))
+    .expect("current");
     core.handle(Input::RunStored { run }).expect("ending")
 }
 
@@ -465,8 +468,11 @@ fn a_done_whose_write_failed_starts_no_job() {
     })
     .expect("a turn is never stale");
     admit(&mut core, R);
-    core.handle(engine(R, TurnEvent::Finished(Finish::Completed)))
-        .expect("current");
+    core.handle(engine(
+        super::engine_key(&core, R),
+        TurnEvent::Finished(Finish::Completed),
+    ))
+    .expect("current");
     core.handle(Input::StoreFailed { run: R }).expect("ending");
     let stored = core.handle(Input::RunStored { run: R }).expect("ending");
     assert!(

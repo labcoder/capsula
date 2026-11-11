@@ -3,16 +3,20 @@
 //! `cl` run can't overlap a worker spawn in another binary's tests.
 #![cfg(all(windows, debug_assertions))]
 
+use std::io::{self, Read as _};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-use kumochi_brain::platform::Job;
+use kumochi_brain::platform::{Job, Launch, Stdio, spawn};
 use kumochi_brain::speech::{
     Deadlines, Generation, NativeError, SpeechError, SpeechFault, SpeechHandle, SpeechSupervisor,
 };
 
 const WORKER: &str = env!("CARGO_BIN_EXE_kumochid");
+const FIXTURE_PATIENCE: Duration = Duration::from_secs(180);
+const OUTPUT_PATIENCE: Duration = Duration::from_secs(5);
+const OUTPUT_LIMIT: u64 = 64 * 1024;
 
 /// Generous budgets, except a short decode so the hang fixture ends quickly.
 const FIXTURE: Deadlines = Deadlines {
@@ -22,29 +26,157 @@ const FIXTURE: Deadlines = Deadlines {
     unload: Duration::from_secs(10),
 };
 
+fn drain(pipe: impl io::Read + Send + 'static) -> io::Result<mpsc::Receiver<io::Result<Vec<u8>>>> {
+    let (send, receive) = mpsc::channel();
+    drop(std::thread::Builder::new().spawn(move || {
+        let mut bytes = Vec::new();
+        let result = pipe
+            .take(OUTPUT_LIMIT + 1)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes);
+        send.send(result).ok();
+    })?);
+    Ok(receive)
+}
+
+fn fixture_completion(result: io::Result<u32>, readers_started: bool) -> Result<(), String> {
+    let code = result
+        .map_err(|error| format!("speech fixture operation failed ({:?})", error.kind()))?;
+    if code != 0 {
+        return Err(format!("speech fixture exited with code {code}"));
+    }
+    if !readers_started {
+        return Err("speech fixture output readers missing".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn a_startup_failure_is_not_replaced_by_missing_readers() {
+    let failure = io::Error::new(io::ErrorKind::PermissionDenied, "private startup error marker");
+    assert_eq!(
+        fixture_completion(Err(failure), false),
+        Err("speech fixture operation failed (PermissionDenied)".into())
+    );
+    assert_eq!(
+        fixture_completion(Ok(0), false),
+        Err("speech fixture output readers missing".into())
+    );
+}
+
+fn run_fixture(fixture: &str) {
+    let exe = std::env::current_exe().expect("test binary");
+    let system_root = std::env::var_os("SystemRoot").expect("Windows system root");
+    let mut random = [0; 16];
+    getrandom::fill(&mut random).expect("fixture directory identity");
+    let dir = std::env::temp_dir().join(format!(
+        "speech-{}-{:032x}",
+        std::process::id(),
+        u128::from_le_bytes(random)
+    ));
+    let job = Job::new().expect("fixture job");
+    std::fs::create_dir(&dir).expect("a new fixture directory, never an existing path");
+    let mut stdout = None;
+    let mut stderr = None;
+    let result = (|| -> io::Result<u32> {
+        let args = ["--exact".into(), fixture.into(), "--ignored".into()];
+        let env = [
+            ("SystemRoot".into(), system_root),
+            ("LOCALAPPDATA".into(), dir.as_os_str().to_owned()),
+            ("APPDATA".into(), dir.as_os_str().to_owned()),
+            ("TEMP".into(), dir.as_os_str().to_owned()),
+            ("TMP".into(), dir.as_os_str().to_owned()),
+            ("RUST_TEST_THREADS".into(), "1".into()),
+        ];
+        let mut child = spawn(&Launch {
+            exe: &exe,
+            args: &args,
+            cwd: &dir,
+            env: &env,
+            stdio: Stdio::Piped,
+            jobs: &[&job],
+        })?;
+        drop(child.stdin.take());
+        stdout = Some(drain(child.stdout.take().ok_or_else(|| {
+            io::Error::other("fixture stdout missing")
+        })?)?);
+        stderr = Some(drain(child.stderr.take().ok_or_else(|| {
+            io::Error::other("fixture stderr missing")
+        })?)?);
+        if !child.process.exits_within(FIXTURE_PATIENCE)? {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "speech fixture exceeded its deadline",
+            ));
+        }
+        child.process.exit_code()
+    })();
+    let stopped = job.terminate();
+    let stdout = stdout.map(|receive| receive.recv_timeout(OUTPUT_PATIENCE));
+    let stderr = stderr.map(|receive| receive.recv_timeout(OUTPUT_PATIENCE));
+    let drained = stdout.as_ref().is_none_or(Result::is_ok)
+        && stderr.as_ref().is_none_or(Result::is_ok);
+    let cleanup = if stopped.is_ok() && drained {
+        std::fs::remove_dir_all(&dir)
+    } else {
+        Err(io::Error::other("fixture teardown was not confirmed"))
+    };
+    if let Err(error) = fixture_completion(result, stdout.is_some() && stderr.is_some()) {
+        panic!(
+            "{error}; job_stopped={}; output_drained={drained}; directory_cleaned={}",
+            stopped.is_ok(),
+            cleanup.is_ok()
+        );
+    }
+    assert!(
+        stopped.is_ok() && drained && cleanup.is_ok(),
+        "fixture teardown incomplete; job_stopped={}; output_drained={drained}; directory_cleaned={}",
+        stopped.is_ok(),
+        cleanup.is_ok()
+    );
+    let stdout = stdout
+        .expect("fixture stdout reader started")
+        .expect("fixture stdout closed within its deadline")
+        .unwrap_or_else(|error| panic!("fixture stdout read failed ({:?})", error.kind()));
+    let stderr = stderr
+        .expect("fixture stderr reader started")
+        .expect("fixture stderr closed within its deadline")
+        .unwrap_or_else(|error| panic!("fixture stderr read failed ({:?})", error.kind()));
+    assert!(
+        u64::try_from(stdout.len()).expect("bounded stdout") <= OUTPUT_LIMIT
+            && u64::try_from(stderr.len()).expect("bounded stderr") <= OUTPUT_LIMIT,
+        "fixture output exceeded its bound"
+    );
+    assert!(
+        std::str::from_utf8(&stdout)
+            .expect("test output is UTF-8")
+            .lines()
+            .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;")),
+        "the exact fixture ran and passed, rather than matching no tests"
+    );
+}
+
 fn start(job: &Arc<Job>) -> SpeechHandle {
     SpeechSupervisor::with_deadlines(PathBuf::from(WORKER), Arc::clone(job), FIXTURE)
         .expect("supervisor")
 }
 
-/// A load with no models is answered with a typed failure, so the worker serves: `Missing` when
-/// no natives were ever staged, `Create` when an earlier run staged them.
 async fn serves(speech: &SpeechHandle) {
-    let nowhere = std::env::temp_dir().join("kumochi-no-natives-here");
-    let loaded = speech.load(nowhere.clone(), nowhere).await;
-    assert!(
-        matches!(
-            loaded,
-            Err(SpeechError::Native(
-                NativeError::Missing | NativeError::Create
-            ))
-        ),
-        "a typed answer, not a loss: {loaded:?}"
+    assert_eq!(
+        speech.load("\0".into(), "\0".into()).await,
+        Err(SpeechError::Native(NativeError::Input)),
+        "the worker refuses the model path before native storage"
     );
 }
 
+#[test]
+fn a_fresh_worker_answers_without_a_model() {
+    run_fixture("fresh_worker_fixture");
+}
+
 #[tokio::test]
-async fn a_fresh_worker_answers_without_a_model() {
+#[ignore = "exact child fixture with private logs, run by the default wrapper"]
+async fn fresh_worker_fixture() {
     let job = Arc::new(Job::new().expect("job"));
     let speech = start(&job);
     assert_eq!(
@@ -63,8 +195,14 @@ async fn a_fresh_worker_answers_without_a_model() {
     job.terminate().expect("end job");
 }
 
+#[test]
+fn every_fault_loses_only_the_worker_and_the_next_one_serves() {
+    run_fixture("faults_fixture");
+}
+
 #[tokio::test]
-async fn every_fault_loses_only_the_worker_and_the_next_one_serves() {
+#[ignore = "exact child fixture with private logs, run by the default wrapper"]
+async fn faults_fixture() {
     let job = Arc::new(Job::new().expect("job"));
     for fault in [
         SpeechFault::Hang,
@@ -94,7 +232,8 @@ async fn every_fault_loses_only_the_worker_and_the_next_one_serves() {
 /// the loss is seen, as speech input does, is held through the exit wait and served by the next
 /// worker.
 #[tokio::test]
-async fn a_reload_sent_as_a_decode_is_lost_is_served_by_the_next_worker() {
+#[ignore = "exact child fixture with private logs, run by the default wrapper"]
+async fn reload_fixture() {
     let job = Arc::new(Job::new().expect("job"));
     let speech = start(&job);
     let mut losses = speech.lost();
@@ -111,6 +250,11 @@ async fn a_reload_sent_as_a_decode_is_lost_is_served_by_the_next_worker() {
     drop(speech);
     tokio::task::yield_now().await;
     job.terminate().expect("end job");
+}
+
+#[test]
+fn a_reload_sent_as_a_decode_is_lost_is_served_by_the_next_worker() {
+    run_fixture("reload_fixture");
 }
 
 /// Builds a DLL whose `kumochi_test_throw` throws, with the same compiler as the layout probe.

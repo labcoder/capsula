@@ -102,7 +102,10 @@ fn a_truncated_failed_or_interrupted_round_fails_its_active_run() {
             ends[1] = reason;
         }
         assert_eq!(
-            core.handle(engine(R, TurnEvent::Finished(finish.clone()))),
+            core.handle(engine(
+                super::engine_key(&core, R),
+                TurnEvent::Finished(finish.clone())
+            )),
             Ok(ends),
             "{finish:?}"
         );
@@ -113,11 +116,17 @@ fn a_truncated_failed_or_interrupted_round_fails_its_active_run() {
 #[test]
 fn text_then_a_truncated_round_is_never_done() {
     let mut core = started();
-    core.handle(engine(R, TurnEvent::TextDelta("half".to_owned())))
-        .expect("current");
+    core.handle(engine(
+        super::engine_key(&core, R),
+        TurnEvent::TextDelta("half".to_owned()),
+    ))
+    .expect("current");
     assert_eq!(
-        core.handle(engine(R, TurnEvent::Finished(Finish::Truncated)))
-            .expect("current"),
+        core.handle(engine(
+            super::engine_key(&core, R),
+            TurnEvent::Finished(Finish::Truncated)
+        ))
+        .expect("current"),
         vec![
             Effect::CancelEngine { run: R },
             failed(ErrorKey::AccountOffline, Action::Retry),
@@ -130,8 +139,11 @@ fn text_then_a_truncated_round_is_never_done() {
 #[test]
 fn a_local_stop_is_not_truncation_and_nothing_follows_its_run_end() {
     let mut core = started();
-    core.handle(engine(R, TurnEvent::TextDelta("so far".to_owned())))
-        .expect("current");
+    core.handle(engine(
+        super::engine_key(&core, R),
+        TurnEvent::TextDelta("so far".to_owned()),
+    ))
+    .expect("current");
     assert_eq!(
         core.handle(Input::Stop {
             run: R,
@@ -152,7 +164,7 @@ fn a_local_stop_is_not_truncation_and_nothing_follows_its_run_end() {
     );
     for event in late() {
         assert_eq!(
-            core.handle(engine(R, event.clone())),
+            core.handle(engine(super::engine_key(&core, R), event.clone())),
             Err(Stale),
             "{event:?}"
         );
@@ -164,12 +176,15 @@ fn a_local_stop_is_not_truncation_and_nothing_follows_its_run_end() {
 fn a_completed_round_then_late_events_send_nothing_after_its_run_end() {
     let mut core = started();
     assert_eq!(
-        core.handle(engine(R, TurnEvent::Finished(Finish::Completed))),
+        core.handle(engine(
+            super::engine_key(&core, R),
+            TurnEvent::Finished(Finish::Completed)
+        )),
         Ok(vec![end_run(None, None, RunEnd::Done)])
     );
     for event in late() {
         assert_eq!(
-            core.handle(engine(R, event.clone())),
+            core.handle(engine(super::engine_key(&core, R), event.clone())),
             Err(Stale),
             "{event:?}"
         );
@@ -183,17 +198,20 @@ fn a_completed_round_then_late_events_send_nothing_after_its_run_end() {
 #[test]
 fn a_draw_line_with_no_newline_fails_at_the_label_cap() {
     let mut core = started();
-    assert_eq!(core.handle(engine(R, draw_call())), Ok(Vec::new()));
+    assert_eq!(
+        core.handle(engine(super::engine_key(&core, R), draw_call())),
+        Ok(Vec::new())
+    );
     let quarter = "x".repeat(MAX_STEP_LABEL / 4);
     for _ in 0..4 {
         assert_eq!(
-            core.handle(engine(R, args(&quarter))),
+            core.handle(engine(super::engine_key(&core, R), args(&quarter))),
             Ok(Vec::new()),
             "the open line fits the cap"
         );
     }
     assert_eq!(
-        core.handle(engine(R, args("x"))),
+        core.handle(engine(super::engine_key(&core, R), args("x"))),
         Ok(ends_failed(Failure::Engine)),
         "one byte past the cap"
     );
@@ -203,9 +221,12 @@ fn a_draw_line_with_no_newline_fails_at_the_label_cap() {
 fn a_ready_draw_call_must_match_what_streamed_and_its_open_line_is_a_step() {
     let mut core = started();
     draw_step(&mut core, R, "a").expect("current");
-    assert_eq!(core.handle(engine(R, args("b"))), Ok(Vec::new()));
     assert_eq!(
-        core.handle(engine(R, ready("a\nb"))),
+        core.handle(engine(super::engine_key(&core, R), args("b"))),
+        Ok(Vec::new())
+    );
+    assert_eq!(
+        core.handle(engine(super::engine_key(&core, R), ready("a\nb"))),
         Ok(Vec::new()),
         "b waits for a's scene id"
     );
@@ -214,7 +235,7 @@ fn a_ready_draw_call_must_match_what_streamed_and_its_open_line_is_a_step() {
         Ok(vec![committed(0, "a"), commit_in_scene(None, 1, "b")])
     );
     assert_eq!(
-        core.handle(engine(R, args("c\n"))),
+        core.handle(engine(super::engine_key(&core, R), args("c\n"))),
         Ok(vec![
             Effect::CancelEngine { run: R },
             state(R, T, Phase::Failed),
@@ -224,10 +245,12 @@ fn a_ready_draw_call_must_match_what_streamed_and_its_open_line_is_a_step() {
     );
 
     let mut core = started();
-    core.handle(engine(R, draw_call())).expect("current");
-    core.handle(engine(R, args("a"))).expect("current");
+    core.handle(engine(super::engine_key(&core, R), draw_call()))
+        .expect("current");
+    core.handle(engine(super::engine_key(&core, R), args("a")))
+        .expect("current");
     assert_eq!(
-        core.handle(engine(R, ready("b"))),
+        core.handle(engine(super::engine_key(&core, R), ready("b"))),
         Ok(ends_failed(Failure::Engine)),
         "final arguments that differ from the streamed ones"
     );
@@ -237,7 +260,7 @@ fn a_ready_draw_call_must_match_what_streamed_and_its_open_line_is_a_step() {
 fn arguments_for_a_call_never_started_fail_the_run() {
     let mut core = started();
     assert_eq!(
-        core.handle(engine(R, delta("a"))),
+        core.handle(engine(super::engine_key(&core, R), delta("a"))),
         Ok(ends_failed(Failure::Engine))
     );
 }

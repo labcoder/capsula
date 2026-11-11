@@ -16,12 +16,13 @@ use kumochi_scene::{
     text::Bounded,
 };
 
-use super::Effect;
+use super::{Activation, Effect};
 
 /// Read-ahead positions per scene: prepared results not yet consumed, plus the running one.
 pub(super) const WINDOW: usize = 8;
 
 pub(super) struct Scene {
+    pub(super) activation: Activation,
     pub(super) state: SceneBinding,
     /// The layout at the activated bound: recovered at rest, empty, or the last consumed step's.
     pub(super) rest: LayoutState,
@@ -33,6 +34,8 @@ pub(super) struct Scene {
     pub(super) view_bytes: usize,
     /// The frame reserved for this scene in the presenter's [`super::Frames`].
     pub(super) frame_bytes: usize,
+    /// The paint cache beside that frame, as its stage charged it.
+    pub(super) cache_bytes: usize,
     pub(super) queue: VecDeque<Ticket>,
     pub(super) running: Option<Running>,
     /// Prepared and not consumed, oldest first.
@@ -51,6 +54,7 @@ pub(super) struct Scene {
 
 /// A prepared result, with the worker's full charge of its layout for when it becomes rest.
 pub(super) struct Ready {
+    pub(super) run: RunId,
     pub(super) step: Deferred<PreparedStep>,
     pub(super) full_after: usize,
 }
@@ -119,6 +123,8 @@ impl Scene {
         retained: usize,
         view: SceneView,
         frame_bytes: usize,
+        cache_bytes: usize,
+        activation: Activation,
     ) -> Self {
         let cut = if matches!(
             state.view().recovery_log().last(),
@@ -129,11 +135,13 @@ impl Scene {
             Cut::Open
         };
         Self {
+            activation,
             retained,
             paint: rest.paint_work(),
             view_bytes: view.resident_bytes(),
             view,
             frame_bytes,
+            cache_bytes,
             state,
             rest,
             queue: VecDeque::new(),
@@ -175,16 +183,20 @@ impl Scene {
         })
     }
 
-    /// What stays charged while its prepared work goes: the rest, its view and its frame.
+    /// What stays charged while its prepared work goes: the rest, its view, its frame and the
+    /// frame's paint cache.
     pub(super) fn held(&self) -> usize {
         self.retained
             .saturating_add(self.view_bytes)
             .saturating_add(self.frame_bytes)
+            .saturating_add(self.cache_bytes)
+            .saturating_add(Activation::BYTES)
     }
 
     /// Drops queued and prepared work with any consumption waiting on it, and asks a running job
     /// to stop. Its window positions free here, once; a late answer finds nothing running.
     pub(super) fn halt(&mut self) {
+        self.activation.halt();
         if let Some(running) = self.running.take() {
             running.cancel.store(true, Ordering::Relaxed);
         }
@@ -210,8 +222,11 @@ impl Scene {
     pub(super) fn cut_now(&self) -> StopCut {
         StopCut {
             activated: self.state.view().activated(),
-            revealed: Bounded::new(self.rest.revealed_at_rest())
-                .expect("a scene holds at most its object cap"),
+            revealed: Bounded::new(
+                self.view
+                    .stop(self.stopped_ms.or(self.sampled_ms).unwrap_or(0)),
+            )
+            .expect("a scene holds at most its object cap"),
         }
     }
 }

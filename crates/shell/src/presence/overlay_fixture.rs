@@ -22,7 +22,10 @@ use kumochi_scene::{
     theme::Theme,
 };
 
-use super::{configure_surface, frame_rate::FrameLoop, line::on_next_frame, options, overlay};
+use super::{
+    configure_surface, frame_rate::FrameLoop, line::on_next_frame, options, overlay,
+    paint_cache::PaintScene,
+};
 use crate::platform::PresenceSurface;
 
 const LIFETIME: Duration = Duration::from_secs(60);
@@ -93,7 +96,7 @@ pub(super) fn resting(
     let items = frame.items();
     let painted = frame
         .paint_items()
-        .map(|(item, prims)| {
+        .map(|(item, _, prims)| {
             let index = items
                 .iter()
                 .position(|each| std::ptr::eq(each, item))
@@ -121,6 +124,9 @@ struct Row {
 
 struct Picture {
     items: Vec<PaintUnit>,
+    /// Each unit's fills, staged once before it paints, as a committed view's are.
+    scenes: Vec<PaintScene>,
+    scratch: super::paint_stroke::Scratch,
     epoch: Instant,
     animated: bool,
     rows: Vec<Row>,
@@ -171,7 +177,13 @@ impl Render for Probe {
                 let start = Instant::now();
                 let (failures, _, [allocated, released]) = crate::allocation::usage(|| {
                     let mut failures = 0;
-                    for (original, prims) in &picture.items {
+                    let Picture {
+                        items,
+                        scenes,
+                        scratch,
+                        ..
+                    } = &mut *picture;
+                    for ((original, prims), scene) in items.iter().zip(scenes) {
                         let mut item = original.clone();
                         if moving {
                             let offset = Vec2::new(seconds.sin() * 8.0, seconds.cos() * 8.0);
@@ -180,7 +192,8 @@ impl Render for Probe {
                             item.draw = 0.5 + 0.5 * seconds.sin();
                             item.flow = seconds.fract();
                         }
-                        if overlay::paint_item(&item, prims, window, cx).is_err() {
+                        if overlay::paint_item(&item, 0, prims, scene, scratch, window, cx).is_err()
+                        {
                             failures += 1;
                         }
                     }
@@ -220,6 +233,8 @@ fn run(mode: Mode) {
     drop(timeout);
     let picture = Rc::new(RefCell::new(Picture {
         items: Vec::new(),
+        scenes: Vec::new(),
+        scratch: super::paint_stroke::Scratch::new(),
         epoch: Instant::now(),
         animated,
         rows: Vec::with_capacity(20_000),
@@ -249,6 +264,10 @@ fn run(mode: Mode) {
             );
             {
                 let mut picture = shared.borrow_mut();
+                picture.scenes = items
+                    .iter()
+                    .map(|(item, prims)| PaintScene::of(item.handle, prims))
+                    .collect();
                 picture.items = items;
                 picture.epoch = Instant::now();
             }

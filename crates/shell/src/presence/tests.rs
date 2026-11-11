@@ -24,6 +24,9 @@ fn mirrored_presenter() -> Presenter {
             logical_size: [1920.0, 1080.0],
         },
         Arc::new(Theme::default()),
+        Box::new(super::paint_cache::Stager(size_of::<
+            super::paint_cache::Stager,
+        >())),
     );
     let now = Instant::now();
     presenter.connected(1);
@@ -102,6 +105,7 @@ fn a_first_mirrored_v1_step_without_paint_does_not_hold_global_escape() {
     for panel in [EscapePanel::Closed, EscapePanel::Open] {
         let activity = Presence::activity(&runs, panel, &presenter);
         assert!(!activity.drawing);
+        assert!(activity.working);
         assert!(!activity.holds_global_escape());
     }
 }
@@ -110,7 +114,12 @@ fn a_first_mirrored_v1_step_without_paint_does_not_hold_global_escape() {
 fn focused_text_panel_escape_clears_idle_mirrored_scenes_without_a_global_hold() {
     use super::{Escape, escape::local_decision};
 
-    let presenter = mirrored_presenter();
+    let mut presenter = mirrored_presenter();
+    drop(
+        presenter
+            .stop(RunId(1), Instant::now())
+            .expect("idle stopped scene"),
+    );
     let activity = Presence::activity(&Runs::default(), EscapePanel::Open, &presenter);
     assert!(!activity.holds_global_escape());
     assert_eq!(
@@ -126,6 +135,80 @@ fn focused_text_panel_escape_clears_idle_mirrored_scenes_without_a_global_hold()
         Escape::CancelEdit
     );
     assert!(!activity.holds_global_escape());
+}
+
+#[test]
+fn pending_mirrored_work_selects_stop_but_a_live_pull_keeps_precedence() {
+    use super::{Escape, escape::local_decision};
+    let presenter = mirrored_presenter();
+    let activity = Presence::activity(&Runs::default(), EscapePanel::Open, &presenter);
+    assert!(activity.working);
+    for panel in [
+        EscapePanel::Open,
+        EscapePanel::SettingsEdit,
+        EscapePanel::Rename,
+    ] {
+        assert_eq!(local_decision(activity, panel, &presenter), Escape::Stop);
+    }
+    assert_eq!(
+        local_decision(
+            Activity {
+                pulling: true,
+                ..activity
+            },
+            EscapePanel::Open,
+            &presenter
+        ),
+        Escape::CancelPull
+    );
+    assert!(!activity.holds_global_escape());
+}
+
+#[gpui::test]
+fn provider_done_keeps_the_presenters_stop_token_when_runs_stop_returns_none(
+    cx: &mut TestAppContext,
+) {
+    use kumochi_protocol::message::ControlToBrain;
+    let owner = test_fixture::presence(cx);
+    let presenter = mirrored_presenter();
+    let controls = owner.update(cx, |this, cx| {
+        this.presenter = presenter;
+        this.session = Some(Session::detached(1, Incarnation(1)));
+        this.runs.connected(1);
+        this.runs
+            .apply_state(RunId(1), ThreadId(1), Phase::Answering);
+        this.runs.apply_state(RunId(1), ThreadId(1), Phase::Done);
+        this.runs
+            .apply_data(DataToShell::RunEnd { run: RunId(1) }, 24);
+        assert!(!this.runs.working());
+        assert_eq!(this.runs.stop(), None);
+        let controls = this.link.record_controls();
+        this.activity = Presence::activity(&this.runs, EscapePanel::Closed, &this.presenter);
+        assert!(this.activity.working);
+        this.escape(cx).expect("Stop after provider Done");
+        assert!(!this.presenter.live_work(Instant::now()));
+        this.text.as_mut().expect("typing panel").typing.open();
+        this.escape(cx)
+            .expect("second clear before cut acknowledgement");
+        assert!(!this.presenter.holds_scenes());
+        controls
+    });
+    let ControlToBrain::StopScenes { run, cuts } = controls.try_recv().expect("covering Stop")
+    else {
+        panic!("StopScenes");
+    };
+    assert_eq!(run, RunId(1));
+    assert_eq!(cuts.len(), 1);
+    assert_eq!(cuts[0].scene, SceneId(1));
+    assert_eq!(cuts[0].cut.activated, 0);
+    assert_eq!(&*cuts[0].cut.revealed, &[]);
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::ClearDrawing {
+            scene_ids: vec![SceneId(1)]
+        })
+    );
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
 }
 
 #[test]
@@ -156,6 +239,23 @@ fn a_hidden_window_takes_its_requested_size() {
 
 /// What a `RunEnd` frame's size grants back [any nonzero size].
 const RUN_END_BYTES: u32 = 24;
+
+#[test]
+fn a_reconnected_presenter_never_reuses_a_previous_sessions_stop_token() {
+    let mut presenter = mirrored_presenter();
+    assert_eq!(presenter.stoppable_run(), Some(RunId(1)));
+    presenter.disconnected();
+    presenter.connected(2);
+    presenter
+        .described(2, &Bounded::default(), Instant::now())
+        .expect("fresh empty membership");
+    assert_eq!(presenter.stoppable_run(), None);
+    assert!(!presenter.live_work(Instant::now()));
+    assert!(
+        !Presence::activity(&Runs::default(), EscapePanel::Closed, &presenter)
+            .holds_global_escape()
+    );
+}
 
 fn answer_history(
     owner: &gpui_kit::Entity<Presence>,
@@ -411,6 +511,87 @@ fn actual_page_batches_route_to_one_history_and_grant_current_session_credit_onc
             assert!(!state.reading());
             assert!(!state.listing());
         }
+    });
+}
+
+#[gpui::test]
+fn unavailable_history_drops_stale_pages_without_crediting_a_replacement_session(
+    cx: &mut TestAppContext,
+) {
+    use kumochi_protocol::message::{DataToBrain, EventId, PageEvent, PageEventKind, PageOf};
+
+    let owner = test_fixture::presence(cx);
+    owner.update(cx, |owner, cx| {
+        let (link, requests) = crate::link::LinkHandle::recording();
+        owner.link = link;
+        owner.session = Some(Session::detached(2, Incarnation(1)));
+        owner.chat.update(cx, |state, _| {
+            state.connected();
+            state.show_for(Some(ThreadId(1)));
+            assert_eq!(state.requests().len(), 2);
+            state.select(Some(ThreadId(2)));
+        });
+        let marker = |id| PageEvent {
+            id: EventId(id),
+            run: Some(RunId(7)),
+            kind: PageEventKind::NoVisual { scene: SceneId(1) },
+            text: String::new(),
+            cut: false,
+        };
+        let page = |request, thread, generation, bytes, events| LinkEvent::Data {
+            generation,
+            bytes,
+            message: DataToShell::Page {
+                request,
+                thread,
+                events,
+                before: Some(EventId(8)),
+            },
+        };
+        owner
+            .link_events(
+                Batch::Plain(vec![
+                    page(3, ThreadId(1), 1, 29, vec![marker(99)]),
+                    page(3, ThreadId(1), 2, 11, vec![marker(99)]),
+                    page(997, ThreadId(2), 2, 13, vec![marker(99)]),
+                ]),
+                cx,
+            )
+            .expect("stale history replies");
+        assert_eq!(owner.session.as_ref().map(Session::granted), Some(24));
+        let state = owner.chat.read(cx);
+        assert_eq!(state.open, Some(ThreadId(2)));
+        assert_eq!(state.events, []);
+        assert_eq!(state.before, None);
+        assert!(state.reading());
+        assert_eq!(
+            requests.try_recv(),
+            Ok(DataToBrain::PageRequest {
+                request: 5,
+                page: PageOf::Events {
+                    thread: ThreadId(2),
+                    before: None,
+                },
+            })
+        );
+        assert_eq!(requests.try_recv(), Err(async_channel::TryRecvError::Empty));
+        owner
+            .link_events(
+                Batch::Plain(vec![
+                    page(5, ThreadId(2), 1, 31, vec![marker(99)]),
+                    page(5, ThreadId(2), 2, 17, vec![marker(9), marker(8)]),
+                    page(3, ThreadId(2), 2, 19, vec![marker(99)]),
+                ]),
+                cx,
+            )
+            .expect("current history reply");
+        assert_eq!(owner.session.as_ref().map(Session::granted), Some(60));
+        let state = owner.chat.read(cx);
+        assert_eq!(state.open, Some(ThreadId(2)));
+        assert_eq!(state.events, [marker(9), marker(8)]);
+        assert_eq!(state.before, Some(EventId(8)));
+        assert!(!state.reading());
+        assert_eq!(owner.threads.read(cx).events, []);
     });
 }
 

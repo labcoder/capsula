@@ -12,7 +12,10 @@ use kumochi_scene::{
     record::Rgb,
 };
 
-use super::{configure_surface, line::on_next_frame, options, paint_paths, scaled};
+use super::{
+    configure_surface, line::on_next_frame, options, paint_cache::PaintScene, paint_geometry,
+    paint_stroke::Scratch, scaled,
+};
 use crate::platform::{self, PresenceSurface};
 
 const BLOCK: u64 = 4;
@@ -34,6 +37,7 @@ struct Case {
     candidate: usize,
     primitives: Vec<(Prim, Affine)>,
     work: PaintWork,
+    cache: PaintScene,
 }
 
 fn color() -> Paint {
@@ -160,11 +164,15 @@ fn case(kind: Kind, candidate: usize) -> Case {
             && work.fill_vertices <= candidate
             && work.outline_points <= candidate
     );
+    let handle = kumochi_scene::Handle::new(1, 0).expect("a diagnostic handle");
+    let sources: Vec<_> = primitives.iter().map(|(prim, _)| prim.clone()).collect();
+    let cache = PaintScene::of(handle, &sources);
     Case {
         kind,
         candidate,
         primitives,
         work,
+        cache,
     }
 }
 
@@ -181,6 +189,7 @@ struct Probe {
     epoch: Instant,
     lifetime: Duration,
     rows: Rc<RefCell<Vec<Row>>>,
+    scratch: Rc<RefCell<Scratch>>,
 }
 
 impl Probe {
@@ -197,6 +206,7 @@ impl Render for Probe {
         let cases = Rc::clone(&self.cases);
         let rows = Rc::clone(&self.rows);
         let epoch = self.epoch;
+        let scratch = Rc::clone(&self.scratch);
         canvas(
             |_, _, _| (),
             move |_, (), window, _| {
@@ -212,15 +222,28 @@ impl Render for Probe {
                 let case = &cases[index];
                 let start = Instant::now();
                 let ((), _, [allocated, released]) = crate::allocation::usage(|| {
-                    for (prim, transform) in &case.primitives {
-                        let paths = paint_paths::paths(
-                            prim,
-                            *transform,
-                            0.99,
-                            elapsed.as_secs_f32().fract(),
-                        )
-                        .expect("bounded diagnostic geometry builds");
-                        for (path, paint) in paths {
+                    for (index, (prim, transform)) in case.primitives.iter().enumerate() {
+                        let paths = if let Prim::Fill { color, .. } = prim {
+                            let handle =
+                                kumochi_scene::Handle::new(1, 0).expect("a diagnostic handle");
+                            [
+                                case.cache
+                                    .fill(handle, index, *transform)
+                                    .expect("a staged diagnostic fill")
+                                    .map(|path| (path, *color)),
+                                None,
+                            ]
+                        } else {
+                            paint_geometry::paths(
+                                &mut scratch.borrow_mut(),
+                                prim,
+                                *transform,
+                                0.99,
+                                elapsed.as_secs_f32().fract(),
+                            )
+                            .expect("bounded diagnostic geometry builds")
+                        };
+                        for (path, paint) in paths.into_iter().flatten() {
                             let mut color = gpui_kit::rgb(paint.rgb.get());
                             color.a *= paint.opacity;
                             window.paint_path(path, color);
@@ -333,6 +356,7 @@ fn run(cases: Vec<Case>, repeats: usize) {
                     epoch,
                     lifetime,
                     rows,
+                    scratch: Rc::new(RefCell::new(Scratch::new())),
                 })
             })
             .expect("diagnostic window");

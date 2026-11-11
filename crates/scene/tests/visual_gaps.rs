@@ -275,7 +275,7 @@ fn edge_label_chips_paint_after_every_edge_stroke() {
     view.frame(u64::MAX, &mut frame).expect("settled frame");
     let kinds: Vec<_> = frame
         .paint_items()
-        .flat_map(|(_, primitives)| primitives)
+        .flat_map(|(_, _, primitives)| primitives)
         .map(|primitive| match primitive {
             Prim::Rect { .. } => "rect",
             Prim::Text { .. } => "text",

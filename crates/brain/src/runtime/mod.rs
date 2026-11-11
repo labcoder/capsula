@@ -10,6 +10,8 @@ pub(crate) mod claude;
 mod connections;
 mod controls;
 mod data;
+#[cfg(test)]
+mod draw_stream_tests;
 mod recovery;
 mod settings;
 mod store_thread;
