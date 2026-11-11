@@ -1,7 +1,6 @@
 //! The FFI owner's guards and error paths against a fake C table, the loader's pins and
 //! closure policy, and Rez-only checks against the real DLLs.
 
-use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char};
 use std::fmt::Write as _;
 use std::fs::File;
@@ -9,6 +8,9 @@ use std::io;
 use std::os::windows::fs::OpenOptionsExt as _;
 use std::os::windows::io::AsRawHandle as _;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use kumochi_protocol::voice::NativeFile;
 use sha2::{Digest as _, Sha256};
@@ -39,9 +41,9 @@ use crate::speech::SpeechSupervisor;
 use crate::test_support::Scratch;
 use crate::voice::stt::{Decode, SttHandle, SttResult};
 
-/// What the fake C functions do and saw, per test thread.
+/// What one fake recognizer's C functions do and saw.
 #[derive(Default)]
-struct Fake {
+pub(super) struct Fake {
     calls: Vec<&'static str>,
     accepted: Vec<(i32, Vec<f32>)>,
     config: Option<(String, i32, String, String, String)>,
@@ -50,14 +52,75 @@ struct Fake {
     null_result: bool,
     /// The result's text, NUL added; `None` gives a null `text`.
     text: Option<Vec<u8>>,
+    released: Option<Sender<&'static str>>,
+    gates: std::collections::BTreeMap<usize, Receiver<()>>,
+    reply_gates: std::collections::BTreeMap<usize, Receiver<()>>,
+    started: Option<Sender<usize>>,
+    active: usize,
+    peak: usize,
+    text_mode: TextMode,
+    expected_peak: Option<usize>,
 }
 
-thread_local! {
-    static FAKE: RefCell<Fake> = RefCell::new(Fake::default());
+#[derive(Clone, Copy, Default)]
+enum TextMode {
+    #[default]
+    Fixed,
+    Samples,
 }
 
-fn fake<T>(f: impl FnOnce(&mut Fake) -> T) -> T {
-    FAKE.with(|fake| f(&mut fake.borrow_mut()))
+pub(super) struct Release {
+    events: Sender<&'static str>,
+    leave: Receiver<()>,
+}
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        self.events.send("resources retiring").expect("observer");
+        self.leave
+            .recv_timeout(Duration::from_secs(5))
+            .expect("release resources");
+        self.events.send("resources released").expect("observer");
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Failure {
+    Recognizer,
+    Warmup,
+}
+
+pub(crate) fn failed_load(
+    failure: Failure,
+    events: Sender<&'static str>,
+    leave: Receiver<()>,
+) -> Sherpa {
+    let sherpa = sherpa(Some(b""));
+    fake(&sherpa, |fake| {
+        fake.null_recognizer = matches!(failure, Failure::Recognizer);
+        fake.null_stream = matches!(failure, Failure::Warmup);
+        fake.released = Some(events.clone());
+    });
+    Sherpa {
+        _release: Some(Release { events, leave }),
+        ..sherpa
+    }
+}
+
+fn fake<T>(sherpa: &Sherpa, f: impl FnOnce(&mut Fake) -> T) -> T {
+    f(&mut sherpa
+        .fake
+        .as_ref()
+        .expect("fake table")
+        .lock()
+        .expect("fixture"))
+}
+
+struct FakeRecognizer(Arc<Mutex<Fake>>);
+
+struct FakeStream {
+    fixture: Arc<Mutex<Fake>>,
+    samples: usize,
 }
 
 /// A result and the text it points into, freed together.
@@ -65,6 +128,7 @@ fn fake<T>(f: impl FnOnce(&mut Fake) -> T) -> T {
 struct FakeResult {
     result: RecognizerResult,
     text: Option<CString>,
+    fixture: Arc<Mutex<Fake>>,
 }
 
 fn read(text: *const c_char) -> String {
@@ -74,11 +138,11 @@ fn read(text: *const c_char) -> String {
         .into_owned()
 }
 
-unsafe extern "C-unwind" fn create_recognizer(
-    config: *const RecognizerConfig,
-) -> *const RawRecognizer {
-    // SAFETY: the code under test passes a live config.
-    let config = unsafe { &*config };
+pub(super) fn create_for(sherpa: &Sherpa, config: &RecognizerConfig) -> *const RawRecognizer {
+    let Some(fixture) = &sherpa.fake else {
+        // SAFETY: the production constructor passes a live ABI-matching config.
+        return unsafe { (sherpa.fns.create_recognizer)(config) };
+    };
     let model = &config.model_config;
     let seen = (
         read(model.transducer.encoder),
@@ -87,42 +151,60 @@ unsafe extern "C-unwind" fn create_recognizer(
         read(model.model_type),
         read(config.decoding_method),
     );
-    fake(|fake| {
+    fake(sherpa, |fake| {
         fake.calls.push("create recognizer");
         fake.config = Some(seen);
         if fake.null_recognizer {
             std::ptr::null()
         } else {
-            Box::into_raw(Box::new(0_u8)).cast()
+            Box::into_raw(Box::new(FakeRecognizer(Arc::clone(fixture)))).cast()
         }
     })
 }
 
 unsafe extern "C-unwind" fn destroy_recognizer(raw: *const RawRecognizer) {
-    fake(|fake| fake.calls.push("destroy recognizer"));
-    // SAFETY: made by create_recognizer's Box.
-    drop(unsafe { Box::from_raw(raw.cast_mut().cast::<u8>()) });
+    // SAFETY: create_for allocated this recognizer, which is destroyed once.
+    let recognizer = unsafe { Box::from_raw(raw.cast_mut().cast::<FakeRecognizer>()) };
+    let mut fake = recognizer.0.lock().expect("fixture");
+    fake.calls.push("destroy recognizer");
+    assert_eq!(fake.active, 0);
+    if let Some(expected) = fake.expected_peak {
+        assert_eq!(fake.peak, expected);
+    }
+    if let Some(events) = &fake.released {
+        events.send("recognizer released").expect("observer");
+    }
 }
 
-unsafe extern "C-unwind" fn create_stream(_: *const RawRecognizer) -> *const RawStream {
-    fake(|fake| {
-        fake.calls.push("create stream");
-        if fake.null_stream {
-            std::ptr::null()
-        } else {
-            Box::into_raw(Box::new(0_u8)).cast()
-        }
-    })
+unsafe extern "C-unwind" fn create_stream(raw: *const RawRecognizer) -> *const RawStream {
+    // SAFETY: the recognizer lives across creation of this stream.
+    let recognizer = unsafe { &*raw.cast::<FakeRecognizer>() };
+    let mut fake = recognizer.0.lock().expect("fixture");
+    fake.calls.push("create stream");
+    if fake.null_stream {
+        std::ptr::null()
+    } else {
+        Box::into_raw(Box::new(FakeStream {
+            fixture: Arc::clone(&recognizer.0),
+            samples: 0,
+        }))
+        .cast()
+    }
 }
 
 unsafe extern "C-unwind" fn destroy_stream(raw: *const RawStream) {
-    fake(|fake| fake.calls.push("destroy stream"));
-    // SAFETY: made by create_stream's Box.
-    drop(unsafe { Box::from_raw(raw.cast_mut().cast::<u8>()) });
+    // SAFETY: create_stream allocated this stream, destroyed once after its result.
+    let stream = unsafe { Box::from_raw(raw.cast_mut().cast::<FakeStream>()) };
+    stream
+        .fixture
+        .lock()
+        .expect("fixture")
+        .calls
+        .push("destroy stream");
 }
 
 unsafe extern "C-unwind" fn accept_waveform(
-    _: *const RawStream,
+    raw: *const RawStream,
     rate: i32,
     samples: *const f32,
     n: i32,
@@ -130,21 +212,63 @@ unsafe extern "C-unwind" fn accept_waveform(
     let n = usize::try_from(n).expect("a positive count");
     // SAFETY: the code under test passes `n` live samples.
     let samples = unsafe { std::slice::from_raw_parts(samples, n) }.to_vec();
-    fake(|fake| {
-        fake.calls.push("accept");
-        fake.accepted.push((rate, samples));
-    });
+    // SAFETY: this call exclusively supplies the new stream's waveform.
+    let stream = unsafe { &mut *raw.cast_mut().cast::<FakeStream>() };
+    stream.samples = n;
+    let mut fake = stream.fixture.lock().expect("fixture");
+    fake.calls.push("accept");
+    fake.accepted.push((rate, samples));
 }
 
-unsafe extern "C-unwind" fn decode_stream(_: *const RawRecognizer, _: *const RawStream) {
-    fake(|fake| fake.calls.push("decode"));
+unsafe extern "C-unwind" fn decode_stream(_: *const RawRecognizer, raw: *const RawStream) {
+    // SAFETY: the stream is exclusively decoded by its caller until this returns.
+    let stream = unsafe { &*raw.cast::<FakeStream>() };
+    let gate = {
+        let mut fake = stream.fixture.lock().expect("fixture");
+        fake.calls.push("decode");
+        fake.active += 1;
+        fake.peak = fake.peak.max(fake.active);
+        let gate = fake.gates.remove(&stream.samples);
+        if let Some(started) = &fake.started {
+            started.send(stream.samples).expect("decode observer");
+        }
+        gate
+    };
+    if let Some(gate) = gate {
+        gate.recv_timeout(Duration::from_secs(5))
+            .expect("release decode");
+    }
+    stream.fixture.lock().expect("fixture").active -= 1;
 }
 
-unsafe extern "C-unwind" fn get_result(_: *const RawStream) -> *const RecognizerResult {
-    let (null, text) = fake(|fake| {
+unsafe extern "C-unwind" fn get_result(raw: *const RawStream) -> *const RecognizerResult {
+    // SAFETY: this decoded stream is live until its result has been destroyed.
+    let stream = unsafe { &*raw.cast::<FakeStream>() };
+    let (null, text, gate) = {
+        let mut fake = stream.fixture.lock().expect("fixture");
         fake.calls.push("get result");
-        (fake.null_result, fake.text.clone())
-    });
+        let gate = fake.reply_gates.remove(&stream.samples);
+        if gate.is_some() {
+            fake.started
+                .as_ref()
+                .expect("reply observer")
+                .send(stream.samples)
+                .expect("reply ready");
+        }
+        (
+            fake.null_result,
+            if matches!(fake.text_mode, TextMode::Samples) {
+                Some(format!("utterance {}", stream.samples).into_bytes())
+            } else {
+                fake.text.clone()
+            },
+            gate,
+        )
+    };
+    if let Some(gate) = gate {
+        gate.recv_timeout(Duration::from_secs(5))
+            .expect("release reply");
+    }
     if null {
         return std::ptr::null();
     }
@@ -152,13 +276,23 @@ unsafe extern "C-unwind" fn get_result(_: *const RawStream) -> *const Recognizer
     // SAFETY: all-zero is valid for a struct of integers, floats and raw pointers.
     let mut result: RecognizerResult = unsafe { std::mem::zeroed() };
     result.text = text.as_ref().map_or(std::ptr::null(), |text| text.as_ptr());
-    Box::into_raw(Box::new(FakeResult { result, text })).cast()
+    Box::into_raw(Box::new(FakeResult {
+        result,
+        text,
+        fixture: Arc::clone(&stream.fixture),
+    }))
+    .cast()
 }
 
 unsafe extern "C-unwind" fn destroy_result(raw: *const RecognizerResult) {
-    fake(|fake| fake.calls.push("destroy result"));
     // SAFETY: made by get_result's Box; `result` is FakeResult's first field.
-    drop(unsafe { Box::from_raw(raw.cast_mut().cast::<FakeResult>()) });
+    let result = unsafe { Box::from_raw(raw.cast_mut().cast::<FakeResult>()) };
+    result
+        .fixture
+        .lock()
+        .expect("fixture")
+        .calls
+        .push("destroy result");
 }
 
 unsafe extern "C-unwind" fn version() -> *const c_char {
@@ -166,28 +300,123 @@ unsafe extern "C-unwind" fn version() -> *const c_char {
 }
 
 fn sherpa(text: Option<&[u8]>) -> Sherpa {
-    fake(|fake| {
-        *fake = Fake {
-            text: text.map(<[u8]>::to_vec),
-            ..Fake::default()
-        };
-    });
-    Sherpa::with_fns(Fns {
-        create_recognizer,
-        destroy_recognizer,
-        create_stream,
-        destroy_stream,
-        accept_waveform,
-        decode_stream,
-        get_result,
-        destroy_result,
-        version,
-        git_sha1: version,
-    })
+    let fixture = Arc::new(Mutex::new(Fake {
+        text: text.map(<[u8]>::to_vec),
+        ..Fake::default()
+    }));
+    Sherpa::with_fns(
+        Fns {
+            create_recognizer: unused_create,
+            destroy_recognizer,
+            create_stream,
+            destroy_stream,
+            accept_waveform,
+            decode_stream,
+            get_result,
+            destroy_result,
+            version,
+            git_sha1: version,
+        },
+        fixture,
+    )
 }
 
-fn calls() -> Vec<&'static str> {
-    fake(|fake| fake.calls.clone())
+unsafe extern "C-unwind" fn unused_create(_: *const RecognizerConfig) -> *const RawRecognizer {
+    std::ptr::null()
+}
+
+fn calls(sherpa: &Sherpa) -> Vec<&'static str> {
+    fake(sherpa, |fake| fake.calls.clone())
+}
+
+pub(crate) fn parallel_load(
+    gates: std::collections::BTreeMap<usize, Receiver<()>>,
+    reply_gates: std::collections::BTreeMap<usize, Receiver<()>>,
+    started: Sender<usize>,
+    events: Sender<&'static str>,
+    leave: Receiver<()>,
+) -> Sherpa {
+    let sherpa = sherpa(Some(b"warmup"));
+    fake(&sherpa, |fake| {
+        fake.gates = gates;
+        fake.reply_gates = reply_gates;
+        fake.started = Some(started);
+        fake.text_mode = TextMode::Samples;
+        fake.expected_peak = Some(2);
+        fake.released = Some(events.clone());
+    });
+    Sherpa {
+        _release: Some(Release { events, leave }),
+        ..sherpa
+    }
+}
+
+#[test]
+fn shared_recognizer_streams_use_independent_fixture_state_and_release_in_order() {
+    let sherpa = sherpa(None);
+    let (started, observed) = std::sync::mpsc::channel();
+    let (first_release, first_gate) = std::sync::mpsc::channel();
+    let (second_release, second_gate) = std::sync::mpsc::channel();
+    fake(&sherpa, |fake| {
+        fake.gates.insert(1, first_gate);
+        fake.gates.insert(2, second_gate);
+        fake.started = Some(started);
+        fake.text_mode = TextMode::Samples;
+        fake.expected_peak = Some(2);
+    });
+    let recognizer = sherpa.recognizer(Path::new("models")).expect("recognizer");
+    std::thread::scope(|scope| {
+        let recognizer = &recognizer;
+        let first = scope.spawn(move || recognizer.decode(16_000, &[1]));
+        assert_eq!(
+            observed
+                .recv_timeout(Duration::from_secs(5))
+                .expect("first"),
+            1
+        );
+        let second = scope.spawn(move || recognizer.decode(16_000, &[2, 2]));
+        assert_eq!(
+            observed
+                .recv_timeout(Duration::from_secs(5))
+                .expect("second"),
+            2
+        );
+        let other = self::sherpa(Some(b"other fixture"));
+        let other_recognizer = other
+            .recognizer(Path::new("other-models"))
+            .expect("other recognizer");
+        assert_eq!(
+            other_recognizer.decode(16_000, &[3]),
+            Ok("other fixture".to_owned())
+        );
+        second_release.send(()).expect("second release");
+        assert_eq!(
+            second.join().expect("second thread"),
+            Ok("utterance 2".to_owned())
+        );
+        assert_eq!(fake(&sherpa, |fake| fake.active), 1);
+        first_release.send(()).expect("first release");
+        assert_eq!(
+            first.join().expect("first thread"),
+            Ok("utterance 1".to_owned())
+        );
+    });
+    assert_eq!(
+        calls(&sherpa)
+            .iter()
+            .filter(|call| **call == "destroy result")
+            .count(),
+        2
+    );
+    assert_eq!(
+        calls(&sherpa)
+            .iter()
+            .filter(|call| **call == "destroy stream")
+            .count(),
+        2
+    );
+    drop(recognizer);
+    assert_eq!(calls(&sherpa).last(), Some(&"destroy recognizer"));
 }
 
 #[test]
@@ -200,11 +429,11 @@ fn a_decode_converts_once_and_drops_result_stream_then_recognizer() {
     );
     drop(recognizer);
     assert_eq!(
-        fake(|fake| fake.accepted.clone()),
+        fake(&sherpa, |fake| fake.accepted.clone()),
         [(44_100, vec![0.0, 0.5, -1.0, 32_767.0 / 32_768.0])]
     );
     assert_eq!(
-        calls(),
+        calls(&sherpa),
         [
             "create recognizer",
             "create stream",
@@ -223,7 +452,7 @@ fn the_recognizer_gets_parakeet_on_eight_cpu_threads() {
     let sherpa = sherpa(None);
     drop(sherpa.recognizer(Path::new(r"C:\models")).expect("created"));
     assert_eq!(
-        fake(|fake| fake.config.clone()),
+        fake(&sherpa, |fake| fake.config.clone()),
         Some((
             r"C:\models\encoder.int8.onnx".to_owned(),
             8,
@@ -237,12 +466,12 @@ fn the_recognizer_gets_parakeet_on_eight_cpu_threads() {
 #[test]
 fn a_null_recognizer_is_create_and_nothing_is_destroyed() {
     let sherpa = sherpa(None);
-    fake(|fake| fake.null_recognizer = true);
+    fake(&sherpa, |fake| fake.null_recognizer = true);
     assert_eq!(
         sherpa.recognizer(Path::new("models")).err(),
         Some(NativeError::Create)
     );
-    assert_eq!(calls(), ["create recognizer"]);
+    assert_eq!(calls(&sherpa), ["create recognizer"]);
 }
 
 #[test]
@@ -281,13 +510,13 @@ fn null_native_returns_fail_and_destroy_every_object_once() {
     for (setup, error, expected) in cases {
         let sherpa = sherpa(Some(b"unused"));
         let recognizer = sherpa.recognizer(Path::new("models")).expect("created");
-        fake(setup);
+        fake(&sherpa, setup);
         assert_eq!(recognizer.decode(16_000, &[1]), Err(error));
         drop(recognizer);
         let mut want = vec!["create recognizer"];
         want.extend_from_slice(expected);
         want.push("destroy recognizer");
-        assert_eq!(calls(), want, "{error:?}");
+        assert_eq!(calls(&sherpa), want, "{error:?}");
     }
 }
 
@@ -306,7 +535,7 @@ fn transcript_text_is_bounded_and_utf8_and_still_destroyed() {
         let recognizer = sherpa.recognizer(Path::new("models")).expect("created");
         assert_eq!(recognizer.decode(16_000, &[1]), want);
         assert_eq!(
-            calls()
+            calls(&sherpa)
                 .iter()
                 .filter(|call| call.starts_with("destroy"))
                 .count(),
@@ -323,7 +552,7 @@ fn bad_input_is_refused_before_any_stream() {
     assert_eq!(recognizer.decode(0, &[1]), Err(NativeError::Input));
     assert_eq!(recognizer.decode(u32::MAX, &[1]), Err(NativeError::Input));
     assert_eq!(recognizer.decode(16_000, &[]), Err(NativeError::Input));
-    assert_eq!(calls(), ["create recognizer"]);
+    assert_eq!(calls(&sherpa), ["create recognizer"]);
     let max = usize::try_from(i32::MAX).expect("64-bit");
     assert_eq!(sample_count(max), Ok(i32::MAX));
     assert_eq!(sample_count(max + 1), Err(NativeError::Input));

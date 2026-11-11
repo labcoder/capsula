@@ -32,8 +32,7 @@ nothing downloads them.
 supplies the models folder under `platform::data_dir`. Construction makes no request, and
 startup never resumes anything automatically. Its only caller is the installer's one fetch,
 through the `download::Fetch` seam, which makes a `Downloader` for each fetch, so start-up builds
-none. Installing, cancelling and start-up are in [The installer](#the-installer); `RemoveVoice`
-is still refused (see [settings](settings.md#config-keys)).
+none. Installing, cancelling, removing and start-up are in [The installer](#the-installer).
 
 The separate HTTPS client uses the OS trust roots, no proxy, credentials, cookies, Referer or
 compression, and `Accept-Encoding: identity`. The first URL and up to five redirects must use
@@ -223,10 +222,11 @@ sequenceDiagram
 `brain::voice::installer::Installer` holds one entry per part: what `config.toml` says about it
 (absent, installed or removing), its phase, its current token, and how many automatic reloads it
 has left. It does no I/O. Each method returns the effects the runtime carries out: start the
-fetch, cancel it, load, unload, or queue the Activate write. Tokens come from one counter, and
-every completion comes back with the token it started with: a fetch's result, a handle's report
-(the token is its ask), or a write's result. A completion for any other token than the part's
-current one changes nothing.
+fetch, cancel it, load, unload, delete a part's folder, or queue the Activate or `RemoveDone`
+write. Tokens come from one counter, and every completion comes back with the token it started
+with: a fetch's result, a handle's report (the token is its ask), a write's result or a delete's.
+A completion for any other token than the part's current one changes nothing, except while a
+removal holds or drains it (see [Remove](#remove)).
 
 At brain start, with no network, after unfinished removals:
 
@@ -239,8 +239,8 @@ At brain start, with no network, after unfinished removals:
 3. A removal whose folder couldn't be deleted is `Failed { VoiceStorage, installed: false }`.
    One whose folder is gone shows `NotInstalled` while its `RemoveDone` write is in flight, and
    stays removing until that write commits. If the write fails, the part is
-   `Failed { VoiceStorage, installed: false }` too, and nothing installs it until the next start
-   finishes the removal.
+   `Failed { VoiceStorage, installed: false }` too. Either failure is retried by the next
+   install or remove of the part, or by the next start (see [Remove](#remove)).
 
 ```mermaid
 stateDiagram-v2
@@ -285,8 +285,8 @@ queue order, with the current settings, and progress follows as `Voice`.
 
 Cancel sends every install that's waiting, fetching or loading back to where it was, with its
 files kept, so the next install resumes. A cancelled load's late success is dropped and sends
-nothing, because the handle already freed it. A commit in flight isn't cancelled. An install
-during a removal's `RemoveDone` write starts once that write commits. Installs keep going while
+nothing, because the handle already freed it. A commit in flight isn't cancelled, and neither
+is a removal. An install during a removal starts once the removal finishes. Installs keep going while
 no shell is connected. Quit tells the running fetch to stop and starts no other, so an install
 still waiting never downloads; a commit already queued still lands. A model lost after Quit
 fails instead of reloading.
@@ -307,9 +307,53 @@ stateDiagram-v2
   Loading --> NotInstalled: cancel before the write
 ```
 
+### Remove
+
+`RemoveVoice`'s one answer is its removal intent's write, which moves the part from `installed`
+to `removing`. The write takes the op's place in the queue, so it stays in order with other
+changes. An Activate that reaches the front after the intent committed isn't written, so it
+can't put the part back in `installed`; one behind a refused intent is written as usual.
+
+1. Nothing else happens before the intent commits. The part keeps its phase, model, fetch and
+   view, and runs still speak. A refused intent is the op's refused answer and changes nothing:
+   what came for the part meanwhile (a fetch's end, a load's report or the Activate's result) is
+   held, then applied in order.
+2. Once it commits, the part shows `NotInstalled` and drains: its fetch is cancelled and every
+   load it started is unloaded. That includes work an earlier cancel or refused Activate already
+   let go of, because a cancel changes the token, not what's running. The drain ends once the
+   part's fetch has ended and each of those loads has its report that the model is gone
+   (`Unloaded`, `Discarded`, `Failed` or `Lost`). A `Loaded` doesn't count, and nothing
+   reloads.
+3. The part's folder is deleted on a blocking task, with the held folders and the reparse-point
+   rule start-up uses (see [settings](settings.md#config-keys)). A folder already gone counts as
+   deleted.
+4. The `RemoveDone` write takes the part out of `removing`.
+
+A failed delete or `RemoveDone` leaves `removing` set and the part
+`Failed { VoiceStorage, installed: false }`. The next `InstallVoice` or `RemoveVoice` of the
+part is answered accepted and retries the same delete and write, with no second intent; an
+install fetches only once `RemoveDone` commits. An install that waited for a failed delete is
+dropped. `RemoveVoice` of a part with nothing installed and no folder is refused with
+`Error(VoiceUnavailable)`, and one during a removal is answered accepted. Either way a queued
+install of the part is dropped. Cancel doesn't stop a removal. Quit lets a queued intent land like
+any other change and stops the removal there, and start-up finishes it from the file.
+
+```mermaid
+stateDiagram-v2
+  Part --> Part: RemoveVoice, intent refused
+  Part --> Draining: intent committed
+  Draining --> Deleting: fetch ended, model gone
+  Deleting --> Clearing: folder gone
+  Deleting --> Cleanup: delete failed
+  Clearing --> NotInstalled: RemoveDone committed
+  Clearing --> Cleanup: RemoveDone failed
+  Cleanup --> Deleting: InstallVoice or RemoveVoice
+```
+
 The brain sends `ControlToShell::Voice` with both parts' `PartState` once per connection, after
 `Account` and before `Scenes`, and again on each change. Reports that came while no shell was
-connected are applied first, so the view is current. The shell doesn't show it yet.
+connected are applied first, so the view is current. Settings → Voice shows speech input's
+state; spoken replies do not yet have their own settings controls.
 
 ## Provenance
 
@@ -392,28 +436,77 @@ flowchart LR
 ```
 
 - **Control:** load, unload and shutdown set fields in one shared state; none of them queues, so
-  none can be refused or held up. At most one decode waits behind the running one, and another is
+  none can be refused or held up. At most two decodes run and one waits; another queued request is
   `SttBusy`. While no model is ready (unloaded, loading, or after a failed load) a decode is
   answered `NotLoaded` at once, and so is one that arrives after unload while a decode still runs.
-  Unload answers a waiting decode `Stale`; a decode in progress finishes and is answered, then the
-  model is unloaded. A decode whose caller has gone is skipped. `Decode` and `SttResult` print no
+  Unload answers a waiting decode `Stale`; both running decodes finish before owned teardown.
+  A decode whose caller has gone before admission is skipped. `Decode` and `SttResult` print no
   samples and no transcript text.
+- **Stale overlap:** a live first receiver preserves FIFO. If that receiver closes, one wanted
+  decode may run beside the stale call on the same loaded model. A stale call still uses a slot
+  until completion and join; its text is dropped, not logged. With one live call and a nonclosed
+  waiter, the existing Condvar uses10ms receiver-closure checks; no polling is needed
+  otherwise. Slots are reaped by completion, so a held stale first call cannot block reuse of the
+  other slot. This owner API is not yet connected to a production hold/microphone caller.
 - **Load:** the worker's `Load`. A failed load leaves speech input unloaded until the next
-  `load`. A newer ask reloads after the running decode, and a decode left waiting is served by
+  `load`. A newer ask reloads after both running decodes, and a decode left waiting is served by
   the new model.
 - **A lost worker:** the `voice-stt` thread has its own subscription to `SpeechHandle::lost`, and a
   small task wakes it on each loss, so an idle loss ends serving too. A load's reply names the
   worker generation that holds the model, and each loss names the generation that died. Only that
   generation's loss is the load's, even one that comes before serving starts. An older worker's
   loss can arrive after a newer load, because the supervisor answers before it broadcasts, so it's
-  skipped and the newer model keeps serving and is unloaded as usual. The running decode is answered
-  `Failed(WorkerLost)`, a waiting one `NotLoaded`, and the ask is reported `Lost`. Speech input
+  skipped and the newer model keeps serving and is unloaded as usual. Still-live running replies are answered
+  `Failed(WorkerLost)` and a waiting one `NotLoaded`. The ask is reported `Lost` only after that
+  worker's confirmed exit, not after the request failure or termination request. Speech input
   stays unloaded unless a newer ask came after the lost load started; a failure's cleanup never
   undoes a newer ask. Retrying is the installer's bounded policy; nothing here retries on its own.
-- **Shutdown:** dropping the handle lets the request in flight finish, unloads and ends the
-  thread; nothing waits for it.
+- **Loss delivery:** the owner checks all available generation notices, completions and joins
+  before delivering sibling successes. Observed loss is sticky; later valid completions cannot
+  restore readiness. A genuinely later loss cannot revoke a success already delivered.
+- **Shutdown:** dropping the handle answers the waiter `Stale`, drains both running calls,
+  unloads and ends the thread; Drop itself never waits. Fallible decode-thread creation failure
+  and a caught unwind in an unwind-capable profile use the existing WorkerLost/retirement path.
+  Release keeps `panic = "abort"`: a brain panic is process fail-stop, with no promise of reply
+  settlement, orderly owner reports or release.
+- **Idle:** running calls, including stale ones, and queued work outrank expiry. The clock resets
+  after the last running call ends, not on a policy update or notification. Physical release
+  still requires the owned unload receipt or matching confirmed exit described below.
 
 ### Load asks
+
+Speech input applies the committed `SttUnload` setting only once installation is ready:
+keep the model warm, unload after 15 idle minutes, or unload after an idle hour. Its existing
+owner condition variable waits for the remaining interval; there is no polling task or second
+timer owner. The interval starts after loading/warm-up and resets after the last decode returns,
+including a failed decode. A running or queued decode takes priority over expiry. Unconfigured
+or explicitly unloaded input has no wanted model, so changing the setting does not load it.
+
+Expiry clears only the current wanted ask under the owner's mutex. The existing unload and
+physical-release confirmation path still runs before `Unloaded` is reported. The installer
+then exposes the existing `PartState::Unloaded`, retaining the installed files. An explicit
+`InstallVoice(SpeechInput)` request in this state loads those files without another download,
+using a fresh ask; reports from the retired ask cannot restore readiness or release the new one.
+The configured interval is armed again only after the new load is ready. A failed reload stays
+failed, and removal/quit cannot be bypassed by this reload path.
+
+Unlike a startup load, an explicitly requested SpeechInput reload can be cancelled. Cancellation
+asks the existing owner to unload its matching ask and rejects late `Loaded` reports, but keeps
+the part in `Loading` until that ask's physical terminal report arrives. Only then does it expose
+`Unloaded` again; the installed files and configuration remain intact for a fresh reload request.
+This idle policy does not unload SpokenReplies or certify all-model memory release.
+
+A connected `KeyDown` also requests this backend reload, but only when the installer is actually
+Unloaded, durably installed, has its handle and is not quitting. A removal intent may still show
+Unloaded in the view; it is not eligible. Other states are no-ops, without a download or a deferred
+install. A key-down received before the matching idle terminal report is dropped, not saved for
+that report. Offline/drained key-downs are also dropped and never replayed on reconnect. A load
+already started while connected may finish offline; failure to queue its Voice notification ends
+the connection without rolling back the load or retrying it.
+
+This is backend reload only: the production shell key-down sender, hold/run admission,
+microphone owner, capture and transcription flow remain unavailable. It does not enable
+recording, allocate a run or turn, change voice-off behavior or affect SpokenReplies.
 
 Both owners, speech input's and spoken replies', take `load(models, ask)` and `unload(ask)`, where
 the ask is the caller's own counter, and send one `LoadReport { ask, event }` per outcome:
@@ -422,9 +515,9 @@ the ask is the caller's own counter, and send one `LoadReport { ask, event }` pe
 |---|---|
 | `Loaded` | the load (with its warm-up) finished and the ask is still the wanted one |
 | `Discarded` | the load finished after its unload or a newer ask; sent once the model is freed in the owner thread |
-| `Failed` | the load failed |
+| `Failed` | the load failed and its resources have been released |
 | `Unloaded` | the ask's model is freed, or the owner never had that ask |
-| `Lost` | speech input only: the worker went while the ask was loading or loaded |
+| `Lost` | speech input only: its worker's exit is confirmed, or its load was definitively never dispatched |
 
 When a load finishes, every command sent meanwhile is already in the shared state, so the owner
 keeps the model only if its ask is still wanted. `unload(ask)` clears only that ask and frees only
@@ -432,7 +525,10 @@ its model: an unload for any other ask is reported `Unloaded` and changes nothin
 the owner's until its model has dropped, so no report says an ask is quiet while its model is
 still being freed, and an ask unloaded while an older model drops never starts loading. Reports
 go out under the state lock, so an unload's own report can't overtake the owner's. Every
-ask that starts loading ends in one of `Discarded`, `Failed`, `Unloaded` or `Lost`.
+ask that starts loading ends in one of `Discarded`, `Failed`, `Unloaded` or `Lost` once release is
+proved. If exit confirmation, dispatch disposition or the exit subscription is lost, speech
+input keeps its current ask without a terminal report. Its owner stops serving, and removal stays
+blocked rather than deleting files an unconfirmed worker may still hold.
 
 ### The FFI owner
 
@@ -547,7 +643,50 @@ flowchart LR
   drops the old model first, including when its replacement has an invalid path.
   `Decode { rate, pcm }` carries mono 16-bit little-endian PCM. `Unload` frees the
   recognizer and then the natives. Without a model a decode is `NotLoaded`. Request and reply
-  `Debug` show no audio, text or paths.
+  `Debug` show no audio, text or paths. Failed recognizer creation or warm-up frees every native
+  owner before sending `Failed` or waiting for the next request.
+- **Concurrency:** at most two scoped native decode calls borrow one recognizer. Each has its
+  own waveform, stream, result and text; the owner creates/prewarms the recognizer and joins all
+  calls before destroying it, then its libraries, on Load, Unload, EOF or framing error. The
+  recognizer is Sync, not Send; Sherpa is neither shared nor moved. This assertion is restricted
+  to the pinned sherpa2.0.1/af2d8d81, ORT1.28.2/33ca9628 CPU Parakeet NeMo greedy configuration
+  without hotwords/ITN/homophone rules. Upstream's shared DecodeStreams contract and its per-call
+  stream/state support it; recheck the assertion for any pin/model/provider/configuration change.
+  Three existing ORT sessions configured with8 threads are not an eight-thread process bound.
+  Concurrent working sets and arena retention can increase peak memory; no RSS or latency result
+  follows from using one recognizer. Only separately admitted exact-artifact measurements count.
+- **Output:** share stdout, not an owner-held StdoutLock, under one mutex for each entire framed
+  reply including header, chunks and flush. Replies may complete out of order; the unchanged
+  supervisor correlates them by ID. No output/control lock is held across joins. A child write
+  or completion-publication failure aborts the worker itself even when its owner blocks reading.
+- **Release receipts.** Speech input subscribes to process exits before each load and tracks its
+  dispatch independently of the reply deadline. `Pending` remains an obligation after timeout;
+  only the supervisor's definitive discard gives `NotDispatched`. `Dispatched(generation)` is
+  published before the body can reach the writer, including a partial or failed write. Once
+  dispatched, release needs a post-drop load failure reply, an unload reply from that same
+  generation, or its matching confirmed exit. Another generation's reply or exit, an unconfirmed
+  exit, lag and channel closure never discharge it. There is no second kill path or cleanup
+  timeout that turns missing evidence into release.
+- **Completion ownership.** Load keeps an armed guard through reply delivery and typed
+  classification. A timely `Loaded` transfers the model; a timely native `Failed` confirms the
+  worker already dropped it. Invalid, late, cancelled or unconsumed completions retire their
+  dispatched generation even when no RPC remains pending. Owned unload captures the old worker
+  generation and arms its obligation before admission; a full queue, cancellation or refusal
+  cannot forget that owner. The supervisor refuses a different-generation unload without
+  writing it. Only timely matching `Unloaded` disarms it. Retirement uses the existing supervisor,
+  not another kill path, and removal stays draining until matching physical confirmation.
+  If the supervisor's retirement lane closes while a handle keeps the exit broadcast alive,
+  speech input drains a queued matching exit or fails `ExitUnconfirmed`, retaining its ask.
+  A fatal unconfirmed exit publishes `Unavailable` before the owner ends. The installer keeps
+  its ask and model obligations, refuses further setup or removal, and Settings asks for a
+  restart. This outcome is not a release receipt; late ordinary reports cannot revive it.
+  The composed ownership tests use a private per-owner, test-only caller-poll cut in the actual
+  STT adapter. They poll the real request through admission, observe its completion waker before
+  advancing the original deadline, then resume that same future. The test owner enters its
+  runtime's clock context so synchronous owned-unload construction uses the paused test clock.
+  A separate observer proves the real exit wait is pending before releasing held true/false
+  process confirmation. This controls caller polling, not native instruction suspension; it
+  adds no non-test control state, branch, lock or channel.
 - **Bounds** [guess]. The rate must be 8–48 kHz. An utterance is at most 60 s and at most
   5,760,000 bytes (60 s at 48 kHz). Both are checked, with the rate, before any duration is
   computed, in the brain before sending and again in the worker. A transcript is at most 16 KiB of
@@ -556,13 +695,16 @@ flowchart LR
   Each is absolute from the call and covers queueing, a respawn, every chunk and the native work.
   Missing one loses the worker. Reply ids keep counting across respawns, so a dead worker's late
   output can't answer its successor's request.
-- **The fail-stop boundary.** The worker serves every request inside one `catch_unwind`, and
+- **The fail-stop boundary.** Both the worker owner and every decode child have their own boundary, and
   sherpa-onnx's functions are `C-unwind`. A C++ exception that escapes sherpa-onnx is a defined
   foreign unwind. A release build (`panic = "abort"`) aborts on it. A debug build either aborts
   or returns an opaque error to the boundary, which aborts at once without inspecting or dropping
   it. Nothing serves again on that native state. A Rust panic ends the same way, after the panic
   hook logs only its location. The worker sets `SEM_NOGPFAULTERRORBOX`, so a crash ends at once
   without a dialog.
+  Fallible child-thread creation failure before any native work returns the existing
+  `Failed(Decode)` instead. Loaded debug Panic/Throw fixtures run on the same decode-child path;
+  unloaded fixtures retain the owner path. No wire fault variant or panic-profile change is needed.
 - **stderr.** sherpa-onnx prints model paths and exception text to stderr on failure (see
   [voice-natives.md](voice-natives.md)). The worker's stderr isn't connected to anything, and its
   log, `kumochi-speech`, records only content-free codes.

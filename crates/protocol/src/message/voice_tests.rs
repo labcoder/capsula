@@ -35,6 +35,7 @@ fn voice_tags_are_pinned() {
             },
             6,
         ),
+        (PartState::Unavailable, 7),
     ] {
         assert_eq!(
             postcard::to_allocvec(&state).expect("encodes")[0],
@@ -72,6 +73,7 @@ fn voice_parts_and_part_states_round_trip() {
         PartState::Loading,
         PartState::Ready,
         PartState::Unloaded,
+        PartState::Unavailable,
         PartState::Failed {
             key: ErrorKey::VoiceCorrupt,
             installed: false,
@@ -91,7 +93,7 @@ fn voice_parts_and_part_states_round_trip() {
             assert_eq!(postcard::from_bytes::<VoiceView>(&bytes), Ok(view));
         }
     }
-    assert!(postcard::from_bytes::<PartState>(&[7]).is_err());
+    assert!(postcard::from_bytes::<PartState>(&[8]).is_err());
 }
 
 fn mic(rate: u32, len: usize, seq: u32) -> MicPcm {

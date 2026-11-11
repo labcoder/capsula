@@ -24,6 +24,8 @@ pub(crate) enum LoadEvent {
     Unloaded,
     /// The worker was lost while the ask was loading or loaded.
     Lost,
+    /// The owner stopped without proof that its model was released.
+    Unavailable,
 }
 
 /// One ask's outcome, as an owner thread reports it.

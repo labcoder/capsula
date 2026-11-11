@@ -1047,8 +1047,8 @@ fn provider_done_with_a_shown_rest_and_a_future_step_stops_then_clears(
         this.draw_changed(cx);
         assert!(this.scene_deadline.is_some());
         this.runs.connected(1);
-        this.runs.apply_state(RunId(6), ThreadId(1), Phase::Answering);
-        this.runs.apply_state(RunId(6), ThreadId(1), Phase::Done);
+        this.runs.apply_state(RunId(6), ThreadId(1), Phase::Answering, None);
+        this.runs.apply_state(RunId(6), ThreadId(1), Phase::Done, None);
         this.runs.apply_data(DataToShell::RunEnd { run: RunId(6) }, 24);
         assert_eq!(this.runs.stop(), None);
         this.activity = crate::presence::Presence::activity(

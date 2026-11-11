@@ -4,6 +4,21 @@ use super::*;
 use crate::screen::wire::CaptureId;
 
 #[test]
+fn growing_a_frame_scrubs_the_old_allocation_before_freeing_it() {
+    let mut frame = RawFrame::default();
+    frame.begin(2, 2).unwrap().fill(0xAB);
+    let (_, capacity) = frame.allocation();
+    let (audit, scrubbed) = std::sync::mpsc::channel();
+    frame.audit(audit);
+    frame.begin(32, 32).unwrap();
+    let old = scrubbed
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("old storage scrubbed before growth");
+    assert_eq!(old, vec![0; capacity]);
+    assert!(frame.allocation().1 >= 32 * 32 * 4);
+}
+
+#[test]
 fn scrubbing_zeroes_the_whole_allocation_spare_capacity_included() {
     let mut frame = RawFrame::default();
     frame.begin(8, 8).expect("in bounds").fill(0xAB);

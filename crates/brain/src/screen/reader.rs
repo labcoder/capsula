@@ -80,7 +80,9 @@ impl<P: ElementPlatform> ThreadedReader<P> {
                         source = None;
                     }
                     if answers.try_send((job.capture, result)).is_err() || !wake() {
-                        break;
+                        drop(requests);
+                        drop(answers);
+                        return;
                     }
                 }
             })

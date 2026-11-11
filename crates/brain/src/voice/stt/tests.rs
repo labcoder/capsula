@@ -16,6 +16,476 @@ use crate::voice::{LoadEvent, LoadReport, Reports};
 
 const WAIT: Duration = Duration::from_secs(5);
 
+mod concurrent;
+
+pub(crate) fn held_for_runtime(
+    reports: Reports,
+    load: mpsc::Receiver<()>,
+) -> (SttHandle, impl Fn() -> Option<Duration>) {
+    let release = Arc::new(Mutex::new(load));
+    let (_losses, losses) = broadcast::channel(4);
+    let handle = SttHandle::spawn_with(reports, losses, move |_, serve| {
+        release
+            .lock()
+            .expect("one engine")
+            .recv_timeout(WAIT)
+            .expect("release load");
+        let (events, _observed) = mpsc::channel();
+        let served = serve(
+            Generation(0),
+            &FakeDecoder {
+                events,
+                release: Arc::clone(&release),
+                lose: Arc::new(AtomicBool::new(false)),
+                gates: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+                panic_at: Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX)),
+            },
+        );
+        assert_eq!(served, Served::Released);
+        Ok(())
+    })
+    .expect("owner starts");
+    let control = Arc::clone(&handle.control);
+    (handle, move || control.lock().unload_after)
+}
+
+#[test]
+fn idle_release_and_a_fresh_installer_request_reload_without_fetching_or_stale_revival() {
+    use crate::voice::installer::{Durable, Effect, Installer};
+    use kumochi_protocol::message::{PartState, SttUnload};
+    use kumochi_protocol::voice::VoicePart::SpeechInput;
+
+    for (policy, seconds) in [(SttUnload::After15Min, 900), (SttUnload::After1Hour, 3600)] {
+        let (mut installer, effects) = Installer::start(
+            [Durable::Installed, Durable::Absent],
+            [true; 2],
+            [true; 2],
+            &[],
+        );
+        assert_eq!(
+            effects,
+            [Effect::Load {
+                part: SpeechInput,
+                ask: 1
+            }]
+        );
+        let harness = Harness::loaded();
+        assert_eq!(
+            installer.reported(SpeechInput, report(1, LoadEvent::Loaded)),
+            []
+        );
+        harness.handle.set_unload(policy);
+        harness.handle.control.update(|state| {
+            assert_eq!(state.unload_after, Some(Duration::from_secs(seconds)));
+            state.idle_since = std::time::Instant::now()
+                .checked_sub(Duration::from_secs(seconds))
+                .expect("fixture clock supports the idle interval");
+        });
+        assert_eq!(harness.event(), Event::TornDown);
+        let terminal = harness.reports(1);
+        assert_eq!(terminal, [report(1, LoadEvent::Unloaded)]);
+        assert_eq!(installer.reported(SpeechInput, terminal[0]), []);
+        assert_eq!(installer.view().speech_input, PartState::Unloaded);
+        assert_eq!(
+            answer(harness.decode(1).expect("not busy")),
+            SttResult::NotLoaded
+        );
+        assert_eq!(
+            installer.install(SpeechInput),
+            [Effect::Load {
+                part: SpeechInput,
+                ask: 3
+            }]
+        );
+        harness.handle.load("models".into(), 3);
+        assert_eq!(harness.event(), Event::Loaded("models".into()));
+        harness.wait_ready();
+        for event in [LoadEvent::Loaded, LoadEvent::Unloaded, LoadEvent::Lost] {
+            assert_eq!(installer.reported(SpeechInput, report(1, event)), []);
+            assert_eq!(installer.view().speech_input, PartState::Loading);
+        }
+        assert_eq!(installer.reported(SpeechInput, harness.reports(1)[0]), []);
+        assert_eq!(installer.view().speech_input, PartState::Ready);
+        let decoded = harness.decode(2).expect("not busy");
+        assert_eq!(harness.event(), Event::Decoding(2));
+        harness.release();
+        assert_eq!(answer(decoded), text(2));
+        harness.handle.unload(1);
+        assert_eq!(harness.reports(1), [report(1, LoadEvent::Unloaded)]);
+        assert_eq!(harness.handle.control.lock().current, Some(3));
+        harness.handle.unload(3);
+        assert_eq!(harness.event(), Event::TornDown);
+        assert_eq!(harness.reports(1), [report(3, LoadEvent::Unloaded)]);
+    }
+}
+
+#[test]
+fn an_expired_idle_clock_never_interrupts_running_or_queued_decodes() {
+    use kumochi_protocol::message::SttUnload;
+
+    let harness = Harness::loaded();
+    harness.handle.set_unload(SttUnload::After15Min);
+    let first = harness.decode(1).expect("not busy");
+    assert_eq!(harness.event(), Event::Decoding(1));
+    let second = harness.decode(2).expect("one waiting decode");
+    harness.handle.control.update(|state| {
+        state.idle_since = std::time::Instant::now()
+            .checked_sub(Duration::from_hours(1))
+            .expect("fixture clock supports one hour of history");
+    });
+    harness.no_event();
+    harness.no_report();
+    harness.release();
+    assert_eq!(answer(first), text(1));
+    assert_eq!(harness.event(), Event::Decoding(2));
+    harness.no_event();
+    harness.no_report();
+    let idle_since = harness.handle.control.lock().idle_since;
+    harness.release();
+    assert_eq!(answer(second), text(2));
+    harness.wait_for(
+        |state| state.idle_since != idle_since,
+        "the worker never reset the idle clock after the second decode",
+    );
+    assert_eq!(harness.handle.control.lock().current, Some(1));
+    harness.handle.control.update(|state| {
+        state.idle_since = std::time::Instant::now()
+            .checked_sub(Duration::from_mins(15))
+            .expect("fixture clock supports fifteen minutes of history");
+    });
+    assert_eq!(harness.event(), Event::TornDown);
+    assert_eq!(harness.reports(1), [report(1, LoadEvent::Unloaded)]);
+}
+
+#[test]
+fn keep_warm_and_a_longer_timeout_preserve_the_loaded_owner() {
+    use kumochi_protocol::message::SttUnload;
+
+    let harness = Harness::loaded();
+    harness.handle.set_unload(SttUnload::Kept);
+    harness.handle.control.update(|state| {
+        assert_eq!(state.unload_after, None);
+        state.idle_since = std::time::Instant::now()
+            .checked_sub(Duration::from_hours(1))
+            .expect("fixture clock supports one hour of history");
+    });
+    harness.no_event();
+    harness.no_report();
+    harness.handle.control.update(|state| {
+        state.idle_since = std::time::Instant::now()
+            .checked_sub(Duration::from_mins(15))
+            .expect("fixture clock supports fifteen minutes of history");
+    });
+    harness.handle.set_unload(SttUnload::After1Hour);
+    harness.no_event();
+    harness.no_report();
+    harness.handle.set_unload(SttUnload::After15Min);
+    assert_eq!(harness.event(), Event::TornDown);
+    assert_eq!(harness.reports(1), [report(1, LoadEvent::Unloaded)]);
+}
+
+#[test]
+fn idle_policy_without_a_wanted_model_neither_loads_nor_accepts_a_decode() {
+    use kumochi_protocol::message::SttUnload;
+
+    let harness = Harness::new();
+    harness.handle.set_unload(SttUnload::After15Min);
+    harness.handle.control.update(|state| {
+        state.idle_since = std::time::Instant::now()
+            .checked_sub(Duration::from_hours(1))
+            .expect("fixture clock supports one hour of history");
+    });
+    assert_eq!(
+        answer(harness.decode(1).expect("not busy")),
+        SttResult::NotLoaded
+    );
+    harness.no_event();
+    harness.no_report();
+    assert_eq!(harness.handle.control.lock().current, None);
+}
+
+#[test]
+fn the_condition_variable_expires_without_another_command() {
+    let harness = Harness::loaded();
+    harness.handle.control.update(|state| {
+        state.unload_after = Some(Duration::from_millis(20));
+        state.idle_since = std::time::Instant::now();
+    });
+    assert_eq!(harness.event(), Event::TornDown);
+    assert_eq!(harness.reports(1), [report(1, LoadEvent::Unloaded)]);
+}
+
+#[tokio::test]
+async fn an_idle_owner_keeps_its_ask_until_teardown_returns_before_loading_a_new_one() {
+    let (events, observed) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let released = Arc::new(Mutex::new(released));
+    let (reports, mut heard) = Reports::new();
+    let (_losses, losses) = broadcast::channel(4);
+    let handle = SttHandle::spawn_with(reports, losses, move |models, serve| {
+        events
+            .send(Event::Loaded(models.to_owned()))
+            .expect("watched");
+        assert_eq!(
+            serve(
+                Generation(0),
+                &FakeDecoder {
+                    events: events.clone(),
+                    release: Arc::clone(&released),
+                    lose: Arc::new(AtomicBool::new(false)),
+                    gates: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+                    panic_at: Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX)),
+                }
+            ),
+            Served::Released
+        );
+        events.send(Event::TornDown).expect("watched");
+        released
+            .lock()
+            .expect("one engine")
+            .recv_timeout(WAIT)
+            .expect("release teardown");
+        Ok(())
+    })
+    .expect("owner starts");
+    handle.load("old-models".into(), 1);
+    assert_eq!(
+        observed.recv_timeout(WAIT).expect("load"),
+        Event::Loaded("old-models".into())
+    );
+    assert_eq!(
+        tokio::time::timeout(WAIT, heard.recv())
+            .await
+            .expect("report"),
+        Some(report(1, LoadEvent::Loaded))
+    );
+    handle.control.update(|state| {
+        state.unload_after = Some(Duration::from_millis(20));
+        state.idle_since = std::time::Instant::now();
+    });
+    assert_eq!(
+        observed.recv_timeout(WAIT).expect("teardown begins"),
+        Event::TornDown
+    );
+    assert_eq!(handle.control.lock().current, Some(1));
+    assert_eq!(
+        heard.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    );
+    handle.set_unload(kumochi_protocol::message::SttUnload::Kept);
+    handle.load("new-models".into(), 2);
+    handle.unload(1);
+    assert_eq!(observed.recv_timeout(Duration::from_millis(100)).ok(), None);
+    release.send(()).expect("finish old teardown");
+    assert_eq!(
+        tokio::time::timeout(WAIT, heard.recv())
+            .await
+            .expect("report"),
+        Some(report(1, LoadEvent::Unloaded))
+    );
+    assert_eq!(
+        observed.recv_timeout(WAIT).expect("reload"),
+        Event::Loaded("new-models".into())
+    );
+    assert_eq!(
+        tokio::time::timeout(WAIT, heard.recv())
+            .await
+            .expect("report"),
+        Some(report(2, LoadEvent::Loaded))
+    );
+    handle.unload(2);
+    assert_eq!(
+        observed.recv_timeout(WAIT).expect("unload"),
+        Event::TornDown
+    );
+    release.send(()).expect("finish new teardown");
+    assert_eq!(
+        tokio::time::timeout(WAIT, heard.recv())
+            .await
+            .expect("report"),
+        Some(report(2, LoadEvent::Unloaded))
+    );
+}
+
+#[tokio::test]
+async fn a_pending_receipt_waits_through_late_dispatch_and_wrong_generation_exits() {
+    use crate::supervise::{Dispatch, Exit};
+    use std::future::Future as _;
+    use std::task::{Context, Poll, Waker};
+
+    let (dispatch, mut receipt) = tokio::sync::watch::channel(Dispatch::Pending);
+    let (exits, mut retired) = broadcast::channel(4);
+    let (retirement, _intents) = crate::supervise::fixture::retirement();
+    let mut release = Box::pin(super::released(&mut receipt, &mut retired, &retirement));
+    let mut context = Context::from_waker(Waker::noop());
+    assert_eq!(release.as_mut().poll(&mut context), Poll::Pending);
+    dispatch.send_replace(Dispatch::Dispatched(Generation(7)));
+    exits
+        .send(Exit {
+            generation: Generation(6),
+            confirmed: true,
+        })
+        .expect("observer");
+    exits
+        .send(Exit {
+            generation: Generation(8),
+            confirmed: true,
+        })
+        .expect("observer");
+    assert_eq!(release.as_mut().poll(&mut context), Poll::Pending);
+    exits
+        .send(Exit {
+            generation: Generation(7),
+            confirmed: true,
+        })
+        .expect("observer");
+    assert_eq!(release.await, Ok(()));
+}
+
+#[tokio::test]
+async fn definitive_no_dispatch_releases_without_a_worker_exit() {
+    use crate::supervise::Dispatch;
+    let (dispatch, mut receipt) = tokio::sync::watch::channel(Dispatch::Pending);
+    let (_exits, mut retired) = broadcast::channel(4);
+    dispatch.send_replace(Dispatch::NotDispatched);
+    let (retirement, _intents) = crate::supervise::fixture::retirement();
+    assert_eq!(
+        super::released(&mut receipt, &mut retired, &retirement).await,
+        Ok(())
+    );
+}
+
+#[tokio::test]
+async fn an_unconfirmed_exit_does_not_release_a_dispatched_load() {
+    use crate::supervise::{Dispatch, Exit};
+    let (_dispatch, mut receipt) = tokio::sync::watch::channel(Dispatch::Dispatched(Generation(7)));
+    let (exits, mut retired) = broadcast::channel(4);
+    exits
+        .send(Exit {
+            generation: Generation(7),
+            confirmed: false,
+        })
+        .expect("observer");
+    let (retirement, _intents) = crate::supervise::fixture::retirement();
+    assert_eq!(
+        super::released(&mut receipt, &mut retired, &retirement).await,
+        Err(SpeechError::ExitUnconfirmed)
+    );
+}
+
+#[tokio::test]
+async fn a_closed_pending_dispatch_receipt_does_not_prove_discard() {
+    use crate::supervise::Dispatch;
+    let (dispatch, mut receipt) = tokio::sync::watch::channel(Dispatch::Pending);
+    let (_exits, mut retired) = broadcast::channel(4);
+    drop(dispatch);
+    let (retirement, _intents) = crate::supervise::fixture::retirement();
+    assert_eq!(
+        super::released(&mut receipt, &mut retired, &retirement).await,
+        Err(SpeechError::ExitUnconfirmed)
+    );
+}
+
+#[tokio::test]
+async fn a_lagged_exit_subscription_does_not_release_a_dispatched_load() {
+    use crate::supervise::{Dispatch, Exit};
+    let (_dispatch, mut receipt) = tokio::sync::watch::channel(Dispatch::Dispatched(Generation(7)));
+    let (exits, mut retired) = broadcast::channel(1);
+    exits
+        .send(Exit {
+            generation: Generation(7),
+            confirmed: true,
+        })
+        .expect("observer");
+    exits
+        .send(Exit {
+            generation: Generation(8),
+            confirmed: true,
+        })
+        .expect("observer");
+    let (retirement, _intents) = crate::supervise::fixture::retirement();
+    assert_eq!(
+        super::released(&mut receipt, &mut retired, &retirement).await,
+        Err(SpeechError::ExitUnconfirmed)
+    );
+}
+
+#[tokio::test]
+async fn a_closed_exit_subscription_does_not_release_a_dispatched_load() {
+    use crate::supervise::Dispatch;
+    let (_dispatch, mut receipt) = tokio::sync::watch::channel(Dispatch::Dispatched(Generation(7)));
+    let (exits, mut closed) = broadcast::channel(1);
+    drop(exits);
+    let (retirement, _intents) = crate::supervise::fixture::retirement();
+    assert_eq!(
+        super::released(&mut receipt, &mut closed, &retirement).await,
+        Err(SpeechError::ExitUnconfirmed)
+    );
+}
+
+#[test]
+fn an_unconfirmed_exit_keeps_its_physical_ask_and_cannot_acknowledge_unload() {
+    use crate::voice::installer::{Durable, Effect, Folder, Installer, RemoveAnswer};
+    use kumochi_protocol::message::PartState;
+    use kumochi_protocol::voice::VoicePart::SpeechInput;
+
+    let (mut installer, effects) = Installer::start(
+        [Durable::Installed, Durable::Absent],
+        [true; 2],
+        [true; 2],
+        &[],
+    );
+    assert_eq!(
+        effects,
+        [Effect::Load {
+            part: SpeechInput,
+            ask: 1
+        }]
+    );
+    let (reports, mut observed) = Reports::new();
+    let (started, start) = mpsc::channel();
+    let (release, leave) = mpsc::channel();
+    let (exited, exit) = mpsc::channel();
+    let guard = OnExit(exited);
+    let (_losses, losses) = broadcast::channel(4);
+    let handle = SttHandle::spawn_with(reports, losses, move |_, _| {
+        let _guard = &guard;
+        started.send(Event::Lost).expect("load started");
+        leave.recv_timeout(WAIT).expect("release load failure");
+        Err(SpeechError::ExitUnconfirmed)
+    })
+    .expect("owner starts");
+    handle.load(PathBuf::from("models"), 1);
+    assert_eq!(start.recv_timeout(WAIT).expect("load starts"), Event::Lost);
+    release.send(()).expect("fail load");
+    assert_eq!(exit.recv_timeout(WAIT).expect("owner ended"), Event::Exited);
+    let fatal = observed
+        .try_recv()
+        .expect("fatal owner report precedes exit");
+    assert_eq!(fatal, report(1, LoadEvent::Unavailable));
+    assert_eq!(installer.reported(SpeechInput, fatal), []);
+    assert_eq!(installer.view().speech_input, PartState::Unavailable);
+    assert!(!installer.ready(SpeechInput));
+    assert_eq!(installer.install(SpeechInput), []);
+    assert_eq!(installer.reload_input(), []);
+    assert_eq!(
+        installer.remove(SpeechInput, Folder::Present),
+        (RemoveAnswer::Refused, vec![])
+    );
+    handle.load(PathBuf::from("newer-models"), 2);
+    handle.unload(1);
+    handle.unload(2);
+    assert_eq!(handle.control.lock().current, Some(1));
+    assert_eq!(
+        handle.control.lock().want.as_ref().map(|(_, ask)| *ask),
+        Some(1)
+    );
+    assert!(matches!(
+        observed.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum Event {
     Loaded(PathBuf),
@@ -31,18 +501,38 @@ struct FakeDecoder {
     events: mpsc::Sender<Event>,
     release: Arc<Mutex<mpsc::Receiver<()>>>,
     lose: Arc<AtomicBool>,
+    gates: Arc<Mutex<std::collections::BTreeMap<usize, mpsc::Receiver<()>>>>,
+    panic_at: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Decoder for FakeDecoder {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "injects a decoder panic to verify worker-loss containment"
+    )]
     fn decode(&self, rate: u32, samples: &[i16]) -> Result<String, SpeechError> {
+        let gate = self
+            .gates
+            .lock()
+            .expect("fixture gates")
+            .remove(&samples.len());
         self.events
             .send(Event::Decoding(samples.len()))
             .expect("the test watches");
-        self.release
-            .lock()
-            .expect("one decoder")
-            .recv_timeout(WAIT)
-            .expect("the test releases the decode");
+        if let Some(gate) = gate {
+            gate.recv_timeout(WAIT).expect("release this decode");
+        } else {
+            self.release
+                .lock()
+                .expect("one decoder")
+                .recv_timeout(WAIT)
+                .expect("the test releases the decode");
+        }
+        assert_ne!(
+            self.panic_at.load(Ordering::SeqCst),
+            samples.len(),
+            "decode fixture panic"
+        );
         if self.lose.load(Ordering::SeqCst) {
             return Err(SpeechError::WorkerLost);
         }
@@ -74,6 +564,8 @@ struct Harness {
     worker: Arc<AtomicU64>,
     /// The running decode's worker is lost when it's released.
     lose: Arc<AtomicBool>,
+    gates: Arc<Mutex<std::collections::BTreeMap<usize, mpsc::Receiver<()>>>>,
+    panic_at: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 fn report(ask: u64, event: LoadEvent) -> LoadReport {
@@ -89,6 +581,10 @@ impl Harness {
         let fail = Arc::clone(&fail_load);
         let lose = Arc::new(AtomicBool::new(false));
         let losing = Arc::clone(&lose);
+        let gates = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+        let decoding_gates = Arc::clone(&gates);
+        let panic_at = Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+        let panicking = Arc::clone(&panic_at);
         let hold_load = Arc::new(AtomicBool::new(false));
         let holding = Arc::clone(&hold_load);
         let hold_serve = Arc::new(AtomicBool::new(false));
@@ -128,6 +624,8 @@ impl Harness {
                         events: events_in.clone(),
                         release: Arc::clone(&released),
                         lose: Arc::clone(&losing),
+                        gates: Arc::clone(&decoding_gates),
+                        panic_at: Arc::clone(&panicking),
                     },
                 );
                 if served == Served::Lost {
@@ -154,6 +652,8 @@ impl Harness {
             losses,
             worker,
             lose,
+            gates,
+            panic_at,
         }
     }
 

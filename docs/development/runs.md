@@ -19,7 +19,7 @@ advance the revision too. A task known from a stored row or an answered run is d
 survives reconnect; an unconfirmed new task falls back to Kumo when the brain incarnation
 changes. This replaces slice 2's new-conversation default (OSC-157).
 
-Each submit captures the target in `TextSubmit` and queues the current revision in a FIFO.
+Each submit captures its turn number, target, selection revision and text in a bounded queue.
 `Target::Kumo` resolves to the connection's `SettingsView.main_thread`; `Target::New` sends
 `None`. Submits are refused as offline until that connection has supplied its `SettingsView`,
 even for New task. Disconnect clears the main id and pending submissions, so a previous
@@ -70,12 +70,26 @@ stays, so after the first `RunState` adopts the task, retrying continues that ta
 turns from older selections don't block New task: explicitly choosing **New task** again
 advances the revision and permits a separate task.
 
-A new `RunState` answers the oldest pending turn. Only a matching queued revision while the
-target is still `New` can adopt that run's thread, without advancing the revision. An empty
-FIFO never adopts, and a task holding a delete slot cannot become the target. A delayed state
-after an explicit switch still answers its own turn but doesn't move input. Esc cancels work,
-not the target or revision. Settings updates replace names and the main id without changing
-the input draft, keyboard focus, viewed history, target or revision.
+Only a run's first `RunState` can answer a pending submit, through its explicit
+`RunOrigin::Typed { turn }` and matching captured concrete thread. An originally New submit
+can instead bind the returned thread, and adopts it only at the same selection revision
+while the target is still New and the thread holds no delete slot. `TurnRefused` settles only
+its exact turn and captured optional thread. Neither path falls back to FIFO. Duplicate,
+unknown, Hold-origin and origin-less states cannot take pending text or Focus authority;
+ordinary unowned runs still show output, release held data credit and remain stoppable.
+Later origin-less phases can finish an already-bound run and its recovery normally.
+
+The link retains its reader generation on both control events. Presence rejects old-session
+events before restoring text, reporting errors, sending Stop or credit, refreshing histories
+or synchronizing deletes, including when turn numbers restart on reconnect. Run fences reset
+only for a new brain incarnation. Removing a keyed pending entry decrements each Esc or
+deletion prefix only when that original position belonged to the prefix. Older cancelled or
+deleted submissions retain their own metadata until their response; a cancelled submit's
+first state owes exactly one Stop for its own run. A delayed state after an explicit switch
+still answers its own turn but doesn't move input. Esc cancels work, not the target or
+revision. Settings updates replace names and the main id without changing the input draft,
+keyboard focus, viewed history, target or revision. This correlation does not admit voice
+holds, capture audio or promote transcripts into turns.
 
 ## Typed drawing admission
 

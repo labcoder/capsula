@@ -1,8 +1,12 @@
-//! The voice installer's state: one entry per part, driven by the user's install and cancel ops
-//! and by the completions of the work it asks for. It does no I/O itself: every method returns
-//! the [`Effect`]s the runtime carries out, and each completion comes back with the token it was
-//! started with. A completion whose token isn't the entry's current one changes nothing.
+//! The voice installer's state: one entry per part, driven by the user's install, cancel and
+//! remove ops and by the completions of the work it asks for. It does no I/O itself: every method
+//! returns the [`Effect`]s the runtime carries out, and each completion comes back with the token
+//! it was started with. A completion whose token isn't the entry's current one changes nothing,
+//! except that a removal holds its prior phase's completions while its intent is written, and
+//! waits for all of the part's work to end before it deletes, cancelled work included.
 
+#[cfg(test)]
+mod removal_tests;
 #[cfg(test)]
 mod tests;
 
@@ -44,13 +48,51 @@ pub(crate) enum Effect {
         part: VoicePart,
         token: u64,
     },
+    /// Deletes the part's folder; the result comes back to `deleted`.
+    Delete {
+        part: VoicePart,
+        token: u64,
+    },
+    /// Queues the write that takes the part out of `removing`; its result comes back to
+    /// `cleared`.
+    Clear {
+        part: VoicePart,
+    },
+}
+
+/// The one answer a `RemoveVoice` gets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RemoveAnswer {
+    /// Nothing is installed or on disk to remove.
+    Refused,
+    /// Accepted with no write: the removal was already accepted, or its cleanup is retried.
+    Accepted,
+    /// The removal intent with this token is staged in the op's place; its result is the answer,
+    /// and goes to `intended`.
+    Intent { token: u64 },
+}
+
+/// Whether a part's folder is on disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Folder {
+    Missing,
+    Present,
 }
 
 /// Where a cancelled install goes back to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Rest {
     Idle,
+    Unloaded,
     Failed(ErrorKey),
+}
+
+/// A completion for the prior token that came while a removal intent was being written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Held {
+    Fetched(Result<(), DownloadError>),
+    Report(LoadEvent),
+    Activated(Result<(), ErrorKey>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,6 +111,10 @@ enum Phase {
         prior: Option<Rest>,
         ask: u64,
     },
+    /// A cancelled installed reload still owns its ask until the terminal report.
+    Unloading {
+        ask: u64,
+    },
     /// The Activate write is in flight. A loss meanwhile waits for its result: `lost`.
     Committing {
         ask: u64,
@@ -77,11 +123,27 @@ enum Phase {
     Ready {
         ask: u64,
     },
+    Unloaded,
+    /// The removal intent is being written; the entry's `intent` keeps what it goes back to.
+    Intent,
+    /// The removal is on disk. Waiting for the part's fetch to end and for every model it asked
+    /// for to go, cancelled ones included.
+    Draining,
+    Deleting,
     /// The `RemoveDone` write is in flight.
     Clearing,
     /// Removing is durable with nothing in flight: its delete or its `RemoveDone` failed.
     Cleanup,
     Failed(ErrorKey),
+}
+
+/// The phase and token before a removal intent, and what completed for that token since, in
+/// arrival order.
+#[derive(Debug)]
+struct Intent {
+    phase: Phase,
+    token: u64,
+    held: Vec<Held>,
 }
 
 #[derive(Debug)]
@@ -93,15 +155,46 @@ struct Entry {
     retry_left: u8,
     /// The part's handle started; without it the part is a fixed load failure.
     available: bool,
-    /// An install waiting for the `RemoveDone` write.
+    /// An install waiting for a removal to finish.
     install_after: bool,
+    /// Set only in `Phase::Intent`.
+    intent: Option<Intent>,
+    /// The asks of every load started with no final report yet, whatever the phase: a cancel or
+    /// an unload doesn't free a model until its report says so.
+    models: Vec<u64>,
+    #[cfg(test)]
+    last_write: Option<(&'static str, u64, Result<(), ErrorKey>)>,
+    #[cfg(test)]
+    last_delete: Option<(u64, Folder)>,
+}
+
+#[cfg(test)]
+pub(crate) struct Diagnostic<'a>(&'a Entry);
+
+#[cfg(test)]
+impl std::fmt::Debug for Diagnostic<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let entry = self.0;
+        f.debug_struct("Part")
+            .field("phase", &entry.phase)
+            .field("token", &entry.token)
+            .field("owners", &entry.models.len())
+            .field("durable", &entry.durable)
+            .field(
+                "held",
+                &entry.intent.as_ref().map(|intent| intent.held.len()),
+            )
+            .field("last_write", &entry.last_write)
+            .field("last_delete", &entry.last_delete)
+            .finish()
+    }
 }
 
 #[derive(Debug)]
 pub(crate) struct Installer {
     parts: [Entry; 2],
-    /// The token of the fetch still running, cancelled or not. Only one runs at a time.
-    fetching: Option<u64>,
+    /// The part and token of the fetch still running, cancelled or not. Only one runs at a time.
+    fetching: Option<(VoicePart, u64)>,
     /// Quit began: no fetch starts again.
     quitting: bool,
     next_token: u64,
@@ -109,6 +202,11 @@ pub(crate) struct Installer {
 }
 
 impl Installer {
+    #[cfg(test)]
+    pub(crate) fn diagnostics(&self) -> [Diagnostic<'_>; 2] {
+        self.parts.each_ref().map(Diagnostic)
+    }
+
     /// The state at brain start, with no network. `whole` says every file of a part has its
     /// size, and `available` that its handle started. `stuck` names the removals whose folders
     /// couldn't be deleted; any other `Removing` part has its `RemoveDone` write queued.
@@ -128,6 +226,12 @@ impl Installer {
                 retry_left: 1,
                 available: available[index],
                 install_after: false,
+                intent: None,
+                models: Vec::new(),
+                #[cfg(test)]
+                last_write: None,
+                #[cfg(test)]
+                last_delete: None,
             }),
             fetching: None,
             quitting: false,
@@ -145,6 +249,7 @@ impl Installer {
                 (_, false, _) => Phase::Failed(ErrorKey::VoiceLoad),
                 (Durable::Installed, true, false) => Phase::Failed(ErrorKey::VoiceCorrupt),
                 (Durable::Installed, true, true) => {
+                    entry.models.push(token);
                     installer.effects.push(Effect::Load { part, ask: token });
                     Phase::Loading {
                         prior: None,
@@ -165,27 +270,72 @@ impl Installer {
         }
     }
 
-    /// Whether `part` is loaded with its install committed.
-    pub(crate) fn ready(&self, part: VoicePart) -> bool {
-        matches!(self.parts[index(part)].phase, Phase::Ready { .. })
+    /// Whether the Activate write for `token` may still be made: a removal since takes it away.
+    pub(crate) fn activating(&self, part: VoicePart, token: u64) -> bool {
+        let entry = &self.parts[index(part)];
+        entry.available && entry.token == token && matches!(entry.phase, Phase::Committing { .. })
     }
 
-    /// `InstallVoice`, answered accepted with no write whatever it does. A failed part, installed
+    /// Whether `part` is loaded with its install committed. A removal intent still being
+    /// written changes nothing yet.
+    pub(crate) fn ready(&self, part: VoicePart) -> bool {
+        let entry = &self.parts[index(part)];
+        entry.available && matches!(entry.shown(), Phase::Ready { .. })
+    }
+
+    /// A connected key-down reloads only installed, idle-unloaded input; it never queues a fetch.
+    pub(crate) fn reload_input(&mut self) -> Vec<Effect> {
+        let entry = &self.parts[index(VoicePart::SpeechInput)];
+        if self.quitting
+            || entry.phase != Phase::Unloaded
+            || entry.durable != Durable::Installed
+            || !entry.available
+        {
+            return Vec::new();
+        }
+        self.install(VoicePart::SpeechInput)
+    }
+
+    /// `InstallVoice`, answered accepted with no write whatever it does. An idle unloaded part
+    /// reloads its installed files with a fresh ask. A failed part, installed
     /// or not, is fetched again, which re-hashes its files. Nothing fetches around an unfinished
-    /// removal: an install waits for its `RemoveDone` write, and one after a failed removal does
-    /// nothing until the next start finishes it.
+    /// removal: an install waits for it to finish, and one after a failed removal first retries
+    /// its delete and `RemoveDone`.
     pub(crate) fn install(&mut self, part: VoicePart) -> Vec<Effect> {
+        if !self.parts[index(part)].available {
+            return self.take();
+        }
+        if self.parts[index(part)].phase == Phase::Unloaded {
+            if self.quitting {
+                return self.take();
+            }
+            let ask = self.token();
+            let entry = &mut self.parts[index(part)];
+            entry.token = ask;
+            entry.models.push(ask);
+            entry.phase = Phase::Loading {
+                prior: Some(Rest::Unloaded),
+                ask,
+            };
+            self.effects.push(Effect::Load { part, ask });
+            return self.take();
+        }
         let entry = &mut self.parts[index(part)];
         let prior = match entry.phase {
-            _ if !entry.available => None,
-            Phase::Idle => Some(Rest::Idle),
-            Phase::Failed(key) => Some(Rest::Failed(key)),
-            Phase::Clearing => {
+            Phase::Intent
+            | Phase::Draining
+            | Phase::Deleting
+            | Phase::Clearing
+            | Phase::Cleanup => {
                 entry.install_after = true;
                 None
             }
+            _ if !entry.available => None,
+            Phase::Idle => Some(Rest::Idle),
+            Phase::Failed(key) => Some(Rest::Failed(key)),
             _ => None,
         };
+        self.retry_cleanup(part);
         if let Some(prior) = prior {
             let token = self.token();
             let entry = &mut self.parts[index(part)];
@@ -198,10 +348,22 @@ impl Installer {
     }
 
     /// `CancelVoiceInstall`: every install still queued, fetching or loading goes back to where it
-    /// was, with its files kept. A commit in flight isn't cancelled. Answered accepted with no
-    /// write.
+    /// was, with its files kept. A commit in flight isn't cancelled, and neither is a removal.
+    /// Answered accepted with no write.
     pub(crate) fn cancel(&mut self) -> Vec<Effect> {
         for (index, part) in VoicePart::ALL.into_iter().enumerate() {
+            if !self.parts[index].available {
+                continue;
+            }
+            if let Phase::Loading {
+                prior: Some(Rest::Unloaded),
+                ask,
+            } = self.parts[index].phase
+            {
+                self.parts[index].phase = Phase::Unloading { ask };
+                self.effects.push(Effect::Unload { part, ask });
+                continue;
+            }
             let (prior, stop) = match self.parts[index].phase {
                 Phase::Queued { prior } => (prior, None),
                 Phase::Fetching { prior, .. } => (prior, Some(Effect::CancelFetch)),
@@ -215,16 +377,56 @@ impl Installer {
             let token = self.token();
             let entry = &mut self.parts[index];
             entry.token = token;
-            entry.phase = match prior {
-                Rest::Idle => Phase::Idle,
-                Rest::Failed(key) => Phase::Failed(key),
-            };
+            entry.phase = prior.phase();
         }
         self.take()
     }
 
+    /// `RemoveVoice`, where `folder` says whether the part's folder exists. A queued install is
+    /// dropped. Nothing else happens before the intent commits: the prior phase keeps its model,
+    /// its fetch and its view.
+    pub(crate) fn remove(
+        &mut self,
+        part: VoicePart,
+        folder: Folder,
+    ) -> (RemoveAnswer, Vec<Effect>) {
+        let entry = &self.parts[index(part)];
+        if !entry.available && !entry.models.is_empty() {
+            return (RemoveAnswer::Refused, self.take());
+        }
+        let token = self.token();
+        let entry = &mut self.parts[index(part)];
+        if let Phase::Queued { prior } = entry.phase {
+            entry.phase = prior.phase();
+        }
+        let answer = match entry.phase {
+            Phase::Intent
+            | Phase::Draining
+            | Phase::Deleting
+            | Phase::Clearing
+            | Phase::Cleanup => RemoveAnswer::Accepted,
+            Phase::Idle | Phase::Failed(_)
+                if entry.durable == Durable::Absent && folder == Folder::Missing =>
+            {
+                RemoveAnswer::Refused
+            }
+            phase => {
+                entry.intent = Some(Intent {
+                    phase,
+                    token: entry.token,
+                    held: Vec::new(),
+                });
+                entry.phase = Phase::Intent;
+                entry.token = token;
+                RemoveAnswer::Intent { token }
+            }
+        };
+        self.retry_cleanup(part);
+        (answer, self.take())
+    }
+
     /// Quit: the running fetch is told to stop, and no fetch starts after it, so an install still
-    /// queued never downloads. A commit already queued still lands.
+    /// queued never downloads. A commit or removal intent already queued still lands.
     pub(crate) fn quit(&mut self) -> Vec<Effect> {
         self.quitting = true;
         if self.fetching.is_some() {
@@ -250,23 +452,34 @@ impl Installer {
         token: u64,
         result: Result<(), DownloadError>,
     ) -> Vec<Effect> {
-        if self.fetching == Some(token) {
+        if self.fetching == Some((part, token)) {
             self.fetching = None;
         }
         let entry = &mut self.parts[index(part)];
-        if let Phase::Fetching { prior, .. } = entry.phase
-            && entry.token == token
-        {
-            entry.phase = match result {
-                Ok(()) => {
-                    self.effects.push(Effect::Load { part, ask: token });
-                    Phase::Loading {
-                        prior: Some(prior),
-                        ask: token,
+        if !entry.available {
+            self.advance();
+            return self.take();
+        }
+        if entry.hold(token, Held::Fetched(result)) {
+            self.advance();
+            return self.take();
+        }
+        match entry.phase {
+            Phase::Fetching { prior, .. } if entry.token == token => {
+                entry.phase = match result {
+                    Ok(()) => {
+                        entry.models.push(token);
+                        self.effects.push(Effect::Load { part, ask: token });
+                        Phase::Loading {
+                            prior: Some(prior),
+                            ask: token,
+                        }
                     }
-                }
-                Err(error) => Phase::Failed(fetch_key(error)),
-            };
+                    Err(error) => Phase::Failed(fetch_key(error)),
+                };
+            }
+            Phase::Draining => self.drained(part),
+            _ => {}
         }
         self.advance();
         self.take()
@@ -274,11 +487,41 @@ impl Installer {
 
     /// A handle's report. A loaded fresh install commits before it's ready; a retry of an
     /// installed part is ready at once. A loss of the current model starts one automatic reload;
-    /// a second loss, like a failed load, is a load failure.
+    /// a second loss, like a failed load, is a load failure. A draining part waits for the first
+    /// report that its model is gone.
     pub(crate) fn reported(&mut self, part: VoicePart, report: LoadReport) -> Vec<Effect> {
         let LoadReport { ask, event } = report;
         let entry = &mut self.parts[index(part)];
+        if event == LoadEvent::Unavailable {
+            if entry.models.contains(&ask) {
+                entry.available = false;
+                entry.install_after = false;
+                if self.fetching.is_some_and(|(fetched, _)| fetched == part) {
+                    self.effects.push(Effect::CancelFetch);
+                }
+            }
+            return self.take();
+        }
+        if !entry.available {
+            return self.take();
+        }
+        if event != LoadEvent::Loaded {
+            entry.models.retain(|&model| model != ask);
+        }
+        if entry.hold(ask, Held::Report(event)) {
+            return self.take();
+        }
         match (entry.phase, event) {
+            (Phase::Draining, _) => self.drained(part),
+            (
+                Phase::Unloading { ask: current },
+                LoadEvent::Unloaded | LoadEvent::Discarded | LoadEvent::Failed | LoadEvent::Lost,
+            ) if current == ask => entry.phase = Phase::Unloaded,
+            (Phase::Ready { ask: current }, LoadEvent::Unloaded)
+                if part == VoicePart::SpeechInput && current == ask =>
+            {
+                entry.phase = Phase::Unloaded;
+            }
             (Phase::Loading { ask: current, .. }, LoadEvent::Loaded) if current == ask => {
                 if entry.durable == Durable::Installed {
                     entry.phase = Phase::Ready { ask };
@@ -316,8 +559,18 @@ impl Installer {
         result: Result<(), ErrorKey>,
     ) -> Vec<Effect> {
         let entry = &mut self.parts[index(part)];
+        #[cfg(test)]
+        {
+            entry.last_write = Some(("activate", token, result));
+        }
         if result.is_ok() {
             entry.durable = Durable::Installed;
+        }
+        if !entry.available {
+            return self.take();
+        }
+        if entry.hold(token, Held::Activated(result)) {
+            return self.take();
         }
         let Phase::Committing { ask, lost } = entry.phase else {
             return self.take();
@@ -339,9 +592,99 @@ impl Installer {
         self.take()
     }
 
+    /// The removal intent's result, which is also its `RemoveVoice`'s answer. Committed, the
+    /// part's fetch is cancelled and every model it asked for is unloaded, cancelled ones
+    /// included, and the folder is deleted once all of them have ended. Refused, the part goes
+    /// back to its prior phase and token, and what completed for them meanwhile is applied in
+    /// order, as if it had just come.
+    pub(crate) fn intended(
+        &mut self,
+        part: VoicePart,
+        token: u64,
+        result: Result<(), ErrorKey>,
+    ) -> Vec<Effect> {
+        let entry = &mut self.parts[index(part)];
+        #[cfg(test)]
+        {
+            entry.last_write = Some(("intent", token, result));
+        }
+        if result.is_ok() {
+            entry.durable = Durable::Removing;
+        }
+        if entry.token != token || entry.phase != Phase::Intent {
+            return self.take();
+        }
+        let Some(Intent {
+            phase: prior,
+            token: prior_token,
+            held,
+        }) = entry.intent.take()
+        else {
+            return self.take();
+        };
+        if result.is_ok() {
+            if self.fetching.is_some_and(|(fetched, _)| fetched == part) {
+                self.effects.push(Effect::CancelFetch);
+            }
+            let entry = &mut self.parts[index(part)];
+            self.effects
+                .extend(entry.models.iter().map(|&ask| Effect::Unload { part, ask }));
+            entry.phase = Phase::Draining;
+            self.drained(part);
+            return self.take();
+        }
+        entry.phase = prior;
+        entry.token = prior_token;
+        let install = std::mem::take(&mut entry.install_after);
+        for completion in held {
+            let effects = match completion {
+                Held::Fetched(result) => self.fetched(part, prior_token, result),
+                Held::Report(event) => self.reported(
+                    part,
+                    LoadReport {
+                        ask: prior_token,
+                        event,
+                    },
+                ),
+                Held::Activated(result) => self.activated(part, prior_token, result),
+            };
+            self.effects.extend(effects);
+        }
+        if install {
+            let effects = self.install(part);
+            self.effects.extend(effects);
+        }
+        self.take()
+    }
+
+    /// A delete's result, the folder as it left it: gone, the `RemoveDone` write follows; still
+    /// there, the removal stays durable, in Cleanup, and an install waiting for it is dropped.
+    pub(crate) fn deleted(&mut self, part: VoicePart, token: u64, folder: Folder) -> Vec<Effect> {
+        let entry = &mut self.parts[index(part)];
+        #[cfg(test)]
+        {
+            entry.last_delete = Some((token, folder));
+        }
+        if entry.token != token || entry.phase != Phase::Deleting {
+            return self.take();
+        }
+        if folder == Folder::Missing {
+            entry.phase = Phase::Clearing;
+            self.effects.push(Effect::Clear { part });
+        } else {
+            entry.phase = Phase::Cleanup;
+            entry.install_after = false;
+        }
+        self.take()
+    }
+
     /// The `RemoveDone` write's result. A failed one leaves the removal durable, in Cleanup.
     pub(crate) fn cleared(&mut self, part: VoicePart, result: Result<(), ErrorKey>) -> Vec<Effect> {
         let entry = &mut self.parts[index(part)];
+        #[cfg(test)]
+        {
+            entry.last_write = Some(("clear", entry.token, result));
+        }
         if result.is_ok() {
             entry.durable = Durable::Absent;
         }
@@ -360,6 +703,31 @@ impl Installer {
         self.take()
     }
 
+    /// From Cleanup, the same delete and `RemoveDone` again, with a new token.
+    fn retry_cleanup(&mut self, part: VoicePart) {
+        if self.parts[index(part)].phase != Phase::Cleanup {
+            return;
+        }
+        let token = self.token();
+        let entry = &mut self.parts[index(part)];
+        entry.token = token;
+        entry.phase = Phase::Deleting;
+        self.effects.push(Effect::Delete { part, token });
+    }
+
+    /// Deletes once a draining part's fetch has ended and each of its models is gone.
+    fn drained(&mut self, part: VoicePart) {
+        let fetching = self.fetching.is_some_and(|(fetched, _)| fetched == part);
+        let entry = &mut self.parts[index(part)];
+        if entry.phase == Phase::Draining && !fetching && entry.models.is_empty() {
+            entry.phase = Phase::Deleting;
+            self.effects.push(Effect::Delete {
+                part,
+                token: entry.token,
+            });
+        }
+    }
+
     /// Starts the earliest queued install's fetch once no fetch is running, unless quitting.
     fn advance(&mut self) {
         if self.quitting || self.fetching.is_some() {
@@ -368,7 +736,7 @@ impl Installer {
         let next = VoicePart::ALL
             .into_iter()
             .zip(&mut self.parts)
-            .filter(|(_, entry)| matches!(entry.phase, Phase::Queued { .. }))
+            .filter(|(_, entry)| entry.available && matches!(entry.phase, Phase::Queued { .. }))
             .min_by_key(|(_, entry)| entry.token);
         if let Some((part, entry)) = next
             && let Phase::Queued { prior } = entry.phase
@@ -377,7 +745,7 @@ impl Installer {
                 prior,
                 progress: None,
             };
-            self.fetching = Some(entry.token);
+            self.fetching = Some((part, entry.token));
             self.effects.push(Effect::Fetch {
                 part,
                 token: entry.token,
@@ -399,6 +767,7 @@ impl Installer {
             return;
         }
         entry.retry_left -= 1;
+        entry.models.push(token);
         entry.phase = Phase::Loading { prior, ask: token };
         self.effects.push(Effect::Load { part, ask: token });
     }
@@ -414,14 +783,48 @@ impl Installer {
     }
 }
 
-fn index(part: VoicePart) -> usize {
+/// A part's place in `VoicePart::ALL`.
+pub(crate) fn index(part: VoicePart) -> usize {
     usize::from(part == VoicePart::SpokenReplies)
 }
 
+impl Rest {
+    fn phase(self) -> Phase {
+        match self {
+            Self::Idle => Phase::Idle,
+            Self::Unloaded => Phase::Unloaded,
+            Self::Failed(key) => Phase::Failed(key),
+        }
+    }
+}
+
 impl Entry {
+    /// Holds a completion for the token a removal intent replaced; says whether it did.
+    fn hold(&mut self, token: u64, completion: Held) -> bool {
+        match &mut self.intent {
+            Some(intent) if intent.token == token => {
+                intent.held.push(completion);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The phase as the user sees it: the one before a removal intent until it commits.
+    fn shown(&self) -> Phase {
+        self.intent
+            .as_ref()
+            .map_or(self.phase, |intent| intent.phase)
+    }
+
     fn state(&self) -> PartState {
-        match self.phase {
-            Phase::Idle | Phase::Clearing => PartState::NotInstalled,
+        if !self.available && !self.models.is_empty() {
+            return PartState::Unavailable;
+        }
+        match self.shown() {
+            Phase::Idle | Phase::Intent | Phase::Draining | Phase::Deleting | Phase::Clearing => {
+                PartState::NotInstalled
+            }
             Phase::Fetching {
                 progress:
                     Some(Progress {
@@ -432,8 +835,11 @@ impl Entry {
                 ..
             } => PartState::Downloading { done, total },
             Phase::Queued { .. } | Phase::Fetching { .. } => PartState::Verifying,
-            Phase::Loading { .. } | Phase::Committing { .. } => PartState::Loading,
+            Phase::Loading { .. } | Phase::Unloading { .. } | Phase::Committing { .. } => {
+                PartState::Loading
+            }
             Phase::Ready { .. } => PartState::Ready,
+            Phase::Unloaded => PartState::Unloaded,
             Phase::Cleanup => self.failed(ErrorKey::VoiceStorage),
             Phase::Failed(key) => self.failed(key),
         }

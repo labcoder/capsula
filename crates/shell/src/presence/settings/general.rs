@@ -306,7 +306,7 @@ fn dock_choice_index(state: &Settings) -> Option<usize> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
     use std::time::Duration;
@@ -458,7 +458,9 @@ mod tests {
     }
 
     /// The Settings window as the shell opens it, over a saved Automatic cap and no owner.
-    fn open(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<super::SettingsView>) {
+    pub(in crate::presence::settings) fn open(
+        cx: &mut TestAppContext,
+    ) -> (AnyWindowHandle, Entity<super::SettingsView>) {
         cx.update(|cx| {
             gpui_kit::init(cx);
             cx.set_global(Strings::english());

@@ -63,6 +63,26 @@ flowchart LR
 - **The shell** isn't in any job, so a brain crash doesn't take the window with it. Each process
   starts the other detached and, where the starting job allows it, outside that job.
 
+Resource owners can opt into a per-command dispatch receipt without changing other callers.
+The supervisor records `Dispatched(generation)` before handing the body to a writer; only
+discarding a command that was never handed off records `NotDispatched`. A caller timeout or a
+closed notification channel is not a discard receipt. [Speech input](voice.md#the-speech-worker)
+uses these facts with matching confirmed exits to keep removal from deleting a live model.
+
+Resource commands also retain an armed completion through the actual one-shot reply. Sending
+the reply does not transfer ownership: dropping an unconsumed reply, rejecting its typed result
+or consuming it at or after the original deadline requests retirement of its worker generation.
+Only a timely, valid synchronous handoff disarms the completion. Ordinary single and streamed
+replies keep their existing payloads and do not allocate a per-request control channel.
+
+Each supervisor has one synchronized, coalesced retirement watermark, initially absent rather
+than generation zero. A newer generation supersedes older intents. An exact current match wakes
+the existing terminate/confirm-exit path even with no pending request; stale intents cannot
+retire a replacement. Replacement waits for physical exit confirmation, and generation exhaustion
+stops without spawning or reusing an identity. Closing the ordinary command lane also confirms
+the final worker. The retirement receiver remains alive until its final exit is published;
+closing that lane is unavailability, never an exit receipt.
+
 ## Recovery
 
 | What happens | What the other process does |

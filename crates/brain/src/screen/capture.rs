@@ -41,6 +41,9 @@ pub(crate) struct Acquired {
 /// One display capture. Windows: Windows Graphics Capture. macOS: `ScreenCaptureKit`'s
 /// `SCScreenshotManager` with Kumochi excluded from the content filter.
 pub(crate) trait Capturer {
+    fn foreground(&mut self) -> Option<TopWindow> {
+        None
+    }
     /// Fills `frame` through [`RawFrame::begin`] with one frame of `display`. It starts nothing
     /// at or after `until`, and stops waiting there.
     ///
@@ -95,11 +98,11 @@ struct Held {
 /// The capture state one worker owns on its serve thread.
 pub(super) struct Screen {
     book: TicketBook,
-    frame: RawFrame,
+    pub(super) frame: RawFrame,
     capturer: Option<Box<dyn Capturer>>,
     held: Option<Held>,
     masks: MaskSink,
-    reader: Option<Result<Box<dyn ElementReader>, i32>>,
+    pub(super) reader: Option<Result<Box<dyn ElementReader>, i32>>,
 }
 
 impl Default for Screen {
@@ -116,17 +119,13 @@ impl Default for Screen {
 }
 
 impl Screen {
-    /// Takes one frame under `ticket`, received at `received`. Its validity is local: it runs
-    /// from receipt, so the brain still checks its own deadline on the reply.
-    pub(super) fn capture(
+    pub(super) fn admit(
         &mut self,
         ticket: &TicketWire,
         display: &DisplayRef,
-        exclude: Exclusion,
         received: Instant,
         now: &dyn Fn() -> Instant,
-        open: (Open, OpenElements),
-    ) -> Result<FrameMeta, Failure> {
+    ) -> Result<Instant, Failure> {
         self.frame.invalidate();
         self.held = None;
         self.masks = Arc::new(Mutex::new(MaskSet::new(ticket.capture())));
@@ -136,25 +135,20 @@ impl Screen {
         if now() >= expires {
             return Err(Refusal::Expired.into());
         }
-        let capturer = match &mut self.capturer {
-            Some(capturer) => capturer,
-            None => self.capturer.insert(open.0().map_err(Failure::Fault)?),
-        };
-        if self.reader.as_ref().is_some_and(Result::is_err) {
-            self.reader = None;
-        }
-        let foreground = self
-            .reader
-            // shortcut: no listener until A6b2's actor; the legacy walk waits for its own reply.
-            .get_or_insert_with(|| open.1(Box::new(|| true)))
-            .as_mut()
-            .ok()
-            .and_then(|reader| {
-                reader.set_shell_pid(ticket.shell_pid());
-                reader.foreground()
-            });
-        let acquired = capturer.capture_into(display, exclude, expires, &mut self.frame)?;
-        if acquired.arrived >= expires || now() >= expires {
+        Ok(expires)
+    }
+
+    pub(super) fn acquired(
+        &mut self,
+        ticket: &TicketWire,
+        display: &DisplayRef,
+        received: Instant,
+        expires: Instant,
+        now: Instant,
+        result: (Acquired, Option<TopWindow>),
+    ) -> Result<FrameMeta, Failure> {
+        let (acquired, foreground) = result;
+        if acquired.arrived >= expires || now >= expires {
             self.frame.invalidate();
             return Err(Refusal::Expired.into());
         }
@@ -181,12 +175,62 @@ impl Screen {
         Ok(meta)
     }
 
-    pub(super) fn elements(
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the dormant alternate loop disposes frames")
+    )]
+    pub(super) fn clear(&mut self) {
+        self.held = None;
+        self.frame.release();
+        self.masks = Arc::new(Mutex::new(MaskSet::new(CaptureId(0))));
+    }
+
+    /// Takes one frame under `ticket`, received at `received`. Its validity is local: it runs
+    /// from receipt, so the brain still checks its own deadline on the reply.
+    pub(super) fn capture(
+        &mut self,
+        ticket: &TicketWire,
+        display: &DisplayRef,
+        exclude: Exclusion,
+        received: Instant,
+        now: &dyn Fn() -> Instant,
+        open: (Open, OpenElements),
+    ) -> Result<FrameMeta, Failure> {
+        let expires = self.admit(ticket, display, received, now)?;
+        let capturer = match &mut self.capturer {
+            Some(capturer) => capturer,
+            None => self.capturer.insert(open.0().map_err(Failure::Fault)?),
+        };
+        if self.reader.as_ref().is_some_and(Result::is_err) {
+            self.reader = None;
+        }
+        let foreground = self
+            .reader
+            // shortcut: no listener until A6b2's actor; the legacy walk waits for its own reply.
+            .get_or_insert_with(|| open.1(Box::new(|| true)))
+            .as_mut()
+            .ok()
+            .and_then(|reader| {
+                reader.set_shell_pid(ticket.shell_pid());
+                reader.foreground()
+            });
+        let acquired = capturer.capture_into(display, exclude, expires, &mut self.frame)?;
+        self.acquired(
+            ticket,
+            display,
+            received,
+            expires,
+            now(),
+            (acquired, foreground),
+        )
+    }
+
+    pub(super) fn walk_job(
         &mut self,
         capture: CaptureId,
         target: ElementTarget,
         now: &dyn Fn() -> Instant,
-    ) -> Result<Walked, Failure> {
+    ) -> Result<Result<WalkJob, Walked>, Failure> {
         let Some(held) = &mut self.held else {
             return Err(Refusal::Stale.into());
         };
@@ -206,12 +250,12 @@ impl Screen {
         if start >= expires {
             return Err(Refusal::Expired.into());
         }
-        let reader = match self
+        match self
             .reader
             .as_mut()
             .ok_or(Failure::Fault(MISSING_ELEMENT_READER))?
         {
-            Ok(reader) => reader,
+            Ok(_) => {}
             Err(code) => {
                 if !super::elements::finish_unavailable(
                     &self.masks,
@@ -221,7 +265,7 @@ impl Screen {
                 }
                 return Err(Failure::Fault(*code));
             }
-        };
+        }
         let display = self
             .frame
             .meta()
@@ -248,7 +292,7 @@ impl Screen {
             if retire {
                 tree = ElementTree::unavailable(capture, super::elements::Unavailable::Busy);
             }
-            return Ok(Walked { tree, retire });
+            return Ok(Err(Walked { tree, retire }));
         };
         let job = WalkJob {
             target,
@@ -257,7 +301,25 @@ impl Screen {
             until: (start + Duration::from_millis(120)).min(expires),
             masks: Arc::clone(&self.masks),
         };
-        reader.walk(job)
+        Ok(Ok(job))
+    }
+
+    pub(super) fn elements(
+        &mut self,
+        capture: CaptureId,
+        target: ElementTarget,
+        now: &dyn Fn() -> Instant,
+    ) -> Result<Walked, Failure> {
+        match self.walk_job(capture, target, now)? {
+            Ok(job) => self
+                .reader
+                .as_mut()
+                .expect("validated")
+                .as_mut()
+                .map_err(|code| Failure::Fault(*code))?
+                .walk(job),
+            Err(walked) => Ok(walked),
+        }
     }
 
     #[cfg(test)]

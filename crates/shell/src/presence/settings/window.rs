@@ -25,6 +25,41 @@ pub(in crate::presence) struct SettingsPanel {
 }
 
 impl Presence {
+    pub(in crate::presence) fn speech_input_action(
+        &mut self,
+        intent: crate::settings::SpeechInputIntent,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let (link, session) = (&self.link, &self.session);
+        self.settings.update(cx, |state, cx| {
+            state.send_speech_input(
+                intent,
+                session.as_ref().map(crate::link::Session::generation),
+                |op| {
+                    session.as_ref().is_some_and(|session| {
+                        link.send_control(session, ControlToBrain::Settings(op))
+                    })
+                },
+            );
+            cx.notify();
+        });
+    }
+
+    pub(in crate::presence) fn save_stt_unload(
+        &mut self,
+        policy: kumochi_protocol::message::SttUnload,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let (link, session) = (&self.link, &self.session);
+        self.settings.update(cx, |state, cx| {
+            state.send_stt_unload(policy, |op| {
+                session
+                    .as_ref()
+                    .is_some_and(|session| link.send_control(session, ControlToBrain::Settings(op)))
+            });
+            cx.notify();
+        });
+    }
     pub(in crate::presence) fn open_accounts(
         &mut self,
         cx: &mut Context<'_, Self>,
@@ -177,6 +212,7 @@ impl Presence {
         if self.settings_panel.is_none() {
             self.settings_panel = Some(self.create_settings(cx)?);
         }
+        self.protect_surface(super::super::exclusion::Slot::Settings, cx)?;
         self.pointer_settle = None;
         self.set_panel(super::super::PanelVisibility::Hidden, cx)?;
         let area = platform::work_area()?;
@@ -239,14 +275,7 @@ impl Presence {
                 configure_surface(window, PresenceSurface::Text, self.events.clone(), cx)?;
                 self.input_windows
                     .bind(crate::presenter::overlay_input::Layer::Panels, window)?;
-                platform::set_capture(
-                    window,
-                    if self.gesture.get().holding() {
-                        super::super::Capture::Excluded
-                    } else {
-                        super::super::Capture::Allowed
-                    },
-                )
+                Ok::<_, platform::PresenceError>(())
             })
             .map_err(|error| OpenError::Gpui(error.into()))??;
         let owner = cx.weak_entity();

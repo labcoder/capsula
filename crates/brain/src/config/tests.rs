@@ -479,6 +479,34 @@ fn a_failed_write_changes_neither_the_file_nor_the_settings() {
     assert_eq!(staged.view.assistant_name.as_str(), "Nimbus");
 }
 
+#[cfg(windows)]
+#[test]
+fn a_held_reader_refuses_atomic_config_replacement_without_changing_settings() {
+    let scratch = Scratch::new("config-open-reader");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    let mut config = Config::load(Some(dir), ThreadId(1));
+    apply(&mut config, SettingsOp::SetAssistantName(name("Nimbus")));
+    let before = std::fs::read(&path).expect("readable");
+    let reader = std::fs::File::open(&path).expect("held reader");
+    let pending = config
+        .stage(SettingsOp::SetAssistantName(name("Cirrus")))
+        .expect("staged");
+    let Err(ConfigError::Write(error)) = pending.write() else {
+        panic!("a held reader must refuse replacement");
+    };
+    assert_eq!(error.raw_os_error(), Some(5));
+    assert_eq!(config.view().assistant_name.as_str(), "Nimbus");
+    assert_eq!(std::fs::read(&path).expect("old file readable"), before);
+    drop(reader);
+    pending
+        .write()
+        .expect("replacement after the reader closes");
+    config.commit(pending);
+    assert_eq!(config.view().assistant_name.as_str(), "Cirrus");
+    assert_eq!(saved(&path)["assistant_name"].as_str(), Some("Cirrus"));
+}
+
 #[test]
 fn debug_prints_neither_names_nor_unknown_values() {
     let scratch = Scratch::new("config-debug");
@@ -742,5 +770,63 @@ fn claude_code_is_on_unless_the_file_could_have_turned_it_off() {
     assert!(
         !Config::load(Some(dir), ThreadId(1)).claude_code_enabled(),
         "a file that can't be parsed may have turned it off"
+    );
+}
+
+#[test]
+fn a_removal_intent_moves_only_its_part_from_installed_to_removing() {
+    let scratch = Scratch::new("config-remove-intent");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    std::fs::write(
+        &path,
+        "[voice]\ntalk_back = false\n\
+         installed = [\"speech-input\", \"later-part\", \"spoken-replies\", \"speech-input\"]\n\
+         removing = [\"other-part\"]\n",
+    )
+    .expect("seeded");
+    let mut config = Config::load(Some(dir), ThreadId(1));
+    let view = config.view().clone();
+    let pending = config
+        .stage_remove_intent(VoicePart::SpeechInput)
+        .expect("staged");
+    pending.write().expect("written");
+    config.commit(pending);
+    let voice = &saved(&path)["voice"];
+    assert_eq!(
+        voice["installed"],
+        toml::Value::Array(vec!["later-part".into(), "spoken-replies".into()])
+    );
+    assert_eq!(
+        voice["removing"],
+        toml::Value::Array(vec!["other-part".into(), "speech-input".into()])
+    );
+    assert_eq!(voice["talk_back"].as_bool(), Some(false));
+    assert_eq!(config.view(), &view);
+    assert_eq!(config.installed(), [VoicePart::SpokenReplies]);
+    assert_eq!(config.removing(), [VoicePart::SpeechInput]);
+}
+
+#[test]
+fn a_removal_intent_with_no_lists_starts_removing() {
+    let scratch = Scratch::new("config-remove-intent-empty");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    std::fs::write(&path, "[voice]\ninstalled = 3\n").expect("seeded");
+    let mut config = Config::load(Some(dir), ThreadId(1));
+    let pending = config
+        .stage_remove_intent(VoicePart::SpokenReplies)
+        .expect("staged");
+    pending.write().expect("written");
+    config.commit(pending);
+    let voice = &saved(&path)["voice"];
+    assert_eq!(
+        voice["installed"].as_integer(),
+        Some(3),
+        "not a list, so left alone"
+    );
+    assert_eq!(
+        voice["removing"],
+        toml::Value::Array(vec!["spoken-replies".into()])
     );
 }

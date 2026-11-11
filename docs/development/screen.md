@@ -75,6 +75,47 @@ release worker. Windows UI Automation supplies the element operation; OCR is not
 The macOS platform equivalent is `posix_spawn` file actions for stdio and a process-group kill;
 it remains unimplemented and unverified.
 
+## Local shell exclusion
+
+Presence owns a never-published local transaction in `presence/exclusion.rs`. No production
+caller acquires it, and it cannot send HoldRecognized, Include, a ticket or a capture request.
+The one private acquisition path snapshots exact native affinity before changing the dock,
+hit proxy, status panel, typing panel, threads panel, settings panel and drawing overlay.
+Absent lazy panels have no pixels; their create/re-show hooks exclude them after the existing
+owner stores the hidden window and before placement can show it. A failed hook leaves the
+new window hidden. The zero-area taskbar host and Explorer-owned UI are outside this claim.
+
+Drawing keeps the overlay's `Visibility` recovery lifecycle, paint scratch and paint notices.
+Its GPUI surface adapter attaches the drawing receipt before show, including a replacement
+window. New drawing windows start capture-allowed because production holds are dormant;
+a future activation must acquire the shared exclusion owner before announcing a hold and
+retain its receipts until authoritative native retirement, not restore them on key release.
+
+The transaction reads all present prior values before mutation. A failed getter grants nothing;
+a failed setter rolls back every potentially changed slot, including that setter's slot.
+Rollback and final restoration continue after an error, retaining failed receipts and refusing
+another acquisition until cleanup succeeds or the exact original instance is confirmed destroyed.
+Receipts keep the original GPUI handle or native owner and a destruction witness, never a delayed
+HWND as identity. A recycled native number cannot inherit an old window's snapshot. Failed GPUI
+updates retain debt; they are not proof of destruction. Destruction is witnessed by WM_NCDESTROY
+or a successful native-owner DestroyWindow, not by pointer-capture loss or owner Drop.
+
+One weak-owner timer carries the full session/input/checked lease-generation key. Its three-second
+cleanup is safe only because this local transaction never authorized a native acquisition.
+CaptureDone/Failed travel with the actual reader's connection generation; Presence checks its live
+session and input before treating them as local cleanup hints. They do not establish native drain.
+Connection loss and direct session replacement revoke before accepting another session, retaining
+failed cleanup debt; quit attempts bounded cleanup without waiting on a worker or pipe.
+No local cleanup sends ExclusionLapsed, so queue acceptance cannot be mistaken for retirement.
+
+Future published grants require both authoritative fencing of every pending/late stage and native
+source drain or confirmed worker exit before restoration. Expiry, cancellation, a queued lapse,
+link loss and the name of a terminal message prove neither. An already accepted frame keeps its
+normal capture lifetime. At most one published lifetime may use a session/CaptureFor pair; an
+exposed input cannot be re-leased, and no replacement is allowed over restoration debt. Input
+allocation and actual coordinator/worker retirement are later integration work, not implemented
+by this dormant transaction. Source regressions do not establish compositor timing or pixel privacy.
+
 ## Capture under a ticket
 
 `Capture { ticket, display, exclude }` takes one frame of one physical display into the worker's
@@ -231,6 +272,31 @@ binary=$(ls -t target/debug/deps/screen-*.exe | head -n 1)
 
 Remove the lock afterward. The strict fixture asserts 1,500–1,600 ms and prints the measured time;
 record Rez's scale with that result.
+
+## Dormant native ownership loop
+
+`screen/actor.rs` is an alternate worker-local protocol and loop, not selected by the
+production brain or worker entry point. Those still use the original synchronous request path.
+The alternate loop creates a dedicated capture producer; that thread constructs, uses and drops
+its non-Send capturer, sampling foreground immediately before capture. Only the sole-owned
+`RawFrame` and content-free result identity move back to the actor. Capture and UIA each reserve
+one completion slot until taken; their nonblocking wakes may coalesce in the bounded inbox.
+The actor checks the slots after every event and nearest-expiry/deadline wake.
+
+The alternate Context stream emits only acquisition metadata and completion. Worker-local Drop,
+Retire and expiry revoke publication before clearing the frame and mask state. A returning image
+is scrubbed/freed rather than published, and a late element tree is taken and discarded. Disposal
+acknowledgement waits for both native jobs to finish; stuck or retiring native work cannot
+acknowledge. At most 16 controls may wait for disposal, matching the inbox cap; the seventeenth
+gets a fixed Busy refusal. Repeated release is idempotent and retains no release history.
+Per-thread retirement fences reject older deletion generations in this worker.
+
+The current allocation is zeroized before growing, releasing or dropping a RawFrame. The tests
+observe synthetic bytes immediately after scrubbing and before freeing; a plain-fill replacement
+remains observationally equivalent in that seam, so optimizer resistance relies on `zeroize`.
+This does not claim the legacy production path implements Drop or expiry disposal. Brain-side
+streams, fences across respawn, full-queue termination and matching-generation release waits
+remain A6b2b, which alone may activate the alternate route. Images, OCR and Supersede remain A6c.
 
 ## Portable element data and walk
 

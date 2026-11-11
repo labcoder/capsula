@@ -3,7 +3,7 @@
 //! a delete of its thread, a disconnect or a new brain drops the text itself, not only the restore.
 
 use kumochi_protocol::message::{
-    Content, DataToShell, ErrorKey, Incarnation, Phase, RunId, ThreadId, UserError,
+    Content, DataToShell, ErrorKey, Incarnation, Phase, RunId, RunOrigin, ThreadId, UserError,
 };
 
 use super::{Applied, Refused, Runs};
@@ -35,19 +35,38 @@ fn submit(runs: &mut Runs, text: &str) {
     runs.submit(text, |_| true).expect("sent");
 }
 
-fn thinking(runs: &mut Runs, run: u64, thread: u64) {
-    runs.apply_run_state(RunId(run), ThreadId(thread), Phase::Thinking, None);
+fn thinking(runs: &mut Runs, run: u64, thread: u64, turn: u32) {
+    runs.apply_run_state(
+        RunId(run),
+        ThreadId(thread),
+        Phase::Thinking,
+        None,
+        Some(RunOrigin::Typed { turn }),
+    );
 }
 
-fn ended(runs: &mut Runs, run: u64, thread: u64, phase: Phase, key: Option<ErrorKey>) -> Applied {
+fn ended(
+    runs: &mut Runs,
+    run: u64,
+    thread: u64,
+    phase: Phase,
+    key: Option<ErrorKey>,
+    origin: Option<RunOrigin>,
+) -> Applied {
     let error = key.map(UserError::from);
-    runs.apply_run_state(RunId(run), ThreadId(thread), phase, error)
+    runs.apply_run_state(RunId(run), ThreadId(thread), phase, error, origin)
         .0
 }
 
 /// The text a failure of `run` in `thread`, explained by `key`, gives back.
-fn failed(runs: &mut Runs, run: u64, thread: u64, key: ErrorKey) -> Option<Content> {
-    ended(runs, run, thread, Phase::Failed, Some(key)).restore
+fn failed(
+    runs: &mut Runs,
+    run: u64,
+    thread: u64,
+    key: ErrorKey,
+    origin: Option<RunOrigin>,
+) -> Option<Content> {
+    ended(runs, run, thread, Phase::Failed, Some(key), origin).restore
 }
 
 #[test]
@@ -55,21 +74,30 @@ fn each_reconnect_key_restores_the_exact_text_once() {
     for key in RECONNECT {
         let mut runs = ready();
         submit(&mut runs, "résumé ✓");
-        runs.apply_state(RunId(1), ThreadId(1), Phase::Thinking);
+        runs.apply_state(
+            RunId(1),
+            ThreadId(1),
+            Phase::Thinking,
+            Some(RunOrigin::Typed { turn: 1 }),
+        );
         assert_eq!(runs.kept(), vec![12], "{key:?}");
         assert_eq!(
-            failed(&mut runs, 1, 1, key),
+            failed(&mut runs, 1, 1, key, None),
             Some(Content::from("résumé ✓")),
             "{key:?}"
         );
         assert_eq!(runs.kept(), Vec::<usize>::new(), "{key:?}");
-        assert_eq!(failed(&mut runs, 1, 1, key), None, "{key:?} restores once");
+        assert_eq!(
+            failed(&mut runs, 1, 1, key, None),
+            None,
+            "{key:?} restores once"
+        );
 
         // A run named by its failure restores the same way.
         let mut runs = ready();
         submit(&mut runs, "first state");
         assert_eq!(
-            failed(&mut runs, 1, 1, key),
+            failed(&mut runs, 1, 1, key, Some(RunOrigin::Typed { turn: 1 })),
             Some(Content::from("first state")),
             "{key:?}"
         );
@@ -81,10 +109,15 @@ fn reconnect_after_answering_never_restores_an_already_started_turn() {
     for key in RECONNECT {
         let mut runs = ready();
         submit(&mut runs, "already started");
-        runs.apply_state(RunId(1), ThreadId(1), Phase::Answering);
-        assert_eq!(failed(&mut runs, 1, 1, key), None, "{key:?}");
+        runs.apply_state(
+            RunId(1),
+            ThreadId(1),
+            Phase::Answering,
+            Some(RunOrigin::Typed { turn: 1 }),
+        );
+        assert_eq!(failed(&mut runs, 1, 1, key, None), None, "{key:?}");
         assert_eq!(runs.kept(), Vec::<usize>::new());
-        assert_eq!(failed(&mut runs, 1, 1, key), None);
+        assert_eq!(failed(&mut runs, 1, 1, key, None), None);
     }
 }
 
@@ -96,7 +129,13 @@ fn explicit_retry_uses_its_captured_thread_and_is_consumed_even_when_refused() {
     submit(&mut runs, "retry café");
     let error =
         UserError::new(ErrorKey::AccountOffline, Vec::new(), vec![Action::Retry]).expect("bounded");
-    runs.apply_run_state(RunId(1), ThreadId(9), Phase::Failed, Some(error.clone()));
+    runs.apply_run_state(
+        RunId(1),
+        ThreadId(9),
+        Phase::Failed,
+        Some(error.clone()),
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
     assert!(runs.retry_ready(RunId(1)));
     assert_eq!(
         runs.retry(RunId(99), "", |_| panic!("wrong run owner")),
@@ -124,14 +163,26 @@ fn explicit_retry_uses_its_captured_thread_and_is_consumed_even_when_refused() {
         runs.retry(RunId(1), "", |_| panic!("single use")),
         Err(Refused::Busy)
     );
-    runs.apply_run_state(RunId(2), ThreadId(9), Phase::Failed, Some(error.clone()));
+    runs.apply_run_state(
+        RunId(2),
+        ThreadId(9),
+        Phase::Failed,
+        Some(error.clone()),
+        Some(RunOrigin::Typed { turn: 2 }),
+    );
     assert_eq!(
         runs.retry(RunId(2), "new draft", |_| panic!("draft preserved")),
         Err(Refused::Busy)
     );
     assert!(!runs.retry_ready(RunId(2)));
     submit(&mut runs, "delivery fails");
-    runs.apply_run_state(RunId(3), ThreadId(9), Phase::Failed, Some(error));
+    runs.apply_run_state(
+        RunId(3),
+        ThreadId(9),
+        Phase::Failed,
+        Some(error),
+        Some(RunOrigin::Typed { turn: 3 }),
+    );
     assert_eq!(runs.retry(RunId(3), "", |_| false), Err(Refused::Offline));
     assert_eq!(
         runs.retry(RunId(3), "", |_| panic!("refused attempt consumed it")),
@@ -154,6 +205,7 @@ fn retry_content_is_dropped_on_each_ownership_change_and_dismissal() {
                 UserError::new(ErrorKey::AccountOffline, Vec::new(), vec![Action::Retry])
                     .expect("bounded"),
             ),
+            Some(RunOrigin::Typed { turn: 1 }),
         );
         assert_eq!(runs.kept(), [MARKER.len()]);
         let debug = format!("{runs:?}");
@@ -203,6 +255,7 @@ fn retry_rechecks_the_captured_main_thread_after_a_settings_change() {
             UserError::new(ErrorKey::AccountOffline, Vec::new(), vec![Action::Retry])
                 .expect("bounded error"),
         ),
+        Some(RunOrigin::Typed { turn: 1 }),
     );
     runs.settings(ThreadId(2));
     assert!(!runs.retry_ready(RunId(1)));
@@ -235,6 +288,7 @@ fn a_stale_selection_revision_cannot_dispatch_retained_retry_text() {
             UserError::new(ErrorKey::AccountOffline, Vec::new(), vec![Action::Retry])
                 .expect("bounded error"),
         ),
+        Some(RunOrigin::Typed { turn: 1 }),
     );
     runs.revision += 1;
     assert!(!runs.retry_ready(RunId(1)));
@@ -255,7 +309,13 @@ fn a_new_target_restores_into_the_thread_its_run_names() {
     assert!(runs.select_thread(None));
     submit(&mut runs, "new task");
     assert_eq!(
-        failed(&mut runs, 1, 7, ErrorKey::SessionEnded),
+        failed(
+            &mut runs,
+            1,
+            7,
+            ErrorKey::SessionEnded,
+            Some(RunOrigin::Typed { turn: 1 })
+        ),
         Some(Content::from("new task"))
     );
 }
@@ -271,15 +331,15 @@ fn any_other_ending_uses_the_text_up_and_a_later_valid_failure_cannot_revive_it(
     for key in others {
         let mut runs = ready();
         submit(&mut runs, "x");
-        thinking(&mut runs, 1, 1);
+        thinking(&mut runs, 1, 1, 1);
         assert_eq!(
-            ended(&mut runs, 1, 1, Phase::Failed, key).restore,
+            ended(&mut runs, 1, 1, Phase::Failed, key, None).restore,
             None,
             "{key:?}"
         );
         assert_eq!(runs.kept(), Vec::<usize>::new(), "{key:?}");
         assert_eq!(
-            failed(&mut runs, 1, 1, ErrorKey::SessionEnded),
+            failed(&mut runs, 1, 1, ErrorKey::SessionEnded, None),
             None,
             "{key:?}"
         );
@@ -287,12 +347,12 @@ fn any_other_ending_uses_the_text_up_and_a_later_valid_failure_cannot_revive_it(
     for phase in [Phase::Done, Phase::Interrupted] {
         let mut runs = ready();
         submit(&mut runs, "x");
-        thinking(&mut runs, 1, 1);
-        let applied = ended(&mut runs, 1, 1, phase, Some(ErrorKey::SessionEnded));
+        thinking(&mut runs, 1, 1, 1);
+        let applied = ended(&mut runs, 1, 1, phase, Some(ErrorKey::SessionEnded), None);
         assert_eq!(applied.restore, None, "{phase:?}");
         assert_eq!(runs.kept(), Vec::<usize>::new(), "{phase:?}");
         assert_eq!(
-            failed(&mut runs, 1, 1, ErrorKey::SessionEnded),
+            failed(&mut runs, 1, 1, ErrorKey::SessionEnded, None),
             None,
             "{phase:?}"
         );
@@ -300,9 +360,9 @@ fn any_other_ending_uses_the_text_up_and_a_later_valid_failure_cannot_revive_it(
     // A turn the brain refused before naming a run takes its text with it.
     let mut runs = ready();
     submit(&mut runs, "x");
-    runs.refused();
+    runs.refused(1, Some(ThreadId(1)));
     assert_eq!(runs.kept(), Vec::<usize>::new());
-    assert_eq!(failed(&mut runs, 1, 1, ErrorKey::SessionEnded), None);
+    assert_eq!(failed(&mut runs, 1, 1, ErrorKey::SessionEnded, None), None);
 }
 
 #[test]
@@ -313,12 +373,24 @@ fn queued_turns_map_to_their_own_runs_and_any_later_attempt_drops_earlier_texts(
     submit(&mut runs, "bb");
     assert_eq!(runs.kept(), vec![2], "b's attempt dropped a's text");
     assert_eq!(
-        failed(&mut runs, 1, 1, ErrorKey::SessionEnded),
+        failed(
+            &mut runs,
+            1,
+            1,
+            ErrorKey::SessionEnded,
+            Some(RunOrigin::Typed { turn: 1 })
+        ),
         None,
         "run 1 is a's"
     );
     assert_eq!(
-        failed(&mut runs, 2, 1, ErrorKey::SessionEnded),
+        failed(
+            &mut runs,
+            2,
+            1,
+            ErrorKey::SessionEnded,
+            Some(RunOrigin::Typed { turn: 2 })
+        ),
         Some(Content::from("bb"))
     );
 
@@ -329,27 +401,36 @@ fn queued_turns_map_to_their_own_runs_and_any_later_attempt_drops_earlier_texts(
         Err(Refused::Blank)
     );
     assert_eq!(runs.kept(), Vec::<usize>::new(), "a refused attempt counts");
-    assert_eq!(failed(&mut runs, 1, 1, ErrorKey::SessionEnded), None);
+    assert_eq!(
+        failed(
+            &mut runs,
+            1,
+            1,
+            ErrorKey::SessionEnded,
+            Some(RunOrigin::Typed { turn: 1 })
+        ),
+        None
+    );
 }
 
 #[test]
 fn a_selection_change_drops_the_text_even_after_coming_back() {
     let mut runs = ready();
     submit(&mut runs, "x");
-    thinking(&mut runs, 1, 1);
+    thinking(&mut runs, 1, 1, 1);
     assert!(runs.select_thread(Some(ThreadId(2))));
     assert_eq!(runs.kept(), Vec::<usize>::new());
     runs.back_to_kumo();
-    assert_eq!(failed(&mut runs, 1, 1, ErrorKey::SessionEnded), None);
+    assert_eq!(failed(&mut runs, 1, 1, ErrorKey::SessionEnded, None), None);
 
     let mut runs = ready();
     assert!(runs.select_thread(Some(ThreadId(2))));
     submit(&mut runs, "y");
-    thinking(&mut runs, 1, 2);
+    thinking(&mut runs, 1, 2, 1);
     runs.back_to_kumo();
     assert_eq!(runs.kept(), Vec::<usize>::new());
     assert!(runs.select_thread(Some(ThreadId(2))));
-    assert_eq!(failed(&mut runs, 1, 2, ErrorKey::SessionEnded), None);
+    assert_eq!(failed(&mut runs, 1, 2, ErrorKey::SessionEnded, None), None);
 }
 
 /// H1: the text belongs to the thread it was typed to, so a run of another thread never takes
@@ -360,27 +441,31 @@ fn a_run_or_target_of_another_thread_never_restores() {
     let mut runs = ready();
     submit(&mut runs, "for one");
     runs.settings(ThreadId(3));
-    thinking(&mut runs, 1, 3);
+    thinking(&mut runs, 1, 3, 1);
     assert_eq!(
         runs.kept(),
-        Vec::<usize>::new(),
-        "run 1 continues 3, not the typed 1"
+        vec![7],
+        "run 1 continues 3 and cannot consume the turn typed to 1"
     );
-    assert_eq!(failed(&mut runs, 1, 3, ErrorKey::SessionEnded), None);
+    assert_eq!(runs.submitted.len(), 1);
+    assert_eq!(runs.submitted[0].turn, 1);
+    assert_eq!(runs.submitted[0].thread, Some(ThreadId(1)));
+    assert!(!runs.focus(RunId(1), ThreadId(9)));
+    assert_eq!(failed(&mut runs, 1, 3, ErrorKey::SessionEnded, None), None);
 
     // Typed to 1 and answered in 1, but input now goes to 3.
     let mut runs = ready();
     submit(&mut runs, "for one");
-    thinking(&mut runs, 1, 1);
+    thinking(&mut runs, 1, 1, 1);
     runs.settings(ThreadId(3));
-    assert_eq!(failed(&mut runs, 1, 1, ErrorKey::SessionEnded), None);
+    assert_eq!(failed(&mut runs, 1, 1, ErrorKey::SessionEnded, None), None);
 }
 
 #[test]
 fn esc_drops_the_text_whether_it_stops_cancels_or_clears() {
     let mut runs = ready();
     submit(&mut runs, "x");
-    thinking(&mut runs, 1, 1);
+    thinking(&mut runs, 1, 1, 1);
     assert!(runs.stop().is_some());
     assert_eq!(runs.kept(), Vec::<usize>::new());
     let (applied, notice) = runs.apply_run_state(
@@ -388,6 +473,7 @@ fn esc_drops_the_text_whether_it_stops_cancels_or_clears() {
         ThreadId(1),
         Phase::Failed,
         Some(ErrorKey::SessionEnded.into()),
+        None,
     );
     assert_eq!((applied.restore, notice), (None, None));
 
@@ -399,14 +485,23 @@ fn esc_drops_the_text_whether_it_stops_cancels_or_clears() {
         "the turn is cancelled before its run is named"
     );
     assert_eq!(runs.kept(), Vec::<usize>::new());
-    assert_eq!(failed(&mut runs, 1, 1, ErrorKey::SessionEnded), None);
+    assert_eq!(
+        failed(
+            &mut runs,
+            1,
+            1,
+            ErrorKey::SessionEnded,
+            Some(RunOrigin::Typed { turn: 1 })
+        ),
+        None
+    );
 
     let mut runs = ready();
     submit(&mut runs, "x");
-    thinking(&mut runs, 1, 1);
+    thinking(&mut runs, 1, 1, 1);
     runs.clear();
     assert_eq!(runs.kept(), Vec::<usize>::new());
-    assert_eq!(failed(&mut runs, 1, 1, ErrorKey::SessionEnded), None);
+    assert_eq!(failed(&mut runs, 1, 1, ErrorKey::SessionEnded, None), None);
 }
 
 #[test]
@@ -420,12 +515,12 @@ fn a_confirmed_delete_drops_its_thread_s_text_even_when_another_is_the_target() 
 
     let mut runs = ready();
     submit(&mut runs, "named");
-    thinking(&mut runs, 1, 1);
+    thinking(&mut runs, 1, 1, 1);
     runs.settings(ThreadId(5));
     assert!(runs.confirm_delete(ThreadId(1)));
     assert_eq!(runs.kept(), Vec::<usize>::new());
     runs.settings(ThreadId(1));
-    assert_eq!(failed(&mut runs, 1, 1, ErrorKey::SessionEnded), None);
+    assert_eq!(failed(&mut runs, 1, 1, ErrorKey::SessionEnded, None), None);
 
     // Another thread's delete leaves it alone.
     let mut runs = ready();
@@ -438,21 +533,21 @@ fn a_confirmed_delete_drops_its_thread_s_text_even_when_another_is_the_target() 
 fn a_disconnect_or_a_new_brain_drops_the_text() {
     let mut runs = ready();
     submit(&mut runs, "x");
-    thinking(&mut runs, 1, 1);
+    thinking(&mut runs, 1, 1, 1);
     runs.disconnected();
     assert_eq!(runs.kept(), Vec::<usize>::new());
     // A new brain numbers runs afresh, so its run 1 isn't the old one.
     runs.met(Incarnation(2));
     runs.connected(2);
     runs.settings(ThreadId(1));
-    assert_eq!(failed(&mut runs, 1, 1, ErrorKey::SessionEnded), None);
+    assert_eq!(failed(&mut runs, 1, 1, ErrorKey::SessionEnded, None), None);
 }
 
 #[test]
 fn a_new_brain_drops_held_texts_even_without_a_disconnect() {
     let mut runs = ready();
     submit(&mut runs, "x");
-    thinking(&mut runs, 1, 1);
+    thinking(&mut runs, 1, 1, 1);
     runs.met(Incarnation(1));
     assert_eq!(runs.kept(), vec![1], "the same brain keeps it");
     runs.met(Incarnation(2));
@@ -480,7 +575,7 @@ fn debug_prints_lengths_never_typed_or_answer_text() {
     assert_redacted(&pending);
     assert!(pending.contains("held: 1"), "{pending}");
 
-    thinking(&mut runs, 1, 1);
+    thinking(&mut runs, 1, 1, 1);
     let shown = runs.shown().expect("the answer shows");
     assert_eq!(shown.text, MARKER);
     let debug = format!("{shown:?}");
@@ -496,7 +591,14 @@ fn debug_prints_lengths_never_typed_or_answer_text() {
         "{named}"
     );
 
-    let applied = ended(&mut runs, 1, 1, Phase::Failed, Some(ErrorKey::SessionEnded));
+    let applied = ended(
+        &mut runs,
+        1,
+        1,
+        Phase::Failed,
+        Some(ErrorKey::SessionEnded),
+        None,
+    );
     assert_eq!(applied.restore.as_deref(), Some(MARKER));
     let debug = format!("{applied:?}");
     assert_redacted(&debug);

@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use kumochi_protocol::message::{ControlToShell, ErrorKey, VoiceView};
+use kumochi_protocol::message::{ControlToShell, ErrorKey, SttUnload, VoiceView};
 use kumochi_protocol::voice::VoicePart;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::watch;
@@ -12,9 +12,10 @@ use tokio::task::JoinHandle;
 
 use super::settings::{BRAIN, Change, Queued, VoiceWrite};
 use super::{Brain, Full, Input, Link};
+use crate::platform::{self, Untrusted};
 use crate::voice::LoadReport;
 use crate::voice::download::{DownloadError, Fetch, FetchPhase, Progress};
-use crate::voice::installer::{Durable, Effect, Installer};
+use crate::voice::installer::{self, Durable, Effect, Folder, Installer, RemoveAnswer};
 use crate::voice::pump::Pump;
 use crate::voice::stt::SttHandle;
 use crate::voice::tts::TtsHandle;
@@ -29,6 +30,8 @@ pub(crate) struct Voice {
     fetcher: Arc<dyn Fetch>,
     /// The one fetch running, cancelled or not.
     fetch: Option<Fetching>,
+    /// Each part's delete in flight, in `VoicePart::ALL` order.
+    deletes: [Option<Deleting>; 2],
     /// What the coordinator was last told about spoken replies.
     spoken: bool,
 }
@@ -42,6 +45,44 @@ struct Fetching {
     task: JoinHandle<Result<(), DownloadError>>,
 }
 
+#[derive(Debug)]
+struct Deleting {
+    token: u64,
+    task: JoinHandle<Folder>,
+}
+
+#[cfg(test)]
+pub(super) struct Diagnostic<'a>(&'a Voice);
+
+#[cfg(test)]
+impl std::fmt::Debug for Diagnostic<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let voice = self.0;
+        f.debug_struct("Voice")
+            .field("parts", &voice.installer.diagnostics())
+            .field(
+                "fetch(part,token,finished)",
+                &voice
+                    .fetch
+                    .as_ref()
+                    .map(|fetch| (fetch.part, fetch.token, fetch.task.is_finished())),
+            )
+            .field(
+                "deletes(token,finished)",
+                &voice.deletes.each_ref().map(|delete| {
+                    delete
+                        .as_ref()
+                        .map(|delete| (delete.token, delete.task.is_finished()))
+                }),
+            )
+            .field(
+                "queued_reports",
+                &voice.reports.each_ref().map(UnboundedReceiver::len),
+            )
+            .finish()
+    }
+}
+
 /// Something voice heard.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Event {
@@ -50,9 +91,16 @@ pub(super) enum Event {
     Progress,
     /// The fetch running ended.
     Fetched(Result<(), DownloadError>),
+    /// A part's delete ended, with the folder as it left it.
+    Deleted(VoicePart, Folder),
 }
 
 impl Voice {
+    #[cfg(test)]
+    pub(super) fn diagnostics(&self) -> Diagnostic<'_> {
+        Diagnostic(self)
+    }
+
     /// A report that came while nothing read them.
     fn try_next(&mut self) -> Option<(VoicePart, LoadReport)> {
         let [stt, tts] = &mut self.reports;
@@ -72,6 +120,7 @@ pub(super) async fn next(voice: &mut Option<Voice>) -> Event {
         return std::future::pending().await;
     };
     let [stt, tts] = &mut voice.reports;
+    let [first, second] = &mut voice.deletes;
     let (progress, task) = match &mut voice.fetch {
         Some(fetch) => (Some(&mut fetch.progress), Some(&mut fetch.task)),
         None => (None, None),
@@ -81,6 +130,8 @@ pub(super) async fn next(voice: &mut Option<Voice>) -> Event {
         Some(report) = tts.recv() => Event::Report(VoicePart::SpokenReplies, report),
         Some(()) = changed(progress) => Event::Progress,
         Some(done) = joined(task) => Event::Fetched(done),
+        Some(done) = deleted(first) => Event::Deleted(VoicePart::SpeechInput, done),
+        Some(done) = deleted(second) => Event::Deleted(VoicePart::SpokenReplies, done),
         else => std::future::pending().await,
     }
 }
@@ -100,6 +151,33 @@ async fn joined(
     }))
 }
 
+async fn deleted(delete: &mut Option<Deleting>) -> Option<Folder> {
+    let done = (&mut delete.as_mut()?.task).await;
+    Some(done.unwrap_or_else(|error| {
+        tracing::error!(panicked = error.is_panic(), "a voice delete didn't finish");
+        Folder::Present
+    }))
+}
+
+/// Deletes `part`'s folder under `models`, and says whether it's still there. Every folder from the
+/// volume root down to `models` is held while the part's folder is deleted through handles that
+/// never follow a reparse point, so a junction on the way, or a folder someone else could change,
+/// deletes nothing. A folder that's already gone counts as deleted. It blocks.
+pub(super) fn delete(models: &Path, part: VoicePart) -> Folder {
+    let deleted = match platform::hold_chain(models) {
+        Ok(_held) => platform::remove_tree(&models.join(part.dir())),
+        Err(Untrusted::Missing) => Ok(()),
+        Err(error) => Err(error),
+    };
+    match deleted {
+        Ok(()) => Folder::Missing,
+        Err(error) => {
+            tracing::warn!(?part, ?error, "a removed voice part wasn't deleted");
+            Folder::Present
+        }
+    }
+}
+
 /// Whether every file of `part` under `models` has its manifest size.
 fn whole(models: &Path, part: VoicePart) -> bool {
     let dir = models.join(part.dir());
@@ -110,6 +188,13 @@ fn whole(models: &Path, part: VoicePart) -> bool {
 }
 
 impl Brain {
+    #[cfg(test)]
+    pub(super) fn voice_deleting(&self, part: VoicePart) -> bool {
+        self.voice
+            .as_ref()
+            .is_some_and(|voice| voice.deletes[installer::index(part)].is_some())
+    }
+
     /// Starts voice at brain start, with no network: each installed part whose files have their
     /// sizes loads. `stuck` names the removals whose folders couldn't be deleted; every other
     /// unfinished removal has its `RemoveDone` queued. A handle that didn't start is `None`, and
@@ -145,9 +230,11 @@ impl Brain {
             reports,
             fetcher,
             fetch: None,
+            deletes: [None, None],
             spoken: false,
         });
         self.run(effects);
+        self.voice_policy();
     }
 
     /// Carries out the installer's effects.
@@ -212,20 +299,29 @@ impl Brain {
                     change: Change::Voice(VoiceWrite::Activate { part, token }),
                     epoch: BRAIN,
                 }),
+                Effect::Delete { part, token } => {
+                    let models = voice.models.clone();
+                    let task = tokio::task::spawn_blocking(move || delete(&models, part));
+                    voice.deletes[installer::index(part)] = Some(Deleting { token, task });
+                }
+                Effect::Clear { part } => self.settings_ops.push_back(Queued {
+                    change: Change::Voice(VoiceWrite::RemoveDone(part)),
+                    epoch: BRAIN,
+                }),
             }
         }
     }
 
     /// Carries out `effects`, then tells the coordinator whether runs speak and the shell the
-    /// view, if it changed from `before`. An Activate it queues waits for the next settings pump.
-    fn voice_apply(
+    /// view, if it changed from `before`. A write it queues waits for the next settings pump.
+    pub(super) fn voice_apply(
         &mut self,
         before: VoiceView,
         effects: Vec<Effect>,
         link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
         self.run(effects);
-        self.spoken_replies();
+        self.voice_policy();
         let Some(voice) = &self.voice else {
             return Ok(());
         };
@@ -259,11 +355,15 @@ impl Brain {
                 Some(fetch) => voice.installer.fetched(fetch.part, fetch.token, result),
                 None => Vec::new(),
             },
+            Event::Deleted(part, done) => match voice.deletes[installer::index(part)].take() {
+                Some(delete) => voice.installer.deleted(part, delete.token, done),
+                None => Vec::new(),
+            },
         };
         self.voice_apply(before, effects, link)
     }
 
-    /// An install or cancel op, already answered accepted.
+    /// Applies an installer action; its caller owns any settings acknowledgement.
     pub(super) fn voice_op(
         &mut self,
         op: impl FnOnce(&mut Installer) -> Vec<Effect>,
@@ -277,6 +377,30 @@ impl Brain {
         self.voice_apply(before, effects, link)
     }
 
+    /// Whether the installer still wants the Activate write for `token`.
+    pub(super) fn voice_activating(&self, part: VoicePart, token: u64) -> bool {
+        self.voice
+            .as_ref()
+            .is_some_and(|voice| voice.installer.activating(part, token))
+    }
+
+    /// `RemoveVoice`: the installer's answer, the view before it and the effects still to carry
+    /// out, or `None` without voice.
+    pub(super) fn voice_remove(
+        &mut self,
+        part: VoicePart,
+    ) -> Option<(RemoveAnswer, VoiceView, Vec<Effect>)> {
+        let voice = self.voice.as_mut()?;
+        let before = voice.installer.view();
+        let folder = if voice.models.join(part.dir()).exists() {
+            Folder::Present
+        } else {
+            Folder::Missing
+        };
+        let (answer, effects) = voice.installer.remove(part, folder);
+        Some((answer, before, effects))
+    }
+
     /// An installer write's result.
     pub(super) fn voice_written(
         &mut self,
@@ -287,6 +411,7 @@ impl Brain {
         self.voice_op(
             |installer| match write {
                 VoiceWrite::Activate { part, token } => installer.activated(part, token, result),
+                VoiceWrite::RemoveIntent { part, token } => installer.intended(part, token, result),
                 VoiceWrite::RemoveDone(part) => installer.cleared(part, result),
             },
             link,
@@ -303,11 +428,18 @@ impl Brain {
         self.run(effects);
     }
 
-    /// Tells the coordinator whether runs speak: spoken replies are ready and talk-back is on.
-    pub(super) fn spoken_replies(&mut self) {
+    /// Applies committed idle settings and tells the coordinator whether runs speak.
+    pub(super) fn voice_policy(&mut self) {
         let Some(voice) = &mut self.voice else {
             return;
         };
+        if let Some(stt) = &voice.stt {
+            stt.set_unload(if voice.installer.ready(VoicePart::SpeechInput) {
+                self.config.view().stt_unload
+            } else {
+                SttUnload::Kept
+            });
+        }
         let loaded =
             voice.installer.ready(VoicePart::SpokenReplies) && self.config.view().talk_back;
         if loaded != voice.spoken {

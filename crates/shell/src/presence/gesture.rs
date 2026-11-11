@@ -1,7 +1,7 @@
 //! Carries keyboard gestures from the native Raw Input callback into the presence owner.
 //!
-//! The callback reduces the gesture itself, so Listening changes in the same `WM_INPUT`
-//! callback that completes the chord, before timers, channels or GPUI. Effects then reach the
+//! The callback reduces the gesture itself; production holds and Listening remain disabled.
+//! Double-tap effects then reach the
 //! owner through `update_window`, which only tries to borrow the app. If GPUI is already
 //! borrowed, because a nested message loop dispatched this callback, effects wait in order
 //! with their original times and are retried until they apply or the owner is gone, instead of

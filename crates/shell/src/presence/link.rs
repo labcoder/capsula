@@ -9,8 +9,8 @@ use crate::drawing::{Broken, Chunk, Effect};
 use crate::link::{Batch, LinkEvent, LinkState};
 use crate::settings::Update;
 use kumochi_protocol::message::{
-    AccountView, ConnectionsView, ControlToBrain, DataToShell, Phase, RunId, SettingsView,
-    ThreadId, UserError,
+    AccountView, ConnectionsView, ControlToBrain, DataToShell, Phase, RunId, RunOrigin,
+    SettingsView, ThreadId, UserError,
 };
 use kumochi_scene::deferred::Deferred;
 use std::time::Instant;
@@ -20,16 +20,29 @@ impl Presence {
     /// the batch only to be applied; a scene batch's buffer still drops off this thread.
     #[expect(
         clippy::too_many_lines,
-        reason = "one exhaustive session event dispatch keeps routing explicit"
+        reason = "one ordered batch dispatcher keeps session fences and event application together"
     )]
     pub(super) fn link_events(
         &mut self,
         mut events: Batch,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
+        let mut applied = false;
         for event in events.drain(..) {
+            if let LinkEvent::RunState { generation, .. }
+            | LinkEvent::TurnRefused { generation, .. }
+            | LinkEvent::CaptureDone { generation, .. }
+            | LinkEvent::CaptureFailed { generation, .. } = &event
+                && self
+                    .session
+                    .as_ref()
+                    .is_none_or(|session| session.generation() != *generation)
+            {
+                continue;
+            }
             match event {
                 LinkEvent::State(state) => {
+                    self.revoke_exclusion(cx);
                     self.session = None;
                     self.link_state(state, cx);
                 }
@@ -38,6 +51,7 @@ impl Presence {
                         state.github.disconnected();
                         cx.notify();
                     });
+                    self.revoke_exclusion(cx);
                     self.session = Some(session);
                     self.link_state(LinkState::Connected, cx);
                 }
@@ -57,12 +71,38 @@ impl Presence {
                         cx,
                     );
                 }
+                LinkEvent::Voice {
+                    generation,
+                    speech_input,
+                } => {
+                    let current = self.session.as_ref().map(crate::link::Session::generation);
+                    self.settings.update(cx, |state, cx| {
+                        if state.receive_speech_input(current, generation, speech_input) {
+                            cx.notify();
+                        }
+                    });
+                }
+                LinkEvent::CaptureDone {
+                    generation,
+                    capture_for,
+                } => {
+                    self.capture_finished(generation, capture_for, cx);
+                }
+                LinkEvent::CaptureFailed {
+                    generation,
+                    capture_for,
+                    reason: _reason,
+                } => {
+                    self.capture_finished(generation, capture_for, cx);
+                }
                 LinkEvent::RunState {
                     run,
                     thread,
                     phase,
                     error,
-                } => self.run_state(run, thread, phase, error, cx),
+                    origin,
+                    ..
+                } => self.run_state(run, thread, phase, error, origin, cx),
                 LinkEvent::Data {
                     generation,
                     message,
@@ -100,8 +140,8 @@ impl Presence {
                     outcome,
                     last_run,
                 } => self.thread_deleted(thread, outcome, last_run, cx),
-                LinkEvent::TurnRefused => {
-                    self.runs.refused();
+                LinkEvent::TurnRefused { turn, thread, .. } => {
+                    self.runs.refused(turn, thread);
                     self.sync_deletes(cx);
                 }
                 LinkEvent::ThreadsChanged => self.threads_changed(cx),
@@ -167,9 +207,14 @@ impl Presence {
                     }
                 }
             }
+            applied = true;
         }
         events.attribute(events.capacity() * size_of::<LinkEvent>());
-        self.runs_changed(cx)
+        if applied {
+            self.runs_changed(cx)
+        } else {
+            Ok(())
+        }
     }
 
     /// A run's phase changed; a failure the brain explained shows its reason, unless Esc or a
@@ -180,9 +225,10 @@ impl Presence {
         thread: ThreadId,
         phase: Phase,
         error: Option<UserError>,
+        origin: Option<RunOrigin>,
         cx: &mut Context<'_, Self>,
     ) {
-        let (applied, notice) = self.runs.apply_run_state(run, thread, phase, error);
+        let (applied, notice) = self.runs.apply_run_state(run, thread, phase, error, origin);
         diagnostics::record(cx, format_args!("run phase={phase:?}"));
         if let Some(restore) = applied.restore
             && let Some(text) = &self.text
@@ -524,7 +570,6 @@ impl Presence {
         self.draw_changed(cx);
         diagnostics::record(cx, format_args!("link state={state:?}"));
         self.state = state;
-        // Listening keeps its label until the gesture ends.
         self.refresh_dock(cx);
         self.panel.update(cx, |panel, cx| {
             panel.state = state;

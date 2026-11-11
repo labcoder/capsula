@@ -23,7 +23,7 @@ use super::{
 
 const GENERATION: u64 = 1;
 const RUN: RunId = RunId(5);
-const LIVE: SceneId = SceneId(20);
+pub(crate) const LIVE: SceneId = SceneId(20);
 const FRAME: u32 = 40;
 
 /// Stages caches that hold nothing and charge the given bytes, for tests that never paint one.
@@ -263,7 +263,7 @@ fn measure_v1_mirror_admission_at_caps() {
 }
 
 /// Every text measures 8 by 10, except one that can't be shaped.
-struct Shaper;
+pub(crate) struct Shaper;
 
 impl TextMeasure for Shaper {
     fn measure(
@@ -533,10 +533,54 @@ fn ms(now: Instant, millis: u64) -> Instant {
 }
 
 /// A live scene whose first step is preparing.
-fn preparing() -> (Presenter, Instant, PrepareJob) {
-    let (mut presenter, now) = live();
-    begin(&mut presenter, LIVE, now);
-    let job = only_job(commit(&mut presenter, LIVE, 0, rect("a"), now).expect("a matching step"));
+pub(crate) fn preparing() -> (Presenter, Instant, PrepareJob) {
+    preparing_for(GENERATION, Box::new(Charged(0)))
+}
+
+pub(crate) fn preparing_for(
+    generation: u64,
+    stage: Box<dyn Stage>,
+) -> (Presenter, Instant, PrepareJob) {
+    let mut presenter = Presenter::new(
+        SurfaceGeometry::Overlay {
+            logical_size: [1920.0, 1080.0],
+        },
+        Arc::new(Theme::default()),
+        stage,
+    );
+    presenter.connected(generation);
+    let now = Instant::now();
+    assert!(
+        presenter
+            .described(generation, &Bounded::default(), now)
+            .expect("empty membership")
+            .is_empty()
+    );
+    let begun = presenter
+        .data(
+            generation,
+            Deferred::new(
+                DataToShell::SceneBegin {
+                    scene: LIVE,
+                    header: header(),
+                },
+                0,
+            ),
+            FRAME,
+            now,
+        )
+        .expect("a new scene");
+    settle(&mut presenter, begun, now).expect("scene admitted");
+    let committed = presenter
+        .data(
+            generation,
+            Deferred::new(commit_frame(LIVE, 0, rect("a")), 0),
+            FRAME,
+            now,
+        )
+        .expect("a matching step");
+    let prepared = settle(&mut presenter, committed, now).expect("step admitted");
+    let job = only_job(prepared);
     (presenter, now, job)
 }
 

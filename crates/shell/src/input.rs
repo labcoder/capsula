@@ -58,15 +58,25 @@ pub(crate) struct Gesture {
     other: [u64; 16],
     phase: Phase,
     first_tap: Option<Instant>,
+    legacy_hold: bool,
 }
 
 impl Gesture {
+    #[cfg(test)]
+    pub(crate) fn legacy_hold_fixture() -> Self {
+        Self {
+            legacy_hold: true,
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn holding(&self) -> bool {
-        matches!(self.phase, Phase::Active { holding: true, .. })
+        self.legacy_hold && matches!(self.phase, Phase::Active { holding: true, .. })
     }
 
     pub(crate) fn listening(&self) -> bool {
-        matches!(self.phase, Phase::Active { .. })
+        self.legacy_hold && matches!(self.phase, Phase::Active { .. })
     }
 
     pub(crate) fn deadline(&self) -> Option<Instant> {
@@ -84,9 +94,25 @@ impl Gesture {
     }
 
     pub(crate) fn handle(&mut self, event: Event, now: Instant) -> [Option<Effect>; 3] {
+        let effects = self.recognize(event, now);
+        if self.legacy_hold {
+            effects
+        } else {
+            effects.map(|effect| effect.filter(|effect| *effect == Effect::OpenInput))
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self {
+            legacy_hold: self.legacy_hold,
+            ..Self::default()
+        };
+    }
+
+    fn recognize(&mut self, event: Event, now: Instant) -> [Option<Effect>; 3] {
         if matches!(event, Event::Reset) {
             let effects = self.cancel();
-            *self = Self::default();
+            self.reset();
             return effects;
         }
         let Event::Key { key, edge } = event else {
@@ -149,7 +175,7 @@ impl Gesture {
     fn other_key(&mut self, code: u16, edge: Edge) -> [Option<Effect>; 3] {
         if code >= 1024 {
             let effects = self.cancel();
-            *self = Self::default();
+            self.reset();
             return effects;
         }
         let word = usize::from(code / 64);
@@ -197,6 +223,56 @@ mod tests {
     use super::{Edge, Effect, Event, Gesture, Key, WINDOW};
     use std::time::{Duration, Instant};
 
+    #[test]
+    fn production_holds_are_silent_but_double_taps_still_open_typing() {
+        let mut gesture = Gesture::default();
+        let now = Instant::now();
+        assert_eq!(
+            key(&mut gesture, Key::LeftControl, Edge::Down, now),
+            [None; 3]
+        );
+        assert_eq!(key(&mut gesture, Key::LeftAlt, Edge::Down, now), [None; 3]);
+        assert!(!gesture.listening());
+        assert_eq!(gesture.handle(Event::Deadline, now + WINDOW), [None; 3]);
+        assert!(!gesture.holding());
+        assert_eq!(
+            key(&mut gesture, Key::LeftAlt, Edge::Up, now + WINDOW),
+            [None; 3]
+        );
+        assert_eq!(
+            key(&mut gesture, Key::LeftControl, Edge::Up, now + WINDOW),
+            [None; 3]
+        );
+        let tap = now + WINDOW * 2;
+        assert_eq!(
+            key(&mut gesture, Key::LeftControl, Edge::Down, tap),
+            [None; 3]
+        );
+        assert_eq!(key(&mut gesture, Key::LeftAlt, Edge::Down, tap), [None; 3]);
+        assert_eq!(key(&mut gesture, Key::LeftAlt, Edge::Up, tap), [None; 3]);
+        assert_eq!(
+            key(
+                &mut gesture,
+                Key::LeftAlt,
+                Edge::Down,
+                tap + Duration::from_millis(1)
+            ),
+            [None; 3]
+        );
+        assert_eq!(
+            key(
+                &mut gesture,
+                Key::LeftAlt,
+                Edge::Up,
+                tap + Duration::from_millis(2)
+            ),
+            [None, Some(Effect::OpenInput), None]
+        );
+        assert!(!gesture.listening());
+        assert!(!gesture.holding());
+        assert_eq!(gesture.handle(Event::Reset, tap + WINDOW), [None; 3]);
+    }
+
     fn key(gesture: &mut Gesture, key: Key, edge: Edge, now: Instant) -> [Option<Effect>; 3] {
         gesture.handle(Event::Key { key, edge }, now)
     }
@@ -217,7 +293,7 @@ mod tests {
     #[test]
     fn new_panels_can_inherit_capture_exclusion_only_during_a_recognized_hold() {
         let now = Instant::now();
-        let mut gesture = Gesture::default();
+        let mut gesture = Gesture::legacy_hold_fixture();
         assert!(!gesture.holding());
         chord(&mut gesture, now);
         assert!(
@@ -257,7 +333,7 @@ mod tests {
                 } else {
                     Key::LeftControl
                 };
-                let mut gesture = Gesture::default();
+                let mut gesture = Gesture::legacy_hold_fixture();
                 assert_eq!(
                     key(&mut gesture, first, Edge::Down, now),
                     [None; 3],
@@ -293,7 +369,7 @@ mod tests {
     fn hold_threshold_and_late_timer_delivery_are_exact() {
         let start = Instant::now();
         for milliseconds in [299, 300, 301] {
-            let mut gesture = Gesture::default();
+            let mut gesture = Gesture::legacy_hold_fixture();
             chord(&mut gesture, start);
             assert_eq!(
                 gesture.deadline(),
@@ -320,7 +396,7 @@ mod tests {
                 "release at {milliseconds}ms without timer delivery"
             );
         }
-        let mut gesture = Gesture::default();
+        let mut gesture = Gesture::legacy_hold_fixture();
         chord(&mut gesture, start);
         assert_eq!(
             gesture.handle(Event::Deadline, start + Duration::from_millis(299)),
@@ -349,7 +425,7 @@ mod tests {
     fn completed_double_tap_is_strictly_inside_window() {
         let start = Instant::now();
         for milliseconds in [299, 300] {
-            let mut gesture = Gesture::default();
+            let mut gesture = Gesture::legacy_hold_fixture();
             tap(&mut gesture, start);
             chord(&mut gesture, start + Duration::from_millis(100));
             let effects = key(
@@ -373,7 +449,7 @@ mod tests {
     #[test]
     fn pending_tap_expires_while_second_chord_can_become_a_hold() {
         let start = Instant::now();
-        let mut gesture = Gesture::default();
+        let mut gesture = Gesture::legacy_hold_fixture();
         tap(&mut gesture, start);
         chord(&mut gesture, start + Duration::from_millis(100));
         assert_eq!(
@@ -401,7 +477,7 @@ mod tests {
     #[test]
     fn interruptions_cancel_taps_and_require_both_modifiers_up() {
         let start = Instant::now();
-        let mut gesture = Gesture::default();
+        let mut gesture = Gesture::legacy_hold_fixture();
         tap(&mut gesture, start);
         chord(&mut gesture, start);
         assert_eq!(
@@ -435,7 +511,7 @@ mod tests {
     #[test]
     fn altgr_does_not_activate_but_one_held_modifier_allows_double_tap() {
         let now = Instant::now();
-        let mut gesture = Gesture::default();
+        let mut gesture = Gesture::legacy_hold_fixture();
         key(&mut gesture, Key::LeftControl, Edge::Down, now);
         assert_eq!(
             key(&mut gesture, Key::Other(1), Edge::Down, now),
@@ -474,7 +550,7 @@ mod tests {
     #[test]
     fn held_other_keys_block_chords_until_every_key_is_released() {
         let now = Instant::now();
-        let mut gesture = Gesture::default();
+        let mut gesture = Gesture::legacy_hold_fixture();
         let right_alt = Key::Other(0x138);
         for other in [right_alt, right_alt, Key::Other(1023)] {
             assert_eq!(
@@ -511,7 +587,7 @@ mod tests {
     #[test]
     fn invalid_other_identity_resets_and_cancels_without_indexing() {
         let now = Instant::now();
-        let mut gesture = Gesture::default();
+        let mut gesture = Gesture::legacy_hold_fixture();
         chord(&mut gesture, now);
         gesture.handle(Event::Deadline, now + WINDOW);
         assert_eq!(
@@ -538,7 +614,7 @@ mod tests {
                 edge: Edge::Down,
             },
         ] {
-            let mut gesture = Gesture::default();
+            let mut gesture = Gesture::legacy_hold_fixture();
             chord(&mut gesture, start);
             gesture.handle(Event::Deadline, start + WINDOW);
             assert_eq!(

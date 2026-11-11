@@ -24,7 +24,7 @@ Cancel-first confirmation and rechecks the session and allowed operation when co
 No login URL, code or credential contents reach the shell. See [Claude Code](claude-code.md).
 
 The status panel's **Settings…** opens a retained window, the tasks panel's size and anchored
-with the same work-area clamping. Kit's tabs expose **General** and **Accounts**.
+with the same work-area clamping. Kit's tabs expose **General**, **Accounts** and **Voice**.
 `shell/settings.rs` owns the plain drafts, validation, per-field saving and errors;
 `presence/settings/window.rs` owns the window and session sends; `presence/settings/mod.rs`
 owns the shared view frame, retained Kit inputs and subscriptions. `general.rs` and `accounts.rs`
@@ -57,6 +57,48 @@ The **Max frame rate** radio group sends its choice at once and checks the newes
 right away, before the brain answers. Its slot in the FIFO belongs to no field, so its answer
 completes no field and its refusal marks none. Choosing the current value sends nothing.
 See [frame rate](frame-rate.md).
+
+The Voice tab adds SpeechInput's existing `SetSttUnload` preference to the same settings FIFO.
+One idle-policy write may be pending; its requested radio stays selected with Saving… while
+further choices are disabled. Only its ordered `answer: true` settles it. An unsolicited view
+does not complete it; a refusal restores the authoritative choice and remains visible until
+a successful retry of that setting. A failed enqueue never changes the saved value. Disconnect
+clears pending policy and voice status, and generation checks reject late snapshots.
+
+The control reader forwards `Voice.speech_input` to the settings model with its connection
+generation instead of dropping the whole Voice view. Status comes only from that snapshot,
+not the selected policy. SpokenReplies is not presented or activated here. The existing backend
+owns all idle timing and physical-release ordering; this UI adds no timer, microphone or hold
+behavior.
+
+The speech-input model row exposes only the default Parakeet setup operations. NotInstalled
+offers Install, either Failed state offers Retry (which can fetch again), and Unloaded offers
+Load using the backend's installed-file reload path. All three send `InstallVoice(SpeechInput)`.
+Verifying, Downloading and Loading offer the existing global `CancelVoiceInstall`. Adjacent
+Fluent help and the button's accessible name explain that cancellation covers all pending voice
+setup, keeps installed files and cannot stop some loading/finishing work, including startup.
+There are no SpokenReplies controls, model selection, removal or automatic hold actions.
+
+The row captures the accepted Voice generation with the specific action. Immediately before
+enqueue, the Settings-window owner checks the current Session against that generation, and
+the model requires an authoritative Settings view, unchanged action eligibility and no pending
+speech request. An old Load cannot become a download-capable Retry, and an old same-action
+callback cannot target a replacement connection. Disconnect clears speech state/generation and
+pending requests; none is replayed. The shared settings FIFO keeps refusal/send feedback
+separate from authoritative model failure keys. Unsolicited or stale settings cannot settle a
+request, and unrelated successes cannot clear its refusal. Pending disables only model requests,
+not idle-policy writes. Its ordered answer settles just that request slot, never changes model
+state and never proves cancellation or physical release; an accepted cancel can remain Loading
+or become Ready. Only generation-fenced Voice snapshots update the displayed model state.
+
+Scoped Ctrl+Tab and Ctrl+Shift+Tab actions cycle the three tabs through `select_tab`, wrapping
+in either direction and returning focus to the Settings frame, whose border shows that focus.
+The pinned Kit tabs are not keyboard focus targets. Tab and Shift+Tab reach the selected tab's
+controls in normal order; Space activates a focused radio. Switching tabs retains drafts and
+uses the existing finish-edit/focus path, without changing Escape dispatch.
+If an authoritative update removes the focused control, a retained focus-lost subscription
+uses GPUI's surviving-ancestor target, falling back to the Settings frame. Ordinary focus moves
+and Voice updates do not request focus; asynchronous removal preserves the Settings key context.
 
 Settings stays visible when deactivated. With Settings focused, Esc stops work, then clears a
 drawing, then cancels the active field edit; another Esc dismisses. The close button also
@@ -216,12 +258,14 @@ folder from the drive's root down to `models` stays open while the part is delet
 deletion never follows a reparse point: a junction or link on the way, or a folder another
 account could change, deletes nothing and leaves the part listed. A folder
 that's already gone counts as deleted. A folder that can't be deleted stays listed, so the next
-start tries again. An unknown name is never deleted, and stays in the list.
+start tries again. An unknown name is never deleted, and stays in the list. A removal at run time
+deletes the same way (see [voice](voice.md#remove)).
 
 `InstallVoice` and `CancelVoiceInstall` are answered accepted when they reach the front of the
-queue, with nothing written by the op itself (see [voice](voice.md#install-and-cancel)). This
-build still refuses `RemoveVoice`, and both of the others when there's no models folder: each is
-staged in queue order like any change, then refused with `Error(VoiceUnavailable)` and its one
+queue, with nothing written by the op itself (see [voice](voice.md#install-and-cancel)).
+`RemoveVoice` is answered by its removal intent's write (see [voice](voice.md#remove)). All three
+are refused when there's no models folder: each is staged in queue order like any change, then
+refused with `Error(VoiceUnavailable)` and its one
 `Settings` answer, with nothing written. The refusal comes after the config read, so while
 `config.toml` is unreadable they're answered `ConfigUnreadable` like every other change.
 

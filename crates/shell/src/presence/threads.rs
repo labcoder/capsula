@@ -117,6 +117,7 @@ impl Presence {
         if self.thread_panel.is_none() {
             self.thread_panel = Some(self.create_threads(cx)?);
         }
+        self.protect_surface(super::exclusion::Slot::Threads, cx)?;
         self.pointer_settle = None;
         self.set_panel(PanelVisibility::Hidden, cx)?;
         let area = platform::work_area()?;
@@ -181,17 +182,12 @@ impl Presence {
         })
         .map_err(|error| OpenError::Gpui(error.into()))?;
         let events = self.events.clone();
-        let capture = if self.gesture.get().holding() {
-            super::Capture::Excluded
-        } else {
-            super::Capture::Allowed
-        };
         window
             .update(cx, |_, window, cx| {
                 configure_surface(window, PresenceSurface::Text, events, cx)?;
                 self.input_windows
                     .bind(crate::presenter::overlay_input::Layer::Panels, window)?;
-                platform::set_capture(window, capture)
+                Ok::<_, platform::PresenceError>(())
             })
             .map_err(|error| OpenError::Gpui(error.into()))??;
         let owner = cx.weak_entity();

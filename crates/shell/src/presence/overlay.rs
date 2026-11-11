@@ -34,7 +34,7 @@ use super::paint_paths::{self, BuildError};
 use super::paint_phase::{self, Phase};
 use super::paint_stroke::Scratch;
 use super::{OpenError, Presence, configure_surface, options, scaled};
-use crate::platform::{self, Capture, PresenceEvent, PresenceSurface};
+use crate::platform::{self, PresenceEvent, PresenceSurface};
 use crate::presenter::{Frames, Sample};
 
 /// One overlay window and its root, opened hidden and closed once hidden again.
@@ -68,6 +68,35 @@ impl PaintNotice {
             .flatten()
             .any(|observation| !before.contains(&Some(*observation)));
         (failed || fresh) && !self.pending.replace(true)
+    }
+}
+
+#[cfg(test)]
+impl Overlay {
+    pub(super) fn detached(
+        frames: Rc<RefCell<Frames>>,
+        owner: WeakEntity<Presence>,
+        scratch: Rc<RefCell<Scratch>>,
+        notice: Rc<PaintNotice>,
+        cx: &mut App,
+    ) -> Self {
+        let painting = Rc::new(Cell::new(false));
+        let gate = Rc::clone(&painting);
+        let (window, drawing) = gpui_kit::open_window(options(), cx, |_, cx| {
+            cx.new(|_| Drawing {
+                frames,
+                owner,
+                painting: gate,
+                scratch,
+                notice,
+            })
+        })
+        .expect("a hidden GPUI test overlay");
+        Self {
+            window,
+            drawing,
+            painting,
+        }
     }
 }
 
@@ -337,23 +366,28 @@ impl Presence {
         moving
     }
 
-    fn sync_overlay(
+    pub(super) fn sync_overlay(
         &mut self,
         sample: Sample,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
         let frames = self.presenter.frames();
-        let capture = if self.gesture.get().holding() {
-            Capture::Excluded
-        } else {
-            Capture::Allowed
-        };
+        if sample.visible && self.overlay.window().is_some() {
+            self.protect_surface(super::exclusion::Slot::Drawing, cx)?;
+        }
+        let handles = self.exclusion_handles();
         let mut surface = Gpui {
             owner: cx.weak_entity(),
-            cx,
+            exclusion: &mut self.exclusion,
+            surfaces: super::exclusion::Windows {
+                native: &self.native,
+                handles,
+                cx,
+                #[cfg(test)]
+                fixture: self.exclusion_fixture.clone(),
+            },
             frames: &frames,
             events: &self.events,
-            capture,
             scratch: &self.paint_scratch,
             notice: &self.paint_notice,
         };
@@ -363,12 +397,11 @@ impl Presence {
 
 /// The overlay's windows through GPUI's own open and close.
 struct Gpui<'a> {
-    cx: &'a mut App,
+    exclusion: &'a mut super::exclusion::Exclusion<super::exclusion::Receipt>,
+    surfaces: super::exclusion::Windows<'a>,
     owner: WeakEntity<Presence>,
     frames: &'a Rc<RefCell<Frames>>,
     events: &'a Sender<PresenceEvent>,
-    /// A window opened during a hold is hidden from capture like the rest.
-    capture: Capture,
     scratch: &'a Rc<RefCell<Scratch>>,
     notice: &'a Rc<PaintNotice>,
 }
@@ -379,36 +412,44 @@ impl Surface for Gpui<'_> {
     fn open(&mut self) -> Result<Overlay, OpenError> {
         let owner = self.owner.clone();
         let events = self.events.clone();
-        let capture = self.capture;
         open(
             Rc::clone(self.frames),
             owner,
             Rc::clone(self.scratch),
             Rc::clone(self.notice),
-            self.cx,
+            self.surfaces.cx,
             |window, cx| {
                 #[cfg(test)]
                 if let Some(result) = tests::recovery::native(tests::recovery::Operation::Configure)
                 {
                     return result;
                 }
-                configure_surface(window, PresenceSurface::Overlay, events, cx)?;
-                platform::set_capture(window, capture)
+                configure_surface(window, PresenceSurface::Overlay, events, cx)
             },
         )
     }
 
     fn show(&mut self, overlay: &Overlay) -> Result<(), OpenError> {
+        #[expect(
+            clippy::as_conversions,
+            reason = "fixed semantic slot indexes the seven handles"
+        )]
+        let drawing = super::exclusion::Slot::Drawing as usize;
+        self.surfaces.handles[drawing] = Some(overlay.window);
+        self.surfaces
+            .protect(self.exclusion, super::exclusion::Slot::Drawing)?;
         #[cfg(test)]
         if let Some(result) = tests::recovery::native(tests::recovery::Operation::Show) {
             return result.map_err(OpenError::from);
         }
-        show(overlay.window, self.cx)
+        show(overlay.window, self.surfaces.cx)
     }
 
     fn repaint(&mut self, overlay: &Overlay) {
         overlay.painting.set(self.frames.borrow().shown);
-        overlay.drawing.update(self.cx, |_, cx| cx.notify());
+        overlay
+            .drawing
+            .update(self.surfaces.cx, |_, cx| cx.notify());
     }
 
     fn hide(&mut self, overlay: &Overlay) -> Result<(), OpenError> {
@@ -416,14 +457,14 @@ impl Surface for Gpui<'_> {
         if let Some(result) = tests::recovery::native(tests::recovery::Operation::Hide) {
             return result.map_err(OpenError::from);
         }
-        hide(overlay.window, self.cx)
+        hide(overlay.window, self.surfaces.cx)
     }
 
     fn close(&mut self, overlay: Overlay) -> Result<(), OpenError> {
         overlay.painting.set(false);
         overlay
             .window
-            .update(self.cx, |_, window, _| window.remove_window())
+            .update(self.surfaces.cx, |_, window, _| window.remove_window())
             .map_err(|error| OpenError::Gpui(error.into()))
     }
 }

@@ -305,6 +305,9 @@ impl Drop for Mapping<'_> {
 }
 
 impl Capturer for Wgc {
+    fn foreground(&mut self) -> Option<crate::screen::TopWindow> {
+        super::elements::foreground()
+    }
     fn capture_into(
         &mut self,
         display: &DisplayRef,
