@@ -101,7 +101,7 @@ pub(in crate::runtime) fn loading_input(
     );
     let (installed, effects) = Installer::start(
         [Durable::Installed, Durable::Absent],
-        [true; 2],
+        [Ok(true); 2],
         [true, false],
         &[],
     );
