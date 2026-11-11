@@ -26,17 +26,20 @@ pub(crate) struct Scratch(PathBuf);
 
 impl Scratch {
     pub(crate) fn trusted(name: &str) -> Self {
-        let mut scratch = Self::new(name);
-        scratch.0 = crate::platform::local_app_data()
-            .expect("local application data")
-            .join(scratch.0.file_name().expect("a scratch name"));
-        scratch
+        Self::under(
+            crate::platform::local_app_data().expect("local application data"),
+            name,
+        )
     }
 
     pub(crate) fn new(name: &str) -> Self {
+        Self::under(std::env::temp_dir(), name)
+    }
+
+    fn under(base: PathBuf, name: &str) -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
+        let dir = base.join(format!(
             "{}-store-{}-{name}-{n}",
             constants::OBJECT_PREFIX,
             std::process::id()
