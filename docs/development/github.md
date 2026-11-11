@@ -19,9 +19,13 @@ Settings retains the session of a Connect it successfully queued, including befo
 the first view arrives. Every panel dismissal cancels that interactive attempt
 through the existing CancelConnect control, including verification and an admitted
 save. A full/closed cancellation queue keeps the send-failure state and ends that
-link so disconnect applies the same fence and queued compensation; the visible
-Cancel button instead stays retryable. Saved-account startup checks and automatic
-renewal have no panel-owned provenance and are not canceled by dismissal.
+link so disconnect applies the same fence and queued compensation. Ending the link
+also interrupts any active run, and queued controls not yet delivered can be lost;
+the visible Cancel button instead stays retryable. Saved-account startup checks
+and automatic renewal have no panel-owned provenance and are not canceled by
+dismissal.
+Accepted terminal snapshots, errors and session changes retire that provenance
+synchronously, before any later event in a batch can start background work.
 Deactivation only updates focus: switching to the browser leaves Settings open.
 The brain's durable Connected transition is completion. A later CancelConnect is
 ignored and EOF preserves that credential, even if its view has not reached the

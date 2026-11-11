@@ -194,6 +194,178 @@ fn dismissal_preserves_an_interactive_sign_in_that_has_completed(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn terminal_batches_retire_interactive_provenance_before_background_work(cx: &mut TestAppContext) {
+    use crate::link::LinkState;
+    use kumochi_protocol::message::{ErrorKey, GitHubLogin};
+
+    let login = GitHubLogin::new("saved-owner").unwrap();
+    let terminals = vec![
+        LinkEvent::GitHub {
+            generation: 7,
+            view: GitHubView::Connected {
+                login: login.clone(),
+                repos: Bounded::default(),
+                default: None,
+                truncated: false,
+            },
+        },
+        LinkEvent::GitHub {
+            generation: 7,
+            view: GitHubView::SignedOut { cleanup: None },
+        },
+        LinkEvent::GitHub {
+            generation: 7,
+            view: GitHubView::NeedsSignIn {
+                login: login.clone(),
+            },
+        },
+        LinkEvent::GitHub {
+            generation: 7,
+            view: GitHubView::NotInstalled {
+                login: login.clone(),
+            },
+        },
+        LinkEvent::GitHub {
+            generation: 7,
+            view: GitHubView::NotVerified { login },
+        },
+        LinkEvent::GitHubError {
+            generation: 7,
+            error: ErrorKey::SignInFailed.into(),
+        },
+        LinkEvent::Connected(Session::detached(8, Incarnation(1))),
+        LinkEvent::State(LinkState::Reconnecting),
+    ];
+    for terminal in terminals {
+        let (window, owner, controls) = github_panel(cx);
+        start_github(window, &controls, cx);
+        receive_github(&owner, challenge(), cx);
+        let interactive = owner.update(cx, |owner, cx| {
+            owner
+                .link_events(
+                    Batch::Plain(vec![
+                        terminal,
+                        LinkEvent::GitHub {
+                            generation: 7,
+                            view: GitHubView::Requesting,
+                        },
+                    ]),
+                    cx,
+                )
+                .unwrap();
+            owner
+                .settings_panel
+                .as_ref()
+                .unwrap()
+                .view
+                .read(cx)
+                .github_interactive
+        });
+        click_github(window, "close-settings", cx);
+        assert!(!owner.read_with(cx, |owner, _| owner.settings_open()));
+        assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+        assert!(!controls.is_closed());
+        assert_eq!(interactive, None, "ownership retires before observers run");
+    }
+}
+
+#[gpui::test]
+fn a_fresh_connect_keeps_interactive_provenance_after_terminal_delivery(cx: &mut TestAppContext) {
+    use kumochi_protocol::message::GitHubLogin;
+
+    for terminal in [
+        GitHubView::SignedOut { cleanup: None },
+        GitHubView::NeedsSignIn {
+            login: GitHubLogin::new("saved-owner").unwrap(),
+        },
+    ] {
+        let (window, owner, controls) = github_panel(cx);
+        start_github(window, &controls, cx);
+        receive_github(&owner, challenge(), cx);
+        owner.update(cx, |owner, cx| {
+            owner
+                .link_events(
+                    Batch::Plain(vec![LinkEvent::GitHub {
+                        generation: 7,
+                        view: terminal.clone(),
+                    }]),
+                    cx,
+                )
+                .unwrap();
+            assert!(owner.github_op(GitHubOp::Connect, cx));
+            owner
+                .link_events(
+                    Batch::Plain(vec![LinkEvent::GitHub {
+                        generation: 7,
+                        view: terminal,
+                    }]),
+                    cx,
+                )
+                .unwrap();
+        });
+        assert_eq!(
+            controls.try_recv(),
+            Ok(ControlToBrain::GitHub(GitHubOp::Connect))
+        );
+        cx.run_until_parked();
+        assert_eq!(
+            owner.read_with(cx, |owner, cx| {
+                owner
+                    .settings_panel
+                    .as_ref()
+                    .unwrap()
+                    .view
+                    .read(cx)
+                    .github_interactive
+            }),
+            Some(7)
+        );
+        click_github(window, "close-settings", cx);
+        assert!(!owner.read_with(cx, |owner, _| owner.settings_open()));
+        assert_eq!(
+            controls.try_recv(),
+            Ok(ControlToBrain::GitHub(GitHubOp::CancelConnect))
+        );
+        assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+        assert!(!controls.is_closed());
+    }
+}
+
+#[gpui::test]
+fn old_session_terminals_cannot_clear_current_interactive_provenance(cx: &mut TestAppContext) {
+    use kumochi_protocol::message::ErrorKey;
+
+    let (window, owner, controls) = github_panel(cx);
+    start_github(window, &controls, cx);
+    receive_github(&owner, challenge(), cx);
+    owner.update(cx, |owner, cx| {
+        owner
+            .link_events(
+                Batch::Plain(vec![
+                    LinkEvent::GitHub {
+                        generation: 6,
+                        view: GitHubView::SignedOut { cleanup: None },
+                    },
+                    LinkEvent::GitHubError {
+                        generation: 6,
+                        error: ErrorKey::SignInFailed.into(),
+                    },
+                ]),
+                cx,
+            )
+            .unwrap();
+    });
+    click_github(window, "close-settings", cx);
+    assert!(!owner.read_with(cx, |owner, _| owner.settings_open()));
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::GitHub(GitHubOp::CancelConnect))
+    );
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+    assert!(!controls.is_closed());
+}
+
+#[gpui::test]
 fn dismissal_with_a_full_control_queue_keeps_the_error_and_ends_the_link(cx: &mut TestAppContext) {
     let (window, owner, controls) = github_panel(cx);
     start_github(window, &controls, cx);

@@ -77,17 +77,6 @@ impl SettingsView {
 
     pub(super) fn sync_github(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let state = &self.model.read(cx).github;
-        if self.github_interactive.is_some_and(|generation| {
-            state.generation != Some(generation)
-                || self.github_generation(cx) != Some(generation)
-                || state.error.is_some()
-                || (!matches!(
-                    state.view,
-                    Some(GitHubView::Requesting | GitHubView::AwaitingUser { .. })
-                ) && state.status() != Text::GitHubRequesting)
-        }) {
-            self.github_interactive = None;
-        }
         let mut selected = None;
         let items = match &state.view {
             Some(GitHubView::Connected { repos, default, .. }) => repos
@@ -385,6 +374,26 @@ impl SettingsView {
 }
 
 impl Presence {
+    pub(in crate::presence) fn settle_github_interactive(&mut self, cx: &mut Context<'_, Self>) {
+        let current = self.session.as_ref().map(Session::generation);
+        let state = &self.settings.read(cx).github;
+        let generation = state.generation;
+        let terminal = state.error.is_some()
+            || (!matches!(
+                state.view,
+                Some(GitHubView::Requesting | GitHubView::AwaitingUser { .. })
+            ) && state.status() != Text::GitHubRequesting);
+        if let Some(panel) = &self.settings_panel {
+            panel.view.update(cx, |view, _| {
+                if view.github_interactive.is_some_and(|attempt| {
+                    current != Some(attempt) || generation != Some(attempt) || terminal
+                }) {
+                    view.github_interactive = None;
+                }
+            });
+        }
+    }
+
     pub(in crate::presence) fn github_op(
         &mut self,
         op: GitHubOp,
@@ -443,7 +452,7 @@ impl Presence {
                 state.github.send_failed = true;
                 cx.notify();
             });
-            // A hidden unfinished sign-in cannot keep running if its cancellation cannot queue.
+            // A hidden sign-in must stop; ending its stalled link also interrupts any active run.
             if let Some(session) = &self.session {
                 self.link.end(session);
             }
