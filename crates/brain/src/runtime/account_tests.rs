@@ -161,7 +161,7 @@ async fn the_account_system_never_prints_a_secret() {
         Box::new(move || Vault::with_service(store.clone(), "test-accounts-debug", &lock)),
         Arc::new(FixedClock(1_800_000_000)),
     );
-    let mut accounts = Accounts::spawn(worker, test_support::net()).expect("accounts");
+    let mut accounts = Accounts::spawn_unconfigured(worker, test_support::net()).expect("accounts");
     let mut printed = vec![format!(
         "{:?}",
         accounts.handle(Input::Op(AccountOp::SignIn))
@@ -218,7 +218,7 @@ async fn closing_waits_for_a_running_credential_job_past_its_deadline() {
         }),
         Arc::new(FixedClock(1_800_000_000)),
     );
-    let mut accounts = Accounts::spawn(worker, test_support::net()).expect("accounts");
+    let mut accounts = Accounts::spawn_unconfigured(worker, test_support::net()).expect("accounts");
     let (entered_tx, entered) = std_mpsc::channel();
     let (release, waiting) = std_mpsc::channel();
     *gate.lock().expect("gate") = Some((entered_tx, waiting));
@@ -280,7 +280,7 @@ async fn a_blocking_browser_launch_never_stalls_the_core_loop() {
         }),
         ..test_support::net()
     };
-    let mut accounts = Accounts::spawn(worker, net).expect("accounts");
+    let mut accounts = Accounts::spawn_unconfigured(worker, net).expect("accounts");
     // Only a stalled loop lets this fire: it frees the launch so the test can end and fail.
     let (reached, watching) = std_mpsc::channel::<()>();
     let stalled = Arc::new(AtomicBool::new(false));
@@ -330,7 +330,7 @@ async fn the_startup_load_runs_on_the_credentials_thread() {
         }),
         Arc::new(FixedClock(1_800_000_000)),
     );
-    let mut accounts = Accounts::spawn(worker, test_support::net()).expect("accounts");
+    let mut accounts = Accounts::spawn_unconfigured(worker, test_support::net()).expect("accounts");
     assert_eq!(
         *threads.lock().expect("threads"),
         [Some("credentials".to_owned())]
@@ -491,7 +491,7 @@ async fn a_dropped_wait_never_cancels_its_refresh() {
         http: Arc::new(move || Ok(http.clone())),
         ..test_support::net()
     };
-    let mut accounts = Accounts::spawn(worker, net).expect("accounts");
+    let mut accounts = Accounts::spawn_unconfigured(worker, net).expect("accounts");
     let (wait, _) = accounts.access();
     drop(wait);
     let refresh_token = || {
@@ -622,7 +622,7 @@ fn seeded_at(
         clock,
         ..test_support::net()
     };
-    Accounts::spawn(worker, net).expect("accounts")
+    Accounts::spawn_unconfigured(worker, net).expect("accounts")
 }
 
 /// Asks for the bearer and runs the account system until its refresh is out.

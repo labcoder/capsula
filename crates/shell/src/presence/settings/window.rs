@@ -25,26 +25,6 @@ pub(in crate::presence) struct SettingsPanel {
 }
 
 impl Presence {
-    pub(in crate::presence) fn github_op(
-        &mut self,
-        op: kumochi_protocol::message::GitHubOp,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let (link, session) = (&self.link, &self.session);
-        self.settings.update(cx, |state, cx| {
-            state.github.send(
-                session.as_ref().map(crate::link::Session::generation),
-                op,
-                |op| {
-                    session.as_ref().is_some_and(|session| {
-                        link.send_control(session, ControlToBrain::GitHub(op))
-                    })
-                },
-            );
-            cx.notify();
-        });
-    }
-
     pub(in crate::presence) fn speech_input_action(
         &mut self,
         intent: crate::settings::SpeechInputIntent,
@@ -332,6 +312,10 @@ impl Presence {
         &mut self,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
+        if !self.settings_open() {
+            return Ok(());
+        }
+        self.dismiss_github_settings(cx);
         if let Some(field) = self
             .settings_panel
             .as_ref()
@@ -340,12 +324,10 @@ impl Presence {
         {
             self.save_setting(field, cx);
         }
-        let Some(panel) = &mut self.settings_panel else {
-            return Ok(());
-        };
-        if !panel.visible {
-            return Ok(());
-        }
+        let panel = self
+            .settings_panel
+            .as_mut()
+            .expect("the Settings panel is visible");
         panel.visible = false;
         panel.focused = false;
         let previous = panel.previous.take();

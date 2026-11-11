@@ -288,7 +288,7 @@ pub(crate) fn owner_accounts(scratch: &Scratch, store: ObservedStore, net: Net) 
         Box::new(move || Vault::with_service(store.clone(), "github-owner-test", &lock)),
         Arc::new(crate::connections::clock::SystemClock),
     );
-    Accounts::spawn(worker, net).unwrap()
+    Accounts::spawn_unconfigured(worker, net).unwrap()
 }
 
 pub(crate) fn active_github(scratch: &Scratch) -> i64 {
@@ -376,6 +376,18 @@ fn device_challenge() -> DeviceCode {
 }
 
 pub(crate) async fn saving_owner(accounts: &mut Accounts) -> Stamp {
+    let stamp = verifying_owner(accounts).await;
+    drive(
+        accounts,
+        GitHubInput::User {
+            stamp,
+            result: Ok(checked_account().user),
+        },
+    );
+    stamp
+}
+
+pub(crate) async fn verifying_owner(accounts: &mut Accounts) -> Stamp {
     tokio::time::pause();
     let stamp = accounts.github.machine().stamp();
     if accounts.github.machine().is_loading() {
@@ -411,13 +423,6 @@ pub(crate) async fn saving_owner(accounts: &mut Accounts) -> Stamp {
         GitHubInput::Poll {
             stamp,
             result: Ok(TokenReply::Token(checked_account().credentials)),
-        },
-    );
-    drive(
-        accounts,
-        GitHubInput::User {
-            stamp,
-            result: Ok(checked_account().user),
         },
     );
     tokio::time::resume();

@@ -178,22 +178,32 @@ impl Presence {
                 }
                 LinkEvent::GitHub { generation, view } => {
                     let current = self.session.as_ref().map(crate::link::Session::generation);
-                    self.settings.update(cx, |state, cx| {
-                        if state
-                            .github
-                            .receive(current, generation, view, Instant::now())
-                        {
+                    let accepted = self.settings.update(cx, |state, cx| {
+                        let accepted =
+                            state
+                                .github
+                                .receive(current, generation, view, Instant::now());
+                        if accepted {
                             cx.notify();
                         }
+                        accepted
                     });
+                    if accepted {
+                        self.settle_github_interactive(cx);
+                    }
                 }
                 LinkEvent::GitHubError { generation, error } => {
                     let current = self.session.as_ref().map(crate::link::Session::generation);
-                    self.settings.update(cx, |state, cx| {
-                        if state.github.receive_error(current, generation, error) {
+                    let accepted = self.settings.update(cx, |state, cx| {
+                        let accepted = state.github.receive_error(current, generation, error);
+                        if accepted {
                             cx.notify();
                         }
+                        accepted
                     });
+                    if accepted {
+                        self.settle_github_interactive(cx);
+                    }
                 }
                 // shortcut: C7a-2b's Accounts paste consumer handles these replies.
                 LinkEvent::KeyStage { generation, reply } => drop((generation, reply)),
@@ -567,6 +577,7 @@ impl Presence {
                 });
             }
         }
+        self.settle_github_interactive(cx);
         self.draw_changed(cx);
         diagnostics::record(cx, format_args!("link state={state:?}"));
         self.state = state;

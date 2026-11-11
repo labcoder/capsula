@@ -146,7 +146,7 @@ async fn keyed(scratch: &Scratch) -> (Accounts, FakeStore, Arc<std::sync::atomic
     );
     let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counted = Arc::clone(&requests);
-    let mut account = Accounts::spawn(
+    let mut account = Accounts::spawn_unconfigured(
         worker,
         Net {
             http: Arc::new(move || Ok(SharedHttp::new(CountedCatalog(Arc::clone(&counted))))),

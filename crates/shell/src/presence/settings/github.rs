@@ -13,6 +13,7 @@ use gpui_kit::{
 };
 use kumochi_protocol::message::{GitHubOp, GitHubView, RepoName, VERIFICATION_URI};
 
+use super::super::Presence;
 use super::SettingsView;
 use crate::link::Session;
 use crate::strings::{Strings, Text};
@@ -52,6 +53,10 @@ impl gpui_kit::component::select::SelectItem for RepoChoice {
 
 #[cfg(debug_assertions)]
 fn configured(view: &SettingsView) -> bool {
+    #[cfg(test)]
+    if let Some(configured) = view.github_configured {
+        return configured;
+    }
     kumochi_protocol::constants::GITHUB_CLIENT_ID.is_some() || view.fixture
 }
 
@@ -365,6 +370,93 @@ impl SettingsView {
                     .map(|(label, op)| self.github_button(*label, op, cx)),
             ),
         )
+    }
+}
+
+impl Presence {
+    pub(in crate::presence) fn settle_github_interactive(&mut self, cx: &mut Context<'_, Self>) {
+        let current = self.session.as_ref().map(Session::generation);
+        let state = &self.settings.read(cx).github;
+        let generation = state.generation;
+        let terminal = state.error.is_some()
+            || (!matches!(
+                state.view,
+                Some(GitHubView::Requesting | GitHubView::AwaitingUser { .. })
+            ) && state.status() != Text::GitHubRequesting);
+        if let Some(panel) = &self.settings_panel {
+            panel.view.update(cx, |view, _| {
+                if view.github_interactive.is_some_and(|attempt| {
+                    current != Some(attempt) || generation != Some(attempt) || terminal
+                }) {
+                    view.github_interactive = None;
+                }
+            });
+        }
+    }
+
+    pub(in crate::presence) fn github_op(
+        &mut self,
+        op: GitHubOp,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        let start = op == GitHubOp::Connect;
+        let stop = matches!(op, GitHubOp::CancelConnect | GitHubOp::SignOut);
+        let (link, session) = (&self.link, &self.session);
+        let generation = session.as_ref().map(Session::generation);
+        let sent = self.settings.update(cx, |state, cx| {
+            let sent = state.github.send(generation, op, |op| {
+                session.as_ref().is_some_and(|session| {
+                    link.send_control(
+                        session,
+                        kumochi_protocol::message::ControlToBrain::GitHub(op),
+                    )
+                })
+            });
+            cx.notify();
+            sent
+        });
+        if sent
+            && (start || stop)
+            && let Some(panel) = &self.settings_panel
+        {
+            panel.view.update(cx, |view, _| {
+                if start {
+                    view.github_interactive = generation;
+                } else if stop {
+                    view.github_interactive = None;
+                }
+            });
+        }
+        sent
+    }
+
+    pub(in crate::presence) fn dismiss_github_settings(&mut self, cx: &mut Context<'_, Self>) {
+        let interactive = self.settings_panel.as_ref().and_then(|panel| {
+            panel
+                .view
+                .update(cx, |view, _| view.github_interactive.take())
+        });
+        if interactive.is_none() || interactive != self.session.as_ref().map(Session::generation) {
+            return;
+        }
+        if !self
+            .settings
+            .read(cx)
+            .github
+            .allows(interactive, &GitHubOp::CancelConnect)
+        {
+            return;
+        }
+        if !self.github_op(GitHubOp::CancelConnect, cx) {
+            self.settings.update(cx, |state, cx| {
+                state.github.send_failed = true;
+                cx.notify();
+            });
+            // A hidden sign-in must stop; ending its stalled link also interrupts any active run.
+            if let Some(session) = &self.session {
+                self.link.end(session);
+            }
+        }
     }
 }
 

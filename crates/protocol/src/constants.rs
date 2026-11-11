@@ -9,8 +9,12 @@ pub const DISPLAY_NAME: &str = "Kumochi";
 /// The fixed product identity sent on GitHub requests.
 pub const HTTP_USER_AGENT: &str = "Kumochi";
 
-/// Unset until the owner supplies the registered application's public client identifier.
-pub const GITHUB_CLIENT_ID: Option<&str> = None;
+/// The registered Kumochi Dev application's public client ID; release registration is pending.
+pub const GITHUB_CLIENT_ID: Option<&str> = if cfg!(debug_assertions) {
+    Some("Iv23liKFSP0RTvDt9XGM")
+} else {
+    None
+};
 
 /// The assistant's name until the user picks their own.
 pub const DEFAULT_ASSISTANT_NAME: &str = "Kumo";
@@ -298,6 +302,14 @@ mod tests {
         BRAIN_LOG, CREDENTIAL_GENERATION_SEGMENT, CREDENTIAL_SERVICE, SCREEN_LOG, SHELL_LOG,
         SPEECH_LOG, account_targets, generation_target,
     };
+
+    #[test]
+    fn github_registration_matches_the_build_profile() {
+        #[cfg(debug_assertions)]
+        assert_eq!(super::GITHUB_CLIENT_ID, Some("Iv23liKFSP0RTvDt9XGM"));
+        #[cfg(not(debug_assertions))]
+        assert_eq!(super::GITHUB_CLIENT_ID, None);
+    }
 
     #[test]
     fn generation_names_never_overlap_a_legacy_name() {

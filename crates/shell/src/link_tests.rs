@@ -533,6 +533,17 @@ pub(crate) fn attended(label: &str) -> Attended {
     attended_from(label, 0)
 }
 
+#[test]
+fn ending_a_session_closes_its_real_pipes_and_retires_control_admission() {
+    let link = attended("settings-cancel-full-fallback");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    link.handle.end(&session);
+    assert!(link.link.join().expect("the aborted session joins"));
+    assert!(!link.handle.send_control(&session, ControlToBrain::Pong));
+    assert!(link.handle.shared.outbox.lock().unwrap().is_none());
+}
+
 fn attended_from(label: &str, previous_generation: u64) -> Attended {
     let (control, shell_control) = pair(&format!("{label}-control"));
     let (data, shell_data) = pair(&format!("{label}-data"));

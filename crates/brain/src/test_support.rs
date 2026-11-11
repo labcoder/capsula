@@ -133,7 +133,7 @@ pub(crate) fn accounts(scratch: &Scratch) -> Accounts {
         Box::new(move || Vault::with_service(store.clone(), "test-accounts", &lock)),
         Arc::new(FixedClock(1_800_000_000)),
     );
-    Accounts::spawn(worker, net()).expect("credential thread")
+    Accounts::spawn_unconfigured(worker, net()).expect("credential thread")
 }
 
 /// What an account system reaches outside the brain through, in tests: it never opens a
