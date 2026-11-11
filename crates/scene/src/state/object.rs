@@ -1,6 +1,5 @@
 use crate::{
     ErrorCode, FieldPath, Finite, Handle, Ms, Step, StepError, WireId,
-    limits::MAX_OBJECT_DEPTH,
     record::{Anchor, Change, KeyValue, Op, Track},
 };
 use std::collections::{BTreeMap, HashSet};
@@ -244,7 +243,8 @@ pub(super) fn validate_op(
         Kind::Solid => Some(Kind::View3d),
         _ => None,
     };
-    if required_parent.is_some() && v.parent.is_none() {
+    if required_parent.is_some() && !matches!(v.kind, Kind::Node | Kind::Edge) && v.parent.is_none()
+    {
         return Err(fail("in", ErrorCode::MissingField));
     }
     for reference in references(op) {
@@ -278,33 +278,11 @@ pub(super) fn validate_op(
         }
     }
     if let Op::Edge(edge) = op {
-        let mut ancestors = [None; MAX_OBJECT_DEPTH];
-        let mut cursor = objects
-            .get(&edge.from)
-            .and_then(|node| node.parent.as_ref());
-        for slot in &mut ancestors {
-            let Some(id) = cursor else { break };
-            let Some(object) = objects.get(id) else { break };
-            if object.kind != Kind::Diagram {
-                break;
-            }
-            *slot = Some(id);
-            cursor = object.parent.as_ref();
-        }
-        let mut common = None;
-        cursor = objects.get(&edge.to).and_then(|node| node.parent.as_ref());
-        for _ in 0..MAX_OBJECT_DEPTH {
-            let Some(id) = cursor else { break };
-            let Some(object) = objects.get(id) else { break };
-            if object.kind != Kind::Diagram {
-                break;
-            }
-            if ancestors.contains(&Some(id)) {
-                common = Some(id);
-                break;
-            }
-            cursor = object.parent.as_ref();
-        }
+        let common = super::parents::nearest(&edge.from, &edge.to, |id| {
+            objects
+                .get(id)
+                .map(|object| (object.kind, object.parent.as_ref()))
+        });
         if common != edge.parent.as_ref() {
             let field = if objects[&edge.from].parent == edge.parent {
                 "to"

@@ -2,7 +2,7 @@
 use super::retire::{map_bytes, records_bytes};
 use super::{
     Admission, Admitted, Candidate, DetachedCandidate, Object, SceneState, WorldCheck, metrics,
-    object, retire, three, work,
+    object, parents, retire, three, work,
 };
 use crate::{
     Budget, ErrorCode, FieldPath, GlobalBudget, Handle, Step, StepError, WireId,
@@ -131,12 +131,13 @@ impl SceneState {
             Arc::new(step.clone()),
             heap::ARC_HEADER + heap::step_bytes(step),
         );
-        let expansion = mermaid::expand(
+        let mut expansion = mermaid::expand(
             &original,
             revision,
             &self.reserved,
             MAX_LIVE_OBJECTS - minimum.objects,
         )?;
+        parents::resolve(&mut expansion.run, &self.objects);
         let bytes = heap::compiled_bytes(&original, &expansion.run)
             + heap::extras_bytes(std::iter::empty(), [&expansion.extras]);
         let expansion = Deferred::new(expansion, bytes);

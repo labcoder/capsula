@@ -3,6 +3,7 @@ mod admission;
 mod binding;
 pub(crate) mod metrics;
 pub(crate) mod object;
+mod parents;
 mod part;
 mod retire;
 mod three;

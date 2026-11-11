@@ -298,10 +298,7 @@ pub(super) fn charge<'a>(
             _ => {}
         }
     }
-    for (parent, counts) in &groups {
-        if parent.is_none() {
-            continue;
-        }
+    for counts in groups.values() {
         for (count, cap, budget) in [
             (counts[0], MAX_DIAGRAM_NODES, Budget::DiagramNodes),
             (counts[1], MAX_DIAGRAM_EDGES, Budget::DiagramEdges),
