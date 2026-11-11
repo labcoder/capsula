@@ -960,18 +960,20 @@ fn legacy_no_visual_controls_are_no_ops_before_more_valid_traffic() {
     );
     frame::write(
         &mut &link.control,
-        &run_state(2, ThreadId(3), Phase::Answering),
+        &run_state(2, ThreadId(3), Phase::Answering, None),
         Pipe::Control,
     )
     .expect("normal run state");
     assert!(matches!(
         next(&events),
         LinkEvent::RunState {
+            generation,
             run: RunId(2),
             thread: ThreadId(3),
             phase: Phase::Answering,
-            error: None
-        }
+            error: None,
+            origin: None
+        } if generation == session.generation()
     ));
     let text = DataToShell::AssistantText {
         run: RunId(2),

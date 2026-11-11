@@ -229,7 +229,7 @@ fn a_failed_surface_configuration_removes_its_hidden_window(cx: &mut TestAppCont
 
 #[gpui::test]
 fn a_retired_hosts_queued_canvas_cannot_read_the_new_hosts_frames(cx: &mut TestAppContext) {
-    cx.update(gpui_kit::init);
+    let adapter = test_fixture::presence(cx);
     for closed in [false, true] {
         let frames = Rc::new(RefCell::new(Frames::default()));
         frames.borrow_mut().shown = true;
@@ -248,13 +248,19 @@ fn a_retired_hosts_queued_canvas_cannot_read_the_new_hosts_frames(cx: &mut TestA
         let drawing = overlay.drawing.clone();
         let window = overlay.window;
         let (events, _receiver) = async_channel::unbounded();
-        cx.update(|cx| {
+        adapter.update(cx, |this, cx| {
+            let handles = this.exclusion_handles();
             Gpui {
-                cx,
+                exclusion: &mut this.exclusion,
+                surfaces: super::super::exclusion::Windows {
+                    native: &this.native,
+                    handles,
+                    cx,
+                    fixture: None,
+                },
                 owner: WeakEntity::new_invalid(),
                 frames: &frames,
                 events: &events,
-                capture: crate::platform::Capture::Allowed,
                 scratch: &Rc::new(RefCell::new(super::Scratch::new())),
                 notice: &Rc::default(),
             }
@@ -268,13 +274,19 @@ fn a_retired_hosts_queued_canvas_cannot_read_the_new_hosts_frames(cx: &mut TestA
         visual.simulate_resize(size(px(100.), px(100.)));
         visual.run_until_parked();
         frames.borrow_mut().shown = false;
-        cx.update(|cx| {
+        adapter.update(cx, |this, cx| {
+            let handles = this.exclusion_handles();
             let mut surface = Gpui {
-                cx,
+                exclusion: &mut this.exclusion,
+                surfaces: super::super::exclusion::Windows {
+                    native: &this.native,
+                    handles,
+                    cx,
+                    fixture: None,
+                },
                 owner: WeakEntity::new_invalid(),
                 frames: &frames,
                 events: &events,
-                capture: crate::platform::Capture::Allowed,
                 scratch: &Rc::new(RefCell::new(super::Scratch::new())),
                 notice: &Rc::default(),
             };
@@ -705,6 +717,9 @@ fn begun_at(stage: Box<dyn Stage>, now: Instant) -> Presenter {
 /// Opens a real overlay over `frames`, enables it as the adapter does, draws it once and runs
 /// what its canvas deferred for `owner`, then removes the window.
 fn draw_once(frames: &Rc<RefCell<Frames>>, owner: WeakEntity<Presence>, cx: &mut TestAppContext) {
+    let adapter = owner
+        .upgrade()
+        .unwrap_or_else(|| test_fixture::presence(cx));
     frames.borrow_mut().shown = true;
     let overlay = cx
         .update(|cx| {
@@ -719,13 +734,19 @@ fn draw_once(frames: &Rc<RefCell<Frames>>, owner: WeakEntity<Presence>, cx: &mut
         })
         .expect("a real overlay constructor");
     let (events, _receiver) = async_channel::unbounded();
-    cx.update(|cx| {
+    adapter.update(cx, |this, cx| {
+        let handles = this.exclusion_handles();
         Gpui {
-            cx,
+            exclusion: &mut this.exclusion,
+            surfaces: super::super::exclusion::Windows {
+                native: &this.native,
+                handles,
+                cx,
+                fixture: None,
+            },
             owner,
             frames,
             events: &events,
-            capture: crate::platform::Capture::Allowed,
             scratch: &Rc::new(RefCell::new(super::Scratch::new())),
             notice: &Rc::default(),
         }

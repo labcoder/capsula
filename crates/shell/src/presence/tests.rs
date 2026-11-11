@@ -205,8 +205,9 @@ fn provider_done_keeps_the_presenters_stop_token_when_runs_stop_returns_none(
         this.session = Some(Session::detached(1, Incarnation(1)));
         this.runs.connected(1);
         this.runs
-            .apply_state(RunId(1), ThreadId(1), Phase::Answering);
-        this.runs.apply_state(RunId(1), ThreadId(1), Phase::Done);
+            .apply_state(RunId(1), ThreadId(1), Phase::Answering, None);
+        this.runs
+            .apply_state(RunId(1), ThreadId(1), Phase::Done, None);
         this.runs
             .apply_data(DataToShell::RunEnd { run: RunId(1) }, 24);
         assert!(!this.runs.working());
