@@ -34,7 +34,7 @@ use super::paint_paths::{self, BuildError};
 use super::paint_phase::{self, Phase};
 use super::paint_stroke::Scratch;
 use super::{OpenError, Presence, configure_surface, options, scaled};
-use crate::platform::{self, Capture, PresenceEvent, PresenceSurface};
+use crate::platform::{self, PresenceEvent, PresenceSurface};
 use crate::presenter::{Frames, Sample};
 
 /// One overlay window and its root, opened hidden and closed once hidden again.
@@ -424,8 +424,7 @@ impl Surface for Gpui<'_> {
                 {
                     return result;
                 }
-                configure_surface(window, PresenceSurface::Overlay, events, cx)?;
-                platform::set_capture(window, Capture::Allowed)
+                configure_surface(window, PresenceSurface::Overlay, events, cx)
             },
         )
     }
