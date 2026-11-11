@@ -959,7 +959,7 @@ async fn a_clear_two_failed_outcomes_left_commits_once_the_store_takes_it() {
 #[tokio::test]
 async fn a_stop_while_a_finished_runs_steps_drain_keeps_what_stayed() {
     let scratch = Scratch::new("late-stop-kept");
-    let (scene, committed) = stopped_after_done(&scratch, &[vec![0]]).await;
+    let (scene, committed) = Box::pin(stopped_after_done(&scratch, &[vec![0]])).await;
     assert_eq!(committed, Some(1));
     assert_eq!(
         kept_after_restart(&scratch, scene),
@@ -970,7 +970,7 @@ async fn a_stop_while_a_finished_runs_steps_drain_keeps_what_stayed() {
 #[tokio::test]
 async fn a_stop_that_kept_nothing_while_a_finished_runs_steps_drain_clears_its_scene() {
     let scratch = Scratch::new("late-stop-none");
-    let (scene, committed) = stopped_after_done(&scratch, &[Vec::new()]).await;
+    let (scene, committed) = Box::pin(stopped_after_done(&scratch, &[Vec::new()])).await;
     assert_eq!(committed, None);
     assert_eq!(kept_after_restart(&scratch, scene), None);
 }
@@ -1038,7 +1038,7 @@ async fn stopped_after_done(scratch: &Scratch, stops: &[Vec<u32>]) -> (SceneId, 
 #[tokio::test]
 async fn a_second_stop_of_a_finished_run_never_trims_its_scene_again() {
     let scratch = Scratch::new("late-stop-twice");
-    let (scene, committed) = stopped_after_done(&scratch, &[vec![0, 1], vec![0]]).await;
+    let (scene, committed) = Box::pin(stopped_after_done(&scratch, &[vec![0, 1], vec![0]])).await;
     assert_eq!(committed, Some(2));
     assert_eq!(
         kept_after_restart(&scratch, scene),
@@ -1120,12 +1120,22 @@ async fn stopped_while_ending(
 async fn a_stop_of_a_replaced_run_whose_steps_were_still_being_stored_keeps_what_stayed() {
     let kept = Scratch::new("ending-replaced-kept");
     assert_eq!(
-        stopped_while_ending(&kept, STEPS_HELD_THEN_REPLACED, vec![0]).await,
+        Box::pin(stopped_while_ending(
+            &kept,
+            STEPS_HELD_THEN_REPLACED,
+            vec![0]
+        ))
+        .await,
         (Some(1), Some((3, vec!["a".to_owned()])))
     );
     let none = Scratch::new("ending-replaced-none");
     assert_eq!(
-        stopped_while_ending(&none, STEPS_HELD_THEN_REPLACED, Vec::new()).await,
+        Box::pin(stopped_while_ending(
+            &none,
+            STEPS_HELD_THEN_REPLACED,
+            Vec::new()
+        ))
+        .await,
         (None, None)
     );
 }
@@ -1134,12 +1144,17 @@ async fn a_stop_of_a_replaced_run_whose_steps_were_still_being_stored_keeps_what
 async fn a_stop_of_a_failed_run_whose_steps_were_still_being_stored_keeps_what_stayed() {
     let kept = Scratch::new("ending-failed-kept");
     assert_eq!(
-        stopped_while_ending(&kept, STEPS_HELD_THEN_FAILED, vec![0]).await,
+        Box::pin(stopped_while_ending(&kept, STEPS_HELD_THEN_FAILED, vec![0])).await,
         (Some(1), Some((3, vec!["a".to_owned()])))
     );
     let none = Scratch::new("ending-failed-none");
     assert_eq!(
-        stopped_while_ending(&none, STEPS_HELD_THEN_FAILED, Vec::new()).await,
+        Box::pin(stopped_while_ending(
+            &none,
+            STEPS_HELD_THEN_FAILED,
+            Vec::new()
+        ))
+        .await,
         (None, None)
     );
 }
@@ -1295,7 +1310,7 @@ async fn another_connection_s_stop_never_trims_a_lost_run_s_scene() {
         for revealed in [Vec::new(), vec![0]] {
             let scratch = Scratch::new("foreign-stop");
             assert_eq!(
-                foreign_stop(&scratch, when, revealed.clone()).await,
+                Box::pin(foreign_stop(&scratch, when, revealed.clone())).await,
                 (Some(3), all()),
                 "{when:?} with {revealed:?}"
             );
@@ -1410,7 +1425,7 @@ async fn a_stop_or_clear_read_with_the_control_pipe_s_end_is_still_applied() {
             run,
             revealed: vec![0],
         };
-        let (scratch, scene, named) = control_then_eof("eof-stop", first, stop).await;
+        let (scratch, scene, named) = Box::pin(control_then_eof("eof-stop", first, stop)).await;
         assert_eq!(
             named
                 .iter()
@@ -1426,7 +1441,7 @@ async fn a_stop_or_clear_read_with_the_control_pipe_s_end_is_still_applied() {
         let clear = |_, scene| ControlToBrain::ClearDrawing {
             scene_ids: vec![scene],
         };
-        let (scratch, scene, named) = control_then_eof("eof-clear", first, clear).await;
+        let (scratch, scene, named) = Box::pin(control_then_eof("eof-clear", first, clear)).await;
         assert!(
             named.iter().all(|named| named.scene != scene),
             "{first:?} ended first"

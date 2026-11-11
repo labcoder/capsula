@@ -5,6 +5,126 @@ use super::*;
 use crate::frame::{HEADER_LEN, Pipe, encode};
 use crate::tap::{Direction, Record, Tapped, write};
 
+#[test]
+fn tagged_github_refusal_appends_wire_tags_and_keeps_error_validation() {
+    use crate::frame::{FrameError, read};
+    let refusal = ControlToShell::GitHubError(ErrorKey::GitHubUnavailable.into());
+    let wire = encode(&refusal, Pipe::Control).unwrap();
+    assert_eq!(wire, [4, 0, 0, 0, 25, 42, 0, 0]);
+    assert_eq!(
+        read::<ControlToShell>(&mut wire.as_slice(), Pipe::Control).unwrap(),
+        Some(refusal)
+    );
+    for length in 1..wire.len() {
+        assert!(matches!(
+            read::<ControlToShell>(&mut &wire[..length], Pipe::Control),
+            Err(FrameError::Truncated)
+        ));
+    }
+    assert_eq!(
+        read::<ControlToShell>(&mut &[][..], Pipe::Control).unwrap(),
+        None
+    );
+    for (message, tag) in [
+        (ControlToShell::Error(ErrorKey::SettingsRefused.into()), 8),
+        (
+            ControlToShell::GitHub(GitHubView::SignedOut { cleanup: None }),
+            17,
+        ),
+        (
+            ControlToShell::AnthropicKeyStageDone {
+                plan: KeyStageId([0; 16]),
+                result: Err(KeyStageFailure::Unavailable),
+            },
+            24,
+        ),
+    ] {
+        let encoded = encode(&message, Pipe::Control).unwrap();
+        assert_eq!(encoded[HEADER_LEN], tag);
+        assert_eq!(
+            read::<ControlToShell>(&mut encoded.as_slice(), Pipe::Control).unwrap(),
+            Some(message)
+        );
+    }
+    assert_eq!(
+        postcard::to_allocvec(&ErrorKey::VoiceUnavailable).unwrap(),
+        [41]
+    );
+    let mut unknown = wire;
+    unknown[5] = 43;
+    assert!(matches!(
+        read::<ControlToShell>(&mut unknown.as_slice(), Pipe::Control),
+        Err(FrameError::Malformed(_))
+    ));
+    let too_many = [14, 0, 0, 0, 25, 42, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    assert!(matches!(
+        read::<ControlToShell>(&mut too_many.as_slice(), Pipe::Control),
+        Err(FrameError::Malformed(postcard::Error::SerdeDeCustom))
+    ));
+}
+
+#[test]
+fn filed_confirmation_and_duplicate_warning_round_trip_independently() {
+    for confirmed_by_user in [false, true] {
+        for maybe_duplicate in [false, true] {
+            let value = ActionState::Filed {
+                number: 7,
+                url: IssueUrl::for_issue(&RepoName::new("o/r").unwrap(), 7).unwrap(),
+                confirmed_by_user,
+                maybe_duplicate,
+            };
+            let bytes = postcard::to_allocvec(&value).unwrap();
+            assert_eq!(postcard::from_bytes::<ActionState>(&bytes).unwrap(), value);
+            assert!(postcard::from_bytes::<ActionState>(&bytes[..bytes.len() - 1]).is_err());
+        }
+    }
+}
+
+#[test]
+fn correlated_cards_keep_legacy_indices_and_the_original_input_bound() {
+    let empty = DataToBrain::IssueCardsRequest {
+        request: 9,
+        drafts: Bounded::default(),
+    };
+    let wire = postcard::to_allocvec(&empty).unwrap();
+    assert_eq!(wire, [8, 9, 0]);
+    assert_eq!(postcard::from_bytes::<DataToBrain>(&wire).unwrap(), empty);
+    let legacy = DataToBrain::IssueCards {
+        drafts: Bounded::default(),
+    };
+    assert_eq!(postcard::to_allocvec(&legacy).unwrap(), [6, 0]);
+    for count in [16, 17] {
+        let mut raw = vec![8];
+        raw.extend(postcard::to_allocvec(&(9_u32, vec![DraftId(1); count])).unwrap());
+        if count == 16 {
+            assert_eq!(
+                postcard::from_bytes::<DataToBrain>(&raw).unwrap(),
+                DataToBrain::IssueCardsRequest {
+                    request: 9,
+                    drafts: Bounded::new(vec![DraftId(1); 16]).unwrap()
+                }
+            );
+        } else {
+            assert!(postcard::from_bytes::<DataToBrain>(&raw).is_err());
+        }
+        for length in 0..raw.len() {
+            assert!(postcard::from_bytes::<DataToBrain>(&raw[..length]).is_err());
+        }
+    }
+    for (status, tag) in [
+        (IssueCardsStatus::Complete, 0),
+        (IssueCardsStatus::Failed, 1),
+    ] {
+        let done = DataToShell::IssueCardsDone { request: 9, status };
+        assert_eq!(postcard::to_allocvec(&done).unwrap(), [19, 9, tag]);
+        assert_eq!(
+            postcard::from_bytes::<DataToShell>(&[19, 9, tag]).unwrap(),
+            done
+        );
+    }
+    assert!(postcard::from_bytes::<DataToShell>(&[19, 9, 2]).is_err());
+}
+
 fn checked<T>(construct: fn(&str) -> Result<T, IssueValueError>, good: &[String], bad: &[String])
 where
     T: TryFrom<String, Error = IssueValueError>

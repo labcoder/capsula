@@ -48,12 +48,21 @@ impl Presence {
                 requests
             }));
         }
+        if self.threads.read(cx).exhausted() || self.threads.read(cx).cards_broken() {
+            if let Some(session) = &self.session {
+                self.link.end(session);
+            }
+            return;
+        }
         for request in requests {
             if !self
                 .session
                 .as_ref()
                 .is_some_and(|session| self.link.send_data(session, request))
             {
+                if let Some(session) = &self.session {
+                    self.link.end(session);
+                }
                 for model in [&self.threads, &self.chat] {
                     model.update(cx, |state, cx| {
                         state.disconnected();

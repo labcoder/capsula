@@ -79,7 +79,8 @@ impl Accounts {
             | ErrorKey::VoiceCorrupt
             | ErrorKey::VoiceStorage
             | ErrorKey::VoiceLoad
-            | ErrorKey::VoiceUnavailable => {}
+            | ErrorKey::VoiceUnavailable
+            | ErrorKey::GitHubUnavailable => {}
             ErrorKey::SignInTimedOut
             | ErrorKey::SignInFailed
             | ErrorKey::SignInOtherAccount

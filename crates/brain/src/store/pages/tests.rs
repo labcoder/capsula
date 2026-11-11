@@ -5,6 +5,74 @@ use crate::drawing::{Reply, Target, Write};
 use crate::store::{Cancel, EventKind, NewEvent, RunEnd, Store, Swap, purge};
 use crate::test_support::Scratch;
 
+#[test]
+fn issue_metadata_is_closed_positive_and_bounded_before_json_decode() {
+    use kumochi_protocol::message::DraftId;
+    assert_eq!(issue_draft(Some(br#"{"draft":1}"#)).unwrap(), DraftId(1));
+    assert_eq!(
+        issue_draft(Some(br#"{"draft":9223372036854775807}"#)).unwrap(),
+        DraftId(9_223_372_036_854_775_807)
+    );
+    let mut boundary = br#"{"draft":7}"#.to_vec();
+    boundary.resize(32, b' ');
+    assert_eq!(issue_draft(Some(&boundary)).unwrap(), DraftId(7));
+    boundary.push(b' ');
+    assert!(matches!(
+        issue_draft(Some(&boundary)),
+        Err(rusqlite::Error::InvalidQuery)
+    ));
+    for bad in [
+        b"".as_slice(),
+        br"{}".as_slice(),
+        br#"{"draft":0}"#,
+        br#"{"draft":-1}"#,
+        br#"{"draft":1.0}"#,
+        br#"{"draft":"1"}"#,
+        br#"{"draft":1,"draft":2}"#,
+        br#"{"draft":1,"extra":0}"#,
+        br#"{"draft":18446744073709551615}"#,
+        br#"{"draft":1"#,
+        b"\xff",
+    ] {
+        assert!(matches!(
+            issue_draft(Some(bad)),
+            Err(rusqlite::Error::InvalidQuery)
+        ));
+    }
+    assert!(matches!(
+        issue_draft(None),
+        Err(rusqlite::Error::InvalidQuery)
+    ));
+}
+
+#[test]
+fn issue_pages_expose_only_titles_and_reject_oversized_stored_metadata() {
+    use crate::store::actions_tests::{body, opened, thread, title};
+    let scratch = Scratch::new("issue-event-page");
+    let mut store = opened(&scratch);
+    let owner = thread(&mut store);
+    let draft = store
+        .create_draft(
+            owner,
+            &title("visible title"),
+            &body("private body marker"),
+            None,
+            None,
+        )
+        .unwrap();
+    let DataToShell::Page { events, .. } = events(&store, owner, None) else {
+        panic!("events");
+    };
+    assert_eq!(events[0].kind, PageEventKind::Issue { draft: draft.draft });
+    assert_eq!(events[0].text, "visible title");
+    assert!(!format!("{events:?}").contains("private body marker"));
+    store.conn.execute("INSERT INTO events(thread,kind,text,body,created_ms) VALUES (?1,'action','title',?2,1)", params![bounded_id(owner.0), format!("{{\"draft\":1}}{}", " ".repeat(100_000))]).unwrap();
+    assert!(matches!(
+        store.pages().events_page(owner, None, 10),
+        Err(StoreError::Read)
+    ));
+}
+
 fn add(store: &mut Store, title: &str, text: &str) -> ThreadId {
     let (thread, run) = store.high_water().expect("ids");
     let thread = ThreadId(thread.0 + 1);

@@ -63,7 +63,7 @@ pub enum Input {
     Loaded {
         /// Startup fence.
         stamp: Stamp,
-        /// Account or cleanup outcome; a vault-open failure is reported as no account.
+        /// Account or cleanup outcome; an unavailable vault does not supply this input.
         result: Result<Option<Account>, Removed>,
     },
     /// One device-code request finished.
@@ -236,6 +236,10 @@ impl Machine {
     /// Identity to attach to newly dispatched work.
     pub fn stamp(&self) -> Stamp {
         self.stamp
+    }
+
+    pub(crate) fn is_loading(&self) -> bool {
+        matches!(self.state, State::Loading)
     }
 
     /// Consumers load this with Acquire immediately before using a bearer or saving.

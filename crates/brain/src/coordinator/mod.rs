@@ -13,6 +13,7 @@ mod admission;
 mod ask;
 mod availability;
 mod calls;
+mod cards;
 mod delete;
 mod drawing;
 mod inline;
@@ -41,6 +42,7 @@ use crate::store::{Failure, Interruption, RunEnd, SceneState};
 
 pub use admission::{BuildContext, BuildKey, ContextBuilt, Unbuilt};
 pub use availability::{Availability, Ready};
+pub use cards::{CardRead, Cards};
 pub use inline::{CompactBuilt, CompactContext};
 pub(crate) use job::JobAsk;
 pub use job::{JobBuilt, JobKey, JobKind, JobOutput, ReadJob};
@@ -48,6 +50,8 @@ pub use lease::{LeaseId, MAX_HOLD, SEND_DEADLINE, SendKey};
 pub use speech::{DRAIN_STALL, QUIET_TIMEOUT, Synthesized};
 pub use store_op::{StoreOp, SummaryText};
 pub use tools::{MAX_CALLS, MAX_ROUNDS, RoundItems};
+mod page;
+pub use page::PageKey;
 
 /// A run's whole wall-clock budget [S3's total cap].
 pub const WALL_CLOCK: Duration = Duration::from_secs(120);
@@ -79,19 +83,27 @@ pub enum Input {
     },
     /// Read a page for one shell connection, without changing any run.
     ReadPage {
-        /// The connection that requested the page.
-        epoch: u64,
-        /// The shell's request counter.
-        request: u32,
+        /// The admitted read.
+        key: PageKey,
         /// The page to read.
         page: PageOf,
     },
+    /// Read one admitted batch without changing a run.
+    ReadCards {
+        /// The admitted batch and bounded source identities.
+        cards: std::sync::Arc<Cards>,
+    },
+    /// A card read finished, before output capacity or deletion checks.
+    CardsRead {
+        /// The original admission.
+        cards: std::sync::Arc<Cards>,
+        /// At most sixteen cards, or a fixed read failure.
+        reply: Result<Vec<CardRead>, ()>,
+    },
     /// A page read finished.
     PageRead {
-        /// The connection that requested the page.
-        epoch: u64,
-        /// The shell's request counter.
-        request: u32,
+        /// The admitted read.
+        key: PageKey,
         /// The page, or `PageFailed` when the read failed.
         reply: DataToShell,
     },
@@ -363,6 +375,20 @@ pub enum Effect {
     Control(ControlToShell),
     /// Send on the data pipe.
     Data(DataToShell),
+    /// Deliver an admitted page without losing terminal ownership.
+    Page {
+        /// The admitted read.
+        key: PageKey,
+        /// Its terminal reply.
+        reply: DataToShell,
+    },
+    /// Deliver a bounded card result under its original admission.
+    Cards {
+        /// The original admission.
+        cards: std::sync::Arc<Cards>,
+        /// A bounded result, checked again before queueing.
+        reply: Result<Vec<CardRead>, ()>,
+    },
     /// Start the engine's round with an admitted build.
     StartEngine {
         /// What the engine answers.
@@ -743,19 +769,15 @@ impl Coordinator {
                     &mut effects,
                 )?;
             }
-            Input::ReadPage {
-                epoch,
-                request,
-                page,
-            } => {
-                let op = StoreOp::ReadPage {
-                    epoch,
-                    request,
-                    page,
-                };
+            Input::ReadPage { key, page } => {
+                let op = StoreOp::ReadPage { key, page };
                 return Ok(vec![Effect::Store(op)]);
             }
-            Input::PageRead { reply, .. } => return Ok(vec![Effect::Data(reply)]),
+            Input::PageRead { key, reply } => return Ok(vec![Effect::Page { key, reply }]),
+            Input::ReadCards { cards } => {
+                return Ok(vec![Effect::Store(StoreOp::ReadCards { cards })]);
+            }
+            Input::CardsRead { cards, reply } => return Ok(vec![Effect::Cards { cards, reply }]),
             Input::Turn { turn, thread, text } => self.typed(turn, thread, text, &mut effects),
             Input::Ask {
                 turn,

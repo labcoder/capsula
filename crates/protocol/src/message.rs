@@ -41,8 +41,8 @@ pub use github::{
 };
 pub use issues::{
     ActionState, ApprovalRev, ContentHash, Decision, DraftId, FailReason, IssueBody, IssueCard,
-    IssueOp, IssueRefused, IssueTitle, IssueUrl, LookupResult, MAX_ISSUE_BODY_BYTES,
-    MAX_ISSUE_CARDS, MAX_ISSUE_TITLE_CHARS, StateVersion,
+    IssueCardsStatus, IssueOp, IssueRefused, IssueTitle, IssueUrl, LookupResult,
+    MAX_ISSUE_BODY_BYTES, MAX_ISSUE_CARDS, MAX_ISSUE_TITLE_CHARS, StateVersion,
 };
 pub use pages::{EventId, PageEvent, PageEventKind, PageOf, ThreadCursor, ThreadRow};
 pub use scenes::{
@@ -591,6 +591,8 @@ pub enum ControlToShell {
         /// Whether adoption committed, even if a later Check or Remove changed the current view.
         result: Result<(), KeyStageFailure>,
     },
+    /// A GitHub connection error, independent of generic account errors.
+    GitHubError(UserError),
 }
 
 /// Shell to brain, on the data pipe.
@@ -649,6 +651,13 @@ pub enum DataToBrain {
         scene: SceneId,
         /// The solid's host identity, from the displayed frame's pick.
         element: kumochi_scene::Handle,
+    },
+    /// Read a bounded batch with a correlated terminal acknowledgement.
+    IssueCardsRequest {
+        /// The shared page/card admission id.
+        request: u32,
+        /// At most sixteen ids, before stable duplicate coalescing.
+        drafts: kumochi_scene::text::Bounded<DraftId, MAX_ISSUE_CARDS>,
     },
 }
 
@@ -786,6 +795,20 @@ pub enum DataToShell {
     SpeechPcm(SpeechPcm),
     /// An authoritative card; its body belongs on the data pipe.
     IssueCard(IssueCard),
+    /// One authoritative card; it does not release the batch's admission.
+    IssueCardRead {
+        /// The shared page/card admission id.
+        request: u32,
+        /// A full snapshot value.
+        card: IssueCard,
+    },
+    /// The sole admission-releasing terminal of a card batch, even when empty.
+    IssueCardsDone {
+        /// The shared page/card admission id.
+        request: u32,
+        /// Fixed, content-free completion status.
+        status: IssueCardsStatus,
+    },
 }
 
 #[cfg(test)]

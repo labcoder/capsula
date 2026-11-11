@@ -1,9 +1,111 @@
 # Issue actions
 
+Local draft creation is dormant too: there is no production tool or UI entry point
+to create one. A user cannot yet create a saved issue; the history path only reads
+compatible records that already exist.
+
 An issue the model drafts becomes a durable action: a row in the store's `actions` table that
 only the user's consent may move toward GitHub. The stages and what a card shows are in
 `crates/brain/src/issues.rs`, the rows in `crates/brain/src/store/actions.rs`. Neither sends a
 request.
+
+## Dormant confirmation handoff
+
+Production history stays read-only: File is not a button, action or keyboard
+command while the runtime ignores Issue controls. The offline fixture alone
+exercises the dormant opener. It uses the shared Cancel-first confirmation with
+plain semantic text and a focusable, keyboard-scrollable full-content preview.
+The preview comes from the current full card, including its bound account and
+repository, never from the repository default or the abbreviated history row.
+
+Each owned history surface holds one transient attempt. Its current Session,
+connection origin, displayed thread/draft, full version/hash/approval, account,
+repository membership and Draft/Failed state must match again at activation.
+Hide, selection, deletion, disconnect, scope turnover and a new hydration retire
+the attempt; hydration invalidates either surface's attempt through the existing
+shared read state. Only weak invalidation flags are shared, not consent or content.
+The callback consumes the attempt before checking or queueing. Cancel, dismissal,
+stale state and a full queue cannot replay it on a later valid snapshot.
+
+An explicit confirmation emits only the existing File consent operation. It does
+not mark Sending or Filed, certify numeric account identity, admit a send or
+resolve Unknown. The store still owns numeric-account/hash/approval admission and
+durable single-use consumption, including refusals. Two surfaces may independently
+hand off the same revision; that is not two remote admissions or exactly-once
+delivery. Native rendering, input and accessibility remain separate gates.
+
+## Authoritative card batches
+
+`IssueCardsRequest` shares the page allocator and four outstanding-read slots. Its sixteen-id
+wire bound applies before duplicates are coalesced in first-requested order. The snapshot reader
+reconstructs content, hash, approval, version and state together. Missing/deleted ids are skipped.
+Each `IssueCardRead` carries the request id; exactly one `IssueCardsDone(Complete|Failed)` ends
+the batch, including empty, all-missing and all-pruned batches. Individual card frames never
+release a slot. Legacy `IssueCards` keeps its wire index but is refused by the negotiated build.
+
+Registration precedes the reader's accepted-write stamp. The store's existing deletion
+transaction cancels matching registered card sources, including those not read yet; a later
+registration instead waits behind that delete before taking its snapshot. At most four batches
+of sixteen source identities are registered. Sources retain their snapshot thread/generation
+and use children of the existing admission Control, not a second cancellation framework.
+Deletion cannot revive a source, even if the deletion transaction subsequently fails; a fresh
+read may reconstruct the still-live row. No title/body is read just to invalidate a source.
+
+Completion, held-output admission and queue selection discard invalid sources. A queued batch
+terminal belongs to its batch, not its last surviving thread. An invalidated active frame closes
+the connection rather than splicing another frame onto its prefix. The original two-second
+admission end covers barrier, Side, SQL, output credit and terminal delivery; no stage renews it.
+Only issue ids returned on displayed pages enter the shell's shared card cache. Paging and
+cache hydration never grant consent or send to GitHub.
+
+## Events and displayed cards
+
+Creation inserts one `draft` event; every durable action/approval change inserts one `action`
+event in the same transaction. Replays, Gone, stale completions and semantic no-ops insert none.
+Recovery copies titles inside SQL and retains whole-send-batch rollback without decoding bodies.
+Event text is only the title; metadata is the closed positive-id object `{"draft":1}`. The page
+reader fetches at most 33 metadata bytes, admits at most 32 UTF-8 bytes, and rejects duplicate,
+unknown, mistyped or missing fields with a fixed read failure. No issue body enters an event.
+
+The browsed and focused histories share one cache, bounded by their currently displayed issue
+ids. Full cards are correlated to an outstanding read and the current displayed ownership.
+State notifications advance a watermark, discard obsolete full content and schedule a bounded
+read. Older cards cannot replace it; equal-version cards hydrate missing content while keeping
+the authoritative state/approval. Conflicting state at the same version fails the connection
+and cannot be repaired by later valid frames. Card frames do not release the four-read budget.
+
+Duplicate reads coalesce. A newer watermark arriving during a read can request one successor
+after its terminal; failure alone never retries. Unknown notifications retain no draft entry
+and coalesce a reread of the open owner pages. Hiding, selection, eviction or deletion removes
+unowned cards and watermarks; outstanding tickets remain until their terminal. Late cards cannot
+recreate them. Reconnect clears the session cache and re-pages before registering ids again.
+P8 consumes this same model; there is no second presentation cache or automatic File action.
+
+## Read-only history presentation
+
+Browse and chat use the same virtualized message rows to show saved issue cards.
+The view borrows only ids owned by its displayed pages from the shared cache;
+it does not retain a second card or approval model. Rows show the saved title,
+repository, bound account and body, with the authoritative state and any duplicate
+warning. A newer state can be shown while its full details are still loading.
+Failed or missing reads show unavailable details, not an empty draft or a retry
+loop. Disconnect, eviction and protocol failure remove access to cached content.
+
+Unknown lookup candidates stay unconfirmed, absence is not proof of no issue,
+and a definite failure means this attempt created no issue, not that nothing was
+sent. Filed confirmation and duplicate warnings remain independent. Saved URLs
+are plain text; the rows contain no editing, consent, File, resend or browser
+action. Every issue row identifies the view as read-only. This presentation
+does not connect the dormant write coordinator or turn saved approval into consent.
+
+Card data and matching terminals notify both histories, while only the request
+owner applies the frame and returns credit. Retained row text is derived on model
+notification, not per frame; changed content invalidates that row's measured height
+without changing its event identity or adding another scrolling region.
+Surviving prefix/suffix rows are compared by event identity and their old indexes
+are invalidated before splicing, so a batched prepend cannot hide a card's resize.
+Issue status, title, warning and details use identified semantic Text children;
+their stable field ids sit under the event row without adding focus targets.
 
 ## Stages
 
@@ -24,6 +126,14 @@ can already hold the earlier attempt's issue and would hide it from the lookup. 
 counts the attempts that may have created an issue. It is 0 in Draft and Failed, which a CHECK
 enforces, and at least 1 in Unknown. The card shows `maybe_duplicate` from 2, and a discarded
 action's `maybe_filed` from 1.
+
+Filed separately retains `maybe_duplicate`: a known Created uses `uncertain >= 1`, while lookup
+placement or user confirmation uses `uncertain >= 2`. Confirmation and duplicate warning are
+independent and survive persistence. Legacy Filed JSON defaults the missing flag to false
+without changing `uncertain` or `confirmed`; the reader still warns when the retained count is
+at least 2. An old count of 1 cannot distinguish Created from placement, so false is not an
+exactly-once guarantee or proof that old ambiguous sends created nothing. False flags stay
+omitted from JSON so the legacy representation remains readable and round-trips unchanged.
 
 ```mermaid
 stateDiagram-v2

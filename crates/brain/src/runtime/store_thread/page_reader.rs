@@ -14,7 +14,7 @@ use kumochi_protocol::message::DataToShell;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::coordinator::{Input, StoreOp};
-use crate::store::{Pages, Side, StoreError};
+use crate::store::{Side, StoreError};
 
 /// The helper's wait after a checkpoint that left frames behind, doubling up to `LAST_RETRY`
 /// [guess].
@@ -26,7 +26,7 @@ const LAST_RETRY: Duration = Duration::from_secs(1);
 #[derive(Debug)]
 pub(super) struct Read {
     pub(super) stamp: u64,
-    /// [`StoreOp::ReadPage`], [`StoreOp::BuildContext`] or [`StoreOp::ReadJob`].
+    /// A page/card read, context build, compaction or title-job read.
     pub(super) op: StoreOp,
 }
 
@@ -71,6 +71,7 @@ impl Barrier {
     }
 
     /// Waits until `stamp` ops have finished; false when the store's thread ended first.
+    #[cfg(test)]
     pub(super) fn wait(&self, stamp: u64) -> bool {
         let progress = lock(&self.progress);
         #[cfg(test)]
@@ -193,6 +194,10 @@ pub(super) struct Hooks {
 }
 
 /// Answers each read in order, then ends once the reads' sender is gone.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one reader loop owns snapshot and terminal ordering"
+)]
 pub(super) fn spawn_reader(
     reads: mpsc::Receiver<Read>,
     exit: &Exit,
@@ -224,21 +229,15 @@ pub(super) fn spawn_reader(
                     at.map(|at| gates.remove(at))
                 };
                 let control = match &op {
-                    StoreOp::ReadCall(call) => Some(&call.control),
-                    StoreOp::BuildContext(read) => Some(&read.control),
-                    StoreOp::CompactContext(read) => Some(&read.control),
-                    StoreOp::ReadJob(read) => Some(&read.control),
-                    _ => None,
+                    StoreOp::ReadCall(call) => &call.control,
+                    StoreOp::BuildContext(read) => &read.control,
+                    StoreOp::CompactContext(read) => &read.control,
+                    StoreOp::ReadJob(read) => &read.control,
+                    StoreOp::ReadPage { key, .. } => &key.control,
+                    StoreOp::ReadCards { cards } => &cards.key.control,
+                    _ => unreachable!("only reads reach the reader"),
                 };
-                let admitted = control.map_or_else(
-                    || {
-                        barrier
-                            .wait(stamp)
-                            .then_some(())
-                            .ok_or(crate::recall::Error::Ended)
-                    },
-                    |control| barrier.wait_until(stamp, control),
-                );
+                let admitted = barrier.wait_until(stamp, control);
                 let open = admitted.is_ok();
                 let reply = match op {
                     StoreOp::ReadCall(call) => Input::ReadFinished(context::read_call(
@@ -247,6 +246,35 @@ pub(super) fn spawn_reader(
                         #[cfg(test)]
                         || wait_at(gate, hooks.observed.as_ref()),
                     )),
+                    StoreOp::ReadCards { cards } => {
+                        let reply = if open {
+                            side.read_until(&cards.key.control, |conn, control| {
+                                control
+                                    .with_handler(conn, |conn, scope| {
+                                        scope
+                                            .query(conn, || {
+                                                #[cfg(test)]
+                                                if let Some(gate) = gate {
+                                                    hold(conn, &gate, hooks.observed.as_ref())?;
+                                                }
+                                                let read =
+                                                    crate::store::context::Snapshot::begin(conn)?;
+                                                let reply = read.cards(&cards)?;
+                                                read.end()?;
+                                                Ok(reply)
+                                            })
+                                            .map_err(StoreError::from)
+                                    })
+                                    .map_err(StoreError::from)?
+                            })
+                        } else {
+                            Err(StoreError::Closed)
+                        };
+                        Input::CardsRead {
+                            cards,
+                            reply: reply.map_err(|_| ()),
+                        }
+                    }
                     StoreOp::BuildContext(build) => Input::ContextBuilt(context::read(
                         open.then_some(&*side),
                         build,
@@ -265,18 +293,27 @@ pub(super) fn spawn_reader(
                         #[cfg(test)]
                         || wait_at(gate, hooks.observed.as_ref()),
                     )),
-                    StoreOp::ReadPage {
-                        epoch,
-                        request,
-                        page,
-                    } => {
+                    StoreOp::ReadPage { key, page } => {
+                        let request = key.request;
                         let reply = if open {
-                            side.read(|conn| {
-                                #[cfg(test)]
-                                if let Some(gate) = gate {
-                                    hold(conn, &gate, hooks.observed.as_ref())?;
-                                }
-                                Pages(conn).read_page(request, page)
+                            side.read_until(&key.control, |conn, control| {
+                                control
+                                    .with_handler(conn, |conn, scope| {
+                                        scope
+                                            .query(conn, || {
+                                                #[cfg(test)]
+                                                if let Some(gate) = gate {
+                                                    hold(conn, &gate, hooks.observed.as_ref())?;
+                                                }
+                                                let read =
+                                                    crate::store::context::Snapshot::begin(conn)?;
+                                                let reply = read.page(request, page)?;
+                                                read.end()?;
+                                                Ok(reply)
+                                            })
+                                            .map_err(StoreError::from)
+                                    })
+                                    .map_err(StoreError::from)?
                             })
                         } else {
                             Err(StoreError::Closed)
@@ -285,8 +322,7 @@ pub(super) fn spawn_reader(
                             tracing::warn!(%error, "a page read failed");
                         }
                         Input::PageRead {
-                            epoch,
-                            request,
+                            key,
                             reply: reply.unwrap_or(DataToShell::PageFailed { request }),
                         }
                     }

@@ -7,6 +7,7 @@ use unic_langid::LanguageIdentifier;
 
 const ENGLISH: &str = include_str!("../../../locales/en/shell.ftl");
 mod claude;
+mod issues;
 
 /// Every string the shell shows. A unit test checks each one is in the catalog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,12 +86,45 @@ pub(crate) enum Text {
     RenameOneLine,
     TaskFallback,
 
+    IssueLoading,
+    IssueUnavailable,
+    IssueDetailsLoading,
+    IssueDetailsUnavailable,
+    IssueReadOnly,
+    IssueConsentTitle,
+    #[cfg(test)]
+    IssueConsentOpen,
+    IssueConsentConsequence,
+    IssueConsentCancel,
+    IssueConsentConfirm,
+    IssueDuplicate,
+
     // Settings
     Settings,
     OpenSettings,
     CloseSettings,
     General,
     Accounts,
+    GitHubWaiting,
+    GitHubSignedOut,
+    GitHubRemoving,
+    GitHubRemovalFailed,
+    GitHubNotDurable,
+    GitHubRequesting,
+    GitHubAwaiting,
+    GitHubConnected,
+    GitHubNotInstalled,
+    GitHubNeedsSignIn,
+    GitHubConnect,
+    GitHubSignInAgain,
+    GitHubRefresh,
+    GitHubSignOut,
+    GitHubTimeout,
+    GitHubFailure,
+    GitHubOffline,
+    GitHubCredentials,
+    GitHubRefused,
+    GitHubUnavailable,
     AssistantName,
     UserName,
     UserNameHelp,
@@ -261,12 +295,44 @@ impl Text {
         RenameOneLine,
         TaskFallback,
 
+        IssueLoading,
+        IssueUnavailable,
+        IssueDetailsLoading,
+        IssueDetailsUnavailable,
+        IssueReadOnly,
+        IssueConsentTitle,
+        IssueConsentOpen,
+        IssueConsentConsequence,
+        IssueConsentCancel,
+        IssueConsentConfirm,
+        IssueDuplicate,
+
         // Settings
         Settings,
         OpenSettings,
         CloseSettings,
         General,
         Accounts,
+        GitHubWaiting,
+        GitHubSignedOut,
+        GitHubRemoving,
+        GitHubRemovalFailed,
+        GitHubNotDurable,
+        GitHubRequesting,
+        GitHubAwaiting,
+        GitHubConnected,
+        GitHubNotInstalled,
+        GitHubNeedsSignIn,
+        GitHubConnect,
+        GitHubSignInAgain,
+        GitHubRefresh,
+        GitHubSignOut,
+        GitHubTimeout,
+        GitHubFailure,
+        GitHubOffline,
+        GitHubCredentials,
+        GitHubRefused,
+        GitHubUnavailable,
         AssistantName,
         UserName,
         UserNameHelp,
@@ -439,12 +505,45 @@ impl Text {
             Self::RenameOneLine => "rename-one-line",
             Self::TaskFallback => "task-fallback",
 
+            Self::IssueLoading => "issue-loading",
+            Self::IssueUnavailable => "issue-unavailable",
+            Self::IssueDetailsLoading => "issue-details-loading",
+            Self::IssueDetailsUnavailable => "issue-details-unavailable",
+            Self::IssueReadOnly => "issue-read-only",
+            Self::IssueConsentTitle => "issue-consent-title",
+            #[cfg(test)]
+            Self::IssueConsentOpen => "issue-consent-open",
+            Self::IssueConsentConsequence => "issue-consent-consequence",
+            Self::IssueConsentCancel => "issue-consent-cancel",
+            Self::IssueConsentConfirm => "issue-consent-confirm",
+            Self::IssueDuplicate => "issue-duplicate",
+
             // Settings
             Self::Settings => "settings-title",
             Self::OpenSettings => "action-settings",
             Self::CloseSettings => "settings-close",
             Self::General => "settings-general",
             Self::Accounts => "settings-accounts",
+            Self::GitHubWaiting => "github-waiting",
+            Self::GitHubSignedOut => "github-signed-out",
+            Self::GitHubRemoving => "github-removing",
+            Self::GitHubRemovalFailed => "github-removal-failed",
+            Self::GitHubNotDurable => "github-not-durable",
+            Self::GitHubRequesting => "github-requesting",
+            Self::GitHubAwaiting => "github-awaiting",
+            Self::GitHubConnected => "github-connected",
+            Self::GitHubNotInstalled => "github-not-installed",
+            Self::GitHubNeedsSignIn => "github-needs-sign-in",
+            Self::GitHubConnect => "github-connect",
+            Self::GitHubSignInAgain => "github-sign-in-again",
+            Self::GitHubRefresh => "github-refresh",
+            Self::GitHubSignOut => "github-sign-out",
+            Self::GitHubTimeout => "github-timeout",
+            Self::GitHubFailure => "github-failure",
+            Self::GitHubOffline => "github-offline",
+            Self::GitHubCredentials => "github-credentials",
+            Self::GitHubRefused => "github-refused",
+            Self::GitHubUnavailable => "github-unavailable",
             Self::AssistantName => "settings-assistant-name",
             Self::UserName => "settings-user-name",
             Self::UserNameHelp => "settings-user-name-help",
@@ -572,10 +671,10 @@ impl Strings {
         self.format(Text::ThreadAssistant.id(), Some(&args))
     }
 
-    pub(crate) fn issue_draft(&self, title: &str) -> String {
+    pub(crate) fn issue_title(&self, title: &str) -> String {
         let mut args = FluentArgs::new();
         args.set("title", title);
-        self.format("thread-issue-draft", Some(&args))
+        self.format("thread-issue-title", Some(&args))
     }
 
     /// The delete dialog's body, with what Kumo keeps.
@@ -697,6 +796,7 @@ const fn error_id(key: ErrorKey) -> &'static str {
         ErrorKey::VoiceStorage => "error-voice-storage",
         ErrorKey::VoiceLoad => "error-voice-load",
         ErrorKey::VoiceUnavailable => "error-voice-unavailable",
+        ErrorKey::GitHubUnavailable => "github-unavailable",
     }
 }
 
@@ -803,8 +903,8 @@ mod tests {
     #[test]
     fn issue_history_fills_the_title_without_interpreting_it() {
         assert_eq!(
-            Strings::english().issue_draft("Fix {layout} — 窓"),
-            "Issue draft: Fix {layout} — 窓"
+            Strings::english().issue_title("Fix {layout} — 窓"),
+            "Issue: Fix {layout} — 窓"
         );
     }
 

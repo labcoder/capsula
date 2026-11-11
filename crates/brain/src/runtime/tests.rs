@@ -35,6 +35,8 @@ mod claude_publish;
 mod deletes;
 #[path = "drawing_tests.rs"]
 mod drawings;
+#[path = "github_tests.rs"]
+mod github;
 #[path = "job_tests.rs"]
 mod jobs;
 #[path = "lease_tests.rs"]

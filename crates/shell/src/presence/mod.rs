@@ -987,9 +987,9 @@ pub(crate) fn open(
         )),
     );
     presenter.input = input;
-    let events_in = event_changes.clone();
+    let (threads, chat) = Threads::pair();
     let owner = cx.new(|cx| {
-        listen(states, event_changes, cx);
+        listen(states, event_changes.clone(), cx);
         Presence {
             input_windows,
             native,
@@ -1001,11 +1001,11 @@ pub(crate) fn open(
             thread_panel: None,
             settings_panel: None,
             settings: cx.new(|_| Settings::default()),
-            threads: cx.new(|_| Threads::default()),
-            chat: cx.new(|_| Threads::chat()),
+            threads: cx.new(|_| threads),
+            chat: cx.new(|_| chat),
             chat_notice: crate::chat_notice::ChatNotice::default(),
             events,
-            events_in,
+            events_in: event_changes,
             carry: carry::Carry::default(),
             link,
             session: None,

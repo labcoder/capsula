@@ -56,7 +56,64 @@ threads-close = Close
 thread-user = You
 thread-assistant = { $assistant }
 thread-no-visual = Drawing unavailable in history
-thread-issue-draft = Issue draft: { $title }
+thread-issue-title = Issue: { $title }
+
+# Saved issue cards are read-only; these states never authorize a send.
+issue-loading = Loading saved issue
+issue-unavailable = Saved issue unavailable
+issue-details-loading = Loading saved details…
+issue-details-unavailable = The saved details aren't available in this view.
+issue-read-only = This saved issue is read-only here. Filing and changes aren't available.
+issue-consent-title = File this issue on GitHub?
+issue-consent-open = File issue…
+issue-consent-consequence = Confirming asks to file this exact saved issue using the bound GitHub account and repository. A queued decision does not mean an issue was filed.
+issue-consent-cancel = Cancel
+issue-consent-confirm = File issue
+issue-duplicate = More than one issue may exist on GitHub.
+issue-repository-unbound = Not selected
+issue-account-unbound = Not bound
+issue-details =
+    Repository: { $repo }
+    Bound account: { $account }
+
+    { $body }
+issue-status-draft = Draft
+issue-status-sending = Preparing or sending
+issue-status-filed =
+    Filed #{ $number }
+    { $confirmation ->
+        [user] Confirmed by you.
+       *[remote] Confirmed by GitHub.
+    }
+    { $url }
+issue-status-failed =
+    Not filed. No issue was created by this attempt.
+    { $reason ->
+        [connection] GitHub wasn't connected.
+        [permission] The account didn't have permission.
+        [repository] The repository wasn't found.
+        [content] GitHub refused the issue's content.
+        [rate] GitHub required a wait before another attempt.
+        [network] The connection failed before sending.
+        [preflight] The check before sending couldn't complete safely.
+        [interrupted] The attempt was interrupted before sending.
+       *[rejected] GitHub refused the attempt.
+    }
+issue-status-unknown =
+    Outcome unknown. An issue may already exist on GitHub.
+    { $lookup ->
+        [none] No matching issue was visible; it may still exist.
+        [several] More than one issue matched.
+        [failed] The lookup failed or was incomplete.
+        [unplaced] Candidate #{ $number } is not confirmed as this issue.
+            { $url }
+       *[pending] No completed lookup is available.
+    }
+issue-status-discarded =
+    { $risk ->
+        [possible] Dismissed. An issue may already exist on GitHub.
+       *[none] Dismissed
+    }
 threads-offline = Reconnect to load tasks.
 threads-search-too-long = That search is too long to send.
 threads-failed = Couldn't load tasks. Close this panel and open it again to retry.
@@ -88,6 +145,26 @@ action-settings = Settings…
 settings-close = Close
 settings-general = General
 settings-accounts = Accounts
+github-waiting = GitHub connections are unavailable. Waiting for the brain.
+github-signed-out = Signed out
+github-removing = Removing saved sign-in…
+github-removal-failed = Signed out. Couldn't remove the saved sign-in. Retry removal before connecting again.
+github-not-durable = Signed out. Couldn't save the removal. Retry before restarting, or the saved sign-in may return.
+github-requesting = Connecting to GitHub…
+github-awaiting = Enter this code on GitHub
+github-connected = Connected
+github-not-installed = Install the GitHub App on your repositories, then sign out and connect again.
+github-needs-sign-in = Sign in again to use this GitHub account.
+github-connect = Connect
+github-sign-in-again = Sign in again
+github-refresh = Refresh
+github-sign-out = Sign out…
+github-timeout = GitHub sign-in timed out. Connect again when you're ready.
+github-failure = Couldn't complete the GitHub operation. Try again.
+github-offline = Couldn't reach GitHub. Check your connection and try again.
+github-credentials = Couldn't access the saved GitHub sign-in. Try again.
+github-refused = GitHub refused that operation. Check the connection and try again.
+github-unavailable = GitHub connection controls aren't available in this build.
 settings-assistant-name = Assistant's name
 settings-user-name = Your name
 settings-user-name-help = Leave blank to unset.

@@ -730,7 +730,7 @@ fn history_action(
                 }
             },
             DataToBrain::PageRequest {
-                request: 3,
+                request: 2,
                 page: PageOf::Events {
                     thread: ThreadId(3),
                     before: None
@@ -798,17 +798,17 @@ fn actual_history_retry_sends_exact_focused_requests_and_keeps_the_draft(cx: &mu
     use kumochi_protocol::message::{DataToShell, PageOf};
     history_action(
         "chat-retry-control",
-        DataToShell::PageFailed { request: 3 },
+        DataToShell::PageFailed { request: 2 },
         &[
             DataToBrain::PageRequest {
-                request: 5,
+                request: 3,
                 page: PageOf::Threads {
                     search: None,
                     after: None,
                 },
             },
             DataToBrain::PageRequest {
-                request: 7,
+                request: 4,
                 page: PageOf::Events {
                     thread: ThreadId(3),
                     before: None,
@@ -825,7 +825,7 @@ fn actual_history_older_sends_the_exact_cursor_and_keeps_the_draft(cx: &mut Test
     history_action(
         "chat-older-control",
         DataToShell::Page {
-            request: 3,
+            request: 2,
             thread: ThreadId(3),
             events: (1..=50)
                 .rev()
@@ -840,7 +840,7 @@ fn actual_history_older_sends_the_exact_cursor_and_keeps_the_draft(cx: &mut Test
             before: Some(EventId(1)),
         },
         &[DataToBrain::PageRequest {
-            request: 5,
+            request: 3,
             page: PageOf::Events {
                 thread: ThreadId(3),
                 before: Some(EventId(1)),

@@ -650,8 +650,7 @@ fn every_operation_gets_one_reply_in_order() {
             end: RunEnd::Done,
         },
         StoreOp::ReadPage {
-            epoch: 4,
-            request: 9,
+            key: crate::coordinator::PageKey::for_tests(4, 9),
             page: PageOf::Events {
                 thread: ThreadId(999),
                 before: None,
@@ -672,8 +671,7 @@ fn every_operation_gets_one_reply_in_order() {
             Input::StoreFailed { run },
             Input::RunStored { run },
             Input::PageRead {
-                epoch: 4,
-                request: 9,
+                key: crate::coordinator::PageKey::for_tests(4, 9),
                 reply: DataToShell::Page {
                     request: 9,
                     thread: ThreadId(999),
@@ -783,8 +781,7 @@ fn a_page_read_neither_stops_a_copy_nor_waits_for_it() {
     let paused = armed_and_paused(&scratch, &[Point::Snapshot]);
     reached(&paused, 0);
     assert!(paused.thread.send(StoreOp::ReadPage {
-        epoch: 1,
-        request: 3,
+        key: crate::coordinator::PageKey::for_tests(1, 3),
         page: PageOf::Threads {
             search: None,
             after: None,
@@ -795,7 +792,7 @@ fn a_page_read_neither_stops_a_copy_nor_waits_for_it() {
         .recv_timeout(PATIENCE)
         .expect("the read didn't wait");
     let Input::PageRead {
-        request: 3,
+        key: crate::coordinator::PageKey { request: 3, .. },
         reply: DataToShell::ThreadList { threads, .. },
         ..
     } = reply
@@ -916,8 +913,7 @@ fn measure_page_reads() {
             after,
         };
         assert!(thread.send(StoreOp::ReadPage {
-            epoch: 1,
-            request: 0,
+            key: crate::coordinator::PageKey::for_tests(1, 0),
             page: common(None),
         }));
         let Some(Input::PageRead {
@@ -953,8 +949,7 @@ fn measure_page_reads() {
                 let request = u32::try_from(at).expect("small");
                 let started = Instant::now();
                 assert!(thread.send(StoreOp::ReadPage {
-                    epoch: 1,
-                    request,
+                    key: crate::coordinator::PageKey::for_tests(1, request),
                     page: page.clone(),
                 }));
                 begin(&thread, at);
@@ -962,7 +957,10 @@ fn measure_page_reads() {
                 while read.is_none() || stored.is_none() {
                     match replies.blocking_recv().expect("the store answers") {
                         Input::PageRead {
-                            request: answered,
+                            key:
+                                crate::coordinator::PageKey {
+                                    request: answered, ..
+                                },
                             reply,
                             ..
                         } if answered == request => {

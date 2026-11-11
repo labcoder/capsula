@@ -25,6 +25,7 @@ impl Drop for ReadSlot<'_> {
 /// The side connections, shared by the store's thread, the page reader and the helper.
 #[derive(Debug)]
 pub struct Side {
+    pub(super) cards: Mutex<Vec<std::sync::Weak<crate::coordinator::Cards>>>,
     closed: Arc<AtomicBool>,
     path: PathBuf,
     reader: Slot,
@@ -70,6 +71,7 @@ fn try_lock<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
 impl Side {
     pub(super) fn new(path: PathBuf) -> Self {
         Self {
+            cards: Mutex::new(Vec::new()),
             closed: Arc::new(AtomicBool::new(false)),
             path,
             reader: Mutex::new(None),
@@ -144,6 +146,7 @@ impl Side {
     ///
     /// # Errors
     /// Fails when the store is unavailable, its file can't be opened, or `read` fails.
+    #[cfg(test)]
     pub(crate) fn read<T>(
         &self,
         read: impl FnOnce(&Connection) -> Result<T, StoreError>,

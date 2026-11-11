@@ -3837,7 +3837,7 @@ dependencies = [
 
 [[package]]
 name = "kumochi-brain"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "base64 0.22.1",
  "fluent-bundle",
@@ -3877,7 +3877,7 @@ dependencies = [
 
 [[package]]
 name = "kumochi-protocol"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "kumochi-scene",
  "postcard",
@@ -3888,7 +3888,7 @@ dependencies = [
 
 [[package]]
 name = "kumochi-scene"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "jsonschema",
  "postcard",
@@ -3901,7 +3901,7 @@ dependencies = [
 
 [[package]]
 name = "kumochi-shell"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "async-channel",
  "fluent-bundle",
@@ -9405,7 +9405,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "keyring",

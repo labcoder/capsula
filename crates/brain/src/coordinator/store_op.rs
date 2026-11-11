@@ -10,7 +10,7 @@ use std::fmt;
 use super::Input;
 use crate::store::{Generation, RunEnd, SceneTarget, TitleSource};
 
-/// A store operation: an autocommit read, or a write in one transaction.
+/// A store operation: a bounded side read, or a write in one transaction.
 #[derive(Clone, Debug, PartialEq)]
 pub enum StoreOp {
     /// A v1 drawing read or durable transition; its arguments never enter logs.
@@ -20,14 +20,17 @@ pub enum StoreOp {
         /// Typed data with content-free diagnostics.
         write: crate::drawing::Write,
     },
-    /// An autocommit read that neither stops nor postpones a purge.
+    /// A bounded read that neither stops nor postpones a purge.
     ReadPage {
-        /// The connection that requested the page.
-        epoch: u64,
-        /// The shell's request counter.
-        request: u32,
+        /// The admitted read.
+        key: super::PageKey,
         /// The page to read.
         page: PageOf,
+    },
+    /// Read authoritative cards on the page reader, in one snapshot.
+    ReadCards {
+        /// The original admission and requested source identities.
+        cards: std::sync::Arc<super::Cards>,
     },
     /// Build a round's context on the page reader, in one read transaction.
     BuildContext(super::BuildContext),
@@ -168,6 +171,7 @@ impl StoreOp {
             Self::RoundItems(round) => Some(round.run),
             Self::Drawing { .. }
             | Self::ReadPage { .. }
+            | Self::ReadCards { .. }
             | Self::BuildContext(_)
             | Self::ReadJob(_)
             | Self::ReadCall(_)
@@ -190,14 +194,19 @@ impl StoreOp {
                 build: call.build,
                 result: Err(crate::recall::Error::Read),
             }),
+            Self::ReadCards { cards } => Input::CardsRead {
+                cards: std::sync::Arc::clone(cards),
+                reply: Err(()),
+            },
             Self::Drawing { serial, .. } => Input::DrawingWritten {
                 serial: *serial,
                 reply: Err(()),
             },
-            Self::ReadPage { epoch, request, .. } => Input::PageRead {
-                epoch: *epoch,
-                request: *request,
-                reply: DataToShell::PageFailed { request: *request },
+            Self::ReadPage { key, .. } => Input::PageRead {
+                key: key.clone(),
+                reply: DataToShell::PageFailed {
+                    request: key.request,
+                },
             },
             Self::BuildContext(build) => Input::ContextBuilt(super::ContextBuilt {
                 key: build.key,

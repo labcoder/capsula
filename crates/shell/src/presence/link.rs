@@ -1,5 +1,8 @@
 //! Applying session-fenced link events to browsed and focused histories and runs.
 
+#[cfg(test)]
+mod github_tests;
+
 use super::{Context, OpenError, Presence, diagnostics};
 use crate::chat_notice::Source;
 use crate::drawing::{Broken, Chunk, Effect};
@@ -15,6 +18,10 @@ use std::time::Instant;
 impl Presence {
     /// Applies what the link reported, in order, then follows the runs once. Each event leaves
     /// the batch only to be applied; a scene batch's buffer still drops off this thread.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one exhaustive session event dispatch keeps routing explicit"
+    )]
     pub(super) fn link_events(
         &mut self,
         mut events: Batch,
@@ -27,6 +34,10 @@ impl Presence {
                     self.link_state(state, cx);
                 }
                 LinkEvent::Connected(session) => {
+                    self.settings.update(cx, |state, cx| {
+                        state.github.disconnected();
+                        cx.notify();
+                    });
                     self.session = Some(session);
                     self.link_state(LinkState::Connected, cx);
                 }
@@ -97,6 +108,26 @@ impl Presence {
                 LinkEvent::Connections { generation, view } => {
                     self.connections_changed(generation, view, cx);
                 }
+                LinkEvent::ActionState {
+                    generation,
+                    draft,
+                    version,
+                    state,
+                    approval,
+                } => {
+                    if self
+                        .session
+                        .as_ref()
+                        .is_some_and(|session| session.generation() == generation)
+                    {
+                        self.threads.update(cx, |model, cx| {
+                            model.action_state(draft, version, state, approval);
+                            cx.notify();
+                        });
+                        self.chat.update(cx, |_, cx| cx.notify());
+                        self.request_pages(cx);
+                    }
+                }
                 LinkEvent::Focus {
                     generation,
                     run,
@@ -104,6 +135,25 @@ impl Presence {
                 } => self.focus(generation, run, thread, cx),
                 LinkEvent::Account { generation, view } => {
                     self.account_changed(generation, view, cx);
+                }
+                LinkEvent::GitHub { generation, view } => {
+                    let current = self.session.as_ref().map(crate::link::Session::generation);
+                    self.settings.update(cx, |state, cx| {
+                        if state
+                            .github
+                            .receive(current, generation, view, Instant::now())
+                        {
+                            cx.notify();
+                        }
+                    });
+                }
+                LinkEvent::GitHubError { generation, error } => {
+                    let current = self.session.as_ref().map(crate::link::Session::generation);
+                    self.settings.update(cx, |state, cx| {
+                        if state.github.receive_error(current, generation, error) {
+                            cx.notify();
+                        }
+                    });
                 }
                 // shortcut: C7a-2b's Accounts paste consumer handles these replies.
                 LinkEvent::KeyStage { generation, reply } => drop((generation, reply)),
@@ -271,16 +321,23 @@ impl Presence {
             let credit = match message {
                 message @ (DataToShell::ThreadList { request, .. }
                 | DataToShell::Page { request, .. }
-                | DataToShell::PageFailed { request }) => {
-                    let model = if self.chat.read(cx).owns_request(request) {
-                        &self.chat
-                    } else {
-                        &self.threads
-                    };
+                | DataToShell::PageFailed { request }
+                | DataToShell::IssueCardRead { request, .. }
+                | DataToShell::IssueCardsDone { request, .. }) => {
+                    let chat = self.chat.read(cx).owns_request(request);
+                    let cards = matches!(
+                        &message,
+                        DataToShell::IssueCardRead { .. } | DataToShell::IssueCardsDone { .. }
+                    );
+                    let model = if chat { &self.chat } else { &self.threads };
                     let credit = model.update(cx, |state, cx| {
                         cx.notify();
                         state.receive(message, bytes)
                     });
+                    if cards {
+                        let peer = if chat { &self.threads } else { &self.chat };
+                        peer.update(cx, |_, cx| cx.notify());
+                    }
                     self.request_pages(cx);
                     credit
                 }
@@ -450,6 +507,7 @@ impl Presence {
             self.settings.update(cx, |state, cx| {
                 state.accounts.disconnected();
                 state.claude.disconnected();
+                state.github.disconnected();
                 state.disconnected();
                 cx.notify();
             });

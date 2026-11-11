@@ -68,6 +68,9 @@ pub enum Stage {
         number: NonZeroU64,
         /// The user confirmed an unplaced candidate.
         confirmed: bool,
+        /// Retained duplicate-risk evidence; old records default to no retained warning.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        maybe_duplicate: bool,
     },
     /// No issue was created; a retry needs fresh consent.
     Failed {
@@ -138,7 +141,11 @@ impl Action {
         match &self.stage {
             Stage::Draft => ActionState::Draft,
             Stage::Preflight { .. } | Stage::Posting { .. } => ActionState::Sending,
-            Stage::Filed { number, confirmed } => ActionState::Filed {
+            Stage::Filed {
+                number,
+                confirmed,
+                maybe_duplicate,
+            } => ActionState::Filed {
                 number: number.get(),
                 url: self
                     .repo
@@ -146,6 +153,7 @@ impl Action {
                     .and_then(|repo| IssueUrl::for_issue(repo, number.get()).ok())
                     .expect("the schema gives a filed action its repository"),
                 confirmed_by_user: *confirmed,
+                maybe_duplicate: *maybe_duplicate || self.uncertain >= 2,
             },
             Stage::Failed { reason } => ActionState::Failed(*reason),
             Stage::Unknown { lookup, .. } => ActionState::Unknown {
@@ -214,6 +222,7 @@ impl Action {
             ) => Stage::Filed {
                 number: NonZeroU64::new(*number).ok_or(IssueRefused::NotAllowedNow)?,
                 confirmed: true,
+                maybe_duplicate: self.uncertain >= 2,
             },
             _ => return Err(IssueRefused::NotAllowedNow),
         };
@@ -296,6 +305,7 @@ impl Action {
                 self.stage = Stage::Filed {
                     number,
                     confirmed: false,
+                    maybe_duplicate: self.uncertain >= 1,
                 };
             }
             (None, CreateOutcome::Definite { reason, .. }) => {
@@ -332,6 +342,7 @@ impl Action {
                 self.stage = Stage::Filed {
                     number,
                     confirmed: false,
+                    maybe_duplicate: self.uncertain >= 2,
                 };
                 return Ok(());
             }
@@ -444,10 +455,15 @@ impl fmt::Debug for Stage {
                 .debug_struct("Posting")
                 .field("unresolved", &unresolved.is_some())
                 .finish_non_exhaustive(),
-            Self::Filed { number, confirmed } => f
+            Self::Filed {
+                number,
+                confirmed,
+                maybe_duplicate,
+            } => f
                 .debug_struct("Filed")
                 .field("number", number)
                 .field("confirmed", confirmed)
+                .field("maybe_duplicate", maybe_duplicate)
                 .finish(),
             Self::Failed { reason } => f.debug_tuple("Failed").field(reason).finish(),
             // An unplaced candidate's URL names the user's repository.

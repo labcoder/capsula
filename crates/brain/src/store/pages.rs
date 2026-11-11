@@ -9,11 +9,34 @@ use super::drawing::MAX_BODY_BYTES;
 use super::threads::{choice_of, kind_of};
 use super::{StoreError, row_id};
 
+fn issue_draft(body: Option<&[u8]>) -> Result<kumochi_protocol::message::DraftId, rusqlite::Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Metadata {
+        draft: u64,
+    }
+    let body = body
+        .filter(|body| body.len() <= 32)
+        .ok_or(rusqlite::Error::InvalidQuery)?;
+    let metadata: Metadata =
+        serde_json::from_slice(body).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    if metadata.draft == 0 || i64::try_from(metadata.draft).is_err() {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(kumochi_protocol::message::DraftId(metadata.draft))
+}
+
 #[cfg(test)]
 mod tests;
 
 /// The page queries, on the store's own connection or on the page reader's.
 pub(crate) struct Pages<'a>(pub(crate) &'a Connection);
+
+impl super::context::Snapshot<'_> {
+    pub(crate) fn page(&self, request: u32, page: PageOf) -> Result<DataToShell, StoreError> {
+        Pages(&self.0).read_page(request, page)
+    }
+}
 
 #[cfg(test)]
 impl super::Store {
@@ -289,8 +312,9 @@ impl Pages<'_> {
                              AND b.id > 0 AND b.id < e.id AND b.thread = e.thread
                              AND b.kind = 'scene_begin' AND b.body IS NOT NULL)
                      END END END
-                 END
-             FROM events e
+                 END,
+                 CASE WHEN e.kind IN ('draft', 'action') THEN substr(CAST(e.body AS BLOB), 1, 33) END
+                 FROM events e
              JOIN threads t ON t.id = e.thread AND t.state = 'live'
              WHERE e.thread = ?1 AND (?2 IS NULL OR e.id < ?2)
              AND e.kind NOT IN ('scene_begin', 'scene_cleared', 'scene_cut', 'revealed',
@@ -329,6 +353,9 @@ impl Pages<'_> {
                             },
                         ),
                         "task_deleted" => PageEventKind::TaskDeleted,
+                        "draft" | "action" => PageEventKind::Issue {
+                            draft: issue_draft(row.get_ref(5)?.as_bytes_or_null()?)?,
+                        },
                         _ => return Err(rusqlite::Error::InvalidQuery),
                     };
                     Ok(PageEvent {

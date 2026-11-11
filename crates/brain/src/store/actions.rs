@@ -26,30 +26,7 @@ impl Store {
         account: Option<&GitHubUser>,
     ) -> Result<Action, StoreError> {
         let thread = sql_id(thread.0, StoreError::NoThread)?;
-        self.action_tx(|tx| {
-            let approval = mint(tx)?;
-            let inserted = tx.execute(
-                "INSERT INTO actions (thread, version, stage, repo, account_id, account_login, title,
-                 body, approval, created_ms)
-                 SELECT id, 1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9 FROM threads
-                 WHERE id = ?1 AND state = 'live'",
-                params![
-                    thread,
-                    stage_json(&Stage::Draft)?,
-                    repo.map(RepoName::as_str),
-                    account.map(|user| user.id.to_string()),
-                    account.map(|user| user.login.as_str()),
-                    title.as_str(),
-                    body.as_str(),
-                    approval,
-                    now_ms()
-                ],
-            )?;
-            if inserted == 0 {
-                return Err(StoreError::NoThread);
-            }
-            load(tx, tx.last_insert_rowid())?.ok_or(StoreError::Issue)
-        })
+        self.action_tx(|tx| insert_draft(tx, thread, title, body, repo, account))
     }
 
     /// The action, while its thread is live.
@@ -234,6 +211,53 @@ fn quiet(error: impl Into<StoreError>) -> StoreError {
     }
 }
 
+fn insert_draft(
+    tx: &Connection,
+    thread: i64,
+    title: &IssueTitle,
+    body: &IssueBody,
+    repo: Option<&RepoName>,
+    account: Option<&GitHubUser>,
+) -> Result<Action, StoreError> {
+    let approval = mint(tx)?;
+    let inserted = tx.execute(
+        "INSERT INTO actions (thread, version, stage, repo, account_id, account_login, title,
+         body, approval, created_ms)
+         SELECT id, 1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9 FROM threads
+         WHERE id = ?1 AND state = 'live'",
+        params![
+            thread,
+            stage_json(&Stage::Draft)?,
+            repo.map(RepoName::as_str),
+            account.map(|user| user.id.to_string()),
+            account.map(|user| user.login.as_str()),
+            title.as_str(),
+            body.as_str(),
+            approval,
+            now_ms()
+        ],
+    )?;
+    if inserted == 0 {
+        return Err(StoreError::NoThread);
+    }
+    let id = tx.last_insert_rowid();
+    event(tx, id, "draft")?;
+    load(tx, id)?.ok_or(StoreError::Issue)
+}
+
+fn event(tx: &Connection, id: i64, kind: &str) -> Result<(), StoreError> {
+    let inserted = tx.execute(
+        "INSERT INTO events(thread, run, kind, text, body, created_ms)
+         SELECT thread, NULL, ?2, title, json_object('draft', id), ?3 FROM actions WHERE id = ?1",
+        params![id, kind, now_ms()],
+    )?;
+    if inserted == 1 {
+        Ok(())
+    } else {
+        Err(StoreError::Issue)
+    }
+}
+
 /// Applies a transition to the live row `id` and writes only a change. A refusal that used up the
 /// current revision is written with a fresh one; `None` from `apply` fails the op.
 fn change_row(
@@ -291,7 +315,7 @@ fn commit_stage(tx: &Connection, id: i64, stage: &Stage, uncertain: u32) -> Resu
         params![id, stage_json(stage)?, uncertain, approval],
     )?;
     if moved == 1 {
-        Ok(())
+        event(tx, id, "action")
     } else {
         Err(StoreError::Issue)
     }
@@ -314,7 +338,7 @@ fn stage_json(stage: &Stage) -> Result<String, StoreError> {
 }
 
 /// The action while its thread is live.
-fn load(conn: &Connection, id: i64) -> Result<Option<Action>, StoreError> {
+pub(super) fn load(conn: &Connection, id: i64) -> Result<Option<Action>, StoreError> {
     conn.query_row(
         "SELECT a.id, a.thread, a.version, a.stage, a.repo, a.account_id, a.account_login, a.title,
          a.body, a.approval, a.consumed, a.uncertain

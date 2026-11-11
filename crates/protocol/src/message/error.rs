@@ -96,6 +96,8 @@ pub enum ErrorKey {
     VoiceLoad,
     /// A voice install, remove or cancel can't be taken now.
     VoiceUnavailable,
+    /// GitHub connection controls are unavailable in this build.
+    GitHubUnavailable,
 }
 
 macro_rules! catalog {
@@ -158,6 +160,8 @@ impl ErrorKey {
         VoiceStorage,
         VoiceLoad,
         VoiceUnavailable,
+
+        GitHubUnavailable,
     }
 }
 

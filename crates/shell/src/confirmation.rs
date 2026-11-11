@@ -9,7 +9,7 @@ use std::{
 use gpui_kit::component::{
     WindowExt as _,
     button::{Button, ButtonVariants as _},
-    dialog::DialogFooter,
+    dialog::{AlertDialog, DialogFooter},
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{App, FocusHandle, Global, SharedString, Window, WindowId};
@@ -19,8 +19,28 @@ struct Confirmations(HashMap<WindowId, Weak<()>>);
 
 impl Global for Confirmations {}
 
+pub(crate) struct Handle {
+    cancel: FocusHandle,
+    modal: FocusHandle,
+    lifetime: Weak<()>,
+}
+
+impl Handle {
+    pub(crate) fn live(&self) -> bool {
+        self.lifetime.strong_count() > 0
+    }
+
+    pub(crate) fn dismiss(&self, window: &mut Window, cx: &mut App) {
+        if self.live()
+            && (self.cancel.is_focused(window) || self.modal.contains_focused(window, cx))
+            && window.has_active_dialog(cx)
+        {
+            window.close_dialog(cx);
+        }
+    }
+}
+
 /// Opens an alert with Cancel focused; Enter activates only a focused button.
-/// The caller can dismiss a stale confirmation with `WindowExt::close_dialog`.
 /// Returns no handle while another dialog is active or this confirmation is exiting.
 pub(crate) fn open(
     window: &mut Window,
@@ -31,6 +51,31 @@ pub(crate) fn open(
     confirm: SharedString,
     on_confirm: impl FnOnce(&mut Window, &mut App) + 'static,
 ) -> Option<FocusHandle> {
+    open_content(
+        window,
+        cx,
+        title,
+        move |alert, _, _| alert.description(body.clone()),
+        cancel,
+        confirm,
+        move |confirmed, window, cx| {
+            if confirmed {
+                on_confirm(window, cx);
+            }
+        },
+    )
+    .map(|handle| handle.cancel)
+}
+
+pub(crate) fn open_content(
+    window: &mut Window,
+    cx: &mut App,
+    title: SharedString,
+    content: impl Fn(AlertDialog, &mut Window, &mut App) -> AlertDialog + 'static,
+    cancel: SharedString,
+    confirm: SharedString,
+    on_decision: impl FnOnce(bool, &mut Window, &mut App) + 'static,
+) -> Option<Handle> {
     if window.has_active_dialog(cx) {
         return None;
     }
@@ -41,51 +86,47 @@ pub(crate) fn open(
         return None;
     }
     let lifetime = Rc::new(());
-    guards.0.insert(id, Rc::downgrade(&lifetime));
+    let weak = Rc::downgrade(&lifetime);
+    guards.0.insert(id, Weak::clone(&weak));
     let cancel_focus = cx.focus_handle().tab_stop(true);
     let confirm_focus = cx.focus_handle().tab_stop(true);
     let focus = cancel_focus.clone();
-    let pending = Rc::new(RefCell::new(Some(on_confirm)));
-    let confirmed = Rc::clone(&pending);
-    let confirm_action = Rc::new(move |window: &mut Window, cx: &mut App| {
-        let callback = confirmed.borrow_mut().take();
+    let pending = Rc::new(RefCell::new(Some(on_decision)));
+    let finish = Rc::new(move |confirmed: bool, window: &mut Window, cx: &mut App| {
+        let callback = pending.borrow_mut().take();
         if let Some(callback) = callback {
             window.close_dialog(cx);
-            callback(window, cx);
+            callback(confirmed, window, cx);
         }
     });
-    window.open_alert_dialog(cx, move |alert, _, _| {
+    window.open_alert_dialog(cx, move |alert, window, cx| {
         let _lifetime = Rc::clone(&lifetime);
-        let cancelled = Rc::clone(&pending);
-        let confirmed = Rc::clone(&confirm_action);
-        let dismissed = Rc::clone(&pending);
-        let enter_pending = Rc::clone(&pending);
+        let enter = Rc::clone(&finish);
+        let dismissed = Rc::clone(&finish);
+        let cancelled = Rc::clone(&finish);
+        let confirmed = Rc::clone(&finish);
         let enter_focus = cancel_focus.clone();
         let enter_confirm_focus = confirm_focus.clone();
-        let enter_confirmed = Rc::clone(&confirm_action);
-        alert
-            .title(title.clone())
-            .description(body.clone())
+        content(alert.title(title.clone()), window, cx)
             .on_ok(move |_, window, cx| {
-                if enter_focus.is_focused(window) && enter_pending.borrow_mut().take().is_some() {
-                    window.close_dialog(cx);
+                if enter_focus.is_focused(window) {
+                    enter(false, window, cx);
                 } else if enter_confirm_focus.is_focused(window) {
-                    enter_confirmed(window, cx);
+                    enter(true, window, cx);
                 }
                 false
             })
-            .on_cancel(move |_, _, _| dismissed.borrow_mut().take().is_some())
+            .on_cancel(move |_, window, cx| {
+                dismissed(false, window, cx);
+                false
+            })
             .footer(
                 DialogFooter::new()
                     .child(
                         Button::new("confirmation-cancel")
                             .label(cancel.clone())
                             .track_focus(&cancel_focus)
-                            .on_click(move |_, window, cx| {
-                                if cancelled.borrow_mut().take().is_some() {
-                                    window.close_dialog(cx);
-                                }
-                            })
+                            .on_click(move |_, window, cx| cancelled(false, window, cx))
                             .map(|button| {
                                 #[cfg(test)]
                                 {
@@ -104,9 +145,7 @@ pub(crate) fn open(
                             .label(confirm.clone())
                             .danger()
                             .track_focus(&confirm_focus)
-                            .on_click(move |_, window, cx| {
-                                confirmed(window, cx);
-                            })
+                            .on_click(move |_, window, cx| confirmed(true, window, cx))
                             .map(|button| {
                                 #[cfg(test)]
                                 {
@@ -122,8 +161,15 @@ pub(crate) fn open(
                     ),
             )
     });
+    let modal = window
+        .focused(cx)
+        .expect("opening a dialog focuses its shell");
     focus.focus(window, cx);
-    Some(focus)
+    Some(Handle {
+        cancel: focus,
+        modal,
+        lifetime: weak,
+    })
 }
 
 #[cfg(test)]

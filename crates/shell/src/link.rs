@@ -20,7 +20,7 @@ use kumochi_protocol::constants::BRAIN_EXE;
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
     AccountView, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain, DataToShell,
-    Deleted, Hello, Incarnation, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase, RunId,
+    Deleted, GitHubView, Hello, Incarnation, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase, RunId,
     SceneDescriptor, SceneDescriptorV1, SettingsView, ThreadId, UserError,
 };
 
@@ -83,6 +83,21 @@ pub(crate) enum LinkEvent {
     Connections {
         generation: u64,
         view: ConnectionsView,
+    },
+    GitHub {
+        generation: u64,
+        view: GitHubView,
+    },
+    GitHubError {
+        generation: u64,
+        error: UserError,
+    },
+    ActionState {
+        generation: u64,
+        draft: kumochi_protocol::message::DraftId,
+        version: kumochi_protocol::message::StateVersion,
+        state: kumochi_protocol::message::ActionState,
+        approval: Option<kumochi_protocol::message::ApprovalRev>,
     },
     /// A run's phase changed, from the control pipe.
     RunState {
@@ -855,6 +870,7 @@ fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
             | ControlToShell::CaptureFailed { .. }
             | ControlToShell::ThreadModelSet { .. }
             | ControlToShell::GitHub(_)
+            | ControlToShell::GitHubError(_)
             | ControlToShell::ActionState { .. }
             | ControlToShell::IssueRefused { .. }
             | ControlToShell::Connections(_)
@@ -1017,6 +1033,22 @@ fn watch(
                     return;
                 }
             }
+            Ok(Some(ControlToShell::GitHub(view))) => {
+                if events
+                    .send_blocking(LinkEvent::GitHub { generation, view })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Ok(Some(ControlToShell::GitHubError(error))) => {
+                if events
+                    .send_blocking(LinkEvent::GitHubError { generation, error })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             Ok(Some(
                 reply @ (ControlToShell::AnthropicKeyStage { .. }
                 | ControlToShell::AnthropicKeyStageDone { .. }),
@@ -1036,6 +1068,25 @@ fn watch(
                     return;
                 }
             }
+            Ok(Some(ControlToShell::ActionState {
+                draft,
+                version,
+                state,
+                approval,
+            })) => {
+                if events
+                    .send_blocking(LinkEvent::ActionState {
+                        generation,
+                        draft,
+                        version,
+                        state,
+                        approval,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             // shortcut: B3a releases the exclusion lease on Capture*; nothing holds one yet.
             // Slice 7's PR 6 stops playback on SpeechRevoked; nothing plays yet. shortcut: nothing
             // shows the voice parts yet; the Settings voice section will read Voice.
@@ -1043,8 +1094,6 @@ fn watch(
             Ok(Some(
                 ControlToShell::CaptureDone { .. }
                 | ControlToShell::CaptureFailed { .. }
-                | ControlToShell::GitHub(_)
-                | ControlToShell::ActionState { .. }
                 | ControlToShell::IssueRefused { .. }
                 | ControlToShell::SpeechRevoked { .. }
                 | ControlToShell::ThreadModelSet { .. }
@@ -1168,7 +1217,7 @@ fn write_data(data: &PipeClient, queue: &Receiver<DataOut>, credit: &Credit) {
 
 #[cfg(all(test, windows))]
 #[path = "link_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 #[path = "link_delete_tests.rs"]
