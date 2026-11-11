@@ -154,6 +154,19 @@ async fn late_valid_owner(cut: Cut) {
         } else {
             caller.stopped().await;
             caller.owned(1);
+            let unavailable = observed.try_recv().expect("owner has finished reporting");
+            assert_eq!(
+                unavailable,
+                LoadReport {
+                    ask: 1,
+                    event: LoadEvent::Unavailable
+                }
+            );
+            assert_eq!(installer.reported(SpeechInput, unavailable), []);
+            assert_eq!(
+                installer.view().speech_input,
+                kumochi_protocol::message::PartState::Unavailable
+            );
             owner.unload(1);
             caller.owned(1);
             assert_eq!(installer.install(SpeechInput), []);
@@ -277,6 +290,19 @@ async fn invalid_load_terminals_cause_real_retirement_and_one_delete_only_after_
                 );
                 assert_eq!(installer.reported(SpeechInput, lost), []);
             } else {
+                let unavailable = report(&mut observed).await;
+                assert_eq!(
+                    unavailable,
+                    LoadReport {
+                        ask: 1,
+                        event: LoadEvent::Unavailable
+                    }
+                );
+                assert_eq!(installer.reported(SpeechInput, unavailable), []);
+                assert_eq!(
+                    installer.view().speech_input,
+                    kumochi_protocol::message::PartState::Unavailable
+                );
                 held(&mut observed).await;
                 assert_eq!(installer.install(SpeechInput), []);
                 assert_eq!(rig.spawns.load(Ordering::Relaxed), 0);
