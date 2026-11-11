@@ -133,6 +133,12 @@ impl Brain {
     /// Applies a control frame with no shell to tell, as `serve` does once the core has gone.
     pub(super) fn control_offline(&mut self, message: ControlToBrain, len: usize, tap: &mut Tap) {
         tap.record(Pipe::Control, Direction::ToBrain, &message, len);
+        if let ControlToBrain::Issue(op) = message {
+            if let Some(effects) = self.issue_op(op, false) {
+                self.apply(effects, None).expect("offline issue effects cannot fill a shell queue");
+            }
+            return;
+        }
         if let ControlToBrain::AccountOp(op) = message {
             let applied = self.account_input(AccountInput::Op(op), None);
             debug_assert!(applied.is_ok(), "applying without a shell can't fail");
@@ -171,6 +177,11 @@ impl Brain {
             .record(Pipe::Control, Direction::ToBrain, &message, len);
         if message == ControlToBrain::Pong {
             *ping_sent = None;
+        }
+        if let ControlToBrain::Issue(op) = message {
+            let effects = self.issue_op(op, true).ok_or(Ended::Lost)?;
+            self.apply(effects, Some(link))?;
+            return Ok(None);
         }
         if let ControlToBrain::GitHub(op) = message {
             self.github_op(op, Some(link)).map_err(|Full| Ended::Lost)?;

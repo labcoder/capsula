@@ -3,7 +3,7 @@
 use std::{fmt, sync::Arc};
 
 use kumochi_protocol::{Secret, message::{
-    ControlToShell, Decision, DraftId, FailReason, IssueOp, IssueRefused,
+    ControlToShell, Decision, FailReason, IssueOp, IssueRefused,
 }};
 use tokio::{task::JoinHandle, time::Instant};
 
@@ -113,9 +113,9 @@ impl Filing {
 }
 
 impl Brain {
-    pub(super) fn issue_op(&mut self, op: IssueOp) -> Option<Vec<Effect>> {
+    pub(super) fn issue_op(&mut self, op: IssueOp, online: bool) -> Option<Vec<Effect>> {
         if self.filing.replies.len() >= super::CONTROL_QUEUE { return None; }
-        let available = self.filing.job.is_none();
+        let available = online && self.filing.job.is_none();
         let (write, start, forced) = match op {
             IssueOp::Consent { draft, hash, approval, decision } => {
                 let start = available && decision == Decision::File;
@@ -160,7 +160,7 @@ impl Brain {
             return Vec::new();
         }
         let Ok(answer) = reply else {
-            if matches!(after, AfterWrite::Result) {
+            if matches!(after, AfterWrite::Result | AfterWrite::Posting) {
                 let effect = self.issue_interrupted(&mut job);
                 self.filing.job = Some(job);
                 return vec![effect];
@@ -188,7 +188,7 @@ impl Brain {
         if stopped(&job) {
             effects.push(self.issue_interrupted(&mut job));
         } else if matches!(after, AfterWrite::Posting) {
-            effects.push(self.issue_send(&mut job));
+            effects.extend(self.issue_send(&mut job));
         } else if let Some(token) = self.account.github.issue_token(job.stamp, job.action.as_ref().expect("the acknowledged action")) {
             job.token = Some(token);
             let factory = Arc::clone(&self.account.net.http);
@@ -214,8 +214,16 @@ impl Brain {
             self.filing.job = Some(job);
             return Vec::new();
         }
-        let mut effects = Vec::new();
-        if stopped(&job) {
+        let ended = stopped(&job);
+        let unauthorized = match &event.outcome {
+            Outcome::Preflight(Err(failure)) | Outcome::Checked(Err(failure)) => failure.unauthorized,
+            Outcome::Posted(CreateOutcome::Definite { status: Some(401), .. }) => true,
+            _ => false,
+        };
+        let mut effects = if unauthorized {
+            self.account.issue_unauthorized(job.stamp).into_iter().map(Effect::Control).collect()
+        } else { Vec::new() };
+        if ended {
             effects.push(self.issue_interrupted(&mut job));
         } else {
             match event.outcome {
@@ -237,9 +245,6 @@ impl Brain {
                     effects.push(self.filing.write(&mut job, AfterWrite::Posting, write));
                 }
                 Outcome::Preflight(Err(failure)) | Outcome::Checked(Err(failure)) => {
-                    if failure.unauthorized {
-                        effects.extend(self.account.issue_unauthorized(job.stamp).into_iter().map(Effect::Control));
-                    }
                     effects.push(self.issue_unsent(&mut job, failure.reason));
                 }
                 Outcome::Checked(Ok(lookup)) => {
@@ -248,14 +253,12 @@ impl Brain {
                     effects.push(self.filing.write(&mut job, AfterWrite::Result, write));
                 }
                 Outcome::Posted(outcome) => {
-                    if matches!(outcome, CreateOutcome::Definite { status: Some(401), .. }) {
-                        effects.extend(self.account.issue_unauthorized(job.stamp).into_iter().map(Effect::Control));
-                    }
                     let action = job.action.as_ref().expect("a create has an action");
                     let write = Write::Posted { draft: action.draft, at: action.version, outcome };
                     effects.push(self.filing.write(&mut job, AfterWrite::Result, write));
                 }
-                Outcome::Built(Err(_)) | Outcome::Stopped => effects.push(self.issue_unsent(&mut job, FailReason::PreflightFailed)),
+                Outcome::Built(Err(_)) => effects.push(self.issue_unsent(&mut job, FailReason::PreflightFailed)),
+                Outcome::Stopped => effects.push(self.issue_interrupted(&mut job)),
                 Outcome::Deadline => unreachable!("the deadline returned above"),
             }
         }
@@ -263,18 +266,18 @@ impl Brain {
         effects
     }
 
-    fn issue_send(&mut self, job: &mut Job) -> Effect {
+    fn issue_send(&mut self, job: &mut Job) -> Option<Effect> {
         let prepared = job.prepared.take().expect("Posting follows complete preflight evidence");
         let action = job.action.as_ref().expect("Posting has an action");
         let Some((token, until, expiry)) = self.account.github.issue_permit(job.stamp, action, &prepared.user, &prepared.repos) else {
-            return self.issue_unsent(job, FailReason::NotConnected);
+            return Some(self.issue_unsent(job, FailReason::NotConnected));
         };
         let http = prepared.http.with_post_access(until, expiry, Arc::clone(&self.account.net.clock));
         let action = action.clone();
         job.phase = Phase::Network(tokio::spawn(async move {
             Outcome::Posted(create_issue(&http, &token, action.repo.as_ref().expect("Posting is bound"), IssueContent { title: &action.title, body: &action.body }).await)
         }));
-        Effect::Control(ControlToShell::ThreadsChanged)
+        None
     }
 
     fn issue_unsent(&mut self, job: &mut Job, reason: FailReason) -> Effect {
@@ -308,6 +311,17 @@ impl Brain {
             effects.push(Effect::Control(ControlToShell::IssueRefused { draft: action.draft, reason }));
         }
         effects
+    }
+
+    pub(super) async fn finish_filing(&mut self) {
+        self.filing.cancel();
+        while self.filing.pending() {
+            let effects = tokio::select! {
+                Some(input) = self.inputs.recv() => self.handle(input).unwrap_or_default(),
+                event = self.filing.next() => self.issue_event(event),
+            };
+            self.apply(effects, None).expect("offline issue cleanup cannot fill a shell queue");
+        }
     }
 }
 

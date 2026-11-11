@@ -196,6 +196,7 @@ pub(crate) struct Brain {
     config_write: Option<settings::Write>,
     /// The account system; its credential work runs on its own thread.
     account: Accounts,
+    filing: issues::Filing,
     /// Claude Code's connection; its calls run on its own lane.
     claude: claude::Claude,
     /// Holds the next settings write until it sends or drops.
@@ -315,6 +316,7 @@ impl Brain {
             settings_ops: VecDeque::new(),
             config_write: None,
             account,
+            filing: issues::Filing::default(),
             claude: claude::Claude::default(),
             #[cfg(test)]
             config_gate: None,
@@ -406,6 +408,7 @@ impl Brain {
     /// the next start, as after a crash.
     pub(crate) async fn quit(mut self, deadline: Instant) -> Quit {
         self.offline(Input::ShellLost);
+        self.finish_filing().await;
         self.voice_quit();
         self.pump_settings_offline();
         #[cfg(test)]
@@ -518,6 +521,11 @@ impl Brain {
         loop {
             let send_due = self.next_send_deadline();
             let input = tokio::select! {
+                event = self.filing.next() => {
+                    let effects = self.issue_event(event);
+                    self.apply(effects, None).expect("offline issue effects cannot fill a shell queue");
+                    continue;
+                }
                 Some(input) = self.inputs.recv() => input,
                 // Engines run only for a current run, and nothing is current without a shell.
                 Some(input) = self.engine_events.recv() => input,
@@ -588,6 +596,12 @@ impl Brain {
     }
 
     fn handle(&mut self, input: Input) -> Option<Vec<Effect>> {
+        if let Input::IssueWritten { serial, reply } = input {
+            return Some(self.issue_written(serial, reply));
+        }
+        if matches!(input, Input::ShellLost) {
+            self.filing.cancel();
+        }
         if let Input::ScenesCleared { scenes, ok: true } = &input {
             self.crashes.cleared(scenes);
         }
@@ -661,6 +675,7 @@ impl Brain {
                 ended = core => ended,
             }
         };
+        self.filing.cancel();
         queue.borrow_mut().end_reads();
         if reading && quit.get().is_none() {
             #[cfg(test)]
@@ -796,6 +811,13 @@ impl Brain {
                 input = self.account.next() => {
                     if self.account_input(input, Some(&mut link)).is_err() {
                         return Ended::Lost;
+                    }
+                    continue;
+                }
+                event = self.filing.next() => {
+                    let effects = self.issue_event(event);
+                    if let Err(ended) = self.apply(effects, Some(&mut link)) {
+                        return ended;
                     }
                     continue;
                 }
