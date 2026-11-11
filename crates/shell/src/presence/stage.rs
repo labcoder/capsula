@@ -173,9 +173,10 @@ mod tests {
 
     #[gpui::test]
     fn opening_and_closing_typing_repositions_a_resting_drawing(cx: &mut gpui_kit::TestAppContext) {
+        let area = [0, 0, 2560, 1400];
+        let _area = crate::platform::work_area_fixture::set(area);
         let owner = crate::presence::test_fixture::presence(cx);
         owner.update(cx, |presence, cx| {
-            let area = crate::platform::work_area().expect("work area");
             presence.layout = Position::TopCenter.layout(area, [58, 21], [380, 124], 0);
             presence.presenter = crate::presenter::tests::painter_fixture(Box::new(
                 crate::presenter::tests::Charged(0),
@@ -187,6 +188,7 @@ mod tests {
             let open = transforms(presence, 2);
             assert_ne!(open, closed);
             let bounds = presence.text.as_ref().expect("typing").bounds;
+            assert_eq!(bounds, [1040, 21, 480, 544]);
             let panel = logical(bounds, presence.scale);
             for transform in &open {
                 assert!(
@@ -215,9 +217,10 @@ mod tests {
 
     #[gpui::test]
     fn panel_transitions_preserve_a_pending_first_paint(cx: &mut gpui_kit::TestAppContext) {
+        let area = [0, 0, 2560, 1400];
+        let _area = crate::platform::work_area_fixture::set(area);
         let owner = crate::presence::test_fixture::presence(cx);
         owner.update(cx, |presence, cx| {
-            let area = crate::platform::work_area().expect("work area");
             presence.layout = Position::TopCenter.layout(area, [58, 21], [380, 124], 0);
             let (mut presenter, now, job) = crate::presenter::tests::preparing();
             presenter
@@ -230,6 +233,10 @@ mod tests {
             let closed = transforms(presence, 1);
             assert!(!presence.presenter.begin_painted(now));
             presence.open_text(cx).expect("open typing before paint");
+            assert_eq!(
+                presence.text.as_ref().expect("typing").bounds,
+                [1040, 21, 480, 544]
+            );
             presence.presenter.frames().borrow_mut().shown = true;
             assert_ne!(transforms(presence, 1), closed);
             let observation = presence
@@ -250,6 +257,32 @@ mod tests {
             assert_eq!(transforms(presence, 1), closed);
             assert!(presence.presenter.begin_painted(now));
             assert!(!presence.presenter.begin_painted(now));
+        });
+    }
+
+    #[gpui::test]
+    fn opening_typing_on_a_small_display_keeps_the_fallback_placement(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let area = [0, 0, 640, 480];
+        let _area = crate::platform::work_area_fixture::set(area);
+        let owner = crate::presence::test_fixture::presence(cx);
+        owner.update(cx, |presence, cx| {
+            presence.layout = Position::TopCenter.layout(area, [58, 21], [380, 124], 0);
+            presence.presenter = crate::presenter::tests::painter_fixture(Box::new(
+                crate::presenter::tests::Charged(0),
+            ))
+            .0;
+            presence.place_drawings(cx.weak_entity(), cx);
+            let closed = transforms(presence, 2);
+            presence.open_text(cx).expect("open typing");
+            assert_eq!(
+                presence.text.as_ref().expect("typing").bounds,
+                [80, 0, 480, 480]
+            );
+            assert_eq!(transforms(presence, 2), closed);
+            presence.dismiss_text(cx).expect("close typing");
+            assert_eq!(transforms(presence, 2), closed);
         });
     }
 

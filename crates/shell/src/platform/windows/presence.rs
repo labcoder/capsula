@@ -847,6 +847,10 @@ pub(crate) fn performance_counter() -> i64 {
 /// # Errors
 /// Fails when Windows can't report it.
 pub(crate) fn work_area() -> Result<[i32; 4], PresenceError> {
+    #[cfg(test)]
+    if let Some(area) = crate::platform::work_area_fixture::get() {
+        return Ok(area);
+    }
     let mut rect = RECT::default();
     // SAFETY: SPI_GETWORKAREA writes one RECT into `rect`, which is writable for the call.
     unsafe {
