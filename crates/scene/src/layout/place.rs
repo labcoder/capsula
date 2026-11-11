@@ -26,14 +26,13 @@ impl LayoutState {
 
     /// Canvas or growing world-space content bounds used for presentation.
     pub fn fit_extent(&self) -> Rect {
-        let Some(content) = self
-            .content
-            .filter(|rect| rect.size.x > 0.0 && rect.size.y > 0.0)
-        else {
+        let Some(content) = self.content else {
             return self.canvas;
         };
         if self.declared_canvas {
             self.canvas.union(content)
+        } else if content.size.x <= 0.0 || content.size.y <= 0.0 {
+            self.canvas
         } else {
             Rect {
                 origin: content.origin - Vec2::new(CONTENT_PADDING, CONTENT_PADDING),

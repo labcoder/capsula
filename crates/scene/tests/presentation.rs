@@ -294,6 +294,57 @@ fn overflow_grows_a_declared_canvas_instead_of_clipping_to_it() {
 }
 
 #[test]
+fn axis_aligned_strokes_grow_the_declared_canvas_before_fitting() {
+    for (from, to, extent, translation) in [
+        (
+            [90, 90],
+            [120, 90],
+            rect(0.0, 0.0, 120.0, 100.0),
+            [0.0, 25.0 / 3.0],
+        ),
+        (
+            [90, 90],
+            [90, 120],
+            rect(0.0, 0.0, 100.0, 120.0),
+            [25.0 / 3.0, 0.0],
+        ),
+        (
+            [-20, 90],
+            [10, 90],
+            rect(-20.0, 0.0, 120.0, 100.0),
+            [50.0 / 3.0, 25.0 / 3.0],
+        ),
+        (
+            [90, -20],
+            [90, 10],
+            rect(0.0, -20.0, 100.0, 120.0),
+            [25.0 / 3.0, 50.0 / 3.0],
+        ),
+    ] {
+        let layout = picture(
+            header(Some([100.0, 100.0])),
+            json!([{"line":{"id":"line","from":from,"to":to}}]),
+        );
+        assert_eq!(layout.fit_extent(), extent, "stroke {from:?} to {to:?}");
+        let actual = place(layout.fit_extent(), rect(0.0, 0.0, 100.0, 100.0), 2.0);
+        let expected = [
+            5.0 / 6.0,
+            0.0,
+            0.0,
+            5.0 / 6.0,
+            translation[0],
+            translation[1],
+        ];
+        for (actual, expected) in actual.0.into_iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() < 0.00001,
+                "{actual} != {expected}"
+            );
+        }
+    }
+}
+
+#[test]
 fn presentation_respects_the_remaining_composed_scale_envelope() {
     for put in [
         json!([
