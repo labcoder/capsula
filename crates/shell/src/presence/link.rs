@@ -458,6 +458,9 @@ impl Presence {
             return;
         }
         self.runs.settings(view.main_thread);
+        if !view.hold_to_talk {
+            self.cancel_voice(cx);
+        }
         self.clear_refusal(cx);
         self.sync_settings_notice(cx);
         if matches!(

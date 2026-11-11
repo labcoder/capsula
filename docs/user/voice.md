@@ -38,6 +38,9 @@ The tab does not remove models, open the microphone or control spoken replies.
 
 ## Hold to speak
 
+**Hold to talk** starts on. Turn it off in **Settings → Voice** to disable this gesture and
+its key-down model reloads; changing the idle-unload preference does not turn it back on.
+
 Hold **left Ctrl + left Alt** and wait for **Listening** before speaking. Preparing or loading
 is not recording permission. Releasing either key stops collection, transcribes locally and
 sends nonblank words once through normal chat, using the captured target, model and connection.

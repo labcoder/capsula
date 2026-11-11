@@ -621,6 +621,7 @@ impl LinkHandle {
             ControlToBrain::ThreadOp(ThreadOp::SetModel { .. })
                 | ControlToBrain::Settings(
                     SettingsOp::SetDefaultModel(_)
+                        | SettingsOp::SetHoldToTalk(false)
                         | SettingsOp::RemoveVoice(VoicePart::SpeechInput)
                 )
                 | ControlToBrain::AccountOp(_)

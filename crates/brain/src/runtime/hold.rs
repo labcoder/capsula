@@ -245,6 +245,10 @@ impl Brain {
                     return Ok(true);
                 }
                 self.holds.high = gesture.0;
+                if !self.hold_to_talk_enabled() {
+                    Self::hold_status(key, HoldStatus::Failed(HoldFailure::NotLoaded), link)?;
+                    return Ok(true);
+                }
                 if self.holds.debt.is_some_and(|debt| debt.epoch != self.epoch) {
                     Self::hold_status(key, HoldStatus::Failed(HoldFailure::Unavailable), link)?;
                     return Ok(true);
@@ -357,9 +361,10 @@ impl Brain {
                 self.apply(effects, Some(link)).map_err(|_| Full)?;
                 return Ok(false);
             }
-            ControlToBrain::Settings(SettingsOp::RemoveVoice(
-                kumochi_protocol::voice::VoicePart::SpeechInput,
-            )) => {
+            ControlToBrain::Settings(
+                SettingsOp::RemoveVoice(kumochi_protocol::voice::VoicePart::SpeechInput)
+                | SettingsOp::SetHoldToTalk(false),
+            ) => {
                 self.hold_end(HoldStatus::Failed(HoldFailure::NotLoaded), link)?;
                 return Ok(false);
             }

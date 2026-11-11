@@ -210,8 +210,10 @@ impl Brain {
             return Ok(None);
         }
         if let ControlToBrain::KeyDown { .. } = message {
-            self.voice_op(Installer::reload_input, Some(link))
-                .map_err(|Full| Ended::Lost)?;
+            if self.hold_to_talk_enabled() {
+                self.voice_op(Installer::reload_input, Some(link))
+                    .map_err(|Full| Ended::Lost)?;
+            }
             return Ok(None);
         }
         control_input(message)

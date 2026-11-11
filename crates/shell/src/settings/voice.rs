@@ -29,6 +29,57 @@ pub(crate) struct SpeechInputIntent {
 }
 
 impl Settings {
+    pub(crate) fn hold_to_talk_enabled(&self) -> bool {
+        self.view.as_ref().is_some_and(|view| view.hold_to_talk)
+            && self.hold_to_talk_choice() != Some(false)
+    }
+
+    pub(crate) fn hold_to_talk_choice(&self) -> Option<bool> {
+        let saved = self.view.as_ref()?.hold_to_talk;
+        self.pending
+            .iter()
+            .find_map(|pending| match (pending.slot, pending.failed) {
+                (Slot::HoldToTalk(on), false) => Some(on),
+                _ => None,
+            })
+            .or(Some(saved))
+    }
+
+    pub(crate) fn hold_to_talk_pending(&self) -> bool {
+        self.pending
+            .iter()
+            .any(|pending| matches!(pending.slot, Slot::HoldToTalk(_)))
+    }
+
+    pub(crate) fn hold_to_talk_error(&self) -> Option<&UserError> {
+        self.notice_slot
+            .filter(|slot| matches!(slot, Slot::HoldToTalk(_)))
+            .and(self.notice.as_ref())
+    }
+
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the checkbox and wire setter carry this boolean unchanged"
+    )]
+    pub(crate) fn send_hold_to_talk(
+        &mut self,
+        on: bool,
+        send: impl FnOnce(SettingsOp) -> bool,
+    ) -> bool {
+        if self.hold_to_talk_pending()
+            || self.hold_to_talk_choice().is_none_or(|old| old == on)
+            || !send(SettingsOp::SetHoldToTalk(on))
+        {
+            return false;
+        }
+        self.pending.push_back(Pending {
+            slot: Slot::HoldToTalk(on),
+            failed: false,
+            reset_draft: false,
+        });
+        true
+    }
+
     pub(crate) fn receive_speech_input(
         &mut self,
         current: Option<u64>,

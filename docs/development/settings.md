@@ -240,9 +240,10 @@ than growing the window with the text. The existing Settings content region owns
 | `show_in_taskbar` | boolean | `false` |
 | `[voice] talk_back` | boolean | `false` |
 | `[voice] stt_unload` | `kept`, `15m` or `1h` | `kept` |
+| `[voice] hold_to_talk` | boolean | `true` |
 
-**Voice settings** live in a `[voice]` table. `SetTalkBack` and `SetSttUnload` save
-`talk_back` and `stt_unload` through the same queue and atomic save as every other change, and
+**Voice settings** live in a `[voice]` table. `SetTalkBack`, `SetSttUnload` and `SetHoldToTalk` save
+`talk_back`, `stt_unload` and `hold_to_talk` through the same queue and atomic save as every other change, and
 `SettingsView` is their only wire home. A bad value, or a `voice` key that isn't a table, reads
 as the default and stays on disk until the user sets that key. Setting one where `voice` isn't
 a table replaces it with a table. Every other key in the table survives each write, including
@@ -250,6 +251,9 @@ a table replaces it with a table. Every other key in the table survives each wri
 names, `speech-input` and `spoken-replies`. A part in both counts as removing. Start-up loads each
 installed part, and an install adds its part to `installed` under epoch 0 once it has loaded (see
 [voice](voice.md#the-installer)).
+
+Missing `hold_to_talk` uses the named on-by-default choice; a present value of the wrong type
+fails closed to off without rewriting the file. Its setter changes no other voice preference.
 
 `removing` names a removal that hasn't finished. At start-up, before anything is served, the
 brain deletes each listed part's folder under `%LOCALAPPDATA%\<product>\models` and then queues a

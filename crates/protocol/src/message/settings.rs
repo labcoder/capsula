@@ -170,7 +170,12 @@ pub enum SettingsOp {
     RemoveVoice(VoicePart),
     /// Stop the install in progress. Refused like `InstallVoice` until then.
     CancelVoiceInstall,
+    /// Allow deliberate held speech input.
+    SetHoldToTalk(bool),
 }
+
+/// The initial held-speech choice, also used by older settings files without the key.
+pub const DEFAULT_HOLD_TO_TALK: bool = true;
 
 /// When an idle speech-input model is unloaded to free its memory.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,6 +192,10 @@ pub enum SttUnload {
 /// The settings as the brain holds them: once per connection before `Scenes`, and after
 /// every [`SettingsOp`], applied or refused.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each boolean is an independent persisted preference"
+)]
 pub struct SettingsView {
     /// The assistant's name.
     pub assistant_name: AssistantName,
@@ -208,6 +217,8 @@ pub struct SettingsView {
     pub talk_back: bool,
     /// When an idle speech-input model is unloaded.
     pub stt_unload: SttUnload,
+    /// Whether deliberate held speech input is enabled.
+    pub hold_to_talk: bool,
 }
 
 /// The most frames a second Kumo draws. The shell paces to the display, so the rate it runs at
@@ -282,6 +293,7 @@ mod tests {
             show_in_taskbar: false,
             talk_back: false,
             stt_unload: SttUnload::Kept,
+            hold_to_talk: crate::message::DEFAULT_HOLD_TO_TALK,
         }
     }
 
@@ -298,6 +310,8 @@ mod tests {
             (10, SettingsOp::RemoveVoice(VoicePart::SpeechInput)),
             (10, SettingsOp::RemoveVoice(VoicePart::SpokenReplies)),
             (11, SettingsOp::CancelVoiceInstall),
+            (12, SettingsOp::SetHoldToTalk(false)),
+            (12, SettingsOp::SetHoldToTalk(true)),
         ];
         for (tag, op) in ops {
             let bytes = postcard::to_allocvec(&op).expect("encodes");
@@ -312,6 +326,8 @@ mod tests {
             [6, 1]
         );
         assert!(postcard::from_bytes::<SettingsOp>(&[12]).is_err());
+        assert!(postcard::from_bytes::<SettingsOp>(&[12, 2]).is_err());
+        assert!(postcard::from_bytes::<SettingsOp>(&[13]).is_err());
         assert!(postcard::from_bytes::<SettingsOp>(&[8, 3]).is_err());
         assert!(postcard::from_bytes::<SettingsOp>(&[9, 2]).is_err());
         assert_eq!(SttUnload::default(), SttUnload::Kept);
@@ -377,6 +393,7 @@ mod tests {
                     show_in_taskbar: shown,
                     talk_back: false,
                     stt_unload: SttUnload::Kept,
+                    hold_to_talk: crate::message::DEFAULT_HOLD_TO_TALK,
                 };
                 let bytes = postcard::to_allocvec(&view).expect("encodes");
                 assert_eq!(

@@ -214,6 +214,9 @@ impl Presence {
     ) {
         match intent {
             Intent::Warm(gesture) => {
+                if !self.settings.read(cx).hold_to_talk_enabled() {
+                    return;
+                }
                 if let Some(session) = self
                     .session
                     .as_ref()
@@ -232,63 +235,7 @@ impl Presence {
                 gesture,
                 generation,
             } => {
-                let Ok(token) = generation else {
-                    self.voice_notice(Text::HoldUnavailable, cx);
-                    return;
-                };
-                if self.voice.pending.is_some() {
-                    self.end_voice(Text::HoldCancelled, cx);
-                }
-                let Some(session) = self.session.clone() else {
-                    if token.discard_unstarted().is_err() {
-                        self.link.microphone_gate().cancel(gesture);
-                    }
-                    self.link.clear_input(gesture);
-                    return;
-                };
-                if self
-                    .dismiss_settings(cx)
-                    .and_then(|()| self.dismiss_threads(cx))
-                    .and_then(|()| self.dismiss_text(cx))
-                    .is_err()
-                {
-                    self.unused_voice(&token, &session);
-                    self.link.clear_input(gesture);
-                    self.voice_notice(Text::HoldUnavailable, cx);
-                    return;
-                }
-                if self.voice.pending.is_some()
-                    || !self.voice_current(stamp)
-                    || !self.link.input_is(gesture)
-                    || token.mode(&session.alive(), Instant::now()) != Ok(Mode::Preparing)
-                {
-                    self.unused_voice(&token, &session);
-                    self.link.clear_input(gesture);
-                    return;
-                }
-                let request = self.runs.begin_hold(gesture);
-                if let Ok(request) = request
-                    && self.drain_voice_cancel()
-                    && self.link.send_control(&session, request)
-                {
-                    self.voice.pending = Some(Hold {
-                        token,
-                        stamp,
-                        session,
-                        source: Source::Waiting,
-                        released: None,
-                        terminal: None,
-                    });
-                    self.chat_notice.clear();
-                    self.error = None;
-                    self.refusal = None;
-                    self.voice_notice(Text::HoldPreparing, cx);
-                } else {
-                    self.unused_voice(&token, &session);
-                    self.runs.cancel_hold();
-                    self.drain_voice_cancel();
-                    self.voice_notice(Text::HoldUnavailable, cx);
-                }
+                self.recognize_voice(gesture, generation, stamp, cx);
             }
             Intent::End { gesture, cancelled } => {
                 let Some(hold) = self
@@ -308,6 +255,87 @@ impl Presence {
                 }
             }
             Intent::Unavailable => self.voice_notice(Text::HoldUnavailable, cx),
+        }
+    }
+
+    fn recognize_voice(
+        &mut self,
+        gesture: GestureId,
+        generation: Result<Generation, crate::platform::microphone::MicError>,
+        stamp: Stamp,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Ok(token) = generation else {
+            self.voice_notice(Text::HoldUnavailable, cx);
+            return;
+        };
+        if !self.settings.read(cx).hold_to_talk_enabled() {
+            if let Some(session) = &self.session {
+                self.unused_voice(&token, session);
+            } else if token.discard_unstarted().is_err() {
+                self.link.microphone_gate().cancel(gesture);
+            }
+            self.link.clear_input(gesture);
+            let notice = if self.settings.read(cx).view().is_some() {
+                Text::HoldDisabled
+            } else {
+                Text::VoiceStatusUnknown
+            };
+            self.voice_notice(notice, cx);
+            return;
+        }
+        if self.voice.pending.is_some() {
+            self.end_voice(Text::HoldCancelled, cx);
+        }
+        let Some(session) = self.session.clone() else {
+            if token.discard_unstarted().is_err() {
+                self.link.microphone_gate().cancel(gesture);
+            }
+            self.link.clear_input(gesture);
+            return;
+        };
+        if self
+            .dismiss_settings(cx)
+            .and_then(|()| self.dismiss_threads(cx))
+            .and_then(|()| self.dismiss_text(cx))
+            .is_err()
+        {
+            self.unused_voice(&token, &session);
+            self.link.clear_input(gesture);
+            self.voice_notice(Text::HoldUnavailable, cx);
+            return;
+        }
+        if self.voice.pending.is_some()
+            || !self.voice_current(stamp)
+            || !self.link.input_is(gesture)
+            || token.mode(&session.alive(), Instant::now()) != Ok(Mode::Preparing)
+        {
+            self.unused_voice(&token, &session);
+            self.link.clear_input(gesture);
+            return;
+        }
+        let request = self.runs.begin_hold(gesture);
+        if let Ok(request) = request
+            && self.drain_voice_cancel()
+            && self.link.send_control(&session, request)
+        {
+            self.voice.pending = Some(Hold {
+                token,
+                stamp,
+                session,
+                source: Source::Waiting,
+                released: None,
+                terminal: None,
+            });
+            self.chat_notice.clear();
+            self.error = None;
+            self.refusal = None;
+            self.voice_notice(Text::HoldPreparing, cx);
+        } else {
+            self.unused_voice(&token, &session);
+            self.runs.cancel_hold();
+            self.drain_voice_cancel();
+            self.voice_notice(Text::HoldUnavailable, cx);
         }
     }
 

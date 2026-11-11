@@ -44,6 +44,7 @@ pub(super) struct SettingsView {
     tab: usize,
     dock_notice: Option<Text>,
     taskbar_notice: Option<Text>,
+    hold_notice: Option<Text>,
     pub(super) stop: bool,
     _events: Vec<Subscription>,
     _watch: Subscription,
@@ -145,6 +146,7 @@ impl SettingsView {
             tab: 0,
             dock_notice: None,
             taskbar_notice: None,
+            hold_notice: None,
             stop: false,
             _events: subscriptions,
             _watch: watch,
@@ -220,6 +222,7 @@ impl SettingsView {
     pub(super) fn finish_edit(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         self.dock_notice = None;
         self.taskbar_notice = None;
+        self.hold_notice = None;
         self.confirmation = None;
         window.close_all_dialogs(cx);
         self.editing = None;
@@ -306,6 +309,7 @@ impl Render for SettingsView {
                         .on_click(cx.listener(|view, tab, window, cx| {
                             view.dock_notice = None;
                             view.taskbar_notice = None;
+                            view.hold_notice = None;
                             view.confirmation = None;
                             window.close_all_dialogs(cx);
                             view.tab = *tab;

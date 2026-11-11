@@ -80,6 +80,7 @@ enum Slot {
     Dock(DockPosition),
     Taskbar(TaskbarChoice),
     SttUnload(SttUnload),
+    HoldToTalk(bool),
     SpeechInput(SpeechInputAction),
 }
 
@@ -91,6 +92,7 @@ impl Slot {
             | (Self::Dock(_), Self::Dock(_))
             | (Self::Taskbar(_), Self::Taskbar(_))
             | (Self::SttUnload(_), Self::SttUnload(_))
+            | (Self::HoldToTalk(_), Self::HoldToTalk(_))
             | (Self::SpeechInput(_), Self::SpeechInput(_)) => true,
             _ => false,
         }
@@ -103,6 +105,7 @@ impl Slot {
             | Self::Dock(_)
             | Self::Taskbar(_)
             | Self::SttUnload(_)
+            | Self::HoldToTalk(_)
             | Self::SpeechInput(_) => None,
         }
     }
@@ -371,6 +374,7 @@ impl Settings {
                 | Slot::Dock(_)
                 | Slot::Taskbar(_)
                 | Slot::SttUnload(_)
+                | Slot::HoldToTalk(_)
                 | Slot::SpeechInput(_) => None,
             });
         queued.or(self.view.as_ref().map(|view| view.max_frame_rate))

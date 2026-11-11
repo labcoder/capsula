@@ -120,6 +120,41 @@ fn queued_control(output: &mut mpsc::Receiver<Vec<u8>>) -> ControlToShell {
 }
 
 #[tokio::test]
+async fn hold_to_talk_off_never_reloads_on_key_down() {
+    let scratch = Scratch::trusted("voice-key-down-disabled");
+    let (mut brain, _release, _fetch, unloaded) = released_input(&scratch).await;
+    brain.voice_event(unloaded, None).unwrap();
+    std::fs::write(
+        scratch.dir().join(CONFIG_FILE),
+        "[voice]\nhold_to_talk = false\n",
+    )
+    .unwrap();
+    brain.config = scratch.config();
+    let (out, mut output) = mpsc::channel(8);
+    let queue = RefCell::new(DataQueue::new(window()));
+    let (ready, mut tap) = (Notify::new(), Tap::from_env());
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    let mut ping = None;
+    for gesture in [1, 2] {
+        assert_eq!(
+            brain.control_frame(
+                ControlToBrain::KeyDown {
+                    gesture: kumochi_protocol::message::GestureId(gesture),
+                    t_qpc: 1,
+                },
+                0,
+                &mut link,
+                &mut ping
+            ),
+            Ok(None)
+        );
+        assert_eq!(brain.hold_voice().0, PartState::Unloaded);
+        assert_eq!(output.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    }
+    brain.close().await;
+}
+
+#[tokio::test]
 async fn connected_key_down_reloads_input_without_a_turn_or_settings_work() {
     let scratch = Scratch::trusted("voice-key-down");
     let (mut brain, release, fetch, unloaded) = released_input(&scratch).await;

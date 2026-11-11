@@ -33,6 +33,52 @@ fn chord(deliver: &Deliver, edge: Edge, at: Instant) {
 }
 
 #[gpui::test]
+fn hold_to_talk_off_keeps_typing_and_never_warms_or_opens_a_source(cx: &mut TestAppContext) {
+    let (owner, data, controls) = ready(cx);
+    let starts = Rc::new(Cell::new(0));
+    let attempts = Rc::clone(&starts);
+    owner.update(cx, |owner, cx| {
+        owner.text.as_mut().unwrap().typing.open();
+        owner.settings.update(cx, |settings, _| {
+            let mut saved = settings.view().unwrap().clone();
+            saved.hold_to_talk = false;
+            settings.set_view(saved, crate::settings::Update::Unsolicited);
+        });
+        owner.voice.start = Some(Box::new(move |_, _| {
+            attempts.set(attempts.get() + 1);
+            Err(MicError::Unavailable)
+        }));
+    });
+    let deliver = native(&owner, cx);
+    let at = Instant::now();
+    cx.update(|_| {
+        chord(&deliver, Edge::Down, at);
+        deliver(
+            Event::Deadline,
+            EventTime {
+                instant: at + Duration::from_millis(300),
+            },
+        );
+    });
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.text_open());
+        assert_eq!(owner.voice.status, Some(Text::HoldDisabled));
+        assert!(owner.voice.pending.is_none());
+        assert!(!owner.link.input_is(GestureId(1)));
+    });
+    assert_eq!(starts.get(), 0);
+    assert!(data.is_empty());
+    assert_eq!(
+        controls.try_recv().unwrap(),
+        ControlToBrain::VoiceHoldStopped {
+            gesture: GestureId(1)
+        }
+    );
+    assert!(controls.is_empty());
+}
+
+#[gpui::test]
 fn stale_deferred_typing_cannot_take_over_a_new_native_hold(cx: &mut TestAppContext) {
     let (owner, _data, _controls) = ready(cx);
     let deliver = native(&owner, cx);
@@ -91,7 +137,7 @@ fn stale_deferred_escape_cannot_cancel_a_new_native_hold(cx: &mut TestAppContext
             .unwrap()
             .token
             .discard_unstarted()
-            .unwrap()
+            .unwrap();
     });
     cx.update(|_| {
         deliver(
@@ -161,7 +207,7 @@ fn stale_deferred_escape_marker_ends_on_raw_key_up_without_a_hotkey(cx: &mut Tes
             .unwrap()
             .token
             .discard_unstarted()
-            .unwrap()
+            .unwrap();
     });
     cx.update(|_| {
         deliver(

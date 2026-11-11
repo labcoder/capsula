@@ -806,6 +806,12 @@ delivery, not worker/native copies or physical retirement.
 
 ### Voice-only held turns
 
+`voice.hold_to_talk` defaults on, including older files without the key. Settings → Voice
+persists its separate `SetHoldToTalk` operation; changing the idle policy leaves it alone.
+The Brain refuses held input and key-down reloads while it is off or an off save is queued
+or in flight. The Shell also checks its received choice before disrupting local panels;
+switching off revokes current input, and switching on waits for the saved answer.
+
 The runtime owns one pre-run hold, keyed by connection epoch and a monotonically
 consumed gesture number. Recognition captures defaults and queues a stamped
 target/model/deletion read through the existing store reader. Pinned admission

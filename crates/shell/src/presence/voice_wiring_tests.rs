@@ -27,6 +27,28 @@ pub(super) fn ready(
         let controls = link.record_controls();
         owner.link = link;
         owner.session = Some(Session::detached(1, Incarnation(1)));
+        owner.settings.update(cx, |settings, _| {
+            settings.set_view(
+                kumochi_protocol::message::SettingsView {
+                    assistant_name: kumochi_protocol::message::AssistantName::new(
+                        kumochi_protocol::constants::DEFAULT_ASSISTANT_NAME,
+                    )
+                    .unwrap(),
+                    user_name: None,
+                    onboarded: true,
+                    main_thread: ThreadId(1),
+                    max_frame_rate: kumochi_protocol::message::MaxFrameRate::AUTOMATIC,
+                    default_model: None,
+                    dock_position: kumochi_protocol::message::DockPosition::TopCenter,
+                    show_in_taskbar: false,
+                    talk_back: false,
+                    stt_unload: kumochi_protocol::message::SttUnload::Kept,
+                    hold_to_talk: true,
+                },
+                crate::settings::Update::Unsolicited,
+            );
+            settings.receive_speech_input(Some(1), 1, PartState::Ready);
+        });
         owner.runs.met(Incarnation(1));
         owner.runs.connected(1);
         owner.runs.settings(ThreadId(1));

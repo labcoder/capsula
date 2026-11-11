@@ -32,6 +32,7 @@ const SHOW_IN_TASKBAR: &str = "show_in_taskbar";
 const VOICE: &str = "voice";
 const TALK_BACK: &str = "talk_back";
 const STT_UNLOAD: &str = "stt_unload";
+const HOLD_TO_TALK: &str = "hold_to_talk";
 const INSTALLED: &str = "installed";
 const REMOVING: &str = "removing";
 
@@ -250,6 +251,9 @@ impl Config {
             }
             SettingsOp::SetTalkBack(on) => {
                 voice_mut(&mut table).insert(TALK_BACK.to_owned(), Value::Boolean(on));
+            }
+            SettingsOp::SetHoldToTalk(on) => {
+                voice_mut(&mut table).insert(HOLD_TO_TALK.to_owned(), Value::Boolean(on));
             }
             SettingsOp::SetSttUnload(unload) => {
                 let name = match unload {
@@ -480,6 +484,11 @@ fn view_of(table: &Table, main_thread: ThreadId) -> SettingsView {
             _ => invalid(STT_UNLOAD).unwrap_or_default(),
         },
     };
+    let hold_to_talk = match voice.and_then(|voice| voice.get(HOLD_TO_TALK)) {
+        Some(Value::Boolean(on)) => *on,
+        None => kumochi_protocol::message::DEFAULT_HOLD_TO_TALK,
+        Some(_) => invalid(HOLD_TO_TALK).unwrap_or(false),
+    };
     SettingsView {
         assistant_name,
         user_name,
@@ -491,6 +500,7 @@ fn view_of(table: &Table, main_thread: ThreadId) -> SettingsView {
         show_in_taskbar,
         talk_back,
         stt_unload,
+        hold_to_talk,
     }
 }
 

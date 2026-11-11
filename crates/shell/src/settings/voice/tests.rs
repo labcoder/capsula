@@ -17,6 +17,7 @@ fn saved(policy: SttUnload) -> SettingsView {
         show_in_taskbar: false,
         talk_back: false,
         stt_unload: policy,
+        hold_to_talk: kumochi_protocol::message::DEFAULT_HOLD_TO_TALK,
     }
 }
 
@@ -24,6 +25,40 @@ fn connected() -> Settings {
     let mut state = Settings::default();
     state.set_view(saved(SttUnload::Kept), Update::Unsolicited);
     state
+}
+
+#[test]
+fn hold_to_talk_waits_for_its_own_answer_and_refusal_restores_the_saved_choice() {
+    let mut state = connected();
+    assert!(state.hold_to_talk_enabled());
+    assert!(state.send_hold_to_talk(false, |op| op == SettingsOp::SetHoldToTalk(false)));
+    assert!(!state.hold_to_talk_enabled());
+    assert!(state.hold_to_talk_pending());
+    state.set_view(saved(SttUnload::Kept), Update::Unsolicited);
+    assert!(!state.hold_to_talk_enabled());
+    assert!(!state.send_hold_to_talk(true, |_| panic!("one save remains in flight")));
+    state.error(ErrorKey::SettingsRefused.into());
+    state.set_view(saved(SttUnload::Kept), Update::Answer);
+    assert!(!state.hold_to_talk_pending());
+    assert!(state.hold_to_talk_enabled());
+    assert_eq!(
+        state.hold_to_talk_error().map(UserError::key),
+        Some(ErrorKey::SettingsRefused)
+    );
+    assert!(state.send_hold_to_talk(false, |_| true));
+    let mut settled = saved(SttUnload::Kept);
+    settled.hold_to_talk = false;
+    state.set_view(settled.clone(), Update::Answer);
+    assert!(!state.hold_to_talk_enabled());
+    assert_eq!(state.hold_to_talk_error(), None);
+    assert!(!state.send_hold_to_talk(true, |_| false));
+    assert_eq!(state.hold_to_talk_choice(), Some(false));
+    assert!(!state.hold_to_talk_pending());
+    assert!(state.send_hold_to_talk(true, |_| true));
+    assert!(!state.hold_to_talk_enabled());
+    settled.hold_to_talk = true;
+    state.set_view(settled, Update::Answer);
+    assert!(state.hold_to_talk_enabled());
 }
 
 #[test]

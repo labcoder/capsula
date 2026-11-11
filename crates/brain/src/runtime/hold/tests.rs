@@ -12,6 +12,83 @@ const KEY: HoldKey = HoldKey {
     gesture: GestureId(9),
 };
 
+#[tokio::test]
+async fn hold_to_talk_off_refuses_before_admission() {
+    let scratch = Scratch::new("hold-disabled");
+    let (mut brain, _release, mut decoded, _fetch) =
+        crate::runtime::tests::holds::input(&scratch, Vec::new(), "not submitted").await;
+    std::fs::write(
+        scratch.dir().join(kumochi_protocol::constants::CONFIG_FILE),
+        "[voice]\nhold_to_talk = false\n",
+    )
+    .unwrap();
+    brain.config = scratch.config();
+    let (out, mut output) = mpsc::channel(8);
+    let queue = RefCell::new(DataQueue::new(0));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    assert!(
+        brain
+            .hold_control(
+                &ControlToBrain::VoiceHoldRecognized {
+                    gesture: KEY.gesture,
+                    thread: None,
+                    selection: 1,
+                },
+                &mut link
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        status(&mut output),
+        HoldStatus::Failed(HoldFailure::NotLoaded)
+    );
+    assert!(brain.holds.pending.is_none());
+    assert_eq!(brain.holds.debt, None);
+    assert_eq!(brain.coordinator.current_run(), None);
+    assert_eq!(decoded.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    let pending = brain.config.stage(SettingsOp::SetHoldToTalk(true)).unwrap();
+    pending.write().unwrap();
+    brain.config.commit(pending);
+    assert!(brain.hold_to_talk_enabled());
+    brain
+        .hold_control(
+            &ControlToBrain::VoiceHoldRecognized {
+                gesture: KEY.gesture,
+                thread: None,
+                selection: 1,
+            },
+            &mut link,
+        )
+        .unwrap();
+    assert!(brain.holds.pending.is_none());
+    assert_eq!(output.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn queued_and_in_flight_hold_to_talk_off_block_before_the_save_commits() {
+    use crate::runtime::settings::{Change, Gate, Queued};
+    let scratch = Scratch::new("hold-disable-save");
+    let mut brain = test_support::brain(&scratch, "");
+    assert!(brain.hold_to_talk_enabled());
+    let release = brain.hold_config_write();
+    brain.settings_ops.push_back(Queued {
+        change: Change::User(SettingsOp::SetHoldToTalk(false)),
+        epoch: 0,
+    });
+    assert!(!brain.hold_to_talk_enabled());
+    brain.pump_settings(None).unwrap();
+    assert!(brain.config.view().hold_to_talk);
+    assert!(!brain.hold_to_talk_enabled());
+    release.send(Gate::Write).unwrap();
+    brain.drain_settings().await;
+    assert!(!brain.config.view().hold_to_talk);
+    assert!(!brain.hold_to_talk_enabled());
+    brain.close().await;
+}
+
 #[derive(Clone, Copy)]
 enum AdmissionStage {
     Grant,

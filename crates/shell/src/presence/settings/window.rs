@@ -61,6 +61,31 @@ impl Presence {
             cx.notify();
         });
     }
+
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the checkbox and wire setter carry this boolean unchanged"
+    )]
+    pub(in crate::presence) fn save_hold_to_talk(
+        &mut self,
+        on: bool,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        let (link, session) = (&self.link, &self.session);
+        let sent = self.settings.update(cx, |state, cx| {
+            let sent = state.send_hold_to_talk(on, |op| {
+                session
+                    .as_ref()
+                    .is_some_and(|session| link.send_control(session, ControlToBrain::Settings(op)))
+            });
+            cx.notify();
+            sent
+        });
+        if sent && !on {
+            self.cancel_voice(cx);
+        }
+        sent
+    }
     pub(in crate::presence) fn open_accounts(
         &mut self,
         cx: &mut Context<'_, Self>,

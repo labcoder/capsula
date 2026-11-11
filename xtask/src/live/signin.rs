@@ -283,6 +283,7 @@ mod tests {
             show_in_taskbar: false,
             talk_back: false,
             stt_unload: kumochi_protocol::message::SttUnload::Kept,
+            hold_to_talk: kumochi_protocol::message::DEFAULT_HOLD_TO_TALK,
         };
         let row = ThreadRow {
             id: ThreadId(2),

@@ -50,8 +50,8 @@ pub use scenes::{
     SceneDataError, SceneDescriptorV1, SceneFailure, SceneHeader, SceneSnapshotChunk,
 };
 pub use settings::{
-    AssistantName, DockPosition, MAX_NAME_CHARS, MaxFrameRate, NameError, NotACap, SettingsOp,
-    SettingsView, SttUnload, UserName,
+    AssistantName, DEFAULT_HOLD_TO_TALK, DockPosition, MAX_NAME_CHARS, MaxFrameRate, NameError,
+    NotACap, SettingsOp, SettingsView, SttUnload, UserName,
 };
 pub use threads::{
     Effort, LISTED_MODELS_CALL_TOOLS, MAX_MODEL_NAME_CHARS, MAX_MODELS, MAX_SLUG_BYTES,

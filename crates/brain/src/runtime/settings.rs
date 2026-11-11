@@ -55,6 +55,7 @@ pub(super) struct Queued {
 pub(super) struct Write {
     epoch: u64,
     model: bool,
+    disables_hold: bool,
     voice: Option<VoiceWrite>,
     github: Option<GitHubWrite>,
     handle: JoinHandle<(Pending, Result<(), ConfigError>)>,
@@ -96,6 +97,20 @@ pub(super) type Written = (
 );
 
 impl Brain {
+    pub(super) fn hold_to_talk_enabled(&self) -> bool {
+        self.config.view().hold_to_talk
+            && self
+                .config_write
+                .as_ref()
+                .is_none_or(|write| !write.disables_hold)
+            && !self.settings_ops.iter().any(|queued| {
+                matches!(
+                    queued.change,
+                    Change::User(SettingsOp::SetHoldToTalk(false))
+                )
+            })
+    }
+
     pub(super) fn changing_model(&self) -> bool {
         self.config_write.as_ref().is_some_and(|write| write.model)
             || self
@@ -157,6 +172,7 @@ impl Brain {
         pending: Pending,
         epoch: u64,
         model: bool,
+        disables_hold: bool,
         voice: Option<VoiceWrite>,
         github: Option<GitHubWrite>,
     ) {
@@ -177,6 +193,7 @@ impl Brain {
         self.config_write = Some(Write {
             epoch,
             model,
+            disables_hold,
             voice,
             github,
             handle,
@@ -195,6 +212,7 @@ impl Brain {
                 break;
             };
             let model = matches!(&change, Change::User(SettingsOp::SetDefaultModel(_)));
+            let disables_hold = matches!(&change, Change::User(SettingsOp::SetHoldToTalk(false)));
             if model {
                 self.holds
                     .invalidate(kumochi_protocol::message::HoldStatus::Failed(
@@ -281,7 +299,7 @@ impl Brain {
             };
             match staged {
                 Ok(pending) => {
-                    self.start_settings_write(pending, epoch, model, voice, github);
+                    self.start_settings_write(pending, epoch, model, disables_hold, voice, github);
                 }
                 Err(error) => {
                     tracing::warn!(%error, "settings change refused");
