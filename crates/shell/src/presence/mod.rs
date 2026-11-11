@@ -352,7 +352,7 @@ impl Presence {
                 }
                 Effect::Listening | Effect::HoldStarted | Effect::HoldEnded => continue,
                 Effect::OpenInput => {
-                    if let Err(error) = self.open_text(cx) {
+                    if let Err(error) = self.focus_text(cx) {
                         tracing::error!(%error, "can't open the typing panel");
                     }
                 }

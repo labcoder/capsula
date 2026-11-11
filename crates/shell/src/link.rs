@@ -426,7 +426,6 @@ struct Shared {
     microphone: CollectionGate,
     input: AtomicU32,
     choice: AtomicU64,
-    escaped_input: AtomicBool,
     /// Set once the user chose Quit, so a closing brain isn't restarted.
     quitting: AtomicBool,
     /// The control pipe while connected, so Quit can bound its writes.
@@ -511,22 +510,17 @@ impl LinkHandle {
         let input = &self.shared.input;
         let _changed = input.compare_exchange(gesture.0, 0, Ordering::AcqRel, Ordering::Acquire);
     }
-    pub(crate) fn take_input_escape(&self) -> bool {
-        self.shared.escaped_input.swap(false, Ordering::AcqRel)
-    }
-    pub(crate) fn mark_input_escape(&self) {
-        self.shared.escaped_input.store(true, Ordering::Release);
-    }
     pub(crate) fn cancel_input(&self) -> bool {
+        self.cancel_input_gesture().is_some()
+    }
+    pub(crate) fn cancel_input_gesture(&self) -> Option<GestureId> {
         let shared = &self.shared;
-        let Some(gesture) = shared.revoke_input() else {
-            return false;
-        };
+        let gesture = shared.revoke_input()?;
         let cancel = ControlToBrain::GestureCancel { gesture };
         #[cfg(test)]
         if let Some(recording) = &self.control_recording {
             let _queued = recording.try_send(cancel);
-            return true;
+            return Some(gesture);
         }
         let outbox = shared.outbox.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(outbox) = outbox.as_ref()
@@ -534,7 +528,7 @@ impl LinkHandle {
         {
             outbox.pipe.abort();
         }
-        true
+        Some(gesture)
     }
 
     /// Marks Quit, so the link starts no brain from here on. Cheap enough for the UI thread.
@@ -742,6 +736,7 @@ impl LinkHandle {
         let (recording, requests) = async_channel::unbounded();
         let mut link = Self::detached();
         link.recording = Some(recording);
+        link.shared.generations.store(1, Ordering::Release);
         (link, requests)
     }
 

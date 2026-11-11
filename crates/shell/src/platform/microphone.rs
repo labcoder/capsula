@@ -69,6 +69,10 @@ pub(crate) enum MicError {
 pub(crate) struct CollectionGate(Arc<AtomicU64>);
 
 impl CollectionGate {
+    pub(crate) fn latest(&self) -> u64 {
+        self.0.load(Ordering::Acquire) >> 3
+    }
+
     /// Arms a strictly newer nonzero gesture only after the prior join receipt.
     pub(crate) fn arm(&self, gesture: GestureId) -> Result<Generation, MicError> {
         self.arm_at(gesture, Instant::now())

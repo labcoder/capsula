@@ -257,14 +257,14 @@ fn escape_consumes_the_native_input_marker_without_dismissing_typing(cx: &mut Te
     owner.update(cx, |owner, cx| {
         owner.text.as_mut().expect("typing fixture").typing.open();
         owner.link.cancel_input();
-        owner.link.mark_input_escape();
-        owner.escape(cx).expect("cancel voice only");
+        owner
+            .native_escape(Some(GestureId(1)), cx)
+            .expect("cancel voice only");
         assert!(owner.voice.pending.is_none());
         assert!(owner.text_open());
-        assert!(!owner.link.take_input_escape());
-        owner.link.mark_input_escape();
-        owner.escape(cx).expect("consume a deferred native marker");
+        owner
+            .native_escape(Some(GestureId(1)), cx)
+            .expect("consume a deferred native marker");
         assert!(owner.text_open());
-        assert!(!owner.link.take_input_escape());
     });
 }

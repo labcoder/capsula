@@ -104,7 +104,9 @@ impl Keys {
             let deadline = deliver(event, at);
             self.arm(hwnd, deadline, Instant::now());
         }
-        message == WM_TIMER || message == DESKTOP_SWITCHED
+        message == WM_TIMER
+            || message == DESKTOP_SWITCHED
+            || (event == Event::Escape && self.deliver.get().is_some())
     }
 
     fn arm(&self, hwnd: HWND, deadline: Option<Instant>, now: Instant) {

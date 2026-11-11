@@ -194,6 +194,17 @@ impl Presence {
         self.drain_voice_cancel();
     }
 
+    pub(super) fn cancel_voice_gesture(&mut self, gesture: GestureId, cx: &mut Context<'_, Self>) {
+        if self
+            .voice
+            .pending
+            .as_ref()
+            .is_some_and(|hold| hold.token.gesture() == gesture)
+        {
+            self.end_voice(Text::HoldCancelled, cx);
+        }
+    }
+
     pub(super) fn voice_intent(
         &mut self,
         intent: Intent,

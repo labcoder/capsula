@@ -150,6 +150,10 @@ impl Presence {
 
     pub(super) fn open_text(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
         self.cancel_voice(cx);
+        self.focus_text(cx)
+    }
+
+    pub(super) fn focus_text(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
         self.show_voice_answer(cx)?;
         let text = self.text.as_mut().expect("created above");
         let draft = text

@@ -7,8 +7,214 @@ use kumochi_protocol::message::{MicPcm, RunId};
 
 use super::super::voice_wiring_tests::{hold, ready, status};
 use super::*;
+use crate::input::{Edge, Event, Key};
 use crate::link::{Batch, LinkEvent};
 use crate::platform::microphone::{MicError, Running};
+use crate::platform::{Deliver, EventTime};
+
+fn native(owner: &Entity<Presence>, cx: &mut TestAppContext) -> Deliver {
+    let weak = owner.downgrade();
+    owner.update(cx, |owner, cx| {
+        super::super::gesture::deliver(
+            Rc::clone(&owner.gesture),
+            owner.dock_window,
+            weak,
+            owner.link.clone(),
+            Rc::clone(&owner.voice.target),
+            cx,
+        )
+    })
+}
+
+fn chord(deliver: &Deliver, edge: Edge, at: Instant) {
+    for key in [Key::LeftControl, Key::LeftAlt] {
+        deliver(Event::Key { key, edge }, EventTime { instant: at });
+    }
+}
+
+#[gpui::test]
+fn stale_deferred_typing_cannot_take_over_a_new_native_hold(cx: &mut TestAppContext) {
+    let (owner, _data, _controls) = ready(cx);
+    let deliver = native(&owner, cx);
+    let at = Instant::now();
+    cx.update(|_| {
+        chord(&deliver, Edge::Down, at);
+        chord(&deliver, Edge::Up, at + Duration::from_millis(10));
+        chord(&deliver, Edge::Down, at + Duration::from_millis(20));
+        chord(&deliver, Edge::Up, at + Duration::from_millis(30));
+        chord(&deliver, Edge::Down, at + Duration::from_millis(40));
+        deliver(
+            Event::Deadline,
+            EventTime {
+                instant: at + Duration::from_millis(340),
+            },
+        );
+    });
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.link.input_is(GestureId(3)));
+        assert_eq!(owner.voice.status, Some(Text::HoldPreparing));
+        assert!(!owner.text_open());
+        assert_eq!(
+            owner
+                .voice
+                .pending
+                .as_ref()
+                .unwrap()
+                .token
+                .mode(&owner.session.as_ref().unwrap().alive(), Instant::now()),
+            Ok(Mode::Preparing)
+        );
+    });
+}
+
+#[gpui::test]
+fn stale_deferred_escape_cannot_cancel_a_new_native_hold(cx: &mut TestAppContext) {
+    let (owner, _data, _controls) = ready(cx);
+    let deliver = native(&owner, cx);
+    let at = Instant::now();
+    cx.update(|_| {
+        chord(&deliver, Edge::Down, at);
+        deliver(
+            Event::Deadline,
+            EventTime {
+                instant: at + Duration::from_millis(300),
+            },
+        );
+    });
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        owner
+            .voice
+            .pending
+            .as_ref()
+            .unwrap()
+            .token
+            .discard_unstarted()
+            .unwrap()
+    });
+    cx.update(|_| {
+        deliver(
+            Event::Key {
+                key: Key::Other(1),
+                edge: Edge::Down,
+            },
+            EventTime {
+                instant: at + Duration::from_millis(310),
+            },
+        );
+        deliver(
+            Event::Escape,
+            EventTime {
+                instant: at + Duration::from_millis(311),
+            },
+        );
+        deliver(
+            Event::Key {
+                key: Key::Other(1),
+                edge: Edge::Up,
+            },
+            EventTime {
+                instant: at + Duration::from_millis(312),
+            },
+        );
+        chord(&deliver, Edge::Up, at + Duration::from_millis(320));
+        chord(&deliver, Edge::Down, at + Duration::from_millis(330));
+        deliver(
+            Event::Deadline,
+            EventTime {
+                instant: at + Duration::from_millis(630),
+            },
+        );
+    });
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.link.input_is(GestureId(2)));
+        assert_eq!(owner.voice.status, Some(Text::HoldPreparing));
+        assert_eq!(
+            owner.voice.pending.as_ref().unwrap().token.gesture(),
+            GestureId(2)
+        );
+    });
+}
+
+#[gpui::test]
+fn stale_deferred_escape_marker_ends_on_raw_key_up_without_a_hotkey(cx: &mut TestAppContext) {
+    let (owner, _data, _controls) = ready(cx);
+    let deliver = native(&owner, cx);
+    let at = Instant::now();
+    cx.update(|_| {
+        chord(&deliver, Edge::Down, at);
+        deliver(
+            Event::Deadline,
+            EventTime {
+                instant: at + Duration::from_millis(300),
+            },
+        );
+    });
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        owner
+            .voice
+            .pending
+            .as_ref()
+            .unwrap()
+            .token
+            .discard_unstarted()
+            .unwrap()
+    });
+    cx.update(|_| {
+        deliver(
+            Event::Key {
+                key: Key::Other(1),
+                edge: Edge::Down,
+            },
+            EventTime {
+                instant: at + Duration::from_millis(310),
+            },
+        );
+        deliver(
+            Event::Key {
+                key: Key::Other(1),
+                edge: Edge::Up,
+            },
+            EventTime {
+                instant: at + Duration::from_millis(312),
+            },
+        );
+        chord(&deliver, Edge::Up, at + Duration::from_millis(320));
+    });
+    cx.run_until_parked();
+    owner.update(cx, |owner, cx| {
+        owner.runs.submit("typed", |_| true).unwrap();
+        owner
+            .link_events(
+                Batch::Plain(vec![LinkEvent::RunState {
+                    generation: 1,
+                    origin: Some(RunOrigin::Typed { turn: 1 }),
+                    run: RunId(1),
+                    thread: ThreadId(1),
+                    phase: Phase::Thinking,
+                    error: None,
+                }]),
+                cx,
+            )
+            .unwrap();
+        assert!(owner.runs.working());
+    });
+    cx.update(|_| {
+        deliver(
+            Event::Escape,
+            EventTime {
+                instant: at + Duration::from_millis(640),
+            },
+        );
+    });
+    cx.run_until_parked();
+    owner.update(cx, |owner, _| {
+        assert!(!owner.runs.working());
+    });
+}
 
 fn until(cx: &mut TestAppContext, ready: impl Fn(&mut TestAppContext) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(3);

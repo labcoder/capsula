@@ -855,6 +855,11 @@ changes away and back. PCM wrappers scrub rejected or dropped queued packets and
 as typed submissions. Local status, source finalization and ordinary chat are not a second
 transcript store or retry queue.
 
+Deferred native typing and Escape retain their original input owner. Superseded typing
+cannot open over a newer hold, and an old native Escape can cancel only its captured gesture.
+A raw Escape without a hotkey loses that captured owner at key-up; focused-panel Escape
+and explicit typing still act on the current input immediately.
+
 Preparing/loading, Listening, stopping, transcribing and thinking reuse the existing dock,
 status and text views, with localized accessible status text. Only matching live Admitted
 opens the source; Listening precedes acceptance of that source's Running receipt. Thinking

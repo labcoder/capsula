@@ -180,12 +180,12 @@ fn choice_revision_exhaustion_cancels_and_refuses_instead_of_wrapping() {
 fn hotkey_delivery_can_mark_escape_after_the_raw_edge_already_cancelled_input() {
     let link = LinkHandle::detached();
     link.track_input(GestureId(1));
-    assert!(link.cancel_input());
+    let escaped = link.cancel_input_gesture();
     assert!(!link.input_is(GestureId(1)));
-    assert!(!link.take_input_escape());
-    link.mark_input_escape();
-    assert!(link.take_input_escape());
-    assert!(!link.take_input_escape());
+    assert_eq!(link.cancel_input_gesture(), None);
+    link.track_input(GestureId(2));
+    assert_eq!(escaped, Some(GestureId(1)));
+    assert!(link.input_is(GestureId(2)));
 }
 
 #[test]
@@ -196,11 +196,8 @@ fn matching_clear_and_escape_cancel_preserve_cancel_stop_order() {
     link.track_input(GestureId(9));
     link.clear_input(GestureId(8));
     assert!(link.input_is(GestureId(9)));
-    assert!(link.cancel_input());
-    assert!(!link.cancel_input());
-    link.mark_input_escape();
-    assert!(link.take_input_escape());
-    assert!(!link.take_input_escape());
+    assert_eq!(link.cancel_input_gesture(), Some(GestureId(9)));
+    assert_eq!(link.cancel_input_gesture(), None);
     assert!(link.send_control(
         &session,
         ControlToBrain::VoiceHoldStopped {
