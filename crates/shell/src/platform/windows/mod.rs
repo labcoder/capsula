@@ -5,6 +5,7 @@ mod folders;
 mod hit_mask;
 mod host;
 mod keyboard;
+pub(super) mod microphone;
 mod observer;
 mod overlay_input;
 mod pipe;

@@ -11,11 +11,25 @@
 //! but still violates the no-lock contract, including borrowed error paths.
 //! CoreAudio input calls the same helper at `src/host/coreaudio/macos/device.rs:781`.
 
+mod pcm;
+#[cfg(test)]
+mod tests;
+
+use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::thread;
 use std::time::{Duration, Instant};
 
+use async_channel::Receiver;
+use kumochi_protocol::message::MicPcm;
 use kumochi_protocol::message::{GestureId, HOLD_START_TIMEOUT_MS};
+use zeroize::Zeroize;
+
+pub(super) use pcm::{Format, Packetizer, Sample};
+
+pub(super) const POLL: Duration = Duration::from_millis(20);
+const PCM_QUEUE: usize = 4;
 
 /// The existing 60-second hold limit, independent of sample delivery.
 const HOLD_LIMIT: Duration = Duration::from_secs(60);
@@ -148,8 +162,7 @@ impl Generation {
     }
 
     pub(super) fn collecting(&self, session: &AtomicBool) -> bool {
-        session.load(Ordering::Acquire)
-            && self.gate.load(Ordering::Acquire) == (u64::from(self.gesture.0) << 3 | COLLECTING)
+        self.mode(session, Instant::now()) == Ok(Mode::Collecting)
     }
 
     pub(crate) fn mode(&self, session: &AtomicBool, now: Instant) -> Result<Mode, MicError> {
@@ -184,5 +197,237 @@ impl Generation {
 
     pub(super) fn running(&self) -> Result<(), MicError> {
         self.advance(OPENING, RUNNING)
+    }
+}
+/// Running is preparation evidence, never permission to copy samples.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Running {
+    pub(crate) gesture: GestureId,
+    pub(crate) rate: u32,
+}
+
+/// Finalization is reported only after the worker's native teardown and join.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Finalization {
+    Released { packets: u32 },
+    Discarded(MicError),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StopReason {
+    Release,
+    Cancel,
+}
+
+/// This receipt, unlike a stop request, releases the device generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StopReceipt {
+    pub(crate) gesture: GestureId,
+    pub(crate) finalization: Finalization,
+}
+
+/// One source worker. Dropping requests cancellation but is not a join receipt.
+pub(crate) struct MicOwner {
+    generation: Generation,
+    session: Arc<AtomicBool>,
+    wake: Arc<OnceLock<thread::Thread>>,
+    completion: Receiver<Result<Finalization, MicError>>,
+    reported: bool,
+    pub(crate) running: Receiver<Running>,
+    pub(crate) pcm: Receiver<MicPcm>,
+}
+
+struct WorkerCleanup {
+    generation: Generation,
+    discard: Receiver<MicPcm>,
+    keep: bool,
+}
+impl Drop for WorkerCleanup {
+    fn drop(&mut self) {
+        if !self.keep {
+            self.generation.cancel();
+            while let Ok(mut packet) = self.discard.try_recv() {
+                packet.samples.zeroize();
+            }
+        }
+    }
+}
+
+impl fmt::Debug for MicOwner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MicOwner")
+            .field("gesture", &self.generation.gesture)
+            .field("queued_packets", &self.pcm.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl MicOwner {
+    /// Caller must have Brain admission and must forward PCM on a separate worker.
+    /// No device is touched on this calling thread.
+    pub(crate) fn start(
+        generation: Generation,
+        session: Arc<AtomicBool>,
+    ) -> Result<Self, MicError> {
+        Self::start_with(generation, session, super::windows::microphone::capture)
+    }
+
+    fn start_with(
+        generation: Generation,
+        session: Arc<AtomicBool>,
+        capture: impl FnOnce(
+            &Generation,
+            &AtomicBool,
+            &async_channel::Sender<Running>,
+            &async_channel::Sender<MicPcm>,
+        ) -> Result<Finalization, MicError>
+        + Send
+        + 'static,
+    ) -> Result<Self, MicError> {
+        if generation.startup.set(Instant::now()).is_err() {
+            return Err(MicError::Stale);
+        }
+        if let Err(error) = generation.advance(ARMED, OPENING) {
+            generation.cancel();
+            transition(&generation.gate, generation.gesture, RETIRED);
+            return Err(error);
+        }
+        let (running_tx, running) = async_channel::bounded(1);
+        let (pcm_tx, pcm) = async_channel::bounded(PCM_QUEUE);
+        let token = generation.clone();
+        let permit = Arc::clone(&session);
+        let discard = pcm.clone();
+        let wake = Arc::new(OnceLock::new());
+        let source_wake = Arc::clone(&wake);
+        let (completed, completion) = async_channel::bounded(1);
+        let watch = generation.clone();
+        let watch_permit = Arc::clone(&session);
+        let reaper = thread::Builder::new()
+            .spawn(move || {
+                let worker = thread::Builder::new().spawn(move || {
+                    let mut cleanup = WorkerCleanup {
+                        generation: token.clone(),
+                        discard,
+                        keep: false,
+                    };
+                    if source_wake.set(thread::current()).is_err() {
+                        return Err(MicError::Unconfirmed);
+                    }
+                    let result = capture(&token, &permit, &running_tx, &pcm_tx);
+                    cleanup.keep = matches!(result, Ok(Finalization::Released { .. }));
+                    result
+                });
+                let result = match worker {
+                    Ok(worker) => {
+                        while !worker.is_finished() {
+                            if watch.mode(&watch_permit, Instant::now()).is_err() {
+                                worker.thread().unpark();
+                            }
+                            thread::park_timeout(POLL);
+                        }
+                        worker.join().unwrap_or(Err(MicError::Unconfirmed))
+                    }
+                    Err(_) => {
+                        watch.cancel();
+                        Ok(Finalization::Discarded(MicError::Unavailable))
+                    }
+                };
+                if completed.try_send(result).is_err() {
+                    watch.cancel();
+                }
+            })
+            .map_err(|_| {
+                generation.cancel();
+                transition(&generation.gate, generation.gesture, RETIRED);
+                MicError::Unavailable
+            })?;
+        drop(reaper);
+        Ok(Self {
+            generation,
+            session,
+            wake,
+            completion,
+            reported: false,
+            running,
+            pcm,
+        })
+    }
+
+    /// Call only after accepting this running receipt and publishing matching UI state.
+    pub(crate) fn accept_running(&self, running: Running) -> Result<(), MicError> {
+        if running.gesture != self.generation.gesture {
+            return Err(MicError::Stale);
+        }
+        self.generation.mode(&self.session, Instant::now())?;
+        self.generation.advance(RUNNING, COLLECTING)
+    }
+
+    /// The native edge should already have closed the gate; this is idempotent.
+    pub(crate) fn stop(&self, reason: StopReason) {
+        match reason {
+            StopReason::Release => {
+                transition(&self.generation.gate, self.generation.gesture, RELEASED)
+            }
+            StopReason::Cancel => self.generation.cancel(),
+        }
+        if let Some(worker) = self.wake.get() {
+            worker.unpark();
+        }
+    }
+
+    /// Nonblocking polling; an error leaves the generation unavailable, not retired.
+    pub(crate) fn try_receipt(&mut self) -> Option<Result<StopReceipt, MicError>> {
+        if self.reported {
+            return None;
+        }
+        match self.completion.try_recv() {
+            Ok(result) => {
+                self.reported = true;
+                Some(self.joined(Ok(result)))
+            }
+            Err(async_channel::TryRecvError::Empty) => None,
+            Err(async_channel::TryRecvError::Closed) => {
+                self.reported = true;
+                self.generation.cancel();
+                Some(Err(MicError::Unconfirmed))
+            }
+        }
+    }
+
+    fn joined(
+        &self,
+        result: thread::Result<Result<Finalization, MicError>>,
+    ) -> Result<StopReceipt, MicError> {
+        match result {
+            Ok(Ok(mut finalization)) => {
+                if matches!(finalization, Finalization::Released { .. }) {
+                    match self.generation.mode(&self.session, Instant::now()) {
+                        Ok(Mode::Release) => {}
+                        Err(error) => finalization = Finalization::Discarded(error),
+                        _ => finalization = Finalization::Discarded(MicError::Cancelled),
+                    }
+                }
+                if matches!(finalization, Finalization::Discarded(_)) {
+                    while let Ok(mut packet) = self.pcm.try_recv() {
+                        packet.samples.zeroize();
+                    }
+                }
+                transition(&self.generation.gate, self.generation.gesture, RETIRED);
+                Ok(StopReceipt {
+                    gesture: self.generation.gesture,
+                    finalization,
+                })
+            }
+            _ => {
+                self.generation.cancel();
+                Err(MicError::Unconfirmed)
+            }
+        }
+    }
+}
+
+impl Drop for MicOwner {
+    fn drop(&mut self) {
+        self.stop(StopReason::Cancel);
     }
 }
