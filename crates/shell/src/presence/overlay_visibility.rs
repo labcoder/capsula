@@ -221,7 +221,7 @@ mod tests {
     fn presenter() -> Presenter {
         kumochi_scene::deferred::start().expect("the dropper starts");
         let surface = SurfaceGeometry::Overlay {
-            logical_size: [1920.0, 1080.0],
+            default_canvas: [1920.0, 1080.0],
         };
         Presenter::new(
             surface,

@@ -289,7 +289,7 @@ fn a_nested_overlay_group_inherits_the_surface_default_direction() {
             {"edge":{"id":"ab","in":"deep","from":"a","to":"b"}}
         ]}),
         SurfaceGeometry::Overlay {
-            logical_size: [800.0, 600.0],
+            default_canvas: [800.0, 600.0],
         },
     );
     let a = bounds(&prepared.after, "a");

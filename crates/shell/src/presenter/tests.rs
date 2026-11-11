@@ -313,7 +313,7 @@ fn label(id: &str, text: &str) -> Step {
 fn presenter() -> Presenter {
     kumochi_scene::deferred::start().expect("the dropper starts");
     let surface = SurfaceGeometry::Overlay {
-        logical_size: [1920.0, 1080.0],
+        default_canvas: [1920.0, 1080.0],
     };
     let mut presenter = Presenter::new(surface, Arc::new(Theme::default()), Box::new(Charged(0)));
     presenter.connected(GENERATION);
@@ -550,7 +550,7 @@ pub(crate) fn preparing_for(
 ) -> (Presenter, Instant, PrepareJob) {
     let mut presenter = Presenter::new(
         SurfaceGeometry::Overlay {
-            logical_size: [1920.0, 1080.0],
+            default_canvas: [1920.0, 1080.0],
         },
         Arc::new(Theme::default()),
         stage,
@@ -1582,7 +1582,7 @@ fn stale_held_and_discarded_snapshot_data_drops_on_the_dropper() {
 fn rejected_undelivered_and_discarded_preparations_drop_on_the_dropper() {
     let theme = Arc::new(Theme::default());
     let surface = SurfaceGeometry::Overlay {
-        logical_size: [1920.0, 1080.0],
+        default_canvas: [1920.0, 1080.0],
     };
     let mut presenter = Presenter::new(surface, Arc::clone(&theme), Box::new(Charged(0)));
     let release = hold_dropper();
@@ -1965,7 +1965,7 @@ pub(crate) mod recovery_recording;
 pub(crate) fn host_recovery_fixture(stage: Box<dyn Stage>, survivor: bool) -> Presenter {
     let mut presenter = Presenter::new(
         SurfaceGeometry::Overlay {
-            logical_size: [1920.0, 1080.0],
+            default_canvas: [1920.0, 1080.0],
         },
         Arc::new(Theme {
             font_size: 15.03125,

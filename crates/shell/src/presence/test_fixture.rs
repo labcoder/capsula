@@ -82,7 +82,7 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             paint_notice: Rc::default(),
             presenter: Presenter::new(
                 SurfaceGeometry::Overlay {
-                    logical_size: [1920.0, 1080.0],
+                    default_canvas: [1920.0, 1080.0],
                 },
                 Arc::new(Theme::default()),
                 Box::new(super::paint_cache::Stager(

@@ -422,7 +422,7 @@ fn host_surface_defaults_choose_the_expected_diagram_flow_and_width() {
         ),
         (
             SurfaceGeometry::Overlay {
-                logical_size: [600.0, 400.0],
+                default_canvas: [600.0, 400.0],
             },
             Vec2::new(224.0, 36.0),
             Vec2::new(376.0, 36.0),
@@ -1000,7 +1000,7 @@ fn procedural_outputs_fit_the_admission_reservations_and_share_stroked_vertices(
         first.preparation,
         before,
         SurfaceGeometry::Overlay {
-            logical_size: [800.0, 600.0],
+            default_canvas: [800.0, 600.0],
         },
         Arc::new(Theme::default()),
     )

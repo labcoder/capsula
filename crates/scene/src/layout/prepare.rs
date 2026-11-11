@@ -54,6 +54,7 @@ pub fn prepare(
     };
     build.check_cancel()?;
     let mut after = before.clone();
+    after.canvas = viewport;
     if !ticket.extras.is_empty() {
         after
             .extras
@@ -318,6 +319,7 @@ pub fn prepare(
     }
     after.prune_extras();
     validate_bounds(&after)?;
+    after.grow_content()?;
     for primitive in after
         .objects
         .values()

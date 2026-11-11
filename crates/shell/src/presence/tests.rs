@@ -50,7 +50,7 @@ fn mirrored_presenter() -> Presenter {
     deferred::start().expect("the dropper starts before intake");
     let mut presenter = Presenter::new(
         SurfaceGeometry::Overlay {
-            logical_size: [1920.0, 1080.0],
+            default_canvas: [1920.0, 1080.0],
         },
         Arc::new(Theme::default()),
         Box::new(super::paint_cache::Stager(size_of::<

@@ -3,7 +3,7 @@ use crate::{
     ErrorCode, Handle, Op, SceneState, WireId,
     deferred::Deferred,
     display::{Item, PaintWork},
-    geom::{Affine, Vec2},
+    geom::{Affine, Rect, Vec2},
     mermaid::Extra,
     record::{Direction, KeyValue, Rgb, Track},
     theme::Theme,
@@ -119,6 +119,9 @@ pub struct LayoutState {
     pub(super) extras: BTreeMap<u32, Arc<BTreeMap<usize, Extra>>>,
     /// Prepared 3D views by view id.
     pub(super) views: BTreeMap<WireId, Arc<ViewGeometry>>,
+    pub(super) canvas: Rect,
+    pub(super) declared_canvas: bool,
+    pub(super) content: Option<Rect>,
 }
 impl fmt::Debug for LayoutState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -140,6 +143,14 @@ impl LayoutState {
             handles: BTreeMap::new(),
             extras: BTreeMap::new(),
             views: BTreeMap::new(),
+            canvas: Rect {
+                origin: Vec2::default(),
+                size: scene.header().size.map_or(Vec2::new(960.0, 600.0), |size| {
+                    Vec2::new(size[0].get(), size[1].get())
+                }),
+            },
+            declared_canvas: scene.header().size.is_some(),
+            content: None,
         }
     }
     /// Prepared 3D views by view id.
@@ -370,11 +381,15 @@ impl LayoutState {
                     .map(|(id, view)| (id.clone(), Arc::new(view.retain(|h| three.contains(&h)))))
                     .collect()
             },
+            canvas: self.canvas,
+            declared_canvas: self.declared_canvas,
+            content: None,
         });
         after.prune_extras();
         for object in after.objects.values() {
             after.world_bounds(object)?;
         }
+        after.grow_content()?;
         Ok(after.into_inner())
     }
 }

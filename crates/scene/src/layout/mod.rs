@@ -8,6 +8,7 @@ mod edges;
 pub(crate) mod heap;
 mod nodes;
 mod path;
+mod place;
 mod prepare;
 mod primitives;
 mod state;
@@ -20,6 +21,7 @@ use crate::{
     geom::{Rect, Vec2},
     theme::Theme,
 };
+pub use place::place;
 pub use prepare::{prepare, recover, recover_all};
 pub use state::LayoutState;
 pub(crate) use state::Rest;
@@ -28,10 +30,10 @@ use std::sync::Arc;
 /// Host geometry supplied for this rendering, not persisted drawing coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SurfaceGeometry {
-    /// Overlay display dimensions in logical pixels.
+    /// Overlay drawing canvas, independent of the display or presentation box.
     Overlay {
-        /// Logical width and height.
-        logical_size: [f32; 2],
+        /// Canvas dimensions when the drawing does not declare its own size.
+        default_canvas: [f32; 2],
     },
     /// Inline layout with the host's available width.
     Inline {
@@ -47,7 +49,10 @@ impl Default for SurfaceGeometry {
 impl SurfaceGeometry {
     fn viewport(self, canvas_size: Option<[f32; 2]>) -> Result<Rect, PrepareError> {
         let size = match self {
-            Self::Overlay { logical_size } => Vec2::new(logical_size[0], logical_size[1]),
+            Self::Overlay { default_canvas } => {
+                let size = canvas_size.unwrap_or(default_canvas);
+                Vec2::new(size[0], size[1])
+            }
             Self::Inline { width } => canvas_size
                 .map_or(Vec2::new(width, crate::limits::MAX_COORD), |size| {
                     Vec2::new(size[0], size[1])
