@@ -375,6 +375,44 @@ fn curve_subdivision_reserves_the_presentation_scale() {
 }
 
 #[test]
+fn a_small_overlay_diagram_of_rounded_nodes_fits_the_paint_budgets() {
+    // The shape of a recorded call the shell refused for the paint work of its rounded rects.
+    let work = picture(
+        header(Some([520.0, 320.0])),
+        &json!([
+            {"node":{"id":"a","label":"Alpha \u{2600}\u{fe0f}","shape":"circle","color":"amber"}},
+            {"node":{"id":"b","label":"Bravo","sub":"second","shape":"round","color":"blue"}},
+            {"node":{"id":"c","label":"Charlie","sub":"third","shape":"round","color":"gray"}},
+            {"node":{"id":"d","label":"Delta","sub":"fourth","shape":"pill","color":"teal"}},
+            {"edge":{"id":"ab","from":"a","to":"b","label":"one"}},
+            {"edge":{"id":"bc","from":"b","to":"c","label":"two"}},
+            {"edge":{"id":"cd","from":"c","to":"d","label":"three"}},
+            {"edge":{"id":"db","from":"d","to":"b","label":"four"}}
+        ]),
+    )
+    .paint_work();
+    assert!(work.within_limits(), "{work:?}");
+}
+
+#[test]
+fn four_plain_nodes_and_three_labelled_edges_fit_the_paint_budgets() {
+    let work = picture(
+        header(Some([520.0, 320.0])),
+        &json!([
+            {"node":{"id":"a","label":"Alpha"}},
+            {"node":{"id":"b","label":"Bravo"}},
+            {"node":{"id":"c","label":"Charlie"}},
+            {"node":{"id":"d","label":"Delta"}},
+            {"edge":{"id":"ab","from":"a","to":"b","label":"one"}},
+            {"edge":{"id":"bc","from":"b","to":"c","label":"two"}},
+            {"edge":{"id":"cd","from":"c","to":"d","label":"three"}}
+        ]),
+    )
+    .paint_work();
+    assert!(work.within_limits(), "{work:?}");
+}
+
+#[test]
 fn a_growing_step_replaces_the_fit_once_and_removal_does_not_shrink_it() {
     let mut scene = SceneState::begin(header(None)).expect("scene");
     let mut budget = GlobalBudget::default();
