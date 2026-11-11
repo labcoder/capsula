@@ -211,6 +211,13 @@ pub(super) struct Windows<'a> {
 }
 
 impl Windows<'_> {
+    #[cfg_attr(
+        test,
+        expect(
+            clippy::panic_in_result_fn,
+            reason = "fixture assertions enforce exclusion before native placement"
+        )
+    )]
     pub(super) fn protect(
         &mut self,
         owner: &mut Exclusion<Receipt>,
@@ -339,14 +346,6 @@ impl Surfaces for Windows<'_> {
 }
 
 impl Presence {
-    #[cfg(test)]
-    pub(super) fn check_exclusion_before_show(&self, slot: Slot) {
-        if let (Some(lease), Some(fixture)) = (&self.exclusion.lease, &self.exclusion_fixture) {
-            assert!(!lease.revoked, "a revoked owner cannot reach placement");
-            fixture.borrow().assert_excluded(slot);
-        }
-    }
-
     fn with_exclusion<T>(
         &mut self,
         cx: &mut Context<'_, Self>,
