@@ -130,6 +130,7 @@ fn recorded_graph_stays_centered_through_activation_stop_recovery_and_stage_chan
     stopped.set_stage(stage);
     let mut rest_frame = Frame::new();
     stopped.frame(0, &mut rest_frame).expect("stopped frame");
+    assert_eq!(rest_frame.items().len(), 7);
     assert!(
         rest_frame
             .items()
@@ -154,6 +155,7 @@ fn recorded_graph_stays_centered_through_activation_stop_recovery_and_stage_chan
     recovered_view
         .frame(0, &mut recovered_frame)
         .expect("recovered frame");
+    assert_eq!(recovered_frame.items().len(), 7);
     assert!(
         recovered_frame
             .items()
@@ -172,12 +174,14 @@ fn recorded_graph_stays_centered_through_activation_stop_recovery_and_stage_chan
     recovered_view
         .frame(0, &mut recovered_frame)
         .expect("new stage");
+    assert_eq!(recovered_frame.items().len(), 7);
     assert!(
         recovered_frame
             .items()
             .iter()
             .all(|item| item.transform == Affine::pose(1.0, 0.0, Vec2::new(-6.0, 34.0)))
     );
+    assert_eq!(recovered_view.layout().items().len(), sources.len());
     assert!(
         recovered_view
             .layout()
