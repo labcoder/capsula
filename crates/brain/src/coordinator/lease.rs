@@ -78,6 +78,14 @@ impl Coordinator {
         effects: &mut Vec<Effect>,
     ) {
         let pending = self.pending_deletes();
+        if !self.hold_valid() {
+            effects.push(Effect::Rebuild(SendKey::Build(key)));
+            if self.current_run() == Some(key.run) {
+                self.fail(key.run, Failure::Engine, effects)
+                    .expect("the run is current");
+            }
+            return;
+        }
         let current = self
             .current
             .as_ref()

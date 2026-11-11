@@ -29,6 +29,8 @@ mod draw_tool;
 mod drawing;
 #[path = "engine_tests.rs"]
 mod engines;
+#[path = "hold_tests.rs"]
+mod hold;
 #[path = "inline_tests.rs"]
 mod inline;
 #[path = "job_tests.rs"]

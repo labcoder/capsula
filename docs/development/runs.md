@@ -494,3 +494,25 @@ The step is a labelled placeholder until slice 4's scene format. A run's steps d
 its first step's write begins the scene and returns its id, and the steps after it wait in the
 run until that ack. A Stop, a replacement, a failed first write or a lost shell drops the waiting
 steps, and the run still settles.
+
+### Voice hold admission
+
+The runtime owns one pending hold, keyed by shell epoch and gesture with its captured
+selection revision and a shared cancellation flag. Recognition queues `ReadHold` on the
+existing stamped page reader: after prior accepted writes, one bounded, cancellable read
+transaction captures the live target's deletion generation and effective model/effort.
+New captures defaults without creating a thread or inventing a run identity.
+
+Only `submit_hold` assigns real thread/run ids and emits a Hold-origin run. Recognized words
+become ordinary deletable user history, written once through the existing ordered turn,
+context and send gates; they do not advance typed/Ask deletion watermarks. The run retains
+the pinned choice and connection before its first build, which skips the thread-choice
+reread but still checks the catalog. No separate transcript or audio record is stored.
+
+Deletion generation safety follows acceptance ordering: the runtime invalidates the shared
+flag before accepting any later target deletion or model write, including changes away and
+back. It also invalidates on selection/settings/connection/session changes, newer explicit
+input and cancel. This applies while a snapshot read is pending and after it completes, so
+an answered deletion cannot revive an old admission. Once submitted, the coordinator also
+fences target deletion/model inputs before routing them. SendReady requires the live flag,
+exact pinned snapshot, ready connection and model; cancellation never grants another send.
