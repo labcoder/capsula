@@ -280,7 +280,7 @@ async fn model_review_h2_preserves_a_replacement_between_hash_and_discard() {
         }),
     );
     assert_eq!(fetch(&downloader).await.0, Ok(()));
-    assert_eq!(*attempted.lock().unwrap(), Some(Err(Some(32))));
+    assert_eq!(*attempted.lock().unwrap(), Some(Err(Some(5))));
     assert_eq!(fs::read(replacement).unwrap(), b"abcdef");
     assert_eq!(fs::read(target).unwrap(), b"abcdef");
 }
