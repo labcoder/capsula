@@ -109,7 +109,6 @@ impl Presence {
             return Ok(());
         }
         let area = platform::work_area()?;
-        let mut text_bounds = [0, 0, scaled(380.0, self.scale), scaled(140.0, self.scale)];
         let mut status_bounds = self.layout.panel;
         let panels = [
             self.settings_panel
@@ -119,8 +118,8 @@ impl Presence {
                 .as_mut()
                 .map(|panel| (threads_open, panel.window, &mut panel.bounds)),
             self.text
-                .as_ref()
-                .map(|panel| (text_open, panel.window, &mut text_bounds)),
+                .as_mut()
+                .map(|panel| (text_open, panel.window, &mut panel.bounds)),
             Some((status_open, self.panel_window, &mut status_bounds)),
         ];
         for (visible, handle, bounds) in panels.into_iter().flatten() {

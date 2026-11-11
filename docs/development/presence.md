@@ -26,9 +26,13 @@ and the keyboard is armed before the brain link starts connecting; [input.md](in
 the shortcut, the typing panel and Esc. A link failure shows in the status panel; Retry never sends
 the previous input again.
 
-`presence::stage` uses the accepted dock layout and maximum status panel to choose the
-largest free work-area band, with a 32-logical-pixel inset. It updates the presenter's stage
-when the dock lands. A retained GPUI display observer refreshes the dock's scale and anchor,
+`presence::stage` unions the accepted dock layout, the status peek's minimum reservation
+and the accepted bounds of the visible typing, Threads or Settings panel. It chooses the
+largest-area free band below, above, left or right, in that tie order, with a
+32-logical-pixel inset. Opening or closing a panel updates placement before the next paint;
+when the dock lands, panels re-anchor before the stage is recomputed. The typing panel
+retains its accepted size when re-anchored, like Threads and Settings.
+A retained GPUI display observer refreshes the dock's scale and anchor,
 the drawing stage and a shown overlay's bounds after display changes. Existing views snap
 to the new stage; their scene clocks and prepared geometry stay intact. See
 [scene.md](scene.md#canvas-and-overlay-placement) for the canvas and scale-envelope rules.

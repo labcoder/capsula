@@ -82,10 +82,12 @@ grown by content that overflows it. Without a declared canvas, the content has 2
 pixels of padding on each side. Empty or zero-sized content falls back to the canvas.
 Stop rebuilds the extent from survivors; recovery replays the same preparation and cuts.
 
-The shell chooses the largest free band around the dock and its maximum status panel in
-the primary display's work area, inset by 32 logical pixels. It converts physical work-area
-and dock bounds using the window scale. Dock placement and GPUI display-change events
-refresh the stage. Activation, step installation, Stop and recovery also read the work area
+The shell reserves the dock, a minimum status peek and whichever typing, Threads or Settings
+panel is visible. It chooses the largest-area free band below, above, left or right, in
+that tie order, in the primary display's work area, inset by 32 logical pixels. Physical
+work-area, dock and accepted panel bounds use the window scale. Panel open/close,
+dock placement (after re-anchoring panels) and GPUI display-change events refresh the
+stage before repaint. Activation, step installation, Stop and recovery also read the work area
 fresh before placing their views; ordinary animation frames do not poll it.
 Work-area-only changes wait for the next placement; add a work-area notification through
 the presence adapter. Per-display overlays are not implemented.

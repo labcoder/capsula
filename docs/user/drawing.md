@@ -17,7 +17,9 @@ clicks, so the app underneath keeps working. While one is on screen, Esc clears 
 (see [Esc](escape.md)). Kumochi centers each drawing in the free area beside its panel,
 shrinks it to fit, or enlarges it up to twice its canvas size when there is room. A drawing
 uses its declared canvas, or its content bounds when no canvas size was given. Moving the
-dock or changing the display re-places the drawing immediately, without redrawing its steps.
+dock, opening or closing a typing, Threads or Settings panel, or changing the display
+re-places the drawing immediately, without redrawing its steps. The free area stays clear
+of the open panel and reserves room for the smaller status peek even when it is hidden.
 
 This update changes how drawing coordinates are laid out. Drawings left on screen by an
 older version are cleared on reconnect; conversation history is kept.

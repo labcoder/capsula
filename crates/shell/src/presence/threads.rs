@@ -162,6 +162,7 @@ impl Presence {
             state.show();
             cx.notify();
         });
+        self.place_drawings(cx.weak_entity(), cx);
         self.request_pages(cx);
         Ok(())
     }
@@ -270,6 +271,7 @@ impl Presence {
             state.hide();
             cx.notify();
         });
+        self.place_drawings(cx.weak_entity(), cx);
         self.request_pages(cx);
         self.pointer_changed(cx)
     }
