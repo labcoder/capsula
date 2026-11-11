@@ -10,7 +10,7 @@
 use std::fs::File;
 use std::path::Path;
 
-use super::{Untrusted, hold_chain, model_file};
+use super::{Untrusted, hold_chain, model_file, validate_model_path};
 
 pub(crate) struct ModelFiles {
     pub(crate) files: Vec<File>,
@@ -19,6 +19,7 @@ pub(crate) struct ModelFiles {
 
 impl ModelFiles {
     pub(crate) fn open(dir: &Path, names: &[&str]) -> Result<Self, Untrusted> {
+        validate_model_path(dir)?;
         let parents = hold_chain(dir)?;
         let files = names
             .iter()

@@ -53,7 +53,7 @@ pub(crate) use protected::{
 pub(crate) use protected::{
     Untrusted, create_model_dir, create_model_write, discard_model, hold_chain, hold_file,
     local_app_data, mark, marker, model_file, open_model_write, owner_only_dir, private_tree,
-    profile_dir, publish_model, remove_tree, unmark,
+    profile_dir, publish_model, remove_tree, unmark, validate_model_path,
 };
 pub use root_store::trust_roots;
 pub use spawn::{Launch, Spawned, Stdio, spawn};

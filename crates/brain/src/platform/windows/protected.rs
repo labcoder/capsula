@@ -57,7 +57,7 @@ use super::pipe::user_sid;
 mod models;
 pub(crate) use models::{
     create_model_dir, create_model_write, discard_model, model_file, open_model_write,
-    publish_model,
+    publish_model, validate_model_path,
 };
 
 /// Why a path can't be trusted. It carries no path.
@@ -956,9 +956,12 @@ mod tests {
     #[test]
     fn the_default_local_app_data_chain_passes_the_existing_boundary() {
         let known = super::local_app_data().expect("local application data");
+        super::models::validate_model_path(&known).expect("ordinary local profile drive");
         let held = super::hold_chain(&known).expect("ordinary default profile chain");
         assert!(!held.is_empty());
         let configured = std::env::var_os("LOCALAPPDATA").expect("default local application data");
+        super::models::validate_model_path(std::path::Path::new(&configured))
+            .expect("ordinary configured profile drive");
         assert!(
             !super::hold_chain(std::path::Path::new(&configured))
                 .expect("ordinary configured profile chain")

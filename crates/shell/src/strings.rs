@@ -887,7 +887,7 @@ mod tests {
         let strings = Strings::english();
         assert_eq!(
             strings.error(&ErrorKey::VoiceModelPath.into()),
-            "The speech model folder goes through a link or network location. Use an ordinary local folder."
+            "The speech model folder goes through a link or network location, or has unsafe permissions. Use an ordinary local folder."
         );
     }
 

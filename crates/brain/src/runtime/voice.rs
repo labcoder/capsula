@@ -167,11 +167,12 @@ async fn deleted(delete: &mut Option<Deleting>) -> Option<Folder> {
 /// never follow a reparse point, so a junction on the way, or a folder someone else could change,
 /// deletes nothing. A folder that's already gone counts as deleted. It blocks.
 pub(super) fn delete(models: &Path, part: VoicePart) -> Folder {
-    let deleted = match platform::hold_chain(models) {
-        Ok(_held) => platform::remove_tree(&models.join(part.dir())),
-        Err(Untrusted::Missing) => Ok(()),
-        Err(error) => Err(error),
-    };
+    let deleted =
+        match platform::validate_model_path(models).and_then(|()| platform::hold_chain(models)) {
+            Ok(_held) => platform::remove_tree(&models.join(part.dir())),
+            Err(Untrusted::Missing) => Ok(()),
+            Err(error) => Err(error),
+        };
     match deleted {
         Ok(()) => Folder::Missing,
         Err(error) => {
@@ -405,7 +406,9 @@ impl Brain {
     ) -> Option<(RemoveAnswer, VoiceView, Vec<Effect>)> {
         let voice = self.voice.as_mut()?;
         let before = voice.installer.view();
-        let folder = match platform::hold_chain(&voice.models.join(part.dir())) {
+        let folder = match platform::validate_model_path(&voice.models)
+            .and_then(|()| platform::hold_chain(&voice.models.join(part.dir())))
+        {
             Err(Untrusted::Missing) => Folder::Missing,
             Ok(_) | Err(_) => Folder::Present,
         };

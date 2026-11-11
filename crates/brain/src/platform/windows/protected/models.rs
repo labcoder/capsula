@@ -8,17 +8,32 @@ use std::path::{Component, Path, PathBuf, Prefix};
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
     FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_READ, FileRenameInfo,
-    READ_CONTROL, SetFileInformationByHandle,
+    GetDriveTypeW, READ_CONTROL, SetFileInformationByHandle,
+};
+use windows_sys::Win32::System::WindowsProgramming::{
+    DRIVE_CDROM, DRIVE_FIXED, DRIVE_RAMDISK, DRIVE_REMOVABLE,
 };
 
 use super::{
     Kind, Untrusted, check_marker, delete_on_close, hold_chain, hold_file, open, owner_only_dir,
 };
 
-pub(crate) fn create_model_dir(path: &Path) -> Result<Vec<File>, Untrusted> {
+pub(crate) fn validate_model_path(path: &Path) -> Result<(), Untrusted> {
+    validate_path(path, |root| {
+        // SAFETY: `root` is a live NUL-terminated drive-root string.
+        unsafe { GetDriveTypeW(root.as_ptr()) }
+    })
+}
+
+fn validate_path(path: &Path, drive_kind: impl FnOnce(&[u16; 4]) -> u32) -> Result<(), Untrusted> {
     let mut components = path.components();
-    if !matches!(components.next(), Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_)))
-        || components.next() != Some(Component::RootDir)
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return Err(Untrusted::Unsafe);
+    };
+    let Prefix::Disk(drive) = prefix.kind() else {
+        return Err(Untrusted::Unsafe);
+    };
+    if components.next() != Some(Component::RootDir)
         || components.any(|component| !matches!(component, Component::Normal(_)))
     {
         return Err(Untrusted::Unsafe);
@@ -27,6 +42,19 @@ pub(crate) fn create_model_dir(path: &Path) -> Result<Vec<File>, Untrusted> {
     if normalized.as_os_str() != path.as_os_str() {
         return Err(Untrusted::Unsafe);
     }
+    let root = [u16::from(drive), u16::from(b':'), u16::from(b'\\'), 0];
+    let kind = drive_kind(&root);
+    if !matches!(
+        kind,
+        DRIVE_FIXED | DRIVE_REMOVABLE | DRIVE_RAMDISK | DRIVE_CDROM
+    ) {
+        return Err(Untrusted::Unsafe);
+    }
+    Ok(())
+}
+
+pub(crate) fn create_model_dir(path: &Path) -> Result<Vec<File>, Untrusted> {
+    validate_model_path(path)?;
     let mut missing = Vec::new();
     let mut parent = path;
     let mut held = loop {
@@ -134,6 +162,25 @@ mod tests {
     use crate::test_support::Scratch;
     use std::io::Write as _;
 
+    #[test]
+    fn model_paths_refuse_unc_before_querying_a_drive_and_refuse_network_mappings() {
+        assert_eq!(
+            validate_path(Path::new(r"\\127.0.0.1\never-contact\models"), |_| panic!(
+                "UNC must be lexical"
+            )),
+            Err(Untrusted::Unsafe)
+        );
+        assert_eq!(
+            validate_path(Path::new(r"Z:\models"), |root| {
+                assert_eq!(
+                    root,
+                    &[u16::from(b'Z'), u16::from(b':'), u16::from(b'\\'), 0]
+                );
+                windows_sys::Win32::System::WindowsProgramming::DRIVE_REMOTE
+            }),
+            Err(Untrusted::Unsafe)
+        );
+    }
     #[test]
     fn model_paths_publish_the_held_partial_without_replacing_an_unexpected_arrival() {
         let scratch = Scratch::trusted("model-publication");

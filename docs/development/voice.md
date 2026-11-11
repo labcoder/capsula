@@ -49,6 +49,8 @@ remain supported for the development installer, with writers and rebinding exclu
 Both model constructors hold their checked parents and model files until the loaded engine is
 destroyed. These storage guarantees are the platform adapter contract; model policy has no OS
 conditionals. Intentional linked-folder relocation is not supported.
+Drive-letter network mappings are refused before opening their root; local drives still pass
+the existing held-chain ownership, permission and resolved-path checks.
 Start-up inspects sizes through the same checked file handles. A refused path becomes the
 existing `Failed` state with `VoiceModelPath`, including constructor failures reported by either
 owner; Settings explains that the model folder must be an ordinary local folder. This is not the
