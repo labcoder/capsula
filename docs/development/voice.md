@@ -880,3 +880,8 @@ unconfirmed source remains unavailable rather than claiming stopped or allowing 
 No-Running start failures take their notice from the true stop result, not a manufactured
 user cancellation. Confirmed unavailable/unsupported microphones have a dedicated notice;
 only unconfirmed source cleanup uses the microphone-active restart warning.
+
+The Shell data writer serializes into one caller-owned zeroizing buffer and scrubs its
+owned capacity after success, encoding refusal or a partial/failed write. Frame headers,
+payload caps, packet drop and credit ordering are unchanged. This does not erase bytes
+already written to the pipe, allocator/OS copies or native speech-runtime storage.

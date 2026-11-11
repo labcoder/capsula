@@ -9,6 +9,78 @@ use kumochi_protocol::voice::VoicePart;
 use std::sync::atomic::Ordering;
 
 #[test]
+fn data_writer_scrubs_serialized_pcm_after_success() {
+    let packet = private_pcm();
+    let mut encoded = zeroize::Zeroizing::new(Vec::new());
+    let mut bytes = Vec::new();
+    super::super::write_data_frame(&mut bytes, &packet, &mut encoded).expect("written");
+    let Some(DataToBrain::MicPcm(packet)) =
+        frame::read(&mut bytes.as_slice(), Pipe::Data).expect("valid frame")
+    else {
+        panic!("one PCM packet");
+    };
+    assert_eq!(packet.gesture, GestureId(7));
+    assert_eq!(packet.seq, 0);
+    assert_eq!(packet.rate, 16_000);
+    assert!(packet.last);
+    assert_eq!(packet.samples, [17, -93, 405]);
+    assert!(
+        encoded.is_empty(),
+        "private bytes survived a successful write"
+    );
+}
+
+#[test]
+fn data_writer_scrubs_serialized_pcm_after_write_failure() {
+    let packet = private_pcm();
+    for available in [0, 3] {
+        let mut encoded = zeroize::Zeroizing::new(Vec::new());
+        let mut bytes = [0; 3];
+        let mut writer = std::io::Cursor::new(&mut bytes[..available]);
+        let result = super::super::write_data_frame(&mut writer, &packet, &mut encoded);
+        assert!(matches!(result, Err(frame::FrameError::Io(error))
+            if error.kind() == std::io::ErrorKind::WriteZero));
+        assert_eq!(
+            writer.position(),
+            u64::try_from(available).expect("small fixture")
+        );
+        assert!(encoded.is_empty(), "private bytes survived a failed write");
+    }
+}
+
+#[test]
+fn data_writer_scrubs_serialized_text_after_encode_failure() {
+    let packet = DataToBrain::TextSubmit {
+        turn: 1,
+        screen: kumochi_protocol::message::ScreenChoice::None,
+        thread: None,
+        text: "x".repeat(Pipe::Data.max_payload()).into(),
+    };
+    let mut encoded = zeroize::Zeroizing::new(Vec::new());
+    let mut bytes = Vec::new();
+    let result = super::super::write_data_frame(&mut bytes, &packet, &mut encoded);
+    assert!(matches!(
+        result,
+        Err(frame::FrameError::TooLarge { max: 262_144, .. })
+    ));
+    assert!(bytes.is_empty());
+    assert!(
+        encoded.is_empty(),
+        "private bytes survived an encoding refusal"
+    );
+}
+
+fn private_pcm() -> DataToBrain {
+    DataToBrain::MicPcm(MicPcm {
+        gesture: GestureId(7),
+        seq: 0,
+        rate: 16_000,
+        last: true,
+        samples: vec![17, -93, 405],
+    })
+}
+
+#[test]
 fn any_session_owner_ending_revokes_only_its_own_live_flag() {
     let old = Session::detached(1, Incarnation(1));
     let current = Session::detached(2, Incarnation(1));

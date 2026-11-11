@@ -8,7 +8,7 @@
 //! from Credential Manager, and checks that the pipe's server is the brain beside the shell.
 
 use std::fmt;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -28,7 +28,7 @@ use kumochi_protocol::message::{
 use kumochi_protocol::voice::VoicePart;
 
 use kumochi_scene::deferred::Deferred;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::credential::{self, CredentialError};
 use crate::platform::microphone::CollectionGate;
@@ -1479,9 +1479,10 @@ fn write_control(control: &PipeClient, queue: &Receiver<ControlToBrain>) {
 /// Writes queued turns in order, and after each wake-up any credit that has added up, until the
 /// queue closes or the pipe fails.
 fn write_data(data: &PipeClient, queue: &Receiver<DataOut>, credit: &Credit) {
+    let mut encoded = Zeroizing::new(Vec::new());
     while let Ok(out) = queue.recv_blocking() {
         let submitted = match &out {
-            DataOut::Submit(message) => frame::write(&mut &*data, message, Pipe::Data),
+            DataOut::Submit(message) => write_data_frame(&mut &*data, message, &mut encoded),
             DataOut::Credit => Ok(()),
         };
         drop(out);
@@ -1501,6 +1502,17 @@ fn write_data(data: &PipeClient, queue: &Receiver<DataOut>, credit: &Credit) {
             Err(error) => tracing::error!(%error, "a data message couldn't be encoded"),
         }
     }
+}
+
+fn write_data_frame(
+    writer: &mut impl Write,
+    message: &DataToBrain,
+    encoded: &mut Zeroizing<Vec<u8>>,
+) -> Result<(), FrameError> {
+    let result = frame::encode_into(message, Pipe::Data, encoded)
+        .and_then(|()| writer.write_all(encoded).map_err(FrameError::from));
+    encoded.zeroize();
+    result
 }
 
 #[cfg(all(test, windows))]
