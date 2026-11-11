@@ -57,6 +57,9 @@ Start-up inspects sizes through the same checked file handles. A refused path be
 existing `Failed` state with `VoiceModelPath`, including constructor failures reported by either
 owner; Settings explains that the model folder must be an ordinary local folder. This is not the
 restart-only `Unavailable` state: no model remains held after a path refusal.
+Removal preflights and retains every model-tree entry before deleting any of them. An unsafe
+descendant refuses the whole removal without deleting safe siblings; unrelated staging cleanup
+retains its existing behavior.
 
 Free space must cover the remaining bytes plus 10%, rounded up. An exclusively locked `.part`
 is rehashed before a Range request. A valid 206 appends; 200 replaces the prefix. A bad range

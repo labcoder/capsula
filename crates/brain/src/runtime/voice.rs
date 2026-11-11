@@ -169,7 +169,7 @@ async fn deleted(delete: &mut Option<Deleting>) -> Option<Folder> {
 pub(super) fn delete(models: &Path, part: VoicePart) -> Folder {
     let deleted =
         match platform::validate_model_path(models).and_then(|()| platform::hold_chain(models)) {
-            Ok(_held) => platform::remove_tree(&models.join(part.dir())),
+            Ok(_held) => platform::remove_model_tree(&models.join(part.dir())),
             Err(Untrusted::Missing) => Ok(()),
             Err(error) => Err(error),
         };

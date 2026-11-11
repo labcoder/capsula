@@ -57,7 +57,7 @@ use super::pipe::user_sid;
 mod models;
 pub(crate) use models::{
     check_model_final, create_model_dir, create_model_write, discard_model, model_file,
-    model_final, open_model_write, publish_model, validate_model_path,
+    model_final, open_model_write, publish_model, remove_model_tree, validate_model_path,
 };
 
 /// Why a path can't be trusted. It carries no path.

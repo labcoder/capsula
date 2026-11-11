@@ -71,7 +71,8 @@ pub use windows::{Launch, Spawned, Stdio, spawn};
 pub(crate) use windows::{
     Untrusted, check_model_final, create_model_dir, create_model_write, discard_model, hold_chain,
     local_app_data, mark, marker, model_file, model_final, open_model_write, owner_only_dir,
-    private_tree, profile_dir, publish_model, remove_tree, unmark, validate_model_path,
+    private_tree, profile_dir, publish_model, remove_model_tree, remove_tree, unmark,
+    validate_model_path,
 };
 #[cfg(windows)]
 pub use windows::{managed_presence, system_env};

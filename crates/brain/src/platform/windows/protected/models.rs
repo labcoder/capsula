@@ -5,9 +5,10 @@ use std::os::windows::io::AsRawHandle as _;
 use std::path::{Component, Path, PathBuf, Prefix};
 
 use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
-    FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_READ, FileRenameInfo,
-    GetDriveTypeW, READ_CONTROL, SetFileInformationByHandle,
+    DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+    FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
+    FILE_SHARE_READ, FileRenameInfo, GetDriveTypeW, READ_CONTROL, SetFileInformationByHandle,
 };
 use windows_sys::Win32::System::WindowsProgramming::{
     DRIVE_CDROM, DRIVE_FIXED, DRIVE_RAMDISK, DRIVE_REMOVABLE,
@@ -121,6 +122,50 @@ fn checked_write(file: File, path: &Path) -> Result<File, Untrusted> {
 pub(crate) fn discard_model(file: File) -> Result<(), Untrusted> {
     delete_on_close(&file)?;
     drop(file);
+    Ok(())
+}
+
+pub(crate) fn remove_model_tree(path: &Path) -> Result<(), Untrusted> {
+    let mut held = Vec::new();
+    match collect_model_tree(path, &Trusted::new()?, &mut held) {
+        Ok(()) => {}
+        Err(Untrusted::Missing) => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    for entry in held {
+        delete_on_close(&entry)?;
+        drop(entry);
+    }
+    Ok(())
+}
+
+fn collect_model_tree(
+    path: &Path,
+    trusted: &Trusted,
+    held: &mut Vec<File>,
+) -> Result<(), Untrusted> {
+    let entry = open(path, Kind::Folder, DELETE | FILE_LIST_DIRECTORY)?;
+    let attributes = super::attributes(&entry)?;
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(Untrusted::Reparse);
+    }
+    let kind = if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        Kind::Folder
+    } else {
+        Kind::File
+    };
+    check(&entry, path, kind, trusted)?;
+    if kind == Kind::Folder {
+        for name in super::names(&entry)? {
+            match collect_model_tree(&path.join(name), trusted, held) {
+                Ok(()) | Err(Untrusted::Missing) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    } else if attributes & FILE_ATTRIBUTE_READONLY != 0 {
+        return Err(Untrusted::Io);
+    }
+    held.push(entry);
     Ok(())
 }
 

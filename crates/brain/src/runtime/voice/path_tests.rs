@@ -2,6 +2,37 @@ use super::*;
 use crate::test_support::Scratch;
 
 #[test]
+fn model_review_h3_refused_removal_preserves_all_original_names_and_bytes() {
+    let scratch = Scratch::trusted("model-tree-refusal");
+    let models = scratch.dir().join("models");
+    let part = models.join(VoicePart::SpeechInput.dir());
+    std::fs::create_dir_all(part.join("b-folder")).unwrap();
+    std::fs::write(part.join("a-model"), b"ordinary").unwrap();
+    std::fs::write(part.join("b-folder").join("model"), b"nested").unwrap();
+    let outside = scratch.dir().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("sentinel"), b"outside").unwrap();
+    let link = part.join("z-link");
+    std::fs::create_dir(&link).unwrap();
+    crate::platform::sherpa::tests::set_junction(&link, &outside).unwrap();
+    let target = std::fs::read_link(&link).unwrap();
+    assert_eq!(delete(&models, VoicePart::SpeechInput), Folder::Present);
+    let mut names = std::fs::read_dir(&part)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(names, ["a-model", "b-folder", "z-link"]);
+    assert_eq!(std::fs::read(part.join("a-model")).unwrap(), b"ordinary");
+    assert_eq!(
+        std::fs::read(part.join("b-folder").join("model")).unwrap(),
+        b"nested"
+    );
+    assert_eq!(std::fs::read_link(link).unwrap(), target);
+    assert_eq!(std::fs::read(outside.join("sentinel")).unwrap(), b"outside");
+}
+
+#[test]
 fn model_paths_startup_refuses_a_redirected_installed_folder_without_reading_it() {
     let scratch = Scratch::trusted("voice-startup-link");
     let actual = scratch.dir().join("actual");
