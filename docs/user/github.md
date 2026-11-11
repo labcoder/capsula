@@ -1,11 +1,12 @@
 # GitHub connection
 
-Open **Settings → Accounts** for GitHub. This build does not yet contain a
-registered GitHub App client ID, so the section explains that GitHub is not
-configured and Connect is unavailable. It cannot use a browser's saved sign-in,
-gh, another app's credentials or a pasted token instead.
+Open **Settings → Accounts** for GitHub. Debug builds can connect to the
+**Kumochi Dev** GitHub App. Release builds do not yet have a registered app:
+the section explains that GitHub is not configured and Connect is unavailable.
+Kumochi cannot use a browser's saved sign-in, gh, another app's credentials or a
+pasted token instead.
 
-In a configured build, **Connect** requests a short-lived code. Enter that code
+In a debug build, **Connect** requests a short-lived code. Enter that code
 on the fixed GitHub device page opened by **Open GitHub verification** and authorize Kumochi's
 own App in your browser. **Cancel** ends the attempt; an expired or canceled code
 cannot be revived. The connection shows the verified account and repositories

@@ -3,11 +3,12 @@
 ## Configuration and reachability
 
 Settings → Accounts contains the GitHub connection workflow. The public
-`GITHUB_CLIENT_ID` in `crates/protocol/src/constants.rs` is deliberately unset in
-every build. Until it names the registered application's client ID, Connect is
+`GITHUB_CLIENT_ID` in `crates/protocol/src/constants.rs` names the registered
+Kumochi Dev app in debug builds. The app enables device flow and expiring
+user-to-server tokens. Release builds leave the client ID unset: Connect is
 refused without constructing HTTP or starting GitHub credential work. An App ID,
 another application's token or an environment variable is not a replacement.
-The GitHub App must enable device flow and have the required repository access.
+Repository access still requires installing the app for those repositories.
 
 With a configured client, the runtime executes device sign-in, verification,
 credential settlement, repository refresh, durable default selection and sign-out.
@@ -294,8 +295,9 @@ stateDiagram-v2
 ## Credential authority and lane
 
 Accounts owns the device-machine adapter on the existing credential lane. A checked,
-configured client identifier enables startup, effect dispatch and snapshots. The
-deliberately unset product constant keeps Connect closed in current builds.
+configured client identifier enables startup, effect dispatch and snapshots.
+Debug builds use the Kumochi Dev registration; release builds keep Connect closed
+until the release app is registered.
 Ordinary account startup and its existing vault sweeps are unchanged; there is no
 second account cache, credential worker or issue-consent receiver.
 

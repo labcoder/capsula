@@ -288,7 +288,7 @@ pub(crate) fn owner_accounts(scratch: &Scratch, store: ObservedStore, net: Net) 
         Box::new(move || Vault::with_service(store.clone(), "github-owner-test", &lock)),
         Arc::new(crate::connections::clock::SystemClock),
     );
-    Accounts::spawn(worker, net).unwrap()
+    Accounts::spawn_unconfigured(worker, net).unwrap()
 }
 
 pub(crate) fn active_github(scratch: &Scratch) -> i64 {

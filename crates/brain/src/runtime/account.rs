@@ -178,6 +178,22 @@ impl Accounts {
         worker: Worker<S>,
         net: Net,
     ) -> std::io::Result<Self> {
+        Self::spawn_with_github(worker, net, github::GitHub::new())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spawn_unconfigured<S: CredentialStore + 'static>(
+        worker: Worker<S>,
+        net: Net,
+    ) -> std::io::Result<Self> {
+        Self::spawn_with_github(worker, net, github::GitHub::with_client(None))
+    }
+
+    fn spawn_with_github<S: CredentialStore + 'static>(
+        worker: Worker<S>,
+        net: Net,
+        github: github::GitHub,
+    ) -> std::io::Result<Self> {
         let (state, started) = AccountState::start();
         let (events_tx, events) = mpsc::unbounded_channel();
         let (loaded_tx, loaded) = std_mpsc::channel();
@@ -185,7 +201,7 @@ impl Accounts {
         let (jobs, released) = spawn(worker, loaded_tx, events_tx.clone(), reads_tx.clone())?;
         let salt = getrandom::u64().map_err(std::io::Error::other)?;
         let mut accounts = Self {
-            github: github::GitHub::new(),
+            github,
             state,
             jobs: Some(jobs),
             released: Some(released),

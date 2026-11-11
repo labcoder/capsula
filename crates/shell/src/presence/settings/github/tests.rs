@@ -7,7 +7,7 @@ use kumochi_scene::text::Bounded;
 
 #[derive(Clone, Copy)]
 enum AppConfiguration {
-    Unset,
+    Product,
     Fixture,
 }
 
@@ -108,8 +108,9 @@ fn sent(controls: &async_channel::Receiver<ControlToBrain>, expected: &GitHubOp)
 }
 
 #[gpui::test]
+#[cfg(not(debug_assertions))]
 fn an_unconfigured_build_explains_the_missing_app_and_cannot_send_connect(cx: &mut TestAppContext) {
-    let (window, _, owner, controls) = open(cx, AppConfiguration::Unset);
+    let (window, _, owner, controls) = open(cx, AppConfiguration::Product);
     receive(&owner, GitHubView::SignedOut { cleanup: None }, cx);
     let mut frame = VisualTestContext::from_window(window, cx);
     assert!(frame.debug_bounds("github-configuration").is_some());
@@ -118,6 +119,18 @@ fn an_unconfigured_build_explains_the_missing_app_and_cannot_send_connect(cx: &m
         controls.try_recv(),
         Err(async_channel::TryRecvError::Empty)
     ));
+    assert_eq!(frame.opened_url(), None);
+}
+
+#[gpui::test]
+#[cfg(debug_assertions)]
+fn the_dev_registration_enables_the_production_connect_control(cx: &mut TestAppContext) {
+    let (window, _, owner, controls) = open(cx, AppConfiguration::Product);
+    receive(&owner, GitHubView::SignedOut { cleanup: None }, cx);
+    let mut frame = VisualTestContext::from_window(window, cx);
+    assert_eq!(frame.debug_bounds("github-configuration"), None);
+    click(&mut frame, "github-connect");
+    sent(&controls, &GitHubOp::Connect);
     assert_eq!(frame.opened_url(), None);
 }
 
@@ -170,7 +183,7 @@ fn verification_activation_rechecks_session_origin_and_monotonic_code_expiry(
     cx: &mut TestAppContext,
 ) {
     for stale in 0..3 {
-        let (window, view, owner, _) = open(cx, AppConfiguration::Unset);
+        let (window, view, owner, _) = open(cx, AppConfiguration::Product);
         receive(&owner, awaiting(), cx);
         let mut frame = VisualTestContext::from_window(window, cx);
         frame.update(|window, cx| window.draw(cx).clear(cx));
@@ -212,7 +225,7 @@ fn verification_activation_rechecks_session_origin_and_monotonic_code_expiry(
         frame.run_until_parked();
         assert_eq!(frame.opened_url(), None, "stale activation {stale}");
     }
-    let (window, _, owner, _) = open(cx, AppConfiguration::Unset);
+    let (window, _, owner, _) = open(cx, AppConfiguration::Product);
     receive(&owner, awaiting(), cx);
     let mut frame = VisualTestContext::from_window(window, cx);
     click(&mut frame, "github-verification");
@@ -334,7 +347,7 @@ fn repository_choice_debug_does_not_reveal_the_repository() {
 fn an_unverified_saved_login_checks_again_through_the_settings_control_without_granting_authority(
     cx: &mut TestAppContext,
 ) {
-    let (window, view, owner, controls) = open(cx, AppConfiguration::Unset);
+    let (window, view, owner, controls) = open(cx, AppConfiguration::Product);
     let unverified = GitHubView::NotVerified {
         login: GitHubLogin::new("example").unwrap(),
     };

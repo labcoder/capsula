@@ -26,7 +26,7 @@ fn accounts(scratch: &Scratch, http: SharedHttp) -> Accounts {
         Box::new(move || Vault::with_service(store.clone(), "key-test", &lock)),
         Arc::new(FixedClock(0)),
     );
-    let mut accounts = Accounts::spawn(
+    let mut accounts = Accounts::spawn_unconfigured(
         worker,
         Net {
             http: Arc::new(move || Ok(http.clone())),
@@ -95,7 +95,7 @@ async fn a_staged_paste_is_refused_and_the_saved_key_still_checks_out() {
         Box::new(move || Vault::with_service(owned.clone(), "key-test", &lock)),
         Arc::new(FixedClock(0)),
     );
-    let mut accounts = Accounts::spawn(
+    let mut accounts = Accounts::spawn_unconfigured(
         worker,
         Net {
             http: Arc::new(|| Ok(SharedHttp::new(EmptyCatalog))),
@@ -214,7 +214,7 @@ async fn a_remove_sent_while_a_native_read_is_blocked_wins() {
         }),
         Arc::new(FixedClock(0)),
     );
-    let mut accounts = Accounts::spawn(worker, test_support::net()).expect("worker");
+    let mut accounts = Accounts::spawn_unconfigured(worker, test_support::net()).expect("worker");
     armed.store(true, std::sync::atomic::Ordering::SeqCst);
     accounts.connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey));
     tokio::task::spawn_blocking(move || {
@@ -298,7 +298,7 @@ async fn a_failed_removal_stays_pending_until_a_retry_commits_it() {
         Box::new(move || Vault::with_service(owned.clone(), "key-test", &worker_lock)),
         Arc::new(FixedClock(0)),
     );
-    let mut accounts = Accounts::spawn(
+    let mut accounts = Accounts::spawn_unconfigured(
         worker,
         Net {
             http: Arc::new(move || Ok(SharedHttp::new(CountedCatalog(Arc::clone(&counted))))),

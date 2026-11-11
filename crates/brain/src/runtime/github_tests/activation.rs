@@ -147,6 +147,81 @@ async fn repositories_visible(shell: &mut Shell<DuplexStream>) {
 }
 
 #[tokio::test]
+async fn the_product_registration_controls_device_flow_without_using_real_credentials() {
+    let scratch = Scratch::new("github-product-registration");
+    let store = ObservedStore::default();
+    let lock = owner_lock(&scratch);
+    let worker = crate::connections::account::Worker::new(
+        Box::new(move || Vault::with_service(store.clone(), "github-owner-test", &lock)),
+        Arc::new(crate::connections::clock::SystemClock),
+    );
+    let http = AccountHttp::new(vec![(
+        RequestKind::Code,
+        json!({
+            "device_code":"offline-device", "user_code":"ABCD-EFGH",
+            "verification_uri":"https://github.com/login/device", "expires_in":900, "interval":900
+        }),
+    )]);
+    let mut net = crate::test_support::net();
+    net.http = http.factory();
+    let mut accounts = crate::runtime::account::Accounts::spawn(worker, net).unwrap();
+    settle_owner(&mut accounts).await;
+    assert_eq!(http.seen(), Vec::<RequestKind>::new());
+    let mut brain = brain_with_github_owner(&scratch, accounts);
+    let mut tap = Tap::from_env();
+    let ((control, data), mut shell) = duplex();
+    let client = async {
+        #[cfg(debug_assertions)]
+        assert_eq!(
+            github_view(&mut shell).await,
+            GitHubView::SignedOut { cleanup: None }
+        );
+        assert!(shell.scenes().await.is_empty());
+        shell.send(&ControlToBrain::GitHub(GitHubOp::Connect)).await;
+        #[cfg(debug_assertions)]
+        {
+            assert_eq!(github_view(&mut shell).await, GitHubView::Requesting);
+            let GitHubView::AwaitingUser {
+                user_code,
+                expires_in_s,
+            } = github_view(&mut shell).await
+            else {
+                panic!("the configured dev app presents its device code");
+            };
+            assert_eq!(user_code.as_str(), "ABCD-EFGH");
+            assert!((1..=900).contains(&expires_in_s));
+            shell
+                .send(&ControlToBrain::GitHub(GitHubOp::CancelConnect))
+                .await;
+            assert_eq!(
+                github_view(&mut shell).await,
+                GitHubView::SignedOut { cleanup: None }
+            );
+        }
+        #[cfg(not(debug_assertions))]
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::GitHubError(
+                ErrorKey::AccountMisconfigured.into()
+            ))
+        );
+        shell.control_out.shutdown().await.unwrap();
+        assert_eq!(shell.control().await, None);
+    };
+    let (ended, ()) = timeout(PATIENCE, async {
+        tokio::join!(brain.serve(control, data, &mut tap), client)
+    })
+    .await
+    .unwrap();
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
+    #[cfg(debug_assertions)]
+    assert_eq!(http.seen(), vec![RequestKind::Code]);
+    #[cfg(not(debug_assertions))]
+    assert_eq!(http.seen(), Vec::<RequestKind>::new());
+}
+
+#[tokio::test]
 #[expect(
     clippy::too_many_lines,
     reason = "keeps the real control, FIFO, settings and reconnect lifecycle with its cleanup assertions"

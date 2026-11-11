@@ -188,7 +188,7 @@ pub(in crate::runtime) fn brain_with_a_saved_key(scratch: &Scratch) -> Brain {
         Box::new(move || Vault::with_service(store.clone(), "key-test", &lock)),
         Arc::new(FixedClock(0)),
     );
-    let accounts = Accounts::spawn(
+    let accounts = Accounts::spawn_unconfigured(
         worker,
         Net {
             http: Arc::new(|| Ok(SharedHttp::new(EmptyCatalog))),
