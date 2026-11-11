@@ -10,6 +10,21 @@ name** blank to unset it. Settings are stored locally; changing a name doesn't s
 or discard your message draft. If the background process is disconnected, reconnect before
 editing. **Accounts** manages your [ChatGPT sign-in](accounts.md).
 
+In Settings, Ctrl+Tab goes to the next tab and Ctrl+Shift+Tab to the previous one, wrapping
+at either end. Focus returns to the Settings frame; use Tab or Shift+Tab to reach its controls
+and Space to choose a focused radio.
+
+**Voice** shows speech input's reported installation/load status and its idle preference:
+**Keep warm**, **After 15 minutes**, or **After an hour**. A choice says **Saving…** while it
+waits for the background process to save it. If saving is refused, the saved choice returns
+and the error stays beside the control until a successful retry. Offline controls are disabled;
+reconnecting reads the saved preference instead of assuming an interrupted save succeeded.
+
+The preference can be chosen before speech input is installed. It doesn't install models,
+start recording, reload an unloaded model or change spoken replies. **Installed · unloaded**
+means the installed speech-input files remain available without a ready recognizer; it is not
+a measurement of freed memory. See [voice](voice.md).
+
 **Max frame rate** caps how fast the dock animates. **Automatic** picks 60 or 72, whichever
 suits your display; a higher cap is smoother and uses more power. Kumochi draws at a rate your
 display's refresh divides evenly, so motion stays steady, and Settings shows that rate. On a

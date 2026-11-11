@@ -14,4 +14,25 @@ download.
 
 Downloads need space for the remaining bytes plus 10%. Cancelled or interrupted downloads
 keep their partial files for a later explicit attempt; they never resume just because the app
-starts. Installation controls are not connected yet.
+starts. **Settings → Voice → Install model** explicitly downloads, verifies and loads the default
+Parakeet speech-input model. **Retry setup** retries a failed setup and may verify or fetch files
+again, even when the status says installed. **Load model** reloads an installed, idle-unloaded
+model without another download. There is no model picker.
+
+**Settings → Voice** shows speech input's installed/loaded status and lets you keep its model
+warm or unload it after 15 idle minutes or an idle hour. The policy takes effect only after
+its setting is saved and speech input is ready. Active decoding finishes before idle unloading;
+the status changes to unloaded only after the background owner reports release. This does not
+certify how much native memory returned to Windows.
+
+**Cancel voice setup** applies to pending setup for all voice features, not just speech input.
+Some loading or finishing work cannot be stopped, including a model loading at startup.
+Installed files and reusable partial downloads are kept. A request answer is not a cancellation
+or release receipt: the current status can stay loading or later become ready. The tab shows
+request-pending, send-failure and refusal feedback separately from the brain's model status.
+Only that status establishes whether a model is ready or unloaded.
+
+Tab and Shift+Tab reach the labeled controls; Enter or Space activates a focused model button.
+These are explicit Settings actions; opening the tab or reconnecting does not start setup.
+The tab does not remove models, open the microphone or control spoken replies. Hold-triggered
+speech and its automatic reload are not connected yet.

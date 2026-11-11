@@ -71,8 +71,8 @@ sequenceDiagram
   that follows still cancels. Pause (E1) resets, because it has no dependable key-up. A keyboard
   overrun resets. A key with no make code is named through `MapVirtualKeyW`.
 - **Same callback.** The gesture lives in an `Rc<Cell<Gesture>>` shared by the native callback
-  and the owner. The callback reduces it before anything else, so Listening is true by the time
-  the callback returns. The line's fill then changes through `AsyncApp::update_window`, which
+  and the owner. The callback reduces it before anything else, with holds and Listening disabled.
+  Double-tap effects reach the owner through `AsyncApp::update_window`, which
   only tries to borrow GPUI. If GPUI is already borrowed, because a nested message loop
   dispatched the callback, the effects wait in an ordered queue with their original times, and
   a foreground task retries them every millisecond until they apply or the owner is gone.
@@ -94,13 +94,19 @@ sequenceDiagram
 
 ## What each effect does
 
-| Effect | Shell action in slice 1 |
+| Effect | Current shell action |
 |---|---|
-| Listening | The dock's line takes the accent colour until the gesture ends |
+| Listening | Disabled in production, including deferred delivery and later dock refreshes |
 | Resting | The dock's line returns to its resting fill |
-| HoldStarted | Every Kumochi window gets `WDA_EXCLUDEFROMCAPTURE`, then the hold is logged. Slice 7 sends `HoldRecognized` only after this call returns |
-| HoldEnded | Capture exclusion is removed |
+| HoldStarted | Disabled; no exclusion acquisition, capture request or hold announcement |
+| HoldEnded | Ignored; releasing a key is not capture retirement |
 | OpenInput | The typing panel opens and takes focus (see [Taking the front](#taking-the-front)) |
+
+The recognizer still measures short taps and rejects long presses as taps. Production holds
+emit no effects and expose neither holding nor Listening state. Recognition-only tests use an
+explicit legacy fixture; this is not a production setting. Typed submissions remain text-only
+(`ScreenChoice::None`). The separate [local exclusion transaction](screen.md#local-shell-exclusion)
+has no production acquisition caller and never announces a lease.
 
 ## The typing panel
 
@@ -207,10 +213,8 @@ creates no file.
 - `--input-diagnostics=<file>` writes one line per input milestone, flushed as it happens, as
   `qpc=<QueryPerformanceCounter> <event> key=value…`. Durations are in microseconds since the
   native callback's entry. Lines carry no keys and no text:
-  - `listening applied_us=N start_qpc=Q` and `listening painted_us=N`: the line's fill change,
-    with `Q` the counter read when the `WM_INPUT` callback began, before parsing, then the
-    GPUI paint phase of the frame that shows it (a paint closure, not a present). Both appear
-    only while the gesture is still Listening; a press that rests first logs neither.
+  - Listening and hold effects are currently inactive in the production gesture adapter.
+    It retains an `Instant` for gesture timing, not a callback QPC for a listening paint join.
   - `resting`
   - `hold excluded=true|false` and `hold ended restored=true|false`: whether every surface,
     the dock's native proxy included, took the capture affinity
@@ -234,8 +238,9 @@ creates no file.
 A paint isn't a present. The gate harness joins its exact Canvas QPC to the separately logged
 posted-completion interval and a unique eligible PresentMon row on the validated dock swapchain.
 Missing, dropped, reused or ambiguous joins remain unmeasured; a Canvas marker alone never
-passes a present or display gate. Keyboard gates `WM_INPUT` QPC → present at p95 ≤7ms;
-hover gates the native pointer-entry QPC → the peek's first present at p95 ≤8ms. That QPC is read
+passes a present or display gate. The keyboard `WM_INPUT` QPC → present gate at p95 ≤7ms is
+unmeasured without a retained callback counter. Hover gates the native pointer-entry QPC →
+the peek's first present at p95 ≤8ms. That QPC is read
 when the entering `WM_MOUSEMOVE` is dispatched to the proxy's window procedure. So it excludes
 OS routing and the message's wait in the UI thread's Win32 message queue before dispatch, and
 includes the wait from dispatch, through the presence event channel, to the presence handler. A change whose entry is missing or no later than the previous change
