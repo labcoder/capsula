@@ -183,7 +183,10 @@ fn receive(
 
 fn hidden_drawing(owner: &gpui_kit::Entity<Presence>, cx: &mut gpui_kit::TestAppContext) {
     owner.update(cx, |this, cx| {
-        let (mut presenter, now, job) = crate::presenter::tests::preparing();
+        let generation = this.session.as_ref().expect("fixture session").generation();
+        let stage = super::super::paint_cache::Stager::new(&this.paint_scratch);
+        let (mut presenter, now, job) =
+            crate::presenter::tests::preparing_for(generation, Box::new(stage));
         presenter
             .completed(job.run(&mut crate::presenter::tests::Shaper), now)
             .expect("existing prepared-frame fixture");
