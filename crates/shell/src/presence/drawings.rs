@@ -21,14 +21,17 @@ impl Presence {
         }
     }
 
-    /// Arms the drawing's frames on the dock's window, unless they're armed already. The dock
-    /// stays shown, but the status panel hides whenever the peek closes or the typing panel or
-    /// Settings is open, and Windows paints no hidden window: frames armed there would wait,
-    /// leaving a drawing at its first sample.
+    /// Arms the drawing's frames on the dock's window, unless they're armed already. Peek,
+    /// typing and Settings changes keep the dock shown, but the status panel hides whenever the
+    /// peek closes or the typing panel or Settings is open, and Windows paints no hidden window:
+    /// frames armed there would wait, leaving a drawing at its first sample.
     pub(super) fn want_frames(&mut self, cx: &mut Context<'_, Self>) {
         if !self.frames.want(Instant::now()) {
             return;
         }
+        // shortcut: a dock that fails closed (presence.md) hides with these frames armed, so
+        // drawings wait for a position choice to show it; stop or clear them, or move their
+        // loop, once drawings must keep moving through that failure.
         let owner = cx.weak_entity();
         let armed = self
             .dock_window

@@ -71,11 +71,14 @@ the cap. They're short or occasional, so they're left until a profile shows them
 ## The drawing overlay
 
 Drawings and Kumo in the peek each have a `FrameLoop`, paced by the same cap. A drawing's
-frames come from the dock's window, which stays shown, and Kumo's from the peek's window.
+frames come from the dock's window, which peek, typing and Settings changes keep shown, and
+Kumo's from the peek's window.
 Windows sends a hidden window no `WM_PAINT`, so a frame callback armed on one waits until it's
 shown again. The status panel hides whenever the peek closes or the typing panel or Settings is
 open, so a drawing that took its frames from it stopped at its first sample (OSC-596). Kumo
-shades nothing while the peek is hidden, so its frames can wait there.
+shades nothing while the peek is hidden, so its frames can wait there. If the dock's placement
+fails closed and hides it (presence.md, "The line and hit testing"), drawing frames wait too
+until a position choice shows it again; nothing moves them to another window.
 
 Each accepted drawing frame samples scene views at their own absolute clocks; the pacer's
 capped delta never becomes a drawing's lifetime clock. Only changed samples invalidate the
