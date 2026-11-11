@@ -9,6 +9,8 @@
 
 use std::time::{Duration, Instant};
 
+pub(crate) mod hold;
+
 const WINDOW: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

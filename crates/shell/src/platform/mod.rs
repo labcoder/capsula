@@ -3,6 +3,7 @@
 pub(crate) mod credential;
 pub(crate) mod host;
 pub(crate) mod input;
+pub(crate) mod microphone;
 
 #[cfg(windows)]
 #[expect(
