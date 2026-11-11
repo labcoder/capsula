@@ -204,6 +204,7 @@ hold-thinking = Thinking…
 hold-empty = No speech detected. Try again.
 hold-cancelled = Speech input cancelled.
 hold-unavailable = Speech input unavailable. Restart the app if the microphone stays active.
+hold-microphone-unavailable = Microphone unavailable. Check microphone access and your input device, then try again.
 hold-failed = Speech input failed. Try again.
 voice-restart-required = Speech input unavailable. Restart the app.
 voice-installed-failed = Installed · speech input unavailable

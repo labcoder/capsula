@@ -89,7 +89,7 @@ impl Presence {
             return;
         };
         if !matches!(hold.source, Source::Sent) {
-            self.end_voice(Text::HoldUnavailable, cx);
+            self.end_voice(Text::HoldFailed, cx);
             if let Some(session) = &self.session {
                 self.link.end(session);
             }
@@ -254,7 +254,7 @@ impl Presence {
                     self.finish_voice();
                 }
             }
-            Intent::Unavailable => self.voice_notice(Text::HoldUnavailable, cx),
+            Intent::Unavailable => self.voice_notice(Text::HoldFailed, cx),
         }
     }
 
@@ -266,7 +266,12 @@ impl Presence {
         cx: &mut Context<'_, Self>,
     ) {
         let Ok(token) = generation else {
-            self.voice_notice(Text::HoldUnavailable, cx);
+            let notice = if self.voice.status == Some(Text::HoldUnavailable) {
+                Text::HoldUnavailable
+            } else {
+                Text::TurnBusy
+            };
+            self.voice_notice(notice, cx);
             return;
         };
         if let Some(notice) = self.settings.read(cx).hold_to_talk_notice() {
@@ -299,7 +304,7 @@ impl Presence {
         {
             self.unused_voice(&token, &session);
             self.link.clear_input(gesture);
-            self.voice_notice(Text::HoldUnavailable, cx);
+            self.voice_notice(Text::HoldFailed, cx);
             return;
         }
         if self.voice.pending.is_some()
@@ -312,6 +317,11 @@ impl Presence {
             return;
         }
         let request = self.runs.begin_hold(gesture);
+        let notice = if matches!(request, Err(crate::runs::Refused::Busy)) {
+            Text::TurnBusy
+        } else {
+            Text::HoldFailed
+        };
         if let Ok(request) = request
             && self.drain_voice_cancel()
             && self.link.send_control(&session, request)
@@ -332,7 +342,7 @@ impl Presence {
             self.unused_voice(&token, &session);
             self.runs.cancel_hold();
             self.drain_voice_cancel();
-            self.voice_notice(Text::HoldUnavailable, cx);
+            self.voice_notice(notice, cx);
         }
     }
 
@@ -389,7 +399,6 @@ impl Presence {
                         _ => Text::VoiceStatusUnknown,
                     },
                     HoldFailure::Busy => Text::TurnBusy,
-                    HoldFailure::Unavailable => Text::HoldUnavailable,
                     _ => Text::HoldFailed,
                 },
                 cx,
@@ -419,7 +428,7 @@ impl Presence {
         #[cfg(not(test))]
         let source = MicOwner::start(token.clone(), session.alive());
         let Ok(mut mic) = source else {
-            self.end_voice(Text::HoldUnavailable, cx);
+            self.end_voice(Text::HoldMicrophoneUnavailable, cx);
             return;
         };
         self.voice.pending.as_mut().expect("admitted hold").source = Source::Recording;
@@ -464,7 +473,7 @@ impl Presence {
                 })
                 .unwrap_or(false)
             });
-            if !accepted || running.is_ok_and(|running| mic.accept_running(running).is_err()) {
+            if running.is_ok_and(|running| !accepted || mic.accept_running(running).is_err()) {
                 mic.stop(StopReason::Cancel);
                 let _applied = this.update(cx, |this, cx| {
                     if this
@@ -536,16 +545,16 @@ impl Presence {
                             hold.source = Source::Joined(count);
                             this.finish_voice();
                         } else {
-                            let notice = if matches!(
-                                receipt.finalization,
+                            let notice = match receipt.finalization {
                                 Finalization::Discarded(
                                     crate::platform::microphone::MicError::Cancelled
-                                        | crate::platform::microphone::MicError::SessionLost
-                                )
-                            ) {
-                                Text::HoldCancelled
-                            } else {
-                                Text::HoldFailed
+                                    | crate::platform::microphone::MicError::SessionLost,
+                                ) => Text::HoldCancelled,
+                                Finalization::Discarded(
+                                    crate::platform::microphone::MicError::Unavailable
+                                    | crate::platform::microphone::MicError::Format,
+                                ) => Text::HoldMicrophoneUnavailable,
+                                _ => Text::HoldFailed,
                             };
                             this.end_voice(notice, cx);
                         }

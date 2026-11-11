@@ -33,6 +33,110 @@ fn chord(deliver: &Deliver, edge: Edge, at: Instant) {
 }
 
 #[gpui::test]
+fn microphone_start_without_running_reports_unavailable_not_cancellation(cx: &mut TestAppContext) {
+    cx.background_executor.allow_parking();
+    for (worker, error) in [
+        (true, MicError::Unavailable),
+        (true, MicError::Format),
+        (false, MicError::Unavailable),
+    ] {
+        let (owner, data, controls) = ready(cx);
+        let (token, _) = hold(&owner, 1, cx);
+        assert_eq!(
+            controls.try_recv().unwrap(),
+            ControlToBrain::VoiceHoldRecognized {
+                gesture: GestureId(1),
+                thread: Some(ThreadId(1)),
+                selection: 1,
+            }
+        );
+        owner.update(cx, |owner, _| {
+            owner.voice.start = Some(Box::new(move |token, session| {
+                if worker {
+                    MicOwner::start_with(token, session, move |_, _, _, _| {
+                        Ok(Finalization::Discarded(error))
+                    })
+                } else {
+                    Err(error)
+                }
+            }));
+        });
+        status(&owner, 1, 1, HoldStatus::Admitted, cx);
+        until(cx, |cx| {
+            owner.read_with(cx, |owner, _| owner.voice.pending.is_none())
+        });
+        owner.read_with(cx, |owner, cx| {
+            assert_eq!(owner.voice.status.map(|text| cx.global::<crate::strings::Strings>().get(text)),
+                Some("Microphone unavailable. Check microphone access and your input device, then try again.".to_owned()));
+            assert!(!owner.dock.read(cx).listening);
+            assert!(!owner.link.input_is(GestureId(1)));
+        });
+        assert!(data.is_empty());
+        assert!(token.retired());
+        assert_eq!(
+            controls.try_recv().unwrap(),
+            ControlToBrain::VoiceHoldStopped {
+                gesture: GestureId(1)
+            }
+        );
+        assert_eq!(
+            controls.try_recv().unwrap(),
+            ControlToBrain::GestureCancel {
+                gesture: GestureId(1)
+            }
+        );
+        assert!(controls.is_empty());
+    }
+}
+
+#[gpui::test]
+fn microphone_start_refusals_before_open_never_suggest_an_active_device(cx: &mut TestAppContext) {
+    let (owner, data, _controls) = ready(cx);
+    let (_token, stamp) = hold(&owner, 1, cx);
+    owner.update(cx, |owner, cx| {
+        owner.voice_intent(
+            Intent::Recognized {
+                gesture: GestureId(2),
+                generation: Err(MicError::Stale),
+            },
+            stamp,
+            0,
+            cx,
+        );
+        assert_eq!(owner.voice.status, Some(Text::TurnBusy));
+        assert_eq!(
+            owner.voice.pending.as_ref().unwrap().token.gesture(),
+            GestureId(1)
+        );
+    });
+    assert!(data.is_empty());
+    let (owner, data, _controls) = ready(cx);
+    owner.update(cx, |owner, cx| {
+        owner.runs.disconnected();
+        let token = owner.link.microphone_gate().arm(GestureId(1)).unwrap();
+        owner.link.track_input(GestureId(1));
+        let stamp = Stamp {
+            target: (owner.runs.thread(), owner.runs.revision()),
+            session: 1,
+            choice: owner.link.choice_revision(),
+        };
+        owner.voice_intent(
+            Intent::Recognized {
+                gesture: GestureId(1),
+                generation: Ok(token.clone()),
+            },
+            stamp,
+            0,
+            cx,
+        );
+        assert_eq!(owner.voice.status, Some(Text::HoldFailed));
+        assert!(owner.voice.pending.is_none());
+        assert!(token.retired());
+    });
+    assert!(data.is_empty());
+}
+
+#[gpui::test]
 #[expect(
     clippy::too_many_lines,
     reason = "one refused-state flow checks retained surfaces, recovery and recording authority"

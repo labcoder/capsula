@@ -877,3 +877,6 @@ opens the ordinary answer panel without activation or injected focus input. Answ
 off to ordinary Runs. Explicit typed input cancels and drains the pending hold before its
 first submit attempt. Cancellation keeps a recording owner until true completion; an
 unconfirmed source remains unavailable rather than claiming stopped or allowing replacement.
+No-Running start failures take their notice from the true stop result, not a manufactured
+user cancellation. Confirmed unavailable/unsupported microphones have a dedicated notice;
+only unconfirmed source cleanup uses the microphone-active restart warning.
