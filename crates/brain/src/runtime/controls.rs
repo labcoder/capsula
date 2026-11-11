@@ -134,8 +134,9 @@ impl Brain {
     pub(super) fn control_offline(&mut self, message: ControlToBrain, len: usize, tap: &mut Tap) {
         tap.record(Pipe::Control, Direction::ToBrain, &message, len);
         if let ControlToBrain::Issue(op) = message {
-            if let Some(effects) = self.issue_op(op, false) {
-                self.apply(effects, None).expect("offline issue effects cannot fill a shell queue");
+            if let Some(effects) = self.issue_op(&op, None) {
+                self.apply(effects, None)
+                    .expect("offline issue effects cannot fill a shell queue");
             }
             return;
         }
@@ -179,7 +180,7 @@ impl Brain {
             *ping_sent = None;
         }
         if let ControlToBrain::Issue(op) = message {
-            let effects = self.issue_op(op, true).ok_or(Ended::Lost)?;
+            let effects = self.issue_op(&op, Some(self.epoch)).ok_or(Ended::Lost)?;
             self.apply(effects, Some(link))?;
             return Ok(None);
         }

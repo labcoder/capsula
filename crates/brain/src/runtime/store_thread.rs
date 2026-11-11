@@ -532,7 +532,11 @@ impl StoreThread {
 #[expect(clippy::too_many_lines, reason = "one short arm per store op")]
 fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input>, op: StoreOp) {
     match op {
-        StoreOp::Issue { serial, write, scope } => {
+        StoreOp::Issue {
+            serial,
+            write,
+            scope,
+        } => {
             purger.op_arriving();
             let reply = store
                 .reconnect()

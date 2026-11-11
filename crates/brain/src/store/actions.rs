@@ -9,7 +9,7 @@ use rusqlite::{Connection, OptionalExtension as _, Row, Transaction, params};
 
 use super::{Store, StoreError, now_ms, sql_id};
 use crate::connections::github::{api::GitHubUser, issues::CreateOutcome};
-use crate::issues::{Action, Answer, Live, Lookup, Mark, Stage, WriteScope};
+use crate::issues::{Action, Answer, Live, Lookup, Mark, Stage, Write, WriteScope};
 
 impl Store {
     /// Executes one operation on the existing ordered store writer.
@@ -21,24 +21,35 @@ impl Store {
         write: &crate::issues::Write,
         scope: Option<&WriteScope>,
     ) -> Result<Answer, StoreError> {
-        let busy: u64 = self.conn.query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
-            .map_err(quiet)?.try_into().map_err(|_| StoreError::Issue)?;
-        self.conn.busy_timeout(std::time::Duration::ZERO).map_err(quiet)?;
+        let busy: u64 = self
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+            .map_err(quiet)?
+            .try_into()
+            .map_err(|_| StoreError::Issue)?;
+        self.conn
+            .busy_timeout(std::time::Duration::ZERO)
+            .map_err(quiet)?;
         let installed = if let Some(scope) = scope {
             let scope = scope.clone();
-            self.conn.progress_handler(1000, Some(move || scope.stopped()))
+            self.conn
+                .progress_handler(1000, Some(move || scope.stopped()))
         } else {
             Ok(())
         };
         self.issue_scope = scope.cloned();
-        let reply = installed.map_err(quiet).and_then(|()| self.apply_issue_write(write));
+        let reply = installed
+            .map_err(quiet)
+            .and_then(|()| self.apply_issue_write(write));
         self.issue_scope = None;
         let removed = if scope.is_some() {
             self.conn.progress_handler(0, None::<fn() -> bool>)
         } else {
             Ok(())
         };
-        let restored = self.conn.busy_timeout(std::time::Duration::from_millis(busy));
+        let restored = self
+            .conn
+            .busy_timeout(std::time::Duration::from_millis(busy));
         if removed.is_err() || restored.is_err() {
             self.serving = false;
             tracing::warn!("the issue SQL scope could not be restored; the writer must reopen");
@@ -51,19 +62,28 @@ impl Store {
         if self.issue_scope.as_ref().is_some_and(WriteScope::stopped) {
             return Err(StoreError::Issue);
         }
-        use crate::issues::Write;
         match write {
             Write::Read(draft) => Ok(self.action(*draft)?.map_or(Answer::Gone, Answer::Unchanged)),
-            Write::Consent { draft, hash, approval, decision, live } => {
-                self.consent(*draft, hash, *approval, *decision, &live.live())
+            Write::Consent {
+                draft,
+                hash,
+                approval,
+                decision,
+                live,
+            } => self.consent(*draft, hash, *approval, *decision, &live.live()),
+            Write::Preflighted { draft, at, result } => {
+                self.preflighted(*draft, *at, result.clone())
             }
-            Write::Preflighted { draft, at, result } => self.preflighted(*draft, *at, result.clone()),
             Write::Posted { draft, at, outcome } => self.posted(*draft, *at, outcome),
             Write::Interrupted { draft, at } => self.interrupted(*draft, *at),
             Write::NotSent { draft, at, reason } => {
                 self.change(*draft, |action| Some(action.not_sent(*at, *reason)))
             }
-            Write::LookedUp { draft, episode, lookup } => self.looked_up(*draft, *episode, *lookup),
+            Write::LookedUp {
+                draft,
+                episode,
+                lookup,
+            } => self.looked_up(*draft, *episode, *lookup),
             Write::Discard(draft) => self.discard_draft(*draft),
         }
     }

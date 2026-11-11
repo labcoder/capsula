@@ -186,13 +186,11 @@ impl Http for BoundedHttp {
                 return Err(if post { HttpError::Timeout } else { HttpError::Request });
             }
             result = timeout_at(self.control.deadline(), self.inner.execute(request)) => {
-                match result {
-                    Ok(response) => response?,
-                    Err(_) => {
-                        self.control.cancel();
-                        return Err(HttpError::Timeout);
-                    }
-                }
+                let Ok(response) = result else {
+                    self.control.cancel();
+                    return Err(HttpError::Timeout);
+                };
+                response?
             }
         };
         if !post && let Some(date) = response.meta.date_s.filter(|date| *date > 0) {

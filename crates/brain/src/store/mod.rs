@@ -22,6 +22,8 @@ mod duplicate_tests;
 mod heard;
 #[cfg(test)]
 mod heard_tests;
+#[cfg(test)]
+mod issue_scope_tests;
 mod pages;
 mod purge;
 pub(crate) mod recall;

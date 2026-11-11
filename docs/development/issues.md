@@ -259,6 +259,15 @@ revision. Unresolved actions are skipped, and bind never files.
 
 ## Sending
 
+Admission, recovery reads and the transition to Posting share the operation's original
+cancellation and deadline on the ordered store writer. A scoped SQLite progress handler
+interrupts long statements; lock waits are disabled and cancellation is checked again before
+COMMIT. The handler and busy timeout are restored afterward. A successful COMMIT remains an
+acknowledged success even if cancellation arrives at completion. A restoration failure retires
+the connection for reopening without erasing that durable answer. Result and compensation writes
+do not reuse the canceled admission scope: they settle an already admitted phase and cannot
+start another request.
+
 The runtime calls each completion with the version of the answer that entered its phase, never a
 version read later. At any other version, earlier or later, or in another stage, a completion
 answers `Refused(NotAllowedNow)` and writes nothing.

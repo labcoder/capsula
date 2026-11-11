@@ -1,6 +1,9 @@
 use std::{fmt, num::NonZeroU64};
 
-use kumochi_protocol::{Secret, message::{FailReason, RepoName}};
+use kumochi_protocol::{
+    Secret,
+    message::{FailReason, RepoName},
+};
 use kumochi_scene::text::Bounded;
 
 use super::transport::{BoundedHttp, Control};
@@ -39,14 +42,25 @@ pub(super) struct Failure {
     pub unauthorized: bool,
 }
 
-const INCONCLUSIVE: Failure = Failure { reason: FailReason::PreflightFailed, unauthorized: false };
-const NO_ACCOUNT: Failure = Failure { reason: FailReason::NotConnected, unauthorized: false };
-const NO_REPO: Failure = Failure { reason: FailReason::NotFound, unauthorized: false };
+const INCONCLUSIVE: Failure = Failure {
+    reason: FailReason::PreflightFailed,
+    unauthorized: false,
+};
+const NO_ACCOUNT: Failure = Failure {
+    reason: FailReason::NotConnected,
+    unauthorized: false,
+};
+const NO_REPO: Failure = Failure {
+    reason: FailReason::NotFound,
+    unauthorized: false,
+};
 
 impl From<ApiError> for Failure {
     fn from(error: ApiError) -> Self {
         Self {
-            reason: error.definite_reason().unwrap_or(FailReason::PreflightFailed),
+            reason: error
+                .definite_reason()
+                .unwrap_or(FailReason::PreflightFailed),
             unauthorized: matches!(error, ApiError::Refused { status: 401, .. }),
         }
     }
@@ -82,19 +96,33 @@ pub(super) async fn preflight(
         repo,
         creator: &user.login,
         since_s: anchor.saturating_sub(1),
-        content: IssueContent { title: &action.title, body: &action.body },
+        content: IssueContent {
+            title: &action.title,
+            body: &action.body,
+        },
     };
     let found = list_matches(&http, &token, &query).await?;
-    let at_s = found.meta.date_s.filter(|date| *date > 0 && *date >= anchor)
-        .and_then(NonZeroU64::new).ok_or(INCONCLUSIVE)?;
+    let at_s = found
+        .meta
+        .date_s
+        .filter(|date| *date > 0 && *date >= anchor)
+        .and_then(NonZeroU64::new)
+        .ok_or(INCONCLUSIVE)?;
     if !found.complete {
         return Err(INCONCLUSIVE);
     }
-    let numbers = found.issues.into_iter()
+    let numbers = found
+        .issues
+        .into_iter()
         .map(|issue| NonZeroU64::new(issue.number).ok_or(INCONCLUSIVE))
         .collect::<Result<Vec<_>, _>>()?;
     let presend = Bounded::new(numbers).map_err(|_| INCONCLUSIVE)?;
-    Ok(Prepared { http, user, repos, mark: Mark { at_s, presend } })
+    Ok(Prepared {
+        http,
+        user,
+        repos,
+        mark: Mark { at_s, presend },
+    })
 }
 
 pub(super) async fn check(
@@ -111,10 +139,17 @@ pub(super) async fn check(
         repo,
         creator: &user.login,
         since_s: mark.at_s.get().saturating_sub(1),
-        content: IssueContent { title: &action.title, body: &action.body },
+        content: IssueContent {
+            title: &action.title,
+            body: &action.body,
+        },
     };
     let found = list_matches(http, token, &query).await?;
-    let Some(date) = found.meta.date_s.filter(|date| *date > 0 && *date >= mark.at_s.get()) else {
+    let Some(date) = found
+        .meta
+        .date_s
+        .filter(|date| *date > 0 && *date >= mark.at_s.get())
+    else {
         return Ok(Lookup::Failed);
     };
     if !found.complete {
@@ -125,7 +160,11 @@ pub(super) async fn check(
         if issue.created_s > date {
             return Ok(Lookup::Failed);
         }
-        if mark.presend.iter().any(|number| number.get() == issue.number) {
+        if mark
+            .presend
+            .iter()
+            .any(|number| number.get() == issue.number)
+        {
             continue;
         }
         if issue.created_s == mark.at_s.get() {

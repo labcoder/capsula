@@ -1,7 +1,10 @@
 //! Typed issue operations for the existing store thread; filing policy stays in the runtime.
 
 use std::fmt;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use tokio::time::Instant;
 
@@ -29,7 +32,10 @@ impl Eq for WriteScope {}
 
 impl WriteScope {
     pub(crate) fn new(deadline: Instant) -> Self {
-        Self { deadline, cancelled: Arc::new(AtomicBool::new(false)) }
+        Self {
+            deadline,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     pub(crate) fn cancel(&self) {
