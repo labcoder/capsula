@@ -1388,6 +1388,64 @@ fn esc_after_a_busy_or_offline_refusal_clears_the_drawing_on_screen(cx: &mut Tes
 }
 
 #[gpui::test]
+fn a_run_that_fails_or_stops_after_thinking_ends_the_hold_quietly(cx: &mut TestAppContext) {
+    for phase in [Phase::Failed, Phase::Interrupted] {
+        let (owner, _data, controls) = ready(cx);
+        let deliver = native(&owner, cx);
+        let at = Instant::now();
+        let finish = listen(&owner, &deliver, 1, at, cx);
+        release(
+            &owner,
+            &deliver,
+            &finish,
+            at + Duration::from_millis(900),
+            cx,
+        );
+        owner.update(cx, |owner, cx| {
+            for (phase, origin) in [
+                (
+                    Phase::Thinking,
+                    Some(RunOrigin::Hold {
+                        gesture: GestureId(1),
+                    }),
+                ),
+                (phase, None),
+            ] {
+                owner
+                    .link_events(
+                        Batch::Plain(vec![LinkEvent::RunState {
+                            generation: 1,
+                            run: RunId(1),
+                            thread: ThreadId(1),
+                            phase,
+                            error: None,
+                            origin,
+                        }]),
+                        cx,
+                    )
+                    .unwrap();
+            }
+            assert!(owner.voice.pending.is_none());
+            assert_eq!(owner.voice.status, None);
+            assert!(!owner.link.input_is(GestureId(1)));
+        });
+        assert!(
+            std::iter::from_fn(|| controls.try_recv().ok())
+                .all(|control| !matches!(control, ControlToBrain::GestureCancel { .. }))
+        );
+        let at = at + Duration::from_secs(3);
+        let finish = listen(&owner, &deliver, 2, at, cx);
+        release(
+            &owner,
+            &deliver,
+            &finish,
+            at + Duration::from_millis(900),
+            cx,
+        );
+    }
+}
+
+#[gpui::test]
 fn esc_during_listening_cancels_that_hold_and_the_next_hold_listens(cx: &mut TestAppContext) {
     let (owner, _data, _controls) = ready(cx);
     let deliver = native(&owner, cx);

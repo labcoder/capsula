@@ -34,7 +34,6 @@ enum FailureReason {
     RecognitionSend,
     PacketCountMismatch,
     RunBeforeStop,
-    RunFailed,
     NoSession,
     PendingHold,
     StaleContext,
@@ -148,18 +147,14 @@ impl Presence {
                     tracing::error!("can't show the voice answer");
                 }
             }
-            Phase::Answering | Phase::Done => {
+            // Speech input finished once the run exists; its own error or stop speaks for it.
+            Phase::Answering | Phase::Done | Phase::Failed | Phase::Interrupted => {
                 self.link.microphone_gate().cancel(gesture);
                 self.link.clear_input(gesture);
                 self.voice.pending = None;
                 self.voice.status = None;
                 self.refresh_dock(cx);
             }
-            Phase::Failed => {
-                tracing::warn!(stage = ?FailureStage::Run, reason = ?FailureReason::RunFailed, "held speech input failed");
-                self.end_voice(Text::HoldFailed, cx);
-            }
-            Phase::Interrupted => self.end_voice(Text::HoldCancelled, cx),
             _ => {}
         }
     }

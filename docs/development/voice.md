@@ -925,8 +925,8 @@ opens the source; Listening precedes acceptance of that source's Running receipt
 opens the ordinary answer panel without activation or injected focus input, and re-places a
 resting drawing clear of it before the next paint. Answering hands off to ordinary Runs. Only a
 run's first state carries its origin, so the hold remembers the run that state named and matches
-later states by run; Answering, Done, Failed or Interrupted then end it, and Esc returns to the
-ordinary order. A recognised hold refused at admission always shows the failed notice, including
+later states by run; Answering, Done, Failed or Interrupted then end it without a speech notice,
+since the run's own error or stop already shows, and Esc returns to the ordinary order. A recognised hold refused at admission always shows the failed notice, including
 one first recognised at its release, whose gate has already closed.
 
 The 300 ms hold deadline is a native one-shot timer. On Windows that is `WM_TIMER`, the lowest
