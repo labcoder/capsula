@@ -39,8 +39,8 @@ partial answer, as one assistant message. The text before that is already in the
 another connection replays as its text only, with no items and no results, so no call travels
 without its result. The connection is the one the run was bound to when its turn arrived, recorded
 in its snapshot. A stored item or result that doesn't decode, or a result over 64 KiB [guess],
-fails the build, and their bytes count toward the bound. `append_round` runs that same result
-check on every result before it writes, so a round the build would refuse is never stored: its
+fails the build, and their bytes count toward the bound. `append_round` runs those same checks
+on every item and result before it writes, so a round the build would refuse is never stored: its
 write fails and the run ends `failed(store)`, and the thread's next run builds as usual.
 
 ## Origin and references
