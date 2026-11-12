@@ -403,6 +403,19 @@ fn a_chain_may_hold_sixteen_links_but_not_seventeen() {
 }
 
 #[test]
+fn a_re_pointed_target_no_longer_counts_below_its_old_anchor() {
+    let (a, a_links) = chain("a", 9);
+    let (b, b_links) = chain("b", 9);
+    let put = [a, b, vec![circle("p"), circle("q")]].concat();
+    let mut set = [a_links, b_links].concat();
+    set.push(json!({"target":"b0","behind":"p"}));
+    admitted(
+        &[json!({"id":"both","put":put,"set":set})],
+        &json!({"id":"move","set":[{"target":"b0","behind":"q"},{"target":"p","behind":"a8"}]}),
+    );
+}
+
+#[test]
 fn links_stay_between_objects_with_the_same_parent() {
     let base = [cloud()];
     let diagram = |set: Value| {
