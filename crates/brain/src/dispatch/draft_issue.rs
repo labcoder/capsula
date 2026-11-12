@@ -62,7 +62,7 @@ pub(super) const DRAFT_ISSUE: Tool = Tool {
     name: ToolName::DraftIssue,
     wire: "draft_issue",
     description: "Saves a GitHub issue as a draft card in this conversation. Use it when the user \
-                  asks to file, open or report an issue; the user then files it from the card. \
+                  asks to file, open or report a GitHub issue; the user then files it from the card. \
                   This tool itself does not file, authorize a send or contact GitHub. Keep the complete serialized arguments \
                   within 16 KiB, including keys and JSON escaping. Do not include hidden format \
                   or direction controls, joiners, fillers or variation selectors. Preview text is \

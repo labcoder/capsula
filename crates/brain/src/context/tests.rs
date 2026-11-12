@@ -291,7 +291,8 @@ fn a_kumo_request_states_its_model_names_role_and_ordered_runs() {
     assert!(
         instructions.contains(
             "When the user asks you to file, open or report a GitHub issue and you have the \
-             draft_issue tool, call\nit"
+             draft_issue tool, call\nit. When it succeeds, tell them the issue is saved as a card \
+             here and they file it from that card.\n"
         ),
         "issue line"
     );

@@ -1144,7 +1144,7 @@ mod tests {
         assert_eq!(payload(&models, Pipe::Data), 77_404);
     }
 
-    /// Every queued control pays for the largest variant, and the shell's recovery bounds count it.
+    /// Every slot of the shell's 64-slot control queues is as large as the largest variant.
     #[test]
     fn a_control_to_the_brain_stays_within_64_bytes() {
         let size = std::mem::size_of::<ControlToBrain>();

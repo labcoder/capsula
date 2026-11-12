@@ -714,10 +714,10 @@ fn queue_refusal_is_not_replayed_by_later_valid_input(cx: &mut TestAppContext) {
     });
     cx.simulate_keystrokes(f.views[0].1, "enter space");
     assert!(f.controls.try_recv().is_err());
-    let ended = f
+    let alive = f
         .owner
         .read_with(cx, |owner, _| owner.session.as_ref().unwrap().alive());
-    assert!(!ended.load(std::sync::atomic::Ordering::Acquire));
+    assert!(!alive.load(std::sync::atomic::Ordering::Acquire));
     controls::deliver(
         &f,
         vec![
@@ -773,6 +773,8 @@ fn queue_refusal_is_not_replayed_by_later_valid_input(cx: &mut TestAppContext) {
         ],
         cx,
     );
+    assert!(f.controls.try_recv().is_err());
+    cx.simulate_keystrokes(f.views[0].1, "enter space");
     assert!(f.controls.try_recv().is_err());
     open(&f, 0, cx);
     confirm(&f, 0, cx);

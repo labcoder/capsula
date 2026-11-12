@@ -569,7 +569,7 @@ saved cards, state notifications and history reads never register any.
 Successfully read or committed state from an old session still reaches a replacement as
 unsolicited `ActionState` with `request: None`; its old request/refusal/error never does.
 
-`IssueUnavailable` is appended at tag 26 under the same exact `BUILD_ID` pairing.
+`IssueUnavailable` is appended at tag 29 under the same exact `BUILD_ID` pairing.
 Its maximum complete frame is 26 bytes: the four-byte header, one-byte tag,
 two ten-byte `u64` identities and one-byte kind. The brain sends it when SQL cannot provide a
 terminal authoritative answer or a request identity is already spent; it carries no version,
