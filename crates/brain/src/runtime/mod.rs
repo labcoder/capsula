@@ -711,6 +711,7 @@ impl Brain {
         self.deadline = None;
         self.drain = None;
         self.quiet.clear();
+        self.filing.session = None;
         ended
     }
 

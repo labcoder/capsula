@@ -92,6 +92,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 fn content_free_ops_keep_their_fields_and_others_only_their_name_and_length() {
     let welcome = ControlToShell::Welcome {
         incarnation: Incarnation(7),
+        issue_epoch: 11,
     };
     let hello = ControlToBrain::Hello(Hello {
         build_id: "0.1.0+abc".to_owned(),
@@ -119,7 +120,7 @@ fn content_free_ops_keep_their_fields_and_others_only_their_name_and_length() {
         out,
         [
             format!("    0 Control shell -> brain  Hello ({hello_len} bytes)"),
-            "    1 Control brain -> shell  Welcome { incarnation: Incarnation(7) }".to_owned(),
+            "    1 Control brain -> shell  Welcome { incarnation: Incarnation(7), issue_epoch: 11 }".to_owned(),
             format!(
                 "    2 Control shell -> brain  Settings ({} bytes)",
                 wire_len(&rename, Pipe::Control)

@@ -9,14 +9,14 @@ use std::num::NonZeroU64;
 async fn failed_request_identities_are_fenced_at_zero_and_max_until_the_session_changes() {
     let scratch = crate::test_support::Scratch::new("github-filing-request-watermark");
     let mut brain = crate::test_support::brain(&scratch, "");
-    let epoch = brain.epoch;
-    for (current, request) in [(epoch, 0), (epoch, u64::MAX), (epoch + 1, 0)] {
-        brain.epoch = current;
+    let session = brain.prepare_issue_session(Incarnation(1));
+    for request in [0, u64::MAX] {
         let effects = brain
             .issue_op(
+                session,
                 request,
                 &IssueOp::Discard { draft: DraftId(1) },
-                Some(current),
+                Some(brain.epoch),
             )
             .unwrap();
         let [Effect::Store(StoreOp::Issue { serial, .. })] = effects.as_slice() else {
@@ -31,9 +31,10 @@ async fn failed_request_identities_are_fenced_at_zero_and_max_until_the_session_
         );
         assert_eq!(
             brain.issue_op(
+                session,
                 request,
                 &IssueOp::CheckAgain { draft: DraftId(2) },
-                Some(current)
+                Some(brain.epoch)
             ),
             Some(vec![Effect::Control(ControlToShell::IssueUnavailable {
                 request,
@@ -43,9 +44,10 @@ async fn failed_request_identities_are_fenced_at_zero_and_max_until_the_session_
         if request == u64::MAX {
             assert_eq!(
                 brain.issue_op(
+                    session,
                     request - 1,
                     &IssueOp::Discard { draft: DraftId(3) },
-                    Some(current)
+                    Some(brain.epoch)
                 ),
                 Some(vec![Effect::Control(ControlToShell::IssueUnavailable {
                     request: u64::MAX - 1,
@@ -56,6 +58,45 @@ async fn failed_request_identities_are_fenced_at_zero_and_max_until_the_session_
         assert_eq!(brain.filing.deadline_for_test(), None);
         assert!(!brain.filing.pending());
     }
+    let replacement = brain.prepare_issue_session(Incarnation(1));
+    assert_eq!(replacement.epoch, session.epoch + 1);
+    for stale in [
+        session,
+        IssueSession {
+            incarnation: Incarnation(2),
+            ..replacement
+        },
+    ] {
+        assert_eq!(
+            brain.issue_op(
+                stale,
+                u64::MAX,
+                &IssueOp::Discard { draft: DraftId(3) },
+                Some(brain.epoch)
+            ),
+            None
+        );
+    }
+    let effects = brain
+        .issue_op(
+            replacement,
+            0,
+            &IssueOp::Discard { draft: DraftId(1) },
+            Some(brain.epoch),
+        )
+        .unwrap();
+    let [Effect::Store(StoreOp::Issue { serial, .. })] = effects.as_slice() else {
+        panic!("only fresh provenance allows the replacement's restarted request counter");
+    };
+    assert_eq!(
+        brain.issue_written(*serial, Err(())),
+        vec![Effect::Control(ControlToShell::IssueUnavailable {
+            request: 0,
+            draft: DraftId(1)
+        })]
+    );
+    assert_eq!(brain.filing.deadline_for_test(), None);
+    assert!(!brain.filing.pending());
     brain.close().await;
 }
 

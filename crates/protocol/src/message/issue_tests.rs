@@ -423,7 +423,19 @@ fn roundtrip<T: Serialize + DeserializeOwned + std::fmt::Debug + PartialEq>(
 fn largest_issue_and_connection_frames_fit_their_exact_budgets() {
     let card = card();
     roundtrip(
+        &ControlToShell::Welcome {
+            incarnation: Incarnation(u64::MAX),
+            issue_epoch: u64::MAX,
+        },
+        Pipe::Control,
+        25,
+    );
+    roundtrip(
         &ControlToBrain::Issue {
+            session: IssueSession {
+                incarnation: Incarnation(u64::MAX),
+                epoch: u64::MAX,
+            },
             request: u64::MAX,
             op: IssueOp::Consent {
                 draft: card.draft,
@@ -433,7 +445,7 @@ fn largest_issue_and_connection_frames_fit_their_exact_budgets() {
             },
         },
         Pipe::Control,
-        69,
+        89,
     );
     roundtrip(
         &ControlToShell::GitHub(GitHubView::Connected {
@@ -491,6 +503,134 @@ fn largest_issue_and_connection_frames_fit_their_exact_budgets() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one exact provenance scenario covers Welcome and operation prefixes at minimum, varint and maximum identities"
+)]
+fn issue_provenance_round_trips_exactly_through_welcome_and_operation_prefixes() {
+    use crate::frame::{FrameError, read};
+    for (session, bytes) in [
+        (
+            IssueSession {
+                incarnation: Incarnation(0),
+                epoch: 0,
+            },
+            vec![0, 0],
+        ),
+        (
+            IssueSession {
+                incarnation: Incarnation(5),
+                epoch: 128,
+            },
+            vec![5, 128, 1],
+        ),
+        (
+            IssueSession {
+                incarnation: Incarnation(u64::MAX),
+                epoch: u64::MAX,
+            },
+            vec![
+                255, 255, 255, 255, 255, 255, 255, 255, 255, 1, 255, 255, 255, 255, 255, 255, 255,
+                255, 255, 1,
+            ],
+        ),
+    ] {
+        assert_eq!(postcard::to_allocvec(&session).unwrap(), bytes);
+        assert_eq!(
+            postcard::from_bytes::<IssueSession>(&bytes).unwrap(),
+            session
+        );
+        let json = serde_json::json!({"incarnation":session.incarnation.0,"epoch":session.epoch});
+        assert_eq!(serde_json::to_value(session).unwrap(), json);
+        assert_eq!(
+            serde_json::from_value::<IssueSession>(json).unwrap(),
+            session
+        );
+        for length in 0..bytes.len() {
+            assert!(postcard::from_bytes::<IssueSession>(&bytes[..length]).is_err());
+        }
+        let welcome = ControlToShell::Welcome {
+            incarnation: session.incarnation,
+            issue_epoch: session.epoch,
+        };
+        let wire = encode(&welcome, Pipe::Control).unwrap();
+        let mut payload = vec![0];
+        payload.extend(&bytes);
+        assert_eq!(&wire[HEADER_LEN..], payload);
+        assert_eq!(
+            read::<ControlToShell>(&mut wire.as_slice(), Pipe::Control).unwrap(),
+            Some(welcome.clone())
+        );
+        let json = serde_json::json!({"Welcome":{"incarnation":session.incarnation.0,"issue_epoch":session.epoch}});
+        assert_eq!(serde_json::to_value(&welcome).unwrap(), json);
+        assert_eq!(
+            serde_json::from_value::<ControlToShell>(json).unwrap(),
+            welcome
+        );
+        for length in 1..wire.len() {
+            assert!(matches!(
+                read::<ControlToShell>(&mut &wire[..length], Pipe::Control),
+                Err(FrameError::Truncated)
+            ));
+        }
+        let issue = ControlToBrain::Issue {
+            session,
+            request: 0,
+            op: IssueOp::Discard { draft: DraftId(9) },
+        };
+        let wire = encode(&issue, Pipe::Control).unwrap();
+        let mut payload = vec![25];
+        payload.extend(bytes);
+        payload.extend([0, 1, 9]);
+        assert_eq!(&wire[HEADER_LEN..], payload);
+        assert_eq!(
+            read::<ControlToBrain>(&mut wire.as_slice(), Pipe::Control).unwrap(),
+            Some(issue)
+        );
+        for length in 1..wire.len() {
+            assert!(matches!(
+                read::<ControlToBrain>(&mut &wire[..length], Pipe::Control),
+                Err(FrameError::Truncated)
+            ));
+        }
+    }
+}
+
+#[test]
+fn issue_provenance_rejects_missing_mistyped_overflow_and_truncated_identities() {
+    for json in [
+        r#"{}"#,
+        r#"{"incarnation":1}"#,
+        r#"{"epoch":2}"#,
+        r#"{"incarnation":"1","epoch":2}"#,
+        r#"{"incarnation":18446744073709551616,"epoch":2}"#,
+        r#"{"incarnation":1,"epoch":18446744073709551616}"#,
+    ] {
+        assert!(serde_json::from_str::<IssueSession>(json).is_err());
+    }
+    for identity in [
+        vec![128, 128, 128, 128, 128, 128, 128, 128, 128, 2, 0],
+        vec![0, 128, 128, 128, 128, 128, 128, 128, 128, 128, 2],
+    ] {
+        assert!(postcard::from_bytes::<IssueSession>(&identity).is_err());
+        let mut welcome = vec![0];
+        welcome.extend(&identity);
+        assert!(postcard::from_bytes::<ControlToShell>(&welcome).is_err());
+        let mut issue = vec![25];
+        issue.extend(identity);
+        issue.extend([0, 1, 9]);
+        assert!(postcard::from_bytes::<ControlToBrain>(&issue).is_err());
+    }
+    assert!(serde_json::from_str::<ControlToShell>(r#"{"Welcome":{"incarnation":1}}"#).is_err());
+    assert!(
+        serde_json::from_str::<ControlToBrain>(
+            r#"{"Issue":{"request":0,"op":{"Discard":{"draft":9}}}}"#
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn issue_operation_identity_preserves_inner_tags_and_exact_wire_fields() {
     use crate::frame::{FrameError, read};
     let mut consent = vec![0, 2];
@@ -517,10 +657,14 @@ fn issue_operation_identity_preserves_inner_tags_and_exact_wire_fields() {
             ),
         ] {
             let message = ControlToBrain::Issue {
+                session: IssueSession {
+                    incarnation: Incarnation(1),
+                    epoch: 2,
+                },
                 request,
                 op: op.clone(),
             };
-            let mut expected = vec![25];
+            let mut expected = vec![25, 1, 2];
             expected.extend(identity);
             expected.extend(&inner);
             let wire = encode(&message, Pipe::Control).unwrap();
@@ -545,11 +689,15 @@ fn issue_operation_identity_preserves_inner_tags_and_exact_wire_fields() {
     }
     assert_eq!(
         serde_json::to_value(ControlToBrain::Issue {
+            session: IssueSession {
+                incarnation: Incarnation(1),
+                epoch: 2
+            },
             request: 128,
             op: IssueOp::Discard { draft: DraftId(2) }
         })
         .unwrap(),
-        serde_json::json!({"Issue":{"request":128,"op":{"Discard":{"draft":2}}}})
+        serde_json::json!({"Issue":{"session":{"incarnation":1,"epoch":2},"request":128,"op":{"Discard":{"draft":2}}}})
     );
 }
 
@@ -557,6 +705,10 @@ fn issue_operation_identity_preserves_inner_tags_and_exact_wire_fields() {
 fn issue_operation_unknown_tags_and_overflow_are_rejected_without_changing_decisions() {
     for decision in [Decision::FileAnyway, Decision::ThisIsTheIssue] {
         let message = ControlToBrain::Issue {
+            session: IssueSession {
+                incarnation: Incarnation(1),
+                epoch: 2,
+            },
             request: 1,
             op: IssueOp::Consent {
                 draft: DraftId(2),
@@ -571,24 +723,26 @@ fn issue_operation_unknown_tags_and_overflow_are_rejected_without_changing_decis
             message
         );
     }
-    assert!(postcard::from_bytes::<ControlToBrain>(&[25, 0, 3]).is_err());
-    let mut unknown_decision = vec![25, 0, 0, 2];
+    assert!(postcard::from_bytes::<ControlToBrain>(&[25, 1, 2, 0, 3]).is_err());
+    let mut unknown_decision = vec![25, 1, 2, 0, 0, 2];
     unknown_decision.extend([91; 32]);
     unknown_decision.extend([3, 3]);
     assert!(postcard::from_bytes::<ControlToBrain>(&unknown_decision).is_err());
-    let mut overflow = vec![25];
+    let mut overflow = vec![25, 1, 2];
     overflow.extend([128; 10]);
     overflow.extend([1, 2]);
     assert!(postcard::from_bytes::<ControlToBrain>(&overflow).is_err());
     assert!(
         serde_json::from_str::<ControlToBrain>(
-            r#"{"Issue":{"request":18446744073709551616,"op":{"Discard":{"draft":2}}}}"#
+            r#"{"Issue":{"session":{"incarnation":1,"epoch":2},"request":18446744073709551616,"op":{"Discard":{"draft":2}}}}"#
         )
         .is_err()
     );
     assert!(
-        serde_json::from_str::<ControlToBrain>(r#"{"Issue":{"request":1,"op":"Unknown"}}"#)
-            .is_err()
+        serde_json::from_str::<ControlToBrain>(
+            r#"{"Issue":{"session":{"incarnation":1,"epoch":2},"request":1,"op":"Unknown"}}"#
+        )
+        .is_err()
     );
 }
 
@@ -884,6 +1038,10 @@ fn outer_wire_carriers_and_tap_never_format_issue_or_device_content() {
     );
     private(
         &ControlToBrain::Issue {
+            session: IssueSession {
+                incarnation: Incarnation(u64::MAX),
+                epoch: u64::MAX,
+            },
             request: u64::MAX,
             op: IssueOp::Consent {
                 draft: card.draft,

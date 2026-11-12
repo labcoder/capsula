@@ -84,6 +84,15 @@ pub type Capability = Secret<[u8; CAPABILITY_LEN]>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Incarnation(pub u64);
 
+/// The brain and authenticated connection that offered issue operations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueSession {
+    /// The brain process that prepared the connection.
+    pub incarnation: Incarnation,
+    /// The brain's reserved connection epoch.
+    pub epoch: u64,
+}
+
 /// One thread of conversation, as the store numbers it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ThreadId(pub u64);
@@ -414,6 +423,8 @@ pub enum ControlToBrain {
     GitHub(GitHubOp),
     /// Consent or another explicit issue-card action.
     Issue {
+        /// The original brain-issued connection provenance.
+        session: IssueSession,
         /// The shell's connection-lifetime operation identity.
         request: u64,
         /// The content-bound operation.
@@ -440,6 +451,8 @@ pub enum ControlToShell {
     Welcome {
         /// This brain's incarnation.
         incarnation: Incarnation,
+        /// The reserved epoch required by this connection's issue operations.
+        issue_epoch: u64,
     },
     /// The shell is from another build. The brain exits after sending this, so the shell can
     /// start the brain from its own folder.
@@ -858,10 +871,10 @@ mod tests {
     };
     use crate::frame::{self, HEADER_LEN, Pipe};
 
-    /// The bytes another build must be able to read: the handshake and its answers. A new
-    /// variant goes at the end of its enum, or these tags move.
+    /// Hello and mismatch stay readable before the paired-build check; Welcome retains its
+    /// tag and carries the reserved issue epoch.
     #[test]
-    fn handshake_frames_keep_their_bytes_across_builds() {
+    fn handshake_frames_keep_their_tags_and_bind_the_issue_epoch() {
         let hello = Hello {
             build_id: "b".to_owned(),
             capability: Secret::new([7; CAPABILITY_LEN]),
@@ -883,9 +896,10 @@ mod tests {
         );
         assert_eq!(
             encode(postcard::to_allocvec(&ControlToShell::Welcome {
-                incarnation: Incarnation(5)
+                incarnation: Incarnation(5),
+                issue_epoch: 128,
             })),
-            [0, 5]
+            [0, 5, 128, 1]
         );
         assert_eq!(
             encode(postcard::to_allocvec(&ControlToShell::BuildMismatch {

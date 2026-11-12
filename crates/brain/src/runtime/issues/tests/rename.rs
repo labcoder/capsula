@@ -49,6 +49,7 @@ async fn a_case_only_repository_change_cannot_send_an_unknown_or_dismissed_issue
         let retained = if dismissed {
             let effects = brain
                 .issue_op(
+                    brain.issue_session().unwrap(),
                     1001,
                     &IssueOp::Discard {
                         draft: unknown.draft,
@@ -119,7 +120,14 @@ async fn a_case_only_repository_change_cannot_send_an_unknown_or_dismissed_issue
             approval: ApprovalRev(3),
             decision: Decision::File,
         };
-        let effects = brain.issue_op(1002, &consent, Some(brain.epoch)).unwrap();
+        let effects = brain
+            .issue_op(
+                brain.issue_session().unwrap(),
+                1002,
+                &consent,
+                Some(brain.epoch),
+            )
+            .unwrap();
         brain.apply(effects, None).unwrap();
         let saved = timeout(PATIENCE, brain.inputs.recv())
             .await
@@ -161,7 +169,14 @@ async fn a_case_only_repository_change_cannot_send_an_unknown_or_dismissed_issue
             ]
         );
         assert!(!brain.filing.pending());
-        let effects = brain.issue_op(1002, &consent, Some(brain.epoch)).unwrap();
+        let effects = brain
+            .issue_op(
+                brain.issue_session().unwrap(),
+                1002,
+                &consent,
+                Some(brain.epoch),
+            )
+            .unwrap();
         assert_eq!(
             effects,
             vec![Effect::Control(ControlToShell::IssueUnavailable {

@@ -7,7 +7,7 @@ use async_channel::Receiver;
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
     ControlToBrain, ControlToShell, DataToBrain, DataToShell, Deleted, ErrorKey, Incarnation,
-    Phase, RunId, RunOrigin, ThreadId, UserError,
+    IssueSession, Phase, RunId, RunOrigin, ThreadId, UserError,
 };
 
 use super::{Connection, Link, LinkEvent, LinkHandle, Session, Shared, start, welcome};
@@ -562,7 +562,10 @@ fn attended_from(label: &str, previous_generation: u64) -> Attended {
     let connection = Connection {
         control: Arc::new(shell_control),
         data: Arc::new(shell_data),
-        incarnation: Incarnation(1),
+        issue_session: IssueSession {
+            incarnation: Incarnation(1),
+            epoch: 91,
+        },
     };
     let link = thread::spawn(move || start.link.attend(connection, &start.events));
     Attended {
@@ -1371,6 +1374,7 @@ fn a_repeated_handshake_ends_the_connection() {
     let _session = connected(next(&events));
     let welcome = ControlToShell::Welcome {
         incarnation: Incarnation(2),
+        issue_epoch: 2,
     };
     frame::write(&mut &link.control, &welcome, Pipe::Control).expect("written");
     assert!(matches!(
@@ -1384,6 +1388,10 @@ fn a_repeated_handshake_ends_the_connection() {
 /// the handshake takes Welcome, and the link passes Settings and Scenes on around the account
 /// view without ending the connection.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one handshake scenario checks server provenance and ordered first frames through the real link"
+)]
 fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
     use kumochi_protocol::message::{AccountView, AssistantName, MaxFrameRate, SettingsView};
     let (control, shell_control) = pair("first-frames-control");
@@ -1404,6 +1412,7 @@ fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
     for message in [
         ControlToShell::Welcome {
             incarnation: Incarnation(4),
+            issue_epoch: 91,
         },
         ControlToShell::Settings {
             answer: false,
@@ -1416,8 +1425,14 @@ fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
     ] {
         frame::write(&mut &control, &message, Pipe::Control).expect("written");
     }
-    let incarnation = welcome(&shell_control).expect("the handshake takes Welcome");
-    assert_eq!(incarnation, Incarnation(4));
+    let issue_session = welcome(&shell_control).expect("the handshake takes Welcome");
+    assert_eq!(
+        issue_session,
+        IssueSession {
+            incarnation: Incarnation(4),
+            epoch: 91
+        }
+    );
     let (sender, events) = async_channel::unbounded();
     let link = Link {
         brain: PathBuf::new(),
@@ -1428,11 +1443,20 @@ fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
     let connection = Connection {
         control: Arc::new(shell_control),
         data: Arc::new(shell_data),
-        incarnation,
+        issue_session,
     };
     let link = thread::spawn(move || start.link.attend(connection, &start.events));
     let events = patient(events);
     let session = connected(next(&events));
+    assert_eq!(session.generation(), 1);
+    assert_eq!(session.incarnation(), Incarnation(4));
+    assert_eq!(
+        session.issue_session(),
+        IssueSession {
+            incarnation: Incarnation(4),
+            epoch: 91
+        }
+    );
     let LinkEvent::Settings {
         view: shown,
         answer: false,
@@ -1482,7 +1506,12 @@ fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one two-connection scenario checks send fences, original frame provenance and credit isolation"
+)]
 fn an_ended_connection_s_sends_and_credit_never_reach_the_next() {
+    use kumochi_protocol::message::{ApprovalRev, ContentHash, Decision, DraftId, IssueOp};
     let (a_control, a_shell_control) = pair("generation-a-control");
     let (a_data, a_shell_data) = pair("generation-a-data");
     let (b_control, b_shell_control) = pair("generation-b-control");
@@ -1499,21 +1528,31 @@ fn an_ended_connection_s_sends_and_credit_never_reach_the_next() {
     let (handle, start) = start(link, sender);
     let link = thread::spawn(move || {
         [
-            (a_shell_control, a_shell_data),
-            (b_shell_control, b_shell_data),
+            (a_shell_control, a_shell_data, 31),
+            (b_shell_control, b_shell_data, 32),
         ]
         .into_iter()
-        .all(|(control, data)| {
+        .all(|(control, data, epoch)| {
             let connection = Connection {
                 control: Arc::new(control),
                 data: Arc::new(data),
-                incarnation: Incarnation(1),
+                issue_session: IssueSession {
+                    incarnation: Incarnation(1),
+                    epoch,
+                },
             };
             start.link.attend(connection, &start.events)
         })
     });
     let events = patient(events);
     let a = connected(next(&events));
+    assert_eq!(
+        a.issue_session(),
+        IssueSession {
+            incarnation: Incarnation(1),
+            epoch: 31
+        }
+    );
     frame::write(&mut &a_data, &text(1, "from a"), Pipe::Data).expect("written");
     let LinkEvent::Data {
         generation, bytes, ..
@@ -1526,6 +1565,40 @@ fn an_ended_connection_s_sends_and_credit_never_reach_the_next() {
     drop(a_control);
     let b = connected(next(&events));
     assert_ne!(b.generation(), a.generation());
+    assert_eq!(
+        b.issue_session(),
+        IssueSession {
+            incarnation: Incarnation(1),
+            epoch: 32
+        }
+    );
+    let original = ControlToBrain::Issue {
+        session: a.issue_session(),
+        request: 0,
+        op: IssueOp::Consent {
+            draft: DraftId(9),
+            hash: ContentHash([7; 32]),
+            approval: ApprovalRev(1),
+            decision: Decision::File,
+        },
+    };
+    assert!(!handle.send_control(&a, original.clone()));
+    assert!(handle.send_control(&b, original.clone()));
+    assert_eq!(
+        frame::read::<ControlToBrain>(&mut &b_control, Pipe::Control).expect("original frame"),
+        Some(original),
+        "requeued frames retain their original issue provenance"
+    );
+    let fresh = ControlToBrain::Issue {
+        session: b.issue_session(),
+        request: 0,
+        op: IssueOp::Discard { draft: DraftId(9) },
+    };
+    assert!(handle.send_control(&b, fresh.clone()));
+    assert_eq!(
+        frame::read::<ControlToBrain>(&mut &b_control, Pipe::Control).expect("fresh frame"),
+        Some(fresh)
+    );
     // A UI that took A's frame only now, with B already installed.
     a.grant(bytes);
     let mut runs = Runs::default();
@@ -1780,7 +1853,10 @@ fn a_delete_answered_before_a_new_brain_never_fences_the_new_brain_s_runs() {
             let connection = Connection {
                 control: Arc::new(control),
                 data: Arc::new(data),
-                incarnation,
+                issue_session: IssueSession {
+                    incarnation,
+                    epoch: 1,
+                },
             };
             start.link.attend(connection, &start.events)
         })

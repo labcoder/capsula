@@ -425,8 +425,14 @@ impl Presence {
         let queued = request.is_some_and(|request| {
             self.issue_request = request;
             self.session.as_ref().is_some_and(|session| {
-                self.link
-                    .send_control(session, ControlToBrain::Issue { request, op })
+                self.link.send_control(
+                    session,
+                    ControlToBrain::Issue {
+                        session: session.issue_session(),
+                        request,
+                        op,
+                    },
+                )
             })
         });
         self.threads.update(cx, |model, cx| {

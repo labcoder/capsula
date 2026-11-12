@@ -3,8 +3,8 @@ use crate::link::{Batch, LinkEvent, LinkHandle, Session};
 use gpui_kit::component::WindowExt;
 use kumochi_protocol::message::{
     ApprovalRev, ContentHash, ControlToBrain, DataToBrain, DataToShell, Decision, Deleted, DraftId,
-    FailReason, GitHubLogin, GitHubView, Incarnation, IssueCardsStatus, IssueOp, LookupResult,
-    PageOf, RepoName, StateVersion,
+    FailReason, GitHubLogin, GitHubView, Incarnation, IssueCardsStatus, IssueOp, IssueSession,
+    LookupResult, PageOf, RepoName, StateVersion,
 };
 use kumochi_scene::text::Bounded;
 
@@ -183,6 +183,10 @@ fn open(f: &Fixture, at: usize, cx: &mut TestAppContext) {
 
 fn payload(request: u64, approval: u64) -> ControlToBrain {
     ControlToBrain::Issue {
+        session: IssueSession {
+            incarnation: Incarnation(1),
+            epoch: 1,
+        },
         request,
         op: IssueOp::Consent {
             draft: DraftId(9),

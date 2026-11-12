@@ -4,7 +4,10 @@ use std::{fmt, sync::Arc};
 
 use kumochi_protocol::{
     Secret,
-    message::{ControlToShell, Decision, DraftId, FailReason, IssueOp, IssueRefused},
+    message::{
+        ControlToShell, Decision, DraftId, FailReason, Incarnation, IssueOp, IssueRefused,
+        IssueSession,
+    },
 };
 use tokio::{task::JoinHandle, time::Instant};
 
@@ -31,7 +34,9 @@ mod owner_tests;
 #[derive(Default)]
 pub(super) struct Filing {
     next: u64,
-    last_request: Option<(u64, u64)>,
+    next_session: u64,
+    pub(super) session: Option<IssueSession>,
+    last_request: Option<(IssueSession, u64)>,
     job: Option<Job>,
     replies: Vec<Reply>,
 }
@@ -166,8 +171,27 @@ impl Filing {
 }
 
 impl Brain {
+    pub(crate) fn prepare_issue_session(&mut self, incarnation: Incarnation) -> IssueSession {
+        self.filing.next_session = self
+            .filing
+            .next_session
+            .checked_add(1)
+            .expect("issue session identities never wrap");
+        let session = IssueSession {
+            incarnation,
+            epoch: self.filing.next_session,
+        };
+        self.filing.session = Some(session);
+        session
+    }
+
+    pub(super) fn issue_session(&self) -> Option<IssueSession> {
+        self.filing.session
+    }
+
     pub(super) fn issue_op(
         &mut self,
+        session: IssueSession,
         request: u64,
         op: &IssueOp,
         epoch: Option<u64>,
@@ -177,13 +201,16 @@ impl Brain {
             | IssueOp::CheckAgain { draft }
             | IssueOp::Discard { draft } => *draft,
         };
-        if let Some((epoch, last)) = self.filing.last_request
-            && epoch == self.epoch
+        if self.issue_session() != Some(session) {
+            return None;
+        }
+        if let Some((previous, last)) = self.filing.last_request
+            && previous == session
             && request <= last
         {
             return Some(self.issue_unavailable(self.epoch, request, draft));
         }
-        self.filing.last_request = Some((self.epoch, request));
+        self.filing.last_request = Some((session, request));
         if self.filing.replies.len() >= super::CONTROL_QUEUE {
             return None;
         }

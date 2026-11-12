@@ -37,6 +37,7 @@ async fn one_deadline_cancels_held_consent_or_posting_without_an_eof_or_http_han
         };
         let effects = brain
             .issue_op(
+                brain.issue_session().unwrap(),
                 401,
                 &IssueOp::Consent {
                     draft: action.draft,
@@ -156,7 +157,14 @@ async fn close_and_quit_join_a_canceled_constructor_before_closing_the_sql_write
             approval: ApprovalRev(1),
             decision: Decision::File,
         };
-        let effects = brain.issue_op(501, &consent, Some(brain.epoch)).unwrap();
+        let effects = brain
+            .issue_op(
+                brain.issue_session().unwrap(),
+                501,
+                &consent,
+                Some(brain.epoch),
+            )
+            .unwrap();
         brain.apply(effects, None).unwrap();
         timeout(PATIENCE, async {
             loop {
@@ -169,7 +177,14 @@ async fn close_and_quit_join_a_canceled_constructor_before_closing_the_sql_write
         .await
         .unwrap();
         brain.filing.cancel();
-        let effects = brain.issue_op(502, &consent, Some(brain.epoch)).unwrap();
+        let effects = brain
+            .issue_op(
+                brain.issue_session().unwrap(),
+                502,
+                &consent,
+                Some(brain.epoch),
+            )
+            .unwrap();
         brain.apply(effects, None).unwrap();
         tokio::time::pause();
         let closing = async move {
@@ -231,7 +246,14 @@ async fn the_original_deadline_after_post_handoff_records_unknown_and_replay_nev
         approval: ApprovalRev(1),
         decision: Decision::File,
     };
-    let effects = brain.issue_op(601, &consent, Some(brain.epoch)).unwrap();
+    let effects = brain
+        .issue_op(
+            brain.issue_session().unwrap(),
+            601,
+            &consent,
+            Some(brain.epoch),
+        )
+        .unwrap();
     brain.apply(effects, None).unwrap();
     timeout(PATIENCE, async {
         loop {
@@ -287,7 +309,14 @@ async fn the_original_deadline_after_post_handoff_records_unknown_and_replay_nev
             .unwrap(),
         Some(unknown.clone())
     );
-    let effects = brain.issue_op(602, &consent, Some(brain.epoch)).unwrap();
+    let effects = brain
+        .issue_op(
+            brain.issue_session().unwrap(),
+            602,
+            &consent,
+            Some(brain.epoch),
+        )
+        .unwrap();
     brain.apply(effects, None).unwrap();
     timeout(PATIENCE, async {
         while brain.filing.pending() {
@@ -330,6 +359,7 @@ async fn another_draft_consumes_each_approval_but_cannot_repeat_an_unknown_or_di
     let (mut brain, first) = filing_owner(&scratch, &server).await;
     let effects = brain
         .issue_op(
+            brain.issue_session().unwrap(),
             701,
             &IssueOp::Consent {
                 draft: first.draft,
@@ -381,6 +411,7 @@ async fn another_draft_consumes_each_approval_but_cannot_repeat_an_unknown_or_di
         if attempt == 2 {
             let effects = brain
                 .issue_op(
+                    brain.issue_session().unwrap(),
                     712,
                     &IssueOp::Discard { draft: first.draft },
                     Some(brain.epoch),
@@ -409,6 +440,7 @@ async fn another_draft_consumes_each_approval_but_cannot_repeat_an_unknown_or_di
         }
         let effects = brain
             .issue_op(
+                brain.issue_session().unwrap(),
                 request,
                 &IssueOp::Consent {
                     draft: second.draft,

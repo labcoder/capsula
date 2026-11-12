@@ -60,7 +60,12 @@ resolve Unknown. The store still owns numeric-account/hash/approval admission an
 durable single-use consumption, including refusals. Both histories share pending-operation
 feedback, admitted only after the control queues successfully. App-lifetime request identities
 increase without wrapping and correlate final acknowledgements and refusals even when the
-state/version is unchanged. Before SQL or job admission, the brain records a per-session
+state/version is unchanged. Welcome advertises the brain incarnation and a connection epoch
+reserved before the rest of the handshake. Every issue frame retains that originating pair.
+The brain checks it before SQL, request-watermark updates or job admission; stale provenance
+ends the connection without sending old request feedback into the replacement. A failed
+handshake also consumes its reserved epoch. A restarted shell can begin its request counter
+again only with the newly advertised provenance. Before SQL or job admission, the brain records a per-session
 in-memory high-water mark. An equal or older request receives only `IssueUnavailable`, without
 SQL, client construction, HTTP or a new deadline. Failed writes and terminal delivery cannot
 clear that fence; a fresh confirmation needs a new request. This session-scoped watermark does
@@ -248,7 +253,7 @@ The checks run in order:
 Only this duplicate-identity comparison uses SQLite `NOCASE` for repository names. Cards,
 content hashes and current-membership checks keep the literal spelling. The decoded API and
 saved actions retain names, not numeric repository IDs, so a full rename or transfer cannot be
-recognized as the same repository. Existing bindings are never silently retargeted.
+recognized as the same repository (OSC-648). Existing bindings are never silently retargeted.
 
 A refusal never changes stage, content or binding. Because the refused revision is used up, a
 stale click can't file once its cause is fixed, and a double click on a sending card is a no-op.

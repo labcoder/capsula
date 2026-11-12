@@ -146,7 +146,7 @@ impl Tapped for ControlToShell {
         // Every field is named, so a field added to a listed op fails to build until reviewed.
         matches!(
             self,
-            Self::Welcome { incarnation: _ }
+            Self::Welcome { incarnation: _, issue_epoch: _ }
                 | Self::RunState {
                     run: _,
                     thread: _,

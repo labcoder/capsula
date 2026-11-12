@@ -83,7 +83,9 @@ async fn live_refusals_and_offline_controls_never_start_work_or_change_approval(
         Err(crate::connections::http_client::HttpError::Configuration)
     });
     brain.account.net.launcher = Arc::new(RejectLaunch(Arc::clone(&attempts)));
+    let session = brain.prepare_issue_session(kumochi_protocol::message::Incarnation(1));
     let issue = ControlToBrain::Issue {
+        session,
         request: 1,
         op: IssueOp::Consent {
             draft: action.draft,

@@ -11,6 +11,7 @@ async fn a_replacement_hydrated_while_construction_waits_receives_the_old_settle
     let scratch = Scratch::new("github-filing-replacement-hydrated-sending");
     let server = Arc::new(FilingServer::default());
     let (mut brain, action) = filing_owner(&scratch, &server).await;
+    let session = brain.issue_session().unwrap();
     let entered = Arc::new(Notify::new());
     let started = Arc::clone(&entered);
     let http = Arc::clone(&server);
@@ -28,6 +29,7 @@ async fn a_replacement_hydrated_while_construction_waits_receives_the_old_settle
         open_filing(&mut shell).await;
         shell
             .send(&ControlToBrain::Issue {
+                session,
                 request: 1001,
                 op: IssueOp::Consent {
                     draft: action.draft,
@@ -59,6 +61,7 @@ async fn a_replacement_hydrated_while_construction_waits_receives_the_old_settle
     assert_eq!(ended, Ended::Lost);
     assert!(brain.filing.pending());
     let original_epoch = brain.epoch;
+    brain.prepare_issue_session(Incarnation(1));
     let ((control, data), mut replacement) = duplex();
     let client = async {
         open_filing(&mut replacement).await;

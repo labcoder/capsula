@@ -509,7 +509,7 @@ display identity and grants no authority; Check again reuses RefreshRepos for GE
 | Pipe and direction | Message | Fields |
 | --- | --- | --- |
 | Control, shell to brain | `GitHub(GitHubOp)` | Connect, cancel, sign out, retry cleanup, set default repository or refresh repositories |
-| Control, shell to brain | `Issue { request, op }` | Strictly increasing, nonwrapping per-session `u64` request and unchanged IssueOp: consent (`draft`, `hash`, `approval`, `decision`), discard or check again |
+| Control, shell to brain | `Issue { session, request, op }` | Originating `IssueSession { incarnation, epoch }`, strictly increasing nonwrapping per-session `u64` request and unchanged IssueOp: consent (`draft`, `hash`, `approval`, `decision`), discard or check again |
 | Control, brain to shell | `GitHub(GitHubView)` | Connection state; a connected view has a login, at most 200 repositories, truncation flag and optional default |
 | Control, brain to shell | `ActionState` | Optional final-ack `request`, `draft`, `version`, `state`, optional `approval` |
 | Control, brain to shell | `IssueRefused` | Original `request`, `draft`, authoritative `version` and optional `approval`, content-free `reason`; no stage/content change |
@@ -528,7 +528,14 @@ bounded repository view fits the 64 KiB control cap.
 The correlated Issue, ActionState and IssueRefused shapes retain their existing enum tags
 (25, 18 and 19). This is a paired-build wire change: the exact `BUILD_ID` handshake rejects
 mixed binaries, as for earlier shape changes; there is no independent protocol number.
-The largest correlated consent is 69 bytes including its frame header; the largest
+Welcome keeps tag 0 and now advertises `issue_epoch` after the brain incarnation. The brain
+reserves that epoch before sending Welcome, even if the remaining handshake fails. The shell
+copies this pair into newly created issue frames; it never rewrites an old frame for a new
+connection. Missing, stale or foreign provenance ends the connection before SQL, client
+construction, request-watermark updates or HTTP work. It sends no old correlation into the
+replacement. This is constant-size state, not an accumulated approval or request set.
+
+The largest correlated consent is 89 bytes including its frame header; the largest
 ActionState is 249 bytes and IssueRefused is 57 bytes. `Some(request)` on ActionState
 acknowledges the final outcome, including an unchanged GET result. Progress, initial lookup
 reads and unsolicited updates use `None`. Before a refusal, the brain sends authoritative

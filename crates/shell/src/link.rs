@@ -20,8 +20,8 @@ use kumochi_protocol::constants::BRAIN_EXE;
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
     AccountView, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain, DataToShell,
-    Deleted, GitHubView, Hello, Incarnation, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase, RunId,
-    RunOrigin, SceneDescriptor, SceneDescriptorV1, SettingsView, ThreadId, UserError,
+    Deleted, GitHubView, Hello, Incarnation, IssueSession, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES,
+    Phase, RunId, RunOrigin, SceneDescriptor, SceneDescriptorV1, SettingsView, ThreadId, UserError,
 };
 
 use kumochi_scene::deferred::Deferred;
@@ -255,8 +255,8 @@ pub(crate) struct Session {
     /// be reconnected to.
     generation: u64,
     credit: Arc<Credit>,
-    /// The brain it reached.
-    incarnation: Incarnation,
+    /// The brain and authenticated connection it reached.
+    issue_session: IssueSession,
 }
 
 impl Session {
@@ -265,7 +265,11 @@ impl Session {
     }
 
     pub(crate) fn incarnation(&self) -> Incarnation {
-        self.incarnation
+        self.issue_session.incarnation
+    }
+
+    pub(crate) fn issue_session(&self) -> IssueSession {
+        self.issue_session
     }
 
     /// Grants this connection's brain `bytes` more of data frames, once the UI has taken a frame
@@ -319,7 +323,7 @@ enum LinkError {
 struct Connection {
     control: Arc<PipeClient>,
     data: Arc<PipeClient>,
-    incarnation: Incarnation,
+    issue_session: IssueSession,
 }
 
 /// What the data writer sends.
@@ -616,7 +620,10 @@ impl Session {
                 bytes: AtomicU32::new(0),
                 wake: wake.downgrade(),
             }),
-            incarnation,
+            issue_session: IssueSession {
+                incarnation,
+                epoch: generation,
+            },
         }
     }
 
@@ -723,7 +730,7 @@ impl Link {
                     continue;
                 }
             };
-            tracing::info!(incarnation = ?connection.incarnation, "connected to the brain");
+            tracing::info!(incarnation = ?connection.issue_session.incarnation, "connected to the brain");
             if !self.attend(connection, events) || self.quitting() {
                 return;
             }
@@ -750,7 +757,7 @@ impl Link {
         let Connection {
             control,
             data,
-            incarnation,
+            issue_session,
         } = connection;
         let (control_out, control_queue) = async_channel::bounded(CONTROL_QUEUE);
         let (data_out, data_queue) = async_channel::bounded(DATA_QUEUE);
@@ -806,7 +813,7 @@ impl Link {
             .send_blocking(LinkEvent::Connected(Session {
                 generation,
                 credit,
-                incarnation,
+                issue_session,
             }))
             .is_ok();
         let read = spawned.and_then(|()| {
@@ -892,20 +899,20 @@ impl Link {
             &ControlToBrain::Hello(hello.clone()),
             Pipe::Control,
         )?;
-        let incarnation = welcome(&control)?;
+        let issue_session = welcome(&control)?;
         let data = open(&Pipe::Data.name(self.session), &self.brain)?;
         frame::write(&mut &data, &DataToBrain::Hello(hello), Pipe::Data)?;
         control.set_timeout(None);
         Ok(Connection {
             control: Arc::new(control),
             data: Arc::new(data),
-            incarnation,
+            issue_session,
         })
     }
 }
 
-/// The brain's answer to Hello: its incarnation, or why this brain can't be used.
-fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
+/// The brain's answer to Hello: its issue session, or why this brain can't be used.
+fn welcome(control: &PipeClient) -> Result<IssueSession, LinkError> {
     match frame::read::<ControlToShell>(&mut &*control, Pipe::Control)? {
         None
         | Some(
@@ -943,7 +950,13 @@ fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
             );
             Err(LinkError::BuildMismatch)
         }
-        Some(ControlToShell::Welcome { incarnation }) => Ok(incarnation),
+        Some(ControlToShell::Welcome {
+            incarnation,
+            issue_epoch,
+        }) => Ok(IssueSession {
+            incarnation,
+            epoch: issue_epoch,
+        }),
     }
 }
 

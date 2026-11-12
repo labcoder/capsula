@@ -161,6 +161,10 @@ fn storage_error_allows_only_manual_check_or_dismiss_and_never_schedules_a_reque
         assert_eq!(
             f.controls.try_recv().unwrap(),
             ControlToBrain::Issue {
+                session: IssueSession {
+                    incarnation: Incarnation(1),
+                    epoch: 1
+                },
                 request: 1,
                 op: op.clone()
             }
@@ -186,7 +190,14 @@ fn storage_error_allows_only_manual_check_or_dismiss_and_never_schedules_a_reque
         click(&f, 1, selector, cx);
         assert_eq!(
             f.controls.try_recv().unwrap(),
-            ControlToBrain::Issue { request: 2, op }
+            ControlToBrain::Issue {
+                session: IssueSession {
+                    incarnation: Incarnation(1),
+                    epoch: 1
+                },
+                request: 2,
+                op
+            }
         );
         assert!(f.controls.try_recv().is_err());
         assert!(f.requests.try_recv().is_err());
@@ -454,6 +465,10 @@ fn unknown_check_again_is_get_only_and_final_unchanged_busy_or_offline_replies_r
         assert_eq!(
             f.controls.try_recv().unwrap(),
             ControlToBrain::Issue {
+                session: IssueSession {
+                    incarnation: Incarnation(1),
+                    epoch: 1
+                },
                 request: 1,
                 op: IssueOp::CheckAgain { draft: DraftId(9) }
             }
@@ -518,6 +533,10 @@ fn unknown_check_again_is_get_only_and_final_unchanged_busy_or_offline_replies_r
         assert_eq!(
             f.controls.try_recv().unwrap(),
             ControlToBrain::Issue {
+                session: IssueSession {
+                    incarnation: Incarnation(1),
+                    epoch: 1
+                },
                 request: 2,
                 op: IssueOp::CheckAgain { draft: DraftId(9) }
             }
@@ -561,6 +580,10 @@ fn unusable_bound_drafts_offer_replacement_guidance_and_dismiss_without_retarget
     assert_eq!(
         f.controls.try_recv().unwrap(),
         ControlToBrain::Issue {
+            session: IssueSession {
+                incarnation: Incarnation(1),
+                epoch: 1
+            },
             request: 1,
             op: IssueOp::Discard { draft: DraftId(9) }
         }
@@ -700,6 +723,10 @@ fn reconnect_drops_feedback_and_old_session_refusals_cannot_finish_a_new_attempt
     assert_eq!(
         f.controls.try_recv().unwrap(),
         ControlToBrain::Issue {
+            session: IssueSession {
+                incarnation: Incarnation(1),
+                epoch: 1
+            },
             request: 1,
             op: IssueOp::CheckAgain { draft: DraftId(9) }
         }
@@ -781,9 +808,26 @@ fn reconnect_drops_feedback_and_old_session_refusals_cannot_finish_a_new_attempt
         ],
         cx,
     );
+    assert!(f.controls.try_recv().is_err());
     open(&f, 1, cx);
+    assert!(f.controls.try_recv().is_err());
     confirm(&f, 1, cx);
-    assert_eq!(f.controls.try_recv().unwrap(), payload(2, 1));
+    assert_eq!(
+        f.controls.try_recv().unwrap(),
+        ControlToBrain::Issue {
+            session: IssueSession {
+                incarnation: Incarnation(1),
+                epoch: 2
+            },
+            request: 2,
+            op: IssueOp::Consent {
+                draft: DraftId(9),
+                hash: ContentHash([7; 32]),
+                approval: ApprovalRev(1),
+                decision: Decision::File,
+            },
+        }
+    );
     deliver(
         &f,
         vec![LinkEvent::IssueRefused {

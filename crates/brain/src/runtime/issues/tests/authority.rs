@@ -19,6 +19,7 @@ pub(super) async fn posting_acknowledgement(
     });
     let effects = brain
         .issue_op(
+            brain.issue_session().unwrap(),
             601,
             &IssueOp::Consent {
                 draft: action.draft,
@@ -447,6 +448,7 @@ async fn a_sql_result_save_failure_after_one_post_becomes_unknown_and_replay_can
         .unwrap();
     let effects = brain
         .issue_op(
+            brain.issue_session().unwrap(),
             601,
             &IssueOp::Consent {
                 draft: action.draft,

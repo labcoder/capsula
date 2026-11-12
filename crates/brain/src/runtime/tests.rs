@@ -185,6 +185,10 @@ fn staged_github_and_issue_controls_do_not_admit_or_change_a_run() {
     for message in [
         ControlToBrain::GitHub(GitHubOp::Connect),
         ControlToBrain::Issue {
+            session: kumochi_protocol::message::IssueSession {
+                incarnation: kumochi_protocol::message::Incarnation(1),
+                epoch: 1,
+            },
             request: 1,
             op: IssueOp::Discard { draft: DraftId(9) },
         },

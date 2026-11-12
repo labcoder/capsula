@@ -14,7 +14,8 @@ use crate::runtime::{Seen, StoreOp};
 use kumochi_protocol::{
     Secret,
     message::{
-        ActionState, ApprovalRev, GitHubLogin, GitHubView, IssueUrl, LookupResult, StateVersion,
+        ActionState, ApprovalRev, GitHubLogin, GitHubView, Incarnation, IssueUrl, LookupResult,
+        StateVersion,
     },
 };
 use kumochi_scene::text::Bounded;
@@ -184,7 +185,9 @@ async fn filing_owner(scratch: &Scratch, server: &Arc<FilingServer>) -> (Brain, 
         },
     );
     assert_eq!(server.factories.load(Ordering::SeqCst), 0);
-    (brain_with_github_owner(scratch, accounts), action)
+    let mut brain = brain_with_github_owner(scratch, accounts);
+    brain.prepare_issue_session(Incarnation(1));
+    (brain, action)
 }
 
 async fn open_filing(shell: &mut Shell<DuplexStream>) {
@@ -205,11 +208,16 @@ async fn open_filing(shell: &mut Shell<DuplexStream>) {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "two framed sessions distinguish stale provenance from a fresh request without another POST"
+)]
 async fn wire_file_commits_one_literal_post_and_replayed_consent_cannot_send_again() {
     let scratch = Scratch::new("github-filing-wire-file");
     let server = Arc::new(FilingServer::default());
     let (mut brain, action) = filing_owner(&scratch, &server).await;
     let consent = ControlToBrain::Issue {
+        session: brain.issue_session().unwrap(),
         request: 101,
         op: IssueOp::Consent {
             draft: action.draft,
@@ -265,11 +273,37 @@ async fn wire_file_commits_one_literal_post_and_replayed_consent_cannot_send_aga
     .await
     .unwrap();
     assert_eq!(ended, Ended::Lost);
+    let replacement_session = brain.prepare_issue_session(Incarnation(1));
     let ((control, data), mut replacement) = duplex();
     let client = async {
         open_filing(&mut replacement).await;
-        replacement.send(&consent).await;
-        assert_eq!(replacement.control().await, filed);
+        replacement
+            .send(&ControlToBrain::Issue {
+                session: replacement_session,
+                request: 0,
+                op: IssueOp::Consent {
+                    draft: action.draft,
+                    hash: action.hash(),
+                    approval: ApprovalRev(1),
+                    decision: Decision::File,
+                },
+            })
+            .await;
+        assert_eq!(
+            replacement.control().await,
+            Some(ControlToShell::ActionState {
+                request: Some(0),
+                draft: action.draft,
+                version: StateVersion(4),
+                state: ActionState::Filed {
+                    number: 17,
+                    url: IssueUrl::new("https://github.com/owner/repo/issues/17").unwrap(),
+                    confirmed_by_user: false,
+                    maybe_duplicate: false,
+                },
+                approval: None,
+            })
+        );
         replacement.control_out.shutdown().await.unwrap();
         assert_eq!(replacement.control().await, None);
     };
@@ -309,6 +343,7 @@ async fn wire_eof_during_held_consent_consumes_approval_and_records_known_unsent
     let scratch = Scratch::new("github-filing-wire-admission-eof");
     let server = Arc::new(FilingServer::default());
     let (mut brain, action) = filing_owner(&scratch, &server).await;
+    let session = brain.issue_session().unwrap();
     let mut observed = brain.observe();
     let release = brain.hold_store(|op| {
         matches!(
@@ -325,6 +360,7 @@ async fn wire_eof_during_held_consent_consumes_approval_and_records_known_unsent
         open_filing(&mut shell).await;
         shell
             .send(&ControlToBrain::Issue {
+                session,
                 request: 301,
                 op: IssueOp::Consent {
                     draft: action.draft,
@@ -416,6 +452,7 @@ async fn wire_eof_before_handoff_is_failed_but_a_lost_post_stays_unknown_without
             presend: Bounded::default(),
         };
         let consent = ControlToBrain::Issue {
+            session: brain.issue_session().unwrap(),
             request: if after_handoff { 201 } else { 200 },
             op: IssueOp::Consent {
                 draft: action.draft,
@@ -531,7 +568,7 @@ async fn wire_eof_before_handoff_is_failed_but_a_lost_post_stays_unknown_without
             Some(settled.clone())
         );
         let terminal = Some(ControlToShell::ActionState {
-            request: Some(if after_handoff { 201 } else { 200 }),
+            request: Some(0),
             draft: action.draft,
             version: settled.version,
             state: if after_handoff {
@@ -544,14 +581,27 @@ async fn wire_eof_before_handoff_is_failed_but_a_lost_post_stays_unknown_without
             },
             approval: Some(ApprovalRev(2)),
         });
+        let replacement_session = brain.prepare_issue_session(Incarnation(1));
         let ((control, data), mut replacement) = duplex();
         let client = async {
             open_filing(&mut replacement).await;
-            replacement.send(&consent).await;
+            replacement
+                .send(&ControlToBrain::Issue {
+                    session: replacement_session,
+                    request: 0,
+                    op: IssueOp::Consent {
+                        draft: action.draft,
+                        hash: action.hash(),
+                        approval: ApprovalRev(1),
+                        decision: Decision::File,
+                    },
+                })
+                .await;
             assert_eq!(replacement.control().await, terminal);
             if after_handoff {
                 replacement
                     .send(&ControlToBrain::Issue {
+                        session: replacement_session,
                         request: 202,
                         op: IssueOp::CheckAgain {
                             draft: action.draft,
@@ -590,6 +640,7 @@ async fn wire_eof_before_handoff_is_failed_but_a_lost_post_stays_unknown_without
                 assert_eq!(replacement.control().await, candidate_state(Some(202)));
                 replacement
                     .send(&ControlToBrain::Issue {
+                        session: replacement_session,
                         request: 203,
                         op: IssueOp::CheckAgain {
                             draft: action.draft,

@@ -35,6 +35,7 @@ async fn a_failed_discard_store_write_must_settle_its_correlated_attempt() {
     .unwrap();
     let effects = brain
         .issue_op(
+            brain.issue_session().unwrap(),
             901,
             &IssueOp::Discard {
                 draft: action.draft,
@@ -94,7 +95,9 @@ async fn every_non_job_operation_and_an_admitted_recovery_read_settle_a_store_er
             },
         };
         let epoch = (operation == 5).then_some(brain.epoch);
-        let effects = brain.issue_op(902, &op, epoch).unwrap();
+        let effects = brain
+            .issue_op(brain.issue_session().unwrap(), 902, &op, epoch)
+            .unwrap();
         brain.apply(effects, None).unwrap();
         assert_eq!(
             settle(&mut brain).await,
@@ -139,7 +142,9 @@ async fn a_missing_action_finishes_each_operation_without_claiming_authoritative
                 decision: Decision::File,
             },
         };
-        let effects = brain.issue_op(903, &op, Some(brain.epoch)).unwrap();
+        let effects = brain
+            .issue_op(brain.issue_session().unwrap(), 903, &op, Some(brain.epoch))
+            .unwrap();
         brain.apply(effects, None).unwrap();
         assert_eq!(
             settle(&mut brain).await,
@@ -186,7 +191,14 @@ async fn a_failed_approval_write_is_spent_only_if_its_compensation_commits() {
             approval: ApprovalRev(1),
             decision: Decision::File,
         };
-        let effects = brain.issue_op(904, &consent, Some(brain.epoch)).unwrap();
+        let effects = brain
+            .issue_op(
+                brain.issue_session().unwrap(),
+                904,
+                &consent,
+                Some(brain.epoch),
+            )
+            .unwrap();
         brain.apply(effects, None).unwrap();
         let failed = timeout(PATIENCE, brain.inputs.recv())
             .await
@@ -258,7 +270,14 @@ async fn a_failed_approval_write_is_spent_only_if_its_compensation_commits() {
         assert_eq!(server.receipt.load(Ordering::Acquire), 0);
         if keep_failing {
             conn.execute_batch("DROP TRIGGER refuse_approval;").unwrap();
-            let effects = brain.issue_op(905, &consent, Some(brain.epoch)).unwrap();
+            let effects = brain
+                .issue_op(
+                    brain.issue_session().unwrap(),
+                    905,
+                    &consent,
+                    Some(brain.epoch),
+                )
+                .unwrap();
             brain.apply(effects, None).unwrap();
             assert_eq!(
                 settle(&mut brain).await,
@@ -296,7 +315,14 @@ async fn a_failed_approval_write_is_spent_only_if_its_compensation_commits() {
             assert_eq!(server.posts.load(Ordering::SeqCst), 1);
             assert_eq!(server.receipt.load(Ordering::Acquire), 17);
         } else {
-            let effects = brain.issue_op(905, &consent, Some(brain.epoch)).unwrap();
+            let effects = brain
+                .issue_op(
+                    brain.issue_session().unwrap(),
+                    905,
+                    &consent,
+                    Some(brain.epoch),
+                )
+                .unwrap();
             brain.apply(effects, None).unwrap();
             assert_eq!(
                 settle(&mut brain).await,
@@ -365,6 +391,7 @@ async fn a_storage_terminal_after_posting_cannot_unlock_a_second_post() {
     );
     let effects = brain
         .issue_op(
+            brain.issue_session().unwrap(),
             906,
             &IssueOp::Consent {
                 draft: action.draft,
@@ -404,6 +431,7 @@ async fn a_storage_terminal_after_posting_cannot_unlock_a_second_post() {
     assert_eq!(second.approval, Some(ApprovalRev(2)));
     let effects = brain
         .issue_op(
+            brain.issue_session().unwrap(),
             907,
             &IssueOp::Consent {
                 draft: second.draft,

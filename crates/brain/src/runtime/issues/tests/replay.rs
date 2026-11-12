@@ -1,9 +1,27 @@
 use super::*;
 
+async fn final_reply(shell: &mut Shell<DuplexStream>) -> Vec<ControlToShell> {
+    let mut frames = Vec::new();
+    loop {
+        let reply = shell.control().await.unwrap();
+        let terminal = matches!(
+            reply,
+            ControlToShell::ActionState {
+                request: Some(_),
+                ..
+            } | ControlToShell::IssueUnavailable { .. }
+        );
+        frames.push(reply);
+        if terminal {
+            return frames;
+        }
+    }
+}
+
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
-    reason = "one framed session proves failed storage cannot revive an old consent but a fresh confirmation can file"
+    reason = "old-frame replay ends its replacement before fresh confirmation in a new framed session"
 )]
 async fn wire_replay_after_both_approval_writes_fail_requires_a_new_request() {
     let scratch = Scratch::new("github-filing-failed-admission-replay");
@@ -21,6 +39,11 @@ async fn wire_replay_after_both_approval_writes_fail_requires_a_new_request() {
         approval: ApprovalRev(1),
         decision: Decision::File,
     };
+    let original = ControlToBrain::Issue {
+        session: brain.issue_session().unwrap(),
+        request: 904,
+        op: consent.clone(),
+    };
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
@@ -28,29 +51,9 @@ async fn wire_replay_after_both_approval_writes_fail_requires_a_new_request() {
         let mut replies = Vec::new();
         let mut work = Vec::new();
         let mut saved = Vec::new();
-        for (attempt, request) in [904, 904, 905].into_iter().enumerate() {
-            shell
-                .send(&ControlToBrain::Issue {
-                    request,
-                    op: consent.clone(),
-                })
-                .await;
-            let mut frames = Vec::new();
-            loop {
-                let reply = shell.control().await.unwrap();
-                let terminal = matches!(
-                    reply,
-                    ControlToShell::ActionState {
-                        request: Some(_),
-                        ..
-                    } | ControlToShell::IssueUnavailable { .. }
-                );
-                frames.push(reply);
-                if terminal {
-                    break;
-                }
-            }
-            replies.push(frames);
+        for attempt in 0..2 {
+            shell.send(&original).await;
+            replies.push(final_reply(&mut shell).await);
             work.push((
                 server.factories.load(Ordering::SeqCst),
                 server.gets.load(Ordering::SeqCst),
@@ -71,12 +74,71 @@ async fn wire_replay_after_both_approval_writes_fail_requires_a_new_request() {
         assert_eq!(shell.control().await, None);
         (replies, work, saved)
     };
-    let (ended, (replies, work, saved)) = timeout(PATIENCE, async {
+    let (ended, (mut replies, mut work, mut saved)) = timeout(PATIENCE, async {
         tokio::join!(brain.serve(control, data, &mut tap), client)
     })
     .await
     .unwrap();
     assert_eq!(ended, Ended::Lost);
+    brain.prepare_issue_session(kumochi_protocol::message::Incarnation(1));
+    let ((control, data), mut replacement) = duplex();
+    let client = async {
+        open_filing(&mut replacement).await;
+        replacement.send(&original).await;
+        assert_eq!(replacement.control().await, None);
+    };
+    let (ended, ()) = timeout(PATIENCE, async {
+        tokio::join!(brain.serve(control, data, &mut tap), client)
+    })
+    .await
+    .unwrap();
+    assert_eq!(ended, Ended::Lost);
+    assert_eq!(server.factories.load(Ordering::SeqCst), 0);
+    assert_eq!(server.gets.load(Ordering::SeqCst), 0);
+    assert_eq!(server.posts.load(Ordering::SeqCst), 0);
+    assert_eq!(server.receipt.load(Ordering::Acquire), 0);
+    assert_eq!(
+        Store::open(&scratch.db())
+            .unwrap()
+            .action(action.draft)
+            .unwrap(),
+        Some(action.clone())
+    );
+    let session = brain.prepare_issue_session(kumochi_protocol::message::Incarnation(1));
+    let ((control, data), mut fresh_shell) = duplex();
+    let client = async {
+        open_filing(&mut fresh_shell).await;
+        fresh_shell
+            .send(&ControlToBrain::Issue {
+                session,
+                request: 0,
+                op: consent,
+            })
+            .await;
+        let frames = final_reply(&mut fresh_shell).await;
+        fresh_shell.control_out.shutdown().await.unwrap();
+        assert_eq!(fresh_shell.control().await, None);
+        frames
+    };
+    let (ended, fresh_frames) = timeout(PATIENCE, async {
+        tokio::join!(brain.serve(control, data, &mut tap), client)
+    })
+    .await
+    .unwrap();
+    assert_eq!(ended, Ended::Lost);
+    replies.push(fresh_frames);
+    work.push((
+        server.factories.load(Ordering::SeqCst),
+        server.gets.load(Ordering::SeqCst),
+        server.posts.load(Ordering::SeqCst),
+        server.receipt.load(Ordering::Acquire),
+    ));
+    saved.push(
+        Store::open(&scratch.db())
+            .unwrap()
+            .action(action.draft)
+            .unwrap(),
+    );
     brain.close().await;
     assert_eq!(
         replies[0],
@@ -114,7 +176,7 @@ async fn wire_replay_after_both_approval_writes_fail_requires_a_new_request() {
                 approval: None,
             },
             ControlToShell::ActionState {
-                request: Some(905),
+                request: Some(0),
                 draft: action.draft,
                 version: StateVersion(4),
                 state: ActionState::Filed {
