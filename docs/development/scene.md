@@ -571,6 +571,73 @@ Neither Stop nor append renumbers old handles. The returned commit index is
 zero-based over lifetime commits. Handle decoding rejects zero/unused revisions
 and slots beyond the 856-operation bound.
 
+### Paint order and `set.behind`
+
+Objects paint in handle order, so a new object lands on top. `{"target":"sun","behind":"c1"}`
+in a step's `set` links the target to `c1`, whether the target is new in that step or already
+drawn; a later link for the same target replaces the earlier one. Each prepared object keeps its
+latest link as an anchor handle (`Placed.behind`).
+
+Paint order follows the live links, not the order they were written. An object with a live link
+paints immediately below its anchor. Everything behind `c1`, directly or through a chain (moon
+behind sun behind `c1`), paints as one group just before `c1`, and `c1`'s direct dependants keep
+handle order among themselves, so the newer one paints higher. Objects with no live link paint in
+handle order. The same links give the same picture whatever order they were set in, within one
+step or across steps.
+
+- **Refusals**, all at `set[i].behind`:
+  - the target is a container (diagram, table or chart, whose children would stay on top) or a 3D
+    object: `KindChanged`;
+  - the anchor is unknown (`UnknownRef`), removed by the same step (`RemovedInStep`) or 3D
+    (`Unsupported`);
+  - the target and the anchor have different parents: both must be top-level, or siblings in one
+    container (`KindChanged`);
+  - the link would close a cycle, directly, through a chain, through a removed anchor or within one
+    step's `set` list (`ReferenceCycle`, at the link that closes it), so an earlier link can't be
+    reversed;
+  - the link would make a chain longer than `MAX_OBJECT_DEPTH` (16) links (`TooDeep`).
+
+  Admission rebuilds each target's latest anchor from the kept steps only when a step names
+  `behind`, so no admission state is stored. A removed object keeps its link in that map while
+  something live is behind it, the same rule the layout holds it by, so the cycle walk passes
+  through it the way its dependants do and it counts towards their chain's length. A removed
+  object with nothing live behind it is left out and counts for nothing, from the step after
+  the one that removes it: within that step it still counts, so removing a 16-deep stack and
+  linking its base in one step is refused `TooDeep` where two steps are admitted. That only
+  refuses more, and replay refuses the same step.
+- **A removed or cut anchor.** It keeps its place in the walk without painting, so nothing that
+  survives changes order: its dependants paint where they did, and if the anchor was behind
+  something, they stay behind that too. `LayoutState` holds every removed or cut anchor that a
+  live link still reaches, directly or through another held anchor, with its own last link, and
+  lets it go once nothing reaches it; `prepare` and `LayoutState::cut` rebuild that set the same
+  way, and admission's map keeps the same removed objects' links. Replay and recovery
+  prepare the same steps and cuts in the same order, so the live view, replay and `recover` agree.
+  A cut that drops the step that named `behind` drops its links with it, because a dropped step
+  never reaches the layout or admission's map.
+- **Stored records.** `behind` is an appended optional field of `Change`. Stored steps are JSON,
+  where an absent field decodes as none, so every step stored before it still decodes
+  (`a_stored_step_written_before_behind_existed_still_decodes`). Postcard only crosses the
+  brain–shell pipe between one build's two processes and is never stored. The other way round
+  doesn't hold: this build writes `"behind":null` into every `set` entry and `Change` denies
+  unknown fields, so an older build can't decode a stored step with a non-empty `set` written by
+  this one, and its recovery leaves that scene out and clears it.
+- **Cost.** Nothing is added per frame: sampling and paint read the order `SceneView` builds when
+  it activates a step or installs a rest view. With no link in the scene that order is the
+  in-place handle sort, with no added allocation or lookup. With links it is built once, with four
+  allocations bounded by the node count plus the held anchors (the places by handle, the sorted
+  links, the walk stack and the order). Each held anchor is one entry in the layout's held map,
+  counted in its index bytes; the map stays empty, and costs nothing, in a scene with no links.
+  Each prepare and each cut rebuilds the map, so with links cut and recovery allocate it once
+  each; every held anchor lies on a live chain of at most 16 links, so it holds at most 16 per
+  live object with a link.
+  Admission's walk up from an anchor stops at 16 links. It reads the depth below a target from
+  counts of the objects at each distance below every linked object, built once per step that
+  names `behind` and updated along at most 16 anchors for each link, so a step that re-points a
+  target with many objects behind it costs no walk over them.
+
+`behind` can't bring an object forward: moving an existing object in front of a newer one, or
+undoing a link, needs a remove and a new put (`shortcut:`, until someone asks for "in front").
+
 ### Bounded Mermaid flowcharts
 
 `{"mermaid":{"in":"d","src":"flowchart LR\nA[Start] --> B[Done]"}}`

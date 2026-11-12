@@ -1,5 +1,6 @@
 use crate::{
     ErrorCode, FieldPath, Finite, Handle, Ms, Step, StepError, WireId,
+    limits::MAX_OBJECT_DEPTH,
     record::{Anchor, Change, KeyValue, Op, Track},
 };
 use std::collections::{BTreeMap, HashSet};
@@ -383,27 +384,112 @@ fn validate_dimensions(op: &Op, prefix: &FieldPath, step: &Step) -> Result<(), S
     Ok(())
 }
 
-pub(super) fn validate_changes(
-    step: &Step,
+/// `history` holds each target's latest anchor from kept earlier steps. A removed object keeps its
+/// link only while something live is behind it, as the layout holds it in the paint walk. This
+/// step's links join them in set order, so a link that would close a cycle or make a chain longer
+/// than `MAX_OBJECT_DEPTH` is refused where it appears.
+pub(super) fn validate_changes<'a>(
+    step: &'a Step,
     objects: &BTreeMap<WireId, Object>,
     removed: &HashSet<&WireId>,
+    history: &BTreeMap<&'a WireId, &'a WireId>,
 ) -> Result<(), StepError> {
+    let mut behind = BTreeMap::new();
+    for (&target, &anchor) in history
+        .iter()
+        .filter(|(target, _)| objects.contains_key(**target))
+    {
+        let mut link = Some((target, anchor));
+        while let Some((target, anchor)) = link {
+            if behind.insert(target, anchor).is_some() {
+                break;
+            }
+            link = history
+                .get(anchor)
+                .filter(|_| !objects.contains_key(anchor))
+                .map(|next| (anchor, *next));
+        }
+    }
+    // How many objects sit exactly k links below each object, so the depth below a target is
+    // read in at most MAX_OBJECT_DEPTH steps instead of walked.
+    let mut depths: BTreeMap<&WireId, [u32; MAX_OBJECT_DEPTH + 1]> = BTreeMap::new();
+    for &target in behind.keys() {
+        let mut at = target;
+        for distance in 1..=MAX_OBJECT_DEPTH {
+            let Some(&anchor) = behind.get(at) else {
+                break;
+            };
+            depths.entry(anchor).or_insert([0; MAX_OBJECT_DEPTH + 1])[distance] += 1;
+            at = anchor;
+        }
+    }
     for (index, change) in step.set.iter().enumerate() {
         let prefix = FieldPath::default().field("set").index(index);
+        let fail = |field, code| StepError::in_step(&step.id, prefix.clone().field(field), code);
         let Some(target) = objects.get(&change.target) else {
-            return Err(StepError::in_step(
-                &step.id,
-                prefix.field("target"),
-                ErrorCode::UnknownRef,
-            ));
+            return Err(fail("target", ErrorCode::UnknownRef));
         };
         validate_change(change, target.kind, &prefix, step)?;
         if removed.contains(&change.target) {
-            return Err(StepError::in_step(
-                &step.id,
-                prefix.field("target"),
-                ErrorCode::RemovedInStep,
-            ));
+            return Err(fail("target", ErrorCode::RemovedInStep));
+        }
+        let Some(anchor) = &change.behind else {
+            continue;
+        };
+        let Some(below) = objects.get(anchor) else {
+            return Err(fail("behind", ErrorCode::UnknownRef));
+        };
+        if removed.contains(anchor) {
+            return Err(fail("behind", ErrorCode::RemovedInStep));
+        }
+        if below.kind.three_dimensional() {
+            return Err(fail("behind", ErrorCode::Unsupported));
+        }
+        if below.parent != target.parent {
+            return Err(fail("behind", ErrorCode::KindChanged));
+        }
+        // Admitted chains are acyclic and at most MAX_OBJECT_DEPTH links long, so this walk stops.
+        let mut above = 0;
+        let mut at = anchor;
+        loop {
+            if at == &change.target {
+                return Err(fail("behind", ErrorCode::ReferenceCycle));
+            }
+            let Some(&next) = behind.get(at) else {
+                break;
+            };
+            above += 1;
+            if above >= MAX_OBJECT_DEPTH {
+                return Err(fail("behind", ErrorCode::TooDeep));
+            }
+            at = next;
+        }
+        let mut moved = depths
+            .get(&change.target)
+            .copied()
+            .unwrap_or([0; MAX_OBJECT_DEPTH + 1]);
+        let beneath = moved.iter().rposition(|count| *count > 0).unwrap_or(0);
+        if above + 1 + beneath > MAX_OBJECT_DEPTH {
+            return Err(fail("behind", ErrorCode::TooDeep));
+        }
+        moved[0] = 1;
+        let old = behind.insert(&change.target, anchor);
+        for (start, joined) in [(old, false), (Some(anchor), true)] {
+            let mut next = start;
+            for distance in 1..=MAX_OBJECT_DEPTH {
+                let Some(at) = next else {
+                    break;
+                };
+                let counts = depths.entry(at).or_insert([0; MAX_OBJECT_DEPTH + 1]);
+                for (count, moving) in counts[distance..].iter_mut().zip(moved) {
+                    *count = if joined {
+                        *count + moving
+                    } else {
+                        *count - moving
+                    };
+                }
+                next = behind.get(at).copied();
+            }
         }
     }
     Ok(())
@@ -430,6 +516,11 @@ fn validate_change(
         (change.emphasis.is_some(), kind == Kind::Row, "emphasis"),
         (change.info.is_some(), kind == Kind::Solid, "info"),
         (change.color.is_some(), kind != Kind::View3d, "color"),
+        (
+            change.behind.is_some(),
+            !kind.container() && !kind.three_dimensional(),
+            "behind",
+        ),
     ] {
         if present && !owned {
             return Err(StepError::in_step(

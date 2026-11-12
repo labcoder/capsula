@@ -65,6 +65,12 @@ fn every_two_dimensional_operation_and_mixed_form_fits_the_schema() {
     assert!(valid(
         &json!({"step": {"id": "s", "set": [{"target": "n", "text": "renamed", "color": "green"}], "remove": ["old"]}})
     ));
+    assert!(valid(
+        &json!({"step": {"id": "s", "set": [{"target": "sun", "behind": "cloud"}]}})
+    ));
+    assert!(!valid(
+        &json!({"step": {"id": "s", "set": [{"target": "sun", "behind": "two words"}]}})
+    ));
 }
 
 #[test]

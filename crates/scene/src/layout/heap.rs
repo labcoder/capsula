@@ -96,6 +96,7 @@ fn change_bytes(change: &Change) -> usize {
         + optional(change.text.as_ref())
         + optional(change.label.as_ref())
         + optional(change.info.as_ref())
+        + change.behind.as_ref().map_or(0, |id| id.as_str().len())
         + change.cells.as_deref().map_or(0, cells)
         + change.data.as_deref().map_or(0, elements)
 }

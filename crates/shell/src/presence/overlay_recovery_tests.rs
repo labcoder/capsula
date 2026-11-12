@@ -834,11 +834,13 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
         "recovery_apply case={case:?} allocations={allocations} bytes={bytes} retained_allocations={} retained_bytes={}",
         retained[0], retained[1]
     );
+    // Bytes include each held LayoutState's empty behind-anchor map (24 bytes, no allocation):
+    // two in the kept Scene (rest and view) and four in the recovered-scenes buffer.
     let bound = match case {
-        Case::A => [390, 130_961, 167, 65_598],
-        Case::B => [392, 129_825, 169, 64_462],
-        Case::C | Case::E => [149, 45_788, 65, 19_298],
-        Case::D => [395, 130_889, 172, 65_526],
+        Case::A => [390, 131_105, 167, 65_646],
+        Case::B => [392, 129_969, 169, 64_510],
+        Case::C | Case::E => [149, 45_932, 65, 19_346],
+        Case::D => [395, 131_033, 172, 65_574],
     };
     assert!(
         allocations <= bound[0]

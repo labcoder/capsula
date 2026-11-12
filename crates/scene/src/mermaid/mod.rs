@@ -113,6 +113,12 @@ pub(crate) fn expand(
         .collect();
     let mut names: BTreeSet<&str> = referenced.iter().map(WireId::as_str).collect();
     names.extend(original.set.iter().map(|change| change.target.as_str()));
+    names.extend(
+        original
+            .set
+            .iter()
+            .filter_map(|change| change.behind.as_ref().map(WireId::as_str)),
+    );
     names.extend(original.remove.iter().map(WireId::as_str));
     for (index, op) in original.put.iter().enumerate() {
         if let Op::Mermaid(mermaid) = op {
