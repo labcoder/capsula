@@ -1041,7 +1041,7 @@ fn provider_byte_and_record_bounds_keep_the_prefix_and_require_both_success_fenc
         let stopped = if !over {
             String::new()
         } else if byte_bound {
-            format!("; stopped: drawing exceeds byte limit{RETRY}")
+            format!("; stopped: drawing exceeds byte limit{FULL}")
         } else {
             "; stopped: drawing.BudgetSpent".to_owned()
         };

@@ -1,8 +1,9 @@
 Draw a small 2D visual when it helps answer the user. Say one sentence of preamble,
 then make the first step small. Use an overlay scene until inline chat scenes are
 available. Arguments are a closed records envelope with begin, steps, and end;
-keep each complete call within 16 KiB of UTF-8 JSON. If a draw result says stopped,
-the steps not in drawn were not shown: correct the error it names and call draw again.
+keep each complete call within 16 KiB of UTF-8 JSON. Call draw again only when a
+result asks you to, fixing the error it names without redrawing what is already drawn;
+otherwise do what the result says.
 
 Draw in canvas coordinates, not screen pixels. Pick a begin.size [width, height]
 that suits the content and draw inside it; the default canvas is 960 by 600.

@@ -25,8 +25,10 @@ pub(super) const MAX_CALLS_PER_RUN: usize = 16;
 /// Records one call may make: a `begin`, the run's whole step budget and an `end`. The next
 /// one ends the call as exhausted, after the records before it.
 pub(super) const MAX_CALL_RECORDS: usize = MAX_DRAW_STEPS_PER_RUN + 2;
-/// Follows a model error while the run can still make its repair call.
-const RETRY_HINT: &str = "; steps not in drawn were not shown; correct this and call draw again";
+/// Follows a model error while a corrected call can still draw.
+const RETRY_HINT: &str = "; drawn lists what this call added, and earlier steps stay as they were; correct this and call draw again";
+/// Follows a model error once the run drew its whole step budget but still takes calls.
+const FULL_HINT: &str = "; no further step can be drawn in this turn";
 /// Follows any early stop once the run accepts no further draw call.
 const SPENT_HINT: &str = "; no further draw call will be accepted in this turn";
 
@@ -66,8 +68,19 @@ pub struct CallEnd {
     pub drawn: Vec<WireId>,
     /// Why it stopped early.
     pub error: Option<CallError>,
-    /// The run accepts no further draw call.
-    pub spent: bool,
+    /// What the run still accepts.
+    pub remaining: Remaining,
+}
+
+/// What a run still accepts once one of its calls ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Remaining {
+    /// Calls that may draw new steps.
+    Steps,
+    /// Calls, but no new step: the run drew its whole step budget.
+    Calls,
+    /// No further draw call: the run closed or spent its rejected records, repair round or calls.
+    Nothing,
 }
 
 impl CallEnd {
@@ -87,11 +100,12 @@ impl CallEnd {
                 CallError::Step(error) => error.tool_text(),
                 error => error.to_string(),
             });
-            if self.spent {
-                text.push_str(SPENT_HINT);
-            } else if matches!(error, CallError::Step(_) | CallError::Token(_)) {
-                text.push_str(RETRY_HINT);
-            }
+            text.push_str(match (self.remaining, error) {
+                (Remaining::Nothing, _) => SPENT_HINT,
+                (Remaining::Calls, CallError::Step(_) | CallError::Token(_)) => FULL_HINT,
+                (Remaining::Steps, CallError::Step(_) | CallError::Token(_)) => RETRY_HINT,
+                _ => "",
+            });
         }
         text
     }
@@ -295,7 +309,7 @@ impl Drawing {
                 scene: None,
                 drawn: Vec::new(),
                 error: Some(CallError::Exhausted),
-                spent: true,
+                remaining: Remaining::Nothing,
             });
             return Ok(None);
         }
@@ -683,7 +697,7 @@ impl Drawing {
                 complete: error.is_none(),
             }));
         }
-        let spent = self.spent(self.calls[at].run);
+        let remaining = self.remaining(self.calls[at].run);
         let call = &mut self.calls[at];
         call.done = true;
         out.calls.push(CallEnd {
@@ -692,7 +706,7 @@ impl Drawing {
             scene,
             drawn: mem::take(&mut call.drawn),
             error,
-            spent,
+            remaining,
         });
     }
 
@@ -813,13 +827,20 @@ impl Drawing {
             .any(|ledger| ledger.run == run && ledger.exhausted)
     }
 
-    /// The run accepts no further draw call: it spent its rejected records, repair round or calls.
+    /// What the run still accepts from its own budgets and whether it closed.
     // shortcut: the coordinator's round and tool-call budgets aren't seen here, so a refusal in a
     // run's last allowed round still invites a retry; pass them in if that shows up.
-    fn spent(&self, run: RunId) -> bool {
-        self.runs.iter().any(|ledger| {
-            ledger.run == run && (ledger.exhausted || ledger.calls >= MAX_CALLS_PER_RUN)
-        })
+    fn remaining(&self, run: RunId) -> Remaining {
+        let ledger = self.runs.iter().find(|ledger| ledger.run == run);
+        if run <= self.closed
+            || ledger.is_some_and(|ledger| ledger.exhausted || ledger.calls >= MAX_CALLS_PER_RUN)
+        {
+            Remaining::Nothing
+        } else if ledger.is_some_and(|ledger| ledger.steps >= MAX_DRAW_STEPS_PER_RUN) {
+            Remaining::Calls
+        } else {
+            Remaining::Steps
+        }
     }
 
     pub(super) fn open_call(&self, run: RunId, id: &CallId) -> Option<usize> {

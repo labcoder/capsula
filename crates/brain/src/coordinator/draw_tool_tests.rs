@@ -12,7 +12,8 @@ use crate::test_support::Scratch;
 #[path = "provider_draw_tests.rs"]
 mod provider_stream;
 
-const RETRY: &str = "; steps not in drawn were not shown; correct this and call draw again";
+const RETRY: &str = "; drawn lists what this call added, and earlier steps stay as they were; correct this and call draw again";
+const FULL: &str = "; no further step can be drawn in this turn";
 const SPENT: &str = "; no further draw call will be accepted in this turn";
 
 fn id(name: &str) -> CallId {

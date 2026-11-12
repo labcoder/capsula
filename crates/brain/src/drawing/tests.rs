@@ -14,8 +14,8 @@ use kumochi_scene::{
 
 use super::call::MAX_CALL_RECORDS;
 use super::{
-    CallEnd, CallError, Drawing, Held, Input, MAX_QUEUED_JOBS, Output, Reply, StoredScene, Target,
-    Write,
+    CallEnd, CallError, Drawing, Held, Input, MAX_QUEUED_JOBS, Output, Remaining, Reply,
+    StoredScene, Target, Write,
 };
 use crate::coordinator::{Effect, Stale, StoreOp};
 use crate::engines::CallId;
@@ -2029,6 +2029,11 @@ fn a_failed_repair_round_spends_the_run_s_drawing_budget() {
     assert!(next.calls[0].complete(), "the next run has its own budget");
 }
 
+/// The closing phrases of a stopped result.
+const RETRY: &str = "; drawn lists what this call added, and earlier steps stay as they were; correct this and call draw again";
+const FULL: &str = "; no further step can be drawn in this turn";
+const SPENT: &str = "; no further draw call will be accepted in this turn";
+
 #[test]
 fn a_refusal_says_whether_a_repair_follows_and_the_repair_reuses_the_unsaved_scene_name() {
     let mut drawing = Drawing::default();
@@ -2037,22 +2042,93 @@ fn a_refusal_says_whether_a_repair_follows_and_the_repair_reuses_the_unsaved_sce
         || r#"{"id":"a","put":[{"text":{"id":"x","text":"","at":[0,0],"size":0}}]}"#.to_owned();
     let stopped = "drawn: []; stopped: step a: put[0].text.size: scene.OutOfRange";
     let first = store.run(&mut drawing, call(1, "c1", args("sky", &[refused()])));
-    assert_eq!(
-        first.calls[0].tool_text(),
-        format!("{stopped}; steps not in drawn were not shown; correct this and call draw again")
-    );
+    assert_eq!(first.calls[0].tool_text(), format!("{stopped}{RETRY}"));
     assert!(store.scenes.is_empty(), "the refused call saved no scene");
     let repaired = store.run(&mut drawing, call(1, "c2", args("sky", &[text("a", "x")])));
     assert_eq!(repaired.calls[0].tool_text(), "drawn: [a]");
     assert_eq!(store.scenes.len(), 1);
-    let spent = "; no further draw call will be accepted in this turn";
     store.run(&mut drawing, call(2, "c3", args("sea", &[refused()])));
     let repair = store.run(&mut drawing, call(2, "c4", args("sea", &[refused()])));
-    assert_eq!(repair.calls[0].tool_text(), format!("{stopped}{spent}"));
+    assert_eq!(repair.calls[0].tool_text(), format!("{stopped}{SPENT}"));
     let late = store.run(&mut drawing, call(2, "c5", args("sea", &[text("a", "x")])));
     assert_eq!(
         late.calls[0].tool_text(),
-        format!("drawn: []; stopped: drawing.BudgetSpent{spent}")
+        format!("drawn: []; stopped: drawing.BudgetSpent{SPENT}")
+    );
+}
+
+#[test]
+fn a_replayed_step_before_a_refusal_stays_without_being_listed_as_drawn() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    store.run(&mut drawing, call(1, "c1", args("s", &[text("a", "x")])));
+    let refused = r#"{"id":"b","put":[{"text":{"id":"y","text":"","at":[0,0],"size":0}}]}"#;
+    let out = store.run(
+        &mut drawing,
+        call(1, "c2", args("s", &[text("a", "x"), refused.to_owned()])),
+    );
+    assert_eq!(
+        out.calls[0].tool_text(),
+        format!("drawn: []; stopped: step b: put[0].text.size: scene.OutOfRange{RETRY}")
+    );
+    assert_eq!(drawing.scenes[0].state.committed(), 1, "a stays as it was");
+}
+
+#[test]
+fn a_refusal_after_the_run_s_last_step_says_no_further_step_while_replays_still_run() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    let steps = |prefix: &str, count: usize| -> Vec<String> {
+        (1..=count)
+            .map(|n| text(&format!("{prefix}{n}"), &format!("{prefix}x{n}")))
+            .collect()
+    };
+    let refused =
+        r#"{"id":"r","put":[{"text":{"id":"rx","text":"","at":[0,0],"size":0}}]}"#.to_owned();
+    let below = MAX_DRAW_STEPS_PER_RUN - 1;
+    store.run(&mut drawing, call(1, "c1", args("s", &steps("a", below))));
+    let short = store.run(&mut drawing, call(1, "c2", args("s", &[refused])));
+    assert_eq!(
+        short.calls[0].tool_text(),
+        format!("drawn: []; stopped: step r: put[0].text.size: scene.OutOfRange{RETRY}")
+    );
+    // Two scenes of 32, so only the run's budget is full, not either scene's own.
+    let half = MAX_DRAW_STEPS_PER_RUN / 2;
+    store.run(&mut drawing, call(2, "c3", args("t", &steps("b", half))));
+    store.run(&mut drawing, call(2, "c4", args("u", &steps("c", half))));
+    let full = store.run(&mut drawing, call(2, "c5", args("t", &[text("d", "dx")])));
+    assert_eq!(error(&full.calls[0]), ErrorCode::OverBudget(Budget::Steps));
+    assert_eq!(
+        full.calls[0].tool_text(),
+        format!("drawn: []; stopped: step d: $: scene.OverBudget{FULL}")
+    );
+    let replay = store.run(&mut drawing, call(2, "c6", args("t", &steps("b", 1))));
+    assert_eq!(
+        replay.calls[0].tool_text(),
+        "drawn: []",
+        "a replay still runs"
+    );
+}
+
+#[test]
+fn a_refusal_queued_behind_a_step_write_says_no_further_call_once_the_run_closes() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    let unparsed = r#"{"id":"c","put":[],"colour":1}"#.to_owned();
+    let out = drawing
+        .handle(call(1, "c", args("s", &[text("a", "x"), unparsed])))
+        .expect("a fresh call");
+    let lookup = sent(&out).expect("a lookup").1;
+    let out = reply(&mut drawing, &out, Ok(store.answer(&lookup)));
+    let write = sent(&out).expect("the first step").1;
+    let closed = drawing
+        .handle(Input::RunClosed { run: RunId(1) })
+        .expect("a close");
+    assert!(closed.calls.is_empty(), "the call waits for its write");
+    let out = reply(&mut drawing, &out, Ok(store.answer(&write)));
+    assert_eq!(
+        out.calls[0].tool_text(),
+        format!("drawn: [a]; stopped: step c: $: scene.UnknownField{SPENT}")
     );
 }
 
@@ -2149,7 +2225,7 @@ fn debug_and_display_never_carry_drawing_content() {
             path: kumochi_scene::FieldPath::default(),
             code: ErrorCode::IdReused,
         })),
-        spent: false,
+        remaining: Remaining::Steps,
     };
     let stored = StoredScene {
         scene: SceneId(1),
