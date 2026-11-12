@@ -222,7 +222,7 @@ fn a_removed_anchor_leaves_its_dependant_where_it_painted_and_recovery_agrees() 
 }
 
 #[test]
-fn a_removed_anchor_hands_its_own_link_to_its_dependants() {
+fn a_removed_anchor_keeps_its_own_link_for_its_dependants() {
     let (scene, _, view) = drawn(vec![
         cloud(),
         json!({"id":"sun","put":[circle("sun"),circle("moon")],
@@ -284,7 +284,19 @@ fn nested_removed_anchors_keep_the_order_of_what_survives() {
 }
 
 #[test]
-fn two_cuts_hand_on_links_and_drop_unshown_links_alike_live_and_recovered() {
+fn removing_two_anchors_in_one_step_keeps_the_order_of_what_survives() {
+    let names = ["a1", "a2", "b", "z"];
+    let (scene, _, view) = drawn(vec![
+        json!({"id":"put","put":[circle("a1"),circle("a2"),circle("b"),circle("z")],"set":[
+            {"target":"a1","behind":"b"},{"target":"a2","behind":"b"},{"target":"z","behind":"a1"}]}),
+        json!({"id":"both","remove":["a1","b"]}),
+    ]);
+    assert_eq!(painted(&view, &names), ["z", "a2"]);
+    assert_eq!(painted(&recovered(&scene), &names), ["z", "a2"]);
+}
+
+#[test]
+fn two_cuts_hold_dropped_anchors_and_drop_unshown_links_alike_live_and_recovered() {
     let (mut scene, mut budget, view) = drawn(vec![
         cloud(),
         json!({"id":"sun","put":[circle("sun")],
@@ -301,7 +313,7 @@ fn two_cuts_hand_on_links_and_drop_unshown_links_alike_live_and_recovered() {
     assert_eq!(
         painted(&view, ALL),
         ["sky", "sun", "c1"],
-        "sun takes c2's place behind c1, and the unshown link is gone"
+        "sun stays under the held c2, behind c1, and the unshown link is gone"
     );
     assert_eq!(painted(&recovered(&scene), ALL), ["sky", "sun", "c1"]);
     activate(
@@ -515,6 +527,39 @@ fn a_removed_stack_with_nothing_live_behind_it_no_longer_counts() {
         ],
         &json!({"id":"move","set":[{"target":"o0","behind":"x"}]}),
     );
+}
+
+#[test]
+fn a_stack_removed_in_a_step_still_counts_in_that_step() {
+    let (mut put, set) = chain("o", 17);
+    put.push(circle("x"));
+    let removed: Vec<String> = (1..17).map(|index| format!("o{index}")).collect();
+    refused(
+        &[json!({"id":"chain","put":put,"set":set})],
+        &json!({"id":"move","remove":removed,"set":[{"target":"o0","behind":"x"}]}),
+        ErrorCode::TooDeep,
+        "set[0].behind",
+    );
+}
+
+#[test]
+fn a_removed_object_below_a_target_still_counts_towards_sixteen() {
+    let link_base = |count: usize| {
+        let (mut put, set) = chain("o", count);
+        put.push(circle("x"));
+        let removed: Vec<String> = (1..count - 1).map(|index| format!("o{index}")).collect();
+        (
+            [
+                json!({"id":"chain","put":put,"set":set}),
+                json!({"id":"drop","remove":removed}),
+            ],
+            json!({"id":"move","set":[{"target":"o0","behind":"x"}]}),
+        )
+    };
+    let (steps, link) = link_base(16);
+    admitted(&steps, &link);
+    let (steps, link) = link_base(17);
+    refused(&steps, &link, ErrorCode::TooDeep, "set[0].behind");
 }
 
 #[test]
