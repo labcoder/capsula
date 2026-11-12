@@ -16,6 +16,8 @@ mod bench;
 #[cfg(windows)]
 mod gate;
 #[cfg(windows)]
+mod hermetic;
+#[cfg(windows)]
 mod live;
 #[cfg(windows)]
 mod platform;
@@ -33,6 +35,11 @@ fn usage() -> String {
     format!(
         "usage: cargo xtask <task>
 
+The gate tasks (cold-start, gate-session, hover-gate, bench, slice2-gate) run only as the gate
+identity, never as Kumochi or Kumochi Dev, and build the images they launch themselves:
+  cargo run --release --package xtask --features kumochi-protocol/gate-identity -- <task>
+See docs/development/gate-identity.md.
+
 tasks:
   cold-start <path-session.txt>
                     approved input-free ten-launch cold gate; create-new redirect
@@ -48,14 +55,14 @@ tasks:
   input-quiet <seconds>
                     observe raw input on a hidden window for 1..120 seconds;
                     class, motion and marker only; no keys/text or injected input
-  bench idle [--duration 1..60] [--baseline <release-directory> | --panel]
+  bench idle [--duration 1..60] [--baseline <checkout> | --panel]
                     release idle CPU/private bytes on Rez (default 60s)
                     refuses existing product processes; normal-priority launch,
                     30s settle, GetProcessTimes + private bytes, bounded autoquit;
                     CPU is percent of one core, not the whole machine;
                     three 2s saturated-thread trials calibrate the highest cycle rate
                     before launch; cycles CPU is the gate, GetProcessTimes stays beside it
-                    baseline uses that directory and closes its own shell window
+                    baseline builds that checkout's images and closes its own shell window
                     panel opens the current shell's panel before settling, without input
                     the current shell must paint no dock frame from the settle to Quit
   live account      print only the dev brain's non-secret account state; never signs in
@@ -73,7 +80,7 @@ tasks:
                     renewing it; writes target\\live\\<time>\\catalog-provenance.json with
                     only approved keys and closed words; exits 10-19 having sent nothing;
                     refuses while any product process runs
-  slice2-gate       the slice 2 gate: the real dev brain with fixture scripts, driven
+  slice2-gate       the slice 2 gate: the real brain with fixture scripts, driven
                     over its real pipes by a scripted client; no input; refuses while
                     any product process runs
   check-vendor      fail unless every crate in vendor/ is what Cargo.lock builds;

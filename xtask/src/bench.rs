@@ -13,8 +13,9 @@ use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail, ensure};
-use kumochi_protocol::constants::{BRAIN_EXE, SHELL_EXE};
+use kumochi_protocol::constants::SHELL_EXE;
 
+use crate::hermetic::{self, Folders, Profile, Run};
 use crate::platform::{self, Process};
 
 #[derive(Debug)]
@@ -110,9 +111,7 @@ fn options(mut args: impl Iterator<Item = String>) -> Result<(u64, Option<PathBu
     let mut workload = match args.next().as_deref() {
         Some("idle") => Workload::Idle,
         Some("stretch") => bail!("motion trials return with the pull (C2a)"),
-        _ => bail!(
-            "use cargo xtask bench idle [--duration 1..60] [--baseline <release-directory> | --panel]"
-        ),
+        _ => bail!("use bench idle [--duration 1..60] [--baseline <checkout> | --panel]"),
     };
     let mut duration = None;
     let mut baseline = None;
@@ -131,8 +130,7 @@ fn options(mut args: impl Iterator<Item = String>) -> Result<(u64, Option<PathBu
             }
             "--baseline" if baseline.is_none() => {
                 baseline = Some(PathBuf::from(
-                    args.next()
-                        .context("--baseline needs a release directory")?,
+                    args.next().context("--baseline needs a checkout")?,
                 ));
             }
             "--panel" if workload == Workload::Idle => workload = Workload::Panel,
@@ -146,36 +144,51 @@ fn options(mut args: impl Iterator<Item = String>) -> Result<(u64, Option<PathBu
     Ok((duration.unwrap_or(60), baseline, workload))
 }
 
+/// Measures the gate release shell built from this workspace, or from the `--baseline` checkout.
 pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
     let (seconds, baseline, workload) = options(args)?;
-    let exe = std::env::current_exe()?;
-    let release: PathBuf = exe
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let root = std::env::current_exe()?
         .parent()
-        .and_then(|path| path.parent())
-        .context("xtask executable is not inside a Cargo profile directory")?
-        .join("release");
-    let release = baseline.as_ref().unwrap_or(&release);
-    let shell = release.join(SHELL_EXE);
-    ensure!(
-        shell.is_file() && release.join(BRAIN_EXE).is_file(),
-        "build both release binaries before benchmarking"
-    );
-    let existing = platform::processes().context("checking for existing product processes")?;
-    ensure!(
-        existing.is_empty(),
-        "refusing to run: existing product process PIDs {:?}",
-        existing.iter().map(|entry| entry.pid).collect::<Vec<_>>()
-    );
+        .and_then(Path::parent)
+        .context("xtask is not in a Cargo profile folder")?
+        .join("bench")
+        .join(stamp.to_string());
+    let run = Run::begin(root)?;
+    let measured = (|| {
+        let (release, build) = hermetic::build(
+            &["kumochi-shell", "kumochi-brain"],
+            Profile::Release,
+            baseline.as_deref(),
+        )?;
+        println!("build_seconds={:.1}", build.as_secs_f64());
+        idle(
+            &release.join(SHELL_EXE),
+            &run.folders("app")?,
+            seconds,
+            baseline.as_deref(),
+            workload,
+        )
+    })();
+    run.finish(measured)
+}
 
+fn idle(
+    shell: &Path,
+    folders: &Folders,
+    seconds: u64,
+    baseline: Option<&Path>,
+    workload: Workload,
+) -> Result<()> {
     // A baseline shell may predate the settled-interval count, so only the current one is checked.
-    let paints = if baseline.is_none() {
+    let paints = if baseline.is_some() {
+        None
+    } else {
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let path =
             std::env::temp_dir().join(format!("idle-bench-{}-{nonce}.txt", std::process::id()));
         println!("dock paint diagnostics: {}", path.display());
         Some(path)
-    } else {
-        None
     };
     let mut extra: Vec<OsString> = Vec::new();
     if workload == Workload::Panel {
@@ -189,7 +202,8 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
     }
     println!("workload: {workload:?}; baseline: {}", baseline.is_some());
     let cycle_rate = calibrate_rate()?;
-    let mut child = platform::launch(&shell, (seconds + 40) * 1000, extra)
+    crate::live::refuse_running(&platform::processes()?, std::process::id())?;
+    let mut child = platform::launch(shell, folders, (seconds + 40) * 1000, extra)
         .context("launching release shell at normal priority")?;
     let deadline = Instant::now() + Duration::from_secs(seconds + 60);
     let mut tracked = Vec::new();

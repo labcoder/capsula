@@ -50,6 +50,40 @@ fn identities_preserve_stored_names_and_profile_aliases() {
 }
 
 #[test]
+fn the_gate_identity_shares_no_stored_name_with_the_real_ones() {
+    let gate = ProductIdentity::GATE;
+    assert_eq!(
+        [
+            gate.data_dir,
+            gate.credential_service,
+            gate.instance_service,
+            gate.object_prefix,
+            gate.shell_lock
+        ],
+        [
+            "Kumochi Gate",
+            "Kumochi Gate",
+            "Kumochi Gate instance",
+            "kumochi-gate",
+            "kumochi-gate-shell"
+        ]
+    );
+    assert_eq!(
+        instance_target(gate.instance_service, 7),
+        "capability-7.Kumochi Gate instance"
+    );
+    assert_eq!(
+        generation_target(gate.credential_service, "host", "00ff", 0),
+        "Kumochi Gate/gen/host/00ff/0"
+    );
+    let gate: BTreeSet<_> = account_targets("Kumochi Gate").collect();
+    assert_eq!(gate.len(), 262);
+    for real in ["Kumochi", "Kumochi Dev"] {
+        assert!(gate.is_disjoint(&account_targets(real).collect()));
+    }
+}
+
+#[test]
 fn account_inventory_is_exact_bounded_and_disjoint() {
     let inventory = |service: &str| {
         let actual: Vec<_> = account_targets(service).collect();

@@ -74,8 +74,8 @@ pub(super) fn run(folder: &Path) -> Result<Row> {
 
     let mut failures = Vec::new();
     let (attempts, running) = purge(&case, t, &gone, &mut failures)?;
-    let (files, hits) = store::files(&case.local, &gone)?;
-    let (_, control) = store::files(&case.local, &kept)?;
+    let (files, hits) = store::files(&case.folders.local, &gone)?;
+    let (_, control) = store::files(&case.folders.local, &kept)?;
     let conn = store::open(&case.store())?;
     let rows = store::rows(&conn, &gone)?;
     let kept_rows = store::rows(&conn, &kept)?;
@@ -132,7 +132,7 @@ fn purge(
         let brain = case.start()?;
         let client = Client::connect()?;
         thread::sleep(PURGE_WAIT);
-        let running = store::live_files(&case.local, gone)?;
+        let running = store::live_files(&case.folders.local, gone)?;
         client.quit()?;
         brain.exited()?;
         let purge_left = store::purge_files(&case.data())?;

@@ -18,7 +18,7 @@ use crate::platform::credential::CredentialStoreError;
 use io::Verified;
 
 /// The authority's file in the data folder; not the history store, so no purge touches it.
-pub(crate) const FILE: &str = "credentials.db";
+pub(crate) const FILE: &str = kumochi_protocol::constants::AUTHORITY_FILE;
 /// The newest schema this build knows; a newer file is refused, never downgraded.
 const VERSION: i64 = 3;
 /// The sign-out marker's JSON bound, as the vault had it.
