@@ -287,6 +287,11 @@ fn refused(steps: &[Value], last: &Value, code: ErrorCode, path: &str) {
     assert_eq!(scene.revision(), revision, "a refusal commits nothing");
 }
 
+fn admitted(steps: &[Value], last: &Value) {
+    let (scene, budget, _) = drawn(steps.to_vec());
+    scene.admit(&typed(last), &budget).expect("admitted");
+}
+
 #[test]
 fn a_link_that_would_close_a_cycle_is_refused_in_the_step_that_closes_it() {
     let cloud = cloud();
@@ -353,6 +358,38 @@ fn a_chain_ends_at_a_removed_anchor() {
         json!({"id":"two","set":[{"target":"sky","behind":"c1"}]}),
     ]);
     assert_eq!(painted(&view, ALL), ["sky", "c1"]);
+}
+
+/// `count` circles named `{prefix}0` upwards, each behind the one before it.
+fn chain(prefix: &str, count: usize) -> (Vec<Value>, Vec<Value>) {
+    let name = |index: usize| format!("{prefix}{index}");
+    let put = (0..count).map(|index| circle(&name(index))).collect();
+    let set = (1..count)
+        .map(|index| json!({"target":name(index),"behind":name(index - 1)}))
+        .collect();
+    (put, set)
+}
+
+#[test]
+fn a_chain_may_hold_sixteen_links_but_not_seventeen() {
+    let (put, set) = chain("o", 18);
+    let sixteen = [json!({"id":"chain","put":put,"set":&set[..16]})];
+    refused(
+        &sixteen,
+        &json!({"id":"more","set":[set[16]]}),
+        ErrorCode::TooDeep,
+        "set[0].behind",
+    );
+    let (a, a_links) = chain("a", 9);
+    let (b, b_links) = chain("b", 9);
+    let joined = |b_count: usize| {
+        let put = [a.clone(), b.clone()].concat();
+        let set = [&a_links[..], &b_links[..b_count]].concat();
+        [json!({"id":"both","put":put,"set":set})]
+    };
+    let join = json!({"id":"join","set":[{"target":"b0","behind":"a8"}]});
+    admitted(&joined(7), &join);
+    refused(&joined(8), &join, ErrorCode::TooDeep, "set[0].behind");
 }
 
 #[test]

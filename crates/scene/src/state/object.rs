@@ -1,5 +1,6 @@
 use crate::{
     ErrorCode, FieldPath, Finite, Handle, Ms, Step, StepError, WireId,
+    limits::MAX_OBJECT_DEPTH,
     record::{Anchor, Change, KeyValue, Op, Track},
 };
 use std::collections::{BTreeMap, HashSet};
@@ -385,13 +386,18 @@ fn validate_dimensions(op: &Op, prefix: &FieldPath, step: &Step) -> Result<(), S
 
 /// `behind` holds each target's latest anchor from kept earlier steps, removed objects included,
 /// since a removed anchor hands its link on. This step's links join it in set order, so a link
-/// that would close a cycle is refused where it appears.
+/// that would close a cycle or make a chain longer than `MAX_OBJECT_DEPTH` is refused where it
+/// appears.
 pub(super) fn validate_changes<'a>(
     step: &'a Step,
     objects: &BTreeMap<WireId, Object>,
     removed: &HashSet<&WireId>,
     mut behind: BTreeMap<&'a WireId, &'a WireId>,
 ) -> Result<(), StepError> {
+    let mut dependants: BTreeMap<&WireId, Vec<&WireId>> = BTreeMap::new();
+    for (target, anchor) in &behind {
+        dependants.entry(*anchor).or_default().push(*target);
+    }
     for (index, change) in step.set.iter().enumerate() {
         let prefix = FieldPath::default().field("set").index(index);
         let fail = |field, code| StepError::in_step(&step.id, prefix.clone().field(field), code);
@@ -414,18 +420,43 @@ pub(super) fn validate_changes<'a>(
         if below.kind.three_dimensional() {
             return Err(fail("behind", ErrorCode::Unsupported));
         }
-        // Admitted links are acyclic, so the walk visits each linked object at most once.
+        // Admitted chains are acyclic and at most MAX_OBJECT_DEPTH links long, so both walks stop.
+        let mut above = 0;
         let mut at = anchor;
-        for _ in 0..=behind.len() {
+        loop {
             if at == &change.target {
                 return Err(fail("behind", ErrorCode::ReferenceCycle));
             }
             let Some(&next) = behind.get(at) else {
                 break;
             };
+            above += 1;
+            if above >= MAX_OBJECT_DEPTH {
+                return Err(fail("behind", ErrorCode::TooDeep));
+            }
             at = next;
         }
-        behind.insert(&change.target, anchor);
+        let mut beneath = 0;
+        let mut pending = vec![(&change.target, 0)];
+        while let Some((at, depth)) = pending.pop() {
+            beneath = beneath.max(depth);
+            if above + 1 + beneath > MAX_OBJECT_DEPTH {
+                return Err(fail("behind", ErrorCode::TooDeep));
+            }
+            pending.extend(
+                dependants
+                    .get(at)
+                    .into_iter()
+                    .flatten()
+                    .map(|dependant| (*dependant, depth + 1)),
+            );
+        }
+        if let Some(old) = behind.insert(&change.target, anchor)
+            && let Some(list) = dependants.get_mut(old)
+        {
+            list.retain(|dependant| *dependant != &change.target);
+        }
+        dependants.entry(anchor).or_default().push(&change.target);
     }
     Ok(())
 }
