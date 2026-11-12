@@ -1794,7 +1794,8 @@ absolute expiry still schedule normally. A second replacement disposes the first
 Stop includes an unbegun successor in the existing
 pending zero-cut membership; clear remembers its id before disposing the bank. Either can drain
 late commits without recreating old ink. Any successful thread deletion flushes retirement,
-including an unrelated deletion; ordinary successor removal, terminal failure and disconnect
+including an unrelated deletion, and immediately synchronizes visibility and the watchdog;
+ordinary successor removal, terminal failure and disconnect
 also dispose it. Retiring paint failure is local disposal, not an old-scene failure. No retiring
 owner is persisted or recovered, and genuine empty/failure host recreation remains unchanged.
 Header, admission-expiry, sample, paint and host-show refusals use the content-free `SceneFailed`

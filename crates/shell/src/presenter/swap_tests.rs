@@ -469,6 +469,123 @@ fn a_cancelled_old_worker_cannot_replace_the_frozen_sample_or_acknowledge_it() {
 }
 
 #[test]
+fn stop_or_clear_after_handoff_cannot_deliver_a_deferred_paint_acknowledgement() {
+    use kumochi_protocol::message::ControlToBrain;
+    for clear in [false, true] {
+        let (mut presenter, now) = fixture(&[LIVE]);
+        replace(&mut presenter, &[LIVE], NEXT, now);
+        begin(&mut presenter, NEXT, now);
+        prepare(
+            &mut presenter,
+            0,
+            step(
+                r#"{"step":{"id":"first","put":[{"shape":{"id":"first","kind":"rect","box":[0,0,10,10],"enter":"none"}}]}}"#,
+            ),
+            now,
+        );
+        presenter
+            .advance(GENERATION, now)
+            .expect("selected successor");
+        assert!(presenter.sample_at(now).0.visible);
+        assert!(!presenter.frames.borrow().paint(|_, _| Ok::<_, ()>(())));
+        let effects = if clear {
+            presenter.clear(now)
+        } else {
+            presenter.stop(RUN, now)
+        }
+        .expect("terminal local action");
+        if clear {
+            assert_eq!(
+                controls(&effects),
+                [&ControlToBrain::ClearDrawing {
+                    scene_ids: vec![NEXT]
+                }]
+            );
+        } else {
+            let controls = controls(&effects);
+            let [ControlToBrain::StopScenes { run, cuts }] = controls.as_slice() else {
+                panic!("one covering stop");
+            };
+            assert_eq!(*run, RUN);
+            assert_eq!(cuts.len(), 1);
+            assert_eq!(cuts[0].scene, NEXT);
+            assert_eq!(cuts[0].cut.activated, 1);
+            assert_eq!(
+                &*cuts[0].cut.revealed,
+                &[kumochi_scene::Handle::new(1, 0).expect("first object")]
+            );
+        }
+        assert_eq!(presenter.take_shown(GENERATION), [None; 4]);
+        assert!(presenter.frames.borrow().retirement.is_none());
+        assert!(!presenter.scenes.contains_key(&LIVE));
+    }
+}
+
+#[test]
+fn an_incoming_success_prepared_before_a_second_marker_or_reconnect_stays_stale() {
+    let after = SceneId(40);
+    for reconnect in [false, true] {
+        let (mut presenter, now) = fixture(&[LIVE]);
+        replace(&mut presenter, &[LIVE], NEXT, now);
+        begin(&mut presenter, NEXT, now);
+        let effects =
+            commit_as(&mut presenter, RUN, NEXT, 0, rect("late"), now).expect("incoming work");
+        let answer = only_job(effects).run(&mut Shaper);
+        if reconnect {
+            presenter.connected(GENERATION + 1);
+        } else {
+            replace(&mut presenter, &[NEXT], after, now);
+            begin(&mut presenter, after, now);
+            let effects = commit_as(&mut presenter, RUN, after, 0, rect("current"), now)
+                .expect("current work");
+            presenter
+                .completed(only_job(effects).run(&mut Shaper), now)
+                .expect("current answer");
+            presenter
+                .advance(GENERATION, now)
+                .expect("current activation");
+            assert!(presenter.sample_at(now).0.visible);
+        }
+        let before = picture(&presenter);
+        let mut shown = [None; 4];
+        if !reconnect {
+            shown[0] = Some(super::super::activation::Shown {
+                generation: GENERATION,
+                run: RUN,
+                scene: after,
+                index: 0,
+            });
+        }
+        assert_eq!(presenter.take_shown(GENERATION), shown);
+        let effects = presenter
+            .completed(answer, now)
+            .expect("late incoming answer");
+        assert!(effects.is_empty());
+        assert_eq!(picture(&presenter), before);
+        assert!(!presenter.scenes.contains_key(&NEXT));
+        assert!(bound_everywhere(&presenter));
+        assert_eq!(
+            presenter.take_shown(if reconnect {
+                GENERATION + 1
+            } else {
+                GENERATION
+            }),
+            [None; 4]
+        );
+        if reconnect {
+            assert!(!presenter.sample_at(now).0.visible);
+            assert_eq!(presenter.residency(), 0);
+        } else {
+            assert_eq!(
+                presenter.scenes.keys().copied().collect::<Vec<_>>(),
+                [after]
+            );
+            assert_eq!(presenter.scenes[&after].view.activated(), 1);
+        }
+    }
+}
+
+#[test]
 fn four_retiring_frames_never_paint_a_fifth_and_their_failures_emit_no_old_ack() {
     let ids = [SceneId(1), SceneId(2), SceneId(3), SceneId(4)];
     let (mut presenter, now) = fixture(&ids);

@@ -954,6 +954,85 @@ fn replacement_selects_the_successor_on_the_same_shown_host_without_an_old_ack(
 }
 
 #[gpui::test]
+fn deleting_a_thread_resynchronizes_idle_retiring_ink_only_on_success(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    use crate::presence::overlay_visibility::Visibility;
+    use kumochi_protocol::message::{
+        ControlToBrain, DataToShell, Deleted, RunId, SceneId, ThreadId,
+    };
+    use kumochi_scene::deferred::Deferred;
+    for outcome in [Deleted::Hidden, Deleted::Removed, Deleted::NotHidden] {
+        let terminal = outcome != Deleted::NotHidden;
+        let (owner, window, controls) = super::owned_static_canvas(cx);
+        let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(
+            controls.try_recv(),
+            Ok(ControlToBrain::StepShown {
+                run: RunId(6),
+                scene: SceneId(1),
+                index: 0
+            })
+        );
+        let script = HostGuard::install(if terminal {
+            &[
+                Step(Operation::Hide, Outcome::Success),
+                Step(Operation::Configure, Outcome::Success),
+            ]
+        } else {
+            &[]
+        });
+        let now = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let expires = now + std::time::Duration::from_millis(250);
+        owner.update(&mut visual, |this, cx| {
+            let effects = this.presenter.data(
+                1,
+                Deferred::new(
+                    DataToShell::ScenesReplaced {
+                        scenes: vec![SceneId(1)],
+                        successor: SceneId(2),
+                    },
+                    0,
+                ),
+                0,
+                now,
+            );
+            assert!(!this.scene_effects_at(effects, now, cx));
+            this.frames.idle();
+            assert!(this.presenter.drawn());
+            assert_eq!(this.scene_deadline, Some(expires));
+            this.thread_deleted(ThreadId(99), outcome, None, cx);
+            if terminal {
+                assert!(matches!(&this.overlay, Visibility::Hidden(_)));
+                assert_ne!(
+                    this.overlay.window().expect("fresh hidden host").window,
+                    window
+                );
+                assert!(!this.presenter.frames().borrow().shown);
+                assert!(!this.presenter.drawn());
+                assert_eq!(this.presenter.deadline(), None);
+                assert_eq!(this.scene_deadline, None);
+                assert!(this.scene_timer.is_none());
+            } else {
+                assert!(matches!(&this.overlay, Visibility::Shown(_)));
+                assert_eq!(
+                    this.overlay.window().expect("original shown host").window,
+                    window
+                );
+                assert!(this.presenter.frames().borrow().shown);
+                assert!(this.presenter.drawn());
+                assert_eq!(this.presenter.deadline(), Some(expires));
+                assert_eq!(this.scene_deadline, Some(expires));
+            }
+            assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+        });
+        script.finish();
+        close_callback_scene(&owner, cx);
+    }
+}
+
+#[gpui::test]
 fn an_unpainted_static_successor_sleeps_until_the_original_expiry(
     cx: &mut gpui_kit::TestAppContext,
 ) {

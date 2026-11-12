@@ -62,12 +62,13 @@ impl Presence {
         cx: &mut Context<'_, Self>,
     ) {
         let held = self.runs.deleting().contains(&thread);
-        if outcome != Deleted::NotHidden {
-            self.presenter.discard_replacement();
-        }
         let credit = self.runs.deleted(thread, outcome, last_run);
         self.grant(credit);
         self.link.settle_delete(thread);
+        if outcome != Deleted::NotHidden {
+            self.presenter.discard_replacement();
+            self.draw_changed(cx);
+        }
         if held {
             for model in [&self.threads, &self.chat] {
                 model.update(cx, |state, cx| {
