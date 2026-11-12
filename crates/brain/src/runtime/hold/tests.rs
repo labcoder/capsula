@@ -391,6 +391,96 @@ async fn prepared_hold_across_loading_is_admitted_before_first_serve_iteration()
 }
 
 #[tokio::test]
+async fn stop_before_admission_cancels_the_pending_hold_and_owes_no_debt() {
+    use crate::runtime::{Recovery, voice};
+    use kumochi_protocol::message::PartState;
+    let scratch = Scratch::new("hold-stop-before-admission");
+    let (mut brain, release, _decoded, _fetch) =
+        crate::runtime::tests::holds::loading_input(&scratch, Vec::new(), "unused");
+    let resume = crate::voice::stt::hold_before_serving(brain.hold_voice().1.unwrap());
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    link.recovery = Some(Recovery::new(&[], 1024));
+    recording(&mut brain);
+    let hold = brain.holds.pending.as_mut().unwrap();
+    hold.ask = None;
+    hold.audio = None;
+    brain.holds.debt = None;
+    brain.holds.gate.active.store(0, Ordering::SeqCst);
+    brain.hold_voice_changed(&mut link).unwrap();
+    assert!(
+        brain
+            .hold_control(
+                &ControlToBrain::VoiceHoldStopped {
+                    gesture: KEY.gesture
+                },
+                &mut link
+            )
+            .unwrap()
+    );
+    accepted(&mut output, KEY.gesture);
+    assert_eq!(status(&mut output), HoldStatus::Cancelled);
+    assert!(brain.holds.pending.is_none());
+    release.send(()).unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(5), voice::next(&mut brain.voice))
+        .await
+        .unwrap();
+    brain.voice_event(event, Some(&mut link)).unwrap();
+    let bytes = output.try_recv().unwrap();
+    let view = kumochi_protocol::frame::decode::<ControlToShell>(
+        &bytes[kumochi_protocol::frame::HEADER_LEN..],
+    )
+    .unwrap();
+    assert!(matches!(view, ControlToShell::Voice(view) if view.speech_input == PartState::Ready));
+    assert_eq!(output.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    assert_eq!(brain.holds.debt, None);
+    resume();
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn admission_ties_device_debt_to_the_admitting_shell_process() {
+    use crate::runtime::{Recovery, voice};
+    use std::sync::atomic::AtomicU8;
+    let scratch = Scratch::new("hold-debt-peer");
+    let (mut brain, release, _decoded, _fetch) =
+        crate::runtime::tests::holds::loading_input(&scratch, Vec::new(), "unused");
+    let resume = crate::voice::stt::hold_before_serving(brain.hold_voice().1.unwrap());
+    let exited = Arc::new(AtomicU8::new(0));
+    brain.connected_shell(ShellProcess::fixture(10, Arc::clone(&exited)));
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    link.recovery = Some(Recovery::new(&[], 1024));
+    recording(&mut brain);
+    let hold = brain.holds.pending.as_mut().unwrap();
+    hold.ask = None;
+    hold.audio = None;
+    brain.holds.debt = None;
+    brain.holds.gate.active.store(0, Ordering::SeqCst);
+    brain.hold_voice_changed(&mut link).unwrap();
+    release.send(()).unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(5), voice::next(&mut brain.voice))
+        .await
+        .unwrap();
+    brain.voice_event(event, Some(&mut link)).unwrap();
+    assert_eq!(status(&mut output), HoldStatus::Admitted);
+    resume();
+    brain.holds.lost();
+    brain.connected_shell(ShellProcess::fixture(20, Arc::new(AtomicU8::new(0))));
+    assert_eq!(brain.holds.debt, Some(KEY));
+    exited.store(1, Ordering::Release);
+    brain.connected_shell(ShellProcess::fixture(20, Arc::new(AtomicU8::new(0))));
+    assert_eq!(brain.holds.debt, None);
+    brain.close().await;
+}
+
+#[tokio::test]
 async fn ordinary_admission_limits_refuse_decoded_transfer_without_a_turn() {
     Box::pin(admission_boundaries(AdmissionStage::Transfer)).await;
 }
@@ -423,6 +513,9 @@ async fn expired_finalization(last: ControlToBrain) {
         }
     };
     brain.hold_control(&first, &mut link).unwrap();
+    if !stop_last {
+        accepted(&mut output, KEY.gesture);
+    }
     assert_eq!(output.try_recv(), Err(mpsc::error::TryRecvError::Empty));
     let owed = stop_last.then_some(KEY);
     assert_eq!(brain.holds.debt, owed);
@@ -434,6 +527,7 @@ async fn expired_finalization(last: ControlToBrain) {
             &mut link,
         )
         .unwrap();
+    accepted(&mut output, GestureId(8));
     assert_eq!(brain.holds.debt, owed);
     tokio::time::pause();
     brain.holds.pending.as_mut().unwrap().deadline = Instant::now() + Duration::from_secs(1);
@@ -445,6 +539,9 @@ async fn expired_finalization(last: ControlToBrain) {
         Some(message) = controls.recv() => { brain.hold_control(&message, &mut link).unwrap(); }
         _ = next(&mut brain.holds) => panic!("the core's ready control precedes its ready hold timer"),
     }
+    if stop_last {
+        accepted(&mut output, KEY.gesture);
+    }
     let terminal = status(&mut output);
     assert_eq!(terminal, HoldStatus::Failed(HoldFailure::TimedOut));
     assert!(brain.holds.pending.is_none());
@@ -454,6 +551,7 @@ async fn expired_finalization(last: ControlToBrain) {
     assert_eq!(decoded.try_recv(), Err(mpsc::error::TryRecvError::Empty));
     brain.hold_control(&first, &mut link).unwrap();
     brain.hold_control(&last, &mut link).unwrap();
+    accepted(&mut output, KEY.gesture);
     assert_eq!(output.try_recv(), Err(mpsc::error::TryRecvError::Empty));
     tokio::time::resume();
     brain.close().await;
@@ -549,6 +647,57 @@ fn status(output: &mut mpsc::Receiver<Vec<u8>>) -> HoldStatus {
     }
 }
 
+fn accepted(output: &mut mpsc::Receiver<Vec<u8>>, gesture: GestureId) {
+    let bytes = output.try_recv().unwrap();
+    assert_eq!(
+        kumochi_protocol::frame::decode::<ControlToShell>(
+            &bytes[kumochi_protocol::frame::HEADER_LEN..]
+        )
+        .unwrap(),
+        ControlToShell::VoiceHoldStopAccepted { gesture }
+    );
+}
+
+#[tokio::test]
+async fn duplicate_stop_acceptance_never_poisons_or_restarts_the_pending_audio() {
+    let scratch = Scratch::new("hold-duplicate-stop");
+    let mut brain = test_support::brain(&scratch, "");
+    let (out, mut output) = mpsc::channel(4);
+    let queue = RefCell::new(DataQueue::new(0));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    recording(&mut brain);
+    for _ in 0..2 {
+        assert!(
+            brain
+                .hold_control(
+                    &ControlToBrain::VoiceHoldStopped {
+                        gesture: KEY.gesture
+                    },
+                    &mut link
+                )
+                .unwrap()
+        );
+        accepted(&mut output, KEY.gesture);
+        assert_eq!(brain.holds.debt, None);
+        assert!(brain.holds.pending.is_some());
+        assert_eq!(brain.coordinator.current_run(), None);
+        assert_eq!(output.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    }
+    let audio = brain
+        .holds
+        .pending
+        .as_mut()
+        .unwrap()
+        .audio
+        .as_mut()
+        .unwrap();
+    assert_eq!(audio.end(0), Ok(()));
+    assert_eq!(audio.take(), Some(Vec::new()));
+    brain.close().await;
+}
+
 #[tokio::test]
 async fn malformed_audio_is_terminal_and_old_gestures_cannot_poison_the_owner() {
     let scratch = Scratch::new("hold-terminal-framing");
@@ -611,6 +760,7 @@ async fn malformed_audio_is_terminal_and_old_gestures_cannot_poison_the_owner() 
             )
             .unwrap();
         assert_eq!(brain.holds.debt, None);
+        accepted(&mut output, KEY.gesture);
     }
     assert_eq!(brain.coordinator.current_run(), None);
     brain.close().await;
@@ -683,6 +833,7 @@ async fn deadline_and_eof_never_fabricate_a_physical_stop_receipt() {
         )
         .unwrap();
     let deadline = brain.holds.pending.as_ref().unwrap().deadline;
+    accepted(&mut output, KEY.gesture);
     assert!(deadline <= Instant::now() + Duration::from_millis(u64::from(HOLD_DRAIN_TIMEOUT_MS)));
     brain.holds.pending.as_mut().unwrap().deadline = Instant::now();
     assert!(matches!(next(&mut brain.holds).await, Event::Deadline));
@@ -856,6 +1007,7 @@ async fn final_packet_and_key_up_without_source_receipt_cannot_schedule_decode()
             &mut link,
         )
         .unwrap();
+    accepted(&mut output, KEY.gesture);
     assert_eq!(
         status(&mut output),
         HoldStatus::Failed(HoldFailure::NotLoaded)

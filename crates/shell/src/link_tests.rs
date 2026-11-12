@@ -547,6 +547,17 @@ fn ending_a_session_closes_its_real_pipes_and_retires_control_admission() {
 }
 
 fn attended_from(label: &str, previous_generation: u64) -> Attended {
+    attended_shared(
+        label,
+        Arc::new(Shared {
+            generations: std::sync::atomic::AtomicU64::new(previous_generation),
+            ..Shared::default()
+        }),
+        Incarnation(1),
+    )
+}
+
+fn attended_shared(label: &str, shared: Arc<Shared>, incarnation: Incarnation) -> Attended {
     let (control, shell_control) = pair(&format!("{label}-control"));
     let (data, shell_data) = pair(&format!("{label}-data"));
     control.set_timeout(Some(PATIENCE));
@@ -555,17 +566,14 @@ fn attended_from(label: &str, previous_generation: u64) -> Attended {
     let link = Link {
         brain: PathBuf::new(),
         session: 0,
-        shared: Arc::new(Shared {
-            generations: std::sync::atomic::AtomicU64::new(previous_generation),
-            ..Shared::default()
-        }),
+        shared,
     };
     let (handle, start) = start(link, sender);
     let connection = Connection {
         control: Arc::new(shell_control),
         data: Arc::new(shell_data),
         issue_origin: IssueSession {
-            incarnation: Incarnation(1),
+            incarnation,
             epoch: 91,
         },
     };

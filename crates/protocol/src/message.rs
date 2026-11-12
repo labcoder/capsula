@@ -670,6 +670,11 @@ pub enum ControlToShell {
         /// A closed failure class, never a foreign diagnostic or invented state.
         kind: IssueUnavailableKind,
     },
+    /// The brain processed this stop receipt; it does not say any debt was cleared.
+    VoiceHoldStopAccepted {
+        /// The completed source generation, including a replay from an earlier connection.
+        gesture: GestureId,
+    },
 }
 
 /// Shell to brain, on the data pipe.

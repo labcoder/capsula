@@ -8,6 +8,163 @@ use kumochi_protocol::message::{
 use kumochi_protocol::voice::VoicePart;
 use std::sync::atomic::Ordering;
 
+fn voice_request(gesture: GestureId) -> ControlToBrain {
+    ControlToBrain::VoiceHoldRecognized {
+        gesture,
+        thread: None,
+        selection: 0,
+    }
+}
+
+#[test]
+fn microphone_stop_reserves_one_receipt_until_the_brain_accepts_it() {
+    let mut link = LinkHandle::detached();
+    let queue = link.record_controls();
+    let session = Session::detached(1, Incarnation(1));
+    assert!(link.send_control(&session, voice_request(GestureId(1))));
+    assert_eq!(queue.try_recv(), Ok(voice_request(GestureId(1))));
+    assert!(!link.send_control(&session, voice_request(GestureId(2))));
+    assert_eq!(queue.try_recv(), Err(async_channel::TryRecvError::Empty));
+    assert!(link.send_control(
+        &session,
+        ControlToBrain::VoiceHoldStopped {
+            gesture: GestureId(1)
+        }
+    ));
+    assert_eq!(
+        queue.try_recv(),
+        Ok(ControlToBrain::VoiceHoldStopped {
+            gesture: GestureId(1)
+        })
+    );
+    assert!(!link.send_control(&session, voice_request(GestureId(2))));
+    assert_eq!(queue.try_recv(), Err(async_channel::TryRecvError::Empty));
+}
+
+#[test]
+fn microphone_stop_survives_a_dead_source_session() {
+    let mut link = LinkHandle::detached();
+    let queue = link.record_controls();
+    let session = Session::detached(1, Incarnation(1));
+    assert!(link.send_control(&session, voice_request(GestureId(1))));
+    assert_eq!(queue.try_recv(), Ok(voice_request(GestureId(1))));
+    session.alive().store(false, Ordering::Release);
+    assert!(link.send_control(
+        &session,
+        ControlToBrain::VoiceHoldStopped {
+            gesture: GestureId(1)
+        }
+    ));
+    assert_eq!(
+        queue.try_recv(),
+        Ok(ControlToBrain::VoiceHoldStopped {
+            gesture: GestureId(1)
+        })
+    );
+}
+
+#[test]
+fn microphone_stop_replays_until_acceptance_without_reviving_or_duplicating_input() {
+    for completed in [false, true] {
+        for incarnation in [1, 2] {
+            let old = attended(&format!("stop-old-{completed}-{incarnation}"));
+            let shared = Arc::clone(&old.handle.shared);
+            let source = connected(old.events.recv_blocking().unwrap());
+            let recognized = voice_request(GestureId(7));
+            let stopped = ControlToBrain::VoiceHoldStopped {
+                gesture: GestureId(7),
+            };
+            assert!(old.handle.send_control(&source, recognized.clone()));
+            assert_eq!(
+                frame::read(&mut &old.control, Pipe::Control).unwrap(),
+                Some(recognized)
+            );
+            if completed {
+                assert!(old.handle.send_control(&source, stopped.clone()));
+                assert_eq!(
+                    frame::read(&mut &old.control, Pipe::Control).unwrap(),
+                    Some(stopped.clone())
+                );
+            }
+            drop(old.control);
+            assert!(old.link.join().unwrap());
+            let current = attended_shared(
+                &format!("stop-new-{completed}-{incarnation}"),
+                shared,
+                Incarnation(incarnation),
+            );
+            let session = connected(current.events.recv_blocking().unwrap());
+            if !completed {
+                stop_ack(&current, GestureId(7));
+                assert!(current.handle.voice_stop_pending());
+                assert!(current.handle.send_control(&source, stopped.clone()));
+            }
+            assert_eq!(
+                frame::read(&mut &current.control, Pipe::Control).unwrap(),
+                Some(stopped.clone())
+            );
+            current
+                .handle
+                .shared
+                .accept_microphone_stop(source.generation(), GestureId(7));
+            assert!(current.handle.voice_stop_pending());
+            assert!(current.handle.send_control(&source, stopped));
+            stop_ack(&current, GestureId(8));
+            assert!(current.handle.voice_stop_pending());
+            assert!(
+                !current
+                    .handle
+                    .send_control(&session, voice_request(GestureId(8)))
+            );
+            stop_ack(&current, GestureId(7));
+            assert!(!current.handle.voice_stop_pending());
+            let recognized = voice_request(GestureId(8));
+            assert!(current.handle.send_control(&session, recognized.clone()));
+            assert_eq!(
+                frame::read(&mut &current.control, Pipe::Control).unwrap(),
+                Some(recognized)
+            );
+            stop_ack(&current, GestureId(7));
+            stop_ack(&current, GestureId(8));
+            assert!(current.handle.voice_stop_pending());
+            assert!(current.handle.send_control(
+                &session,
+                ControlToBrain::VoiceHoldStopped {
+                    gesture: GestureId(8)
+                }
+            ));
+            assert_eq!(
+                frame::read(&mut &current.control, Pipe::Control).unwrap(),
+                Some(ControlToBrain::VoiceHoldStopped {
+                    gesture: GestureId(8)
+                })
+            );
+            stop_ack(&current, GestureId(7));
+            assert!(current.handle.voice_stop_pending());
+            stop_ack(&current, GestureId(8));
+            assert!(!current.handle.voice_stop_pending());
+            drop(current.control);
+            assert!(current.link.join().unwrap());
+        }
+    }
+}
+
+fn stop_ack(link: &Attended, gesture: GestureId) {
+    frame::write(
+        &mut &link.control,
+        &ControlToShell::VoiceHoldStopAccepted { gesture },
+        Pipe::Control,
+    )
+    .expect("stop acceptance written");
+    frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control)
+        .expect("barrier ping written");
+    assert_eq!(
+        frame::read(&mut &link.control, Pipe::Control).expect("barrier answer"),
+        Some(ControlToBrain::Pong),
+        "the reader applies acceptance before handling this ping"
+    );
+}
+
 #[test]
 fn data_writer_scrubs_serialized_pcm_after_success() {
     let packet = private_pcm();

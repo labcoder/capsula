@@ -61,4 +61,6 @@ before Listening cancels rather than submitting startup audio. The source has a 
 If microphone cleanup cannot be confirmed, input stays unavailable and another recording is
 refused; a timeout never means the microphone was released. Follow the restart warning if it
 stays active. A system-default-device change does not migrate an already-open microphone.
-Losing the connection during a recording can leave later holds unavailable until the app restarts.
+Losing the connection cancels that recording; it never retries your words. Once microphone
+cleanup is confirmed, its stop receipt is retried across reconnects until acknowledged.
+Another hold waits for that acknowledgement. Unconfirmed cleanup still keeps input unavailable.

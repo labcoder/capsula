@@ -235,8 +235,13 @@ fn a_captured_target_or_session_cannot_be_rebound_at_delivery(cx: &mut TestAppCo
 #[gpui::test]
 fn late_status_and_release_cannot_cancel_a_newer_held_input(cx: &mut TestAppContext) {
     let (owner, _data, _controls) = ready(cx);
-    let (_old, old_stamp) = hold(&owner, 1, cx);
+    let (old, old_stamp) = hold(&owner, 1, cx);
     owner.update(cx, Presence::cancel_voice);
+    owner.read_with(cx, |owner, _| {
+        assert!(old.retired());
+        owner.link.accept_recorded_microphone_stop(1, GestureId(1));
+        assert!(!owner.link.voice_stop_pending());
+    });
     let (new, _) = hold(&owner, 2, cx);
     owner.update(cx, |owner, cx| {
         owner.voice_intent(
