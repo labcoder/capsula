@@ -29,9 +29,11 @@ pub(super) const MAX_CALL_RECORDS: usize = MAX_DRAW_STEPS_PER_RUN + 2;
 const RETRY_HINT: &str = "; drawn lists what this call added, and earlier steps stay as they were; correct this and call draw again";
 /// Follows a model error once the run drew its whole step budget but still takes calls.
 const FULL_HINT: &str = "; no further step can be drawn in this turn";
-/// Follows a step too large to paint while the run can still draw.
+/// Follows a step too large to paint while the run can still draw and earlier steps stay shown.
 const PAINT_HINT: &str =
-    "; the picture stays at its last shown step; use fewer shapes and call draw again";
+    "; the picture stays at its last shown step; use fewer or simpler shapes and call draw again";
+/// Follows a step too large to paint that left its scene with nothing shown, so it was removed.
+const CLEARED_HINT: &str = "; nothing of this scene was shown, so it was removed; begin a new scene with a new name and fewer or simpler shapes";
 /// Follows any early stop once the run accepts no further draw call.
 const SPENT_HINT: &str = "; no further draw call will be accepted in this turn";
 
@@ -58,7 +60,10 @@ pub enum CallError {
     Interrupted,
     /// The shell couldn't paint a step of the call's scene: it held too many shapes.
     #[error("drawing.TooMuchToPaint")]
-    TooMuchToPaint,
+    TooMuchToPaint {
+        /// Nothing of the scene was shown, so it was removed.
+        cleared: bool,
+    },
 }
 
 /// A call that ended: the steps it drew and, unless it completed, why the rest didn't.
@@ -110,10 +115,11 @@ impl CallEnd {
                 (Remaining::Nothing, _) => SPENT_HINT,
                 (
                     Remaining::Calls,
-                    CallError::Step(_) | CallError::Token(_) | CallError::TooMuchToPaint,
+                    CallError::Step(_) | CallError::Token(_) | CallError::TooMuchToPaint { .. },
                 ) => FULL_HINT,
                 (Remaining::Steps, CallError::Step(_) | CallError::Token(_)) => RETRY_HINT,
-                (Remaining::Steps, CallError::TooMuchToPaint) => PAINT_HINT,
+                (Remaining::Steps, CallError::TooMuchToPaint { cleared: false }) => PAINT_HINT,
+                (Remaining::Steps, CallError::TooMuchToPaint { cleared: true }) => CLEARED_HINT,
                 _ => "",
             });
         }
@@ -154,6 +160,8 @@ pub(super) struct RunLedger {
     pub(super) run: RunId,
     calls: usize,
     steps: usize,
+    /// Committed steps a failed cut then dropped; `steps` keeps them, so no budget comes back.
+    refused: usize,
     rejected: u8,
     /// A call failed, so the next calls are the repair round.
     failed: bool,
@@ -161,8 +169,14 @@ pub(super) struct RunLedger {
 }
 
 impl RunLedger {
+    // shortcut: a step refused after its run closed finds no ledger and adds no notice; carry
+    // the count past the run's end if a late refusal shows up in practice.
     pub(super) fn drew_nothing(&self) -> bool {
-        self.calls > 0 && self.steps == 0
+        self.calls > 0 && self.steps == self.refused
+    }
+
+    pub(super) fn refuse_step(&mut self) {
+        self.refused += 1;
     }
 }
 
@@ -882,6 +896,7 @@ impl Drawing {
                     run,
                     calls: 0,
                     steps: 0,
+                    refused: 0,
                     rejected: 0,
                     failed: false,
                     exhausted: false,

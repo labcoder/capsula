@@ -1064,8 +1064,58 @@ fn a_finished_run_whose_draw_calls_committed_no_step_says_so_once() {
         let mut core = started();
         let mut effects = call(&mut core, args);
         effects.extend(finish(&mut core, Finish::Completed));
+        assert_eq!(
+            not_returned(&effects),
+            0,
+            "the notice waits for the stored outcome"
+        );
+        effects.extend(stored(&mut core));
         assert_eq!(not_returned(&effects), 1);
     }
+}
+
+#[test]
+fn a_done_run_whose_outcome_write_fails_adds_no_drawing_notice() {
+    let mut core = started();
+    let mut effects = call(&mut core, br#"{"records":[]}"#);
+    effects.extend(finish(&mut core, Finish::Completed));
+    effects.extend(
+        core.handle(Input::StoreFailed { run: R })
+            .expect("the outcome write failed"),
+    );
+    effects.extend(stored(&mut core));
+    assert_eq!(not_returned(&effects), 0);
+}
+
+/// Answers every drawing write `batch` starts, one after another, keeping every effect.
+fn settle(core: &mut Coordinator, store: &mut Store, mut batch: Vec<Effect>) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    while batch
+        .iter()
+        .any(|effect| matches!(effect, Effect::Store(StoreOp::Drawing { .. })))
+    {
+        effects.extend(batch.iter().cloned());
+        batch = commit(core, store, &batch);
+    }
+    effects.extend(batch);
+    effects
+}
+
+fn stored(core: &mut Coordinator) -> Vec<Effect> {
+    core.handle(Input::RunStored { run: R })
+        .expect("stored outcome")
+}
+
+fn ended_done(effects: &[Effect]) -> bool {
+    effects.iter().any(|effect| {
+        matches!(
+            effect,
+            Effect::Store(StoreOp::EndRun {
+                end: RunEnd::Done,
+                ..
+            })
+        )
+    })
 }
 
 #[test]
@@ -1078,14 +1128,9 @@ fn a_committed_step_a_stop_or_a_failed_run_adds_no_drawing_notice() {
     let mut effects = finish(&mut core, Finish::Completed);
     let second = commit(&mut core, &mut store, &first);
     let last = commit(&mut core, &mut store, &second);
-    assert!(last.iter().any(|effect| matches!(
-        effect,
-        Effect::Store(StoreOp::EndRun {
-            end: RunEnd::Done,
-            ..
-        })
-    )));
+    assert!(ended_done(&last));
     effects.extend(first.into_iter().chain(second).chain(last));
+    effects.extend(stored(&mut core));
     assert_eq!(not_returned(&effects), 0);
 
     let scratch = Scratch::new("drawing-cleared");
@@ -1095,22 +1140,9 @@ fn a_committed_step_a_stop_or_a_failed_run_adds_no_drawing_notice() {
     let mut batch = commit(&mut core, &mut store, &lookup);
     batch.extend(core.handle(Input::ClearVisible).expect("user clear"));
     batch.extend(finish(&mut core, Finish::Completed));
-    let mut effects = Vec::new();
-    while batch
-        .iter()
-        .any(|effect| matches!(effect, Effect::Store(StoreOp::Drawing { .. })))
-    {
-        effects.extend(batch.iter().cloned());
-        batch = commit(&mut core, &mut store, &batch);
-    }
-    effects.extend(batch);
-    assert!(effects.iter().any(|effect| matches!(
-        effect,
-        Effect::Store(StoreOp::EndRun {
-            end: RunEnd::Done,
-            ..
-        })
-    )));
+    let mut effects = settle(&mut core, &mut store, batch);
+    assert!(ended_done(&effects));
+    effects.extend(stored(&mut core));
     assert_eq!(not_returned(&effects), 0);
 
     let mut core = started();
@@ -1131,4 +1163,54 @@ fn a_committed_step_a_stop_or_a_failed_run_adds_no_drawing_notice() {
         Finish::Failed(crate::engines::EngineFailure::Provider),
     ));
     assert_eq!(not_returned(&effects), 0);
+}
+
+#[test]
+fn committed_steps_the_shell_refused_count_as_no_drawing_unless_one_was_shown() {
+    for shown in [false, true] {
+        let scratch = Scratch::new(if shown {
+            "drawing-kept"
+        } else {
+            "drawing-refused"
+        });
+        let mut store = open(&scratch);
+        let mut core = started();
+        let lookup = draw(&mut core);
+        let mut effects = settle(&mut core, &mut store, lookup);
+        let scene = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Data(DataToShell::SceneStepCommit { scene, .. }) => Some(*scene),
+                _ => None,
+            })
+            .expect("a committed step");
+        if shown {
+            effects.extend(
+                core.handle(Input::Drawing(drawing::Input::StepShown {
+                    run: R,
+                    scene,
+                    index: 0,
+                }))
+                .expect("a committed step"),
+            );
+        }
+        let failed = core
+            .handle(Input::Drawing(drawing::Input::StepFailed {
+                run: R,
+                scene,
+                index: u32::from(shown),
+                reason: kumochi_protocol::message::SceneFailure::PaintWork,
+                cut: kumochi_scene::StopCut {
+                    activated: u32::from(shown),
+                    revealed: kumochi_scene::text::Bounded::new(Vec::new()).expect("none"),
+                },
+            }))
+            .expect("a committed step");
+        effects.extend(settle(&mut core, &mut store, failed));
+        let finished = finish(&mut core, Finish::Completed);
+        effects.extend(settle(&mut core, &mut store, finished));
+        assert!(ended_done(&effects));
+        effects.extend(stored(&mut core));
+        assert_eq!(not_returned(&effects), usize::from(!shown));
+    }
 }

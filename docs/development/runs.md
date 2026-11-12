@@ -133,12 +133,13 @@ identity here even when the shell had no run at header refusal; they are distinc
 conversation and localizes its fixed text; it never attaches late loss
 to whichever conversation happens to be open. Recovery creates no pending replacement fact.
 
-A run that ends `done` after calling `draw` without committing a step sends one
-`DrawingNotReturned` for its thread/run, which the shell shows as "No drawing came back" through
-the same single notice. This covers every call refused and calls that came back empty. A
-committed step never triggers it, because that step is either shown, fails with its own
-notice, or is cleared by the user; Stop and failed runs, which report their own ending, don't
-either. A run that never calls `draw` gets no notice: the brain doesn't guess intent from the
+A run that ends `done` after calling `draw`, with no committed step left that the shell
+didn't refuse, sends one `DrawingNotReturned` for its thread/run once its outcome is stored,
+which the shell shows as "No drawing came back" through the same single notice. This covers
+every call refused, calls that came back empty, and committed steps that a `StepFailed` cut
+then dropped; those still count against the run's step budget. A step that was shown or that
+the user cleared counts as returned. Stop and failed runs, which report their own ending, get no
+notice, and neither does a step refused after its run ended. A run that never calls `draw` gets no notice: the brain doesn't guess intent from the
 request.
 
 `StepShown` and `StepFailed` validate lifetime indices and the run that committed the step.

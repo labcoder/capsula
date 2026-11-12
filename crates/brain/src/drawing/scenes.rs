@@ -176,8 +176,16 @@ impl Drawing {
             return;
         };
         if let CutKind::Failed(reason) = kind {
+            let from = usize::try_from(cut.activated).unwrap_or(usize::MAX);
+            for run in self.scenes[at].committers.iter().skip(from).flatten() {
+                if let Some(ledger) = self.runs.iter_mut().find(|ledger| ledger.run == *run) {
+                    ledger.refuse_step();
+                }
+            }
             let error = if reason == SceneFailure::PaintWork {
-                super::CallError::TooMuchToPaint
+                super::CallError::TooMuchToPaint {
+                    cleared: cut.activated == 0,
+                }
             } else {
                 super::CallError::Failed
             };

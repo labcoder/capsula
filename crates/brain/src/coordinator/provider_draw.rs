@@ -360,7 +360,7 @@ impl Coordinator {
                 CallError::Interrupted => b"interrupted",
                 CallError::Store => b"store",
                 CallError::Failed => b"preparation",
-                CallError::TooMuchToPaint => b"paint",
+                CallError::TooMuchToPaint { .. } => b"paint",
             };
             let hash: [u8; 32] = Sha256::new()
                 .chain_update(b"draw-prefix-failure\0")

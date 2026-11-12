@@ -700,11 +700,82 @@ fn a_step_too_large_to_paint_ends_its_call_asking_for_fewer_shapes() {
         },
     );
     assert_eq!(failed.calls.len(), 1);
-    assert_eq!(failed.calls[0].error, Some(CallError::TooMuchToPaint));
+    assert_eq!(
+        failed.calls[0].error,
+        Some(CallError::TooMuchToPaint { cleared: true })
+    );
     assert_eq!(
         failed.calls[0].tool_text(),
-        "drawn: [big]; stopped: drawing.TooMuchToPaint; the picture stays at its last shown step; use fewer shapes and call draw again"
+        "drawn: [big]; stopped: drawing.TooMuchToPaint; nothing of this scene was shown, so it was removed; begin a new scene with a new name and fewer or simpler shapes"
     );
+    assert!(drawing.drew_nothing(RunId(1)));
+}
+
+#[test]
+fn a_later_step_too_large_to_paint_keeps_the_shown_picture() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    store.run(
+        &mut drawing,
+        streamed(
+            "big",
+            0,
+            r#"{"begin":{"v":1,"scene":"big","surface":"overlay","alt":""}}"#,
+        ),
+    );
+    store.run(&mut drawing, streamed("big", 1, &step(&text("one", "one"))));
+    store.run(
+        &mut drawing,
+        Input::StepShown {
+            run: RunId(1),
+            scene: SceneId(1),
+            index: 0,
+        },
+    );
+    store.run(&mut drawing, streamed("big", 2, &step(&text("two", "two"))));
+    let shown = cut(1, vec![handle(&drawing, 1, "one")]);
+    let failed = store.run(
+        &mut drawing,
+        Input::StepFailed {
+            run: RunId(1),
+            scene: SceneId(1),
+            index: 1,
+            reason: SceneFailure::PaintWork,
+            cut: shown,
+        },
+    );
+    assert_eq!(failed.calls.len(), 1);
+    assert_eq!(
+        failed.calls[0].tool_text(),
+        "drawn: [one, two]; stopped: drawing.TooMuchToPaint; the picture stays at its last shown step; use fewer or simpler shapes and call draw again"
+    );
+    assert!(!drawing.drew_nothing(RunId(1)));
+}
+
+/// What happens today when a complete call's step is refused after the call ended; OSC-683
+/// may hold the call's result until its last step is shown or refused.
+#[test]
+fn a_complete_call_whose_step_is_refused_later_tells_the_model_nothing() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    let ended = store.run(
+        &mut drawing,
+        call(1, "done", args("done", &[text("s1", "a")])),
+    );
+    assert_eq!(ended.calls.len(), 1);
+    assert_eq!(ended.calls[0].error, None);
+    let failed = store.run(
+        &mut drawing,
+        Input::StepFailed {
+            run: RunId(1),
+            scene: SceneId(1),
+            index: 0,
+            reason: SceneFailure::PaintWork,
+            cut: cut(0, vec![]),
+        },
+    );
+    assert_eq!(failed.calls, []);
+    assert!(drawing.drew_nothing(RunId(1)));
 }
 
 fn call(run: u64, call: &str, args: Vec<u8>) -> Input {
