@@ -24,7 +24,7 @@ use crate::{
 pub use place::place;
 pub use prepare::{prepare, recover, recover_all};
 pub use state::LayoutState;
-pub(crate) use state::Rest;
+pub(crate) use state::{PlacedEntry, Rest};
 use std::sync::Arc;
 
 /// Overlay layout dimensions when the drawing does not declare a canvas.

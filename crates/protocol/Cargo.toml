@@ -7,6 +7,11 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# The gate tools' identity (OSC-680). Enabled only on a gate tool's command line, never here or in
+# another manifest: a workspace build would then ship it.
+gate-identity = []
+
 [dependencies]
 kumochi-scene.workspace = true
 postcard = { version = "1", default-features = false, features = ["use-std"] }

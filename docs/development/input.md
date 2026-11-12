@@ -285,7 +285,8 @@ stops the session and is reported, never silently repaired with registry writes.
 ## One approved final-main gate session
 
 The separate `cold-start <path-session.txt>` task runs ten input-free cold launches in its own
-approved quiet window before the owner session. It uses the same create-new transcript and
+approved quiet window before the owner session. Both run as the gate identity and build the
+images they launch (see [the gate identity](gate-identity.md)). It uses the same create-new transcript and
 adjacent evidence-directory contract below, but never arms Ready or enters the input phase
 sequence. It is not an extra loop inside `gate-session`.
 
@@ -313,8 +314,8 @@ purged. No input, foreground transfer, elevation or fixture is involved.
 
 `gate-session` replaces the old per-phase `input-session` launcher. Preparation, a green build,
 or a Good feel verdict does not authorize desktop input. Invoke it only after fresh owner
-approval and the Captain's GO, with the release binaries and xtask already built and no builds
-or other heavy work running. It refuses existing product processes and never retries a failed
+approval and the Captain's GO, with the gate xtask and its release images already built (see
+[the gate identity](gate-identity.md)) and no builds or other heavy work running. It refuses existing product processes and never retries a failed
 input phase.
 
 The complete stdout **and** stderr transcript is required evidence. In Git Bash, choose a fresh

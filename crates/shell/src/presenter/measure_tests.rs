@@ -408,14 +408,18 @@ fn measure_native_maximal_content_residency() {
     }
 }
 
+/// Maximal content passes admission but not the paint cap: step 21 adds a scene's first
+/// 500-point scatter series, past `PaintWork::LIMITS`, so the shell refuses it with `PaintWork`
+/// and halts the scene. Step 21 is prepared when step 13 is consumed, so 14 steps activate.
+/// With four maximal scenes the fourth is refused sooner, at step 0, since their 150 fill
+/// vertices each pass `MAX_GLOBAL_FILL_VERTICES` together. No maximal scene reaches its full
+/// drawing, so a residency peak here would measure a truncated run. This test checks the
+/// refusal instead, and `measure_native_eight_window_residency_at_paint_caps` measures the
+/// eight-window allowance with content the paint cap admits.
 #[test]
-#[ignore = "run with --exact --ignored alone under the quiet-Rez lock; no window or input"]
-#[expect(
-    clippy::too_many_lines,
-    reason = "drive the real eight-window scheduler and returned owners on native font shaping"
-)]
-fn measure_native_eight_window_residency() {
-    use kumochi_scene::limits::MAX_RESIDENT_BYTES;
+#[ignore = "native font shaping; run with --exact --ignored; no window or input"]
+fn native_maximal_content_is_refused_as_paint_work() {
+    use kumochi_protocol::message::{ControlToBrain, SceneFailure};
     use std::{sync::mpsc, time::Duration};
 
     let _timeout = std::thread::spawn(|| {
@@ -428,7 +432,6 @@ fn measure_native_eight_window_residency() {
         maximal_content::Content::UnicodeBytes,
         maximal_content::Content::AsciiCells,
     ] {
-        let ascii = matches!(content, maximal_content::Content::AsciiCells);
         let text = app.text_system();
         let (sender, receiver) = mpsc::sync_channel(1);
         app.background_executor()
@@ -436,104 +439,64 @@ fn measure_native_eight_window_residency() {
                 let mut measure =
                     super::super::Measure::new(text, gpui_kit::Font::default().family);
                 let (mut presenter, now) = live();
+                let id = SceneId(200);
+                begin(&mut presenter, id, now);
                 let mut running = Vec::new();
-                let mut drawing_bytes = 0;
-                for offset in 0..4 {
-                    let id = SceneId(200 + u64::from(offset));
-                    begin(&mut presenter, id, now);
-                    let (bytes, steps) = maximal_content::fixture(content, offset);
-                    drawing_bytes = bytes;
-                    for (index, source) in steps.into_iter().enumerate() {
-                        let effects = commit(
-                            &mut presenter,
-                            id,
-                            u32::try_from(index).expect("64 steps"),
-                            source,
-                            now,
-                        )
+                let (_, steps) = maximal_content::fixture(content, 0);
+                for (index, source) in steps.into_iter().enumerate() {
+                    let index = u32::try_from(index).expect("64 steps");
+                    let effects = commit(&mut presenter, id, index, source, now)
                         .expect("legal maximal content");
-                        assert!(controls(&effects).is_empty());
-                        running.extend(super::jobs(effects));
-                    }
-                }
-                while let Some(job) = running.pop() {
-                    let effects = presenter
-                        .completed(job.run(&mut measure), now)
-                        .expect("a native answer");
-                    assert!(controls(&effects).is_empty(), "every prefix fits");
+                    assert!(controls(&effects).is_empty());
                     running.extend(super::jobs(effects));
                 }
-                let usage = presenter.global.usage();
-                assert_eq!(
-                    (usage.scenes, usage.objects, usage.cells, usage.marks),
-                    (4, 1500, 4000, 20000)
-                );
-                for scene in presenter.scenes.values() {
-                    assert_eq!(scene.ready.len(), super::super::scene::WINDOW);
-                    assert_eq!(scene.queue.len(), 56);
-                }
-                let mut peak = presenter.residency();
-                let mut active: Vec<_> = (0..4).map(|_| None).collect();
+                let mut refusals = Vec::new();
                 let mut consumed = 0;
-                for expected in 0..64 {
-                    for (offset, previous) in active.iter_mut().enumerate() {
-                        let id = SceneId(200 + u64::try_from(offset).expect("four scenes"));
-                        let done = presenter
-                            .consume_ready(id, expected, now, 0, 0)
-                            .expect("the next native head fits with the prior owner held");
-                        assert_eq!(done.step.step().index, expected);
-                        let scene = presenter.scenes.get_mut(&id).expect("the consumed scene");
-                        scene.view = kumochi_scene::SceneView::new(
-                            &scene.rest,
-                            scene.state.view().activated(),
-                        );
-                        scene.view_bytes = scene.view.resident_bytes();
-                        peak = peak.max(presenter.residency());
-                        drop(previous.replace(done.step));
-                        let effects = done.effects.expect("a current scene");
-                        assert!(controls(&effects).is_empty());
+                loop {
+                    while let Some(job) = running.pop() {
+                        let effects = presenter
+                            .completed(job.run(&mut measure), now)
+                            .expect("a native answer");
+                        refusals.extend(controls(&effects).into_iter().cloned());
                         running.extend(super::jobs(effects));
-                        while let Some(job) = running.pop() {
-                            let effects = presenter
-                                .completed(job.run(&mut measure), now)
-                                .expect("a native answer");
-                            assert!(controls(&effects).is_empty(), "every successor fits");
-                            running.extend(super::jobs(effects));
-                            peak = peak.max(presenter.residency());
-                        }
-                        for scene in presenter.scenes.values() {
-                            assert!(
-                                scene.ready.len() + usize::from(scene.running.is_some())
-                                    <= super::super::scene::WINDOW
-                            );
-                        }
-                        assert!(presenter.residency() <= MAX_RESIDENT_BYTES);
-                        consumed += 1;
                     }
+                    if presenter.scenes[&id].ready.is_empty() {
+                        break;
+                    }
+                    let done = presenter
+                        .consume_ready(id, consumed, now, 0, 0)
+                        .expect("the ready head");
+                    consumed += 1;
+                    let effects = done.effects.expect("a current scene");
+                    refusals.extend(controls(&effects).into_iter().cloned());
+                    running.extend(super::jobs(effects));
+                    drop(done.step);
                 }
-                assert_eq!(consumed, 256);
-                for scene in presenter.scenes.values() {
-                    assert_eq!(scene.state.view().activated(), 64);
-                    assert!(scene.ready.is_empty() && scene.queue.is_empty());
-                }
-                assert!(peak <= MAX_RESIDENT_BYTES);
-                drop(active);
-                assert_eq!(
-                    presenter
-                        .returned
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                    0
-                );
-                drop(presenter.clear(now).expect("clear native rest"));
-                assert_eq!(presenter.residency(), 0);
-                sender.send((drawing_bytes, peak)).expect("the receiver");
+                let scene = &presenter.scenes[&id];
+                assert!(scene.running.is_none() && scene.queue.is_empty());
+                assert_eq!(scene.state.view().activated(), consumed);
+                sender.send((refusals, consumed)).expect("the receiver");
             })
             .detach();
-        let (drawing_bytes, peak) = receiver
+        let (refusals, consumed) = receiver
             .recv_timeout(Duration::from_secs(180))
-            .expect("native window worker");
-        println!(
-            "native_eight_window ascii_cells={ascii} scenes=4 objects=1500 cells=4000 marks=20000 lifetime_prefixes=256 ready_per_scene=8 consumed=256 drawing_bytes_per_scene={drawing_bytes} peak_charge_bytes={peak} allowance_bytes={MAX_RESIDENT_BYTES}; fixture replaces resting views after consumption, reserved frames included, one returned owner per scene, previous retained until next handoff, synthetic scheduler clock, no production activation, paint or RSS measurement"
+            .expect("native refusal worker");
+        assert_eq!(
+            consumed,
+            21 + 1 - u32::try_from(super::super::scene::WINDOW).expect("small")
+        );
+        assert!(
+            matches!(
+                refusals.as_slice(),
+                [ControlToBrain::StepFailed {
+                    scene: SceneId(200),
+                    index: 21,
+                    reason: SceneFailure::PaintWork,
+                    ..
+                }]
+            ),
+            "{} refusals",
+            refusals.len()
         );
     }
 }

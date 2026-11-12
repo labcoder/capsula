@@ -4,10 +4,11 @@
     reason = "Win32 calls are confined to the platform module"
 )]
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
+use std::os::windows::ffi::OsStringExt as _;
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 use std::os::windows::process::CommandExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -18,6 +19,7 @@ use windows::Win32::Foundation::{
     ERROR_NO_MORE_FILES, FILETIME, HANDLE, HLOCAL, HWND, LPARAM, LocalFree, UNICODE_STRING,
     WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
 };
+use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
@@ -28,11 +30,15 @@ use windows::Win32::System::Threading::{
     WaitForSingleObject,
 };
 use windows::Win32::System::WindowsProgramming::{QueryProcessCycleTime, QueryThreadCycleTime};
-use windows::Win32::UI::Shell::CommandLineToArgvW;
+use windows::Win32::UI::Shell::{
+    CommandLineToArgvW, FOLDERID_LocalAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, WM_CLOSE,
 };
 use windows::core::{BOOL, PCWSTR};
+
+use crate::hermetic::Folders;
 
 #[cfg(test)]
 mod command_line_tests;
@@ -222,12 +228,15 @@ fn command_role(line: &[u16]) -> Result<&'static str> {
     role.context("unrecognized product helper role")
 }
 
+/// Starts `exe` with `folders` as its data and settings folders.
 pub(crate) fn launch(
     exe: &Path,
+    folders: &Folders,
     quit_after_ms: u64,
     extra: impl IntoIterator<Item = impl AsRef<OsStr>>,
 ) -> Result<Child> {
-    Ok(Command::new(exe)
+    Ok(folders
+        .apply(&mut Command::new(exe))
         .args(extra)
         .arg(format!("--quit-after-ms={quit_after_ms}"))
         .creation_flags(NORMAL_PRIORITY_CLASS.0)
@@ -235,6 +244,17 @@ pub(crate) fn launch(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?)
+}
+
+/// The real `LocalAppData` folder, as the shell knows it, whatever `LOCALAPPDATA` says.
+pub(crate) fn local_app_data() -> Result<PathBuf> {
+    // SAFETY: plain call; on success the string it returns is freed below.
+    let path = unsafe { SHGetKnownFolderPath(&FOLDERID_LocalAppData, KF_FLAG_DEFAULT, None) }?;
+    // SAFETY: the shell returned a valid NUL-terminated string, read before it's freed.
+    let folder = PathBuf::from(OsString::from_wide(unsafe { path.as_wide() }));
+    // SAFETY: the buffer the shell allocated, freed once after its last use.
+    unsafe { CoTaskMemFree(Some(path.0.cast_const().cast())) };
+    Ok(folder)
 }
 
 /// The command that force-ends `pid` and every process it started. std can end one child, not

@@ -53,7 +53,11 @@ fn main() -> ExitCode {
         tracing::error!(%error, "can't start scene destruction");
         return ExitCode::FAILURE;
     }
-    tracing::info!(build = kumochi_protocol::BUILD_ID, "brain started");
+    tracing::info!(
+        build = kumochi_protocol::BUILD_ID,
+        identity = constants::DATA_DIR,
+        "brain started"
+    );
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

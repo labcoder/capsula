@@ -76,7 +76,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    tracing::info!(build = kumochi_protocol::BUILD_ID, "shell started");
+    tracing::info!(
+        build = kumochi_protocol::BUILD_ID,
+        identity = constants::DATA_DIR,
+        "shell started"
+    );
     let (events, link_events) = async_channel::unbounded();
     let (link, start) = match link::prepare(events) {
         Ok(prepared) => prepared,
