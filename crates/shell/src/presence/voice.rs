@@ -87,6 +87,8 @@ pub(super) struct Hold {
 #[derive(Default)]
 pub(super) struct Voice {
     pub(super) target: Rc<Cell<(Option<ThreadId>, u64)>>,
+    /// Set while the onboarding window shows; the native fence drops holds while it's set.
+    pub(super) paused: Rc<Cell<bool>>,
     pub(super) pending: Option<Hold>,
     pub(super) status: Option<Text>,
     #[cfg(test)]

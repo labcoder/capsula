@@ -51,6 +51,7 @@ pub(super) fn deliver(
     owner: WeakEntity<Presence>,
     link: LinkHandle,
     target: Rc<Cell<(Option<ThreadId>, u64)>>,
+    paused: Rc<Cell<bool>>,
     cx: &mut App,
 ) -> Deliver {
     let (deferred, pending) = async_channel::unbounded::<Pending>();
@@ -83,9 +84,10 @@ pub(super) fn deliver(
             tracing::warn!(stage = ?InputStage::Delivery, reason = ?InputReason::ClockUnavailable, "held speech input failed");
             link.cancel_input();
             let mut state = gesture.get();
-            let _cancelled = fence
-                .borrow_mut()
-                .reduce(&mut state, Event::Reset, at.instant);
+            let _cancelled =
+                fence
+                    .borrow_mut()
+                    .reduce(&mut state, Event::Reset, at.instant, paused.get());
             gesture.set(state);
             return None;
         };
@@ -112,7 +114,9 @@ pub(super) fn deliver(
             None
         };
         let mut state = gesture.get();
-        let delivery = fence.borrow_mut().reduce(&mut state, event, at.instant);
+        let delivery = fence
+            .borrow_mut()
+            .reduce(&mut state, event, at.instant, paused.get());
         gesture.set(state);
         for intent in delivery.intents.iter().flatten() {
             match intent {

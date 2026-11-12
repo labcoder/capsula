@@ -1,3 +1,4 @@
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::{
@@ -5,16 +6,17 @@ use gpui_kit::{
     WindowOptions,
 };
 use kumochi_protocol::message::{
-    AssistantName, ControlToBrain, DockPosition, Incarnation, MaxFrameRate, NameError, SettingsOp,
-    SettingsView, SttUnload, ThreadId, UserName,
+    AssistantName, ControlToBrain, DockPosition, GestureId, Incarnation, MaxFrameRate, NameError,
+    SettingsOp, SettingsView, SttUnload, ThreadId, UserName,
 };
 
 use super::{OnboardingPanel, OnboardingView, Select};
 use crate::input::{Edge, Effect, Event, Gesture, Key};
 use crate::link::{Batch, LinkEvent, Session};
 use crate::onboarding::{Onboarding, Step, ThisRun};
-use crate::platform::{EventTime, PresenceEvent};
+use crate::platform::{Deliver, EventTime, PresenceEvent};
 use crate::presence::settings::field_status;
+use crate::presence::voice_wiring_tests::ready;
 use crate::presence::{PanelVisibility, Presence, test_fixture};
 use crate::settings::{Error, Field, Update};
 use crate::strings::{Strings, Text};
@@ -49,7 +51,7 @@ fn showing(
     async_channel::Receiver<ControlToBrain>,
 ) {
     let owner = test_fixture::presence(cx);
-    let (window, controls) = owner.update(cx, |owner, cx| {
+    let controls = owner.update(cx, |owner, cx| {
         owner.session = Some(Session::detached(7, Incarnation(1)));
         let controls = owner.link.record_controls();
         owner.settings.update(cx, |state, _| {
@@ -58,6 +60,16 @@ fn showing(
                 None
             );
         });
+        controls
+    });
+    let window = open_over(&owner, cx);
+    focus_input(&owner, window, cx);
+    (owner, window, controls)
+}
+
+/// Shows the onboarding window over `owner` through the setter `open_onboarding` uses.
+fn open_over(owner: &Entity<Presence>, cx: &mut TestAppContext) -> AnyWindowHandle {
+    owner.update(cx, |owner, cx| {
         let state =
             Onboarding::begin(&view("Kumo", false), ThisRun::Owed).expect("onboarding is owed");
         let (model, events, weak) = (
@@ -69,16 +81,17 @@ fn showing(
             cx.new(|cx| OnboardingView::new(state, model, weak, events, window, cx))
         })
         .expect("a GPUI test window opens");
-        owner.onboarding = Some(OnboardingPanel {
-            window,
-            view,
-            bounds: [0; 4],
-            previous: None,
-        });
-        (window, controls)
-    });
-    focus_input(&owner, window, cx);
-    (owner, window, controls)
+        owner.set_onboarding(
+            OnboardingPanel {
+                window,
+                view,
+                bounds: [0; 4],
+                previous: None,
+            },
+            cx,
+        );
+        window
+    })
 }
 
 fn focus_input(owner: &Entity<Presence>, window: AnyWindowHandle, cx: &mut TestAppContext) {
@@ -447,4 +460,173 @@ fn the_double_tap_and_the_taskbar_button_open_nothing_over_onboarding(cx: &mut T
     assert_eq!(guarded(&owner, cx), [false, false]);
     owner.update(cx, |owner, cx| owner.close_onboarding(cx).expect("close"));
     assert_eq!(guarded(&owner, cx), [true, true]);
+}
+
+fn native(owner: &Entity<Presence>, cx: &mut TestAppContext) -> Deliver {
+    let weak = owner.downgrade();
+    owner.update(cx, |owner, cx| {
+        crate::presence::gesture::deliver(
+            Rc::clone(&owner.gesture),
+            owner.dock_window,
+            weak,
+            owner.link.clone(),
+            Rc::clone(&owner.voice.target),
+            Rc::clone(&owner.voice.paused),
+            cx,
+        )
+    })
+}
+
+fn chord(deliver: &Deliver, edge: Edge, at: Instant) {
+    for key in [Key::LeftControl, Key::LeftAlt] {
+        deliver(Event::Key { key, edge }, EventTime { instant: at });
+    }
+}
+
+fn at_ms(at: Instant, millis: u64) -> EventTime {
+    EventTime {
+        instant: at + Duration::from_millis(millis),
+    }
+}
+
+/// A whole hold: the chord, the 300 ms threshold through `threshold` (GPUI's scheduled timer
+/// when `None`), the release at 400 ms, then two quiet seconds.
+fn whole_hold(deliver: &Deliver, threshold: Option<Event>, cx: &mut TestAppContext) {
+    let at = cx.background_executor.now();
+    chord(deliver, Edge::Down, at);
+    cx.run_until_parked();
+    if let Some(event) = threshold {
+        deliver(event, at_ms(at, 300));
+    } else {
+        cx.background_executor
+            .advance_clock(Duration::from_millis(300));
+    }
+    cx.run_until_parked();
+    chord(deliver, Edge::Up, at + Duration::from_millis(400));
+    cx.run_until_parked();
+    cx.background_executor.advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+}
+
+/// The chord held past the native deadline, then what it sent the brain.
+fn recognised(
+    deliver: &Deliver,
+    controls: &async_channel::Receiver<ControlToBrain>,
+    cx: &mut TestAppContext,
+) -> (Instant, Vec<ControlToBrain>) {
+    let at = cx.background_executor.now();
+    chord(deliver, Edge::Down, at);
+    deliver(Event::Deadline, at_ms(at, 300));
+    cx.run_until_parked();
+    (
+        at,
+        std::iter::from_fn(|| controls.try_recv().ok()).collect(),
+    )
+}
+
+#[gpui::test]
+fn holds_while_onboarding_shows_reach_neither_the_brain_nor_the_microphone(
+    cx: &mut TestAppContext,
+) {
+    let (owner, _data, controls) = ready(cx);
+    let deliver = native(&owner, cx);
+    open_over(&owner, cx);
+    for threshold in [
+        Some(Event::Deadline),
+        None,
+        Some(Event::Key {
+            key: Key::LeftAlt,
+            edge: Edge::Down,
+        }),
+        Some(Event::Key {
+            key: Key::LeftAlt,
+            edge: Edge::Up,
+        }),
+    ] {
+        whole_hold(&deliver, threshold, cx);
+        assert!(controls.is_empty(), "{threshold:?}");
+        owner.read_with(cx, |owner, _| {
+            assert_eq!(owner.link.microphone_gate().latest(), 0, "{threshold:?}");
+            assert!(owner.voice.pending.is_none(), "{threshold:?}");
+            assert_eq!(owner.voice.status, None, "{threshold:?}");
+        });
+    }
+    owner.update(cx, |owner, cx| owner.close_onboarding(cx).expect("close"));
+    let (_, sent) = recognised(&deliver, &controls, cx);
+    assert!(matches!(
+        sent[..],
+        [
+            ControlToBrain::KeyDown {
+                gesture: GestureId(5),
+                ..
+            },
+            ControlToBrain::VoiceHoldRecognized {
+                gesture: GestureId(5),
+                ..
+            },
+        ]
+    ));
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.voice.status, Some(Text::HoldPreparing));
+    });
+}
+
+#[gpui::test]
+fn a_hold_held_as_onboarding_opens_ends_as_refused_and_the_next_one_after_close_works(
+    cx: &mut TestAppContext,
+) {
+    let (owner, _data, controls) = ready(cx);
+    let deliver = native(&owner, cx);
+    let (at, sent) = recognised(&deliver, &controls, cx);
+    assert!(matches!(
+        sent[..],
+        [
+            ControlToBrain::KeyDown {
+                gesture: GestureId(1),
+                ..
+            },
+            ControlToBrain::VoiceHoldRecognized {
+                gesture: GestureId(1),
+                ..
+            },
+        ]
+    ));
+    open_over(&owner, cx);
+    cx.run_until_parked();
+    let ended = std::iter::from_fn(|| controls.try_recv().ok()).collect::<Vec<_>>();
+    let cancel = ControlToBrain::GestureCancel {
+        gesture: GestureId(1),
+    };
+    let stopped = ControlToBrain::VoiceHoldStopped {
+        gesture: GestureId(1),
+    };
+    assert_eq!(ended, [cancel.clone(), stopped, cancel]);
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.pending.is_none());
+        assert_eq!(owner.voice.status, Some(Text::HoldCancelled));
+        assert!(!owner.link.input_is(GestureId(1)));
+    });
+    chord(&deliver, Edge::Up, at + Duration::from_millis(400));
+    cx.run_until_parked();
+    assert!(controls.is_empty());
+    owner.update(cx, |owner, cx| owner.close_onboarding(cx).expect("close"));
+    cx.background_executor.advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    let (_, sent) = recognised(&deliver, &controls, cx);
+    assert!(matches!(
+        sent[..],
+        [
+            ControlToBrain::KeyDown {
+                gesture: GestureId(2),
+                ..
+            },
+            ControlToBrain::VoiceHoldRecognized {
+                gesture: GestureId(2),
+                ..
+            },
+        ]
+    ));
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.voice.status, Some(Text::HoldPreparing));
+    });
 }

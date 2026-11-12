@@ -29,6 +29,7 @@ pub(crate) enum InputReason {
     ChordStarted,
     ChordSuppressed,
     HoldRecognized,
+    Paused,
     Interrupted,
     Reset,
     Deferred,
@@ -69,6 +70,8 @@ pub(crate) struct Fence {
     gate: CollectionGate,
     last: u32,
     current: Option<GestureId>,
+    /// The current gesture began while paused, so it stays dropped to its end.
+    dropped: bool,
 }
 
 impl Fence {
@@ -77,10 +80,19 @@ impl Fence {
             gate,
             last: 0,
             current: None,
+            dropped: false,
         }
     }
 
-    pub(crate) fn reduce(&mut self, state: &mut Gesture, event: Event, now: Instant) -> Delivery {
+    /// While `paused` (the onboarding window shows), a hold is dropped before recognition: no
+    /// warm-up, no armed collection and no intent, so nothing reaches the owner.
+    pub(crate) fn reduce(
+        &mut self,
+        state: &mut Gesture,
+        event: Event,
+        now: Instant,
+        paused: bool,
+    ) -> Delivery {
         let reduced = state.recognize(event, now);
         let cancelled = matches!(
             event,
@@ -102,7 +114,8 @@ impl Fence {
                     if self.current.is_none() {
                         self.gate.cancel_current();
                     }
-                    Some(self.current.map_or(Intent::Unavailable, Intent::Warm))
+                    self.dropped = paused;
+                    (!paused).then(|| self.current.map_or(Intent::Unavailable, Intent::Warm))
                 }
                 Some(Effect::HoldStarted) => {
                     let by = match event {
@@ -113,6 +126,11 @@ impl Fence {
                         Event::Scheduled => Recognition::Scheduled,
                         _ => Recognition::Deadline,
                     };
+                    if paused || self.dropped {
+                        self.current = None;
+                        tracing::debug!(stage = ?InputStage::Gesture, reason = ?InputReason::Paused, ?by, "held speech input boundary");
+                        continue;
+                    }
                     tracing::debug!(stage = ?InputStage::Gesture, reason = ?InputReason::HoldRecognized, ?by, "held speech input boundary");
                     Some(self.current.map_or(Intent::Unavailable, |gesture| {
                         let generation = self.gate.arm(gesture);
@@ -164,7 +182,7 @@ mod tests {
     use crate::platform::microphone::Mode;
 
     fn key(fence: &mut Fence, state: &mut Gesture, key: Key, edge: Edge, at: Instant) -> Delivery {
-        fence.reduce(state, Event::Key { key, edge }, at)
+        fence.reduce(state, Event::Key { key, edge }, at, false)
     }
 
     fn begin() -> (Fence, Gesture, Instant) {
@@ -228,10 +246,14 @@ mod tests {
             },
         ] {
             let (mut fence, mut state, at) = begin();
-            let delivery =
-                fence.reduce(&mut state, Event::Deadline, at + Duration::from_millis(300));
+            let delivery = fence.reduce(
+                &mut state,
+                Event::Deadline,
+                at + Duration::from_millis(300),
+                false,
+            );
             let generation = recognized(&delivery);
-            let terminal = fence.reduce(&mut state, event, at + Duration::from_millis(301));
+            let terminal = fence.reduce(&mut state, event, at + Duration::from_millis(301), false);
             assert!(matches!(
                 terminal.intents[0],
                 Some(Intent::End {
@@ -258,7 +280,12 @@ mod tests {
             at + Duration::from_millis(300),
         );
         let generation = recognized(&release);
-        let reset = fence.reduce(&mut state, Event::Reset, at + Duration::from_millis(301));
+        let reset = fence.reduce(
+            &mut state,
+            Event::Reset,
+            at + Duration::from_millis(301),
+            false,
+        );
         assert!(matches!(
             reset.intents[0],
             Some(Intent::End {
@@ -281,8 +308,111 @@ mod tests {
         key(&mut fence, &mut state, Key::LeftControl, Edge::Down, at);
         let pressed = key(&mut fence, &mut state, Key::LeftAlt, Edge::Down, at);
         assert!(matches!(pressed.intents[0], Some(Intent::Unavailable)));
-        let hold = fence.reduce(&mut state, Event::Deadline, at + Duration::from_millis(300));
+        let hold = fence.reduce(
+            &mut state,
+            Event::Deadline,
+            at + Duration::from_millis(300),
+            false,
+        );
         assert!(matches!(hold.intents[0], Some(Intent::Unavailable)));
         assert_eq!(fence.last, u32::MAX);
+    }
+
+    /// The chord pressed at `at`, the threshold event at 300 ms and the chord released at 400 ms,
+    /// each reduced with its own `paused` value.
+    fn whole_hold(
+        fence: &mut Fence,
+        state: &mut Gesture,
+        threshold: Event,
+        at: Instant,
+        paused: [bool; 3],
+    ) -> Vec<Delivery> {
+        let mut delivered = Vec::new();
+        for key in [Key::LeftControl, Key::LeftAlt] {
+            let edge = Edge::Down;
+            delivered.push(fence.reduce(state, Event::Key { key, edge }, at, paused[0]));
+        }
+        let crossed = at + Duration::from_millis(300);
+        delivered.push(fence.reduce(state, threshold, crossed, paused[1]));
+        for key in [Key::LeftAlt, Key::LeftControl] {
+            let (edge, released) = (Edge::Up, at + Duration::from_millis(400));
+            delivered.push(fence.reduce(state, Event::Key { key, edge }, released, paused[2]));
+        }
+        delivered
+    }
+
+    fn intents(delivered: &[Delivery]) -> Vec<Intent> {
+        delivered
+            .iter()
+            .flat_map(|delivery| delivery.intents.iter().flatten().cloned())
+            .collect()
+    }
+
+    #[test]
+    fn a_paused_hold_is_dropped_on_every_recognition_path_and_the_next_one_is_not() {
+        let gate = CollectionGate::default();
+        let mut fence = Fence::new(gate.clone());
+        let mut state = Gesture::default();
+        let mut at = Instant::now();
+        for threshold in [
+            Event::Deadline,
+            Event::Scheduled,
+            Event::Key {
+                key: Key::LeftAlt,
+                edge: Edge::Down,
+            },
+            Event::Key {
+                key: Key::LeftAlt,
+                edge: Edge::Up,
+            },
+        ] {
+            let armed = gate.latest();
+            let paused = whole_hold(&mut fence, &mut state, threshold, at, [true; 3]);
+            assert!(intents(&paused).is_empty(), "{threshold:?}");
+            assert_eq!(gate.latest(), armed, "{threshold:?}");
+            at += Duration::from_secs(2);
+            let next = intents(&whole_hold(
+                &mut fence, &mut state, threshold, at, [false; 3],
+            ));
+            let gesture = GestureId(fence.last);
+            assert!(matches!(next[0], Intent::Warm(warm) if warm == gesture));
+            let Intent::Recognized {
+                gesture: recognised,
+                generation: Ok(generation),
+            } = &next[1]
+            else {
+                panic!("{threshold:?} recognises the next hold");
+            };
+            assert_eq!(*recognised, gesture);
+            assert_eq!(gate.latest(), u64::from(gesture.0));
+            generation.discard_unstarted().unwrap();
+            at += Duration::from_secs(2);
+        }
+    }
+
+    #[test]
+    fn a_hold_that_meets_a_pause_on_either_side_of_its_press_stays_dropped() {
+        let gate = CollectionGate::default();
+        let mut fence = Fence::new(gate.clone());
+        let mut state = Gesture::default();
+        let at = Instant::now();
+        let begun = whole_hold(
+            &mut fence,
+            &mut state,
+            Event::Deadline,
+            at,
+            [true, false, false],
+        );
+        assert!(intents(&begun).is_empty());
+        let later = at + Duration::from_secs(2);
+        let paused = whole_hold(
+            &mut fence,
+            &mut state,
+            Event::Deadline,
+            later,
+            [false, true, true],
+        );
+        assert!(matches!(intents(&paused)[..], [Intent::Warm(GestureId(2))]));
+        assert_eq!(gate.latest(), 0);
     }
 }

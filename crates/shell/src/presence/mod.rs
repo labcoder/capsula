@@ -1032,11 +1032,23 @@ pub(crate) fn open(
     let position = flags.position();
     owner.update(cx, |this, cx| this.position(position, cx))?;
     owner.update(cx, |this, cx| this.observe(position, cx))?;
-    let (link, target) = {
+    let (link, target, paused) = {
         let this = owner.read(cx);
-        (this.link.clone(), Rc::clone(&this.voice.target))
+        (
+            this.link.clone(),
+            Rc::clone(&this.voice.target),
+            Rc::clone(&this.voice.paused),
+        )
     };
-    let deliver = gesture::deliver(gesture, dock_window, owner.downgrade(), link, target, cx);
+    let deliver = gesture::deliver(
+        gesture,
+        dock_window,
+        owner.downgrade(),
+        link,
+        target,
+        paused,
+        cx,
+    );
     owner.update(cx, |this, _| this.native.arm_keyboard(deliver))?;
     owner.update(cx, Presence::sync_escape)?;
     schedule_diagnostic_launch(&owner, flags, cx);

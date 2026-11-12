@@ -343,6 +343,7 @@ fn native(owner: &Entity<Presence>, cx: &mut TestAppContext) -> Deliver {
             weak,
             owner.link.clone(),
             Rc::clone(&owner.voice.target),
+            Rc::clone(&owner.voice.paused),
             cx,
         )
     })

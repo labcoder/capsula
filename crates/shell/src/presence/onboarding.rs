@@ -434,12 +434,15 @@ impl Presence {
             cx.new(|cx| OnboardingView::new(state, model, owner, events, window, cx))
         })
         .map_err(|error| OpenError::Gpui(error.into()))?;
-        self.onboarding = Some(OnboardingPanel {
-            window,
-            view,
-            bounds: [0; 4],
-            previous: None,
-        });
+        self.set_onboarding(
+            OnboardingPanel {
+                window,
+                view,
+                bounds: [0; 4],
+                previous: None,
+            },
+            cx,
+        );
         window
             .update(cx, |_, window, cx| {
                 configure_surface(window, PresenceSurface::Text, self.events.clone(), cx)?;
@@ -453,6 +456,14 @@ impl Presence {
         self.set_panel(PanelVisibility::Hidden, cx)?;
         tracing::info!("onboarding opened");
         self.show_onboarding(Select::All, cx)
+    }
+
+    /// Holds the window and pauses holds while it shows. A hold already recognised ends as a
+    /// refused one does, with input cleared, so Esc and the next hold work after it.
+    fn set_onboarding(&mut self, panel: OnboardingPanel, cx: &mut Context<'_, Self>) {
+        self.onboarding = Some(panel);
+        self.voice.paused.set(true);
+        self.cancel_voice(cx);
     }
 
     /// Places the window under the dock and brings it to the front with focus in its input. If
@@ -541,6 +552,7 @@ impl Presence {
         let Some(panel) = self.onboarding.take() else {
             return Ok(());
         };
+        self.voice.paused.set(false);
         panel
             .window
             .update(cx, |_, window, _| {
