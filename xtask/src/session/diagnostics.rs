@@ -23,10 +23,9 @@ pub(crate) enum Mark {
 }
 
 /// Every non-input line the shell records; any other unknown event still fails.
-const STATUS: [&str; 10] = [
+const STATUS: [&str; 9] = [
     "link state=",
-    "listening painted_us=",
-    "resting",
+    "carry drop perch=",
     "run phase=",
     "submit sent=",
     "dock settled",
@@ -72,6 +71,7 @@ impl Record {
             Mark::Status
         } else {
             match event {
+                "resting" => Mark::Status,
                 "input dismissed" => Mark::Dismissed,
                 "escape action=Stop" => Mark::EscapeStop,
                 "escape action=Clear" => Mark::EscapeClear,
@@ -106,7 +106,7 @@ mod tests {
     #[test]
     fn feel_summary_reports_recognition_and_focus_without_treating_it_as_a_gate() {
         let records = [
-            "qpc=20 listening painted_us=1200",
+            "qpc=20 carry drop perch=true",
             "qpc=30 resting",
             "qpc=70 input opened focused=false",
             "qpc=80 input opened focused=true",
@@ -139,6 +139,8 @@ mod tests {
             "qpc=2 kumo bakedsize=64",
             "qpc=2 link",
             "qpc=3 listening applied_us=1 start_qpc=1",
+            "qpc=3 listening painted_us=42",
+            "qpc=3 restingX",
         ] {
             assert!(
                 Record::parse(line).is_err(),
@@ -164,7 +166,7 @@ mod tests {
             ("qpc=9 submit sent=true", 9),
             ("qpc=10 dock settled", 10),
             ("qpc=11 dock paints settled=3", 11),
-            ("qpc=12 listening painted_us=42", 12),
+            ("qpc=12 carry drop perch=false", 12),
             ("qpc=13 resting", 13),
         ] {
             assert_eq!(

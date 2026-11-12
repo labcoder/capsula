@@ -243,7 +243,7 @@ creates no file.
     hash or length is logged, and an empty draft never counts as preserved. The first open logs
     no draft line.
   - `escape action=Stop|Clear|CancelEdit|Dismiss|Ignore` and `escape wanted=true|false stop=true|false`
-  - status lines that no gate reads: `link state=`, `listening painted_us=`, `resting`,
+  - status lines that no gate reads: `link state=`, `carry drop perch=`, `resting` (exactly),
     `run phase=`, `submit sent=`, `dock settled`, `dock paints settled=`, `kumo baked`,
     `kumo frame shade_us=` and `kumo reshades=`. The harness reads them as status and still
     refuses any other unknown event.
@@ -344,8 +344,10 @@ display/background-process metadata identify the measurement environment.
 One owned EDIT/Ready fixture remains alive throughout the session. Injection starts disabled.
 The initial release shell is bounded to 120 seconds while the owner has about 90 seconds to try
 the 300ms hold and double tap by hand and choose independent categorical feel verdicts.
-The dock is a short line at top center by default, and Listening turns it the accent colour,
-not a separate test window.
+The dock is a short line at top center by default, not a separate test window. The gate copy
+has no speech model, so a hold is recognised but the line stays plain and nothing is recorded or
+sent; hovering the line may show Not installed in the status panel. Hold feel can't be judged in
+this copy, so Unrated is the right Hold verdict.
 The test window is only for verdicts and Ready. Ready stays disabled until the owner explicitly
 selects both verdicts, including Unrated if that is the owner's choice.
 The feel product writes `feel/milestones.log`; after its graceful exit, `feel/summary.txt`
@@ -405,16 +407,16 @@ cleanup; a phase cannot begin without its complete budget.
    samples for 60. It sends no motion or input and omits the gate observer. Calibrated cycles
    are the CPU gate, with GetProcessTimes alongside; the limit is 1% of one core. DWM and private
    bytes are retained too.
-2. Hover runs after the resting receipts: 100 pointer entries onto the dock. Before each entry,
-   once the previous cycle has hidden the peek, it waits 1–8ms in a fixed jitter. After the entry
-   it waits a fixed 100ms, checks that the peek is visible, then leaves and waits until it hides.
-3. Resting receipts run for 20 seconds; the motion receipts return with the pull (C2a). The harmless EDIT covers the tested area. Only actual EDIT/proxy recipient counts,
+2. Resting receipts run for 20 seconds; the motion receipts return with the pull (C2a). The harmless EDIT covers the tested area. Only actual EDIT/proxy recipient counts,
    screen points and QPCs prove delivery; WindowFromPoint checks alone are not receipts.
    Every required category needs stable native and measured display coverage. Rest additionally
    needs displayed-body receipts at the line's center and edge. Dropped-only or otherwise unavailable display evidence makes the phase
    incomplete even when native routing succeeded.
    Hovering the body opens the peek; candidate points exclude its rectangle so that
    later receipt trials cannot target the panel instead of the proxy or covering EDIT.
+3. Hover runs after the resting receipts: 100 pointer entries onto the dock. Before each entry,
+   once the previous cycle has hidden the peek, it waits 1–8ms in a fixed jitter. After the entry
+   it waits a fixed 100ms, checks that the peek is visible, then leaves and waits until it hides.
 4. Focus requires a visible, foreground typing surface before typing a known draft. It dismisses
    through local Esc, reopens, double-taps again while active, then clicks a second top-level
    fixture window, distinct from the previous foreground. After the Dismissed mark, typing must
