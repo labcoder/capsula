@@ -1232,3 +1232,179 @@ fn a_stalled_open_or_stop_warns_without_releasing_its_generation(cx: &mut TestAp
         assert!(data.is_empty());
     }
 }
+
+fn after(at: Instant, millis: u64) -> EventTime {
+    EventTime {
+        instant: at + Duration::from_millis(millis),
+    }
+}
+
+fn listen(
+    owner: &Entity<Presence>,
+    deliver: &Deliver,
+    gesture: u32,
+    at: Instant,
+    cx: &mut TestAppContext,
+) -> Sender<()> {
+    let (open, finish, started, samples) = source(owner, cx, None);
+    chord(deliver, Edge::Down, at);
+    deliver(Event::Deadline, after(at, 301));
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.voice.status, Some(Text::HoldPreparing));
+    });
+    status(owner, 1, gesture, HoldStatus::Admitted, cx);
+    started.recv_timeout(Duration::from_secs(3)).unwrap();
+    open.send(()).unwrap();
+    until(cx, |cx| {
+        owner.read_with(cx, |o, _| o.voice.status == Some(Text::HoldListening))
+    });
+    samples.recv_timeout(Duration::from_secs(3)).unwrap();
+    finish
+}
+
+fn release(
+    owner: &Entity<Presence>,
+    deliver: &Deliver,
+    finish: &Sender<()>,
+    at: Instant,
+    cx: &mut TestAppContext,
+) {
+    chord(deliver, Edge::Up, at);
+    finish.send(()).unwrap();
+    until(cx, |cx| {
+        owner.read_with(cx, |o, _| {
+            o.voice
+                .pending
+                .as_ref()
+                .is_some_and(|h| matches!(h.source, Source::Sent))
+        })
+    });
+}
+
+#[gpui::test]
+fn esc_after_a_finished_hold_run_leaves_voice_alone_and_the_next_hold_listens(
+    cx: &mut TestAppContext,
+) {
+    let (owner, _data, controls) = ready(cx);
+    let deliver = native(&owner, cx);
+    let at = Instant::now();
+    let finish = listen(&owner, &deliver, 1, at, cx);
+    release(
+        &owner,
+        &deliver,
+        &finish,
+        at + Duration::from_millis(900),
+        cx,
+    );
+    owner.update(cx, |owner, cx| {
+        for (phase, origin) in [
+            (
+                Phase::Thinking,
+                Some(RunOrigin::Hold {
+                    gesture: GestureId(1),
+                }),
+            ),
+            (Phase::Done, None),
+        ] {
+            owner
+                .link_events(
+                    Batch::Plain(vec![LinkEvent::RunState {
+                        generation: 1,
+                        run: RunId(1),
+                        thread: ThreadId(1),
+                        phase,
+                        error: None,
+                        origin,
+                    }]),
+                    cx,
+                )
+                .unwrap();
+        }
+        assert!(owner.voice.pending.is_none());
+        assert_eq!(owner.voice.status, None);
+    });
+    while controls.try_recv().is_ok() {}
+    deliver(Event::Escape, after(at, 2_000));
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.pending.is_none());
+        assert_eq!(owner.voice.status, None);
+    });
+    assert!(
+        std::iter::from_fn(|| controls.try_recv().ok())
+            .all(|control| !matches!(control, ControlToBrain::GestureCancel { .. }))
+    );
+    let at = at + Duration::from_secs(3);
+    let finish = listen(&owner, &deliver, 2, at, cx);
+    release(
+        &owner,
+        &deliver,
+        &finish,
+        at + Duration::from_millis(900),
+        cx,
+    );
+}
+
+#[gpui::test]
+fn esc_during_listening_cancels_that_hold_and_the_next_hold_listens(cx: &mut TestAppContext) {
+    let (owner, _data, _controls) = ready(cx);
+    let deliver = native(&owner, cx);
+    let at = Instant::now();
+    let finish = listen(&owner, &deliver, 1, at, cx);
+    deliver(Event::Escape, after(at, 600));
+    finish.send(()).unwrap();
+    until(cx, |cx| {
+        owner.read_with(cx, |o, _| o.voice.pending.is_none())
+    });
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.voice.status, Some(Text::HoldCancelled));
+    });
+    chord(&deliver, Edge::Up, at + Duration::from_millis(900));
+    let at = at + Duration::from_secs(2);
+    let finish = listen(&owner, &deliver, 2, at, cx);
+    release(
+        &owner,
+        &deliver,
+        &finish,
+        at + Duration::from_millis(900),
+        cx,
+    );
+}
+
+#[gpui::test]
+fn a_hold_seen_only_at_release_is_refused_with_a_notice_and_a_repeat_recovers_the_next(
+    cx: &mut TestAppContext,
+) {
+    let (owner, _data, _controls) = ready(cx);
+    let deliver = native(&owner, cx);
+    let at = Instant::now();
+    chord(&deliver, Edge::Down, at);
+    chord(&deliver, Edge::Up, at + Duration::from_millis(400));
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.pending.is_none());
+        assert_eq!(owner.voice.status, Some(Text::HoldFailed));
+    });
+    let at = at + Duration::from_secs(1);
+    chord(&deliver, Edge::Down, at);
+    deliver(
+        Event::Key {
+            key: Key::LeftAlt,
+            edge: Edge::Down,
+        },
+        after(at, 500),
+    );
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.voice.status, Some(Text::HoldPreparing));
+        assert_eq!(
+            owner
+                .voice
+                .pending
+                .as_ref()
+                .map(|hold| hold.token.gesture()),
+            Some(GestureId(2))
+        );
+    });
+}

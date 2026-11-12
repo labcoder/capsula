@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use kumochi_protocol::message::{
-    ControlToBrain, GestureId, HoldFailure, HoldStatus, Phase, RunOrigin, ThreadId,
+    ControlToBrain, GestureId, HoldFailure, HoldStatus, Phase, RunId, RunOrigin, ThreadId,
 };
 
 use super::{Context, Presence, Session};
@@ -81,6 +81,8 @@ pub(super) struct Hold {
     source: Source,
     released: Option<u64>,
     terminal: Option<Text>,
+    /// Later run states carry no origin, so they match the hold by the run its first one named.
+    run: Option<RunId>,
 }
 
 #[derive(Default)]
@@ -110,25 +112,27 @@ impl Presence {
 
     pub(super) fn voice_run(
         &mut self,
+        run: RunId,
         origin: Option<RunOrigin>,
         phase: Phase,
         applied: &crate::runs::Applied,
         cx: &mut Context<'_, Self>,
     ) {
-        let Some(RunOrigin::Hold { gesture }) = origin else {
-            return;
-        };
         if !applied.visible {
             return;
         }
-        let Some(hold) = self
-            .voice
-            .pending
-            .as_ref()
-            .filter(|hold| hold.token.gesture() == gesture && hold.terminal.is_none())
-        else {
+        let Some(hold) = self.voice.pending.as_mut().filter(|hold| {
+            hold.terminal.is_none()
+                && match origin {
+                    Some(RunOrigin::Hold { gesture }) => hold.token.gesture() == gesture,
+                    Some(_) => false,
+                    None => hold.run == Some(run),
+                }
+        }) else {
             return;
         };
+        hold.run = Some(run);
+        let gesture = hold.token.gesture();
         if !matches!(hold.source, Source::Sent) {
             tracing::warn!(stage = ?FailureStage::Run, reason = ?FailureReason::RunBeforeStop, "held speech input failed");
             self.end_voice(Text::HoldFailed, cx);
@@ -360,6 +364,7 @@ impl Presence {
                 self.link.microphone_gate().cancel(gesture);
             }
             self.link.clear_input(gesture);
+            self.voice_notice(Text::HoldFailed, cx);
             return;
         };
         if self
@@ -389,6 +394,7 @@ impl Presence {
             tracing::debug!(stage = ?FailureStage::Admission, ?reason, "held speech input refused");
             self.unused_voice(&token, &session);
             self.link.clear_input(gesture);
+            self.voice_notice(Text::HoldFailed, cx);
             return;
         }
         let request = self.runs.begin_hold(gesture);
@@ -422,6 +428,7 @@ impl Presence {
                 source: Source::Waiting,
                 released: None,
                 terminal: None,
+                run: None,
             });
             self.chat_notice.clear();
             self.error = None;

@@ -247,7 +247,7 @@ impl Presence {
         cx: &mut Context<'_, Self>,
     ) {
         let (applied, notice) = self.runs.apply_run_state(run, thread, phase, error, origin);
-        self.voice_run(origin, phase, &applied, cx);
+        self.voice_run(run, origin, phase, &applied, cx);
         diagnostics::record(cx, format_args!("run phase={phase:?}"));
         if let Some(restore) = applied.restore
             && let Some(text) = &self.text

@@ -922,8 +922,17 @@ and explicit typing still act on the current input immediately.
 Preparing/loading, Listening, stopping, transcribing and thinking reuse the existing dock,
 status and text views, with localized accessible status text. Only matching live Admitted
 opens the source; Listening precedes acceptance of that source's Running receipt. Thinking
-opens the ordinary answer panel without activation or injected focus input. Answering hands
-off to ordinary Runs. Explicit typed input cancels and drains the pending hold before its
+opens the ordinary answer panel without activation or injected focus input, and re-places a
+resting drawing clear of it before the next paint. Answering hands off to ordinary Runs. Only a
+run's first state carries its origin, so the hold remembers the run that state named and matches
+later states by run; Answering, Done, Failed or Interrupted then end it, and Esc returns to the
+ordinary order. A recognised hold refused at admission always shows the failed notice, including
+one first recognised at its release, whose gate has already closed.
+
+The 300 ms hold deadline is a native one-shot timer. On Windows that is `WM_TIMER`, the lowest
+priority message, so a busy UI thread can delay it past the release. Auto-repeat of a held
+chord key also advances the gesture, so a late timer delays recognition to the first repeat
+instead of losing the hold. Explicit typed input cancels and drains the pending hold before its
 first submit attempt. Cancellation keeps a recording owner until true completion; an
 unconfirmed source remains unavailable rather than claiming stopped or allowing replacement.
 No-Running start failures take their notice from the true stop result, not a manufactured

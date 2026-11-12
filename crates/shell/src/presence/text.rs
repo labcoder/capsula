@@ -148,6 +148,7 @@ impl Presence {
                 cx.notify();
             });
         }
+        self.place_drawings(cx.weak_entity(), cx);
         self.runs_changed(cx)
     }
 
@@ -191,7 +192,6 @@ impl Presence {
                 format_args!("input draft nonempty={nonempty} preserved={preserved}"),
             );
         }
-        self.place_drawings(cx.weak_entity(), cx);
         self.runs_changed(cx)
     }
 

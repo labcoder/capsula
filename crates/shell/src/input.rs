@@ -131,8 +131,9 @@ impl Gesture {
             Key::Other(code) => return self.other_key(code, edge),
         };
         let down = edge == Edge::Down;
+        // A held key's auto-repeat also reaches the threshold, in case the deadline timer is late.
         if self.down[index] == down {
-            return [None; 3];
+            return [self.advance(now), None, None];
         }
         let threshold = self.advance(now);
         self.down[index] = down;
