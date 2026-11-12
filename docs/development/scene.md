@@ -598,12 +598,16 @@ step or across steps.
   - the link would make a chain longer than `MAX_OBJECT_DEPTH` (16) links (`TooDeep`).
 
   Admission rebuilds each target's latest anchor from the kept steps only when a step names
-  `behind`, so no admission state is stored. Removed objects keep their links in that map, so the
-  cycle walk passes through them the way their dependants do, and they count towards a chain's
-  length.
-- **A removed or cut anchor.** Its dependants take its place: if the anchor was behind something,
-  they are now behind that; if it wasn't, they hold its position among the unlinked objects.
-  `prepare` and `LayoutState::cut` hand the links on in the same way, and replay and recovery
+  `behind`, so no admission state is stored. A removed object keeps its link in that map while
+  something live is behind it, the same rule the layout holds it by, so the cycle walk passes
+  through it the way its dependants do and it counts towards their chain's length. A removed
+  object with nothing live behind it is left out and counts for nothing.
+- **A removed or cut anchor.** It keeps its place in the walk without painting, so nothing that
+  survives changes order: its dependants paint where they did, and if the anchor was behind
+  something, they stay behind that too. `LayoutState` holds every removed or cut anchor that a
+  live link still reaches, directly or through another held anchor, with its own last link, and
+  lets it go once nothing reaches it; `prepare` and `LayoutState::cut` rebuild that set the same
+  way, and admission's map keeps the same removed objects' links. Replay and recovery
   prepare the same steps and cuts in the same order, so the live view, replay and `recover` agree.
   A cut that drops the step that named `behind` drops its links with it, because a dropped step
   never reaches the layout or admission's map.
@@ -617,9 +621,13 @@ step or across steps.
 - **Cost.** Nothing is added per frame: sampling and paint read the order `SceneView` builds when
   it activates a step or installs a rest view. With no link in the scene that order is the
   in-place handle sort, with no added allocation or lookup. With links it is built once, with four
-  allocations bounded by the node count (a handle index, the sorted links, the walk stack and the
-  order). Admission's walk up from an anchor stops at 16 links, and the walk down from a target
-  visits only its dependants.
+  allocations bounded by the node count plus the held anchors (the places by handle, the sorted
+  links, the walk stack and the order). Each held anchor is one entry in the layout's held map,
+  counted in its index bytes; the map stays empty, and costs nothing, in a scene with no links.
+  Admission's walk up from an anchor stops at 16 links. It reads the depth below a target from
+  counts of the objects at each distance below every linked object, built once per step that
+  names `behind` and updated along at most 16 anchors for each link, so a step that re-points a
+  target with many objects behind it costs no walk over them.
 
 `behind` can't bring an object forward: moving an existing object in front of a newer one, or
 undoing a link, needs a remove and a new put (`shortcut:`, until someone asks for "in front").
