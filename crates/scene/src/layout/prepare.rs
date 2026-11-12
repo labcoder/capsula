@@ -702,7 +702,8 @@ fn patch(source: &Op, change: &Change) -> Op {
                 $value.color = Some(color.clone())
             };
         }
-        // A filled object's colour is its fill too, as an `anim` colour track already paints it.
+        // A filled object's colour is its fill too, as an `anim` colour track paints fill and
+        // outline; unlike a track, a set leaves a shape's label at the theme foreground.
         // shortcut: a set cannot give a filled shape an outline unlike its fill; remove and put it.
         macro_rules! filled {
             ($value:expr) => {{

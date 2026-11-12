@@ -76,10 +76,12 @@ rect's `radius` of 0 gives square corners, as when it is left out. The offered s
 states these minimums and the positive bounds of circle `r`, path `scale`, text `size`,
 `max_width` and highlight `pad`; box and size components are checked only at
 admission. `set` cannot change a width. `set color` on a shape or path with a fill recolours
-the fill as well as the outline, as an `anim` colour track already paints it, so "make it red"
-reaches a filled shape. A `set` therefore can't give a filled shape an outline colour unlike its
-fill; that takes a remove and a new put (`shortcut:` in `layout::prepare::patch`). A stored
-`set color` replays the same way on recovery.
+the fill as well as the outline, as an `anim` colour track paints those two, so "make it red"
+reaches a filled shape. Unlike a colour track, it leaves a shape's label at the theme
+foreground. A `set` therefore can't give a filled shape an outline colour unlike its fill; that
+takes a remove and a new put (`shortcut:` in `layout::prepare::patch`). Drawings saved before
+this rule recover with it too: an old `set color` on a filled shape now recolours its fill. The
+layout version stays 2, because a bump would make recovery skip and clear every stored scene.
 
 ### Canvas and overlay placement
 
