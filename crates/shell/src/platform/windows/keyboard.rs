@@ -6,7 +6,7 @@
 //! they hide would otherwise leave keys held.
 
 use std::cell::{Cell, OnceCell};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::RemoteDesktop::{
@@ -21,9 +21,10 @@ use windows::Win32::UI::Input::{
     RIDEV_DEVNOTIFY, RIDEV_INPUTSINK, RIDEV_REMOVE, RIM_TYPEKEYBOARD, RegisterRawInputDevices,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EVENT_SYSTEM_DESKTOPSWITCH, GIDC_REMOVAL, KillTimer, PBT_APMSUSPEND, PostMessageW,
-    RI_KEY_BREAK, RI_KEY_E0, RI_KEY_E1, SetTimer, WINEVENT_OUTOFCONTEXT, WM_APP, WM_INPUT,
-    WM_INPUT_DEVICE_CHANGE, WM_NCDESTROY, WM_POWERBROADCAST, WM_TIMER, WM_WTSSESSION_CHANGE,
+    EVENT_SYSTEM_DESKTOPSWITCH, GIDC_REMOVAL, GetQueueStatus, KillTimer, PBT_APMSUSPEND,
+    PostMessageW, QS_ALLINPUT, RI_KEY_BREAK, RI_KEY_E0, RI_KEY_E1, SetTimer, WINEVENT_OUTOFCONTEXT,
+    WM_APP, WM_INPUT, WM_INPUT_DEVICE_CHANGE, WM_NCDESTROY, WM_POWERBROADCAST, WM_TIMER,
+    WM_WTSSESSION_CHANGE,
 };
 
 use super::presence::{PresenceError, struct_size};
@@ -40,6 +41,8 @@ const OVERRUN_MAKE_CODE: u16 = 0xFF;
 const KEYBOARD: (u16, u16) = (0x01, 0x06);
 /// Posted to the proxy when the input desktop changes.
 const DESKTOP_SWITCHED: u32 = WM_APP + 2;
+/// How late an armed deadline may be at a chord key before the message queue is logged.
+const OVERDUE: Duration = Duration::from_millis(50);
 
 thread_local! {
     /// The proxy that hears desktop switches; the WinEvent callback has no context of its own.
@@ -61,6 +64,8 @@ pub(super) struct Keys {
     deliver: OnceCell<Deliver>,
     /// The deadline the timer is armed for, if any.
     deadline: Cell<Option<Instant>>,
+    /// The overdue deadline whose message queue was already logged.
+    overdue: Cell<Option<Instant>>,
     sessions: Cell<bool>,
     desktop: Cell<Option<HWINEVENTHOOK>>,
 }
@@ -101,6 +106,11 @@ impl Keys {
             }
             _ => return false,
         };
+        if self.overdue(event, at.instant) {
+            // SAFETY: reads only this thread's own message queue state.
+            let queue = unsafe { GetQueueStatus(QS_ALLINPUT) };
+            tracing::debug!(stage = ?InputStage::Native, reason = ?InputReason::DeadlineOverdue, queue, "held speech input boundary");
+        }
         if let Some(deliver) = self.deliver.get() {
             // `at` stays the event's time; the timer counts from now, since delivery takes time.
             let deadline = deliver(event, at);
@@ -118,6 +128,21 @@ impl Keys {
         message == WM_TIMER
             || message == DESKTOP_SWITCHED
             || (event == Event::Escape && self.deliver.get().is_some())
+    }
+
+    /// True once per armed deadline, when a chord key arrives more than `OVERDUE` after it.
+    fn overdue(&self, event: Event, at: Instant) -> bool {
+        matches!(
+            event,
+            Event::Key {
+                key: Key::LeftControl | Key::LeftAlt,
+                ..
+            }
+        ) && self
+            .deadline
+            .get()
+            .filter(|deadline| at.saturating_duration_since(*deadline) > OVERDUE)
+            .is_some_and(|deadline| self.overdue.replace(Some(deadline)) != Some(deadline))
     }
 
     fn arm(&self, hwnd: HWND, deadline: Option<Instant>, now: Instant) {
@@ -460,6 +485,33 @@ mod tests {
         blocked.acquire(|| EscapeHotkey::register(second.0));
         assert!(!blocked.shows_stop(), "releasing the first hold frees Esc");
         blocked.release();
+    }
+
+    #[test]
+    fn an_overdue_deadline_is_reported_once_at_the_first_late_chord_key() {
+        let keys = super::Keys::default();
+        let start = std::time::Instant::now();
+        let at = |millis| start + std::time::Duration::from_millis(millis);
+        let chord = Event::Key {
+            key: Key::LeftAlt,
+            edge: Edge::Down,
+        };
+        assert!(!keys.overdue(chord, at(400)), "nothing armed");
+        keys.deadline.set(Some(at(300)));
+        assert!(!keys.overdue(chord, at(350)), "exactly 50 ms late");
+        let other = Event::Key {
+            key: Key::Other(0x1E),
+            edge: Edge::Down,
+        };
+        assert!(!keys.overdue(other, at(351)), "not a chord key");
+        assert!(!keys.overdue(Event::Deadline, at(351)), "not a key");
+        assert!(keys.overdue(chord, at(351)), "51 ms late");
+        assert!(!keys.overdue(chord, at(900)), "once per deadline");
+        keys.deadline.set(Some(at(1_300)));
+        assert!(
+            keys.overdue(chord, at(1_400)),
+            "the next gesture's deadline"
+        );
     }
 
     #[test]

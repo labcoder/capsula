@@ -18,7 +18,9 @@ Debug builds also record the chord/hold, deferred delivery and stale-admission b
 including a chord suppressed by outstanding key state. They never record key identities or
 ordinary typing. Native keyboard registration and capture start remain separate boundaries.
 The native gesture deadline records arming and delivery independently, so a delayed deadline
-can be distinguished from an admission refusal. Capture receipts distinguish unreliable driver
+can be distinguished from an admission refusal. The recognition line names what reached the
+threshold, `by=Deadline`, `Repeat` or `Release`, and a chord key arriving more than 50 ms after
+an armed deadline logs the thread's message queue status bits as one number, once per gesture. Capture receipts distinguish unreliable driver
 timestamps from gaps in retained native packets. `Timestamp` always fails closed. Isolated
 discontinuities no longer discard an utterance. The adapter reports each packet's device
 position, and after physical stop shared `PacketBoundary` sums the frames missing between kept

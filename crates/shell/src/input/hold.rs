@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use kumochi_protocol::message::GestureId;
 
-use super::{Effect, Event, Gesture, Key};
+use super::{Edge, Effect, Event, Gesture, Key};
 use crate::platform::microphone::{CollectionGate, Generation, MicError};
 
 #[derive(Debug)]
@@ -22,6 +22,7 @@ pub(crate) enum InputReason {
     DeadlineArm,
     DeadlineArmed,
     DeadlineDelivered,
+    DeadlineOverdue,
     RawInputRead,
     CallbackMissing,
     ClockUnavailable,
@@ -33,6 +34,14 @@ pub(crate) enum InputReason {
     Deferred,
     OwnerGone,
     QueueClosed,
+}
+
+/// Which event reached the hold threshold.
+#[derive(Debug)]
+enum Recognition {
+    Deadline,
+    Repeat,
+    Release,
 }
 
 #[derive(Clone, Debug)]
@@ -95,7 +104,14 @@ impl Fence {
                     Some(self.current.map_or(Intent::Unavailable, Intent::Warm))
                 }
                 Some(Effect::HoldStarted) => {
-                    tracing::debug!(stage = ?InputStage::Gesture, reason = ?InputReason::HoldRecognized, "held speech input boundary");
+                    let by = match event {
+                        Event::Key {
+                            edge: Edge::Down, ..
+                        } => Recognition::Repeat,
+                        Event::Key { edge: Edge::Up, .. } => Recognition::Release,
+                        _ => Recognition::Deadline,
+                    };
+                    tracing::debug!(stage = ?InputStage::Gesture, reason = ?InputReason::HoldRecognized, ?by, "held speech input boundary");
                     Some(self.current.map_or(Intent::Unavailable, |gesture| {
                         let generation = self.gate.arm(gesture);
                         if let Err(reason) = generation {

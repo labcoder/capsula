@@ -164,7 +164,7 @@ pub(super) fn deliver(
                 Applied::Yes
             )
         {
-            return state.deadline();
+            return gesture.get().deadline();
         }
         backlog.set(backlog.get() + 1);
         tracing::debug!(stage = ?InputStage::Delivery, reason = ?InputReason::Deferred, "held speech input boundary");
@@ -173,7 +173,7 @@ pub(super) fn deliver(
             backlog.set(backlog.get() - 1);
             tracing::debug!(stage = ?InputStage::Delivery, reason = ?InputReason::QueueClosed, "held speech input boundary");
         }
-        state.deadline()
+        gesture.get().deadline()
     })
 }
 

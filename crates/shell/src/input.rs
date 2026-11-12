@@ -131,7 +131,9 @@ impl Gesture {
             Key::Other(code) => return self.other_key(code, edge),
         };
         let down = edge == Edge::Down;
-        // A held key's auto-repeat also reaches the threshold, in case the deadline timer is late.
+        // shortcut: a held key's auto-repeat also reaches the threshold when the deadline timer is
+        // late, but only after the keyboard's repeat delay (about 500 ms, up to 1 s), so such a
+        // hold starts late and one released sooner is refused; upgrade once the deadline can't starve.
         if self.down[index] == down {
             return [self.advance(now), None, None];
         }

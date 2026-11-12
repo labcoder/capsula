@@ -260,11 +260,40 @@ fn blocked_hold_chords_and_refused_collection_arms_log_no_key_codes(cx: &mut Tes
         [
             "stage=Gesture reason=ChordSuppressed",
             "stage=Gesture reason=ChordStarted",
-            "stage=Gesture reason=HoldRecognized",
+            "stage=Gesture reason=HoldRecognized by=Deadline",
             "stage=Gesture reason=Stale",
             "stage=Admission reason=Stale",
         ]
     );
+}
+
+#[gpui::test]
+fn a_recognised_hold_logs_whether_the_deadline_a_repeat_or_the_release_reached_it(
+    cx: &mut TestAppContext,
+) {
+    let (captured, _logging, _second) = capture();
+    let (owner, _data, _controls) = ready(cx);
+    let deliver = native(&owner, cx);
+    let at = Instant::now();
+    chord(&deliver, Edge::Down, at);
+    deliver(
+        Event::Key {
+            key: Key::LeftAlt,
+            edge: Edge::Down,
+        },
+        after(at, 500),
+    );
+    chord(&deliver, Edge::Up, at + Duration::from_millis(900));
+    let at = at + Duration::from_secs(2);
+    chord(&deliver, Edge::Down, at);
+    chord(&deliver, Edge::Up, at + Duration::from_millis(400));
+    cx.run_until_parked();
+    let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    let recognised = text
+        .lines()
+        .filter_map(|line| line.split("reason=HoldRecognized ").nth(1))
+        .collect::<Vec<_>>();
+    assert_eq!(recognised, ["by=Repeat", "by=Release"]);
 }
 
 fn native(owner: &Entity<Presence>, cx: &mut TestAppContext) -> Deliver {
