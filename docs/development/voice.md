@@ -9,28 +9,28 @@ Voice is optional. A user installs two parts separately, and each runs locally i
 
 Sizes are decimal megabytes of the exact bytes installed.
 
-Hold-to-talk failures log a closed stage and reason at shell admission, capture completion,
-and brain hold status/decode boundaries. These diagnostics contain no audio, recognized text,
+Hold-to-talk failures log a closed stage and reason at shell admission, capture completion, and
+brain hold status/decode boundaries. These diagnostics contain no audio, recognized text,
 gesture/session identifiers, device names, paths or foreign error text. A microphone receipt
-distinguishes unsupported/unavailable input from discontinuity, capacity and cleanup failures;
-the generic user-facing notice does not identify the failed boundary by itself.
-Debug builds also record the chord/hold, deferred delivery and stale-admission boundaries,
-including a chord suppressed by outstanding key state. They record no key beyond the left Ctrl+Alt
-chord itself and no ordinary typing, though debug builds stamp every left Ctrl+Alt chord,
-including other apps' Ctrl+Alt shortcuts. Native keyboard registration and capture start
-remain separate boundaries. The native gesture deadline records arming and delivery independently, so a delayed deadline
-can be distinguished from an admission refusal. The recognition line names what reached the
-threshold, `by=Deadline`, `Repeat` or `Release`, and a chord key arriving more than 50 ms after
-an armed deadline logs the thread's message queue status bits as one number, once per gesture.
-Capture receipts distinguish unreliable driver timestamps from gaps in retained native packets. `Timestamp` always fails closed. Isolated
-discontinuities no longer discard an utterance. The adapter reports each packet's device
-position, and after physical stop shared `PacketBoundary` sums the frames missing between kept
-packets and rejects the hold when they exceed 25% of its span, kept plus missing frames. Frames
-lost before the first kept packet are outside the retained audio and don't count. Discontinuity
-flags are counted for diagnostics only, since one flag can stand for any amount of lost audio.
-There is no lifetime gap limit, so sparse losses in a long dictation remain admissible.
-A gap removes audio; it never inserts silence, replays old audio or admits pre-Listening audio.
-The queue must still drain after Listening, and the next nonempty packet is still discarded.
+distinguishes unsupported/unavailable input from discontinuity, capacity and cleanup failures; the
+generic user-facing notice does not identify the failed boundary by itself. Debug builds also record
+the chord/hold, deferred delivery and stale-admission boundaries, including a chord suppressed by
+outstanding key state. They record no key beyond the left Ctrl+Alt chord itself and no ordinary
+typing, though debug builds stamp every left Ctrl+Alt chord, including other apps' Ctrl+Alt
+shortcuts. Native keyboard registration and capture start remain separate boundaries. The native
+gesture deadline records arming and delivery independently, so a delayed deadline can be
+distinguished from an admission refusal. The recognition line names what reached the threshold,
+`by=Deadline`, `Repeat` or `Release`, and a chord key arriving more than 50 ms after an armed
+deadline logs the thread's message queue status bits as one number, once per gesture. Capture
+receipts distinguish unreliable driver timestamps from gaps in retained native packets. `Timestamp`
+always fails closed. Isolated discontinuities no longer discard an utterance. The adapter reports
+each packet's device position, and after physical stop shared `PacketBoundary` sums the frames
+missing between kept packets and rejects the hold when they exceed 25% of its span, kept plus
+missing frames. Frames lost before the first kept packet are outside the retained audio and don't
+count. Discontinuity flags are counted for diagnostics only, since one flag can stand for any amount
+of lost audio. There is no lifetime gap limit, so sparse losses in a long dictation remain
+admissible. A gap removes audio; it never inserts silence, replays old audio or admits pre-Listening
+audio. The queue must still drain after Listening, and the next nonempty packet is still discarded.
 
 One `held microphone capture summary` is logged after each capture ends, with only numeric
 fields: `discontinuities`, `first_discontinuity_packet` (one-based kept ordinal, zero if none),
@@ -46,17 +46,17 @@ existing monotonic time. Timestamp and over-budget holds are discarded, not tran
 
 The fake-source policy tests contain no Windows types. Native adapters supply frame count,
 first-frame device position, discontinuity and timestamp-error facts, collection authority and a
-post-Listening drained-queue observation. WASAPI alone translates flag bits and owns
-acquire/release calls; a Core Audio adapter must supply equivalent facts and the same consent, cancellation and cleanup guarantees.
-WASAPI requests at least 100 ms of buffering for its 20 ms polling interval. The wire queue is
-sized from that buffer, room for all of it drained in one pass plus three chunks, so a stall the
-buffer absorbs can't overflow the queue instead. The adapter allocates scratch
-before Start, and checks the pinned device/format before Start and after Stop rather than making
-allocating COM queries in the pump. Mid-stream unplug/reconfiguration errors from GetBuffer or
+post-Listening drained-queue observation. WASAPI alone translates flag bits and owns acquire/release
+calls; a Core Audio adapter must supply equivalent facts and the same consent, cancellation and
+cleanup guarantees. WASAPI requests at least 100 ms of buffering for its 20 ms polling interval. The
+wire queue is sized from that buffer, room for all of it drained in one pass plus three chunks, so a
+stall the buffer absorbs can't overflow the queue instead. The adapter allocates scratch before
+Start, and checks the pinned device/format before Start and after Stop rather than making allocating
+COM queries in the pump. Mid-stream unplug/reconfiguration errors from GetBuffer or
 GetNextPacketSize, a device-invalidated result from ReleaseBuffer or Stop, or a failed after-Stop
-check, discard the hold; its generation retires, so the next hold can open. Any other
-ReleaseBuffer or Stop failure stays unconfirmed. The initialized stream's
-format remains pinned; no reopen or reinterpretation is attempted.
+check, discard the hold; its generation retires, so the next hold can open. Any other ReleaseBuffer
+or Stop failure stays unconfirmed. The initialized stream's format remains pinned; no reopen or
+reinterpretation is attempted.
 
 The stop receipt still asserts physical release/join, and the matched wire packet count still
 asserts ordered delivery, not lossless device time. Previously the native validator implicitly
