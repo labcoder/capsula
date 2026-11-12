@@ -235,7 +235,7 @@ async fn first_speech_setup_loads_and_holds_without_restarting_the_brain() {
         &[],
         (Some(stt), None),
         [heard, tts],
-        fetch.clone(),
+        Arc::<super::voice::HeldFetch>::clone(&fetch),
     );
     assert_eq!(brain.hold_voice().0, PartState::NotInstalled);
     let ((control, data), mut shell) = duplex();

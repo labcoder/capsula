@@ -45,10 +45,6 @@ fn capture() -> (
 }
 
 #[gpui::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one captured log checks the independent capture and brain failure boundaries"
-)]
 fn hold_failures_log_closed_stages_and_reasons_without_user_content(cx: &mut TestAppContext) {
     cx.background_executor.allow_parking();
     let (captured, _logging, _second) = capture();
@@ -98,7 +94,7 @@ fn hold_failures_log_closed_stages_and_reasons_without_user_content(cx: &mut Tes
     let (owner, _data, _controls) = ready(cx);
     let (_, stamp) = hold(&owner, 1, cx);
     owner.update(cx, |owner, cx| {
-        owner.voice_intent(Intent::Unavailable, stamp, 0, cx)
+        owner.voice_intent(Intent::Unavailable, stamp, 0, cx);
     });
     for reason in [
         HoldFailure::NotLoaded,
@@ -247,7 +243,7 @@ fn blocked_hold_chords_and_refused_collection_arms_log_no_key_codes(cx: &mut Tes
     ));
     assert!(controls.is_empty());
     owner.read_with(cx, |owner, _| {
-        assert_eq!(owner.voice.status, Some(Text::TurnBusy))
+        assert_eq!(owner.voice.status, Some(Text::TurnBusy));
     });
     let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
     let diagnostics = text
