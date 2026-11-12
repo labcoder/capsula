@@ -290,6 +290,10 @@ impl Threads {
         self.event_pending.is_some() || self.event_needed.is_some()
     }
 
+    pub(crate) fn history_revision(&self) -> u64 {
+        self.event_revision
+    }
+
     pub(crate) fn connected(&mut self) {
         self.retire_issue_confirmation();
         self.connected = true;
@@ -795,7 +799,11 @@ impl Threads {
             .filter(|pending| pending.request == request)
         {
             self.event_pending = None;
-            pending.revision == self.event_revision
+            let current = pending.revision == self.event_revision;
+            if current {
+                self.event_revision = self.event_revision.wrapping_add(1);
+            }
+            current
         } else {
             return;
         };
