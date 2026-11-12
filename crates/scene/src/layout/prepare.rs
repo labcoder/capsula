@@ -314,19 +314,15 @@ pub fn prepare(
         after.handles.insert(*handle, id.clone());
         after.objects.insert(id, object);
     }
+    after.hand_on_links(&before);
     for change in ticket.run.set.iter() {
         if let Some(anchor) = &change.behind {
-            let paint_at = after
-                .objects
-                .get(anchor)
-                .ok_or_else(invariant)?
-                .paint_at
-                .under();
+            let anchor = after.objects.get(anchor).ok_or_else(invariant)?.item.handle;
             after
                 .objects
                 .get_mut(&change.target)
                 .ok_or_else(invariant)?
-                .paint_at = paint_at;
+                .behind = Some(anchor);
         }
     }
     edges::route(&mut after, &build)?;

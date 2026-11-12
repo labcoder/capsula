@@ -64,30 +64,8 @@ impl Rest {
     }
 }
 
-/// Where an object paints: by anchor, then deeper behind-chains first, then by handle. An object
-/// paints at its own handle until a `set` puts it behind another; it keeps that anchor after the
-/// anchor is removed or cut, so replay and recovery recompute the same order.
-// shortcut: nothing moves an object in front of a newer one; add "in front" when someone asks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct PaintKey {
-    anchor: Handle,
-    depth: std::cmp::Reverse<u32>,
-}
-impl PaintKey {
-    pub(crate) fn own(handle: Handle) -> Self {
-        Self {
-            anchor: handle,
-            depth: std::cmp::Reverse(0),
-        }
-    }
-    /// Just below `self`, and above anything already behind the same anchor at that depth.
-    pub(super) fn under(self) -> Self {
-        Self {
-            anchor: self.anchor,
-            depth: std::cmp::Reverse(self.depth.0.saturating_add(1)),
-        }
-    }
-}
+/// What [`LayoutState::placed`] yields for one object.
+pub(crate) type PlacedEntry<'a> = (&'a Item, Rest, f32, usize, f32, Option<Handle>);
 
 /// Explicit motion envelopes by property, shared between prefixes until one changes them.
 pub(super) type Motions = BTreeMap<&'static str, crate::state::work::Motion>;
@@ -110,8 +88,9 @@ pub(super) struct Placed {
     pub work: PaintWork,
     /// Composed scale `work` charged the rect fallbacks at; the painter refuses a pose past it.
     pub paint_scale: f32,
-    /// Paint position, set once per step that changes it, never per frame.
-    pub paint_at: PaintKey,
+    /// The latest `set.behind` anchor. A removed or cut anchor hands on its own link, or its
+    /// handle stays here as the position the object holds.
+    pub behind: Option<Handle>,
 }
 
 impl Placed {
@@ -119,9 +98,8 @@ impl Placed {
         if let Some(old) = cached {
             item.transform = old.item.transform;
         }
-        let paint_at = cached.map_or(PaintKey::own(item.handle), |old| old.paint_at);
         Self {
-            paint_at,
+            behind: cached.and_then(|old| old.behind),
             item,
             source,
             anchors: cached.map_or([Vec2::default(); 2], |old| old.anchors),
@@ -227,7 +205,8 @@ impl LayoutState {
         }
     }
     /// Every placed item with its resting values and inherited opacity, for activation.
-    pub(crate) fn placed(&self) -> impl Iterator<Item = (&Item, Rest, f32, usize, f32)> {
+    /// Each object's item, rest, inherited opacity, label start, paint scale and behind link.
+    pub(crate) fn placed(&self) -> impl Iterator<Item = PlacedEntry<'_>> {
         self.objects.values().map(|object| {
             let primitives = &object.item.primitives;
             let label_start = if matches!(&*object.source, Op::Edge(_)) {
@@ -244,6 +223,7 @@ impl LayoutState {
                 object.inherited_opacity,
                 label_start,
                 object.paint_scale,
+                object.behind,
             )
         })
     }
@@ -303,12 +283,35 @@ impl LayoutState {
             std::iter::once(view.handle).chain(view.solids.iter().map(|solid| solid.handle))
         })
     }
-    /// Where a placed handle paints; an unknown handle paints at itself.
-    pub(crate) fn paint_at(&self, handle: Handle) -> PaintKey {
-        self.handles
-            .get(&handle)
-            .and_then(|id| self.objects.get(id))
-            .map_or(PaintKey::own(handle), |object| object.paint_at)
+    /// Moves each link to an anchor that `before` held and this state dropped onto that anchor's
+    /// own link, so the dependants take the dropped anchor's place.
+    pub(super) fn hand_on_links(&mut self, before: &Self) {
+        let dropped = |handle: &Handle| {
+            before
+                .handles
+                .get(handle)
+                .filter(|_| !self.handles.contains_key(handle))
+                .and_then(|id| before.objects.get(id))
+        };
+        let moved: Vec<(WireId, Handle)> = self
+            .objects
+            .iter()
+            .filter_map(|(id, object)| {
+                let mut at = object.behind?;
+                for _ in 0..before.objects.len() {
+                    let Some(next) = dropped(&at).and_then(|anchor| anchor.behind) else {
+                        break;
+                    };
+                    at = next;
+                }
+                (Some(at) != object.behind).then(|| (id.clone(), at))
+            })
+            .collect();
+        for (id, at) in moved {
+            if let Some(object) = self.objects.get_mut(&id) {
+                object.behind = Some(at);
+            }
+        }
     }
     /// Resolves a prepared model id without consulting future scene commits.
     pub fn handle(&self, id: &WireId) -> Option<Handle> {
@@ -433,6 +436,7 @@ impl LayoutState {
             presentation_limit: self.presentation_limit,
         });
         after.prune_extras();
+        after.hand_on_links(self);
         for object in after.objects.values() {
             after.world_bounds(object)?;
         }

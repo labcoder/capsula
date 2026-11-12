@@ -1,11 +1,13 @@
-//! `set.behind`: admission, paint order, a removed anchor, recovery and stored records.
+//! `set.behind`: admission, paint order, removed and cut anchors, recovery and stored records.
 #[path = "support/scene.rs"]
 mod scene_support;
 
 use kumochi_scene::{
     ErrorCode, Frame, GlobalBudget, Handle, Record, SceneEvent, SceneState, SceneView, Step,
+    StopCut,
     layout::{LayoutState, SurfaceGeometry, recover},
     parse_record,
+    text::Bounded,
     theme::Theme,
 };
 use scene_support::{Measure, id, new_scene, prepared};
@@ -24,17 +26,71 @@ fn typed(value: &Value) -> Step {
     step
 }
 
+/// Commits, prepares and activates one step on `view`.
+fn activate(scene: &mut SceneState, budget: &mut GlobalBudget, view: &mut SceneView, value: Value) {
+    let now = u64::from(scene.revision()) * 100;
+    let step = prepared(scene, budget, view.layout(), value);
+    view.activate(step, now, 0, &mut Frame::new())
+        .expect("fresh activation");
+}
+
 /// Prepares and activates each step on one view.
 fn drawn(steps: Vec<Value>) -> (SceneState, GlobalBudget, SceneView) {
     let mut scene = new_scene("behind");
     let mut budget = GlobalBudget::default();
     let mut view = SceneView::new(&LayoutState::new(&scene), scene.activated());
-    for (now, value) in (0..).step_by(100).zip(steps) {
-        let step = prepared(&mut scene, &mut budget, view.layout(), value);
-        view.activate(step, now, 0, &mut Frame::new())
-            .expect("fresh activation");
+    for value in steps {
+        activate(&mut scene, &mut budget, &mut view, value);
     }
     (scene, budget, view)
+}
+
+/// The scene rebuilt from its recovery log, as a restart shows it.
+fn recovered(scene: &SceneState) -> SceneView {
+    let (state, layout) = recover(
+        scene.header().clone(),
+        scene.recovery_log(),
+        SurfaceGeometry::default(),
+        &Arc::new(Theme::default()),
+        &mut Measure,
+        &AtomicBool::new(false),
+        None,
+    )
+    .expect("replay");
+    SceneView::new(&layout, state.activated())
+}
+
+/// Stops through `activated`, keeping every object on `view` except `dropped`, and returns the
+/// live view of the cut.
+fn cut(
+    scene: &mut SceneState,
+    budget: &mut GlobalBudget,
+    view: &SceneView,
+    activated: u32,
+    dropped: &[&str],
+) -> SceneView {
+    let dropped: Vec<Handle> = dropped
+        .iter()
+        .map(|name| view.layout().handle(&id(name)).expect("dropped object"))
+        .collect();
+    let revealed = view
+        .layout()
+        .items()
+        .iter()
+        .map(|item| item.handle)
+        .filter(|handle| !dropped.contains(handle))
+        .collect::<Vec<_>>();
+    scene
+        .stop(
+            &StopCut {
+                activated,
+                revealed: Bounded::new(revealed).expect("bounded cut"),
+            },
+            budget,
+        )
+        .expect("effective cut");
+    let live = view.layout().cut(scene).expect("cut layout");
+    SceneView::new(&live, scene.activated())
 }
 
 /// The named objects in the order they paint, bottom first, at rest.
@@ -53,7 +109,7 @@ fn painted(view: &SceneView, names: &[&str]) -> Vec<String> {
         .collect()
 }
 
-const ALL: &[&str] = &["sky", "c1", "c2", "c3", "sun", "moon", "star"];
+const ALL: &[&str] = &["sky", "c1", "c2", "c3", "sun", "moon", "star", "comet"];
 
 fn cloud() -> Value {
     json!({"id":"cloud","put":[
@@ -78,18 +134,67 @@ fn an_object_put_behind_another_paints_just_below_it() {
 }
 
 #[test]
-fn chains_and_later_objects_behind_one_anchor_keep_a_deterministic_order() {
+fn a_chain_paints_as_one_group_below_its_anchor() {
     let (_, _, view) = drawn(vec![
         cloud(),
         json!({"id":"sun","put":[circle("sun"),circle("moon")],
             "set":[{"target":"sun","behind":"c1"},{"target":"moon","behind":"sun"}]}),
         json!({"id":"star","put":[circle("star")],"set":[{"target":"star","behind":"c1"}]}),
+        json!({"id":"comet","put":[circle("comet")],"set":[{"target":"comet","behind":"star"}]}),
     ]);
     assert_eq!(
         painted(&view, ALL),
-        ["sky", "moon", "sun", "star", "c1", "c2"],
-        "deeper chains first; at one depth, the newer object paints higher"
+        ["sky", "moon", "sun", "comet", "star", "c1", "c2"],
+        "everything behind sun paints with it, and comet sits just below star alone"
     );
+}
+
+#[test]
+fn an_anchor_s_dependants_keep_handle_order() {
+    let (_, _, view) = drawn(vec![
+        cloud(),
+        json!({"id":"sun","put":[circle("sun")],"set":[{"target":"sun","behind":"c2"}]}),
+        json!({"id":"older","set":[{"target":"c1","behind":"c2"}]}),
+    ]);
+    assert_eq!(
+        painted(&view, ALL),
+        ["sky", "c1", "sun", "c2"],
+        "the older c1 paints below the newer sun, whatever order the links came in"
+    );
+}
+
+#[test]
+fn a_dependant_follows_its_anchor_when_the_anchor_moves_later() {
+    let (_, _, view) = drawn(vec![
+        cloud(),
+        json!({"id":"sun","put":[circle("sun"),circle("moon")],"set":[{"target":"moon","behind":"sun"}]}),
+        json!({"id":"move","set":[{"target":"sun","behind":"c1"}]}),
+    ]);
+    assert_eq!(painted(&view, ALL), ["sky", "moon", "sun", "c1", "c2"]);
+    let (_, _, view) = drawn(vec![
+        cloud(),
+        json!({"id":"sun","put":[circle("sun")],"set":[{"target":"sun","behind":"c2"}]}),
+        json!({"id":"move","set":[{"target":"c2","behind":"c1"}]}),
+    ]);
+    assert_eq!(painted(&view, ALL), ["sky", "sun", "c2", "c1"]);
+}
+
+#[test]
+fn the_same_links_paint_the_same_whatever_order_they_were_set_in() {
+    let put = || json!([circle("sun"), circle("moon")]);
+    let moon = json!({"target":"moon","behind":"sun"});
+    let sun = json!({"target":"sun","behind":"c2"});
+    let expected = ["sky", "c1", "moon", "sun", "c2"];
+    for set in [json!([moon, sun]), json!([sun, moon])] {
+        let (_, _, view) = drawn(vec![cloud(), json!({"id":"one","put":put(),"set":set})]);
+        assert_eq!(painted(&view, ALL), expected, "one step");
+    }
+    let (_, _, view) = drawn(vec![
+        cloud(),
+        json!({"id":"one","put":put(),"set":[moon]}),
+        json!({"id":"two","set":[sun]}),
+    ]);
+    assert_eq!(painted(&view, ALL), expected, "across steps");
 }
 
 #[test]
@@ -110,18 +215,64 @@ fn a_removed_anchor_leaves_its_dependant_where_it_painted_and_recovery_agrees() 
         json!({"id":"star","put":[circle("star"), circle("c3")],"set":[{"target":"c3","behind":"sun"}]}),
     ]);
     assert_eq!(painted(&view, ALL), ["sky", "c3", "sun", "c2", "star"]);
-    let (state, layout) = recover(
-        scene.header().clone(),
-        scene.recovery_log(),
-        SurfaceGeometry::default(),
-        &Arc::new(Theme::default()),
-        &mut Measure,
-        &AtomicBool::new(false),
-        None,
-    )
-    .expect("replay");
-    let recovered = SceneView::new(&layout, state.activated());
-    assert_eq!(painted(&recovered, ALL), ["sky", "c3", "sun", "c2", "star"]);
+    assert_eq!(
+        painted(&recovered(&scene), ALL),
+        ["sky", "c3", "sun", "c2", "star"]
+    );
+}
+
+#[test]
+fn a_removed_anchor_hands_its_own_link_to_its_dependants() {
+    let (scene, _, view) = drawn(vec![
+        cloud(),
+        json!({"id":"sun","put":[circle("sun"),circle("moon")],
+            "set":[{"target":"sun","behind":"c1"},{"target":"moon","behind":"sun"}]}),
+        json!({"id":"drop","remove":["sun"]}),
+        json!({"id":"move","set":[{"target":"c1","behind":"sky"}]}),
+    ]);
+    assert_eq!(
+        painted(&view, ALL),
+        ["moon", "c1", "sky", "c2"],
+        "moon is behind c1 now, so it moves with c1"
+    );
+    assert_eq!(
+        painted(&recovered(&scene), ALL),
+        ["moon", "c1", "sky", "c2"]
+    );
+}
+
+#[test]
+fn two_cuts_hand_on_links_and_drop_unshown_links_alike_live_and_recovered() {
+    let (mut scene, mut budget, view) = drawn(vec![
+        cloud(),
+        json!({"id":"sun","put":[circle("sun")],
+            "set":[{"target":"sun","behind":"c2"},{"target":"c2","behind":"c1"}]}),
+    ]);
+    assert_eq!(painted(&view, ALL), ["sky", "sun", "c2", "c1"]);
+    drop(prepared(
+        &mut scene,
+        &mut budget,
+        view.layout(),
+        json!({"id":"unshown","set":[{"target":"sky","behind":"sun"}]}),
+    ));
+    let mut view = cut(&mut scene, &mut budget, &view, 2, &["c2"]);
+    assert_eq!(
+        painted(&view, ALL),
+        ["sky", "sun", "c1"],
+        "sun takes c2's place behind c1, and the unshown link is gone"
+    );
+    assert_eq!(painted(&recovered(&scene), ALL), ["sky", "sun", "c1"]);
+    activate(
+        &mut scene,
+        &mut budget,
+        &mut view,
+        json!({"id":"star","put":[circle("star")],
+            "set":[{"target":"star","behind":"sun"},{"target":"sun","behind":"sky"}]}),
+    );
+    assert_eq!(painted(&view, ALL), ["star", "sun", "sky", "c1"]);
+    let view = cut(&mut scene, &mut budget, &view, 4, &["sun"]);
+    assert_eq!(painted(&view, ALL), ["star", "sky", "c1"]);
+    assert_eq!(painted(&recovered(&scene), ALL), ["star", "sky", "c1"]);
 }
 
 fn refused(steps: &[Value], last: &Value, code: ErrorCode, path: &str) {
@@ -167,6 +318,29 @@ fn a_link_that_would_close_a_cycle_is_refused_in_the_step_that_closes_it() {
         &json!({"id":"both","set":[{"target":"c1","behind":"c2"},{"target":"c2","behind":"c1"}]}),
         ErrorCode::ReferenceCycle,
         "set[1].behind",
+    );
+}
+
+#[test]
+fn a_cycle_through_a_removed_anchor_is_refused_in_one_step_or_two() {
+    let linked = [
+        cloud(),
+        json!({"id":"sun","put":[circle("sun")],
+            "set":[{"target":"sun","behind":"c1"},{"target":"c1","behind":"c2"}]}),
+    ];
+    refused(
+        &linked,
+        &json!({"id":"x","remove":["c1"],"set":[{"target":"c2","behind":"sun"}]}),
+        ErrorCode::ReferenceCycle,
+        "set[0].behind",
+    );
+    let mut removed = linked.to_vec();
+    removed.push(json!({"id":"drop","remove":["c1"]}));
+    refused(
+        &removed,
+        &json!({"id":"x","set":[{"target":"c2","behind":"sun"}]}),
+        ErrorCode::ReferenceCycle,
+        "set[0].behind",
     );
 }
 

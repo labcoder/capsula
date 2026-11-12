@@ -383,8 +383,9 @@ fn validate_dimensions(op: &Op, prefix: &FieldPath, step: &Step) -> Result<(), S
     Ok(())
 }
 
-/// `behind` holds each target's latest anchor from kept earlier steps; this step's links join it
-/// in set order, so a link that would close a cycle is refused where it appears.
+/// `behind` holds each target's latest anchor from kept earlier steps, removed objects included,
+/// since a removed anchor hands its link on. This step's links join it in set order, so a link
+/// that would close a cycle is refused where it appears.
 pub(super) fn validate_changes<'a>(
     step: &'a Step,
     objects: &BTreeMap<WireId, Object>,
@@ -413,16 +414,16 @@ pub(super) fn validate_changes<'a>(
         if below.kind.three_dimensional() {
             return Err(fail("behind", ErrorCode::Unsupported));
         }
-        // Live links are acyclic, so the walk visits each live object at most once.
+        // Admitted links are acyclic, so the walk visits each linked object at most once.
         let mut at = anchor;
-        for _ in 0..=objects.len() {
+        for _ in 0..=behind.len() {
             if at == &change.target {
                 return Err(fail("behind", ErrorCode::ReferenceCycle));
             }
-            match behind.get(at) {
-                Some(&next) if objects.contains_key(next) => at = next,
-                _ => break,
-            }
+            let Some(&next) = behind.get(at) else {
+                break;
+            };
+            at = next;
         }
         behind.insert(&change.target, anchor);
     }
