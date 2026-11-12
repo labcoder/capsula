@@ -20,25 +20,28 @@ ordinary typing. Native keyboard registration and capture start remain separate 
 The native gesture deadline records arming and delivery independently, so a delayed deadline
 can be distinguished from an admission refusal. Capture receipts distinguish unreliable driver
 timestamps from gaps in retained native packets. `Timestamp` always fails closed. Isolated
-discontinuities no longer discard an utterance: after physical stop, shared `PacketBoundary`
-rejects only when more than 25% of kept packets were flagged. A flag on the first kept packet
-is counted for diagnostics but excluded from that share because it has no retained predecessor.
-There is no lifetime gap count limit, so sparse losses in a long dictation remain admissible.
+discontinuities no longer discard an utterance. The adapter reports each packet's device
+position, and after physical stop shared `PacketBoundary` sums the frames missing between kept
+packets and rejects the hold when they exceed 25% of its span, kept plus missing frames. Frames
+lost before the first kept packet are outside the retained audio and don't count. Discontinuity
+flags are counted for diagnostics only, since one flag can stand for any amount of lost audio.
+There is no lifetime gap limit, so sparse losses in a long dictation remain admissible.
 A gap removes audio; it never inserts silence, replays old audio or admits pre-Listening audio.
 The queue must still drain after Listening, and the next nonempty packet is still discarded.
 
 One `held microphone capture summary` is logged after each capture ends, with only numeric
 fields: `discontinuities`, `first_discontinuity_packet` (one-based kept ordinal, zero if none),
-`first_discontinuity_ms` (observed loop time since stream start), `kept_packets`, `kept_frames`
-and `discarded_before_listening` (nonempty packets discarded while collection was not live).
+`first_discontinuity_ms` (observed loop time since stream start), `kept_packets`, `kept_frames`,
+`missing_frames` (device frames between kept packets that never arrived) and
+`discarded_before_listening` (nonempty packets discarded while collection was not live).
 These count native packets/frames, not the subsequently packed wire chunks. Counters commit
 only after an authorized copy and native buffer release. No per-packet allocation, lock,
 logging or extra clock query is added for these diagnostics; the first flag uses the loop's
 existing monotonic time. Timestamp and over-budget holds are discarded, not transcribed.
 
 The fake-source policy tests contain no Windows types. Native adapters supply frame count,
-discontinuity and timestamp-error facts, collection authority and a post-Listening drained-queue
-observation. WASAPI alone translates flag bits and owns acquire/release calls; a Core Audio
+first-frame device position, discontinuity and timestamp-error facts, collection authority and a
+post-Listening drained-queue observation. WASAPI alone translates flag bits and owns acquire/release calls; a Core Audio
 adapter must supply equivalent facts and the same consent, cancellation and cleanup guarantees.
 WASAPI requests at least 100 ms of buffering for its 20 ms polling interval, allocates scratch
 before Start, and checks the pinned device/format before Start and after Stop rather than making
@@ -48,7 +51,7 @@ format remains pinned; no reopen or reinterpretation is attempted.
 
 The stop receipt still asserts physical release/join, and the matched wire packet count still
 asserts ordered delivery, not lossless device time. Previously the native validator implicitly
-required continuity after startup; it now certifies the shared gap-share bound instead. The
+required continuity after startup; it now certifies the shared lost-frame bound instead. The
 brain receives no synthetic samples or new continuity flag and still waits for true stop before
 decoding. A confirmed discarded receipt logs `held speech input ended`; an unconfirmed receipt
 logs `held speech input failed`.

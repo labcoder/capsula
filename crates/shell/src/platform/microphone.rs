@@ -69,14 +69,17 @@ pub(crate) enum MicError {
 #[derive(Clone, Copy)]
 pub(super) struct PacketStatus {
     pub(super) frames: u32,
+    /// The device's stream position of the packet's first frame, in frames.
+    pub(super) position: u64,
     pub(super) discontinuity: bool,
     pub(super) timestamp_error: bool,
 }
 
 pub(super) const CAPTURE_BUFFER: Duration = Duration::from_millis(100);
 
-// Excluding the first packet's transition flag, a quarter permits sparse losses but rejects dense gaps.
-const MAX_DISCONTINUITY_SHARE: u32 = 4;
+/// A hold fails when more than one frame in this many of its span, from the first kept frame
+/// to the last, never reached it: sparse losses pass and a mostly lost hold doesn't.
+const MISSING_SHARE_DIVISOR: u64 = 4;
 
 pub(super) struct PacketBoundary {
     startup: bool,
@@ -88,6 +91,8 @@ pub(super) struct PacketBoundary {
     first_discontinuity_ms: u64,
     kept_packets: u32,
     kept_frames: u64,
+    missing_frames: u64,
+    next_position: Option<u64>,
     discarded_before_listening: u32,
 }
 
@@ -103,6 +108,8 @@ impl Default for PacketBoundary {
             first_discontinuity_ms: 0,
             kept_packets: 0,
             kept_frames: 0,
+            missing_frames: 0,
+            next_position: None,
             discarded_before_listening: 0,
         }
     }
@@ -153,6 +160,12 @@ impl PacketBoundary {
     pub(super) fn kept(&mut self, packet: PacketStatus, at: Instant) {
         self.kept_packets = self.kept_packets.saturating_add(1);
         self.kept_frames = self.kept_frames.saturating_add(u64::from(packet.frames));
+        if let Some(next) = self.next_position {
+            self.missing_frames = self
+                .missing_frames
+                .saturating_add(packet.position.saturating_sub(next));
+        }
+        self.next_position = Some(packet.position.saturating_add(u64::from(packet.frames)));
         if packet.discontinuity {
             self.discontinuities = self.discontinuities.saturating_add(1);
             if self.discontinuities == 1 {
@@ -172,10 +185,9 @@ impl PacketBoundary {
         if let Some(error) = self.failed {
             return Err(error);
         }
-        let gaps = self
-            .discontinuities
-            .saturating_sub(u32::from(self.first_discontinuity_packet == 1));
-        if gaps.saturating_mul(MAX_DISCONTINUITY_SHARE) > self.kept_packets {
+        if self.missing_frames.saturating_mul(MISSING_SHARE_DIVISOR)
+            > self.kept_frames.saturating_add(self.missing_frames)
+        {
             self.failed = Some(MicError::Discontinuity);
             return Err(MicError::Discontinuity);
         }
@@ -189,6 +201,7 @@ impl PacketBoundary {
             first_discontinuity_ms = self.first_discontinuity_ms,
             kept_packets = self.kept_packets,
             kept_frames = self.kept_frames,
+            missing_frames = self.missing_frames,
             discarded_before_listening = self.discarded_before_listening,
             "held microphone capture summary"
         );

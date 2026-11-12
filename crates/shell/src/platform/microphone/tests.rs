@@ -809,6 +809,7 @@ fn outer_audio_carriers_redact_text_and_byte_list_sentinels() {
 
 const CLEAN: PacketStatus = PacketStatus {
     frames: 0,
+    position: 0,
     discontinuity: false,
     timestamp_error: false,
 };
@@ -821,14 +822,30 @@ const CLOCK: PacketStatus = PacketStatus {
     ..CLEAN
 };
 
+/// A flagged packet whose device frames before it never arrived.
+const fn lost(frames: u64) -> PacketStatus {
+    PacketStatus {
+        position: frames,
+        ..GAP
+    }
+}
+
+/// Each packet follows the last on the device, after the frames its flags' `position` lost.
 fn collect(packets: &[(bool, bool, &[i16], PacketStatus)]) -> Result<Vec<i16>, MicError> {
     let mut boundary = PacketBoundary::default();
     let start = Instant::now();
     boundary.started(start);
     let mut pcm = Vec::new();
+    let mut position = 0;
     for (index, &(live, drained, samples, flags)) in packets.iter().enumerate() {
         let frames = u32::try_from(samples.len()).unwrap();
-        let status = PacketStatus { frames, ..flags };
+        position += flags.position;
+        let status = PacketStatus {
+            frames,
+            position,
+            ..flags
+        };
+        position += u64::from(frames);
         if boundary.packet(live, drained, status)? {
             boundary.kept(
                 status,
@@ -889,7 +906,7 @@ fn first_kept_packet_can_be_flagged_after_a_clean_or_empty_startup() {
 }
 
 #[test]
-fn later_kept_discontinuity_ends_the_sequence_before_clean_audio() {
+fn discontinuity_flags_without_lost_frames_keep_every_kept_packet() {
     for clean in [0, 1] {
         let mut packets: Vec<(bool, bool, &[i16], PacketStatus)> =
             vec![(true, true, &[11], GAP), (true, true, &[21], CLEAN)];
@@ -901,8 +918,22 @@ fn later_kept_discontinuity_ends_the_sequence_before_clean_audio() {
             (true, true, &[42], GAP),
             (true, true, &[51], CLEAN),
         ]);
-        assert_eq!(collect(&packets), Err(MicError::Discontinuity));
+        let mut kept = vec![21];
+        kept.extend(std::iter::repeat_n(31, clean));
+        kept.extend([41, 42, 51]);
+        assert_eq!(collect(&packets), Ok(kept));
     }
+}
+
+#[test]
+fn a_hold_mostly_lost_behind_rare_flags_is_discarded() {
+    let mut packets: Vec<(bool, bool, &[i16], PacketStatus)> =
+        vec![(true, true, &[11], CLEAN), (true, true, &[21], CLEAN)];
+    for _ in 0..3 {
+        packets.push((true, true, &[31], lost(83)));
+        packets.extend(std::iter::repeat_n((true, true, &[41][..], CLEAN), 9));
+    }
+    assert_eq!(collect(&packets), Err(MicError::Discontinuity));
 }
 
 #[test]
@@ -966,7 +997,7 @@ fn sparse_gaps_in_a_long_hold_do_not_accumulate_into_a_lifetime_limit() {
 }
 
 #[test]
-fn the_gap_share_is_inclusive_at_a_quarter_and_terminal_above_it() {
+fn lost_frames_pass_at_a_quarter_and_fail_one_frame_above() {
     let mut boundary = PacketBoundary::default();
     let start = Instant::now();
     boundary.started(start);
@@ -975,12 +1006,24 @@ fn the_gap_share_is_inclusive_at_a_quarter_and_terminal_above_it() {
         Ok(false)
     );
     assert_eq!(
-        boundary.packet(true, true, PacketStatus { frames: 9, ..GAP }),
+        boundary.packet(
+            true,
+            true,
+            PacketStatus {
+                frames: 9,
+                position: 7,
+                ..GAP
+            }
+        ),
         Ok(false)
     );
-    for (index, flags) in [CLEAN, CLEAN, GAP, CLEAN].into_iter().enumerate() {
+    for (index, (position, flags)) in [(500, CLEAN), (510, CLEAN), (530, GAP)]
+        .into_iter()
+        .enumerate()
+    {
         let packet = PacketStatus {
             frames: 10,
+            position,
             ..flags
         };
         assert_eq!(boundary.packet(true, true, packet), Ok(true));
@@ -993,12 +1036,18 @@ fn the_gap_share_is_inclusive_at_a_quarter_and_terminal_above_it() {
     assert_eq!(boundary.discontinuities, 1);
     assert_eq!(boundary.first_discontinuity_packet, 3);
     assert_eq!(boundary.first_discontinuity_ms, 20);
-    assert_eq!(boundary.kept_packets, 4);
-    assert_eq!(boundary.kept_frames, 40);
+    assert_eq!(boundary.kept_packets, 3);
+    assert_eq!(boundary.kept_frames, 30);
+    assert_eq!(boundary.missing_frames, 10);
     assert_eq!(boundary.discarded_before_listening, 1);
-    let packet = PacketStatus { frames: 10, ..GAP };
+    let packet = PacketStatus {
+        frames: 1,
+        position: 541,
+        ..GAP
+    };
     assert_eq!(boundary.packet(true, true, packet), Ok(true));
-    boundary.kept(packet, start + Duration::from_millis(40));
+    boundary.kept(packet, start + Duration::from_millis(30));
+    assert_eq!(boundary.missing_frames, 11);
     assert_eq!(boundary.finish(Ok(())), Err(MicError::Discontinuity));
     assert_eq!(
         boundary.packet(true, true, CLEAN),

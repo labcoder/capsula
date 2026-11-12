@@ -330,6 +330,7 @@ fn read(
         let mut data = std::ptr::null_mut();
         let mut frames = 0;
         let mut flags = 0;
+        let mut position = 0;
         let vtable = source.input.vtable();
         let interface = source.input.as_raw();
         // SAFETY: outputs outlive the call; raw HRESULT avoids allocating COM errors while borrowing audio.
@@ -339,7 +340,7 @@ fn read(
                 &raw mut data,
                 &raw mut frames,
                 &raw mut flags,
-                std::ptr::null_mut(),
+                &raw mut position,
                 std::ptr::null_mut(),
             )
         };
@@ -352,6 +353,7 @@ fn read(
         let silent = flags & AUDCLNT_BUFFERFLAGS_SILENT.0.cast_unsigned() != 0;
         let status = PacketStatus {
             frames,
+            position,
             discontinuity: flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0.cast_unsigned() != 0,
             timestamp_error: flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0.cast_unsigned() != 0,
         };
