@@ -340,50 +340,59 @@ fn a_scene_refusal_never_cancels_an_unrelated_pending_replacement() {
     );
 }
 
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "whether this fixed regression prefix has a validated paint"
+)]
+fn committed_replacement_prefix(painted: bool) -> (Drawing, Store, u32) {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    store.run(
+        &mut drawing,
+        call(1, "old", args("old", &[text("old", "old")])),
+    );
+    store.run(
+        &mut drawing,
+        streamed(
+            "new",
+            0,
+            r#"{"begin":{"v":1,"scene":"new","surface":"overlay","alt":""}}"#,
+        ),
+    );
+    store.run(
+        &mut drawing,
+        streamed("new", 1, r#"{"step":{"id":"empty","start":"now"}}"#),
+    );
+    let next = if painted {
+        store.run(
+            &mut drawing,
+            streamed(
+                "new",
+                2,
+                &format!(r#"{{"step":{}}}"#, text("visible", "visible")),
+            ),
+        );
+        store.run(
+            &mut drawing,
+            Input::StepShown {
+                run: RunId(1),
+                scene: SceneId(2),
+                index: 1,
+            },
+        );
+        3
+    } else {
+        2
+    };
+    (drawing, store, next)
+}
+
 #[test]
 fn a_brain_error_after_a_committed_prefix_reports_loss_once_without_hiding_its_cause() {
     use kumochi_protocol::message::ControlToShell;
     for painted in [false, true] {
         for store_failure in [false, true] {
-            let mut drawing = Drawing::default();
-            let mut store = Store::default();
-            store.run(
-                &mut drawing,
-                call(1, "old", args("old", &[text("old", "old")])),
-            );
-            store.run(
-                &mut drawing,
-                streamed(
-                    "new",
-                    0,
-                    r#"{"begin":{"v":1,"scene":"new","surface":"overlay","alt":""}}"#,
-                ),
-            );
-            store.run(
-                &mut drawing,
-                streamed("new", 1, r#"{"step":{"id":"empty","start":"now"}}"#),
-            );
-            let next = if painted {
-                store.run(
-                    &mut drawing,
-                    streamed(
-                        "new",
-                        2,
-                        &format!(r#"{{"step":{}}}"#, text("visible", "visible")),
-                    ),
-                );
-                store.run(
-                    &mut drawing,
-                    Input::StepShown {
-                        run: RunId(1),
-                        scene: SceneId(2),
-                        index: 1,
-                    },
-                );
-                3
-            } else {
-                2
-            };
+            let (mut drawing, mut store, next) = committed_replacement_prefix(painted);
             let failed = if store_failure {
                 let pending = drawing
                     .handle(streamed(
@@ -475,24 +484,7 @@ fn a_brain_error_after_a_committed_prefix_reports_loss_once_without_hiding_its_c
 #[test]
 fn cancelling_an_empty_committed_replacement_does_not_report_a_drawing_failure() {
     use kumochi_protocol::message::ControlToShell;
-    let mut drawing = Drawing::default();
-    let mut store = Store::default();
-    store.run(
-        &mut drawing,
-        call(1, "old", args("old", &[text("old", "old")])),
-    );
-    store.run(
-        &mut drawing,
-        streamed(
-            "new",
-            0,
-            r#"{"begin":{"v":1,"scene":"new","surface":"overlay","alt":""}}"#,
-        ),
-    );
-    store.run(
-        &mut drawing,
-        streamed("new", 1, r#"{"step":{"id":"empty"}}"#),
-    );
+    let (mut drawing, mut store, _) = committed_replacement_prefix(false);
     let stopped = store.run(
         &mut drawing,
         Input::CallFinished {
