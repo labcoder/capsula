@@ -252,7 +252,7 @@ impl Render for OnboardingView {
             .p_6()
             .rounded_lg()
             .border_1()
-            .border_color(if self.focus.contains_focused(window, cx) {
+            .border_color(if self.focus.is_focused(window) {
                 cx.theme().ring
             } else {
                 cx.theme().border
