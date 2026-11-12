@@ -970,9 +970,17 @@ fn a_cancel_after_the_browser_finished_keeps_the_sign_in() {
             h.release();
         }
         assert_eq!(h.closed, 0, "registering: {registering}");
-        assert_eq!(h.view(), &AccountView::SigningIn, "registering: {registering}");
+        assert_eq!(
+            h.view(),
+            &AccountView::SigningIn,
+            "registering: {registering}"
+        );
         h.reply(received(Some("refresh-new"), "subject-1", PLAN));
-        assert_eq!(h.view(), &signed_in(PlanState::Enabled, None), "registering: {registering}");
+        assert_eq!(
+            h.view(),
+            &signed_in(PlanState::Enabled, None),
+            "registering: {registering}"
+        );
         assert_eq!(h.refresh_token().as_deref(), Some("refresh-new"));
         assert!(h.revocations().is_empty(), "registering: {registering}");
         assert!(h.errors.is_empty(), "{:?}", h.errors);
