@@ -244,10 +244,11 @@ stateDiagram-v2
   new generation; the running call sees it at its next 20 ms poll, its job is terminated within the
   bounds above, and its late result is dropped. Cancel only stops the sign-in: if Claude Code had
   already saved one, the Status after it shows Ready, and only Disconnect signs out. If that
-  Status isn't signed in, or fails, the brain removes Kumochi's Claude Code folder without a
-  logout (Disconnect's deletion) and finds again, because a job ended part way through Claude
-  Code's save may have left a sign-in file no view would offer to remove. A Status that
-  couldn't run (another brain holds the lock, or the lane is stuck) deletes nothing. A second
+  Status isn't signed in, or it or the Version before it fails, the brain removes Kumochi's
+  Claude Code folder without a logout (Disconnect's deletion) and finds again, because a job
+  ended part way through Claude Code's save may have left a sign-in file no view would offer to
+  remove. Only two failures of either call delete nothing: Busy (another brain holds the lock)
+  and Refused (the lane is stuck). A second
   Cancel while the first's Status is out is ignored. For now the expected path is the paste-code
   fallback (OSC-244): the user opens the link the console prints, signs in, and pastes the code
   the page shows back into the console. Kumochi never reads or relays that link or code.

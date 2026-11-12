@@ -854,3 +854,38 @@ async fn a_job_after_a_cancel_starts_without_its_cleanup() {
     assert_eq!(claude.view(), ClaudeCodeView::SignedOut { version: V });
     assert_eq!(base.calls(), [FOUND[0], FOUND[1], FOUND[0], FOUND[1]]);
 }
+
+#[tokio::test]
+async fn a_cancel_whose_version_fails_removes_claude_codes_folder() {
+    let base = Base::new("cancel-version-fails");
+    let mut claude = signed_out(&base, "loginhang").await;
+    claude.op(ConnectionOp::ConnectClaudeCode);
+    started(&base, "auth login").await;
+    std::fs::write(partial(&base), b"").expect("a partial save");
+    claude.op(ConnectionOp::CancelClaudeSignIn);
+    timeout(Duration::from_secs(30), async {
+        loop {
+            let wake = claude.next().await;
+            if let Wake::Lane(Done {
+                generation,
+                result: Ok(Outcome::Version(_)),
+            }) = wake
+                && generation == claude.generation
+            {
+                claude.wake(Wake::Lane(Done {
+                    generation,
+                    result: Err(Failure::Deadline),
+                }));
+                return;
+            }
+            claude.wake(wake);
+        }
+    })
+    .await
+    .expect("the cancel's Version");
+    assert_eq!(claude.view(), ClaudeCodeView::CleanupPending);
+    settle(&mut claude).await;
+    assert!(claude.close(soon()).await);
+    assert_eq!(claude.view(), ClaudeCodeView::SignedOut { version: V });
+    assert!(!partial(&base).exists());
+}

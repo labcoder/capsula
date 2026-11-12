@@ -299,10 +299,11 @@ impl Claude {
         {
             self.quarantine = None;
         }
-        // The Status after a Cancel: unless it's signed in, or nothing could run, the sign-in may
-        // have left Claude Code's file in Kumochi's folder, and only a Disconnect removes it.
+        // The Version and Status after a Cancel: unless the Status is signed in, or the lane
+        // couldn't run the call (Busy, Refused), the sign-in may have left Claude Code's file in
+        // Kumochi's folder, and only a Disconnect removes it.
         let leftover = self.cancelled == Some(generation)
-            && self.out == Some(Work::Status)
+            && matches!(self.out, Some(Work::Version | Work::Status))
             && !matches!(
                 result,
                 Ok(Outcome::Status {
