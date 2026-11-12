@@ -43,7 +43,10 @@ same work area, dock layout and scale: a drawing that stays put is easier to fol
 that re-centres every time space frees up. So closing a panel, including the typing panel a
 held voice request hides while it runs, leaves the drawing where it is. A panel opening over
 it, a dock move or a display change re-places it, and a drawing that starts on a cleared
-screen takes the best stage at that moment. The typing panel
+screen takes the best stage at that moment. "On screen" means any scene the presenter holds,
+including one that hasn't painted yet. A reconnect counts as a cleared screen, so recovered
+drawings take the best stage. A drawing that replaces one still held takes the kept stage,
+which may be smaller than the best one, until the screen clears. The typing panel
 retains its accepted size when re-anchored, like Threads and Settings.
 A retained GPUI display observer refreshes the dock's scale and anchor,
 the drawing stage and a shown overlay's bounds after display changes. Existing views snap

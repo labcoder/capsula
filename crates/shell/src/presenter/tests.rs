@@ -286,7 +286,7 @@ impl TextMeasure for Shaper {
     }
 }
 
-fn header() -> SceneHeader {
+pub(crate) fn header() -> SceneHeader {
     let source = br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":"diagram"}}"#;
     let Ok(Record::Begin(begin)) = parse_record(source) else {
         panic!("a begin record");

@@ -656,6 +656,95 @@ mod tests {
         });
     }
 
+    fn scene_frame(
+        presence: &mut Presence,
+        message: kumochi_protocol::message::DataToShell,
+        cx: &mut Context<'_, Presence>,
+    ) {
+        let frame = kumochi_scene::deferred::Deferred::new(message, 64);
+        presence
+            .link_events(
+                crate::link::Batch::Plain(vec![crate::link::LinkEvent::SceneData {
+                    generation: 1,
+                    frame,
+                    bytes: 64,
+                }]),
+                cx,
+            )
+            .expect("scene frame applies");
+    }
+
+    fn kept_below_typing(presence: &mut Presence, cx: &mut Context<'_, Presence>) {
+        use kumochi_protocol::message::Incarnation;
+        drawn(presence);
+        presence.session = Some(crate::link::Session::detached(1, Incarnation(1)));
+        presence.open_text(cx).expect("open typing");
+        presence.dismiss_text(cx).expect("close typing");
+        assert_eq!(stage_of(presence), Some(TYPING_STAGE));
+    }
+
+    #[gpui::test]
+    fn a_new_scene_after_a_removal_takes_the_best_stage(cx: &mut gpui_kit::TestAppContext) {
+        use kumochi_protocol::message::{DataToShell, SceneId};
+        let _area = crate::platform::work_area_fixture::set(AREA);
+        let owner = crate::presence::test_fixture::presence(cx);
+        owner.update(cx, |presence, cx| {
+            kept_below_typing(presence, cx);
+            scene_frame(
+                presence,
+                DataToShell::ScenesRemoved {
+                    scenes: vec![crate::presenter::tests::LIVE],
+                },
+                cx,
+            );
+            assert!(!presence.presenter.holds_scenes());
+            scene_frame(
+                presence,
+                DataToShell::SceneBegin {
+                    scene: SceneId(21),
+                    header: crate::presenter::tests::header(),
+                },
+                cx,
+            );
+            assert!(presence.presenter.holds_scenes());
+            assert_eq!(stage_of(presence), Some(PEEK_STAGE));
+        });
+    }
+
+    #[gpui::test]
+    fn a_drawing_recovered_after_a_reconnect_takes_the_best_stage(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use kumochi_protocol::message::{Incarnation, SceneDescriptorV1};
+        let _area = crate::platform::work_area_fixture::set(AREA);
+        let owner = crate::presence::test_fixture::presence(cx);
+        owner.update(cx, |presence, cx| {
+            kept_below_typing(presence, cx);
+            let descriptor = SceneDescriptorV1::new(crate::presenter::tests::LIVE, 1, 1, 1)
+                .expect("one recovered scene");
+            presence
+                .link_events(
+                    crate::link::Batch::Plain(vec![
+                        crate::link::LinkEvent::State(crate::link::LinkState::Reconnecting),
+                        crate::link::LinkEvent::Connected(crate::link::Session::detached(
+                            2,
+                            Incarnation(1),
+                        )),
+                        crate::link::LinkEvent::ScenesV1 {
+                            generation: 2,
+                            scenes: kumochi_scene::text::Bounded::new(vec![descriptor])
+                                .expect("one descriptor"),
+                        },
+                    ]),
+                    cx,
+                )
+                .expect("the link drops, reconnects and describes its scene");
+            assert!(presence.presenter.holds_scenes());
+            presence.place_drawings(cx.weak_entity(), cx);
+            assert_eq!(stage_of(presence), Some(PEEK_STAGE));
+        });
+    }
+
     #[test]
     fn only_a_panel_closing_keeps_the_stage_of_a_shown_drawing() {
         let kept = Placed {
