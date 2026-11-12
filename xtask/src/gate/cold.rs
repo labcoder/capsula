@@ -14,12 +14,18 @@ use super::{
     observation::{self, Kind, Observation},
     present::Present,
 };
+use crate::hermetic::Run;
 use crate::platform::{self, Process, gate_capture, input_session::WindowKind};
 use crate::session;
 
 pub(in crate::gate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
     let output = super::retained_output(args)?;
-    let images = Images::release(&std::env::current_exe()?)?;
+    let run = Run::begin(output.join("data"))?;
+    let result = Images::build(&run).and_then(|images| batch(&output, &images));
+    session::combine([result, run.finish()])
+}
+
+fn batch(output: &Path, images: &Images) -> Result<()> {
     let foreground = gate_capture::foreground();
     let end = Instant::now() + Duration::from_secs(300);
     let guard = || -> Result<()> {
@@ -32,13 +38,7 @@ pub(in crate::gate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
     };
     fs::write(
         output.join("identity.txt"),
-        format!(
-            "driver_build_id={}\ndriver_sha256={}\nshell_sha256={}\nbrain_sha256={}\n",
-            kumochi_protocol::BUILD_ID,
-            gate_capture::file_sha256(&std::env::current_exe()?)?,
-            images.shell_sha256,
-            images.brain_sha256
-        ),
+        images.identity(&std::env::current_exe()?)?,
     )?;
     fs::write(
         output.join("environment-before.txt"),
@@ -59,7 +59,7 @@ pub(in crate::gate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         );
         let directory = output.join(format!("launch-{index}"));
         fs::create_dir(&directory)?;
-        let sample = launch(&images, &directory, &guard);
+        let sample = launch(images, &directory, &guard);
         match sample {
             Ok(sample) => {
                 writeln!(
@@ -106,7 +106,7 @@ fn launch(images: &Images, output: &Path, guard: &impl Fn() -> Result<()>) -> Re
     let mut observer_arg = OsString::from("--gate-observer=");
     let observer = output.join("observer.log");
     observer_arg.push(&observer);
-    let launched = platform::launch(&images.shell, 20_000, [observer_arg]);
+    let launched = platform::launch(&images.shell, &images.folders, 20_000, [observer_arg]);
     let mut child = match launched {
         Ok(child) => child,
         Err(error) => {

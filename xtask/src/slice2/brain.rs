@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, bail};
 use kumochi_protocol::constants::{BRAIN_EXE, DATA_DIR, FIXTURE_ENV, STORE_FILE};
 
+use crate::hermetic::Folders;
+
 /// How long a quitting brain gets to exit.
 const EXIT: Duration = Duration::from_secs(15);
 
@@ -24,31 +26,26 @@ pub(super) fn leftovers() -> Vec<Child> {
     std::mem::take(&mut *LEFTOVERS.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
+/// The folder under the gate's folder that holds the items' folders, which the run deletes.
+pub(super) const DATA: &str = "data";
+
 /// One gate item's folder: its fixture script, and the `%LOCALAPPDATA%` and `%APPDATA%` its
 /// brains share.
 #[derive(Debug)]
 pub(super) struct Case {
     bin: PathBuf,
     fixture: PathBuf,
-    /// What the brain sees as `%LOCALAPPDATA%`: its store and logs.
-    pub(super) local: PathBuf,
-    /// What the brain sees as `%APPDATA%`: its settings.
-    roaming: PathBuf,
+    /// What the brain sees as `%LOCALAPPDATA%` (its store and logs) and `%APPDATA%`.
+    pub(super) folders: Folders,
 }
 
 impl Case {
     pub(super) fn new(folder: &Path, name: &str, script: &str) -> Result<Self> {
-        let root = folder.join(name);
-        let local = root.join("local");
-        let roaming = root.join("roaming");
-        for dir in [&local, &roaming] {
-            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        }
+        let root = folder.join(DATA).join(name);
         let case = Self {
             bin: folder.join("bin"),
             fixture: root.join("fixture.txt"),
-            local,
-            roaming,
+            folders: Folders::create(&root)?,
         };
         case.script(script)?;
         Ok(case)
@@ -61,7 +58,7 @@ impl Case {
 
     /// The brain's data folder.
     pub(super) fn data(&self) -> PathBuf {
-        self.local.join(DATA_DIR)
+        self.folders.local.join(DATA_DIR)
     }
 
     pub(super) fn store(&self) -> PathBuf {
@@ -69,9 +66,9 @@ impl Case {
     }
 
     pub(super) fn start(&self) -> Result<Brain> {
-        let child = Command::new(self.bin.join(BRAIN_EXE))
-            .env("LOCALAPPDATA", &self.local)
-            .env("APPDATA", &self.roaming)
+        let child = self
+            .folders
+            .apply(&mut Command::new(self.bin.join(BRAIN_EXE)))
             .env(FIXTURE_ENV, &self.fixture)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

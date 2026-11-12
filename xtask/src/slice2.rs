@@ -1,11 +1,10 @@
-//! `cargo xtask slice2-gate`: the slice 2 gate. It runs the real dev brain with fixture scripts and
-//! drives its real pipes from a scripted client, with no mouse or keyboard input.
+//! `slice2-gate`: the slice 2 gate. It runs the real brain, built with the gate identity, with
+//! fixture scripts and drives its real pipes from a scripted client, with no mouse or keyboard input.
 //!
 //! The brain only serves the `kumochi.exe` beside it, so the gate copies the brain and itself, as
 //! `kumochi.exe`, into a fresh folder under `target/slice2-gate` and runs the client from that copy.
-//! Each item gets its own `%LOCALAPPDATA%` and `%APPDATA%`, so no item sees another's store or
-//! settings. A brain still reaches some of the developer's dev data outside them, in Claude Code's
-//! folder and in Credential Manager: see `docs/development/slice2-gate.md` and OSC-680.
+//! Each item gets its own `%LOCALAPPDATA%` and `%APPDATA%`, with Claude Code off, and the run
+//! deletes what its brains left: see `docs/development/gate-identity.md`.
 #![expect(
     clippy::print_stdout,
     reason = "the gate's verdicts and numbers are its output"
@@ -28,7 +27,8 @@ use anyhow::{Context as _, Result, ensure};
 use kumochi_protocol::constants::{BRAIN_EXE, SHELL_EXE};
 use kumochi_protocol::message::{ControlToShell, DataToBrain, DataToShell, Phase, RunId, ThreadId};
 
-use crate::{live, platform};
+use crate::hermetic::{self, Profile, Run};
+use crate::live;
 use client::{Client, Frame};
 
 /// One gate item, run in its own folder.
@@ -96,19 +96,13 @@ pub(crate) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
     }
 }
 
-/// Builds the dev brain, copies it and this program into a fresh folder, and runs the gate there:
-/// every item, or only those whose names hold the filter.
+/// Builds the gate brain, copies it and this program into a fresh folder, runs the gate there
+/// (every item, or only those whose names hold the filter), and then deletes what its brains left.
 fn prepare(only: Option<&str>) -> Result<()> {
     ensure!(
         cfg!(debug_assertions),
-        "run the gate from a debug xtask (`cargo xtask slice2-gate`): a release one would copy a \
-         release brain, which uses the installed product's pipe and credential names"
+        "run the gate from a debug xtask: only a debug brain plays fixture scripts"
     );
-    ensure!(
-        platform::processes()?.is_empty(),
-        "close every {SHELL_EXE} and {BRAIN_EXE} first: a dev brain holds the pipes the gate uses"
-    );
-    live::build_brain()?;
     let me = std::env::current_exe()?;
     let target = me.parent().context("xtask has a folder")?;
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -117,16 +111,21 @@ fn prepare(only: Option<&str>) -> Result<()> {
         .context("the profile folder has a parent")?
         .join("slice2-gate")
         .join(stamp.to_string());
-    let bin = folder.join("bin");
-    fs::create_dir_all(&bin)?;
-    fs::copy(target.join(BRAIN_EXE), bin.join(BRAIN_EXE)).context("copying the brain")?;
-    fs::copy(&me, bin.join(SHELL_EXE)).context("copying the client")?;
-    println!("slice 2 gate in {}", folder.display());
-    let mut gate = Command::new(bin.join(SHELL_EXE));
-    gate.args(["slice2-gate", INNER]).arg(&folder).args(only);
-    let ran = live::run_bounded(gate, GATE_LIMIT, "the gate")?;
-    ensure!(ran.success(), "the gate failed");
-    Ok(())
+    let run = Run::begin(folder.join(brain::DATA))?;
+    let ran = (|| {
+        let built = hermetic::build(&["kumochi-brain"], Profile::Debug, None)?;
+        let bin = folder.join("bin");
+        fs::create_dir_all(&bin)?;
+        fs::copy(built.join(BRAIN_EXE), bin.join(BRAIN_EXE)).context("copying the brain")?;
+        fs::copy(&me, bin.join(SHELL_EXE)).context("copying the client")?;
+        println!("slice 2 gate in {}", folder.display());
+        let mut gate = Command::new(bin.join(SHELL_EXE));
+        gate.args(["slice2-gate", INNER]).arg(&folder).args(only);
+        let ran = live::run_bounded(gate, GATE_LIMIT, "the gate")?;
+        ensure!(ran.success(), "the gate failed");
+        Ok(())
+    })();
+    crate::session::combine([ran, run.finish()])
 }
 
 /// Ends each brain whose kill failed during its item and says how that went, so that item fails

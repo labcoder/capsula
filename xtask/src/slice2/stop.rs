@@ -312,7 +312,7 @@ pub(super) fn late_step(folder: &Path) -> Result<Row> {
     }
     client.quit()?;
     brain.exited()?;
-    let (files, file_hits) = store::files(&case.local, &late)?;
+    let (files, file_hits) = store::files(&case.folders.local, &late)?;
     let rows = store::rows(&store::open(&case.store())?, &late)?;
     if !rows.hits.is_empty() || rows.fts > 0 || !file_hits.is_empty() {
         failures.push(format!(
