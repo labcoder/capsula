@@ -634,7 +634,7 @@ pub enum ControlToShell {
         /// Admission or a content-free outcome; it cannot itself claim a running microphone.
         status: HoldStatus,
     },
-    /// This connection's stop receipt was processed; no other gesture's debt is forgiven.
+    /// The brain processed this stop receipt; it does not say any debt was cleared.
     VoiceHoldStopAccepted {
         /// The completed source generation, including a replay from an earlier connection.
         gesture: GestureId,
