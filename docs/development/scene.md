@@ -1776,7 +1776,8 @@ Recovery waits for a free worker slot under one unchanged two-second deadline fo
 a conservative margin over the measured core recovery fixtures (below 86 ms on Rez with
 fixed text measurement). Full cap recovery
 with real fonts remains a B9 measurement, not a claim made by the fixed-measurement fixture.
-A failed recovered scene is cleared through `ClearDrawing`, retaining its typed history and
+A failed recovered scene is refused through `SceneFailed`, which the brain clears without
+treating it as a user clear, retaining its typed history and
 allowing successful scenes to install. If the whole batch misses its deadline, its pending
 scenes clear and late answers cannot restore them. Stop clears incomplete recovery first,
 then cuts every known v1 scene at its activated bound. Cuts remain held until the data-pipe

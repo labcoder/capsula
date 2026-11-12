@@ -475,7 +475,8 @@ and the store would refuse it too.
 
 shortcut: steps stream as one `draw` call: the first step starts it, each step is one
 newline-terminated argument delta, and the script's end sends `ToolCallReady` with the joined lines,
-then `Finished(Completed)`. Slice 4's B3 replaces this adapter with recorded draw arguments.
+then `Finished(Completed)`. Real engines send recorded draw arguments; only the fixture keeps
+this adapter.
 
 ## Around the coordinator
 
@@ -518,7 +519,7 @@ unconfirmed earlier clear debt still suppresses automatic relaunch. An
 in-process hand-started connection still waits behind settlement before describe. Failed debt
 is memory-only and does not survive brain exit; typed drawing history is never deleted.
 
-The step is a labelled placeholder until slice 4's scene format. A run's steps draw in one scene:
+A run's steps draw in one scene:
 its first step's write begins the scene and returns its id, and the steps after it wait in the
 run until that ack. A Stop, a replacement, a failed first write or a lost shell drops the waiting
 steps, and the run still settles.

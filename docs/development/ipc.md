@@ -606,7 +606,7 @@ ordinary reconnect recovery rebuilds all four scenes together, not one against a
 If a stored scene cannot replay or the brain builds an invalid descriptor, chunk or encoded
 frame, that whole scene is omitted and cleared durably before membership is sent. Other scenes
 recover against one shared budget; the failure does not force a reconnect loop. A recovered
-scene that B4 cannot prepare is cleared through `ClearDrawing`, retaining its stored history,
+scene that the shell cannot prepare is refused through `SceneFailed` and cleared, retaining its stored history,
 not cut through a stale run's `StepFailed` observation.
 
 The data FIFO orders removal of an evicted scene before the next scene's header and first
