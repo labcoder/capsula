@@ -10,123 +10,6 @@ use anyhow::{Result, ensure};
 use super::{Frame, Hover, Kind, Observation, load};
 use crate::gate::present::{Join, MatchedPresent, PresentRows};
 
-pub(in crate::gate) fn summarize_keyboard(
-    canvas_pairs: &[(i64, i64)],
-    path: &Path,
-    pid: u32,
-    rows: &mut PresentRows,
-    dock_chain: u64,
-    output: &Path,
-) -> Result<()> {
-    let (observation, validation) = load(path, pid);
-    let frequency = observation.startup.map_or(0, |value| value.frequency);
-    let mut report = String::from(
-        "keyboard WM_INPUT QPC-to-present gate; display latency reported separately, not gated\n",
-    );
-    seed_report(&mut report, rows, frequency)?;
-    if let Err(error) = &validation {
-        writeln!(report, "observation_error={error:#}")?;
-    }
-    let mut chords = Vec::new();
-    let mut displays = Vec::new();
-    let mut successful = 0;
-    for (index, &(start, canvas)) in canvas_pairs.iter().enumerate() {
-        let role = match index {
-            0..=99 => "chord",
-            100 => "hold",
-            _ => "extra",
-        };
-        write!(
-            report,
-            "sample={} role={role} start_qpc={start} canvas_qpc={canvas} ",
-            index + 1
-        )?;
-        let frame = if start <= 0 || canvas < start {
-            Err("InvalidCallback")
-        } else {
-            dock_frame(&observation, canvas)
-        };
-        let ticks = match frame {
-            Ok(frame) if validation.is_ok() => sample(
-                &mut report,
-                frame,
-                start,
-                rows.join_present(
-                    dock_chain,
-                    frame.paint_qpc,
-                    frame.completion_qpc.unwrap_or(0),
-                    frequency,
-                ),
-                frequency,
-            )?,
-            Ok(_) => {
-                writeln!(report, "status=ObservationInvalid")?;
-                None
-            }
-            Err(status) => {
-                writeln!(report, "status={status}")?;
-                None
-            }
-        };
-        if let Some((ticks, display)) = ticks {
-            successful += 1;
-            if index < 100 {
-                chords.push(ticks);
-                displays.extend(display);
-            }
-        }
-    }
-    let budget_pass = statistics(
-        &mut report,
-        "chords",
-        &mut chords,
-        canvas_pairs.len().min(100),
-        frequency,
-        Some(7),
-    )?;
-    statistics(
-        &mut report,
-        "chords_display",
-        &mut displays,
-        canvas_pairs.len().min(100),
-        frequency,
-        None,
-    )?;
-    writeln!(
-        report,
-        "expected_chords=100 actual_pairs={} expected_hold_rows=1",
-        canvas_pairs.len()
-    )?;
-    let pass = validation.is_ok() && canvas_pairs.len() == 101 && successful == 101 && budget_pass;
-    writeln!(
-        report,
-        "total_successful={successful} attempted={} expected=101 gate={}",
-        canvas_pairs.len(),
-        if pass { "pass" } else { "unmeasured_or_fail" }
-    )?;
-    save_report(&output.join("keyboard-display.txt"), &report)?;
-    ensure!(
-        pass,
-        "keyboard present gate incomplete or over budget; see {}",
-        output.display()
-    );
-    Ok(())
-}
-
-fn dock_frame(observation: &Observation, canvas: i64) -> std::result::Result<&Frame, &'static str> {
-    let mut frames = observation.frames.iter().filter(|frame| {
-        frame.kind == Kind::Dock
-            && frame
-                .completion_qpc
-                .is_some_and(|end| (frame.paint_qpc..=end).contains(&canvas))
-    });
-    match (frames.next(), frames.next()) {
-        (Some(frame), None) => Ok(frame),
-        (None, _) => Err("MissingFrame"),
-        _ => Err("AmbiguousFrame"),
-    }
-}
-
 /// The first panel frame drawn for one visible panel change.
 fn first_panel_frame(
     observation: &Observation,
@@ -427,131 +310,48 @@ fn save_report(path: &Path, report: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{
-        read,
-        tests::{COMMIT, GEOMETRY, STARTUP, directory, finish},
-    };
+    use super::super::tests::{COMMIT, GEOMETRY, STARTUP, directory, finish};
     use super::*;
     use std::fs;
 
     const CSV_HEADER: &str = "Application,ProcessID,SwapChainAddress,Runtime,SyncInterval,PresentFlags,Dropped,TimeInSeconds,msInPresentAPI,msBetweenPresents,AllowsTearing,PresentMode,msUntilRenderComplete,msUntilDisplayed,msBetweenDisplayChange,msFlipDelay,msUntilRenderStart,msGPUActive,QPCTime\n";
 
-    fn scenario(directory: &Path, kind: Kind) -> Vec<(i64, i64)> {
-        let hover = kind == Kind::Panel;
-        let count = if hover { 100 } else { 101 };
+    fn scenario(directory: &Path) {
         let mut text = format!(
             "{GEOMETRY}{COMMIT}{STARTUP}paint frame=1 qpc=12 kind=panel hover=0 drawn_epoch=0 drawn_geometry=0 mask_epoch=1\n"
         );
         let mut csv = CSV_HEADER.to_owned();
-        let mut pairs = Vec::new();
-        for index in 0..count {
+        for index in 0..100 {
             let start = 100 + index * 20;
             let paint = start + 1;
-            if hover {
-                writeln!(
-                    text,
-                    "click qpc={start} point=2,2 mask_epoch=1 marker=0x43505331"
-                )
-                .unwrap();
-                writeln!(
-                    text,
-                    "hover id={} qpc={paint} visible=true click_qpc={start}",
-                    index + 1
-                )
-                .unwrap();
-            }
-            let (kind, epoch, geometry, hover_id, chain) = if hover {
-                ("panel", 0, 0, index + 1, 20)
-            } else {
-                ("dock", 1, 1, 0, 10)
-            };
-            writeln!(text, "paint frame={} qpc={paint} kind={kind} hover={hover_id} drawn_epoch={epoch} drawn_geometry={geometry} mask_epoch=1\ndrawn frame={} qpc={}", index + 2, index + 2, paint + 4).unwrap();
-            let display_ms = if !hover && index == 100 { 50 } else { 13 };
+            writeln!(
+                text,
+                "click qpc={start} point=2,2 mask_epoch=1 marker=0x43505331"
+            )
+            .unwrap();
+            writeln!(
+                text,
+                "hover id={} qpc={paint} visible=true click_qpc={start}",
+                index + 1
+            )
+            .unwrap();
+            writeln!(text, "paint frame={} qpc={paint} kind=panel hover={} drawn_epoch=0 drawn_geometry=0 mask_epoch=1\ndrawn frame={} qpc={}", index + 2, index + 1, index + 2, paint + 4).unwrap();
             writeln!(
                 csv,
-                "app.exe,42,0x{chain:X},DXGI,0,0,0,0.1,0,0,0,Composed: Flip,0,{display_ms},0,0,0,0,{}",
+                "app.exe,42,0x14,DXGI,0,0,0,0.1,0,0,0,Composed: Flip,0,13,0,0,0,0,{}",
                 paint + 1
             )
             .unwrap();
-            pairs.push((start, paint + 1));
         }
-        fs::write(
-            directory.join("observer.log"),
-            finish(text, usize::try_from(count).unwrap() + 1, 1),
-        )
-        .unwrap();
+        fs::write(directory.join("observer.log"), finish(text, 101, 1)).unwrap();
         fs::write(directory.join("present.csv"), csv).unwrap();
-        pairs
-    }
-
-    #[test]
-    fn keyboard_reports_hold_separately_and_preserves_missing_joins() {
-        let directory = directory();
-        let pairs = scenario(&directory, Kind::Dock);
-        let mut rows = crate::gate::present::read(&directory.join("present.csv"), 42).unwrap();
-        summarize_keyboard(
-            &pairs,
-            &directory.join("observer.log"),
-            42,
-            &mut rows,
-            10,
-            &directory,
-        )
-        .unwrap();
-        let report = fs::read_to_string(directory.join("keyboard-display.txt")).unwrap();
-        assert!(
-            report.contains("sample=101 role=hold"),
-            "hold stays outside the chord percentile"
-        );
-        assert!(
-            report.contains("display_latency_ms=52.000000"),
-            "slow hold is retained separately"
-        );
-        assert!(report.contains("summary=chords n=100 successful=100 attempted=100 p50_ms=2.000000 p95_ms=2.000000 max_ms=2.000000 budget_ms=7 budget_pass=true"), "present gate ignores the slower display endpoint");
-        assert!(report.contains("summary=chords_display n=100 successful=100 attempted=100 p50_ms=15.000000 p95_ms=15.000000 max_ms=15.000000"), "display statistics stay beside the present gate");
-        let mut observation = read(&directory.join("observer.log"), 42).unwrap();
-        assert_eq!(
-            dock_frame(&observation, 105).map(|frame| frame.id),
-            Ok(2),
-            "completion boundary is inclusive"
-        );
-        observation.frames[1].completion_qpc = Some(125);
-        assert!(
-            matches!(dock_frame(&observation, 122), Err("AmbiguousFrame")),
-            "overlapping bounds cannot select a frame"
-        );
-        fs::remove_file(directory.join("keyboard-display.txt")).unwrap();
-        let mut rows = crate::gate::present::read(&directory.join("present.csv"), 42).unwrap();
-        let mut incomplete = pairs;
-        incomplete[0] = (1, 2);
-        assert!(
-            summarize_keyboard(
-                &incomplete,
-                &directory.join("observer.log"),
-                42,
-                &mut rows,
-                10,
-                &directory
-            )
-            .is_err(),
-            "missing frame prevents gate success"
-        );
-        let report = fs::read_to_string(directory.join("keyboard-display.txt")).unwrap();
-        assert!(
-            report.contains("status=MissingFrame")
-                && report.contains("total_successful=100 attempted=101"),
-            "failed sample remains in denominator and report"
-        );
-        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
     fn hover_pins_only_unique_panel_chain_and_uses_nearest_rank_percentiles() {
         let directory = directory();
-        let injections = scenario(&directory, Kind::Panel)
-            .iter()
-            .map(|(start, _)| start - 10)
-            .collect::<Vec<_>>();
+        scenario(&directory);
+        let injections = (0..100).map(|index| 90 + index * 20).collect::<Vec<i64>>();
         let csv_path = directory.join("present.csv");
         let mut rows = crate::gate::present::read(&csv_path, 42).unwrap();
         summarize_hover(
@@ -638,7 +438,7 @@ mod tests {
     #[test]
     fn hover_gate_requires_a_fresh_native_entry_and_every_change_in_the_denominator() {
         let directory = directory();
-        scenario(&directory, Kind::Panel);
+        scenario(&directory);
         let observer = directory.join("observer.log");
         let log = fs::read_to_string(&observer).unwrap();
         let prefix = log.split("close commits=").next().unwrap();
@@ -686,7 +486,7 @@ mod tests {
     #[test]
     fn hover_recovers_the_first_panel_present_only_as_a_derived_seed() {
         let directory = directory();
-        scenario(&directory, Kind::Panel);
+        scenario(&directory);
         let csv_path = directory.join("present.csv");
         let csv = fs::read_to_string(&csv_path).unwrap();
         let mut lines = csv.lines();
@@ -733,120 +533,74 @@ mod tests {
 
     #[test]
     fn unavailable_display_does_not_hide_valid_present_samples() {
-        for kind in [Kind::Dock, Kind::Panel] {
-            let directory = directory();
-            let pairs = scenario(&directory, kind);
-            let csv_path = directory.join("present.csv");
-            let csv = fs::read_to_string(&csv_path).unwrap();
-            fs::write(
-                &csv_path,
-                csv.replace(",13,", ",NA,").replace(",50,", ",0,"),
-            )
-            .unwrap();
-            let mut rows = crate::gate::present::read(&csv_path, 42).unwrap();
-            let (file, label, count) = match kind {
-                Kind::Dock => {
-                    summarize_keyboard(
-                        &pairs,
-                        &directory.join("observer.log"),
-                        42,
-                        &mut rows,
-                        10,
-                        &directory,
-                    )
-                    .unwrap();
-                    ("keyboard-display.txt", "chords_display", 101)
-                }
-                Kind::Panel => {
-                    summarize_hover(
-                        &directory.join("observer.log"),
-                        42,
-                        &mut rows,
-                        10,
-                        &directory,
-                        &[],
-                    )
-                    .unwrap();
-                    ("hover-display.txt", "hover_display", 100)
-                }
-            };
-            let report = fs::read_to_string(directory.join(file)).unwrap();
-            assert_eq!(
-                report
-                    .matches("status=Presented present_latency_ms=2.000000")
-                    .count(),
-                count
-            );
-            assert_eq!(report.matches("display_status=Unavailable displayed_qpc=unmeasured display_latency_ms=unmeasured").count(), count);
-            assert!(report.contains(&format!("summary={label} n=0 successful=0 attempted=100 p50_ms=unmeasured p95_ms=unmeasured max_ms=unmeasured")), "missing display is not a zero-latency sample");
-            assert!(report.contains("gate=pass"));
-            fs::remove_dir_all(directory).unwrap();
-        }
+        let directory = directory();
+        scenario(&directory);
+        let csv_path = directory.join("present.csv");
+        let csv = fs::read_to_string(&csv_path).unwrap();
+        fs::write(&csv_path, csv.replace(",13,", ",NA,")).unwrap();
+        let mut rows = crate::gate::present::read(&csv_path, 42).unwrap();
+        summarize_hover(
+            &directory.join("observer.log"),
+            42,
+            &mut rows,
+            10,
+            &directory,
+            &[],
+        )
+        .unwrap();
+        let report = fs::read_to_string(directory.join("hover-display.txt")).unwrap();
+        assert_eq!(
+            report
+                .matches("status=Presented present_latency_ms=2.000000")
+                .count(),
+            100
+        );
+        assert_eq!(report.matches("display_status=Unavailable displayed_qpc=unmeasured display_latency_ms=unmeasured").count(), 100);
+        assert!(report.contains("summary=hover_display n=0 successful=0 attempted=100 p50_ms=unmeasured p95_ms=unmeasured max_ms=unmeasured"), "missing display is not a zero-latency sample");
+        assert!(report.contains("gate=pass"));
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
     fn invalid_present_joins_keep_samples_in_the_gate_denominator() {
-        for kind in [Kind::Dock, Kind::Panel] {
-            for status in ["Missing", "Ambiguous", "Reused", "Dropped"] {
-                let directory = directory();
-                let pairs = scenario(&directory, kind);
-                let csv_path = directory.join("present.csv");
-                let csv = fs::read_to_string(&csv_path).unwrap();
-                let first = csv.lines().nth(1).unwrap();
-                let csv = match status {
-                    "Missing" => csv.replacen(first, &first.replace(",102", ",109"), 1),
-                    "Ambiguous" => format!("{csv}{}\n", first.replace(",102", ",103")),
-                    "Dropped" => {
-                        csv.replacen(first, &first.replace("DXGI,0,0,0,", "DXGI,0,0,1,"), 1)
-                    }
-                    "Reused" => csv.clone(),
-                    _ => unreachable!("test enumerates invalid join statuses"),
-                };
-                fs::write(&csv_path, csv).unwrap();
-                let mut rows = crate::gate::present::read(&csv_path, 42).unwrap();
-                if status == "Reused" {
-                    let chain = if kind == Kind::Dock { 10 } else { 20 };
-                    rows.join_present(chain, 101, 105, 1000).unwrap();
-                }
-                let (result, file, expected) = match kind {
-                    Kind::Dock => (
-                        summarize_keyboard(
-                            &pairs,
-                            &directory.join("observer.log"),
-                            42,
-                            &mut rows,
-                            10,
-                            &directory,
-                        ),
-                        "keyboard-display.txt",
-                        "total_successful=100 attempted=101",
-                    ),
-                    Kind::Panel => (
-                        summarize_hover(
-                            &directory.join("observer.log"),
-                            42,
-                            &mut rows,
-                            10,
-                            &directory,
-                            &[],
-                        ),
-                        "hover-display.txt",
-                        "summary=hover n=99 successful=99 attempted=100",
-                    ),
-                };
-                assert!(result.is_err(), "{kind:?} {status} cannot pass");
-                let report = fs::read_to_string(directory.join(file)).unwrap();
-                assert!(
-                    report.contains(&format!("status={status}")),
-                    "{kind:?} {status} remains explicit"
-                );
-                assert!(
-                    report.contains(expected),
-                    "{kind:?} {status} remains in the denominator"
-                );
-                assert!(report.contains("gate=unmeasured_or_fail"));
-                fs::remove_dir_all(directory).unwrap();
+        for status in ["Missing", "Ambiguous", "Reused", "Dropped"] {
+            let directory = directory();
+            scenario(&directory);
+            let csv_path = directory.join("present.csv");
+            let csv = fs::read_to_string(&csv_path).unwrap();
+            let first = csv.lines().nth(1).unwrap();
+            let csv = match status {
+                "Missing" => csv.replacen(first, &first.replace(",102", ",109"), 1),
+                "Ambiguous" => format!("{csv}{}\n", first.replace(",102", ",103")),
+                "Dropped" => csv.replacen(first, &first.replace("DXGI,0,0,0,", "DXGI,0,0,1,"), 1),
+                "Reused" => csv.clone(),
+                _ => unreachable!("test enumerates invalid join statuses"),
+            };
+            fs::write(&csv_path, csv).unwrap();
+            let mut rows = crate::gate::present::read(&csv_path, 42).unwrap();
+            if status == "Reused" {
+                rows.join_present(20, 101, 105, 1000).unwrap();
             }
+            let result = summarize_hover(
+                &directory.join("observer.log"),
+                42,
+                &mut rows,
+                10,
+                &directory,
+                &[],
+            );
+            assert!(result.is_err(), "{status} cannot pass");
+            let report = fs::read_to_string(directory.join("hover-display.txt")).unwrap();
+            assert!(
+                report.contains(&format!("status={status}")),
+                "{status} remains explicit"
+            );
+            assert!(
+                report.contains("summary=hover n=99 successful=99 attempted=100"),
+                "{status} remains in the denominator"
+            );
+            assert!(report.contains("gate=unmeasured_or_fail"));
+            fs::remove_dir_all(directory).unwrap();
         }
     }
 }

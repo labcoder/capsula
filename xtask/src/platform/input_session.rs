@@ -31,7 +31,6 @@ mod activation;
 mod fixture;
 mod gate;
 mod guard;
-mod layouts;
 mod quiet;
 mod registry;
 mod session;
@@ -39,7 +38,6 @@ mod switch_window;
 
 pub(crate) use fixture::fixture;
 use fixture::{CHANGES, CLICK_POINT, CLICK_QPC, CLICKS, ESCAPES, property};
-pub(crate) use layouts::Layouts;
 pub(crate) use quiet::quiet;
 pub(crate) use registry::Registry;
 pub(crate) use session::{Session, Target};
@@ -223,12 +221,6 @@ impl FixtureEscMode {
 pub(crate) enum WindowKind {
     Fixture,
     ProductProxy,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Layout {
-    German,
-    Spanish,
 }
 
 /// Starts the fixture, which closes itself after `lifetime` (at most an hour). It shows the feel
