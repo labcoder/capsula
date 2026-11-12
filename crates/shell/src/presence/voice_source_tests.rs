@@ -1450,6 +1450,7 @@ fn esc_after_a_busy_or_offline_refusal_clears_the_drawing_on_screen(cx: &mut Tes
         owner.read_with(cx, |owner, _| {
             assert!(owner.voice.pending.is_none());
             assert_eq!(owner.voice.status, Some(notice));
+            assert!(!owner.link.input_is(GestureId(1)));
             assert!(owner.activity.drawing);
             assert!(owner.presenter.holds_scenes());
         });
