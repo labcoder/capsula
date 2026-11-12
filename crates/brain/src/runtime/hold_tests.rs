@@ -302,10 +302,12 @@ async fn exact_ordered_pcm_and_independent_resampling_tail_reach_one_real_hold_r
                 })
                 .collect();
             assert_eq!(sent_users.len(), 1);
-            let minute = sent_users[0]
+            let context = sent_users[0]
                 .strip_prefix("recognized sentinel\n\nLocal time: ")
                 .unwrap();
+            let (minute, drawings) = context.split_once("\nDrawings on screen: ").unwrap();
             super::asks::assert_minute(minute);
+            assert_eq!(drawings, "[]");
             assert!(requests.is_empty());
             brain.close().await;
             assert_eq!(users(&scratch), ["recognized sentinel"]);
