@@ -62,5 +62,7 @@ that `deliver` in `presence/gesture.rs` reads on every key event and deadline, a
 clears the flag. `Fence::reduce` drops a hold that meets the pause, whichever event reaches the
 threshold: no warm-up `KeyDown`, no armed microphone gate, nothing sent to the brain and no
 notice. A hold that began while paused stays dropped after the window closes, and the next one
-goes through. A hold already recognised when the window opens (a reconnect can reopen it) ends as
-a refused one does, with input cleared and the cancelled notice.
+goes through. A hold already recognised when the window opens (a reconnect can reopen it) ends
+through `cancel_voice`, with input cleared. One not yet recording ends at once with the cancelled
+notice. One already recording shows the stopping notice until its microphone has stopped and
+joined, then ends.

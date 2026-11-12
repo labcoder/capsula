@@ -458,8 +458,9 @@ impl Presence {
         self.show_onboarding(Select::All, cx)
     }
 
-    /// Holds the window and pauses holds while it shows. A hold already recognised ends as a
-    /// refused one does, with input cleared, so Esc and the next hold work after it.
+    /// Holds the window and pauses holds while it shows. A hold already recognised ends through
+    /// `cancel_voice` with input cleared, so Esc and the next hold work after it: cancelled at
+    /// once if not yet recording, stopping until its microphone joins if it is.
     fn set_onboarding(&mut self, panel: OnboardingPanel, cx: &mut Context<'_, Self>) {
         self.onboarding = Some(panel);
         self.voice.paused.set(true);
