@@ -30,17 +30,14 @@ never the installed `Kumochi` or the developer's `Kumochi Dev`.
 
 ## Starting a gate tool
 
-Each tool refuses unless it was itself built with the feature. The release tools run as
+Each tool refuses unless it was itself built with the feature:
 
 ```bash
 cargo run --release --package xtask --features kumochi-protocol/gate-identity -- <task> [<arguments>]
 ```
 
-and `slice2-gate` without `--release`, since only a debug brain plays fixture scripts:
-
-```bash
-cargo run --package xtask --features kumochi-protocol/gate-identity -- slice2-gate [<words>]
-```
+`slice2-gate` builds a debug brain whatever xtask's profile, since only a debug brain plays
+fixture scripts.
 
 A tool builds the images it launches itself, right before it uses them, with the feature, into
 `gate` beside its own profile folders (`<target>/gate/{debug,release}`), and launches nothing
@@ -49,7 +46,9 @@ from anywhere else. Cargo rebuilds an image there that was built without the fea
 checkout from before the feature existed fails to build, so it can't launch a real identity.
 
 The measured sessions want no build running while they measure, so build first and then run the
-built xtask, whose own build is then only cargo's up-to-date check:
+built xtask, whose own build is then only cargo's up-to-date check. Each tool records how long its
+build took as `build_seconds=` (in `identity.txt`, or on bench's and slice2-gate's output); a
+timed result whose build took more than a few seconds started on a busy machine:
 
 ```bash
 cargo build --release --package xtask --features kumochi-protocol/gate-identity
@@ -69,8 +68,8 @@ flowchart TD
   E --> F[clean up, on success and failure]
 ```
 
-1. **One at a time.** A run holds an exclusive lock on `%TEMP%\kumochi-gate-run.lock` until it ends,
-   and refuses while any `kumochi.exe` or `kumochid.exe` runs, of any identity. Two gate runs
+1. **One at a time, in a new folder.** A run holds an exclusive lock on
+   `%TEMP%\kumochi-gate-run.lock` until it ends, and refuses while any `kumochi.exe` or `kumochid.exe` runs, of any identity. Two gate runs
    would share the gate pipes, and the shell's hotkey, raw input and tray icon belong to the
    Windows session, not the identity.
 2. **Nothing outlives it.** The run puts itself in a kill-on-close job that forbids breakaway, so a
@@ -80,11 +79,17 @@ flowchart TD
    brain runs no `claude.exe` and reads no Claude Code policy.
 4. **Cleanup.** At the end, success or failure, and only once no product process is left, the run:
    - reads each launch's own `credentials.db` and deletes the `Kumochi Gate/gen/<kind>/<generation>/<n>`
-     names (chunks 0 to 63) of every generation recorded there, then that launch's folders. It
-     never deletes by prefix or wildcard, and never an entry it can't match to its own run. A launch
-     whose authority can't be read keeps its folders and entries, and the run fails naming it;
+     names (chunks 0 to 63) of every generation recorded there, then, after a success, that
+     launch's folders. A failed run keeps its folders, with the product logs, until the next run.
+     It never deletes by prefix or wildcard, and never an entry it can't match to its own run. A
+     launch whose authority can't be read keeps its folders and entries, and the run fails naming it;
    - deletes `capability-<session>.Kumochi Gate instance` by its exact name;
    - deletes `Kumochi Gate` in the system's Local AppData, which holds the Claude Code lane's lock.
+
+A run creates its root folder, which must not exist yet, and names it in the lock file until it
+has cleaned up. If a run is interrupted (Ctrl-C, a killed xtask, a panic, or a product process
+still running at the end), the next gate run cleans up what that folder's own `credentials.db`
+names before it starts, so rerunning any gate tool clears an interrupted one.
 
 The gate identity never signs in: the `live` checks refuse anything but the dev identity, and no
 gate tool has a path that stores a credential.
@@ -100,3 +105,28 @@ gate tool has a path that stores a credential.
 - The installed `claude.exe` and the Claude Code policy reads, only if Claude Code were on; gate
   runs turn it off.
 - The per-session hotkey, raw input and tray icon.
+
+## What a gate result speaks for
+
+A gate image is the shipped code apart from its names: the same profile, configuration and
+`BUILD_ID`. But a gate run fixes three things that earlier measurements didn't:
+
+- Claude Code is off. With no settings file, a brain runs `claude --version` and its sign-in
+  status at start, so earlier numbers taken with fresh folders included that work, and `bench idle`'s
+  process tree no longer holds `claude.exe`.
+- The data is fresh. All launches of one run share one data folder, so `cold-start`'s first launch
+  is a first-ever start (a new store and authority, the legacy-name sweep and a host write) and the
+  other nine start on warm data. With ten launches, p95 is the maximum, so the first launch can
+  decide it.
+- `--baseline` builds that checkout's source with the current toolchain and this workspace's cargo
+  configuration. It compares code under identical tooling, not the binary that shipped, and it
+  can't build a commit from before the gate identity existed.
+
+## Other systems
+
+The gate tools are Windows-only today. A macOS port needs every stored name (the Application
+Support folder, Keychain services, socket and lock names) taken from `ProductIdentity::ACTIVE`,
+with the trusted root from the account record rather than `$HOME`; a per-launch data-root
+override, since macOS has no `LOCALAPPDATA` and moving `HOME` would move the trusted root; and,
+for the run itself, a Keychain delete by service and account, a process check, a kill-on-exit
+process group and the lock.

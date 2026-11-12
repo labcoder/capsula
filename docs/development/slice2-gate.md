@@ -5,7 +5,7 @@ or keyboard input. It runs on Rez, at normal priority, on a quiet machine, as th
 (see [the gate identity](gate-identity.md)):
 
 ```bash
-cargo run --package xtask --features kumochi-protocol/gate-identity -- slice2-gate [<words>]
+cargo run --release --package xtask --features kumochi-protocol/gate-identity -- slice2-gate [<words>]
 ```
 
 ## How it runs
@@ -59,8 +59,8 @@ flowchart LR
 - Every pipe write, and the wait for `Welcome`, is bounded; a stuck transfer is cancelled and
   waited for before its buffer goes. The brain build is killed, with everything it started, after
   40 minutes, and the whole gate, with its brains, after another 20; a `taskkill` that fails is
-  reported with the process it left. It refuses to run from a release xtask, since only a debug
-  brain plays fixture scripts.
+  reported with the process it left. It builds a debug brain from either xtask profile, since only a
+  debug brain plays fixture scripts.
 - A brain whose kill fails isn't waited on, which would never return: the gate keeps its handle,
   ends it after its item with `taskkill`, waits for it to exit, and fails that item. It only ever
   ends brains it started and still holds, so no other process can match, even with a reused id.

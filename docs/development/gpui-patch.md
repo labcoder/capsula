@@ -166,5 +166,6 @@ and `show` only decides whether to order it front.
 6. Run the hidden-window test above.
 7. Re-measure `bench idle` (and `bench stretch` once the pull brings it back in C2a) as the gate
    identity, against the previous build's checkout with `--baseline` (see
-   [the gate identity](gate-identity.md)), and
+   [the gate identity](gate-identity.md)); the baseline checkout must include the gate identity,
+   and both sides run with Claude Code off, and
    repeat the OSC-132 hand checks.
