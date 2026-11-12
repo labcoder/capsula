@@ -413,10 +413,12 @@ fn read(
         if copied != 0 {
             boundary.kept(status, now);
         }
+        // The gate and session are still read per frame; only the deadline clock is per copy.
+        let copied_at = Instant::now();
         for frame in
             raw[..copied].chunks_exact(source.format.bytes() * usize::from(source.format.channels))
         {
-            token.mode(session, Instant::now())?;
+            token.mode(session, copied_at)?;
             packets.push(source.format.mono(frame)?, output)?;
         }
         raw[..copied].zeroize();
