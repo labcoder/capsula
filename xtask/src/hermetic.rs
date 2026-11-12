@@ -4,6 +4,7 @@
 //! left. See `docs/development/gate-identity.md`.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
+use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::io::{Read as _, Seek as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -11,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use kumochi_protocol::constants::{
-    ACCOUNT_MAX_CHUNKS, CONFIG_FILE, ProductIdentity, generation_hex, generation_target,
-    instance_target,
+    ACCOUNT_MAX_CHUNKS, AUTHORITY_FILE, CONFIG_FILE, ProductIdentity, generation_hex,
+    generation_target, instance_target,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -22,8 +23,10 @@ use crate::{live, platform};
 const COMMAND: &str =
     "cargo run --release --package xtask --features kumochi-protocol/gate-identity -- <task>";
 const GATE: ProductIdentity = ProductIdentity::GATE;
-/// The brain's credential authority in its data folder (the brain's `authority::FILE`).
-const AUTHORITY: &str = "credentials.db";
+/// The file in a run's root that holds its run id, so recovery deletes only a gate run's folder.
+const MARKER: &str = "gate-run";
+/// The lock's one line: this, the run id, a space, the run's root and a newline.
+const LOCK_LINE: &str = "kumochi-gate-run ";
 /// Claude Code off, so the brain starts no `claude.exe` and reads no policy for it.
 const SETTINGS: &str = "[claude_code]\nenabled = false\n";
 /// How long building the images may take [guess: a cold release shell build on Rez].
@@ -78,11 +81,12 @@ pub(crate) fn build(
     if profile == Profile::Release {
         cargo.arg("--release");
     }
-    if let Some(checkout) = checkout {
-        cargo
-            .arg("--manifest-path")
-            .arg(checkout.join("Cargo.toml"));
-    }
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .context("xtask is in the workspace")?;
+    cargo
+        .arg("--manifest-path")
+        .arg(checkout.unwrap_or(workspace).join("Cargo.toml"));
     let built = live::run_bounded(cargo, BUILD_LIMIT, "the gate build")?;
     ensure!(built.success(), "the gate build failed ({built})");
     let profile = match profile {
@@ -134,13 +138,13 @@ impl Run {
     /// away from it; cleans up after an interrupted run; and creates `root`, which must be new.
     pub(crate) fn begin(root: PathBuf) -> Result<Self> {
         require_gate(ProductIdentity::ACTIVE)?;
-        let mut alone =
-            take(&std::env::temp_dir().join(format!("{}-run.lock", GATE.object_prefix)))?;
+        let lock = platform::local_app_data()?.join(format!("{}-run.lock", GATE.object_prefix));
+        let mut alone = take(&lock)?;
         live::refuse_running(&platform::processes()?, std::process::id())?;
         platform::Job::kill_on_close()
             .and_then(platform::Job::hold_self)
             .context("putting the run in a job")?;
-        claim(&mut alone, &root, &mut CredentialManager)?;
+        claim(&mut alone, &lock, &root, &mut CredentialManager)?;
         Ok(Self { root, alone })
     }
 
@@ -204,9 +208,10 @@ fn take(path: &Path) -> Result<File> {
     }
 }
 
-/// Cleans up the earlier run the held `lock` names, if it didn't finish, then creates `root`,
-/// which must be new, so that every folder under it is this run's, and names it in the lock.
-fn claim(lock: &mut File, root: &Path, store: &mut impl Credentials) -> Result<()> {
+/// Cleans up the earlier run the held `lock` (at `path`) names, if it didn't finish, then creates
+/// `root`, which must be new, so that every folder under it is this run's; marks it with a new run
+/// id; and names both in the lock.
+fn claim(lock: &mut File, path: &Path, root: &Path, store: &mut impl Credentials) -> Result<()> {
     ensure!(
         !root.try_exists()?,
         "{} already exists; a gate run takes a new folder",
@@ -216,12 +221,20 @@ fn claim(lock: &mut File, root: &Path, store: &mut impl Credentials) -> Result<(
     let mut earlier = String::new();
     lock.rewind()?;
     lock.read_to_string(&mut earlier)?;
-    let earlier = Path::new(&earlier);
-    if !earlier.as_os_str().is_empty() && earlier.try_exists()? {
-        remove_entries(earlier, store, Keep::Nothing).with_context(|| {
+    if !earlier.is_empty() {
+        let line = earlier.trim_end();
+        let folder = line.splitn(3, ' ').nth(2).unwrap_or(line);
+        let earlier = interrupted(&earlier).with_context(|| {
             format!(
-                "cleaning up after the interrupted gate run in {}",
-                earlier.display()
+                "{} names {folder}, which no gate run can be shown to have made, so nothing was \
+                 deleted",
+                path.display()
+            )
+        })?;
+        remove_entries(&earlier, store, Keep::Nothing).with_context(|| {
+            format!(
+                "cleaning up after the interrupted gate run in {folder}, which {} names",
+                path.display()
             )
         })?;
     }
@@ -229,10 +242,42 @@ fn claim(lock: &mut File, root: &Path, store: &mut impl Credentials) -> Result<(
         fs::create_dir_all(parent)?;
     }
     fs::create_dir(root)?;
+    let id = run_id();
+    fs::write(root.join(MARKER), &id)?;
     lock.set_len(0)?;
     lock.rewind()?;
-    lock.write_all(named.as_bytes())?;
+    lock.write_all(format!("{LOCK_LINE}{id} {named}\n").as_bytes())?;
     Ok(())
+}
+
+/// The folder a gate run's lock `line` names, only when the line is whole and that folder holds
+/// the same run id in its marker: a truncated line, a stale or foreign one, or a folder no gate run
+/// marked never names anything to delete.
+fn interrupted(line: &str) -> Option<PathBuf> {
+    let (id, root) = line
+        .strip_prefix(LOCK_LINE)?
+        .strip_suffix('\n')?
+        .split_once(' ')?;
+    if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) || root.contains('\n') {
+        return None;
+    }
+    let root = PathBuf::from(root);
+    (root.is_absolute() && fs::read_to_string(root.join(MARKER)).ok()? == id).then_some(root)
+}
+
+/// A fresh 128-bit run id in hex; it tells this run's folder apart, and needn't be secret.
+fn run_id() -> String {
+    let half = || {
+        let mut hasher = RandomState::new().build_hasher();
+        hasher.write_u32(std::process::id());
+        hasher.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_nanos()),
+        );
+        hasher.finish()
+    };
+    format!("{:016x}{:016x}", half(), half())
 }
 
 /// What the cleanup keeps after deleting the entries.
@@ -263,36 +308,56 @@ impl Credentials for CredentialManager {
 }
 
 /// For each launch folder under `root`: deletes the gate names of every generation its own
-/// authority records, then, unless `keep` says otherwise, the folder; then `root`. A folder whose
-/// authority can't be read keeps its folder and its entries, since nothing else can say which
-/// entries are its own.
+/// authority records, then, unless `keep` says otherwise, the folder; then `root`. A launch that
+/// fails keeps its folder, and the others still run. A folder whose authority can't be read keeps
+/// its entries too, since nothing else can say which entries are its own.
 fn remove_entries(root: &Path, store: &mut impl Credentials, keep: Keep) -> Result<()> {
     let mut kept = Vec::new();
     for launch in fs::read_dir(root)? {
         let launch = launch?.path();
-        let authority = launch.join("local").join(GATE.data_dir).join(AUTHORITY);
-        match own_entries(&authority) {
-            Ok(targets) => {
-                for target in &targets {
-                    store.delete(target)?;
-                }
-                if keep == Keep::Nothing {
-                    fs::remove_dir_all(&launch)
-                        .with_context(|| format!("deleting {}", launch.display()))?;
-                }
-            }
-            Err(_) => kept.push(launch.display().to_string()),
+        if launch.file_name() == Some(MARKER.as_ref()) {
+            continue;
+        }
+        if let Err(error) = remove_launch(&launch, store, keep) {
+            kept.push(format!("{}: {error:#}", launch.display()));
         }
     }
     ensure!(
         kept.is_empty(),
-        "kept for a manual cleanup, since their credential authority couldn't be read: {}",
+        "kept for a manual cleanup: {}",
         kept.join("; ")
     );
     if keep == Keep::Folders {
         return Ok(());
     }
+    let marker = root.join(MARKER);
+    if marker.try_exists()? {
+        fs::remove_file(marker)?;
+    }
     fs::remove_dir(root).with_context(|| format!("deleting {}", root.display()))
+}
+
+/// Deletes the entries one launch's own authority names, then, unless kept, its folders, which
+/// must hold only the gate identity's data: anything else is the only sign of what ran there.
+fn remove_launch(launch: &Path, store: &mut impl Credentials, keep: Keep) -> Result<()> {
+    let local = launch.join("local");
+    let targets = own_entries(&local.join(GATE.data_dir).join(AUTHORITY_FILE))
+        .map_err(|_| anyhow!("its credential authority couldn't be read"))?;
+    for target in &targets {
+        store.delete(target)?;
+    }
+    if keep == Keep::Folders {
+        return Ok(());
+    }
+    for entry in fs::read_dir(&local)? {
+        let name = entry?.file_name();
+        ensure!(
+            name == GATE.data_dir,
+            "its data folder holds {}, which no gate image writes",
+            name.display()
+        );
+    }
+    fs::remove_dir_all(launch).with_context(|| format!("deleting {}", launch.display()))
 }
 
 /// The gate names of every chunk of every generation `authority` records; none when it doesn't
@@ -376,10 +441,11 @@ mod tests {
         );
     }
 
+    /// A launch's authority with the brain's `generations` table (`connections/authority.rs`).
     fn authority(launch: &Path, generations: &[[u8; 16]]) {
         let data = launch.join("local/Kumochi Gate");
         fs::create_dir_all(&data).expect("data folder");
-        let db = Connection::open(data.join(AUTHORITY)).expect("authority");
+        let db = Connection::open(data.join(AUTHORITY_FILE)).expect("authority");
         db.execute_batch("CREATE TABLE generations (generation BLOB NOT NULL, kind TEXT NOT NULL)")
             .expect("table");
         for generation in generations {
@@ -424,7 +490,7 @@ mod tests {
         assert_eq!(store.0, BTreeSet::new());
         assert!(
             root.join("app/local/Kumochi Gate")
-                .join(AUTHORITY)
+                .join(AUTHORITY_FILE)
                 .is_file()
         );
     }
@@ -447,28 +513,28 @@ mod tests {
     #[test]
     fn a_run_cleans_up_after_an_interrupted_one_and_takes_only_a_new_folder() {
         let dir = scratch::dir("gate-claim");
-        let earlier = dir.join("earlier");
-        authority(&earlier.join("app"), &[[0x07; 16]]);
-        let ours = "Kumochi Gate/gen/host/07070707070707070707070707070707/0";
-        let mut store = Fake([ours.to_owned()].into());
+        let (earlier, line) = interrupted_run(&dir);
+        let mut store = Fake([HELD.to_owned()].into());
         let path = dir.join("run.lock");
-        fs::write(&path, earlier.to_str().expect("Unicode")).expect("an interrupted run's lock");
+        fs::write(&path, line).expect("an interrupted run's lock");
         let mut lock = take(&path).expect("lock");
         let root = dir.join("now");
-        claim(&mut lock, &root, &mut store).expect("claimed");
+        claim(&mut lock, &path, &root, &mut store).expect("claimed");
         assert_eq!(store.0, BTreeSet::new());
         assert!(!earlier.exists());
-        assert!(root.is_dir());
         drop(lock);
+        let id = fs::read_to_string(root.join(MARKER)).expect("the new run's id");
+        assert_eq!(id.len(), 32);
+        assert_ne!(id, EARLIER_ID);
         assert_eq!(
             fs::read_to_string(&path).expect("lock"),
-            root.to_str().expect("Unicode")
+            format!("kumochi-gate-run {id} {}\n", root.display())
         );
         let existing = dir.join("existing");
         fs::create_dir(&existing).expect("a folder another run made");
         fs::write(&path, "").expect("a finished run's lock");
         let mut lock = take(&path).expect("lock");
-        let error = claim(&mut lock, &existing, &mut store).expect_err("not new");
+        let error = claim(&mut lock, &path, &existing, &mut store).expect_err("not new");
         drop(lock);
         assert_eq!(
             format!("{error:#}"),
@@ -480,27 +546,136 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).expect("lock"), "");
     }
 
+    const HELD: &str = "Kumochi Gate/gen/host/07070707070707070707070707070707/0";
+    const EARLIER_ID: &str = "0123456789abcdef0123456789abcdef";
+
+    /// An interrupted run's folder in `dir`, marked and holding one generation, and its lock line.
+    fn interrupted_run(dir: &Path) -> (PathBuf, String) {
+        let earlier = dir.join("earlier");
+        authority(&earlier.join("app"), &[[0x07; 16]]);
+        fs::write(earlier.join(MARKER), EARLIER_ID).expect("marker");
+        let line = format!("kumochi-gate-run {EARLIER_ID} {}\n", earlier.display());
+        (earlier, line)
+    }
+
+    #[test]
+    fn recovery_deletes_nothing_unless_the_whole_lock_and_the_folders_mark_agree() {
+        type Spoil = fn(&Path, &mut String);
+        // Each case, the bytes it cuts from the folder's name, and how it spoils the run.
+        let cases: [(&str, usize, Spoil); 4] = [
+            ("no-newline", 0, |_, line| line.truncate(line.len() - 1)),
+            ("cut-path", 3, |_, line| line.truncate(line.len() - 4)),
+            ("unmarked", 0, |earlier, _| {
+                fs::remove_file(earlier.join(MARKER)).expect("no mark");
+            }),
+            ("another-id", 0, |earlier, _| {
+                fs::write(earlier.join(MARKER), "fedcba9876543210fedcba9876543210")
+                    .expect("another run's id");
+            }),
+        ];
+        for (case, cut, spoil) in cases {
+            let dir = scratch::dir(&format!("gate-recovery-{case}"));
+            let (earlier, mut line) = interrupted_run(&dir);
+            spoil(&earlier, &mut line);
+            let mut store = Fake([HELD.to_owned()].into());
+            let path = dir.join("run.lock");
+            fs::write(&path, &line).expect("lock");
+            let mut lock = take(&path).expect("lock");
+            let root = dir.join("now");
+            let error = claim(&mut lock, &path, &root, &mut store).expect_err(case);
+            drop(lock);
+            let named = earlier.display().to_string();
+            let named = &named[..named.len() - cut];
+            assert_eq!(
+                format!("{error:#}"),
+                format!(
+                    "{} names {named}, which no gate run can be shown to have made, so nothing \
+                     was deleted",
+                    path.display()
+                ),
+                "{case}"
+            );
+            assert_eq!(store.0, [HELD.to_owned()].into(), "{case}");
+            assert!(
+                earlier
+                    .join("app/local/Kumochi Gate")
+                    .join(AUTHORITY_FILE)
+                    .is_file()
+            );
+            assert!(!root.exists(), "{case}");
+            assert_eq!(fs::read_to_string(&path).expect("lock"), line, "{case}");
+        }
+    }
+
+    #[test]
+    fn an_empty_lock_names_no_earlier_run_so_nothing_is_deleted() {
+        let dir = scratch::dir("gate-recovery-empty");
+        let (earlier, _) = interrupted_run(&dir);
+        let mut store = Fake([HELD.to_owned()].into());
+        let path = dir.join("run.lock");
+        fs::write(&path, "").expect("lock");
+        let mut lock = take(&path).expect("lock");
+        claim(&mut lock, &path, &dir.join("now"), &mut store).expect("claimed");
+        assert_eq!(store.0, [HELD.to_owned()].into());
+        assert!(
+            earlier
+                .join("app/local/Kumochi Gate")
+                .join(AUTHORITY_FILE)
+                .is_file()
+        );
+        assert_eq!(
+            fs::read_to_string(earlier.join(MARKER)).expect("mark"),
+            EARLIER_ID
+        );
+    }
+
     #[test]
     fn cleanup_keeps_a_launch_whose_authority_it_cannot_read() {
         let root = scratch::dir("gate-unreadable");
         let data = root.join("app/local/Kumochi Gate");
         fs::create_dir_all(&data).expect("data folder");
         fs::write(
-            data.join(AUTHORITY),
+            data.join(AUTHORITY_FILE),
             b"not a database, but long enough to be read as one",
         )
         .expect("authority");
-        let held = "Kumochi Gate/gen/host/07070707070707070707070707070707/0";
-        let mut store = Fake([held.to_owned()].into());
+        authority(&root.join("good"), &[[0x08; 16]]);
+        let mut store = Fake(
+            [
+                HELD.to_owned(),
+                "Kumochi Gate/gen/host/08080808080808080808080808080808/0".to_owned(),
+            ]
+            .into(),
+        );
         let error = remove_entries(&root, &mut store, Keep::Nothing).expect_err("kept");
         assert_eq!(
             format!("{error:#}"),
             format!(
-                "kept for a manual cleanup, since their credential authority couldn't be read: {}",
+                "kept for a manual cleanup: {}: its credential authority couldn't be read",
                 root.join("app").display()
             )
         );
-        assert_eq!(store.0, [held.to_owned()].into());
-        assert!(data.join(AUTHORITY).is_file());
+        assert_eq!(store.0, [HELD.to_owned()].into());
+        assert!(data.join(AUTHORITY_FILE).is_file());
+        assert!(!root.join("good").exists());
+    }
+
+    #[test]
+    fn cleanup_keeps_a_launch_whose_data_folder_holds_another_identity() {
+        let root = scratch::dir("gate-foreign");
+        authority(&root.join("app"), &[[0x07; 16]]);
+        fs::create_dir(root.join("app/local/Kumochi")).expect("another identity's folder");
+        let mut store = Fake([HELD.to_owned()].into());
+        let error = remove_entries(&root, &mut store, Keep::Nothing).expect_err("kept");
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "kept for a manual cleanup: {}: its data folder holds Kumochi, which no gate image \
+                 writes",
+                root.join("app").display()
+            )
+        );
+        assert_eq!(store.0, BTreeSet::new());
+        assert!(root.join("app/local/Kumochi").is_dir());
     }
 }
