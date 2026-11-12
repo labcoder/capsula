@@ -1554,6 +1554,23 @@ fn a_continuing_call_repeats_the_whole_header() {
 }
 
 #[test]
+fn a_draw_call_puts_an_object_behind_an_earlier_one_and_refuses_a_cycle() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    store.run(
+        &mut drawing,
+        call(1, "c1", args("s", &[text("a", "x"), text("b", "y")])),
+    );
+    let behind = r#"{"id":"c","put":[{"text":{"id":"z","text":"","at":[0,0]}}],"set":[{"target":"z","behind":"x"}]}"#;
+    let out = store.run(&mut drawing, call(2, "c2", args("s", &[behind.to_owned()])));
+    assert_eq!(trace(&out), ["write step 3", "step 1#2", "end 1 true"]);
+    let cycle = r#"{"id":"d","set":[{"target":"x","behind":"z"}]}"#;
+    let out = store.run(&mut drawing, call(3, "c3", args("s", &[cycle.to_owned()])));
+    assert!(trace(&out).is_empty(), "nothing is written");
+    assert_eq!(error(&out.calls[0]), ErrorCode::ReferenceCycle);
+}
+
+#[test]
 fn a_continuing_call_may_restate_the_title_and_alt() {
     let mut drawing = Drawing::default();
     let mut store = Store::default();
