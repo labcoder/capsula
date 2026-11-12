@@ -11,8 +11,9 @@ impl Presence {
         gesture: Option<GestureId>,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
-        if let Some(gesture) = gesture {
-            self.cancel_voice_gesture(gesture, cx);
+        if let Some(gesture) = gesture
+            && self.cancel_voice_gesture(gesture, cx)
+        {
             return Ok(());
         }
         if self.voice_working() {

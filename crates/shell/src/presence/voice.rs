@@ -246,15 +246,21 @@ impl Presence {
         self.drain_voice_cancel();
     }
 
-    pub(super) fn cancel_voice_gesture(&mut self, gesture: GestureId, cx: &mut Context<'_, Self>) {
-        if self
+    /// Ends the pending hold if `gesture` is it, and says whether it did.
+    pub(super) fn cancel_voice_gesture(
+        &mut self,
+        gesture: GestureId,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        let pending = self
             .voice
             .pending
             .as_ref()
-            .is_some_and(|hold| hold.token.gesture() == gesture)
-        {
+            .is_some_and(|hold| hold.token.gesture() == gesture);
+        if pending {
             self.end_voice(Text::HoldCancelled, cx);
         }
+        pending
     }
 
     pub(super) fn voice_intent(
@@ -436,6 +442,7 @@ impl Presence {
             self.voice_notice(Text::HoldPreparing, cx);
         } else {
             self.unused_voice(&token, &session);
+            self.link.clear_input(gesture);
             self.runs.cancel_hold();
             self.drain_voice_cancel();
             self.voice_notice(notice, cx);

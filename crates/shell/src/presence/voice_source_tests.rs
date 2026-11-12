@@ -1347,6 +1347,47 @@ fn esc_after_a_finished_hold_run_leaves_voice_alone_and_the_next_hold_listens(
 }
 
 #[gpui::test]
+fn esc_after_a_busy_or_offline_refusal_clears_the_drawing_on_screen(cx: &mut TestAppContext) {
+    for (busy, notice) in [(true, Text::TurnBusy), (false, Text::HoldFailed)] {
+        let (owner, _data, _controls) = ready(cx);
+        let deliver = native(&owner, cx);
+        owner.update(cx, |owner, cx| {
+            if busy {
+                owner.runs.begin_hold(GestureId(1)).unwrap();
+                owner.runs.cancel_hold();
+                owner.runs.take_hold_cancel().unwrap();
+            } else {
+                owner.runs.disconnected();
+            }
+            owner.presenter = crate::presenter::tests::painter_fixture(Box::new(
+                crate::presenter::tests::Charged(0),
+            ))
+            .0;
+            owner.presenter.frames().borrow_mut().shown = true;
+            owner.runs_changed(cx).unwrap();
+            assert!(owner.activity.drawing);
+        });
+        let at = Instant::now();
+        chord(&deliver, Edge::Down, at);
+        deliver(Event::Deadline, after(at, 301));
+        chord(&deliver, Edge::Up, at + Duration::from_millis(400));
+        cx.run_until_parked();
+        owner.read_with(cx, |owner, _| {
+            assert!(owner.voice.pending.is_none());
+            assert_eq!(owner.voice.status, Some(notice));
+            assert!(owner.activity.drawing);
+            assert!(owner.presenter.holds_scenes());
+        });
+        deliver(Event::Escape, after(at, 1_000));
+        cx.run_until_parked();
+        owner.read_with(cx, |owner, _| {
+            assert!(!owner.presenter.holds_scenes());
+            assert!(owner.voice.pending.is_none());
+        });
+    }
+}
+
+#[gpui::test]
 fn esc_during_listening_cancels_that_hold_and_the_next_hold_listens(cx: &mut TestAppContext) {
     let (owner, _data, _controls) = ready(cx);
     let deliver = native(&owner, cx);
