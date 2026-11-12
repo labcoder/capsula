@@ -267,7 +267,12 @@ impl Render for OnboardingView {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(div().text_lg().child(strings.onboarding_title()))
+                    .child(
+                        div()
+                            .text_lg()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(strings.onboarding_title()),
+                    )
                     .child(
                         Button::new("onboarding-close")
                             .debug_selector(|| "onboarding-close".into())
