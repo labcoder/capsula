@@ -1027,7 +1027,9 @@ lines, arrows, paths, edges and series draw in, and everything else fades in. An
 `"enter":"none"` appears at once. When no object in the step names a `delay` or an
 `at_word`, each starts 60% of the way through the previous object's entrance, in `put`
 order; if the last would end after 4 s, every gap and default length shrinks by one ratio
-to fit, while an authored `dur` keeps its exact length (`motion::pace`).
+to fit, while an authored `dur` keeps its exact length (`motion::pace`). An object with
+`"enter":"none"` keeps its turn in that order but adds no time, so the next one starts
+as it appears.
 `entrance_end()` is when the last object the step put finishes entering, after parent
 gating and clipped to the deadline. The presenter ends the step at the later of its
 narration segment and that instant, so the next `speech` step waits for the drawing.
