@@ -123,8 +123,8 @@ It refuses an existing product process, launches the release shell at normal pri
 bounded graceful-quit deadline, settles for thirty seconds, and samples user plus kernel time
 over sixty seconds. CPU is percent of one core; memory is endpoint private bytes, not working
 set or peak memory. `--duration 1..60` shortens a harness smoke check, not an acceptance run.
-The task checks that the same shell, brain and worker survive the sample and waits for all
-three to exit. Run only in an agreed quiet window; the benchmark sends no input.
+The task checks that the same shell, brain and both workers survive the sample and waits for all
+four to exit. Run only in an agreed quiet window; the benchmark sends no input.
 `--baseline <release-directory>` samples older binaries with the same counters. After the sample,
 it sends `WM_CLOSE` to the spawned shell's presence proxy, which requests the normal graceful
 Quit path. Pre-dock binaries fall back to closing their single visible status window. Both

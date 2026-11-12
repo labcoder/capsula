@@ -271,7 +271,9 @@ The separate `cold-start <path-session.txt>` task runs ten input-free cold launc
 approved quiet window before the owner session. Both run as the gate identity and build the
 images they launch (see [the gate identity](gate-identity.md)). It uses the same create-new transcript and
 adjacent evidence-directory contract below, but never arms Ready or enters the input phase
-sequence. It is not an extra loop inside `gate-session`.
+sequence. It is not an extra loop inside `gate-session`. Each launch in either task waits up to
+3 s for the brain and both its workers (screen and speech) and holds all of them, and refuses any
+other product process.
 
 The cold trace starts before process launch with the product executable-name filter; all its
 rows must later match that one owned PID. A completed PID-filtered warm capture identifies the
@@ -293,7 +295,8 @@ FILETIME through a precise-UTC/QPC bracket of at most 1ms. The anchor estimate i
 lower bound, because creation-timestamp granularity is outside that bracket. Ten conservative
 upper bounds produce nearest-rank p50/p95/max against 400ms. These are fresh
 processes, not a cache-flushed boot: binaries are hashed before each launch and OS caches are not
-purged. No input, foreground transfer, elevation or fixture is involved.
+purged. No input, foreground transfer, elevation or fixture is involved. Launch 1 starts a
+profile already marked onboarded, so onboarding's own start cost is unmeasured.
 
 `gate-session` replaces the old per-phase `input-session` launcher. Preparation, a green build,
 or a Good feel verdict does not authorize desktop input. Invoke it only after fresh owner

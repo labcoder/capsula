@@ -25,8 +25,10 @@ use crate::platform::{
 };
 
 mod diagnostics;
+mod tree;
 use diagnostics::pair_paints;
 pub(crate) use diagnostics::{Mark, Record};
+pub(crate) use tree::{ROLES, Startup, product_tree, unchanged};
 
 #[derive(Debug)]
 pub(crate) struct PhaseContext<'a> {
@@ -379,33 +381,26 @@ pub(crate) fn stop_product(
     combine(cleanup)
 }
 
+/// Waits up to 3 s for the brain and every worker of the launch `shell_pid` started, and holds
+/// each with the exit code a graceful quit gives it.
 pub(crate) fn owned_helpers(shell_pid: u32) -> Result<Vec<(&'static str, platform::Process, u32)>> {
     let until = Instant::now() + Duration::from_secs(3);
     loop {
-        let processes = platform::processes()?;
-        let pair = processes
-            .iter()
-            .find(|entry| !entry.shell && entry.parent == shell_pid)
-            .and_then(|brain| {
-                processes
+        match product_tree(shell_pid, &platform::processes()?, platform::helper_role)? {
+            Startup::Complete(tree) => {
+                return tree[1..]
                     .iter()
-                    .find(|entry| !entry.shell && entry.parent == brain.pid)
-                    .map(|worker| (brain.pid, worker.pid))
-            });
-        if let Some((brain, worker)) = pair {
-            ensure!(
-                processes.len() == 3,
-                "product process set changed before input session; refusing contaminated run"
-            );
-            return Ok(vec![
-                ("brain", platform::Process::open(brain)?, 0),
-                ("screen-worker", platform::Process::open(worker)?, 1),
-            ]);
+                    .zip(&ROLES[1..])
+                    .map(|(&(role, pid), &(_, code))| {
+                        Ok((role, platform::Process::open(pid)?, code))
+                    })
+                    .collect();
+            }
+            Startup::Missing(role) => ensure!(
+                Instant::now() < until,
+                "the launch's {role} didn't start within 3s"
+            ),
         }
-        ensure!(
-            Instant::now() < until,
-            "owned brain/screen-worker startup timed out"
-        );
         sleep(Duration::from_millis(10));
     }
 }
