@@ -12,6 +12,9 @@ pub(crate) const STAGGER: (u64, u64) = (3, 5);
 /// The longest a step's default pace may run, in ms.
 pub(crate) const STEP_MS: u64 = 4_000;
 
+/// An authored length shrinks the defaults to a quarter at most, so they still visibly enter.
+pub(crate) const SQUEEZE_FLOOR: (u64, u64) = (1, 4);
+
 /// One object a step puts, as authored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Authored {
@@ -40,8 +43,8 @@ pub(crate) struct Paced {
 /// an explicit `"none"` appears at once. If no object names a `delay` or an `at_word`, each
 /// object starts [`STAGGER`] of the way through the previous one's entrance; when the last
 /// entrance would end after [`STEP_MS`], every gap and default length shrinks by one ratio
-/// until the step fits, or as far as its authored lengths allow. An authored length of
-/// [`STEP_MS`] or more ends late rather than squeezing the rest of the step to nothing.
+/// until the step fits, or as far as its authored lengths allow; an authored length that
+/// would shrink them below [`SQUEEZE_FLOOR`] ends the step late instead.
 pub(crate) fn pace(objects: &[Authored]) -> Vec<Paced> {
     let timed = objects.iter().any(|object| object.timed);
     let mut start = 0_u64;
@@ -70,8 +73,8 @@ pub(crate) fn pace(objects: &[Authored]) -> Vec<Paced> {
             continue;
         };
         if !timed
-            && left > 0
             && scaled > 0
+            && (authored == 0 || left * SQUEEZE_FLOOR.1 >= scaled * SQUEEZE_FLOOR.0)
             && u128::from(left) * u128::from(span) < u128::from(room) * u128::from(scaled)
         {
             (room, span) = (left, scaled);
@@ -225,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn an_authored_length_of_4_s_or_more_ends_late_and_just_under_squeezes_the_defaults() {
+    fn an_authored_length_shrinks_the_defaults_to_a_quarter_at_most_and_past_that_ends_late() {
         let around = |dur| {
             pace(&[
                 stroke(600),
@@ -237,30 +240,30 @@ mod tests {
             ])
         };
         assert_eq!(
-            around(3_999),
+            around(3_910),
             [
-                paced(0, Enter::Draw, 1),
-                paced(1, Enter::Draw, 3_999),
-                paced(7, Enter::Fade, 0),
+                paced(0, Enter::Draw, 150),
+                paced(90, Enter::Draw, 3_910),
+                paced(676, Enter::Fade, 87),
             ],
-            "scaled by 1/360 so the authored entrance ends at exactly 4,000"
+            "90 ms left for a 360 ms start is exactly a quarter, ending at 4,000"
         );
-        assert_eq!(
-            around(4_000),
-            [
-                paced(0, Enter::Draw, 600),
-                paced(360, Enter::Draw, 4_000),
-                paced(2_760, Enter::Fade, 350),
-            ]
-        );
-        assert_eq!(
-            around(4_001),
-            [
-                paced(0, Enter::Draw, 600),
-                paced(360, Enter::Draw, 4_001),
-                paced(2_760, Enter::Fade, 350),
-            ]
-        );
+        for (dur, last) in [
+            (3_911, 2_706),
+            (3_999, 2_759),
+            (4_000, 2_760),
+            (4_001, 2_760),
+        ] {
+            assert_eq!(
+                around(dur),
+                [
+                    paced(0, Enter::Draw, 600),
+                    paced(360, Enter::Draw, dur),
+                    paced(last, Enter::Fade, 350),
+                ],
+                "{dur} ms ends late at the default pace"
+            );
+        }
     }
 
     #[test]
