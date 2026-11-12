@@ -12,6 +12,8 @@ pub(super) enum Owner {
     Pointer,
     Typing,
     Settings,
+    /// The first-run window keeps the peek closed until it's gone.
+    Onboarding,
     Stop,
 }
 
@@ -19,6 +21,8 @@ impl Presence {
     pub(super) fn panel_owner(&self, cx: &App) -> Owner {
         if self.kumo.read(cx).pull_live() {
             Owner::Pull
+        } else if self.onboarding.is_some() {
+            Owner::Onboarding
         } else if self.settings_open() {
             Owner::Settings
         } else if self.text_open() || self.threads_open() {
@@ -88,7 +92,7 @@ impl Presence {
 /// The peek's visibility as the pointer moves elsewhere: leaving is the grace timer's call.
 pub(super) fn pointer(current: PanelVisibility, owner: Owner) -> PanelVisibility {
     match owner {
-        Owner::Typing | Owner::Settings => PanelVisibility::Hidden,
+        Owner::Typing | Owner::Settings | Owner::Onboarding => PanelVisibility::Hidden,
         Owner::Stop | Owner::Pull => PanelVisibility::Visible,
         Owner::Pointer => current,
     }
@@ -105,7 +109,7 @@ pub(super) fn left(owner: Owner) -> PanelVisibility {
 
 #[cfg(test)]
 mod tests {
-    use super::Owner::{Pointer, Pull, Settings, Stop, Typing};
+    use super::Owner::{Onboarding, Pointer, Pull, Settings, Stop, Typing};
     use super::PanelVisibility::{Hidden, Visible};
     use super::{left, over_line, pointer};
 
@@ -115,6 +119,13 @@ mod tests {
         assert_eq!(over_line(Typing), Hidden);
         assert_eq!(pointer(Visible, Settings), Hidden);
         assert_eq!(left(Settings), Hidden);
+    }
+
+    #[test]
+    fn onboarding_keeps_the_peek_closed_even_over_the_line() {
+        assert_eq!(over_line(Onboarding), Hidden);
+        assert_eq!(pointer(Visible, Onboarding), Hidden);
+        assert_eq!(left(Onboarding), Hidden);
     }
 
     #[test]

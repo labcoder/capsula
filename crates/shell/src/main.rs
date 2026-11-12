@@ -23,6 +23,7 @@ mod input;
 mod instance;
 mod link;
 mod logging;
+mod onboarding;
 mod platform;
 mod presence;
 mod presenter;

@@ -453,7 +453,7 @@ impl Surface for Gpui<'_> {
     fn show(&mut self, overlay: &Overlay) -> Result<(), OpenError> {
         #[expect(
             clippy::as_conversions,
-            reason = "fixed semantic slot indexes the seven handles"
+            reason = "fixed semantic slot indexes the eight handles"
         )]
         let drawing = super::exclusion::Slot::Drawing as usize;
         self.surfaces.handles[drawing] = Some(overlay.window);

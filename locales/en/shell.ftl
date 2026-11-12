@@ -220,6 +220,15 @@ settings-frame-rate-now = Drawing at { $fps } frames a second on this display.
 settings-saving = Saving…
 settings-offline = Reconnect to change settings.
 rename-busy = The assistant's name is still saving. Try again in a moment.
+
+onboarding-title = Welcome to { $app }
+onboarding-close = Finish later
+onboarding-continue = Continue
+# { $name } marks where the name input sits; text may come before or after it.
+onboarding-welcome = Hi, I'm { $name }
+onboarding-welcome-help = Call me something else if you like. You can change it later in Settings.
+onboarding-user = What should { $assistant } call you?
+onboarding-user-help = Optional. It's sent to the model you chat with, so { $assistant } can use it.
 settings-unavailable = Couldn't send that change. Try again in a moment.
 settings-not-saved = Settings not saved
 error-settings-refused = Couldn't save that setting. Try again.

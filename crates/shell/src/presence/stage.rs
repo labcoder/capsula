@@ -45,10 +45,15 @@ impl Presence {
             return;
         };
         let panel = self
-            .settings_panel
+            .onboarding
             .as_ref()
-            .filter(|_| self.settings_open())
             .map(|panel| panel.bounds)
+            .or_else(|| {
+                self.settings_panel
+                    .as_ref()
+                    .filter(|_| self.settings_open())
+                    .map(|panel| panel.bounds)
+            })
             .or_else(|| {
                 self.thread_panel
                     .as_ref()

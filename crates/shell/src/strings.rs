@@ -170,6 +170,11 @@ pub(crate) enum Text {
     SettingsSaving,
     SettingsOffline,
     RenameBusy,
+
+    // Onboarding
+    OnboardingClose,
+    OnboardingContinue,
+    OnboardingWelcomeHelp,
     SettingsUnavailable,
     SettingsNotSaved,
     SettingsSaveHelp,
@@ -417,6 +422,11 @@ impl Text {
         SettingsSaving,
         SettingsOffline,
         RenameBusy,
+
+        // Onboarding
+        OnboardingClose,
+        OnboardingContinue,
+        OnboardingWelcomeHelp,
         SettingsUnavailable,
         SettingsNotSaved,
         SettingsSaveHelp,
@@ -667,6 +677,9 @@ impl Text {
             Self::SettingsSaving => "settings-saving",
             Self::SettingsOffline => "settings-offline",
             Self::RenameBusy => "rename-busy",
+            Self::OnboardingClose => "onboarding-close",
+            Self::OnboardingContinue => "onboarding-continue",
+            Self::OnboardingWelcomeHelp => "onboarding-welcome-help",
             Self::SettingsUnavailable => "settings-unavailable",
             Self::SettingsNotSaved => "settings-not-saved",
             Self::SettingsSaveHelp => "settings-save-help",
@@ -786,6 +799,32 @@ impl Strings {
         let mut args = FluentArgs::new();
         args.set("assistant", assistant);
         self.format(Text::ThreadAssistant.id(), Some(&args))
+    }
+
+    /// The onboarding window's heading, with the product name.
+    pub(crate) fn onboarding_title(&self) -> String {
+        let mut args = FluentArgs::new();
+        args.set("app", kumochi_protocol::constants::DISPLAY_NAME);
+        self.format("onboarding-title", Some(&args))
+    }
+
+    /// The welcome's words before and after the name input, which may sit anywhere in it.
+    pub(crate) fn onboarding_welcome(&self) -> (String, String) {
+        const SPOT: &str = "\u{E000}";
+        let mut args = FluentArgs::new();
+        args.set("name", SPOT);
+        let text = self.format("onboarding-welcome", Some(&args));
+        match text.split_once(SPOT) {
+            Some((before, after)) => (before.to_owned(), after.to_owned()),
+            None => (text, String::new()),
+        }
+    }
+
+    /// The question for the user's name and its help line, with the assistant's name.
+    pub(crate) fn onboarding_user(&self, assistant: &str) -> [String; 2] {
+        let mut args = FluentArgs::new();
+        args.set("assistant", assistant);
+        ["onboarding-user", "onboarding-user-help"].map(|id| self.format(id, Some(&args)))
     }
 
     pub(crate) fn issue_title(&self, title: &str) -> String {
@@ -942,6 +981,26 @@ mod tests {
                 "Also show {} in the taskbar",
                 kumochi_protocol::constants::DISPLAY_NAME
             )
+        );
+    }
+
+    #[test]
+    fn onboarding_splits_the_welcome_at_the_name_and_fills_in_the_names() {
+        let strings = Strings::english();
+        assert_eq!(
+            strings.onboarding_welcome(),
+            ("Hi, I'm ".to_owned(), String::new())
+        );
+        assert_eq!(
+            strings.onboarding_title(),
+            format!("Welcome to {}", kumochi_protocol::constants::DISPLAY_NAME)
+        );
+        assert_eq!(
+            strings.onboarding_user("Mochi"),
+            [
+                "What should Mochi call you?".to_owned(),
+                "Optional. It's sent to the model you chat with, so Mochi can use it.".to_owned()
+            ]
         );
     }
 
