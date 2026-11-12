@@ -245,9 +245,9 @@ fn semantic_failure_identity_is_independent_of_ready_timing_and_early_ack_keeps_
         assert_prefix(&store, &["s1", "s2"]);
         assert_eq!(ends(&effects), [false]);
         let result = result(&effects);
-        let expected = ToolOutput::Text(
-            "drawn: [s1, s2]; stopped: step s3: remove[0]: scene.UnknownRef".into(),
-        );
+        let expected = ToolOutput::Text(format!(
+            "drawn: [s1, s2]; stopped: step s3: remove[0]: scene.UnknownRef{RETRY}"
+        ));
         assert_eq!(result.output, expected);
         hashes.push(result.hash);
         assert_eq!(
@@ -337,7 +337,7 @@ fn terminal_syntax_typed_and_truncated_tails_keep_one_prefix_and_a_fixed_refusal
         };
         assert_eq!(ends(&failed), [false]);
         let result = result(&failed);
-        let expected = ToolOutput::Text(format!("drawn: [s1]; stopped: {stopped}"));
+        let expected = ToolOutput::Text(format!("drawn: [s1]; stopped: {stopped}{RETRY}"));
         assert_eq!(result.output, expected);
         assert_eq!(
             call(&mut core, "refused", &args(None)),
@@ -437,9 +437,9 @@ fn replacement_admission_does_not_turn_an_unverified_same_id_into_an_old_result_
         if hold_result {
             assert_eq!(
                 result.output,
-                ToolOutput::Text(
-                    "drawn: [s1, s2]; stopped: step s3: remove[0]: scene.UnknownRef".into()
-                )
+                ToolOutput::Text(format!(
+                    "drawn: [s1, s2]; stopped: step s3: remove[0]: scene.UnknownRef{RETRY}"
+                ))
             );
         } else {
             let ToolOutput::Text(text) = &result.output else {
@@ -822,7 +822,9 @@ fn a_refused_draw_logs_one_warning_with_only_its_code_and_field() {
     let refused = result(&delta(&mut core, "inline", &inline));
     assert_eq!(
         refused.output,
-        ToolOutput::Text("drawn: []; stopped: surface: scene.Unsupported".into())
+        ToolOutput::Text(format!(
+            "drawn: []; stopped: surface: scene.Unsupported{RETRY}"
+        ))
     );
     let text = logs.text();
     let lines: Vec<&str> = text
@@ -1037,11 +1039,11 @@ fn provider_byte_and_record_bounds_keep_the_prefix_and_require_both_success_fenc
         assert_eq!(ends(&effects), [!over]);
         let result = result(&effects);
         let stopped = if !over {
-            ""
+            String::new()
         } else if byte_bound {
-            "; stopped: drawing exceeds byte limit"
+            format!("; stopped: drawing exceeds byte limit{FULL}")
         } else {
-            "; stopped: drawing.BudgetSpent"
+            "; stopped: drawing.BudgetSpent".to_owned()
         };
         let expected = ToolOutput::Text(format!("drawn: [{}]{stopped}", ids.join(", ")));
         assert_eq!(result.output, expected);
@@ -1277,12 +1279,14 @@ fn invalid_replacement_streams_join_only_noncanonical_fixed_results_before_or_af
         };
         let result = result(&effects);
         let expected = ToolOutput::Text(match first {
-            "canonical" => "drawn: [s1, s2]; stopped: step s3: remove[0]: scene.UnknownRef".into(),
+            "canonical" => {
+                format!("drawn: [s1, s2]; stopped: step s3: remove[0]: scene.UnknownRef{RETRY}")
+            }
             "malformed" => format!(
-                "drawn: [s1]; stopped: malformed drawing at byte {}",
+                "drawn: [s1]; stopped: malformed drawing at byte {}{RETRY}",
                 PREFIX.len() + 1
             ),
-            _ => "drawn: [s1]; stopped: truncated drawing".into(),
+            _ => format!("drawn: [s1]; stopped: truncated drawing{RETRY}"),
         });
         assert_eq!(result.output, expected);
         let old = super::super::engine_key(&core, R);
@@ -1516,7 +1520,9 @@ fn a_streamed_inline_begin_is_refused_before_lookup_or_scene_work_and_overlay_re
     assert!(store.drawing_scenes().expect("no scene").scenes.is_empty());
     assert!(core.drawing.snapshot().scenes.is_empty());
     let refused = result(&failed);
-    let expected = ToolOutput::Text("drawn: []; stopped: surface: scene.Unsupported".into());
+    let expected = ToolOutput::Text(format!(
+        "drawn: []; stopped: surface: scene.Unsupported{RETRY}"
+    ));
     assert_eq!(refused.output, expected);
     assert_eq!(
         call(&mut core, "inline", &args(None)),

@@ -25,7 +25,7 @@ use kumochi_scene::{Admitted, Begin, GlobalBudget, Record, SceneState, Step, Sto
 use crate::coordinator::{Effect, Stale, StoreOp};
 use crate::engines::CallId;
 
-pub use call::{CallEnd, CallError};
+pub use call::{CallEnd, CallError, Remaining};
 pub use io::{Reply, StoredScene, Target, Write};
 pub(crate) use snapshot::CHUNK_TARGET;
 pub use snapshot::Snapshot;

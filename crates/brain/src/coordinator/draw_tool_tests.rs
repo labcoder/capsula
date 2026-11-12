@@ -12,6 +12,10 @@ use crate::test_support::Scratch;
 #[path = "provider_draw_tests.rs"]
 mod provider_stream;
 
+const RETRY: &str = "; drawn lists what this call added, and earlier steps stay as they were; correct this and call draw again";
+const FULL: &str = "; no further step can be drawn in this turn";
+const SPENT: &str = "; no further draw call will be accepted in this turn";
+
 fn id(name: &str) -> CallId {
     CallId::new(name).expect("ASCII fixture")
 }
@@ -540,7 +544,7 @@ fn preflight_failure(third: Value, expected_error: &str) {
         panic!("typed refusal, not bare Invalid");
     };
     assert!(text.starts_with("drawn: []; stopped: step s3: "));
-    assert!(text.ends_with(expected_error));
+    assert!(text.ends_with(&format!("{expected_error}{RETRY}")));
     let expected = ToolOutput::Text(text.clone());
     assert_eq!(
         call(&mut core, "bad", &args(None)).0,
@@ -562,7 +566,7 @@ fn a_preflight_refusal_spends_the_existing_repair_budget() {
     assert_eq!(answers.len(), 3);
     assert_eq!(
         answers[2].1,
-        ToolOutput::Text("drawn: []; stopped: drawing.BudgetSpent".into())
+        ToolOutput::Text(format!("drawn: []; stopped: drawing.BudgetSpent{SPENT}"))
     );
 }
 
@@ -936,7 +940,9 @@ fn semantic_admission_returns_only_the_durable_prefix_and_exact_error() {
         .expect("honest partial result");
     assert_eq!(
         result.output,
-        ToolOutput::Text("drawn: [s1, s2]; stopped: step s3: remove[0]: scene.UnknownRef".into())
+        ToolOutput::Text(format!(
+            "drawn: [s1, s2]; stopped: step s3: remove[0]: scene.UnknownRef{RETRY}"
+        ))
     );
     assert_eq!(
         store.drawing_scenes().expect("committed prefix").scenes[0]
@@ -1064,7 +1070,9 @@ fn an_inline_begin_is_refused_before_scene_writes_on_model_and_mcp_routes() {
         {"end":{}}
     ]}))
     .expect("fixture");
-    let expected = ToolOutput::Text("drawn: []; stopped: surface: scene.Unsupported".into());
+    let expected = ToolOutput::Text(format!(
+        "drawn: []; stopped: surface: scene.Unsupported{RETRY}"
+    ));
     let repaired = ToolOutput::Text("drawn: [s1, s2]".into());
     let caller = |is_mcp, name: &str| {
         if is_mcp {
