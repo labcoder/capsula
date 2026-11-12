@@ -1306,6 +1306,284 @@ fn older_button_continues_pages_that_only_extend_a_drawing_row(cx: &mut TestAppC
     });
 }
 
+#[gpui::test]
+fn older_failure_stays_cancelled_after_list_or_repair_success(cx: &mut TestAppContext) {
+    use gpui_kit::VisualTestContext;
+    use kumochi_protocol::message::{DataToShell, EventId, PageEvent, PageEventKind, PageOf};
+
+    let page = |request, first, last, before: Option<u64>| DataToShell::Page {
+        request,
+        thread: ThreadId(3),
+        events: (first..=last)
+            .rev()
+            .map(|id| PageEvent {
+                id: EventId(id),
+                run: Some(RunId(1)),
+                kind: PageEventKind::AssistantText,
+                text: "fixture message".into(),
+                cut: false,
+            })
+            .collect(),
+        before: before.map(EventId),
+    };
+    for repair in [false, true] {
+        let (owner, window, data) = opened_history(page(2, 11, 60, Some(11)), cx);
+        if !repair {
+            owner.update(cx, |owner, cx| {
+                owner.chat.update(cx, |chat, cx| {
+                    chat.refresh();
+                    cx.notify();
+                });
+                owner.request_pages(cx);
+            });
+            assert_eq!(
+                data.try_recv().expect("list refresh"),
+                DataToBrain::PageRequest {
+                    request: 3,
+                    page: PageOf::Threads {
+                        search: None,
+                        after: None
+                    },
+                }
+            );
+        }
+        click_recovery(window, "chat-older-control", cx);
+        let older = if repair { 3 } else { 4 };
+        assert_eq!(
+            data.try_recv().expect("older request"),
+            DataToBrain::PageRequest {
+                request: older,
+                page: PageOf::Events {
+                    thread: ThreadId(3),
+                    before: Some(EventId(11))
+                },
+            }
+        );
+        if repair {
+            owner.update(cx, |owner, cx| {
+                owner.chat.update(cx, |chat, cx| {
+                    chat.run_state(ThreadId(3));
+                    cx.notify();
+                });
+                owner.request_pages(cx);
+            });
+            assert_eq!(
+                data.try_recv().expect("run-state list repair"),
+                DataToBrain::PageRequest {
+                    request: 4,
+                    page: PageOf::Threads {
+                        search: None,
+                        after: None
+                    },
+                }
+            );
+        }
+        assert!(data.is_empty());
+        let mut replies = vec![
+            LinkEvent::Data {
+                generation: 1,
+                message: DataToShell::PageFailed { request: older },
+                bytes: 17,
+            },
+            LinkEvent::Data {
+                generation: 1,
+                message: DataToShell::ThreadList {
+                    request: if repair { 4 } else { 3 },
+                    threads: Vec::new(),
+                    next: None,
+                },
+                bytes: 19,
+            },
+        ];
+        if repair {
+            replies.push(LinkEvent::Data {
+                generation: 1,
+                message: page(5, 11, 60, Some(11)),
+                bytes: 19,
+            });
+        }
+        receive(&owner, replies, cx);
+        if repair {
+            assert_eq!(
+                data.try_recv().expect("queued repair"),
+                DataToBrain::PageRequest {
+                    request: 5,
+                    page: PageOf::Events {
+                        thread: ThreadId(3),
+                        before: None
+                    },
+                }
+            );
+        }
+        assert!(data.is_empty());
+        cx.run_until_parked();
+        owner.update(cx, |owner, cx| {
+            owner.chat.update(cx, |chat, cx| {
+                assert!(
+                    !chat.failed,
+                    "the successful read masks the shared failure flag"
+                );
+                chat.older_events();
+                cx.notify();
+            });
+            owner.request_pages(cx);
+        });
+        let passive = if repair { 6 } else { 5 };
+        assert_eq!(
+            data.try_recv().expect("later passive page"),
+            DataToBrain::PageRequest {
+                request: passive,
+                page: PageOf::Events {
+                    thread: ThreadId(3),
+                    before: Some(EventId(11))
+                },
+            }
+        );
+        receive(
+            &owner,
+            vec![LinkEvent::Data {
+                generation: 1,
+                message: page(passive, 1, 10, None),
+                bytes: 19,
+            }],
+            cx,
+        );
+        cx.run_until_parked();
+        let mut frame = VisualTestContext::from_window(window, cx);
+        let region = frame.debug_bounds("chat-message-region").expect("messages");
+        assert!(
+            frame
+                .debug_bounds("message-event-60")
+                .expect("the passive page keeps the current reading anchor")
+                .intersects(&region)
+        );
+        assert!(frame.debug_bounds("message-event-1").is_none());
+    }
+}
+
+#[gpui::test]
+fn older_button_skips_assistant_segments_hidden_by_the_provisional_preview(
+    cx: &mut TestAppContext,
+) {
+    use gpui_kit::VisualTestContext;
+    use kumochi_protocol::message::{
+        DataToShell, EventId, PageEvent, PageEventKind, PageOf, SceneId,
+    };
+
+    let (owner, window, data) = opened_history(
+        DataToShell::Page {
+            request: 2,
+            thread: ThreadId(3),
+            events: (4..=53)
+                .rev()
+                .map(|id| PageEvent {
+                    id: EventId(id),
+                    run: Some(RunId(1)),
+                    kind: PageEventKind::NoVisual { scene: SceneId(3) },
+                    text: String::new(),
+                    cut: false,
+                })
+                .collect(),
+            before: Some(EventId(4)),
+        },
+        cx,
+    );
+    owner.update(cx, |owner, cx| {
+        owner
+            .runs
+            .apply_state(RunId(1), ThreadId(3), Phase::Answering, None);
+        assert_eq!(
+            owner.runs.apply_data(
+                DataToShell::AssistantText {
+                    run: RunId(1),
+                    delta: "provisional preview".into(),
+                },
+                17
+            ),
+            17
+        );
+        owner.runs_changed(cx).expect("live preview");
+    });
+    cx.run_until_parked();
+    click_recovery(window, "chat-older-control", cx);
+    assert_eq!(
+        data.try_recv().expect("older request"),
+        DataToBrain::PageRequest {
+            request: 3,
+            page: PageOf::Events {
+                thread: ThreadId(3),
+                before: Some(EventId(4))
+            },
+        }
+    );
+    receive(
+        &owner,
+        vec![LinkEvent::Data {
+            generation: 1,
+            message: DataToShell::Page {
+                request: 3,
+                thread: ThreadId(3),
+                events: vec![PageEvent {
+                    id: EventId(2),
+                    run: Some(RunId(1)),
+                    kind: PageEventKind::AssistantText,
+                    text: "stored segment".into(),
+                    cut: false,
+                }],
+                before: Some(EventId(2)),
+            },
+            bytes: 19,
+        }],
+        cx,
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        data.try_recv()
+            .expect("continue past the hidden assistant row"),
+        DataToBrain::PageRequest {
+            request: 4,
+            page: PageOf::Events {
+                thread: ThreadId(3),
+                before: Some(EventId(2))
+            },
+        }
+    );
+    assert!(data.is_empty());
+    receive(
+        &owner,
+        vec![LinkEvent::Data {
+            generation: 1,
+            message: DataToShell::Page {
+                request: 4,
+                thread: ThreadId(3),
+                events: vec![PageEvent {
+                    id: EventId(1),
+                    run: Some(RunId(1)),
+                    kind: PageEventKind::User,
+                    text: "oldest user turn".into(),
+                    cut: false,
+                }],
+                before: None,
+            },
+            bytes: 19,
+        }],
+        cx,
+    );
+    cx.run_until_parked();
+    let mut frame = VisualTestContext::from_window(window, cx);
+    let region = frame.debug_bounds("chat-message-region").expect("messages");
+    assert!(
+        frame
+            .debug_bounds("message-event-1")
+            .expect("older visible user turn")
+            .intersects(&region)
+    );
+    assert!(frame.debug_bounds("message-event-2").is_none());
+    assert!(frame.debug_bounds("message-live-1").is_some());
+    assert!(frame.debug_bounds("chat-older-control").is_none());
+    assert!(data.is_empty());
+}
+
 fn renewal_run() -> LinkEvent {
     LinkEvent::RunState {
         generation: 1,

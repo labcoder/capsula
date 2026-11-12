@@ -799,7 +799,11 @@ impl Threads {
             .filter(|pending| pending.request == request)
         {
             self.event_pending = None;
-            pending.revision == self.event_revision
+            let current = pending.revision == self.event_revision;
+            if current {
+                self.event_revision = self.event_revision.wrapping_add(1);
+            }
+            current
         } else {
             return;
         };

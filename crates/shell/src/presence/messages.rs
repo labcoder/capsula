@@ -39,7 +39,7 @@ pub(super) struct Messages {
     preview: Option<Row>,
     live_row: Option<RunId>,
     proven: Option<RunId>,
-    reveal_older: Option<(u64, EventId)>,
+    reveal_older: Option<(u64, EventId, Option<u64>)>,
     _watch: Subscription,
     github_watch: Option<Subscription>,
     _activation_watch: Subscription,
@@ -56,6 +56,12 @@ struct Row {
     details: Option<SharedString>,
     warning: Option<SharedString>,
     cut: Option<SharedString>,
+}
+
+impl Row {
+    fn visible(&self, live: Option<RunId>) -> bool {
+        !self.assistant || self.run.is_none() || self.run != live || self.id.0 == "live"
+    }
 }
 
 impl std::fmt::Debug for Row {
@@ -178,7 +184,12 @@ impl Messages {
             && state.open.is_some()
             && let Some(before) = state.before
         {
-            self.reveal_older = Some((state.history_revision(), before));
+            let first = self
+                .rows
+                .iter()
+                .find(|row| row.visible(self.live_row))
+                .map(|row| row.id.1);
+            self.reveal_older = Some((state.history_revision(), before, first));
             older(&self.model, &self.owner, cx);
         }
     }
@@ -244,25 +255,24 @@ impl Messages {
         }
         self.shown_thread = state.open;
         self.proven = state.proven;
-        if let Some((revision, before)) = self.reveal_older {
+        if let Some((revision, before, first)) = self.reveal_older {
             if state.history_revision() != revision || !state.online() || !state.loaded {
                 self.reveal_older = None;
-            } else if !state.reading() {
-                if state.failed {
-                    self.reveal_older = None;
-                } else if state.before != Some(before) {
-                    self.reveal_older = None;
-                    if ids.first() == self.ids.first()
-                        && let Some(before) = state.before
-                    {
-                        self.reveal_older = Some((revision, before));
-                        older(&self.model, &self.owner, cx);
-                    } else {
-                        self.list.scroll_to(ListOffset {
-                            item_ix: 0,
-                            offset_in_item: px(0.0),
-                        });
-                    }
+            } else if !state.reading() && state.before != Some(before) {
+                self.reveal_older = None;
+                let earlier = self
+                    .rows
+                    .iter()
+                    .find(|row| row.visible(live))
+                    .is_some_and(|row| first.is_none_or(|first| row.id.1 < first));
+                if !earlier && let Some(before) = state.before {
+                    self.reveal_older = Some((revision, before, first));
+                    older(&self.model, &self.owner, cx);
+                } else {
+                    self.list.scroll_to(ListOffset {
+                        item_ix: 0,
+                        offset_in_item: px(0.0),
+                    });
                 }
             }
         }
@@ -302,10 +312,8 @@ impl Render for Messages {
             } else {
                 rows.get(ix)
             };
-            row.filter(|row| {
-                !row.assistant || row.run.is_none() || row.run != live_row || row.id.0 == "live"
-            })
-            .map_or_else(|| div().into_any_element(), |row| message(row, cx))
+            row.filter(|row| row.visible(live_row))
+                .map_or_else(|| div().into_any_element(), |row| message(row, cx))
         })
         .size_full();
         div()
@@ -1209,7 +1217,7 @@ mod tests {
                 view.older(cx);
                 assert_eq!(
                     view.reveal_older,
-                    Some((model.read(cx).history_revision(), EventId(11)))
+                    Some((model.read(cx).history_revision(), EventId(11), Some(11)))
                 );
             });
             model.update(cx, |state, cx| {
