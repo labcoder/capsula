@@ -19,6 +19,11 @@ Simple node-and-arrow diagrams do not need a separate container: their nodes bel
 the scene itself, and each arrow follows the diagram shared by its endpoints. These
 diagrams have the same 48-node and 96-arrow limits as explicitly grouped diagrams.
 
+For function graphs, Kumochi asks the model for sampled values on a chart, with y growing
+upward, rather than a hand-drawn path. Curves draw in along those samples; functions such
+as 1/x use separate branches across a discontinuity. The model still supplies the values
+and ranges: Kumochi does not calculate the function or guarantee its mathematics.
+
 Drawings appear on the main display, over your other windows. They never take focus or catch
 clicks, so the app underneath keeps working. While one is on screen, Esc clears it
 (see [Esc](escape.md)). Kumochi centers each drawing in the free area beside its panel,
