@@ -207,6 +207,8 @@ pub(crate) enum Text {
     // Onboarding
     OnboardingClose,
     OnboardingContinue,
+    OnboardingNotNow,
+    OnboardingPlan,
     OnboardingWelcomeHelp,
 
     // ChatGPT accounts
@@ -482,6 +484,8 @@ impl Text {
         // Onboarding
         OnboardingClose,
         OnboardingContinue,
+        OnboardingNotNow,
+        OnboardingPlan,
         OnboardingWelcomeHelp,
 
         // ChatGPT accounts
@@ -759,6 +763,8 @@ impl Text {
             // Onboarding
             Self::OnboardingClose => "onboarding-close",
             Self::OnboardingContinue => "onboarding-continue",
+            Self::OnboardingNotNow => "onboarding-not-now",
+            Self::OnboardingPlan => "onboarding-plan",
             Self::OnboardingWelcomeHelp => "onboarding-welcome-help",
 
             // ChatGPT accounts
@@ -895,6 +901,13 @@ impl Strings {
         let mut args = FluentArgs::new();
         args.set("assistant", assistant);
         ["onboarding-user", "onboarding-user-help"].map(|id| self.format(id, Some(&args)))
+    }
+
+    /// The account step's heading and help line, with the assistant's name.
+    pub(crate) fn onboarding_accounts(&self, assistant: &str) -> [String; 2] {
+        let mut args = FluentArgs::new();
+        args.set("assistant", assistant);
+        ["onboarding-accounts", "onboarding-accounts-help"].map(|id| self.format(id, Some(&args)))
     }
 
     pub(crate) fn issue_title(&self, title: &str) -> String {

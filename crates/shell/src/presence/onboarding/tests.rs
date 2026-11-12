@@ -6,8 +6,10 @@ use gpui_kit::{
     WindowOptions,
 };
 use kumochi_protocol::message::{
-    AssistantName, ControlToBrain, DockPosition, GestureId, Incarnation, MaxFrameRate, NameError,
-    OnboardingStep, SettingsOp, SettingsView, SttUnload, ThreadId, UserName,
+    AccountOp, AccountView, Action, AssistantName, ClaudeCodeView, ClaudeVersion, ConnectionOp,
+    ConnectionsView, ControlToBrain, DockPosition, ErrorKey, GestureId, Incarnation, KeyView,
+    MaxFrameRate, NameError, OnboardingStep, PlanState, SettingsOp, SettingsView, SttUnload,
+    ThreadId, UserError, UserName,
 };
 
 use super::{OnboardingPanel, OnboardingView, Select};
@@ -19,6 +21,7 @@ use crate::presence::settings::field_status;
 use crate::presence::voice_wiring_tests::ready;
 use crate::presence::{PanelVisibility, Presence, test_fixture};
 use crate::settings::{Error, Field, Update};
+use crate::sign_in_mark::SignInMark;
 use crate::strings::{Strings, Text};
 
 #[expect(
@@ -133,6 +136,14 @@ fn escape(owner: &Entity<Presence>, window: AnyWindowHandle, cx: &mut TestAppCon
     cx.run_until_parked();
 }
 
+/// Continue or Not now, as the footer button runs it.
+fn press_continue(owner: &Entity<Presence>, cx: &mut TestAppContext) {
+    owner.update(cx, |owner, cx| {
+        owner.onboarding_continue(cx).expect("continue")
+    });
+    cx.run_until_parked();
+}
+
 fn rename(owner: &Entity<Presence>, name: &str, cx: &mut TestAppContext) {
     owner.update(cx, |owner, cx| {
         owner.settings.update(cx, |state, cx| {
@@ -179,6 +190,7 @@ fn selected(owner: &Entity<Presence>, cx: &mut TestAppContext) -> std::ops::Rang
             .view
             .read(cx)
             .input()
+            .expect("a name step")
             .read(cx)
             .selected_range()
     })
@@ -249,9 +261,17 @@ fn an_unsent_finish_says_so_and_can_be_pressed_again(cx: &mut TestAppContext) {
             SettingsOp::CompleteOnboardingStep(OnboardingStep::Welcome)
         ))
     );
-    let session = owner.update(cx, |owner, _| owner.session.take());
     VisualTestContext::from_window(window, cx).simulate_keystrokes("enter");
     cx.run_until_parked();
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::Settings(
+            SettingsOp::CompleteOnboardingStep(OnboardingStep::YourName)
+        ))
+    );
+    assert_eq!(step(&owner, cx), Step::Accounts);
+    let session = owner.update(cx, |owner, _| owner.session.take());
+    press_continue(&owner, cx);
     let unsent = |owner: &Entity<Presence>, cx: &mut TestAppContext| {
         owner.read_with(cx, |owner, cx| {
             owner
@@ -266,13 +286,12 @@ fn an_unsent_finish_says_so_and_can_be_pressed_again(cx: &mut TestAppContext) {
     assert!(unsent(&owner, cx));
     assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
     owner.update(cx, |owner, _| owner.session = session);
-    VisualTestContext::from_window(window, cx).simulate_keystrokes("enter");
-    cx.run_until_parked();
+    press_continue(&owner, cx);
     assert!(!unsent(&owner, cx));
     assert_eq!(
         controls.try_recv(),
         Ok(ControlToBrain::Settings(
-            SettingsOp::CompleteOnboardingStep(OnboardingStep::YourName)
+            SettingsOp::CompleteOnboardingStep(OnboardingStep::Accounts)
         ))
     );
     assert_eq!(
@@ -432,17 +451,22 @@ fn the_finish_lands_on_the_peek_only_when_the_brain_says_so(cx: &mut TestAppCont
     cx.run_until_parked();
     VisualTestContext::from_window(window, cx).simulate_keystrokes("enter");
     cx.run_until_parked();
+    press_continue(&owner, cx);
     let sent = std::iter::from_fn(|| controls.try_recv().ok()).collect::<Vec<_>>();
     assert_eq!(
         sent,
-        [OnboardingStep::Welcome, OnboardingStep::YourName]
-            .map(|step| ControlToBrain::Settings(SettingsOp::CompleteOnboardingStep(step)))
-            .into_iter()
-            .chain([ControlToBrain::Settings(SettingsOp::FinishOnboarding)])
-            .collect::<Vec<_>>()
+        [
+            OnboardingStep::Welcome,
+            OnboardingStep::YourName,
+            OnboardingStep::Accounts
+        ]
+        .map(|step| ControlToBrain::Settings(SettingsOp::CompleteOnboardingStep(step)))
+        .into_iter()
+        .chain([ControlToBrain::Settings(SettingsOp::FinishOnboarding)])
+        .collect::<Vec<_>>()
     );
     owner.update(cx, |owner, cx| {
-        for _ in 0..2 {
+        for _ in 0..3 {
             owner
                 .link_events(
                     Batch::Plain(vec![LinkEvent::Settings {
@@ -721,4 +745,350 @@ fn a_hold_held_as_onboarding_opens_ends_as_refused_and_the_next_one_after_close_
     owner.read_with(cx, |owner, _| {
         assert_eq!(owner.voice.status, Some(Text::HoldPreparing));
     });
+}
+
+fn account(owner: &Entity<Presence>, generation: u64, view: AccountView, cx: &mut TestAppContext) {
+    owner.update(cx, |owner, cx| {
+        owner
+            .link_events(
+                Batch::Plain(vec![LinkEvent::Account { generation, view }]),
+                cx,
+            )
+            .expect("an account view");
+    });
+    cx.run_until_parked();
+}
+
+fn claude(
+    owner: &Entity<Presence>,
+    generation: u64,
+    view: ClaudeCodeView,
+    cx: &mut TestAppContext,
+) {
+    owner.update(cx, |owner, cx| {
+        owner
+            .link_events(
+                Batch::Plain(vec![LinkEvent::Connections {
+                    generation,
+                    view: ConnectionsView {
+                        anthropic: KeyView::Missing,
+                        claude_code: view,
+                    },
+                }]),
+                cx,
+            )
+            .expect("a connections view");
+    });
+    cx.run_until_parked();
+}
+
+const SIGNED_OUT: AccountView = AccountView::SignedOut {
+    revocation_unconfirmed: false,
+};
+
+const CLAUDE_OUT: ClaudeCodeView = ClaudeCodeView::SignedOut {
+    version: ClaudeVersion {
+        major: 2,
+        minor: 1,
+        patch: 306,
+    },
+};
+
+fn drain(controls: &async_channel::Receiver<ControlToBrain>) -> Vec<ControlToBrain> {
+    std::iter::from_fn(|| controls.try_recv().ok()).collect()
+}
+
+/// The window at the account step on connection 7, signed out of both connections, with the two
+/// step records drained.
+fn on_accounts(
+    cx: &mut TestAppContext,
+) -> (
+    Entity<Presence>,
+    AnyWindowHandle,
+    async_channel::Receiver<ControlToBrain>,
+) {
+    let (owner, window, controls) = showing(cx);
+    account(&owner, 7, SIGNED_OUT, cx);
+    claude(&owner, 7, CLAUDE_OUT, cx);
+    for _ in 0..2 {
+        VisualTestContext::from_window(window, cx).simulate_keystrokes("enter");
+        cx.run_until_parked();
+    }
+    assert_eq!(step(&owner, cx), Step::Accounts);
+    assert_eq!(drain(&controls).len(), 2, "the two step records");
+    (owner, window, controls)
+}
+
+/// Continue with ChatGPT from the step, as its button does.
+fn sign_in(owner: &Entity<Presence>, cx: &mut TestAppContext) {
+    owner.update(cx, |owner, cx| {
+        owner.onboarding_account_op(AccountOp::SignIn, cx);
+    });
+}
+
+fn chatgpt_mark(owner: &Entity<Presence>, cx: &mut TestAppContext) -> SignInMark {
+    owner.read_with(cx, |owner, _| owner.onboarding_chatgpt)
+}
+
+#[gpui::test]
+fn enter_on_the_account_step_starts_nothing(cx: &mut TestAppContext) {
+    let (owner, window, controls) = on_accounts(cx);
+    VisualTestContext::from_window(window, cx).simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(drain(&controls), []);
+    assert_eq!(step(&owner, cx), Step::Accounts);
+}
+
+/// The brain may start a sign-in late, so a dismissal cancels one it hasn't shown yet, past the
+/// model's gate, once.
+#[gpui::test]
+fn a_dismissal_before_the_wait_shows_cancels_the_sign_in_once(cx: &mut TestAppContext) {
+    let (owner, window, controls) = on_accounts(cx);
+    sign_in(&owner, cx);
+    assert_eq!(
+        drain(&controls),
+        [ControlToBrain::AccountOp(AccountOp::SignIn)]
+    );
+    escape(&owner, window, cx);
+    assert!(owner.read_with(cx, |owner, _| owner.onboarding.is_none()));
+    assert_eq!(
+        drain(&controls),
+        [ControlToBrain::AccountOp(AccountOp::CancelSignIn)]
+    );
+    account(&owner, 7, AccountView::SigningIn, cx);
+    assert_eq!(drain(&controls), [], "a sent cancel isn't owed again");
+    assert_eq!(chatgpt_mark(&owner, cx), SignInMark::Settled);
+}
+
+#[gpui::test]
+fn a_dismissal_while_the_browser_waits_cancels_it(cx: &mut TestAppContext) {
+    let (owner, _, controls) = on_accounts(cx);
+    sign_in(&owner, cx);
+    account(&owner, 7, AccountView::SigningIn, cx);
+    drain(&controls);
+    owner.update(cx, |owner, cx| {
+        owner.dismiss_onboarding(cx).expect("Finish later")
+    });
+    assert_eq!(
+        drain(&controls),
+        [ControlToBrain::AccountOp(AccountOp::CancelSignIn)]
+    );
+}
+
+/// A sign-in that ended, by leaving the wait or by an error offering a new one, isn't cancelled.
+#[gpui::test]
+fn a_sign_in_that_ended_is_not_cancelled(cx: &mut TestAppContext) {
+    for ended in [false, true] {
+        let (owner, window, controls) = on_accounts(cx);
+        sign_in(&owner, cx);
+        account(&owner, 7, AccountView::SigningIn, cx);
+        if ended {
+            account(&owner, 7, SIGNED_OUT, cx);
+        } else {
+            let error = UserError::new(ErrorKey::SignInTimedOut, Vec::new(), vec![Action::SignIn])
+                .expect("one action");
+            owner.update(cx, |owner, cx| {
+                owner
+                    .link_events(
+                        Batch::Plain(vec![LinkEvent::Error {
+                            generation: 7,
+                            error,
+                        }]),
+                        cx,
+                    )
+                    .expect("the sign-in's error");
+            });
+        }
+        drain(&controls);
+        escape(&owner, window, cx);
+        assert_eq!(drain(&controls), [], "ended by a view: {ended}");
+    }
+}
+
+/// Continue and Not now leave a waiting sign-in alone; the finish hands it over.
+#[gpui::test]
+fn continue_hands_a_waiting_sign_in_over(cx: &mut TestAppContext) {
+    let (owner, _, controls) = on_accounts(cx);
+    sign_in(&owner, cx);
+    account(&owner, 7, AccountView::SigningIn, cx);
+    drain(&controls);
+    press_continue(&owner, cx);
+    assert_eq!(
+        drain(&controls),
+        [
+            ControlToBrain::Settings(SettingsOp::CompleteOnboardingStep(OnboardingStep::Accounts)),
+            ControlToBrain::Settings(SettingsOp::FinishOnboarding)
+        ]
+    );
+    owner.update(cx, |owner, cx| {
+        for onboarded in [false, true] {
+            owner
+                .link_events(
+                    Batch::Plain(vec![LinkEvent::Settings {
+                        generation: 7,
+                        view: view("Kumo", onboarded),
+                        answer: true,
+                    }]),
+                    cx,
+                )
+                .expect("an answer");
+        }
+        assert!(owner.onboarding.is_none());
+    });
+    assert_eq!(chatgpt_mark(&owner, cx), SignInMark::Settled);
+    assert_eq!(drain(&controls), []);
+}
+
+/// A cancel that can't be sent stays owed across a link drop: sent at the next connection's wait,
+/// dropped when that connection shows none.
+#[gpui::test]
+fn an_owed_cancel_survives_a_link_drop(cx: &mut TestAppContext) {
+    for waiting in [true, false] {
+        let (owner, window, controls) = on_accounts(cx);
+        sign_in(&owner, cx);
+        drain(&controls);
+        owner.update(cx, |owner, cx| {
+            owner.session = None;
+            owner
+                .settings
+                .update(cx, |state, _| state.accounts.disconnected());
+        });
+        escape(&owner, window, cx);
+        assert_eq!(drain(&controls), []);
+        assert_eq!(
+            chatgpt_mark(&owner, cx),
+            SignInMark::CancelOwed { generation: 7 }
+        );
+        owner.update(cx, |owner, _| {
+            owner.session = Some(Session::detached(8, Incarnation(2)));
+        });
+        account(
+            &owner,
+            8,
+            if waiting {
+                AccountView::SigningIn
+            } else {
+                SIGNED_OUT
+            },
+            cx,
+        );
+        let cancel = [ControlToBrain::AccountOp(AccountOp::CancelSignIn)];
+        assert_eq!(
+            drain(&controls),
+            &cancel[..usize::from(waiting)],
+            "{waiting}"
+        );
+        assert_eq!(chatgpt_mark(&owner, cx), SignInMark::Settled);
+    }
+}
+
+#[gpui::test]
+fn a_sign_in_from_elsewhere_drops_an_owed_cancel(cx: &mut TestAppContext) {
+    let (owner, window, controls) = on_accounts(cx);
+    sign_in(&owner, cx);
+    owner.update(cx, |owner, _| owner.session = None);
+    escape(&owner, window, cx);
+    drain(&controls);
+    owner.update(cx, |owner, cx| {
+        owner.account_op(AccountOp::SignIn, cx);
+    });
+    assert_eq!(chatgpt_mark(&owner, cx), SignInMark::Settled);
+}
+
+#[gpui::test]
+fn claude_codes_sign_in_from_the_step_is_cancelled_on_dismissal(cx: &mut TestAppContext) {
+    for refused in [false, true] {
+        let (owner, window, controls) = on_accounts(cx);
+        owner.update(cx, |owner, cx| {
+            owner
+                .settings
+                .update(cx, |state, _| state.claude.open_connect());
+            owner.onboarding_claude_op(ConnectionOp::ConnectClaudeCode, cx);
+        });
+        assert_eq!(
+            drain(&controls),
+            [ControlToBrain::Connection(ConnectionOp::ConnectClaudeCode)]
+        );
+        if refused {
+            claude(&owner, 7, CLAUDE_OUT, cx);
+        }
+        escape(&owner, window, cx);
+        let cancel = [ControlToBrain::Connection(ConnectionOp::CancelClaudeSignIn)];
+        assert_eq!(
+            drain(&controls),
+            &cancel[..usize::from(!refused)],
+            "{refused}"
+        );
+    }
+}
+
+/// After a shell restart the window owns a waiting sign-in it finds, at open or on a connection's
+/// first view.
+#[gpui::test]
+fn the_window_adopts_a_waiting_sign_in_after_a_restart(cx: &mut TestAppContext) {
+    for at_open in [true, false] {
+        let (owner, window, controls) = showing(cx);
+        if at_open {
+            owner.update(cx, |owner, cx| {
+                owner.settings.update(cx, |state, _| {
+                    assert!(state.accounts.receive(Some(7), 7, AccountView::SigningIn));
+                });
+                owner.adopt_onboarding_sign_ins(cx);
+            });
+        } else {
+            account(&owner, 7, AccountView::SigningIn, cx);
+        }
+        escape(&owner, window, cx);
+        assert_eq!(
+            drain(&controls),
+            [ControlToBrain::AccountOp(AccountOp::CancelSignIn)],
+            "{at_open}"
+        );
+    }
+}
+
+#[gpui::test]
+fn the_plan_line_shows_once_this_windows_sign_in_completes(cx: &mut TestAppContext) {
+    let (owner, _, _controls) = on_accounts(cx);
+    let shows = |owner: &Entity<Presence>, cx: &mut TestAppContext| {
+        owner.read_with(cx, |owner, cx| {
+            let view = owner.onboarding.as_ref().expect("showing").view.read(cx);
+            (view.plan, super::accounts::usable(owner.settings.read(cx)))
+        })
+    };
+    assert_eq!(shows(&owner, cx), (false, false));
+    sign_in(&owner, cx);
+    account(&owner, 7, AccountView::SigningIn, cx);
+    account(
+        &owner,
+        7,
+        AccountView::SignedIn {
+            email: None,
+            plan: PlanState::Enabled,
+            recovery: None,
+        },
+        cx,
+    );
+    assert_eq!(shows(&owner, cx), (true, true));
+}
+
+/// A refused op opens no mark, so a dismissal has nothing to cancel.
+#[gpui::test]
+fn a_refused_sign_in_opens_no_mark(cx: &mut TestAppContext) {
+    let (owner, window, controls) = on_accounts(cx);
+    account(
+        &owner,
+        7,
+        AccountView::SignedIn {
+            email: None,
+            plan: PlanState::Enabled,
+            recovery: None,
+        },
+        cx,
+    );
+    sign_in(&owner, cx);
+    assert_eq!(drain(&controls), []);
+    assert_eq!(chatgpt_mark(&owner, cx), SignInMark::Settled);
+    escape(&owner, window, cx);
+    assert_eq!(drain(&controls), []);
 }

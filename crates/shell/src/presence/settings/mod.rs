@@ -1,7 +1,7 @@
 //! Settings window state and shared frame, with one module per tab.
 
 pub(super) mod accounts;
-mod claude;
+pub(super) mod claude;
 mod general;
 mod github;
 mod voice;
