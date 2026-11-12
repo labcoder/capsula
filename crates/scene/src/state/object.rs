@@ -410,9 +410,18 @@ pub(super) fn validate_changes<'a>(
                 .map(|next| (anchor, *next));
         }
     }
-    let mut dependants: BTreeMap<&WireId, Vec<&WireId>> = BTreeMap::new();
-    for (target, anchor) in &behind {
-        dependants.entry(*anchor).or_default().push(*target);
+    // How many objects sit exactly k links below each object, so the depth below a target is
+    // read in at most MAX_OBJECT_DEPTH steps instead of walked.
+    let mut depths: BTreeMap<&WireId, [u32; MAX_OBJECT_DEPTH + 1]> = BTreeMap::new();
+    for &target in behind.keys() {
+        let mut at = target;
+        for distance in 1..=MAX_OBJECT_DEPTH {
+            let Some(&anchor) = behind.get(at) else {
+                break;
+            };
+            depths.entry(anchor).or_insert([0; MAX_OBJECT_DEPTH + 1])[distance] += 1;
+            at = anchor;
+        }
     }
     for (index, change) in step.set.iter().enumerate() {
         let prefix = FieldPath::default().field("set").index(index);
@@ -439,7 +448,7 @@ pub(super) fn validate_changes<'a>(
         if below.parent != target.parent {
             return Err(fail("behind", ErrorCode::KindChanged));
         }
-        // Admitted chains are acyclic and at most MAX_OBJECT_DEPTH links long, so both walks stop.
+        // Admitted chains are acyclic and at most MAX_OBJECT_DEPTH links long, so this walk stops.
         let mut above = 0;
         let mut at = anchor;
         loop {
@@ -455,27 +464,33 @@ pub(super) fn validate_changes<'a>(
             }
             at = next;
         }
-        let mut beneath = 0;
-        let mut pending = vec![(&change.target, 0)];
-        while let Some((at, depth)) = pending.pop() {
-            beneath = beneath.max(depth);
-            if above + 1 + beneath > MAX_OBJECT_DEPTH {
-                return Err(fail("behind", ErrorCode::TooDeep));
+        let mut moved = depths
+            .get(&change.target)
+            .copied()
+            .unwrap_or([0; MAX_OBJECT_DEPTH + 1]);
+        let beneath = moved.iter().rposition(|count| *count > 0).unwrap_or(0);
+        if above + 1 + beneath > MAX_OBJECT_DEPTH {
+            return Err(fail("behind", ErrorCode::TooDeep));
+        }
+        moved[0] = 1;
+        let old = behind.insert(&change.target, anchor);
+        for (start, joined) in [(old, false), (Some(anchor), true)] {
+            let mut next = start;
+            for distance in 1..=MAX_OBJECT_DEPTH {
+                let Some(at) = next else {
+                    break;
+                };
+                let counts = depths.entry(at).or_insert([0; MAX_OBJECT_DEPTH + 1]);
+                for (count, objects) in counts[distance..].iter_mut().zip(moved) {
+                    *count = if joined {
+                        *count + objects
+                    } else {
+                        count.saturating_sub(objects)
+                    };
+                }
+                next = behind.get(at).copied();
             }
-            pending.extend(
-                dependants
-                    .get(at)
-                    .into_iter()
-                    .flatten()
-                    .map(|dependant| (*dependant, depth + 1)),
-            );
         }
-        if let Some(old) = behind.insert(&change.target, anchor)
-            && let Some(list) = dependants.get_mut(old)
-        {
-            list.retain(|dependant| *dependant != &change.target);
-        }
-        dependants.entry(anchor).or_default().push(&change.target);
     }
     Ok(())
 }
