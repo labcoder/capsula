@@ -601,7 +601,10 @@ step or across steps.
   `behind`, so no admission state is stored. A removed object keeps its link in that map while
   something live is behind it, the same rule the layout holds it by, so the cycle walk passes
   through it the way its dependants do and it counts towards their chain's length. A removed
-  object with nothing live behind it is left out and counts for nothing.
+  object with nothing live behind it is left out and counts for nothing, from the step after
+  the one that removes it: within that step it still counts, so removing a 16-deep stack and
+  linking its base in one step is refused `TooDeep` where two steps are admitted. That only
+  refuses more, and replay refuses the same step.
 - **A removed or cut anchor.** It keeps its place in the walk without painting, so nothing that
   survives changes order: its dependants paint where they did, and if the anchor was behind
   something, they stay behind that too. `LayoutState` holds every removed or cut anchor that a
@@ -624,6 +627,9 @@ step or across steps.
   allocations bounded by the node count plus the held anchors (the places by handle, the sorted
   links, the walk stack and the order). Each held anchor is one entry in the layout's held map,
   counted in its index bytes; the map stays empty, and costs nothing, in a scene with no links.
+  Each prepare and each cut rebuilds the map, so with links cut and recovery allocate it once
+  each; every held anchor lies on a live chain of at most 16 links, so it holds at most 16 per
+  live object with a link.
   Admission's walk up from an anchor stops at 16 links. It reads the depth below a target from
   counts of the objects at each distance below every linked object, built once per step that
   names `behind` and updated along at most 16 anchors for each link, so a step that re-points a
