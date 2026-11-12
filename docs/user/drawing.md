@@ -14,8 +14,10 @@ replaces this conversation's earlier drawings once the new drawing's first step 
 Normally their last picture stays briefly until the new drawing starts on the same drawing
 layer. This visual hold lasts at most 250 ms while the interface is running and can end sooner
 when space is tight; it does not keep the old drawings available for further changes. If the
-replacement then fails, the screen may be left empty and its conversation reports that the
-previous drawings were removed, even if the drawing call had already ended.
+replacement then fails, the screen may be left empty and its conversation gets one notice that
+the previous drawings were removed, even if the drawing call had already ended. This includes
+a rejected later drawing record or a failed save after the replacement's first step was saved;
+the error keeps its specific cause. Stopping a drawing yourself does not report a drawing failure.
 Separate drawings can be kept for comparison, up to four on
 screen; they can still overlap until side-by-side arrangement is available.
 

@@ -118,9 +118,11 @@ restore victims and may leave no drawing. Failed cut retries share the clear bac
 30 seconds [guess], without resetting while a cut is in flight.
 
 A successor keeps one bounded pending-replacement fact until its first validated `StepShown`.
-A terminal failure before that paint ends open calls with `drawing.ReplacementFailedPreviousRemoved`
-and emits one content-free `DrawingReplacementFailed` for the replacement's original thread/run.
-Already-ended results are not rewritten. Whole-scene `SceneFailed` refusals derive their original
+A terminal brain validation/store error or shell refusal before that paint emits one content-free
+`DrawingReplacementFailed` for the replacement's original thread/run. Tool results retain their
+specific validation, store or preparation error; they do not duplicate the loss notice. User
+cancellation reports no drawing failure, and already-ended results are not rewritten.
+Whole-scene `SceneFailed` refusals derive their original
 identity here even when the shell had no run at header refusal; they are distinct from explicit
 `ClearDrawing` requests. The shell retains only its existing single notice, filters it by
 conversation and localizes its fixed text; it never attaches late loss
