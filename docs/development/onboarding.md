@@ -25,10 +25,12 @@ durable.
 ```mermaid
 flowchart TD
     S{"First SettingsView"} -- "onboarded is true" --> D["Dock only, as on any day"]
-    S -- "onboarded is false" --> W["1 Welcome: Hi, I'm (name input)"]
-    W -- "Enter or Continue: unchanged, or saved" --> U["2 Your name (optional)"]
+    S -- "onboarded is false" --> R{"onboarding_from, clamped to this build's steps"}
+    R -- "welcome" --> W["1 Welcome: Hi, I'm (name input)"]
+    R -- "your_name or later" --> U["2 Your name (optional)"]
+    W -- "Enter or Continue: unchanged, or saved; records Welcome" --> U
     W -- "invalid, or refused (Continue again goes on)" --> W
-    U -- "Enter or Continue: blank, unchanged, or saved" --> F["FinishOnboarding queued"]
+    U -- "Enter or Continue: blank, unchanged, or saved; records Your name" --> F["FinishOnboarding queued"]
     U -- "invalid, or refused (Continue again goes on)" --> U
     F -- "refused or not sent" --> U
     F -- "answered: onboarded is true" --> P["Window closes, the peek opens"]

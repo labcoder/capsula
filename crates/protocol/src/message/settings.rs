@@ -362,10 +362,39 @@ mod tests {
         );
         assert!(postcard::from_bytes::<SettingsOp>(&[12]).is_err());
         assert!(postcard::from_bytes::<SettingsOp>(&[12, 2]).is_err());
-        assert!(postcard::from_bytes::<SettingsOp>(&[13]).is_err());
+        assert!(postcard::from_bytes::<SettingsOp>(&[13, 4]).is_err());
+        assert!(postcard::from_bytes::<SettingsOp>(&[14]).is_err());
         assert!(postcard::from_bytes::<SettingsOp>(&[8, 3]).is_err());
         assert!(postcard::from_bytes::<SettingsOp>(&[9, 2]).is_err());
         assert_eq!(SttUnload::default(), SttUnload::Kept);
+    }
+
+    #[test]
+    fn onboarding_steps_keep_their_wire_positions() {
+        use crate::message::OnboardingStep;
+        let steps = [
+            ([13, 0], OnboardingStep::Welcome),
+            ([13, 1], OnboardingStep::YourName),
+            ([13, 2], OnboardingStep::Accounts),
+            ([13, 3], OnboardingStep::Shortcut),
+        ];
+        for (bytes, step) in steps {
+            let op = SettingsOp::CompleteOnboardingStep(step);
+            assert_eq!(postcard::to_allocvec(&op).expect("encodes"), bytes);
+            assert_eq!(
+                postcard::from_bytes::<SettingsOp>(&bytes).expect("decodes"),
+                op
+            );
+        }
+        let view = SettingsView {
+            onboarding_from: OnboardingStep::Shortcut,
+            ..view()
+        };
+        let bytes = postcard::to_allocvec(&view).expect("encodes");
+        assert_eq!(
+            postcard::from_bytes::<SettingsView>(&bytes).expect("decodes"),
+            view
+        );
     }
 
     #[test]
