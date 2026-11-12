@@ -352,8 +352,7 @@ mod tests {
 
     use super::{
         Ask, Build, Check, Entry, build, end, end_with, entry, refuse_running, run_bounded,
-        wait_bounded,
-        warn_cleanup, with_cleanup,
+        wait_bounded, warn_cleanup, with_cleanup,
     };
     use crate::platform;
 

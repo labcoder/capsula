@@ -3,8 +3,9 @@
 //!
 //! The brain only serves the `kumochi.exe` beside it, so the gate copies the brain and itself, as
 //! `kumochi.exe`, into a fresh folder under `target/slice2-gate` and runs the client from that copy.
-//! Each item gets its own `%LOCALAPPDATA%`, so no item sees another's store, and the developer's own
-//! dev store is never touched.
+//! Each item gets its own `%LOCALAPPDATA%` and `%APPDATA%`, so no item sees another's store or
+//! settings. A brain still reaches some of the developer's dev data outside them, in Claude Code's
+//! folder and in Credential Manager: see `docs/development/slice2-gate.md` and OSC-680.
 #![expect(
     clippy::print_stdout,
     reason = "the gate's verdicts and numbers are its output"
@@ -293,7 +294,9 @@ mod tests {
         let lines = end_leftovers(vec![left]);
         assert_eq!(
             lines,
-            [format!("brain {pid} outlived its kill; it has exited since")]
+            [format!(
+                "brain {pid} outlived its kill; it has exited since"
+            )]
         );
     }
 

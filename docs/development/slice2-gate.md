@@ -19,10 +19,24 @@ flowchart LR
   copies the brain and itself, renamed `kumochi.exe`, into a fresh folder and runs the scripted
   client from that copy. The client reads the instance capability from Credential Manager and
   sends `Hello` on both pipes, as the shell does.
-- Each item gets its own `%LOCALAPPDATA%` folder and fixture script (`KUMOCHI_FIXTURE`, dev builds
-  only), so items never share a store and the developer's dev store is never touched. The gate
-  refuses to start while any `kumochi.exe` or `kumochid.exe` runs, because a dev brain would hold
-  the session's pipes.
+- Each item gets its own `%LOCALAPPDATA%` and `%APPDATA%` folders and fixture script
+  (`KUMOCHI_FIXTURE`, dev builds only), so items never share a store or settings. That doesn't keep
+  a brain away from all of the developer's dev data (OSC-680). Every brain start still:
+  - builds Claude Code's lane in `Kumochi Dev` under the local application data folder the system
+    reports, not the one in the environment. It takes `claude-code.lock` there, deletes leftover
+    launch folders in `claude-code\engine`, and deletes `claude-code` itself when a Disconnect
+    left its marker. With no settings file in the item's `%APPDATA%`, Claude Code is on, so the
+    brain also runs the installed `claude.exe` for its version and its sign-in status against
+    that folder's `config`;
+  - writes the instance capability to Credential Manager under `Kumochi Dev instance`, and deletes
+    it when it exits cleanly;
+  - opens a new account authority in its own folder, which writes a host entry under the
+    `Kumochi Dev` service that stays after the run, and deletes that service's earlier-format
+    account names.
+
+  Until OSC-680 is settled, run the gate only where that is acceptable. The gate refuses to start
+  while any `kumochi.exe` or `kumochid.exe` runs, because a dev brain would hold the session's
+  pipes.
 - The client answers `Ping`, grants credit for each data frame it takes, and records every frame
   with the instant its reader thread took it. Its data reader can pause, take frames one at a
   time, or keep reading while it withholds credit.

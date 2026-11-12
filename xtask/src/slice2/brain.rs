@@ -1,8 +1,9 @@
-//! The real brain, started from the gate's folder with its own `%LOCALAPPDATA%` and fixture.
+//! The real brain, started from the gate's folder with its own `%LOCALAPPDATA%`, `%APPDATA%` and
+//! fixture.
 
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::io;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, PoisonError};
 use std::thread;
@@ -23,24 +24,31 @@ pub(super) fn leftovers() -> Vec<Child> {
     std::mem::take(&mut *LEFTOVERS.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
-/// One gate item's folder: its fixture script, and the `%LOCALAPPDATA%` its brains share.
+/// One gate item's folder: its fixture script, and the `%LOCALAPPDATA%` and `%APPDATA%` its
+/// brains share.
 #[derive(Debug)]
 pub(super) struct Case {
     bin: PathBuf,
     fixture: PathBuf,
-    /// What the brain sees as `%LOCALAPPDATA%`: its store and logs, and nothing else.
+    /// What the brain sees as `%LOCALAPPDATA%`: its store and logs.
     pub(super) local: PathBuf,
+    /// What the brain sees as `%APPDATA%`: its settings.
+    roaming: PathBuf,
 }
 
 impl Case {
     pub(super) fn new(folder: &Path, name: &str, script: &str) -> Result<Self> {
         let root = folder.join(name);
         let local = root.join("local");
-        fs::create_dir_all(&local).with_context(|| format!("creating {}", local.display()))?;
+        let roaming = root.join("roaming");
+        for dir in [&local, &roaming] {
+            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
         let case = Self {
             bin: folder.join("bin"),
             fixture: root.join("fixture.txt"),
             local,
+            roaming,
         };
         case.script(script)?;
         Ok(case)
@@ -63,6 +71,7 @@ impl Case {
     pub(super) fn start(&self) -> Result<Brain> {
         let child = Command::new(self.bin.join(BRAIN_EXE))
             .env("LOCALAPPDATA", &self.local)
+            .env("APPDATA", &self.roaming)
             .env(FIXTURE_ENV, &self.fixture)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
