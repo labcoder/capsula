@@ -562,12 +562,21 @@ mod tests {
             (60, None, Workload::Panel)
         );
         assert_eq!(
-            options(["idle", "--onboarding", "--baseline", "a"].into_iter().map(str::to_owned))
-                .unwrap(),
+            options(
+                ["idle", "--onboarding", "--baseline", "a"]
+                    .into_iter()
+                    .map(str::to_owned)
+            )
+            .unwrap(),
             (60, Some(PathBuf::from("a")), Workload::Onboarding)
         );
         assert!(
-            options(["idle", "--panel", "--onboarding"].into_iter().map(str::to_owned)).is_err(),
+            options(
+                ["idle", "--panel", "--onboarding"]
+                    .into_iter()
+                    .map(str::to_owned)
+            )
+            .is_err(),
             "one workload at a time"
         );
     }
