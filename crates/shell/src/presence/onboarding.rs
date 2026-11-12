@@ -468,7 +468,8 @@ impl Presence {
                 window.bounds_changed(cx);
                 match platform::activate_presence_window(window) {
                     Ok(previous) => {
-                        if previous.is_some() {
+                        // A taskbar click would otherwise make Kumochi's own window the one restored.
+                        if panel.previous.is_none() {
                             panel.previous = previous;
                         }
                         panel
