@@ -57,6 +57,12 @@ impl Presence {
             } else {
                 EscapePanel::Threads
             }
+        } else if self.onboarding.is_some() {
+            if self.onboarding_editing(cx) {
+                EscapePanel::OnboardingEdit
+            } else {
+                EscapePanel::Onboarding
+            }
         } else if self.text_open() {
             EscapePanel::Open
         } else {
@@ -72,12 +78,15 @@ impl Presence {
             Escape::Stop => {
                 if let Some(message) = self.runs.stop() {
                     self.stop_run(message, cx);
-                } else if let Some(run) = self.presenter.stoppable_run()
-                    && self.presenter.live_work(std::time::Instant::now())
-                {
+                } else if self.presenter.live_work(std::time::Instant::now()) {
                     self.place_drawings(cx.weak_entity(), cx);
-                    let effects = self.presenter.stop(run, std::time::Instant::now());
-                    self.scene_effects(effects, cx);
+                    if let Some(run) = self.presenter.stoppable_run() {
+                        let effects = self.presenter.stop(run, std::time::Instant::now());
+                        self.scene_effects(effects, cx);
+                    } else {
+                        self.presenter.discard_replacement();
+                        self.draw_changed(cx);
+                    }
                 }
                 None
             }
@@ -100,6 +109,8 @@ impl Presence {
                     }
                 } else if panel == EscapePanel::Threads {
                     self.dismiss_threads(cx)?;
+                } else if panel == EscapePanel::Onboarding {
+                    self.dismiss_onboarding(cx)?;
                 } else {
                     self.dismiss_text(cx)?;
                 }
@@ -108,6 +119,8 @@ impl Presence {
             Escape::CancelEdit => {
                 if panel == EscapePanel::SettingsEdit {
                     self.cancel_settings_edit(cx)?;
+                } else if panel == EscapePanel::OnboardingEdit {
+                    self.cancel_onboarding_edit(cx);
                 } else if let Some(panel) = &self.thread_panel {
                     panel
                         .window

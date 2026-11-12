@@ -2,10 +2,7 @@
 use crate::{
     Handle, Text,
     geom::{Affine, Rect, Vec2},
-    limits::{
-        MAX_COMPOSED_SCALE, MAX_GLOBAL_DASH_PIECES, MAX_GLOBAL_FILL_VERTICES,
-        MAX_GLOBAL_OUTLINE_POINTS,
-    },
+    limits::{MAX_GLOBAL_DASH_PIECES, MAX_GLOBAL_FILL_VERTICES, MAX_GLOBAL_OUTLINE_POINTS},
     record::{Align, Rgb},
 };
 use std::{fmt, sync::Arc};
@@ -162,9 +159,10 @@ pub struct PaintWork {
 impl PaintWork {
     /// Charges every primitive once; a fill's crossing test costs O(points²).
     ///
-    /// Every `Prim::Rect` is charged as if the painter's path fallback draws it, because
-    /// rotation and partial reveals that trigger the fallback change from frame to frame.
-    pub fn of(primitives: &[Prim]) -> Self {
+    /// Every `Prim::Rect` is charged as if the painter's path fallback draws it at `scale`, the
+    /// composed scale its object was charged at, because rotation and partial reveals that
+    /// trigger the fallback change from frame to frame.
+    pub fn of(primitives: &[Prim], scale: f32) -> Self {
         primitives
             .iter()
             .map(|primitive| match primitive {
@@ -195,7 +193,7 @@ impl PaintWork {
                     fill,
                     border,
                 } => {
-                    let points = fallback_corner_segments(*rect, *radius)
+                    let points = fallback_corner_segments(*rect, *radius, scale)
                         .saturating_add(1)
                         .saturating_mul(4)
                         .saturating_add(1);
@@ -254,8 +252,9 @@ impl PaintWork {
     }
     /// The work of `primitives` on top of `spent`, or `None` once the sum doesn't fit `cap`.
     /// Each fill counts crossings only up to the room left in `cap`, so work that can never
-    /// fit stops after at most `cap.fill_vertices` counted fill points.
-    pub(crate) fn within(primitives: &[Prim], spent: Self, cap: Self) -> Option<Self> {
+    /// fit stops after at most `cap.fill_vertices` counted fill points. Rects are charged at
+    /// `scale`, as in [`Self::of`].
+    pub(crate) fn within(primitives: &[Prim], spent: Self, cap: Self, scale: f32) -> Option<Self> {
         primitives
             .iter()
             .try_fold(Self::default(), |sum, primitive| {
@@ -269,7 +268,7 @@ impl PaintWork {
                         )?;
                         Self::fills(points.len() + crossings(points, room))
                     }
-                    other => Self::of(std::slice::from_ref(other)),
+                    other => Self::of(std::slice::from_ref(other), scale),
                 };
                 let sum = sum + work;
                 (spent + sum).fits(cap).then_some(sum)
@@ -366,10 +365,10 @@ pub fn corner_segments(world_radius: f64) -> usize {
     whole((std::f64::consts::FRAC_PI_4 / half_angle).ceil()).map_or(usize::MAX, |n| n.max(1))
 }
 /// Corner pieces a `Prim::Rect` fallback is charged: its radius clamped as painted, at the
-/// largest admitted composed scale, so no later pose needs more.
-pub fn fallback_corner_segments(rect: Rect, radius: f32) -> usize {
+/// composed scale its object was charged at, so no admitted pose needs more.
+pub fn fallback_corner_segments(rect: Rect, radius: f32, scale: f32) -> usize {
     let radius = radius.clamp(0.0, (rect.size.x.min(rect.size.y) * 0.5).max(0.0));
-    corner_segments(f64::from(radius) * f64::from(MAX_COMPOSED_SCALE))
+    corner_segments(f64::from(radius) * f64::from(scale))
 }
 
 /// Intersecting edge pairs of a closed polygon, stopping at `cap + 1`: non-adjacent edges that
@@ -518,6 +517,12 @@ impl fmt::Debug for Item {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::limits::MAX_COMPOSED_SCALE;
+
+    /// Charges `primitives` at the largest admitted composed scale.
+    fn at_64(primitives: &[Prim]) -> PaintWork {
+        PaintWork::of(primitives, MAX_COMPOSED_SCALE)
+    }
 
     fn points(points: &[[f32; 2]]) -> Arc<[Vec2]> {
         points.iter().map(|p| Vec2::new(p[0], p[1])).collect()
@@ -675,7 +680,7 @@ mod tests {
     #[test]
     fn paint_work_charges_dashes_fills_and_every_rect_as_its_fallback() {
         let segment = [[0.0, 0.0], [100.0, 0.0]];
-        let dashed = PaintWork::of(&[
+        let dashed = at_64(&[
             Prim::Line {
                 points: points(&segment),
                 closed: false,
@@ -698,7 +703,7 @@ mod tests {
                 ..PaintWork::default()
             }
         );
-        let at_limit = PaintWork::of(&[Prim::Fill {
+        let at_limit = at_64(&[Prim::Fill {
             points: star(257, 85),
             color: paint(),
         }]);
@@ -710,7 +715,7 @@ mod tests {
             at_limit.fits_builds(),
             "257 points + 21,588 crossings fit one build"
         );
-        let over = PaintWork::of(&[Prim::Fill {
+        let over = at_64(&[Prim::Fill {
             points: star(331, 66),
             color: paint(),
         }]);
@@ -720,7 +725,7 @@ mod tests {
             "331 points + 21,515 crossings exceed one build"
         );
 
-        let square = PaintWork::of(&[rect(100.0, 0.0, Some(paint()), Some((paint(), 2.0)))]);
+        let square = at_64(&[rect(100.0, 0.0, Some(paint()), Some((paint(), 2.0)))]);
         assert_eq!(
             square,
             PaintWork {
@@ -732,15 +737,15 @@ mod tests {
             }
         );
         // Radius 8 at scale 64 needs 26 pieces per corner: 4 · 27 + 1 points.
-        let node = PaintWork::of(&[rect(100.0, 8.0, None, Some((paint(), 2.0)))]);
+        let node = at_64(&[rect(100.0, 8.0, None, Some((paint(), 2.0)))]);
         assert_eq!((node.outline_points, node.fill_vertices), (109, 0));
         // Clamped to half of a 10-unit side: radius 5 at scale 64 needs 20 pieces.
         assert_eq!(
-            PaintWork::of(&[rect(10.0, 8.0, Some(paint()), None)]).fill_vertices,
+            at_64(&[rect(10.0, 8.0, Some(paint()), None)]).fill_vertices,
             85
         );
         assert_eq!(
-            fallback_corner_segments(Rect::default(), f32::NAN),
+            fallback_corner_segments(Rect::default(), f32::NAN, MAX_COMPOSED_SCALE),
             usize::MAX
         );
         let largest = Prim::Rect {
@@ -752,12 +757,12 @@ mod tests {
             fill: None,
             border: Some((paint(), 2.0)),
         };
-        assert_eq!(PaintWork::of(&[largest]).largest_outline, 5_033);
+        assert_eq!(at_64(&[largest]).largest_outline, 5_033);
         // Radii 23,510 and 23,545 need 1,363 and 1,364 pieces at scale 64.
-        let outline = PaintWork::of(&[rect(50_000.0, 23_510.0, None, Some((paint(), 2.0)))]);
+        let outline = at_64(&[rect(50_000.0, 23_510.0, None, Some((paint(), 2.0)))]);
         assert_eq!(outline.largest_outline, 5_457);
         assert!(outline.fits_builds(), "the largest outline under the limit");
-        let outline = PaintWork::of(&[rect(
+        let outline = at_64(&[rect(
             50_000.0,
             23_545.0,
             Some(paint()),
@@ -786,7 +791,14 @@ mod tests {
             max_width: None,
             align: Align::Left,
         };
-        assert_eq!(PaintWork::of(&[text]), PaintWork::default());
+        assert_eq!(at_64(&[text]), PaintWork::default());
+    }
+
+    #[test]
+    fn a_rect_is_charged_at_the_scale_it_is_given() {
+        // Radius 8 at scale 2 needs 5 pieces per corner: 4 · 6 + 1 points, against 109 at 64.
+        let bordered = [rect(100.0, 8.0, None, Some((paint(), 2.0)))];
+        assert_eq!(PaintWork::of(&bordered, 2.0).outline_points, 25);
     }
 
     #[test]
@@ -873,7 +885,12 @@ mod tests {
         let square = fill(&[[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]);
         let bowtie = fill(&[[0.0, 0.0], [10.0, 10.0], [10.0, 0.0], [0.0, 10.0]]);
         let within = |prims: &[Prim], fill_vertices| {
-            PaintWork::within(prims, spent(fill_vertices), PaintWork::LIMITS)
+            PaintWork::within(
+                prims,
+                spent(fill_vertices),
+                PaintWork::LIMITS,
+                MAX_COMPOSED_SCALE,
+            )
         };
         assert_eq!(
             within(std::slice::from_ref(&bowtie), 507),
@@ -918,19 +935,19 @@ mod tests {
         ] {
             let mut previous = vec![rect(100.0, 0.0, None, Some((paint(), 2.0))); squares];
             previous.push(dash(2_980.0));
-            let spent = PaintWork::of(&previous);
+            let spent = at_64(&previous);
             let next = [
                 dash(length),
                 rect(100.0, radius, None, Some((paint(), 2.0))),
             ];
-            let work = PaintWork::of(&next);
+            let work = at_64(&next);
             let total = spent + work;
             assert_eq!(
                 (total.dash_pieces, total.outline_points),
                 (dashes, outlines)
             );
             assert_eq!(
-                PaintWork::within(&next, spent, PaintWork::LIMITS),
+                PaintWork::within(&next, spent, PaintWork::LIMITS, MAX_COMPOSED_SCALE),
                 accepted.then_some(PaintWork {
                     dash_pieces: 212,
                     outline_points: new_outline,

@@ -11,6 +11,10 @@ impl SceneView {
     /// # Errors
     /// Returns `Stale`, leaving `out` untouched, when `out` is bound to an earlier view or
     /// generation; clear it outside paint first.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one parent-first pass composes every pose and emits its paint items"
+    )]
     pub fn frame(&self, now: u64, out: &mut Frame) -> Result<(), PrepareError> {
         let bound = out
             .generation
@@ -109,6 +113,7 @@ impl SceneView {
                 draw: world.draw,
                 color: world.color,
                 flow: world.flow,
+                paint_scale: node.paint_scale,
             });
         }
         Ok(())

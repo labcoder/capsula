@@ -299,6 +299,7 @@ fn scene_v1_control_reaches_the_canonical_drawing_consumer() {
             run: RunId(1),
             scene: SceneId(1),
             index: 0,
+            reason: SceneFailure::Timeout,
             cut: cut.cut,
         }),
     ];

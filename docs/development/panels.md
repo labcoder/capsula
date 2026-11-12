@@ -99,8 +99,14 @@ and nonblocking requests; `presence/thread_view.rs` composes the task list with 
 `presence/messages.rs` conversation component:
 
 - gpui-kit's `ListState<ThreadsDelegate>` supplies thread selection, search, and load-more;
-- GPUI's variable-height `list()` supplies the messages, displayed oldest first. Older pages
-  are inserted at the top, preserving the visible scroll anchor. Page Up and Page Down scroll
+- GPUI's variable-height `list()` supplies the messages, displayed oldest first. Scroll-triggered
+  older pages are inserted at the top, preserving the visible scroll anchor. The explicit
+  Older messages button reveals the newly loaded page instead; pages that only extend an
+  existing drawing placeholder or contain assistant segments hidden by the provisional preview
+  continue until an older visible row or the true start is reached. A failed event read advances
+  the history revision, so later successful reads cannot revive its pending navigation.
+  Selection changes and reconnects also cancel that navigation.
+  Page Up and Page Down scroll
   the focused message region; its scrollbar and Older messages command are also available.
   The messages are the user's turns, the stored answers and the drawing steps; a Stop's record
   of which steps stayed isn't listed, since the steps themselves are.

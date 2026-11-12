@@ -149,10 +149,7 @@ fn prepare(check: Check) -> Result<()> {
     let name = check.args().join(" ");
     refuse_running(&platform::processes()?, std::process::id())?;
     println!("live {name}: building the dev brain (at most {BUILD_LIMIT:?})");
-    let mut cargo = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
-    cargo.args(["build", "--quiet", "--package", "kumochi-brain"]);
-    let built = run_bounded(cargo, BUILD_LIMIT, "the brain build")?;
-    ensure!(built.success(), "the brain didn't build ({built})");
+    build_brain()?;
     let me = std::env::current_exe()?;
     let target = me.parent().context("xtask has a folder")?;
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -176,8 +173,21 @@ fn prepare(check: Check) -> Result<()> {
     Ok(())
 }
 
+/// Builds the dev brain, ending the build and everything it started past [`BUILD_LIMIT`].
+pub(crate) fn build_brain() -> Result<()> {
+    let mut cargo = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    cargo.args(["build", "--quiet", "--package", "kumochi-brain"]);
+    build(cargo, BUILD_LIMIT)
+}
+
+fn build(cargo: Command, limit: Duration) -> Result<()> {
+    let built = run_bounded(cargo, limit, "the brain build")?;
+    ensure!(built.success(), "the brain didn't build ({built})");
+    Ok(())
+}
+
 /// Starts `command` and waits for it as [`bounded`] does.
-fn run_bounded(mut command: Command, limit: Duration, what: &str) -> Result<ExitStatus> {
+pub(crate) fn run_bounded(mut command: Command, limit: Duration, what: &str) -> Result<ExitStatus> {
     let child = command
         .spawn()
         .with_context(|| format!("starting {what}"))?;
@@ -210,7 +220,7 @@ fn wait_bounded(child: &mut Child, limit: Duration) -> io::Result<Option<ExitSta
 }
 
 /// Ends `child` and everything it started, and reaps it.
-fn end(child: &mut Child) -> Result<()> {
+pub(crate) fn end(child: &mut Child) -> Result<()> {
     let pid = child.id();
     let kill = platform::kill_tree(pid).map_err(|error| anyhow!("{error:#}; {}", survivor(pid)))?;
     end_with(child, kill, KILL_LIMIT)
@@ -341,8 +351,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        Ask, Build, Check, Entry, end, end_with, entry, refuse_running, run_bounded, wait_bounded,
-        warn_cleanup, with_cleanup,
+        Ask, Build, Check, Entry, build, end, end_with, entry, refuse_running, run_bounded,
+        wait_bounded, warn_cleanup, with_cleanup,
     };
     use crate::platform;
 
@@ -387,6 +397,20 @@ mod tests {
         assert!(
             slow.try_wait().expect("reads").is_some(),
             "the child is reaped"
+        );
+    }
+
+    #[test]
+    fn a_build_past_its_limit_is_ended() {
+        let start = Instant::now();
+        let error = build(held(), SHORT).expect_err("a hung build fails");
+        assert_eq!(
+            format!("{error:#}"),
+            "the brain build didn't finish in 200ms"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "it returned in bound"
         );
     }
 

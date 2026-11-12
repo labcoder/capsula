@@ -887,13 +887,13 @@ enum CallPhase {
     Ended,
 }
 impl CallState {
-    /// Checks record order and typed-equal continuation headers.
+    /// Checks record order and continuation headers with [`Begin::continues`].
     /// # Errors
     /// Returns an ordering or header error without changing phase.
     pub fn accept(&mut self, record: &Record, header: &Begin) -> Result<(), StepError> {
         let code = match (&self.phase, record) {
             (CallPhase::Ended, _) => Some(ErrorCode::AfterEnd),
-            (CallPhase::Before, Record::Begin(begin)) if begin != header => {
+            (CallPhase::Before, Record::Begin(begin)) if !begin.continues(header) => {
                 Some(ErrorCode::HeaderMismatch)
             }
             (CallPhase::Before, Record::Begin(_)) => {

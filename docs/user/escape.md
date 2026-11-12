@@ -8,10 +8,11 @@ Esc does one thing at a time, in this order:
    includes a message you just sent that it hasn't started answering: its answer never shows.
 2. Otherwise, if a drawing is on screen, it clears. The answer's text stays. That includes
    drawings still coming back after a reconnect: they don't come back.
-3. Otherwise, it cancels an active inline rename or Settings field edit in the focused panel,
-   without saving. Stopping work or clearing a drawing leaves the edit intact.
-4. Otherwise, it closes the focused typing box, Tasks or Settings panel. After cancelling an
-   edit, another Esc closes the panel.
+3. Otherwise, it cancels an active inline rename, Settings field edit or
+   [onboarding](onboarding.md) name edit, without saving. Stopping work or clearing a drawing
+   leaves the edit intact.
+4. Otherwise, it closes the focused typing box, Tasks or Settings panel, or the onboarding
+   window until you next start Kumochi. After cancelling an edit, another Esc closes the panel.
 
 Switching to another window also hides the typing box and keeps your draft, without bringing
 the previous app back. Esc and the box's close request still return focus to the previous app

@@ -17,7 +17,7 @@ use kumochi_protocol::message::{
     ThreadRow, ThreadTitle,
 };
 
-use super::messages::{Messages, older};
+use super::messages::Messages;
 use super::thread_selection::Selection;
 use super::{Presence, PresenceEvent, send};
 use crate::runs::Target;
@@ -586,8 +586,7 @@ impl ThreadsView {
         let more = state.before.is_some();
         let waiting = state.open.is_some() && state.reading();
         let older_label = cx.global::<Strings>().get(Text::OlderMessages);
-        let owner = self.owner.clone();
-        let model = self.model.clone();
+        let older_messages = self.messages.clone();
         let messages = self.messages.clone();
         div()
             .flex_1()
@@ -605,7 +604,9 @@ impl ThreadsView {
                     .ghost()
                     .disabled(waiting)
                     .label(older_label)
-                    .on_click(move |_, _, cx| older(&model, &owner, cx))
+                    .on_click(move |_, _, cx| {
+                        older_messages.update(cx, Messages::older);
+                    })
             }))
             .children(waiting.then(Spinner::new))
             .children(empty.map(|text| {

@@ -1,6 +1,6 @@
 //! Settings window state and shared frame, with one module per tab.
 
-mod accounts;
+pub(super) mod accounts;
 mod claude;
 mod general;
 mod github;
@@ -15,13 +15,14 @@ use gpui_kit::component::select::{SelectEvent, SelectState};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _, scroll::ScrollableElement as _};
 use gpui_kit::{
-    AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
+    App, AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
     KeyBinding, ParentElement as _, Render, Styled as _, Subscription, Task, WeakEntity, Window,
     div,
 };
+use kumochi_protocol::message::NameError;
 
 use super::{Presence, PresenceEvent, send};
-use crate::settings::{Field, Settings};
+use crate::settings::{Error, Field, Settings};
 use crate::strings::{Strings, Text};
 
 gpui_kit::actions!(settings, [NextTab, PreviousTab]);
@@ -169,28 +170,17 @@ impl SettingsView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        match event {
-            InputEvent::Focus => self.editing = Some(field),
-            InputEvent::Change => {
-                let value = input.read(cx).value();
-                self.model.update(cx, |state, cx| {
-                    state.change(field, &value);
-                    cx.notify();
-                });
-            }
-            InputEvent::PressEnter { shift: false, .. } | InputEvent::Blur => {
-                if self.editing == Some(field) {
-                    self.editing = None;
-                }
-                let _gone = self
-                    .owner
-                    .update(cx, |owner, cx| owner.save_setting(field, cx));
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    window.focus(&self.focus, cx);
-                }
-            }
-            InputEvent::PressEnter { .. } => {}
-        }
+        name_input_event(
+            field,
+            input,
+            event,
+            &mut self.editing,
+            &self.focus,
+            &self.model,
+            &self.owner,
+            window,
+            cx,
+        );
         cx.notify();
     }
 
@@ -240,6 +230,69 @@ impl SettingsView {
         window.focus(&self.focus, cx);
         cx.notify();
     }
+}
+
+/// A name input's events, for every view that edits a name: Focus marks the field edited, Change
+/// drafts it, and Enter or Blur saves it; Enter then focuses `after_enter`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the editing view's own state, passed through"
+)]
+pub(in crate::presence) fn name_input_event(
+    field: Field,
+    input: &Entity<InputState>,
+    event: &InputEvent,
+    editing: &mut Option<Field>,
+    after_enter: &FocusHandle,
+    model: &Entity<Settings>,
+    owner: &WeakEntity<Presence>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    match event {
+        InputEvent::Focus => *editing = Some(field),
+        InputEvent::Change => {
+            let value = input.read(cx).value();
+            model.update(cx, |state, cx| {
+                state.change(field, &value);
+                cx.notify();
+            });
+        }
+        InputEvent::PressEnter { shift: false, .. } | InputEvent::Blur => {
+            if *editing == Some(field) {
+                *editing = None;
+            }
+            let _gone = owner.update(cx, |owner, cx| owner.save_setting(field, cx));
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                window.focus(after_enter, cx);
+            }
+        }
+        InputEvent::PressEnter { .. } => {}
+    }
+}
+
+/// The words under a name input: Saving… while its save is in flight, and its error, if any.
+pub(in crate::presence) fn field_status(
+    state: &Settings,
+    field: Field,
+    strings: &Strings,
+) -> (Option<String>, Option<String>) {
+    let error = state.field(field).error.as_ref().map(|error| match error {
+        Error::Validation(NameError::Empty) => strings.get(Text::RenameEmpty),
+        Error::Validation(NameError::TooLong) => strings.get(Text::RenameNameTooLong),
+        Error::Validation(NameError::NotOneLine) => strings.get(Text::RenameOneLine),
+        Error::Brain(error) => strings.error(error),
+        Error::Offline => strings.get(if state.view().is_none() {
+            Text::SettingsOffline
+        } else {
+            Text::SettingsUnavailable
+        }),
+    });
+    let saving = state
+        .field(field)
+        .saving
+        .then(|| strings.get(Text::SettingsSaving));
+    (saving, error)
 }
 
 impl Render for SettingsView {

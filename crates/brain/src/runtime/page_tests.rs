@@ -962,6 +962,7 @@ async fn read_pages_and_text(
             | DataToShell::PageFailed { .. }
             | DataToShell::SceneSnapshot { .. }
             | DataToShell::ScenesRemoved { .. }
+            | DataToShell::ScenesReplaced { .. }
             | DataToShell::SceneBegin { .. }
             | DataToShell::SceneStepCommit { .. }
             | DataToShell::SceneSnapshotV1 { .. }

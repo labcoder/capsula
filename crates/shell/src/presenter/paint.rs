@@ -31,13 +31,13 @@ pub(crate) trait Stage {
 }
 
 pub(super) struct Slot {
-    frame: Frame,
+    pub(super) frame: Frame,
     /// Staged from the view this frame samples; it goes wherever the frame goes.
     cache: RefCell<Box<dyn SceneCache>>,
     /// Changes whenever the scene's view is replaced, so an older paint never counts.
-    epoch: u64,
+    pub(super) epoch: u64,
     /// The activated bound of the last sample at this epoch.
-    sampled: Option<u32>,
+    pub(super) sampled: Option<u32>,
     sampled_ms: Option<u64>,
     moving: bool,
     wake: Option<u64>,
@@ -46,7 +46,7 @@ pub(super) struct Slot {
     /// The painted bound already acknowledged at this epoch.
     acknowledged: Option<u32>,
     /// A primitive failed to paint, so the scene paints no more and is cleared.
-    failed: Cell<bool>,
+    pub(super) failed: Cell<bool>,
     /// The activation this epoch installed hasn't begun: its first sample with something to
     /// paint is kept until a shown overlay paints it.
     pending: bool,
@@ -70,10 +70,11 @@ pub(crate) struct Painted {
 
 #[derive(Default)]
 pub(crate) struct Frames {
-    slots: [Option<(SceneId, Slot)>; MAX_VISIBLE_SCENES],
+    pub(super) slots: [Option<(SceneId, Slot)>; MAX_VISIBLE_SCENES],
+    pub(super) retirement: Option<super::swap::Retirement>,
     epoch: u64,
     /// A slot left or changed placement since the last sample.
-    invalidated: bool,
+    pub(super) invalidated: bool,
     /// Whether the overlay is shown, so only a paint that can reach the screen counts.
     pub(crate) shown: bool,
 }
@@ -267,6 +268,20 @@ impl Frames {
             slot.wake = view.next_wake(now_ms);
             sample.visible |= !slot.frame.items().is_empty();
         }
+        self.handoff();
+        if let Some(retirement) = &self.retirement
+            && retirement.epoch.is_none()
+        {
+            sample.visible =
+                self.slots.iter().flatten().any(|(id, slot)| {
+                    *id != retirement.successor && !slot.frame.items().is_empty()
+                }) || retirement
+                    .pictures
+                    .iter()
+                    .flatten()
+                    .any(|p| !p.slot.failed.get());
+        }
+        sample.changed |= std::mem::take(&mut self.invalidated);
         Ok(sample)
     }
 
@@ -279,19 +294,48 @@ impl Frames {
     ) -> bool {
         let shown = self.shown;
         let mut failed = false;
-        for (_, slot) in self.slots.iter().flatten() {
+        let mut draw = |slot: &Slot, live: bool| {
             if slot.failed.get() {
-                continue;
+                return;
             }
             let result = paint(&slot.frame, &mut **slot.cache.borrow_mut());
             match result {
-                Ok(()) if shown && !slot.frame.items().is_empty() => slot.painted.set(slot.sampled),
+                Ok(()) if live && shown && !slot.frame.items().is_empty() => {
+                    slot.painted.set(slot.sampled);
+                }
                 Ok(()) => {}
                 Err(_) => {
                     tracing::warn!("a drawing couldn't paint; clearing it");
                     slot.failed.set(true);
                     failed = true;
                 }
+            }
+        };
+        if let Some(retirement) = &self.retirement
+            && retirement.epoch.is_none()
+        {
+            let mut selected = [None; MAX_VISIBLE_SCENES];
+            let live = self
+                .slots
+                .iter()
+                .flatten()
+                .filter(|(id, _)| *id != retirement.successor)
+                .map(|(id, slot)| (*id, slot, true));
+            let frozen = retirement
+                .pictures
+                .iter()
+                .flatten()
+                .map(|p| (p.id, &p.slot, false));
+            for (place, slot) in selected.iter_mut().zip(live.chain(frozen)) {
+                *place = Some(slot);
+            }
+            selected.sort_unstable_by_key(|slot| slot.map(|(id, _, _)| id));
+            for (_, slot, live) in selected.into_iter().flatten() {
+                draw(slot, live);
+            }
+        } else {
+            for (_, slot) in self.slots.iter().flatten() {
+                draw(slot, true);
             }
         }
         failed
@@ -405,6 +449,7 @@ impl Presenter {
     }
 
     pub(crate) fn sample_at(&mut self, now: std::time::Instant) -> (Sample, Vec<Effect>) {
+        self.frames.borrow_mut().expire_retirement(now);
         self.sample_times(|scene| scene.activation.time(now))
     }
 
@@ -433,7 +478,7 @@ impl Presenter {
                 }
                 Err(id) => {
                     self.release(id);
-                    self.forget(id, &mut out);
+                    self.forget_failed(id, &mut out);
                 }
             }
         }
@@ -441,11 +486,12 @@ impl Presenter {
 
     /// Clears every scene whose frame failed to paint.
     pub(crate) fn paint_failed(&mut self) -> Vec<Effect> {
+        self.frames.borrow_mut().retire_failed_pictures();
         let mut out = Out::default();
         let failed = self.frames.borrow().failed();
         for id in failed.into_iter().flatten() {
             self.release(id);
-            self.forget(id, &mut out);
+            self.forget_failed(id, &mut out);
         }
         out.finish()
     }

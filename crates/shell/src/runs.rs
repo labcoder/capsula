@@ -839,6 +839,7 @@ impl Runs {
             | DataToShell::PageFailed { .. }
             | DataToShell::SceneSnapshot { .. }
             | DataToShell::ScenesRemoved { .. }
+            | DataToShell::ScenesReplaced { .. }
             | DataToShell::SceneBegin { .. }
             | DataToShell::SceneStepCommit { .. }
             | DataToShell::SceneSnapshotV1 { .. }
@@ -910,6 +911,7 @@ fn run_of(message: &DataToShell) -> Option<RunId> {
         | DataToShell::PageFailed { .. }
         | DataToShell::SceneSnapshot { .. }
         | DataToShell::ScenesRemoved { .. }
+        | DataToShell::ScenesReplaced { .. }
         | DataToShell::SceneBegin { .. }
         | DataToShell::SceneStepCommit { .. }
         | DataToShell::SceneSnapshotV1 { .. }

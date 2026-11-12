@@ -21,7 +21,7 @@ use kumochi_protocol::constants::BRAIN_EXE;
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
     AccountView, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain, DataToShell,
-    Deleted, GestureId, GitHubView, Hello, HoldStatus, Incarnation, MAX_PENDING_TURNS,
+    Deleted, ErrorKey, GestureId, GitHubView, Hello, HoldStatus, Incarnation, MAX_PENDING_TURNS,
     MAX_VISIBLE_SCENES, Phase, RunId, RunOrigin, SceneDescriptor, SceneDescriptorV1, SettingsOp,
     SettingsView, ThreadId, ThreadOp, UserError,
 };
@@ -67,6 +67,12 @@ pub(crate) enum LinkState {
 /// What the link tells the UI thread, in the order it happened. Nothing from the brain comes
 /// before `Connected`, and none of a connection's messages after its next state.
 pub(crate) enum LinkEvent {
+    DrawingNotice {
+        generation: u64,
+        key: ErrorKey,
+        thread: ThreadId,
+        run: RunId,
+    },
     VoiceHold {
         generation: u64,
         gesture: GestureId,
@@ -1095,6 +1101,8 @@ fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
             | ControlToShell::ThreadModelSet { .. }
             | ControlToShell::GitHub(_)
             | ControlToShell::GitHubError(_)
+            | ControlToShell::DrawingReplacementFailed { .. }
+            | ControlToShell::DrawingNotReturned { .. }
             | ControlToShell::ActionState { .. }
             | ControlToShell::IssueRefused { .. }
             | ControlToShell::Connections(_)
@@ -1271,6 +1279,32 @@ fn watch(
                     return;
                 }
             }
+            Ok(Some(ControlToShell::DrawingReplacementFailed { thread, run })) => {
+                if events
+                    .send_blocking(LinkEvent::DrawingNotice {
+                        generation,
+                        key: ErrorKey::DrawingReplacementFailed,
+                        thread,
+                        run,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Ok(Some(ControlToShell::DrawingNotReturned { thread, run })) => {
+                if events
+                    .send_blocking(LinkEvent::DrawingNotice {
+                        generation,
+                        key: ErrorKey::DrawingNotReturned,
+                        thread,
+                        run,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             Ok(Some(ControlToShell::Account(view))) => {
                 if events
                     .send_blocking(LinkEvent::Account { generation, view })
@@ -1435,6 +1469,7 @@ fn read_data(data: &PipeClient, control: &PipeClient, events: &Sender<LinkEvent>
                         | DataToShell::SceneCutApplied { .. }
                         | DataToShell::SceneEnd { .. }
                         | DataToShell::ScenesRemoved { .. }
+                        | DataToShell::ScenesReplaced { .. }
                 ) {
                     LinkEvent::SceneData {
                         generation,

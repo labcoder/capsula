@@ -368,7 +368,7 @@ impl Presence {
             tracing::error!(%error, "the drawing overlay couldn't update");
             // A drawing that can't be shown is cleared rather than kept off screen.
             if sample.visible {
-                let effects = self.presenter.clear(now);
+                let effects = self.presenter.refuse_all(now);
                 return self.scene_effects_at(effects, now, cx);
             }
         }
@@ -453,7 +453,7 @@ impl Surface for Gpui<'_> {
     fn show(&mut self, overlay: &Overlay) -> Result<(), OpenError> {
         #[expect(
             clippy::as_conversions,
-            reason = "fixed semantic slot indexes the seven handles"
+            reason = "fixed semantic slot indexes the eight handles"
         )]
         let drawing = super::exclusion::Slot::Drawing as usize;
         self.surfaces.handles[drawing] = Some(overlay.window);
@@ -642,10 +642,15 @@ fn assemble(
                             .map(|path| Pending::Path(path, *color)),
                         None,
                     ],
-                    _ => {
-                        paint_geometry::paths(scratch, prim, item.transform, item.draw, item.flow)?
-                            .map(|each| each.map(|(path, paint)| Pending::Path(path, paint)))
-                    }
+                    _ => paint_geometry::paths(
+                        scratch,
+                        prim,
+                        item.transform,
+                        item.draw,
+                        item.flow,
+                        item.paint_scale,
+                    )?
+                    .map(|each| each.map(|(path, paint)| Pending::Path(path, paint))),
                 }
             };
             for piece in pieces.into_iter().flatten() {

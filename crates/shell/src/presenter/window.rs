@@ -80,7 +80,8 @@ impl Presenter {
     /// Activates the scene's oldest prepared step, which must be `expected_index`, at
     /// `scene_time` over a narration segment of `segment_ms`: its removals retire, its layout
     /// becomes the rest, its activated view replaces the old one in a new frame epoch, its
-    /// window position frees and held frames resume.
+    /// window position frees and held frames resume. The step ends at the later of the
+    /// segment's end and its last entrance's.
     /// # Errors
     /// [`ConsumeError`], with nothing changed.
     pub(crate) fn consume_ready(
@@ -112,6 +113,9 @@ impl Presenter {
             .view
             .prepare_activation(&head.step, scene_time, segment_ms)
             .map_err(|_| ConsumeError::Stale)?;
+        let segment_ms = activation.view().entrance_end().map_or(segment_ms, |end| {
+            segment_ms.max(end.saturating_sub(scene_time))
+        });
         let cache = self.stage.stage(activation.view());
         let cache_bytes = cache.bytes();
         let bytes = head.step.attribution();
@@ -121,12 +125,17 @@ impl Presenter {
             .saturating_add(scene.view_bytes)
             .saturating_add(scene.cache_bytes)
             .saturating_add(head.step.resident_bytes);
-        let after = total
+        let mut after = total
             .saturating_sub(outgoing)
             .saturating_add(head.full_after)
             .saturating_add(view_bytes)
             .saturating_add(cache_bytes)
             .saturating_add(bytes);
+        if after > MAX_RESIDENT_BYTES {
+            let mut frames = self.frames.borrow_mut();
+            after = after.saturating_sub(frames.retirement_bytes());
+            frames.discard_retirement();
+        }
         if after > MAX_RESIDENT_BYTES {
             drop(Deferred::new(cache, cache_bytes));
             return Err(ConsumeError::Residency);

@@ -70,6 +70,19 @@ within ±20,000. Chart data uses finite f64 values instead of coordinate-bounded
 numbers. Composed transforms and domain-specific ranges are admission checks.
 Screen/capture anchors are absent, not ignored.
 
+Line, arrow and path stroke widths must be above 0. A shape's `width` is its outline,
+2 by default; 0 draws the shape without an outline, and negative widths are refused. A
+rect's `radius` of 0 gives square corners, as when it is left out. The offered schema
+states these minimums and the positive bounds of circle `r`, path `scale`, text `size`,
+`max_width` and highlight `pad`; box and size components are checked only at
+admission. `set` cannot change a width. `set color` on a shape or path with a fill recolours
+the fill as well as the outline, as an `anim` colour track paints those two, so "make it red"
+reaches a filled shape. Unlike a colour track, it leaves a shape's label at the theme
+foreground. A `set` therefore can't give a filled shape an outline colour unlike its fill; that
+takes a remove and a new put (`shortcut:` in `layout::prepare::patch`). Drawings saved before
+this rule recover with it too: an old `set color` on a filled shape now recolours its fill. The
+layout version stays 2, because a bump would make recovery skip and clear every stored scene.
+
 ### Canvas and overlay placement
 
 Overlay preparation uses `begin.size`, or a 960×600 default canvas. Inline preparation
@@ -89,7 +102,8 @@ retain at least 240×160 logical pixels; the small-display fallback is described
 [presence.md](presence.md). Physical work-area, dock and accepted panel bounds use the window
 scale. Panel open/close,
 dock placement (after re-anchoring panels) and GPUI display-change events refresh the
-stage before repaint. Activation, step installation, Stop and recovery also read the work area
+stage before repaint; a drawing already on screen keeps a stage that still fits, as
+[presence.md](presence.md) describes. Activation, step installation, Stop and recovery also read the work area
 fresh before placing their views; ordinary animation frames do not poll it.
 Work-area-only changes wait for the next placement; add a work-area notification through
 the presence adapter. Per-display overlays are not implemented.
@@ -509,12 +523,16 @@ serialize drawing content into logs, or trace a model-facing tool reply.
 ## Admission and identity
 
 `SceneState::begin` validates positive optional canvas dimensions. `CallState`
-guards one call's begin/step/end order; a new call gets a fresh guard and must
-repeat the stored header with typed equality. Ending a call does not end its scene.
+guards one call's begin/step/end order; a new call gets a fresh guard and must repeat the
+stored header's `v`, `scene`, `surface`, `size` and `others` (`Begin::continues`). Its
+`title` and `alt` may be restated differently: they describe the drawing, and the stored
+header keeps its first text, so the description can go stale after an edit (`shortcut:`).
+Racing calls that begin one new name use the same comparison. Ending a call does not end
+its scene.
 
 `begin.others` is the closed vocabulary `clear` (default) or `keep`. Old stored headers
 decode to `clear`, and serialization always includes it. Only a new scene applies this
-policy: a continuation with an identical stored header never clears another scene.
+policy: a continuation of a stored header never clears another scene.
 
 `ReplacementAdmission` owns a newcomer, its checked candidate and at most four deduplicated
 victims with their original identities, revisions, mutations and charges. All early and
@@ -531,7 +549,7 @@ earlier kept step, never one dropped by a cut. Admission rejects cycles, missing
 or wrongly typed parents/endpoints, properties the target does not own, invalid
 track values/times, and removals that orphan a surviving dependant. Only `draw`
 has kind-specific track ownership checks so far; a `set` or `anim` targeting an object
-removed by that same step fails as `UnknownRef`. The motion layer defines the
+removed by that same step fails as `RemovedInStep`. The motion layer defines the
 remaining property rules. Admission expands bounded Mermaid sources before checking
 the executable candidate; callers still submit and persist the original typed step.
 
@@ -711,8 +729,11 @@ Repeated finite animations, including delay, must fit 60 seconds; infinite repea
 fit its first play and remains bounded by the scene deadline. Zero-period repetition,
 zero-period flow and duplicate same-step (target, property) tracks fail with `OutOfRange`.
 
-The private SVG walker accepts M/L/H/V/Q/C/Z, absolute or relative, including implicit
-repetitions. It validates coordinates and counts commands before vertices exist.
+The private SVG walker accepts M/L/H/V/Q/T/C/S/Z, absolute or relative, including implicit
+repetitions. `S` and `T` become ordinary cubic and quadratic segments: their first control
+point reflects the previous segment's last control point through the pen when that segment was
+a cubic (for `S`) or a quadratic (for `T`), and is the pen otherwise. A reflected point outside
+±20,000 is `OutOfRange`. Arcs (`A`) remain `Unsupported`. It validates coordinates and counts commands before vertices exist.
 Quadratic and cubic second differences determine power-of-two subdivision counts at
 0.25 logical-pixel tolerance after conservative composed scale bounds. SVG admission and
 preparation reserve up to a further 2× presentation scale for overlays, capped at composed scale 64;
@@ -727,9 +748,9 @@ floor(length / 10) + 2 per segment + 1, with 6-unit dashes and 4-unit gaps in pr
 path's control polygon times its `scale`, a line's from, vias or bend control and to, a rect's
 or ellipse's box perimeter 2(w + h), and a polygon's own closed point sequence, never its box.
 The extra piece covers f32 rounding of prepared points and applies only when there is an edge,
-so an op without one, such as a path of only moves, charges 0. A line with a `ref` end and a diagram
-edge charge 0, because their geometry needs fonts; preparation counts them exactly (Paint work
-below). Past the global cap, admission fails with `OverBudget(DashPieces)`.
+so an op without one, such as a path of only moves or a shape of `width` 0, charges 0. A line with
+a `ref` end and a diagram edge charge 0, because their geometry needs fonts; preparation counts
+them exactly (Paint work below). Past the global cap, admission fails with `OverBudget(DashPieces)`.
 
 Transform checks compose conservative scale, translation and rotation envelopes down
 the parent graph, including spring overshoot, and reject overflow or scale underflow.
@@ -755,7 +776,7 @@ Prepared residency remains the preparation layer's separate limit.
 | Path | 512 points, 4,096 flattened segments | 20,000 segments |
 | Dash pieces | Explicit geometry preflighted; generated geometry counted at preparation | 512 |
 | Fill vertices | Points plus crossing pairs, at most 21,845 per build | 512 |
-| Bordered-rect outline points | Rounded fallback at maximum admitted scale | 512 |
+| Bordered-rect outline points | Rounded fallback at the object's charged scale | 512 |
 | Motion | 256 tracks, 32 keys/track, 60 s/track and after last activation | — |
 | Object graph | Depth 16 | — |
 | Coordinates | Finite, absolute value ≤20,000 after composition | — |
@@ -788,8 +809,8 @@ painter is implemented here.
 ### Paint work
 
 Preparation counts each new or replaced item's `display::PaintWork` once, when its primitives
-change, and `LayoutState::paint_work` sums them in O(objects) for the shell's guard. None of
-the counts depends on display, pose or reveal, and sums saturate.
+or its charged scale change, and `LayoutState::paint_work` sums them in O(objects) for the
+shell's guard. None of the counts depends on display, pose or reveal, and sums saturate.
 
 - Dashed lines count `dash_pieces`: an edge of length l meets at most floor(l / 10) + 2 dashes
   at any flow phase or reveal.
@@ -802,9 +823,16 @@ the counts depends on display, pose or reveal, and sums saturate.
   rounding cannot introduce uncounted tessellation work. Numeric ceiling fixtures check lyon's
   vertex-count assumptions; any build error fails loudly rather than dropping a primitive.
 - Every `Prim::Rect` is charged as the painter's path fallback, which rotation and partial
-  reveals trigger: `corner_segments(radius · 64)` pieces per corner, the largest admitted
-  composed scale, and 4(n + 1) + 1 points. Filled rects add them to the fill counts, bordered
-  rects to the outline counts. The painter must refuse a pose that needs more pieces.
+  reveals trigger: `corner_segments(radius · c)` pieces per corner and 4(n + 1) + 1 points.
+  c is its object's charged scale: the composed-scale envelope of the object and its
+  ancestors, times the surface limit (2 on an overlay, 1 inline), times 1 + 2⁻¹⁶, then capped
+  at 64. The 2⁻¹⁶ is a conservative allowance for f32 drift between that envelope and a
+  frame's composed matrix along an admitted chain, not a proof. Preparation recomputes c for
+  every retained object after the step's motion updates and keeps a count only when both its
+  primitives and c are unchanged, so a later track on an ancestor recounts its descendants.
+  Filled rects add the points to the fill counts, bordered rects to the outline counts. Frame
+  items carry c, and the painter's fallback refuses with `OverCharge` a pose that needs more
+  pieces than c buys.
 
 lyon_tessellation's debug tessellator prints every point it fills to stdout when
 `LYON_FORCE_LOGGING` is set (`fill.rs:77-95`, `:563-566`), and `set_logging(false)` can't turn
@@ -826,7 +854,7 @@ overlaps as weak. There is no union pass or extra paint charge for isolation.
 
 A fill over `FILL_VERTEX_LIMIT` (21,845, a third of the u16 index space) or a rect outline over
 `OUTLINE_POINT_LIMIT` (5,460) can't be one tessellation build, so preparation fails with
-`OverResidency`. `PaintWork::within_limits` also checks the global dash, fill-vertex and
+`OverPaintWork`. `PaintWork::within_limits` also checks the global dash, fill-vertex and
 outline budgets, which are measured on Rez. Solid strokes carry no paint charge because
 construction bounds every generated line: a flattened path has at most 4,096 segments and
 every other line at most 513 points including a closed outline's repeated first point, so
@@ -834,15 +862,15 @@ the longest run, closed, costs 4 × 4,098 + 4 = 16,396 of a build's 21,845 verti
 The painter still refuses a longer run loudly.
 
 The global limits are 512 dash pieces, 512 fill vertices and 512 outline points, shared
-across all visible scenes and reserved ready/rest states. Four radius-8 filled and bordered
-boxes cost 436 fill and outline points, leaving room for labels and dashed connectors;
+across all visible scenes and reserved ready/rest states. On an overlay, four radius-8 filled
+and bordered boxes cost 100 fill and outline points, leaving room for labels and dashed connectors;
 labels remain subject to the existing text and object limits. A drawing beyond the limits
-fails explicitly through the scene's residency failure or recovery clear, without simplifying
+fails explicitly through the scene's `PaintWork` failure or recovery clear, without simplifying
 its geometry. Before counting crossings, preparation refuses any one generated fill with
 more than 512 points, which cannot fit even without a crossing. Given a paint cap
 (`PrepareInput::with_paint_cap`, and the `paint_cap` of `recover` and `recover_all`; the
 shell's worker and recovery pass `PaintWork::LIMITS`), it also keeps a running total of the
-scene's own paint work and refuses with `OverResidency` once that passes the cap, which no
+scene's own paint work and refuses with `OverPaintWork` once that passes the cap, which no
 admission could accept. Each fill then counts crossings only up to the fill budget left, so a
 refused scene costs at most about 512²/2 crossing tests. Without a cap the charge stays exact.
 
@@ -1022,6 +1050,18 @@ whose own entrance and every ancestor's entrance have finished, each clipped to 
 deadline; the host passes those handles into the authoritative `StopCut`.
 Each child's entrance starts no earlier than its parent's start, retaining its own
 duration, so delayed diagrams do not hide their children's entrances.
+An object that names no `enter` gets a default entrance over its kind's default length:
+lines, arrows, paths, edges and series draw in, and everything else fades in. An explicit
+`"enter":"none"` appears at once. When no object in the step names a `delay` or an
+`at_word`, each starts 60% of the way through the previous object's entrance, in `put`
+order; if the last would end after 4 s, every gap and default length shrinks by one ratio
+to fit, while an authored `dur` keeps its exact length; one that would shrink the gaps and
+default lengths below a quarter ends late instead (`motion::pace`). An object with
+`"enter":"none"` keeps its turn in that order but adds no time, so the next one starts
+as it appears.
+`entrance_end()` is when the last object the step put finishes entering, after parent
+gating and clipped to the deadline. The presenter ends the step at the later of its
+narration segment and that instant, so the next `speech` step waits for the drawing.
 Explicit tracks retain their step-relative clocks, so a track may finish while a
 delayed parent still hides its target; only entrances are shifted.
 `delay_entrance(by)` starts what the view's own step put `by` ms later: its objects'
@@ -1059,7 +1099,8 @@ Synthetic narration takes `max(800, ceil(words * 4000 / 11))` milliseconds, with
 use integer proportional placement within that segment, with u128 multiplication.
 Speech-driven timing and painting belong to their later slices.
 
-Esc during an explicit opacity fade-in without `enter` reveals its final opacity.
+Esc during an explicit opacity fade-in on an object with `"enter":"none"` reveals its final
+opacity.
 Exact interrupted recovery needs timestamps in the log; use entrances for reveals.
 
 ```mermaid
@@ -1520,6 +1561,13 @@ use an `anim` opacity track, not `set.opacity`, which the strict schema rejects.
 
 Charts prepare bar, line, area, scatter and pie geometry with measured nice-axis
 labels. Numeric point pairs retain their x coordinates; scalar points use indices.
+Function graphs use line charts with sampled `[x,y]` values in mathematical coordinates
+and explicit `x.min/max` and `y.min/max`: preparation maps positive y upward. The drawing
+prompt asks for radians, endpoints, zeros and extrema, not canvas-space Bézier controls.
+Line segments connect samples in order; separate series represent discontinuous branches
+such as 1/x across zero. Samples outside the domains map to their boundaries, so the model
+must choose in-range samples and correct values; Kumochi does not evaluate expressions.
+Series draw in by default, without an explicit `enter`.
 Log ticks use whole decades. Automatic log domains round out to decades; an explicit
 window containing no whole decade has no tick labels.
 Stacks accumulate positive and negative bar values separately. Pie normalization
@@ -1609,7 +1657,8 @@ unconsumed ready successors plus a running position, not the gap between lifetim
 At most eight jobs or undelivered answers retain worker slots; dropping an unspawned job
 releases its slot too. Recovered layouts, ready deltas and returned consumption owners
 share the unchanged 64 MiB allowance. An over-cap answer fails with `Residency` rather than
-waiting indefinitely for bytes. Clearing, removal and disconnect release the presenter's
+waiting indefinitely for bytes; one whose paint work, with the other scenes', passes
+`PaintWork::LIMITS` fails with `PaintWork`. Clearing, removal and disconnect release the presenter's
 ownership but cannot release a result still held by its caller. Each mirrored scene also
 reserves a resting view and a frame inside this allowance: the view's cloned layout index,
 node/paint/track storage and generation, plus both frame buffers, and the frame's paint cache
@@ -1671,6 +1720,17 @@ latency, real Win32 HWND/DWM/capture-exclusion behavior and native Rez before-an
 measurements remain unmeasured; a `160..161` count alone does not close the recovery or
 acceptance gates.
 
+The five episodes run in plain `cargo test`: `the_recovery_episodes_pass_in_fresh_processes`
+reruns each alone in a child process of the test binary, because the deferred dropper's pending
+counts and the recorder's start order are process-wide. In the steady-state draws, an allocation
+outside Kumochi's own `App` paint scopes is GPUI's: it is counted and held to its measured
+ceiling of 91 allocations and 23,137 bytes, while Kumochi's own scopes still add none. The whole
+interval from the first draw (`162`) through the terminal apply (`161`) counts as `App` and is
+held to measured per-case bounds, at most 395 allocations and 130,961 bytes, of which at most
+172 allocations and 65,598 bytes outlive the interval. The real typing panel's gpui-kit text
+input keeps the text system alive after teardown, so the episodes expect two holders of it; this
+is an accepted exception to raise with gpui-kit.
+
 Fixed four-slot cache
 metadata is conservatively charged in full to each scene, rather than adding an unmetered
 index allocation. Begin, recovery and acknowledged-cut adoption check the combined charge.
@@ -1716,7 +1776,8 @@ Recovery waits for a free worker slot under one unchanged two-second deadline fo
 a conservative margin over the measured core recovery fixtures (below 86 ms on Rez with
 fixed text measurement). Full cap recovery
 with real fonts remains a B9 measurement, not a claim made by the fixed-measurement fixture.
-A failed recovered scene is cleared through `ClearDrawing`, retaining its typed history and
+A failed recovered scene is refused through `SceneFailed`, which the brain clears without
+treating it as a user clear, retaining its typed history and
 allowing successful scenes to install. If the whole batch misses its deadline, its pending
 scenes clear and late answers cannot restore them. Stop clears incomplete recovery first,
 then cuts every known v1 scene at its activated bound. Cuts remain held until the data-pipe
@@ -1734,6 +1795,44 @@ the original cuts rather than being cut by a delayed follow-up Stop.
 Clear intent made while scenes are mirrored survives brain restarts because scene ids are
 durable event ids; membership
 that still names a locally cleared scene causes its idempotent clear to be sent again.
+
+### Bounded visual replacement
+
+`ScenesReplaced` ends old semantic bindings and tombstones their ids immediately. The UI-owned
+shared `Frames` bank moves up to four sampled frames, their caches and required layout/view
+owners into one retirement attempt. Those pictures never resample, animate, accept input or
+acknowledge old steps. Survivors plus outgoing pictures retain scene order; the incoming target
+does not paint beside them. Its first current sample with items atomically replaces the outgoing
+set, including a zero-alpha or zero-length entrance pose. Waiting for positive ink would prevent
+the first paint from starting that entrance's clock.
+
+The frozen owners remain charged against combined logical object/work caps and the unchanged
+64 MiB presenter residency allowance, including fixed staging and returned owners. If a new
+admission, preparation or activation would fit only without retirement, the bank relinquishes
+its frozen owners through the existing dropper and continues the ordinary replacement. It never
+adds a new capacity refusal. Worker answers and physical dropper retention remain separate from
+that presenter allowance. At most four frames are selected, never outgoing plus incoming.
+
+One watchdog deadline, 250 ms from marker processing, releases the visual hold without failing
+the newcomer. Continuations do not reset it. After handoff the successor epoch is guarded only
+until first paint or that original expiry; structurally empty prefixes can advance. While that
+epoch is guarded, its ready head is excluded from activation wakes; future view wakes and the
+absolute expiry still schedule normally. A second replacement disposes the first attempt.
+Stop includes an unbegun successor in the existing
+pending zero-cut membership; clear remembers its id before disposing the bank. Either can drain
+late commits without recreating old ink. Any successful thread deletion flushes retirement,
+including an unrelated deletion, and immediately synchronizes visibility and the watchdog;
+ordinary successor removal, terminal failure and disconnect
+also dispose it. Retiring paint failure is local disposal, not an old-scene failure. No retiring
+owner is persisted or recovered, and genuine empty/failure host recreation remains unchanged.
+Header, admission-expiry, sample, paint and host-show refusals use the content-free `SceneFailed`
+clear instead of an explicit user clear. The brain derives replacement-loss feedback from the
+committed scene, so neither an unbegun successor nor a recovered owner needs the shell to guess
+its original run.
+Whole-scene refusals ignore unknown or gone ids and clear only their live target; they never
+cancel unrelated newcomers as an explicit user clear does.
+Esc without a known run disposes the visual hold without inventing a run id; pending typed
+cancellation and later named runs still use ordinary fencing.
 
 ### Serialized activation and first-paint acknowledgement
 

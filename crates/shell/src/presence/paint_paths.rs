@@ -68,6 +68,7 @@ pub(super) fn paths(
     transform: Affine,
     draw: f32,
     flow: f32,
+    paint_scale: f32,
 ) -> Result<Vec<(Path<Pixels>, Paint)>, BuildError> {
     let mut built = Vec::new();
     match prim {
@@ -102,7 +103,7 @@ pub(super) fn paths(
             border,
         } => {
             let zoom = scale(transform);
-            let charge = fallback_corner_segments(*rect, *radius);
+            let charge = fallback_corner_segments(*rect, *radius, paint_scale);
             let (radius, segments) = corners(*rect, *radius, zoom, charge)?;
             let outer = rounded(*rect, radius, segments);
             if let Some(paint) = background {

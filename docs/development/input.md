@@ -187,8 +187,9 @@ Rejected alternatives:
 ## Esc
 
 `escape.rs` decides each press: stop moving work first, clear an idle drawing second, cancel
-an active inline rename or Settings field edit in the focused panel third, otherwise dismiss
-the typing panel or focused Tasks or Settings panel. Stop and clear leave an edit intact;
+an active inline rename, Settings field edit or onboarding name edit third, otherwise dismiss
+the typing panel, the focused Tasks or Settings panel, or the onboarding window, which runs
+Finish later ([onboarding](onboarding.md)). Stop and clear leave an edit intact;
 cancelling an edit restores its saved value without sending it and doesn't dismiss its panel.
 The local effect always happens first, and nothing waits on the brain:
 
@@ -388,6 +389,9 @@ for measured gates. An Off or Unrated result needs owner disposition, but does n
 authorized measurements after Ready. If Ready is absent, the session stops without injecting.
 
 ### Fixed automated order and bounds
+
+A scratch profile needs `onboarded = true` in its `config.toml`, or the onboarding window
+opens, takes focus and uses up the double-tap.
 
 Each automated phase launches a fresh stable shell PID at normal priority under the same
 fixture lease. Idle alone gets a 120-second product bound; every other phase gets 90 seconds,

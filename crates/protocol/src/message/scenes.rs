@@ -264,6 +264,8 @@ pub enum SceneFailure {
     Residency,
     /// Text measurement failed.
     TextMeasure,
+    /// The step's paint work passed the shell's cap: too many shapes to paint.
+    PaintWork,
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@
 mod allocation;
 use kumochi_scene::{
     Admission, Begin, Frame, GlobalBudget, Record, SceneState, SceneView, StopCut,
-    display::{MeasureError, TextMeasure, TextStyle},
+    display::{MeasureError, PaintWork, TextMeasure, TextStyle, fallback_corner_segments},
     geom::{Affine, Rect, Vec2},
     layout::{LayoutState, PrepareInput, PreparedStep, SurfaceGeometry, place, prepare, recover},
     parse_record,
@@ -58,6 +58,7 @@ fn picture(header: Begin, put: &serde_json::Value) -> LayoutState {
     prepared(&mut scene, &mut budget, before, &step).after
 }
 
+/// Commits and prepares `step` under the paint cap the shell passes.
 fn prepared(
     scene: &mut SceneState,
     budget: &mut GlobalBudget,
@@ -76,7 +77,8 @@ fn prepared(
         },
         Arc::new(Theme::default()),
     )
-    .expect("input");
+    .expect("input")
+    .with_paint_cap(Some(PaintWork::LIMITS));
     prepare(input, &mut Measure, &AtomicBool::new(false)).expect("prepare")
 }
 
@@ -118,7 +120,9 @@ fn recorded_graph_stays_centered_through_activation_stop_recovery_and_stage_chan
     assert_eq!(step.after.fit_extent(), rect(16.0, -14.0, 473.0, 448.0));
     let mut frame = Frame::new();
     view.activate(step, 0, 800, &mut frame).expect("activate");
-    view.frame(1000, &mut frame).expect("sample");
+    // Default entrances pace the recorded objects, so sample once the last has entered.
+    let entered = view.entrance_end().expect("the step puts objects");
+    view.frame(entered, &mut frame).expect("sample");
     let expected = Affine::pose(2.0, 0.0, Vec2::new(775.0, 354.0));
     assert_graph_placement(&frame, expected);
     let ((), activity) = allocation::activity(|| {
@@ -131,7 +135,7 @@ fn recorded_graph_stays_centered_through_activation_stop_recovery_and_stage_chan
         .stop(
             &StopCut {
                 activated: 1,
-                revealed: Bounded::new(view.stop(1000)).expect("cut"),
+                revealed: Bounded::new(view.stop(entered)).expect("cut"),
             },
             &mut budget,
         )
@@ -370,6 +374,132 @@ fn curve_subdivision_reserves_the_presentation_scale() {
         panic!("curve")
     };
     assert_eq!(points.len(), 9);
+}
+
+#[test]
+fn a_small_overlay_diagram_of_rounded_nodes_fits_the_paint_budgets() {
+    // The shape of a recorded call the shell refused for the paint work of its rounded rects.
+    let work = picture(
+        header(Some([520.0, 320.0])),
+        &json!([
+            {"node":{"id":"a","label":"Alpha \u{2600}\u{fe0f}","shape":"circle","color":"amber"}},
+            {"node":{"id":"b","label":"Bravo","sub":"second","shape":"round","color":"blue"}},
+            {"node":{"id":"c","label":"Charlie","sub":"third","shape":"round","color":"gray"}},
+            {"node":{"id":"d","label":"Delta","sub":"fourth","shape":"pill","color":"teal"}},
+            {"edge":{"id":"ab","from":"a","to":"b","label":"one"}},
+            {"edge":{"id":"bc","from":"b","to":"c","label":"two"}},
+            {"edge":{"id":"cd","from":"c","to":"d","label":"three"}},
+            {"edge":{"id":"db","from":"d","to":"b","label":"four"}}
+        ]),
+    )
+    .paint_work();
+    // At the overlay's charge of 2 the radius-40 circle needs 10 pieces per corner (4 · 11 + 1
+    // points), the radius-12 rounds 6 (29) and the radius-32 pill 9 (41), filled and bordered.
+    // Each edge adds a 3-point arrowhead and a radius-4 label chip of 21 fill points.
+    assert_eq!(
+        work,
+        PaintWork {
+            dash_pieces: 0,
+            fill_vertices: 45 + 2 * 29 + 41 + 4 * (3 + 21),
+            largest_fill: 45,
+            outline_points: 45 + 2 * 29 + 41,
+            largest_outline: 45,
+        }
+    );
+}
+
+#[test]
+fn four_plain_nodes_and_three_labelled_edges_fit_the_paint_budgets() {
+    let work = picture(
+        header(Some([520.0, 320.0])),
+        &json!([
+            {"node":{"id":"a","label":"Alpha"}},
+            {"node":{"id":"b","label":"Bravo"}},
+            {"node":{"id":"c","label":"Charlie"}},
+            {"node":{"id":"d","label":"Delta"}},
+            {"edge":{"id":"ab","from":"a","to":"b","label":"one"}},
+            {"edge":{"id":"bc","from":"b","to":"c","label":"two"}},
+            {"edge":{"id":"cd","from":"c","to":"d","label":"three"}}
+        ]),
+    )
+    .paint_work();
+    // Four radius-4 boxes at the overlay's charge of 2: 4 pieces per corner, so 4 · 5 + 1 points,
+    // filled and bordered. Each edge adds a 3-point arrowhead and a label chip of 21.
+    assert_eq!(
+        work,
+        PaintWork {
+            dash_pieces: 0,
+            fill_vertices: 4 * 21 + 3 * (3 + 21),
+            largest_fill: 21,
+            outline_points: 4 * 21,
+            largest_outline: 21,
+        }
+    );
+}
+
+#[test]
+fn the_drift_allowance_comes_before_the_64_clamp() {
+    // g = 32 on the overlay reaches the 64 clamp. Radius 1.2671660184860229 sits just under the
+    // ten-piece threshold there, so each filled, bordered rect costs 4 · 11 + 1 points; applying
+    // the allowance after the clamp would cross it, to 49 each and 539 in all.
+    let mut put = vec![
+        json!({"diagram":{"id":"d"}}),
+        json!({"anim":{"target":"d","track":"scale","keys":[[0,32]]}}),
+    ];
+    put.extend((0..11).map(|index| {
+        json!({"shape":{"id":format!("r{index}"),"in":"d","kind":"rect","box":[index * 4,0,3,3],"radius":1.267_166_f32,"fill":"blue"}})
+    }));
+    let work = picture(header(Some([520.0, 320.0])), &json!(put)).paint_work();
+    assert_eq!(
+        work,
+        PaintWork {
+            dash_pieces: 0,
+            fill_vertices: 11 * 45,
+            largest_fill: 45,
+            outline_points: 11 * 45,
+            largest_outline: 45,
+        }
+    );
+}
+
+#[test]
+fn a_rotated_chain_at_the_depth_limit_stays_within_its_charge() {
+    // Fifteen turned diagrams scale the rect by 16 at the 16-object depth limit, and its radius
+    // puts the overlay's 32 just under the ten-piece threshold. The frame's composed matrix may
+    // land on either side of it, so the allowance charges eleven.
+    let radius = 2.534_332_f32;
+    let mut put = vec![json!({"diagram":{"id":"g0"}})];
+    put.extend(
+        (1..15).map(|n| json!({"diagram":{"id":format!("g{n}"),"in":format!("g{}", n - 1)}})),
+    );
+    put.extend(
+        (0..15).map(|n| json!({"anim":{"target":format!("g{n}"),"track":"rotate","keys":[[0,7]]}})),
+    );
+    put.extend(
+        (0..4).map(|n| json!({"anim":{"target":format!("g{n}"),"track":"scale","keys":[[0,2]]}})),
+    );
+    put.push(json!({"shape":{"id":"r","in":"g14","kind":"rect","box":[0,0,8,8],"radius":radius,"fill":"blue"}}));
+    let layout = picture(header(None), &json!(put));
+    let mut view = SceneView::new(&layout, 0);
+    view.set_stage(rect(0.0, 0.0, 2560.0, 1440.0));
+    let mut frame = Frame::new();
+    view.frame(0, &mut frame).expect("a fresh frame");
+    let item = frame
+        .items()
+        .iter()
+        .find(|item| !item.primitives.is_empty())
+        .expect("the rect");
+    let [a, b, c, d, ..] = item.transform.0;
+    let posed = (a * d - b * c).abs().sqrt();
+    assert!((posed - 32.0).abs() < 1e-3, "posed at {posed}");
+    assert!(b.abs() > 1.0, "turned, so the painter takes the fallback");
+    let bounds = rect(0.0, 0.0, 8.0, 8.0);
+    assert_eq!(fallback_corner_segments(bounds, radius, 32.0), 10);
+    assert_eq!(
+        fallback_corner_segments(bounds, radius, item.paint_scale),
+        11
+    );
+    assert!(fallback_corner_segments(bounds, radius, posed) <= 11);
 }
 
 #[test]

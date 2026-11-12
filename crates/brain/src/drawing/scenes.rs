@@ -2,7 +2,7 @@
 //! fifth-scene eviction.
 
 use kumochi_protocol::message::{
-    DataToShell, MAX_VISIBLE_SCENES, RunId, SceneHeader, SceneId, ThreadId,
+    DataToShell, MAX_VISIBLE_SCENES, RunId, SceneFailure, SceneHeader, SceneId, ThreadId,
 };
 use kumochi_scene::text::Bounded;
 use kumochi_scene::{ReplacementDisposition, Step, StopCut};
@@ -12,6 +12,22 @@ use super::{CutKind, Drawing, Held, Job, LAYOUT_VERSION, Output, Pend, Pending, 
 use crate::coordinator::{Effect, StoreOp};
 
 impl Drawing {
+    pub(super) fn replacement_failed(&mut self, scene: SceneId, out: &mut Output) {
+        if let Some(at) = self.live(scene)
+            && self.scenes[at].replacement == Some(super::ReplacementLoss::Pending)
+        {
+            let held = &mut self.scenes[at];
+            held.replacement = Some(super::ReplacementLoss::Failed);
+            let run = held.committers[0].expect("replacement's first step was committed live");
+            out.effects.push(Effect::Control(
+                kumochi_protocol::message::ControlToShell::DrawingReplacementFailed {
+                    thread: held.thread,
+                    run,
+                },
+            ));
+        }
+    }
+
     /// `run` committed `scene`'s step `index`. A scene the brain doesn't hold is stale; any
     /// other mismatch would retire or cut a step the shell was never sent.
     pub(super) fn committed_by(
@@ -37,6 +53,10 @@ impl Drawing {
 
     /// A step's write committed, so its admission commits too and the shell gets it, after the
     /// header for a new scene. A scene that left meanwhile drops it.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one committed write keeps victim retirement and successor installation ordered"
+    )]
     pub(super) fn stored(&mut self, write: StepWait, id: SceneId, out: &mut Output) {
         let StepWait {
             run,
@@ -72,6 +92,7 @@ impl Drawing {
                 (scene, committed.index)
             }
             Pend::New { admission, victims } => {
+                let replacement = (!victims.is_empty()).then_some(super::ReplacementLoss::Pending);
                 let mut states: Vec<_> = self
                     .scenes
                     .iter_mut()
@@ -91,8 +112,15 @@ impl Drawing {
                     out.effects.push(Effect::RevokeScenes {
                         scenes: victims.clone(),
                     });
-                    out.effects
-                        .push(Effect::Data(DataToShell::ScenesRemoved { scenes: victims }));
+                    let message = if installed.is_some() {
+                        DataToShell::ScenesReplaced {
+                            scenes: victims,
+                            successor: id,
+                        }
+                    } else {
+                        DataToShell::ScenesRemoved { scenes: victims }
+                    };
+                    out.effects.push(Effect::Data(message));
                 }
                 let Some((state, committed)) = installed else {
                     self.drew(run, &call, id, &step);
@@ -119,7 +147,9 @@ impl Drawing {
                     layout_version: LAYOUT_VERSION,
                     state,
                     committers: vec![Some(run)],
+                    refused_through: 0,
                     gone: false,
+                    replacement,
                 });
                 (id, committed.index)
             }
@@ -146,8 +176,25 @@ impl Drawing {
         let Some(at) = self.live(scene) else {
             return;
         };
-        if kind == CutKind::Failed {
-            self.end_calls_in(scene, out);
+        if let CutKind::Failed(reason) = kind {
+            let held = &mut self.scenes[at];
+            let from = usize::try_from(cut.activated)
+                .unwrap_or(usize::MAX)
+                .max(held.refused_through);
+            for run in held.committers.iter().skip(from).flatten() {
+                if let Some(ledger) = self.runs.iter_mut().find(|ledger| ledger.run == *run) {
+                    ledger.refuse_step();
+                }
+            }
+            held.refused_through = held.committers.len();
+            let error = if reason == SceneFailure::PaintWork {
+                super::CallError::TooMuchToPaint {
+                    cleared: cut.activated == 0,
+                }
+            } else {
+                super::CallError::Failed
+            };
+            self.end_calls_in(scene, &error, out);
         }
         let held = &mut self.scenes[at];
         let logged = held.state.recovery_log().len();
@@ -279,6 +326,19 @@ impl Drawing {
     /// charges are released once no write is pending.
     pub(super) fn clear(&mut self, scenes: &[SceneId], out: &mut Output) {
         self.clear_newcomers(out);
+        self.clear_scenes(scenes, out);
+    }
+
+    pub(super) fn scene_failed(&mut self, scene: SceneId, out: &mut Output) {
+        if self.live(scene).is_none() {
+            return;
+        }
+        self.replacement_failed(scene, out);
+        self.end_calls_in(scene, &super::CallError::Failed, out);
+        self.clear_scenes(&[scene], out);
+    }
+
+    fn clear_scenes(&mut self, scenes: &[SceneId], out: &mut Output) {
         let left = self.leave(|held| scenes.contains(&held.scene));
         if left.is_empty() {
             return;

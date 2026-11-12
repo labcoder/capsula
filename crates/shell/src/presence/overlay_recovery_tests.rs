@@ -239,12 +239,12 @@ pub(in crate::presence::overlay) fn intent(effects: &[crate::presenter::Effect])
     OBSERVATION.with(|slot| {
         if let Some(observed) = slot.borrow_mut().as_mut() {
             use kumochi_protocol::message::{ControlToBrain, SceneId};
-            let [crate::presenter::Effect::Control(ControlToBrain::ClearDrawing { scene_ids })] =
+            let [crate::presenter::Effect::Control(ControlToBrain::SceneFailed { scene })] =
                 effects
             else {
-                panic!("the sole terminal effect must be ClearDrawing");
+                panic!("the sole terminal effect must be SceneFailed");
             };
-            assert_eq!(scene_ids, &[SceneId(20)]);
+            assert_eq!(*scene, SceneId(20));
             observed.controls += 1;
             assert_eq!(observed.controls, 1);
         }
@@ -261,7 +261,7 @@ pub(in crate::presence::overlay) fn apply_return() {
     });
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Case {
     A,
     B,
@@ -395,8 +395,7 @@ fn prepared_geometry(
 )]
 fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
     use super::super::super::{
-        overlay_visibility::Visibility, paint_cache::Stager, paint_phase, paint_stroke,
-        test_fixture,
+        overlay_visibility::Visibility, paint_cache::Stager, paint_stroke, test_fixture,
     };
     use crate::{
         allocation,
@@ -670,8 +669,9 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
     assert_eq!(controls.len(), usize::from(!refused));
     drop(gate);
     if !refused {
-        assert!(
-            matches!(controls.try_recv(), Ok(ControlToBrain::ClearDrawing { scene_ids }) if scene_ids == [SceneId(20)])
+        assert_eq!(
+            controls.try_recv(),
+            Ok(ControlToBrain::SceneFailed { scene: SceneId(20) })
         );
     }
     assert_eq!(
@@ -712,7 +712,8 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
     drop(owner);
     inner.quit();
     drop(inner);
-    assert_eq!(Arc::strong_count(&target), 1);
+    // The real typing panel's gpui-kit text input keeps the text system alive after teardown.
+    assert_eq!(Arc::strong_count(&target), 2);
     drop(target);
     allocation::checkpoint(6, 169);
     let seen = observer.snapshot();
@@ -801,53 +802,199 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
         if enter > boundary(163) && draw.painting {
             assert!(matches!(case, Case::C));
             assert_eq!(draw.host, h1.window_id().as_u64());
-            assert_eq!(
-                paint_phase::tests::assert_paths(&events[enter..=returned], 3),
-                0
-            );
+            assert_eq!(app_paths(events, enter..returned + 1), 0);
         }
     }
     if matches!(case, Case::C | Case::E) {
+        let redraw = boundary(166)..boundary(167);
         assert_eq!(
-            events[boundary(166)..boundary(167)]
+            events[redraw.clone()]
                 .iter()
                 .filter(|event| event.action == 5)
                 .count(),
             1
         );
-        assert_eq!(
-            paint_phase::tests::assert_paths(&events[boundary(166)..boundary(167)], 3),
-            0
+        assert_eq!(app_paths(events, redraw.clone()), 0);
+        let [allocations, bytes] = gpui(events, redraw);
+        println!("recovery_redraw case={case:?} gpui_allocations={allocations} gpui_bytes={bytes}");
+        assert!(
+            allocations <= 91 && bytes <= 23_137,
+            "GPUI's own redraw stays within its measured ceiling"
+        );
+    }
+    let recovery = &events[first..boundary(161)];
+    let [allocations, bytes] = recovery
+        .iter()
+        .filter(|event| event.action == 0)
+        .fold([0, 0], |[count, bytes], event| {
+            [count + 1, bytes + event.size]
+        });
+    let retained = retained(recovery);
+    println!(
+        "recovery_apply case={case:?} allocations={allocations} bytes={bytes} retained_allocations={} retained_bytes={}",
+        retained[0], retained[1]
+    );
+    let bound = match case {
+        Case::A => [390, 130_961, 167, 65_598],
+        Case::B => [392, 129_825, 169, 64_462],
+        Case::C | Case::E => [149, 45_788, 65, 19_298],
+        Case::D => [395, 130_889, 172, 65_526],
+    };
+    assert!(
+        allocations <= bound[0]
+            && bytes <= bound[1]
+            && retained[0] <= bound[2]
+            && retained[1] <= bound[3],
+        "the recovery interval stays within its measured bound"
+    );
+}
+
+/// Kumochi's own outermost App scopes, where the path rule applies to App-tagged allocations.
+fn app_scopes(events: &[crate::allocation::Request]) -> Vec<std::ops::Range<usize>> {
+    let mut scopes = Vec::new();
+    let mut depth = 0_usize;
+    let mut start = 0;
+    for (index, event) in events.iter().enumerate() {
+        match (event.action, event.tag) {
+            (2, 1) => {
+                if depth == 0 {
+                    start = index;
+                }
+                depth += 1;
+            }
+            (3, 1) => {
+                depth = depth
+                    .checked_sub(1)
+                    .expect("an App scope closes after it opens");
+                if depth == 0 {
+                    scopes.push(start..index + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(depth, 0, "every App scope closes");
+    scopes
+}
+
+/// The path rule over Kumochi's own App scopes that overlap `range`. GPUI's own per-redraw
+/// allocations are counted and reported by `gpui`; the limit applies to Kumochi's.
+fn app_paths(events: &[crate::allocation::Request], range: std::ops::Range<usize>) -> usize {
+    app_scopes(events)
+        .into_iter()
+        .filter(|scope| scope.start < range.end && range.start < scope.end)
+        .map(|scope| super::super::super::paint_phase::tests::assert_paths(&events[scope], 3))
+        .sum()
+}
+
+/// GPUI's allocations in `range`, as `[count, bytes]`: every one outside Kumochi's App scopes,
+/// and inside them every one a GPUI, shape or fill phase tagged. The episode's ambient tag is
+/// App, so a tag alone can't tell GPUI's work outside the scopes from Kumochi's.
+fn gpui(events: &[crate::allocation::Request], range: std::ops::Range<usize>) -> [usize; 2] {
+    let scopes = app_scopes(events);
+    range
+        .filter(|index| {
+            events[*index].action == 0
+                && (events[*index].tag != 1 || !scopes.iter().any(|scope| scope.contains(index)))
+        })
+        .fold([0, 0], |[count, bytes], index| {
+            [count + 1, bytes + events[index].size]
+        })
+}
+
+#[test]
+fn the_gpui_bucket_takes_gpui_tags_inside_app_scopes_and_everything_outside() {
+    let event = |action, size, tag| crate::allocation::Request {
+        action,
+        pointer: 0,
+        size,
+        align: 1,
+        tag,
+    };
+    let events = [
+        event(0, 1, 1),
+        event(2, 0, 1),
+        event(0, 10, 1),
+        event(0, 20, 3),
+        event(0, 40, 4),
+        event(1, 0, 3),
+        event(3, 0, 1),
+        event(0, 80, 1),
+    ];
+    assert_eq!(gpui(&events, 0..events.len()), [4, 141]);
+    assert_eq!(gpui(&events, 2..5), [2, 60]);
+}
+
+/// Allocations in `events` that no later event there frees, as `[count, bytes]`.
+fn retained(events: &[crate::allocation::Request]) -> [usize; 2] {
+    events
+        .iter()
+        .enumerate()
+        .filter(|(index, event)| {
+            event.action == 0
+                && !events[index + 1..]
+                    .iter()
+                    .any(|next| next.action == 1 && next.pointer == event.pointer)
+        })
+        .fold([0, 0], |[count, bytes], (_, event)| {
+            [count + 1, bytes + event.size]
+        })
+}
+
+/// The episodes' dropper counts and recorder order are process-wide, so each runs alone in a
+/// child process of this test binary.
+#[test]
+fn the_recovery_episodes_pass_in_fresh_processes() {
+    let module = module_path!()
+        .split_once("::")
+        .expect("a crate-qualified module path")
+        .1;
+    for episode in [
+        "accepting_the_last_failed_scene_recreates_a_hidden_host",
+        "refusing_the_last_failed_scene_disconnects_and_recreates",
+        "accepting_one_failed_scene_keeps_the_real_survivor_host",
+        "refusing_one_failed_scene_disconnects_its_survivor",
+        "a_refused_hide_leaves_the_real_host_disabled_without_retry",
+    ] {
+        let name = format!("{module}::{episode}");
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args(["--exact", &name, "--ignored", "--test-threads=1"])
+            .output()
+            .expect("the child test process runs");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed;"),
+            "{episode} passes alone in its own process"
         );
     }
 }
 
 #[gpui::test]
-#[ignore = "requires one exact --ignored selector in a fresh isolated process"]
+#[ignore = "runs in its own process from the_recovery_episodes_pass_in_fresh_processes"]
 fn accepting_the_last_failed_scene_recreates_a_hidden_host(cx: &mut gpui_kit::TestAppContext) {
     episode(cx, Case::A);
 }
 
 #[gpui::test]
-#[ignore = "requires one exact --ignored selector in a fresh isolated process"]
+#[ignore = "runs in its own process from the_recovery_episodes_pass_in_fresh_processes"]
 fn refusing_the_last_failed_scene_disconnects_and_recreates(cx: &mut gpui_kit::TestAppContext) {
     episode(cx, Case::B);
 }
 
 #[gpui::test]
-#[ignore = "requires one exact --ignored selector in a fresh isolated process"]
+#[ignore = "runs in its own process from the_recovery_episodes_pass_in_fresh_processes"]
 fn accepting_one_failed_scene_keeps_the_real_survivor_host(cx: &mut gpui_kit::TestAppContext) {
     episode(cx, Case::C);
 }
 
 #[gpui::test]
-#[ignore = "requires one exact --ignored selector in a fresh isolated process"]
+#[ignore = "runs in its own process from the_recovery_episodes_pass_in_fresh_processes"]
 fn refusing_one_failed_scene_disconnects_its_survivor(cx: &mut gpui_kit::TestAppContext) {
     episode(cx, Case::D);
 }
 
 #[gpui::test]
-#[ignore = "requires one exact --ignored selector in a fresh isolated process"]
+#[ignore = "runs in its own process from the_recovery_episodes_pass_in_fresh_processes"]
 fn a_refused_hide_leaves_the_real_host_disabled_without_retry(cx: &mut gpui_kit::TestAppContext) {
     episode(cx, Case::E);
 }
@@ -886,6 +1033,286 @@ fn first_paint_control_refusal_ends_the_real_owner_and_cancels_its_scene_wake(
 }
 
 #[gpui::test]
+fn replacement_selects_the_successor_on_the_same_shown_host_without_an_old_ack(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    use kumochi_protocol::message::{ControlToBrain, DataToShell, RunId, SceneHeader, SceneId};
+    use kumochi_scene::{Record, deferred::Deferred, parse_record};
+    let (owner, window, controls) = super::owned_static_canvas(cx);
+    let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::StepShown {
+            run: RunId(6),
+            scene: SceneId(1),
+            index: 0
+        })
+    );
+    let script = HostGuard::install(&[]);
+    let now = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    owner.update(&mut visual, |this, cx| {
+        let effects = this.presenter.data(
+            1,
+            Deferred::new(
+                DataToShell::ScenesReplaced {
+                    scenes: vec![SceneId(1)],
+                    successor: SceneId(2),
+                },
+                0,
+            ),
+            0,
+            now,
+        );
+        assert!(!this.scene_effects_at(effects, now, cx));
+        assert_eq!(
+            this.overlay.window().expect("shown old picture").window,
+            window
+        );
+        assert!(this.presenter.drawn());
+    });
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+    owner.update(&mut visual, |this, cx| {
+        let Record::Begin(begin) = parse_record(br#"{"begin":{"v":1,"scene":"next","surface":"overlay","alt":"new"}}"#).expect("header") else { panic!("begin"); };
+        let effects = this.presenter.data(1, Deferred::new(DataToShell::SceneBegin {
+            scene: SceneId(2), header: SceneHeader { begin, layout_version: 2 },
+        }, 0), 0, now);
+        assert!(!this.scene_effects_at(effects, now, cx));
+        super::prepare_scene_step_at(&mut this.presenter, SceneId(2), 0,
+            br#"{"step":{"id":"new","put":[{"shape":{"id":"new","kind":"rect","box":[0,0,30,30],"enter":"none"}}]}}"#, now);
+        assert!(!this.scene_effects_at(Ok(Vec::new()), now, cx));
+        assert_eq!(this.overlay.window().expect("shown successor").window, window);
+        assert!(this.presenter.drawn());
+        assert_eq!(this.presenter.frames().borrow().painted(SceneId(1)), None);
+    });
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::StepShown {
+            run: RunId(6),
+            scene: SceneId(2),
+            index: 0
+        })
+    );
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+    script.finish();
+    close_callback_scene(&owner, cx);
+}
+
+#[gpui::test]
+fn deleting_a_thread_resynchronizes_idle_retiring_ink_only_on_success(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    use crate::presence::overlay_visibility::Visibility;
+    use kumochi_protocol::message::{
+        ControlToBrain, DataToShell, Deleted, RunId, SceneId, ThreadId,
+    };
+    use kumochi_scene::deferred::Deferred;
+    for outcome in [Deleted::Hidden, Deleted::Removed, Deleted::NotHidden] {
+        let terminal = outcome != Deleted::NotHidden;
+        let (owner, window, controls) = super::owned_static_canvas(cx);
+        let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(
+            controls.try_recv(),
+            Ok(ControlToBrain::StepShown {
+                run: RunId(6),
+                scene: SceneId(1),
+                index: 0
+            })
+        );
+        let script = HostGuard::install(if terminal {
+            &[
+                Step(Operation::Hide, Outcome::Success),
+                Step(Operation::Configure, Outcome::Success),
+            ]
+        } else {
+            &[]
+        });
+        let now = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let expires = now + std::time::Duration::from_millis(250);
+        owner.update(&mut visual, |this, cx| {
+            let effects = this.presenter.data(
+                1,
+                Deferred::new(
+                    DataToShell::ScenesReplaced {
+                        scenes: vec![SceneId(1)],
+                        successor: SceneId(2),
+                    },
+                    0,
+                ),
+                0,
+                now,
+            );
+            assert!(!this.scene_effects_at(effects, now, cx));
+            this.frames.idle();
+            assert!(this.presenter.drawn());
+            assert_eq!(this.scene_deadline, Some(expires));
+            this.thread_deleted(ThreadId(99), outcome, None, cx);
+            if terminal {
+                assert!(matches!(&this.overlay, Visibility::Hidden(_)));
+                assert_ne!(
+                    this.overlay.window().expect("fresh hidden host").window,
+                    window
+                );
+                assert!(!this.presenter.frames().borrow().shown);
+                assert!(!this.presenter.drawn());
+                assert_eq!(this.presenter.deadline(), None);
+                assert_eq!(this.scene_deadline, None);
+                assert!(this.scene_timer.is_none());
+            } else {
+                assert!(matches!(&this.overlay, Visibility::Shown(_)));
+                assert_eq!(
+                    this.overlay.window().expect("original shown host").window,
+                    window
+                );
+                assert!(this.presenter.frames().borrow().shown);
+                assert!(this.presenter.drawn());
+                assert_eq!(this.presenter.deadline(), Some(expires));
+                assert_eq!(this.scene_deadline, Some(expires));
+            }
+            assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+        });
+        script.finish();
+        close_callback_scene(&owner, cx);
+    }
+}
+
+#[gpui::test]
+fn an_unpainted_static_successor_sleeps_until_the_original_expiry(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    use kumochi_protocol::message::{ControlToBrain, DataToShell, RunId, SceneHeader, SceneId};
+    use kumochi_scene::{Record, deferred::Deferred, parse_record};
+    let (owner, window, controls) = super::owned_static_canvas(cx);
+    let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::StepShown {
+            run: RunId(6),
+            scene: SceneId(1),
+            index: 0
+        })
+    );
+    let script = HostGuard::install(&[]);
+    let now = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let expires = now + std::time::Duration::from_millis(250);
+    owner.update(&mut visual, |this, cx| {
+        let effects = this.presenter.data(1, Deferred::new(DataToShell::ScenesReplaced {
+            scenes: vec![SceneId(1)], successor: SceneId(2),
+        }, 0), 0, now);
+        assert!(!this.scene_effects_at(effects, now, cx));
+        let Record::Begin(begin) = parse_record(br#"{"begin":{"v":1,"scene":"next","surface":"overlay","alt":"new"}}"#).expect("header") else { panic!("begin"); };
+        let effects = this.presenter.data(1, Deferred::new(DataToShell::SceneBegin {
+            scene: SceneId(2), header: SceneHeader { begin, layout_version: 2 },
+        }, 0), 0, now);
+        assert!(!this.scene_effects_at(effects, now, cx));
+        super::prepare_scene_step_at(&mut this.presenter, SceneId(2), 0,
+            br#"{"step":{"id":"first","put":[{"shape":{"id":"first","kind":"rect","box":[0,0,30,30],"enter":"none"}}]}}"#, now);
+        super::prepare_scene_step_at(&mut this.presenter, SceneId(2), 1,
+            br#"{"step":{"id":"next","start":"now","put":[{"shape":{"id":"next","kind":"rect","box":[40,0,30,30],"enter":"none"}}]}}"#, now);
+        assert!(!this.scene_effects_at(Ok(Vec::new()), now, cx));
+        assert_eq!(this.presenter.frames().borrow().painted(SceneId(2)), None);
+        assert_eq!(this.presenter.next_wake(now), None);
+        assert_eq!(this.presenter.deadline(), Some(expires));
+        assert_eq!(this.scene_deadline, Some(expires));
+        assert!(this.scene_timer.is_some());
+        assert!(!this.draw_changed_at(now + std::time::Duration::from_millis(249), cx));
+        assert_eq!(this.scene_deadline, Some(expires));
+        assert_eq!(this.presenter.take_shown(1), [None; 4]);
+        assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+    });
+    script.finish();
+    close_callback_scene(&owner, cx);
+}
+
+#[gpui::test]
+fn escape_before_a_successor_run_is_known_discards_ink_without_fabricating_a_stop(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    use kumochi_protocol::message::{ControlToBrain, DataToShell, RunId, SceneId};
+    use kumochi_scene::deferred::Deferred;
+    let (owner, window, controls) = super::owned_static_canvas(cx);
+    let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::StepShown {
+            run: RunId(6),
+            scene: SceneId(1),
+            index: 0,
+        })
+    );
+    let script = HostGuard::install(&[
+        Step(Operation::Hide, Outcome::Success),
+        Step(Operation::Configure, Outcome::Success),
+    ]);
+    owner.update(&mut visual, |this, cx| {
+        let now = std::time::Instant::now();
+        let effects = this.presenter.data(
+            1,
+            Deferred::new(
+                DataToShell::ScenesReplaced {
+                    scenes: vec![SceneId(1)],
+                    successor: SceneId(2),
+                },
+                0,
+            ),
+            0,
+            now,
+        );
+        assert!(!this.scene_effects_at(effects, now, cx));
+        assert!(this.presenter.drawn());
+        assert_eq!(this.presenter.stoppable_run(), None);
+        this.activity = crate::presence::Presence::activity(
+            &this.runs,
+            crate::escape::Panel::Closed,
+            &this.presenter,
+        );
+        this.escape(cx)
+            .expect("Esc disposes the unbound visual hold");
+        assert!(!this.presenter.drawn());
+        assert_eq!(this.scene_deadline, None);
+        assert_eq!(this.presenter.deadline(), None);
+    });
+    script.finish();
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+    close_callback_scene(&owner, cx);
+}
+
+#[gpui::test]
+fn a_refused_host_show_reports_a_scene_failure_instead_of_a_user_clear(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    use kumochi_protocol::message::{ControlToBrain, SceneId};
+    let now = std::time::Instant::now();
+    let (owner, controls) = callback_scene(
+        br#"{"step":{"id":"static","put":[{"shape":{"id":"box","kind":"rect","box":[0,0,30,30],"enter":"none"}}]}}"#,
+        now, cx,
+    );
+    let script = HostGuard::install(&[
+        Step(Operation::Configure, Outcome::Success),
+        Step(Operation::Show, Outcome::NotWin32),
+        Step(Operation::Hide, Outcome::Success),
+        Step(Operation::Configure, Outcome::Success),
+    ]);
+    owner.update(cx, |this, cx| {
+        assert!(!this.draw_changed_at(now, cx));
+        assert!(!this.presenter.holds_scenes());
+        assert_eq!(this.scene_deadline, None);
+    });
+    script.finish();
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::SceneFailed { scene: SceneId(1) })
+    );
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+    close_callback_scene(&owner, cx);
+}
+
+#[gpui::test]
 fn a_failure_after_success_is_drained_before_any_paint_acknowledgement(
     cx: &mut gpui_kit::TestAppContext,
 ) {
@@ -911,9 +1338,7 @@ fn a_failure_after_success_is_drained_before_any_paint_acknowledgement(
     script.finish();
     assert_eq!(
         controls.try_recv(),
-        Ok(ControlToBrain::ClearDrawing {
-            scene_ids: vec![SceneId(1)]
-        })
+        Ok(ControlToBrain::SceneFailed { scene: SceneId(1) })
     );
     assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
     owner.update(&mut visual, |this, cx| {
@@ -1229,8 +1654,8 @@ fn the_recorded_graph_finishes_drawing_while_the_status_panel_is_hidden(
     script.finish();
     assert_eq!(
         retained_draw(&owner, cx),
-        [1.0, 1.0, 0.683_830_8, 1.0, 1.0, 1.0, 1.0],
-        "the recorded first frame, the fg labels included"
+        [0.809_890_6],
+        "the recorded first frame: the x axis draws in and the rest wait their turn"
     );
     assert_eq!(vsync_shown(&owner, cx), 1);
     assert_eq!(retained_draw(&owner, cx), [1.0; 7]);

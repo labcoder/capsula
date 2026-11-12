@@ -101,8 +101,9 @@ fn opacity(view: &SceneView, now: u64, name: &str) -> u32 {
 fn transform(view: &SceneView, now: u64, name: &str) -> Affine {
     item(view, now, name).expect("emitted").transform
 }
+/// A rect that appears at once.
 fn rect(name: &str) -> Value {
-    json!({"shape":{"id":name,"kind":"rect","box":[0,0,10,10]}})
+    json!({"shape":{"id":name,"kind":"rect","box":[0,0,10,10],"enter":"none"}})
 }
 /// 256 rectangles, `r0` to `r255`.
 fn rects() -> Vec<Value> {
@@ -238,7 +239,7 @@ fn an_active_view_releases_its_whole_charge_but_the_shared_version() {
             &mut budget,
             &mut view,
             json!({"id":"fade","put":[
-                {"shape":{"id":"s","kind":"rect","box":[0,0,10,10],"fill":"blue"}},
+                {"shape":{"id":"s","kind":"rect","box":[0,0,10,10],"fill":"blue","enter":"none"}},
                 {"anim":{"target":"s","track":"opacity","ease":"linear","keys":keys}}
             ]}),
             0,
@@ -259,6 +260,33 @@ fn an_active_view_releases_its_whole_charge_but_the_shared_version() {
 }
 
 #[test]
+fn objects_without_an_entrance_draw_or_fade_in_each_60_percent_through_the_last() {
+    let (mut scene, mut budget, mut view) = fresh();
+    activate(
+        &mut scene,
+        &mut budget,
+        &mut view,
+        json!({"id":"paced","put":[
+            {"line":{"id":"l","from":[0,0],"to":[10,0]}},
+            {"shape":{"id":"s","kind":"rect","box":[0,0,10,10]}}
+        ]}),
+        0,
+    );
+    let draw = |now| item(&view, now, "l").expect("emitted").draw.to_bits();
+    assert_eq!(draw(0), 0.0_f32.to_bits(), "the line draws in");
+    assert_eq!(draw(600), 1.0_f32.to_bits());
+    assert_eq!(
+        item(&view, 359, "s"),
+        None,
+        "the rect waits for 60% of the line's 600 ms"
+    );
+    assert_eq!(opacity(&view, 360, "s"), 0.0_f32.to_bits(), "then fades in");
+    assert_eq!(opacity(&view, 710, "s"), 1.0_f32.to_bits());
+    assert_eq!(view.stop(709), vec![handle(&view, "l")]);
+    assert_eq!(view.entrance_end(), Some(710));
+}
+
+#[test]
 fn a_child_entrance_waits_for_its_delayed_parent_without_shortening() {
     let (mut scene, mut budget, mut view) = fresh();
     activate(
@@ -267,7 +295,7 @@ fn a_child_entrance_waits_for_its_delayed_parent_without_shortening() {
         &mut view,
         json!({
             "id":"delayed","say":"one two three four five six seven eight nine ten","put":[
-                {"diagram":{"id":"d","at_word":5,"delay":200}},
+                {"diagram":{"id":"d","at_word":5,"delay":200,"enter":"none"}},
                 {"shape":{"id":"child","in":"d","kind":"rect","box":[0,0,8,8],"enter":"fade","dur":400}}
             ]
         }),
@@ -387,7 +415,7 @@ fn a_three_level_entrance_chain_keeps_its_start_when_a_child_is_added_later() {
         &mut budget,
         &mut view,
         json!({"id":"pending","say":"one two three four five six seven eight nine ten","put":[
-            {"diagram":{"id":"d","at_word":5,"delay":200}},
+            {"diagram":{"id":"d","at_word":5,"delay":200,"enter":"none"}},
             {"table":{"id":"t","in":"d","cols":["V"],"enter":"fade","dur":400}},
             {"row":{"id":"first","in":"t","cells":[1],"enter":"fade","dur":400}}
         ]}),
@@ -812,8 +840,8 @@ fn explicit_position_replaces_a_running_glide_and_suppresses_the_next_one() {
         &mut budget,
         &mut view,
         json!({"id":"first","put":[
-            {"diagram":{"id":"d","box":[0,0,1,1]}},
-            {"node":{"id":"a","in":"d","label":"A"}}
+            {"diagram":{"id":"d","box":[0,0,1,1],"enter":"none"}},
+            {"node":{"id":"a","in":"d","label":"A","enter":"none"}}
         ]}),
         0,
     );
@@ -977,16 +1005,17 @@ fn an_entrance_scheduled_past_the_deadline_appears_at_rest_there() {
 #[test]
 fn stop_reveals_only_objects_whose_own_and_ancestor_entrances_finished() {
     let (mut scene, mut budget, mut view) = fresh();
+    // A zero delay keeps the step's authored timing, so every entrance starts at 0.
     activate(
         &mut scene,
         &mut budget,
         &mut view,
         json!({"id":"mixed","put":[
-            {"diagram":{"id":"d"}},
+            {"diagram":{"id":"d","enter":"none","delay":0}},
             {"table":{"id":"t","in":"d","cols":["V"],"enter":"fade","dur":1000}},
             {"row":{"id":"r","in":"t","cells":[1],"enter":"fade","dur":200}},
             {"shape":{"id":"x","kind":"rect","box":[300,0,320,20],"enter":"fade","dur":500}},
-            {"shape":{"id":"y","kind":"rect","box":[340,0,360,20]}}
+            {"shape":{"id":"y","kind":"rect","box":[340,0,360,20],"enter":"none"}}
         ]}),
         0,
     );
@@ -1022,9 +1051,9 @@ fn detached_rows_keep_the_cut_ancestors_factor_under_their_own_track() {
         &mut budget,
         &mut view,
         json!({"id":"first","put":[
-            {"diagram":{"id":"d","opacity":0.5}},
-            {"table":{"id":"t","in":"d","cols":["V"]}},
-            {"row":{"id":"r","in":"t","cells":[1],"opacity":0}},
+            {"diagram":{"id":"d","opacity":0.5,"enter":"none"}},
+            {"table":{"id":"t","in":"d","cols":["V"],"enter":"none"}},
+            {"row":{"id":"r","in":"t","cells":[1],"opacity":0,"enter":"none"}},
             {"anim":{"target":"r","track":"opacity","ease":"linear","keys":[[0,0],[100,1]]}}
         ]}),
         0,
@@ -1099,7 +1128,7 @@ fn explicit_opacity_can_raise_a_zero_base_without_an_ancestor() {
         &mut budget,
         &mut view,
         json!({"id":"zero_base","put":[
-            {"shape":{"id":"s","kind":"rect","box":[0,0,8,8],"opacity":0}},
+            {"shape":{"id":"s","kind":"rect","box":[0,0,8,8],"opacity":0,"enter":"none"}},
             {"anim":{"target":"s","track":"opacity","ease":"linear","keys":[[0,0],[100,1]]}}
         ]}),
         0,
@@ -1190,7 +1219,7 @@ fn finished_tracks_frame_the_same_live_and_after_a_cut() {
         &mut scene,
         &mut budget,
         &mut view,
-        json!({"id":"tracks","put":[{"path":{"id":"s","d":"M0 0 L8 0 L8 8 L0 8 Z"}},
+        json!({"id":"tracks","put":[{"path":{"id":"s","d":"M0 0 L8 0 L8 8 L0 8 Z","enter":"none"}},
             {"anim":{"target":"s","track":"color","keys":[[0,"red"],[100,"blue"]]}},
             {"anim":{"target":"s","track":"draw","keys":[[0,0],[100,0.5]]}},
             {"anim":{"target":"s","track":"x","ease":"spring","yoyo":true,"repeat":1,
@@ -1247,9 +1276,9 @@ fn a_glide_starts_where_the_group_was_and_survives_unrelated_steps() {
         &mut budget,
         &mut view,
         json!({"id":"first","put":[
-            {"diagram":{"id":"d","box":[0,0,260,300],"dir":"down"}},
-            {"node":{"id":"root","in":"d","label":"Root"}},
-            {"node":{"id":"a","in":"d","label":"A"}},{"node":{"id":"b","in":"d","label":"B"}},
+            {"diagram":{"id":"d","box":[0,0,260,300],"dir":"down","enter":"none"}},
+            {"node":{"id":"root","in":"d","label":"Root","enter":"none"}},
+            {"node":{"id":"a","in":"d","label":"A","enter":"none"}},{"node":{"id":"b","in":"d","label":"B"}},
             {"edge":{"id":"ra","in":"d","from":"root","to":"a"}},{"edge":{"id":"rb","in":"d","from":"root","to":"b"}}
         ]}),
         0,

@@ -11,7 +11,7 @@ mod drawings;
 mod escape;
 #[expect(
     clippy::as_conversions,
-    reason = "seven fixed semantic slot discriminants index the fixed receipt array"
+    reason = "eight fixed semantic slot discriminants index the fixed receipt array"
 )]
 mod exclusion;
 mod frame_rate;
@@ -24,6 +24,7 @@ mod line;
 mod link;
 mod messages;
 pub(crate) mod observer;
+mod onboarding;
 mod overlay;
 #[cfg(test)]
 mod overlay_fixture;
@@ -125,6 +126,10 @@ struct Presence {
     text: Option<TextPanel>,
     thread_panel: Option<ThreadsPanel>,
     settings_panel: Option<SettingsPanel>,
+    /// The first-run window, while it shows.
+    onboarding: Option<onboarding::OnboardingPanel>,
+    /// Whether onboarding may still open this run.
+    onboarding_run: crate::onboarding::ThisRun,
     settings: Entity<Settings>,
     threads: Entity<Threads>,
     chat: Entity<Threads>,
@@ -153,6 +158,8 @@ struct Presence {
     /// `--esc-fixture`: hold global Esc from startup until the first Esc, with no fake work.
     escape_fixture: bool,
     layout: Layout,
+    /// The stage drawings were last given, and the geometry it was chosen from.
+    drawing_placement: Option<stage::Placed>,
     panel_visibility: PanelVisibility,
     scale: f32,
     pointer_settle: Option<Task<()>>,
@@ -333,7 +340,9 @@ impl Presence {
                 }
                 Effect::Listening | Effect::HoldStarted | Effect::HoldEnded => continue,
                 Effect::OpenInput => {
-                    if let Err(error) = self.focus_text(cx) {
+                    if self.onboarding.is_none()
+                        && let Err(error) = self.focus_text(cx)
+                    {
                         tracing::error!(%error, "can't open the typing panel");
                     }
                 }
@@ -509,6 +518,11 @@ impl Presence {
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
         match event {
+            PresenceEvent::ShowStatus | PresenceEvent::DockPressed { .. }
+                if self.onboarding.is_some() =>
+            {
+                self.show_onboarding(onboarding::Select::Keep, cx)?;
+            }
             PresenceEvent::ShowStatus => self.set_panel(PanelVisibility::Visible, cx)?,
             // Hover opens the peek; a press does nothing until C2a's pull starts there.
             PresenceEvent::DockPressed { .. } => {}
@@ -969,6 +983,8 @@ pub(crate) fn open(
             text: None,
             thread_panel: None,
             settings_panel: None,
+            onboarding: None,
+            onboarding_run: crate::onboarding::ThisRun::Owed,
             settings: cx.new(|_| Settings::default()),
             threads: cx.new(|_| threads),
             chat: cx.new(|_| chat),
@@ -991,6 +1007,7 @@ pub(crate) fn open(
             escape_hold: EscapeHold::default(),
             escape_fixture: flags.escape_fixture,
             layout: Layout::default(),
+            drawing_placement: None,
             panel_visibility: PanelVisibility::Hidden,
             scale,
             pointer_settle: None,

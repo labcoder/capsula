@@ -354,7 +354,8 @@ fn shape_length(r: &crate::record::Shape) -> f64 {
 }
 
 fn shape_geometry(work: &mut Work, r: &crate::record::Shape) -> Result<(), ErrorCode> {
-    work.dash = r.dash.then(|| shape_length(r));
+    let outlined = r.width.is_none_or(|width| width.get() > 0.0);
+    work.dash = (r.dash && outlined).then(|| shape_length(r));
     if let Some(b) = r.bounds {
         work.extent = work.extent.max(rect_extent(b)?);
     } else {

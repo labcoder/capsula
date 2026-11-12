@@ -1,8 +1,8 @@
 //! Incremental placement, preparation isolation and ordered-cut recovery.
 use kumochi_scene::{
-    Admission, Begin, Budget, ErrorCode, GlobalBudget, Handle, Record, SceneState, Step, StopCut,
-    WireId,
-    display::{Item, MeasureError, Prim, TextMeasure, TextStyle},
+    Admission, Begin, Budget, ErrorCode, Frame, GlobalBudget, Handle, Record, SceneState,
+    SceneView, Step, StopCut, WireId,
+    display::{Item, MeasureError, PaintWork, Prim, TextMeasure, TextStyle},
     geom::Vec2,
     layout::{
         Glide, LayoutState, PrepareError, PrepareInput, PreparedStep, SurfaceGeometry, prepare,
@@ -586,9 +586,52 @@ fn path_paint_changes_reuse_geometry_without_requesting_new_sizing_facts() {
     assert!(Arc::ptr_eq(old, new));
     assert_eq!(color.rgb.get(), 0x00ff_6b7d);
     let Prim::Fill { color, .. } = &next.display.items[0].primitives[0] else {
-        panic!("unchanged fill");
+        panic!("recolored fill");
     };
-    assert_eq!(color.rgb.get(), 0x005f_d39a);
+    assert_eq!(
+        color.rgb.get(),
+        0x00ff_6b7d,
+        "a set color recolors the fill too"
+    );
+}
+
+#[test]
+fn set_color_recolors_a_filled_shape_and_leaves_an_unfilled_one_unfilled() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let mut measure = Measure::default();
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[
+            {"shape":{"id":"puff","kind":"circle","at":[50,50],"r":20,"color":"#ffffff","fill":"#ffffff","width":1}},
+            {"shape":{"id":"ring","kind":"circle","at":[120,50],"r":20,"color":"#ffffff"}}
+        ]}),
+    );
+    let first = picture(&scene, first, &before, &mut measure).expect("shapes");
+    let next = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"red","set":[{"target":"puff","color":"#ff0000"},{"target":"ring","color":"#ff0000"}]}),
+    );
+    let next = picture(&scene, next, &first.after, &mut measure).expect("recolored");
+    let items = next.after.items();
+    let [
+        Prim::Fill { color: fill, .. },
+        Prim::Line { color: outline, .. },
+    ] = &*items[0].primitives
+    else {
+        panic!("a filled circle keeps its fill and outline");
+    };
+    assert_eq!(
+        (fill.rgb.get(), outline.rgb.get()),
+        (0x00ff_0000, 0x00ff_0000)
+    );
+    let [Prim::Line { color: ring, .. }] = &*items[1].primitives else {
+        panic!("an unfilled circle gains no fill");
+    };
+    assert_eq!(ring.rgb.get(), 0x00ff_0000);
 }
 
 #[test]
@@ -797,6 +840,33 @@ fn kept_recovery_failures_report_the_revision_and_layout_checks_full_envelopes()
     assert!(
         matches!(error,PrepareError::Layout(error) if error.code==kumochi_scene::ErrorCode::OutOfRange)
     );
+    // A shrinking track charges its rect at the envelope's 4, not the resting 1: 7 pieces per
+    // corner, so 4 · 8 + 1 points, live and recovered.
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let shrinking = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"shrinking","put":[
+            {"shape":{"id":"r","kind":"rect","box":[0,0,16,16],"radius":8,"fill":"blue"}},
+            {"anim":{"target":"r","track":"scale","keys":[[0,4],[100,1]]}}
+        ]}),
+    );
+    let live = picture(&scene, shrinking, &before, &mut Measure::default()).expect("shrinking");
+    let (_, recovered) = recover(
+        header(),
+        scene.recovery_log(),
+        SurfaceGeometry::default(),
+        &Arc::new(Theme::default()),
+        &mut Measure::default(),
+        &AtomicBool::new(false),
+        Some(PaintWork::LIMITS),
+    )
+    .expect("recovered under the cap");
+    for work in [live.after.paint_work(), recovered.paint_work()] {
+        assert_eq!((work.fill_vertices, work.outline_points), (33, 33));
+    }
 }
 
 #[test]
@@ -966,6 +1036,115 @@ fn detached_edges_can_be_updated_without_resurrecting_their_endpoints() {
     )
     .expect("updated detached replay");
     assert_eq!(recovered.items(), next.after.items());
+}
+
+#[test]
+fn a_zero_width_shape_keeps_its_fill_and_draws_no_outline() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"sky","put":[
+            {"shape":{"id":"skybg","kind":"rect","box":[0,0,480,300],"fill":"#BFE8FF","color":"#BFE8FF","width":0}},
+            {"shape":{"id":"sun","kind":"circle","at":[400,60],"r":30,"fill":"#FFD700","width":0}}
+        ]}),
+    );
+    let prepared =
+        picture(&scene, first, &before, &mut Measure::default()).expect("zero-width shapes");
+    let primitives = |name: &'static str| {
+        let handle = prepared.after.handle(&id(name));
+        let item = prepared
+            .display
+            .items
+            .iter()
+            .find(|item| Some(item.handle) == handle)
+            .expect("prepared item");
+        Arc::clone(&item.primitives)
+    };
+    assert!(matches!(
+        &*primitives("skybg"),
+        [Prim::Rect {
+            fill: Some(_),
+            border: None,
+            ..
+        }]
+    ));
+    assert!(matches!(&*primitives("sun"), [Prim::Fill { .. }]));
+}
+
+#[test]
+fn a_zero_width_dashed_shape_reserves_no_dash_and_draws_no_outline() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    // Its 8,000-long dashed outline needs 513 pieces, one past the global cap.
+    let outlined = step(json!({"id":"big","put":[
+        {"shape":{"id":"big","kind":"rect","box":[0,0,2000,2000],"fill":"blue","dash":true}}
+    ]}));
+    assert!(matches!(
+        scene.admit(&outlined, &budget),
+        Err(error) if error.code == ErrorCode::OverBudget(Budget::DashPieces)
+    ));
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"big","put":[
+            {"shape":{"id":"big","kind":"rect","box":[0,0,2000,2000],"fill":"blue","width":0,"dash":true}}
+        ]}),
+    );
+    assert_eq!(budget.usage().dash_pieces, 0);
+    let prepared =
+        picture(&scene, first, &before, &mut Measure::default()).expect("no dashed outline");
+    assert_eq!(prepared.after.paint_work().dash_pieces, 0);
+    let handle = prepared.after.handle(&id("big"));
+    let item = prepared
+        .display
+        .items
+        .iter()
+        .find(|item| Some(item.handle) == handle)
+        .expect("prepared item");
+    assert!(matches!(
+        &*item.primitives,
+        [Prim::Rect {
+            fill: Some(_),
+            border: None,
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn a_zero_radius_rect_prepares_as_a_plain_square_cornered_rect() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"rects","put":[
+            {"shape":{"id":"square","kind":"rect","box":[20,20,100,60],"radius":0}},
+            {"shape":{"id":"plain","kind":"rect","box":[20,20,100,60]}}
+        ]}),
+    );
+    let prepared = picture(&scene, first, &before, &mut Measure::default()).expect("zero radius");
+    let primitives = |name: &'static str| {
+        let handle = prepared.after.handle(&id(name));
+        let item = prepared
+            .display
+            .items
+            .iter()
+            .find(|item| Some(item.handle) == handle)
+            .expect("prepared item");
+        Arc::clone(&item.primitives)
+    };
+    let square = primitives("square");
+    assert!(matches!(
+        &*square,
+        [Prim::Rect { radius, border: Some(_), .. }] if radius.to_bits() == 0.0_f32.to_bits()
+    ));
+    assert_eq!(square, primitives("plain"));
 }
 
 #[test]
@@ -2087,6 +2266,47 @@ fn grouped_and_stacked_bars_use_series_slots_and_signed_baselines() {
 }
 
 #[test]
+fn sampled_sine_maps_one_period_with_positive_y_upward() {
+    use std::f64::consts::{FRAC_PI_2, PI, TAU};
+
+    let result = chart_picture(&json!([
+        {"chart":{"id":"c","kind":"line","box":[0,0,400,300],
+            "x":{"min":0,"max":TAU},"y":{"min":-1,"max":1}}},
+        {"series":{"id":"s","in":"c","data":[
+            [0,0],[FRAC_PI_2,1],[PI,0],[3.0 * FRAC_PI_2,-1],[TAU,0]
+        ]}}
+    ]));
+    let items = result.after.items();
+    let handle = result.after.handle(&id("s")).expect("sine handle");
+    let series = items
+        .iter()
+        .find(|item| item.handle == handle)
+        .expect("sine series");
+    let lines: Vec<_> = series
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Prim::Line { points, closed, .. } => Some((points, closed)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lines.len(), 1);
+    let (points, closed) = lines[0];
+    assert!(!closed, "a sine period is an open curve");
+    let expected = [
+        [54.0, 142.2],
+        [136.0, 16.0],
+        [218.0, 142.2],
+        [300.0, 268.4],
+        [382.0, 142.2],
+    ];
+    assert_eq!(points.len(), expected.len());
+    for (actual, expected) in points.iter().zip(expected) {
+        assert_vec2_near(*actual, expected);
+    }
+}
+
+#[test]
 fn pair_x_scatter_uses_uneven_numeric_spacing_and_log_y_midpoints() {
     let result = chart_picture(&json!([
         {"chart":{"id":"c","kind":"scatter","box":[0,0,400,300],"y":{"min":1,"max":100,"scale":"log"}}},
@@ -2881,17 +3101,17 @@ fn preparation_counts_paint_work_once_and_refuses_an_unbuildable_fill() {
         ]}),
     );
     let first = picture(&scene, first, &before, &mut measure).expect("buildable paint work");
-    // The dash: floor(100 / 10) + 2. The rect: radius 10 at scale 64 needs 29 pieces per
-    // corner, so 4 · 30 + 1 points, filled and bordered. The star: 257 points + 257 · 84
+    // The dash: floor(100 / 10) + 2. The rect: radius 10 at the inline scale needs 4 pieces per
+    // corner, so 4 · 5 + 1 points, filled and bordered. The star: 257 points + 257 · 84
     // crossings, exactly one build.
     assert_eq!(
         first.after.paint_work(),
         kumochi_scene::display::PaintWork {
             dash_pieces: 12,
-            fill_vertices: 121 + 21_845,
+            fill_vertices: 21 + 21_845,
             largest_fill: 21_845,
-            outline_points: 121,
-            largest_outline: 121,
+            outline_points: 21,
+            largest_outline: 21,
         }
     );
     let next = committed(
@@ -2902,7 +3122,7 @@ fn preparation_counts_paint_work_once_and_refuses_an_unbuildable_fill() {
     // 331 points + 331 · 65 crossings is one vertex past a single build.
     assert!(matches!(
         picture(&scene, next, &first.after, &mut measure),
-        Err(PrepareError::OverResidency)
+        Err(PrepareError::OverPaintWork)
     ));
 }
 
@@ -2926,7 +3146,7 @@ fn generated_fill_points_refuse_before_crossing_count_above_the_global_cap() {
             };
             assert_eq!(points.len(), 505);
         } else {
-            assert!(matches!(prepared, Err(PrepareError::OverResidency)));
+            assert!(matches!(prepared, Err(PrepareError::OverPaintWork)));
         }
     }
 }
@@ -2955,15 +3175,90 @@ fn a_replaced_item_is_recounted_and_an_unchanged_one_keeps_its_count() {
     );
     let next = picture(&scene, next, &first.after, &mut measure).expect("two markers");
     let two = next.after.paint_work();
-    // A scatter marker is a filled 8-unit rect of radius 4: 18 pieces per corner at scale 64,
-    // so 4 · 19 + 1 points. The untouched dashed path keeps floor(100 / 10) + 2.
-    assert_eq!(three.fill_vertices - two.fill_vertices, 77);
+    // A scatter marker is a filled 8-unit rect of radius 4: 3 pieces per corner at the inline
+    // scale, so 4 · 4 + 1 points. The untouched dashed path keeps floor(100 / 10) + 2.
+    assert_eq!(three.fill_vertices - two.fill_vertices, 17);
     assert_eq!((three.dash_pieces, two.dash_pieces), (12, 12));
     assert_eq!(
         first.after.paint_work(),
         three,
         "the earlier layout keeps its own counts"
     );
+}
+
+#[test]
+fn a_later_ancestor_track_recharges_shared_rects_and_refuses_growth_past_the_cap() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let mut measure = Measure::default();
+    let before = LayoutState::new(&scene);
+    let capped =
+        |committed: kumochi_scene::Committed, before: &LayoutState, measure: &mut Measure| {
+            let input = PrepareInput::new(
+                committed.preparation,
+                before.clone(),
+                SurfaceGeometry::default(),
+                Arc::new(Theme::default()),
+            )
+            .map_err(|(error, _)| error)
+            .expect("the step follows its base")
+            .with_paint_cap(Some(PaintWork::LIMITS));
+            prepare(input, measure, &AtomicBool::new(false))
+        };
+    let scaled = |scale: u32| json!({"id":format!("scale{scale}"),"put":[{"anim":{"target":"d","track":"scale","keys":[[0,scale]]}}]});
+    let mut put = vec![json!({"diagram":{"id":"d"}})];
+    put.extend((0..8).map(|index| {
+        json!({"shape":{"id":format!("r{index}"),"in":"d","kind":"rect","box":[index * 20,0,16,16],"radius":8,"fill":"blue"}})
+    }));
+    let first = committed(&mut scene, &mut budget, json!({"id":"rects","put":put}));
+    let first = capped(first, &before, &mut measure).expect("eight rects");
+    let next = committed(&mut scene, &mut budget, scaled(4));
+    let next = capped(next, &first.after, &mut measure).expect("a scaled ancestor");
+    let rect = |layout: &LayoutState| {
+        layout
+            .items()
+            .into_iter()
+            .find(|item| !item.primitives.is_empty())
+            .expect("a rect")
+    };
+    assert!(Arc::ptr_eq(
+        &rect(&first.after).primitives,
+        &rect(&next.after).primitives
+    ));
+    let mut frame = Frame::new();
+    SceneView::new(&next.after, 0)
+        .frame(0, &mut frame)
+        .expect("a fresh frame");
+    let charges: Vec<u32> = frame
+        .items()
+        .iter()
+        .filter(|item| !item.primitives.is_empty())
+        .map(|item| item.paint_scale.to_bits())
+        .collect();
+    // The envelope's 4 at the inline limit of 1, with the 2⁻¹⁶ allowance.
+    assert_eq!(charges, vec![(4.0_f32 + 1.0 / 16_384.0).to_bits(); 8]);
+    // Radius 8 needs 4 pieces per corner at 1 and 7 at 4: 4 · 5 + 1 and 4 · 8 + 1 points, filled
+    // and bordered. At 32 it needs 18, so eight rects of 77 points pass the cap.
+    let work = |points: usize| PaintWork {
+        dash_pieces: 0,
+        fill_vertices: 8 * points,
+        largest_fill: points,
+        outline_points: 8 * points,
+        largest_outline: points,
+    };
+    assert_eq!(first.after.paint_work(), work(21));
+    assert_eq!(next.after.paint_work(), work(33));
+    let over = committed(&mut scene, &mut budget, scaled(32));
+    assert!(matches!(
+        capped(over, &next.after, &mut measure),
+        Err(PrepareError::OverPaintWork)
+    ));
+    assert_eq!(
+        first.after.paint_work(),
+        work(21),
+        "the earlier prefix keeps its own work"
+    );
+    assert_eq!(next.after.paint_work(), work(33));
 }
 
 /// A convex polygon of `count` points on a circle: no crossings, so it charges its points.
@@ -3013,7 +3308,7 @@ fn bounded_preparation_refuses_once_the_scene_s_own_work_passes_the_cap() {
                     .fill_vertices,
                 fill
             ),
-            None => assert!(matches!(prepared, Err(PrepareError::OverResidency))),
+            None => assert!(matches!(prepared, Err(PrepareError::OverPaintWork))),
         }
     }
     let (scene, commit) = fill_scene(&[convex("a", 300), convex("b", 213)]);
@@ -3051,7 +3346,7 @@ fn bounded_recovery_refuses_a_scene_over_the_cap() {
                 result,
                 Err(kumochi_scene::layout::RecoveryError {
                     revision: 1,
-                    error: PrepareError::OverResidency,
+                    error: PrepareError::OverPaintWork,
                 })
             ));
         } else {
@@ -3102,7 +3397,7 @@ fn bounded_second_step_counts_reused_fill_work_before_new_objects() {
             };
             assert!(Arc::ptr_eq(old, reused));
         } else {
-            assert!(matches!(result, Err(PrepareError::OverResidency)));
+            assert!(matches!(result, Err(PrepareError::OverPaintWork)));
         }
         assert_eq!(first.after.paint_work().fill_vertices, 300);
     }

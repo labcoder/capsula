@@ -5,7 +5,7 @@ use kumochi_protocol::message::{ControlToBrain, DataToShell, SceneHeader, SceneI
 use kumochi_scene::{
     FrameItem, Record, SceneView,
     deferred::Deferred,
-    display::{MeasureError, Paint, Prim, TextMeasure, TextStyle},
+    display::{MeasureError, Paint, Prim, TextMeasure, TextStyle, fallback_corner_segments},
     geom::{Affine, Rect, Vec2},
     layout::SurfaceGeometry,
     parse_record,
@@ -62,6 +62,16 @@ fn prepare_canvas_step(presenter: &mut Presenter, index: u32, record: &[u8]) {
 }
 
 fn prepare_canvas_step_at(presenter: &mut Presenter, index: u32, record: &[u8], now: Instant) {
+    prepare_scene_step_at(presenter, TWINNED, index, record, now);
+}
+
+fn prepare_scene_step_at(
+    presenter: &mut Presenter,
+    scene: SceneId,
+    index: u32,
+    record: &[u8],
+    now: Instant,
+) {
     let Record::Step(step) = parse_record(record).expect("fixture step") else {
         panic!("step");
     };
@@ -71,7 +81,7 @@ fn prepare_canvas_step_at(presenter: &mut Presenter, index: u32, record: &[u8], 
             Deferred::new(
                 DataToShell::SceneStepCommit {
                     run: kumochi_protocol::message::RunId(6),
-                    scene: TWINNED,
+                    scene,
                     index,
                     step,
                 },
@@ -523,6 +533,62 @@ fn a_fill_past_an_item_s_first_primitive_finds_its_own_staged_entry() {
 }
 
 #[test]
+fn the_deepest_turned_chain_builds_its_fallback_within_its_charge() {
+    // The scene's depth-limit chain: fifteen turned diagrams, four scaling by 2, around a rect
+    // whose radius puts the overlay's 32 just under ten pieces, so the allowance charges eleven.
+    let radius = f64::from(2.534_332_f32);
+    let mut put = vec![r#"{"diagram":{"id":"g0"}}"#.to_owned()];
+    put.extend((1..15).map(|n| format!(r#"{{"diagram":{{"id":"g{n}","in":"g{}"}}}}"#, n - 1)));
+    put.extend(
+        (0..15)
+            .map(|n| format!(r#"{{"anim":{{"target":"g{n}","track":"rotate","keys":[[0,7]]}}}}"#)),
+    );
+    put.extend(
+        (0..4).map(|n| format!(r#"{{"anim":{{"target":"g{n}","track":"scale","keys":[[0,2]]}}}}"#)),
+    );
+    put.push(format!(r#"{{"shape":{{"id":"r","in":"g14","kind":"rect","box":[0,0,8,8],"radius":{radius},"fill":"blue"}}}}"#));
+    let record = format!(
+        r#"{{"step":{{"id":"chain","start":"now","put":[{}]}}}}"#,
+        put.join(",")
+    );
+    let now = Instant::now();
+    let mut presenter = begun_at(Box::new(Stager(size_of::<Stager>())), now);
+    assert!(presenter.set_stage(Rect {
+        origin: Vec2::new(0.0, 0.0),
+        size: Vec2::new(3840.0, 2160.0),
+    }));
+    prepare_canvas_step_at(&mut presenter, 0, record.as_bytes(), now);
+    assert!(presenter.advance(1, now).expect("activate").is_empty());
+    let (sample, _) = presenter.sample(60_000);
+    assert!(sample.visible);
+    let failed = presenter.frames().borrow().paint(|frame, _| {
+        let (item, _, prims) = frame
+            .paint_items()
+            .find(|(_, _, prims)| matches!(prims, [Prim::Rect { .. }]))
+            .expect("the rect");
+        let m = item.transform.0;
+        let posed = (m[0] * m[3] - m[1] * m[2]).abs().sqrt();
+        assert!((posed - 32.0).abs() < 1e-3, "placed at 2, posed at {posed}");
+        let [Prim::Rect { rect, radius, .. }] = prims else {
+            panic!("one rect");
+        };
+        assert_eq!(
+            fallback_corner_segments(*rect, *radius, item.paint_scale),
+            11
+        );
+        let mut half = item.clone();
+        half.draw = 0.5;
+        let built = staged(&half, prims).expect("the fallback builds within its charge");
+        assert!(
+            matches!(built.as_slice(), [Pending::Path(..), Pending::Path(..)]),
+            "the turned, half-drawn rect's fill and border"
+        );
+        Ok::<(), BuildError>(())
+    });
+    assert!(!failed);
+}
+
+#[test]
 fn an_item_that_cannot_show_builds_nothing() {
     let shown = item();
     assert_eq!(staged(&shown, &[card()]).map(|built| built.len()), Ok(1));
@@ -772,7 +838,7 @@ fn cleared(presenter: &mut Presenter) -> Vec<Vec<SceneId>> {
         .paint_failed()
         .into_iter()
         .filter_map(|effect| match effect {
-            Effect::Control(ControlToBrain::ClearDrawing { scene_ids }) => Some(scene_ids),
+            Effect::Control(ControlToBrain::SceneFailed { scene }) => Some(vec![scene]),
             _ => None,
         })
         .collect()

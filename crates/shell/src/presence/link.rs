@@ -33,6 +33,7 @@ impl Presence {
             | LinkEvent::TurnRefused { generation, .. }
             | LinkEvent::VoiceHold { generation, .. }
             | LinkEvent::CaptureDone { generation, .. }
+            | LinkEvent::DrawingNotice { generation, .. }
             | LinkEvent::CaptureFailed { generation, .. } = &event
                 && self
                     .session
@@ -42,6 +43,9 @@ impl Presence {
                 continue;
             }
             match event {
+                LinkEvent::DrawingNotice {
+                    key, thread, run, ..
+                } => self.show_error(&key.into(), Source::Drawing { thread, run }, cx),
                 LinkEvent::State(state) => {
                     self.cancel_voice(cx);
                     self.revoke_exclusion(cx);
@@ -363,7 +367,8 @@ impl Presence {
         {
             self.place_drawings(cx.weak_entity(), cx);
         }
-        if let DataToShell::ScenesRemoved { scenes } = &*frame
+        if let DataToShell::ScenesRemoved { scenes } | DataToShell::ScenesReplaced { scenes, .. } =
+            &*frame
             && self
                 .session
                 .as_ref()
@@ -491,6 +496,9 @@ impl Presence {
         {
             tracing::warn!(%error, "can't restore the saved dock position");
         }
+        if let Err(error) = self.onboarding_changed(cx) {
+            tracing::error!(%error, "can't show onboarding");
+        }
     }
 
     /// Shows the brain's error in both panels and on the connected dock.
@@ -568,6 +576,8 @@ impl Presence {
             self.runs.met(session.incarnation());
             self.runs.connected(session.generation());
             self.presenter.connected(session.generation());
+            // Recovered drawings start on a cleared screen, so none keeps the old stage.
+            self.drawing_placement = None;
             for model in [&self.threads, &self.chat] {
                 model.update(cx, |state, cx| {
                     state.connected();
@@ -600,6 +610,9 @@ impl Presence {
         self.draw_changed(cx);
         diagnostics::record(cx, format_args!("link state={state:?}"));
         self.state = state;
+        if let Err(error) = self.onboarding_changed(cx) {
+            tracing::error!(%error, "can't show onboarding");
+        }
         self.refresh_dock(cx);
         self.panel.update(cx, |panel, cx| {
             panel.state = state;

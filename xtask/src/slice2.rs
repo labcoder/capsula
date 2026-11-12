@@ -3,8 +3,9 @@
 //!
 //! The brain only serves the `kumochi.exe` beside it, so the gate copies the brain and itself, as
 //! `kumochi.exe`, into a fresh folder under `target/slice2-gate` and runs the client from that copy.
-//! Each item gets its own `%LOCALAPPDATA%`, so no item sees another's store, and the developer's own
-//! dev store is never touched.
+//! Each item gets its own `%LOCALAPPDATA%` and `%APPDATA%`, so no item sees another's store or
+//! settings. A brain still reaches some of the developer's dev data outside them, in Claude Code's
+//! folder and in Credential Manager: see `docs/development/slice2-gate.md` and OSC-680.
 #![expect(
     clippy::print_stdout,
     reason = "the gate's verdicts and numbers are its output"
@@ -20,15 +21,14 @@ mod store;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
-use std::thread;
+use std::process::{Child, Command};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context as _, Result, bail, ensure};
+use anyhow::{Context as _, Result, ensure};
 use kumochi_protocol::constants::{BRAIN_EXE, SHELL_EXE};
 use kumochi_protocol::message::{ControlToShell, DataToBrain, DataToShell, Phase, RunId, ThreadId};
 
-use crate::platform;
+use crate::{live, platform};
 use client::{Client, Frame};
 
 /// One gate item, run in its own folder.
@@ -38,6 +38,11 @@ type Item = fn(&Path) -> Result<Row>;
 const INNER: &str = "--inner";
 /// How long the whole gate may run before it and its brains are killed.
 const GATE_LIMIT: Duration = Duration::from_mins(20);
+/// Prefixes of the markers an item expects gone and kept. FTS5 stores a term after the first on an
+/// index page only as what it adds to the term before it, so the raw byte scan sees a whole marker
+/// only when no other indexed term shares its first letter; no fixture word starts with these.
+const GONE: &str = "qgone";
+const KEPT: &str = "zkept";
 /// How long one expected frame may take before the item fails.
 const PATIENCE: Duration = Duration::from_secs(10);
 
@@ -103,11 +108,7 @@ fn prepare(only: Option<&str>) -> Result<()> {
         platform::processes()?.is_empty(),
         "close every {SHELL_EXE} and {BRAIN_EXE} first: a dev brain holds the pipes the gate uses"
     );
-    let built = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
-        .args(["build", "--quiet", "--package", "kumochi-brain"])
-        .status()
-        .context("building the brain")?;
-    ensure!(built.success(), "the brain didn't build");
+    live::build_brain()?;
     let me = std::env::current_exe()?;
     let target = me.parent().context("xtask has a folder")?;
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -121,32 +122,27 @@ fn prepare(only: Option<&str>) -> Result<()> {
     fs::copy(target.join(BRAIN_EXE), bin.join(BRAIN_EXE)).context("copying the brain")?;
     fs::copy(&me, bin.join(SHELL_EXE)).context("copying the client")?;
     println!("slice 2 gate in {}", folder.display());
-    let mut gate = Command::new(bin.join(SHELL_EXE))
-        .args(["slice2-gate", INNER])
-        .arg(&folder)
-        .args(only)
-        .spawn()
-        .context("running the gate")?;
-    let end = Instant::now() + GATE_LIMIT;
-    while gate.try_wait()?.is_none() {
-        if Instant::now() >= end {
-            let brains: Vec<_> = platform::processes()?
-                .into_iter()
-                .filter(|entry| entry.parent == gate.id())
-                .collect();
-            gate.kill()?;
-            gate.wait()?;
-            for brain in brains {
-                let _gone = Command::new("taskkill")
-                    .args(["/T", "/F", "/PID", &brain.pid.to_string()])
-                    .status();
-            }
-            bail!("the gate didn't finish in {GATE_LIMIT:?}; it and its brains were killed");
-        }
-        thread::sleep(Duration::from_millis(200));
-    }
-    ensure!(gate.wait()?.success(), "the gate failed");
+    let mut gate = Command::new(bin.join(SHELL_EXE));
+    gate.args(["slice2-gate", INNER]).arg(&folder).args(only);
+    let ran = live::run_bounded(gate, GATE_LIMIT, "the gate")?;
+    ensure!(ran.success(), "the gate failed");
     Ok(())
+}
+
+/// Ends each brain whose kill failed during its item and says how that went, so that item fails
+/// and the next one doesn't meet it on the pipes. Only brains the gate started and still holds
+/// are ended, so no other process can match, whatever its id.
+fn end_leftovers(brains: Vec<Child>) -> Vec<String> {
+    brains
+        .into_iter()
+        .map(|mut brain| {
+            let pid = brain.id();
+            match live::end(&mut brain) {
+                Ok(()) => format!("brain {pid} outlived its kill; it has exited since"),
+                Err(error) => format!("brain {pid} outlived its kill and wasn't ended: {error:#}"),
+            }
+        })
+        .collect()
 }
 
 fn gate(folder: &Path, only: Option<&str>) -> Result<()> {
@@ -168,14 +164,17 @@ fn gate(folder: &Path, only: Option<&str>) -> Result<()> {
             continue;
         }
         println!("running: {name}");
-        match item(folder) {
-            Ok(row) => rows.push(row),
-            Err(error) => rows.push(Row {
-                item: name,
-                verdict: Verdict::Fail,
-                detail: format!("{error:#}"),
-            }),
-        }
+        let row = item(folder).unwrap_or_else(|error| Row {
+            item: name,
+            verdict: Verdict::Fail,
+            detail: format!("{error:#}"),
+        });
+        let left = end_leftovers(brain::leftovers());
+        rows.push(if left.is_empty() {
+            row
+        } else {
+            Row::checked(name, &left, row.detail)
+        });
     }
     rows.extend(only.is_none().then(|| Row {
         item: "Esc on the real key in the real shell",
@@ -262,20 +261,44 @@ fn first_text(client: &mut Client, run: RunId) -> Result<()> {
     })
 }
 
-/// A random lowercase word no fixture or store holds by chance.
-fn marker() -> String {
+/// A random lowercase word starting with `prefix` that no fixture or store holds by chance.
+fn marker(prefix: &str) -> String {
     use std::hash::{BuildHasher as _, RandomState};
     format!(
-        "capsgate{:016x}",
+        "{prefix}{:016x}",
         RandomState::new().hash_one(SystemTime::now())
     )
 }
 
 #[cfg(test)]
 mod tests {
+    use std::process::{Command, Stdio};
     use std::time::Duration;
 
-    use super::percentile;
+    use super::{end_leftovers, percentile};
+
+    /// A harmless child that waits on its stdin, which stays open while the command or child lives.
+    fn held() -> Command {
+        let mut command = Command::new("cmd");
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
+    #[test]
+    fn a_leftover_brain_is_ended_and_its_exit_confirmed() {
+        let left = held().spawn().expect("cmd starts");
+        let pid = left.id();
+        let lines = end_leftovers(vec![left]);
+        assert_eq!(
+            lines,
+            [format!(
+                "brain {pid} outlived its kill; it has exited since"
+            )]
+        );
+    }
 
     #[test]
     fn percentiles_take_the_nearest_rank() {

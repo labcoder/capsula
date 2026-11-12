@@ -191,9 +191,7 @@ fn a_failed_epoch_cannot_deliver_an_earlier_success() {
     assert_eq!(presenter.take_shown(GENERATION), [None; 4]);
     assert_eq!(
         controls(&presenter.paint_failed()),
-        [&ControlToBrain::ClearDrawing {
-            scene_ids: vec![LIVE],
-        }]
+        [&ControlToBrain::SceneFailed { scene: LIVE }]
     );
     assert_eq!(presenter.stoppable_run(), None);
     assert_eq!(presenter.residency(), 0);
@@ -376,7 +374,7 @@ fn independently_begun_scenes_have_distinct_origins_over_the_same_sampler() {
 #[test]
 fn same_bound_motion_and_skipped_delayed_endpoints_invalidate_once_then_rest() {
     let moving = step(
-        r#"{"step":{"id":"motion","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10]}},{"anim":{"target":"r","track":"x","ease":"linear","delay":100,"keys":[[0,0],[100,100]]}}]}}"#,
+        r#"{"step":{"id":"motion","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10],"enter":"none"}},{"anim":{"target":"r","track":"x","ease":"linear","delay":100,"keys":[[0,0],[100,100]]}}]}}"#,
     );
     let (mut presenter, now) = prepared(&[(RUN, moving)]);
     presenter.advance(GENERATION, now).expect("activate");
@@ -405,7 +403,7 @@ fn same_bound_motion_and_skipped_delayed_endpoints_invalidate_once_then_rest() {
     let (mut presenter, now) = prepared(&[(
         RUN,
         step(
-            r#"{"step":{"id":"motion","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10]}},{"anim":{"target":"r","track":"x","delay":100,"keys":[[0,0],[100,100]]}}]}}"#,
+            r#"{"step":{"id":"motion","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10],"enter":"none"}},{"anim":{"target":"r","track":"x","delay":100,"keys":[[0,0],[100,100]]}}]}}"#,
         ),
     )]);
     presenter.advance(GENERATION, now).expect("activate");
@@ -421,7 +419,7 @@ fn same_bound_motion_and_skipped_delayed_endpoints_invalidate_once_then_rest() {
 #[test]
 fn stop_latches_motion_cancels_a_nonzero_worker_and_ignores_late_results() {
     let moving = step(
-        r#"{"step":{"id":"motion","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10]}},{"anim":{"target":"r","track":"x","keys":[[0,0],[1000,100]]}}]}}"#,
+        r#"{"step":{"id":"motion","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10],"enter":"none"}},{"anim":{"target":"r","track":"x","keys":[[0,0],[1000,100]]}}]}}"#,
     );
     let (mut presenter, now) = prepared(&[(RUN, moving)]);
     presenter.advance(GENERATION, now).expect("activate");
@@ -531,4 +529,23 @@ fn recovery_origin_cut_gaps_and_saturated_ends_keep_lifetime_identity() {
     );
     let scene = &presenter.scenes[&LIVE];
     assert_eq!(scene.activation.due(scene.state.view(), 1), Ok(u64::MAX));
+}
+
+#[test]
+fn a_step_ends_at_its_last_entrance_when_that_outlasts_its_narration() {
+    let lines = step(
+        r#"{"step":{"id":"lines","put":[{"line":{"id":"a","from":[0,0],"to":[10,0]}},{"line":{"id":"b","from":[0,5],"to":[10,5]}}]}}"#,
+    );
+    let (mut presenter, now) = prepared(&[(RUN, lines), (RUN, rect("next"))]);
+    drop(
+        presenter
+            .consume_ready(LIVE, 0, now, 100, 800)
+            .expect("lines"),
+    );
+    let scene = &presenter.scenes[&LIVE];
+    assert_eq!(
+        scene.activation.due(scene.state.view(), 1),
+        Ok(1060),
+        "b draws in from 360 to 960 ms, past the 800 ms segment"
+    );
 }

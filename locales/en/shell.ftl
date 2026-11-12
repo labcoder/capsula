@@ -238,6 +238,17 @@ settings-not-saved = Settings not saved
 error-settings-refused = Couldn't save that setting. Try again.
 error-config-unreadable = Your settings file can't be read, so changes aren't saved. Repair or delete config.toml, then restart.
 
+# Onboarding
+
+onboarding-title = Welcome to { $app }
+onboarding-close = Finish later
+onboarding-continue = Continue
+# { $name } marks where the name input sits; text may come before or after it.
+onboarding-welcome = Hi, I'm { $name }
+onboarding-welcome-help = Call me something else if you like. You can change it later in Settings.
+onboarding-user = What should { $assistant } call you?
+onboarding-user-help = Optional. It's sent to the model you chat with, so { $assistant } can use it.
+
 # ChatGPT accounts
 
 accounts-provider = ChatGPT
@@ -383,4 +394,6 @@ error-voice-corrupt = A voice file didn't match what Kumochi expected, so it was
 error-voice-storage = Kumochi couldn't read, write or delete its voice files.
 error-voice-load = Voice couldn't start.
 error-voice-model-path = The speech model folder goes through a link or network location, or has unsafe permissions. Use an ordinary local folder.
+error-drawing-replacement-failed = The replacement couldn't be drawn. Your previous drawings were removed.
+error-drawing-not-returned = No drawing came back.
 error-voice-unavailable = Voice can't be installed or removed right now.

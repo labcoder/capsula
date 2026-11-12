@@ -120,6 +120,31 @@ user clear suppresses the newcomer. A shell preparation failure after this commi
 restore victims and may leave no drawing. Failed cut retries share the clear backoff, from 500 ms up to
 30 seconds [guess], without resetting while a cut is in flight.
 
+A successor keeps one bounded pending-replacement fact until its first validated `StepShown`.
+A terminal brain validation/store error or shell refusal before that paint emits one content-free
+`DrawingReplacementFailed` for the replacement's original thread/run. Validation and preparation
+tool results keep their specific cause; a store failure instead ends the run as `failed(store)`.
+Both keep the single separate loss notice, and neither result duplicates it. User cancellation
+reports no drawing failure, and already-ended results are not rewritten.
+The notice is immediate, not deferred until the run can no longer draw. When a committed first
+step is empty or still unpainted and a later record of that successor fails, the notice says the
+earlier drawings are gone even though a corrected call in the same run may still draw. A silent
+loss would be worse; run-owned loss accounting is a separate follow-up.
+Whole-scene `SceneFailed` refusals derive their original
+identity here even when the shell had no run at header refusal; they are distinct from explicit
+`ClearDrawing` requests. The shell retains only its existing single notice, filters it by
+conversation and localizes its fixed text; it never attaches late loss
+to whichever conversation happens to be open. Recovery creates no pending replacement fact.
+
+A run that ends `done` after calling `draw`, with no committed step left that the shell
+didn't refuse, sends one `DrawingNotReturned` for its thread/run once its outcome is stored,
+which the shell shows as "No drawing came back" through the same single notice. This covers
+every call refused, calls that came back empty, and committed steps that a `StepFailed` cut
+then dropped; those still count against the run's step budget. A step that was shown or that
+the user cleared counts as returned. Stop and failed runs, which report their own ending, get no
+notice, and neither does a step refused after its run ended. A run that never calls `draw` gets no notice: the brain doesn't guess intent from the
+request.
+
 `StepShown` and `StepFailed` validate lifetime indices and the run that committed the step.
 Bad observations or held-scene cuts break the connection; removed scenes are stale. Pending
 thread deletion holds late drawing frames until the outcome: a refusal releases them in
@@ -454,7 +479,8 @@ and the store would refuse it too.
 
 shortcut: steps stream as one `draw` call: the first step starts it, each step is one
 newline-terminated argument delta, and the script's end sends `ToolCallReady` with the joined lines,
-then `Finished(Completed)`. Slice 4's B3 replaces this adapter with recorded draw arguments.
+then `Finished(Completed)`. Real engines send recorded draw arguments; only the fixture keeps
+this adapter.
 
 ## Around the coordinator
 
@@ -497,7 +523,7 @@ unconfirmed earlier clear debt still suppresses automatic relaunch. An
 in-process hand-started connection still waits behind settlement before describe. Failed debt
 is memory-only and does not survive brain exit; typed drawing history is never deleted.
 
-The step is a labelled placeholder until slice 4's scene format. A run's steps draw in one scene:
+A run's steps draw in one scene:
 its first step's write begins the scene and returns its id, and the steps after it wait in the
 run until that ack. A Stop, a replacement, a failed first write or a lost shell drops the waiting
 steps, and the run still settles.

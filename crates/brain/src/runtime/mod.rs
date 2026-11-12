@@ -1491,6 +1491,7 @@ impl<'a, 't> Link<'a, 't> {
             | DataToShell::IssueCardRead { .. }
             | DataToShell::IssueCardsDone { .. } => return Err(Full),
             DataToShell::ScenesRemoved { .. }
+            | DataToShell::ScenesReplaced { .. }
             | DataToShell::Models { .. }
             | DataToShell::IssueCard(_) => Owner::Marker,
             DataToShell::SceneSnapshot { scene, .. }

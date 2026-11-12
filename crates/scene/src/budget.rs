@@ -174,6 +174,27 @@ impl GlobalBudget {
         self.usage
     }
 
+    /// Checks cached presentation charges alongside live membership without changing it.
+    ///
+    /// # Errors
+    /// The first global cap exceeded by the combined charges.
+    pub fn check_retained(&self, retained: &[Usage]) -> Result<(), ErrorCode> {
+        let mut total = self.usage;
+        for usage in retained {
+            total = Usage {
+                objects: total.objects.saturating_add(usage.objects),
+                cells: total.cells.saturating_add(usage.cells),
+                marks: total.marks.saturating_add(usage.marks),
+                segments: total.segments.saturating_add(usage.segments),
+                dash_pieces: total.dash_pieces.saturating_add(usage.dash_pieces),
+                scenes: total.scenes.saturating_add(usage.scenes),
+                triangles: total.triangles.saturating_add(usage.triangles),
+                ..total
+            };
+        }
+        total.validate_global()
+    }
+
     pub(crate) fn replay() -> Self {
         Self {
             replaying: true,
@@ -199,5 +220,47 @@ impl GlobalBudget {
             .generation
             .checked_add(1)
             .expect("budget changes cannot exhaust u64 within a process lifetime");
+    }
+}
+
+#[cfg(test)]
+mod retained_tests {
+    use super::*;
+
+    #[test]
+    fn retained_objects_share_the_existing_cap_without_changing_membership() {
+        let mut global = GlobalBudget::default();
+        global.install(Usage {
+            objects: 1,
+            scenes: 1,
+            ..Usage::default()
+        });
+        let generation = global.generation();
+        for (objects, expected) in [
+            (MAX_GLOBAL_LIVE_OBJECTS - 1, Ok(())),
+            (
+                MAX_GLOBAL_LIVE_OBJECTS,
+                Err(ErrorCode::OverBudget(Budget::LiveObjects)),
+            ),
+            (usize::MAX, Err(ErrorCode::OverBudget(Budget::LiveObjects))),
+        ] {
+            assert_eq!(
+                global.check_retained(&[Usage {
+                    objects,
+                    ..Usage::default()
+                }]),
+                expected
+            );
+            assert_eq!(
+                global.usage(),
+                Usage {
+                    objects: 1,
+                    scenes: 1,
+                    ..Usage::default()
+                }
+            );
+            assert_eq!(global.generation(), generation);
+        }
+        assert_eq!(global.check_retained(&[]), Ok(()));
     }
 }

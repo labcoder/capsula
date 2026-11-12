@@ -129,6 +129,9 @@ pub enum ErrorCode {
     /// Geometry cannot form a representable surface.
     #[error("scene.Degenerate")]
     Degenerate,
+    /// A `set` or `anim` targets an object the same step removes.
+    #[error("scene.RemovedInStep")]
+    RemovedInStep,
 }
 impl ErrorCode {
     pub(crate) fn from_decode(message: &str, path: &mut FieldPath) -> Self {

@@ -23,6 +23,10 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
+/// Relative allowance for f32 drift between an object's prepared envelope and a frame's composed
+/// transform, applied before the 64 clamp; the painter still compares pieces against pieces.
+const PAINT_DRIFT: f32 = 1.0 + 1.0 / 65_536.0;
+
 /// Builds one immutable picture update from its immediately preceding prepared state.
 /// # Errors
 /// Rejects cancellation, stale inputs, text shaping failures and unsafe generated work.
@@ -318,7 +322,8 @@ pub fn prepare(
         Arc::make_mut(object.motion.get_or_insert_with(Arc::default)).insert(property, motion);
     }
     after.prune_extras();
-    after.presentation_scale = validate_bounds(&after)?;
+    let (presentation_scale, envelopes) = validate_bounds(&after)?;
+    after.presentation_scale = presentation_scale;
     after.grow_content()?;
     for primitive in after
         .objects
@@ -328,23 +333,34 @@ pub fn prepare(
         if let Prim::Fill { points, .. } = primitive
             && points.len() > crate::limits::MAX_GLOBAL_FILL_VERTICES
         {
-            return Err(PrepareError::OverResidency);
+            return Err(PrepareError::OverPaintWork);
         }
     }
     // A capped scene whose own work passes its cap can never be admitted: stop counting there.
+    let surface_limit = after.presentation_limit;
     let mut total = PaintWork::default();
     for (id, object) in &mut after.objects {
+        let envelope = envelopes
+            .get(&object.item.handle)
+            .copied()
+            .ok_or_else(invariant)?;
+        // The fit's largest scale enters once, beside the object's own scale.
+        let scale = (envelope * surface_limit * PAINT_DRIFT).min(crate::limits::MAX_COMPOSED_SCALE);
         object.work = match (before.objects.get(id), paint_cap) {
-            (Some(old), _) if Arc::ptr_eq(&old.item.primitives, &object.item.primitives) => {
+            (Some(old), _)
+                if Arc::ptr_eq(&old.item.primitives, &object.item.primitives)
+                    && old.paint_scale.to_bits() == scale.to_bits() =>
+            {
                 old.work
             }
-            (_, None) => PaintWork::of(&object.item.primitives),
-            (_, Some(cap)) => PaintWork::within(&object.item.primitives, total, cap)
-                .ok_or(PrepareError::OverResidency)?,
+            (_, None) => PaintWork::of(&object.item.primitives, scale),
+            (_, Some(cap)) => PaintWork::within(&object.item.primitives, total, cap, scale)
+                .ok_or(PrepareError::OverPaintWork)?,
         };
+        object.paint_scale = scale;
         total = total + object.work;
         if !object.work.fits_builds() || paint_cap.is_some_and(|cap| !total.fits(cap)) {
-            return Err(PrepareError::OverResidency);
+            return Err(PrepareError::OverPaintWork);
         }
     }
     if after.objects.is_empty() {
@@ -686,10 +702,21 @@ fn patch(source: &Op, change: &Change) -> Op {
                 $value.color = Some(color.clone())
             };
         }
+        // A filled object's colour is its fill too, as an `anim` colour track paints fill and
+        // outline; unlike a track, a set leaves a shape's label at the theme foreground.
+        // shortcut: a set cannot give a filled shape an outline unlike its fill; remove and put it.
+        macro_rules! filled {
+            ($value:expr) => {{
+                color!($value);
+                if $value.fill.is_some() {
+                    $value.fill = Some(color.clone());
+                }
+            }};
+        }
         match &mut source {
             Op::Line(value) | Op::Arrow(value) => color!(value),
-            Op::Path(value) => color!(value),
-            Op::Shape(value) => color!(value),
+            Op::Path(value) => filled!(value),
+            Op::Shape(value) => filled!(value),
             Op::Text(value) => color!(value),
             Op::Callout(value) => color!(value),
             Op::Highlight(value) => color!(value),
@@ -759,7 +786,8 @@ fn update_group_bounds(state: &mut LayoutState) {
     }
 }
 
-fn validate_bounds(state: &LayoutState) -> Result<f32, PrepareError> {
+/// The presentation scale's cap, and each placed object's composed-scale envelope.
+fn validate_bounds(state: &LayoutState) -> Result<(f32, BTreeMap<Handle, f32>), PrepareError> {
     let mut objects = BTreeMap::new();
     for (id, placed) in &state.objects {
         let parent = placed
@@ -809,9 +837,12 @@ fn validate_bounds(state: &LayoutState) -> Result<f32, PrepareError> {
             },
         );
     }
-    let maximum = crate::state::metrics::validate_transforms(&objects)?
+    let envelopes: BTreeMap<Handle, f32> =
+        crate::state::metrics::validate_transforms(&objects)?.collect();
+    let maximum = envelopes
+        .iter()
         .map(|(handle, scale)| {
-            let source = &state.objects[&state.handles[&handle]].source;
+            let source = &state.objects[&state.handles[handle]].source;
             scale
                 * match &**source {
                     Op::Path(path) => path.scale.map_or(1.0, crate::Finite::get),
@@ -826,9 +857,12 @@ fn validate_bounds(state: &LayoutState) -> Result<f32, PrepareError> {
     {
         state.world_bounds(object)?;
     }
-    Ok(state
-        .presentation_limit
-        .min(crate::limits::MAX_COMPOSED_SCALE / maximum))
+    Ok((
+        state
+            .presentation_limit
+            .min(crate::limits::MAX_COMPOSED_SCALE / maximum),
+        envelopes,
+    ))
 }
 
 /// Bytes of `items`' geometry that `shared` doesn't already hold, each allocation once with its

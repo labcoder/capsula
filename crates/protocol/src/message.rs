@@ -415,6 +415,11 @@ pub enum ControlToBrain {
     GitHub(GitHubOp),
     /// Consent or another explicit issue-card action.
     Issue(IssueOp),
+    /// The shell refused an entire scene, possibly before its first run was known.
+    SceneFailed {
+        /// The committed scene to clear, without treating this as an explicit user clear.
+        scene: SceneId,
+    },
     /// A recognized voice-only hold, without screen capture or an exclusion lease.
     VoiceHoldRecognized {
         /// The checked connection-local gesture.
@@ -608,6 +613,20 @@ pub enum ControlToShell {
     },
     /// A GitHub connection error, independent of generic account errors.
     GitHubError(UserError),
+    /// A committed replacement failed before its first successful paint.
+    DrawingReplacementFailed {
+        /// The conversation that requested replacement, even after its call ended.
+        thread: ThreadId,
+        /// Its original run, not a later continuation's run.
+        run: RunId,
+    },
+    /// A run that called `draw` finished with no committed step.
+    DrawingNotReturned {
+        /// The run's conversation.
+        thread: ThreadId,
+        /// The run whose calls drew nothing.
+        run: RunId,
+    },
     /// Voice-only input authority/status, scoped to this connection and gesture.
     VoiceHoldStatus {
         /// The hold this status belongs to.
@@ -830,6 +849,13 @@ pub enum DataToShell {
         request: u32,
         /// Fixed, content-free completion status.
         status: IssueCardsStatus,
+    },
+    /// Committed removals whose successor follows on this FIFO; presentation may bridge them.
+    ScenesReplaced {
+        /// One to four unique victims, never the successor.
+        scenes: Vec<SceneId>,
+        /// The new scene whose first sampled frame ends the visual hold.
+        successor: SceneId,
     },
 }
 

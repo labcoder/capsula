@@ -25,6 +25,17 @@ pub(super) const MAX_CALLS_PER_RUN: usize = 16;
 /// Records one call may make: a `begin`, the run's whole step budget and an `end`. The next
 /// one ends the call as exhausted, after the records before it.
 pub(super) const MAX_CALL_RECORDS: usize = MAX_DRAW_STEPS_PER_RUN + 2;
+/// Follows a model error while a corrected call can still draw.
+const RETRY_HINT: &str = "; drawn lists what this call added, and earlier steps stay as they were; correct this and call draw again";
+/// Follows a model error once the run drew its whole step budget but still takes calls.
+const FULL_HINT: &str = "; no further step can be drawn in this turn";
+/// Follows a step too large to paint while the run can still draw and earlier steps stay shown.
+const PAINT_HINT: &str =
+    "; the picture stays at its last shown step; use fewer or simpler shapes and call draw again";
+/// Follows a step too large to paint that left its scene with nothing shown, so it was removed.
+const CLEARED_HINT: &str = "; nothing of this scene was shown, so it was removed; begin a new scene with a new name and fewer or simpler shapes";
+/// Follows any early stop once the run accepts no further draw call.
+const SPENT_HINT: &str = "; no further draw call will be accepted in this turn";
 
 /// Why a call ended incomplete. `Display` carries no drawing content or model id.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -47,6 +58,12 @@ pub enum CallError {
     /// The owner stopped; submitted writes still settle without accepting queued records.
     #[error("drawing.Interrupted")]
     Interrupted,
+    /// The shell couldn't paint a step of the call's scene: it held too many shapes.
+    #[error("drawing.TooMuchToPaint")]
+    TooMuchToPaint {
+        /// Nothing of the scene was shown, so it was removed.
+        cleared: bool,
+    },
 }
 
 /// A call that ended: the steps it drew and, unless it completed, why the rest didn't.
@@ -62,6 +79,19 @@ pub struct CallEnd {
     pub drawn: Vec<WireId>,
     /// Why it stopped early.
     pub error: Option<CallError>,
+    /// What the run still accepts.
+    pub remaining: Remaining,
+}
+
+/// What a run still accepts once one of its calls ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Remaining {
+    /// Calls that may draw new steps.
+    Steps,
+    /// Calls, but no new step: the run drew its whole step budget.
+    Calls,
+    /// No further draw call: the run closed or spent its rejected records, repair round or calls.
+    Nothing,
 }
 
 impl CallEnd {
@@ -80,6 +110,17 @@ impl CallEnd {
             text.push_str(&match error {
                 CallError::Step(error) => error.tool_text(),
                 error => error.to_string(),
+            });
+            text.push_str(match (self.remaining, error) {
+                (Remaining::Nothing, _) => SPENT_HINT,
+                (
+                    Remaining::Calls,
+                    CallError::Step(_) | CallError::Token(_) | CallError::TooMuchToPaint { .. },
+                ) => FULL_HINT,
+                (Remaining::Steps, CallError::Step(_) | CallError::Token(_)) => RETRY_HINT,
+                (Remaining::Steps, CallError::TooMuchToPaint { cleared: false }) => PAINT_HINT,
+                (Remaining::Steps, CallError::TooMuchToPaint { cleared: true }) => CLEARED_HINT,
+                _ => "",
             });
         }
         text
@@ -119,10 +160,24 @@ pub(super) struct RunLedger {
     pub(super) run: RunId,
     calls: usize,
     steps: usize,
+    /// Committed steps a failed cut then dropped; `steps` keeps them, so no budget comes back.
+    refused: usize,
     rejected: u8,
     /// A call failed, so the next calls are the repair round.
     failed: bool,
     exhausted: bool,
+}
+
+impl RunLedger {
+    // shortcut: a step refused after its run closed finds no ledger and adds no notice; carry
+    // the count past the run's end if a late refusal shows up in practice.
+    pub(super) fn drew_nothing(&self) -> bool {
+        self.calls > 0 && self.steps == self.refused
+    }
+
+    pub(super) fn refuse_step(&mut self) {
+        self.refused = (self.refused + 1).min(self.steps);
+    }
 }
 
 /// The step id a record that didn't parse still names, for the tool result.
@@ -284,6 +339,7 @@ impl Drawing {
                 scene: None,
                 drawn: Vec::new(),
                 error: Some(CallError::Exhausted),
+                remaining: Remaining::Nothing,
             });
             return Ok(None);
         }
@@ -598,7 +654,7 @@ impl Drawing {
             let Bound::New(state) = &self.calls[at].scene else {
                 continue;
             };
-            if *state.header() == header {
+            if state.header().continues(&header) {
                 self.calls[at].scene = Bound::Held(scene);
             } else {
                 let error = StepError::new(ErrorCode::HeaderMismatch);
@@ -659,11 +715,18 @@ impl Drawing {
 
     /// Ends a call: its scene hears whether it completed, and the coordinator gets its result.
     pub(super) fn end(&mut self, at: usize, error: Option<CallError>, out: &mut Output) {
-        let call = &self.calls[at];
-        let scene = match call.scene {
+        let scene = match self.calls[at].scene {
             Bound::Held(scene) => Some(scene),
             Bound::None | Bound::New(_) => None,
         };
+        if error
+            .as_ref()
+            .is_some_and(|error| *error != CallError::Interrupted)
+            && let Some(scene) = scene
+        {
+            self.replacement_failed(scene, out);
+        }
+        let call = &self.calls[at];
         if let Some(scene) = scene.filter(|scene| self.live(*scene).is_some()) {
             out.effects.push(Effect::Data(DataToShell::SceneEnd {
                 run: call.run,
@@ -671,6 +734,7 @@ impl Drawing {
                 complete: error.is_none(),
             }));
         }
+        let remaining = self.remaining(self.calls[at].run);
         let call = &mut self.calls[at];
         call.done = true;
         out.calls.push(CallEnd {
@@ -679,11 +743,12 @@ impl Drawing {
             scene,
             drawn: mem::take(&mut call.drawn),
             error,
+            remaining,
         });
     }
 
     /// Ends every open call drawing in `scene`, whose step the shell couldn't prepare.
-    pub(super) fn end_calls_in(&mut self, scene: SceneId, out: &mut Output) {
+    pub(super) fn end_calls_in(&mut self, scene: SceneId, error: &CallError, out: &mut Output) {
         let failing: Vec<usize> = (0..self.calls.len())
             .filter(|&at| {
                 let call = &self.calls[at];
@@ -691,7 +756,7 @@ impl Drawing {
             })
             .collect();
         for at in failing {
-            self.end(at, Some(CallError::Failed), out);
+            self.end(at, Some(error.clone()), out);
         }
     }
 
@@ -799,6 +864,22 @@ impl Drawing {
             .any(|ledger| ledger.run == run && ledger.exhausted)
     }
 
+    /// What the run still accepts from its own budgets and whether it closed.
+    // shortcut: the coordinator's round and tool-call budgets aren't seen here, so a refusal in a
+    // run's last allowed round still invites a retry; pass them in if that shows up.
+    fn remaining(&self, run: RunId) -> Remaining {
+        let ledger = self.runs.iter().find(|ledger| ledger.run == run);
+        if run <= self.closed
+            || ledger.is_some_and(|ledger| ledger.exhausted || ledger.calls >= MAX_CALLS_PER_RUN)
+        {
+            Remaining::Nothing
+        } else if ledger.is_some_and(|ledger| ledger.steps >= MAX_DRAW_STEPS_PER_RUN) {
+            Remaining::Calls
+        } else {
+            Remaining::Steps
+        }
+    }
+
     pub(super) fn open_call(&self, run: RunId, id: &CallId) -> Option<usize> {
         self.calls
             .iter()
@@ -815,6 +896,7 @@ impl Drawing {
                     run,
                     calls: 0,
                     steps: 0,
+                    refused: 0,
                     rejected: 0,
                     failed: false,
                     exhausted: false,

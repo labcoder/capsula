@@ -48,6 +48,9 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
             return Err(Ended::Broken("more scenes cleared than can be visible"));
         }
         ControlToBrain::ClearDrawing { scene_ids } => Some(Input::Clear { scenes: scene_ids }),
+        ControlToBrain::SceneFailed { scene } => {
+            Some(Input::Drawing(crate::drawing::Input::SceneFailed { scene }))
+        }
         ControlToBrain::DeleteThread {
             thread,
             after_turns,
@@ -70,12 +73,13 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
             run,
             scene,
             index,
+            reason,
             cut,
-            ..
         } => Some(Input::Drawing(crate::drawing::Input::StepFailed {
             run,
             scene,
             index,
+            reason,
             cut,
         })),
         // shortcut: B2a admits holds and consumes focus hints and exclusion lease changes.

@@ -4,19 +4,38 @@ Conversation history shows **Drawing unavailable in history** for stored drawing
 It keeps surrounding text, but does not reconstruct the picture there. This message does
 not mean a drawing still visible on screen has failed, and reading history does not change it.
 
-When Kumochi draws a 2D diagram, each step appears on screen once it is prepared, and drawings
-that were on screen come back after Kumochi reconnects. If you stop a drawing, the parts that
+When Kumochi draws a 2D diagram, each step appears on screen once it is prepared, and its parts
+draw or fade in one after another unless the drawing times them itself. Drawings that were on
+screen come back after Kumochi reconnects. If you stop a drawing, the parts that
 had already finished appearing stay on screen.
 
 Asking for a change to the same subject continues its drawing. A new subject normally
 replaces this conversation's earlier drawings once the new drawing's first step is saved.
-If the new drawing then cannot be drawn, the old drawings may already be gone and the
-screen may be left empty. Separate drawings can be kept for comparison, up to four on
+Normally their last picture stays briefly until the new drawing starts on the same drawing
+layer. This visual hold lasts at most 250 ms while the interface is running and can end sooner
+when space is tight; it does not keep the old drawings available for further changes. If the
+replacement then fails, the screen may be left empty and its conversation gets one notice that
+the previous drawings were removed, even if the drawing call had already ended. This includes
+a rejected later drawing record or a failed save after the replacement's first step was saved;
+the error keeps its specific cause. Stopping a drawing yourself does not report a drawing failure.
+The notice appears as soon as the replacement fails. Kumochi may still correct the drawing in
+the same reply, so a new drawing can appear after the notice; the earlier drawings stay removed.
+If Kumochi tries to draw but none of its drawing can be shown, its reply ends with the notice
+**No drawing came back**. Ask again to retry.
+Separate drawings can be kept for comparison, up to four on
 screen; they can still overlap until side-by-side arrangement is available.
 
 Simple node-and-arrow diagrams do not need a separate container: their nodes belong to
 the scene itself, and each arrow follows the diagram shared by its endpoints. These
-diagrams have the same 48-node and 96-arrow limits as explicitly grouped diagrams.
+diagrams have the same 48-node and 96-arrow limits as explicitly grouped diagrams. In
+practice, what can be painted is smaller: about 20 plain boxes across the drawings on
+screen, or about 10 when arrows have labels. A step past that isn't shown. If Kumochi is still
+drawing when that happens, it's told to use fewer or simpler shapes.
+
+For function graphs, Kumochi asks the model for sampled values on a chart, with y growing
+upward, rather than a hand-drawn path. Curves draw in along those samples; functions such
+as 1/x use separate branches across a discontinuity. The model still supplies the values
+and ranges: Kumochi does not calculate the function or guarantee its mathematics.
 
 Drawings appear on the main display, over your other windows. They never take focus or catch
 clicks, so the app underneath keeps working. While one is on screen, Esc clears it

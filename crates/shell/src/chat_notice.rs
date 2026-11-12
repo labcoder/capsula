@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use kumochi_protocol::message::{AccountOp, Action, ErrorKey, RunId, UserError};
+use kumochi_protocol::message::{AccountOp, Action, ErrorKey, RunId, ThreadId, UserError};
 
 use crate::settings::Field;
 
@@ -11,6 +11,7 @@ pub(crate) enum Source {
     Run(RunId),
     Account,
     Settings(Option<Field>),
+    Drawing { thread: ThreadId, run: RunId },
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -31,6 +32,7 @@ impl fmt::Debug for Notice {
                     Source::Run(_) => "run",
                     Source::Account => "account",
                     Source::Settings(_) => "settings",
+                    Source::Drawing { .. } => "drawing",
                 },
             )
             .finish()
@@ -54,7 +56,7 @@ impl Notice {
                 Source::Run(run) => Route::RunRetry(run),
                 Source::Account => Route::Account(AccountOp::Retry),
                 Source::Settings(Some(field)) => Route::SettingsRetry(field),
-                Source::Settings(None) => return None,
+                Source::Settings(None) | Source::Drawing { .. } => return None,
             },
             Action::SignIn => match self.error.key() {
                 ErrorKey::ClaudeCodeSignedOut | ErrorKey::AnthropicKeyRejected => Route::Accounts,
@@ -64,7 +66,7 @@ impl Notice {
             Action::ManageUsage => Route::Usage,
             Action::OpenSettings => match self.source {
                 Source::Settings(_) => Route::Settings,
-                Source::Run(_) | Source::Account => Route::Accounts,
+                Source::Run(_) | Source::Account | Source::Drawing { .. } => Route::Accounts,
             },
         })
     }
@@ -95,6 +97,12 @@ impl fmt::Debug for ChatNotice {
 }
 
 impl ChatNotice {
+    pub(crate) fn for_thread(&self, thread: Option<ThreadId>) -> Option<&Notice> {
+        self.shown.as_ref().filter(|notice| {
+            !matches!(notice.source, Source::Drawing { thread: owner, .. } if Some(owner) != thread)
+        })
+    }
+
     pub(crate) fn shown(&self) -> Option<&Notice> {
         self.shown.as_ref()
     }
@@ -142,6 +150,28 @@ mod tests {
     use kumochi_protocol::message::{AccountOp, Action, ErrorArg, ErrorKey, RunId};
 
     use super::{ChatNotice, Notice, Route, Source};
+
+    #[test]
+    fn a_late_drawing_notice_stays_with_its_original_thread_and_run() {
+        use kumochi_protocol::message::ThreadId;
+        let mut notices = ChatNotice::default();
+        let source = Source::Drawing {
+            thread: ThreadId(7),
+            run: RunId(3),
+        };
+        notices.present(ErrorKey::DrawingReplacementFailed.into(), source);
+        assert_eq!(notices.for_thread(Some(ThreadId(8))), None);
+        assert_eq!(notices.for_thread(None), None);
+        assert_eq!(
+            notices.for_thread(Some(ThreadId(7))),
+            Some(&Notice {
+                error: ErrorKey::DrawingReplacementFailed.into(),
+                source,
+            })
+        );
+        notices.clear();
+        assert_eq!(notices.for_thread(Some(ThreadId(7))), None);
+    }
     use crate::settings::Field;
 
     #[test]
