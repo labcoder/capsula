@@ -431,7 +431,8 @@ pub struct Line {
     /// via.
     #[serde(default)]
     pub via: Bounded<[Finite; 2], MAX_PATH_POINTS>,
-    /// width.
+    /// Stroke width, above 0.
+    #[schemars(extend("exclusiveMinimum" = 0))]
     pub width: Option<Finite>,
     /// dash.
     #[serde(default)]
@@ -470,7 +471,8 @@ pub struct PathOp {
     pub scale: Option<Finite>,
     /// fill.
     pub fill: Option<Color>,
-    /// width.
+    /// Stroke width, above 0.
+    #[schemars(extend("exclusiveMinimum" = 0))]
     pub width: Option<Finite>,
     /// dash.
     #[serde(default)]
@@ -515,7 +517,8 @@ pub struct Shape {
     pub radius: Option<Finite>,
     /// fill.
     pub fill: Option<Color>,
-    /// width.
+    /// Outline width; 0 draws no outline.
+    #[schemars(extend("minimum" = 0))]
     pub width: Option<Finite>,
     /// dash.
     #[serde(default)]

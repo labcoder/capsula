@@ -68,6 +68,29 @@ fn every_two_dimensional_operation_and_mixed_form_fits_the_schema() {
 }
 
 #[test]
+fn stroke_widths_carry_their_admission_minimums() {
+    let put = |operation: Value| json!({"step": {"id": "s", "put": [operation]}});
+    for (width, expected) in [(json!(0), true), (json!(-1), false)] {
+        assert_eq!(
+            valid(&put(
+                json!({"shape": {"id": "s", "kind": "rect", "width": width}})
+            )),
+            expected,
+            "shape outline width"
+        );
+    }
+    for (width, expected) in [(json!(0.5), true), (json!(0), false)] {
+        for operation in [
+            json!({"line": {"id": "l", "from": [0, 0], "to": [1, 1], "width": width}}),
+            json!({"arrow": {"id": "a", "from": [0, 0], "to": [1, 1], "width": width}}),
+            json!({"path": {"id": "p", "d": "M0 0", "width": width}}),
+        ] {
+            assert_eq!(valid(&put(operation)), expected, "stroke width");
+        }
+    }
+}
+
+#[test]
 fn schema_is_closed_and_excludes_every_three_dimensional_form() {
     for record in [
         json!({"step": {"id": "s", "put": [{"view3d": {"id": "v"}}]}}),

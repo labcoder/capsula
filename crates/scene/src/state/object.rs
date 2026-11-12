@@ -329,9 +329,11 @@ fn validate_dimensions(op: &Op, prefix: &FieldPath, step: &Step) -> Result<(), S
         }
         Op::Shape(r) => {
             bounds(r.bounds)?;
-            for (field, value) in [("r", r.r), ("radius", r.radius), ("width", r.width)] {
+            for (field, value) in [("r", r.r), ("radius", r.radius)] {
                 positive(value, field)?;
             }
+            // A zero outline width draws the shape without an outline.
+            positive(r.width.filter(|width| width.get() != 0.0), "width")?;
             if let Some(size) = r.size {
                 for (index, value) in size.into_iter().enumerate() {
                     if value.get() <= 0.0 {

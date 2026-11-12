@@ -996,6 +996,42 @@ fn detached_edges_can_be_updated_without_resurrecting_their_endpoints() {
 }
 
 #[test]
+fn a_zero_width_shape_keeps_its_fill_and_draws_no_outline() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"sky","put":[
+            {"shape":{"id":"skybg","kind":"rect","box":[0,0,480,300],"fill":"#BFE8FF","color":"#BFE8FF","width":0}},
+            {"shape":{"id":"sun","kind":"circle","at":[400,60],"r":30,"fill":"#FFD700","width":0}}
+        ]}),
+    );
+    let prepared =
+        picture(&scene, first, &before, &mut Measure::default()).expect("zero-width shapes");
+    let primitives = |name: &'static str| {
+        let handle = prepared.after.handle(&id(name));
+        let item = prepared
+            .display
+            .items
+            .iter()
+            .find(|item| Some(item.handle) == handle)
+            .expect("prepared item");
+        Arc::clone(&item.primitives)
+    };
+    assert!(matches!(
+        &*primitives("skybg"),
+        [Prim::Rect {
+            fill: Some(_),
+            border: None,
+            ..
+        }]
+    ));
+    assert!(matches!(&*primitives("sun"), [Prim::Fill { .. }]));
+}
+
+#[test]
 fn procedural_outputs_fit_the_admission_reservations_and_share_stroked_vertices() {
     let mut scene = SceneState::begin(header()).expect("scene");
     let mut budget = GlobalBudget::default();

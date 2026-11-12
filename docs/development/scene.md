@@ -70,6 +70,10 @@ within ±20,000. Chart data uses finite f64 values instead of coordinate-bounded
 numbers. Composed transforms and domain-specific ranges are admission checks.
 Screen/capture anchors are absent, not ignored.
 
+Line, arrow and path stroke widths must be above 0. A shape's `width` is its outline,
+2 by default; 0 draws the shape without an outline, and negative widths are refused. The
+offered schema states both minimums. `set` cannot change a width.
+
 ### Canvas and overlay placement
 
 Overlay preparation uses `begin.size`, or a 960×600 default canvas. Inline preparation
