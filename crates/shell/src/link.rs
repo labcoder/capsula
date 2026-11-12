@@ -256,7 +256,7 @@ pub(crate) struct Session {
     generation: u64,
     credit: Arc<Credit>,
     /// The brain and authenticated connection it reached.
-    issue_session: IssueSession,
+    issue_origin: IssueSession,
 }
 
 impl Session {
@@ -265,11 +265,11 @@ impl Session {
     }
 
     pub(crate) fn incarnation(&self) -> Incarnation {
-        self.issue_session.incarnation
+        self.issue_origin.incarnation
     }
 
     pub(crate) fn issue_session(&self) -> IssueSession {
-        self.issue_session
+        self.issue_origin
     }
 
     /// Grants this connection's brain `bytes` more of data frames, once the UI has taken a frame
@@ -323,7 +323,7 @@ enum LinkError {
 struct Connection {
     control: Arc<PipeClient>,
     data: Arc<PipeClient>,
-    issue_session: IssueSession,
+    issue_origin: IssueSession,
 }
 
 /// What the data writer sends.
@@ -620,7 +620,7 @@ impl Session {
                 bytes: AtomicU32::new(0),
                 wake: wake.downgrade(),
             }),
-            issue_session: IssueSession {
+            issue_origin: IssueSession {
                 incarnation,
                 epoch: generation,
             },
@@ -730,7 +730,7 @@ impl Link {
                     continue;
                 }
             };
-            tracing::info!(incarnation = ?connection.issue_session.incarnation, "connected to the brain");
+            tracing::info!(incarnation = ?connection.issue_origin.incarnation, "connected to the brain");
             if !self.attend(connection, events) || self.quitting() {
                 return;
             }
@@ -757,7 +757,7 @@ impl Link {
         let Connection {
             control,
             data,
-            issue_session,
+            issue_origin,
         } = connection;
         let (control_out, control_queue) = async_channel::bounded(CONTROL_QUEUE);
         let (data_out, data_queue) = async_channel::bounded(DATA_QUEUE);
@@ -813,7 +813,7 @@ impl Link {
             .send_blocking(LinkEvent::Connected(Session {
                 generation,
                 credit,
-                issue_session,
+                issue_origin,
             }))
             .is_ok();
         let read = spawned.and_then(|()| {
@@ -899,14 +899,14 @@ impl Link {
             &ControlToBrain::Hello(hello.clone()),
             Pipe::Control,
         )?;
-        let issue_session = welcome(&control)?;
+        let issue_origin = welcome(&control)?;
         let data = open(&Pipe::Data.name(self.session), &self.brain)?;
         frame::write(&mut &data, &DataToBrain::Hello(hello), Pipe::Data)?;
         control.set_timeout(None);
         Ok(Connection {
             control: Arc::new(control),
             data: Arc::new(data),
-            issue_session,
+            issue_origin,
         })
     }
 }

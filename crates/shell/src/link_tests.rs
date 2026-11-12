@@ -562,7 +562,7 @@ fn attended_from(label: &str, previous_generation: u64) -> Attended {
     let connection = Connection {
         control: Arc::new(shell_control),
         data: Arc::new(shell_data),
-        issue_session: IssueSession {
+        issue_origin: IssueSession {
             incarnation: Incarnation(1),
             epoch: 91,
         },
@@ -1443,7 +1443,7 @@ fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
     let connection = Connection {
         control: Arc::new(shell_control),
         data: Arc::new(shell_data),
-        issue_session,
+        issue_origin: issue_session,
     };
     let link = thread::spawn(move || start.link.attend(connection, &start.events));
     let events = patient(events);
@@ -1536,7 +1536,7 @@ fn an_ended_connection_s_sends_and_credit_never_reach_the_next() {
             let connection = Connection {
                 control: Arc::new(control),
                 data: Arc::new(data),
-                issue_session: IssueSession {
+                issue_origin: IssueSession {
                     incarnation: Incarnation(1),
                     epoch,
                 },
@@ -1853,7 +1853,7 @@ fn a_delete_answered_before_a_new_brain_never_fences_the_new_brain_s_runs() {
             let connection = Connection {
                 control: Arc::new(control),
                 data: Arc::new(data),
-                issue_session: IssueSession {
+                issue_origin: IssueSession {
                     incarnation,
                     epoch: 1,
                 },
