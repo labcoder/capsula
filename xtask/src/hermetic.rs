@@ -440,10 +440,7 @@ mod tests {
             "another gate run is on; one runs at a time"
         );
         drop(first);
-        assert_eq!(
-            fs::read_to_string(&lock).expect("lock"),
-            "C:/the/first/run"
-        );
+        assert_eq!(fs::read_to_string(&lock).expect("lock"), "C:/the/first/run");
         take(&lock).expect("free again once the first ends");
     }
 
