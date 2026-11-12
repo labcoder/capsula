@@ -124,7 +124,7 @@ struct Presence {
     settings_panel: Option<SettingsPanel>,
     /// The first-run window, while it shows.
     onboarding: Option<onboarding::OnboardingPanel>,
-    /// Finish later was chosen: onboarding doesn't open again this run.
+    /// Finish later was chosen, or opening failed: onboarding doesn't open again this run.
     onboarding_later: bool,
     settings: Entity<Settings>,
     threads: Entity<Threads>,

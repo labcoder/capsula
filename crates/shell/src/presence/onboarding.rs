@@ -320,7 +320,14 @@ impl Presence {
             return self.onboarding_next(next, cx);
         }
         match settings.read(cx).view().and_then(Onboarding::begin) {
-            Some(state) if !self.onboarding_later => self.open_onboarding(state, cx),
+            Some(state) if !self.onboarding_later => {
+                let opened = self.open_onboarding(state, cx);
+                if opened.is_err() {
+                    self.onboarding_later = true;
+                    self.close_onboarding(cx)?;
+                }
+                opened
+            }
             _ => Ok(()),
         }
     }
@@ -421,18 +428,14 @@ impl Presence {
             bounds: [0; 4],
             previous: None,
         });
-        let configured = window
+        window
             .update(cx, |_, window, cx| {
                 configure_surface(window, PresenceSurface::Text, self.events.clone(), cx)?;
                 self.input_windows
                     .bind(crate::presenter::overlay_input::Layer::Panels, window)?;
                 Ok::<_, platform::PresenceError>(())
             })
-            .map_err(|error| OpenError::Gpui(error.into()))?;
-        if let Err(error) = configured {
-            self.close_onboarding(cx)?;
-            return Err(error.into());
-        }
+            .map_err(|error| OpenError::Gpui(error.into()))??;
         self.protect_surface(super::exclusion::Slot::Onboarding, cx)?;
         self.pointer_settle = None;
         self.set_panel(PanelVisibility::Hidden, cx)?;

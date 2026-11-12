@@ -235,6 +235,27 @@ fn the_finish_lands_on_the_peek_only_when_the_brain_says_so(cx: &mut TestAppCont
     });
 }
 
+#[gpui::test]
+fn a_failed_open_leaves_nothing_open_and_isnt_retried_this_run(cx: &mut TestAppContext) {
+    // GPUI's test windows have no native handle, so configuring the surface fails here.
+    let owner = test_fixture::presence(cx);
+    owner.update(cx, |owner, cx| {
+        owner.session = Some(Session::detached(7, Incarnation(1)));
+        owner
+            .link_events(
+                Batch::Plain(vec![LinkEvent::Settings {
+                    generation: 7,
+                    view: view("Kumo", false),
+                    answer: false,
+                }]),
+                cx,
+            )
+            .expect("a view that owes onboarding");
+        assert!(owner.onboarding.is_none());
+        assert!(owner.onboarding_later);
+    });
+}
+
 /// A double tap's effects, from timed key events through the recogniser.
 fn double_tap() -> [Option<Effect>; 3] {
     let start = Instant::now();
