@@ -22,6 +22,7 @@ fn view(assistant: &str, user: Option<&str>, onboarded: bool) -> SettingsView {
         show_in_taskbar: false,
         talk_back: false,
         stt_unload: SttUnload::Kept,
+        hold_to_talk: true,
     }
 }
 
