@@ -271,7 +271,9 @@ The separate `cold-start <path-session.txt>` task runs ten input-free cold launc
 approved quiet window before the owner session. Both run as the gate identity and build the
 images they launch (see [the gate identity](gate-identity.md)). It uses the same create-new transcript and
 adjacent evidence-directory contract below, but never arms Ready or enters the input phase
-sequence. It is not an extra loop inside `gate-session`.
+sequence. It is not an extra loop inside `gate-session`. Each launch in either task waits up to
+3 s for the brain and both its workers (screen and speech) and holds all of them, and refuses any
+other product process.
 
 The cold trace starts before process launch with the product executable-name filter; all its
 rows must later match that one owned PID. A completed PID-filtered warm capture identifies the
