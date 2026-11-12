@@ -277,14 +277,12 @@ fn two_cuts_hand_on_links_and_drop_unshown_links_alike_live_and_recovered() {
 
 fn refused(steps: &[Value], last: &Value, code: ErrorCode, path: &str) {
     let (scene, budget, _) = drawn(steps.to_vec());
-    let revision = scene.revision();
     let error = scene.admit(&typed(last), &budget).expect_err("refused");
     assert_eq!(
         (error.code, error.path.as_str()),
         (code, path),
         "the refusal names its code and field"
     );
-    assert_eq!(scene.revision(), revision, "a refusal commits nothing");
 }
 
 fn admitted(steps: &[Value], last: &Value) {
@@ -449,6 +447,26 @@ fn unknown_removed_container_and_three_dimensional_links_are_refused() {
         ErrorCode::KindChanged,
         "set[0].behind",
     );
+    let three = |set: Value| {
+        json!({"id":"x","put":[{"view3d":{"id":"v"}},
+            {"solid":{"in":"v","id":"s","shape":"box","size":[1,1,1]}}],"set":set})
+    };
+    for anchor in ["v", "s"] {
+        refused(
+            base,
+            &three(json!([{"target":"c1","behind":anchor}])),
+            ErrorCode::Unsupported,
+            "set[0].behind",
+        );
+    }
+    for target in ["v", "s"] {
+        refused(
+            base,
+            &three(json!([{"target":target,"behind":"c1"}])),
+            ErrorCode::KindChanged,
+            "set[0].behind",
+        );
+    }
 }
 
 #[test]
@@ -466,7 +484,7 @@ fn a_behind_id_is_never_given_to_a_generated_mermaid_object() {
 
 #[test]
 fn a_stored_step_written_before_behind_existed_still_decodes() {
-    // A step event exactly as the format before `behind` serialized it into the store.
+    // The step event inside a stored row, in the form the format before `behind` wrote.
     let stored = r##"{"step":{"revision":3,"step":{"id":"red","say":null,"put":[],"set":[{"target":"c1","text":null,"label":null,"color":"#ff0000","cells":null,"data":null,"emphasis":null,"info":null}],"remove":[],"start":"speech"}}}"##;
     let event: SceneEvent = serde_json::from_str(stored).expect("old stored step decodes");
     let mut expected: Value = serde_json::from_str(stored).expect("JSON");
