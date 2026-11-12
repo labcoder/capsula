@@ -79,6 +79,9 @@ pub(crate) fn build(
         cargo.args(["--package", package]);
     }
     cargo.arg("--target-dir").arg(&target);
+    // `cargo run` sets it for xtask, and ring's build script reruns when it changes, so keeping it
+    // would rebuild a prebuilt image inside a timed run.
+    cargo.env_remove("CARGO_MANIFEST_DIR");
     if profile == Profile::Release {
         cargo.arg("--release");
     }
