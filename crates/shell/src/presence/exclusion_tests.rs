@@ -554,7 +554,7 @@ fn actual_quit_cleans_a_nonempty_owner_and_does_not_forgive_failed_restoration(
 }
 
 #[test]
-fn all_seven_surfaces_restore_their_exact_independent_prior_affinity() {
+fn all_eight_surfaces_restore_their_exact_independent_prior_affinity() {
     let mut owner = Exclusion::default();
     let mut fake = Fake::new();
     let key = acquire(&mut owner, &mut fake, Instant::now());

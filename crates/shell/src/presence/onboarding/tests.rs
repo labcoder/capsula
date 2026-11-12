@@ -5,7 +5,7 @@ use gpui_kit::{
     WindowOptions,
 };
 use kumochi_protocol::message::{
-    AssistantName, ControlToBrain, DockPosition, Incarnation, MaxFrameRate, SettingsOp,
+    AssistantName, ControlToBrain, DockPosition, Incarnation, MaxFrameRate, NameError, SettingsOp,
     SettingsView, SttUnload, ThreadId, UserName,
 };
 
@@ -14,8 +14,10 @@ use crate::input::{Edge, Effect, Event, Gesture, Key};
 use crate::link::{Batch, LinkEvent, Session};
 use crate::onboarding::{Onboarding, Step, ThisRun};
 use crate::platform::{EventTime, PresenceEvent};
+use crate::presence::settings::field_status;
 use crate::presence::{PanelVisibility, Presence, test_fixture};
-use crate::settings::{Field, Update};
+use crate::settings::{Error, Field, Update};
+use crate::strings::{Strings, Text};
 
 #[expect(
     clippy::fn_params_excessive_bools,
@@ -181,6 +183,79 @@ fn moving_to_a_step_selects_its_saved_name(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(step(&owner, cx), Step::YourName);
     assert_eq!(selected(&owner, cx), 0..5);
+}
+
+#[gpui::test]
+fn enter_on_a_name_that_cant_be_saved_stays_with_focus_in_the_input(cx: &mut TestAppContext) {
+    let (owner, window, controls) = showing(cx);
+    rename(&owner, "", cx);
+    VisualTestContext::from_window(window, cx).simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(step(&owner, cx), Step::Welcome);
+    let mut frame = VisualTestContext::from_window(window, cx);
+    frame.update(|window, cx| {
+        let settings = owner.read(cx).settings.read(cx);
+        assert_eq!(
+            settings.field(Field::Assistant).error,
+            Some(Error::Validation(NameError::Empty))
+        );
+        let strings = cx.global::<Strings>();
+        assert_eq!(
+            field_status(settings, Field::Assistant, strings),
+            (None, Some(strings.get(Text::RenameEmpty)))
+        );
+        let view = owner
+            .read(cx)
+            .onboarding
+            .as_ref()
+            .expect("showing")
+            .view
+            .clone();
+        let input = view.read(cx).inputs[0].read(cx).focus_handle(cx);
+        assert!(input.is_focused(window), "focus stays in the name input");
+    });
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+}
+
+#[gpui::test]
+fn an_unsent_finish_says_so_and_can_be_pressed_again(cx: &mut TestAppContext) {
+    let (owner, window, controls) = showing(cx);
+    VisualTestContext::from_window(window, cx).simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let session = owner.update(cx, |owner, _| owner.session.take());
+    VisualTestContext::from_window(window, cx).simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let unsent = |owner: &Entity<Presence>, cx: &mut TestAppContext| {
+        owner.read_with(cx, |owner, cx| {
+            owner
+                .onboarding
+                .as_ref()
+                .expect("showing")
+                .view
+                .read(cx)
+                .unsent
+        })
+    };
+    assert!(unsent(&owner, cx));
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+    owner.update(cx, |owner, _| owner.session = session);
+    VisualTestContext::from_window(window, cx).simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(!unsent(&owner, cx));
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::Settings(SettingsOp::FinishOnboarding))
+    );
+}
+
+#[gpui::test]
+fn showing_with_select_all_selects_the_name(cx: &mut TestAppContext) {
+    let (owner, _, _) = showing(cx);
+    owner.update(cx, |owner, cx| {
+        owner.show_onboarding(Select::All, cx).expect("show");
+    });
+    cx.run_until_parked();
+    assert_eq!(selected(&owner, cx), 0..4);
 }
 
 #[gpui::test]
@@ -366,7 +441,7 @@ fn guarded(owner: &Entity<Presence>, cx: &mut TestAppContext) -> [bool; 2] {
 }
 
 #[gpui::test]
-fn the_double_tap_and_the_taskbar_button_leave_onboarding_on_top(cx: &mut TestAppContext) {
+fn the_double_tap_and_the_taskbar_button_open_nothing_over_onboarding(cx: &mut TestAppContext) {
     let (owner, _, _) = showing(cx);
     assert_eq!(guarded(&owner, cx), [false, false]);
     owner.update(cx, |owner, cx| owner.close_onboarding(cx).expect("close"));

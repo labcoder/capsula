@@ -191,7 +191,15 @@ fn a_blank_name_over_a_saved_one_clears_it_before_finishing() {
 fn continue_twice_during_one_save_sends_once_and_goes_on_once() {
     let (mut settings, mut onboarding) = first_run(None);
     settings.change(Field::Assistant, "Mochi");
-    assert_eq!(press(&mut settings, &mut onboarding).0.len(), 1);
+    assert_eq!(
+        press(&mut settings, &mut onboarding),
+        (
+            vec![SettingsOp::SetAssistantName(
+                AssistantName::new("Mochi").expect("valid")
+            )],
+            Next::Stay
+        )
+    );
     assert_eq!(press(&mut settings, &mut onboarding), (vec![], Next::Stay));
     assert_eq!(
         answer(&mut settings, &mut onboarding, view("Mochi", None, false)),
