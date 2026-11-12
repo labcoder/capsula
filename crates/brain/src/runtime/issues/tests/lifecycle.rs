@@ -47,6 +47,7 @@ async fn one_deadline_cancels_held_consent_or_posting_without_an_eof_or_http_han
                 Some(brain.epoch),
             )
             .unwrap();
+        let deadline = brain.filing.deadline_for_test().unwrap();
         brain.apply(effects, None).unwrap();
         let scope = timeout(PATIENCE, async {
             loop {
@@ -67,7 +68,10 @@ async fn one_deadline_cancels_held_consent_or_posting_without_an_eof_or_http_han
             }
         }).await.unwrap();
         tokio::time::pause();
-        tokio::time::advance(Duration::from_secs(59)).await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let before_deadline = deadline - Duration::from_secs(1);
+        tokio::time::advance(before_deadline.saturating_duration_since(Instant::now())).await;
+        assert_eq!(Instant::now(), before_deadline);
         assert!(!scope.stopped());
         {
             let next = brain.filing.next();
@@ -75,7 +79,9 @@ async fn one_deadline_cancels_held_consent_or_posting_without_an_eof_or_http_han
             let state = std::future::poll_fn(|cx| Poll::Ready(next.as_mut().poll(cx))).await;
             assert!(matches!(state, Poll::Pending));
         }
-        tokio::time::advance(Duration::from_secs(2)).await;
+        let after_deadline = deadline + Duration::from_secs(1);
+        tokio::time::advance(after_deadline.saturating_duration_since(Instant::now())).await;
+        assert_eq!(Instant::now(), after_deadline);
         let event = {
             let next = brain.filing.next();
             tokio::pin!(next);
@@ -371,11 +377,11 @@ async fn another_draft_consumes_each_approval_but_cannot_repeat_an_unknown_or_di
     };
     assert_eq!(second.version, StateVersion(1));
     assert_eq!(second.approval, Some(ApprovalRev(3)));
-    for (attempt, approval) in [(1, 3), (2, 4)] {
+    for (attempt, approval, request) in [(1, 3, 711), (2, 4, 713)] {
         if attempt == 2 {
             let effects = brain
                 .issue_op(
-                    703,
+                    712,
                     &IssueOp::Discard { draft: first.draft },
                     Some(brain.epoch),
                 )
@@ -403,7 +409,7 @@ async fn another_draft_consumes_each_approval_but_cannot_repeat_an_unknown_or_di
         }
         let effects = brain
             .issue_op(
-                710 + attempt,
+                request,
                 &IssueOp::Consent {
                     draft: second.draft,
                     hash: second.hash(),
@@ -434,14 +440,14 @@ async fn another_draft_consumes_each_approval_but_cannot_repeat_an_unknown_or_di
             notices,
             vec![
                 ControlToShell::ActionState {
-                    request: Some(710 + attempt),
+                    request: Some(request),
                     draft: second.draft,
                     version: StateVersion(attempt + 1),
                     state: ActionState::Draft,
                     approval: Some(ApprovalRev(approval + 1))
                 },
                 ControlToShell::IssueRefused {
-                    request: 710 + attempt,
+                    request,
                     draft: second.draft,
                     version: StateVersion(attempt + 1),
                     approval: Some(ApprovalRev(approval + 1)),

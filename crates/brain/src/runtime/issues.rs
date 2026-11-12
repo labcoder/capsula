@@ -31,6 +31,7 @@ mod owner_tests;
 #[derive(Default)]
 pub(super) struct Filing {
     next: u64,
+    last_request: Option<(u64, u64)>,
     job: Option<Job>,
     replies: Vec<Reply>,
 }
@@ -122,6 +123,11 @@ impl Filing {
         self.job.is_some() || !self.replies.is_empty()
     }
 
+    #[cfg(test)]
+    pub(super) fn deadline_for_test(&self) -> Option<Instant> {
+        self.job.as_ref().map(|job| job.control.deadline())
+    }
+
     pub(super) async fn next(&mut self) -> Event {
         let Some(job) = &mut self.job else {
             return std::future::pending().await;
@@ -166,15 +172,22 @@ impl Brain {
         op: &IssueOp,
         epoch: Option<u64>,
     ) -> Option<Vec<Effect>> {
-        if self.filing.replies.len() >= super::CONTROL_QUEUE {
-            return None;
-        }
-        let available = epoch == Some(self.epoch) && self.filing.job.is_none();
         let draft = match op {
             IssueOp::Consent { draft, .. }
             | IssueOp::CheckAgain { draft }
             | IssueOp::Discard { draft } => *draft,
         };
+        if let Some((epoch, last)) = self.filing.last_request
+            && epoch == self.epoch
+            && request <= last
+        {
+            return Some(self.issue_unavailable(self.epoch, request, draft));
+        }
+        self.filing.last_request = Some((self.epoch, request));
+        if self.filing.replies.len() >= super::CONTROL_QUEUE {
+            return None;
+        }
+        let available = epoch == Some(self.epoch) && self.filing.job.is_none();
         let (write, start, forced) = match op {
             IssueOp::Consent {
                 draft,
@@ -559,9 +572,8 @@ impl Brain {
         answer: &Answer,
         forced: Option<IssueRefused>,
     ) -> Vec<Effect> {
-        if epoch != self.epoch {
-            return Vec::new();
-        }
+        let current = epoch == self.epoch;
+        let request = request.filter(|_| current);
         let (action, reason) = match answer {
             Answer::Changed(action) | Answer::Unchanged(action) => (action, forced),
             Answer::Refused(reason, action) => (action, forced.or(Some(*reason))),
@@ -578,7 +590,7 @@ impl Brain {
             state: action.state(),
             approval: action.approval,
         })];
-        if let Some(reason) = reason {
+        if let Some(reason) = reason.filter(|_| current) {
             effects.push(Effect::Control(ControlToShell::IssueRefused {
                 request: request.expect("a refusal settles its operation"),
                 draft: action.draft,

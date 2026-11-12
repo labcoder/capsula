@@ -6,6 +6,116 @@ use kumochi_scene::text::Bounded;
 use std::num::NonZeroU64;
 
 #[tokio::test]
+async fn failed_request_identities_are_fenced_at_zero_and_max_until_the_session_changes() {
+    let scratch = crate::test_support::Scratch::new("github-filing-request-watermark");
+    let mut brain = crate::test_support::brain(&scratch, "");
+    let epoch = brain.epoch;
+    for (current, request) in [(epoch, 0), (epoch, u64::MAX), (epoch + 1, 0)] {
+        brain.epoch = current;
+        let effects = brain
+            .issue_op(
+                request,
+                &IssueOp::Discard { draft: DraftId(1) },
+                Some(current),
+            )
+            .unwrap();
+        let [Effect::Store(StoreOp::Issue { serial, .. })] = effects.as_slice() else {
+            panic!("a new request reaches the ordered store exactly once");
+        };
+        assert_eq!(
+            brain.issue_written(*serial, Err(())),
+            vec![Effect::Control(ControlToShell::IssueUnavailable {
+                request,
+                draft: DraftId(1),
+            })]
+        );
+        assert_eq!(
+            brain.issue_op(
+                request,
+                &IssueOp::CheckAgain { draft: DraftId(2) },
+                Some(current)
+            ),
+            Some(vec![Effect::Control(ControlToShell::IssueUnavailable {
+                request,
+                draft: DraftId(2),
+            })])
+        );
+        if request == u64::MAX {
+            assert_eq!(
+                brain.issue_op(
+                    request - 1,
+                    &IssueOp::Discard { draft: DraftId(3) },
+                    Some(current)
+                ),
+                Some(vec![Effect::Control(ControlToShell::IssueUnavailable {
+                    request: u64::MAX - 1,
+                    draft: DraftId(3),
+                })])
+            );
+        }
+        assert_eq!(brain.filing.deadline_for_test(), None);
+        assert!(!brain.filing.pending());
+    }
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn an_old_sessions_authoritative_action_survives_without_its_request_or_refusal() {
+    let scratch = crate::test_support::Scratch::new("github-filing-old-session-notices");
+    let action = {
+        let mut store = crate::store::Store::open(&scratch.db()).unwrap();
+        store.recover().unwrap();
+        let thread = store.main_thread().unwrap();
+        store
+            .create_draft(
+                thread,
+                &IssueTitle::new("local issue").unwrap(),
+                &IssueBody::new("saved body").unwrap(),
+                None,
+                None,
+            )
+            .unwrap()
+    };
+    let mut brain = crate::test_support::brain(&scratch, "");
+    let old = brain.epoch;
+    brain.epoch += 1;
+    for answer in [
+        Answer::Changed(action.clone()),
+        Answer::Unchanged(action.clone()),
+        Answer::Refused(IssueRefused::NotAllowedNow, action.clone()),
+    ] {
+        assert_eq!(
+            brain.issue_notice(
+                old,
+                Some(19),
+                action.draft,
+                &answer,
+                Some(IssueRefused::NotConnected)
+            ),
+            vec![Effect::Control(ControlToShell::ActionState {
+                request: None,
+                draft: action.draft,
+                version: StateVersion(1),
+                state: kumochi_protocol::message::ActionState::Draft,
+                approval: Some(ApprovalRev(1)),
+            })]
+        );
+    }
+    assert_eq!(
+        brain.issue_notice(
+            old,
+            Some(19),
+            action.draft,
+            &Answer::Gone,
+            Some(IssueRefused::NotConnected)
+        ),
+        Vec::new()
+    );
+    assert_eq!(brain.issue_unavailable(old, 19, action.draft), Vec::new());
+    brain.close().await;
+}
+
+#[tokio::test]
 async fn an_older_lookup_cannot_complete_a_new_job_in_the_same_uncertain_episode() {
     let scratch = crate::test_support::Scratch::new("github-filing-stale-lookup-owner");
     let mut action = {

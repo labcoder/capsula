@@ -26,6 +26,12 @@ use zeroize::Zeroizing;
 mod authority;
 #[path = "tests/lifecycle.rs"]
 mod lifecycle;
+#[path = "tests/reconnect.rs"]
+mod reconnect;
+#[path = "tests/rename.rs"]
+mod rename;
+#[path = "tests/replay.rs"]
+mod replay;
 #[path = "tests/storage.rs"]
 mod storage;
 
@@ -243,7 +249,13 @@ async fn wire_file_commits_one_literal_post_and_replayed_consent_cannot_send_aga
         }
         assert_eq!(shell.control().await, filed);
         shell.send(&consent).await;
-        assert_eq!(shell.control().await, filed);
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::IssueUnavailable {
+                request: 101,
+                draft: action.draft,
+            })
+        );
         shell.control_out.shutdown().await.unwrap();
         assert_eq!(shell.control().await, None);
     };

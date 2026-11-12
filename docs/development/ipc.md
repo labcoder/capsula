@@ -509,7 +509,7 @@ display identity and grants no authority; Check again reuses RefreshRepos for GE
 | Pipe and direction | Message | Fields |
 | --- | --- | --- |
 | Control, shell to brain | `GitHub(GitHubOp)` | Connect, cancel, sign out, retry cleanup, set default repository or refresh repositories |
-| Control, shell to brain | `Issue { request, op }` | Connection-unique `u64` request and unchanged IssueOp: consent (`draft`, `hash`, `approval`, `decision`), discard or check again |
+| Control, shell to brain | `Issue { request, op }` | Strictly increasing, nonwrapping per-session `u64` request and unchanged IssueOp: consent (`draft`, `hash`, `approval`, `decision`), discard or check again |
 | Control, brain to shell | `GitHub(GitHubView)` | Connection state; a connected view has a login, at most 200 repositories, truncation flag and optional default |
 | Control, brain to shell | `ActionState` | Optional final-ack `request`, `draft`, `version`, `state`, optional `approval` |
 | Control, brain to shell | `IssueRefused` | Original `request`, `draft`, authoritative `version` and optional `approval`, content-free `reason`; no stage/content change |
@@ -536,11 +536,17 @@ ActionState with the same final request; the shell retains that request after ac
 to accept only the matching reason/version/approval. These metadata fields carry no issue
 content and stay off the tap payload allow-list.
 
+The brain records the session's request high-water mark before SQL or job admission, even if
+storage later fails. Equal or older identities receive only `IssueUnavailable`: no SQL read or
+write, renewed deadline or HTTP work. A fresh explicit confirmation uses a new identity.
+Successfully read or committed state from an old session still reaches a replacement as
+unsolicited `ActionState` with `request: None`; its old request/refusal/error never does.
+
 `IssueUnavailable` is appended at tag 26 under the same exact `BUILD_ID` pairing.
 Its maximum complete frame is 25 bytes: the four-byte header, one-byte tag and
 two ten-byte `u64` identities. The brain sends it when SQL cannot provide a
-terminal authoritative answer; it carries no version, approval, state or foreign
-error. The shell generation-fences it and releases only the matching currently
+terminal authoritative answer or a request identity is already spent; it carries no version,
+approval, state or foreign error. The shell generation-fences it and releases only the matching currently
 pending request/draft in the shared history cache. Retained provenance after a
 final acknowledgement does not make a late error current; duplicates and stale
 errors are ignored. A matching error preserves the held card and watermark and

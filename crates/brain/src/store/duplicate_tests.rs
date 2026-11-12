@@ -179,6 +179,148 @@ fn unresolved_content_blocks_distinct_keys_before_or_after_creation_and_dismissa
 }
 
 #[test]
+fn case_only_repository_spelling_cannot_bypass_unknown_or_dismissed_uncertainty() {
+    for dismissed in [false, true] {
+        let scratch = Scratch::new("duplicate-repository-case");
+        let mut store = opened(&scratch);
+        let thread = store.main_thread().unwrap();
+        let lower = RepoName::new("owner/repo").unwrap();
+        let current = RepoName::new("Owner/Repo").unwrap();
+        let account = user(7);
+        let a = store
+            .create_draft(
+                thread,
+                &title("Same café"),
+                &body("first\n\tcafé\n"),
+                Some(&lower),
+                Some(&account),
+            )
+            .unwrap();
+        let preflight = changed(store.consent(
+            a.draft,
+            &a.hash(),
+            ApprovalRev(1),
+            Decision::File,
+            &Live {
+                capacity: true,
+                account: Some(&account),
+                repos: std::slice::from_ref(&lower),
+            },
+        ));
+        let posting = changed(store.preflighted(a.draft, preflight.version, Ok(mark(A))));
+        let a = changed(store.posted(a.draft, posting.version, &uncertain()));
+        assert_eq!(a.version, StateVersion(4));
+        assert_eq!(a.approval, Some(ApprovalRev(2)));
+        assert_eq!(a.consumed, Some(ApprovalRev(1)));
+        assert_eq!(a.uncertain, 1);
+        assert_eq!(
+            a.stage,
+            Stage::Unknown {
+                mark: mark(A),
+                lookup: kumochi_protocol::message::LookupResult::Pending,
+            }
+        );
+        let a = if dismissed {
+            changed(store.discard_draft(a.draft))
+        } else {
+            a
+        };
+        let b = store
+            .create_draft(thread, &a.title, &a.body, Some(&current), Some(&account))
+            .unwrap();
+        assert_eq!(b.approval, Some(ApprovalRev(3)));
+        assert_eq!(a.repo.as_ref().unwrap().as_str(), "owner/repo");
+        assert_eq!(b.repo.as_ref().unwrap().as_str(), "Owner/Repo");
+        assert_ne!(a.hash(), b.hash());
+        let before = snapshot(&store.conn);
+        let live = Live {
+            capacity: true,
+            account: Some(&account),
+            repos: std::slice::from_ref(&current),
+        };
+        let expected = Action {
+            version: StateVersion(2),
+            approval: Some(ApprovalRev(4)),
+            consumed: Some(ApprovalRev(3)),
+            ..b.clone()
+        };
+        assert_eq!(
+            store
+                .consent(b.draft, &b.hash(), ApprovalRev(3), Decision::File, &live)
+                .unwrap(),
+            Answer::Refused(
+                IssueRefused::UnresolvedDraft { draft: a.draft },
+                expected.clone()
+            )
+        );
+        assert_eq!(store.action(a.draft).unwrap(), Some(a));
+        assert_eq!(store.action(b.draft).unwrap(), Some(expected.clone()));
+        let after = snapshot(&store.conn);
+        assert_eq!(after.0[0], before.0[0]);
+        assert_eq!(after.1, 4);
+        let sending: i64 = store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM actions WHERE json_extract(stage, '$.kind') IN ('preflight','posting')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sending, 0);
+        assert_eq!(
+            store
+                .consent(b.draft, &b.hash(), ApprovalRev(3), Decision::File, &live)
+                .unwrap(),
+            Answer::Unchanged(expected)
+        );
+        assert_eq!(snapshot(&store.conn), after);
+    }
+}
+
+#[test]
+fn repository_consent_membership_stays_literal_despite_case_insensitive_duplicate_identity() {
+    let scratch = Scratch::new("duplicate-repository-literal-membership");
+    let mut store = opened(&scratch);
+    let thread = store.main_thread().unwrap();
+    let current = RepoName::new("Owner/Repo").unwrap();
+    let account = user(7);
+    let action = store
+        .create_draft(
+            thread,
+            &title("Same café"),
+            &body("first\n\tcafé\n"),
+            Some(&current),
+            Some(&account),
+        )
+        .unwrap();
+    let lower = RepoName::new("owner/repo").unwrap();
+    assert_eq!(
+        store
+            .consent(
+                action.draft,
+                &action.hash(),
+                ApprovalRev(1),
+                Decision::File,
+                &Live {
+                    capacity: true,
+                    account: Some(&account),
+                    repos: std::slice::from_ref(&lower),
+                },
+            )
+            .unwrap(),
+        Answer::Refused(
+            IssueRefused::RepoNotListed,
+            Action {
+                version: StateVersion(2),
+                approval: Some(ApprovalRev(2)),
+                consumed: Some(ApprovalRev(1)),
+                ..action
+            }
+        )
+    );
+}
+
+#[test]
 fn a_refused_file_retry_restores_failed_and_keeps_its_consumed_approval_spent() {
     let scratch = Scratch::new("duplicate-failed-retry");
     let mut store = opened(&scratch);

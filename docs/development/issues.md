@@ -59,7 +59,12 @@ not mark Sending or Filed, certify numeric account identity, admit a send or
 resolve Unknown. The store still owns numeric-account/hash/approval admission and
 durable single-use consumption, including refusals. Both histories share pending-operation
 feedback, admitted only after the control queues successfully. App-lifetime request identities
-correlate final acknowledgements and refusals even when the state/version is unchanged.
+increase without wrapping and correlate final acknowledgements and refusals even when the
+state/version is unchanged. Before SQL or job admission, the brain records a per-session
+in-memory high-water mark. An equal or older request receives only `IssueUnavailable`, without
+SQL, client construction, HTTP or a new deadline. Failed writes and terminal delivery cannot
+clear that fence; a fresh confirmation needs a new request. This session-scoped watermark does
+not replace durable single-use approvals or guarantee exactly-once delivery.
 Progress never finishes an attempt; stale session/request/version/approval feedback cannot
 replace its result. This is not an exactly-once delivery guarantee.
 
@@ -240,6 +245,11 @@ The checks run in order:
    uncertainty. Otherwise `UnresolvedDraft` names that earlier draft. This check runs in the
    same transaction as approval consumption, not just when the new draft is created.
 
+Only this duplicate-identity comparison uses SQLite `NOCASE` for repository names. Cards,
+content hashes and current-membership checks keep the literal spelling. The decoded API and
+saved actions retain names, not numeric repository IDs, so a full rename or transfer cannot be
+recognized as the same repository. Existing bindings are never silently retargeted.
+
 A refusal never changes stage, content or binding. Because the refused revision is used up, a
 stale click can't file once its cause is fixed, and a double click on a sending card is a no-op.
 An unresolved-draft refusal leaves the earlier action untouched and gives the refused draft a
@@ -275,7 +285,9 @@ do not reuse the canceled admission scope: they settle an already admitted phase
 start another request.
 
 `IssueUnavailable { request, draft }` ends an attempt when its SQL operation cannot provide an
-authoritative answer, including a requested action that is gone. The shared reply site covers
+authoritative answer, including a requested action that is gone, or when the request identity
+has already been used in this session. The latter does not run another SQL operation. The
+shared reply site covers
 Discard, busy/offline File and Check again, and unsupported consent decisions; admitted reads
 and failed cleanup use the same terminal. It carries no state, version, approval or diagnostic.
 Only the matching pending session/request/draft is released. The shell preserves its last card
@@ -293,6 +305,11 @@ the saved Draft and its revision remain unchanged. It is usable only through ano
 confirmation after storage is available, not by replaying the old dialog or by receiving the
 terminal. If compensation commits, the old approval is spent and the known-unsent Failed action
 offers a new one. The terminal itself grants no consent in either case.
+
+A successfully read or committed action remains authoritative after its originating session
+ends. If a replacement has already hydrated Sending, the old owner's later settlement reaches
+it as unsolicited `ActionState { request: None }`. The old request, refusal and unavailable
+feedback stay fenced out of the replacement session.
 
 Cancellation and POST handoff share an atomic fence. For File, expiry or loss before handoff is
 known-unsent Failed; afterward it is Unknown. Recovery uses GitHub's Date and presend exclusions,

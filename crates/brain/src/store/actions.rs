@@ -380,11 +380,12 @@ fn consent_row(
         }
         let account = action.account.as_ref()?;
         let repo = action.repo.as_ref()?;
+        // shortcut: only repository names are retained; store numeric IDs to recognize full renames.
         let other: Option<i64> = tx
             .query_row(
                 "SELECT a.id FROM actions a
                      WHERE a.id <> ?1
-                     AND a.account_id = ?2 AND a.repo = ?3 AND a.title = ?4 AND a.body = ?5
+                     AND a.account_id = ?2 AND a.repo = ?3 COLLATE NOCASE AND a.title = ?4 AND a.body = ?5
                      AND (json_extract(a.stage, '$.kind') IN ('preflight', 'posting', 'unknown')
                           OR (json_extract(a.stage, '$.kind') = 'discarded' AND a.uncertain > 0))
                      ORDER BY a.id LIMIT 1",

@@ -457,17 +457,14 @@ async fn a_sql_result_save_failure_after_one_post_becomes_unknown_and_replay_can
             Some(brain.epoch),
         )
         .unwrap();
-    brain.apply(effects, None).unwrap();
-    let replay = timeout(PATIENCE, brain.inputs.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(matches!(
-        &replay,
-        Input::IssueWritten { reply: Ok(IssueAnswer::Unchanged(stored)), .. }
-            if stored == &settled
-    ));
-    assert_eq!(brain.handle(replay).unwrap(), terminal);
+    assert_eq!(
+        effects,
+        vec![Effect::Control(ControlToShell::IssueUnavailable {
+            request: 601,
+            draft: action.draft,
+        })]
+    );
+    assert_eq!(brain.filing.deadline_for_test(), None);
     assert!(!brain.filing.pending());
     brain.close().await;
     let mut reopened = Store::open(&scratch.db()).unwrap();
