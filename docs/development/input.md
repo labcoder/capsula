@@ -293,7 +293,8 @@ FILETIME through a precise-UTC/QPC bracket of at most 1ms. The anchor estimate i
 lower bound, because creation-timestamp granularity is outside that bracket. Ten conservative
 upper bounds produce nearest-rank p50/p95/max against 400ms. These are fresh
 processes, not a cache-flushed boot: binaries are hashed before each launch and OS caches are not
-purged. No input, foreground transfer, elevation or fixture is involved.
+purged. No input, foreground transfer, elevation or fixture is involved. Launch 1 starts a
+profile already marked onboarded, so onboarding's own start cost is unmeasured.
 
 `gate-session` replaces the old per-phase `input-session` launcher. Preparation, a green build,
 or a Good feel verdict does not authorize desktop input. Invoke it only after fresh owner
