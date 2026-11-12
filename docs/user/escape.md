@@ -2,7 +2,8 @@
 
 Esc does one thing at a time, in this order:
 
-1. If held speech is preparing, recording or transcribing, it cancels that input first.
+1. If held speech is preparing, recording, transcribing or waiting for its reply to start, it
+   cancels that input first.
    Otherwise, if Kumochi is working or speaking, it stops at once. What it already showed stays. That
    includes a message you just sent that it hasn't started answering: its answer never shows.
 2. Otherwise, if a drawing is on screen, it clears. The answer's text stays. That includes

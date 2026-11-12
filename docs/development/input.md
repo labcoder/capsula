@@ -86,7 +86,12 @@ sequenceDiagram
   when it's gone. There's no polling and no timer while nothing is pending. `KillTimer` can leave
   a WM_TIMER already queued; delivering it is harmless, because the gesture ignores a deadline it
   hasn't reached and returns the remaining one. Timer resolution is the system tick, about
-  16 ms [guess, unmeasured on Rez].
+  16 ms [guess, unmeasured on Rez]. WM_TIMER is the lowest priority message, so a busy thread
+  can delay it past the release. A held chord key's auto-repeat also advances the gesture, so
+  a late timer delays recognition to the first repeat, which comes only after the keyboard's
+  repeat delay. The recognition line logs whether the deadline, a repeat or the release reached
+  the threshold, and a chord key more than 50 ms past an armed deadline logs the thread's
+  message queue status once per gesture.
 - **Resets.** Device removal, any session change (lock or unlock), a desktop switch such as
   Ctrl+Alt+Del's secure desktop, suspend, an overrun and Pause all reset the gesture. Keys
   released while Kumochi couldn't see them would otherwise stay held. A desktop switch arrives

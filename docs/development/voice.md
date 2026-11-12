@@ -15,8 +15,9 @@ gesture/session identifiers, device names, paths or foreign error text. A microp
 distinguishes unsupported/unavailable input from discontinuity, capacity and cleanup failures;
 the generic user-facing notice does not identify the failed boundary by itself.
 Debug builds also record the chord/hold, deferred delivery and stale-admission boundaries,
-including a chord suppressed by outstanding key state. They never record key identities or
-ordinary typing. Native keyboard registration and capture start remain separate boundaries.
+including a chord suppressed by outstanding key state. They record no key beyond the left Ctrl+Alt
+chord itself and no ordinary typing, though debug builds stamp every left Ctrl+Alt chord,
+including other apps' Ctrl+Alt shortcuts. Native keyboard registration and capture start remain separate boundaries.
 The native gesture deadline records arming and delivery independently, so a delayed deadline
 can be distinguished from an admission refusal. The recognition line names what reached the
 threshold, `by=Deadline`, `Repeat` or `Release`, and a chord key arriving more than 50 ms after
@@ -36,7 +37,8 @@ fields: `discontinuities`, `first_discontinuity_packet` (one-based kept ordinal,
 `first_discontinuity_ms` (observed loop time since stream start), `kept_packets`, `kept_frames`,
 `missing_frames` (device frames between kept packets that never arrived), `queue_high_water`
 (the most wire chunks seen waiting for the forwarder after a send) and
-`discarded_before_listening` (nonempty packets discarded while collection was not live).
+`discarded_before_listening` (nonempty packets discarded before collection was first seen live;
+packets dropped after that, while the queue drains, and the one straddling packet aren't counted).
 These count native packets/frames, not the subsequently packed wire chunks. Counters commit
 only after an authorized copy and native buffer release. No per-packet allocation, lock,
 logging or extra clock query is added for these diagnostics; the first flag uses the loop's
@@ -936,8 +938,9 @@ opens the ordinary answer panel without activation or injected focus input, and 
 resting drawing clear of it before the next paint. Answering hands off to ordinary Runs. Only a
 run's first state carries its origin, so the hold remembers the run that state named and matches
 later states by run; Answering, Done, Failed or Interrupted then end it without a speech notice,
-since the run's own error or stop already shows, and Esc returns to the ordinary order. A recognised hold refused at admission always shows the failed notice, including
-one first recognised at its release, whose gate has already closed.
+since the run's own error or stop already shows, and Esc returns to the ordinary order. A
+recognised hold refused at admission always shows a notice, busy, disabled, unavailable or failed
+by cause, including one first recognised at its release, whose gate has already closed.
 
 The 300 ms hold deadline is a native one-shot timer. On Windows that is `WM_TIMER`, the lowest
 priority message, so a busy UI thread can delay it past the release. Auto-repeat of a held
