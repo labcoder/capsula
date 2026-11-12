@@ -118,7 +118,9 @@ fn recorded_graph_stays_centered_through_activation_stop_recovery_and_stage_chan
     assert_eq!(step.after.fit_extent(), rect(16.0, -14.0, 473.0, 448.0));
     let mut frame = Frame::new();
     view.activate(step, 0, 800, &mut frame).expect("activate");
-    view.frame(1000, &mut frame).expect("sample");
+    // Default entrances pace the recorded objects, so sample once the last has entered.
+    let entered = view.entrance_end().expect("the step puts objects");
+    view.frame(entered, &mut frame).expect("sample");
     let expected = Affine::pose(2.0, 0.0, Vec2::new(775.0, 354.0));
     assert_graph_placement(&frame, expected);
     let ((), activity) = allocation::activity(|| {
@@ -131,7 +133,7 @@ fn recorded_graph_stays_centered_through_activation_stop_recovery_and_stage_chan
         .stop(
             &StopCut {
                 activated: 1,
-                revealed: Bounded::new(view.stop(1000)).expect("cut"),
+                revealed: Bounded::new(view.stop(entered)).expect("cut"),
             },
             &mut budget,
         )
