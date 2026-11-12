@@ -45,6 +45,7 @@ pub(super) struct OnboardingView {
     events: async_channel::Sender<PresenceEvent>,
     inputs: [Entity<InputState>; 2],
     focus: FocusHandle,
+    /// Kept for the shared name handler; Esc reads the Settings draft instead.
     editing: Option<Field>,
     _events: Vec<Subscription>,
     _watch: Subscription,
@@ -73,6 +74,7 @@ impl OnboardingView {
             .zip(&inputs)
             .map(|(field, input)| {
                 cx.subscribe_in(input, window, move |view, input, event, window, cx| {
+                    // Enter keeps focus in the input, so an error can be fixed in place.
                     let focus = input.read(cx).focus_handle(cx);
                     name_input_event(
                         field,
