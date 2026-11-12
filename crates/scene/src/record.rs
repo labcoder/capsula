@@ -468,6 +468,7 @@ pub struct PathOp {
     /// at.
     pub at: Option<Anchor>,
     /// scale.
+    #[schemars(extend("exclusiveMinimum" = 0))]
     pub scale: Option<Finite>,
     /// fill.
     pub fill: Option<Color>,
@@ -509,11 +510,13 @@ pub struct Shape {
     /// size.
     pub size: Option<[Finite; 2]>,
     /// r.
+    #[schemars(extend("exclusiveMinimum" = 0))]
     pub r: Option<Finite>,
     /// points.
     #[serde(default)]
     pub points: Bounded<[Finite; 2], MAX_PATH_POINTS>,
     /// radius.
+    #[schemars(extend("minimum" = 0))]
     pub radius: Option<Finite>,
     /// fill.
     pub fill: Option<Color>,
@@ -552,6 +555,7 @@ pub struct TextOp {
     /// text.
     pub text: Text,
     /// size.
+    #[schemars(extend("exclusiveMinimum" = 0))]
     pub size: Option<Finite>,
     /// bold.
     #[serde(default)]
@@ -560,6 +564,7 @@ pub struct TextOp {
     #[serde(default)]
     pub align: Align,
     /// max width.
+    #[schemars(extend("exclusiveMinimum" = 0))]
     pub max_width: Option<Finite>,
 }
 /// Callout record fields.
@@ -592,6 +597,7 @@ pub struct Callout {
     /// at.
     pub at: Option<Anchor>,
     /// max width.
+    #[schemars(extend("exclusiveMinimum" = 0))]
     pub max_width: Option<Finite>,
 }
 /// Highlight record fields.
@@ -621,6 +627,7 @@ pub struct Highlight {
     #[serde(default)]
     pub style: HighlightStyle,
     /// pad.
+    #[schemars(extend("exclusiveMinimum" = 0))]
     pub pad: Option<Finite>,
 }
 /// Diagram record fields.

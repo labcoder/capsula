@@ -71,8 +71,11 @@ numbers. Composed transforms and domain-specific ranges are admission checks.
 Screen/capture anchors are absent, not ignored.
 
 Line, arrow and path stroke widths must be above 0. A shape's `width` is its outline,
-2 by default; 0 draws the shape without an outline, and negative widths are refused. The
-offered schema states both minimums. `set` cannot change a width.
+2 by default; 0 draws the shape without an outline, and negative widths are refused. A
+rect's `radius` of 0 gives square corners, as when it is left out. The offered schema
+states these minimums and the positive bounds of circle `r`, path `scale`, text `size`,
+`max_width` and highlight `pad`; box and size components are checked only at
+admission. `set` cannot change a width.
 
 ### Canvas and overlay placement
 

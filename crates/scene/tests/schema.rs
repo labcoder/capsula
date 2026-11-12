@@ -68,24 +68,32 @@ fn every_two_dimensional_operation_and_mixed_form_fits_the_schema() {
 }
 
 #[test]
-fn stroke_widths_carry_their_admission_minimums() {
+fn scalar_dimension_minimums_match_admission() {
     let put = |operation: Value| json!({"step": {"id": "s", "put": [operation]}});
-    for (width, expected) in [(json!(0), true), (json!(-1), false)] {
-        assert_eq!(
-            valid(&put(
-                json!({"shape": {"id": "s", "kind": "rect", "width": width}})
-            )),
-            expected,
-            "shape outline width"
-        );
+    for field in ["width", "radius"] {
+        for (value, expected) in [(json!(0), true), (json!(-1), false)] {
+            let mut shape = json!({"id": "s", "kind": "rect"});
+            shape[field] = value;
+            assert_eq!(
+                valid(&put(json!({ "shape": shape }))),
+                expected,
+                "shape {field} takes zero"
+            );
+        }
     }
-    for (width, expected) in [(json!(0.5), true), (json!(0), false)] {
+    for (value, expected) in [(json!(0.5), true), (json!(0), false)] {
         for operation in [
-            json!({"line": {"id": "l", "from": [0, 0], "to": [1, 1], "width": width}}),
-            json!({"arrow": {"id": "a", "from": [0, 0], "to": [1, 1], "width": width}}),
-            json!({"path": {"id": "p", "d": "M0 0", "width": width}}),
+            json!({"line": {"id": "l", "from": [0, 0], "to": [1, 1], "width": value}}),
+            json!({"arrow": {"id": "a", "from": [0, 0], "to": [1, 1], "width": value}}),
+            json!({"path": {"id": "p", "d": "M0 0", "width": value}}),
+            json!({"path": {"id": "p", "d": "M0 0", "scale": value}}),
+            json!({"shape": {"id": "s", "kind": "circle", "r": value}}),
+            json!({"text": {"id": "t", "at": [0, 0], "text": "", "size": value}}),
+            json!({"text": {"id": "t", "at": [0, 0], "text": "", "max_width": value}}),
+            json!({"callout": {"id": "c", "target": [0, 0], "text": "", "max_width": value}}),
+            json!({"highlight": {"id": "h", "target": [0, 0], "pad": value}}),
         ] {
-            assert_eq!(valid(&put(operation)), expected, "stroke width");
+            assert_eq!(valid(&put(operation.clone())), expected, "{operation}");
         }
     }
 }
