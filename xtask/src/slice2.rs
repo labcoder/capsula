@@ -21,10 +21,9 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context as _, Result, bail, ensure};
+use anyhow::{Context as _, Result, ensure};
 use kumochi_protocol::constants::{BRAIN_EXE, SHELL_EXE};
 use kumochi_protocol::message::{ControlToShell, DataToBrain, DataToShell, Phase, RunId, ThreadId};
 
@@ -122,31 +121,10 @@ fn prepare(only: Option<&str>) -> Result<()> {
     fs::copy(target.join(BRAIN_EXE), bin.join(BRAIN_EXE)).context("copying the brain")?;
     fs::copy(&me, bin.join(SHELL_EXE)).context("copying the client")?;
     println!("slice 2 gate in {}", folder.display());
-    let mut gate = Command::new(bin.join(SHELL_EXE))
-        .args(["slice2-gate", INNER])
-        .arg(&folder)
-        .args(only)
-        .spawn()
-        .context("running the gate")?;
-    let end = Instant::now() + GATE_LIMIT;
-    while gate.try_wait()?.is_none() {
-        if Instant::now() >= end {
-            let brains: Vec<_> = platform::processes()?
-                .into_iter()
-                .filter(|entry| entry.parent == gate.id())
-                .collect();
-            gate.kill()?;
-            gate.wait()?;
-            for brain in brains {
-                let _gone = Command::new("taskkill")
-                    .args(["/T", "/F", "/PID", &brain.pid.to_string()])
-                    .status();
-            }
-            bail!("the gate didn't finish in {GATE_LIMIT:?}; it and its brains were killed");
-        }
-        thread::sleep(Duration::from_millis(200));
-    }
-    ensure!(gate.wait()?.success(), "the gate failed");
+    let mut gate = Command::new(bin.join(SHELL_EXE));
+    gate.args(["slice2-gate", INNER]).arg(&folder).args(only);
+    let ran = live::run_bounded(gate, GATE_LIMIT, "the gate")?;
+    ensure!(ran.success(), "the gate failed");
     Ok(())
 }
 
@@ -155,6 +133,24 @@ fn build(cargo: Command, limit: Duration) -> Result<()> {
     let built = live::run_bounded(cargo, limit, "the brain build")?;
     ensure!(built.success(), "the brain didn't build ({built})");
     Ok(())
+}
+
+/// Ends each brain still running after its item and says whether taskkill ended it, so the item
+/// that left it fails, and the next one doesn't meet it on the pipes.
+fn end_survivors(pids: impl IntoIterator<Item = u32>) -> Vec<String> {
+    pids.into_iter()
+        .map(|pid| {
+            let ended = platform::kill_tree(pid)
+                .and_then(|kill| live::run_bounded(kill, live::KILL_LIMIT, "taskkill"));
+            match ended {
+                Ok(status) if status.success() => {
+                    format!("brain {pid} outlived the item; taskkill ended it")
+                }
+                Ok(status) => format!("brain {pid} outlived the item; taskkill failed ({status})"),
+                Err(error) => format!("brain {pid} outlived the item; taskkill failed: {error:#}"),
+            }
+        })
+        .collect()
 }
 
 fn gate(folder: &Path, only: Option<&str>) -> Result<()> {
@@ -176,14 +172,22 @@ fn gate(folder: &Path, only: Option<&str>) -> Result<()> {
             continue;
         }
         println!("running: {name}");
-        match item(folder) {
-            Ok(row) => rows.push(row),
-            Err(error) => rows.push(Row {
-                item: name,
-                verdict: Verdict::Fail,
-                detail: format!("{error:#}"),
-            }),
-        }
+        let row = item(folder).unwrap_or_else(|error| Row {
+            item: name,
+            verdict: Verdict::Fail,
+            detail: format!("{error:#}"),
+        });
+        let survivors = end_survivors(
+            platform::processes()?
+                .into_iter()
+                .filter(|entry| entry.parent == std::process::id())
+                .map(|entry| entry.pid),
+        );
+        rows.push(if survivors.is_empty() {
+            row
+        } else {
+            Row::checked(name, &survivors, row.detail)
+        });
     }
     rows.extend(only.is_none().then(|| Row {
         item: "Esc on the real key in the real shell",
@@ -284,7 +288,7 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
-    use super::{build, percentile};
+    use super::{build, end_survivors, percentile};
 
     const SHORT: Duration = Duration::from_millis(200);
 
@@ -310,6 +314,36 @@ mod tests {
             start.elapsed() < Duration::from_secs(15),
             "it returned in bound"
         );
+    }
+
+    #[test]
+    fn a_brain_left_by_its_item_is_ended_and_a_failed_kill_is_reported() {
+        let mut left = held().spawn().expect("cmd starts");
+        let mut exited = Command::new("cmd")
+            .args(["/C", "exit 0"])
+            .spawn()
+            .expect("cmd starts");
+        exited.wait().expect("it exits");
+        // The open handle keeps the exited process's id from being reused, so taskkill can't find it.
+        let lines = end_survivors([left.id(), exited.id()]);
+        assert_eq!(
+            lines,
+            [
+                format!("brain {} outlived the item; taskkill ended it", left.id()),
+                format!(
+                    "brain {} outlived the item; taskkill failed (exit code: 128)",
+                    exited.id()
+                ),
+            ]
+        );
+        let start = Instant::now();
+        while left.try_wait().expect("reads").is_none() {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "the survivor outlived taskkill"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]
