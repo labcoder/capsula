@@ -1636,7 +1636,8 @@ fn a_round_the_reader_would_refuse_is_never_written() {
     use crate::dispatch::ToolOutput;
     let mut world = world("ctx-rounds-refused");
     let at = first_round(&mut world);
-    let opaque = |item: Value| Opaque::new(serde_json::to_vec(&item).expect("json")).expect("small");
+    let opaque =
+        |item: Value| Opaque::new(serde_json::to_vec(&item).expect("json")).expect("small");
     let call = CallId::new("c3").expect("short");
     let frame = r#"{"call":"c3","output":{"text":""}}"#;
     let fits = "x".repeat(65 * 1024 - frame.len());
