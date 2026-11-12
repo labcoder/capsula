@@ -170,11 +170,6 @@ pub(crate) enum Text {
     SettingsSaving,
     SettingsOffline,
     RenameBusy,
-
-    // Onboarding
-    OnboardingClose,
-    OnboardingContinue,
-    OnboardingWelcomeHelp,
     SettingsUnavailable,
     SettingsNotSaved,
     SettingsSaveHelp,
@@ -186,6 +181,11 @@ pub(crate) enum Text {
     TaskbarRemoveFailed,
     MaxFrameRate,
     FrameRateAutomatic,
+
+    // Onboarding
+    OnboardingClose,
+    OnboardingContinue,
+    OnboardingWelcomeHelp,
 
     // ChatGPT accounts
     AccountProvider,
@@ -422,11 +422,6 @@ impl Text {
         SettingsSaving,
         SettingsOffline,
         RenameBusy,
-
-        // Onboarding
-        OnboardingClose,
-        OnboardingContinue,
-        OnboardingWelcomeHelp,
         SettingsUnavailable,
         SettingsNotSaved,
         SettingsSaveHelp,
@@ -438,6 +433,11 @@ impl Text {
         TaskbarRemoveFailed,
         MaxFrameRate,
         FrameRateAutomatic,
+
+        // Onboarding
+        OnboardingClose,
+        OnboardingContinue,
+        OnboardingWelcomeHelp,
 
         // ChatGPT accounts
         AccountProvider,
@@ -677,9 +677,6 @@ impl Text {
             Self::SettingsSaving => "settings-saving",
             Self::SettingsOffline => "settings-offline",
             Self::RenameBusy => "rename-busy",
-            Self::OnboardingClose => "onboarding-close",
-            Self::OnboardingContinue => "onboarding-continue",
-            Self::OnboardingWelcomeHelp => "onboarding-welcome-help",
             Self::SettingsUnavailable => "settings-unavailable",
             Self::SettingsNotSaved => "settings-not-saved",
             Self::SettingsSaveHelp => "settings-save-help",
@@ -691,6 +688,11 @@ impl Text {
             Self::TaskbarRemoveFailed => "taskbar-remove-failed",
             Self::MaxFrameRate => "settings-max-frame-rate",
             Self::FrameRateAutomatic => "settings-frame-rate-automatic",
+
+            // Onboarding
+            Self::OnboardingClose => "onboarding-close",
+            Self::OnboardingContinue => "onboarding-continue",
+            Self::OnboardingWelcomeHelp => "onboarding-welcome-help",
 
             // ChatGPT accounts
             Self::AccountProvider => "accounts-provider",
