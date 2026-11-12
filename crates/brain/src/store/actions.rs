@@ -64,15 +64,45 @@ impl Store {
         }
         match write {
             Write::Read(draft) => Ok(self.action(*draft)?.map_or(Answer::Gone, Answer::Unchanged)),
+            Write::Rearm { draft, at, hash } => {
+                let Ok(id) = i64::try_from(draft.0) else {
+                    return Ok(Answer::Gone);
+                };
+                self.action_tx(|tx| {
+                    let Some(action) = load(tx, id)? else {
+                        return Ok(Answer::Gone);
+                    };
+                    if action.version != *at {
+                        return Ok(Answer::Refused(IssueRefused::StaleApproval, action));
+                    }
+                    if action.hash() != *hash {
+                        return Ok(Answer::Refused(IssueRefused::ContentChanged, action));
+                    }
+                    if !matches!(action.stage, Stage::Draft | Stage::Failed { .. }) {
+                        return Ok(Answer::Refused(IssueRefused::NotAllowedNow, action));
+                    }
+                    commit_stage(tx, id, &action.stage, action.uncertain)?;
+                    Ok(Answer::Changed(load(tx, id)?.ok_or(StoreError::Issue)?))
+                })
+            }
             Write::Consent {
                 draft,
+                at,
                 hash,
                 approval,
                 decision,
                 live,
-            } => self.consent(*draft, hash, *approval, *decision, &live.live()),
+            } => {
+                let Ok(id) = i64::try_from(draft.0) else {
+                    return Ok(Answer::Gone);
+                };
+                self.action_tx(|tx| {
+                    consent_row(tx, id, Some(*at), hash, *approval, *decision, &live.live())
+                })
+            }
             Write::CancelledConsent {
                 draft,
+                at,
                 hash,
                 approval,
                 live,
@@ -81,7 +111,15 @@ impl Store {
                     return Ok(Answer::Gone);
                 };
                 self.action_tx(|tx| {
-                    match consent_row(tx, id, hash, *approval, Decision::File, &live.live())? {
+                    match consent_row(
+                        tx,
+                        id,
+                        Some(*at),
+                        hash,
+                        *approval,
+                        Decision::File,
+                        &live.live(),
+                    )? {
                         Answer::Changed(action)
                             if matches!(action.stage, Stage::Preflight { .. }) =>
                         {
@@ -168,7 +206,7 @@ impl Store {
         let Ok(id) = i64::try_from(draft.0) else {
             return Ok(Answer::Gone);
         };
-        self.action_tx(|tx| consent_row(tx, id, hash, approval, decision, live))
+        self.action_tx(|tx| consent_row(tx, id, None, hash, approval, decision, live))
     }
 
     /// Binds the account, and the repository where none is chosen, to every Draft and Failed
@@ -367,12 +405,16 @@ fn event(tx: &Connection, id: i64, kind: &str) -> Result<(), StoreError> {
 fn consent_row(
     tx: &Connection,
     id: i64,
+    at: Option<StateVersion>,
     hash: &ContentHash,
     approval: ApprovalRev,
     decision: Decision,
     live: &Live<'_>,
 ) -> Result<Answer, StoreError> {
     change_row(tx, id, |action| {
+        if at.is_some_and(|at| action.version != at) {
+            return Some(Err(IssueRefused::StaleApproval));
+        }
         let before = action.stage.clone();
         let consent = action.consent(hash, approval, decision, live);
         if decision != Decision::File || consent.is_err() || action.stage == before {

@@ -41,8 +41,9 @@ pub use github::{
 };
 pub use issues::{
     ActionState, ApprovalRev, ContentHash, Decision, DraftId, FailReason, IssueBody, IssueCard,
-    IssueCardsStatus, IssueOp, IssueRefused, IssueTitle, IssueUrl, LookupResult,
-    MAX_ISSUE_BODY_BYTES, MAX_ISSUE_CARDS, MAX_ISSUE_TITLE_CHARS, StateVersion,
+    IssueCardsStatus, IssueOp, IssueRefused, IssueTitle, IssueUnavailableKind, IssueUrl,
+    LookupResult, MAX_ISSUE_BODY_BYTES, MAX_ISSUE_CARDS, MAX_ISSUE_REVIEWS, MAX_ISSUE_TITLE_CHARS,
+    StateVersion,
 };
 pub use pages::{EventId, PageEvent, PageEventKind, PageOf, ThreadCursor, ThreadRow};
 pub use scenes::{
@@ -625,6 +626,8 @@ pub enum ControlToShell {
         request: u64,
         /// The action whose operation could not complete.
         draft: DraftId,
+        /// A closed failure class, never a foreign diagnostic or invented state.
+        kind: IssueUnavailableKind,
     },
 }
 
@@ -841,6 +844,13 @@ pub enum DataToShell {
         request: u32,
         /// Fixed, content-free completion status.
         status: IssueCardsStatus,
+    },
+    /// A newly saved review; only its matching live opener may arm a confirmation.
+    IssueReview {
+        /// The originating rearm request.
+        request: u64,
+        /// The authoritative full review, carried only on data.
+        card: IssueCard,
     },
 }
 

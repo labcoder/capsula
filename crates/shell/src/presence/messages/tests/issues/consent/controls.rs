@@ -1,7 +1,7 @@
 use super::*;
 use kumochi_protocol::message::{IssueRefused, IssueUrl};
 
-fn click(f: &Fixture, at: usize, selector: &'static str, cx: &mut TestAppContext) {
+pub(super) fn click(f: &Fixture, at: usize, selector: &'static str, cx: &mut TestAppContext) {
     f.views[at]
         .1
         .update(cx, |_, window, _| window.activate_window())
@@ -13,7 +13,7 @@ fn click(f: &Fixture, at: usize, selector: &'static str, cx: &mut TestAppContext
     frame.run_until_parked();
 }
 
-fn deliver(f: &Fixture, events: Vec<LinkEvent>, cx: &mut TestAppContext) {
+pub(super) fn deliver(f: &Fixture, events: Vec<LinkEvent>, cx: &mut TestAppContext) {
     f.owner.update(cx, |owner, cx| {
         owner.link_events(Batch::Plain(events), cx).unwrap();
     });
@@ -29,18 +29,19 @@ fn storage_error_preserves_cards_and_requires_fresh_manual_file_confirmation(
     cx: &mut TestAppContext,
 ) {
     let f = fixture(cx, ActionState::Draft, "Literal saved body\n{ $repo }");
+    open(&f, 0, cx);
     let expected = f.models[0].read_with(cx, |model, _| {
         model.issue(DraftId(9)).unwrap().card().unwrap().clone()
     });
-    open(&f, 0, cx);
     confirm(&f, 0, cx);
-    assert_eq!(f.controls.try_recv().unwrap(), payload(1, 1));
+    assert_eq!(f.controls.try_recv().unwrap(), payload(2, 2));
     for (generation, request, draft) in
-        [(2, 1, DraftId(9)), (1, 2, DraftId(9)), (1, 1, DraftId(10))]
+        [(2, 2, DraftId(9)), (1, 3, DraftId(9)), (1, 2, DraftId(10))]
     {
         deliver(
             &f,
             vec![LinkEvent::IssueUnavailable {
+                kind: kumochi_protocol::message::IssueUnavailableKind::Action,
                 generation,
                 request,
                 draft,
@@ -61,8 +62,9 @@ fn storage_error_preserves_cards_and_requires_fresh_manual_file_confirmation(
     deliver(
         &f,
         vec![LinkEvent::IssueUnavailable {
+            kind: kumochi_protocol::message::IssueUnavailableKind::Action,
             generation: 1,
-            request: 1,
+            request: 2,
             draft: DraftId(9),
         }],
         cx,
@@ -74,7 +76,9 @@ fn storage_error_preserves_cards_and_requires_fresh_manual_file_confirmation(
             assert!(!entry.loading());
             assert_eq!(
                 entry.feedback,
-                Some(crate::threads::IssueFeedback::Unavailable)
+                Some(crate::threads::IssueFeedback::Unavailable(
+                    kumochi_protocol::message::IssueUnavailableKind::Action
+                ))
             );
             assert_eq!(entry.card(), Some(&expected));
         });
@@ -92,8 +96,9 @@ fn storage_error_preserves_cards_and_requires_fresh_manual_file_confirmation(
         &f,
         vec![
             LinkEvent::IssueUnavailable {
+                kind: kumochi_protocol::message::IssueUnavailableKind::Action,
                 generation: 1,
-                request: 1,
+                request: 2,
                 draft: DraftId(9),
             },
             LinkEvent::GitHub {
@@ -113,15 +118,19 @@ fn storage_error_preserves_cards_and_requires_fresh_manual_file_confirmation(
     assert!(f.controls.try_recv().is_err());
     cx.simulate_keystrokes(f.views[1].1, "escape");
     cx.run_until_parked();
-    assert!(f.controls.try_recv().is_err());
+    cancelled(&f, 4, 3);
     open(&f, 1, cx);
+    let expected = f.models[0].read_with(cx, |model, _| {
+        model.issue(DraftId(9)).unwrap().card().unwrap().clone()
+    });
     confirm(&f, 1, cx);
-    assert_eq!(f.controls.try_recv().unwrap(), payload(2, 1));
+    assert_eq!(f.controls.try_recv().unwrap(), payload(6, 4));
     deliver(
         &f,
         vec![LinkEvent::IssueUnavailable {
+            kind: kumochi_protocol::message::IssueUnavailableKind::Action,
             generation: 1,
-            request: 1,
+            request: 2,
             draft: DraftId(9),
         }],
         cx,
@@ -172,6 +181,7 @@ fn storage_error_allows_only_manual_check_or_dismiss_and_never_schedules_a_reque
         deliver(
             &f,
             vec![LinkEvent::IssueUnavailable {
+                kind: kumochi_protocol::message::IssueUnavailableKind::Action,
                 generation: 1,
                 request: 1,
                 draft: DraftId(9),
@@ -209,21 +219,22 @@ fn late_storage_error_cannot_overwrite_completed_attempt_feedback(cx: &mut TestA
     let f = fixture(cx, ActionState::Draft, "saved body");
     open(&f, 0, cx);
     confirm(&f, 0, cx);
-    assert_eq!(f.controls.try_recv().unwrap(), payload(1, 1));
+    assert_eq!(f.controls.try_recv().unwrap(), payload(2, 2));
     deliver(
         &f,
         vec![
             LinkEvent::ActionState {
                 generation: 1,
-                request: Some(1),
+                request: Some(2),
                 draft: DraftId(9),
-                version: StateVersion(1),
+                version: StateVersion(2),
                 state: ActionState::Draft,
-                approval: Some(ApprovalRev(1)),
+                approval: Some(ApprovalRev(2)),
             },
             LinkEvent::IssueUnavailable {
+                kind: kumochi_protocol::message::IssueUnavailableKind::Action,
                 generation: 1,
-                request: 1,
+                request: 2,
                 draft: DraftId(9),
             },
         ],
@@ -241,15 +252,16 @@ fn late_storage_error_cannot_overwrite_completed_attempt_feedback(cx: &mut TestA
         vec![
             LinkEvent::IssueRefused {
                 generation: 1,
-                request: 1,
+                request: 2,
                 draft: DraftId(9),
-                version: StateVersion(1),
-                approval: Some(ApprovalRev(1)),
+                version: StateVersion(2),
+                approval: Some(ApprovalRev(2)),
                 reason: IssueRefused::NotAllowedNow,
             },
             LinkEvent::IssueUnavailable {
+                kind: kumochi_protocol::message::IssueUnavailableKind::Action,
                 generation: 1,
-                request: 1,
+                request: 2,
                 draft: DraftId(9),
             },
         ],
@@ -281,7 +293,7 @@ fn unchanged_stage_refusal_keeps_correlation_and_a_fresh_attempt_uses_the_new_ap
         let f = fixture(cx, state.clone(), "Literal { $repo }\n**not markup**");
         open(&f, 0, cx);
         confirm(&f, 0, cx);
-        assert_eq!(f.controls.try_recv().unwrap(), payload(1, 1));
+        assert_eq!(f.controls.try_recv().unwrap(), payload(2, 2));
         for model in &f.models {
             model.read_with(cx, |model, _| {
                 assert!(model.issue(DraftId(9)).unwrap().pending());
@@ -293,9 +305,9 @@ fn unchanged_stage_refusal_keeps_correlation_and_a_fresh_attempt_uses_the_new_ap
                 generation: 1,
                 request: None,
                 draft: DraftId(9),
-                version: StateVersion(1),
+                version: StateVersion(2),
                 state: state.clone(),
-                approval: Some(ApprovalRev(1)),
+                approval: Some(ApprovalRev(2)),
             }],
             cx,
         );
@@ -305,18 +317,18 @@ fn unchanged_stage_refusal_keeps_correlation_and_a_fresh_attempt_uses_the_new_ap
             vec![
                 LinkEvent::ActionState {
                     generation: 1,
-                    request: Some(1),
+                    request: Some(2),
                     draft: DraftId(9),
-                    version: StateVersion(2),
+                    version: StateVersion(3),
                     state: state.clone(),
-                    approval: Some(ApprovalRev(2)),
+                    approval: Some(ApprovalRev(3)),
                 },
                 LinkEvent::IssueRefused {
                     generation: 1,
-                    request: 1,
+                    request: 2,
                     draft: DraftId(9),
-                    version: StateVersion(2),
-                    approval: Some(ApprovalRev(2)),
+                    version: StateVersion(3),
+                    approval: Some(ApprovalRev(3)),
                     reason: IssueRefused::StaleApproval,
                 },
             ],
@@ -332,10 +344,10 @@ fn unchanged_stage_refusal_keeps_correlation_and_a_fresh_attempt_uses_the_new_ap
                 drafts: Bounded::new(vec![DraftId(9)]).unwrap(),
             }
         );
-        let mut card = issue_frame(6, 2, "Literal { $repo }\n**not markup**");
+        let mut card = issue_frame(6, 3, "Literal { $repo }\n**not markup**");
         if let DataToShell::IssueCardRead { card, .. } = &mut card {
             card.state = state.clone();
-            card.approval = Some(ApprovalRev(2));
+            card.approval = Some(ApprovalRev(3));
         }
         deliver(
             &f,
@@ -358,7 +370,7 @@ fn unchanged_stage_refusal_keeps_correlation_and_a_fresh_attempt_uses_the_new_ap
         );
         open(&f, 1, cx);
         confirm(&f, 1, cx);
-        assert_eq!(f.controls.try_recv().unwrap(), payload(2, 2));
+        assert_eq!(f.controls.try_recv().unwrap(), payload(4, 4));
         f.views[0].0.read_with(cx, |view, _| {
             assert_eq!(
                 view.rows[0].feedback.as_deref(),
@@ -367,11 +379,11 @@ fn unchanged_stage_refusal_keeps_correlation_and_a_fresh_attempt_uses_the_new_ap
         });
         let mut stale = Vec::new();
         for (generation, request, draft, version, approval) in [
-            (1, 1, DraftId(9), StateVersion(2), Some(ApprovalRev(2))),
-            (2, 2, DraftId(9), StateVersion(2), Some(ApprovalRev(2))),
-            (1, 2, DraftId(10), StateVersion(2), Some(ApprovalRev(2))),
-            (1, 2, DraftId(9), StateVersion(1), Some(ApprovalRev(1))),
-            (1, 2, DraftId(9), StateVersion(2), Some(ApprovalRev(1))),
+            (1, 2, DraftId(9), StateVersion(3), Some(ApprovalRev(3))),
+            (2, 4, DraftId(9), StateVersion(4), Some(ApprovalRev(4))),
+            (1, 4, DraftId(10), StateVersion(4), Some(ApprovalRev(4))),
+            (1, 4, DraftId(9), StateVersion(3), Some(ApprovalRev(3))),
+            (1, 4, DraftId(9), StateVersion(4), Some(ApprovalRev(3))),
         ] {
             stale.push(LinkEvent::IssueRefused {
                 generation,
@@ -384,11 +396,11 @@ fn unchanged_stage_refusal_keeps_correlation_and_a_fresh_attempt_uses_the_new_ap
         }
         stale.push(LinkEvent::ActionState {
             generation: 1,
-            request: Some(1),
+            request: Some(2),
             draft: DraftId(9),
-            version: StateVersion(2),
+            version: StateVersion(3),
             state,
-            approval: Some(ApprovalRev(2)),
+            approval: Some(ApprovalRev(3)),
         });
         deliver(&f, stale, cx);
         for model in &f.models {
@@ -402,9 +414,9 @@ fn unchanged_stage_refusal_keeps_correlation_and_a_fresh_attempt_uses_the_new_ap
             &f,
             vec![LinkEvent::ActionState {
                 generation: 1,
-                request: Some(2),
+                request: Some(4),
                 draft: DraftId(9),
-                version: StateVersion(3),
+                version: StateVersion(5),
                 state: ActionState::Filed {
                     number: 7,
                     url: IssueUrl::new("https://github.com/o/r/issues/7").unwrap(),
@@ -597,16 +609,16 @@ fn navigating_away_and_back_never_reuses_an_operation_request(cx: &mut TestAppCo
     let f = fixture(cx, ActionState::Draft, "saved body");
     open(&f, 0, cx);
     confirm(&f, 0, cx);
-    assert_eq!(f.controls.try_recv().unwrap(), payload(1, 1));
+    assert_eq!(f.controls.try_recv().unwrap(), payload(2, 2));
     deliver(
         &f,
         vec![LinkEvent::ActionState {
             generation: 1,
-            request: Some(1),
+            request: Some(2),
             draft: DraftId(9),
-            version: StateVersion(1),
+            version: StateVersion(2),
             state: ActionState::Draft,
-            approval: Some(ApprovalRev(1)),
+            approval: Some(ApprovalRev(2)),
         }],
         cx,
     );
@@ -638,15 +650,15 @@ fn navigating_away_and_back_never_reuses_an_operation_request(cx: &mut TestAppCo
     assert!(f.requests.try_recv().is_err());
     open(&f, 0, cx);
     confirm(&f, 0, cx);
-    assert_eq!(f.controls.try_recv().unwrap(), payload(2, 1));
+    assert_eq!(f.controls.try_recv().unwrap(), payload(4, 3));
     deliver(
         &f,
         vec![LinkEvent::IssueRefused {
             generation: 1,
-            request: 1,
+            request: 2,
             draft: DraftId(9),
-            version: StateVersion(1),
-            approval: Some(ApprovalRev(1)),
+            version: StateVersion(2),
+            approval: Some(ApprovalRev(2)),
             reason: IssueRefused::OtherAccount,
         }],
         cx,
@@ -819,11 +831,11 @@ fn reconnect_drops_feedback_and_old_session_refusals_cannot_finish_a_new_attempt
                 incarnation: Incarnation(1),
                 epoch: 2
             },
-            request: 2,
+            request: 3,
             op: IssueOp::Consent {
                 draft: DraftId(9),
                 hash: ContentHash([7; 32]),
-                approval: ApprovalRev(1),
+                approval: ApprovalRev(2),
                 decision: Decision::File,
             },
         }

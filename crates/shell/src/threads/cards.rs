@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use kumochi_protocol::message::{
-    ActionState, ApprovalRev, DraftId, IssueCard, IssueRefused, MAX_ISSUE_CARDS, StateVersion,
-    ThreadId,
+    ActionState, ApprovalRev, DraftId, IssueCard, IssueRefused, IssueUnavailableKind,
+    MAX_ISSUE_CARDS, StateVersion, ThreadId,
 };
 
 use super::View;
@@ -29,18 +29,45 @@ pub(crate) struct Entry {
 struct Attempt {
     request: u64,
     pending: bool,
+    review: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Feedback {
     QueueFailed,
-    Unavailable,
+    Unavailable(IssueUnavailableKind),
     Refused(IssueRefused),
 }
 
 impl Entry {
+    pub(crate) fn review_blocked(&self) -> bool {
+        matches!(
+            self.feedback,
+            Some(Feedback::Unavailable(IssueUnavailableKind::AttemptNotSaved))
+        )
+    }
+
     pub(crate) fn pending(&self) -> bool {
         self.attempt.as_ref().is_some_and(|attempt| attempt.pending)
+    }
+
+    pub(crate) fn pending_action(&self) -> bool {
+        self.attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.pending && !attempt.review)
+    }
+
+    pub(crate) fn pending_review(&self) -> bool {
+        self.attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.pending && attempt.review)
+    }
+
+    pub(crate) fn pending_review_request(&self) -> Option<u64> {
+        self.attempt
+            .as_ref()
+            .filter(|attempt| attempt.pending && attempt.review)
+            .map(|attempt| attempt.request)
     }
 
     pub(crate) fn state(&self) -> Option<&ActionState> {
@@ -282,12 +309,15 @@ impl Cards {
             entry.attempt = request.map(|request| Attempt {
                 request,
                 pending: true,
+                review: false,
             });
-            entry.feedback = request.is_none().then_some(Feedback::QueueFailed);
+            if !entry.review_blocked() {
+                entry.feedback = request.is_none().then_some(Feedback::QueueFailed);
+            }
         }
     }
 
-    pub(super) fn unavailable(&mut self, request: u64, draft: DraftId) {
+    pub(super) fn unavailable(&mut self, request: u64, draft: DraftId, kind: IssueUnavailableKind) {
         let Some(entry) = self.entries.get_mut(&draft) else {
             return;
         };
@@ -298,7 +328,80 @@ impl Cards {
             return;
         }
         attempt.pending = false;
-        entry.feedback = Some(Feedback::Unavailable);
+        if !entry.review_blocked() {
+            entry.feedback = Some(Feedback::Unavailable(kind));
+        }
+    }
+
+    pub(super) fn review_started(&mut self, draft: DraftId, request: u64) {
+        if let Some(entry) = self.entries.get_mut(&draft) {
+            if entry.review_blocked() {
+                return;
+            }
+            entry.attempt = Some(Attempt {
+                request,
+                pending: true,
+                review: true,
+            });
+            entry.feedback = None;
+        }
+    }
+
+    pub(super) fn cancel_review(&mut self, request: u64, draft: DraftId) {
+        if let Some(entry) = self.entries.get_mut(&draft)
+            && entry
+                .attempt
+                .as_ref()
+                .is_some_and(|attempt| attempt.request == request && attempt.review)
+        {
+            entry.attempt = None;
+        }
+    }
+
+    pub(super) fn review(&mut self, request: u64, card: IssueCard) -> bool {
+        if self.broken || card.version.0 == 0 {
+            return false;
+        }
+        let Some(entry) = self.entries.get_mut(&card.draft) else {
+            return false;
+        };
+        if entry.thread != card.thread
+            || entry.review_blocked()
+            || entry
+                .attempt
+                .as_ref()
+                .is_none_or(|attempt| attempt.request != request || !attempt.review)
+            || entry
+                .mark
+                .as_ref()
+                .is_some_and(|mark| card.version < mark.version)
+        {
+            return false;
+        }
+        if entry.mark.as_ref().is_some_and(|mark| {
+            card.version == mark.version
+                && (card.state != mark.state || card.approval != mark.approval)
+        }) || entry
+            .full
+            .as_ref()
+            .is_some_and(|full| full.version == card.version && *full != card)
+        {
+            self.broken = true;
+            return false;
+        }
+        entry.mark = Some(Watermark {
+            version: card.version,
+            state: card.state.clone(),
+            approval: card.approval,
+        });
+        entry.full = Some(card);
+        entry.needed = false;
+        entry.flight = None;
+        if let Some(attempt) = &mut entry.attempt {
+            attempt.pending = false;
+        }
+        entry.feedback = None;
+        true
     }
 
     pub(super) fn refused(
@@ -326,7 +429,9 @@ impl Cards {
         if let Some(attempt) = &mut entry.attempt {
             attempt.pending = false;
         }
-        entry.feedback = Some(Feedback::Refused(reason));
+        if !entry.review_blocked() {
+            entry.feedback = Some(Feedback::Refused(reason));
+        }
     }
 
     pub(super) fn take_refresh(&mut self, view: View) -> bool {

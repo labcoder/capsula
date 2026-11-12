@@ -12,7 +12,7 @@ async fn one_deadline_cancels_held_consent_or_posting_without_an_eof_or_http_han
     for admission in [true, false] {
         let scratch = Scratch::new("github-filing-held-sql-deadline");
         let server = Arc::new(FilingServer::default());
-        let (mut brain, action) = filing_owner(&scratch, &server).await;
+        let (mut brain, action) = reviewed_filing_owner(&scratch, &server).await;
         let mut observed = brain.observe();
         let release = if admission {
             brain.hold_store(|op| {
@@ -42,7 +42,7 @@ async fn one_deadline_cancels_held_consent_or_posting_without_an_eof_or_http_han
                 &IssueOp::Consent {
                     draft: action.draft,
                     hash: action.hash(),
-                    approval: ApprovalRev(1),
+                    approval: ApprovalRev(2),
                     decision: Decision::File,
                 },
                 Some(brain.epoch),
@@ -108,12 +108,12 @@ async fn one_deadline_cancels_held_consent_or_posting_without_an_eof_or_http_han
                 .action(action.draft)
                 .unwrap(),
             Some(Action {
-                version: StateVersion(3),
+                version: StateVersion(4),
                 stage: Stage::Failed {
                     reason: kumochi_protocol::message::FailReason::Interrupted
                 },
-                approval: Some(ApprovalRev(2)),
-                consumed: Some(ApprovalRev(1)),
+                approval: Some(ApprovalRev(3)),
+                consumed: Some(ApprovalRev(2)),
                 ..action
             })
         );
@@ -135,7 +135,7 @@ async fn close_and_quit_join_a_canceled_constructor_before_closing_the_sql_write
     for quit in [false, true] {
         let scratch = Scratch::new("github-filing-retained-factory");
         let server = Arc::new(FilingServer::default());
-        let (mut brain, action) = filing_owner(&scratch, &server).await;
+        let (mut brain, action) = reviewed_filing_owner(&scratch, &server).await;
         let entered = Arc::new(Notify::new());
         let started = Arc::clone(&entered);
         let http = Arc::clone(&server);
@@ -154,7 +154,7 @@ async fn close_and_quit_join_a_canceled_constructor_before_closing_the_sql_write
         let consent = IssueOp::Consent {
             draft: action.draft,
             hash: action.hash(),
-            approval: ApprovalRev(1),
+            approval: ApprovalRev(2),
             decision: Decision::File,
         };
         let effects = brain
@@ -216,12 +216,12 @@ async fn close_and_quit_join_a_canceled_constructor_before_closing_the_sql_write
                 .action(action.draft)
                 .unwrap(),
             Some(Action {
-                version: StateVersion(3),
+                version: StateVersion(4),
                 stage: Stage::Failed {
                     reason: kumochi_protocol::message::FailReason::Interrupted
                 },
-                approval: Some(ApprovalRev(2)),
-                consumed: Some(ApprovalRev(1)),
+                approval: Some(ApprovalRev(3)),
+                consumed: Some(ApprovalRev(2)),
                 ..action
             })
         );
@@ -243,11 +243,11 @@ async fn the_original_deadline_after_post_handoff_records_unknown_and_replay_nev
         lose_response: true,
         ..FilingServer::default()
     });
-    let (mut brain, action) = filing_owner(&scratch, &server).await;
+    let (mut brain, action) = reviewed_filing_owner(&scratch, &server).await;
     let consent = IssueOp::Consent {
         draft: action.draft,
         hash: action.hash(),
-        approval: ApprovalRev(1),
+        approval: ApprovalRev(2),
         decision: Decision::File,
     };
     let effects = brain
@@ -293,7 +293,7 @@ async fn the_original_deadline_after_post_handoff_records_unknown_and_replay_nev
             .unwrap()
     );
     let unknown = Action {
-        version: StateVersion(4),
+        version: StateVersion(5),
         stage: Stage::Unknown {
             mark: Mark {
                 at_s: NonZeroU64::new(120).unwrap(),
@@ -301,8 +301,8 @@ async fn the_original_deadline_after_post_handoff_records_unknown_and_replay_nev
             },
             lookup: LookupResult::Pending,
         },
-        approval: Some(ApprovalRev(2)),
-        consumed: Some(ApprovalRev(1)),
+        approval: Some(ApprovalRev(3)),
+        consumed: Some(ApprovalRev(2)),
         uncertain: 1,
         ..action.clone()
     };
@@ -360,7 +360,7 @@ async fn another_draft_consumes_each_approval_but_cannot_repeat_an_unknown_or_di
         lose_response: true,
         ..FilingServer::default()
     });
-    let (mut brain, first) = filing_owner(&scratch, &server).await;
+    let (mut brain, first) = reviewed_filing_owner(&scratch, &server).await;
     let effects = brain
         .issue_op(
             brain.issue_session().unwrap(),
@@ -368,7 +368,7 @@ async fn another_draft_consumes_each_approval_but_cannot_repeat_an_unknown_or_di
             &IssueOp::Consent {
                 draft: first.draft,
                 hash: first.hash(),
-                approval: ApprovalRev(1),
+                approval: ApprovalRev(2),
                 decision: Decision::File,
             },
             Some(brain.epoch),
@@ -394,7 +394,7 @@ async fn another_draft_consumes_each_approval_but_cannot_repeat_an_unknown_or_di
             .await
             .unwrap()
     );
-    let second = {
+    let mut second = {
         let mut store = Store::open(&scratch.db()).unwrap();
         store
             .create_draft(
@@ -410,8 +410,8 @@ async fn another_draft_consumes_each_approval_but_cannot_repeat_an_unknown_or_di
             .unwrap()
     };
     assert_eq!(second.version, StateVersion(1));
-    assert_eq!(second.approval, Some(ApprovalRev(3)));
-    for (attempt, approval, request) in [(1, 3, 711), (2, 4, 713)] {
+    assert_eq!(second.approval, Some(ApprovalRev(4)));
+    for (attempt, approval, review, request) in [(1, 5, 710, 711), (2, 7, 713, 714)] {
         if attempt == 2 {
             let effects = brain
                 .issue_op(
@@ -433,15 +433,17 @@ async fn another_draft_consumes_each_approval_but_cannot_repeat_an_unknown_or_di
                     .action(first.draft)
                     .unwrap(),
                 Some(Action {
-                    version: StateVersion(5),
+                    version: StateVersion(6),
                     stage: Stage::Discarded,
                     approval: None,
-                    consumed: Some(ApprovalRev(1)),
+                    consumed: Some(ApprovalRev(2)),
                     uncertain: 1,
                     ..first.clone()
                 })
             );
         }
+        second = rearm_filing(&scratch, &mut brain, &second, review).await;
+        assert_eq!(second.approval, Some(ApprovalRev(approval)));
         let effects = brain
             .issue_op(
                 brain.issue_session().unwrap(),
@@ -478,14 +480,14 @@ async fn another_draft_consumes_each_approval_but_cannot_repeat_an_unknown_or_di
                 ControlToShell::ActionState {
                     request: Some(request),
                     draft: second.draft,
-                    version: StateVersion(attempt + 1),
+                    version: StateVersion(2 * attempt + 1),
                     state: ActionState::Draft,
                     approval: Some(ApprovalRev(approval + 1))
                 },
                 ControlToShell::IssueRefused {
                     request,
                     draft: second.draft,
-                    version: StateVersion(attempt + 1),
+                    version: StateVersion(2 * attempt + 1),
                     approval: Some(ApprovalRev(approval + 1)),
                     reason: kumochi_protocol::message::IssueRefused::UnresolvedDraft {
                         draft: first.draft
@@ -499,12 +501,17 @@ async fn another_draft_consumes_each_approval_but_cannot_repeat_an_unknown_or_di
                 .action(second.draft)
                 .unwrap(),
             Some(Action {
-                version: StateVersion(attempt + 1),
+                version: StateVersion(2 * attempt + 1),
                 approval: Some(ApprovalRev(approval + 1)),
                 consumed: Some(ApprovalRev(approval)),
                 ..second.clone()
             })
         );
+        second = Store::open(&scratch.db())
+            .unwrap()
+            .action(second.draft)
+            .unwrap()
+            .unwrap();
         assert_eq!(server.factories.load(Ordering::SeqCst), 1);
         assert_eq!(server.gets.load(Ordering::SeqCst), 4);
         assert_eq!(server.posts.load(Ordering::SeqCst), 1);

@@ -39,25 +39,30 @@ request.
 
 ## Confirmation handoff
 
-Draft and Failed cards with a usable bound connection offer File issue. It uses the shared
-Cancel-first confirmation with
-plain semantic text and a focusable, keyboard-scrollable full-content preview.
-The preview comes from the current full card, including its bound account and
-repository, never from the repository default or the abbreviated history row.
+Draft and Failed cards with a usable bound connection offer Review to file. The opener sends
+`Rearm { draft, version, hash }`, not File. Ordered SQL checks the live editable row and
+atomically advances its version and durable approval without changing content, stage,
+consumed revision or uncertainty. Only the matching live committed reply returns
+`IssueReview { request, card }` on the data pipe. Its authoritative full card opens the shared
+Cancel-first, keyboard-scrollable literal preview, including the bound account and repository.
+An ordinary saved card or state notification can never open it.
 
-Each owned history surface holds one transient attempt. Its current Session,
+Each owned history surface holds one pending review intent or confirmation. Its current Session,
 connection origin, displayed thread/draft, full version/hash/approval, account,
 repository membership and Draft/Failed state must match again at activation.
 Hide, selection, deletion, disconnect, scope turnover and a new hydration retire
 the attempt; hydration invalidates either surface's attempt through the existing
 shared read state. Only weak invalidation flags are shared, not consent or content.
-The callback consumes the attempt before checking or queueing. Cancel, dismissal,
-stale state and a full queue cannot replay it on a later valid snapshot.
+The callback consumes the attempt before checking or queueing. Cancellation references the
+original rearm request, even before a revision is known. Cancel, dismissal, failed dialog/window
+creation, stale state and a full queue retire that intent; failed retirement enqueue ends the
+session. A late reply cannot open a replacement window or resurrect the confirmation.
 
 An explicit confirmation emits only the existing File consent operation. It does
 not mark Sending or Filed, certify numeric account identity, admit a send or
-resolve Unknown. The store still owns numeric-account/hash/approval admission and
-durable single-use consumption, including refusals. Both histories share pending-operation
+resolve Unknown. The brain owns ephemeral single-use permission; the store still owns
+version/numeric-account/hash/approval admission and durable consumption, including refusals.
+Both histories share pending-operation
 feedback, admitted only after the control queues successfully. App-lifetime request identities
 increase without wrapping and correlate final acknowledgements and refusals even when the
 state/version is unchanged. Welcome advertises the brain incarnation and a connection epoch
@@ -65,13 +70,37 @@ reserved before the rest of the handshake. Every issue frame retains that origin
 The brain checks it before SQL, request-watermark updates or job admission; stale provenance
 ends the connection without sending old request feedback into the replacement. A failed
 handshake also consumes its reserved epoch. A restarted shell can begin its request counter
-again only with the newly advertised provenance. Before SQL or job admission, the brain records a per-session
-in-memory high-water mark. An equal or older request receives only `IssueUnavailable`, without
+again only with the newly advertised provenance. Provenance rejects stale transport; it does not
+prove a physical click or turn saved approval metadata into permission. Before SQL or job admission,
+the brain records a per-session in-memory high-water mark. An equal or older request receives only `IssueUnavailable`, without
 SQL, client construction, HTTP or a new deadline. Failed writes and terminal delivery cannot
-clear that fence; a fresh confirmation needs a new request. This session-scoped watermark does
-not replace durable single-use approvals or guarantee exactly-once delivery.
+clear that fence. A different request or connection label alone is not fresh consent.
 Progress never finishes an attempt; stale session/request/version/approval feedback cannot
 replace its result. This is not an exactly-once delivery guarantee.
+
+### Review lifetime
+
+`runtime/issues/reviews.rs` owns pending rearm reservations and outstanding Offered bindings.
+Their combined cap is `MAX_ISSUE_REVIEWS = 16`. Each reservation retains its originating
+session/request, immutable draft/version/hash, absolute 60-second deadline and cancellable SQL
+scope. Cancellation, supersession or disconnect invalidates it immediately, but it occupies its
+slot until acknowledgement. Registration checks liveness and the deadline again at acknowledgement,
+even if the timer event has not run. A late committed reply may publish saved state, never permission.
+At capacity, new rearms receive ReviewCapacity without SQL or HTTP; there is no automatic retry.
+
+Only a live matching committed rearm registers an offer. Immediately after validating transport,
+`Brain::issue_op` synchronously looks up and removes a Consent's ApprovalRev, before the request
+watermark, reply limit, capacity, decision, binding, authority or SQL checks. Missing means invalid,
+regardless of its numeric value. Wrong binding, unsupported decision, busy admission and old request
+all consume a located offer. Unknown revisions allocate nothing. The winner passes the registered
+version/hash binding to both Consent and its compensation. Removal frees capacity but never
+restores permission or cancels an admitted job.
+
+Restart begins with an empty offer set. Creation, binding, recovery, settlement, card/history reads,
+state/refusal publication and cached/reconnected cards never register permission. The durable
+`approval_mark` is the only nonreusing allocator; there are no lifetime tombstones or startup rewrite.
+Each new preview is charged, including queue-entry overhead, against the existing 512-KiB data
+queue cap. If it cannot be queued, the link closes and retires its offers and pending intents.
 
 ## Authoritative card batches
 
@@ -149,13 +178,13 @@ their stable field ids sit under the event row without adding focus targets.
 
 ## Stages
 
-| Stage | Meaning | Offers a decision |
+| Stage | Meaning | Available action |
 |---|---|---|
-| `draft` | Saved locally, waiting for consent | Yes |
+| `draft` | Saved locally, waiting for consent | Review to file or Dismiss |
 | `preflight` | Admitted; the pre-send lookup runs and nothing has been sent | No |
 | `posting` | The create request may have been sent | No |
 | `filed` | The issue exists | No |
-| `failed` | No issue was created; a retry needs fresh consent | Yes |
+| `failed` | No issue was created; a retry needs fresh consent | Review to file or Dismiss |
 | `unknown` | An attempt may have created an issue; Check again never resends | Check again or Dismiss |
 | `discarded` | Dismissed | No |
 
@@ -201,12 +230,12 @@ does not admit them and never turns a lookup candidate into Filed.
 
 ## Approvals and versions
 
-Every commit raises the action's `version`. A commit into Draft, Failed or Unknown takes a fresh
-approval revision from `approval_mark` in the same transaction; other stages hold none, and a
+Every commit raises the action's `version`. A commit into Draft, Failed or Unknown stores fresh
+approval metadata from `approval_mark` in the same transaction; other stages hold none, and a
 rolled-back op issues nothing. The mark is one row that deletion and purges never touch, so no
 revision is issued twice, and `AUTOINCREMENT` does the same for draft ids. A mark or version at
 `i64::MAX`, or an exhausted `uncertain`, fails the op with `StoreError::Issue` and changes
-nothing.
+nothing. Saved approval metadata alone never grants filing permission.
 
 ## Ops
 
@@ -225,7 +254,9 @@ content.
 
 ## Consent
 
-`consent` takes the hash the card showed, its approval revision, a decision, and `Live`: the
+The internal Consent and CancelledConsent writers first require the immutable registered
+version; a mismatch writes nothing. The public legacy `consent` API is unchanged. It takes
+the hash the card showed, its approval revision, a decision, and `Live`: the
 verified user from the device machine's `user()` and the listed repositories. The revision
 decides first:
 
@@ -262,8 +293,9 @@ fresh revision/version. Dismissal does not erase uncertainty or let a new call k
 Hiding a thread for deletion does not bypass the guard while its rows remain. Completing
 history deletion removes those rows, including this local evidence; no separate fingerprint
 or content survives deletion for duplicate detection.
-Every return to Draft, Failed or Unknown offers a new revision. Only Draft and Failed can
-receive another File confirmation in the activated flow; Unknown never resends.
+Every return to Draft, Failed or Unknown stores a new revision but registers no permission.
+Only Draft and Failed can undergo explicit rearm and then another File confirmation;
+Unknown never resends.
 
 The hash is SHA-256 of `{"repo":…,"account":…,"title":…,"body":…}` in that order, with the
 account as its numeric id. It covers no screenshot, since the card shows none.
@@ -289,27 +321,31 @@ the connection for reopening without erasing that durable answer. Result and com
 do not reuse the canceled admission scope: they settle an already admitted phase and cannot
 start another request.
 
-`IssueUnavailable { request, draft }` ends an attempt when its SQL operation cannot provide an
+`IssueUnavailable { request, draft, kind }` ends an attempt when its SQL operation cannot provide an
 authoritative answer, including a requested action that is gone, or when the request identity
 has already been used in this session. The latter does not run another SQL operation. The
-shared reply site covers
-Discard, busy/offline File and Check again, and unsupported consent decisions; admitted reads
+shared reply site covers Discard, unoffered or unsupported File and Check again; admitted reads
 and failed cleanup use the same terminal. It carries no state, version, approval or diagnostic.
 Only the matching pending session/request/draft is released. The shell preserves its last card
-and watermark, shows one fixed localized message, and schedules no read, consent or HTTP retry.
+and watermark and schedules no read, rearm, consent or HTTP retry. ReviewNotSaved says this review
+sent nothing and requires storage repair before explicit review. ReviewCapacity asks the user to
+finish/cancel another review. AttemptNotSaved is reserved for a job whose atomic handoff fence
+says GitHub may have received its POST; it warns against filing again. Other known-unsent or
+non-filing failures use Action. None promises readable saved details when storage cannot read them.
 Late and duplicate terminals cannot replace a completed or newer attempt's feedback.
 
 If initial Consent was interrupted before its transaction committed, the retained admission
-is revalidated by unscoped CancelledConsent. It shares normal validation, single-use approval
+is revalidated by unscoped CancelledConsent with the original registered version. It shares normal validation, single-use approval
 consumption and the unresolved-draft guard, then records known-unsent Failed in the same
 transaction for a newly admitted Preflight. It constructs no client. A refusal or replay does
 not become a new send.
 
 If the approval write and this compensation both fail, neither transaction spends the approval:
-the saved Draft and its revision remain unchanged. It is usable only through another explicit
-confirmation after storage is available, not by replaying the old dialog or by receiving the
-terminal. If compensation commits, the old approval is spent and the known-unsent Failed action
-offers a new one. The terminal itself grants no consent in either case.
+the saved Draft and its revision remain unchanged, but the in-memory offer is already gone.
+Neither exact nor relabelled replay can file, in this session, after reconnect or after restart.
+When storage is available, a new explicit rearm must commit a different revision before another
+preview and confirmation. If compensation commits, its new saved approval is likewise unarmed.
+The terminal itself grants no consent in either case.
 
 A successfully read or committed action remains authoritative after its originating session
 ends. If a replacement has already hydrated Sending, the old owner's later settlement reaches

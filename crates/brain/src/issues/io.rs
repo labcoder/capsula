@@ -73,10 +73,21 @@ impl Snapshot {
 pub enum Write {
     /// Read the live action before a GET-only recovery operation.
     Read(DraftId),
+    /// Supersede a review revision without changing the saved draft's content or stage.
+    Rearm {
+        /// The action.
+        draft: DraftId,
+        /// The immutable version the review is based on.
+        at: StateVersion,
+        /// The exact displayed content binding.
+        hash: ContentHash,
+    },
     /// Consume one consent revision, including a refused admission.
     Consent {
         /// The action.
         draft: DraftId,
+        /// The immutable version registered with this review.
+        at: StateVersion,
         /// The exact displayed content binding.
         hash: ContentHash,
         /// The displayed single-use revision.
@@ -90,6 +101,8 @@ pub enum Write {
     CancelledConsent {
         /// The action.
         draft: DraftId,
+        /// The immutable version registered with the original review.
+        at: StateVersion,
         /// The original displayed content binding.
         hash: ContentHash,
         /// The original single-use revision.
@@ -158,6 +171,7 @@ impl fmt::Debug for Write {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Read(_) => "IssueRead",
+            Self::Rearm { .. } => "IssueRearm",
             Self::Consent { .. } => "IssueConsent",
             Self::CancelledConsent { .. } => "IssueCancelledConsent",
             Self::Preflighted { .. } => "IssuePreflighted",

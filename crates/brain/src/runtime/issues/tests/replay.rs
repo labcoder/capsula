@@ -26,7 +26,7 @@ async fn final_reply(shell: &mut Shell<DuplexStream>) -> Vec<ControlToShell> {
 async fn wire_replay_after_both_approval_writes_fail_requires_a_new_request() {
     let scratch = Scratch::new("github-filing-failed-admission-replay");
     let server = Arc::new(FilingServer::default());
-    let (mut brain, action) = filing_owner(&scratch, &server).await;
+    let (mut brain, action) = reviewed_filing_owner(&scratch, &server).await;
     let conn = rusqlite::Connection::open(scratch.db()).unwrap();
     conn.execute_batch(
         "CREATE TRIGGER refuse_approval BEFORE UPDATE ON actions
@@ -36,7 +36,7 @@ async fn wire_replay_after_both_approval_writes_fail_requires_a_new_request() {
     let consent = IssueOp::Consent {
         draft: action.draft,
         hash: action.hash(),
-        approval: ApprovalRev(1),
+        approval: ApprovalRev(2),
         decision: Decision::File,
     };
     let original = ControlToBrain::Issue {
@@ -112,7 +112,7 @@ async fn wire_replay_after_both_approval_writes_fail_requires_a_new_request() {
             .send(&ControlToBrain::Issue {
                 session,
                 request: 0,
-                op: consent,
+                op: consent.clone(),
             })
             .await;
         let frames = final_reply(&mut fresh_shell).await;
@@ -143,6 +143,7 @@ async fn wire_replay_after_both_approval_writes_fail_requires_a_new_request() {
     assert_eq!(
         replies[0],
         vec![ControlToShell::IssueUnavailable {
+            kind: IssueUnavailableKind::Action,
             request: 904,
             draft: action.draft,
         }]
@@ -150,35 +151,94 @@ async fn wire_replay_after_both_approval_writes_fail_requires_a_new_request() {
     assert_eq!(
         replies[1],
         vec![ControlToShell::IssueUnavailable {
+            kind: IssueUnavailableKind::Action,
             request: 904,
             draft: action.draft,
         }],
         "the exact original frame is terminal even after SQL recovers"
     );
-    assert_eq!(work, vec![(0, 0, 0, 0), (0, 0, 0, 0), (1, 4, 1, 17)]);
+    assert_eq!(work, vec![(0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0)]);
     assert_eq!(saved[0], Some(action.clone()));
     assert_eq!(saved[1], Some(action.clone()));
     assert_eq!(
         replies[2],
+        vec![ControlToShell::IssueUnavailable {
+            kind: IssueUnavailableKind::Action,
+            request: 0,
+            draft: action.draft
+        }]
+    );
+    assert_eq!(saved[2], Some(action.clone()));
+    let (mut restarted, other) = filing_owner(&scratch, &server).await;
+    assert_ne!(other.draft, action.draft);
+    let effects = restarted
+        .issue_op(
+            restarted.issue_session().unwrap(),
+            0,
+            &consent,
+            Some(restarted.epoch),
+        )
+        .unwrap();
+    assert_eq!(
+        effects,
+        vec![crate::coordinator::Effect::Control(
+            ControlToShell::IssueUnavailable {
+                kind: IssueUnavailableKind::Action,
+                request: 0,
+                draft: action.draft,
+            }
+        )]
+    );
+    assert_eq!(restarted.filing.review_counts(), (0, 0));
+    assert_eq!(restarted.filing.deadline_for_test(), None);
+    assert_eq!(
+        Store::open(&scratch.db())
+            .unwrap()
+            .action(action.draft)
+            .unwrap(),
+        Some(action.clone())
+    );
+    assert_eq!(server.factories.load(Ordering::SeqCst), 0);
+    assert_eq!(server.gets.load(Ordering::SeqCst), 0);
+    assert_eq!(server.posts.load(Ordering::SeqCst), 0);
+    let fresh = rearm_filing(&scratch, &mut restarted, &action, 1).await;
+    assert_ne!(fresh.approval, action.approval);
+    assert_ne!(fresh.approval, other.approval);
+    let effects = restarted
+        .issue_op(
+            restarted.issue_session().unwrap(),
+            2,
+            &IssueOp::Consent {
+                draft: fresh.draft,
+                hash: fresh.hash(),
+                approval: fresh.approval.unwrap(),
+                decision: Decision::File,
+            },
+            Some(restarted.epoch),
+        )
+        .unwrap();
+    restarted.apply(effects, None).unwrap();
+    assert_eq!(
+        super::storage::settle(&mut restarted).await,
         vec![
             ControlToShell::ActionState {
                 request: None,
                 draft: action.draft,
-                version: StateVersion(2),
+                version: StateVersion(4),
                 state: ActionState::Sending,
                 approval: None,
             },
             ControlToShell::ActionState {
                 request: None,
                 draft: action.draft,
-                version: StateVersion(3),
+                version: StateVersion(5),
                 state: ActionState::Sending,
                 approval: None,
             },
             ControlToShell::ActionState {
-                request: Some(0),
+                request: Some(2),
                 draft: action.draft,
-                version: StateVersion(4),
+                version: StateVersion(6),
                 state: ActionState::Filed {
                     number: 17,
                     url: IssueUrl::new("https://github.com/owner/repo/issues/17").unwrap(),
@@ -189,18 +249,26 @@ async fn wire_replay_after_both_approval_writes_fail_requires_a_new_request() {
             },
         ]
     );
+    restarted.close().await;
     assert_eq!(
-        saved[2],
+        Store::open(&scratch.db())
+            .unwrap()
+            .action(fresh.draft)
+            .unwrap(),
         Some(Action {
-            version: StateVersion(4),
+            version: StateVersion(6),
             stage: Stage::Filed {
                 number: NonZeroU64::new(17).unwrap(),
                 confirmed: false,
                 maybe_duplicate: false,
             },
             approval: None,
-            consumed: Some(ApprovalRev(1)),
-            ..action
+            consumed: fresh.approval,
+            ..fresh
         })
     );
+    assert_eq!(server.factories.load(Ordering::SeqCst), 1);
+    assert_eq!(server.gets.load(Ordering::SeqCst), 4);
+    assert_eq!(server.posts.load(Ordering::SeqCst), 1);
+    assert_eq!(server.receipt.load(Ordering::Acquire), 17);
 }

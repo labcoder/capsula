@@ -65,13 +65,17 @@ issue-details-loading = Loading saved details…
 issue-details-unavailable = The saved details aren't available in this view.
 issue-read-only = Saved details stay unchanged. Filing requires your explicit confirmation.
 issue-consent-title = File this issue on GitHub?
-issue-consent-open = File issue…
+issue-consent-open = Review to file…
 issue-dismiss = Dismiss
 issue-check-again = Check again
 issue-replacement = This saved destination or approval isn't usable. Dismiss this draft and ask for a replacement after connecting the intended account and repository. This draft won't be retargeted.
 issue-pending = Waiting for this action's result…
 issue-queue-failed = The action wasn't queued. Try again when connected.
 issue-action-unavailable = This action couldn't be completed. Review the saved details before trying again.
+issue-review-pending = Saving a fresh review…
+issue-review-not-saved = The review couldn't be saved. Nothing was sent to GitHub. Restore storage, then explicitly review again.
+issue-review-capacity = Other reviews are open or finishing. Finish or cancel one, then review again.
+issue-attempt-not-saved = The confirmed outcome couldn't be saved. GitHub may have received this issue. Do not file it again.
 issue-refusal =
     { $reason ->
         [approval] The approval changed. Review the current saved details before trying again.

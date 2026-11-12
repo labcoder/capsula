@@ -14,8 +14,8 @@ use crate::runtime::{Seen, StoreOp};
 use kumochi_protocol::{
     Secret,
     message::{
-        ActionState, ApprovalRev, GitHubLogin, GitHubView, Incarnation, IssueUrl, LookupResult,
-        StateVersion,
+        ActionState, ApprovalRev, GitHubLogin, GitHubView, Incarnation, IssueCard,
+        IssueUnavailableKind, IssueUrl, LookupResult, StateVersion,
     },
 };
 use kumochi_scene::text::Bounded;
@@ -33,6 +33,8 @@ mod reconnect;
 mod rename;
 #[path = "tests/replay.rs"]
 mod replay;
+#[path = "tests/reviews.rs"]
+mod reviews;
 #[path = "tests/storage.rs"]
 mod storage;
 
@@ -137,11 +139,17 @@ impl Http for Arc<FilingServer> {
 }
 
 async fn filing_owner(scratch: &Scratch, server: &Arc<FilingServer>) -> (Brain, Action) {
-    let action = {
+    let (action, expected_approval) = {
         let mut store = Store::open(&scratch.db()).unwrap();
         store.recover().unwrap();
         let thread = store.main_thread().unwrap();
-        store
+        let previous: i64 = rusqlite::Connection::open(scratch.db())
+            .unwrap()
+            .query_row("SELECT last FROM approval_mark WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let action = store
             .create_draft(
                 thread,
                 &IssueTitle::new("  Local café  ").unwrap(),
@@ -152,12 +160,13 @@ async fn filing_owner(scratch: &Scratch, server: &Arc<FilingServer>) -> (Brain, 
                     login: GitHubLogin::new("owner-sentinel").unwrap(),
                 }),
             )
-            .unwrap()
+            .unwrap();
+        (action, ApprovalRev(u64::try_from(previous).unwrap() + 1))
     };
     assert_eq!(action.title.as_str(), "  Local café  ");
     assert_eq!(action.body.as_str(), "first\n\tcafé\n");
     assert_eq!(action.version, StateVersion(1));
-    assert_eq!(action.approval, Some(ApprovalRev(1)));
+    assert_eq!(action.approval, Some(expected_approval));
     let mut net = crate::test_support::net();
     net.clock = Arc::new(SystemClock);
     let http = Arc::clone(server);
@@ -190,6 +199,83 @@ async fn filing_owner(scratch: &Scratch, server: &Arc<FilingServer>) -> (Brain, 
     (brain, action)
 }
 
+async fn rearm_filing(
+    scratch: &Scratch,
+    brain: &mut Brain,
+    action: &Action,
+    request: u64,
+) -> Action {
+    use crate::coordinator::{Effect, Input};
+    use crate::issues::Answer as IssueAnswer;
+
+    let last: i64 = rusqlite::Connection::open(scratch.db())
+        .unwrap()
+        .query_row("SELECT last FROM approval_mark WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let expected = Action {
+        version: StateVersion(action.version.0 + 1),
+        approval: Some(ApprovalRev(u64::try_from(last).unwrap() + 1)),
+        ..action.clone()
+    };
+    let effects = brain
+        .issue_op(
+            brain.issue_session().unwrap(),
+            request,
+            &IssueOp::Rearm {
+                draft: action.draft,
+                version: action.version,
+                hash: action.hash(),
+            },
+            Some(brain.epoch),
+        )
+        .unwrap();
+    brain.apply(effects, None).unwrap();
+    let saved = timeout(PATIENCE, brain.inputs.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        &saved,
+        Input::IssueWritten { reply: Ok(IssueAnswer::Changed(stored)), .. } if stored == &expected
+    ));
+    let effects = brain.handle(saved).unwrap();
+    assert_eq!(
+        effects,
+        vec![Effect::Data(DataToShell::IssueReview {
+            request,
+            card: IssueCard {
+                draft: action.draft,
+                thread: action.thread,
+                repo: action.repo.clone(),
+                account: action.account.as_ref().map(|user| user.login.clone()),
+                title: action.title.clone(),
+                body: action.body.clone(),
+                hash: action.hash(),
+                approval: expected.approval,
+                version: expected.version,
+                state: action.state(),
+            },
+        })]
+    );
+    assert_eq!(
+        Store::open(&scratch.db())
+            .unwrap()
+            .action(action.draft)
+            .unwrap(),
+        Some(expected.clone())
+    );
+    brain.apply(effects, None).unwrap();
+    expected
+}
+
+async fn reviewed_filing_owner(scratch: &Scratch, server: &Arc<FilingServer>) -> (Brain, Action) {
+    let (mut brain, action) = filing_owner(scratch, server).await;
+    let action = rearm_filing(scratch, &mut brain, &action, 0).await;
+    (brain, action)
+}
+
 async fn open_filing(shell: &mut Shell<DuplexStream>) {
     assert_eq!(
         shell.control().await,
@@ -216,20 +302,21 @@ async fn wire_file_commits_one_literal_post_and_replayed_consent_cannot_send_aga
     let scratch = Scratch::new("github-filing-wire-file");
     let server = Arc::new(FilingServer::default());
     let (mut brain, action) = filing_owner(&scratch, &server).await;
+    let session = brain.issue_session().unwrap();
     let consent = ControlToBrain::Issue {
-        session: brain.issue_session().unwrap(),
+        session,
         request: 101,
         op: IssueOp::Consent {
             draft: action.draft,
             hash: action.hash(),
-            approval: ApprovalRev(1),
+            approval: ApprovalRev(2),
             decision: Decision::File,
         },
     };
     let filed = Some(ControlToShell::ActionState {
         request: Some(101),
         draft: action.draft,
-        version: StateVersion(4),
+        version: StateVersion(5),
         state: ActionState::Filed {
             number: 17,
             url: IssueUrl::new("https://github.com/owner/repo/issues/17").unwrap(),
@@ -242,8 +329,52 @@ async fn wire_file_commits_one_literal_post_and_replayed_consent_cannot_send_aga
     let mut tap = Tap::from_env();
     let client = async {
         open_filing(&mut shell).await;
+        shell.credit(64 * 1024).await;
+        shell
+            .send(&ControlToBrain::Issue {
+                session,
+                request: 100,
+                op: IssueOp::Rearm {
+                    draft: action.draft,
+                    version: StateVersion(1),
+                    hash: action.hash(),
+                },
+            })
+            .await;
+        assert_eq!(
+            shell.data().await,
+            DataToShell::IssueReview {
+                request: 100,
+                card: IssueCard {
+                    draft: action.draft,
+                    thread: action.thread,
+                    repo: action.repo.clone(),
+                    account: action.account.as_ref().map(|account| account.login.clone()),
+                    title: action.title.clone(),
+                    body: action.body.clone(),
+                    hash: action.hash(),
+                    approval: Some(ApprovalRev(2)),
+                    version: StateVersion(2),
+                    state: ActionState::Draft,
+                },
+            }
+        );
+        assert_eq!(
+            Store::open(&scratch.db())
+                .unwrap()
+                .action(action.draft)
+                .unwrap(),
+            Some(Action {
+                version: StateVersion(2),
+                approval: Some(ApprovalRev(2)),
+                ..action.clone()
+            })
+        );
+        assert_eq!(server.factories.load(Ordering::SeqCst), 0);
+        assert_eq!(server.gets.load(Ordering::SeqCst), 0);
+        assert_eq!(server.posts.load(Ordering::SeqCst), 0);
         shell.send(&consent).await;
-        for version in [2, 3] {
+        for version in [3, 4] {
             assert_eq!(
                 shell.control().await,
                 Some(ControlToShell::ActionState {
@@ -260,6 +391,7 @@ async fn wire_file_commits_one_literal_post_and_replayed_consent_cannot_send_aga
         assert_eq!(
             shell.control().await,
             Some(ControlToShell::IssueUnavailable {
+                kind: IssueUnavailableKind::Action,
                 request: 101,
                 draft: action.draft,
             })
@@ -284,24 +416,17 @@ async fn wire_file_commits_one_literal_post_and_replayed_consent_cannot_send_aga
                 op: IssueOp::Consent {
                     draft: action.draft,
                     hash: action.hash(),
-                    approval: ApprovalRev(1),
+                    approval: ApprovalRev(2),
                     decision: Decision::File,
                 },
             })
             .await;
         assert_eq!(
             replacement.control().await,
-            Some(ControlToShell::ActionState {
-                request: Some(0),
+            Some(ControlToShell::IssueUnavailable {
+                kind: IssueUnavailableKind::Action,
+                request: 0,
                 draft: action.draft,
-                version: StateVersion(4),
-                state: ActionState::Filed {
-                    number: 17,
-                    url: IssueUrl::new("https://github.com/owner/repo/issues/17").unwrap(),
-                    confirmed_by_user: false,
-                    maybe_duplicate: false,
-                },
-                approval: None,
             })
         );
         replacement.control_out.shutdown().await.unwrap();
@@ -321,14 +446,14 @@ async fn wire_file_commits_one_literal_post_and_replayed_consent_cannot_send_aga
     assert_eq!(
         stored,
         Some(Action {
-            version: StateVersion(4),
+            version: StateVersion(5),
             stage: Stage::Filed {
                 number: NonZeroU64::new(17).unwrap(),
                 confirmed: false,
                 maybe_duplicate: false,
             },
             approval: None,
-            consumed: Some(ApprovalRev(1)),
+            consumed: Some(ApprovalRev(2)),
             ..action
         })
     );
@@ -342,7 +467,7 @@ async fn wire_file_commits_one_literal_post_and_replayed_consent_cannot_send_aga
 async fn wire_eof_during_held_consent_consumes_approval_and_records_known_unsent_failure() {
     let scratch = Scratch::new("github-filing-wire-admission-eof");
     let server = Arc::new(FilingServer::default());
-    let (mut brain, action) = filing_owner(&scratch, &server).await;
+    let (mut brain, action) = reviewed_filing_owner(&scratch, &server).await;
     let session = brain.issue_session().unwrap();
     let mut observed = brain.observe();
     let release = brain.hold_store(|op| {
@@ -365,7 +490,7 @@ async fn wire_eof_during_held_consent_consumes_approval_and_records_known_unsent
                 op: IssueOp::Consent {
                     draft: action.draft,
                     hash: action.hash(),
-                    approval: ApprovalRev(1),
+                    approval: ApprovalRev(2),
                     decision: Decision::File,
                 },
             })
@@ -407,12 +532,12 @@ async fn wire_eof_during_held_consent_consumes_approval_and_records_known_unsent
             .action(action.draft)
             .unwrap(),
         Some(Action {
-            version: StateVersion(3),
+            version: StateVersion(4),
             stage: Stage::Failed {
                 reason: kumochi_protocol::message::FailReason::Interrupted
             },
-            approval: Some(ApprovalRev(2)),
-            consumed: Some(ApprovalRev(1)),
+            approval: Some(ApprovalRev(3)),
+            consumed: Some(ApprovalRev(2)),
             ..action
         })
     );
@@ -434,7 +559,7 @@ async fn wire_eof_before_handoff_is_failed_but_a_lost_post_stays_unknown_without
             lose_response: after_handoff,
             ..FilingServer::default()
         });
-        let (mut brain, action) = filing_owner(&scratch, &server).await;
+        let (mut brain, action) = reviewed_filing_owner(&scratch, &server).await;
         let mut observed = brain.observe();
         let release = (!after_handoff).then(|| {
             brain.hold_store(|op| {
@@ -457,7 +582,7 @@ async fn wire_eof_before_handoff_is_failed_but_a_lost_post_stays_unknown_without
             op: IssueOp::Consent {
                 draft: action.draft,
                 hash: action.hash(),
-                approval: ApprovalRev(1),
+                approval: ApprovalRev(2),
                 decision: Decision::File,
             },
         };
@@ -471,7 +596,7 @@ async fn wire_eof_before_handoff_is_failed_but_a_lost_post_stays_unknown_without
                 Some(ControlToShell::ActionState {
                     request: None,
                     draft: action.draft,
-                    version: StateVersion(2),
+                    version: StateVersion(3),
                     state: ActionState::Sending,
                     approval: None,
                 })
@@ -483,7 +608,7 @@ async fn wire_eof_before_handoff_is_failed_but_a_lost_post_stays_unknown_without
                     Some(ControlToShell::ActionState {
                         request: None,
                         draft: action.draft,
-                        version: StateVersion(3),
+                        version: StateVersion(4),
                         state: ActionState::Sending,
                         approval: None,
                     })
@@ -512,7 +637,7 @@ async fn wire_eof_before_handoff_is_failed_but_a_lost_post_stays_unknown_without
             assert_eq!(
                 stored,
                 Some(Action {
-                    version: StateVersion(if after_handoff { 3 } else { 2 }),
+                    version: StateVersion(if after_handoff { 4 } else { 3 }),
                     stage: if after_handoff {
                         Stage::Posting {
                             mark: mark.clone(),
@@ -522,7 +647,7 @@ async fn wire_eof_before_handoff_is_failed_but_a_lost_post_stays_unknown_without
                         Stage::Preflight { unresolved: None }
                     },
                     approval: None,
-                    consumed: Some(ApprovalRev(1)),
+                    consumed: Some(ApprovalRev(2)),
                     ..action.clone()
                 })
             );
@@ -544,7 +669,7 @@ async fn wire_eof_before_handoff_is_failed_but_a_lost_post_stays_unknown_without
                 .unwrap()
         );
         let mut settled = Action {
-            version: StateVersion(if after_handoff { 4 } else { 3 }),
+            version: StateVersion(if after_handoff { 5 } else { 4 }),
             stage: if after_handoff {
                 Stage::Unknown {
                     mark: mark.clone(),
@@ -555,8 +680,8 @@ async fn wire_eof_before_handoff_is_failed_but_a_lost_post_stays_unknown_without
                     reason: kumochi_protocol::message::FailReason::Interrupted,
                 }
             },
-            approval: Some(ApprovalRev(2)),
-            consumed: Some(ApprovalRev(1)),
+            approval: Some(ApprovalRev(3)),
+            consumed: Some(ApprovalRev(2)),
             uncertain: u32::from(after_handoff),
             ..action.clone()
         };
@@ -567,19 +692,10 @@ async fn wire_eof_before_handoff_is_failed_but_a_lost_post_stays_unknown_without
                 .unwrap(),
             Some(settled.clone())
         );
-        let terminal = Some(ControlToShell::ActionState {
-            request: Some(0),
+        let terminal = Some(ControlToShell::IssueUnavailable {
+            kind: IssueUnavailableKind::Action,
+            request: 0,
             draft: action.draft,
-            version: settled.version,
-            state: if after_handoff {
-                ActionState::Unknown {
-                    lookup: LookupResult::Pending,
-                    maybe_duplicate: false,
-                }
-            } else {
-                ActionState::Failed(kumochi_protocol::message::FailReason::Interrupted)
-            },
-            approval: Some(ApprovalRev(2)),
         });
         let replacement_session = brain.prepare_issue_session(Incarnation(1));
         let ((control, data), mut replacement) = duplex();
@@ -592,7 +708,7 @@ async fn wire_eof_before_handoff_is_failed_but_a_lost_post_stays_unknown_without
                     op: IssueOp::Consent {
                         draft: action.draft,
                         hash: action.hash(),
-                        approval: ApprovalRev(1),
+                        approval: ApprovalRev(2),
                         decision: Decision::File,
                     },
                 })
@@ -613,12 +729,12 @@ async fn wire_eof_before_handoff_is_failed_but_a_lost_post_stays_unknown_without
                     Some(ControlToShell::ActionState {
                         request: None,
                         draft: action.draft,
-                        version: StateVersion(4),
+                        version: StateVersion(5),
                         state: ActionState::Unknown {
                             lookup: LookupResult::Pending,
                             maybe_duplicate: false
                         },
-                        approval: Some(ApprovalRev(2)),
+                        approval: Some(ApprovalRev(3)),
                     })
                 );
                 let candidate = LookupResult::Unplaced {
@@ -629,12 +745,12 @@ async fn wire_eof_before_handoff_is_failed_but_a_lost_post_stays_unknown_without
                     Some(ControlToShell::ActionState {
                         request,
                         draft: action.draft,
-                        version: StateVersion(5),
+                        version: StateVersion(6),
                         state: ActionState::Unknown {
                             lookup: candidate.clone(),
                             maybe_duplicate: false,
                         },
-                        approval: Some(ApprovalRev(3)),
+                        approval: Some(ApprovalRev(4)),
                     })
                 };
                 assert_eq!(replacement.control().await, candidate_state(Some(202)));
@@ -649,12 +765,12 @@ async fn wire_eof_before_handoff_is_failed_but_a_lost_post_stays_unknown_without
                     .await;
                 assert_eq!(replacement.control().await, candidate_state(None));
                 assert_eq!(replacement.control().await, candidate_state(Some(203)));
-                settled.version = StateVersion(5);
+                settled.version = StateVersion(6);
                 settled.stage = Stage::Unknown {
                     mark: mark.clone(),
                     lookup: candidate,
                 };
-                settled.approval = Some(ApprovalRev(3));
+                settled.approval = Some(ApprovalRev(4));
             }
             replacement.control_out.shutdown().await.unwrap();
             assert_eq!(replacement.control().await, None);

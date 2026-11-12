@@ -22,6 +22,7 @@ use crate::test_support::Scratch;
 fn consent(action: &Action) -> Write {
     Write::Consent {
         draft: action.draft,
+        at: action.version,
         hash: action.hash(),
         approval: action.approval.unwrap(),
         decision: Decision::File,

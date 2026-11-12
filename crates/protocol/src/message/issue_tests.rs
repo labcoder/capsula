@@ -485,9 +485,10 @@ fn largest_issue_and_connection_frames_fit_their_exact_budgets() {
         &ControlToShell::IssueUnavailable {
             request: u64::MAX,
             draft: DraftId(u64::MAX),
+            kind: IssueUnavailableKind::AttemptNotSaved,
         },
         Pipe::Control,
-        25,
+        26,
     );
     roundtrip(&DataToShell::IssueCard(card.clone()), Pipe::Data, 34261);
     roundtrip(
@@ -500,6 +501,49 @@ fn largest_issue_and_connection_frames_fit_their_exact_budgets() {
         Pipe::Data,
         33955,
     );
+}
+
+#[test]
+fn largest_review_frames_fit_their_exact_budgets() {
+    let card = card();
+    roundtrip(
+        &DataToShell::IssueReview {
+            request: u64::MAX,
+            card: card.clone(),
+        },
+        Pipe::Data,
+        34271,
+    );
+    for (op, length) in [
+        (
+            IssueOp::Rearm {
+                draft: card.draft,
+                version: card.version,
+                hash: card.hash,
+            },
+            88,
+        ),
+        (
+            IssueOp::CancelReview {
+                draft: card.draft,
+                review: u64::MAX,
+            },
+            56,
+        ),
+    ] {
+        roundtrip(
+            &ControlToBrain::Issue {
+                session: IssueSession {
+                    incarnation: Incarnation(u64::MAX),
+                    epoch: u64::MAX,
+                },
+                request: u64::MAX,
+                op,
+            },
+            Pipe::Control,
+            length,
+        );
+    }
 }
 
 #[test]
@@ -632,6 +676,8 @@ fn issue_operation_identity_preserves_inner_tags_and_exact_wire_fields() {
     let mut consent = vec![0, 2];
     consent.extend([91; 32]);
     consent.extend([3, 0]);
+    let mut rearm = vec![3, 2, 3];
+    rearm.extend([91; 32]);
     for (op, inner) in [
         (
             IssueOp::Consent {
@@ -644,6 +690,21 @@ fn issue_operation_identity_preserves_inner_tags_and_exact_wire_fields() {
         ),
         (IssueOp::Discard { draft: DraftId(2) }, vec![1, 2]),
         (IssueOp::CheckAgain { draft: DraftId(2) }, vec![2, 2]),
+        (
+            IssueOp::Rearm {
+                draft: DraftId(2),
+                version: StateVersion(3),
+                hash: ContentHash([91; 32]),
+            },
+            rearm,
+        ),
+        (
+            IssueOp::CancelReview {
+                draft: DraftId(2),
+                review: 128,
+            },
+            vec![4, 2, 128, 1],
+        ),
     ] {
         for (request, identity) in [
             (0, vec![0]),
@@ -719,7 +780,7 @@ fn issue_operation_unknown_tags_and_overflow_are_rejected_without_changing_decis
             message
         );
     }
-    assert!(postcard::from_bytes::<ControlToBrain>(&[25, 1, 2, 0, 3]).is_err());
+    assert!(postcard::from_bytes::<ControlToBrain>(&[25, 1, 2, 0, 5]).is_err());
     let mut unknown_decision = vec![25, 1, 2, 0, 0, 2];
     unknown_decision.extend([91; 32]);
     unknown_decision.extend([3, 3]);
@@ -831,7 +892,7 @@ fn issue_refusals_keep_exact_authoritative_metadata() {
 #[test]
 fn issue_unavailable_has_only_correlated_identity_and_round_trips_exact_wire_data() {
     use crate::frame::{FrameError, read};
-    for (request, draft, payload) in [
+    for (request, draft, mut payload) in [
         (0, DraftId(0), vec![26, 0, 0]),
         (128, DraftId(2), vec![26, 128, 1, 2]),
         (
@@ -843,14 +904,19 @@ fn issue_unavailable_has_only_correlated_identity_and_round_trips_exact_wire_dat
             ],
         ),
     ] {
-        let message = ControlToShell::IssueUnavailable { request, draft };
+        payload.push(0);
+        let message = ControlToShell::IssueUnavailable {
+            request,
+            draft,
+            kind: IssueUnavailableKind::Action,
+        };
         let wire = encode(&message, Pipe::Control).unwrap();
         assert_eq!(&wire[HEADER_LEN..], payload);
         assert_eq!(
             read::<ControlToShell>(&mut wire.as_slice(), Pipe::Control).unwrap(),
             Some(message.clone())
         );
-        let json = serde_json::json!({"IssueUnavailable":{"request":request,"draft":draft.0}});
+        let json = serde_json::json!({"IssueUnavailable":{"request":request,"draft":draft.0,"kind":"Action"}});
         assert_eq!(serde_json::to_value(&message).unwrap(), json);
         assert_eq!(
             serde_json::from_value::<ControlToShell>(json).unwrap(),
@@ -878,10 +944,11 @@ fn issue_unavailable_has_only_correlated_identity_and_round_trips_exact_wire_dat
             "{:?}",
             ControlToShell::IssueUnavailable {
                 request: 128,
-                draft: DraftId(2)
+                draft: DraftId(2),
+                kind: IssueUnavailableKind::Action,
             }
         ),
-        "IssueUnavailable { request: 128, draft: DraftId(2) }"
+        "IssueUnavailable { request: 128, draft: DraftId(2), kind: Action }"
     );
 }
 
@@ -892,6 +959,7 @@ fn issue_unavailable_rejects_unknown_tags_overflow_missing_and_mistyped_identity
         vec![27],
         vec![26, 128, 128, 128, 128, 128, 128, 128, 128, 128, 2, 0],
         vec![26, 0, 128, 128, 128, 128, 128, 128, 128, 128, 128, 2],
+        vec![26, 1, 2, 4],
     ] {
         assert!(postcard::from_bytes::<ControlToShell>(&payload).is_err());
         let mut wire = u32::try_from(payload.len()).unwrap().to_le_bytes().to_vec();
@@ -902,11 +970,13 @@ fn issue_unavailable_rejects_unknown_tags_overflow_missing_and_mistyped_identity
         ));
     }
     for json in [
-        r#"{"IssueUnavailable":{"draft":2}}"#,
-        r#"{"IssueUnavailable":{"request":1}}"#,
-        r#"{"IssueUnavailable":{"request":18446744073709551616,"draft":2}}"#,
-        r#"{"IssueUnavailable":{"request":1,"draft":18446744073709551616}}"#,
-        r#"{"IssueUnavailable":{"request":"1","draft":2}}"#,
+        r#"{"IssueUnavailable":{"draft":2,"kind":"Action"}}"#,
+        r#"{"IssueUnavailable":{"request":1,"kind":"Action"}}"#,
+        r#"{"IssueUnavailable":{"request":18446744073709551616,"draft":2,"kind":"Action"}}"#,
+        r#"{"IssueUnavailable":{"request":1,"draft":18446744073709551616,"kind":"Action"}}"#,
+        r#"{"IssueUnavailable":{"request":"1","draft":2,"kind":"Action"}}"#,
+        r#"{"IssueUnavailable":{"request":1,"draft":2}}"#,
+        r#"{"IssueUnavailable":{"request":1,"draft":2,"kind":"Unknown"}}"#,
     ] {
         assert!(serde_json::from_str::<ControlToShell>(json).is_err());
     }
@@ -1090,6 +1160,15 @@ fn outer_wire_carriers_and_tap_never_format_issue_or_device_content() {
         &markers,
     );
     private(
+        &DataToShell::IssueReview {
+            request: u64::MAX,
+            card: card.clone(),
+        },
+        Pipe::Data,
+        Direction::ToShell,
+        &markers,
+    );
+    private(
         &DataToShell::IssueCard(card),
         Pipe::Data,
         Direction::ToShell,
@@ -1113,6 +1192,177 @@ fn issue_page_debug_omits_its_title() {
         ),
         "PageEvent { id: EventId(1), run: None, kind: Issue { draft: DraftId(2) }, cut: false, .. }"
     );
+}
+
+#[test]
+fn review_operations_have_closed_json_shapes_and_numeric_bounds() {
+    assert_eq!(MAX_ISSUE_REVIEWS, 16);
+    for (op, json) in [
+        (
+            IssueOp::Rearm {
+                draft: DraftId(2),
+                version: StateVersion(3),
+                hash: ContentHash([7; 32]),
+            },
+            serde_json::json!({"Rearm":{"draft":2,"version":3,"hash":vec![7;32]}}),
+        ),
+        (
+            IssueOp::CancelReview {
+                draft: DraftId(2),
+                review: 128,
+            },
+            serde_json::json!({"CancelReview":{"draft":2,"review":128}}),
+        ),
+    ] {
+        assert_eq!(serde_json::to_value(&op).unwrap(), json);
+        assert_eq!(serde_json::from_value::<IssueOp>(json.clone()).unwrap(), op);
+        let name = if matches!(op, IssueOp::Rearm { .. }) {
+            "Rearm"
+        } else {
+            "CancelReview"
+        };
+        let fields = if name == "Rearm" {
+            vec!["draft", "version", "hash"]
+        } else {
+            vec!["draft", "review"]
+        };
+        for field in fields {
+            let mut missing = json.clone();
+            missing[name].as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<IssueOp>(missing).is_err());
+            for invalid in [serde_json::json!("wrong"), serde_json::json!(-1)] {
+                let mut malformed = json.clone();
+                malformed[name][field] = invalid;
+                assert!(serde_json::from_value::<IssueOp>(malformed).is_err());
+            }
+        }
+    }
+    for json in [
+        r#"{"Rearm":{"draft":2,"version":18446744073709551616,"hash":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}}"#,
+        r#"{"CancelReview":{"draft":2,"review":18446744073709551616}}"#,
+        r#"{"CancelReview":{"draft":18446744073709551616,"review":1}}"#,
+    ] {
+        assert!(serde_json::from_str::<IssueOp>(json).is_err());
+    }
+    for tag in [3, 4] {
+        let mut malformed = vec![tag, 2];
+        malformed.extend([128; 10]);
+        malformed.extend([7; 32]);
+        assert!(postcard::from_bytes::<IssueOp>(&malformed).is_err());
+    }
+}
+
+#[test]
+fn review_data_keeps_its_request_full_card_and_exact_appended_wire_tag() {
+    use crate::frame::{FrameError, read};
+    let card = IssueCard {
+        draft: DraftId(1),
+        thread: ThreadId(2),
+        repo: None,
+        account: None,
+        title: IssueTitle::new("t").unwrap(),
+        body: IssueBody::new("b").unwrap(),
+        hash: ContentHash([0; 32]),
+        approval: Some(ApprovalRev(3)),
+        version: StateVersion(4),
+        state: ActionState::Draft,
+    };
+    for (request, identity) in [
+        (0, vec![0]),
+        (
+            u64::MAX,
+            vec![255, 255, 255, 255, 255, 255, 255, 255, 255, 1],
+        ),
+    ] {
+        let mut payload = vec![20];
+        payload.extend(identity);
+        payload.extend([1, 2, 0, 0, 1, b't', 1, b'b']);
+        payload.extend([0; 32]);
+        payload.extend([1, 3, 4, 0]);
+        let message = DataToShell::IssueReview {
+            request,
+            card: card.clone(),
+        };
+        let wire = encode(&message, Pipe::Data).unwrap();
+        assert_eq!(&wire[HEADER_LEN..], payload);
+        assert_eq!(
+            read::<DataToShell>(&mut wire.as_slice(), Pipe::Data).unwrap(),
+            Some(message.clone())
+        );
+        let json = serde_json::json!({"IssueReview":{"request":request,"card":{
+            "draft":1,"thread":2,"repo":null,"account":null,"title":"t","body":"b",
+            "hash":vec![0;32],"approval":3,"version":4,"state":"Draft"
+        }}});
+        assert_eq!(serde_json::to_value(&message).unwrap(), json);
+        assert_eq!(
+            serde_json::from_value::<DataToShell>(json.clone()).unwrap(),
+            message
+        );
+        for length in 1..wire.len() {
+            assert!(matches!(
+                read::<DataToShell>(&mut &wire[..length], Pipe::Data),
+                Err(FrameError::Truncated)
+            ));
+        }
+        for length in 0..payload.len() {
+            assert!(postcard::from_bytes::<DataToShell>(&payload[..length]).is_err());
+        }
+        for (field, value) in [
+            ("title", serde_json::json!("a".repeat(257))),
+            ("body", serde_json::json!("a".repeat(32769))),
+            ("hash", serde_json::json!(vec![0; 31])),
+        ] {
+            let mut invalid = json.clone();
+            invalid["IssueReview"]["card"][field] = value;
+            assert!(serde_json::from_value::<DataToShell>(invalid).is_err());
+        }
+        for field in ["request", "card"] {
+            let mut missing = json.clone();
+            missing["IssueReview"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(serde_json::from_value::<DataToShell>(missing).is_err());
+        }
+    }
+    assert!(postcard::from_bytes::<DataToShell>(&[21]).is_err());
+    assert!(
+        postcard::from_bytes::<DataToShell>(&[20, 128, 128, 128, 128, 128, 128, 128, 128, 128, 2])
+            .is_err()
+    );
+}
+
+#[test]
+fn unavailable_kinds_are_closed_and_keep_distinct_wire_and_json_tags() {
+    for (kind, tag, name) in [
+        (IssueUnavailableKind::Action, 0, "Action"),
+        (IssueUnavailableKind::ReviewNotSaved, 1, "ReviewNotSaved"),
+        (IssueUnavailableKind::ReviewCapacity, 2, "ReviewCapacity"),
+        (IssueUnavailableKind::AttemptNotSaved, 3, "AttemptNotSaved"),
+    ] {
+        assert_eq!(postcard::to_allocvec(&kind).unwrap(), [tag]);
+        assert_eq!(
+            postcard::from_bytes::<IssueUnavailableKind>(&[tag]).unwrap(),
+            kind
+        );
+        let message = ControlToShell::IssueUnavailable {
+            request: 1,
+            draft: DraftId(2),
+            kind,
+        };
+        let wire = encode(&message, Pipe::Control).unwrap();
+        assert_eq!(wire, [4, 0, 0, 0, 26, 1, 2, tag]);
+        assert_eq!(
+            serde_json::to_value(&message).unwrap(),
+            serde_json::json!({"IssueUnavailable":{"request":1,"draft":2,"kind":name}})
+        );
+        assert_eq!(
+            serde_json::from_value::<IssueUnavailableKind>(serde_json::json!(name)).unwrap(),
+            kind
+        );
+    }
+    assert!(postcard::from_bytes::<IssueUnavailableKind>(&[4]).is_err());
+    assert!(postcard::from_bytes::<IssueUnavailableKind>(&[]).is_err());
 }
 
 #[test]

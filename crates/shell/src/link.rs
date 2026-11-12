@@ -125,6 +125,7 @@ pub(crate) enum LinkEvent {
         generation: u64,
         request: u64,
         draft: kumochi_protocol::message::DraftId,
+        kind: kumochi_protocol::message::IssueUnavailableKind,
     },
     /// A run's phase changed, from the control pipe.
     RunState {
@@ -1225,12 +1226,17 @@ fn watch(
                     return;
                 }
             }
-            Ok(Some(ControlToShell::IssueUnavailable { request, draft })) => {
+            Ok(Some(ControlToShell::IssueUnavailable {
+                request,
+                draft,
+                kind,
+            })) => {
                 if events
                     .send_blocking(LinkEvent::IssueUnavailable {
                         generation,
                         request,
                         draft,
+                        kind,
                     })
                     .is_err()
                 {

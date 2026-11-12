@@ -10,7 +10,7 @@ use std::sync::Mutex;
 async fn a_replacement_hydrated_while_construction_waits_receives_the_old_settlement() {
     let scratch = Scratch::new("github-filing-replacement-hydrated-sending");
     let server = Arc::new(FilingServer::default());
-    let (mut brain, action) = filing_owner(&scratch, &server).await;
+    let (mut brain, action) = reviewed_filing_owner(&scratch, &server).await;
     let session = brain.issue_session().unwrap();
     let entered = Arc::new(Notify::new());
     let started = Arc::clone(&entered);
@@ -34,7 +34,7 @@ async fn a_replacement_hydrated_while_construction_waits_receives_the_old_settle
                 op: IssueOp::Consent {
                     draft: action.draft,
                     hash: action.hash(),
-                    approval: ApprovalRev(1),
+                    approval: ApprovalRev(2),
                     decision: Decision::File,
                 },
             })
@@ -44,7 +44,7 @@ async fn a_replacement_hydrated_while_construction_waits_receives_the_old_settle
             Some(ControlToShell::ActionState {
                 request: None,
                 draft: action.draft,
-                version: StateVersion(2),
+                version: StateVersion(3),
                 state: ActionState::Sending,
                 approval: None,
             })
@@ -93,7 +93,7 @@ async fn a_replacement_hydrated_while_construction_waits_receives_the_old_settle
                     body: IssueBody::new("first\n\tcafé\n").unwrap(),
                     hash: action.hash(),
                     approval: None,
-                    version: StateVersion(2),
+                    version: StateVersion(3),
                     state: ActionState::Sending,
                 },
             }
@@ -111,9 +111,9 @@ async fn a_replacement_hydrated_while_construction_waits_receives_the_old_settle
             Some(ControlToShell::ActionState {
                 request: None,
                 draft: action.draft,
-                version: StateVersion(3),
+                version: StateVersion(4),
                 state: ActionState::Failed(kumochi_protocol::message::FailReason::Interrupted),
-                approval: Some(ApprovalRev(2)),
+                approval: Some(ApprovalRev(3)),
             }),
             "the old request must not accompany its authoritative settled state"
         );
@@ -135,12 +135,12 @@ async fn a_replacement_hydrated_while_construction_waits_receives_the_old_settle
             .action(action.draft)
             .unwrap(),
         Some(Action {
-            version: StateVersion(3),
+            version: StateVersion(4),
             stage: Stage::Failed {
                 reason: kumochi_protocol::message::FailReason::Interrupted,
             },
-            approval: Some(ApprovalRev(2)),
-            consumed: Some(ApprovalRev(1)),
+            approval: Some(ApprovalRev(3)),
+            consumed: Some(ApprovalRev(2)),
             ..action
         })
     );

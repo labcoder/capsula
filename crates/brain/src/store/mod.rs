@@ -26,6 +26,8 @@ mod heard_tests;
 mod issue_scope_tests;
 mod pages;
 mod purge;
+#[cfg(test)]
+mod rearm_tests;
 pub(crate) mod recall;
 mod rounds;
 mod scenes;

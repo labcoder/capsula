@@ -101,22 +101,10 @@ async fn live_refusals_and_offline_controls_never_start_work_or_change_approval(
         shell.send(&issue).await;
         assert_eq!(
             shell.control().await,
-            Some(ControlToShell::ActionState {
-                request: Some(1),
-                draft: action.draft,
-                version: kumochi_protocol::message::StateVersion(2),
-                state: kumochi_protocol::message::ActionState::Draft,
-                approval: Some(kumochi_protocol::message::ApprovalRev(2)),
-            })
-        );
-        assert_eq!(
-            shell.control().await,
-            Some(ControlToShell::IssueRefused {
+            Some(ControlToShell::IssueUnavailable {
+                kind: kumochi_protocol::message::IssueUnavailableKind::Action,
                 request: 1,
                 draft: action.draft,
-                version: kumochi_protocol::message::StateVersion(2),
-                approval: Some(kumochi_protocol::message::ApprovalRev(2)),
-                reason: kumochi_protocol::message::IssueRefused::NotConnected,
             })
         );
         for op in operations() {
@@ -168,16 +156,8 @@ async fn live_refusals_and_offline_controls_never_start_work_or_change_approval(
     ));
     assert_eq!(attempts.load(Ordering::SeqCst), 0);
     let store = Store::open(&scratch.db()).unwrap();
-    assert_eq!(
-        store.action(action.draft).unwrap(),
-        Some(crate::issues::Action {
-            version: kumochi_protocol::message::StateVersion(2),
-            approval: Some(kumochi_protocol::message::ApprovalRev(2)),
-            consumed: Some(kumochi_protocol::message::ApprovalRev(1)),
-            ..action
-        })
-    );
-    assert_eq!(counts(&store), (before.0, before.1 + 1));
+    assert_eq!(store.action(action.draft).unwrap(), Some(action));
+    assert_eq!(counts(&store), before);
 }
 
 #[tokio::test]

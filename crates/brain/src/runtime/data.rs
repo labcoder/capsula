@@ -98,6 +98,14 @@ impl DataQueue {
         self.frames.push_back((owner, frame));
     }
 
+    pub(crate) fn push_review(&mut self, frame: Vec<u8>) -> Result<(), super::Full> {
+        if frame.len().saturating_add(ENTRY) > super::DATA_CAP.saturating_sub(self.bytes) {
+            return Err(super::Full);
+        }
+        self.push(Owner::Marker, frame);
+        Ok(())
+    }
+
     pub(crate) fn admit_page(&mut self, epoch: u64, request: u32) -> Option<PageKey> {
         if self.pages.len() == MAX_PENDING_PAGES
             || self.pages.iter().any(|page| page.key.request == request)
@@ -337,6 +345,29 @@ mod tests {
 
     const A: Owner = Owner::Run(RunId(1));
     const B: Owner = Owner::Run(RunId(2));
+
+    #[test]
+    fn review_frames_include_entry_cost_and_never_exceed_the_data_cap() {
+        let cap = crate::runtime::DATA_CAP;
+        let mut queue = DataQueue::new(cap);
+        assert!(matches!(
+            queue.push_review(vec![0; cap - ENTRY + 1]),
+            Err(crate::runtime::Full)
+        ));
+        assert_eq!(queue.bytes(), 0);
+        queue.push_review(vec![0; cap - ENTRY]).unwrap();
+        assert_eq!(queue.bytes(), cap);
+        assert!(matches!(
+            queue.push_review(Vec::new()),
+            Err(crate::runtime::Full)
+        ));
+        assert_eq!(queue.bytes(), cap);
+        assert_eq!(queue.pop(Instant::now()).unwrap().len(), cap - ENTRY);
+        queue.wrote();
+        assert_eq!(queue.bytes(), 0);
+        queue.push_review(vec![0]).unwrap();
+        assert_eq!(queue.bytes(), ENTRY + 1);
+    }
 
     #[test]
     fn frames_go_in_order_and_only_against_credit() {

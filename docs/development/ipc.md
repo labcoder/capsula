@@ -500,7 +500,7 @@ shell will own presentation and pending edits.
 
 Current connection controls route to the configured [GitHub account owner](github.md).
 The unset public client ID refuses Connect without starting account work. Saved issue cards
-activate explicit File consent, Dismiss and Unknown-only GET-only Check again; IssueEdit,
+activate explicit review/rearm followed by File consent, Dismiss and Unknown-only GET-only Check again; IssueEdit,
 FileAnyway and ThisIsTheIssue remain refused. Cards use the bounded history/card reader
 described in [issue actions](issues.md). None of those reads grants consent.
 `GitHubView::NotVerified { login }` is appended at tag 6. It carries only the saved
@@ -509,14 +509,15 @@ display identity and grants no authority; Check again reuses RefreshRepos for GE
 | Pipe and direction | Message | Fields |
 | --- | --- | --- |
 | Control, shell to brain | `GitHub(GitHubOp)` | Connect, cancel, sign out, retry cleanup, set default repository or refresh repositories |
-| Control, shell to brain | `Issue { session, request, op }` | Originating `IssueSession { incarnation, epoch }`, strictly increasing nonwrapping per-session `u64` request and unchanged IssueOp: consent (`draft`, `hash`, `approval`, `decision`), discard or check again |
+| Control, shell to brain | `Issue { session, request, op }` | Originating `IssueSession { incarnation, epoch }`, strictly increasing nonwrapping per-session `u64` request; consent (`draft`, `hash`, `approval`, `decision`), discard, check again, rearm (`draft`, `version`, `hash`) or cancel review (`draft`, original rearm request) |
 | Control, brain to shell | `GitHub(GitHubView)` | Connection state; a connected view has a login, at most 200 repositories, truncation flag and optional default |
 | Control, brain to shell | `ActionState` | Optional final-ack `request`, `draft`, `version`, `state`, optional `approval` |
 | Control, brain to shell | `IssueRefused` | Original `request`, `draft`, authoritative `version` and optional `approval`, content-free `reason`; no stage/content change |
-| Control, brain to shell | `IssueUnavailable` | Original `request` and `draft` only; no authoritative stored answer is available |
+| Control, brain to shell | `IssueUnavailable` | Original `request`, `draft` and closed `kind`; no authoritative stored answer is available |
 | Data, shell to brain | `IssueEdit` | `draft`, checked `title`, normalized `body`, optional `repo` |
 | Data, shell to brain | `IssueCards` | At most 16 draft ids; empty is valid |
 | Data, brain to shell | `IssueCard` | `draft`, `thread`, optional `repo` and `account`, `title`, `body`, `hash`, optional `approval`, `version`, `state` |
+| Data, brain to shell | `IssueReview` | Original `u64` rearm request and authoritative full card; only this correlated live reply may open confirmation |
 
 Titles preserve 1–256 Unicode scalar values, refuse blank or multiline text and controls, and
 are never silently trimmed. Bodies allow empty text, LF and tab, up to 32 KiB of UTF-8 after
@@ -533,7 +534,8 @@ reserves that epoch before sending Welcome, even if the remaining handshake fail
 copies this pair into newly created issue frames; it never rewrites an old frame for a new
 connection. Missing, stale or foreign provenance ends the connection before SQL, client
 construction, request-watermark updates or HTTP work. It sends no old correlation into the
-replacement. This is constant-size state, not an accumulated approval or request set.
+replacement. Transport provenance is constant-size state; it does not prove a human click.
+`Rearm`, `CancelReview` and `IssueReview` are appended variants under the same paired-build rule.
 
 The largest correlated consent is 89 bytes including its frame header; the largest
 ActionState is 249 bytes and IssueRefused is 57 bytes. `Some(request)` on ActionState
@@ -545,21 +547,35 @@ content and stay off the tap payload allow-list.
 
 The brain records the session's request high-water mark before SQL or job admission, even if
 storage later fails. Equal or older identities receive only `IssueUnavailable`: no SQL read or
-write, renewed deadline or HTTP work. A fresh explicit confirmation uses a new identity.
+write, renewed deadline or HTTP work. Before that watermark or any other non-transport refusal,
+Consent synchronously looks up and removes its approval from the brain's outstanding offers.
+Absent means invalid even when SQLite says unused; a different request or connection label
+never restores permission. Only a committed live rearm can register a new offer, bound to its
+session/request and immutable draft/version/hash. Its pending reservation plus outstanding
+offers share `MAX_ISSUE_REVIEWS = 16`; cancelled pending SQL retains its slot until acknowledgement.
+Both cancellation and expiry are rechecked before registration. Restart starts with no offers;
+saved cards, state notifications and history reads never register any.
 Successfully read or committed state from an old session still reaches a replacement as
 unsolicited `ActionState` with `request: None`; its old request/refusal/error never does.
 
 `IssueUnavailable` is appended at tag 26 under the same exact `BUILD_ID` pairing.
-Its maximum complete frame is 25 bytes: the four-byte header, one-byte tag and
-two ten-byte `u64` identities. The brain sends it when SQL cannot provide a
+Its maximum complete frame is 26 bytes: the four-byte header, one-byte tag,
+two ten-byte `u64` identities and one-byte kind. The brain sends it when SQL cannot provide a
 terminal authoritative answer or a request identity is already spent; it carries no version,
 approval, state or foreign error. The shell generation-fences it and releases only the matching currently
 pending request/draft in the shared history cache. Retained provenance after a
 final acknowledgement does not make a late error current; duplicates and stale
-errors are ignored. A matching error preserves the held card and watermark and
-shows one fixed localized message, distinct from an enqueue failure or refusal.
-It schedules no read, retry or network request. Controls become usable for a
-manual retry, and filing still requires a fresh real confirmation of saved details.
+errors are ignored. A matching error preserves the held card and watermark. Action is generic;
+ReviewNotSaved says the review sent nothing and needs storage repair; ReviewCapacity asks the
+user to finish/cancel another review. AttemptNotSaved is reserved for a confirmed job whose POST
+may have been handed off and warns against filing again. None promises readable details when
+storage cannot read them. No kind schedules a read, rearm, retry or network request.
+
+Successful rearm returns only the full IssueReview data frame, not a preceding ActionState that
+could invalidate its own pending intent. Late committed rearms may publish unsolicited saved
+state but never permission or a preview. Review frames include queue-entry overhead in the
+existing 512-KiB data queue cap; failed enqueue ends the link and retires its reviews. Cancellation
+can name the original rearm request before the shell knows the minted revision.
 
 P1 originally staged these messages without senders or action handlers. That staging baseline
 is superseded by the current account and saved-card paths above: it logged only the operation

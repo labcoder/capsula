@@ -1498,7 +1498,8 @@ impl<'a, 't> Link<'a, 't> {
             | DataToShell::IssueCardsDone { .. } => return Err(Full),
             DataToShell::ScenesRemoved { .. }
             | DataToShell::Models { .. }
-            | DataToShell::IssueCard(_) => Owner::Marker,
+            | DataToShell::IssueCard(_)
+            | DataToShell::IssueReview { .. } => Owner::Marker,
             DataToShell::SceneSnapshot { scene, .. }
             | DataToShell::SceneBegin { scene, .. }
             | DataToShell::SceneStepCommit { scene, .. }
@@ -1510,7 +1511,11 @@ impl<'a, 't> Link<'a, 't> {
             tracing::error!("a data message didn't encode");
             return Err(Full);
         };
-        self.queue.borrow_mut().push(owner, frame);
+        if matches!(message, DataToShell::IssueReview { .. }) {
+            self.queue.borrow_mut().push_review(frame)?;
+        } else {
+            self.queue.borrow_mut().push(owner, frame);
+        }
         self.ready.notify_one();
         Ok(())
     }

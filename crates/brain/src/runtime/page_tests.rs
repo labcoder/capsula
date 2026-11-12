@@ -971,6 +971,7 @@ async fn read_pages_and_text(
             | DataToShell::IssueCard(_)
             | DataToShell::IssueCardRead { .. }
             | DataToShell::IssueCardsDone { .. }
+            | DataToShell::IssueReview { .. }
             | DataToShell::Transcript(_)
             | DataToShell::SegmentQueued { .. }
             | DataToShell::SpeechPcm(_)) => {

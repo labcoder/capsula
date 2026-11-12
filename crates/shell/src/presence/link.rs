@@ -42,11 +42,13 @@ impl Presence {
             }
             match event {
                 LinkEvent::State(state) => {
+                    self.retire_issue_review(cx);
                     self.revoke_exclusion(cx);
                     self.session = None;
                     self.link_state(state, cx);
                 }
                 LinkEvent::Connected(session) => {
+                    self.retire_issue_review(cx);
                     self.settings.update(cx, |state, cx| {
                         state.github.disconnected();
                         cx.notify();
@@ -187,12 +189,14 @@ impl Presence {
                             cx.notify();
                         });
                         self.chat.update(cx, |_, cx| cx.notify());
+                        self.fail_issue_review(request, draft, cx);
                     }
                 }
                 LinkEvent::IssueUnavailable {
                     generation,
                     request,
                     draft,
+                    kind,
                 } => {
                     if self
                         .session
@@ -200,10 +204,11 @@ impl Presence {
                         .is_some_and(|session| session.generation() == generation)
                     {
                         self.threads.update(cx, |model, cx| {
-                            model.issue_unavailable(request, draft);
+                            model.issue_unavailable(request, draft, kind);
                             cx.notify();
                         });
                         self.chat.update(cx, |_, cx| cx.notify());
+                        self.fail_issue_review(request, draft, cx);
                     }
                 }
                 LinkEvent::Focus {
@@ -420,6 +425,13 @@ impl Presence {
             .is_some_and(|session| session.generation() == generation)
         {
             let credit = match message {
+                DataToShell::IssueReview { request, card } => {
+                    if self.deliver_issue_review(request, card, bytes, cx) {
+                        0
+                    } else {
+                        bytes
+                    }
+                }
                 message @ (DataToShell::ThreadList { request, .. }
                 | DataToShell::Page { request, .. }
                 | DataToShell::PageFailed { request }

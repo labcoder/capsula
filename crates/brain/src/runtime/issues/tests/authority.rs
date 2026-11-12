@@ -24,7 +24,7 @@ pub(super) async fn posting_acknowledgement(
             &IssueOp::Consent {
                 draft: action.draft,
                 hash: action.hash(),
-                approval: ApprovalRev(1),
+                approval: ApprovalRev(2),
                 decision: Decision::File,
             },
             Some(brain.epoch),
@@ -66,7 +66,7 @@ pub(super) async fn posting_acknowledgement(
     assert_eq!(
         posting,
         &Action {
-            version: StateVersion(3),
+            version: StateVersion(4),
             stage: Stage::Posting {
                 mark: Mark {
                     at_s: NonZeroU64::new(120).unwrap(),
@@ -75,7 +75,7 @@ pub(super) async fn posting_acknowledgement(
                 unresolved: None,
             },
             approval: None,
-            consumed: Some(ApprovalRev(1)),
+            consumed: Some(ApprovalRev(2)),
             ..action.clone()
         }
     );
@@ -90,7 +90,7 @@ async fn final_permit_rechecks_same_generation_repository_authority_after_postin
     for listing_failed in [false, true] {
         let scratch = Scratch::new("github-filing-final-repository-authority");
         let server = Arc::new(FilingServer::default());
-        let (mut brain, action) = filing_owner(&scratch, &server).await;
+        let (mut brain, action) = reviewed_filing_owner(&scratch, &server).await;
         let stamp = brain.account.github.machine().stamp();
         let (posting, scope) = posting_acknowledgement(&mut brain, &action).await;
         let _updates = brain.account.github.machine_mut().on(
@@ -125,12 +125,12 @@ async fn final_permit_rechecks_same_generation_repository_authority_after_postin
             &effects[..],
             [Effect::Control(ControlToShell::ActionState {
                 request: None,
-                version: StateVersion(3),
+                version: StateVersion(4),
                 state: ActionState::Sending,
                 approval: None,
                 ..
             }), Effect::Store(StoreOp::Issue {
-                write: Write::NotSent { draft, at: StateVersion(3), reason: FailReason::NotConnected },
+                write: Write::NotSent { draft, at: StateVersion(4), reason: FailReason::NotConnected },
                 scope: None,
                 ..
             })] if *draft == action.draft
@@ -146,9 +146,9 @@ async fn final_permit_rechecks_same_generation_repository_authority_after_postin
             vec![Effect::Control(ControlToShell::ActionState {
                 request: Some(601),
                 draft: action.draft,
-                version: StateVersion(4),
+                version: StateVersion(5),
                 state: ActionState::Failed(FailReason::NotConnected),
-                approval: Some(ApprovalRev(2)),
+                approval: Some(ApprovalRev(3)),
             })]
         );
         assert!(!brain.filing.pending());
@@ -160,12 +160,12 @@ async fn final_permit_rechecks_same_generation_repository_authority_after_postin
                 .action(action.draft)
                 .unwrap(),
             Some(Action {
-                version: StateVersion(4),
+                version: StateVersion(5),
                 stage: Stage::Failed {
                     reason: FailReason::NotConnected,
                 },
-                approval: Some(ApprovalRev(2)),
-                consumed: Some(ApprovalRev(1)),
+                approval: Some(ApprovalRev(3)),
+                consumed: Some(ApprovalRev(2)),
                 ..action
             })
         );
@@ -182,7 +182,7 @@ async fn wall_expiry_after_posting_commits_refuses_handoff_in_the_same_generatio
 
     let scratch = Scratch::new("github-filing-final-wall-expiry");
     let server = Arc::new(FilingServer::default());
-    let (mut brain, action) = filing_owner(&scratch, &server).await;
+    let (mut brain, action) = reviewed_filing_owner(&scratch, &server).await;
     let stamp = brain.account.github.machine().stamp();
     let (posting, scope) = posting_acknowledgement(&mut brain, &action).await;
     let (_, _, expires_at_s) = brain
@@ -202,7 +202,7 @@ async fn wall_expiry_after_posting_commits_refuses_handoff_in_the_same_generatio
     assert!(matches!(
         &effects[..],
         [Effect::Store(StoreOp::Issue {
-            write: Write::NotSent { draft, at: StateVersion(3), reason: FailReason::Interrupted },
+            write: Write::NotSent { draft, at: StateVersion(4), reason: FailReason::Interrupted },
             scope: None,
             ..
         })] if *draft == action.draft
@@ -217,9 +217,9 @@ async fn wall_expiry_after_posting_commits_refuses_handoff_in_the_same_generatio
         vec![Effect::Control(ControlToShell::ActionState {
             request: Some(601),
             draft: action.draft,
-            version: StateVersion(4),
+            version: StateVersion(5),
             state: ActionState::Failed(FailReason::Interrupted),
-            approval: Some(ApprovalRev(2)),
+            approval: Some(ApprovalRev(3)),
         })]
     );
     assert!(!brain.filing.pending());
@@ -231,12 +231,12 @@ async fn wall_expiry_after_posting_commits_refuses_handoff_in_the_same_generatio
             .action(action.draft)
             .unwrap(),
         Some(Action {
-            version: StateVersion(4),
+            version: StateVersion(5),
             stage: Stage::Failed {
                 reason: FailReason::Interrupted,
             },
-            approval: Some(ApprovalRev(2)),
-            consumed: Some(ApprovalRev(1)),
+            approval: Some(ApprovalRev(3)),
+            consumed: Some(ApprovalRev(2)),
             ..action
         })
     );
@@ -252,7 +252,7 @@ async fn final_permit_rechecks_same_generation_account_expiry_after_posting_comm
 
     let scratch = Scratch::new("github-filing-final-account-expiry");
     let server = Arc::new(FilingServer::default());
-    let (mut brain, action) = filing_owner(&scratch, &server).await;
+    let (mut brain, action) = reviewed_filing_owner(&scratch, &server).await;
     let stamp = brain.account.github.machine().stamp();
     let (posting, scope) = posting_acknowledgement(&mut brain, &action).await;
     let (_, _, expires_at_s) = brain
@@ -273,10 +273,10 @@ async fn final_permit_rechecks_same_generation_account_expiry_after_posting_comm
     assert!(matches!(
         &effects[..],
         [Effect::Control(ControlToShell::ActionState {
-            request: None, version: StateVersion(3), state: ActionState::Sending,
+            request: None, version: StateVersion(4), state: ActionState::Sending,
             approval: None, ..
         }), Effect::Store(StoreOp::Issue {
-            write: Write::NotSent { draft, at: StateVersion(3), reason: FailReason::NotConnected },
+            write: Write::NotSent { draft, at: StateVersion(4), reason: FailReason::NotConnected },
             scope: None, ..
         })] if *draft == action.draft
     ));
@@ -291,9 +291,9 @@ async fn final_permit_rechecks_same_generation_account_expiry_after_posting_comm
         vec![Effect::Control(ControlToShell::ActionState {
             request: Some(601),
             draft: action.draft,
-            version: StateVersion(4),
+            version: StateVersion(5),
             state: ActionState::Failed(FailReason::NotConnected),
-            approval: Some(ApprovalRev(2)),
+            approval: Some(ApprovalRev(3)),
         })]
     );
     assert!(!brain.filing.pending());
@@ -305,12 +305,12 @@ async fn final_permit_rechecks_same_generation_account_expiry_after_posting_comm
             .action(action.draft)
             .unwrap(),
         Some(Action {
-            version: StateVersion(4),
+            version: StateVersion(5),
             stage: Stage::Failed {
                 reason: FailReason::NotConnected
             },
-            approval: Some(ApprovalRev(2)),
-            consumed: Some(ApprovalRev(1)),
+            approval: Some(ApprovalRev(3)),
+            consumed: Some(ApprovalRev(2)),
             ..action
         })
     );
@@ -330,7 +330,7 @@ async fn a_sql_result_save_failure_after_one_post_becomes_unknown_and_replay_can
 
     let scratch = Scratch::new("github-filing-result-save-failure");
     let server = Arc::new(FilingServer::default());
-    let (mut brain, action) = filing_owner(&scratch, &server).await;
+    let (mut brain, action) = reviewed_filing_owner(&scratch, &server).await;
     let (posting, _) = posting_acknowledgement(&mut brain, &action).await;
     let effects = brain.handle(posting).unwrap();
     brain.apply(effects, None).unwrap();
@@ -357,7 +357,7 @@ async fn a_sql_result_save_failure_after_one_post_becomes_unknown_and_replay_can
         write,
         &Write::Posted {
             draft: action.draft,
-            at: StateVersion(3),
+            at: StateVersion(4),
             outcome: CreateOutcome::Created {
                 number: 17,
                 url: IssueUrl::new("https://github.com/owner/repo/issues/17").unwrap(),
@@ -386,7 +386,7 @@ async fn a_sql_result_save_failure_after_one_post_becomes_unknown_and_replay_can
             .action(action.draft)
             .unwrap(),
         Some(Action {
-            version: StateVersion(3),
+            version: StateVersion(4),
             stage: Stage::Posting {
                 mark: Mark {
                     at_s: NonZeroU64::new(120).unwrap(),
@@ -395,7 +395,7 @@ async fn a_sql_result_save_failure_after_one_post_becomes_unknown_and_replay_can
                 unresolved: None,
             },
             approval: None,
-            consumed: Some(ApprovalRev(1)),
+            consumed: Some(ApprovalRev(2)),
             ..action.clone()
         })
     );
@@ -403,7 +403,7 @@ async fn a_sql_result_save_failure_after_one_post_becomes_unknown_and_replay_can
     assert!(matches!(
         &effects[..],
         [Effect::Store(StoreOp::Issue {
-            write: Write::Interrupted { draft, at: StateVersion(3) },
+            write: Write::Interrupted { draft, at: StateVersion(4) },
             scope: None,
             ..
         })] if *draft == action.draft
@@ -414,7 +414,7 @@ async fn a_sql_result_save_failure_after_one_post_becomes_unknown_and_replay_can
         .unwrap()
         .unwrap();
     let settled = Action {
-        version: StateVersion(4),
+        version: StateVersion(5),
         stage: Stage::Unknown {
             mark: Mark {
                 at_s: NonZeroU64::new(120).unwrap(),
@@ -422,8 +422,8 @@ async fn a_sql_result_save_failure_after_one_post_becomes_unknown_and_replay_can
             },
             lookup: LookupResult::Pending,
         },
-        approval: Some(ApprovalRev(2)),
-        consumed: Some(ApprovalRev(1)),
+        approval: Some(ApprovalRev(3)),
+        consumed: Some(ApprovalRev(2)),
         uncertain: 1,
         ..action.clone()
     };
@@ -435,12 +435,12 @@ async fn a_sql_result_save_failure_after_one_post_becomes_unknown_and_replay_can
     let terminal = vec![Effect::Control(ControlToShell::ActionState {
         request: Some(601),
         draft: action.draft,
-        version: StateVersion(4),
+        version: StateVersion(5),
         state: ActionState::Unknown {
             lookup: LookupResult::Pending,
             maybe_duplicate: false,
         },
-        approval: Some(ApprovalRev(2)),
+        approval: Some(ApprovalRev(3)),
     })];
     assert_eq!(brain.handle(cleanup).unwrap(), terminal);
     assert!(!brain.filing.pending());
@@ -453,7 +453,7 @@ async fn a_sql_result_save_failure_after_one_post_becomes_unknown_and_replay_can
             &IssueOp::Consent {
                 draft: action.draft,
                 hash: action.hash(),
-                approval: ApprovalRev(1),
+                approval: ApprovalRev(2),
                 decision: Decision::File,
             },
             Some(brain.epoch),
@@ -462,6 +462,7 @@ async fn a_sql_result_save_failure_after_one_post_becomes_unknown_and_replay_can
     assert_eq!(
         effects,
         vec![Effect::Control(ControlToShell::IssueUnavailable {
+            kind: IssueUnavailableKind::Action,
             request: 601,
             draft: action.draft,
         })]
@@ -515,7 +516,7 @@ async fn a_real_post_401_revokes_only_the_generation_that_sent_it() {
     for replacement in [false, true] {
         let scratch = Scratch::new("github-filing-post-401-generation");
         let server = Arc::new(FilingServer::default());
-        let (mut brain, action) = filing_owner(&scratch, &server).await;
+        let (mut brain, action) = reviewed_filing_owner(&scratch, &server).await;
         let http = Arc::clone(&server);
         brain.account.net.http = Arc::new(move || {
             http.factories.fetch_add(1, Ordering::SeqCst);
@@ -592,7 +593,7 @@ async fn a_real_post_401_revokes_only_the_generation_that_sent_it() {
             .unwrap()
             .unwrap();
         let settled = Action {
-            version: StateVersion(4),
+            version: StateVersion(5),
             stage: if replacement {
                 Stage::Unknown {
                     mark: Mark {
@@ -606,8 +607,8 @@ async fn a_real_post_401_revokes_only_the_generation_that_sent_it() {
                     reason: FailReason::NotConnected,
                 }
             },
-            approval: Some(ApprovalRev(2)),
-            consumed: Some(ApprovalRev(1)),
+            approval: Some(ApprovalRev(3)),
+            consumed: Some(ApprovalRev(2)),
             uncertain: u32::from(replacement),
             ..action.clone()
         };
@@ -621,7 +622,7 @@ async fn a_real_post_401_revokes_only_the_generation_that_sent_it() {
             vec![Effect::Control(ControlToShell::ActionState {
                 request: Some(601),
                 draft: action.draft,
-                version: StateVersion(4),
+                version: StateVersion(5),
                 state: if replacement {
                     ActionState::Unknown {
                         lookup: LookupResult::Pending,
@@ -630,7 +631,7 @@ async fn a_real_post_401_revokes_only_the_generation_that_sent_it() {
                 } else {
                     ActionState::Failed(FailReason::NotConnected)
                 },
-                approval: Some(ApprovalRev(2)),
+                approval: Some(ApprovalRev(3)),
             })]
         );
         assert!(!brain.filing.pending());

@@ -15,7 +15,7 @@ async fn a_case_only_repository_change_cannot_send_an_unknown_or_dismissed_issue
             lose_response: true,
             ..FilingServer::default()
         });
-        let (mut brain, original) = filing_owner(&scratch, &server).await;
+        let (mut brain, original) = reviewed_filing_owner(&scratch, &server).await;
         let (posting, _) = super::authority::posting_acknowledgement(&mut brain, &original).await;
         let effects = brain.handle(posting).unwrap();
         brain.apply(effects, None).unwrap();
@@ -26,7 +26,7 @@ async fn a_case_only_repository_change_cannot_send_an_unknown_or_dismissed_issue
                 .unwrap()
         );
         let unknown = Action {
-            version: StateVersion(4),
+            version: StateVersion(5),
             stage: Stage::Unknown {
                 mark: Mark {
                     at_s: NonZeroU64::new(120).unwrap(),
@@ -34,8 +34,8 @@ async fn a_case_only_repository_change_cannot_send_an_unknown_or_dismissed_issue
                 },
                 lookup: LookupResult::Pending,
             },
-            approval: Some(ApprovalRev(2)),
-            consumed: Some(ApprovalRev(1)),
+            approval: Some(ApprovalRev(3)),
+            consumed: Some(ApprovalRev(2)),
             uncertain: 1,
             ..original
         };
@@ -67,13 +67,13 @@ async fn a_case_only_repository_change_cannot_send_an_unknown_or_dismissed_issue
                 vec![Effect::Control(ControlToShell::ActionState {
                     request: Some(1001),
                     draft: unknown.draft,
-                    version: StateVersion(5),
+                    version: StateVersion(6),
                     state: ActionState::Discarded { maybe_filed: true },
                     approval: None,
                 })]
             );
             Action {
-                version: StateVersion(5),
+                version: StateVersion(6),
                 stage: Stage::Discarded,
                 approval: None,
                 ..unknown
@@ -113,17 +113,20 @@ async fn a_case_only_repository_change_cannot_send_an_unknown_or_dismissed_issue
         assert_eq!(second.account.as_ref().unwrap().id, 7);
         assert_eq!(second.account, retained.account);
         assert_ne!(retained.hash(), second.hash());
-        assert_eq!(second.approval, Some(ApprovalRev(3)));
+        assert_eq!(second.approval, Some(ApprovalRev(4)));
+        let second = rearm_filing(&scratch, &mut brain, &second, 1002).await;
+        assert_eq!(second.version, StateVersion(2));
+        assert_eq!(second.approval, Some(ApprovalRev(5)));
         let consent = IssueOp::Consent {
             draft: second.draft,
             hash: second.hash(),
-            approval: ApprovalRev(3),
+            approval: ApprovalRev(5),
             decision: Decision::File,
         };
         let effects = brain
             .issue_op(
                 brain.issue_session().unwrap(),
-                1002,
+                1003,
                 &consent,
                 Some(brain.epoch),
             )
@@ -134,9 +137,9 @@ async fn a_case_only_repository_change_cannot_send_an_unknown_or_dismissed_issue
             .unwrap()
             .unwrap();
         let refused = Action {
-            version: StateVersion(2),
-            approval: Some(ApprovalRev(4)),
-            consumed: Some(ApprovalRev(3)),
+            version: StateVersion(3),
+            approval: Some(ApprovalRev(6)),
+            consumed: Some(ApprovalRev(5)),
             ..second.clone()
         };
         assert!(matches!(
@@ -147,21 +150,21 @@ async fn a_case_only_repository_change_cannot_send_an_unknown_or_dismissed_issue
             } if *draft == retained.draft && action == &refused
         ));
         let terminal = ControlToShell::ActionState {
-            request: Some(1002),
+            request: Some(1003),
             draft: second.draft,
-            version: StateVersion(2),
+            version: StateVersion(3),
             state: ActionState::Draft,
-            approval: Some(ApprovalRev(4)),
+            approval: Some(ApprovalRev(6)),
         };
         assert_eq!(
             brain.handle(saved).unwrap(),
             vec![
                 Effect::Control(terminal),
                 Effect::Control(ControlToShell::IssueRefused {
-                    request: 1002,
+                    request: 1003,
                     draft: second.draft,
-                    version: StateVersion(2),
-                    approval: Some(ApprovalRev(4)),
+                    version: StateVersion(3),
+                    approval: Some(ApprovalRev(6)),
                     reason: IssueRefused::UnresolvedDraft {
                         draft: retained.draft
                     },
@@ -172,7 +175,7 @@ async fn a_case_only_repository_change_cannot_send_an_unknown_or_dismissed_issue
         let effects = brain
             .issue_op(
                 brain.issue_session().unwrap(),
-                1002,
+                1003,
                 &consent,
                 Some(brain.epoch),
             )
@@ -180,7 +183,8 @@ async fn a_case_only_repository_change_cannot_send_an_unknown_or_dismissed_issue
         assert_eq!(
             effects,
             vec![Effect::Control(ControlToShell::IssueUnavailable {
-                request: 1002,
+                kind: IssueUnavailableKind::Action,
+                request: 1003,
                 draft: second.draft,
             })]
         );

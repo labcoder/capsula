@@ -224,6 +224,7 @@ impl Tapped for DataToShell {
             Self::IssueCard(_) => "IssueCard",
             Self::IssueCardRead { .. } => "IssueCardRead",
             Self::IssueCardsDone { .. } => "IssueCardsDone",
+            Self::IssueReview { .. } => "IssueReview",
         }
     }
 

@@ -41,7 +41,9 @@ fn full_issue(
 
 #[test]
 fn issue_unavailable_releases_only_pending_identity_and_preserves_shared_authority() {
-    use kumochi_protocol::message::{ActionState, IssueCardsStatus, IssueRefused, StateVersion};
+    use kumochi_protocol::message::{
+        ActionState, IssueCardsStatus, IssueRefused, IssueUnavailableKind, StateVersion,
+    };
     let (mut browse, mut chat) = Threads::pair();
     browse.connected();
     browse.show_for(Some(ThreadId(3)));
@@ -71,19 +73,22 @@ fn issue_unavailable_releases_only_pending_identity_and_preserves_shared_authori
     });
     let expected = browse.issue(DraftId(9)).unwrap().card().unwrap().clone();
     browse.issue_submitted(DraftId(9), Some(71));
-    browse.issue_unavailable(72, DraftId(9));
-    browse.issue_unavailable(71, DraftId(10));
+    browse.issue_unavailable(72, DraftId(9), IssueUnavailableKind::Action);
+    browse.issue_unavailable(71, DraftId(10), IssueUnavailableKind::Action);
     for model in [&browse, &chat] {
         let entry = model.issue(DraftId(9)).unwrap();
         assert!(entry.pending());
         assert_eq!(entry.feedback, None);
     }
-    chat.issue_unavailable(71, DraftId(9));
+    chat.issue_unavailable(71, DraftId(9), IssueUnavailableKind::Action);
     for model in [&browse, &chat] {
         let entry = model.issue(DraftId(9)).unwrap();
         assert!(!entry.pending());
         assert!(!entry.loading());
-        assert_eq!(entry.feedback, Some(IssueFeedback::Unavailable));
+        assert_eq!(
+            entry.feedback,
+            Some(IssueFeedback::Unavailable(IssueUnavailableKind::Action))
+        );
         assert_eq!(entry.card(), Some(&expected));
         let reads = model.reads.borrow();
         let mark = reads.cards.entries[&DraftId(9)].mark.as_ref().unwrap();
@@ -95,7 +100,7 @@ fn issue_unavailable_releases_only_pending_identity_and_preserves_shared_authori
     assert_eq!(browse.requests(), []);
     assert_eq!(chat.requests(), []);
     browse.issue_submitted(DraftId(9), Some(72));
-    browse.issue_unavailable(71, DraftId(9));
+    browse.issue_unavailable(71, DraftId(9), IssueUnavailableKind::Action);
     assert!(chat.issue(DraftId(9)).unwrap().pending());
     assert_eq!(chat.issue(DraftId(9)).unwrap().feedback, None);
     browse.action_state(
@@ -105,7 +110,7 @@ fn issue_unavailable_releases_only_pending_identity_and_preserves_shared_authori
         None,
         Some(72),
     );
-    browse.issue_unavailable(72, DraftId(9));
+    browse.issue_unavailable(72, DraftId(9), IssueUnavailableKind::Action);
     assert!(!chat.issue(DraftId(9)).unwrap().pending());
     assert_eq!(chat.issue(DraftId(9)).unwrap().feedback, None);
     browse.issue_refused(
@@ -115,13 +120,13 @@ fn issue_unavailable_releases_only_pending_identity_and_preserves_shared_authori
         None,
         IssueRefused::NotAllowedNow,
     );
-    browse.issue_unavailable(72, DraftId(9));
+    browse.issue_unavailable(72, DraftId(9), IssueUnavailableKind::Action);
     assert_eq!(
         chat.issue(DraftId(9)).unwrap().feedback,
         Some(IssueFeedback::Refused(IssueRefused::NotAllowedNow))
     );
     browse.issue_submitted(DraftId(9), None);
-    browse.issue_unavailable(72, DraftId(9));
+    browse.issue_unavailable(72, DraftId(9), IssueUnavailableKind::Action);
     assert_eq!(
         chat.issue(DraftId(9)).unwrap().feedback,
         Some(IssueFeedback::QueueFailed)
@@ -282,6 +287,107 @@ fn equal_version_hydration_keeps_authority_and_a_conflicting_card_is_terminal() 
         StateVersion(4)
     );
     assert_eq!(state.requests(), []);
+}
+
+#[test]
+fn live_review_fills_shared_content_without_releasing_the_history_batch() {
+    use kumochi_protocol::message::{ActionState, ApprovalRev, IssueBody, StateVersion};
+    let mut cards = cards::Cards::default();
+    cards.shown(View::Browse, Some(ThreadId(3)), vec![DraftId(9)]);
+    cards.shown(View::Chat, Some(ThreadId(3)), vec![DraftId(9)]);
+    cards.start(5, &[DraftId(9)]);
+    let DataToShell::IssueCardRead {
+        card: mut first, ..
+    } = full_issue(5, 1, ActionState::Draft)
+    else {
+        panic!("card fixture");
+    };
+    first.approval = Some(ApprovalRev(1));
+    cards.full(5, first.clone());
+    cards.review_started(DraftId(9), 71);
+    let mut review = first.clone();
+    review.version = StateVersion(2);
+    review.approval = Some(ApprovalRev(2));
+    assert!(!cards.review(70, review.clone()));
+    assert!(
+        cards
+            .entry(View::Chat, DraftId(9))
+            .unwrap()
+            .pending_review()
+    );
+    assert!(cards.review(71, review.clone()));
+    assert!(cards.pending(5));
+    cards.full(5, first);
+    for view in [View::Browse, View::Chat] {
+        let entry = cards.entry(view, DraftId(9)).unwrap();
+        assert_eq!(entry.card(), Some(&review));
+        assert!(!entry.pending());
+        assert!(!entry.loading());
+        assert_eq!(entry.feedback, None);
+    }
+    cards.done(5);
+    assert!(!cards.pending(5));
+    cards.cancel_review(71, DraftId(9));
+    assert!(!cards.review(71, review.clone()));
+    cards.review_started(DraftId(9), 72);
+    review.body = IssueBody::new("different content at the same version").unwrap();
+    assert!(!cards.review(72, review));
+    assert!(cards.broken);
+}
+
+#[test]
+fn a_possible_handoff_lock_survives_queue_failures_and_clear_only_on_new_authority() {
+    use kumochi_protocol::message::{ActionState, IssueUnavailableKind, StateVersion};
+    let mut cards = cards::Cards::default();
+    cards.shown(View::Browse, Some(ThreadId(3)), vec![DraftId(9)]);
+    cards.start(5, &[DraftId(9)]);
+    let DataToShell::IssueCardRead { card, .. } = full_issue(5, 1, ActionState::Draft) else {
+        panic!("card fixture");
+    };
+    cards.full(5, card);
+    cards.done(5);
+    cards.submitted(DraftId(9), Some(71));
+    cards.unavailable(71, DraftId(9), IssueUnavailableKind::AttemptNotSaved);
+    cards.submitted(DraftId(9), None);
+    cards.review_started(DraftId(9), 72);
+    cards.submitted(DraftId(9), Some(73));
+    cards.unavailable(73, DraftId(9), IssueUnavailableKind::Action);
+    let entry = cards.entry(View::Browse, DraftId(9)).unwrap();
+    assert!(entry.review_blocked());
+    assert!(!entry.pending());
+    assert_eq!(
+        entry.feedback,
+        Some(IssueFeedback::Unavailable(
+            IssueUnavailableKind::AttemptNotSaved
+        ))
+    );
+    cards.state(DraftId(9), StateVersion(1), ActionState::Draft, None, None);
+    assert!(
+        cards
+            .entry(View::Browse, DraftId(9))
+            .unwrap()
+            .review_blocked()
+    );
+    cards.state(
+        DraftId(9),
+        StateVersion(2),
+        ActionState::Unknown {
+            lookup: kumochi_protocol::message::LookupResult::None,
+            maybe_duplicate: true,
+        },
+        None,
+        None,
+    );
+    assert!(
+        !cards
+            .entry(View::Browse, DraftId(9))
+            .unwrap()
+            .review_blocked()
+    );
+    assert_eq!(
+        cards.entry(View::Browse, DraftId(9)).unwrap().feedback,
+        None
+    );
 }
 
 #[test]

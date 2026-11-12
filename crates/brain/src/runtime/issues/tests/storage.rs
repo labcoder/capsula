@@ -1,7 +1,7 @@
 use super::*;
 use crate::coordinator::{Effect, Input};
 
-async fn settle(brain: &mut Brain) -> Vec<ControlToShell> {
+pub(super) async fn settle(brain: &mut Brain) -> Vec<ControlToShell> {
     let mut controls = Vec::new();
     timeout(PATIENCE, async {
         while brain.filing.pending() {
@@ -47,6 +47,7 @@ async fn a_failed_discard_store_write_must_settle_its_correlated_attempt() {
     assert_eq!(
         settle(&mut brain).await,
         vec![ControlToShell::IssueUnavailable {
+            kind: IssueUnavailableKind::Action,
             request: 901,
             draft: action.draft
         }]
@@ -72,7 +73,11 @@ async fn every_non_job_operation_and_an_admitted_recovery_read_settle_a_store_er
     for operation in 0..6 {
         let scratch = Scratch::new("github-filing-shared-storage-failure");
         let server = Arc::new(FilingServer::default());
-        let (mut brain, action) = filing_owner(&scratch, &server).await;
+        let (mut brain, action) = if (1..=3).contains(&operation) {
+            reviewed_filing_owner(&scratch, &server).await
+        } else {
+            filing_owner(&scratch, &server).await
+        };
         let conn = rusqlite::Connection::open(scratch.db()).unwrap();
         conn.execute_batch("ALTER TABLE actions RENAME TO unavailable_actions;")
             .unwrap();
@@ -83,7 +88,7 @@ async fn every_non_job_operation_and_an_admitted_recovery_read_settle_a_store_er
             1..=3 => IssueOp::Consent {
                 draft: action.draft,
                 hash: action.hash(),
-                approval: ApprovalRev(1),
+                approval: action.approval.unwrap(),
                 decision: match operation {
                     1 => Decision::File,
                     2 => Decision::FileAnyway,
@@ -98,10 +103,19 @@ async fn every_non_job_operation_and_an_admitted_recovery_read_settle_a_store_er
         let effects = brain
             .issue_op(brain.issue_session().unwrap(), 902, &op, epoch)
             .unwrap();
+        let mut replies: Vec<_> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Control(frame) => Some(frame.clone()),
+                _ => None,
+            })
+            .collect();
         brain.apply(effects, None).unwrap();
+        replies.extend(settle(&mut brain).await);
         assert_eq!(
-            settle(&mut brain).await,
+            replies,
             vec![ControlToShell::IssueUnavailable {
+                kind: IssueUnavailableKind::Action,
                 request: 902,
                 draft: action.draft
             }]
@@ -145,10 +159,19 @@ async fn a_missing_action_finishes_each_operation_without_claiming_authoritative
         let effects = brain
             .issue_op(brain.issue_session().unwrap(), 903, &op, Some(brain.epoch))
             .unwrap();
+        let mut replies: Vec<_> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Control(frame) => Some(frame.clone()),
+                _ => None,
+            })
+            .collect();
         brain.apply(effects, None).unwrap();
+        replies.extend(settle(&mut brain).await);
         assert_eq!(
-            settle(&mut brain).await,
+            replies,
             vec![ControlToShell::IssueUnavailable {
+                kind: IssueUnavailableKind::Action,
                 request: 903,
                 draft: missing
             }]
@@ -178,7 +201,7 @@ async fn a_failed_approval_write_is_spent_only_if_its_compensation_commits() {
     for keep_failing in [false, true] {
         let scratch = Scratch::new("github-filing-approval-storage-failure");
         let server = Arc::new(FilingServer::default());
-        let (mut brain, action) = filing_owner(&scratch, &server).await;
+        let (mut brain, action) = reviewed_filing_owner(&scratch, &server).await;
         let conn = rusqlite::Connection::open(scratch.db()).unwrap();
         conn.execute_batch(
             "CREATE TRIGGER refuse_approval BEFORE UPDATE ON actions
@@ -188,7 +211,7 @@ async fn a_failed_approval_write_is_spent_only_if_its_compensation_commits() {
         let consent = IssueOp::Consent {
             draft: action.draft,
             hash: action.hash(),
-            approval: ApprovalRev(1),
+            approval: ApprovalRev(2),
             decision: Decision::File,
         };
         let effects = brain
@@ -205,6 +228,7 @@ async fn a_failed_approval_write_is_spent_only_if_its_compensation_commits() {
             .unwrap()
             .unwrap();
         assert!(matches!(failed, Input::IssueWritten { reply: Err(()), .. }));
+        assert_eq!(brain.filing.review_counts(), (0, 0));
         assert_eq!(
             Store::open(&scratch.db())
                 .unwrap()
@@ -219,7 +243,11 @@ async fn a_failed_approval_write_is_spent_only_if_its_compensation_commits() {
         assert!(matches!(
             &effects[..],
             [Effect::Store(StoreOp::Issue {
-                write: Write::CancelledConsent { .. },
+                write: Write::CancelledConsent {
+                    at: StateVersion(2),
+                    approval: ApprovalRev(2),
+                    ..
+                },
                 scope: None,
                 ..
             })]
@@ -230,8 +258,9 @@ async fn a_failed_approval_write_is_spent_only_if_its_compensation_commits() {
             assert_eq!(
                 terminal,
                 vec![ControlToShell::IssueUnavailable {
+                    kind: IssueUnavailableKind::Action,
                     request: 904,
-                    draft: action.draft
+                    draft: action.draft,
                 }]
             );
             action.clone()
@@ -241,21 +270,75 @@ async fn a_failed_approval_write_is_spent_only_if_its_compensation_commits() {
                 vec![ControlToShell::ActionState {
                     request: Some(904),
                     draft: action.draft,
-                    version: StateVersion(3),
+                    version: StateVersion(4),
                     state: ActionState::Failed(kumochi_protocol::message::FailReason::Interrupted),
-                    approval: Some(ApprovalRev(2)),
+                    approval: Some(ApprovalRev(3)),
                 }]
             );
             Action {
-                version: StateVersion(3),
+                version: StateVersion(4),
                 stage: Stage::Failed {
                     reason: kumochi_protocol::message::FailReason::Interrupted,
                 },
-                approval: Some(ApprovalRev(2)),
-                consumed: Some(ApprovalRev(1)),
+                approval: Some(ApprovalRev(3)),
+                consumed: Some(ApprovalRev(2)),
                 ..action.clone()
             }
         };
+        assert!(!brain.filing.pending());
+        if keep_failing {
+            conn.execute_batch("DROP TRIGGER refuse_approval;").unwrap();
+        }
+        for request in [904, 905] {
+            let effects = brain
+                .issue_op(
+                    brain.issue_session().unwrap(),
+                    request,
+                    &consent,
+                    Some(brain.epoch),
+                )
+                .unwrap();
+            assert_eq!(
+                effects,
+                vec![Effect::Control(ControlToShell::IssueUnavailable {
+                    kind: IssueUnavailableKind::Action,
+                    request,
+                    draft: action.draft,
+                })]
+            );
+            assert_eq!(brain.filing.deadline_for_test(), None);
+            assert_eq!(brain.filing.review_counts(), (0, 0));
+            assert_eq!(
+                Store::open(&scratch.db())
+                    .unwrap()
+                    .action(action.draft)
+                    .unwrap(),
+                Some(saved.clone())
+            );
+            assert_eq!(server.factories.load(Ordering::SeqCst), 0);
+            assert_eq!(server.gets.load(Ordering::SeqCst), 0);
+            assert_eq!(server.posts.load(Ordering::SeqCst), 0);
+            assert_eq!(server.receipt.load(Ordering::Acquire), 0);
+        }
+        brain.prepare_issue_session(Incarnation(1));
+        let effects = brain
+            .issue_op(
+                brain.issue_session().unwrap(),
+                0,
+                &consent,
+                Some(brain.epoch),
+            )
+            .unwrap();
+        assert_eq!(
+            effects,
+            vec![Effect::Control(ControlToShell::IssueUnavailable {
+                kind: IssueUnavailableKind::Action,
+                request: 0,
+                draft: action.draft,
+            })]
+        );
+        assert_eq!(brain.filing.review_counts(), (0, 0));
+        assert_eq!(brain.filing.deadline_for_test(), None);
         assert_eq!(
             Store::open(&scratch.db())
                 .unwrap()
@@ -263,82 +346,109 @@ async fn a_failed_approval_write_is_spent_only_if_its_compensation_commits() {
                 .unwrap(),
             Some(saved.clone())
         );
-        assert!(!brain.filing.pending());
+        drop(conn);
+        brain.close().await;
+        let (restarted, other) = filing_owner(&scratch, &server).await;
+        brain = restarted;
+        assert_ne!(other.draft, action.draft);
+        let effects = brain
+            .issue_op(
+                brain.issue_session().unwrap(),
+                0,
+                &consent,
+                Some(brain.epoch),
+            )
+            .unwrap();
+        assert_eq!(
+            effects,
+            vec![Effect::Control(ControlToShell::IssueUnavailable {
+                kind: IssueUnavailableKind::Action,
+                request: 0,
+                draft: action.draft,
+            })]
+        );
+        assert_eq!(brain.filing.review_counts(), (0, 0));
+        assert_eq!(brain.filing.deadline_for_test(), None);
+        assert_eq!(
+            Store::open(&scratch.db())
+                .unwrap()
+                .action(action.draft)
+                .unwrap(),
+            Some(saved.clone())
+        );
         assert_eq!(server.factories.load(Ordering::SeqCst), 0);
         assert_eq!(server.gets.load(Ordering::SeqCst), 0);
         assert_eq!(server.posts.load(Ordering::SeqCst), 0);
         assert_eq!(server.receipt.load(Ordering::Acquire), 0);
-        if keep_failing {
-            conn.execute_batch("DROP TRIGGER refuse_approval;").unwrap();
-            let effects = brain
-                .issue_op(
-                    brain.issue_session().unwrap(),
-                    905,
-                    &consent,
-                    Some(brain.epoch),
-                )
-                .unwrap();
-            brain.apply(effects, None).unwrap();
-            assert_eq!(
-                settle(&mut brain).await,
-                vec![
-                    ControlToShell::ActionState {
-                        request: None,
-                        draft: action.draft,
-                        version: StateVersion(2),
-                        state: ActionState::Sending,
-                        approval: None
+        let fresh = rearm_filing(&scratch, &mut brain, &saved, 906).await;
+        assert_ne!(fresh.approval, action.approval);
+        assert_ne!(fresh.approval, other.approval);
+        let effects = brain
+            .issue_op(
+                brain.issue_session().unwrap(),
+                907,
+                &IssueOp::Consent {
+                    draft: fresh.draft,
+                    hash: fresh.hash(),
+                    approval: fresh.approval.unwrap(),
+                    decision: Decision::File,
+                },
+                Some(brain.epoch),
+            )
+            .unwrap();
+        brain.apply(effects, None).unwrap();
+        assert_eq!(
+            settle(&mut brain).await,
+            vec![
+                ControlToShell::ActionState {
+                    request: None,
+                    draft: fresh.draft,
+                    version: StateVersion(fresh.version.0 + 1),
+                    state: ActionState::Sending,
+                    approval: None,
+                },
+                ControlToShell::ActionState {
+                    request: None,
+                    draft: fresh.draft,
+                    version: StateVersion(fresh.version.0 + 2),
+                    state: ActionState::Sending,
+                    approval: None,
+                },
+                ControlToShell::ActionState {
+                    request: Some(907),
+                    draft: fresh.draft,
+                    version: StateVersion(fresh.version.0 + 3),
+                    state: ActionState::Filed {
+                        number: 17,
+                        url: IssueUrl::new("https://github.com/owner/repo/issues/17").unwrap(),
+                        confirmed_by_user: false,
+                        maybe_duplicate: false,
                     },
-                    ControlToShell::ActionState {
-                        request: None,
-                        draft: action.draft,
-                        version: StateVersion(3),
-                        state: ActionState::Sending,
-                        approval: None
-                    },
-                    ControlToShell::ActionState {
-                        request: Some(905),
-                        draft: action.draft,
-                        version: StateVersion(4),
-                        state: ActionState::Filed {
-                            number: 17,
-                            url: IssueUrl::new("https://github.com/owner/repo/issues/17").unwrap(),
-                            confirmed_by_user: false,
-                            maybe_duplicate: false
-                        },
-                        approval: None
-                    },
-                ]
-            );
-            assert_eq!(server.factories.load(Ordering::SeqCst), 1);
-            assert_eq!(server.gets.load(Ordering::SeqCst), 4);
-            assert_eq!(server.posts.load(Ordering::SeqCst), 1);
-            assert_eq!(server.receipt.load(Ordering::Acquire), 17);
-        } else {
-            let effects = brain
-                .issue_op(
-                    brain.issue_session().unwrap(),
-                    905,
-                    &consent,
-                    Some(brain.epoch),
-                )
-                .unwrap();
-            brain.apply(effects, None).unwrap();
-            assert_eq!(
-                settle(&mut brain).await,
-                vec![ControlToShell::ActionState {
-                    request: Some(905),
-                    draft: action.draft,
-                    version: StateVersion(3),
-                    state: ActionState::Failed(kumochi_protocol::message::FailReason::Interrupted),
-                    approval: Some(ApprovalRev(2)),
-                }]
-            );
-            assert_eq!(server.factories.load(Ordering::SeqCst), 0);
-            assert_eq!(server.gets.load(Ordering::SeqCst), 0);
-            assert_eq!(server.posts.load(Ordering::SeqCst), 0);
-        }
-        drop(conn);
+                    approval: None,
+                },
+            ]
+        );
+        assert_eq!(
+            Store::open(&scratch.db())
+                .unwrap()
+                .action(fresh.draft)
+                .unwrap(),
+            Some(Action {
+                version: StateVersion(fresh.version.0 + 3),
+                stage: Stage::Filed {
+                    number: NonZeroU64::new(17).unwrap(),
+                    confirmed: false,
+                    maybe_duplicate: false,
+                },
+                approval: None,
+                consumed: fresh.approval,
+                ..fresh
+            })
+        );
+        assert_eq!(server.factories.load(Ordering::SeqCst), 1);
+        assert_eq!(server.gets.load(Ordering::SeqCst), 4);
+        assert_eq!(server.posts.load(Ordering::SeqCst), 1);
+        assert_eq!(server.receipt.load(Ordering::Acquire), 17);
         brain.close().await;
     }
 }
@@ -351,7 +461,7 @@ async fn a_failed_approval_write_is_spent_only_if_its_compensation_commits() {
 async fn a_storage_terminal_after_posting_cannot_unlock_a_second_post() {
     let scratch = Scratch::new("github-filing-posting-storage-terminal");
     let server = Arc::new(FilingServer::default());
-    let (mut brain, action) = filing_owner(&scratch, &server).await;
+    let (mut brain, action) = reviewed_filing_owner(&scratch, &server).await;
     let (posting, _) = super::authority::posting_acknowledgement(&mut brain, &action).await;
     let conn = rusqlite::Connection::open(scratch.db()).unwrap();
     conn.execute_batch(
@@ -365,12 +475,13 @@ async fn a_storage_terminal_after_posting_cannot_unlock_a_second_post() {
     assert_eq!(
         settle(&mut brain).await,
         vec![ControlToShell::IssueUnavailable {
+            kind: IssueUnavailableKind::AttemptNotSaved,
             request: 601,
             draft: action.draft
         }]
     );
     let posted = Action {
-        version: StateVersion(3),
+        version: StateVersion(4),
         stage: Stage::Posting {
             mark: Mark {
                 at_s: NonZeroU64::new(120).unwrap(),
@@ -379,7 +490,7 @@ async fn a_storage_terminal_after_posting_cannot_unlock_a_second_post() {
             unresolved: None,
         },
         approval: None,
-        consumed: Some(ApprovalRev(1)),
+        consumed: Some(ApprovalRev(2)),
         ..action.clone()
     };
     assert_eq!(
@@ -396,23 +507,22 @@ async fn a_storage_terminal_after_posting_cannot_unlock_a_second_post() {
             &IssueOp::Consent {
                 draft: action.draft,
                 hash: action.hash(),
-                approval: ApprovalRev(1),
+                approval: ApprovalRev(2),
                 decision: Decision::File,
             },
             Some(brain.epoch),
         )
         .unwrap();
-    brain.apply(effects, None).unwrap();
     assert_eq!(
-        settle(&mut brain).await,
-        vec![ControlToShell::ActionState {
-            request: Some(906),
+        effects,
+        vec![Effect::Control(ControlToShell::IssueUnavailable {
+            kind: IssueUnavailableKind::Action,
+            request: 906,
             draft: action.draft,
-            version: StateVersion(3),
-            state: ActionState::Sending,
-            approval: None
-        }]
+        })]
     );
+    brain.apply(effects, None).unwrap();
+    assert!(!brain.filing.pending());
     let second = {
         let mut store = Store::open(&scratch.db()).unwrap();
         store
@@ -428,15 +538,18 @@ async fn a_storage_terminal_after_posting_cannot_unlock_a_second_post() {
             )
             .unwrap()
     };
-    assert_eq!(second.approval, Some(ApprovalRev(2)));
+    assert_eq!(second.approval, Some(ApprovalRev(3)));
+    let second = rearm_filing(&scratch, &mut brain, &second, 907).await;
+    assert_eq!(second.version, StateVersion(2));
+    assert_eq!(second.approval, Some(ApprovalRev(4)));
     let effects = brain
         .issue_op(
             brain.issue_session().unwrap(),
-            907,
+            908,
             &IssueOp::Consent {
                 draft: second.draft,
                 hash: second.hash(),
-                approval: ApprovalRev(2),
+                approval: ApprovalRev(4),
                 decision: Decision::File,
             },
             Some(brain.epoch),
@@ -447,17 +560,17 @@ async fn a_storage_terminal_after_posting_cannot_unlock_a_second_post() {
         settle(&mut brain).await,
         vec![
             ControlToShell::ActionState {
-                request: Some(907),
+                request: Some(908),
                 draft: second.draft,
-                version: StateVersion(2),
+                version: StateVersion(3),
                 state: ActionState::Draft,
-                approval: Some(ApprovalRev(3))
+                approval: Some(ApprovalRev(5))
             },
             ControlToShell::IssueRefused {
-                request: 907,
+                request: 908,
                 draft: second.draft,
-                version: StateVersion(2),
-                approval: Some(ApprovalRev(3)),
+                version: StateVersion(3),
+                approval: Some(ApprovalRev(5)),
                 reason: kumochi_protocol::message::IssueRefused::UnresolvedDraft {
                     draft: action.draft
                 }
@@ -477,7 +590,7 @@ async fn a_storage_terminal_after_posting_cannot_unlock_a_second_post() {
     assert_eq!(
         reopened.action(action.draft).unwrap(),
         Some(Action {
-            version: StateVersion(4),
+            version: StateVersion(5),
             stage: Stage::Unknown {
                 mark: Mark {
                     at_s: NonZeroU64::new(120).unwrap(),
@@ -485,8 +598,8 @@ async fn a_storage_terminal_after_posting_cannot_unlock_a_second_post() {
                 },
                 lookup: LookupResult::Pending,
             },
-            approval: Some(ApprovalRev(4)),
-            consumed: Some(ApprovalRev(1)),
+            approval: Some(ApprovalRev(6)),
+            consumed: Some(ApprovalRev(2)),
             uncertain: 1,
             ..action
         })

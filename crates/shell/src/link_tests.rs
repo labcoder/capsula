@@ -1143,6 +1143,7 @@ fn staged_issue_controls_keep_the_link_and_cards_return_exact_credit() {
         ControlToShell::IssueUnavailable {
             request: 8,
             draft: DraftId(9),
+            kind: kumochi_protocol::message::IssueUnavailableKind::Action,
         },
         ControlToShell::Ping,
     ] {
@@ -1199,12 +1200,46 @@ fn staged_issue_controls_keep_the_link_and_cards_return_exact_credit() {
         generation,
         request,
         draft,
+        kind,
     } = next(&events)
     else {
         panic!("terminal storage failure reaches its session-fenced consumer");
     };
     assert_eq!(generation, session.generation());
     assert_eq!((request, draft), (8, DraftId(9)));
+    assert_eq!(
+        kind,
+        kumochi_protocol::message::IssueUnavailableKind::Action
+    );
+    for kind in [
+        kumochi_protocol::message::IssueUnavailableKind::ReviewNotSaved,
+        kumochi_protocol::message::IssueUnavailableKind::ReviewCapacity,
+        kumochi_protocol::message::IssueUnavailableKind::AttemptNotSaved,
+    ] {
+        frame::write(
+            &mut &link.control,
+            &ControlToShell::IssueUnavailable {
+                request: 9,
+                draft: DraftId(9),
+                kind,
+            },
+            Pipe::Control,
+        )
+        .expect("typed terminal");
+        let LinkEvent::IssueUnavailable {
+            generation,
+            request,
+            draft,
+            kind: received,
+        } = next(&events)
+        else {
+            panic!("typed terminal reaches its consumer");
+        };
+        assert_eq!(
+            (generation, request, draft, received),
+            (session.generation(), 9, DraftId(9), kind)
+        );
+    }
     let card = DataToShell::IssueCard(IssueCard {
         draft: DraftId(9),
         thread: ThreadId(3),
@@ -1237,6 +1272,33 @@ fn staged_issue_controls_keep_the_link_and_cards_return_exact_credit() {
     session.grant(credit);
     assert_eq!(
         frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).expect("read"),
+        Some(DataToBrain::Credit { bytes })
+    );
+    let DataToShell::IssueCard(card) = card else {
+        panic!("card fixture");
+    };
+    let review = DataToShell::IssueReview {
+        request: u64::MAX,
+        card,
+    };
+    frame::write(&mut &*link.data, &review, Pipe::Data).expect("review data");
+    let LinkEvent::Data {
+        generation,
+        message,
+        bytes,
+    } = next(&events)
+    else {
+        panic!("review stays on data");
+    };
+    assert_eq!(generation, session.generation());
+    assert_eq!(message, review);
+    assert_eq!(
+        usize::try_from(bytes).unwrap(),
+        frame::encode(&review, Pipe::Data).unwrap().len()
+    );
+    session.grant(bytes);
+    assert_eq!(
+        frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).unwrap(),
         Some(DataToBrain::Credit { bytes })
     );
     drop(link.control);

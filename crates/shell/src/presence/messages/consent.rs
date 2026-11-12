@@ -1,11 +1,11 @@
 use super::*;
 use crate::confirmation;
-use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::{AppContext as _, ScrollHandle, StatefulInteractiveElement as _};
+use gpui_kit::component::{Disableable as _, WindowExt as _};
+use gpui_kit::{AnyWindowHandle, AppContext as _, ScrollHandle, StatefulInteractiveElement as _};
 use kumochi_protocol::message::{
     ApprovalRev, ContentHash, ControlToBrain, Decision, DraftId, GitHubOp, GitHubView, IssueCard,
-    IssueOp, StateVersion,
+    IssueOp, IssueSession, StateVersion,
 };
 use std::cell::{Cell, Ref};
 use std::sync::Arc;
@@ -14,12 +14,34 @@ pub(super) struct Pending {
     draft: DraftId,
     thread: ThreadId,
     version: StateVersion,
+    previous_approval: Option<ApprovalRev>,
     hash: ContentHash,
-    approval: ApprovalRev,
+    review: u64,
+    scope: u64,
+    session: IssueSession,
     generation: u64,
     origin: Arc<()>,
     live: Rc<Cell<bool>>,
-    dialog: confirmation::Handle,
+    stage: Stage,
+}
+
+enum Stage {
+    Awaiting,
+    Offered {
+        version: StateVersion,
+        approval: ApprovalRev,
+        dialog: confirmation::Handle,
+    },
+}
+
+pub(in crate::presence) struct Route {
+    session: crate::link::Session,
+    request: u64,
+    draft: DraftId,
+    view: WeakEntity<Messages>,
+    window: AnyWindowHandle,
+    live: Rc<Cell<bool>>,
+    delivered: bool,
 }
 
 impl std::fmt::Debug for Pending {
@@ -120,7 +142,7 @@ impl Messages {
     fn current_issue<'a>(&'a self, draft: DraftId, cx: &'a App) -> Option<Ref<'a, IssueCard>> {
         let model = self.model.read(cx);
         let entry = model.issue(draft)?;
-        if entry.loading() || entry.pending() || !model.loaded {
+        if entry.loading() || entry.pending_action() || !model.loaded {
             return None;
         }
         let card = entry.card()?;
@@ -133,6 +155,9 @@ impl Messages {
     }
 
     fn eligible_issue<'a>(&'a self, draft: DraftId, cx: &'a App) -> Option<Ref<'a, IssueCard>> {
+        if self.model.read(cx).issue(draft)?.review_blocked() {
+            return None;
+        }
         let card = self.current_issue(draft, cx)?;
         fileable(&card, &self.owner, cx).then_some(card)
     }
@@ -143,22 +168,39 @@ impl Messages {
         };
         let owner = owner.read(cx);
         let github = &owner.settings.read(cx).github;
-        owner.session.as_ref().map(crate::link::Session::generation) == Some(pending.generation)
-            && Arc::ptr_eq(&github.origin, &pending.origin)
-            && self.eligible_issue(pending.draft, cx).is_some_and(|card| {
-                (card.thread, card.version, card.hash, card.approval)
-                    == (
-                        pending.thread,
-                        pending.version,
-                        pending.hash,
-                        Some(pending.approval),
-                    )
-            })
+        if !owner.session.as_ref().is_some_and(|session| {
+            session.generation() == pending.generation && session.issue_session() == pending.session
+        }) || !Arc::ptr_eq(&github.origin, &pending.origin)
+            || !github.allows(Some(pending.generation), &GitHubOp::RefreshRepos)
+            || github.error.is_some()
+        {
+            return false;
+        }
+        let model = self.model.read(cx);
+        if !model.loaded
+            || model.open != Some(pending.thread)
+            || model.issue_scope() != pending.scope
+            || model.deleting.contains(&pending.thread)
+            || model.issue(pending.draft).is_none()
+        {
+            return false;
+        }
+        match &pending.stage {
+            Stage::Awaiting => true,
+            Stage::Offered {
+                version, approval, ..
+            } => self.eligible_issue(pending.draft, cx).is_some_and(|card| {
+                (card.version, card.hash, card.approval)
+                    == (*version, pending.hash, Some(*approval))
+            }),
+        }
     }
 
     pub(super) fn dismiss_stale_issue(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         if self.pending_issue.as_ref().is_some_and(|pending| {
-            !pending.live.get() || !pending.dialog.live() || !self.matches_issue(pending, cx)
+            !pending.live.get()
+                || matches!(&pending.stage, Stage::Offered { dialog, .. } if !dialog.live())
+                || !self.matches_issue(pending, cx)
         }) {
             self.retire_issue(window, cx);
         }
@@ -167,7 +209,52 @@ impl Messages {
     pub(super) fn retire_issue(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         if let Some(pending) = self.pending_issue.take() {
             pending.live.set(false);
-            pending.dialog.dismiss(window, cx);
+            if let Stage::Offered { dialog, .. } = pending.stage {
+                dialog.dismiss(window, cx);
+            }
+            let _gone = self.owner.update(cx, |owner, cx| {
+                owner.cancel_issue_review(pending.review, cx);
+            });
+        }
+    }
+
+    fn retire_review_if(&mut self, review: u64, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if self
+            .pending_issue
+            .as_ref()
+            .is_some_and(|pending| pending.review == review)
+        {
+            self.retire_issue(window, cx);
+        }
+    }
+
+    pub(super) fn cancel_waiting_review(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        if self
+            .pending_issue
+            .as_ref()
+            .is_some_and(|pending| matches!(&pending.stage, Stage::Awaiting))
+        {
+            self.retire_issue(window, cx);
+            return true;
+        }
+        false
+    }
+
+    pub(super) fn release_issue(&mut self, window: AnyWindowHandle, cx: &mut App) {
+        if let Some(pending) = self.pending_issue.take() {
+            pending.live.set(false);
+            let _gone = self.owner.update(cx, |owner, cx| {
+                owner.cancel_issue_review(pending.review, cx);
+            });
+            if let Stage::Offered { dialog, .. } = pending.stage {
+                cx.defer(move |cx| {
+                    let _closed = window.update(cx, |_, window, cx| dialog.dismiss(window, cx));
+                });
+            }
         }
     }
 
@@ -184,22 +271,30 @@ impl Messages {
         let Some(pending) = self.pending_issue.take() else {
             return false;
         };
-        let live = pending.live.replace(false);
+        let offered = match &pending.stage {
+            Stage::Offered { approval, .. } => Some(*approval),
+            Stage::Awaiting => None,
+        };
         if !confirmed
-            || !live
+            || !pending.live.get()
+            || offered.is_none()
             || !window.is_window_active()
             || !window.is_visible()
             || !self.matches_issue(&pending, cx)
         {
+            self.pending_issue = Some(pending);
+            self.retire_issue(window, cx);
             return false;
         }
+        pending.live.set(false);
         self.owner
             .update(cx, |owner, cx| {
-                owner.send_issue(
+                owner.confirm_issue_review(
+                    pending.review,
                     IssueOp::Consent {
                         draft: pending.draft,
                         hash: pending.hash,
-                        approval: pending.approval,
+                        approval: offered.expect("the offered phase was checked"),
                         decision: Decision::File,
                     },
                     cx,
@@ -214,7 +309,9 @@ impl Messages {
         }
         let draft = match op {
             IssueOp::Discard { draft } | IssueOp::CheckAgain { draft } => draft,
-            IssueOp::Consent { .. } => return,
+            IssueOp::Consent { .. } | IssueOp::Rearm { .. } | IssueOp::CancelReview { .. } => {
+                return;
+            }
         };
         let Some(card) = self.current_issue(draft, cx) else {
             return;
@@ -239,23 +336,18 @@ impl Messages {
         cx: &mut Context<'_, Self>,
     ) -> bool {
         self.dismiss_stale_issue(window, cx);
-        if self.pending_issue.is_some() || !window.is_window_active() || !window.is_visible() {
+        if self.pending_issue.is_some()
+            || !window.is_window_active()
+            || !window.is_visible()
+            || window.has_active_dialog(cx)
+        {
             return false;
         }
         let Some(card) = self.eligible_issue(draft, cx) else {
             return false;
         };
-        let (thread, version, hash, approval) = (
-            card.thread,
-            card.version,
-            card.hash,
-            card.approval.expect("eligible cards have an approval"),
-        );
-        let strings = cx.global::<Strings>();
-        let preview = Preview::new(&card, cx);
-        let heading = strings.get(Text::IssueConsentTitle).into();
-        let cancel = strings.get(Text::IssueConsentCancel).into();
-        let confirm = strings.get(Text::IssueConsentConfirm).into();
+        let (thread, version, hash, previous_approval) =
+            (card.thread, card.version, card.hash, card.approval);
         drop(card);
         let Some(owner) = self.owner.upgrade() else {
             return false;
@@ -266,7 +358,98 @@ impl Messages {
             .as_ref()
             .expect("eligibility checked the session")
             .generation();
+        let session = owner
+            .session
+            .as_ref()
+            .expect("eligibility checked the session")
+            .issue_session();
         let origin = Arc::clone(&owner.settings.read(cx).github.origin);
+        let scope = self.model.read(cx).issue_scope();
+        let live = Rc::new(Cell::new(true));
+        let view = cx.weak_entity();
+        let review = self
+            .owner
+            .update(cx, |owner, cx| {
+                owner.begin_issue_review(
+                    IssueOp::Rearm {
+                        draft,
+                        version,
+                        hash,
+                    },
+                    view,
+                    window.window_handle(),
+                    Rc::clone(&live),
+                    cx,
+                )
+            })
+            .ok()
+            .flatten();
+        let Some(review) = review else {
+            return false;
+        };
+        self.pending_issue = Some(Pending {
+            draft,
+            thread,
+            version,
+            previous_approval,
+            hash,
+            review,
+            scope,
+            session,
+            generation,
+            origin,
+            live,
+            stage: Stage::Awaiting,
+        });
+        true
+    }
+
+    fn receive_issue_review(
+        &mut self,
+        request: u64,
+        card: IssueCard,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        let Some(mut pending) = self.pending_issue.take() else {
+            return false;
+        };
+        if pending.review != request || !matches!(&pending.stage, Stage::Awaiting) {
+            self.pending_issue = Some(pending);
+            return false;
+        }
+        if !pending.live.get()
+            || !window.is_window_active()
+            || !window.is_visible()
+            || !self.matches_issue(&pending, cx)
+            || card.draft != pending.draft
+            || card.thread != pending.thread
+            || card.hash != pending.hash
+            || card.version <= pending.version
+            || card.approval.is_none()
+            || card.approval == pending.previous_approval
+            || !fileable(&card, &self.owner, cx)
+        {
+            self.pending_issue = Some(pending);
+            self.retire_issue(window, cx);
+            return false;
+        }
+        let strings = cx.global::<Strings>();
+        let preview = Preview::new(&card, cx);
+        let heading = strings.get(Text::IssueConsentTitle).into();
+        let cancel = strings.get(Text::IssueConsentCancel).into();
+        let confirm = strings.get(Text::IssueConsentConfirm).into();
+        let version = card.version;
+        let approval = card.approval.expect("the offered approval was checked");
+        let accepted = self
+            .owner
+            .update(cx, |owner, cx| owner.accept_issue_review(request, card, cx))
+            .unwrap_or(false);
+        if !accepted {
+            self.pending_issue = Some(pending);
+            self.retire_issue(window, cx);
+            return false;
+        }
         let preview = cx.new(|_| preview);
         let view = cx.weak_entity();
         let Some(dialog) = confirmation::open_content(
@@ -285,29 +468,25 @@ impl Messages {
                 });
             },
         ) else {
+            self.pending_issue = Some(pending);
+            self.retire_issue(window, cx);
             return false;
         };
-        let live = Rc::new(Cell::new(true));
-        self.model
-            .update(cx, |model, _| model.begin_issue_confirmation(draft, &live));
-        self.pending_issue = Some(Pending {
-            draft,
-            thread,
-            version,
-            hash,
-            approval,
-            generation,
-            origin,
-            live,
-            dialog,
+        self.model.update(cx, |model, _| {
+            model.begin_issue_confirmation(pending.draft, &pending.live);
         });
+        pending.stage = Stage::Offered {
+            version,
+            approval,
+            dialog,
+        };
+        self.pending_issue = Some(pending);
         true
     }
 }
 
 fn fileable(card: &IssueCard, owner: &WeakEntity<Presence>, cx: &App) -> bool {
-    card.approval.is_some()
-        && matches!(card.state, ActionState::Draft | ActionState::Failed(_))
+    matches!(card.state, ActionState::Draft | ActionState::Failed(_))
         && bound_to_connection(card, owner, cx)
 }
 
@@ -350,7 +529,7 @@ pub(super) fn controls(
         card.state,
         ActionState::Draft | ActionState::Failed(_) | ActionState::Unknown { .. }
     );
-    let file = fileable(card, owner, cx);
+    let file = fileable(card, owner, cx) && !entry.review_blocked();
     let pending = entry.pending();
     let strings = cx.global::<Strings>();
     let mut controls = div().flex().flex_col().gap_2();
@@ -362,7 +541,7 @@ pub(super) fn controls(
                 Button::new(("issue-file", draft.0))
                     .debug_selector(move || format!("issue-file-{}", draft.0))
                     .label(strings.get(Text::IssueConsentOpen))
-                    .disabled(pending)
+                    .disabled(entry.pending_action())
                     .on_click(move |_, window, cx| {
                         let _gone = view.update(cx, |view, cx| {
                             view.open_issue_confirmation(draft, window, cx)
@@ -386,6 +565,21 @@ pub(super) fn controls(
             );
         }
         let view = view.clone();
+        if let Some(review) = entry.pending_review_request() {
+            let owner = owner.clone();
+            buttons = buttons.child(
+                Button::new(("issue-cancel-review", draft.0))
+                    .debug_selector(move || format!("issue-cancel-review-{}", draft.0))
+                    .label(strings.get(Text::IssueConsentCancel))
+                    .outline()
+                    .on_click(move |_, window, cx| {
+                        if window.is_window_active() && window.is_visible() {
+                            let _gone =
+                                owner.update(cx, |owner, cx| owner.cancel_issue_review(review, cx));
+                        }
+                    }),
+            );
+        }
         buttons = buttons.child(
             Button::new(("issue-dismiss", draft.0))
                 .debug_selector(move || format!("issue-dismiss-{}", draft.0))
@@ -400,6 +594,7 @@ pub(super) fn controls(
         );
         controls = controls.child(buttons);
         if !pending
+            && !entry.review_blocked()
             && ((!file && !matches!(card.state, ActionState::Unknown { .. }))
                 || !bound_to_connection(card, owner, cx))
         {
@@ -415,31 +610,225 @@ pub(super) fn controls(
 }
 
 impl Presence {
+    fn issue_message(&mut self, session: &crate::link::Session, op: IssueOp) -> Option<u64> {
+        let request = self.issue_request.checked_add(1)?;
+        self.issue_request = request;
+        self.link
+            .send_control(
+                session,
+                ControlToBrain::Issue {
+                    session: session.issue_session(),
+                    request,
+                    op,
+                },
+            )
+            .then_some(request)
+    }
+
+    fn begin_issue_review(
+        &mut self,
+        op: IssueOp,
+        view: WeakEntity<Messages>,
+        window: AnyWindowHandle,
+        live: Rc<Cell<bool>>,
+        cx: &mut Context<'_, Self>,
+    ) -> Option<u64> {
+        let IssueOp::Rearm { draft, .. } = op else {
+            return None;
+        };
+        self.retire_issue_review(cx);
+        let session = self.session.clone()?;
+        let Some(request) = self.issue_message(&session, op) else {
+            self.threads.update(cx, |model, cx| {
+                model.issue_submitted(draft, None);
+                cx.notify();
+            });
+            self.chat.update(cx, |_, cx| cx.notify());
+            self.link.end(&session);
+            return None;
+        };
+        self.issue_review = Some(Route {
+            session,
+            request,
+            draft,
+            view,
+            window,
+            live,
+            delivered: false,
+        });
+        self.threads.update(cx, |model, cx| {
+            model.issue_review_started(draft, request);
+            cx.notify();
+        });
+        self.chat.update(cx, |_, cx| cx.notify());
+        Some(request)
+    }
+
+    fn cancel_review_route(&mut self, route: Route, cx: &mut Context<'_, Self>) {
+        route.live.set(false);
+        if self.session.as_ref().is_some_and(|session| {
+            session.generation() == route.session.generation()
+                && session.issue_session() == route.session.issue_session()
+        }) && self
+            .issue_message(
+                &route.session,
+                IssueOp::CancelReview {
+                    draft: route.draft,
+                    review: route.request,
+                },
+            )
+            .is_none()
+        {
+            self.link.end(&route.session);
+        }
+        self.threads.update(cx, |model, cx| {
+            model.cancel_issue_review(route.request, route.draft);
+            cx.notify();
+        });
+        self.chat.update(cx, |_, cx| cx.notify());
+        cx.defer(move |cx| {
+            let _gone = route.window.update(cx, |_, window, cx| {
+                route.view.update(cx, |view, cx| {
+                    view.retire_review_if(route.request, window, cx);
+                })
+            });
+        });
+    }
+
+    pub(in crate::presence) fn retire_issue_review(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(route) = self.issue_review.take() {
+            self.cancel_review_route(route, cx);
+        }
+    }
+
+    fn cancel_issue_review(&mut self, review: u64, cx: &mut Context<'_, Self>) {
+        if self
+            .issue_review
+            .as_ref()
+            .is_some_and(|route| route.request == review)
+        {
+            self.retire_issue_review(cx);
+        }
+    }
+
+    pub(in crate::presence) fn fail_issue_review(
+        &mut self,
+        request: u64,
+        draft: DraftId,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self
+            .issue_review
+            .as_ref()
+            .is_some_and(|route| route.request == request && route.draft == draft)
+        {
+            self.retire_issue_review(cx);
+        }
+    }
+
+    fn confirm_issue_review(
+        &mut self,
+        review: u64,
+        op: IssueOp,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        if self
+            .issue_review
+            .as_ref()
+            .is_none_or(|route| route.request != review || !route.delivered)
+        {
+            return false;
+        }
+        let route = self
+            .issue_review
+            .take()
+            .expect("the current offered route was checked");
+        route.live.set(false);
+        let queued = self.send_issue(op, cx);
+        if !queued {
+            self.cancel_review_route(route, cx);
+        }
+        queued
+    }
+
+    fn accept_issue_review(
+        &mut self,
+        request: u64,
+        card: IssueCard,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        if self
+            .issue_review
+            .as_ref()
+            .is_none_or(|route| route.request != request || !route.live.get() || !route.delivered)
+        {
+            return false;
+        }
+        let accepted = self.threads.update(cx, |model, cx| {
+            let accepted = model.issue_review(request, card);
+            cx.notify();
+            accepted
+        });
+        self.chat.update(cx, |_, cx| cx.notify());
+        accepted
+    }
+
+    pub(in crate::presence) fn deliver_issue_review(
+        &mut self,
+        request: u64,
+        card: IssueCard,
+        bytes: u32,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        let Some(route) = self.issue_review.as_mut().filter(|route| {
+            route.request == request
+                && route.draft == card.draft
+                && route.live.get()
+                && !route.delivered
+        }) else {
+            return false;
+        };
+        route.delivered = true;
+        let view = route.view.clone();
+        let window = route.window;
+        let session = route.session.clone();
+        let live = Rc::clone(&route.live);
+        let owner = cx.weak_entity();
+        cx.defer(move |cx| {
+            let accepted = live.get()
+                && window
+                    .update(cx, |_, window, cx| {
+                        view.update(cx, |view, cx| {
+                            view.receive_issue_review(request, card, window, cx)
+                        })
+                        .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+            if !accepted {
+                let _gone = owner.update(cx, |owner, cx| owner.cancel_issue_review(request, cx));
+            }
+            session.grant(bytes);
+        });
+        true
+    }
+
     fn send_issue(&mut self, op: IssueOp, cx: &mut Context<'_, Self>) -> bool {
         let draft = match op {
             IssueOp::Consent { draft, .. }
             | IssueOp::Discard { draft }
             | IssueOp::CheckAgain { draft } => draft,
+            IssueOp::Rearm { .. } | IssueOp::CancelReview { .. } => return false,
         };
-        let request = self.issue_request.checked_add(1);
-        let queued = request.is_some_and(|request| {
-            self.issue_request = request;
-            self.session.as_ref().is_some_and(|session| {
-                self.link.send_control(
-                    session,
-                    ControlToBrain::Issue {
-                        session: session.issue_session(),
-                        request,
-                        op,
-                    },
-                )
-            })
-        });
+        self.retire_issue_review(cx);
+        let request = self
+            .session
+            .clone()
+            .and_then(|session| self.issue_message(&session, op));
         self.threads.update(cx, |model, cx| {
-            model.issue_submitted(draft, request.filter(|_| queued));
+            model.issue_submitted(draft, request);
             cx.notify();
         });
         self.chat.update(cx, |_, cx| cx.notify());
-        queued
+        request.is_some()
     }
 }

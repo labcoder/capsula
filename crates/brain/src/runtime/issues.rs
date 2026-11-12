@@ -6,7 +6,7 @@ use kumochi_protocol::{
     Secret,
     message::{
         ControlToShell, Decision, DraftId, FailReason, Incarnation, IssueOp, IssueRefused,
-        IssueSession,
+        IssueSession, IssueUnavailableKind,
     },
 };
 use tokio::{task::JoinHandle, time::Instant};
@@ -23,8 +23,10 @@ use crate::connections::{
 use crate::issues::{Action, Answer, Lookup, Stage, Write};
 
 mod network;
+mod reviews;
 pub(in crate::runtime) mod transport;
 use network::{Failure, Prepared};
+use reviews::{Offered, Rearm};
 use transport::{BoundedHttp, Control};
 
 #[cfg(test)]
@@ -37,6 +39,8 @@ pub(super) struct Filing {
     next_session: u64,
     pub(super) session: Option<IssueSession>,
     last_request: Option<(IssueSession, u64)>,
+    offers: Vec<Offered>,
+    rearms: Vec<Rearm>,
     job: Option<Job>,
     replies: Vec<Reply>,
 }
@@ -54,6 +58,8 @@ impl fmt::Debug for Filing {
         f.debug_struct("Filing")
             .field("busy", &self.job.is_some())
             .field("replies", &self.replies.len())
+            .field("offers", &self.offers.len())
+            .field("rearms", &self.rearms.len())
             .finish_non_exhaustive()
     }
 }
@@ -96,6 +102,7 @@ enum Outcome {
     Posted(CreateOutcome),
     Stopped,
     Deadline,
+    ReviewDeadline,
 }
 
 pub(super) struct Event {
@@ -118,14 +125,15 @@ impl Filing {
         self.next
     }
 
-    pub(super) fn cancel(&self) {
+    pub(super) fn cancel(&mut self) {
         if let Some(job) = &self.job {
             job.control.cancel();
         }
+        self.cancel_reviews();
     }
 
     pub(super) fn pending(&self) -> bool {
-        self.job.is_some() || !self.replies.is_empty()
+        self.job.is_some() || !self.replies.is_empty() || !self.rearms.is_empty()
     }
 
     #[cfg(test)]
@@ -133,16 +141,36 @@ impl Filing {
         self.job.as_ref().map(|job| job.control.deadline())
     }
 
+    #[cfg(test)]
+    pub(super) fn review_counts(&self) -> (usize, usize) {
+        (self.offers.len(), self.rearms.len())
+    }
+
     pub(super) async fn next(&mut self) -> Event {
-        let Some(job) = &mut self.job else {
-            return std::future::pending().await;
-        };
-        let deadline = (!job.control.cancelled()).then_some(job.control.deadline());
-        let id = job.id;
+        let review = self
+            .rearms
+            .iter()
+            .filter(|rearm| rearm.live)
+            .min_by_key(|rearm| rearm.deadline)
+            .map(|rearm| (rearm.serial, rearm.deadline));
+        let deadline = self
+            .job
+            .as_ref()
+            .filter(|job| !job.control.cancelled())
+            .map(|job| job.control.deadline());
+        let id = self.job.as_ref().map_or(0, |job| job.id);
+        let job = &mut self.job;
         tokio::select! {
             biased;
+            () = super::sleep_until(review.map(|(_, deadline)| deadline)) => Event {
+                id: review.expect("only a pending review has a deadline").0,
+                outcome: Outcome::ReviewDeadline,
+            },
             () = super::sleep_until(deadline) => Event { id, outcome: Outcome::Deadline },
             outcome = async {
+                let Some(job) = job else {
+                    return std::future::pending().await;
+                };
                 let outcome = match &mut job.phase {
                     Phase::Construction(task) => Outcome::Built(task.await.unwrap_or(Err(HttpError::Configuration))),
                     Phase::Network(task) => task.await.unwrap_or(Outcome::Stopped),
@@ -172,6 +200,7 @@ impl Filing {
 
 impl Brain {
     pub(crate) fn prepare_issue_session(&mut self, incarnation: Incarnation) -> IssueSession {
+        self.filing.cancel_reviews();
         self.filing.next_session = self
             .filing
             .next_session
@@ -189,6 +218,10 @@ impl Brain {
         self.filing.session
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one synchronous ingress removes permission before any non-transport refusal"
+    )]
     pub(super) fn issue_op(
         &mut self,
         session: IssueSession,
@@ -199,10 +232,24 @@ impl Brain {
         let draft = match op {
             IssueOp::Consent { draft, .. }
             | IssueOp::CheckAgain { draft }
-            | IssueOp::Discard { draft } => *draft,
+            | IssueOp::Discard { draft }
+            | IssueOp::Rearm { draft, .. }
+            | IssueOp::CancelReview { draft, .. } => *draft,
         };
         if self.issue_session() != Some(session) {
             return None;
+        }
+        let offered = if let IssueOp::Consent { approval, .. } = op {
+            self.filing
+                .offers
+                .iter()
+                .position(|offer| offer.approval == *approval)
+                .map(|index| self.filing.offers.swap_remove(index))
+        } else {
+            None
+        };
+        if let IssueOp::CancelReview { review, .. } = op {
+            self.filing.cancel_review(session, *review, draft);
         }
         if let Some((previous, last)) = self.filing.last_request
             && previous == session
@@ -214,27 +261,49 @@ impl Brain {
         if self.filing.replies.len() >= super::CONTROL_QUEUE {
             return None;
         }
+        match op {
+            IssueOp::CancelReview { .. } => return Some(Vec::new()),
+            IssueOp::Rearm {
+                draft,
+                version,
+                hash,
+            } => {
+                return Some(self.issue_rearm(session, request, *draft, *version, *hash, epoch));
+            }
+            _ => {}
+        }
         let available = epoch == Some(self.epoch) && self.filing.job.is_none();
         let (write, start, forced) = match op {
             IssueOp::Consent {
                 draft,
                 hash,
-                approval,
+                approval: _,
                 decision,
             } => {
-                let start = available && *decision == Decision::File;
+                let Some(offered) = offered else {
+                    return Some(self.issue_unavailable(self.epoch, request, *draft));
+                };
+                if offered.session != session
+                    || offered.draft != *draft
+                    || offered.hash != *hash
+                    || *decision != Decision::File
+                {
+                    return Some(self.issue_unavailable(self.epoch, request, *draft));
+                }
+                let start = available;
                 let mut live = self.account.github.issue_snapshot();
                 live.capacity = start;
                 (
                     Write::Consent {
                         draft: *draft,
-                        hash: *hash,
-                        approval: *approval,
+                        at: offered.version,
+                        hash: offered.hash,
+                        approval: offered.approval,
                         decision: *decision,
                         live,
                     },
                     start,
-                    (*decision != Decision::File).then_some(IssueRefused::NotAllowedNow),
+                    None,
                 )
             }
             IssueOp::CheckAgain { draft } => (
@@ -243,6 +312,9 @@ impl Brain {
                 (!available).then_some(IssueRefused::NotAllowedNow),
             ),
             IssueOp::Discard { draft } => (Write::Discard(*draft), false, None),
+            IssueOp::Rearm { .. } | IssueOp::CancelReview { .. } => {
+                unreachable!("review operations are routed before filing")
+            }
         };
         if !start {
             let serial = self.filing.serial();
@@ -293,6 +365,15 @@ impl Brain {
     pub(super) fn issue_written(&mut self, serial: u64, reply: Result<Answer, ()>) -> Vec<Effect> {
         if let Some(index) = self
             .filing
+            .rearms
+            .iter()
+            .position(|rearm| rearm.serial == serial)
+        {
+            let rearm = self.filing.rearms.swap_remove(index);
+            return self.issue_review_written(&rearm, reply);
+        }
+        if let Some(index) = self
+            .filing
             .replies
             .iter()
             .position(|pending| pending.serial == serial)
@@ -330,6 +411,7 @@ impl Brain {
             if matches!(after, AfterWrite::Admission)
                 && let Some(Write::Consent {
                     draft,
+                    at,
                     hash,
                     approval,
                     live,
@@ -338,6 +420,7 @@ impl Brain {
             {
                 let write = Write::CancelledConsent {
                     draft,
+                    at,
                     hash,
                     approval,
                     live,
@@ -351,9 +434,30 @@ impl Brain {
                 self.filing.job = Some(job);
                 return vec![effect];
             }
-            return self.issue_unavailable(job.epoch, job.request, job.draft);
+            return self.issue_unavailable_kind(
+                job.epoch,
+                job.request,
+                job.draft,
+                if job.control.may_have_sent() {
+                    IssueUnavailableKind::AttemptNotSaved
+                } else {
+                    IssueUnavailableKind::Action
+                },
+            );
         };
         job.admission = None;
+        if matches!(answer, Answer::Gone) {
+            return self.issue_unavailable_kind(
+                job.epoch,
+                job.request,
+                job.draft,
+                if job.control.may_have_sent() {
+                    IssueUnavailableKind::AttemptNotSaved
+                } else {
+                    IssueUnavailableKind::Action
+                },
+            );
+        }
         let active = match (&answer, after) {
             (Answer::Changed(action), AfterWrite::Admission) => {
                 matches!(action.stage, Stage::Preflight { .. })
@@ -410,7 +514,14 @@ impl Brain {
         effects
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one event router retains the entering job phase through cancellation and settlement"
+    )]
     pub(super) fn issue_event(&mut self, event: Event) -> Vec<Effect> {
+        if matches!(event.outcome, Outcome::ReviewDeadline) {
+            return self.issue_review_expired(event.id);
+        }
         let Some(mut job) = self.filing.job.take() else {
             return Vec::new();
         };
@@ -503,7 +614,9 @@ impl Brain {
                     effects.push(self.issue_unsent(&mut job, FailReason::PreflightFailed));
                 }
                 Outcome::Stopped => effects.push(self.issue_interrupted(&mut job)),
-                Outcome::Deadline => unreachable!("the deadline returned above"),
+                Outcome::Deadline | Outcome::ReviewDeadline => {
+                    unreachable!("deadlines returned above")
+                }
             }
         }
         self.filing.job = Some(job);
@@ -582,12 +695,23 @@ impl Brain {
     }
 
     fn issue_unavailable(&self, epoch: u64, request: u64, draft: DraftId) -> Vec<Effect> {
+        self.issue_unavailable_kind(epoch, request, draft, IssueUnavailableKind::Action)
+    }
+
+    fn issue_unavailable_kind(
+        &self,
+        epoch: u64,
+        request: u64,
+        draft: DraftId,
+        kind: IssueUnavailableKind,
+    ) -> Vec<Effect> {
         if epoch != self.epoch {
             return Vec::new();
         }
         vec![Effect::Control(ControlToShell::IssueUnavailable {
             request,
             draft,
+            kind,
         })]
     }
 

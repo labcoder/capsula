@@ -25,6 +25,7 @@ async fn failed_request_identities_are_fenced_at_zero_and_max_until_the_session_
         assert_eq!(
             brain.issue_written(*serial, Err(())),
             vec![Effect::Control(ControlToShell::IssueUnavailable {
+                kind: IssueUnavailableKind::Action,
                 request,
                 draft: DraftId(1),
             })]
@@ -37,6 +38,7 @@ async fn failed_request_identities_are_fenced_at_zero_and_max_until_the_session_
                 Some(brain.epoch)
             ),
             Some(vec![Effect::Control(ControlToShell::IssueUnavailable {
+                kind: IssueUnavailableKind::Action,
                 request,
                 draft: DraftId(2),
             })])
@@ -50,6 +52,7 @@ async fn failed_request_identities_are_fenced_at_zero_and_max_until_the_session_
                     Some(brain.epoch)
                 ),
                 Some(vec![Effect::Control(ControlToShell::IssueUnavailable {
+                    kind: IssueUnavailableKind::Action,
                     request: u64::MAX - 1,
                     draft: DraftId(3),
                 })])
@@ -91,6 +94,7 @@ async fn failed_request_identities_are_fenced_at_zero_and_max_until_the_session_
     assert_eq!(
         brain.issue_written(*serial, Err(())),
         vec![Effect::Control(ControlToShell::IssueUnavailable {
+            kind: IssueUnavailableKind::Action,
             request: 0,
             draft: DraftId(1)
         })]

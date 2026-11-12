@@ -11,7 +11,7 @@ use gpui_kit::{
 use kumochi_protocol::message::{ActionState, DraftId, EventId, PageEventKind, RunId, ThreadId};
 use std::rc::Rc;
 
-mod consent;
+pub(super) mod consent;
 
 use super::Presence;
 use crate::runs::Shown;
@@ -40,6 +40,7 @@ pub(super) struct Messages {
     github_watch: Option<Subscription>,
     _activation_watch: Subscription,
     _visibility_watch: Subscription,
+    _release_watch: Subscription,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -147,6 +148,8 @@ impl Messages {
                     view.retire_issue(window, cx);
                 }
             });
+        let release_window = window.window_handle();
+        let release_watch = cx.on_release(move |view, cx| view.release_issue(release_window, cx));
         Self {
             model,
             owner,
@@ -167,6 +170,7 @@ impl Messages {
             github_watch: None,
             _activation_watch: activation_watch,
             _visibility_watch: visibility_watch,
+            _release_watch: release_watch,
         }
     }
 
@@ -340,6 +344,13 @@ impl Render for Messages {
                 this.focus_ring_style(window, cx)
             })
             .key_context("ThreadMessages")
+            .on_key_down(
+                cx.listener(|view, event: &gpui_kit::KeyDownEvent, window, cx| {
+                    if event.keystroke.key == "escape" && view.cancel_waiting_review(window, cx) {
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .on_mouse_down(
                 gpui_kit::MouseButton::Left,
                 cx.listener(|view, _, window, cx| {
@@ -457,7 +468,15 @@ fn row(
             warning: warning.then(|| strings.get(Text::IssueDuplicate).into()),
             feedback: issue.as_ref().and_then(|entry| {
                 if entry.pending() {
-                    Some(strings.get(Text::IssuePending).into())
+                    Some(
+                        strings
+                            .get(if entry.pending_review() {
+                                Text::IssueReviewPending
+                            } else {
+                                Text::IssuePending
+                            })
+                            .into(),
+                    )
                 } else {
                     entry
                         .feedback
