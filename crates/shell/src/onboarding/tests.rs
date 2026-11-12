@@ -3,7 +3,7 @@ use kumochi_protocol::message::{
     SettingsView, SttUnload, ThreadId, UserName,
 };
 
-use super::{Landing, Next, Onboarding, Step, ThisRun};
+use super::{Landing, Next, Onboarding, Step, ThisRun, account_complete};
 use crate::settings::{Error, Field, Settings, Update};
 
 #[expect(
@@ -38,10 +38,12 @@ fn first_run(user: Option<&str>) -> (Settings, Onboarding) {
 /// Continue or Enter as the window runs it: save the step's field, then submit.
 fn press(settings: &mut Settings, onboarding: &mut Onboarding) -> (Vec<SettingsOp>, Next) {
     let mut sent = Vec::new();
-    settings.save(onboarding.step().field(), |op| {
-        sent.push(op);
-        true
-    });
+    if let Some(field) = onboarding.step().field() {
+        settings.save(field, |op| {
+            sent.push(op);
+            true
+        });
+    }
     (sent, onboarding.submit(settings))
 }
 
@@ -57,13 +59,20 @@ fn on_your_name(user: Option<&str>) -> (Settings, Onboarding) {
     (settings, onboarding)
 }
 
+fn on_accounts() -> (Settings, Onboarding) {
+    let (mut settings, mut onboarding) = on_your_name(None);
+    assert_eq!(press(&mut settings, &mut onboarding), (vec![], Next::Moved));
+    assert_eq!(onboarding.step(), Step::Accounts);
+    (settings, onboarding)
+}
+
 #[test]
 fn begin_resumes_at_the_first_step_not_completed_and_never_past_the_last_it_has() {
     for (from, step) in [
         (OnboardingStep::Welcome, Step::Welcome),
         (OnboardingStep::YourName, Step::YourName),
-        (OnboardingStep::Accounts, Step::YourName),
-        (OnboardingStep::Shortcut, Step::YourName),
+        (OnboardingStep::Accounts, Step::Accounts),
+        (OnboardingStep::Shortcut, Step::Accounts),
     ] {
         let view = SettingsView {
             onboarding_from: from,
@@ -74,6 +83,7 @@ fn begin_resumes_at_the_first_step_not_completed_and_never_past_the_last_it_has(
     }
     assert_eq!(Step::Welcome.recorded(), OnboardingStep::Welcome);
     assert_eq!(Step::YourName.recorded(), OnboardingStep::YourName);
+    assert_eq!(Step::Accounts.recorded(), OnboardingStep::Accounts);
 }
 
 #[test]
@@ -89,6 +99,12 @@ fn begin_is_owed_only_until_onboarded_and_an_onboarded_view_closes_at_any_step()
         Next::Close(Landing::Quiet)
     );
     let (mut settings, mut onboarding) = on_your_name(None);
+    settings.set_view(view("Kumo", None, true), Update::Unsolicited);
+    assert_eq!(
+        onboarding.settings_changed(&settings),
+        Next::Close(Landing::Quiet)
+    );
+    let (mut settings, mut onboarding) = on_accounts();
     settings.set_view(view("Kumo", None, true), Update::Unsolicited);
     assert_eq!(
         onboarding.settings_changed(&settings),
@@ -185,17 +201,56 @@ fn boundary_names_are_sent_trimmed() {
 }
 
 #[test]
-fn a_blank_name_with_nothing_saved_finishes_without_sending() {
+fn a_blank_name_with_nothing_saved_goes_on_without_sending() {
     let (mut settings, mut onboarding) = on_your_name(None);
     settings.change(Field::User, "  ");
+    assert_eq!(press(&mut settings, &mut onboarding), (vec![], Next::Moved));
+    assert_eq!(onboarding.step(), Step::Accounts);
+}
+
+/// The account step has no field: Continue or Not now goes on with nothing saved, and it's the
+/// last step this build has.
+#[test]
+fn the_account_step_finishes_with_nothing_saved() {
+    let (mut settings, mut onboarding) = on_accounts();
     assert_eq!(
         press(&mut settings, &mut onboarding),
         (vec![], Next::Finish)
     );
+    assert_eq!(onboarding.step(), Step::Accounts);
+    settings.disconnected();
+    assert_eq!(press(&mut settings, &mut onboarding), (vec![], Next::Stay));
 }
 
 #[test]
-fn a_blank_name_over_a_saved_one_clears_it_before_finishing() {
+fn only_a_signed_in_account_with_its_plan_and_nothing_owed_is_complete() {
+    use kumochi_protocol::message::{AccountRecovery, AccountView, PlanState};
+    let signed_in = |plan, recovery| AccountView::SignedIn {
+        email: None,
+        plan,
+        recovery,
+    };
+    assert!(account_complete(Some(&signed_in(PlanState::Enabled, None))));
+    assert!(account_complete(Some(&signed_in(
+        PlanState::Enabled,
+        Some(AccountRecovery::Retry)
+    ))));
+    for view in [
+        signed_in(PlanState::Enabled, Some(AccountRecovery::SignInAgain)),
+        signed_in(PlanState::Declined, None),
+        signed_in(PlanState::Unavailable, None),
+        AccountView::SigningIn,
+        AccountView::SignedOut {
+            revocation_unconfirmed: false,
+        },
+    ] {
+        assert!(!account_complete(Some(&view)), "{view:?}");
+    }
+    assert!(!account_complete(None));
+}
+
+#[test]
+fn a_blank_name_over_a_saved_one_clears_it_before_going_on() {
     let (mut settings, mut onboarding) = on_your_name(Some("Oscar"));
     settings.change(Field::User, "");
     assert_eq!(
@@ -204,7 +259,7 @@ fn a_blank_name_over_a_saved_one_clears_it_before_finishing() {
     );
     assert_eq!(
         answer(&mut settings, &mut onboarding, view("Kumo", None, false)),
-        Next::Finish
+        Next::Moved
     );
 }
 
@@ -278,7 +333,7 @@ fn a_disconnect_forgets_the_wait_and_the_step_stays_after_reconnect() {
 
 #[test]
 fn an_asked_finish_lands_on_the_peek_and_a_refused_one_can_be_asked_again() {
-    let (mut settings, mut onboarding) = on_your_name(None);
+    let (mut settings, mut onboarding) = on_accounts();
     assert_eq!(press(&mut settings, &mut onboarding).1, Next::Finish);
     assert!(settings.finish_onboarding(|op| op == SettingsOp::FinishOnboarding));
     onboarding.finish_queued(Landing::Peek);
@@ -305,7 +360,7 @@ fn an_asked_finish_lands_on_the_peek_and_a_refused_one_can_be_asked_again() {
 
 #[test]
 fn a_disconnect_forgets_a_queued_finish() {
-    let (mut settings, mut onboarding) = on_your_name(None);
+    let (mut settings, mut onboarding) = on_accounts();
     assert!(settings.finish_onboarding(|_| true));
     onboarding.finish_queued(Landing::Peek);
     settings.disconnected();

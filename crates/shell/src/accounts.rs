@@ -187,6 +187,16 @@ impl Accounts {
         self.waiting = Some(op);
         true
     }
+
+    /// Sends `CancelSignIn` without asking `allows`, for a dismissal that must cancel a sign-in
+    /// the brain hasn't answered or shown yet. The brain ignores it when nothing is signing in.
+    pub(crate) fn cancel_sign_in(&mut self, send: impl FnOnce(AccountOp) -> bool) -> bool {
+        if !send(AccountOp::CancelSignIn) {
+            return false;
+        }
+        self.waiting = Some(AccountOp::CancelSignIn);
+        true
+    }
 }
 
 #[cfg(test)]

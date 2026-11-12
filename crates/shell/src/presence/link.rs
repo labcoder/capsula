@@ -360,16 +360,23 @@ impl Presence {
 
     fn account_changed(&mut self, generation: u64, view: AccountView, cx: &mut Context<'_, Self>) {
         let current = self.session.as_ref().map(crate::link::Session::generation);
-        let recovered = self.settings.update(cx, |state, cx| {
+        let previous = self.settings.read(cx).accounts.generation;
+        let (accepted, recovered) = self.settings.update(cx, |state, cx| {
             if state.accounts.receive(current, generation, view) {
                 cx.notify();
-                return matches!(
-                    state.accounts.view,
-                    Some(AccountView::SignedIn { recovery: None, .. })
-                ) && state.accounts.error.is_none();
+                return (
+                    true,
+                    matches!(
+                        state.accounts.view,
+                        Some(AccountView::SignedIn { recovery: None, .. })
+                    ) && state.accounts.error.is_none(),
+                );
             }
-            false
+            (false, false)
         });
+        if accepted {
+            self.onboarding_account_seen(generation, previous, cx);
+        }
         if recovered {
             self.chat_notice.recovered();
             if self.settings.read(cx).notice().is_some_and(|error| {
@@ -382,17 +389,23 @@ impl Presence {
     }
 
     fn connections_changed(
-        &self,
+        &mut self,
         generation: u64,
         view: ConnectionsView,
         cx: &mut Context<'_, Self>,
     ) {
         let current = self.session.as_ref().map(crate::link::Session::generation);
-        self.settings.update(cx, |state, cx| {
-            if state.claude.receive(current, generation, view.claude_code) {
+        let previous = self.settings.read(cx).claude.generation;
+        let accepted = self.settings.update(cx, |state, cx| {
+            let accepted = state.claude.receive(current, generation, view.claude_code);
+            if accepted {
                 cx.notify();
             }
+            accepted
         });
+        if accepted {
+            self.onboarding_claude_seen(generation, previous, cx);
+        }
     }
 
     /// Scene frames go to the presenter even when stale, so it drops them off the UI thread.
@@ -553,6 +566,7 @@ impl Presence {
 
     /// Shows the brain's error in both panels and on the connected dock.
     fn show_error(&mut self, error: &UserError, source: Source, cx: &mut Context<'_, Self>) {
+        self.onboarding_sign_in_failed(error);
         let field = self.settings.update(cx, |state, cx| {
             state.accounts.error(error);
             let field = state.error(error.clone());
