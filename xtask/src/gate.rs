@@ -142,11 +142,14 @@ struct Images {
     shell_sha256: String,
     brain_sha256: String,
     folders: Folders,
+    /// How long building them took inside the run.
+    build: Duration,
 }
 
 impl Images {
     fn build(run: &Run) -> Result<Self> {
-        let release = hermetic::build(&["kumochi-shell", "kumochi-brain"], Profile::Release, None)?;
+        let (release, build) =
+            hermetic::build(&["kumochi-shell", "kumochi-brain"], Profile::Release, None)?;
         let shell = release.join(SHELL_EXE);
         let brain = release.join(BRAIN_EXE);
         let shell_sha256 = gate_capture::file_sha256(&shell)?;
@@ -157,17 +160,19 @@ impl Images {
             shell_sha256,
             brain_sha256,
             folders: run.folders("app")?,
+            build,
         })
     }
 
     /// The run's identity record: the driver, the images and the identity they were built with.
     fn identity(&self, exe: &Path) -> Result<String> {
         Ok(format!(
-            "driver_build_id={}\nidentity={DATA_DIR}\ndriver_sha256={}\nshell_sha256={}\nbrain_sha256={}\n",
+            "driver_build_id={}\nidentity={DATA_DIR}\ndriver_sha256={}\nshell_sha256={}\nbrain_sha256={}\nbuild_seconds={:.1}\n",
             kumochi_protocol::BUILD_ID,
             gate_capture::file_sha256(exe)?,
             self.shell_sha256,
-            self.brain_sha256
+            self.brain_sha256,
+            self.build.as_secs_f64()
         ))
     }
 
@@ -231,7 +236,7 @@ fn session_run(
     let run = Run::begin(output.join("data"))?;
     let result =
         Images::build(&run).and_then(|images| run_session(&output, &images, opener, trials));
-    session::combine([result, run.finish()])
+    run.finish(result)
 }
 
 fn run_session(

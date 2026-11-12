@@ -38,7 +38,7 @@ fn usage() -> String {
 The gate tasks (cold-start, gate-session, hover-gate, bench, slice2-gate) run only as the gate
 identity, never as Kumochi or Kumochi Dev, and build the images they launch themselves:
   cargo run --release --package xtask --features kumochi-protocol/gate-identity -- <task>
-(slice2-gate without --release). See docs/development/gate-identity.md.
+See docs/development/gate-identity.md.
 
 tasks:
   cold-start <path-session.txt>

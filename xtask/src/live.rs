@@ -120,7 +120,7 @@ fn entry(identity: ProductIdentity, args: &[String]) -> Result<Entry> {
 
 /// Fails while a product process other than `me` runs: a dev brain holds the pipes the harness
 /// uses and the account's session lock.
-fn refuse_running(running: &[platform::Entry], me: u32) -> Result<()> {
+pub(crate) fn refuse_running(running: &[platform::Entry], me: u32) -> Result<()> {
     let others: Vec<String> = running
         .iter()
         .filter(|entry| entry.pid != me)

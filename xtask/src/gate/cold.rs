@@ -22,7 +22,7 @@ pub(in crate::gate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
     let output = super::retained_output(args)?;
     let run = Run::begin(output.join("data"))?;
     let result = Images::build(&run).and_then(|images| batch(&output, &images));
-    session::combine([result, run.finish()])
+    run.finish(result)
 }
 
 fn batch(output: &Path, images: &Images) -> Result<()> {

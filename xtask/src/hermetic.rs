@@ -3,15 +3,16 @@
 //! folders of their own with Claude Code off, runs alone, and at the end deletes what its brains
 //! left. See `docs/development/gate-identity.md`.
 
-use std::fs::{self, File, TryLockError};
+use std::fs::{self, File, OpenOptions, TryLockError};
+use std::io::{Read as _, Seek as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use kumochi_protocol::constants::{
-    ACCOUNT_MAX_CHUNKS, BRAIN_EXE, CONFIG_FILE, ProductIdentity, SHELL_EXE, generation_hex,
-    generation_target, instance_target,
+    ACCOUNT_MAX_CHUNKS, CONFIG_FILE, ProductIdentity, generation_hex, generation_target,
+    instance_target,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -45,12 +46,14 @@ pub(crate) enum Profile {
 
 /// Builds `packages` with the gate identity into `gate` beside this xtask's profile folders, from
 /// `checkout`'s workspace or this one, and returns the profile folder holding them. Cargo rebuilds
-/// anything built there without the feature, so what this returns is always a gate image.
+/// anything built there without the feature, so what this returns is always a gate image. Also
+/// returns how long the build took, so a timed run that started right after a full build shows.
 pub(crate) fn build(
     packages: &[&str],
     profile: Profile,
     checkout: Option<&Path>,
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, Duration)> {
+    let started = Instant::now();
     let target = std::env::current_exe()?
         .parent()
         .and_then(Path::parent)
@@ -64,6 +67,7 @@ pub(crate) fn build(
     cargo.args([
         "build",
         "--quiet",
+        "--locked",
         "--features",
         "kumochi-protocol/gate-identity",
     ]);
@@ -81,10 +85,11 @@ pub(crate) fn build(
     }
     let built = live::run_bounded(cargo, BUILD_LIMIT, "the gate build")?;
     ensure!(built.success(), "the gate build failed ({built})");
-    Ok(target.join(match profile {
+    let profile = match profile {
         Profile::Debug => "debug",
         Profile::Release => "release",
-    }))
+    };
+    Ok((target.join(profile), started.elapsed()))
 }
 
 /// One launch's own `%LOCALAPPDATA%` and `%APPDATA%`, with Claude Code off in its settings.
@@ -114,59 +119,54 @@ impl Folders {
     }
 }
 
-/// One gate run, alone, with its launches' folders under its root.
+/// One gate run, alone, with its launches' folders under a root it created.
 #[derive(Debug)]
 pub(crate) struct Run {
     root: PathBuf,
-    /// Held until the run ends; another run fails to take it.
-    _alone: File,
+    /// Held until the run ends, so another run fails to take it; it names this run's root until
+    /// the run has cleaned up, so the next run can clean up after an interrupted one.
+    alone: File,
 }
 
 impl Run {
     /// Refuses unless this is the gate identity, no other gate run is on and no product process
-    /// runs, then puts this process in a kill-on-close job, so nothing it starts outlives it or
-    /// breaks away from it.
+    /// runs; puts this process in a kill-on-close job, so nothing it starts outlives it or breaks
+    /// away from it; cleans up after an interrupted run; and creates `root`, which must be new.
     pub(crate) fn begin(root: PathBuf) -> Result<Self> {
         require_gate(ProductIdentity::ACTIVE)?;
-        let lock = std::env::temp_dir().join(format!("{}-run.lock", GATE.object_prefix));
-        let alone = File::create(&lock).with_context(|| format!("opening {}", lock.display()))?;
-        match alone.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => bail!("another gate run is on; one runs at a time"),
-            Err(TryLockError::Error(error)) => return Err(error.into()),
-        }
-        let running = platform::processes()?;
-        ensure!(
-            running.is_empty(),
-            "close every {SHELL_EXE} and {BRAIN_EXE} first (running: {:?})",
-            running.iter().map(|entry| entry.pid).collect::<Vec<_>>()
-        );
+        let mut alone =
+            take(&std::env::temp_dir().join(format!("{}-run.lock", GATE.object_prefix)))?;
+        live::refuse_running(&platform::processes()?, std::process::id())?;
         platform::Job::kill_on_close()
             .and_then(platform::Job::hold_self)
             .context("putting the run in a job")?;
-        fs::create_dir_all(&root)?;
-        Ok(Self {
-            root,
-            _alone: alone,
-        })
+        claim(&mut alone, &root, &mut CredentialManager)?;
+        Ok(Self { root, alone })
     }
 
     pub(crate) fn folders(&self, name: &str) -> Result<Folders> {
         Folders::create(&self.root.join(name))
     }
 
-    /// Once no product process is left: deletes what each launch's own authority names in
-    /// Credential Manager and that launch's folders, then the gate's instance entry for this
-    /// session and the gate's folder in the real `LocalAppData`. Runs on success and on failure.
-    pub(crate) fn finish(self) -> Result<()> {
-        let running = platform::processes()?;
-        ensure!(
-            running.is_empty(),
-            "product processes still run, so nothing was cleaned up; the run's folders are in {}",
+    /// Ends the run with `result`. Once no product process is left: deletes what each launch's
+    /// own authority names in Credential Manager, then the gate's instance entry for this session
+    /// and the gate's folder in the real `LocalAppData`. After a success it also deletes the
+    /// run's folders; after a failure it keeps them, with the product logs, until the next run.
+    pub(crate) fn finish(self, result: Result<()>) -> Result<()> {
+        let kept = format!(
+            "the run's folders stay in {} until the next gate run deletes them",
             self.root.display()
         );
+        if let Err(running) = live::refuse_running(&platform::processes()?, std::process::id()) {
+            return crate::session::combine([result, Err(running.context(kept))]);
+        }
+        let keep = if result.is_ok() {
+            Keep::Nothing
+        } else {
+            Keep::Folders
+        };
         let mut store = CredentialManager;
-        let entries = remove_entries(&self.root, &mut store);
+        let entries = remove_entries(&self.root, &mut store, keep);
         let instance = platform::gate_pipe::session_id()
             .map_err(anyhow::Error::from)
             .and_then(|session| store.delete(&instance_target(GATE.instance_service, session)));
@@ -178,8 +178,69 @@ impl Run {
             }
             Ok(())
         });
-        crate::session::combine([entries, instance, known])
+        // The lock names the root until its folders are gone, so the next run deletes them.
+        let released = match (keep, &entries) {
+            (Keep::Nothing, Ok(())) => self.alone.set_len(0).map_err(anyhow::Error::from),
+            (Keep::Folders, _) => Err(anyhow!("{kept}")),
+            (Keep::Nothing, Err(_)) => Ok(()),
+        };
+        crate::session::combine([result, entries, instance, known, released])
     }
+}
+
+/// Takes the gate-run lock at `path`, or refuses while another run holds it.
+fn take(path: &Path) -> Result<File> {
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(TryLockError::WouldBlock) => bail!("another gate run is on; one runs at a time"),
+        Err(TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
+/// Cleans up the earlier run the held `lock` names, if it didn't finish, then creates `root`,
+/// which must be new, so that every folder under it is this run's, and names it in the lock.
+fn claim(lock: &mut File, root: &Path, store: &mut impl Credentials) -> Result<()> {
+    ensure!(
+        !root.try_exists()?,
+        "{} already exists; a gate run takes a new folder",
+        root.display()
+    );
+    let named = root.to_str().context("the run's folder isn't Unicode")?;
+    let mut earlier = String::new();
+    lock.rewind()?;
+    lock.read_to_string(&mut earlier)?;
+    let earlier = Path::new(&earlier);
+    if !earlier.as_os_str().is_empty() && earlier.try_exists()? {
+        remove_entries(earlier, store, Keep::Nothing).with_context(|| {
+            format!(
+                "cleaning up after the interrupted gate run in {}",
+                earlier.display()
+            )
+        })?;
+    }
+    if let Some(parent) = root.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::create_dir(root)?;
+    lock.set_len(0)?;
+    lock.rewind()?;
+    lock.write_all(named.as_bytes())?;
+    Ok(())
+}
+
+/// What the cleanup keeps after deleting the entries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Keep {
+    Nothing,
+    /// The launch folders, with their product logs, after a failed run.
+    Folders,
 }
 
 /// Credential Manager as the cleanup sees it, so tests use a fake, never the real store.
@@ -202,9 +263,10 @@ impl Credentials for CredentialManager {
 }
 
 /// For each launch folder under `root`: deletes the gate names of every generation its own
-/// authority records, then the folder; then `root`. A folder whose authority can't be read keeps
-/// its folder and its entries, since nothing else can say which entries are its own.
-fn remove_entries(root: &Path, store: &mut impl Credentials) -> Result<()> {
+/// authority records, then, unless `keep` says otherwise, the folder; then `root`. A folder whose
+/// authority can't be read keeps its folder and its entries, since nothing else can say which
+/// entries are its own.
+fn remove_entries(root: &Path, store: &mut impl Credentials, keep: Keep) -> Result<()> {
     let mut kept = Vec::new();
     for launch in fs::read_dir(root)? {
         let launch = launch?.path();
@@ -214,8 +276,10 @@ fn remove_entries(root: &Path, store: &mut impl Credentials) -> Result<()> {
                 for target in &targets {
                     store.delete(target)?;
                 }
-                fs::remove_dir_all(&launch)
-                    .with_context(|| format!("deleting {}", launch.display()))?;
+                if keep == Keep::Nothing {
+                    fs::remove_dir_all(&launch)
+                        .with_context(|| format!("deleting {}", launch.display()))?;
+                }
             }
             Err(_) => kept.push(launch.display().to_string()),
         }
@@ -225,6 +289,9 @@ fn remove_entries(root: &Path, store: &mut impl Credentials) -> Result<()> {
         "kept for a manual cleanup, since their credential authority couldn't be read: {}",
         kept.join("; ")
     );
+    if keep == Keep::Folders {
+        return Ok(());
+    }
     fs::remove_dir(root).with_context(|| format!("deleting {}", root.display()))
 }
 
@@ -342,9 +409,78 @@ mod tests {
                 .chain(others.map(str::to_owned))
                 .collect(),
         );
-        remove_entries(&root, &mut store).expect("cleaned up");
+        remove_entries(&root, &mut store, Keep::Nothing).expect("cleaned up");
         assert_eq!(store.0, others.map(str::to_owned).into());
         assert!(!root.exists());
+    }
+
+    #[test]
+    fn a_failed_run_deletes_its_entries_but_keeps_its_folders() {
+        let root = scratch::dir("gate-failed");
+        authority(&root.join("app"), &[[0x07; 16]]);
+        let mut store =
+            Fake(["Kumochi Gate/gen/host/07070707070707070707070707070707/0".to_owned()].into());
+        remove_entries(&root, &mut store, Keep::Folders).expect("entries deleted");
+        assert_eq!(store.0, BTreeSet::new());
+        assert!(
+            root.join("app/local/Kumochi Gate")
+                .join(AUTHORITY)
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn a_second_gate_run_is_refused_while_the_first_holds_the_lock() {
+        let lock = scratch::dir("gate-lock").join("run.lock");
+        fs::write(&lock, "C:/the/first/run").expect("the first run's folder");
+        let first = take(&lock).expect("the first run takes it");
+        let error = take(&lock).expect_err("the second is refused");
+        assert_eq!(
+            format!("{error:#}"),
+            "another gate run is on; one runs at a time"
+        );
+        drop(first);
+        assert_eq!(
+            fs::read_to_string(&lock).expect("lock"),
+            "C:/the/first/run"
+        );
+        take(&lock).expect("free again once the first ends");
+    }
+
+    #[test]
+    fn a_run_cleans_up_after_an_interrupted_one_and_takes_only_a_new_folder() {
+        let dir = scratch::dir("gate-claim");
+        let earlier = dir.join("earlier");
+        authority(&earlier.join("app"), &[[0x07; 16]]);
+        let ours = "Kumochi Gate/gen/host/07070707070707070707070707070707/0";
+        let mut store = Fake([ours.to_owned()].into());
+        let path = dir.join("run.lock");
+        fs::write(&path, earlier.to_str().expect("Unicode")).expect("an interrupted run's lock");
+        let mut lock = take(&path).expect("lock");
+        let root = dir.join("now");
+        claim(&mut lock, &root, &mut store).expect("claimed");
+        assert_eq!(store.0, BTreeSet::new());
+        assert!(!earlier.exists());
+        assert!(root.is_dir());
+        drop(lock);
+        assert_eq!(
+            fs::read_to_string(&path).expect("lock"),
+            root.to_str().expect("Unicode")
+        );
+        let existing = dir.join("existing");
+        fs::create_dir(&existing).expect("a folder another run made");
+        fs::write(&path, "").expect("a finished run's lock");
+        let mut lock = take(&path).expect("lock");
+        let error = claim(&mut lock, &existing, &mut store).expect_err("not new");
+        drop(lock);
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "{} already exists; a gate run takes a new folder",
+                existing.display()
+            )
+        );
+        assert_eq!(fs::read_to_string(&path).expect("lock"), "");
     }
 
     #[test]
@@ -359,7 +495,7 @@ mod tests {
         .expect("authority");
         let held = "Kumochi Gate/gen/host/07070707070707070707070707070707/0";
         let mut store = Fake([held.to_owned()].into());
-        let error = remove_entries(&root, &mut store).expect_err("kept");
+        let error = remove_entries(&root, &mut store, Keep::Nothing).expect_err("kept");
         assert_eq!(
             format!("{error:#}"),
             format!(

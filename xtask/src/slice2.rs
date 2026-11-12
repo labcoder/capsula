@@ -99,10 +99,6 @@ pub(crate) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
 /// Builds the gate brain, copies it and this program into a fresh folder, runs the gate there
 /// (every item, or only those whose names hold the filter), and then deletes what its brains left.
 fn prepare(only: Option<&str>) -> Result<()> {
-    ensure!(
-        cfg!(debug_assertions),
-        "run the gate from a debug xtask: only a debug brain plays fixture scripts"
-    );
     let me = std::env::current_exe()?;
     let target = me.parent().context("xtask has a folder")?;
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -113,10 +109,11 @@ fn prepare(only: Option<&str>) -> Result<()> {
         .join(stamp.to_string());
     let run = Run::begin(folder.join(brain::DATA))?;
     let ran = (|| {
-        let built = hermetic::build(&["kumochi-brain"], Profile::Debug, None)?;
+        let (debug, took) = hermetic::build(&["kumochi-brain"], Profile::Debug, None)?;
+        println!("build_seconds={:.1}", took.as_secs_f64());
         let bin = folder.join("bin");
         fs::create_dir_all(&bin)?;
-        fs::copy(built.join(BRAIN_EXE), bin.join(BRAIN_EXE)).context("copying the brain")?;
+        fs::copy(debug.join(BRAIN_EXE), bin.join(BRAIN_EXE)).context("copying the brain")?;
         fs::copy(&me, bin.join(SHELL_EXE)).context("copying the client")?;
         println!("slice 2 gate in {}", folder.display());
         let mut gate = Command::new(bin.join(SHELL_EXE));
@@ -125,7 +122,7 @@ fn prepare(only: Option<&str>) -> Result<()> {
         ensure!(ran.success(), "the gate failed");
         Ok(())
     })();
-    crate::session::combine([ran, run.finish()])
+    run.finish(ran)
 }
 
 /// Ends each brain whose kill failed during its item and says how that went, so that item fails

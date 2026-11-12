@@ -17,7 +17,6 @@ use kumochi_protocol::constants::SHELL_EXE;
 
 use crate::hermetic::{self, Folders, Profile, Run};
 use crate::platform::{self, Process};
-use crate::session;
 
 #[derive(Debug)]
 pub(crate) struct GateCpu {
@@ -157,11 +156,12 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         .join(stamp.to_string());
     let run = Run::begin(root)?;
     let measured = (|| {
-        let release = hermetic::build(
+        let (release, build) = hermetic::build(
             &["kumochi-shell", "kumochi-brain"],
             Profile::Release,
             baseline.as_deref(),
         )?;
+        println!("build_seconds={:.1}", build.as_secs_f64());
         idle(
             &release.join(SHELL_EXE),
             &run.folders("app")?,
@@ -170,7 +170,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
             workload,
         )
     })();
-    session::combine([measured, run.finish()])
+    run.finish(measured)
 }
 
 fn idle(
