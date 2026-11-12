@@ -143,7 +143,7 @@ pub async fn run() -> Result<(), BrainError> {
     let claude_on = config.claude_code_enabled();
     // Before the capability is stored, so its write never overlaps the vault's first reads.
     let (account, vault_held) = accounts().map_err(BrainError::Accounts)?;
-    config.count_in_use(account.signed_in(), high_water.1);
+    config.count_in_use(&account.view(), high_water.1);
     let mut brain = Brain::new(
         store,
         main_thread,

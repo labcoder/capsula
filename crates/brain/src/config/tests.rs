@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
 use kumochi_protocol::message::{
-    AssistantName, DockPosition, Effort, ErrorKey, MAX_SLUG_BYTES, MaxFrameRate, ModelChoice,
-    ModelSlug, RepoName, RunId, SettingsOp, SttUnload, ThreadId, UserName,
+    AccountView, AssistantName, DockPosition, Effort, ErrorKey, MAX_SLUG_BYTES, MaxFrameRate,
+    ModelChoice, ModelSlug, PlanState, RepoName, RunId, SettingsOp, SttUnload, ThreadId, UserName,
 };
 use kumochi_protocol::voice::VoicePart;
 
@@ -1066,14 +1066,35 @@ fn a_removal_intent_with_no_lists_starts_removing() {
 #[test]
 fn an_absent_onboarded_key_counts_a_profile_in_use_and_a_saved_value_wins() {
     let scratch = Scratch::new("config-onboarded-in-use");
-    for (row, (text, signed_in, high_water, onboarded)) in [
-        ("future_key = 1\n", false, 0, false),
-        ("future_key = 1\n", true, 0, true),
-        ("future_key = 1\n", false, 1, true),
-        ("onboarded = false\n", true, 5, false),
-        ("onboarded = true\n", false, 0, true),
-        ("onboarded = \"yes\"\n", false, 0, false),
-        ("onboarded = \"yes\"\n", true, 0, true),
+    let signed_in = |plan| AccountView::SignedIn {
+        email: None,
+        plan,
+        recovery: None,
+    };
+    let signed_out = AccountView::SignedOut {
+        revocation_unconfirmed: false,
+    };
+    let absent = "future_key = 1\n";
+    for (row, (text, account, high_water, onboarded)) in [
+        (absent, signed_out.clone(), 0, false),
+        (absent, AccountView::Busy, 0, false),
+        (absent, signed_in(PlanState::Enabled), 0, true),
+        (absent, signed_in(PlanState::Declined), 0, true),
+        (absent, signed_out.clone(), 1, true),
+        (
+            "onboarded = false\n",
+            signed_in(PlanState::Enabled),
+            5,
+            false,
+        ),
+        ("onboarded = true\n", signed_out.clone(), 0, true),
+        ("onboarded = \"yes\"\n", signed_out, 0, false),
+        (
+            "onboarded = \"yes\"\n",
+            signed_in(PlanState::Enabled),
+            0,
+            true,
+        ),
     ]
     .into_iter()
     .enumerate()
@@ -1082,12 +1103,8 @@ fn an_absent_onboarded_key_counts_a_profile_in_use_and_a_saved_value_wins() {
         std::fs::create_dir_all(&dir).expect("row folder");
         std::fs::write(dir.join(CONFIG_FILE), text).expect("seeded");
         let mut config = Config::load(Some(dir), ThreadId(1));
-        config.count_in_use(signed_in, RunId(high_water));
-        assert_eq!(
-            config.view().onboarded,
-            onboarded,
-            "{text} signed_in={signed_in} high_water={high_water}"
-        );
+        config.count_in_use(&account, RunId(high_water));
+        assert_eq!(config.view().onboarded, onboarded, "row {row}");
     }
 }
 
@@ -1098,7 +1115,10 @@ fn the_start_answer_outlives_other_writes_and_finishing_onboarding_is_saved() {
     let path = used.join(CONFIG_FILE);
     std::fs::write(&path, "future_key = 1\n").expect("seeded");
     let mut config = Config::load(Some(used), ThreadId(1));
-    config.count_in_use(false, RunId(3));
+    let signed_out = AccountView::SignedOut {
+        revocation_unconfirmed: false,
+    };
+    config.count_in_use(&signed_out, RunId(3));
     assert!(config.view().onboarded);
     apply(&mut config, SettingsOp::SetTaskbar(true));
     assert!(config.view().onboarded);
@@ -1107,7 +1127,7 @@ fn the_start_answer_outlives_other_writes_and_finishing_onboarding_is_saved() {
 
     let fresh = dir(&scratch).join("fresh");
     let mut config = Config::load(Some(fresh.clone()), ThreadId(1));
-    config.count_in_use(false, RunId(0));
+    config.count_in_use(&signed_out, RunId(0));
     assert!(!config.view().onboarded);
     apply(&mut config, SettingsOp::FinishOnboarding);
     assert!(config.view().onboarded);
@@ -1137,7 +1157,12 @@ fn a_config_that_cant_be_written_serves_onboarded_and_still_refuses_every_write(
         (Config::load(None, ThreadId(1)), ConfigError::NoHome),
     ] {
         assert!(config.view().onboarded, "{refusal}");
-        config.count_in_use(false, RunId(0));
+        config.count_in_use(
+            &AccountView::SignedOut {
+                revocation_unconfirmed: false,
+            },
+            RunId(0),
+        );
         assert!(config.view().onboarded, "{refusal}");
         let view = config.view().clone();
         let ops = [

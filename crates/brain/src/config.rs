@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
 use kumochi_protocol::message::{
-    AssistantName, DockPosition, ErrorKey, MaxFrameRate, ModelChoice, RepoName, RunId, SettingsOp,
-    SettingsView, SttUnload, ThreadId, UserName,
+    AccountView, AssistantName, DockPosition, ErrorKey, MaxFrameRate, ModelChoice, RepoName, RunId,
+    SettingsOp, SettingsView, SttUnload, ThreadId, UserName,
 };
 use kumochi_protocol::voice::VoicePart;
 use toml::{Table, Value};
@@ -153,12 +153,12 @@ impl Config {
     /// Counts a profile already in use as onboarded while `config.toml` has no `onboarded`
     /// key: the account's first load is signed in, or a run was ever issued. Called once at
     /// start, before any shell is served, so a later sign-in or write never changes the answer.
-    pub(crate) fn count_in_use(&mut self, signed_in: bool, high_water: RunId) {
+    pub(crate) fn count_in_use(&mut self, account: &AccountView, high_water: RunId) {
         let Ok(table) = &self.table else {
             return;
         };
-        self.in_use = signed_in || high_water.0 > 0;
-        self.view.onboarded = onboarded(table, self.in_use);
+        self.in_use = matches!(account, AccountView::SignedIn { .. }) || high_water.0 > 0;
+        self.view.onboarded = onboarded(table).unwrap_or(self.in_use);
     }
 
     /// The settings now.
@@ -429,6 +429,10 @@ fn voice_mut(table: &mut Table) -> &mut Table {
 
 /// The settings a table holds. A known key with a bad value reads as its default, and stays in
 /// the table untouched until the user sets that key.
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "what an absent onboarded key reads as, fixed at start"
+)]
 fn view_of(table: &Table, main_thread: ThreadId, in_use: bool) -> SettingsView {
     let assistant_name = match table.get(ASSISTANT_NAME) {
         None => None,
@@ -445,7 +449,7 @@ fn view_of(table: &Table, main_thread: ThreadId, in_use: bool) -> SettingsView {
         Some(Value::String(text)) => UserName::new(text).ok().or_else(|| invalid(USER_NAME)),
         Some(_) => invalid(USER_NAME),
     };
-    let onboarded = onboarded(table, in_use);
+    let onboarded = onboarded(table).unwrap_or(in_use);
     let max_frame_rate = match table.get(MAX_FRAME_RATE) {
         None => MaxFrameRate::AUTOMATIC,
         Some(Value::Integer(fps)) => u16::try_from(*fps)
@@ -506,12 +510,12 @@ fn view_of(table: &Table, main_thread: ThreadId, in_use: bool) -> SettingsView {
     }
 }
 
-/// The `onboarded` key, or `in_use` when it's absent or bad.
-fn onboarded(table: &Table, in_use: bool) -> bool {
+/// The `onboarded` key; none when it's absent or bad.
+fn onboarded(table: &Table) -> Option<bool> {
     match table.get(ONBOARDED) {
-        None => in_use,
-        Some(Value::Boolean(done)) => *done,
-        Some(_) => invalid(ONBOARDED).unwrap_or(in_use),
+        None => None,
+        Some(Value::Boolean(done)) => Some(*done),
+        Some(_) => invalid(ONBOARDED),
     }
 }
 
