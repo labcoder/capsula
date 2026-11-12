@@ -276,6 +276,7 @@ impl Presence {
         let Some(panel) = &mut self.thread_panel else {
             return Ok(());
         };
+        let shown = (panel.typing, panel.focused, panel.previous);
         if !panel.typing.close(reason) {
             return Ok(());
         }
@@ -284,16 +285,17 @@ impl Presence {
             .previous
             .take()
             .filter(|_| matches!(reason, Hide::Dismiss));
-        panel
-            .window
-            .update(cx, |_, window, _| {
-                if let Some(previous) = previous {
-                    platform::restore_foreground(window, previous);
-                }
-                platform::hide_presence_window(window)?;
-                Ok::<_, platform::PresenceError>(())
-            })
-            .map_err(|error| OpenError::Gpui(error.into()))??;
+        let hidden = panel.window.update(cx, |_, window, _| {
+            if let Some(previous) = previous {
+                platform::restore_foreground(window, previous);
+            }
+            platform::hide_presence_window(window)
+        });
+        // A panel still on screen must stay open, so Esc and its close button can try again.
+        if !matches!(hidden, Ok(Ok(()))) {
+            (panel.typing, panel.focused, panel.previous) = shown;
+        }
+        hidden.map_err(|error| OpenError::Gpui(error.into()))??;
         self.threads.update(cx, |state, cx| {
             state.hide();
             cx.notify();
@@ -301,5 +303,39 @@ impl Presence {
         self.place_drawings(cx.weak_entity(), cx);
         self.request_pages(cx);
         self.pointer_changed(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui_kit::TestAppContext;
+
+    use super::{OpenError, Presence, ThreadsPanel};
+
+    #[gpui::test]
+    fn a_tasks_panel_that_failed_to_hide_stays_open_and_esc_still_closes_it(
+        cx: &mut TestAppContext,
+    ) {
+        let _area = crate::platform::work_area_fixture::set([0, 0, 2560, 1400]);
+        let owner = crate::presence::test_fixture::presence(cx);
+        let window = owner.update(cx, |owner, cx| {
+            owner.thread_panel = Some(ThreadsPanel::detached(owner.threads.clone(), cx));
+            owner.open_threads(cx).expect("open tasks");
+            let panel = owner.thread_panel.as_mut().expect("tasks fixture");
+            // As its window's activation reports once it's in front.
+            panel.focused = true;
+            panel.typing.activated();
+            panel.window
+        });
+        // GPUI refuses to update a window from inside its own update, as a click on it would.
+        let hidden = window
+            .update(cx, |_, _, cx| owner.update(cx, Presence::dismiss_threads))
+            .expect("tasks window");
+        assert!(matches!(hidden, Err(OpenError::Gpui(_))));
+        owner.update(cx, |owner, cx| {
+            assert!(owner.threads_focused(), "Tasks is still on screen and focused");
+            owner.escape(cx).expect("Esc");
+            assert!(!owner.threads_open(), "Esc hid Tasks");
+        });
     }
 }
