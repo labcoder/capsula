@@ -35,7 +35,7 @@ const BUILD_LIMIT: Duration = Duration::from_mins(20);
 /// How long the copied harness may run; the final bound on everything it waits for.
 const RUN_LIMIT: Duration = Duration::from_mins(8);
 /// How long `taskkill` gets, and then the process it ended, to be gone.
-pub(crate) const KILL_LIMIT: Duration = Duration::from_secs(10);
+const KILL_LIMIT: Duration = Duration::from_secs(10);
 /// How long the brain gets to exit after `Quitting`: its quit takes 2 s plus at most 5 s for a
 /// refresh already out.
 const EXIT: Duration = Duration::from_secs(15);
@@ -210,7 +210,7 @@ fn wait_bounded(child: &mut Child, limit: Duration) -> io::Result<Option<ExitSta
 }
 
 /// Ends `child` and everything it started, and reaps it.
-fn end(child: &mut Child) -> Result<()> {
+pub(crate) fn end(child: &mut Child) -> Result<()> {
     let pid = child.id();
     let kill = platform::kill_tree(pid).map_err(|error| anyhow!("{error:#}; {}", survivor(pid)))?;
     end_with(child, kill, KILL_LIMIT)

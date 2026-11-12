@@ -52,10 +52,11 @@ flowchart LR
 - Every pipe write, and the wait for `Welcome`, is bounded; a stuck transfer is cancelled and
   waited for before its buffer goes. The brain build is killed, with everything it started, after
   20 minutes, and the whole gate, with its brains, after another 20; a `taskkill` that fails is
-  reported with the process it left.
-- A brain still running after its item is ended, and that item fails, saying whether `taskkill`
-  ended it, so the next item doesn't meet it on the pipes.
-  It refuses to run from a release xtask, whose brain would use the installed product's names.
+  reported with the process it left. It refuses to run from a release xtask, whose brain would use
+  the installed product's names.
+- A brain whose kill fails isn't waited on, which would never return: the gate keeps its handle,
+  ends it after its item with `taskkill`, waits for it to exit, and fails that item. It only ever
+  ends brains it started and still holds, so no other process can match, even with a reused id.
 - shortcut: one scene can't reach three snapshot chunks today (32 KiB target, at most 64 steps of
   256 B), so the reconnect item's chunks span four scenes; chunking inside a scene is covered by
   the brain's recovery tests. Use one scene once slice 4's steps are bigger.
