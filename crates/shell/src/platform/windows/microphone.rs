@@ -19,8 +19,8 @@ use windows::core::{GUID, Interface};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::platform::microphone::{
-    Finalization, Format, Generation, MicError, Mode, POLL, PacketBoundary, PacketStatus,
-    Packetizer, Running, Sample,
+    CAPTURE_BUFFER, Finalization, Format, Generation, MicError, Mode, POLL, PacketBoundary,
+    PacketStatus, Packetizer, Running, Sample,
 };
 
 struct Apartment;
@@ -76,8 +76,10 @@ impl Source {
         let mix = Mix(unsafe { client.GetMixFormat() }.map_err(|_| MicError::Format)?);
         let format = read_format(&mix)?;
         live(token, session)?;
+        let buffer =
+            i64::try_from(CAPTURE_BUFFER.as_nanos() / 100).map_err(|_| MicError::Format)?;
         // SAFETY: the mix format is live and validated. Flags exclude loopback and rate conversion.
-        unsafe { client.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 0, 0, mix.0, None) }
+        unsafe { client.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, buffer, 0, mix.0, None) }
             .map_err(|_| MicError::Unavailable)?;
         live(token, session)?;
         // SAFETY: the initialized input client supplies this capture service.
@@ -89,6 +91,21 @@ impl Source {
             format,
             started: false,
         })
+    }
+
+    fn check(&self) -> Result<(), MicError> {
+        // SAFETY: the pinned endpoint remains owned on this COM thread.
+        if unsafe { self.device.GetState() }.map_err(|_| MicError::Unavailable)?
+            != DEVICE_STATE_ACTIVE
+        {
+            return Err(MicError::Unavailable);
+        }
+        // SAFETY: this off-pump query owns its COM allocation until Mix drops.
+        let mix = Mix(unsafe { self.client.GetMixFormat() }.map_err(|_| MicError::Format)?);
+        if read_format(&mix)? != self.format {
+            return Err(MicError::Format);
+        }
+        Ok(())
     }
 
     fn stop(&mut self) -> Result<(), MicError> {
@@ -176,6 +193,19 @@ pub(crate) fn capture(
     running: &Sender<Running>,
     output: &Sender<MicPcm>,
 ) -> Result<Finalization, MicError> {
+    let mut boundary = PacketBoundary::default();
+    let result = capture_with(token, session, running, output, &mut boundary);
+    boundary.log();
+    result
+}
+
+fn capture_with(
+    token: &Generation,
+    session: &AtomicBool,
+    running: &Sender<Running>,
+    output: &Sender<MicPcm>,
+    boundary: &mut PacketBoundary,
+) -> Result<Finalization, MicError> {
     let _apartment = match Apartment::new() {
         Ok(apartment) => apartment,
         Err(error) => return Ok(Finalization::Discarded(error)),
@@ -192,7 +222,15 @@ pub(crate) fn capture(
         }
     };
     let mut packets = Packetizer::new(token.gesture(), source.format)?;
-    let mut result = collect(&mut source, token, session, running, output, &mut packets);
+    let mut result = collect(
+        &mut source,
+        token,
+        session,
+        running,
+        output,
+        &mut packets,
+        boundary,
+    );
     if matches!(result, Err(MicError::Stale | MicError::Cancelled))
         && token.mode(session, Instant::now()) == Ok(Mode::Release)
     {
@@ -203,6 +241,11 @@ pub(crate) fn capture(
         packets.clear();
     }
     source.stop()?;
+    result = boundary.finish(result.and_then(|()| source.check()));
+    if result.is_err() {
+        token.cancel();
+        packets.clear();
+    }
     drop(source);
     if result == Err(MicError::Unconfirmed) {
         return Err(MicError::Unconfirmed);
@@ -230,8 +273,18 @@ fn collect(
     running: &Sender<Running>,
     output: &Sender<MicPcm>,
     packets: &mut Packetizer,
+    boundary: &mut PacketBoundary,
 ) -> Result<(), MicError> {
     live(token, session)?;
+    source.check()?;
+    let mut raw = Zeroizing::new(vec![
+        0_u8;
+        MAX_MIC_SAMPLES
+            * usize::from(source.format.channels)
+            * source.format.bytes()
+    ]);
+    live(token, session)?;
+    boundary.started(Instant::now());
     source.started = true;
     // SAFETY: this initialized capture client has one worker, no borrowed buffer and no callbacks.
     unsafe { source.client.Start() }.map_err(|_| MicError::Unavailable)?;
@@ -243,13 +296,7 @@ fn collect(
             rate: source.format.rate,
         })
         .map_err(|_| MicError::Unavailable)?;
-    let mut raw = Zeroizing::new(vec![
-        0_u8;
-        MAX_MIC_SAMPLES
-            * usize::from(source.format.channels)
-            * source.format.bytes()
-    ]);
-    let result = read(source, token, session, output, packets, &mut raw);
+    let result = read(source, token, session, output, packets, &mut raw, boundary);
     if result.is_err() {
         token.cancel();
     }
@@ -264,24 +311,15 @@ fn read(
     output: &Sender<MicPcm>,
     packets: &mut Packetizer,
     raw: &mut [u8],
+    boundary: &mut PacketBoundary,
 ) -> Result<(), MicError> {
     let mut ready = false;
-    let mut boundary = PacketBoundary::default();
     loop {
-        let mode = token.mode(session, Instant::now())?;
+        let now = Instant::now();
+        let mode = token.mode(session, now)?;
+        boundary.observe(mode);
         if mode == Mode::Release {
             return Ok(());
-        }
-        // SAFETY: pinned endpoint remains owned on this COM thread.
-        if unsafe { source.device.GetState() }.map_err(|_| MicError::Unavailable)?
-            != DEVICE_STATE_ACTIVE
-        {
-            return Err(MicError::Unavailable);
-        }
-        // SAFETY: the pinned client is live; Mix owns this off-buffer COM allocation.
-        let mix = Mix(unsafe { source.client.GetMixFormat() }.map_err(|_| MicError::Format)?);
-        if read_format(&mix)? != source.format {
-            return Err(MicError::Format);
         }
         // SAFETY: no buffer is currently held; this is a nonblocking capture-size query.
         if unsafe { source.input.GetNextPacketSize() }.map_err(|_| MicError::Unavailable)? == 0 {
@@ -312,16 +350,12 @@ fn read(
             n.checked_mul(usize::from(source.format.channels) * source.format.bytes())
         });
         let silent = flags & AUDCLNT_BUFFERFLAGS_SILENT.0.cast_unsigned() != 0;
-        let allowed = boundary.packet(
-            token.collecting(session),
-            ready,
-            PacketStatus {
-                frames,
-                discontinuity: flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0.cast_unsigned()
-                    != 0,
-                timestamp_error: flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0.cast_unsigned() != 0,
-            },
-        );
+        let status = PacketStatus {
+            frames,
+            discontinuity: flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0.cast_unsigned() != 0,
+            timestamp_error: flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0.cast_unsigned() != 0,
+        };
+        let allowed = boundary.packet(token.collecting(session), ready, status);
         let copied = match bytes {
             Some(n) if n <= raw.len() && allowed == Ok(true) && (silent || !data.is_null()) => {
                 let borrowed = if silent {
@@ -355,6 +389,9 @@ fn read(
             || allowed && frames != 0 && !silent && data.is_null()
         {
             return Err(MicError::Overflow);
+        }
+        if copied != 0 {
+            boundary.kept(status, now);
         }
         for frame in
             raw[..copied].chunks_exact(source.format.bytes() * usize::from(source.format.channels))

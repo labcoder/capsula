@@ -19,17 +19,39 @@ including a chord suppressed by outstanding key state. They never record key ide
 ordinary typing. Native keyboard registration and capture start remain separate boundaries.
 The native gesture deadline records arming and delivery independently, so a delayed deadline
 can be distinguished from an admission refusal. Capture receipts distinguish unreliable driver
-timestamps from a gap between retained native packets. `Timestamp` always fails closed.
-`Discontinuity` means a flag on the second or later kept packet, never discarded startup audio
-or the first kept packet, which has no retained predecessor. Those startup flags are ignored
-without counters or additional logging. Both errors propagate only after releasing the native
-buffer. The queue must still drain after Listening, and the next nonempty packet is still
-discarded before any audio is kept; no pre-Listening or prior-hold audio becomes eligible.
-This decision lives in the shared microphone `PacketBoundary`, tested with a fake packet
-source without Windows types. A native adapter supplies frame count, discontinuity and
-timestamp-error facts, collection authority and a drained-queue observation after Listening.
-WASAPI alone translates its flag bits and owns the acquire/release calls; a Core Audio adapter
-would supply the same facts and retain the same consent, cancellation and cleanup guarantees.
+timestamps from gaps in retained native packets. `Timestamp` always fails closed. Isolated
+discontinuities no longer discard an utterance: after physical stop, shared `PacketBoundary`
+rejects only when more than 25% of kept packets were flagged. A flag on the first kept packet
+is counted for diagnostics but excluded from that share because it has no retained predecessor.
+There is no lifetime gap count limit, so sparse losses in a long dictation remain admissible.
+A gap removes audio; it never inserts silence, replays old audio or admits pre-Listening audio.
+The queue must still drain after Listening, and the next nonempty packet is still discarded.
+
+One `held microphone capture summary` is logged after each capture ends, with only numeric
+fields: `discontinuities`, `first_discontinuity_packet` (one-based kept ordinal, zero if none),
+`first_discontinuity_ms` (observed loop time since stream start), `kept_packets`, `kept_frames`
+and `discarded_before_listening` (nonempty packets discarded while collection was not live).
+These count native packets/frames, not the subsequently packed wire chunks. Counters commit
+only after an authorized copy and native buffer release. No per-packet allocation, lock,
+logging or extra clock query is added for these diagnostics; the first flag uses the loop's
+existing monotonic time. Timestamp and over-budget holds are discarded, not transcribed.
+
+The fake-source policy tests contain no Windows types. Native adapters supply frame count,
+discontinuity and timestamp-error facts, collection authority and a post-Listening drained-queue
+observation. WASAPI alone translates flag bits and owns acquire/release calls; a Core Audio
+adapter must supply equivalent facts and the same consent, cancellation and cleanup guarantees.
+WASAPI requests at least 100 ms of buffering for its 20 ms polling interval, allocates scratch
+before Start, and checks the pinned device/format before Start and after Stop rather than making
+allocating COM queries in the pump. Mid-stream unplug/reconfiguration errors from GetBuffer or
+GetNextPacketSize, or a failed after-Stop check, discard the hold. The initialized stream's
+format remains pinned; no reopen or reinterpretation is attempted.
+
+The stop receipt still asserts physical release/join, and the matched wire packet count still
+asserts ordered delivery, not lossless device time. Previously the native validator implicitly
+required continuity after startup; it now certifies the shared gap-share bound instead. The
+brain receives no synthetic samples or new continuity flag and still waits for true stop before
+decoding. A confirmed discarded receipt logs `held speech input ended`; an unconfirmed receipt
+logs `held speech input failed`.
 
 ## The manifest
 

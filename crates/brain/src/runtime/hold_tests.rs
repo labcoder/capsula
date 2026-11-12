@@ -393,6 +393,34 @@ async fn exact_ordered_pcm_and_independent_resampling_tail_reach_one_real_hold_r
 }
 
 #[tokio::test]
+async fn accepted_sparse_capture_pcm_reaches_transcription() {
+    let scratch = Scratch::trusted("hold-sparse-capture");
+    let (mut brain, release, mut decoded, _fetch) =
+        input(&scratch, vec![21, 31, 41, 51], "sparse capture transcript").await;
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        opened(&mut shell).await;
+        recognize(&mut shell).await;
+        packet(&mut shell, 16_000, 0, true, vec![21, 31, 41, 51]).await;
+        release_source(&mut shell, 1).await;
+        status(&mut shell, HoldStatus::Transcribing).await;
+        assert_eq!(decoded.recv().await, Some(()));
+        release.send(()).unwrap();
+        let (run, _) = shell.state().await;
+        shell.read_to_end(run).await;
+        drop(shell);
+    };
+    let (_, ()) = tokio::time::timeout(super::PATIENCE, async {
+        tokio::join!(brain.serve(control, data, &mut tap), client)
+    })
+    .await
+    .unwrap();
+    brain.close().await;
+    assert_eq!(users(&scratch), ["sparse capture transcript"]);
+}
+
+#[tokio::test]
 async fn no_samples_or_blank_transcript_store_and_send_nothing() {
     for text in ["", " \t\r\n", "unused"] {
         let scratch = Scratch::new("hold-empty");

@@ -73,15 +73,52 @@ pub(super) struct PacketStatus {
     pub(super) timestamp_error: bool,
 }
 
-#[derive(Default)]
-pub(super) enum PacketBoundary {
-    #[default]
-    Discard,
-    FirstKept,
-    Contiguous,
+pub(super) const CAPTURE_BUFFER: Duration = Duration::from_millis(100);
+
+// Excluding the first packet's transition flag, a quarter permits sparse losses but rejects dense gaps.
+const MAX_DISCONTINUITY_SHARE: u32 = 4;
+
+pub(super) struct PacketBoundary {
+    startup: bool,
+    listening: bool,
+    failed: Option<MicError>,
+    started: Option<Instant>,
+    discontinuities: u32,
+    first_discontinuity_packet: u32,
+    first_discontinuity_ms: u64,
+    kept_packets: u32,
+    kept_frames: u64,
+    discarded_before_listening: u32,
+}
+
+impl Default for PacketBoundary {
+    fn default() -> Self {
+        Self {
+            startup: true,
+            listening: false,
+            failed: None,
+            started: None,
+            discontinuities: 0,
+            first_discontinuity_packet: 0,
+            first_discontinuity_ms: 0,
+            kept_packets: 0,
+            kept_frames: 0,
+            discarded_before_listening: 0,
+        }
+    }
 }
 
 impl PacketBoundary {
+    pub(super) fn started(&mut self, at: Instant) {
+        self.started = Some(at);
+    }
+
+    pub(super) fn observe(&mut self, mode: Mode) {
+        if mode == Mode::Collecting {
+            self.listening = true;
+        }
+    }
+
     #[expect(
         clippy::fn_params_excessive_bools,
         reason = "collection authority and the drained queue fence one startup packet"
@@ -92,24 +129,69 @@ impl PacketBoundary {
         drained: bool,
         packet: PacketStatus,
     ) -> Result<bool, MicError> {
+        if let Some(error) = self.failed {
+            return Err(error);
+        }
         if packet.timestamp_error {
+            self.failed = Some(MicError::Timestamp);
             return Err(MicError::Timestamp);
+        }
+        self.listening |= live || drained;
+        if !self.listening && packet.frames != 0 {
+            self.discarded_before_listening = self.discarded_before_listening.saturating_add(1);
         }
         if !live || !drained || packet.frames == 0 {
             return Ok(false);
         }
-        match self {
-            Self::Discard => {
-                *self = Self::FirstKept;
-                Ok(false)
-            }
-            Self::FirstKept => {
-                *self = Self::Contiguous;
-                Ok(true)
-            }
-            Self::Contiguous if packet.discontinuity => Err(MicError::Discontinuity),
-            Self::Contiguous => Ok(true),
+        if self.startup {
+            self.startup = false;
+            return Ok(false);
         }
+        Ok(true)
+    }
+
+    pub(super) fn kept(&mut self, packet: PacketStatus, at: Instant) {
+        self.kept_packets = self.kept_packets.saturating_add(1);
+        self.kept_frames = self.kept_frames.saturating_add(u64::from(packet.frames));
+        if packet.discontinuity {
+            self.discontinuities = self.discontinuities.saturating_add(1);
+            if self.discontinuities == 1 {
+                self.first_discontinuity_packet = self.kept_packets;
+                self.first_discontinuity_ms = self.started.map_or(0, |start| {
+                    u64::try_from(at.saturating_duration_since(start).as_millis())
+                        .unwrap_or(u64::MAX)
+                });
+            }
+        }
+    }
+
+    pub(super) fn finish(&mut self, source: Result<(), MicError>) -> Result<(), MicError> {
+        if self.failed.is_none() {
+            self.failed = source.err();
+        }
+        if let Some(error) = self.failed {
+            return Err(error);
+        }
+        let gaps = self
+            .discontinuities
+            .saturating_sub(u32::from(self.first_discontinuity_packet == 1));
+        if gaps.saturating_mul(MAX_DISCONTINUITY_SHARE) > self.kept_packets {
+            self.failed = Some(MicError::Discontinuity);
+            return Err(MicError::Discontinuity);
+        }
+        Ok(())
+    }
+
+    pub(super) fn log(&self) {
+        tracing::info!(
+            discontinuities = self.discontinuities,
+            first_discontinuity_packet = self.first_discontinuity_packet,
+            first_discontinuity_ms = self.first_discontinuity_ms,
+            kept_packets = self.kept_packets,
+            kept_frames = self.kept_frames,
+            discarded_before_listening = self.discarded_before_listening,
+            "held microphone capture summary"
+        );
     }
 }
 

@@ -823,13 +823,21 @@ const CLOCK: PacketStatus = PacketStatus {
 
 fn collect(packets: &[(bool, bool, &[i16], PacketStatus)]) -> Result<Vec<i16>, MicError> {
     let mut boundary = PacketBoundary::default();
+    let start = Instant::now();
+    boundary.started(start);
     let mut pcm = Vec::new();
-    for &(live, drained, samples, flags) in packets {
+    for (index, &(live, drained, samples, flags)) in packets.iter().enumerate() {
         let frames = u32::try_from(samples.len()).unwrap();
-        if boundary.packet(live, drained, PacketStatus { frames, ..flags })? {
+        let status = PacketStatus { frames, ..flags };
+        if boundary.packet(live, drained, status)? {
+            boundary.kept(
+                status,
+                start + Duration::from_millis(u64::try_from(index).unwrap() * 10),
+            );
             pcm.extend_from_slice(samples);
         }
     }
+    boundary.finish(Ok(()))?;
     Ok(pcm)
 }
 
@@ -888,7 +896,11 @@ fn later_kept_discontinuity_ends_the_sequence_before_clean_audio() {
         for _ in 0..clean {
             packets.push((true, true, &[31], CLEAN));
         }
-        packets.extend_from_slice(&[(true, true, &[41], GAP), (true, true, &[51], CLEAN)]);
+        packets.extend_from_slice(&[
+            (true, true, &[41], GAP),
+            (true, true, &[42], GAP),
+            (true, true, &[51], CLEAN),
+        ]);
         assert_eq!(collect(&packets), Err(MicError::Discontinuity));
     }
 }
@@ -923,4 +935,122 @@ fn timestamps_remain_fatal_before_during_and_after_the_boundary() {
             assert_eq!(collect(&packets), Err(MicError::Timestamp));
         }
     }
+}
+
+#[test]
+fn one_gap_on_the_third_kept_packet_completes_for_transcription() {
+    assert_eq!(
+        collect(&[
+            (true, true, &[11], CLEAN),
+            (true, true, &[21], CLEAN),
+            (true, true, &[31], CLEAN),
+            (true, true, &[41], GAP),
+            (true, true, &[51], CLEAN),
+        ]),
+        Ok(vec![21, 31, 41, 51])
+    );
+}
+
+#[test]
+fn sparse_gaps_in_a_long_hold_do_not_accumulate_into_a_lifetime_limit() {
+    let mut packets: Vec<(bool, bool, &[i16], PacketStatus)> = vec![(true, true, &[11], CLEAN)];
+    packets.extend((0..3_000).map(|index| {
+        (
+            true,
+            true,
+            &[21][..],
+            if index % 500 == 2 { GAP } else { CLEAN },
+        )
+    }));
+    assert_eq!(collect(&packets), Ok(vec![21; 3_000]));
+}
+
+#[test]
+fn the_gap_share_is_inclusive_at_a_quarter_and_terminal_above_it() {
+    let mut boundary = PacketBoundary::default();
+    let start = Instant::now();
+    boundary.started(start);
+    assert_eq!(
+        boundary.packet(false, false, PacketStatus { frames: 7, ..GAP }),
+        Ok(false)
+    );
+    assert_eq!(
+        boundary.packet(true, true, PacketStatus { frames: 9, ..GAP }),
+        Ok(false)
+    );
+    for (index, flags) in [CLEAN, CLEAN, GAP, CLEAN].into_iter().enumerate() {
+        let packet = PacketStatus {
+            frames: 10,
+            ..flags
+        };
+        assert_eq!(boundary.packet(true, true, packet), Ok(true));
+        boundary.kept(
+            packet,
+            start + Duration::from_millis(u64::try_from(index).unwrap() * 10),
+        );
+    }
+    assert_eq!(boundary.finish(Ok(())), Ok(()));
+    assert_eq!(boundary.discontinuities, 1);
+    assert_eq!(boundary.first_discontinuity_packet, 3);
+    assert_eq!(boundary.first_discontinuity_ms, 20);
+    assert_eq!(boundary.kept_packets, 4);
+    assert_eq!(boundary.kept_frames, 40);
+    assert_eq!(boundary.discarded_before_listening, 1);
+    let packet = PacketStatus { frames: 10, ..GAP };
+    assert_eq!(boundary.packet(true, true, packet), Ok(true));
+    boundary.kept(packet, start + Duration::from_millis(40));
+    assert_eq!(boundary.finish(Ok(())), Err(MicError::Discontinuity));
+    assert_eq!(
+        boundary.packet(true, true, CLEAN),
+        Err(MicError::Discontinuity)
+    );
+    assert_eq!(boundary.finish(Ok(())), Err(MicError::Discontinuity));
+}
+
+#[test]
+fn timestamp_and_native_source_failures_stay_failed_after_clean_input() {
+    for reason in [MicError::Unavailable, MicError::Format] {
+        let mut boundary = PacketBoundary::default();
+        let packet = PacketStatus { frames: 3, ..CLEAN };
+        assert_eq!(boundary.packet(true, true, packet), Ok(false));
+        assert_eq!(boundary.packet(true, true, packet), Ok(true));
+        boundary.kept(packet, Instant::now());
+        assert_eq!(boundary.kept_frames, 3);
+        assert_eq!(boundary.finish(Err(reason)), Err(reason));
+        assert_eq!(
+            boundary.packet(true, true, PacketStatus { frames: 1, ..CLEAN }),
+            Err(reason)
+        );
+        assert_eq!(boundary.finish(Ok(())), Err(reason));
+    }
+    let mut boundary = PacketBoundary::default();
+    assert_eq!(
+        boundary.packet(
+            true,
+            true,
+            PacketStatus {
+                frames: 1,
+                discontinuity: true,
+                ..CLOCK
+            }
+        ),
+        Err(MicError::Timestamp)
+    );
+    assert_eq!(
+        boundary.packet(true, true, PacketStatus { frames: 1, ..CLEAN }),
+        Err(MicError::Timestamp)
+    );
+    assert_eq!(boundary.finish(Ok(())), Err(MicError::Timestamp));
+}
+
+#[test]
+fn revocation_does_not_reclassify_discarded_packets_as_before_listening() {
+    let mut boundary = PacketBoundary::default();
+    let packet = PacketStatus { frames: 3, ..CLEAN };
+    assert_eq!(boundary.packet(false, false, packet), Ok(false));
+    boundary.observe(Mode::Collecting);
+    assert_eq!(boundary.packet(false, false, packet), Ok(false));
+    assert_eq!(boundary.discarded_before_listening, 1);
+    assert_eq!(boundary.kept_packets, 0);
+    assert_eq!(boundary.kept_frames, 0);
 }
