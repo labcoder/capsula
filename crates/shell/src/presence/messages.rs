@@ -322,16 +322,15 @@ impl Render for Messages {
             } else {
                 rows.get(ix)
             };
-            row.filter(|row| row.visible(live_row))
-                .map_or_else(
-                    || div().into_any_element(),
-                    |row| {
-                        let controls = row.draft.map(|draft| {
-                            consent::controls(draft, model.read(cx), &owner, &view, &issue_labels, cx)
-                        });
-                        message(row, controls, cx)
-                    },
-                )
+            row.filter(|row| row.visible(live_row)).map_or_else(
+                || div().into_any_element(),
+                |row| {
+                    let controls = row.draft.map(|draft| {
+                        consent::controls(draft, model.read(cx), &owner, &view, &issue_labels, cx)
+                    });
+                    message(row, controls, cx)
+                },
+            )
         })
         .size_full();
         div()
