@@ -507,11 +507,33 @@ fn bound_to_connection(card: &IssueCard, owner: &WeakEntity<Presence>, cx: &App)
                 && card.repo.as_ref().is_some_and(|repo| repos.contains(repo)))
 }
 
+#[derive(Clone)]
+pub(super) struct Labels {
+    open: SharedString,
+    check: SharedString,
+    cancel: SharedString,
+    dismiss: SharedString,
+    replacement: SharedString,
+}
+
+impl Labels {
+    pub(super) fn new(strings: &Strings) -> Self {
+        Self {
+            open: strings.get(Text::IssueConsentOpen).into(),
+            check: strings.get(Text::IssueCheckAgain).into(),
+            cancel: strings.get(Text::IssueConsentCancel).into(),
+            dismiss: strings.get(Text::IssueDismiss).into(),
+            replacement: strings.get(Text::IssueReplacement).into(),
+        }
+    }
+}
+
 pub(super) fn controls(
     draft: DraftId,
     model: &Threads,
     owner: &WeakEntity<Presence>,
     view: &WeakEntity<Messages>,
+    labels: &Labels,
     cx: &App,
 ) -> gpui_kit::AnyElement {
     let Some(entry) = model.issue(draft) else {
@@ -531,7 +553,6 @@ pub(super) fn controls(
     );
     let file = fileable(card, owner, cx) && !entry.review_blocked();
     let pending = entry.pending();
-    let strings = cx.global::<Strings>();
     let mut controls = div().flex().flex_col().gap_2();
     if actionable {
         let mut buttons = div().flex().gap_2();
@@ -540,7 +561,7 @@ pub(super) fn controls(
             buttons = buttons.child(
                 Button::new(("issue-file", draft.0))
                     .debug_selector(move || format!("issue-file-{}", draft.0))
-                    .label(strings.get(Text::IssueConsentOpen))
+                    .label(labels.open.clone())
                     .disabled(entry.pending_action())
                     .on_click(move |_, window, cx| {
                         let _gone = view.update(cx, |view, cx| {
@@ -554,7 +575,7 @@ pub(super) fn controls(
             buttons = buttons.child(
                 Button::new(("issue-check", draft.0))
                     .debug_selector(move || format!("issue-check-{}", draft.0))
-                    .label(strings.get(Text::IssueCheckAgain))
+                    .label(labels.check.clone())
                     .outline()
                     .disabled(pending)
                     .on_click(move |_, window, cx| {
@@ -570,7 +591,7 @@ pub(super) fn controls(
             buttons = buttons.child(
                 Button::new(("issue-cancel-review", draft.0))
                     .debug_selector(move || format!("issue-cancel-review-{}", draft.0))
-                    .label(strings.get(Text::IssueConsentCancel))
+                    .label(labels.cancel.clone())
                     .outline()
                     .on_click(move |_, window, cx| {
                         if window.is_window_active() && window.is_visible() {
@@ -583,7 +604,7 @@ pub(super) fn controls(
         buttons = buttons.child(
             Button::new(("issue-dismiss", draft.0))
                 .debug_selector(move || format!("issue-dismiss-{}", draft.0))
-                .label(strings.get(Text::IssueDismiss))
+                .label(labels.dismiss.clone())
                 .ghost()
                 .disabled(pending)
                 .on_click(move |_, window, cx| {
@@ -599,10 +620,7 @@ pub(super) fn controls(
                 || !bound_to_connection(card, owner, cx))
         {
             controls = controls.child(div().debug_selector(|| "issue-replacement".into()).child(
-                gpui_kit::Text::new(
-                    "issue-replacement".into(),
-                    strings.get(Text::IssueReplacement).into(),
-                ),
+                gpui_kit::Text::new("issue-replacement".into(), labels.replacement.clone()),
             ));
         }
     }

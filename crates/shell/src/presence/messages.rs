@@ -28,6 +28,7 @@ pub(super) struct Messages {
     focus: FocusHandle,
     shown_thread: Option<ThreadId>,
     rows: Rc<[Row]>,
+    issue_labels: consent::Labels,
     ids: Vec<(&'static str, u64)>,
     count: usize,
     rem: Pixels,
@@ -158,6 +159,7 @@ impl Messages {
             focus: cx.focus_handle().tab_stop(true),
             shown_thread,
             rows,
+            issue_labels: consent::Labels::new(cx.global::<Strings>()),
             ids,
             count,
             rem: window.rem_size(),
@@ -308,6 +310,7 @@ impl Render for Messages {
             self.list.remeasure();
         }
         let rows = Rc::clone(&self.rows);
+        let issue_labels = self.issue_labels.clone();
         let live = self.preview.clone();
         let live_row = self.live_row;
         let model = self.model.clone();
@@ -324,7 +327,7 @@ impl Render for Messages {
                     || div().into_any_element(),
                     |row| {
                         let controls = row.draft.map(|draft| {
-                            consent::controls(draft, model.read(cx), &owner, &view, cx)
+                            consent::controls(draft, model.read(cx), &owner, &view, &issue_labels, cx)
                         });
                         message(row, controls, cx)
                     },
