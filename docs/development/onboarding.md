@@ -14,7 +14,7 @@ name. Sign-in and the shortcut steps come later. The brain decides whether onboa
 - `shell/onboarding.rs` is the plain state: the step, the field whose save it waits for, and
   whether a finish is queued. It holds no text, so it has nothing to log.
 - `presence/onboarding.rs` owns the window (`Presence.onboarding`), the launch decision, and
-  Finish later (`Presence.onboarding_later`, for this run only).
+  whether it may still open this run (`Presence.onboarding_run`, put off by Finish later).
 
 ## Flow
 
