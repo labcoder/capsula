@@ -481,11 +481,11 @@ pub(super) fn validate_changes<'a>(
                     break;
                 };
                 let counts = depths.entry(at).or_insert([0; MAX_OBJECT_DEPTH + 1]);
-                for (count, objects) in counts[distance..].iter_mut().zip(moved) {
+                for (count, moving) in counts[distance..].iter_mut().zip(moved) {
                     *count = if joined {
-                        *count + objects
+                        *count + moving
                     } else {
-                        count.saturating_sub(objects)
+                        *count - moving
                     };
                 }
                 next = behind.get(at).copied();
