@@ -906,8 +906,8 @@ live before the retained old process when comparing a same-process reconnect.
 The Shell reserves one metadata-only stop slot before queueing recognition. Confirmed
 source completion changes it to a retained receipt, which is queued on the current outbox
 even if its original Session has ended. Each new connection replays it once, including
-after a Brain restart. Only `VoiceHoldStopAccepted` for that receipt on its current reader
-generation frees the slot; queueing, EOF and a new incarnation do not. While it is occupied,
+after a Brain restart. Only `VoiceHoldStopAccepted` for that receipt, read on the connection that last
+carried it, frees the slot; queueing, EOF and a new incarnation do not. While it is occupied,
 another hold is Busy without hiding typing or opening another source. No PCM, KeyUp,
 recognition or text is replayed. A redundant accepted receipt never restarts decode.
 

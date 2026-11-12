@@ -64,17 +64,6 @@ impl Shared {
     }
 
     pub(super) fn accept_microphone_stop(&self, generation: u64, gesture: GestureId) {
-        let outbox = self.outbox.lock().unwrap_or_else(PoisonError::into_inner);
-        if outbox
-            .as_ref()
-            .is_none_or(|outbox| outbox.generation != generation)
-        {
-            return;
-        }
-        self.settle_microphone_stop(generation, gesture);
-    }
-
-    fn settle_microphone_stop(&self, generation: u64, gesture: GestureId) {
         let mut pending = self
             .microphone_stop
             .lock()
@@ -91,7 +80,7 @@ impl LinkHandle {
     #[cfg(test)]
     pub(crate) fn accept_recorded_microphone_stop(&self, generation: u64, gesture: GestureId) {
         assert!(self.control_recording.is_some());
-        self.shared.settle_microphone_stop(generation, gesture);
+        self.shared.accept_microphone_stop(generation, gesture);
     }
 
     pub(crate) fn voice_stop_pending(&self) -> bool {
