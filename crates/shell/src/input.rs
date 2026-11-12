@@ -29,8 +29,14 @@ pub(crate) enum Edge {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Event {
-    Key { key: Key, edge: Edge },
+    Key {
+        key: Key,
+        edge: Edge,
+    },
+    /// The native one-shot timer for the gesture's deadline.
     Deadline,
+    /// GPUI's timer for the same deadline, which a busy native queue can't starve.
+    Scheduled,
     Reset,
     Escape,
 }
@@ -131,9 +137,9 @@ impl Gesture {
             Key::Other(code) => return self.other_key(code, edge),
         };
         let down = edge == Edge::Down;
-        // shortcut: a held key's auto-repeat also reaches the threshold when the deadline timer is
+        // shortcut: a held key's auto-repeat also reaches the threshold if both deadline timers are
         // late, but only after the keyboard's repeat delay (about 500 ms, up to 1 s), so such a
-        // hold starts late and one released sooner is refused; upgrade once the deadline can't starve.
+        // hold starts late; drop it once desk logs never show `by=Repeat`.
         if self.down[index] == down {
             return [self.advance(now), None, None];
         }

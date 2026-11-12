@@ -8,7 +8,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::{AnyWindowHandle, App, AppContext as _, AsyncApp, WeakEntity};
 
@@ -78,7 +78,7 @@ pub(super) fn deliver(
     let fence = std::cell::RefCell::new(Fence::new(link.microphone_gate()));
     let escaped = Cell::new(None);
     let escape_down = Cell::new(false);
-    Box::new(move |event, at| {
+    let reduce: Rc<Reduce> = Rc::new(move |event, at| {
         let Ok(qpc) = u64::try_from(performance_counter()) else {
             tracing::warn!(stage = ?InputStage::Delivery, reason = ?InputReason::ClockUnavailable, "held speech input failed");
             link.cancel_input();
@@ -174,7 +174,58 @@ pub(super) fn deliver(
             tracing::debug!(stage = ?InputStage::Delivery, reason = ?InputReason::QueueClosed, "held speech input boundary");
         }
         gesture.get().deadline()
+    });
+    let scheduled = Rc::new(Cell::new((0, None)));
+    let timers = cx.to_async();
+    Box::new(move |event, at| {
+        let deadline = reduce(event, at);
+        schedule(&reduce, &scheduled, deadline, &timers);
+        deadline
     })
+}
+
+type Reduce = dyn Fn(Event, EventTime) -> Option<Instant>;
+
+/// Backs the native deadline with GPUI's timer, whose wake is a posted message that a thread
+/// busy with paint and timer messages can't starve. Whichever arrives first recognises the
+/// hold; the other finds nothing due. `scheduled` is the latest timer's serial and deadline.
+fn schedule(
+    reduce: &Rc<Reduce>,
+    scheduled: &Rc<Cell<(u64, Option<Instant>)>>,
+    deadline: Option<Instant>,
+    cx: &AsyncApp,
+) {
+    let (serial, armed) = scheduled.get();
+    if armed == deadline {
+        return;
+    }
+    let serial = serial.wrapping_add(1);
+    scheduled.set((serial, deadline));
+    let Some(deadline) = deadline else {
+        return;
+    };
+    let (reduce, scheduled) = (Rc::downgrade(reduce), Rc::downgrade(scheduled));
+    cx.spawn(async move |cx| {
+        let executor = cx.background_executor().clone();
+        executor
+            .timer(deadline.saturating_duration_since(executor.now()))
+            .await;
+        let (Some(reduce), Some(scheduled)) = (reduce.upgrade(), scheduled.upgrade()) else {
+            return;
+        };
+        if scheduled.get().0 != serial {
+            return;
+        }
+        scheduled.set((serial, None));
+        let next = reduce(
+            Event::Scheduled,
+            EventTime {
+                instant: executor.now(),
+            },
+        );
+        schedule(&reduce, &scheduled, next, cx);
+    })
+    .detach();
 }
 
 /// Applies effects through a fallible borrow of the app.

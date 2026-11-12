@@ -87,10 +87,12 @@ sequenceDiagram
   a WM_TIMER already queued; delivering it is harmless, because the gesture ignores a deadline it
   hasn't reached and returns the remaining one. Timer resolution is the system tick, about
   16 ms [guess, unmeasured on Rez]. WM_TIMER is the lowest priority message, so a busy thread
-  can delay it past the release. A held chord key's auto-repeat also advances the gesture, so
-  a late timer delays recognition to the first repeat, which comes only after the keyboard's
-  repeat delay. The recognition line logs whether the deadline, a repeat or the release reached
-  the threshold, and a chord key more than 50 ms past an armed deadline logs the thread's
+  can delay it past the release. The shared delivery code also schedules each new deadline on
+  GPUI's timer, which wakes the UI thread with a posted message that paint and timer messages
+  can't starve. It reduces through the same path, and whichever timer arrives first wins; the
+  other finds nothing due. A held chord key's auto-repeat also advances the gesture, a backstop
+  that comes only after the keyboard's repeat delay. The recognition line logs whether the native
+  deadline, the scheduled one, a repeat or the release reached the threshold, and a chord key more than 50 ms past an armed deadline logs the thread's
   message queue status once per gesture.
 - **Resets.** Device removal, any session change (lock or unlock), a desktop switch such as
   Ctrl+Alt+Del's secure desktop, suspend, an overrun and Pause all reset the gesture. Keys

@@ -296,6 +296,44 @@ fn a_recognised_hold_logs_whether_the_deadline_a_repeat_or_the_release_reached_i
     assert_eq!(recognised, ["by=Repeat", "by=Release"]);
 }
 
+#[gpui::test]
+fn a_hold_whose_native_deadline_never_arrives_is_recognised_by_the_scheduled_one(
+    cx: &mut TestAppContext,
+) {
+    let (captured, _logging, _second) = capture();
+    let (owner, _data, _controls) = ready(cx);
+    let deliver = native(&owner, cx);
+    let at = cx.background_executor.now();
+    chord(&deliver, Edge::Down, at);
+    cx.run_until_parked();
+    cx.background_executor
+        .advance_clock(Duration::from_millis(299));
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| assert!(owner.voice.pending.is_none()));
+    cx.background_executor
+        .advance_clock(Duration::from_millis(1));
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.voice.status, Some(Text::HoldPreparing));
+        assert_eq!(
+            owner
+                .voice
+                .pending
+                .as_ref()
+                .map(|hold| hold.token.gesture()),
+            Some(GestureId(1))
+        );
+    });
+    deliver(Event::Deadline, after(at, 340));
+    cx.run_until_parked();
+    let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    let recognised = text
+        .lines()
+        .filter_map(|line| line.split("reason=HoldRecognized ").nth(1))
+        .collect::<Vec<_>>();
+    assert_eq!(recognised, ["by=Scheduled"]);
+}
+
 fn native(owner: &Entity<Presence>, cx: &mut TestAppContext) -> Deliver {
     let weak = owner.downgrade();
     owner.update(cx, |owner, cx| {

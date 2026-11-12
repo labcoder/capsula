@@ -40,6 +40,7 @@ pub(crate) enum InputReason {
 #[derive(Debug)]
 enum Recognition {
     Deadline,
+    Scheduled,
     Repeat,
     Release,
 }
@@ -109,6 +110,7 @@ impl Fence {
                             edge: Edge::Down, ..
                         } => Recognition::Repeat,
                         Event::Key { edge: Edge::Up, .. } => Recognition::Release,
+                        Event::Scheduled => Recognition::Scheduled,
                         _ => Recognition::Deadline,
                     };
                     tracing::debug!(stage = ?InputStage::Gesture, reason = ?InputReason::HoldRecognized, ?by, "held speech input boundary");

@@ -943,9 +943,10 @@ recognised hold refused at admission always shows a notice, busy, disabled, unav
 by cause, including one first recognised at its release, whose gate has already closed.
 
 The 300 ms hold deadline is a native one-shot timer. On Windows that is `WM_TIMER`, the lowest
-priority message, so a busy UI thread can delay it past the release. Auto-repeat of a held
-chord key also advances the gesture, so a late timer delays recognition to the first repeat
-instead of losing the hold. Explicit typed input cancels and drains the pending hold before its
+priority message, so a busy UI thread can delay it past the release. Shared gesture code also
+schedules the same deadline on GPUI's timer, whose wake is a posted message; whichever arrives
+first recognises the hold and the other finds nothing due. Auto-repeat of a held chord key also
+advances the gesture, as a backstop that comes only after the keyboard's repeat delay. Explicit typed input cancels and drains the pending hold before its
 first submit attempt. Cancellation keeps a recording owner until true completion; an
 unconfirmed source remains unavailable rather than claiming stopped or allowing replacement.
 No-Running start failures take their notice from the true stop result, not a manufactured
