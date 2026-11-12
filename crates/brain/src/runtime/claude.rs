@@ -59,6 +59,8 @@ pub(crate) struct Claude {
     again: bool,
     /// A Disconnect is still to finish.
     cleaning: bool,
+    /// A Cancel ended this generation's sign-in, and its Status hasn't come yet.
+    cancelled: bool,
     /// The launches admitted, until each one's teardown is over and its report, if one is due,
     /// was heard.
     launches: Vec<Held>,
@@ -125,6 +127,7 @@ impl Claude {
             out: None,
             again: false,
             cleaning: false,
+            cancelled: false,
             launches: Vec::new(),
             quarantine: None,
             warm: None,
@@ -163,6 +166,7 @@ impl Claude {
         self.generation += 1;
         lane.fence(self.generation);
         self.again = false;
+        self.cancelled = false;
         self.submit(work)
     }
 
@@ -255,7 +259,7 @@ impl Claude {
                     && self.view == ClaudeCodeView::SigningIn
                     && self.out == Some(Work::Login) =>
             {
-                self.begin(Work::Version);
+                self.cancelled = self.begin(Work::Version);
             }
             // A Disconnect the lane can't take leaves nothing marked, so it may be asked again.
             ConnectionOp::DisconnectClaudeCode if signs_in && self.finds && !self.cleaning => {
@@ -294,9 +298,22 @@ impl Claude {
         {
             self.quarantine = None;
         }
+        let cancelled = std::mem::take(&mut self.cancelled);
+        // The Status after a Cancel: unless it's signed in, or nothing could run, the sign-in may
+        // have left Claude Code's file in Kumochi's folder, and only a Disconnect removes it.
+        let leftover = cancelled
+            && self.out == Some(Work::Status)
+            && !matches!(
+                result,
+                Ok(Outcome::Status {
+                    signed_in: true,
+                    ..
+                }) | Err(Failure::Busy | Failure::Refused)
+            );
         match result {
             Ok(Outcome::Version(_) | Outcome::LoginEnded) => {
                 if self.submit(Work::Status) {
+                    self.cancelled = cancelled;
                     return false;
                 }
             }
@@ -339,6 +356,12 @@ impl Claude {
             }
         }
         self.out = None;
+        if leftover {
+            self.cleaning = self.begin(Work::Disconnect { logout: false });
+            if self.cleaning {
+                self.view = ClaudeCodeView::CleanupPending;
+            }
+        }
         if std::mem::take(&mut self.again) {
             self.find();
         }

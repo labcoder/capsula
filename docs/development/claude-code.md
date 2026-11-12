@@ -225,7 +225,7 @@ stateDiagram-v2
     Finding --> AuditFailed: discovery failed
     Finding --> Unavailable: work cannot finish
     SignedOut --> SigningIn: Connect
-    SigningIn --> SignedOut: Cancel, then Status
+    SigningIn --> CleanupPending: Cancel, then a Status not signed in or failing
     SigningIn --> Ready: login ends, or Cancel after it saved a sign-in, then Status
     Ready --> CleanupPending: Disconnect
     SigningIn --> CleanupPending: Disconnect
@@ -243,7 +243,11 @@ stateDiagram-v2
   A second Connect while one runs is ignored. **Cancel** and **Disconnect** start a
   new generation; the running call sees it at its next 20 ms poll, its job is terminated within the
   bounds above, and its late result is dropped. Cancel only stops the sign-in: if Claude Code had
-  already saved one, the Status after it shows Ready, and only Disconnect signs out. A second
+  already saved one, the Status after it shows Ready, and only Disconnect signs out. If that
+  Status isn't signed in, or fails, the brain removes Kumochi's Claude Code folder without a
+  logout (Disconnect's deletion) and finds again, because a job ended part way through Claude
+  Code's save may have left a sign-in file no view would offer to remove. A Status that
+  couldn't run (another brain holds the lock, or the lane is stuck) deletes nothing. A second
   Cancel while the first's Status is out is ignored. For now the expected path is the paste-code
   fallback (OSC-244): the user opens the link the console prints, signs in, and pastes the code
   the page shows back into the console. Kumochi never reads or relays that link or code.
