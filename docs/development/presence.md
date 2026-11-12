@@ -37,7 +37,13 @@ largest-area usable band below, above, left or right, in that tie order, with a
 is usable, it retries with only the dock and peek reserved, then uses the inset work area
 as a last resort. On a display too small for both, an open panel can cover a drawing and
 its entrance can play unseen. Opening or closing a panel updates placement before the next paint;
-when the dock lands, panels re-anchor before the stage is recomputed. The typing panel
+when the dock lands, panels re-anchor before the stage is recomputed. While a drawing is on
+screen it keeps its stage as long as that stage still fits inside the newly chosen one for the
+same work area, dock layout and scale: a drawing that stays put is easier to follow than one
+that re-centres every time space frees up. So closing a panel, including the typing panel a
+held voice request hides while it runs, leaves the drawing where it is. A panel opening over
+it, a dock move or a display change re-places it, and a drawing that starts on a cleared
+screen takes the best stage at that moment. The typing panel
 retains its accepted size when re-anchored, like Threads and Settings.
 A retained GPUI display observer refreshes the dock's scale and anchor,
 the drawing stage and a shown overlay's bounds after display changes. Existing views snap
