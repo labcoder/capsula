@@ -537,7 +537,9 @@ Recognition at 300 ms requests admission; chord make only warms speech input.
 It never turns the legacy Listening effect into recording authority. Normal release
 and cancellation are distinct intents. The native reducer closes the atomic collection
 gate before queuing UI delivery, so a delayed recognition cannot reopen released input.
-Reset also cancels released speech that has not yet become a run.
+Reset also cancels released speech that has not yet become a run. While the onboarding window
+shows, the fence drops a hold before it warms or arms anything, on every recognition path
+([onboarding](onboarding.md#hold-to-talk)).
 
 The microphone generation remains occupied until its matching stop/join receipt or
 proof it was never started. Cancellation and startup/hold deadlines are not release

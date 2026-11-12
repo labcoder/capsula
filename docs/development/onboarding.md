@@ -57,6 +57,10 @@ flowchart TD
 
 ## Hold to talk
 
-Holds are dropped in `Gesture::handle` on main today, so onboarding needs no hold gate yet. When
-hold to talk lands, `deliver` in `presence/gesture.rs` takes one more `Rc<Cell<bool>>` that
-`Presence` sets while the window shows, and `Fence::reduce` drops holds while it's set.
+Holds are paused while the window shows. Opening it sets `voice.paused`, an `Rc<Cell<bool>>`
+that `deliver` in `presence/gesture.rs` reads on every key event and deadline, and closing it
+clears the flag. `Fence::reduce` drops a hold that meets the pause, whichever event reaches the
+threshold: no warm-up `KeyDown`, no armed microphone gate, nothing sent to the brain and no
+notice. A hold that began while paused stays dropped after the window closes, and the next one
+goes through. A hold already recognised when the window opens (a reconnect can reopen it) ends as
+a refused one does, with input cleared and the cancelled notice.

@@ -942,7 +942,10 @@ run's first state carries its origin, so the hold remembers the run that state n
 later states by run; Answering, Done, Failed or Interrupted then end it without a speech notice,
 since the run's own error or stop already shows, and Esc returns to the ordinary order. A
 recognised hold refused at admission always shows a notice, busy, disabled, unavailable or failed
-by cause, including one first recognised at its release, whose gate has already closed.
+by cause, including one first recognised at its release, whose gate has already closed. While
+the onboarding window shows, the native fence drops a hold before recognition, so it is never
+refused and shows nothing; one already recognised when the window opens ends cancelled
+([onboarding](onboarding.md#hold-to-talk)).
 
 The 300 ms hold deadline is a native one-shot timer. On Windows that is `WM_TIMER`, the lowest
 priority message, so a busy UI thread can delay it past the release. Shared gesture code also
