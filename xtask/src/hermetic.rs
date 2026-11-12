@@ -27,8 +27,9 @@ const GATE: ProductIdentity = ProductIdentity::GATE;
 const MARKER: &str = "gate-run";
 /// The lock's one line: this, the run id, a space, the run's root and a newline.
 const LOCK_LINE: &str = "kumochi-gate-run ";
+/// Onboarding finished, so no shell opens the onboarding window and takes the foreground; and
 /// Claude Code off, so the brain starts no `claude.exe` and reads no policy for it.
-const SETTINGS: &str = "[claude_code]\nenabled = false\n";
+const SETTINGS: &str = "onboarded = true\n\n[claude_code]\nenabled = false\n";
 /// How long building the images may take [guess: a cold release shell build on Rez].
 const BUILD_LIMIT: Duration = Duration::from_mins(40);
 
@@ -78,6 +79,9 @@ pub(crate) fn build(
         cargo.args(["--package", package]);
     }
     cargo.arg("--target-dir").arg(&target);
+    // `cargo run` sets it for xtask, and ring's build script reruns when it changes, so keeping it
+    // would rebuild a prebuilt image inside a timed run.
+    cargo.env_remove("CARGO_MANIFEST_DIR");
     if profile == Profile::Release {
         cargo.arg("--release");
     }
@@ -429,12 +433,12 @@ mod tests {
     }
 
     #[test]
-    fn launch_folders_are_their_own_with_claude_code_off() {
+    fn launch_folders_are_their_own_onboarded_with_claude_code_off() {
         let dir = scratch::dir("gate-folders");
         let folders = Folders::create(&dir).expect("folders");
         assert_eq!(
             fs::read_to_string(dir.join("roaming/Kumochi Gate/config.toml")).expect("settings"),
-            "[claude_code]\nenabled = false\n"
+            "onboarded = true\n\n[claude_code]\nenabled = false\n"
         );
         assert!(dir.join("local").is_dir());
         let mut command = Command::new("unused");

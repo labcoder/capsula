@@ -57,6 +57,10 @@ cargo build --release --package kumochi-shell --package kumochi-brain \
 ./target/release/xtask.exe gate-session "$transcript"
 ```
 
+The tool's own build drops the `CARGO_MANIFEST_DIR` that `cargo run` sets, so `cargo run` finds the
+prebuilt images up to date too. Prebuild after the last commit or checkout: the build id follows
+HEAD's reflog, so either rebuilds them.
+
 ## What a run does
 
 ```mermaid
@@ -77,7 +81,8 @@ flowchart TD
    shell a brain relaunches, or a brain a shell starts, ends with the run.
 3. **Its own folders.** Every launch gets its own `%LOCALAPPDATA%` and `%APPDATA%` under the run's
    folder, and `%APPDATA%\Kumochi Gate\config.toml` says `[claude_code] enabled = false`, so the
-   brain runs no `claude.exe` and reads no Claude Code policy. The brain logs `Claude Code
+   brain runs no `claude.exe` and reads no Claude Code policy. It also says `onboarded = true`: a
+   gate launch isn't a first-run test, and onboarding's window would take the foreground. The brain logs `Claude Code
    setting enabled=false` at start, so the run's own brain log shows it.
 4. **Cleanup.** At the end, success or failure, and only once no product process is left, the run:
    - reads each launch's own `credentials.db` and deletes the `Kumochi Gate/gen/<kind>/<generation>/<n>`
@@ -127,8 +132,9 @@ A gate image is the shipped code apart from its names: the same profile, configu
   status at start, so earlier numbers taken with fresh folders included that work, and `bench idle`'s
   process tree no longer holds `claude.exe`.
 - The data is fresh. All launches of one run share one data folder, so `cold-start`'s first launch
-  is a first-ever start (a new store and authority, the legacy-name sweep and a host write) and the
-  other nine start on warm data. With ten launches, p95 is the maximum, so the first launch can
+  is the first start of a profile already marked onboarded (a new store and authority, the
+  legacy-name sweep and a host write), not a first-ever run, and the other nine start on warm
+  data. Onboarding's own start cost is unmeasured. With ten launches, p95 is the maximum, so the first launch can
   decide it.
 - `--baseline` builds that checkout's source with the current toolchain and this workspace's cargo
   configuration. It compares code under identical tooling, not the binary that shipped, and it
