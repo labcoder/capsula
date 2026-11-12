@@ -33,6 +33,15 @@ pub(crate) enum Landing {
     Quiet,
 }
 
+/// Whether onboarding may still open this run.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ThisRun {
+    #[default]
+    Owed,
+    /// Finish later was chosen, or the window couldn't open: not again until the next launch.
+    PutOff,
+}
+
 /// What the window does after a submit or a settings change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Next {
@@ -56,9 +65,10 @@ pub(crate) struct Onboarding {
 }
 
 impl Onboarding {
-    /// What a launch shows: none once the brain says onboarding isn't owed.
-    pub(crate) fn begin(view: &SettingsView) -> Option<Self> {
-        (!view.onboarded).then_some(Self {
+    /// What a settings view opens: none once the brain says onboarding isn't owed, or once it
+    /// was put off this run.
+    pub(crate) fn begin(view: &SettingsView, run: ThisRun) -> Option<Self> {
+        (!view.onboarded && run == ThisRun::Owed).then_some(Self {
             step: Step::Welcome,
             awaiting: None,
             finishing: None,

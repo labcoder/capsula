@@ -20,7 +20,7 @@ use super::{
     Foreground, LinkState, OpenError, PanelVisibility, Presence, PresenceEvent, PresenceSurface,
     configure_surface, options, platform, send, status_text,
 };
-use crate::onboarding::{Landing, Next, Onboarding, Step};
+use crate::onboarding::{Landing, Next, Onboarding, Step, ThisRun};
 use crate::settings::{Field, Settings};
 use crate::strings::{Strings, Text};
 
@@ -326,17 +326,19 @@ impl Presence {
             });
             return self.onboarding_next(next, cx);
         }
-        match settings.read(cx).view().and_then(Onboarding::begin) {
-            Some(state) if !self.onboarding_later => {
-                let opened = self.open_onboarding(state, cx);
-                if opened.is_err() {
-                    self.onboarding_later = true;
-                    self.close_onboarding(cx)?;
-                }
-                opened
-            }
-            _ => Ok(()),
+        let Some(state) = settings
+            .read(cx)
+            .view()
+            .and_then(|view| Onboarding::begin(view, self.onboarding_run))
+        else {
+            return Ok(());
+        };
+        let opened = self.open_onboarding(state, cx);
+        if opened.is_err() {
+            self.onboarding_run = ThisRun::PutOff;
+            self.close_onboarding(cx)?;
         }
+        opened
     }
 
     /// Continue or Enter: the step's name is saved, then the plain state decides.
@@ -507,7 +509,7 @@ impl Presence {
             self.save_setting(field, cx);
             self.cancel_onboarding_edit(cx);
         }
-        self.onboarding_later = true;
+        self.onboarding_run = ThisRun::PutOff;
         tracing::info!("onboarding put off for this run");
         self.close_onboarding(cx)
     }

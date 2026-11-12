@@ -124,8 +124,8 @@ struct Presence {
     settings_panel: Option<SettingsPanel>,
     /// The first-run window, while it shows.
     onboarding: Option<onboarding::OnboardingPanel>,
-    /// Finish later was chosen, or opening failed: onboarding doesn't open again this run.
-    onboarding_later: bool,
+    /// Whether onboarding may still open this run.
+    onboarding_run: crate::onboarding::ThisRun,
     settings: Entity<Settings>,
     threads: Entity<Threads>,
     chat: Entity<Threads>,
@@ -938,7 +938,7 @@ pub(crate) fn open(
             thread_panel: None,
             settings_panel: None,
             onboarding: None,
-            onboarding_later: false,
+            onboarding_run: crate::onboarding::ThisRun::Owed,
             settings: cx.new(|_| Settings::default()),
             threads: cx.new(|_| threads),
             chat: cx.new(|_| chat),

@@ -3,7 +3,7 @@ use kumochi_protocol::message::{
     SttUnload, ThreadId, UserName,
 };
 
-use super::{Landing, Next, Onboarding, Step};
+use super::{Landing, Next, Onboarding, Step, ThisRun};
 use crate::settings::{Error, Field, Settings, Update};
 
 #[expect(
@@ -27,7 +27,7 @@ fn view(assistant: &str, user: Option<&str>, onboarded: bool) -> SettingsView {
 
 fn first_run(user: Option<&str>) -> (Settings, Onboarding) {
     let first = view("Kumo", user, false);
-    let onboarding = Onboarding::begin(&first).expect("onboarding is owed");
+    let onboarding = Onboarding::begin(&first, ThisRun::Owed).expect("onboarding is owed");
     let mut settings = Settings::default();
     assert_eq!(settings.set_view(first, Update::Unsolicited), None);
     (settings, onboarding)
@@ -57,7 +57,8 @@ fn on_your_name(user: Option<&str>) -> (Settings, Onboarding) {
 
 #[test]
 fn begin_is_owed_only_until_onboarded_and_an_onboarded_view_closes_at_any_step() {
-    assert!(Onboarding::begin(&view("Kumo", None, true)).is_none());
+    assert!(Onboarding::begin(&view("Kumo", None, true), ThisRun::Owed).is_none());
+    assert!(Onboarding::begin(&view("Kumo", None, false), ThisRun::PutOff).is_none());
     let (mut settings, mut onboarding) = first_run(None);
     assert_eq!(onboarding.step(), Step::Welcome);
     assert!(!onboarding.finishing());

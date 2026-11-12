@@ -12,7 +12,7 @@ use kumochi_protocol::message::{
 use super::{OnboardingPanel, OnboardingView, Select};
 use crate::input::{Edge, Effect, Event, Gesture, Key};
 use crate::link::{Batch, LinkEvent, Session};
-use crate::onboarding::{Onboarding, Step};
+use crate::onboarding::{Onboarding, Step, ThisRun};
 use crate::platform::{EventTime, PresenceEvent};
 use crate::presence::{PanelVisibility, Presence, test_fixture};
 use crate::settings::{Field, Update};
@@ -55,7 +55,8 @@ fn showing(
                 None
             );
         });
-        let state = Onboarding::begin(&view("Kumo", false)).expect("onboarding is owed");
+        let state =
+            Onboarding::begin(&view("Kumo", false), ThisRun::Owed).expect("onboarding is owed");
         let (model, events, weak) = (
             owner.settings.clone(),
             owner.events.clone(),
@@ -194,7 +195,7 @@ fn esc_restores_an_edited_name_then_a_second_esc_puts_onboarding_off(cx: &mut Te
     escape(&owner, window, cx);
     owner.read_with(cx, |owner, _| {
         assert!(owner.onboarding.is_none());
-        assert!(owner.onboarding_later);
+        assert_eq!(owner.onboarding_run, ThisRun::PutOff);
     });
     assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
 }
@@ -212,7 +213,7 @@ fn finish_later_saves_a_valid_edited_name_and_sends_no_finish(cx: &mut TestAppCo
     cx.run_until_parked();
     owner.read_with(cx, |owner, _| {
         assert!(owner.onboarding.is_none());
-        assert!(owner.onboarding_later);
+        assert_eq!(owner.onboarding_run, ThisRun::PutOff);
     });
     assert_eq!(
         controls.try_recv(),
@@ -259,7 +260,7 @@ fn an_onboarded_view_closes_the_window_quietly(cx: &mut TestAppContext) {
             )
             .expect("an unsolicited view");
         assert!(owner.onboarding.is_none());
-        assert!(!owner.onboarding_later);
+        assert_eq!(owner.onboarding_run, ThisRun::Owed);
         assert_eq!(owner.panel_visibility, PanelVisibility::Hidden);
     });
 }
@@ -309,7 +310,7 @@ fn a_failed_open_leaves_nothing_open_and_isnt_retried_this_run(cx: &mut TestAppC
             )
             .expect("a view that owes onboarding");
         assert!(owner.onboarding.is_none());
-        assert!(owner.onboarding_later);
+        assert_eq!(owner.onboarding_run, ThisRun::PutOff);
     });
 }
 

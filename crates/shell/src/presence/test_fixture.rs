@@ -67,7 +67,7 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             thread_panel: None,
             settings_panel: None,
             onboarding: None,
-            onboarding_later: false,
+            onboarding_run: crate::onboarding::ThisRun::Owed,
             settings: cx.new(|_| Settings::default()),
             threads: cx.new(|_| threads),
             chat: cx.new(|_| chat),
