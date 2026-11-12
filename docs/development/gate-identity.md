@@ -77,7 +77,8 @@ flowchart TD
    shell a brain relaunches, or a brain a shell starts, ends with the run.
 3. **Its own folders.** Every launch gets its own `%LOCALAPPDATA%` and `%APPDATA%` under the run's
    folder, and `%APPDATA%\Kumochi Gate\config.toml` says `[claude_code] enabled = false`, so the
-   brain runs no `claude.exe` and reads no Claude Code policy.
+   brain runs no `claude.exe` and reads no Claude Code policy. The brain logs `Claude Code
+   setting enabled=false` at start, so the run's own brain log shows it.
 4. **Cleanup.** At the end, success or failure, and only once no product process is left, the run:
    - reads each launch's own `credentials.db` and deletes the `Kumochi Gate/gen/<kind>/<generation>/<n>`
      names (chunks 0 to 63) of every generation recorded there, then, after a success, that
