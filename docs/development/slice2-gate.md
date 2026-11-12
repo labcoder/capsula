@@ -19,10 +19,24 @@ flowchart LR
   copies the brain and itself, renamed `kumochi.exe`, into a fresh folder and runs the scripted
   client from that copy. The client reads the instance capability from Credential Manager and
   sends `Hello` on both pipes, as the shell does.
-- Each item gets its own `%LOCALAPPDATA%` folder and fixture script (`KUMOCHI_FIXTURE`, dev builds
-  only), so items never share a store and the developer's dev store is never touched. The gate
-  refuses to start while any `kumochi.exe` or `kumochid.exe` runs, because a dev brain would hold
-  the session's pipes.
+- Each item gets its own `%LOCALAPPDATA%` and `%APPDATA%` folders and fixture script
+  (`KUMOCHI_FIXTURE`, dev builds only), so items never share a store or settings. That doesn't keep
+  a brain away from all of the developer's dev data (OSC-680). Every brain start still:
+  - builds Claude Code's lane in `Kumochi Dev` under the local application data folder the system
+    reports, not the one in the environment. It takes `claude-code.lock` there, deletes leftover
+    launch folders in `claude-code\engine`, and deletes `claude-code` itself when a Disconnect
+    left its marker. With no settings file in the item's `%APPDATA%`, Claude Code is on, so the
+    brain also runs the installed `claude.exe` for its version and its sign-in status against
+    that folder's `config`;
+  - writes the instance capability to Credential Manager under `Kumochi Dev instance`, and deletes
+    it when it exits cleanly;
+  - opens a new account authority in its own folder, which writes a host entry under the
+    `Kumochi Dev` service that stays after the run, and deletes that service's earlier-format
+    account names.
+
+  Until OSC-680 is settled, run the gate only where that is acceptable. The gate refuses to start
+  while any `kumochi.exe` or `kumochid.exe` runs, because a dev brain would hold the session's
+  pipes.
 - The client answers `Ping`, grants credit for each data frame it takes, and records every frame
   with the instant its reader thread took it. Its data reader can pause, take frames one at a
   time, or keep reading while it withholds credit.
@@ -50,11 +64,20 @@ flowchart LR
   known drawings. The real shell's install logic is covered by its unit tests, as its fence is.
 - `Stale` is the brain's own verdict and isn't on the pipe, so the late-step item checks its effects.
 - Every pipe write, and the wait for `Welcome`, is bounded; a stuck transfer is cancelled and
-  waited for before its buffer goes. The whole gate is killed, with its brains, after 20 minutes.
-  It refuses to run from a release xtask, whose brain would use the installed product's names.
+  waited for before its buffer goes. The brain build is killed, with everything it started, after
+  20 minutes, and the whole gate, with its brains, after another 20; a `taskkill` that fails is
+  reported with the process it left. It refuses to run from a release xtask, whose brain would use
+  the installed product's names.
+- A brain whose kill fails isn't waited on, which would never return: the gate keeps its handle,
+  ends it after its item with `taskkill`, waits for it to exit, and fails that item. It only ever
+  ends brains it started and still holds, so no other process can match, even with a reused id.
 - shortcut: one scene can't reach three snapshot chunks today (32 KiB target, at most 64 steps of
   256 B), so the reconnect item's chunks span four scenes; chunking inside a scene is covered by
   the brain's recovery tests. Use one scene once slice 4's steps are bigger.
+- The deleted and kept markers start with letters no fixture word starts with (`qgone…` and
+  `zkept…`). FTS5 stores a term after the first on an index page only as what it adds to the term
+  before it, so a marker sharing a prefix with its neighbour would never appear whole in the raw
+  bytes, and a stale one would pass the scan.
 - Retrieval, summaries and Claude Code also hold thread content; slices 3 and 8 add them to the
   deletion item.
 - The brain is a dev build, because only dev builds read `KUMOCHI_FIXTURE`, so its timings are
