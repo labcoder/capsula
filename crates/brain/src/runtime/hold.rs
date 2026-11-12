@@ -2,6 +2,8 @@
 
 mod audio;
 #[cfg(test)]
+mod reconnect_tests;
+#[cfg(test)]
 mod tests;
 
 use std::sync::Arc;
@@ -18,6 +20,7 @@ use zeroize::Zeroize as _;
 
 use super::{Brain, Effect, Full, Input, Link, Origin};
 use crate::coordinator::{HoldKey, HoldSnapshot};
+use crate::platform::ShellProcess;
 use crate::voice::stt::{Decode, SttHandle, SttResult};
 
 #[derive(Debug)]
@@ -80,8 +83,9 @@ impl Ingress {
 pub(super) struct Holds {
     high: u32,
     pending: Option<Hold>,
-    // shortcut: a lost admitted connection retains debt until restart; add authenticated peer-lifetime recovery next.
     debt: Option<HoldKey>,
+    debt_peer: Option<ShellProcess>,
+    peer: Option<ShellProcess>,
     gate: Arc<Gate>,
     send: mpsc::Sender<Packet>,
     receive: mpsc::Receiver<Packet>,
@@ -125,6 +129,8 @@ impl Default for Holds {
             high: 0,
             pending: None,
             debt: None,
+            debt_peer: None,
+            peer: None,
             gate: Arc::default(),
             send,
             receive,
@@ -133,6 +139,22 @@ impl Default for Holds {
 }
 
 impl Holds {
+    fn connected(&mut self, peer: ShellProcess) {
+        self.retire_exited_peer();
+        self.peer = Some(peer);
+    }
+
+    fn retire_exited_peer(&mut self) {
+        if self
+            .debt_peer
+            .as_ref()
+            .is_some_and(|peer| matches!(peer.exited(), Ok(true)))
+        {
+            self.debt = None;
+            self.debt_peer = None;
+        }
+    }
+
     pub(super) fn ingress(&self) -> Ingress {
         Ingress {
             send: self.send.clone(),
@@ -163,10 +185,20 @@ impl Holds {
         self.high = 0;
     }
 
-    pub(super) fn stopped(&mut self, key: HoldKey) {
-        if self.debt == Some(key) {
+    pub(super) fn stopped(&mut self, key: HoldKey) -> bool {
+        let same_peer = self
+            .debt_peer
+            .as_ref()
+            .zip(self.peer.as_ref())
+            .is_some_and(|(old, current)| old.same_live_process(current).unwrap_or(false));
+        if self.debt == Some(key)
+            || (same_peer && self.debt.is_some_and(|debt| debt.gesture == key.gesture))
+        {
             self.debt = None;
+            self.debt_peer = None;
+            return true;
         }
+        false
     }
 }
 
@@ -202,6 +234,10 @@ pub(super) async fn next(holds: &mut Holds) -> Event {
 }
 
 impl Brain {
+    pub(crate) fn connected_shell(&mut self, peer: ShellProcess) {
+        self.holds.connected(peer);
+    }
+
     fn hold_status(key: HoldKey, status: HoldStatus, link: &mut Link<'_, '_>) -> Result<(), Full> {
         if let HoldStatus::Failed(reason) = status {
             tracing::warn!(stage = ?FailureStage::Status, ?reason, "held speech input failed");
@@ -273,6 +309,7 @@ impl Brain {
                     Self::hold_status(key, HoldStatus::Failed(HoldFailure::NotLoaded), link)?;
                     return Ok(true);
                 }
+                self.holds.retire_exited_peer();
                 if self.holds.debt.is_some_and(|debt| debt.epoch != self.epoch) {
                     tracing::warn!(stage = ?FailureStage::ReleaseDebt, reason = ?HoldFailure::Unavailable, "held speech input failed");
                     Self::hold_status(key, HoldStatus::Failed(HoldFailure::Unavailable), link)?;
@@ -345,7 +382,11 @@ impl Brain {
                 self.holds.high = self.holds.high.max(gesture.0);
                 let key = key(*gesture);
                 if matches!(message, ControlToBrain::VoiceHoldStopped { .. }) {
-                    self.holds.stopped(key);
+                    let accepted = self.holds.stopped(key);
+                    link.control(&ControlToShell::VoiceHoldStopAccepted { gesture: *gesture })?;
+                    if !accepted {
+                        return Ok(true);
+                    }
                 }
                 let Some(hold) = self.holds.pending.as_mut().filter(|hold| hold.key == key) else {
                     return Ok(true);
@@ -478,6 +519,7 @@ impl Brain {
         hold.deadline = Instant::now()
             + Duration::from_millis(u64::from(HOLD_START_TIMEOUT_MS + MAX_HOLD_CHUNKS * 20));
         self.holds.debt = Some(hold.key);
+        self.holds.debt_peer = self.holds.peer.clone();
         self.holds.gate.overflow.store(0, Ordering::SeqCst);
         self.holds
             .gate

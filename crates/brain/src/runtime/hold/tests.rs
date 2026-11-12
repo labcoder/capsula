@@ -423,6 +423,9 @@ async fn expired_finalization(last: ControlToBrain) {
         }
     };
     brain.hold_control(&first, &mut link).unwrap();
+    if !stop_last {
+        accepted(&mut output, KEY.gesture);
+    }
     assert_eq!(output.try_recv(), Err(mpsc::error::TryRecvError::Empty));
     let owed = stop_last.then_some(KEY);
     assert_eq!(brain.holds.debt, owed);
@@ -434,6 +437,7 @@ async fn expired_finalization(last: ControlToBrain) {
             &mut link,
         )
         .unwrap();
+    accepted(&mut output, GestureId(8));
     assert_eq!(brain.holds.debt, owed);
     tokio::time::pause();
     brain.holds.pending.as_mut().unwrap().deadline = Instant::now() + Duration::from_secs(1);
@@ -445,6 +449,9 @@ async fn expired_finalization(last: ControlToBrain) {
         Some(message) = controls.recv() => { brain.hold_control(&message, &mut link).unwrap(); }
         _ = next(&mut brain.holds) => panic!("the core's ready control precedes its ready hold timer"),
     }
+    if stop_last {
+        accepted(&mut output, KEY.gesture);
+    }
     let terminal = status(&mut output);
     assert_eq!(terminal, HoldStatus::Failed(HoldFailure::TimedOut));
     assert!(brain.holds.pending.is_none());
@@ -454,6 +461,7 @@ async fn expired_finalization(last: ControlToBrain) {
     assert_eq!(decoded.try_recv(), Err(mpsc::error::TryRecvError::Empty));
     brain.hold_control(&first, &mut link).unwrap();
     brain.hold_control(&last, &mut link).unwrap();
+    accepted(&mut output, KEY.gesture);
     assert_eq!(output.try_recv(), Err(mpsc::error::TryRecvError::Empty));
     tokio::time::resume();
     brain.close().await;
@@ -549,6 +557,57 @@ fn status(output: &mut mpsc::Receiver<Vec<u8>>) -> HoldStatus {
     }
 }
 
+fn accepted(output: &mut mpsc::Receiver<Vec<u8>>, gesture: GestureId) {
+    let bytes = output.try_recv().unwrap();
+    assert_eq!(
+        kumochi_protocol::frame::decode::<ControlToShell>(
+            &bytes[kumochi_protocol::frame::HEADER_LEN..]
+        )
+        .unwrap(),
+        ControlToShell::VoiceHoldStopAccepted { gesture }
+    );
+}
+
+#[tokio::test]
+async fn duplicate_stop_acceptance_never_poisons_or_restarts_the_pending_audio() {
+    let scratch = Scratch::new("hold-duplicate-stop");
+    let mut brain = test_support::brain(&scratch, "");
+    let (out, mut output) = mpsc::channel(4);
+    let queue = RefCell::new(DataQueue::new(0));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    recording(&mut brain);
+    for _ in 0..2 {
+        assert!(
+            brain
+                .hold_control(
+                    &ControlToBrain::VoiceHoldStopped {
+                        gesture: KEY.gesture
+                    },
+                    &mut link
+                )
+                .unwrap()
+        );
+        accepted(&mut output, KEY.gesture);
+        assert_eq!(brain.holds.debt, None);
+        assert!(brain.holds.pending.is_some());
+        assert_eq!(brain.coordinator.current_run(), None);
+        assert_eq!(output.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    }
+    let audio = brain
+        .holds
+        .pending
+        .as_mut()
+        .unwrap()
+        .audio
+        .as_mut()
+        .unwrap();
+    assert_eq!(audio.end(0), Ok(()));
+    assert_eq!(audio.take(), Some(Vec::new()));
+    brain.close().await;
+}
+
 #[tokio::test]
 async fn malformed_audio_is_terminal_and_old_gestures_cannot_poison_the_owner() {
     let scratch = Scratch::new("hold-terminal-framing");
@@ -611,6 +670,7 @@ async fn malformed_audio_is_terminal_and_old_gestures_cannot_poison_the_owner() 
             )
             .unwrap();
         assert_eq!(brain.holds.debt, None);
+        accepted(&mut output, KEY.gesture);
     }
     assert_eq!(brain.coordinator.current_run(), None);
     brain.close().await;
@@ -683,6 +743,7 @@ async fn deadline_and_eof_never_fabricate_a_physical_stop_receipt() {
         )
         .unwrap();
     let deadline = brain.holds.pending.as_ref().unwrap().deadline;
+    accepted(&mut output, KEY.gesture);
     assert!(deadline <= Instant::now() + Duration::from_millis(u64::from(HOLD_DRAIN_TIMEOUT_MS)));
     brain.holds.pending.as_mut().unwrap().deadline = Instant::now();
     assert!(matches!(next(&mut brain.holds).await, Event::Deadline));
@@ -856,6 +917,7 @@ async fn final_packet_and_key_up_without_source_receipt_cannot_schedule_decode()
             &mut link,
         )
         .unwrap();
+    accepted(&mut output, KEY.gesture);
     assert_eq!(
         status(&mut output),
         HoldStatus::Failed(HoldFailure::NotLoaded)

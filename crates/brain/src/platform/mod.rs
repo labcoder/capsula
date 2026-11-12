@@ -8,9 +8,11 @@ pub use windows::{WindowProbe, WindowSample, WindowSession};
 mod connected_shell;
 mod model_files;
 mod session_lock;
+mod shell_process;
 mod trust_roots;
 
 pub(crate) use model_files::ModelFiles;
+pub(crate) use shell_process::ShellProcess;
 
 #[cfg(all(test, windows))]
 pub(crate) use std::os::windows::fs::{

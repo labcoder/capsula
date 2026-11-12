@@ -292,7 +292,7 @@ pub(crate) fn shell_connection(
     data: &NamedPipeServer,
     expected: &std::path::Path,
 ) -> io::Result<(
-    OwnedHandle,
+    super::super::ShellProcess,
     super::super::connected_shell::Registration<'static>,
 )> {
     let process = client_process(server)?;
@@ -316,7 +316,10 @@ pub(crate) fn shell_connection(
             "shell identity changed",
         ));
     }
-    Ok((process, super::super::register_shell(pid)))
+    Ok((
+        super::super::ShellProcess::new(pid, process),
+        super::super::register_shell(pid),
+    ))
 }
 
 /// Whether `process` has exited. An exited process still opens while anyone holds it.

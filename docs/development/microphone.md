@@ -54,6 +54,10 @@ already-packetized samples and reports only the successfully queued packet count
 The parent sends that count and source receipt over control, with PCM on data;
 neither cross-pipe order is assumed. Cancel/reset, session loss, permission/device
 loss, deadline, format failure and overflow use discard, not KeyUp submission.
+The transport reserves one stop slot before recognition and retains real completion until
+the Brain accepts it. A late completion uses the current outbox rather than its ended
+Session; reconnect replays only receipt metadata. Another hold waits for that acceptance.
+This does not change native cleanup or allow a failed stop to become a receipt.
 Other-key/reset, suspend, input-session loss, presence destruction, target/model
 changes, deletion and newer explicit input must all reach the same gate/stop path.
 Losing foreground alone does not cancel a global gesture.

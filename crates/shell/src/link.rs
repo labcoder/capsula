@@ -34,6 +34,8 @@ use crate::credential::{self, CredentialError};
 use crate::platform::microphone::CollectionGate;
 use crate::platform::{self, PipeClient};
 
+mod microphone;
+
 /// How long one connection attempt may take, starting the brain included.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Pause between tries while the brain starts or rotates its capability.
@@ -430,6 +432,7 @@ fn queue_on(
 #[derive(Debug, Default)]
 struct Shared {
     microphone: CollectionGate,
+    microphone_stop: Mutex<Option<microphone::Stop>>,
     input: AtomicU32,
     choice: AtomicU64,
     /// Set once the user chose Quit, so a closing brain isn't restarted.
@@ -618,6 +621,11 @@ impl LinkHandle {
     /// Queues a control message for `session`'s brain. False once that connection has ended, or
     /// when the brain has stopped reading. Never blocks.
     pub(crate) fn send_control(&self, session: &Session, message: ControlToBrain) -> bool {
+        if let ControlToBrain::VoiceHoldStopped { gesture } = &message
+            && let Some(retained) = self.retain_microphone_stop(session, *gesture)
+        {
+            return retained;
+        }
         if !session.alive.load(Ordering::Acquire) {
             return false;
         }
@@ -649,7 +657,7 @@ impl LinkHandle {
                     return false;
                 }
             }
-            out.try_send(message).is_ok()
+            shared.queue_voice_control(out, message)
         };
         #[cfg(test)]
         if let Some(recording) = &self.control_recording {
@@ -965,6 +973,7 @@ impl Link {
             pipe: Arc::clone(&control),
             submits: AtomicU32::new(0),
         });
+        self.shared.replay_microphone_stop();
         // Quit may have come while connecting, when there was no pipe to send it on; held
         // deletes go first. A full queue is retried by Quit's wait.
         if self.quitting() {
@@ -1110,6 +1119,7 @@ fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
             | ControlToShell::AnthropicKeyStageDone { .. }
             | ControlToShell::SpeechRevoked { .. }
             | ControlToShell::VoiceHoldStatus { .. }
+            | ControlToShell::VoiceHoldStopAccepted { .. }
             | ControlToShell::Voice(_),
         ) => Err(LinkError::Rejected),
         Some(ControlToShell::BuildMismatch { brain_build }) => {
@@ -1349,6 +1359,9 @@ fn watch(
                 if events.send_blocking(event).is_err() {
                     return;
                 }
+            }
+            Ok(Some(ControlToShell::VoiceHoldStopAccepted { gesture })) => {
+                shared.accept_microphone_stop(generation, gesture);
             }
             Ok(Some(
                 reply @ (ControlToShell::AnthropicKeyStage { .. }

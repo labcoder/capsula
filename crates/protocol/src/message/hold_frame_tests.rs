@@ -61,6 +61,14 @@ fn voice_only_hold_controls_append_tags_without_screen_authority() {
     }
 }
 
+#[test]
+fn voice_stop_acceptance_appends_a_redacted_control_tag() {
+    let message = ControlToShell::VoiceHoldStopAccepted { gesture: GESTURE };
+    assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], 29);
+    round_trip(&message, Pipe::Control, 6);
+    redacted(&message, Direction::ToShell, "VoiceHoldStopAccepted", 6);
+}
+
 fn round_trip<M: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(
     message: &M,
     pipe: Pipe,

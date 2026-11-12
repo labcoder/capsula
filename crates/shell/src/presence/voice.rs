@@ -269,7 +269,12 @@ impl Presence {
     ) {
         match intent {
             Intent::Warm(gesture) => {
-                if let Some(reason) = self.settings.read(cx).hold_to_talk_notice() {
+                if let Some(reason) = self
+                    .settings
+                    .read(cx)
+                    .hold_to_talk_notice()
+                    .or_else(|| self.link.voice_stop_pending().then_some(Text::TurnBusy))
+                {
                     tracing::debug!(stage = ?FailureStage::Admission, ?reason, "held speech input refused");
                     return;
                 }
@@ -345,7 +350,12 @@ impl Presence {
             self.voice_notice(notice, cx);
             return;
         };
-        if let Some(notice) = self.settings.read(cx).hold_to_talk_notice() {
+        if let Some(notice) = self
+            .settings
+            .read(cx)
+            .hold_to_talk_notice()
+            .or_else(|| self.link.voice_stop_pending().then_some(Text::TurnBusy))
+        {
             tracing::debug!(stage = ?FailureStage::Admission, reason = ?notice, "held speech input refused");
             if let Some(session) = &self.session {
                 self.unused_voice(&token, session);

@@ -195,9 +195,23 @@ async fn release_source(shell: &mut Shell<tokio::io::DuplexStream>, chunks: u32)
             chunks,
         })
         .await;
+    source_stopped(shell, G).await;
+}
+
+async fn source_stopped(shell: &mut Shell<tokio::io::DuplexStream>, expected: GestureId) {
     shell
-        .send(&ControlToBrain::VoiceHoldStopped { gesture: G })
+        .send(&ControlToBrain::VoiceHoldStopped { gesture: expected })
         .await;
+    loop {
+        match shell.control().await {
+            Some(ControlToShell::Voice(_)) => {}
+            Some(ControlToShell::VoiceHoldStopAccepted { gesture }) => {
+                assert_eq!(gesture, expected);
+                return;
+            }
+            other => panic!("expected stop acceptance, got {other:?}"),
+        }
+    }
 }
 
 fn users(scratch: &Scratch) -> Vec<String> {
@@ -626,13 +640,20 @@ async fn accepted_target_deletion_cancels_before_late_decode_and_uses_no_phantom
         shell
             .send(&ControlToBrain::VoiceHoldStopped { gesture: next })
             .await;
+        let mut replies = vec![shell.control().await, shell.control().await];
+        replies.sort_by_key(|reply| {
+            matches!(reply, Some(ControlToShell::VoiceHoldStopAccepted { .. }))
+        });
         assert_eq!(
-            shell.control().await,
-            Some(ControlToShell::ThreadDeleted {
-                thread,
-                outcome: Deleted::Removed,
-                last_run: Some(run)
-            })
+            replies,
+            [
+                Some(ControlToShell::ThreadDeleted {
+                    thread,
+                    outcome: Deleted::Removed,
+                    last_run: Some(run)
+                }),
+                Some(ControlToShell::VoiceHoldStopAccepted { gesture: next })
+            ]
         );
         shell
             .send(&ControlToBrain::KeyUp {
@@ -717,9 +738,7 @@ async fn loading_waits_only_for_the_same_held_gesture_and_never_fetches() {
             .send(&ControlToBrain::GestureCancel { gesture: fresh })
             .await;
         status_for(&mut shell, fresh, HoldStatus::Cancelled).await;
-        shell
-            .send(&ControlToBrain::VoiceHoldStopped { gesture: fresh })
-            .await;
+        source_stopped(&mut shell, fresh).await;
         drop(shell);
     };
     let (_, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
