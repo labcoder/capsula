@@ -746,3 +746,48 @@ async fn loading_waits_only_for_the_same_held_gesture_and_never_fetches() {
     brain.close().await;
     assert_eq!(users(&scratch), Vec::<String>::new());
 }
+
+#[tokio::test]
+async fn a_replayed_receipt_from_the_same_live_shell_admits_the_next_hold() {
+    use crate::platform::ShellProcess;
+    use std::sync::atomic::AtomicU8;
+    let scratch = Scratch::new("hold-replay-admits");
+    let (mut brain, _release, _decoded, _) = input(&scratch, Vec::new(), "must not decode").await;
+    let live = Arc::new(AtomicU8::new(0));
+    let mut tap = Tap::from_env();
+    brain.connected_shell(ShellProcess::fixture(10, Arc::clone(&live)));
+    let ((control, data), mut shell) = duplex();
+    let client = async {
+        opened(&mut shell).await;
+        recognize(&mut shell).await;
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.connected_shell(ShellProcess::fixture(10, Arc::clone(&live)));
+    let ((control, data), mut shell) = duplex();
+    let client = async {
+        opened(&mut shell).await;
+        shell
+            .send(&ControlToBrain::VoiceHoldRecognized {
+                gesture: G,
+                thread: None,
+                selection: 5,
+            })
+            .await;
+        status(&mut shell, HoldStatus::Failed(HoldFailure::Unavailable)).await;
+        source_stopped(&mut shell, G).await;
+        shell
+            .send(&ControlToBrain::VoiceHoldRecognized {
+                gesture: GestureId(18),
+                thread: None,
+                selection: 6,
+            })
+            .await;
+        status_for(&mut shell, GestureId(18), HoldStatus::Admitted).await;
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
+}
