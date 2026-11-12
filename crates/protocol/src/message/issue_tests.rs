@@ -964,7 +964,7 @@ fn issue_unavailable_has_only_correlated_identity_and_round_trips_exact_wire_dat
 fn issue_unavailable_rejects_unknown_tags_overflow_missing_and_mistyped_identity() {
     use crate::frame::{FrameError, read};
     for payload in [
-        vec![30],
+        vec![31],
         vec![29, 128, 128, 128, 128, 128, 128, 128, 128, 128, 2, 0],
         vec![29, 0, 128, 128, 128, 128, 128, 128, 128, 128, 128, 2],
         vec![29, 1, 2, 4],

@@ -609,6 +609,9 @@ fn a_hold_held_as_onboarding_opens_ends_as_refused_and_the_next_one_after_close_
     chord(&deliver, Edge::Up, at + Duration::from_millis(400));
     cx.run_until_parked();
     assert!(controls.is_empty());
+    owner.update(cx, |owner, _| {
+        owner.link.accept_recorded_microphone_stop(1, GestureId(1));
+    });
     owner.update(cx, |owner, cx| owner.close_onboarding(cx).expect("close"));
     cx.background_executor.advance_clock(Duration::from_secs(2));
     cx.run_until_parked();
