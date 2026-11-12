@@ -729,6 +729,86 @@ fn every_operation_gets_one_reply_in_order() {
 }
 
 #[test]
+fn a_round_the_reader_would_refuse_fails_its_run_and_the_thread_goes_on() {
+    use crate::coordinator::RoundItems;
+    use crate::dispatch::ToolOutput;
+    use crate::engines::CallId;
+    let scratch = Scratch::new("refused-round");
+    let store = Store::open(&scratch.db()).expect("store");
+    let thread = ThreadId(1);
+    let (acks, mut replies) = mpsc::unbounded_channel();
+    let store = StoreThread::spawn(store, acks, Schedule::default()).expect("thread");
+    let round = |run, output| {
+        StoreOp::RoundItems(RoundItems {
+            thread,
+            run,
+            round: 1,
+            connection: crate::context::ConnectionTag(7),
+            text: None,
+            items: Vec::new(),
+            calls: vec![(CallId::new("c1").expect("short"), output)],
+        })
+    };
+    let end = |run, end| StoreOp::EndRun {
+        thread,
+        run,
+        text: None,
+        revealed: None,
+        clear: None,
+        end,
+    };
+    let over = ToolOutput::Text("x".repeat(65 * 1024));
+    for op in [
+        StoreOp::BeginTurn {
+            thread,
+            title: Some("t".into()),
+            run: RunId(1),
+            text: "hi".into(),
+        },
+        round(RunId(1), over),
+        end(RunId(1), RunEnd::Failed(crate::store::Failure::Store)),
+        StoreOp::BeginTurn {
+            thread,
+            title: None,
+            run: RunId(2),
+            text: "again".into(),
+        },
+        round(RunId(2), ToolOutput::Text("ok".into())),
+        end(RunId(2), RunEnd::Done),
+    ] {
+        assert!(store.send(op));
+    }
+    store.close().blocking_recv().expect("closed");
+    let mut got = Vec::new();
+    while let Ok(reply) = replies.try_recv() {
+        got.push(reply);
+    }
+    assert_eq!(
+        got,
+        [
+            Input::TurnStored { run: RunId(1) },
+            Input::StoreFailed { run: RunId(1) },
+            Input::RunStored { run: RunId(1) },
+            Input::TurnStored { run: RunId(2) },
+            Input::RoundStored {
+                run: RunId(2),
+                round: 1
+            },
+            Input::RunStored { run: RunId(2) },
+        ]
+    );
+    let conn = Connection::open(scratch.db()).expect("open");
+    let results: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind = 'tool_result'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count");
+    assert_eq!(results, 1, "only the second run's result was written");
+}
+
+#[test]
 fn a_heard_point_is_stored_and_answers_nothing() {
     let scratch = Scratch::new("heard-op");
     let store = Store::open(&scratch.db()).expect("store");

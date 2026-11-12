@@ -1632,6 +1632,62 @@ fn a_bad_stored_round_record_fails_the_build() {
 }
 
 #[test]
+fn a_round_the_reader_would_refuse_is_never_written() {
+    use crate::dispatch::ToolOutput;
+    let mut world = world("ctx-rounds-refused");
+    let at = first_round(&mut world);
+    let opaque = |item: Value| Opaque::new(serde_json::to_vec(&item).expect("json")).expect("small");
+    let call = CallId::new("c3").expect("short");
+    let frame = r#"{"call":"c3","output":{"text":""}}"#;
+    let fits = "x".repeat(65 * 1024 - frame.len());
+    let over = "x".repeat(65 * 1024 + 1 - frame.len());
+    let backwards = vec![HistoryRef {
+        thread: world.main,
+        first: EventId(2),
+        last: EventId(1),
+    }];
+    for output in [ToolOutput::Text(over), ToolOutput::History(backwards)] {
+        let refused = world.store.append_round(
+            at,
+            ConnectionTag(7),
+            Some("Refused."),
+            &[opaque(said("assistant", "Refused."))],
+            &[(call.clone(), output)],
+        );
+        assert!(
+            matches!(refused, Err(StoreError::RoundRecord)),
+            "{refused:?}"
+        );
+    }
+    world
+        .store
+        .append_round(
+            at,
+            ConnectionTag(7),
+            None,
+            &[opaque(call_item("c3"))],
+            &[(call, ToolOutput::Text(fits.clone()))],
+        )
+        .expect("the largest result the reader takes");
+    world
+        .store
+        .end_run(at.0, at.1, &[], RunEnd::Done)
+        .expect("ended");
+    let (_, next) = world.run(Some(world.main), "next", None);
+    let mut expected = first_round_input();
+    expected.extend([
+        call_item("c3"),
+        json!({ "type": "function_call_output", "call_id": "c3", "output": fits }),
+        next_ask(),
+    ]);
+    assert_eq!(
+        next_input(&world, next, 7),
+        expected,
+        "the refused rounds left nothing, and the thread still builds"
+    );
+}
+
+#[test]
 fn a_full_text_output_replays_as_its_text_and_an_untagged_one_as_it_was() {
     let mut world = world("ctx-rounds-text");
     let main = world.main;
