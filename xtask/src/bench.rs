@@ -202,6 +202,7 @@ fn idle(
     }
     println!("workload: {workload:?}; baseline: {}", baseline.is_some());
     let cycle_rate = calibrate_rate()?;
+    crate::live::refuse_running(&platform::processes()?, std::process::id())?;
     let mut child = platform::launch(shell, folders, (seconds + 40) * 1000, extra)
         .context("launching release shell at normal priority")?;
     let deadline = Instant::now() + Duration::from_secs(seconds + 60);

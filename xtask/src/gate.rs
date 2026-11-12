@@ -186,7 +186,8 @@ impl Images {
     }
 }
 
-fn retained_output(mut args: impl Iterator<Item = String>) -> Result<PathBuf> {
+/// The transcript and its evidence folder, which must not exist yet; the gate run creates it.
+fn retained_output(mut args: impl Iterator<Item = String>) -> Result<(PathBuf, PathBuf)> {
     let transcript = PathBuf::from(
         args.next()
             .context("task needs an existing create-new redirected path-session.txt")?,
@@ -197,15 +198,32 @@ fn retained_output(mut args: impl Iterator<Item = String>) -> Result<PathBuf> {
     );
     gate_capture::require_transcript(&transcript)?;
     let output = evidence_directory(&transcript)?;
-    fs::create_dir(&output)?;
-    fs::write(
+    ensure!(
+        !output.try_exists()?,
+        "{} already exists; use a new transcript name",
+        output.display()
+    );
+    Ok((transcript, output))
+}
+
+/// Begins the gate run in a new evidence folder for the transcript, records the transcript there,
+/// runs `body` with the folder, and ends the run.
+fn retained_run(
+    args: impl Iterator<Item = String>,
+    body: impl FnOnce(&Path, &Run) -> Result<()>,
+) -> Result<()> {
+    let (transcript, output) = retained_output(args)?;
+    let run = Run::begin(output.join("data"))?;
+    let result = fs::write(
         output.join("transcript.txt"),
         format!(
             "path={}\nstdout_and_stderr_verified=true\ncreate_new_redirection_required=true\n",
             transcript.display()
         ),
-    )?;
-    Ok(output)
+    )
+    .map_err(anyhow::Error::from)
+    .and_then(|()| body(&output, &run));
+    run.finish(result)
 }
 
 pub(crate) fn cold(args: impl Iterator<Item = String>) -> Result<()> {
@@ -232,11 +250,9 @@ fn session_run(
     opener: (&str, Opener),
     trials: &[Trial],
 ) -> Result<()> {
-    let output = retained_output(args)?;
-    let run = Run::begin(output.join("data"))?;
-    let result =
-        Images::build(&run).and_then(|images| run_session(&output, &images, opener, trials));
-    run.finish(result)
+    retained_run(args, |output, run| {
+        Images::build(run).and_then(|images| run_session(output, &images, opener, trials))
+    })
 }
 
 fn run_session(

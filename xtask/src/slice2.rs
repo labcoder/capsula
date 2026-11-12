@@ -24,7 +24,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, ensure};
-use kumochi_protocol::constants::{BRAIN_EXE, SHELL_EXE};
+use kumochi_protocol::constants::{BRAIN_EXE, ProductIdentity, SHELL_EXE};
 use kumochi_protocol::message::{ControlToShell, DataToBrain, DataToShell, Phase, RunId, ThreadId};
 
 use crate::hermetic::{self, Profile, Run};
@@ -81,6 +81,7 @@ impl Row {
 }
 
 pub(crate) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
+    hermetic::require_gate(ProductIdentity::ACTIVE)?;
     match args.next() {
         Some(inner) if inner == INNER => {
             let folder = args.next().context("the inner gate needs its folder")?;
@@ -271,7 +272,7 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::time::Duration;
 
-    use super::{end_leftovers, percentile};
+    use super::{INNER, end_leftovers, percentile, run};
 
     /// A harmless child that waits on its stdin, which stays open while the command or child lives.
     fn held() -> Command {
@@ -281,6 +282,25 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         command
+    }
+
+    #[test]
+    fn both_entries_refuse_unless_run_as_the_gate_identity() {
+        let folder = crate::scratch::dir("slice2-refused");
+        let inner = [
+            INNER,
+            folder.to_str().expect("Unicode"),
+            "no item is named this",
+        ];
+        for args in [&inner[..], &[]] {
+            let error = run(args.iter().map(|arg| (*arg).to_owned())).expect_err("refused");
+            assert_eq!(
+                format!("{error:#}"),
+                "a gate tool runs only as the gate identity: cargo run --release --package xtask \
+                 --features kumochi-protocol/gate-identity -- <task>"
+            );
+        }
+        assert!(!folder.join("report.md").exists());
     }
 
     #[test]
