@@ -391,6 +391,45 @@ async fn prepared_hold_across_loading_is_admitted_before_first_serve_iteration()
 }
 
 #[tokio::test]
+async fn admission_ties_device_debt_to_the_admitting_shell_process() {
+    use crate::runtime::{Recovery, voice};
+    use std::sync::atomic::AtomicU8;
+    let scratch = Scratch::new("hold-debt-peer");
+    let (mut brain, release, _decoded, _fetch) =
+        crate::runtime::tests::holds::loading_input(&scratch, Vec::new(), "unused");
+    let resume = crate::voice::stt::hold_before_serving(brain.hold_voice().1.unwrap());
+    let exited = Arc::new(AtomicU8::new(0));
+    brain.connected_shell(ShellProcess::fixture(10, Arc::clone(&exited)));
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    link.recovery = Some(Recovery::new(&[], 1024));
+    recording(&mut brain);
+    let hold = brain.holds.pending.as_mut().unwrap();
+    hold.ask = None;
+    hold.audio = None;
+    brain.holds.debt = None;
+    brain.holds.gate.active.store(0, Ordering::SeqCst);
+    brain.hold_voice_changed(&mut link).unwrap();
+    release.send(()).unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(5), voice::next(&mut brain.voice))
+        .await
+        .unwrap();
+    brain.voice_event(event, Some(&mut link)).unwrap();
+    assert_eq!(status(&mut output), HoldStatus::Admitted);
+    resume();
+    brain.holds.lost();
+    brain.connected_shell(ShellProcess::fixture(20, Arc::new(AtomicU8::new(0))));
+    assert_eq!(brain.holds.debt, Some(KEY));
+    exited.store(1, Ordering::Release);
+    brain.connected_shell(ShellProcess::fixture(20, Arc::new(AtomicU8::new(0))));
+    assert_eq!(brain.holds.debt, None);
+    brain.close().await;
+}
+
+#[tokio::test]
 async fn ordinary_admission_limits_refuse_decoded_transfer_without_a_turn() {
     Box::pin(admission_boundaries(AdmissionStage::Transfer)).await;
 }
