@@ -35,9 +35,6 @@ type Item = fn(&Path) -> Result<Row>;
 
 /// The argument the copied gate runs with.
 const INNER: &str = "--inner";
-/// How long building the brain may take before the build and everything it started are killed
-/// [guess: a cold build on Rez takes a few minutes].
-const BUILD_LIMIT: Duration = Duration::from_mins(20);
 /// How long the whole gate may run before it and its brains are killed.
 const GATE_LIMIT: Duration = Duration::from_mins(20);
 /// Prefixes of the markers an item expects gone and kept. FTS5 stores a term after the first on an
@@ -110,9 +107,7 @@ fn prepare(only: Option<&str>) -> Result<()> {
         platform::processes()?.is_empty(),
         "close every {SHELL_EXE} and {BRAIN_EXE} first: a dev brain holds the pipes the gate uses"
     );
-    let mut cargo = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
-    cargo.args(["build", "--quiet", "--package", "kumochi-brain"]);
-    build(cargo, BUILD_LIMIT)?;
+    live::build_brain()?;
     let me = std::env::current_exe()?;
     let target = me.parent().context("xtask has a folder")?;
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -130,13 +125,6 @@ fn prepare(only: Option<&str>) -> Result<()> {
     gate.args(["slice2-gate", INNER]).arg(&folder).args(only);
     let ran = live::run_bounded(gate, GATE_LIMIT, "the gate")?;
     ensure!(ran.success(), "the gate failed");
-    Ok(())
-}
-
-/// Runs the brain build, ending it and everything it started past `limit`.
-fn build(cargo: Command, limit: Duration) -> Result<()> {
-    let built = live::run_bounded(cargo, limit, "the brain build")?;
-    ensure!(built.success(), "the brain didn't build ({built})");
     Ok(())
 }
 
@@ -284,11 +272,9 @@ fn marker(prefix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::process::{Command, Stdio};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
-    use super::{GONE, KEPT, build, end_leftovers, marker, percentile};
-
-    const SHORT: Duration = Duration::from_millis(200);
+    use super::{GONE, KEPT, end_leftovers, marker, percentile};
 
     /// A harmless child that waits on its stdin, which stays open while the command or child lives.
     fn held() -> Command {
@@ -298,20 +284,6 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         command
-    }
-
-    #[test]
-    fn a_build_past_its_limit_is_ended() {
-        let start = Instant::now();
-        let error = build(held(), SHORT).expect_err("a hung build fails");
-        assert_eq!(
-            format!("{error:#}"),
-            "the brain build didn't finish in 200ms"
-        );
-        assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "it returned in bound"
-        );
     }
 
     #[test]
