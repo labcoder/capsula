@@ -296,15 +296,18 @@ impl Presenter {
     }
 
     pub(crate) fn next_wake(&self, now: Instant) -> Option<Instant> {
+        let frames = self.frames.borrow();
         self.scenes
-            .values()
-            .filter(|scene| scene.cut == Cut::Open && !scene.skipping)
-            .filter_map(|scene| {
+            .iter()
+            .filter(|(_, scene)| scene.cut == Cut::Open && !scene.skipping)
+            .filter_map(|(id, scene)| {
                 let time = scene.activation.time(now);
                 let head = scene
                     .ready
                     .front()
-                    .filter(|_| scene.pending_consumption.is_none())
+                    .filter(|_| {
+                        scene.pending_consumption.is_none() && !frames.guards_successor(*id)
+                    })
                     .and_then(|head| {
                         scene
                             .activation

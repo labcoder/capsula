@@ -145,16 +145,26 @@ fn the_selected_epoch_waits_only_for_its_first_paint_or_the_original_expiry() {
     let (mut presenter, now) = fixture(&[LIVE]);
     replace(&mut presenter, &[LIVE], NEXT, now);
     begin(&mut presenter, NEXT, now);
-    prepare(&mut presenter, 0, rect("first"), now);
+    prepare(
+        &mut presenter,
+        0,
+        step(
+            r#"{"step":{"id":"first","put":[{"shape":{"id":"first","kind":"rect","box":[0,0,10,10],"enter":"none"}}]}}"#,
+        ),
+        now,
+    );
     let mut second = rect("second");
     second.start = Start::Now;
     prepare(&mut presenter, 1, second, now);
     presenter.advance(GENERATION, now).expect("first");
     assert!(presenter.sample_at(now).0.visible);
+    assert!(!presenter.animating(now));
+    assert_eq!(presenter.next_wake(now), None);
     presenter
         .advance(GENERATION, ms(now, 249))
         .expect("guarded");
     assert_eq!(presenter.scenes[&NEXT].view.activated(), 1);
+    assert_eq!(presenter.next_wake(ms(now, 249)), None);
     assert_eq!(presenter.deadline(), Some(ms(now, 250)));
     presenter
         .advance(GENERATION, ms(now, 250))

@@ -1788,8 +1788,10 @@ that presenter allowance. At most four frames are selected, never outgoing plus 
 
 One watchdog deadline, 250 ms from marker processing, releases the visual hold without failing
 the newcomer. Continuations do not reset it. After handoff the successor epoch is guarded only
-until first paint or that original expiry; structurally empty prefixes can advance. A second
-replacement disposes the first attempt. Stop includes an unbegun successor in the existing
+until first paint or that original expiry; structurally empty prefixes can advance. While that
+epoch is guarded, its ready head is excluded from activation wakes; future view wakes and the
+absolute expiry still schedule normally. A second replacement disposes the first attempt.
+Stop includes an unbegun successor in the existing
 pending zero-cut membership; clear remembers its id before disposing the bank. Either can drain
 late commits without recreating old ink. Any successful thread deletion flushes retirement,
 including an unrelated deletion; ordinary successor removal, terminal failure and disconnect
