@@ -173,6 +173,8 @@ impl PacketBoundary {
     pub(super) fn kept(&mut self, packet: PacketStatus, at: Instant) {
         self.kept_packets = self.kept_packets.saturating_add(1);
         self.kept_frames = self.kept_frames.saturating_add(u64::from(packet.frames));
+        // shortcut: a position that restarts, goes backwards or always reads 0 counts nothing
+        // missing, so the hold passes; count those steps in the summary if a desk log shows them.
         if let Some(next) = self.next_position {
             self.missing_frames = self
                 .missing_frames
