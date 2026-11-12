@@ -23,7 +23,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
-use kumochi_protocol::constants::{BRAIN_EXE, LIVE_BUDGET_ENV, SHELL_EXE};
+use kumochi_protocol::constants::{BRAIN_EXE, LIVE_BUDGET_ENV, ProductIdentity, SHELL_EXE};
 
 use self::claude_signin::Ask;
 use crate::platform;
@@ -42,24 +42,13 @@ const EXIT: Duration = Duration::from_secs(15);
 const POLL: Duration = Duration::from_millis(50);
 
 pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
-    let build = if cfg!(debug_assertions) {
-        Build::Debug
-    } else {
-        Build::Release
-    };
-    match entry(build, &args.collect::<Vec<_>>())? {
+    match entry(ProductIdentity::ACTIVE, &args.collect::<Vec<_>>())? {
         Entry::Prepare(check) => prepare(check),
         Entry::Inner(Check::Account) => signin::harness(signin::inspect),
         Entry::Inner(Check::SignIn) => signin::inner(),
         Entry::Inner(Check::Claude(ask)) => claude_signin::inner(ask),
         Entry::Inner(Check::Catalog) => unreachable!("entry refuses --inner for the capture"),
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Build {
-    Debug,
-    Release,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -98,12 +87,13 @@ impl Check {
     }
 }
 
-/// Which side of the harness the arguments after `live` ask for; both need a debug build.
-fn entry(build: Build, args: &[String]) -> Result<Entry> {
+/// Which side of the harness the arguments after `live` ask for; both need the dev identity: a
+/// release build uses the installed product's names, and the gate identity never signs in.
+fn entry(identity: ProductIdentity, args: &[String]) -> Result<Entry> {
     ensure!(
-        build == Build::Debug,
-        "run it from a debug xtask (`cargo xtask live signin`): a release one uses the installed \
-         product's pipe and credential names"
+        identity == ProductIdentity::DEV,
+        "run it from a debug xtask without the gate feature (`cargo xtask live signin`): a release \
+         one uses the installed product's pipe and credential names, and a gate one never signs in"
     );
     let (words, inner) = match args.split_last() {
         Some((last, words)) if last == INNER => (words, true),
@@ -174,7 +164,7 @@ fn prepare(check: Check) -> Result<()> {
 }
 
 /// Builds the dev brain, ending the build and everything it started past [`BUILD_LIMIT`].
-pub(crate) fn build_brain() -> Result<()> {
+fn build_brain() -> Result<()> {
     let mut cargo = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     cargo.args(["build", "--quiet", "--package", "kumochi-brain"]);
     build(cargo, BUILD_LIMIT)
@@ -351,8 +341,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        Ask, Build, Check, Entry, build, end, end_with, entry, refuse_running, run_bounded,
-        wait_bounded, warn_cleanup, with_cleanup,
+        Ask, Check, Entry, ProductIdentity, build, end, end_with, entry, refuse_running,
+        run_bounded, wait_bounded, warn_cleanup, with_cleanup,
     };
     use crate::platform;
 
@@ -503,8 +493,9 @@ mod tests {
     #[test]
     fn both_sides_refuse_a_release_build_and_take_no_folder() {
         let args = |list: &[&str]| list.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
-        let release = "run it from a debug xtask (`cargo xtask live signin`): a release one uses \
-                       the installed product's pipe and credential names";
+        let release = "run it from a debug xtask without the gate feature (`cargo xtask live \
+                       signin`): a release one uses the installed product's pipe and credential \
+                       names, and a gate one never signs in";
         for list in [
             &["account"][..],
             &["signin"][..],
@@ -512,8 +503,10 @@ mod tests {
             &["claude-signin", "--disconnect", "--inner"],
             &["catalog-provenance"],
         ] {
-            let error = entry(Build::Release, &args(list)).expect_err("release");
-            assert_eq!(format!("{error:#}"), release);
+            for identity in [ProductIdentity::RELEASE, ProductIdentity::GATE] {
+                let error = entry(identity, &args(list)).expect_err("not dev");
+                assert_eq!(format!("{error:#}"), release);
+            }
         }
         let claude = Check::Claude;
         for (list, want) in [
@@ -536,7 +529,10 @@ mod tests {
             ),
             (&["catalog-provenance"], Entry::Prepare(Check::Catalog)),
         ] {
-            assert_eq!(entry(Build::Debug, &args(list)).expect("debug"), want);
+            assert_eq!(
+                entry(ProductIdentity::DEV, &args(list)).expect("debug"),
+                want
+            );
         }
         for list in [
             &[][..],
@@ -551,7 +547,7 @@ mod tests {
             &["catalog-provenance", "--inner"],
             &["catalog-provenance", "C:/elsewhere"],
         ] {
-            let error = entry(Build::Debug, &args(list)).expect_err("refused");
+            let error = entry(ProductIdentity::DEV, &args(list)).expect_err("refused");
             assert_eq!(
                 format!("{error:#}"),
                 "usage: cargo xtask live account | signin | claude-signin [--disconnect] | catalog-provenance"
