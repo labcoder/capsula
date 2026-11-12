@@ -348,9 +348,10 @@ Every op is answered with the current view; anything else sends one only when it
 the registration is saved, the code is exchanged or the set is saved, a cancel changes nothing and
 the sign-in completes (`a_cancel_after_the_browser_finished_keeps_the_sign_in`). A first sign-in
 saves the issued registration before its code is sent, so a failed exchange still keeps the
-client. A replaced attempt's waiting code is never sent; a sent request is never
-aborted. An op arriving while the current attempt's save runs waits for it (only the newest
-is kept); the save is published first.
+client. A replaced attempt's waiting code is never sent; a sent request is never aborted. An op
+arriving while the current attempt's save runs waits for it (only the newest is kept); the save is
+published first. A cancel during the save also drops a waiting Open again, so no browser opens
+after it (`a_cancel_during_the_save_keeps_the_set_and_drops_a_waiting_open_again`).
 
 **The token lane** admits one token request at a time and holds it until the result has a durable
 owner: the account, the revocation list, or the knowledge that nothing was issued.
