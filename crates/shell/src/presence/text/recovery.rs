@@ -151,8 +151,7 @@ impl TextView {
                     .disabled(!enabled)
                     .on_click(move |_, window, cx| {
                         let owner = owner.clone();
-                        // Settings hides this window, which GPUI can't update while it
-                        // dispatches this click.
+                        // Settings hides this window, which GPUI can't update mid-click.
                         cx.defer(move |cx| {
                             if let Ok(Err(_)) =
                                 owner.update(cx, |this, cx| this.recover(source, action, cx))
