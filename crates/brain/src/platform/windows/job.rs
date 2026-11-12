@@ -283,7 +283,7 @@ impl Helper {
     /// Only [`Helper::exits_within`] shows that it ended.
     ///
     /// # Errors
-    /// Fails when termination fails and the process isn't confirmed exited.
+    /// Fails when Windows refuses for any reason but access denied and the process hasn't exited.
     pub fn terminate(&self) -> io::Result<()> {
         // SAFETY: the process handle is open for the borrow and has termination access.
         if unsafe { TerminateProcess(self.process.as_raw_handle(), TERMINATED) } != FALSE {

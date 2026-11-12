@@ -493,6 +493,7 @@ async fn an_unseen_exit_refuses_held_and_later_requests_by_type_without_a_respaw
     );
 }
 
+#[cfg(windows)]
 #[tokio::test]
 #[expect(clippy::disallowed_methods, reason = "spawns while holding spawn_lock")]
 async fn a_live_worker_that_refuses_termination_is_reported_unconfirmed() {
