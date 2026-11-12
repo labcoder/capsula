@@ -12,6 +12,7 @@ use kumochi_scene::{
     display::{MeasureError, Paint, Prim, TextMeasure, TextStyle},
     geom::{Affine, Vec2},
     layout::{LayoutState, PrepareInput, SurfaceGeometry, prepare},
+    limits::MAX_COMPOSED_SCALE,
     parse_record,
     record::Rgb,
     theme::Theme,
@@ -151,7 +152,8 @@ fn a_staged_fill_paints_the_vertices_and_bounds_of_the_per_paint_build() {
     ];
     for (handle, index, prim) in &fills {
         for transform in transforms {
-            let built = paths(prim, transform, 1.0, 0.0).expect("today's build");
+            let built =
+                paths(prim, transform, 1.0, 0.0, MAX_COMPOSED_SCALE).expect("today's build");
             assert_eq!(built.len(), 1, "one path per covering fill");
             let staged = scene
                 .fill(*handle, *index, transform)
@@ -176,7 +178,7 @@ fn a_fill_that_covers_nothing_or_is_refused_stages_as_its_per_paint_result() {
         ]),
         color: ink(),
     };
-    let built = paths(&flat, Affine::default(), 1.0, 0.0);
+    let built = paths(&flat, Affine::default(), 1.0, 0.0, MAX_COMPOSED_SCALE);
     assert_eq!(built.map(|built| built.len()), Ok(0), "today's build");
     let scene = PaintScene::of(handle, &[flat, over()]);
     assert_eq!(

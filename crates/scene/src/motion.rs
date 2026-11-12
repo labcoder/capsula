@@ -380,6 +380,7 @@ struct Node {
     rest: Rest,
     opacity: f32,
     inherited: f32,
+    paint_scale: f32,
     timing: Timing,
     /// Put by the step this view activated, so [`SceneView::delay_entrance`] moves its timing.
     fresh: bool,
@@ -403,7 +404,7 @@ fn slot(track: Track) -> usize {
 
 /// Orders placed objects parent-first, so one pass composes every world transform.
 fn build_nodes(layout: &LayoutState, timing: impl Fn(&Item) -> Timing) -> Vec<Node> {
-    let items: BTreeMap<Handle, (&Item, Rest, f32, usize)> = layout
+    let items: BTreeMap<Handle, (&Item, Rest, f32, usize, f32)> = layout
         .placed()
         .map(|entry| (entry.0.handle, entry))
         .collect();
@@ -430,7 +431,7 @@ fn build_nodes(layout: &LayoutState, timing: impl Fn(&Item) -> Timing) -> Vec<No
     order
         .iter()
         .map(|(_, handle)| {
-            let (item, rest, inherited, label_start) = items[handle];
+            let (item, rest, inherited, label_start, paint_scale) = items[handle];
             Node {
                 handle: *handle,
                 parent: item.parent.and_then(|parent| index.get(&parent).copied()),
@@ -441,6 +442,7 @@ fn build_nodes(layout: &LayoutState, timing: impl Fn(&Item) -> Timing) -> Vec<No
                 rest,
                 opacity: item.opacity,
                 inherited,
+                paint_scale,
                 timing: timing(item),
                 fresh: false,
                 owners: [None; 10],
@@ -467,6 +469,9 @@ pub struct FrameItem {
     pub color: Option<Paint>,
     /// Dash phase of a flowing edge, in periods.
     pub flow: f32,
+    /// Composed scale its rect fallbacks were charged at; a pose that needs more corner pieces
+    /// than that scale is refused.
+    pub paint_scale: f32,
 }
 impl fmt::Debug for FrameItem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

@@ -25,6 +25,7 @@ pub(super) fn paths(
     transform: Affine,
     draw: f32,
     flow: f32,
+    paint_scale: f32,
 ) -> Result<PrimPaths, BuildError> {
     let mut paths = [None, None];
     match prim {
@@ -62,7 +63,7 @@ pub(super) fn paths(
             fill,
             border,
         } => {
-            let charge = fallback_corner_segments(*rect, *radius);
+            let charge = fallback_corner_segments(*rect, *radius, paint_scale);
             let (radius, segments) = corners(*rect, *radius, scale(transform), charge)?;
             let outer = Rounded::new(*rect, radius, segments);
             if let Some(paint) = fill {

@@ -9,6 +9,7 @@ use gpui_kit::{AppContext as _, Context, IntoElement, Render, Styled as _, Windo
 use kumochi_scene::{
     display::{Paint, PaintWork, Prim},
     geom::{Affine, Rect, Vec2},
+    limits::MAX_COMPOSED_SCALE,
     record::Rgb,
 };
 
@@ -118,10 +119,12 @@ fn case(kind: Kind, candidate: usize) -> Case {
         let mut left = candidate;
         if !matches!(kind, Kind::Fill) {
             let mut largest = polygon(3);
-            let mut charged = PaintWork::of(std::slice::from_ref(&largest)).fill_vertices;
+            let mut charged =
+                PaintWork::of(std::slice::from_ref(&largest), MAX_COMPOSED_SCALE).fill_vertices;
             for count in 4..=208 {
                 let prim = polygon(count);
-                let charge = PaintWork::of(std::slice::from_ref(&prim)).fill_vertices;
+                let charge =
+                    PaintWork::of(std::slice::from_ref(&prim), MAX_COMPOSED_SCALE).fill_vertices;
                 if charge > candidate {
                     break;
                 }
@@ -132,7 +135,7 @@ fn case(kind: Kind, candidate: usize) -> Case {
             left -= charged;
         }
         let prim = polygon(16);
-        let charge = PaintWork::of(std::slice::from_ref(&prim)).fill_vertices;
+        let charge = PaintWork::of(std::slice::from_ref(&prim), MAX_COMPOSED_SCALE).fill_vertices;
         assert!(charge > 0);
         for _ in 0..left / charge {
             primitives.push((prim.clone(), pose));
@@ -148,7 +151,7 @@ fn case(kind: Kind, candidate: usize) -> Case {
             fill: None,
             border: Some((color(), 0.1)),
         };
-        let charge = PaintWork::of(std::slice::from_ref(&prim)).outline_points;
+        let charge = PaintWork::of(std::slice::from_ref(&prim), MAX_COMPOSED_SCALE).outline_points;
         assert!(charge > 0);
         for _ in 0..candidate / charge {
             primitives.push((prim.clone(), Affine::pose(64.0, 0.01, Vec2::new(0.0, 0.0))));
@@ -157,7 +160,7 @@ fn case(kind: Kind, candidate: usize) -> Case {
     let work = primitives
         .iter()
         .fold(PaintWork::default(), |sum, (prim, _)| {
-            sum + PaintWork::of(std::slice::from_ref(prim))
+            sum + PaintWork::of(std::slice::from_ref(prim), MAX_COMPOSED_SCALE)
         });
     assert!(
         work.dash_pieces <= candidate
@@ -240,6 +243,7 @@ impl Render for Probe {
                                 *transform,
                                 0.99,
                                 elapsed.as_secs_f32().fract(),
+                                MAX_COMPOSED_SCALE,
                             )
                             .expect("bounded diagnostic geometry builds")
                         };
@@ -484,7 +488,7 @@ fn small_primitives(candidate: usize) -> Case {
         .primitives
         .iter()
         .fold(PaintWork::default(), |sum, (prim, _)| {
-            sum + PaintWork::of(std::slice::from_ref(prim))
+            sum + PaintWork::of(std::slice::from_ref(prim), MAX_COMPOSED_SCALE)
         });
     mixed
 }
@@ -533,7 +537,10 @@ fn measure_preparation_work() {
         }
         for trial in 0..3 {
             let start = Instant::now();
-            let work = std::hint::black_box(PaintWork::of(std::hint::black_box(&primitives)));
+            let work = std::hint::black_box(PaintWork::of(
+                std::hint::black_box(&primitives),
+                MAX_COMPOSED_SCALE,
+            ));
             let elapsed = start.elapsed().as_nanos();
             assert_eq!(work.fill_vertices, total);
             println!(
@@ -559,7 +566,10 @@ fn measure_preparation_work() {
             .collect();
         for trial in 0..3 {
             let start = Instant::now();
-            let work = std::hint::black_box(PaintWork::of(std::hint::black_box(&primitives)));
+            let work = std::hint::black_box(PaintWork::of(
+                std::hint::black_box(&primitives),
+                MAX_COMPOSED_SCALE,
+            ));
             println!(
                 "paint_work_parallel_metadata points={total} items={} trial={trial} nanos={} fill={}; metadata-only, not full preparation",
                 primitives.len(),

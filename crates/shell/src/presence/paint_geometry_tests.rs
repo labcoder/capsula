@@ -4,6 +4,7 @@ use gpui_kit::{Path, Pixels};
 use kumochi_scene::{
     display::{Paint, Prim},
     geom::{Affine, Rect, Vec2},
+    limits::MAX_COMPOSED_SCALE,
     record::Rgb,
 };
 
@@ -42,13 +43,13 @@ fn geometry(path: &Path<Pixels>) -> (Vec<Segment>, [f32; 4]) {
 }
 
 fn parity(scratch: &mut Scratch, prim: &Prim, transform: Affine, draw: f32, flow: f32) {
-    let old = paint_paths::paths(prim, transform, draw, flow).map(|paths| {
+    let old = paint_paths::paths(prim, transform, draw, flow, MAX_COMPOSED_SCALE).map(|paths| {
         paths
             .into_iter()
             .map(|(path, paint)| (geometry(&path), paint))
             .collect::<Vec<_>>()
     });
-    let new = paths(scratch, prim, transform, draw, flow).map(|paths| {
+    let new = paths(scratch, prim, transform, draw, flow, MAX_COMPOSED_SCALE).map(|paths| {
         paths
             .into_iter()
             .flatten()
@@ -58,7 +59,14 @@ fn parity(scratch: &mut Scratch, prim: &Prim, transform: Affine, draw: f32, flow
     assert_eq!(new, old, "draw={draw} flow={flow} transform={transform:?}");
     let ((), events) = crate::allocation::requests(8_192, || {
         let _app = paint_phase::enter(Phase::App);
-        drop(paths(scratch, prim, transform, draw, flow));
+        drop(paths(
+            scratch,
+            prim,
+            transform,
+            draw,
+            flow,
+            MAX_COMPOSED_SCALE,
+        ));
     });
     paint_phase::tests::assert_paths(&events, 1);
 }
@@ -174,8 +182,16 @@ fn lazy_rect_contours_match_the_reference_at_degenerate_and_reveal_boundaries() 
 fn an_empty_stroke_has_no_handoff_or_other_allocation() {
     let prim = line(0, false, false);
     let mut scratch = Scratch::new();
-    let (built, counts) =
-        crate::allocation::activity(|| paths(&mut scratch, &prim, Affine::default(), 1.0, 0.0));
+    let (built, counts) = crate::allocation::activity(|| {
+        paths(
+            &mut scratch,
+            &prim,
+            Affine::default(),
+            1.0,
+            0.0,
+            MAX_COMPOSED_SCALE,
+        )
+    });
     assert_eq!(
         built.expect("empty stroke").into_iter().flatten().count(),
         0
@@ -212,7 +228,7 @@ fn exact_edge_and_chord_reveal_boundaries_match_on_both_sides() {
             rect,
             radius,
             1.0,
-            kumochi_scene::display::fallback_corner_segments(rect, radius),
+            kumochi_scene::display::fallback_corner_segments(rect, radius, MAX_COMPOSED_SCALE),
         )
         .expect("charged corners");
         let outline = paint_paths::rounded(rect, radius, segments);
@@ -288,7 +304,8 @@ fn largest_charged_rects_and_mirrored_strokes_preserve_parity_and_refusal() {
             &rect,
             Affine::pose(65.0, 0.3, Vec2::default()),
             1.0,
-            0.0
+            0.0,
+            MAX_COMPOSED_SCALE,
         )
         .map(|paths| paths.into_iter().flatten().count()),
         Err(paint_paths::BuildError::OverCharge)
@@ -383,11 +400,28 @@ fn one_straight_stroke_requests_only_one_exact_handoff() {
         width: 2.0,
     };
     let mut scratch = Scratch::new();
-    drop(paths(&mut scratch, &prim, Affine::default(), 1.0, 0.0).expect("warm"));
+    drop(
+        paths(
+            &mut scratch,
+            &prim,
+            Affine::default(),
+            1.0,
+            0.0,
+            MAX_COMPOSED_SCALE,
+        )
+        .expect("warm"),
+    );
     let ((), requests) = crate::allocation::requests(100, || {
         let _app = paint_phase::enter(Phase::App);
-        let built =
-            paths(&mut scratch, &prim, Affine::default(), 1.0, 0.0).expect("a straight stroke");
+        let built = paths(
+            &mut scratch,
+            &prim,
+            Affine::default(),
+            1.0,
+            0.0,
+            MAX_COMPOSED_SCALE,
+        )
+        .expect("a straight stroke");
         assert_eq!(built[0].as_ref().expect("one handoff").0.vertices.len(), 6);
         drop(built);
     });
@@ -427,6 +461,7 @@ fn each_transient_fill_releases_its_own_allocations_before_returning() {
                 Affine::pose(1.0, 0.3, Vec2::default()),
                 0.5,
                 0.0,
+                MAX_COMPOSED_SCALE,
             )
             .expect("background and sector"),
         );
