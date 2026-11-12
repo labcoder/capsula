@@ -531,7 +531,7 @@ earlier kept step, never one dropped by a cut. Admission rejects cycles, missing
 or wrongly typed parents/endpoints, properties the target does not own, invalid
 track values/times, and removals that orphan a surviving dependant. Only `draw`
 has kind-specific track ownership checks so far; a `set` or `anim` targeting an object
-removed by that same step fails as `UnknownRef`. The motion layer defines the
+removed by that same step fails as `RemovedInStep`. The motion layer defines the
 remaining property rules. Admission expands bounded Mermaid sources before checking
 the executable candidate; callers still submit and persist the original typed step.
 
