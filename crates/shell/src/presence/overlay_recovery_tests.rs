@@ -815,7 +815,7 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
             1
         );
         assert_eq!(app_paths(events, redraw.clone()), 0);
-        let [allocations, bytes] = outside_app(events, redraw);
+        let [allocations, bytes] = gpui(events, redraw);
         println!("recovery_redraw case={case:?} gpui_allocations={allocations} gpui_bytes={bytes}");
         assert!(
             allocations <= 91 && bytes <= 23_137,
@@ -849,7 +849,7 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
     );
 }
 
-/// Kumochi's own outermost App scopes; GPUI's redraw work runs outside them.
+/// Kumochi's own outermost App scopes, where the path rule applies to App-tagged allocations.
 fn app_scopes(events: &[crate::allocation::Request]) -> Vec<std::ops::Range<usize>> {
     let mut scopes = Vec::new();
     let mut depth = 0_usize;
@@ -878,7 +878,7 @@ fn app_scopes(events: &[crate::allocation::Request]) -> Vec<std::ops::Range<usiz
 }
 
 /// The path rule over Kumochi's own App scopes that overlap `range`. GPUI's own per-redraw
-/// allocations are counted and reported by `outside_app`; the limit applies to Kumochi's.
+/// allocations are counted and reported by `gpui`; the limit applies to Kumochi's.
 fn app_paths(events: &[crate::allocation::Request], range: std::ops::Range<usize>) -> usize {
     app_scopes(events)
         .into_iter()
@@ -887,16 +887,42 @@ fn app_paths(events: &[crate::allocation::Request], range: std::ops::Range<usize
         .sum()
 }
 
-/// Allocations in `range` outside Kumochi's App scopes, as `[count, bytes]`.
-fn outside_app(events: &[crate::allocation::Request], range: std::ops::Range<usize>) -> [usize; 2] {
+/// GPUI's allocations in `range`, as `[count, bytes]`: every one outside Kumochi's App scopes,
+/// and inside them every one a GPUI, shape or fill phase tagged. The episode's ambient tag is
+/// App, so a tag alone can't tell GPUI's work outside the scopes from Kumochi's.
+fn gpui(events: &[crate::allocation::Request], range: std::ops::Range<usize>) -> [usize; 2] {
     let scopes = app_scopes(events);
     range
         .filter(|index| {
-            events[*index].action == 0 && !scopes.iter().any(|scope| scope.contains(index))
+            events[*index].action == 0
+                && (events[*index].tag != 1 || !scopes.iter().any(|scope| scope.contains(index)))
         })
         .fold([0, 0], |[count, bytes], index| {
             [count + 1, bytes + events[index].size]
         })
+}
+
+#[test]
+fn the_gpui_bucket_takes_gpui_tags_inside_app_scopes_and_everything_outside() {
+    let event = |action, size, tag| crate::allocation::Request {
+        action,
+        pointer: 0,
+        size,
+        align: 1,
+        tag,
+    };
+    let events = [
+        event(0, 1, 1),
+        event(2, 0, 1),
+        event(0, 10, 1),
+        event(0, 20, 3),
+        event(0, 40, 4),
+        event(1, 0, 3),
+        event(3, 0, 1),
+        event(0, 80, 1),
+    ];
+    assert_eq!(gpui(&events, 0..events.len()), [4, 141]);
+    assert_eq!(gpui(&events, 2..5), [2, 60]);
 }
 
 /// Allocations in `events` that no later event there frees, as `[count, bytes]`.
