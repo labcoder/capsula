@@ -237,8 +237,16 @@ impl Build<'_> {
                         .iter()
                         .cloned()
                         .map(|mut primitive| {
-                            if let Prim::Line { color, .. } = &mut primitive {
-                                *color = self.color(path_op.color.as_ref());
+                            match &mut primitive {
+                                Prim::Line { color, .. } => {
+                                    *color = self.color(path_op.color.as_ref());
+                                }
+                                Prim::Fill { color, .. } => {
+                                    if let Some(fill) = &path_op.fill {
+                                        *color = self.theme.resolve(fill).into();
+                                    }
+                                }
+                                _ => {}
                             }
                             primitive
                         }),

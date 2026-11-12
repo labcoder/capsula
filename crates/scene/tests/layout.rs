@@ -586,9 +586,52 @@ fn path_paint_changes_reuse_geometry_without_requesting_new_sizing_facts() {
     assert!(Arc::ptr_eq(old, new));
     assert_eq!(color.rgb.get(), 0x00ff_6b7d);
     let Prim::Fill { color, .. } = &next.display.items[0].primitives[0] else {
-        panic!("unchanged fill");
+        panic!("recolored fill");
     };
-    assert_eq!(color.rgb.get(), 0x005f_d39a);
+    assert_eq!(
+        color.rgb.get(),
+        0x00ff_6b7d,
+        "a set color recolors the fill too"
+    );
+}
+
+#[test]
+fn set_color_recolors_a_filled_shape_and_leaves_an_unfilled_one_unfilled() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let mut measure = Measure::default();
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[
+            {"shape":{"id":"puff","kind":"circle","at":[50,50],"r":20,"color":"#ffffff","fill":"#ffffff","width":1}},
+            {"shape":{"id":"ring","kind":"circle","at":[120,50],"r":20,"color":"#ffffff"}}
+        ]}),
+    );
+    let first = picture(&scene, first, &before, &mut measure).expect("shapes");
+    let next = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"red","set":[{"target":"puff","color":"#ff0000"},{"target":"ring","color":"#ff0000"}]}),
+    );
+    let next = picture(&scene, next, &first.after, &mut measure).expect("recolored");
+    let items = next.after.items();
+    let [
+        Prim::Fill { color: fill, .. },
+        Prim::Line { color: outline, .. },
+    ] = &*items[0].primitives
+    else {
+        panic!("a filled circle keeps its fill and outline");
+    };
+    assert_eq!(
+        (fill.rgb.get(), outline.rgb.get()),
+        (0x00ff_0000, 0x00ff_0000)
+    );
+    let [Prim::Line { color: ring, .. }] = &*items[1].primitives else {
+        panic!("an unfilled circle gains no fill");
+    };
+    assert_eq!(ring.rgb.get(), 0x00ff_0000);
 }
 
 #[test]
