@@ -387,6 +387,54 @@ mod tests {
     }
 
     #[test]
+    fn a_chord_key_repeat_starts_the_hold_once_and_only_from_the_threshold() {
+        let start = Instant::now();
+        let at = |millis| start + Duration::from_millis(millis);
+        let mut gesture = Gesture::legacy_hold_fixture();
+        chord(&mut gesture, start);
+        assert_eq!(
+            key(&mut gesture, Key::LeftAlt, Edge::Down, at(299)),
+            [None; 3],
+            "a repeat before the threshold"
+        );
+        assert_eq!(
+            key(&mut gesture, Key::LeftAlt, Edge::Down, at(300)),
+            [Some(Effect::HoldStarted), None, None],
+            "a repeat at the threshold"
+        );
+        assert!(gesture.holding());
+        assert_eq!(
+            key(&mut gesture, Key::LeftControl, Edge::Down, at(330)),
+            [None; 3],
+            "a repeat once holding"
+        );
+        assert_eq!(
+            gesture.handle(Event::Deadline, at(340)),
+            [None; 3],
+            "the late timer once holding"
+        );
+        let mut ready = Gesture::legacy_hold_fixture();
+        assert_eq!(key(&mut ready, Key::LeftAlt, Edge::Down, start), [None; 3]);
+        assert_eq!(
+            key(&mut ready, Key::LeftAlt, Edge::Down, at(400)),
+            [None; 3],
+            "a repeat while ready"
+        );
+        let mut releasing = Gesture::legacy_hold_fixture();
+        chord(&mut releasing, start);
+        assert_eq!(
+            key(&mut releasing, Key::Other(0x1E), Edge::Down, at(10)),
+            [Some(Effect::Resting), None, None],
+            "another key cancels"
+        );
+        assert_eq!(
+            key(&mut releasing, Key::LeftAlt, Edge::Down, at(400)),
+            [None; 3],
+            "a repeat while releasing"
+        );
+    }
+
+    #[test]
     fn hold_threshold_and_late_timer_delivery_are_exact() {
         let start = Instant::now();
         for milliseconds in [299, 300, 301] {

@@ -1334,6 +1334,7 @@ fn esc_after_a_finished_hold_run_leaves_voice_alone_and_the_next_hold_listens(
                     gesture: GestureId(1),
                 }),
             ),
+            (Phase::Answering, None),
             (Phase::Done, None),
         ] {
             owner
@@ -1352,6 +1353,12 @@ fn esc_after_a_finished_hold_run_leaves_voice_alone_and_the_next_hold_listens(
         }
         assert!(owner.voice.pending.is_none());
         assert_eq!(owner.voice.status, None);
+        owner.presenter =
+            crate::presenter::tests::painter_fixture(Box::new(crate::presenter::tests::Charged(0)))
+                .0;
+        owner.presenter.frames().borrow_mut().shown = true;
+        owner.runs_changed(cx).unwrap();
+        assert!(owner.presenter.holds_scenes());
     });
     while controls.try_recv().is_ok() {}
     deliver(Event::Escape, after(at, 2_000));
@@ -1359,6 +1366,7 @@ fn esc_after_a_finished_hold_run_leaves_voice_alone_and_the_next_hold_listens(
     owner.read_with(cx, |owner, _| {
         assert!(owner.voice.pending.is_none());
         assert_eq!(owner.voice.status, None);
+        assert!(!owner.presenter.holds_scenes());
     });
     assert!(
         std::iter::from_fn(|| controls.try_recv().ok())
