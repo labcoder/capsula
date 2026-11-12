@@ -5,10 +5,10 @@ use gpui_kit::component::{ActiveTheme as _, ThemeStyled as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement, KeyBinding,
-    ListAlignment, ListState as MessageList, ParentElement as _, Pixels, Render, SharedString,
-    Styled as _, Subscription, WeakEntity, Window, div, list, px,
+    ListAlignment, ListOffset, ListState as MessageList, ParentElement as _, Pixels, Render,
+    SharedString, Styled as _, Subscription, WeakEntity, Window, div, list, px,
 };
-use kumochi_protocol::message::{ActionState, PageEventKind, RunId, ThreadId};
+use kumochi_protocol::message::{ActionState, EventId, PageEventKind, RunId, ThreadId};
 use std::rc::Rc;
 
 #[cfg_attr(
@@ -39,6 +39,7 @@ pub(super) struct Messages {
     preview: Option<Row>,
     live_row: Option<RunId>,
     proven: Option<RunId>,
+    reveal_older: Option<(u64, EventId)>,
     _watch: Subscription,
     github_watch: Option<Subscription>,
     _activation_watch: Subscription,
@@ -155,6 +156,7 @@ impl Messages {
             preview: None,
             live_row: None,
             proven: None,
+            reveal_older: None,
             _watch: watch,
             github_watch: None,
             _activation_watch: activation_watch,
@@ -166,6 +168,18 @@ impl Messages {
         if self.live.as_ref() != answer {
             self.live = answer.cloned();
             self.sync(cx);
+        }
+    }
+
+    pub(super) fn older(&mut self, cx: &mut Context<'_, Self>) {
+        let state = self.model.read(cx);
+        if state.online()
+            && !state.reading()
+            && state.open.is_some()
+            && let Some(before) = state.before
+        {
+            self.reveal_older = Some((state.history_revision(), before));
+            older(&self.model, &self.owner, cx);
         }
     }
 
@@ -229,10 +243,32 @@ impl Messages {
             self.list.reset(count);
         }
         self.shown_thread = state.open;
+        self.proven = state.proven;
+        if let Some((revision, before)) = self.reveal_older {
+            if state.history_revision() != revision || !state.online() || !state.loaded {
+                self.reveal_older = None;
+            } else if !state.reading() {
+                if state.failed {
+                    self.reveal_older = None;
+                } else if state.before != Some(before) {
+                    self.reveal_older = None;
+                    if ids.first() == self.ids.first()
+                        && let Some(before) = state.before
+                    {
+                        self.reveal_older = Some((revision, before));
+                        older(&self.model, &self.owner, cx);
+                    } else {
+                        self.list.scroll_to(ListOffset {
+                            item_ix: 0,
+                            offset_in_item: px(0.0),
+                        });
+                    }
+                }
+            }
+        }
         self.ids = ids;
         self.count = count;
         self.live_row = live;
-        self.proven = state.proven;
         cx.notify();
     }
 }
@@ -1141,6 +1177,74 @@ mod tests {
             assert_eq!(offset.item_ix, 0);
             assert!((offset.offset_in_item - resized_height * 0.4).abs() < px(1.0));
         });
+    }
+
+    #[gpui::test]
+    fn pending_older_navigation_is_retired_by_reconnect_selection_or_failure(
+        cx: &mut TestAppContext,
+    ) {
+        use kumochi_protocol::message::DataToShell;
+
+        for change in ["reconnect", "selection", "failure"] {
+            let (model, view, _) = open_with_events(cx, Vec::new());
+            model.update(cx, |state, cx| {
+                state.connected();
+                state.show();
+                assert_eq!(state.requests().len(), 2);
+                state.apply(DataToShell::ThreadList {
+                    request: 1,
+                    threads: Vec::new(),
+                    next: None,
+                });
+                state.apply(DataToShell::Page {
+                    request: 2,
+                    thread: ThreadId(1),
+                    events: (11..=30).rev().map(event).collect(),
+                    before: Some(EventId(11)),
+                });
+                cx.notify();
+            });
+            cx.run_until_parked();
+            view.update(cx, |view, cx| {
+                view.older(cx);
+                assert_eq!(
+                    view.reveal_older,
+                    Some((model.read(cx).history_revision(), EventId(11)))
+                );
+            });
+            model.update(cx, |state, cx| {
+                state.older_events();
+                assert_eq!(state.requests().len(), 1);
+                match change {
+                    "reconnect" => {
+                        state.disconnected();
+                        state.connected();
+                        assert_eq!(state.requests().len(), 2);
+                        state.apply(DataToShell::Page {
+                            request: 5,
+                            thread: ThreadId(1),
+                            events: (31..=50).rev().map(event).collect(),
+                            before: Some(EventId(31)),
+                        });
+                    }
+                    "selection" => state.select(Some(ThreadId(2))),
+                    "failure" => state.apply(DataToShell::PageFailed { request: 3 }),
+                    _ => unreachable!("three terminal changes"),
+                }
+                state.apply(DataToShell::Page {
+                    request: 3,
+                    thread: ThreadId(1),
+                    events: vec![event(1)],
+                    before: None,
+                });
+                cx.notify();
+            });
+            cx.run_until_parked();
+            view.read_with(cx, |view, _| {
+                assert_eq!(view.reveal_older, None);
+                assert_eq!(view.list.logical_scroll_top().item_ix, view.count);
+            });
+        }
     }
 
     #[gpui::test]

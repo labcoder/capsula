@@ -1094,6 +1094,218 @@ fn actual_history_older_sends_the_exact_cursor_and_keeps_the_draft(cx: &mut Test
     );
 }
 
+fn opened_history(
+    first: kumochi_protocol::message::DataToShell,
+    cx: &mut TestAppContext,
+) -> (
+    Entity<Presence>,
+    gpui_kit::AnyWindowHandle,
+    async_channel::Receiver<DataToBrain>,
+) {
+    use kumochi_protocol::message::DataToShell;
+    let (owner, data, _) = ready(cx);
+    let window = owner.update(cx, |owner, cx| {
+        assert!(owner.runs.select_thread(Some(ThreadId(3))));
+        owner.chat.update(cx, |chat, cx| {
+            chat.show_for(Some(ThreadId(3)));
+            cx.notify();
+        });
+        owner.text.as_mut().expect("typing fixture").typing.open();
+        owner.runs_changed(cx).expect("focused history");
+        owner.text.as_ref().expect("typing fixture").window
+    });
+    assert_eq!(data.len(), 2);
+    while data.try_recv().is_ok() {}
+    receive(
+        &owner,
+        vec![
+            LinkEvent::Data {
+                generation: 1,
+                message: DataToShell::ThreadList {
+                    request: 1,
+                    threads: Vec::new(),
+                    next: None,
+                },
+                bytes: 17,
+            },
+            LinkEvent::Data {
+                generation: 1,
+                message: first,
+                bytes: 19,
+            },
+        ],
+        cx,
+    );
+    cx.run_until_parked();
+    (owner, window, data)
+}
+
+#[gpui::test]
+fn older_button_reveals_each_page_of_drawing_dense_history(cx: &mut TestAppContext) {
+    use gpui_kit::VisualTestContext;
+    use kumochi_protocol::message::{
+        DataToShell, EventId, PageEvent, PageEventKind, PageOf, SceneId,
+    };
+
+    let page = |request, first, last, before: Option<u64>| DataToShell::Page {
+        request,
+        thread: ThreadId(3),
+        events: (first..=last)
+            .rev()
+            .map(|id| PageEvent {
+                id: EventId(id),
+                run: Some(RunId(id / 10 + 1)),
+                kind: match id % 5 {
+                    0 => PageEventKind::User,
+                    1 => PageEventKind::AssistantText,
+                    _ => PageEventKind::NoVisual {
+                        scene: SceneId(id / 10 + 1),
+                    },
+                },
+                text: if id % 5 <= 1 {
+                    "fixture message".into()
+                } else {
+                    String::new()
+                },
+                cut: false,
+            })
+            .collect(),
+        before: before.map(EventId),
+    };
+    let (owner, window, data) = opened_history(page(2, 151, 200, Some(151)), cx);
+    draft(&owner, "keep this history draft", cx);
+    cx.run_until_parked();
+    for (request, first, last, before) in [
+        (3, 101, 150, Some(101)),
+        (4, 51, 100, Some(51)),
+        (5, 1, 50, None),
+    ] {
+        click_recovery(window, "chat-older-control", cx);
+        assert_eq!(
+            data.try_recv().expect("older request"),
+            DataToBrain::PageRequest {
+                request,
+                page: PageOf::Events {
+                    thread: ThreadId(3),
+                    before: Some(EventId(last + 1))
+                },
+            }
+        );
+        assert!(data.is_empty());
+        receive(
+            &owner,
+            vec![LinkEvent::Data {
+                generation: 1,
+                message: page(request, first, last, before),
+                bytes: 19,
+            }],
+            cx,
+        );
+        cx.run_until_parked();
+        let mut frame = VisualTestContext::from_window(window, cx);
+        let region = frame.debug_bounds("chat-message-region").expect("messages");
+        let selector = match first {
+            101 => "message-event-101",
+            51 => "message-event-51",
+            1 => "message-event-1",
+            _ => unreachable!("three fixture pages"),
+        };
+        let oldest = frame
+            .debug_bounds(selector)
+            .expect("new older message is rendered");
+        assert!(
+            oldest.intersects(&region),
+            "the new page must be visible, not above the preserved anchor"
+        );
+        assert_eq!(
+            frame.debug_bounds("chat-older-control").is_some(),
+            before.is_some()
+        );
+    }
+    owner.read_with(cx, |owner, cx| {
+        assert_eq!(owner.chat.read(cx).events.len(), 200);
+        assert_eq!(owner.chat.read(cx).before, None);
+        assert_eq!(
+            owner
+                .text
+                .as_ref()
+                .expect("typing fixture")
+                .input
+                .read(cx)
+                .value()
+                .as_ref(),
+            "keep this history draft"
+        );
+    });
+}
+
+#[gpui::test]
+fn older_button_continues_pages_that_only_extend_a_drawing_row(cx: &mut TestAppContext) {
+    use gpui_kit::VisualTestContext;
+    use kumochi_protocol::message::{
+        DataToShell, EventId, PageEvent, PageEventKind, PageOf, SceneId,
+    };
+
+    let page = |request, first, last, before: Option<u64>| DataToShell::Page {
+        request,
+        thread: ThreadId(3),
+        events: (first..=last)
+            .rev()
+            .map(|id| PageEvent {
+                id: EventId(id),
+                run: Some(RunId(1)),
+                kind: if id == 1 {
+                    PageEventKind::User
+                } else {
+                    PageEventKind::NoVisual { scene: SceneId(2) }
+                },
+                text: String::new(),
+                cut: false,
+            })
+            .collect(),
+        before: before.map(EventId),
+    };
+    let (owner, window, data) = opened_history(page(2, 102, 151, Some(102)), cx);
+    click_recovery(window, "chat-older-control", cx);
+    for (request, first, last, before) in [(3, 52, 101, Some(52)), (4, 1, 51, None)] {
+        assert_eq!(
+            data.try_recv().expect("older request"),
+            DataToBrain::PageRequest {
+                request,
+                page: PageOf::Events {
+                    thread: ThreadId(3),
+                    before: Some(EventId(last + 1))
+                },
+            }
+        );
+        assert!(data.is_empty());
+        receive(
+            &owner,
+            vec![LinkEvent::Data {
+                generation: 1,
+                message: page(request, first, last, before),
+                bytes: 19,
+            }],
+            cx,
+        );
+        cx.run_until_parked();
+    }
+    assert!(data.is_empty());
+    let mut frame = VisualTestContext::from_window(window, cx);
+    let region = frame.debug_bounds("chat-message-region").expect("messages");
+    assert!(
+        frame
+            .debug_bounds("message-event-1")
+            .expect("oldest user row")
+            .intersects(&region)
+    );
+    assert!(frame.debug_bounds("chat-older-control").is_none());
+    owner.read_with(cx, |owner, cx| {
+        assert_eq!(owner.chat.read(cx).events.len(), 151);
+        assert_eq!(owner.chat.read(cx).before, None);
+    });
+}
+
 fn renewal_run() -> LinkEvent {
     LinkEvent::RunState {
         generation: 1,

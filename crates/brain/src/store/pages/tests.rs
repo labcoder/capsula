@@ -359,6 +359,64 @@ fn newest_events_continue_exactly_before_the_last_returned_id_and_skip_revealed_
 }
 
 #[test]
+fn hidden_drawing_and_tool_rows_do_not_consume_a_page_or_create_a_continuation() {
+    let scratch = Scratch::new("pages-hidden-rows");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let thread = ThreadId(1);
+    store
+        .begin_turn(thread, Some("fixture"), RunId(1), "oldest")
+        .expect("turn");
+    for kind in [
+        "scene_begin",
+        "scene_cleared",
+        "scene_cut",
+        "revealed",
+        "output_item",
+        "tool_result",
+    ] {
+        for _ in 0..MAX_PAGE_ROWS {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO events(thread,run,kind,created_ms) VALUES (?1,1,?2,1)",
+                    params![bounded_id(thread.0), kind],
+                )
+                .expect("hidden row");
+        }
+    }
+    let (rows, before) = store
+        .pages()
+        .events_page(thread, None, MAX_PAGE_ROWS)
+        .expect("first page");
+    assert_eq!(
+        rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [EventId(1)]
+    );
+    assert_eq!(before, None);
+    store
+        .append(
+            thread,
+            RunId(1),
+            &vec![
+                NewEvent {
+                    kind: EventKind::AssistantText,
+                    text: Some("fixture"),
+                    body: None,
+                };
+                MAX_PAGE_ROWS - 1
+            ],
+        )
+        .expect("exactly one visible page");
+    let (rows, before) = store
+        .pages()
+        .events_page(thread, None, MAX_PAGE_ROWS)
+        .expect("one page");
+    assert_eq!(rows.len(), MAX_PAGE_ROWS);
+    assert_eq!(rows.last().expect("oldest row").id, EventId(1));
+    assert_eq!(before, None);
+}
+
+#[test]
 fn oversized_unicode_event_is_cut_to_the_full_frame_budget_and_can_continue() {
     let scratch = Scratch::new("pages-unicode");
     let mut store = Store::open(&scratch.db()).expect("store");

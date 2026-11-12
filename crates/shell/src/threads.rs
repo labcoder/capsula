@@ -290,6 +290,10 @@ impl Threads {
         self.event_pending.is_some() || self.event_needed.is_some()
     }
 
+    pub(crate) fn history_revision(&self) -> u64 {
+        self.event_revision
+    }
+
     pub(crate) fn connected(&mut self) {
         self.retire_issue_confirmation();
         self.connected = true;

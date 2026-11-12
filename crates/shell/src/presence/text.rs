@@ -579,8 +579,7 @@ impl TextView {
         let reading = state.reading();
         let online = state.online();
         let retry_owner = self.owner.clone();
-        let older_owner = self.owner.clone();
-        let model = self.model.clone();
+        let messages = self.messages.clone();
         div()
             .flex()
             .flex_col()
@@ -623,7 +622,7 @@ impl TextView {
                             .label(cx.global::<Strings>().get(Text::OlderMessages))
                             .disabled(!online || reading)
                             .on_click(move |_, _, cx| {
-                                super::messages::older(&model, &older_owner, cx);
+                                messages.update(cx, |messages, cx| messages.older(cx));
                             }),
                     )
                 })
