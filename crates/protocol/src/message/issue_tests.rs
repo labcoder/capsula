@@ -503,10 +503,6 @@ fn largest_issue_and_connection_frames_fit_their_exact_budgets() {
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one exact provenance scenario covers Welcome and operation prefixes at minimum, varint and maximum identities"
-)]
 fn issue_provenance_round_trips_exactly_through_welcome_and_operation_prefixes() {
     use crate::frame::{FrameError, read};
     for (session, bytes) in [
@@ -599,7 +595,7 @@ fn issue_provenance_round_trips_exactly_through_welcome_and_operation_prefixes()
 #[test]
 fn issue_provenance_rejects_missing_mistyped_overflow_and_truncated_identities() {
     for json in [
-        r#"{}"#,
+        "{}",
         r#"{"incarnation":1}"#,
         r#"{"epoch":2}"#,
         r#"{"incarnation":"1","epoch":2}"#,
@@ -991,6 +987,10 @@ fn private(
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one sentinel scenario follows private content through every outer wire carrier and tap"
+)]
 fn outer_wire_carriers_and_tap_never_format_issue_or_device_content() {
     let title = "zqx-private-title";
     let body = "zqx-private-body";

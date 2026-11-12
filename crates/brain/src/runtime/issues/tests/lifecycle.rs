@@ -233,6 +233,10 @@ async fn close_and_quit_join_a_canceled_constructor_before_closing_the_sql_write
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one actual POST must remain uncertain at its original deadline and cannot be replayed"
+)]
 async fn the_original_deadline_after_post_handoff_records_unknown_and_replay_never_resends() {
     let scratch = Scratch::new("github-filing-post-deadline");
     let server = Arc::new(FilingServer {
