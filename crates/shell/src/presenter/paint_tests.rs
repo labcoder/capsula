@@ -104,7 +104,7 @@ fn anchored_prepared_work_fits_at_the_limit_and_fails_one_over() {
             assert_eq!(prepared.after.paint_work().dash_pieces, limit);
         } else {
             assert!(
-                matches!(&**result, Err(PrepareError::OverResidency)),
+                matches!(&**result, Err(PrepareError::OverPaintWork)),
                 "the worker refuses work over the D1 cap"
             );
         }
@@ -116,7 +116,7 @@ fn anchored_prepared_work_fits_at_the_limit_and_fails_one_over() {
         } else {
             assert_eq!(
                 controls(&effects),
-                [&failed(LIVE, 0, SceneFailure::Residency)]
+                [&failed(LIVE, 0, SceneFailure::PaintWork)]
             );
             assert_eq!(presenter.scenes[&LIVE].ready.len(), 0);
             assert_eq!(presenter.paint_work().dash_pieces, 0);

@@ -1039,10 +1039,10 @@ impl Presenter {
                 || prepared.validate(scene.state.view(), scene.tip()).is_err()
             {
                 Err(SceneFailure::Validation)
-            } else if total.saturating_add(prepared.resident_bytes) > MAX_RESIDENT_BYTES
-                || !(other_work + paint).within_limits()
-            {
+            } else if total.saturating_add(prepared.resident_bytes) > MAX_RESIDENT_BYTES {
                 Err(SceneFailure::Residency)
+            } else if !(other_work + paint).within_limits() {
+                Err(SceneFailure::PaintWork)
             } else {
                 Ok((prepared, paint))
             }
@@ -1183,6 +1183,7 @@ fn failure(error: &PrepareError) -> SceneFailure {
         PrepareError::Stale => SceneFailure::Validation,
         PrepareError::TextMeasure => SceneFailure::TextMeasure,
         PrepareError::OverResidency => SceneFailure::Residency,
+        PrepareError::OverPaintWork => SceneFailure::PaintWork,
         PrepareError::Layout(_) => SceneFailure::Layout,
     }
 }

@@ -4,7 +4,8 @@
 use std::sync::Arc;
 
 use kumochi_protocol::message::{
-    DataToShell, MAX_DRAW_STEPS_PER_RUN, RunId, SceneCut, SceneCuts, SceneHeader, SceneId, ThreadId,
+    DataToShell, MAX_DRAW_STEPS_PER_RUN, RunId, SceneCut, SceneCuts, SceneFailure, SceneHeader,
+    SceneId, ThreadId,
 };
 use kumochi_scene::text::Bounded;
 use kumochi_scene::{
@@ -536,6 +537,7 @@ fn replacement_failure_reports_loss_once_after_the_call_and_original_run_ended()
             run: RunId(1),
             scene: SceneId(2),
             index: 0,
+            reason: SceneFailure::Timeout,
             cut: cut(0, vec![]),
         },
     );
@@ -557,6 +559,7 @@ fn replacement_failure_reports_loss_once_after_the_call_and_original_run_ended()
             run: RunId(1),
             scene: SceneId(2),
             index: 0,
+            reason: SceneFailure::Timeout,
             cut: cut(0, vec![]),
         },
     );
@@ -649,6 +652,7 @@ fn an_open_replacement_call_reports_loss_without_overwriting_its_failure_code() 
                 run: RunId(1),
                 scene: SceneId(2),
                 index: 0,
+                reason: SceneFailure::Timeout,
                 cut,
             },
         );
@@ -670,6 +674,37 @@ fn an_open_replacement_call_reports_loss_without_overwriting_its_failure_code() 
             "drawn: [new]; stopped: drawing.PreparationFailed"
         );
     }
+}
+
+#[test]
+fn a_step_too_large_to_paint_ends_its_call_asking_for_fewer_shapes() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    store.run(
+        &mut drawing,
+        streamed(
+            "big",
+            0,
+            r#"{"begin":{"v":1,"scene":"big","surface":"overlay","alt":""}}"#,
+        ),
+    );
+    store.run(&mut drawing, streamed("big", 1, &step(&text("big", "big"))));
+    let failed = store.run(
+        &mut drawing,
+        Input::StepFailed {
+            run: RunId(1),
+            scene: SceneId(1),
+            index: 0,
+            reason: SceneFailure::PaintWork,
+            cut: cut(0, vec![]),
+        },
+    );
+    assert_eq!(failed.calls.len(), 1);
+    assert_eq!(failed.calls[0].error, Some(CallError::TooMuchToPaint));
+    assert_eq!(
+        failed.calls[0].tool_text(),
+        "drawn: [big]; stopped: drawing.TooMuchToPaint; the picture stays at its last shown step; use fewer shapes and call draw again"
+    );
 }
 
 fn call(run: u64, call: &str, args: Vec<u8>) -> Input {

@@ -2,7 +2,7 @@
 //! fifth-scene eviction.
 
 use kumochi_protocol::message::{
-    DataToShell, MAX_VISIBLE_SCENES, RunId, SceneHeader, SceneId, ThreadId,
+    DataToShell, MAX_VISIBLE_SCENES, RunId, SceneFailure, SceneHeader, SceneId, ThreadId,
 };
 use kumochi_scene::text::Bounded;
 use kumochi_scene::{ReplacementDisposition, Step, StopCut};
@@ -175,8 +175,13 @@ impl Drawing {
         let Some(at) = self.live(scene) else {
             return;
         };
-        if kind == CutKind::Failed {
-            self.end_calls_in(scene, out);
+        if let CutKind::Failed(reason) = kind {
+            let error = if reason == SceneFailure::PaintWork {
+                super::CallError::TooMuchToPaint
+            } else {
+                super::CallError::Failed
+            };
+            self.end_calls_in(scene, &error, out);
         }
         let held = &mut self.scenes[at];
         let logged = held.state.recovery_log().len();
@@ -316,7 +321,7 @@ impl Drawing {
             return;
         }
         self.replacement_failed(scene, out);
-        self.end_calls_in(scene, out);
+        self.end_calls_in(scene, &super::CallError::Failed, out);
         self.clear_scenes(&[scene], out);
     }
 

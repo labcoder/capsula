@@ -3122,7 +3122,7 @@ fn preparation_counts_paint_work_once_and_refuses_an_unbuildable_fill() {
     // 331 points + 331 · 65 crossings is one vertex past a single build.
     assert!(matches!(
         picture(&scene, next, &first.after, &mut measure),
-        Err(PrepareError::OverResidency)
+        Err(PrepareError::OverPaintWork)
     ));
 }
 
@@ -3146,7 +3146,7 @@ fn generated_fill_points_refuse_before_crossing_count_above_the_global_cap() {
             };
             assert_eq!(points.len(), 505);
         } else {
-            assert!(matches!(prepared, Err(PrepareError::OverResidency)));
+            assert!(matches!(prepared, Err(PrepareError::OverPaintWork)));
         }
     }
 }
@@ -3251,7 +3251,7 @@ fn a_later_ancestor_track_recharges_shared_rects_and_refuses_growth_past_the_cap
     let over = committed(&mut scene, &mut budget, scaled(32));
     assert!(matches!(
         capped(over, &next.after, &mut measure),
-        Err(PrepareError::OverResidency)
+        Err(PrepareError::OverPaintWork)
     ));
     assert_eq!(
         first.after.paint_work(),
@@ -3308,7 +3308,7 @@ fn bounded_preparation_refuses_once_the_scene_s_own_work_passes_the_cap() {
                     .fill_vertices,
                 fill
             ),
-            None => assert!(matches!(prepared, Err(PrepareError::OverResidency))),
+            None => assert!(matches!(prepared, Err(PrepareError::OverPaintWork))),
         }
     }
     let (scene, commit) = fill_scene(&[convex("a", 300), convex("b", 213)]);
@@ -3346,7 +3346,7 @@ fn bounded_recovery_refuses_a_scene_over_the_cap() {
                 result,
                 Err(kumochi_scene::layout::RecoveryError {
                     revision: 1,
-                    error: PrepareError::OverResidency,
+                    error: PrepareError::OverPaintWork,
                 })
             ));
         } else {
@@ -3397,7 +3397,7 @@ fn bounded_second_step_counts_reused_fill_work_before_new_objects() {
             };
             assert!(Arc::ptr_eq(old, reused));
         } else {
-            assert!(matches!(result, Err(PrepareError::OverResidency)));
+            assert!(matches!(result, Err(PrepareError::OverPaintWork)));
         }
         assert_eq!(first.after.paint_work().fill_vertices, 300);
     }

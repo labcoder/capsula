@@ -854,7 +854,7 @@ overlaps as weak. There is no union pass or extra paint charge for isolation.
 
 A fill over `FILL_VERTEX_LIMIT` (21,845, a third of the u16 index space) or a rect outline over
 `OUTLINE_POINT_LIMIT` (5,460) can't be one tessellation build, so preparation fails with
-`OverResidency`. `PaintWork::within_limits` also checks the global dash, fill-vertex and
+`OverPaintWork`. `PaintWork::within_limits` also checks the global dash, fill-vertex and
 outline budgets, which are measured on Rez. Solid strokes carry no paint charge because
 construction bounds every generated line: a flattened path has at most 4,096 segments and
 every other line at most 513 points including a closed outline's repeated first point, so
@@ -865,12 +865,12 @@ The global limits are 512 dash pieces, 512 fill vertices and 512 outline points,
 across all visible scenes and reserved ready/rest states. On an overlay, four radius-8 filled
 and bordered boxes cost 100 fill and outline points, leaving room for labels and dashed connectors;
 labels remain subject to the existing text and object limits. A drawing beyond the limits
-fails explicitly through the scene's residency failure or recovery clear, without simplifying
+fails explicitly through the scene's `PaintWork` failure or recovery clear, without simplifying
 its geometry. Before counting crossings, preparation refuses any one generated fill with
 more than 512 points, which cannot fit even without a crossing. Given a paint cap
 (`PrepareInput::with_paint_cap`, and the `paint_cap` of `recover` and `recover_all`; the
 shell's worker and recovery pass `PaintWork::LIMITS`), it also keeps a running total of the
-scene's own paint work and refuses with `OverResidency` once that passes the cap, which no
+scene's own paint work and refuses with `OverPaintWork` once that passes the cap, which no
 admission could accept. Each fill then counts crossings only up to the fill budget left, so a
 refused scene costs at most about 512²/2 crossing tests. Without a cap the charge stays exact.
 
@@ -1657,7 +1657,8 @@ unconsumed ready successors plus a running position, not the gap between lifetim
 At most eight jobs or undelivered answers retain worker slots; dropping an unspawned job
 releases its slot too. Recovered layouts, ready deltas and returned consumption owners
 share the unchanged 64 MiB allowance. An over-cap answer fails with `Residency` rather than
-waiting indefinitely for bytes. Clearing, removal and disconnect release the presenter's
+waiting indefinitely for bytes; one whose paint work, with the other scenes', passes
+`PaintWork::LIMITS` fails with `PaintWork`. Clearing, removal and disconnect release the presenter's
 ownership but cannot release a result still held by its caller. Each mirrored scene also
 reserves a resting view and a frame inside this allowance: the view's cloned layout index,
 node/paint/track storage and generation, plus both frame buffers, and the frame's paint cache

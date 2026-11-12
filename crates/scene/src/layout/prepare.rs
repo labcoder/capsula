@@ -333,7 +333,7 @@ pub fn prepare(
         if let Prim::Fill { points, .. } = primitive
             && points.len() > crate::limits::MAX_GLOBAL_FILL_VERTICES
         {
-            return Err(PrepareError::OverResidency);
+            return Err(PrepareError::OverPaintWork);
         }
     }
     // A capped scene whose own work passes its cap can never be admitted: stop counting there.
@@ -355,12 +355,12 @@ pub fn prepare(
             }
             (_, None) => PaintWork::of(&object.item.primitives, scale),
             (_, Some(cap)) => PaintWork::within(&object.item.primitives, total, cap, scale)
-                .ok_or(PrepareError::OverResidency)?,
+                .ok_or(PrepareError::OverPaintWork)?,
         };
         object.paint_scale = scale;
         total = total + object.work;
         if !object.work.fits_builds() || paint_cap.is_some_and(|cap| !total.fits(cap)) {
-            return Err(PrepareError::OverResidency);
+            return Err(PrepareError::OverPaintWork);
         }
     }
     if after.objects.is_empty() {

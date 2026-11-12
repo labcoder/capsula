@@ -291,6 +291,7 @@ fn failures_round_trip_without_content() {
         SceneFailure::Layout,
         SceneFailure::Residency,
         SceneFailure::TextMeasure,
+        SceneFailure::PaintWork,
     ]) {
         assert_eq!(postcard::to_allocvec(&failure), Ok(vec![tag]));
         assert_eq!(decode::<SceneFailure>(&failure), Ok(failure));

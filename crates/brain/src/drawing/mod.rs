@@ -19,7 +19,7 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
 
-use kumochi_protocol::message::{RunId, SceneCuts, SceneId, ThreadId};
+use kumochi_protocol::message::{RunId, SceneCuts, SceneFailure, SceneId, ThreadId};
 use kumochi_scene::{Admitted, Begin, GlobalBudget, Record, SceneState, Step, StopCut};
 
 use crate::coordinator::{Effect, Stale, StoreOp};
@@ -113,6 +113,8 @@ pub enum Input {
         scene: SceneId,
         /// Its zero-based lifetime index.
         index: u32,
+        /// Why, without content.
+        reason: SceneFailure,
         /// The cut at the last activated revision.
         cut: StopCut,
     },
@@ -235,7 +237,7 @@ enum CutKind {
     /// A run stopped.
     Stop,
     /// The shell couldn't prepare a step, so the calls drawing in the scene end too.
-    Failed,
+    Failed(SceneFailure),
 }
 
 /// The one write in the store.
@@ -418,6 +420,7 @@ impl Drawing {
                 run,
                 scene,
                 index,
+                reason,
                 cut,
             } => {
                 if self.committed_by(run, scene, index, &mut out) {
@@ -425,7 +428,7 @@ impl Drawing {
                     let job = Job::Cut {
                         scene,
                         cut,
-                        kind: CutKind::Failed,
+                        kind: CutKind::Failed(reason),
                     };
                     self.enqueue(job, &mut out);
                 }

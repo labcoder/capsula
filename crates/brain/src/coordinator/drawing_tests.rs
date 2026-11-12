@@ -168,6 +168,7 @@ fn a_committed_step_s_say_is_spoken_and_its_failed_scene_drops_it() {
             run: R,
             scene,
             index: 0,
+            reason: kumochi_protocol::message::SceneFailure::Timeout,
             cut: kumochi_scene::StopCut {
                 activated: 0,
                 revealed: kumochi_scene::text::Bounded::new(Vec::new()).expect("none"),

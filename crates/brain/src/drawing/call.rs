@@ -29,6 +29,9 @@ pub(super) const MAX_CALL_RECORDS: usize = MAX_DRAW_STEPS_PER_RUN + 2;
 const RETRY_HINT: &str = "; drawn lists what this call added, and earlier steps stay as they were; correct this and call draw again";
 /// Follows a model error once the run drew its whole step budget but still takes calls.
 const FULL_HINT: &str = "; no further step can be drawn in this turn";
+/// Follows a step too large to paint while the run can still draw.
+const PAINT_HINT: &str =
+    "; the picture stays at its last shown step; use fewer shapes and call draw again";
 /// Follows any early stop once the run accepts no further draw call.
 const SPENT_HINT: &str = "; no further draw call will be accepted in this turn";
 
@@ -53,6 +56,9 @@ pub enum CallError {
     /// The owner stopped; submitted writes still settle without accepting queued records.
     #[error("drawing.Interrupted")]
     Interrupted,
+    /// The shell couldn't paint a step of the call's scene: it held too many shapes.
+    #[error("drawing.TooMuchToPaint")]
+    TooMuchToPaint,
 }
 
 /// A call that ended: the steps it drew and, unless it completed, why the rest didn't.
@@ -102,8 +108,12 @@ impl CallEnd {
             });
             text.push_str(match (self.remaining, error) {
                 (Remaining::Nothing, _) => SPENT_HINT,
-                (Remaining::Calls, CallError::Step(_) | CallError::Token(_)) => FULL_HINT,
+                (
+                    Remaining::Calls,
+                    CallError::Step(_) | CallError::Token(_) | CallError::TooMuchToPaint,
+                ) => FULL_HINT,
                 (Remaining::Steps, CallError::Step(_) | CallError::Token(_)) => RETRY_HINT,
+                (Remaining::Steps, CallError::TooMuchToPaint) => PAINT_HINT,
                 _ => "",
             });
         }
@@ -724,7 +734,7 @@ impl Drawing {
     }
 
     /// Ends every open call drawing in `scene`, whose step the shell couldn't prepare.
-    pub(super) fn end_calls_in(&mut self, scene: SceneId, out: &mut Output) {
+    pub(super) fn end_calls_in(&mut self, scene: SceneId, error: &CallError, out: &mut Output) {
         let failing: Vec<usize> = (0..self.calls.len())
             .filter(|&at| {
                 let call = &self.calls[at];
@@ -732,7 +742,7 @@ impl Drawing {
             })
             .collect();
         for at in failing {
-            self.end(at, Some(CallError::Failed), out);
+            self.end(at, Some(error.clone()), out);
         }
     }
 
