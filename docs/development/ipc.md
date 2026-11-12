@@ -572,7 +572,7 @@ tags and bytes do not change. Mixed builds still fail their build-id handshake.
 | Data, brain to shell | `SceneEnd` | A call completed or ended incomplete; already committed history remains. |
 | Data, brain to shell | `ScenesReplaced` | One to four unique removed ids and a distinct successor, before its begin/first step; a bounded presentation bridge, not a transaction acknowledgement. |
 | Control, brain to shell | `DrawingReplacementFailed` | Fixed localized loss feedback for the original thread/run, including after its tool result ended. |
-| Control, brain to shell | `DrawingNotReturned` | A finished run called `draw` and committed no step; fixed localized feedback for its thread/run. |
+| Control, brain to shell | `DrawingNotReturned` | A run whose `done` outcome is stored called `draw`, and the shell refused every step it committed, if any; fixed localized feedback for its thread/run. |
 | Control, shell to brain | `SceneFailed` | A terminal whole-scene refusal, distinct from a user clear; the brain already owns its originating run/thread. |
 
 `SceneFailed` reports a cause to the brain, including a header refused before the shell knows

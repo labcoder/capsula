@@ -186,6 +186,8 @@ struct Held {
     state: SceneState,
     /// The run that committed each lifetime revision; `None` for recovered steps.
     committers: Vec<Option<RunId>>,
+    /// Revisions a failed cut already counted as refused, so a later one counts only newer ones.
+    refused_through: usize,
     /// Cleared or deleted: no frame of it goes out, and it leaves once no write is pending.
     gone: bool,
     replacement: Option<ReplacementLoss>,
@@ -344,6 +346,7 @@ impl Drawing {
                 thread: stored.thread,
                 layout_version: stored.header.layout_version,
                 committers: vec![None; usize::try_from(state.revision()).unwrap_or_default()],
+                refused_through: 0,
                 state,
                 gone: false,
                 replacement: None,
@@ -483,7 +486,7 @@ impl Drawing {
         })]
     }
 
-    /// Whether `run` called `draw` and committed no step.
+    /// Whether `run` called `draw` and every step it committed was refused by the shell.
     pub fn drew_nothing(&self, run: RunId) -> bool {
         self.runs
             .iter()

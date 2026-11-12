@@ -147,6 +147,7 @@ impl Drawing {
                     layout_version: LAYOUT_VERSION,
                     state,
                     committers: vec![Some(run)],
+                    refused_through: 0,
                     gone: false,
                     replacement,
                 });
@@ -176,12 +177,16 @@ impl Drawing {
             return;
         };
         if let CutKind::Failed(reason) = kind {
-            let from = usize::try_from(cut.activated).unwrap_or(usize::MAX);
-            for run in self.scenes[at].committers.iter().skip(from).flatten() {
+            let held = &mut self.scenes[at];
+            let from = usize::try_from(cut.activated)
+                .unwrap_or(usize::MAX)
+                .max(held.refused_through);
+            for run in held.committers.iter().skip(from).flatten() {
                 if let Some(ledger) = self.runs.iter_mut().find(|ledger| ledger.run == *run) {
                     ledger.refuse_step();
                 }
             }
+            held.refused_through = held.committers.len();
             let error = if reason == SceneFailure::PaintWork {
                 super::CallError::TooMuchToPaint {
                     cleared: cut.activated == 0,

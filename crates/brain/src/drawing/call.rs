@@ -176,7 +176,7 @@ impl RunLedger {
     }
 
     pub(super) fn refuse_step(&mut self) {
-        self.refused += 1;
+        self.refused = (self.refused + 1).min(self.steps);
     }
 }
 

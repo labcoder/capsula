@@ -752,6 +752,64 @@ fn a_later_step_too_large_to_paint_keeps_the_shown_picture() {
     assert!(!drawing.drew_nothing(RunId(1)));
 }
 
+/// One record of run `run`'s streamed call `call`.
+fn record_of(run: u64, call: &str, index: u32, record: &str) -> Input {
+    Input::Record {
+        thread: THREAD,
+        run: RunId(run),
+        call: CallId::new(call).expect("a short ASCII id"),
+        index,
+        bytes: record.as_bytes().to_vec(),
+    }
+}
+
+/// A second failed cut on one scene counts only steps the first didn't, so a run whose later
+/// steps are all refused still drew nothing, and one that showed a step still drew something.
+#[test]
+fn a_second_failed_cut_counts_only_steps_the_first_did_not() {
+    let begin = begin("big", "");
+    for showing in [1, 2] {
+        let mut drawing = Drawing::default();
+        let mut store = Store::default();
+        let first = store.run(
+            &mut drawing,
+            call(1, "first", args("big", &[text("one", "one")])),
+        );
+        assert_eq!(first.calls[0].error, None);
+        store.run(
+            &mut drawing,
+            Input::StepShown {
+                run: RunId(1),
+                scene: SceneId(1),
+                index: 0,
+            },
+        );
+        if showing == 2 {
+            store.run(&mut drawing, Input::RunClosed { run: RunId(1) });
+        }
+        let shown = cut(1, vec![handle(&drawing, 1, "one")]);
+        for (index, call, id) in [(1, "second", "two"), (2, "third", "three")] {
+            store.run(&mut drawing, record_of(showing, call, 0, &begin));
+            store.run(
+                &mut drawing,
+                record_of(showing, call, 1, &step(&text(id, id))),
+            );
+            let failed = store.run(
+                &mut drawing,
+                Input::StepFailed {
+                    run: RunId(showing),
+                    scene: SceneId(1),
+                    index,
+                    reason: SceneFailure::PaintWork,
+                    cut: shown.clone(),
+                },
+            );
+            assert_eq!(failed.calls.len(), 1);
+        }
+        assert_eq!(drawing.drew_nothing(RunId(showing)), showing == 2);
+    }
+}
+
 /// What happens today when a complete call's step is refused after the call ended; OSC-683
 /// may hold the call's result until its last step is shown or refused.
 #[test]
@@ -2464,6 +2522,7 @@ fn a_snapshot_leaves_out_a_scene_the_shell_would_refuse_and_keeps_the_rest() {
         layout_version: 2,
         state: SceneState::begin(begin).expect("a valid header"),
         committers: Vec::new(),
+        refused_through: 0,
         gone: false,
         replacement: None,
     });
@@ -2490,6 +2549,7 @@ fn a_snapshot_leaves_out_a_scene_the_shell_would_refuse_and_keeps_the_rest() {
             layout_version: 2,
             state,
             committers: vec![None],
+            refused_through: 0,
             gone: false,
             replacement: None,
         });
