@@ -350,6 +350,18 @@ fn a_cycle_through_a_removed_anchor_is_refused_in_one_step_or_two() {
 }
 
 #[test]
+fn a_re_pointed_target_s_old_link_no_longer_closes_a_cycle() {
+    admitted(
+        &[
+            cloud(),
+            json!({"id":"one","set":[{"target":"c1","behind":"c2"}]}),
+            json!({"id":"two","set":[{"target":"c1","behind":"sky"}]}),
+        ],
+        &json!({"id":"three","set":[{"target":"c2","behind":"c1"}]}),
+    );
+}
+
+#[test]
 fn a_chain_ends_at_a_removed_anchor() {
     let (_, _, view) = drawn(vec![
         cloud(),
