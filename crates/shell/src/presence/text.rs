@@ -622,7 +622,7 @@ impl TextView {
                             .label(cx.global::<Strings>().get(Text::OlderMessages))
                             .disabled(!online || reading)
                             .on_click(move |_, _, cx| {
-                                messages.update(cx, |messages, cx| messages.older(cx));
+                                messages.update(cx, Messages::older);
                             }),
                     )
                 })

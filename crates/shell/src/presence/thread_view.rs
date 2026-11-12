@@ -605,7 +605,7 @@ impl ThreadsView {
                     .disabled(waiting)
                     .label(older_label)
                     .on_click(move |_, _, cx| {
-                        older_messages.update(cx, |messages, cx| messages.older(cx));
+                        older_messages.update(cx, Messages::older);
                     })
             }))
             .children(waiting.then(Spinner::new))
