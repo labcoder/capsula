@@ -675,6 +675,10 @@ fn unavailable_unknown_loading_and_wrong_scope_never_open_a_confirmation(cx: &mu
 }
 
 #[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one refusal, reconnect and fresh confirmation scenario, read top to bottom"
+)]
 fn queue_refusal_is_not_replayed_by_later_valid_input(cx: &mut TestAppContext) {
     let mut f = fixture(cx, ActionState::Draft, "saved body");
     open(&f, 0, cx);
@@ -710,9 +714,84 @@ fn queue_refusal_is_not_replayed_by_later_valid_input(cx: &mut TestAppContext) {
     });
     cx.simulate_keystrokes(f.views[0].1, "enter space");
     assert!(f.controls.try_recv().is_err());
+    let ended = f
+        .owner
+        .read_with(cx, |owner, _| owner.session.as_ref().unwrap().alive());
+    assert!(!ended.load(std::sync::atomic::Ordering::Acquire));
+    controls::deliver(
+        &f,
+        vec![
+            LinkEvent::State(crate::link::LinkState::Reconnecting),
+            LinkEvent::Connected(Session::detached(2, Incarnation(1))),
+        ],
+        cx,
+    );
+    assert_eq!(std::iter::from_fn(|| f.requests.try_recv().ok()).count(), 4);
+    controls::deliver(
+        &f,
+        vec![
+            LinkEvent::GitHub {
+                generation: 2,
+                view: connected(),
+            },
+            LinkEvent::Data {
+                generation: 2,
+                message: page(7),
+                bytes: 11,
+            },
+            LinkEvent::Data {
+                generation: 2,
+                message: page(9),
+                bytes: 11,
+            },
+        ],
+        cx,
+    );
+    assert_eq!(
+        f.requests.try_recv().unwrap(),
+        DataToBrain::IssueCardsRequest {
+            request: 10,
+            drafts: Bounded::new(vec![DraftId(9)]).unwrap(),
+        }
+    );
+    controls::deliver(
+        &f,
+        vec![
+            LinkEvent::Data {
+                generation: 2,
+                message: issue_frame(10, 1, "saved body"),
+                bytes: 17,
+            },
+            LinkEvent::Data {
+                generation: 2,
+                message: DataToShell::IssueCardsDone {
+                    request: 10,
+                    status: IssueCardsStatus::Complete,
+                },
+                bytes: 7,
+            },
+        ],
+        cx,
+    );
+    assert!(f.controls.try_recv().is_err());
     open(&f, 0, cx);
     confirm(&f, 0, cx);
-    assert_eq!(f.controls.try_recv().unwrap(), payload(5, 3));
+    assert_eq!(
+        f.controls.try_recv().unwrap(),
+        ControlToBrain::Issue {
+            session: IssueSession {
+                incarnation: Incarnation(1),
+                epoch: 2,
+            },
+            request: 5,
+            op: IssueOp::Consent {
+                draft: DraftId(9),
+                hash: ContentHash([7; 32]),
+                approval: ApprovalRev(2),
+                decision: Decision::File,
+            },
+        }
+    );
     assert!(f.controls.try_recv().is_err());
 }
 

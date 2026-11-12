@@ -901,13 +901,13 @@ fn issue_refusals_keep_exact_authoritative_metadata() {
 fn issue_unavailable_has_only_correlated_identity_and_round_trips_exact_wire_data() {
     use crate::frame::{FrameError, read};
     for (request, draft, mut payload) in [
-        (0, DraftId(0), vec![26, 0, 0]),
-        (128, DraftId(2), vec![26, 128, 1, 2]),
+        (0, DraftId(0), vec![29, 0, 0]),
+        (128, DraftId(2), vec![29, 128, 1, 2]),
         (
             u64::MAX,
             DraftId(u64::MAX),
             vec![
-                26, 255, 255, 255, 255, 255, 255, 255, 255, 255, 1, 255, 255, 255, 255, 255, 255,
+                29, 255, 255, 255, 255, 255, 255, 255, 255, 255, 1, 255, 255, 255, 255, 255, 255,
                 255, 255, 255, 1,
             ],
         ),
@@ -964,10 +964,10 @@ fn issue_unavailable_has_only_correlated_identity_and_round_trips_exact_wire_dat
 fn issue_unavailable_rejects_unknown_tags_overflow_missing_and_mistyped_identity() {
     use crate::frame::{FrameError, read};
     for payload in [
-        vec![27],
-        vec![26, 128, 128, 128, 128, 128, 128, 128, 128, 128, 2, 0],
-        vec![26, 0, 128, 128, 128, 128, 128, 128, 128, 128, 128, 2],
-        vec![26, 1, 2, 4],
+        vec![30],
+        vec![29, 128, 128, 128, 128, 128, 128, 128, 128, 128, 2, 0],
+        vec![29, 0, 128, 128, 128, 128, 128, 128, 128, 128, 128, 2],
+        vec![29, 1, 2, 4],
     ] {
         assert!(postcard::from_bytes::<ControlToShell>(&payload).is_err());
         let mut wire = u32::try_from(payload.len()).unwrap().to_le_bytes().to_vec();
@@ -1282,7 +1282,7 @@ fn review_data_keeps_its_request_full_card_and_exact_appended_wire_tag() {
             vec![255, 255, 255, 255, 255, 255, 255, 255, 255, 1],
         ),
     ] {
-        let mut payload = vec![20];
+        let mut payload = vec![21];
         payload.extend(identity);
         payload.extend([1, 2, 0, 0, 1, b't', 1, b'b']);
         payload.extend([0; 32]);
@@ -1359,7 +1359,7 @@ fn unavailable_kinds_are_closed_and_keep_distinct_wire_and_json_tags() {
             kind,
         };
         let wire = encode(&message, Pipe::Control).unwrap();
-        assert_eq!(wire, [4, 0, 0, 0, 26, 1, 2, tag]);
+        assert_eq!(wire, [4, 0, 0, 0, 29, 1, 2, tag]);
         assert_eq!(
             serde_json::to_value(&message).unwrap(),
             serde_json::json!({"IssueUnavailable":{"request":1,"draft":2,"kind":name}})
