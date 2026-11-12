@@ -8,14 +8,10 @@ use gpui_kit::{
     ListAlignment, ListOffset, ListState as MessageList, ParentElement as _, Pixels, Render,
     SharedString, Styled as _, Subscription, WeakEntity, Window, div, list, px,
 };
-use kumochi_protocol::message::{ActionState, EventId, PageEventKind, RunId, ThreadId};
+use kumochi_protocol::message::{ActionState, DraftId, EventId, PageEventKind, RunId, ThreadId};
 use std::rc::Rc;
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "issue confirmation remains dormant")
-)]
-mod consent;
+pub(super) mod consent;
 
 use super::Presence;
 use crate::runs::Shown;
@@ -32,6 +28,7 @@ pub(super) struct Messages {
     focus: FocusHandle,
     shown_thread: Option<ThreadId>,
     rows: Rc<[Row]>,
+    issue_labels: consent::Labels,
     ids: Vec<(&'static str, u64)>,
     count: usize,
     rem: Pixels,
@@ -44,17 +41,20 @@ pub(super) struct Messages {
     github_watch: Option<Subscription>,
     _activation_watch: Subscription,
     _visibility_watch: Subscription,
+    _release_watch: Subscription,
 }
 
 #[derive(Clone, PartialEq, Eq)]
 struct Row {
     id: (&'static str, u64),
+    draft: Option<DraftId>,
     run: Option<RunId>,
     assistant: bool,
     label: Option<SharedString>,
     text: SharedString,
     details: Option<SharedString>,
     warning: Option<SharedString>,
+    feedback: Option<SharedString>,
     cut: Option<SharedString>,
 }
 
@@ -133,6 +133,8 @@ impl Messages {
                 let settings = owner.read(cx).settings.clone();
                 cx.observe_in(&settings, window, |view, _, window, cx| {
                     view.dismiss_stale_issue(window, cx);
+                    view.list.remeasure();
+                    cx.notify();
                 })
             });
         });
@@ -147,6 +149,8 @@ impl Messages {
                     view.retire_issue(window, cx);
                 }
             });
+        let release_window = window.window_handle();
+        let release_watch = cx.on_release(move |view, cx| view.release_issue(release_window, cx));
         Self {
             model,
             owner,
@@ -155,6 +159,7 @@ impl Messages {
             focus: cx.focus_handle().tab_stop(true),
             shown_thread,
             rows,
+            issue_labels: consent::Labels::new(cx.global::<Strings>()),
             ids,
             count,
             rem: window.rem_size(),
@@ -167,6 +172,7 @@ impl Messages {
             github_watch: None,
             _activation_watch: activation_watch,
             _visibility_watch: visibility_watch,
+            _release_watch: release_watch,
         }
     }
 
@@ -304,16 +310,27 @@ impl Render for Messages {
             self.list.remeasure();
         }
         let rows = Rc::clone(&self.rows);
+        let issue_labels = self.issue_labels.clone();
         let live = self.preview.clone();
         let live_row = self.live_row;
+        let model = self.model.clone();
+        let owner = self.owner.clone();
+        let view = cx.weak_entity();
         let messages = list(self.list.clone(), move |ix, _, cx| {
             let row = if ix == rows.len() {
                 live.as_ref()
             } else {
                 rows.get(ix)
             };
-            row.filter(|row| row.visible(live_row))
-                .map_or_else(|| div().into_any_element(), |row| message(row, cx))
+            row.filter(|row| row.visible(live_row)).map_or_else(
+                || div().into_any_element(),
+                |row| {
+                    let controls = row.draft.map(|draft| {
+                        consent::controls(draft, model.read(cx), &owner, &view, &issue_labels, cx)
+                    });
+                    message(row, controls, cx)
+                },
+            )
         })
         .size_full();
         div()
@@ -329,6 +346,13 @@ impl Render for Messages {
                 this.focus_ring_style(window, cx)
             })
             .key_context("ThreadMessages")
+            .on_key_down(
+                cx.listener(|view, event: &gpui_kit::KeyDownEvent, window, cx| {
+                    if event.keystroke.key == "escape" && view.cancel_waiting_review(window, cx) {
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .on_mouse_down(
                 gpui_kit::MouseButton::Left,
                 cx.listener(|view, _, window, cx| {
@@ -435,6 +459,7 @@ fn row(
         );
         return Row {
             id,
+            draft: Some(draft),
             run,
             assistant: false,
             label: Some(status.into()),
@@ -443,6 +468,23 @@ fn row(
                 .into(),
             details: Some(format!("{details}\n\n{}", strings.get(Text::IssueReadOnly)).into()),
             warning: warning.then(|| strings.get(Text::IssueDuplicate).into()),
+            feedback: issue.as_ref().and_then(|entry| {
+                if entry.pending() {
+                    Some(
+                        strings
+                            .get(if entry.pending_review() {
+                                Text::IssueReviewPending
+                            } else {
+                                Text::IssuePending
+                            })
+                            .into(),
+                    )
+                } else {
+                    entry
+                        .feedback
+                        .map(|feedback| strings.issue_feedback(feedback).into())
+                }
+            }),
             cut: if card.is_none() {
                 cut.map(|text| strings.get(text).into())
             } else {
@@ -467,12 +509,14 @@ fn row(
     };
     Row {
         id,
+        draft: None,
         run,
         assistant: kind == PageEventKind::AssistantText,
         label: label.map(Into::into),
         text: text.into(),
         details: None,
         warning: None,
+        feedback: None,
         cut: cut.map(|text| strings.get(text).into()),
     }
 }
@@ -485,7 +529,7 @@ fn message_text(row: &Row, field: &'static str, value: SharedString) -> gpui_kit
     }
 }
 
-fn message(row: &Row, cx: &App) -> gpui_kit::AnyElement {
+fn message(row: &Row, controls: Option<gpui_kit::AnyElement>, cx: &App) -> gpui_kit::AnyElement {
     let id = row.id;
     div()
         .id(id)
@@ -523,6 +567,12 @@ fn message(row: &Row, cx: &App) -> gpui_kit::AnyElement {
                 .text_color(cx.theme().muted_foreground)
                 .child(notice)
         }))
+        .children(row.feedback.clone().map(|feedback| {
+            div()
+                .text_sm()
+                .child(message_text(row, "issue-feedback", feedback))
+        }))
+        .children(controls)
         .into_any_element()
 }
 

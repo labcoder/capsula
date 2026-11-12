@@ -4,6 +4,8 @@ use super::*;
 mod activation;
 #[path = "github_tests/dismissal.rs"]
 mod dismissal;
+#[path = "issues/tests.rs"]
+mod filing;
 use kumochi_protocol::message::{
     Decision, ErrorKey, GitHubOp, IssueBody, IssueOp, IssueTitle, RepoName,
 };
@@ -50,6 +52,10 @@ impl crate::connections::oauth::Launcher for RejectLaunch {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one wire scenario checks live refusal, offline replay and absence of credential or HTTP work"
+)]
 async fn live_refusals_and_offline_controls_never_start_work_or_change_approval() {
     let scratch = Scratch::new("github-refusal");
     let (action, before) = {
@@ -77,17 +83,30 @@ async fn live_refusals_and_offline_controls_never_start_work_or_change_approval(
         Err(crate::connections::http_client::HttpError::Configuration)
     });
     brain.account.net.launcher = Arc::new(RejectLaunch(Arc::clone(&attempts)));
-    let issue = ControlToBrain::Issue(IssueOp::Consent {
-        draft: action.draft,
-        hash: action.hash(),
-        approval: action.approval.unwrap(),
-        decision: Decision::File,
-    });
+    let session = brain.prepare_issue_session(kumochi_protocol::message::Incarnation(1));
+    let issue = ControlToBrain::Issue {
+        session,
+        request: 1,
+        op: Box::new(IssueOp::Consent {
+            draft: action.draft,
+            hash: action.hash(),
+            approval: action.approval.unwrap(),
+            decision: Decision::File,
+        }),
+    };
     let mut tap = Tap::from_env();
     let ((control, data), mut shell) = duplex();
     let client = async {
         assert!(shell.scenes().await.is_empty());
         shell.send(&issue).await;
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::IssueUnavailable {
+                kind: kumochi_protocol::message::IssueUnavailableKind::Action,
+                request: 1,
+                draft: action.draft,
+            })
+        );
         for op in operations() {
             let error = if op == GitHubOp::Connect {
                 ErrorKey::AccountMisconfigured

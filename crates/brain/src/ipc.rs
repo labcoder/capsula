@@ -213,8 +213,10 @@ impl Pipes {
             }
             Verdict::Welcome => {}
         }
+        let session = brain.prepare_issue_session(identity.incarnation);
         let welcome = ControlToShell::Welcome {
             incarnation: identity.incarnation,
+            issue_epoch: session.epoch,
         };
         send(&mut self.control, &welcome, tap).await?;
 

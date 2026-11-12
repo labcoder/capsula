@@ -1,8 +1,42 @@
-use kumochi_protocol::message::{ActionState, FailReason, IssueCard, LookupResult};
+use kumochi_protocol::message::{
+    ActionState, FailReason, IssueCard, IssueRefused, IssueUnavailableKind, LookupResult,
+};
 
 use super::{FluentArgs, Strings};
 
 impl Strings {
+    pub(crate) fn issue_feedback(&self, feedback: crate::threads::IssueFeedback) -> String {
+        let reason = match feedback {
+            crate::threads::IssueFeedback::QueueFailed => {
+                return self.get(super::Text::IssueQueueFailed);
+            }
+            crate::threads::IssueFeedback::Unavailable(kind) => {
+                return self.get(match kind {
+                    IssueUnavailableKind::Action => super::Text::IssueActionUnavailable,
+                    IssueUnavailableKind::ReviewNotSaved => super::Text::IssueReviewNotSaved,
+                    IssueUnavailableKind::ReviewCapacity => super::Text::IssueReviewCapacity,
+                    IssueUnavailableKind::AttemptNotSaved => super::Text::IssueAttemptNotSaved,
+                });
+            }
+            crate::threads::IssueFeedback::Refused(reason) => reason,
+        };
+        let mut args = FluentArgs::new();
+        args.set(
+            "reason",
+            match reason {
+                IssueRefused::StaleApproval => "approval",
+                IssueRefused::ContentChanged => "content",
+                IssueRefused::NotConnected => "connection",
+                IssueRefused::OtherAccount => "account",
+                IssueRefused::RepoNotListed => "repository",
+                IssueRefused::NotAllowedNow => "busy",
+                IssueRefused::ThreadGone => "thread",
+                IssueRefused::UnresolvedDraft { .. } => "unresolved",
+            },
+        );
+        self.format("issue-refusal", Some(&args))
+    }
+
     pub(crate) fn issue_status(&self, state: &ActionState) -> String {
         let mut args = FluentArgs::new();
         let id = match state {
@@ -85,6 +119,53 @@ impl Strings {
 mod tests {
     use super::*;
     use kumochi_protocol::message::IssueUrl;
+
+    #[test]
+    fn terminal_storage_failure_copy_is_distinct_from_a_failed_enqueue() {
+        let strings = Strings::english();
+        assert_eq!(
+            strings.issue_feedback(crate::threads::IssueFeedback::Unavailable(
+                kumochi_protocol::message::IssueUnavailableKind::Action
+            )),
+            "This action couldn't be completed. Review the saved details before trying again."
+        );
+        assert_eq!(
+            strings.issue_feedback(crate::threads::IssueFeedback::QueueFailed),
+            "The action wasn't queued. Try again when connected."
+        );
+    }
+
+    #[test]
+    fn review_failures_do_not_confuse_preconfirmation_with_possible_post_handoff() {
+        let strings = Strings::english();
+        for (kind, text) in [
+            (
+                IssueUnavailableKind::ReviewNotSaved,
+                "The review couldn't be saved. Nothing was sent to GitHub. Restore storage, then explicitly review again.",
+            ),
+            (
+                IssueUnavailableKind::ReviewCapacity,
+                "Other reviews are open or finishing. Finish or cancel one, then review again.",
+            ),
+            (
+                IssueUnavailableKind::AttemptNotSaved,
+                "The confirmed outcome couldn't be saved. GitHub may have received this issue. Do not file it again.",
+            ),
+        ] {
+            assert_eq!(
+                strings.issue_feedback(crate::threads::IssueFeedback::Unavailable(kind)),
+                text
+            );
+        }
+        assert_eq!(
+            strings.get(super::super::Text::IssueReviewPending),
+            "Saving a fresh review…"
+        );
+        assert_eq!(
+            strings.get(super::super::Text::IssueConsentOpen),
+            "Review to file…"
+        );
+    }
 
     #[test]
     fn saved_status_copy_keeps_uncertain_candidates_and_confirmations_distinct() {

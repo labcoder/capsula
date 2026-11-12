@@ -10,7 +10,8 @@ use crate::bridge::{CallKey, LaunchId};
 use crate::context::{Built, ModelRequest, Origin};
 use crate::coordinator::{BuildContext, LeaseId, SendKey};
 use crate::dispatch::{
-    Caller, Committed, Dispatch, LocalWrite, Route, Then, ToolError, ToolOutput, schemas,
+    Caller, CommitCall, Committed, Dispatch, LocalWrite, Route, Then, ToolError, ToolOutput,
+    schemas,
 };
 use crate::engines::{CallId, ToolName};
 use crate::store::{Failure, RunEnd};
@@ -665,6 +666,127 @@ fn a_quiet_or_late_creation_lists_the_task_and_moves_nothing() {
         core.handle(created(&caller, true)),
         Ok(vec![Effect::Control(ControlToShell::ThreadsChanged)]),
         "the task exists, but its run no longer moves the input"
+    );
+}
+
+fn drafting(core: &mut Coordinator, caller: Caller) -> CommitCall {
+    let mut effects = Vec::new();
+    assert_eq!(
+        core.tool_call(
+            caller,
+            ToolName::DraftIssue,
+            br#"{"title":"Trip plan","body":"first\r\nsecond\r\n","repo":"owner/repo"}"#,
+            &mut effects,
+        ),
+        Dispatch::Committing
+    );
+    match effects.as_slice() {
+        [Effect::Store(StoreOp::CommitCall(call))] => call.clone(),
+        other => panic!("unexpected effects {other:?}"),
+    }
+}
+
+#[test]
+fn a_current_runs_draft_refreshes_history_and_answers_only_after_commit() {
+    let mut core = fresh();
+    running(&mut core, R, None);
+    let caller = model(R, "draft");
+    let call = drafting(&mut core, caller.clone());
+    assert_eq!(call.key, caller.key());
+    assert_eq!(call.thread, T);
+    assert_eq!(call.tool, "draft_issue");
+    assert_eq!(call.then, Some(Then::IssueDrafted));
+    match &call.write {
+        LocalWrite::DraftIssue {
+            title,
+            body,
+            repo,
+            account,
+        } => {
+            assert_eq!(title.as_str(), "Trip plan");
+            assert_eq!(body.as_str(), "first\nsecond\n");
+            assert_eq!(
+                repo.as_ref()
+                    .map(kumochi_protocol::message::RepoName::as_str),
+                Some("owner/repo")
+            );
+            assert_eq!(account, &None);
+        }
+        other => panic!("unexpected write {other:?}"),
+    }
+    let output = ToolOutput::Text(
+        "Saved a local issue draft for user review. Nothing was filed on GitHub.".to_owned(),
+    );
+    assert_eq!(call.output, output);
+    assert_eq!(answered(&core), []);
+    assert_eq!(
+        core.handle(Input::CallCommitted {
+            key: call.key,
+            outcome: Committed::Done,
+            then: call.then,
+        }),
+        Ok(vec![Effect::Control(ControlToShell::ThreadsChanged)])
+    );
+    assert_eq!(core.current_run(), Some(R));
+    assert_eq!(answered(&core), [(caller, output)]);
+}
+
+#[test]
+fn a_draft_committed_after_stop_refreshes_history_without_reviving_its_run() {
+    let mut core = fresh();
+    running(&mut core, R, None);
+    let caller = model(R, "draft");
+    let call = drafting(&mut core, caller.clone());
+    assert_eq!(call.then, Some(Then::IssueDrafted));
+    assert_eq!(answered(&core), []);
+    core.handle(Input::Stop {
+        run: R,
+        revealed: Vec::new(),
+    })
+    .expect("stop");
+    assert_eq!(core.current_run(), None);
+
+    let next = RunId(R.0 + 1);
+    running(&mut core, next, Some(T));
+    let mut effects = Vec::new();
+    assert_eq!(
+        core.tool_call(caller, ToolName::DraftIssue, b"{}", &mut effects),
+        ended()
+    );
+    assert_eq!(effects, []);
+    let caller = model(next, "draft");
+    let next_call = drafting(&mut core, caller.clone());
+    assert_eq!(next_call.key, caller.key());
+    assert_eq!(next_call.then, Some(Then::IssueDrafted));
+    assert_eq!(answered(&core), []);
+    assert_eq!(
+        core.handle(Input::CallCommitted {
+            key: call.key,
+            outcome: Committed::Done,
+            then: call.then,
+        }),
+        Ok(vec![Effect::Control(ControlToShell::ThreadsChanged)])
+    );
+    assert_eq!(core.current_run(), Some(next));
+    assert_eq!(answered(&core), []);
+    assert_eq!(
+        core.handle(Input::CallCommitted {
+            key: next_call.key,
+            outcome: Committed::Done,
+            then: next_call.then,
+        }),
+        Ok(vec![Effect::Control(ControlToShell::ThreadsChanged)])
+    );
+    assert_eq!(core.current_run(), Some(next));
+    assert_eq!(
+        answered(&core),
+        [(
+            caller,
+            ToolOutput::Text(
+                "Saved a local issue draft for user review. Nothing was filed on GitHub."
+                    .to_owned()
+            )
+        )]
     );
 }
 

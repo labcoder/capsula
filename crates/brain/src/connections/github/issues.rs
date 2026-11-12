@@ -109,6 +109,11 @@ impl IssuePayload {
     pub(in crate::connections) fn as_bytes(&self) -> &[u8] {
         &self.0
     }
+
+    #[cfg(test)]
+    pub(crate) fn bytes_for_test(&self) -> &[u8] {
+        self.as_bytes()
+    }
 }
 
 impl fmt::Debug for IssuePayload {

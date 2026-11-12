@@ -266,7 +266,13 @@ fn a_kumo_request_states_its_model_names_role_and_ordered_runs() {
             .iter()
             .map(|tool| tool.name)
             .collect::<Vec<_>>(),
-        ["draw", "search_history", "read_history", "list_tasks"]
+        [
+            "draw",
+            "draft_issue",
+            "search_history",
+            "read_history",
+            "list_tasks"
+        ]
     );
     assert_eq!(built.sources, [main]);
     let instructions = &built.request.instructions;
@@ -281,6 +287,14 @@ fn a_kumo_request_states_its_model_names_role_and_ordered_runs() {
     assert!(
         instructions.contains("This is your main conversation"),
         "Kumo's role"
+    );
+    assert!(
+        instructions.contains(
+            "When the user asks you to file, open or report a GitHub issue and you have the \
+             draft_issue tool, call\nit. When it succeeds, tell them the issue is saved as a card \
+             here and they file it from that card.\n"
+        ),
+        "issue line"
     );
     assert!(!instructions.contains('\r'), "one line ending");
 }
@@ -413,6 +427,35 @@ fn complete_drawing_headers_count_outer_escaping_before_the_request_bound() {
     let diagnostic = format!("{built:?} {:?}", built.request);
     assert!(!diagnostic.contains("PRIVATE_HEADER_"));
     assert!(!diagnostic.contains(&format!("{:?}", marker.as_bytes())));
+}
+
+#[test]
+fn the_names_in_settings_win_over_names_in_earlier_turns() {
+    const ASSISTANT: &str = "\nIf an earlier message or summary calls you something other than Kumo, it's out of date: Kumo is your name in the user's settings now.\n";
+    const USER: &str = "\nIf an earlier message or summary calls the user something other than Oscar, it's out of date: Oscar is their name in their settings now.\n";
+    let mut world = world("ctx-current-names");
+    let main = world.main;
+    let (_, current) = world.run(Some(main), "ask", None);
+    for (user, says_user) in [(Some("Oscar"), true), (None, false)] {
+        let built = world
+            .build(
+                &snapshot(Origin::Kumo, user),
+                (main, current),
+                Supplied::default(),
+                BOUND,
+            )
+            .expect("built");
+        let instructions = &built.request.instructions;
+        assert!(
+            instructions.contains(ASSISTANT),
+            "assistant: {instructions}"
+        );
+        assert_eq!(
+            instructions.contains(USER),
+            says_user,
+            "user: {instructions}"
+        );
+    }
 }
 
 #[test]

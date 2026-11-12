@@ -12,6 +12,7 @@ use kumochi_protocol::message::{
 use kumochi_scene::text::Bounded;
 
 mod cards;
+pub(crate) use cards::Feedback as IssueFeedback;
 #[cfg(test)]
 mod tests;
 
@@ -213,11 +214,62 @@ impl Threads {
         version: kumochi_protocol::message::StateVersion,
         state: kumochi_protocol::message::ActionState,
         approval: Option<kumochi_protocol::message::ApprovalRev>,
+        request: Option<u64>,
     ) {
         self.reads
             .borrow_mut()
             .cards
-            .state(draft, version, state, approval);
+            .state(draft, version, state, approval, request);
+    }
+
+    pub(crate) fn issue_submitted(&mut self, draft: DraftId, request: Option<u64>) {
+        self.reads.borrow_mut().cards.submitted(draft, request);
+    }
+
+    pub(crate) fn issue_scope(&self) -> u64 {
+        self.event_revision
+    }
+
+    pub(crate) fn issue_review_started(&mut self, draft: DraftId, request: u64) {
+        self.reads.borrow_mut().cards.review_started(draft, request);
+    }
+
+    pub(crate) fn issue_review(
+        &mut self,
+        request: u64,
+        card: kumochi_protocol::message::IssueCard,
+    ) -> bool {
+        self.reads.borrow_mut().cards.review(request, card)
+    }
+
+    pub(crate) fn cancel_issue_review(&mut self, request: u64, draft: DraftId) {
+        self.reads.borrow_mut().cards.cancel_review(request, draft);
+    }
+
+    pub(crate) fn issue_unavailable(
+        &mut self,
+        request: u64,
+        draft: DraftId,
+        kind: kumochi_protocol::message::IssueUnavailableKind,
+    ) {
+        self.reads
+            .borrow_mut()
+            .cards
+            .unavailable(request, draft, kind);
+    }
+
+    pub(crate) fn issue_refused(
+        &mut self,
+        request: u64,
+        draft: DraftId,
+        version: kumochi_protocol::message::StateVersion,
+        approval: Option<kumochi_protocol::message::ApprovalRev>,
+        reason: kumochi_protocol::message::IssueRefused,
+    ) {
+        self.reads
+            .borrow_mut()
+            .cards
+            .refused(request, draft, version, approval, reason);
     }
 
     fn sync_cards(&mut self) {
@@ -702,6 +754,7 @@ impl Threads {
             DataToShell::IssueCard(_)
             | DataToShell::IssueCardRead { .. }
             | DataToShell::IssueCardsDone { .. }
+            | DataToShell::IssueReview { .. }
             | DataToShell::AssistantText { .. }
             | DataToShell::StepCommit { .. }
             | DataToShell::RunEnd { .. }

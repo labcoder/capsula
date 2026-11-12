@@ -68,7 +68,7 @@ impl Tapped for ControlToBrain {
             Self::SegmentPlayed { .. } => "SegmentPlayed",
             Self::AudioOutput { .. } => "AudioOutput",
             Self::GitHub(_) => "GitHub",
-            Self::Issue(_) => "Issue",
+            Self::Issue { .. } => "Issue",
             Self::VoiceHoldRecognized { .. } => "VoiceHoldRecognized",
             Self::VoiceHoldStopped { .. } => "VoiceHoldStopped",
         }
@@ -137,6 +137,7 @@ impl Tapped for ControlToShell {
             Self::GitHub(_) => "GitHub",
             Self::ActionState { .. } => "ActionState",
             Self::IssueRefused { .. } => "IssueRefused",
+            Self::IssueUnavailable { .. } => "IssueUnavailable",
             Self::ThreadModelSet { .. } => "ThreadModelSet",
             Self::Voice(_) => "Voice",
             Self::GitHubError(_) => "GitHubError",
@@ -152,7 +153,7 @@ impl Tapped for ControlToShell {
         // Every field is named, so a field added to a listed op fails to build until reviewed.
         matches!(
             self,
-            Self::Welcome { incarnation: _ }
+            Self::Welcome { incarnation: _, issue_epoch: _ }
                 | Self::RunState {
                     run: _,
                     thread: _,
@@ -231,6 +232,7 @@ impl Tapped for DataToShell {
             Self::IssueCard(_) => "IssueCard",
             Self::IssueCardRead { .. } => "IssueCardRead",
             Self::IssueCardsDone { .. } => "IssueCardsDone",
+            Self::IssueReview { .. } => "IssueReview",
         }
     }
 

@@ -332,6 +332,11 @@ impl Machine {
         self.stamp
     }
 
+    #[cfg(test)]
+    pub(crate) fn clock_for_test(&mut self, clock: Arc<dyn Clock>) {
+        self.clock = clock;
+    }
+
     pub(crate) fn is_loading(&self) -> bool {
         matches!(self.state, State::Loading)
     }
@@ -373,6 +378,24 @@ impl Machine {
             State::Connected(account) => Some(account.credentials.token.clone()),
             _ => None,
         }
+    }
+
+    pub(crate) fn issue_access(
+        &self,
+        account: u64,
+        repo: &RepoName,
+    ) -> Option<(Secret<GitHubToken>, Instant, u64)> {
+        if self.user()?.id != account || !self.repositories()?.contains(repo) {
+            return None;
+        }
+        let State::Connected(connected) = &self.state else {
+            return None;
+        };
+        Some((
+            connected.credentials.token.clone(),
+            self.token_end?,
+            connected.credentials.expires_at_s,
+        ))
     }
 
     /// Complete repository authority for consumers in this generation.

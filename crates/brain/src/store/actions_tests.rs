@@ -166,6 +166,7 @@ fn issue_events_share_action_and_approval_commits_but_not_noops_or_replays() {
     assert_eq!(issue_events(&store).len(), 1);
     let disconnected = Live {
         account: None,
+        capacity: true,
         repos: &[],
     };
     assert!(matches!(
@@ -518,6 +519,7 @@ fn hidden_threads_take_no_action_input_and_nothing_comes_back() {
     let (seven, listed) = (user(7), [repo()]);
     let live = Live {
         account: Some(&seven),
+        capacity: true,
         repos: &listed,
     };
     store.begin_delete(hidden).expect("hidden");
@@ -605,6 +607,7 @@ fn revisions_and_draft_ids_are_never_reused_after_deletion_and_purge() {
     let (seven, listed) = (user(7), [repo()]);
     let live = Live {
         account: Some(&seven),
+        capacity: true,
         repos: &listed,
     };
     let gone = store.consent(second, &fresh.hash(), ApprovalRev(3), Decision::File, &live);
@@ -718,6 +721,7 @@ fn a_failure_after_the_mint_rolls_the_mint_back() {
     let current = store.action(editable).expect("read").expect("live");
     let disconnected = Live {
         account: None,
+        capacity: true,
         repos: &[],
     };
     let refuse = |store: &mut Store| {
@@ -1043,6 +1047,7 @@ fn counters_fail_closed_at_their_limits() {
     assert!(matches!(edit(&mut store), Err(StoreError::Issue)));
     let disconnected = Live {
         account: None,
+        capacity: true,
         repos: &[],
     };
     let refused = store.consent(
@@ -1152,6 +1157,7 @@ fn issue_actions_print_no_content() {
     let repos = [planted.clone()];
     let live = Live {
         account: Some(&account),
+        capacity: true,
         repos: &repos,
     };
     let mut answers = Vec::new();

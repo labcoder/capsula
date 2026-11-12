@@ -134,7 +134,10 @@ do not normally dismiss a newly active panel, except for the rapid away/back cac
 [presence](presence.md). The panel is hidden, not closed, so its draft survives.
 Hover never opens over it or dismisses it.
 Opening the typing panel dismisses Tasks and Settings. Settings uses its normal dismissal
-path, saving an active field edit as on blur.
+path, saving an active field edit as on blur. The chat header's **Tasks…** and a recovery
+notice's Settings actions open their panel in its place once the click is handled, because
+GPUI can't hide a window from inside that window's own click. A hide that fails leaves the panel open with its history, so Esc and its
+close button still work.
 Enter submits to the [captured input target](runs.md#the-shells-input-target). When the target
 isn't Kumo, the panel names it and offers **Back to Kumo**. A settings update preserves the
 draft and keyboard focus without changing that target.

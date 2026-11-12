@@ -74,6 +74,13 @@ pub enum Input {
         /// Pinned admission data, or a content-free read failure.
         result: Result<HoldSnapshot, ()>,
     },
+    /// The store answered an operation owned and routed by the runtime issue system.
+    IssueWritten {
+        /// The issue owner's outstanding operation identity.
+        serial: u64,
+        /// The durable action or a content-free store failure.
+        reply: Result<crate::issues::Answer, ()>,
+    },
     /// Fence a run immediately and apply scene-wide activated cuts in control-pipe order.
     StopScenes {
         /// The locally fenced run.
@@ -771,7 +778,7 @@ impl Coordinator {
         self.fence_hold_input(&input);
         let mut effects = Vec::new();
         match input {
-            Input::HoldPrepared { .. } => return Err(Stale),
+            Input::HoldPrepared { .. } | Input::IssueWritten { .. } => return Err(Stale),
             Input::StopScenes { run, .. } if run < self.session_start || run > self.last_run => {
                 return Err(Stale);
             }
@@ -930,12 +937,18 @@ impl Coordinator {
             Input::CallCommitted { key, outcome, then } => match outcome {
                 crate::dispatch::Committed::Done => {
                     // The task exists whether or not its run is still current.
-                    let created = matches!(then, Some(crate::dispatch::Then::Created { .. }));
-                    if created {
+                    let refresh = matches!(
+                        then,
+                        Some(
+                            crate::dispatch::Then::Created { .. }
+                                | crate::dispatch::Then::IssueDrafted
+                        )
+                    );
+                    if refresh {
                         effects.push(Effect::Control(ControlToShell::ThreadsChanged));
                     }
                     match self.call_committed(&key, then, &mut effects) {
-                        Err(Stale) if created => {}
+                        Err(Stale) if refresh => {}
                         settled => settled?,
                     }
                 }

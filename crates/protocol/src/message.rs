@@ -41,8 +41,9 @@ pub use github::{
 };
 pub use issues::{
     ActionState, ApprovalRev, ContentHash, Decision, DraftId, FailReason, IssueBody, IssueCard,
-    IssueCardsStatus, IssueOp, IssueRefused, IssueTitle, IssueUrl, LookupResult,
-    MAX_ISSUE_BODY_BYTES, MAX_ISSUE_CARDS, MAX_ISSUE_TITLE_CHARS, StateVersion,
+    IssueCardsStatus, IssueOp, IssueRefused, IssueTitle, IssueUnavailableKind, IssueUrl,
+    LookupResult, MAX_ISSUE_BODY_BYTES, MAX_ISSUE_CARDS, MAX_ISSUE_REVIEWS, MAX_ISSUE_TITLE_CHARS,
+    StateVersion,
 };
 pub use pages::{EventId, PageEvent, PageEventKind, PageOf, ThreadCursor, ThreadRow};
 pub use scenes::{
@@ -84,6 +85,15 @@ pub type Capability = Secret<[u8; CAPABILITY_LEN]>;
 /// in flight.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Incarnation(pub u64);
+
+/// The brain and authenticated connection that offered issue operations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueSession {
+    /// The brain process that prepared the connection.
+    pub incarnation: Incarnation,
+    /// The brain's reserved connection epoch.
+    pub epoch: u64,
+}
 
 /// One thread of conversation, as the store numbers it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -414,7 +424,14 @@ pub enum ControlToBrain {
     /// The user's operation on Kumochi's GitHub connection.
     GitHub(GitHubOp),
     /// Consent or another explicit issue-card action.
-    Issue(IssueOp),
+    Issue {
+        /// The original brain-issued connection provenance.
+        session: IssueSession,
+        /// The shell's connection-lifetime operation identity.
+        request: u64,
+        /// The content-bound operation, boxed so this rare variant doesn't widen every control.
+        op: Box<IssueOp>,
+    },
     /// The shell refused an entire scene, possibly before its first run was known.
     SceneFailed {
         /// The committed scene to clear, without treating this as an explicit user clear.
@@ -455,6 +472,8 @@ pub enum ControlToShell {
     Welcome {
         /// This brain's incarnation.
         incarnation: Incarnation,
+        /// The reserved epoch required by this connection's issue operations.
+        issue_epoch: u64,
     },
     /// The shell is from another build. The brain exits after sending this, so the shell can
     /// start the brain from its own folder.
@@ -560,6 +579,8 @@ pub enum ControlToShell {
     GitHub(GitHubView),
     /// A versioned action transition, independent of data-pipe delivery.
     ActionState {
+        /// The completed operation, absent for progress or unsolicited state.
+        request: Option<u64>,
         /// The action.
         draft: DraftId,
         /// Its monotonic presentation version.
@@ -571,8 +592,14 @@ pub enum ControlToShell {
     },
     /// A refused operation; it never changes the card's state.
     IssueRefused {
+        /// The original shell operation identity.
+        request: u64,
         /// The action whose operation was refused.
         draft: DraftId,
+        /// The authoritative presentation version.
+        version: StateVersion,
+        /// The authoritative current approval.
+        approval: Option<ApprovalRev>,
         /// A content-free refusal.
         reason: IssueRefused,
     },
@@ -633,6 +660,15 @@ pub enum ControlToShell {
         gesture: GestureId,
         /// Admission or a content-free outcome; it cannot itself claim a running microphone.
         status: HoldStatus,
+    },
+    /// An operation ended without an authoritative stored answer; no card state is implied.
+    IssueUnavailable {
+        /// The original shell operation identity.
+        request: u64,
+        /// The action whose operation could not complete.
+        draft: DraftId,
+        /// A closed failure class, never a foreign diagnostic or invented state.
+        kind: IssueUnavailableKind,
     },
     /// The brain processed this stop receipt; it does not say any debt was cleared.
     VoiceHoldStopAccepted {
@@ -862,6 +898,13 @@ pub enum DataToShell {
         /// The new scene whose first sampled frame ends the visual hold.
         successor: SceneId,
     },
+    /// A newly saved review; only its matching live opener may arm a confirmation.
+    IssueReview {
+        /// The originating rearm request.
+        request: u64,
+        /// The authoritative full review, carried only on data.
+        card: IssueCard,
+    },
 }
 
 #[cfg(test)]
@@ -891,10 +934,10 @@ mod tests {
     };
     use crate::frame::{self, HEADER_LEN, Pipe};
 
-    /// The bytes another build must be able to read: the handshake and its answers. A new
-    /// variant goes at the end of its enum, or these tags move.
+    /// Hello and mismatch stay readable before the paired-build check; Welcome retains its
+    /// tag and carries the reserved issue epoch.
     #[test]
-    fn handshake_frames_keep_their_bytes_across_builds() {
+    fn handshake_frames_keep_their_tags_and_bind_the_issue_epoch() {
         let hello = Hello {
             build_id: "b".to_owned(),
             capability: Secret::new([7; CAPABILITY_LEN]),
@@ -916,9 +959,10 @@ mod tests {
         );
         assert_eq!(
             encode(postcard::to_allocvec(&ControlToShell::Welcome {
-                incarnation: Incarnation(5)
+                incarnation: Incarnation(5),
+                issue_epoch: 128,
             })),
-            [0, 5]
+            [0, 5, 128, 1]
         );
         assert_eq!(
             encode(postcard::to_allocvec(&ControlToShell::BuildMismatch {
@@ -1103,5 +1147,15 @@ mod tests {
         // Tag, the connection's tag and a two-byte count, then 200 times a one-byte slug length,
         // 64 bytes of slug, a two-byte name length and 80 four-byte characters.
         assert_eq!(payload(&models, Pipe::Data), 77_404);
+    }
+
+    /// Every slot of the shell's 64-slot control queues is as large as the largest variant.
+    #[test]
+    fn a_control_to_the_brain_stays_within_64_bytes() {
+        let size = std::mem::size_of::<ControlToBrain>();
+        assert!(
+            size <= 64,
+            "ControlToBrain is {size} bytes; box the payload of the variant that grew it"
+        );
     }
 }

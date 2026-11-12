@@ -12,6 +12,21 @@ pub const MAX_ISSUE_TITLE_CHARS: usize = 256;
 pub const MAX_ISSUE_BODY_BYTES: usize = 32 * 1024;
 /// The most cards requested in one frame (guess).
 pub const MAX_ISSUE_CARDS: usize = 16;
+/// Outstanding offered reviews and pending review writes share this bound.
+pub const MAX_ISSUE_REVIEWS: usize = 16;
+
+/// Why an operation ended without an authoritative stored answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IssueUnavailableKind {
+    /// A non-filing or known-unsent action could not complete.
+    Action,
+    /// The review could not be saved; nothing was sent to GitHub.
+    ReviewNotSaved,
+    /// Offered and finishing reviews occupy every review slot.
+    ReviewCapacity,
+    /// A confirmed attempt's outcome could not be saved after possible handoff.
+    AttemptNotSaved,
+}
 
 /// Whether a correlated card read completed; earlier delivered cards remain valid on failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,7 +168,7 @@ pub enum IssueOp {
         draft: DraftId,
         /// The content binding the user saw.
         hash: ContentHash,
-        /// The revision offered on the card.
+        /// The revision granted by a correlated live review.
         approval: ApprovalRev,
         /// The explicit decision.
         decision: Decision,
@@ -167,6 +182,22 @@ pub enum IssueOp {
     CheckAgain {
         /// The draft.
         draft: DraftId,
+    },
+    /// Request a new durable review of the exact displayed draft.
+    Rearm {
+        /// The displayed draft.
+        draft: DraftId,
+        /// The displayed presentation version.
+        version: StateVersion,
+        /// The displayed content binding.
+        hash: ContentHash,
+    },
+    /// Retire a pending or offered review, without changing the saved card.
+    CancelReview {
+        /// The reviewed draft.
+        draft: DraftId,
+        /// The original rearm request, including before its approval was minted.
+        review: u64,
     },
 }
 
@@ -247,8 +278,7 @@ pub enum ActionState {
     },
 }
 
-/// A refusal never changes the stored stage, content or binding; refusing the current approval
-/// uses it up and offers a fresh one.
+/// A refusal carries the saved revision but never grants filing authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IssueRefused {
     /// The approval isn't current.
@@ -265,6 +295,11 @@ pub enum IssueRefused {
     NotAllowedNow,
     /// The thread was deleted or changed generation.
     ThreadGone,
+    /// Another exact local draft has an unresolved attempt that may create an issue.
+    UnresolvedDraft {
+        /// The earlier draft whose uncertainty must not be bypassed.
+        draft: DraftId,
+    },
 }
 
 /// The exact content and current consent binding displayed on one card.
@@ -278,13 +313,13 @@ pub struct IssueCard {
     pub repo: Option<RepoName>,
     /// The bound account, if connected.
     pub account: Option<GitHubLogin>,
-    /// The exact approved title.
+    /// The exact saved title.
     pub title: IssueTitle,
-    /// The exact normalized body.
+    /// The exact normalized saved body.
     pub body: IssueBody,
     /// The brain's content binding.
     pub hash: ContentHash,
-    /// The current approval, absent when no decision is offered.
+    /// Saved revision metadata, not permission; only a correlated live `IssueReview` grants review permission.
     pub approval: Option<ApprovalRev>,
     /// The action's presentation version.
     pub version: StateVersion,
