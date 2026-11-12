@@ -192,7 +192,8 @@ pub struct SettingsView {
     pub assistant_name: AssistantName,
     /// The user's name, if set.
     pub user_name: Option<UserName>,
-    /// Onboarding has finished.
+    /// Onboarding isn't owed: `config.toml` says it finished, or it has no `onboarded` key and
+    /// the profile was already in use when the brain started. True when the file can't be read.
     pub onboarded: bool,
     /// The main thread, Kumo's, which the shell labels with `assistant_name`.
     pub main_thread: ThreadId,

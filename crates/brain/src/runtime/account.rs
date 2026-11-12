@@ -398,6 +398,11 @@ impl Accounts {
         Availability::Unavailable(reason)
     }
 
+    /// Where the account stands now.
+    pub(crate) fn view(&self) -> AccountView {
+        self.state.view()
+    }
+
     /// The account's catalog epoch while it can send model requests: its generation for jobs.
     pub(super) fn sendable(&self) -> Option<u64> {
         self.catalog.usable.then_some(self.catalog.epoch)
