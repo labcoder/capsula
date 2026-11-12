@@ -49,7 +49,9 @@ sized from that buffer, room for all of it drained in one pass plus three chunks
 buffer absorbs can't overflow the queue instead. The adapter allocates scratch
 before Start, and checks the pinned device/format before Start and after Stop rather than making
 allocating COM queries in the pump. Mid-stream unplug/reconfiguration errors from GetBuffer or
-GetNextPacketSize, or a failed after-Stop check, discard the hold. The initialized stream's
+GetNextPacketSize, a device-invalidated result from ReleaseBuffer or Stop, or a failed after-Stop
+check, discard the hold; its generation retires, so the next hold can open. Any other
+ReleaseBuffer or Stop failure stays unconfirmed. The initialized stream's
 format remains pinned; no reopen or reinterpretation is attempted.
 
 The stop receipt still asserts physical release/join, and the matched wire packet count still

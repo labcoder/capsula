@@ -34,6 +34,23 @@ fn dropping_an_owner_drains_its_committed_unforwarded_queue() {
 }
 
 #[test]
+fn a_device_gone_at_teardown_discards_and_any_other_teardown_error_stays_unconfirmed() {
+    use crate::platform::windows::microphone::teardown_error;
+    use windows::Win32::Foundation::E_FAIL;
+    use windows::Win32::Media::Audio::{AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_E_NOT_INITIALIZED};
+
+    assert_eq!(
+        teardown_error(AUDCLNT_E_DEVICE_INVALIDATED),
+        MicError::Unavailable
+    );
+    assert_eq!(
+        teardown_error(AUDCLNT_E_NOT_INITIALIZED),
+        MicError::Unconfirmed
+    );
+    assert_eq!(teardown_error(E_FAIL), MicError::Unconfirmed);
+}
+
+#[test]
 fn native_batch_commit_rejects_revocation_after_authorization() {
     use crate::platform::windows::microphone::copy_batch;
     use std::sync::atomic::AtomicU64;

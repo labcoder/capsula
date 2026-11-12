@@ -7,15 +7,15 @@ use async_channel::Sender;
 use kumochi_protocol::message::{MAX_MIC_SAMPLES, MicPcm};
 use windows::Win32::Media::Audio::{
     AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_BUFFERFLAGS_SILENT,
-    AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR, AUDCLNT_SHAREMODE_SHARED, DEVICE_STATE_ACTIVE,
-    IAudioCaptureClient, IAudioClient, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
-    WAVEFORMATEX, WAVEFORMATEXTENSIBLE, eCapture, eCommunications,
+    AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR, AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_SHAREMODE_SHARED,
+    DEVICE_STATE_ACTIVE, IAudioCaptureClient, IAudioClient, IMMDevice, IMMDeviceEnumerator,
+    MMDeviceEnumerator, WAVEFORMATEX, WAVEFORMATEXTENSIBLE, eCapture, eCommunications,
 };
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
     CoUninitialize,
 };
-use windows::core::{GUID, Interface};
+use windows::core::{GUID, HRESULT, Interface};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::platform::microphone::{
@@ -112,7 +112,7 @@ impl Source {
         if self.started {
             self.started = false;
             // SAFETY: only this worker starts/stops this client, and no native buffer is borrowed.
-            unsafe { self.client.Stop() }.map_err(|_| MicError::Unconfirmed)?;
+            unsafe { self.client.Stop() }.map_err(|error| teardown_error(error.code()))?;
         }
         Ok(())
     }
@@ -123,6 +123,16 @@ impl Drop for Source {
         if self.stop().is_err() {
             // The explicit stop path returns Unconfirmed; unwinding never creates a receipt.
         }
+    }
+}
+
+/// A device gone mid-hold ended its stream, and dropping the client releases it; any other
+/// teardown failure leaves the stream's state unknown.
+pub(in crate::platform) fn teardown_error(code: HRESULT) -> MicError {
+    if code == AUDCLNT_E_DEVICE_INVALIDATED {
+        MicError::Unavailable
+    } else {
+        MicError::Unconfirmed
     }
 }
 
@@ -241,8 +251,11 @@ fn capture_with(
         token.cancel();
         packets.clear();
     }
-    source.stop()?;
-    result = boundary.finish(result.and_then(|()| source.check()));
+    let stopped = source.stop();
+    if stopped == Err(MicError::Unconfirmed) {
+        return Err(MicError::Unconfirmed);
+    }
+    result = boundary.finish(result.and(stopped).and_then(|()| source.check()));
     if result.is_err() {
         token.cancel();
         packets.clear();
@@ -389,7 +402,7 @@ fn read(
         // SAFETY: balances the one successful GetBuffer; no borrowed slice survives this call.
         let released = unsafe { (vtable.ReleaseBuffer)(interface, frames) };
         if released.is_err() {
-            return Err(MicError::Unconfirmed);
+            return Err(teardown_error(released));
         }
         let allowed = allowed?;
         if bytes.is_none_or(|n| n > raw.len())
