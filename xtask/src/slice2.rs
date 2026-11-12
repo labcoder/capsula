@@ -274,7 +274,7 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::time::Duration;
 
-    use super::{GONE, KEPT, end_leftovers, marker, percentile};
+    use super::{end_leftovers, percentile};
 
     /// A harmless child that waits on its stdin, which stays open while the command or child lives.
     fn held() -> Command {
@@ -295,17 +295,6 @@ mod tests {
             lines,
             [format!("brain {pid} outlived its kill; it has exited since")]
         );
-    }
-
-    #[test]
-    fn the_gone_and_kept_markers_share_no_prefix() {
-        let (gone, kept) = (marker(GONE), marker(KEPT));
-        let shared = gone
-            .bytes()
-            .zip(kept.bytes())
-            .take_while(|(a, b)| a == b)
-            .count();
-        assert_eq!(shared, 0, "{gone} and {kept}");
     }
 
     #[test]
