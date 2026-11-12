@@ -239,12 +239,12 @@ pub(in crate::presence::overlay) fn intent(effects: &[crate::presenter::Effect])
     OBSERVATION.with(|slot| {
         if let Some(observed) = slot.borrow_mut().as_mut() {
             use kumochi_protocol::message::{ControlToBrain, SceneId};
-            let [crate::presenter::Effect::Control(ControlToBrain::ClearDrawing { scene_ids })] =
+            let [crate::presenter::Effect::Control(ControlToBrain::SceneFailed { scene })] =
                 effects
             else {
-                panic!("the sole terminal effect must be ClearDrawing");
+                panic!("the sole terminal effect must be SceneFailed");
             };
-            assert_eq!(scene_ids, &[SceneId(20)]);
+            assert_eq!(*scene, SceneId(20));
             observed.controls += 1;
             assert_eq!(observed.controls, 1);
         }
@@ -261,7 +261,7 @@ pub(in crate::presence::overlay) fn apply_return() {
     });
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Case {
     A,
     B,
@@ -395,8 +395,7 @@ fn prepared_geometry(
 )]
 fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
     use super::super::super::{
-        overlay_visibility::Visibility, paint_cache::Stager, paint_phase, paint_stroke,
-        test_fixture,
+        overlay_visibility::Visibility, paint_cache::Stager, paint_stroke, test_fixture,
     };
     use crate::{
         allocation,
@@ -670,8 +669,9 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
     assert_eq!(controls.len(), usize::from(!refused));
     drop(gate);
     if !refused {
-        assert!(
-            matches!(controls.try_recv(), Ok(ControlToBrain::ClearDrawing { scene_ids }) if scene_ids == [SceneId(20)])
+        assert_eq!(
+            controls.try_recv(),
+            Ok(ControlToBrain::SceneFailed { scene: SceneId(20) })
         );
     }
     assert_eq!(
@@ -712,7 +712,8 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
     drop(owner);
     inner.quit();
     drop(inner);
-    assert_eq!(Arc::strong_count(&target), 1);
+    // The real typing panel's gpui-kit text input keeps the text system alive after teardown.
+    assert_eq!(Arc::strong_count(&target), 2);
     drop(target);
     allocation::checkpoint(6, 169);
     let seen = observer.snapshot();
@@ -801,53 +802,173 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
         if enter > boundary(163) && draw.painting {
             assert!(matches!(case, Case::C));
             assert_eq!(draw.host, h1.window_id().as_u64());
-            assert_eq!(
-                paint_phase::tests::assert_paths(&events[enter..=returned], 3),
-                0
-            );
+            assert_eq!(app_paths(events, enter..returned + 1), 0);
         }
     }
     if matches!(case, Case::C | Case::E) {
+        let redraw = boundary(166)..boundary(167);
         assert_eq!(
-            events[boundary(166)..boundary(167)]
+            events[redraw.clone()]
                 .iter()
                 .filter(|event| event.action == 5)
                 .count(),
             1
         );
-        assert_eq!(
-            paint_phase::tests::assert_paths(&events[boundary(166)..boundary(167)], 3),
-            0
+        assert_eq!(app_paths(events, redraw.clone()), 0);
+        let [allocations, bytes] = outside_app(events, redraw);
+        println!("recovery_redraw case={case:?} gpui_allocations={allocations} gpui_bytes={bytes}");
+        assert!(
+            allocations <= 91 && bytes <= 23_137,
+            "GPUI's own redraw stays within its measured ceiling"
+        );
+    }
+    let recovery = &events[first..boundary(161)];
+    let [allocations, bytes] = recovery
+        .iter()
+        .filter(|event| event.action == 0)
+        .fold([0, 0], |[count, bytes], event| {
+            [count + 1, bytes + event.size]
+        });
+    let retained = retained(recovery);
+    println!(
+        "recovery_apply case={case:?} allocations={allocations} bytes={bytes} retained_allocations={} retained_bytes={}",
+        retained[0], retained[1]
+    );
+    let bound = match case {
+        Case::A => [390, 130_961, 167, 65_598],
+        Case::B => [392, 129_825, 169, 64_462],
+        Case::C | Case::E => [149, 45_788, 65, 19_298],
+        Case::D => [395, 130_889, 172, 65_526],
+    };
+    assert!(
+        allocations <= bound[0]
+            && bytes <= bound[1]
+            && retained[0] <= bound[2]
+            && retained[1] <= bound[3],
+        "the recovery interval stays within its measured bound"
+    );
+}
+
+/// Kumochi's own outermost App scopes; GPUI's redraw work runs outside them.
+fn app_scopes(events: &[crate::allocation::Request]) -> Vec<std::ops::Range<usize>> {
+    let mut scopes = Vec::new();
+    let mut depth = 0_usize;
+    let mut start = 0;
+    for (index, event) in events.iter().enumerate() {
+        match (event.action, event.tag) {
+            (2, 1) => {
+                if depth == 0 {
+                    start = index;
+                }
+                depth += 1;
+            }
+            (3, 1) => {
+                depth = depth
+                    .checked_sub(1)
+                    .expect("an App scope closes after it opens");
+                if depth == 0 {
+                    scopes.push(start..index + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(depth, 0, "every App scope closes");
+    scopes
+}
+
+/// The path rule over Kumochi's own App scopes that overlap `range`. GPUI's own per-redraw
+/// allocations are counted and reported by `outside_app`; the limit applies to Kumochi's.
+fn app_paths(events: &[crate::allocation::Request], range: std::ops::Range<usize>) -> usize {
+    app_scopes(events)
+        .into_iter()
+        .filter(|scope| scope.start < range.end && range.start < scope.end)
+        .map(|scope| super::super::super::paint_phase::tests::assert_paths(&events[scope], 3))
+        .sum()
+}
+
+/// Allocations in `range` outside Kumochi's App scopes, as `[count, bytes]`.
+fn outside_app(events: &[crate::allocation::Request], range: std::ops::Range<usize>) -> [usize; 2] {
+    let scopes = app_scopes(events);
+    range
+        .filter(|index| {
+            events[*index].action == 0 && !scopes.iter().any(|scope| scope.contains(index))
+        })
+        .fold([0, 0], |[count, bytes], index| {
+            [count + 1, bytes + events[index].size]
+        })
+}
+
+/// Allocations in `events` that no later event there frees, as `[count, bytes]`.
+fn retained(events: &[crate::allocation::Request]) -> [usize; 2] {
+    events
+        .iter()
+        .enumerate()
+        .filter(|(index, event)| {
+            event.action == 0
+                && !events[index + 1..]
+                    .iter()
+                    .any(|next| next.action == 1 && next.pointer == event.pointer)
+        })
+        .fold([0, 0], |[count, bytes], (_, event)| {
+            [count + 1, bytes + event.size]
+        })
+}
+
+/// The episodes' dropper counts and recorder order are process-wide, so each runs alone in a
+/// child process of this test binary.
+#[test]
+fn the_recovery_episodes_pass_in_fresh_processes() {
+    let module = module_path!()
+        .split_once("::")
+        .expect("a crate-qualified module path")
+        .1;
+    for episode in [
+        "accepting_the_last_failed_scene_recreates_a_hidden_host",
+        "refusing_the_last_failed_scene_disconnects_and_recreates",
+        "accepting_one_failed_scene_keeps_the_real_survivor_host",
+        "refusing_one_failed_scene_disconnects_its_survivor",
+        "a_refused_hide_leaves_the_real_host_disabled_without_retry",
+    ] {
+        let name = format!("{module}::{episode}");
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args(["--exact", &name, "--ignored", "--test-threads=1"])
+            .output()
+            .expect("the child test process runs");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed;"),
+            "{episode} passes alone in its own process"
         );
     }
 }
 
 #[gpui::test]
-#[ignore = "requires one exact --ignored selector in a fresh isolated process"]
+#[ignore = "runs in its own process from the_recovery_episodes_pass_in_fresh_processes"]
 fn accepting_the_last_failed_scene_recreates_a_hidden_host(cx: &mut gpui_kit::TestAppContext) {
     episode(cx, Case::A);
 }
 
 #[gpui::test]
-#[ignore = "requires one exact --ignored selector in a fresh isolated process"]
+#[ignore = "runs in its own process from the_recovery_episodes_pass_in_fresh_processes"]
 fn refusing_the_last_failed_scene_disconnects_and_recreates(cx: &mut gpui_kit::TestAppContext) {
     episode(cx, Case::B);
 }
 
 #[gpui::test]
-#[ignore = "requires one exact --ignored selector in a fresh isolated process"]
+#[ignore = "runs in its own process from the_recovery_episodes_pass_in_fresh_processes"]
 fn accepting_one_failed_scene_keeps_the_real_survivor_host(cx: &mut gpui_kit::TestAppContext) {
     episode(cx, Case::C);
 }
 
 #[gpui::test]
-#[ignore = "requires one exact --ignored selector in a fresh isolated process"]
+#[ignore = "runs in its own process from the_recovery_episodes_pass_in_fresh_processes"]
 fn refusing_one_failed_scene_disconnects_its_survivor(cx: &mut gpui_kit::TestAppContext) {
     episode(cx, Case::D);
 }
 
 #[gpui::test]
-#[ignore = "requires one exact --ignored selector in a fresh isolated process"]
+#[ignore = "runs in its own process from the_recovery_episodes_pass_in_fresh_processes"]
 fn a_refused_hide_leaves_the_real_host_disabled_without_retry(cx: &mut gpui_kit::TestAppContext) {
     episode(cx, Case::E);
 }

@@ -1719,6 +1719,17 @@ latency, real Win32 HWND/DWM/capture-exclusion behavior and native Rez before-an
 measurements remain unmeasured; a `160..161` count alone does not close the recovery or
 acceptance gates.
 
+The five episodes run in plain `cargo test`: `the_recovery_episodes_pass_in_fresh_processes`
+reruns each alone in a child process of the test binary, because the deferred dropper's pending
+counts and the recorder's start order are process-wide. In the steady-state draws, an allocation
+outside Kumochi's own `App` paint scopes is GPUI's: it is counted and held to its measured
+ceiling of 91 allocations and 23,137 bytes, while Kumochi's own scopes still add none. The whole
+interval from the first draw (`162`) through the terminal apply (`161`) counts as `App` and is
+held to measured per-case bounds, at most 395 allocations and 130,961 bytes, of which at most
+172 allocations and 65,598 bytes outlive the interval. The real typing panel's gpui-kit text
+input keeps the text system alive after teardown, so the episodes expect two holders of it; this
+is an accepted exception to raise with gpui-kit.
+
 Fixed four-slot cache
 metadata is conservatively charged in full to each scene, rather than adding an unmetered
 index allocation. Begin, recovery and acknowledged-cut adoption check the combined charge.
