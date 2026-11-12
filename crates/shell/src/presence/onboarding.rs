@@ -6,7 +6,7 @@ mod tests;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _};
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Context, Div, Entity, FocusHandle, Focusable as _,
     InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Render, Styled as _,
@@ -150,14 +150,16 @@ impl OnboardingView {
                     .flex_col()
                     .gap_2()
                     .child(
+                        // Centred: taffy gets no text baselines from GPUI, only box bottoms.
                         div()
                             .flex()
                             .flex_wrap()
-                            .items_baseline()
+                            .items_center()
                             .gap_x_2()
-                            .text_2xl()
+                            .text_xl()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                             .child(before)
-                            .child(div().w(rems(12.0)).child(input))
+                            .child(div().flex_1().min_w(rems(12.0)).child(input.large()))
                             .child(after),
                     )
                     .child(help(strings.get(Text::OnboardingWelcomeHelp)))
