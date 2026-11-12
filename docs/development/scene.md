@@ -75,7 +75,11 @@ Line, arrow and path stroke widths must be above 0. A shape's `width` is its out
 rect's `radius` of 0 gives square corners, as when it is left out. The offered schema
 states these minimums and the positive bounds of circle `r`, path `scale`, text `size`,
 `max_width` and highlight `pad`; box and size components are checked only at
-admission. `set` cannot change a width.
+admission. `set` cannot change a width. `set color` on a shape or path with a fill recolours
+the fill as well as the outline, as an `anim` colour track already paints it, so "make it red"
+reaches a filled shape. A `set` therefore can't give a filled shape an outline colour unlike its
+fill; that takes a remove and a new put (`shortcut:` in `layout::prepare::patch`). A stored
+`set color` replays the same way on recovery.
 
 ### Canvas and overlay placement
 
@@ -516,12 +520,16 @@ serialize drawing content into logs, or trace a model-facing tool reply.
 ## Admission and identity
 
 `SceneState::begin` validates positive optional canvas dimensions. `CallState`
-guards one call's begin/step/end order; a new call gets a fresh guard and must
-repeat the stored header with typed equality. Ending a call does not end its scene.
+guards one call's begin/step/end order; a new call gets a fresh guard and must repeat the
+stored header's `v`, `scene`, `surface`, `size` and `others` (`Begin::continues`). Its
+`title` and `alt` may be restated differently: they describe the drawing, and the stored
+header keeps its first text, so the description can go stale after an edit (`shortcut:`).
+Racing calls that begin one new name use the same comparison. Ending a call does not end
+its scene.
 
 `begin.others` is the closed vocabulary `clear` (default) or `keep`. Old stored headers
 decode to `clear`, and serialization always includes it. Only a new scene applies this
-policy: a continuation with an identical stored header never clears another scene.
+policy: a continuation of a stored header never clears another scene.
 
 `ReplacementAdmission` owns a newcomer, its checked candidate and at most four deduplicated
 victims with their original identities, revisions, mutations and charges. All early and
@@ -718,8 +726,11 @@ Repeated finite animations, including delay, must fit 60 seconds; infinite repea
 fit its first play and remains bounded by the scene deadline. Zero-period repetition,
 zero-period flow and duplicate same-step (target, property) tracks fail with `OutOfRange`.
 
-The private SVG walker accepts M/L/H/V/Q/C/Z, absolute or relative, including implicit
-repetitions. It validates coordinates and counts commands before vertices exist.
+The private SVG walker accepts M/L/H/V/Q/T/C/S/Z, absolute or relative, including implicit
+repetitions. `S` and `T` become ordinary cubic and quadratic segments: their first control
+point reflects the previous segment's last control point through the pen when that segment was
+a cubic (for `S`) or a quadratic (for `T`), and is the pen otherwise. A reflected point outside
+±20,000 is `OutOfRange`. Arcs (`A`) remain `Unsupported`. It validates coordinates and counts commands before vertices exist.
 Quadratic and cubic second differences determine power-of-two subdivision counts at
 0.25 logical-pixel tolerance after conservative composed scale bounds. SVG admission and
 preparation reserve up to a further 2× presentation scale for overlays, capped at composed scale 64;
