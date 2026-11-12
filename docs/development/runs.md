@@ -1,6 +1,6 @@
 # Runs and the coordinator
 
-A **run** is one user turn: in slice 2 a typed message, later a voice hold or an ask-about. The
+A **run** is one user turn: a typed message, a voice hold or an ask-about. The
 brain's **coordinator** (`crates/brain/src/coordinator/`) is its core loop, written sans I/O: it
 takes inputs and returns effects, and the systems around it (the store, the engine, the pipes,
 timers) do the work and report back. So the order of Esc, late completions and interruption is
@@ -88,8 +88,11 @@ deleted submissions retain their own metadata until their response; a cancelled 
 first state owes exactly one Stop for its own run. A delayed state after an explicit switch
 still answers its own turn but doesn't move input. Esc cancels work, not the target or
 revision. Settings updates replace names and the main id without changing the input draft,
-keyboard focus, viewed history, target or revision. This correlation does not admit voice
-holds, capture audio or promote transcripts into turns.
+keyboard focus, viewed history, target or revision. Voice uses a separate metadata-only
+pending hold keyed by gesture, captured target/revision and current session, not the typed
+queue or its watermark. Only its matching visible Hold-origin first state can bind New;
+Thinking stays cancellable and Answering returns to ordinary Runs. Source admission and
+transcription remain in the [voice owner](voice.md#voice-only-held-turns).
 
 ## Typed drawing admission
 
@@ -116,6 +119,31 @@ Every matching successful reply settles victims, even if deletion, interruption 
 user clear suppresses the newcomer. A shell preparation failure after this commit does not
 restore victims and may leave no drawing. Failed cut retries share the clear backoff, from 500 ms up to
 30 seconds [guess], without resetting while a cut is in flight.
+
+A successor keeps one bounded pending-replacement fact until its first validated `StepShown`.
+A terminal brain validation/store error or shell refusal before that paint emits one content-free
+`DrawingReplacementFailed` for the replacement's original thread/run. Validation and preparation
+tool results keep their specific cause; a store failure instead ends the run as `failed(store)`.
+Both keep the single separate loss notice, and neither result duplicates it. User cancellation
+reports no drawing failure, and already-ended results are not rewritten.
+The notice is immediate, not deferred until the run can no longer draw. When a committed first
+step is empty or still unpainted and a later record of that successor fails, the notice says the
+earlier drawings are gone even though a corrected call in the same run may still draw. A silent
+loss would be worse; run-owned loss accounting is a separate follow-up.
+Whole-scene `SceneFailed` refusals derive their original
+identity here even when the shell had no run at header refusal; they are distinct from explicit
+`ClearDrawing` requests. The shell retains only its existing single notice, filters it by
+conversation and localizes its fixed text; it never attaches late loss
+to whichever conversation happens to be open. Recovery creates no pending replacement fact.
+
+A run that ends `done` after calling `draw`, with no committed step left that the shell
+didn't refuse, sends one `DrawingNotReturned` for its thread/run once its outcome is stored,
+which the shell shows as "No drawing came back" through the same single notice. This covers
+every call refused, calls that came back empty, and committed steps that a `StepFailed` cut
+then dropped; those still count against the run's step budget. A step that was shown or that
+the user cleared counts as returned. Stop and failed runs, which report their own ending, get no
+notice, and neither does a step refused after its run ended. A run that never calls `draw` gets no notice: the brain doesn't guess intent from the
+request.
 
 `StepShown` and `StepFailed` validate lifetime indices and the run that committed the step.
 Bad observations or held-scene cuts break the connection; removed scenes are stale. Pending
@@ -451,7 +479,8 @@ and the store would refuse it too.
 
 shortcut: steps stream as one `draw` call: the first step starts it, each step is one
 newline-terminated argument delta, and the script's end sends `ToolCallReady` with the joined lines,
-then `Finished(Completed)`. Slice 4's B3 replaces this adapter with recorded draw arguments.
+then `Finished(Completed)`. Real engines send recorded draw arguments; only the fixture keeps
+this adapter.
 
 ## Around the coordinator
 
@@ -494,7 +523,41 @@ unconfirmed earlier clear debt still suppresses automatic relaunch. An
 in-process hand-started connection still waits behind settlement before describe. Failed debt
 is memory-only and does not survive brain exit; typed drawing history is never deleted.
 
-The step is a labelled placeholder until slice 4's scene format. A run's steps draw in one scene:
+A run's steps draw in one scene:
 its first step's write begins the scene and returns its id, and the steps after it wait in the
 run until that ack. A Stop, a replacement, a failed first write or a lost shell drops the waiting
 steps, and the run still settles.
+
+### Voice hold admission
+
+The runtime owns one pending hold, keyed by shell epoch and gesture with its captured
+selection revision and a shared cancellation flag. Recognition queues `ReadHold` on the
+existing stamped page reader: after prior accepted writes, one bounded, cancellable read
+transaction captures the live target's deletion generation and effective model/effort.
+New captures defaults without creating a thread or inventing a run identity.
+
+Only `submit_hold` assigns real thread/run ids and emits a Hold-origin run. Recognized words
+become ordinary deletable user history, written once through the existing ordered turn,
+context and send gates; they do not advance typed/Ask deletion watermarks. The run retains
+the pinned choice and connection before its first build, which skips the thread-choice
+reread but still checks the catalog. No separate transcript or audio record is stored.
+
+Deletion generation safety follows acceptance ordering: the runtime invalidates the shared
+flag before accepting any later target deletion or model write, including changes away and
+back. It also invalidates on selection/settings/connection/session changes, newer explicit
+input and cancel. This applies while a snapshot read is pending and after it completes, so
+an answered deletion cannot revive an old admission. Once submitted, the coordinator also
+fences target deletion/model inputs before routing them. SendReady requires the live flag,
+exact pinned snapshot, ready connection and model; cancellation never grants another send.
+
+The Shell retains one gesture/selection/target handoff without words or a typed
+turn count. Only its first matching Hold-origin state can bind New to a real
+thread. Thinking remains cancellable; Answering transfers to ordinary run
+handling. Selection changes, confirmed deletion and newer typed/Ask input
+invalidate it. Callers revoke collection and drain `take_hold_cancel` before
+queueing replacement input; typed submission refuses while cancellation is
+undelivered. Refused/offline gestures are consumed too. Once this Shell has
+attempted a voice hold, unrequested or cancelled first Hold states are stopped,
+never displayed or allowed to retarget. Before that, the existing unowned-run
+display behavior is unchanged. Disconnect
+clears connection-local cancellation but retains the lifetime gesture high-water.

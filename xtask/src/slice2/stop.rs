@@ -12,7 +12,7 @@ use kumochi_protocol::message::{
 
 use super::brain::Case;
 use super::client::{Client, Frame};
-use super::{PATIENCE, Row, ended, first_text, marker, percentile, run_end, store, turn};
+use super::{GONE, PATIENCE, Row, ended, first_text, marker, percentile, run_end, store, turn};
 
 /// Stops measured for each kind of pressure.
 const REPEATS: usize = 20;
@@ -281,7 +281,7 @@ fn replaced(client: &Client, old: RunId, new: RunId, failures: &mut Vec<String>)
 }
 
 pub(super) fn late_step(folder: &Path) -> Result<Row> {
-    let late = marker();
+    let late = marker(GONE);
     let script = format!("0 text a\n0 step first\n5000 step never\nlate {late}\n");
     let case = Case::new(folder, "late-step", &script)?;
     let brain = case.start()?;
@@ -312,7 +312,7 @@ pub(super) fn late_step(folder: &Path) -> Result<Row> {
     }
     client.quit()?;
     brain.exited()?;
-    let (files, file_hits) = store::files(&case.local, &late)?;
+    let (files, file_hits) = store::files(&case.folders.local, &late)?;
     let rows = store::rows(&store::open(&case.store())?, &late)?;
     if !rows.hits.is_empty() || rows.fts > 0 || !file_hits.is_empty() {
         failures.push(format!(

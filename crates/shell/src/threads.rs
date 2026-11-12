@@ -760,6 +760,7 @@ impl Threads {
             | DataToShell::RunEnd { .. }
             | DataToShell::SceneSnapshot { .. }
             | DataToShell::ScenesRemoved { .. }
+            | DataToShell::ScenesReplaced { .. }
             | DataToShell::SceneBegin { .. }
             | DataToShell::SceneStepCommit { .. }
             | DataToShell::SceneSnapshotV1 { .. }

@@ -11,13 +11,26 @@ had already finished appearing stay on screen.
 
 Asking for a change to the same subject continues its drawing. A new subject normally
 replaces this conversation's earlier drawings once the new drawing's first step is saved.
-If the new drawing then cannot be drawn, the old drawings may already be gone and the
-screen may be left empty. Separate drawings can be kept for comparison, up to four on
+Normally their last picture stays briefly until the new drawing starts on the same drawing
+layer. This visual hold lasts at most 250 ms while the interface is running and can end sooner
+when space is tight; it does not keep the old drawings available for further changes. If the
+replacement then fails, the screen may be left empty and its conversation gets one notice that
+the previous drawings were removed, even if the drawing call had already ended. This includes
+a rejected later drawing record or a failed save after the replacement's first step was saved;
+the error keeps its specific cause. Stopping a drawing yourself does not report a drawing failure.
+The notice appears as soon as the replacement fails. Kumochi may still correct the drawing in
+the same reply, so a new drawing can appear after the notice; the earlier drawings stay removed.
+If Kumochi tries to draw but none of its drawing can be shown, its reply ends with the notice
+**No drawing came back**. Ask again to retry.
+Separate drawings can be kept for comparison, up to four on
 screen; they can still overlap until side-by-side arrangement is available.
 
 Simple node-and-arrow diagrams do not need a separate container: their nodes belong to
 the scene itself, and each arrow follows the diagram shared by its endpoints. These
-diagrams have the same 48-node and 96-arrow limits as explicitly grouped diagrams.
+diagrams have the same 48-node and 96-arrow limits as explicitly grouped diagrams. In
+practice, what can be painted is smaller: about 20 plain boxes across the drawings on
+screen, or about 10 when arrows have labels. A step past that isn't shown. If Kumochi is still
+drawing when that happens, it's told to use fewer or simpler shapes.
 
 For function graphs, Kumochi asks the model for sampled values on a chart, with y growing
 upward, rather than a hand-drawn path. Curves draw in along those samples; functions such

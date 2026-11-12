@@ -37,7 +37,16 @@ largest-area usable band below, above, left or right, in that tie order, with a
 is usable, it retries with only the dock and peek reserved, then uses the inset work area
 as a last resort. On a display too small for both, an open panel can cover a drawing and
 its entrance can play unseen. Opening or closing a panel updates placement before the next paint;
-when the dock lands, panels re-anchor before the stage is recomputed. The typing panel
+when the dock lands, panels re-anchor before the stage is recomputed. While a drawing is on
+screen it keeps its stage as long as that stage still fits inside the newly chosen one for the
+same work area, dock layout and scale: a drawing that stays put is easier to follow than one
+that re-centres every time space frees up. So closing a panel, including the typing panel a
+held voice request hides while it runs, leaves the drawing where it is. A panel opening over
+it, a dock move or a display change re-places it, and a drawing that starts on a cleared
+screen takes the best stage at that moment. "On screen" means any scene the presenter holds,
+including one that hasn't painted yet. A reconnect counts as a cleared screen, so recovered
+drawings take the best stage. A drawing that replaces one still held takes the kept stage,
+which may be smaller than the best one, until the screen clears. The typing panel
 retains its accepted size when re-anchored, like Threads and Settings.
 A retained GPUI display observer refreshes the dock's scale and anchor,
 the drawing stage and a shown overlay's bounds after display changes. Existing views snap
@@ -101,7 +110,8 @@ graceful Quit after ten seconds, without moving the pointer or sending input. In
 small even before placement, so a transparency failure cannot cover the desktop. This is a
 bounded launch check, not a performance benchmark or permission to inject input.
 
-For idle measurements, build the workspace in release mode, then run `cargo xtask bench idle`.
+For idle measurements, run `bench idle` as the gate identity (see
+[the gate identity](gate-identity.md)); it builds the release shell and brain it measures.
 Before launching the shell, the benchmark spins one thread in three two-second trials,
 measuring `QueryThreadCycleTime` divided by wall time and printing each rate and the highest.
 Each role and the process-tree total report calibrated cycle CPU as
@@ -113,8 +123,8 @@ It refuses an existing product process, launches the release shell at normal pri
 bounded graceful-quit deadline, settles for thirty seconds, and samples user plus kernel time
 over sixty seconds. CPU is percent of one core; memory is endpoint private bytes, not working
 set or peak memory. `--duration 1..60` shortens a harness smoke check, not an acceptance run.
-The task checks that the same shell, brain and worker survive the sample and waits for all
-three to exit. Run only in an agreed quiet window; the benchmark sends no input.
+The task checks that the same shell, brain and both workers survive the sample and waits for all
+four to exit. Run only in an agreed quiet window; the benchmark sends no input.
 `--baseline <release-directory>` samples older binaries with the same counters. After the sample,
 it sends `WM_CLOSE` to the spawned shell's presence proxy, which requests the normal graceful
 Quit path. Pre-dock binaries fall back to closing their single visible status window. Both

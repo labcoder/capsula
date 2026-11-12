@@ -106,7 +106,10 @@ impl TextPanel {
 }
 
 impl Presence {
-    pub(super) fn open_text(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+    pub(super) fn show_voice_answer(
+        &mut self,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
         self.dismiss_settings(cx)?;
         self.dismiss_threads(cx)?;
         if self.text.is_none() {
@@ -145,6 +148,18 @@ impl Presence {
                 cx.notify();
             });
         }
+        self.place_drawings(cx.weak_entity(), cx);
+        self.runs_changed(cx)
+    }
+
+    pub(super) fn open_text(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        self.cancel_voice(cx);
+        self.focus_text(cx)
+    }
+
+    pub(super) fn focus_text(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        self.show_voice_answer(cx)?;
+        let text = self.text.as_mut().expect("created above");
         let draft = text
             .draft
             .take()
@@ -177,7 +192,6 @@ impl Presence {
                 format_args!("input draft nonempty={nonempty} preserved={preserved}"),
             );
         }
-        self.place_drawings(cx.weak_entity(), cx);
         self.runs_changed(cx)
     }
 
@@ -187,7 +201,9 @@ impl Presence {
         let close_events = self.events.clone();
         let owner = cx.weak_entity();
         let notice = typing_notice(
-            self.chat_notice.shown().and(self.error.as_ref()),
+            self.chat_notice
+                .for_thread(self.runs.thread())
+                .and(self.error.as_ref()),
             self.refusal,
             cx.global::<Strings>(),
         );
@@ -314,6 +330,7 @@ impl Presence {
 
 impl Presence {
     pub(super) fn submit(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        self.cancel_voice(cx);
         let Some(text) = &self.text else {
             return Ok(());
         };
@@ -350,7 +367,9 @@ impl Presence {
     ) {
         let strings = cx.global::<Strings>();
         let notice = typing_notice(
-            self.chat_notice.shown().and(self.error.as_ref()),
+            self.chat_notice
+                .for_thread(self.runs.thread())
+                .and(self.error.as_ref()),
             self.refusal,
             strings,
         );
@@ -382,6 +401,9 @@ impl Presence {
 
     /// Follows the input target and pushes its bounded live answer into the retained chat.
     pub(super) fn refresh_conversation(&mut self, cx: &mut Context<'_, Self>) {
+        self.voice
+            .target
+            .set((self.runs.thread(), self.runs.revision()));
         if self.text.as_ref().is_some_and(|text| text.typing.visible) {
             self.chat.update(cx, |state, cx| {
                 if state.follow(self.runs.thread()) {
@@ -409,12 +431,17 @@ impl Presence {
         };
         let answer = self.runs.shown();
         let target = self.runs.target();
-        let recovery = self.chat_notice.shown().cloned();
+        let recovery = self.chat_notice.for_thread(self.runs.thread()).cloned();
         let notice = typing_notice(
             recovery.as_ref().and(self.error.as_ref()),
             self.refusal,
             cx.global::<Strings>(),
-        );
+        )
+        .or_else(|| {
+            self.voice
+                .status
+                .map(|status| cx.global::<Strings>().get(status).into())
+        });
         let retry = recovery.as_ref().is_some_and(
             |notice| matches!(notice.source, Source::Run(run) if self.runs.retry_ready(run)),
         );

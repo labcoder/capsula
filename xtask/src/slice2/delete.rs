@@ -10,34 +10,50 @@ use kumochi_protocol::message::{ControlToBrain, ControlToShell, Deleted, Phase, 
 
 use super::brain::Case;
 use super::client::{Client, Frame};
-use super::{PATIENCE, Row, ended, marker, run_end, store, turn};
+use super::{GONE, KEPT, PATIENCE, Row, ended, marker, run_end, store, turn};
 
 /// How long a restarted brain gets to purge before it's asked to quit.
 const PURGE_WAIT: Duration = Duration::from_secs(2);
 /// Restarts before an unfinished purge fails the item.
 const ATTEMPTS: usize = 3;
 
+/// The item's text: the deleted thread's fixture and turn, then the kept thread's.
+struct Texts {
+    gone_script: String,
+    gone_turn: String,
+    kept_script: String,
+    kept_turn: String,
+}
+
+impl Texts {
+    fn new(gone: &str, kept: &str) -> Self {
+        let mixed = format!("{}{}", gone[..1].to_ascii_uppercase(), &gone[1..]);
+        let upper = gone.to_ascii_uppercase();
+        Self {
+            gone_script: format!("0 text answer {upper} end\n0 step label {gone}\n0 text tail\n"),
+            gone_turn: format!("Title {mixed} words"),
+            kept_script: format!("0 text keep {kept}\n0 step keep\n"),
+            kept_turn: format!("Keep {kept}"),
+        }
+    }
+}
+
 pub(super) fn run(folder: &Path) -> Result<Row> {
-    let gone = marker();
-    let kept = marker();
-    let mixed = format!("CapsGate{}", &gone["capsgate".len()..]);
-    let upper = gone.to_ascii_uppercase();
-    let case = Case::new(
-        folder,
-        "delete",
-        &format!("0 text answer {upper} end\n0 step label {gone}\n0 text tail\n"),
-    )?;
+    let gone = marker(GONE);
+    let kept = marker(KEPT);
+    let texts = Texts::new(&gone, &kept);
+    let case = Case::new(folder, "delete", &texts.gone_script)?;
     let brain = case.start()?;
     let mut client = Client::connect()?;
-    let (run, t) = turn(&mut client, None, &format!("Title {mixed} words"))?;
+    let (run, t) = turn(&mut client, None, &texts.gone_turn)?;
     done(&mut client, run)?;
     client.quit()?;
     brain.exited()?;
 
-    case.script(&format!("0 text keep {kept}\n0 step keep\n"))?;
+    case.script(&texts.kept_script)?;
     let brain = case.start()?;
     let mut client = Client::connect()?;
-    let (run, _) = turn(&mut client, None, &format!("Keep {kept}"))?;
+    let (run, _) = turn(&mut client, None, &texts.kept_turn)?;
     done(&mut client, run)?;
     client.control(&ControlToBrain::DeleteThread {
         thread: t,
@@ -58,8 +74,8 @@ pub(super) fn run(folder: &Path) -> Result<Row> {
 
     let mut failures = Vec::new();
     let (attempts, running) = purge(&case, t, &gone, &mut failures)?;
-    let (files, hits) = store::files(&case.local, &gone)?;
-    let (_, control) = store::files(&case.local, &kept)?;
+    let (files, hits) = store::files(&case.folders.local, &gone)?;
+    let (_, control) = store::files(&case.folders.local, &kept)?;
     let conn = store::open(&case.store())?;
     let rows = store::rows(&conn, &gone)?;
     let kept_rows = store::rows(&conn, &kept)?;
@@ -116,7 +132,7 @@ fn purge(
         let brain = case.start()?;
         let client = Client::connect()?;
         thread::sleep(PURGE_WAIT);
-        let running = store::live_files(&case.local, gone)?;
+        let running = store::live_files(&case.folders.local, gone)?;
         client.quit()?;
         brain.exited()?;
         let purge_left = store::purge_files(&case.data())?;
@@ -141,4 +157,35 @@ fn done(client: &mut Client, run: RunId) -> Result<()> {
         bail!("run {} ended {phase:?}", run.0);
     }
     run_end(client, run)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{GONE, KEPT, marker};
+    use super::Texts;
+
+    /// FTS5 stores a term as what it adds to the term before it, so the scan sees a whole marker
+    /// only when no other word in the item starts with the same letter.
+    #[test]
+    fn no_other_word_starts_with_a_markers_first_letter() {
+        let (gone, kept) = (marker(GONE), marker(KEPT));
+        assert_ne!(gone.as_bytes()[0], kept.as_bytes()[0], "{gone} and {kept}");
+        let texts = Texts::new(&gone, &kept);
+        let words = [
+            &texts.gone_script,
+            &texts.gone_turn,
+            &texts.kept_script,
+            &texts.kept_turn,
+        ]
+        .into_iter()
+        .flat_map(|text| text.split_whitespace())
+        .map(str::to_ascii_lowercase)
+        .filter(|word| *word != gone && *word != kept);
+        for word in words {
+            assert!(
+                !word.starts_with(&gone[..1]) && !word.starts_with(&kept[..1]),
+                "{word} shares a marker's first letter"
+            );
+        }
+    }
 }

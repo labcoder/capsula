@@ -9,6 +9,64 @@ Voice is optional. A user installs two parts separately, and each runs locally i
 
 Sizes are decimal megabytes of the exact bytes installed.
 
+Hold-to-talk failures log a closed stage and reason at shell admission, capture completion, and
+brain hold status/decode boundaries. These diagnostics contain no audio, recognized text,
+gesture/session identifiers, device names, paths or foreign error text. A microphone receipt
+distinguishes unsupported/unavailable input from discontinuity, capacity and cleanup failures; the
+generic user-facing notice does not identify the failed boundary by itself. Debug builds also record
+the chord/hold, deferred delivery and stale-admission boundaries, including a chord suppressed by
+outstanding key state. They record no key beyond the left Ctrl+Alt chord itself and no ordinary
+typing, though debug builds stamp every left Ctrl+Alt chord, including other apps' Ctrl+Alt
+shortcuts. Native keyboard registration and capture start remain separate boundaries. The native
+gesture deadline records arming and delivery independently, so a delayed deadline can be
+distinguished from an admission refusal. The recognition line names what reached the threshold,
+`by=Deadline`, `Repeat` or `Release`, and a chord key arriving more than 50 ms after an armed
+deadline logs the thread's message queue status bits as one number, once per gesture. Capture
+receipts distinguish unreliable driver timestamps from gaps in retained native packets. `Timestamp`
+always fails closed. Isolated discontinuities no longer discard an utterance. The adapter reports
+each packet's device position, and after physical stop shared `PacketBoundary` sums the frames
+missing between kept packets and rejects the hold when they exceed 25% of its span, kept plus
+missing frames. Frames lost before the first kept packet are outside the retained audio and don't
+count. Discontinuity flags are counted for diagnostics only, since one flag can stand for any amount
+of lost audio. A position that restarts, goes backwards or always reads 0 counts no missing frames,
+so on such a device the rule checks nothing and the hold passes. There is no lifetime gap limit, so
+sparse losses in a long dictation remain admissible. A gap removes audio; it never inserts silence,
+replays old audio or admits pre-Listening audio. The queue must still drain after Listening, and the
+next nonempty packet is still discarded.
+
+One `held microphone capture summary` is logged after each capture ends, with only numeric
+fields: `discontinuities`, `first_discontinuity_packet` (one-based kept ordinal, zero if none),
+`first_discontinuity_ms` (observed loop time since stream start), `kept_packets`, `kept_frames`,
+`missing_frames` (device frames between kept packets that never arrived), `queue_high_water`
+(the most wire chunks seen waiting for the forwarder after a send) and
+`discarded_before_listening` (nonempty packets discarded before collection was first seen live;
+packets dropped after that, while the queue drains, and the one straddling packet aren't counted).
+These count native packets/frames, not the subsequently packed wire chunks. Counters commit
+only after an authorized copy and native buffer release. No per-packet allocation, lock,
+logging or extra clock query is added for these diagnostics; the first flag uses the loop's
+existing monotonic time. Timestamp and over-budget holds are discarded, not transcribed.
+
+The fake-source policy tests use no Windows types, apart from the teardown-error mapping test's two
+HRESULT constants. Native adapters supply frame count, first-frame device position, discontinuity
+and timestamp-error facts, collection authority and a post-Listening drained-queue observation.
+WASAPI alone translates flag bits and owns acquire/release calls; a Core Audio adapter must supply
+equivalent facts and the same consent, cancellation and cleanup guarantees. WASAPI requests at least
+100 ms of buffering for its 20 ms polling interval. The wire queue is sized from that buffer, room
+for all of it drained in one pass plus three chunks, so a stall the buffer absorbs can't overflow
+the queue instead. The adapter allocates scratch before Start, and checks the pinned device/format
+before Start and after Stop rather than making allocating COM queries in the pump. Mid-stream
+unplug/reconfiguration errors from GetBuffer or GetNextPacketSize, a device-invalidated result from
+ReleaseBuffer or Stop, or a failed after-Stop check, discard the hold; its generation retires, so
+the next hold can open. Any other ReleaseBuffer or Stop failure stays unconfirmed. The initialized
+stream's format remains pinned; no reopen or reinterpretation is attempted.
+
+The stop receipt still asserts physical release/join, and the matched wire packet count still
+asserts ordered delivery, not lossless device time. Previously the native validator implicitly
+required continuity after startup; it now certifies the shared lost-frame bound instead. The
+brain receives no synthetic samples or new continuity flag and still waits for true stop before
+decoding. A confirmed discarded receipt logs `held speech input ended`; an unconfirmed receipt
+logs `held speech input failed`.
+
 ## The manifest
 
 `kumochi_protocol::voice` is the only list of voice files. Each model file has an immutable
@@ -766,3 +824,147 @@ binary's profile folder), the header (`SHERPA_INCLUDE`), the models (`VOICE_MODE
 - `measure_parakeet` runs the layout check, then times load and release-to-text decodes through
   the owner and the release `kumochid --speech` at 16, 44.1 and 48 kHz, with WER against S5's
   reference transcripts.
+
+### Held input normalization
+
+The hold accumulator accepts only contiguous, unique native-rate packets. One
+KeyUp count, one nonempty last packet at count−1 and the matching physical-stop
+receipt must agree; control and PCM may arrive in either order. Zero input uses
+count zero without inventing a terminal sample. Validation never waits on queue
+capacity.
+
+Malformed framing or a repeated terminal permanently closes that accumulator and
+scrubs its owned buffers. Successful PCM transfer is single-use: later input is
+rejected and a second take returns no value.
+
+Normalization runs off the capture path, incrementally through the existing sinc
+resampler into at most 960,000 mono 16 kHz i16 samples: 1,920,000 bytes, not a
+60-second 192 kHz raw recording. The two 3,840-element f32 scratch vectors add
+30,720 bytes. Before its first private sample, the hold reserves resampler history
+for one maximum packet plus both kernel wings (at most 4,246 f32 elements,
+16,984 bytes for 192→16 kHz); legal packets and final padding do not reallocate it.
+The shared 2,049-element f64 kernel table adds 16,392 bytes, not per utterance.
+
+Failure/drop zeroizes owned accumulator/scratch capacity and the reserved history
+allocation. Successful transfer moves normalized PCM intact and zeroizes the
+remaining scratch/history. This does not erase incoming frames,
+allocator/OS copies, buffers transferred to other owners or native inference state.
+These payload figures are not the full peak: ingress/link queues, transport,
+metadata and allocator overhead also count. Scheduling moves the normalized
+vector to STT; cancelling its receiver fences the result, not audio already owned
+by an in-flight decode. STT's serialization/worker copies and native inference
+allocations remain part of the unmeasured end-to-end peak.
+
+Held decode admission reuses the STT owner's current ready load and busy tracking,
+resetting its existing idle clock. The shortest 15-minute idle interval exceeds
+the bounded hold plus decode; explicit unload, removal and worker loss still
+invalidate that load. PCM transferred to STT is scrubbed when its owned decode
+ends or is refused, including a busy queue. Cancelling the result receiver fences
+delivery, not worker/native copies or physical retirement.
+
+### Voice-only held turns
+
+`voice.hold_to_talk` defaults on, including older files without the key. Settings → Voice
+persists its separate `SetHoldToTalk` operation; changing the idle policy leaves it alone.
+The Brain refuses held input and key-down reloads while it is off or an off save is queued
+or in flight. The Shell also checks its received choice before disrupting local panels;
+switching off revokes current input, and switching on waits for the saved answer.
+Before closing a panel or discarding typed recovery, Shell also requires speech input to be
+ready, loading or idle-unloaded. Other received states show their own notice without taking
+Esc, opening a source or changing local drafts and errors. Brain remains the admission authority.
+
+The runtime owns one pre-run hold, keyed by connection epoch and a monotonically
+consumed gesture number. Recognition captures defaults and queues a stamped
+target/model/deletion read through the existing store reader. Pinned admission
+is checked before microphone permission and through ordinary storage/build/send
+gates. Missing speech input fails without installing or downloading anything.
+The Shell distinguishes missing and unloaded models from its received speech-input state.
+An existing load can finish only while that same hold is live. Preparation uses
+the store read budget and loading the existing speech load budget.
+
+Microphone frames use an eight-packet queue. The data reader never waits on it:
+overflow terminally fails the matching gesture while credit still progresses.
+The source independently limits collection to 60 seconds. Brain permits the
+10-second startup allowance plus collection, then two seconds for remaining
+frames after both final count and physical stop. Neither deadline proves stop.
+Exact finalization moves nonempty PCM once to the existing STT owner. Nonblank
+text becomes ordinary deletable user history with Hold origin, not a typed/Ask
+watermark; blank results create no turn. No held-input path requests a screen.
+
+New typed/Ask input supersedes an unsubmitted hold. Target/model/default/connection
+changes and deletion fence admission before acceptance; selection cancellation
+is scoped to its gesture. Either pipe ending fences the old owner before grace
+controls drain. Only the matching authenticated physical-stop receipt clears
+admitted device debt, including during grace; failure, timeout or a new session
+cannot borrow uncertain ownership. A failed status write closes the connection.
+
+Known limit: losing a connection during an admitted hold can retain device debt across
+reconnect even after the Shell stops. Later holds then remain unavailable until Kumochi
+restarts. Recovery needs authenticated peer-lifetime and receipt proof, not a timeout,
+single-instance lock or new connection.
+
+Held input uses the ordinary runtime turn-admission gate both before a microphone
+permit and before decoded text becomes a run: initial scene recovery must be
+described, outgoing data must be below its cap, and ending-run/cleanup debt must
+have room. A closed gate ends that hold once as Busy without storing words or
+starting a provider. PCM ingress, control processing and credit remain live;
+there is no second queue of recognized words waiting for capacity.
+
+The STT owner publishes serving-ready before Loaded in the same mutex-protected
+transition, after checking the current ask and shutdown. The serving loop retains
+its worker-loss check before decoding. A prepared
+hold waiting on that load can admit the same owner immediately; Loaded never
+promises readiness that only a later serving-loop iteration will establish.
+
+Finalization controls check the existing hold deadline before changing audio or
+granting a drain/decode budget. A late matching stop still clears physical device
+debt, but neither it nor a late KeyUp can revive an expired input.
+
+Shell installs the native gesture fence before GPUI deferral and retains one metadata-only
+handoff through admitted source start, physical receipt/count and the matching Hold-origin
+run. Per-session liveness closes at either pipe edge. Accepted target/model/account/speech
+mutations revoke logical input before enqueue, with a monotonic choice revision to detect
+changes away and back. PCM wrappers scrub rejected or dropped queued packets and never count
+as typed submissions. Local status, source finalization and ordinary chat are not a second
+transcript store or retry queue.
+
+Deferred native typing and Escape retain their original input owner. Superseded typing
+cannot open over a newer hold, and an old native Escape can cancel only its captured gesture.
+A raw Escape without a hotkey loses that captured owner at key-up; focused-panel Escape
+and explicit typing still act on the current input immediately.
+
+Preparing/loading, Listening, stopping, transcribing and thinking reuse the existing dock,
+status and text views, with localized accessible status text. Only matching live Admitted
+opens the source; Listening precedes acceptance of that source's Running receipt. Thinking
+opens the ordinary answer panel without activation or injected focus input, and re-places a
+resting drawing clear of it before the next paint. Answering hands off to ordinary Runs. Only a
+run's first state carries its origin, so the hold remembers the run that state named and matches
+later states by run; Answering, Done, Failed or Interrupted then end it without a speech notice,
+since the run's own error or stop already shows, and Esc returns to the ordinary order. A
+recognised hold refused at admission always shows a notice, busy, disabled, unavailable or failed
+by cause, including one first recognised at its release, whose gate has already closed. While
+the onboarding window shows, the native fence drops a hold before recognition, so it is never
+refused and shows nothing. One already recognised when the window opens ends through
+`cancel_voice`: cancelled at once if it isn't recording yet, otherwise stopping until its
+microphone has joined ([onboarding](onboarding.md#hold-to-talk)).
+
+The 300 ms hold deadline is a native one-shot timer. On Windows that is `WM_TIMER`, the lowest
+priority message, so a busy UI thread can delay it past the release. Shared gesture code also
+schedules the same deadline on GPUI's timer, whose wake is a posted message; whichever arrives
+first recognises the hold and the other finds nothing due. Auto-repeat of a held chord key also
+advances the gesture, as a backstop that comes only after the keyboard's repeat delay. Explicit typed input cancels and drains the pending hold before its
+first submit attempt. Cancellation keeps a recording owner until true completion; an
+unconfirmed source remains unavailable rather than claiming stopped or allowing replacement.
+No-Running start failures take their notice from the true stop result, not a manufactured
+user cancellation. Confirmed unavailable/unsupported microphones have a dedicated notice;
+only unconfirmed source cleanup uses the microphone-active restart warning.
+When a late receipt confirms cleanup, its confirmed notice replaces that warning without
+reviving the terminal hold or transcribing its expired audio.
+
+The Shell data writer serializes into one caller-owned zeroizing buffer and scrubs all
+bytes written into it after success, encoding refusal or a partial/failed write, then clears
+its length. Earlier frames' written bytes are already scrubbed; each frame's cleanup is
+proportional to that frame, not the retained capacity. Writer exit or unwinding scrubs the
+whole owned capacity. Frame headers, payload caps, packet drop and credit ordering are unchanged.
+This does not erase bytes
+already written to the pipe, allocator/OS copies or native speech-runtime storage.

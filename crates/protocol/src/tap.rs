@@ -47,6 +47,7 @@ impl Tapped for ControlToBrain {
             Self::Stop { .. } => "Stop",
             Self::Pong => "Pong",
             Self::ClearDrawing { .. } => "ClearDrawing",
+            Self::SceneFailed { .. } => "SceneFailed",
             Self::DeleteThread { .. } => "DeleteThread",
             Self::Settings(_) => "Settings",
             Self::ThreadOp(_) => "ThreadOp",
@@ -68,6 +69,8 @@ impl Tapped for ControlToBrain {
             Self::AudioOutput { .. } => "AudioOutput",
             Self::GitHub(_) => "GitHub",
             Self::Issue { .. } => "Issue",
+            Self::VoiceHoldRecognized { .. } => "VoiceHoldRecognized",
+            Self::VoiceHoldStopped { .. } => "VoiceHoldStopped",
         }
     }
 
@@ -138,6 +141,9 @@ impl Tapped for ControlToShell {
             Self::ThreadModelSet { .. } => "ThreadModelSet",
             Self::Voice(_) => "Voice",
             Self::GitHubError(_) => "GitHubError",
+            Self::DrawingReplacementFailed { .. } => "DrawingReplacementFailed",
+            Self::DrawingNotReturned { .. } => "DrawingNotReturned",
+            Self::VoiceHoldStatus { .. } => "VoiceHoldStatus",
         }
     }
 
@@ -212,6 +218,7 @@ impl Tapped for DataToShell {
             Self::PageFailed { .. } => "PageFailed",
             Self::SceneSnapshot { .. } => "SceneSnapshot",
             Self::ScenesRemoved { .. } => "ScenesRemoved",
+            Self::ScenesReplaced { .. } => "ScenesReplaced",
             Self::SceneBegin { .. } => "SceneBegin",
             Self::SceneStepCommit { .. } => "SceneStepCommit",
             Self::SceneSnapshotV1 { .. } => "SceneSnapshotV1",

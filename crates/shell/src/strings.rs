@@ -162,6 +162,19 @@ pub(crate) enum Text {
     VoiceLoading,
     VoiceReady,
     VoiceUnloaded,
+    HoldPreparing,
+    HoldToTalk,
+    HoldToTalkHelp,
+    HoldDisabled,
+    HoldListening,
+    HoldStopping,
+    HoldTranscribing,
+    HoldThinking,
+    HoldEmpty,
+    HoldCancelled,
+    HoldUnavailable,
+    HoldMicrophoneUnavailable,
+    HoldFailed,
     VoiceRestartRequired,
     VoiceInstalledFailed,
     VoiceNotInstalledFailed,
@@ -190,6 +203,11 @@ pub(crate) enum Text {
     TaskbarRemoveFailed,
     MaxFrameRate,
     FrameRateAutomatic,
+
+    // Onboarding
+    OnboardingClose,
+    OnboardingContinue,
+    OnboardingWelcomeHelp,
 
     // ChatGPT accounts
     AccountProvider,
@@ -419,6 +437,19 @@ impl Text {
         VoiceLoading,
         VoiceReady,
         VoiceUnloaded,
+        HoldPreparing,
+        HoldToTalk,
+        HoldToTalkHelp,
+        HoldDisabled,
+        HoldListening,
+        HoldStopping,
+        HoldTranscribing,
+        HoldThinking,
+        HoldEmpty,
+        HoldCancelled,
+        HoldUnavailable,
+        HoldMicrophoneUnavailable,
+        HoldFailed,
         VoiceRestartRequired,
         VoiceInstalledFailed,
         VoiceNotInstalledFailed,
@@ -447,6 +478,11 @@ impl Text {
         TaskbarRemoveFailed,
         MaxFrameRate,
         FrameRateAutomatic,
+
+        // Onboarding
+        OnboardingClose,
+        OnboardingContinue,
+        OnboardingWelcomeHelp,
 
         // ChatGPT accounts
         AccountProvider,
@@ -678,6 +714,19 @@ impl Text {
             Self::VoiceLoading => "voice-loading",
             Self::VoiceReady => "voice-ready",
             Self::VoiceUnloaded => "voice-unloaded",
+            Self::HoldPreparing => "hold-preparing",
+            Self::HoldToTalk => "hold-to-talk",
+            Self::HoldToTalkHelp => "hold-to-talk-help",
+            Self::HoldDisabled => "hold-disabled",
+            Self::HoldListening => "hold-listening",
+            Self::HoldStopping => "hold-stopping",
+            Self::HoldTranscribing => "hold-transcribing",
+            Self::HoldThinking => "hold-thinking",
+            Self::HoldEmpty => "hold-empty",
+            Self::HoldCancelled => "hold-cancelled",
+            Self::HoldUnavailable => "hold-unavailable",
+            Self::HoldMicrophoneUnavailable => "hold-microphone-unavailable",
+            Self::HoldFailed => "hold-failed",
             Self::VoiceRestartRequired => "voice-restart-required",
             Self::VoiceInstalledFailed => "voice-installed-failed",
             Self::VoiceNotInstalledFailed => "voice-not-installed-failed",
@@ -706,6 +755,11 @@ impl Text {
             Self::TaskbarRemoveFailed => "taskbar-remove-failed",
             Self::MaxFrameRate => "settings-max-frame-rate",
             Self::FrameRateAutomatic => "settings-frame-rate-automatic",
+
+            // Onboarding
+            Self::OnboardingClose => "onboarding-close",
+            Self::OnboardingContinue => "onboarding-continue",
+            Self::OnboardingWelcomeHelp => "onboarding-welcome-help",
 
             // ChatGPT accounts
             Self::AccountProvider => "accounts-provider",
@@ -814,6 +868,33 @@ impl Strings {
         let mut args = FluentArgs::new();
         args.set("assistant", assistant);
         self.format(Text::ThreadAssistant.id(), Some(&args))
+    }
+
+    /// The onboarding window's heading, with the product name.
+    pub(crate) fn onboarding_title(&self) -> String {
+        let mut args = FluentArgs::new();
+        args.set("app", kumochi_protocol::constants::DISPLAY_NAME);
+        self.format("onboarding-title", Some(&args))
+    }
+
+    /// The welcome's words before and after the name input, which may sit anywhere in it. Both
+    /// are trimmed, since the row spaces the input itself.
+    pub(crate) fn onboarding_welcome(&self) -> (String, String) {
+        const SPOT: &str = "\u{E000}";
+        let mut args = FluentArgs::new();
+        args.set("name", SPOT);
+        let text = self.format("onboarding-welcome", Some(&args));
+        match text.split_once(SPOT) {
+            Some((before, after)) => (before.trim().to_owned(), after.trim().to_owned()),
+            None => (text, String::new()),
+        }
+    }
+
+    /// The question for the user's name and its help line, with the assistant's name.
+    pub(crate) fn onboarding_user(&self, assistant: &str) -> [String; 2] {
+        let mut args = FluentArgs::new();
+        args.set("assistant", assistant);
+        ["onboarding-user", "onboarding-user-help"].map(|id| self.format(id, Some(&args)))
     }
 
     pub(crate) fn issue_title(&self, title: &str) -> String {
@@ -943,6 +1024,8 @@ const fn error_id(key: ErrorKey) -> &'static str {
         ErrorKey::VoiceUnavailable => "error-voice-unavailable",
         ErrorKey::VoiceModelPath => "error-voice-model-path",
         ErrorKey::GitHubUnavailable => "github-unavailable",
+        ErrorKey::DrawingReplacementFailed => "error-drawing-replacement-failed",
+        ErrorKey::DrawingNotReturned => "error-drawing-not-returned",
     }
 }
 
@@ -969,6 +1052,26 @@ mod tests {
                 "Also show {} in the taskbar",
                 kumochi_protocol::constants::DISPLAY_NAME
             )
+        );
+    }
+
+    #[test]
+    fn onboarding_splits_the_welcome_at_the_name_and_fills_in_the_names() {
+        let strings = Strings::english();
+        assert_eq!(
+            strings.onboarding_welcome(),
+            ("Hi, I'm".to_owned(), String::new())
+        );
+        assert_eq!(
+            strings.onboarding_title(),
+            format!("Welcome to {}", kumochi_protocol::constants::DISPLAY_NAME)
+        );
+        assert_eq!(
+            strings.onboarding_user("Mochi"),
+            [
+                "What should Mochi call you?".to_owned(),
+                "Optional. It's sent to the model you chat with, so Mochi can use it.".to_owned()
+            ]
         );
     }
 

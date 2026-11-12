@@ -9,6 +9,8 @@
 
 use std::time::{Duration, Instant};
 
+pub(crate) mod hold;
+
 const WINDOW: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,9 +29,16 @@ pub(crate) enum Edge {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Event {
-    Key { key: Key, edge: Edge },
+    Key {
+        key: Key,
+        edge: Edge,
+    },
+    /// The native one-shot timer for the gesture's deadline.
     Deadline,
+    /// GPUI's timer for the same deadline, which a busy native queue can't starve.
+    Scheduled,
     Reset,
+    Escape,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +102,7 @@ impl Gesture {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn handle(&mut self, event: Event, now: Instant) -> [Option<Effect>; 3] {
         let effects = self.recognize(event, now);
         if self.legacy_hold {
@@ -110,7 +120,10 @@ impl Gesture {
     }
 
     fn recognize(&mut self, event: Event, now: Instant) -> [Option<Effect>; 3] {
-        if matches!(event, Event::Reset) {
+        if matches!(event, Event::Reset | Event::Escape) {
+            if !matches!(self.phase, Phase::Ready) {
+                tracing::debug!(stage = ?hold::InputStage::Gesture, reason = ?hold::InputReason::Reset, "held speech input boundary");
+            }
             let effects = self.cancel();
             self.reset();
             return effects;
@@ -124,11 +137,22 @@ impl Gesture {
             Key::Other(code) => return self.other_key(code, edge),
         };
         let down = edge == Edge::Down;
+        // shortcut: a held key's auto-repeat also reaches the threshold if both deadline timers are
+        // late, but only after the keyboard's repeat delay (about 500 ms, up to 1 s), so such a
+        // hold starts late; drop it once desk logs never show `by=Repeat`.
         if self.down[index] == down {
-            return [None; 3];
+            return [self.advance(now), None, None];
         }
         let threshold = self.advance(now);
         self.down[index] = down;
+        if down && self.down == [true; 2] {
+            let reason = if matches!(self.phase, Phase::Ready) && self.other == [0; 16] {
+                hold::InputReason::ChordStarted
+            } else {
+                hold::InputReason::ChordSuppressed
+            };
+            tracing::debug!(stage = ?hold::InputStage::Gesture, ?reason, "held speech input boundary");
+        }
         if down
             && matches!(self.phase, Phase::Ready)
             && self.down == [true; 2]
@@ -173,6 +197,9 @@ impl Gesture {
     }
 
     fn other_key(&mut self, code: u16, edge: Edge) -> [Option<Effect>; 3] {
+        if edge == Edge::Down && matches!(self.phase, Phase::Active { .. }) {
+            tracing::debug!(stage = ?hold::InputStage::Gesture, reason = ?hold::InputReason::Interrupted, "held speech input boundary");
+        }
         if code >= 1024 {
             let effects = self.cancel();
             self.reset();
@@ -363,6 +390,54 @@ mod tests {
                 assert!(!gesture.listening(), "first release ends listening");
             }
         }
+    }
+
+    #[test]
+    fn a_chord_key_repeat_starts_the_hold_once_and_only_from_the_threshold() {
+        let start = Instant::now();
+        let at = |millis| start + Duration::from_millis(millis);
+        let mut gesture = Gesture::legacy_hold_fixture();
+        chord(&mut gesture, start);
+        assert_eq!(
+            key(&mut gesture, Key::LeftAlt, Edge::Down, at(299)),
+            [None; 3],
+            "a repeat before the threshold"
+        );
+        assert_eq!(
+            key(&mut gesture, Key::LeftAlt, Edge::Down, at(300)),
+            [Some(Effect::HoldStarted), None, None],
+            "a repeat at the threshold"
+        );
+        assert!(gesture.holding());
+        assert_eq!(
+            key(&mut gesture, Key::LeftControl, Edge::Down, at(330)),
+            [None; 3],
+            "a repeat once holding"
+        );
+        assert_eq!(
+            gesture.handle(Event::Deadline, at(340)),
+            [None; 3],
+            "the late timer once holding"
+        );
+        let mut ready = Gesture::legacy_hold_fixture();
+        assert_eq!(key(&mut ready, Key::LeftAlt, Edge::Down, start), [None; 3]);
+        assert_eq!(
+            key(&mut ready, Key::LeftAlt, Edge::Down, at(400)),
+            [None; 3],
+            "a repeat while ready"
+        );
+        let mut releasing = Gesture::legacy_hold_fixture();
+        chord(&mut releasing, start);
+        assert_eq!(
+            key(&mut releasing, Key::Other(0x1E), Edge::Down, at(10)),
+            [Some(Effect::Resting), None, None],
+            "another key cancels"
+        );
+        assert_eq!(
+            key(&mut releasing, Key::LeftAlt, Edge::Down, at(400)),
+            [None; 3],
+            "a repeat while releasing"
+        );
     }
 
     #[test]

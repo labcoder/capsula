@@ -45,6 +45,7 @@ impl Presence {
         };
         match route {
             Route::RunRetry(run) => {
+                self.cancel_voice(cx);
                 self.dismiss_recovery_notice(cx);
                 let Some(input) = self.text.as_ref().map(|text| text.input.clone()) else {
                     self.runs.dismiss_retry();
@@ -70,7 +71,9 @@ impl Presence {
                 self.notices_changed(&previous, cx);
                 self.runs_changed(cx)?;
             }
-            Route::Account(op) => self.account_op(op, cx),
+            Route::Account(op) => {
+                let _sent = self.account_op(op, cx);
+            }
             Route::SettingsRetry(field) => {
                 let _sent = self.save_setting(field, cx);
             }

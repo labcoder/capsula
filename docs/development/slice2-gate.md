@@ -1,13 +1,18 @@
 # The slice 2 gate
 
-`cargo xtask slice2-gate` checks slice 2's promises against the real dev brain, with no shell
-window and no mouse or keyboard input. It runs on Rez, at normal priority, on a quiet machine.
+`slice2-gate` checks slice 2's promises against the real brain, with no shell window and no mouse
+or keyboard input. It runs on Rez, at normal priority, on a quiet machine, as the gate identity
+(see [the gate identity](gate-identity.md)):
+
+```bash
+cargo run --release --package xtask --features kumochi-protocol/gate-identity -- slice2-gate [<words>]
+```
 
 ## How it runs
 
 ```mermaid
 flowchart LR
-  X[cargo xtask slice2-gate] -->|cargo build| B[kumochid.exe, dev build]
+  X[gate xtask: slice2-gate] -->|cargo build, gate identity| B[kumochid.exe, debug gate build]
   X -->|copies| F["target/slice2-gate/&lt;time&gt;/bin"]
   F --> C["kumochi.exe (a copy of xtask)"]
   F --> D[kumochid.exe]
@@ -19,15 +24,19 @@ flowchart LR
   copies the brain and itself, renamed `kumochi.exe`, into a fresh folder and runs the scripted
   client from that copy. The client reads the instance capability from Credential Manager and
   sends `Hello` on both pipes, as the shell does.
-- Each item gets its own `%LOCALAPPDATA%` folder and fixture script (`KUMOCHI_FIXTURE`, dev builds
-  only), so items never share a store and the developer's dev store is never touched. The gate
-  refuses to start while any `kumochi.exe` or `kumochid.exe` runs, because a dev brain would hold
-  the session's pipes.
+- Each item gets its own `%LOCALAPPDATA%` and `%APPDATA%` folders, under the gate folder's `data`,
+  with Claude Code off, and its own fixture script (`KUMOCHI_FIXTURE`, debug builds only), so items
+  never share a store or settings. A brain still names its pipes, its instance capability, its
+  Credential Manager entries and its Claude Code lane folder by identity rather than by the
+  environment, which is why the gate runs as `Kumochi Gate`, one gate run at a time, and deletes
+  what its brains left when it ends: see [the gate identity](gate-identity.md).
 - The client answers `Ping`, grants credit for each data frame it takes, and records every frame
   with the instant its reader thread took it. Its data reader can pause, take frames one at a
   time, or keep reading while it withholds credit.
 - It prints a table of verdicts and numbers and writes it to `report.md` in the gate's folder.
-  `cargo xtask slice2-gate <words>` runs only the items whose names contain them.
+  `slice2-gate <words>` runs only the items whose names contain them.
+- `slice2-gate --inner` is internal: it is how the copy runs the items, and it starts brains
+  without the run lock, the process check or the cleanup. Never run it by hand.
 
 ## The items
 
@@ -50,12 +59,21 @@ flowchart LR
   known drawings. The real shell's install logic is covered by its unit tests, as its fence is.
 - `Stale` is the brain's own verdict and isn't on the pipe, so the late-step item checks its effects.
 - Every pipe write, and the wait for `Welcome`, is bounded; a stuck transfer is cancelled and
-  waited for before its buffer goes. The whole gate is killed, with its brains, after 20 minutes.
-  It refuses to run from a release xtask, whose brain would use the installed product's names.
+  waited for before its buffer goes. The brain build is killed, with everything it started, after
+  40 minutes, and the whole gate, with its brains, after another 20; a `taskkill` that fails is
+  reported with the process it left. It builds a debug brain from either xtask profile, since only a
+  debug brain plays fixture scripts.
+- A brain whose kill fails isn't waited on, which would never return: the gate keeps its handle,
+  ends it after its item with `taskkill`, waits for it to exit, and fails that item. It only ever
+  ends brains it started and still holds, so no other process can match, even with a reused id.
 - shortcut: one scene can't reach three snapshot chunks today (32 KiB target, at most 64 steps of
   256 B), so the reconnect item's chunks span four scenes; chunking inside a scene is covered by
   the brain's recovery tests. Use one scene once slice 4's steps are bigger.
+- The deleted and kept markers start with letters no fixture word starts with (`qgone…` and
+  `zkept…`). FTS5 stores a term after the first on an index page only as what it adds to the term
+  before it, so a marker sharing a prefix with its neighbour would never appear whole in the raw
+  bytes, and a stale one would pass the scan.
 - Retrieval, summaries and Claude Code also hold thread content; slices 3 and 8 add them to the
   deletion item.
-- The brain is a dev build, because only dev builds read `KUMOCHI_FIXTURE`, so its timings are
+- The brain is a debug build, because only debug builds read `KUMOCHI_FIXTURE`, so its timings are
   slower than a release brain's would be.

@@ -70,6 +70,19 @@ within ±20,000. Chart data uses finite f64 values instead of coordinate-bounded
 numbers. Composed transforms and domain-specific ranges are admission checks.
 Screen/capture anchors are absent, not ignored.
 
+Line, arrow and path stroke widths must be above 0. A shape's `width` is its outline,
+2 by default; 0 draws the shape without an outline, and negative widths are refused. A
+rect's `radius` of 0 gives square corners, as when it is left out. The offered schema
+states these minimums and the positive bounds of circle `r`, path `scale`, text `size`,
+`max_width` and highlight `pad`; box and size components are checked only at
+admission. `set` cannot change a width. `set color` on a shape or path with a fill recolours
+the fill as well as the outline, as an `anim` colour track paints those two, so "make it red"
+reaches a filled shape. Unlike a colour track, it leaves a shape's label at the theme
+foreground. A `set` therefore can't give a filled shape an outline colour unlike its fill; that
+takes a remove and a new put (`shortcut:` in `layout::prepare::patch`). Drawings saved before
+this rule recover with it too: an old `set color` on a filled shape now recolours its fill. The
+layout version stays 2, because a bump would make recovery skip and clear every stored scene.
+
 ### Canvas and overlay placement
 
 Overlay preparation uses `begin.size`, or a 960×600 default canvas. Inline preparation
@@ -89,7 +102,8 @@ retain at least 240×160 logical pixels; the small-display fallback is described
 [presence.md](presence.md). Physical work-area, dock and accepted panel bounds use the window
 scale. Panel open/close,
 dock placement (after re-anchoring panels) and GPUI display-change events refresh the
-stage before repaint. Activation, step installation, Stop and recovery also read the work area
+stage before repaint; a drawing already on screen keeps a stage that still fits, as
+[presence.md](presence.md) describes. Activation, step installation, Stop and recovery also read the work area
 fresh before placing their views; ordinary animation frames do not poll it.
 Work-area-only changes wait for the next placement; add a work-area notification through
 the presence adapter. Per-display overlays are not implemented.
@@ -509,12 +523,16 @@ serialize drawing content into logs, or trace a model-facing tool reply.
 ## Admission and identity
 
 `SceneState::begin` validates positive optional canvas dimensions. `CallState`
-guards one call's begin/step/end order; a new call gets a fresh guard and must
-repeat the stored header with typed equality. Ending a call does not end its scene.
+guards one call's begin/step/end order; a new call gets a fresh guard and must repeat the
+stored header's `v`, `scene`, `surface`, `size` and `others` (`Begin::continues`). Its
+`title` and `alt` may be restated differently: they describe the drawing, and the stored
+header keeps its first text, so the description can go stale after an edit (`shortcut:`).
+Racing calls that begin one new name use the same comparison. Ending a call does not end
+its scene.
 
 `begin.others` is the closed vocabulary `clear` (default) or `keep`. Old stored headers
 decode to `clear`, and serialization always includes it. Only a new scene applies this
-policy: a continuation with an identical stored header never clears another scene.
+policy: a continuation of a stored header never clears another scene.
 
 `ReplacementAdmission` owns a newcomer, its checked candidate and at most four deduplicated
 victims with their original identities, revisions, mutations and charges. All early and
@@ -552,6 +570,73 @@ one-based, slots are zero-based, and animation slots are not compacted away.
 Neither Stop nor append renumbers old handles. The returned commit index is
 zero-based over lifetime commits. Handle decoding rejects zero/unused revisions
 and slots beyond the 856-operation bound.
+
+### Paint order and `set.behind`
+
+Objects paint in handle order, so a new object lands on top. `{"target":"sun","behind":"c1"}`
+in a step's `set` links the target to `c1`, whether the target is new in that step or already
+drawn; a later link for the same target replaces the earlier one. Each prepared object keeps its
+latest link as an anchor handle (`Placed.behind`).
+
+Paint order follows the live links, not the order they were written. An object with a live link
+paints immediately below its anchor. Everything behind `c1`, directly or through a chain (moon
+behind sun behind `c1`), paints as one group just before `c1`, and `c1`'s direct dependants keep
+handle order among themselves, so the newer one paints higher. Objects with no live link paint in
+handle order. The same links give the same picture whatever order they were set in, within one
+step or across steps.
+
+- **Refusals**, all at `set[i].behind`:
+  - the target is a container (diagram, table or chart, whose children would stay on top) or a 3D
+    object: `KindChanged`;
+  - the anchor is unknown (`UnknownRef`), removed by the same step (`RemovedInStep`) or 3D
+    (`Unsupported`);
+  - the target and the anchor have different parents: both must be top-level, or siblings in one
+    container (`KindChanged`);
+  - the link would close a cycle, directly, through a chain, through a removed anchor or within one
+    step's `set` list (`ReferenceCycle`, at the link that closes it), so an earlier link can't be
+    reversed;
+  - the link would make a chain longer than `MAX_OBJECT_DEPTH` (16) links (`TooDeep`).
+
+  Admission rebuilds each target's latest anchor from the kept steps only when a step names
+  `behind`, so no admission state is stored. A removed object keeps its link in that map while
+  something live is behind it, the same rule the layout holds it by, so the cycle walk passes
+  through it the way its dependants do and it counts towards their chain's length. A removed
+  object with nothing live behind it is left out and counts for nothing, from the step after
+  the one that removes it: within that step it still counts, so removing a 16-deep stack and
+  linking its base in one step is refused `TooDeep` where two steps are admitted. That only
+  refuses more, and replay refuses the same step.
+- **A removed or cut anchor.** It keeps its place in the walk without painting, so nothing that
+  survives changes order: its dependants paint where they did, and if the anchor was behind
+  something, they stay behind that too. `LayoutState` holds every removed or cut anchor that a
+  live link still reaches, directly or through another held anchor, with its own last link, and
+  lets it go once nothing reaches it; `prepare` and `LayoutState::cut` rebuild that set the same
+  way, and admission's map keeps the same removed objects' links. Replay and recovery
+  prepare the same steps and cuts in the same order, so the live view, replay and `recover` agree.
+  A cut that drops the step that named `behind` drops its links with it, because a dropped step
+  never reaches the layout or admission's map.
+- **Stored records.** `behind` is an appended optional field of `Change`. Stored steps are JSON,
+  where an absent field decodes as none, so every step stored before it still decodes
+  (`a_stored_step_written_before_behind_existed_still_decodes`). Postcard only crosses the
+  brain–shell pipe between one build's two processes and is never stored. The other way round
+  doesn't hold: this build writes `"behind":null` into every `set` entry and `Change` denies
+  unknown fields, so an older build can't decode a stored step with a non-empty `set` written by
+  this one, and its recovery leaves that scene out and clears it.
+- **Cost.** Nothing is added per frame: sampling and paint read the order `SceneView` builds when
+  it activates a step or installs a rest view. With no link in the scene that order is the
+  in-place handle sort, with no added allocation or lookup. With links it is built once, with four
+  allocations bounded by the node count plus the held anchors (the places by handle, the sorted
+  links, the walk stack and the order). Each held anchor is one entry in the layout's held map,
+  counted in its index bytes; the map stays empty, and costs nothing, in a scene with no links.
+  Each prepare and each cut rebuilds the map, so with links cut and recovery allocate it once
+  each; every held anchor lies on a live chain of at most 16 links, so it holds at most 16 per
+  live object with a link.
+  Admission's walk up from an anchor stops at 16 links. It reads the depth below a target from
+  counts of the objects at each distance below every linked object, built once per step that
+  names `behind` and updated along at most 16 anchors for each link, so a step that re-points a
+  target with many objects behind it costs no walk over them.
+
+`behind` can't bring an object forward: moving an existing object in front of a newer one, or
+undoing a link, needs a remove and a new put (`shortcut:`, until someone asks for "in front").
 
 ### Bounded Mermaid flowcharts
 
@@ -711,8 +796,11 @@ Repeated finite animations, including delay, must fit 60 seconds; infinite repea
 fit its first play and remains bounded by the scene deadline. Zero-period repetition,
 zero-period flow and duplicate same-step (target, property) tracks fail with `OutOfRange`.
 
-The private SVG walker accepts M/L/H/V/Q/C/Z, absolute or relative, including implicit
-repetitions. It validates coordinates and counts commands before vertices exist.
+The private SVG walker accepts M/L/H/V/Q/T/C/S/Z, absolute or relative, including implicit
+repetitions. `S` and `T` become ordinary cubic and quadratic segments: their first control
+point reflects the previous segment's last control point through the pen when that segment was
+a cubic (for `S`) or a quadratic (for `T`), and is the pen otherwise. A reflected point outside
+±20,000 is `OutOfRange`. Arcs (`A`) remain `Unsupported`. It validates coordinates and counts commands before vertices exist.
 Quadratic and cubic second differences determine power-of-two subdivision counts at
 0.25 logical-pixel tolerance after conservative composed scale bounds. SVG admission and
 preparation reserve up to a further 2× presentation scale for overlays, capped at composed scale 64;
@@ -727,9 +815,9 @@ floor(length / 10) + 2 per segment + 1, with 6-unit dashes and 4-unit gaps in pr
 path's control polygon times its `scale`, a line's from, vias or bend control and to, a rect's
 or ellipse's box perimeter 2(w + h), and a polygon's own closed point sequence, never its box.
 The extra piece covers f32 rounding of prepared points and applies only when there is an edge,
-so an op without one, such as a path of only moves, charges 0. A line with a `ref` end and a diagram
-edge charge 0, because their geometry needs fonts; preparation counts them exactly (Paint work
-below). Past the global cap, admission fails with `OverBudget(DashPieces)`.
+so an op without one, such as a path of only moves or a shape of `width` 0, charges 0. A line with
+a `ref` end and a diagram edge charge 0, because their geometry needs fonts; preparation counts
+them exactly (Paint work below). Past the global cap, admission fails with `OverBudget(DashPieces)`.
 
 Transform checks compose conservative scale, translation and rotation envelopes down
 the parent graph, including spring overshoot, and reject overflow or scale underflow.
@@ -833,7 +921,7 @@ overlaps as weak. There is no union pass or extra paint charge for isolation.
 
 A fill over `FILL_VERTEX_LIMIT` (21,845, a third of the u16 index space) or a rect outline over
 `OUTLINE_POINT_LIMIT` (5,460) can't be one tessellation build, so preparation fails with
-`OverResidency`. `PaintWork::within_limits` also checks the global dash, fill-vertex and
+`OverPaintWork`. `PaintWork::within_limits` also checks the global dash, fill-vertex and
 outline budgets, which are measured on Rez. Solid strokes carry no paint charge because
 construction bounds every generated line: a flattened path has at most 4,096 segments and
 every other line at most 513 points including a closed outline's repeated first point, so
@@ -844,12 +932,12 @@ The global limits are 512 dash pieces, 512 fill vertices and 512 outline points,
 across all visible scenes and reserved ready/rest states. On an overlay, four radius-8 filled
 and bordered boxes cost 100 fill and outline points, leaving room for labels and dashed connectors;
 labels remain subject to the existing text and object limits. A drawing beyond the limits
-fails explicitly through the scene's residency failure or recovery clear, without simplifying
+fails explicitly through the scene's `PaintWork` failure or recovery clear, without simplifying
 its geometry. Before counting crossings, preparation refuses any one generated fill with
 more than 512 points, which cannot fit even without a crossing. Given a paint cap
 (`PrepareInput::with_paint_cap`, and the `paint_cap` of `recover` and `recover_all`; the
 shell's worker and recovery pass `PaintWork::LIMITS`), it also keeps a running total of the
-scene's own paint work and refuses with `OverResidency` once that passes the cap, which no
+scene's own paint work and refuses with `OverPaintWork` once that passes the cap, which no
 admission could accept. Each fill then counts crossings only up to the fill budget left, so a
 refused scene costs at most about 512²/2 crossing tests. Without a cap the charge stays exact.
 
@@ -1636,7 +1724,8 @@ unconsumed ready successors plus a running position, not the gap between lifetim
 At most eight jobs or undelivered answers retain worker slots; dropping an unspawned job
 releases its slot too. Recovered layouts, ready deltas and returned consumption owners
 share the unchanged 64 MiB allowance. An over-cap answer fails with `Residency` rather than
-waiting indefinitely for bytes. Clearing, removal and disconnect release the presenter's
+waiting indefinitely for bytes; one whose paint work, with the other scenes', passes
+`PaintWork::LIMITS` fails with `PaintWork`. Clearing, removal and disconnect release the presenter's
 ownership but cannot release a result still held by its caller. Each mirrored scene also
 reserves a resting view and a frame inside this allowance: the view's cloned layout index,
 node/paint/track storage and generation, plus both frame buffers, and the frame's paint cache
@@ -1698,6 +1787,17 @@ latency, real Win32 HWND/DWM/capture-exclusion behavior and native Rez before-an
 measurements remain unmeasured; a `160..161` count alone does not close the recovery or
 acceptance gates.
 
+The five episodes run in plain `cargo test`: `the_recovery_episodes_pass_in_fresh_processes`
+reruns each alone in a child process of the test binary, because the deferred dropper's pending
+counts and the recorder's start order are process-wide. In the steady-state draws, an allocation
+outside Kumochi's own `App` paint scopes is GPUI's: it is counted and held to its measured
+ceiling of 91 allocations and 23,137 bytes, while Kumochi's own scopes still add none. The whole
+interval from the first draw (`162`) through the terminal apply (`161`) counts as `App` and is
+held to measured per-case bounds, at most 395 allocations and 130,961 bytes, of which at most
+172 allocations and 65,598 bytes outlive the interval. The real typing panel's gpui-kit text
+input keeps the text system alive after teardown, so the episodes expect two holders of it; this
+is an accepted exception to raise with gpui-kit.
+
 Fixed four-slot cache
 metadata is conservatively charged in full to each scene, rather than adding an unmetered
 index allocation. Begin, recovery and acknowledged-cut adoption check the combined charge.
@@ -1710,8 +1810,13 @@ The ignored native eight-window residency fixture replaces each consumed rest wi
 resting view and includes the reserved frames. It retains the previous consumption owner
 until the next handoff, with four scenes and eight prepared positions each. This exercises
 the storage allowance on native shaping, not production activation, paint latency or RSS.
-On Rez at 100% scale (96 DPI, 2560×1440/144 Hz), the 2026-11-05 run charged peaks of
-54,823,602 bytes for the Unicode fixture and 52,430,246 for ASCII, below 67,108,864.
+It runs at the paint and object caps. Since the shell worker applies `PaintWork::LIMITS`,
+maximal content never reaches the window whole: a lone maximal scene's step 21, its first
+500-point scatter series, is refused with `PaintWork`, and with four scenes the fourth is
+refused at step 0. A separate ignored native test checks the lone-scene refusal. The
+maximal-content peaks below predate that cap. On Rez at 100% scale (96 DPI,
+2560×1440/144 Hz), the 2026-11-05 run charged peaks of 54,823,602 bytes for the Unicode
+fixture and 52,430,246 for ASCII, below 67,108,864.
 That binary was built before the final main merge; these are not exact-final-head native results.
 These are allowance checks, not before/after performance comparisons or heap bounds.
 
@@ -1743,7 +1848,8 @@ Recovery waits for a free worker slot under one unchanged two-second deadline fo
 a conservative margin over the measured core recovery fixtures (below 86 ms on Rez with
 fixed text measurement). Full cap recovery
 with real fonts remains a B9 measurement, not a claim made by the fixed-measurement fixture.
-A failed recovered scene is cleared through `ClearDrawing`, retaining its typed history and
+A failed recovered scene is refused through `SceneFailed`, which the brain clears without
+treating it as a user clear, retaining its typed history and
 allowing successful scenes to install. If the whole batch misses its deadline, its pending
 scenes clear and late answers cannot restore them. Stop clears incomplete recovery first,
 then cuts every known v1 scene at its activated bound. Cuts remain held until the data-pipe
@@ -1761,6 +1867,44 @@ the original cuts rather than being cut by a delayed follow-up Stop.
 Clear intent made while scenes are mirrored survives brain restarts because scene ids are
 durable event ids; membership
 that still names a locally cleared scene causes its idempotent clear to be sent again.
+
+### Bounded visual replacement
+
+`ScenesReplaced` ends old semantic bindings and tombstones their ids immediately. The UI-owned
+shared `Frames` bank moves up to four sampled frames, their caches and required layout/view
+owners into one retirement attempt. Those pictures never resample, animate, accept input or
+acknowledge old steps. Survivors plus outgoing pictures retain scene order; the incoming target
+does not paint beside them. Its first current sample with items atomically replaces the outgoing
+set, including a zero-alpha or zero-length entrance pose. Waiting for positive ink would prevent
+the first paint from starting that entrance's clock.
+
+The frozen owners remain charged against combined logical object/work caps and the unchanged
+64 MiB presenter residency allowance, including fixed staging and returned owners. If a new
+admission, preparation or activation would fit only without retirement, the bank relinquishes
+its frozen owners through the existing dropper and continues the ordinary replacement. It never
+adds a new capacity refusal. Worker answers and physical dropper retention remain separate from
+that presenter allowance. At most four frames are selected, never outgoing plus incoming.
+
+One watchdog deadline, 250 ms from marker processing, releases the visual hold without failing
+the newcomer. Continuations do not reset it. After handoff the successor epoch is guarded only
+until first paint or that original expiry; structurally empty prefixes can advance. While that
+epoch is guarded, its ready head is excluded from activation wakes; future view wakes and the
+absolute expiry still schedule normally. A second replacement disposes the first attempt.
+Stop includes an unbegun successor in the existing
+pending zero-cut membership; clear remembers its id before disposing the bank. Either can drain
+late commits without recreating old ink. Any successful thread deletion flushes retirement,
+including an unrelated deletion, and immediately synchronizes visibility and the watchdog;
+ordinary successor removal, terminal failure and disconnect
+also dispose it. Retiring paint failure is local disposal, not an old-scene failure. No retiring
+owner is persisted or recovered, and genuine empty/failure host recreation remains unchanged.
+Header, admission-expiry, sample, paint and host-show refusals use the content-free `SceneFailed`
+clear instead of an explicit user clear. The brain derives replacement-loss feedback from the
+committed scene, so neither an unbegun successor nor a recovered owner needs the shell to guess
+its original run.
+Whole-scene refusals ignore unknown or gone ids and clear only their live target; they never
+cancel unrelated newcomers as an explicit user clear does.
+Esc without a known run disposes the visual hold without inventing a run id; pending typed
+cancellation and later named runs still use ordinary fencing.
 
 ### Serialized activation and first-paint acknowledgement
 

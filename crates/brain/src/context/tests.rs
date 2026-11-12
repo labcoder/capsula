@@ -1638,6 +1638,116 @@ fn a_bad_stored_round_record_fails_the_build() {
 }
 
 #[test]
+fn a_round_the_reader_would_refuse_is_never_written() {
+    use crate::dispatch::ToolOutput;
+    let mut world = world("ctx-rounds-refused");
+    let at = first_round(&mut world);
+    let opaque =
+        |item: Value| Opaque::new(serde_json::to_vec(&item).expect("json")).expect("small");
+    let call = CallId::new("c3").expect("short");
+    let frame = r#"{"call":"c3","output":{"text":""}}"#;
+    let fits = "x".repeat(65 * 1024 - frame.len());
+    let over = "x".repeat(65 * 1024 + 1 - frame.len());
+    let backwards = vec![HistoryRef {
+        thread: world.main,
+        first: EventId(2),
+        last: EventId(1),
+    }];
+    for output in [ToolOutput::Text(over), ToolOutput::History(backwards)] {
+        let refused = world.store.append_round(
+            at,
+            ConnectionTag(7),
+            Some("Refused."),
+            &[opaque(said("assistant", "Refused."))],
+            &[(call.clone(), output)],
+        );
+        assert!(
+            matches!(refused, Err(StoreError::RoundRecord)),
+            "{refused:?}"
+        );
+    }
+    world
+        .store
+        .append_round(
+            at,
+            ConnectionTag(7),
+            None,
+            &[opaque(call_item("c3"))],
+            &[(call, ToolOutput::Text(fits.clone()))],
+        )
+        .expect("the largest result the reader takes");
+    world
+        .store
+        .end_run(at.0, at.1, &[], RunEnd::Done)
+        .expect("ended");
+    let (_, next) = world.run(Some(world.main), "next", None);
+    let mut expected = first_round_input();
+    expected.extend([
+        call_item("c3"),
+        json!({ "type": "function_call_output", "call_id": "c3", "output": fits }),
+        next_ask(),
+    ]);
+    assert_eq!(
+        next_input(&world, next, 7),
+        expected,
+        "the refused rounds left nothing, and the thread still builds"
+    );
+}
+
+#[test]
+fn a_native_item_the_reader_would_refuse_is_never_written() {
+    let mut world = world("ctx-rounds-native-refused");
+    let at = first_round(&mut world);
+    // `1e5` is legal JSON that reads back as `100000.0`, so this item grows past 256 KiB.
+    let growing = format!(r#"{{"n":[{}1e5],"type":"message"}}"#, "1e5,".repeat(59_999));
+    let frame = r#"{"pad":"","type":"message"}"#;
+    let fits = format!(
+        r#"{{"pad":"{}","type":"message"}}"#,
+        "x".repeat(256 * 1024 - frame.len())
+    );
+    assert_eq!(fits.len(), 256 * 1024);
+    let opaque = |item: &str| Opaque::new(item.as_bytes().to_vec()).expect("within the cap");
+    let refused = world.store.append_round(
+        at,
+        ConnectionTag(7),
+        Some("Refused."),
+        &[opaque(&growing)],
+        &[],
+    );
+    assert!(
+        matches!(refused, Err(StoreError::RoundRecord)),
+        "{refused:?}"
+    );
+    world
+        .store
+        .append_round(at, ConnectionTag(7), None, &[opaque(&fits)], &[])
+        .expect("the largest item the reader takes");
+    let reader = Connection::open(world.scratch.db()).expect("reader");
+    let items = Snapshot::begin(&reader)
+        .expect("snapshot")
+        .conversation(world.main, None, usize::MAX)
+        .expect("the thread still reads");
+    let natives: Vec<&[u8]> = items
+        .iter()
+        .filter_map(|item| match &item.body {
+            Body::Native { item, .. } => Some(item.bytes()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        natives.len(),
+        5,
+        "round 1's four items and the one that fits"
+    );
+    assert_eq!(natives[4], fits.as_bytes());
+    assert!(
+        !items
+            .iter()
+            .any(|item| item.body == Body::Assistant("Refused.".into()))
+    );
+}
+
+#[test]
 fn a_full_text_output_replays_as_its_text_and_an_untagged_one_as_it_was() {
     let mut world = world("ctx-rounds-text");
     let main = world.main;

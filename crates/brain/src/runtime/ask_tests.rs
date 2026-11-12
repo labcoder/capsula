@@ -103,11 +103,8 @@ fn seed(scratch: &Scratch, [label, info, alt]: [&str; 3], choice: &ModelChoice) 
     scene
 }
 
-/// The current turn carries its minute and the complete drawing header.
-fn assert_turn_context(context: &str, alt: &str) {
-    let (stamp, drawings) = context
-        .split_once("\nDrawings on screen: ")
-        .expect("drawing context follows time");
+/// `stamp` reads as `YYYY-MM-DD HH:MM`.
+pub(super) fn assert_minute(stamp: &str) {
     assert_eq!(stamp.len(), 16, "YYYY-MM-DD HH:MM");
     assert!(
         stamp.char_indices().all(|(at, c)| match at {
@@ -118,6 +115,14 @@ fn assert_turn_context(context: &str, alt: &str) {
         }),
         "YYYY-MM-DD HH:MM"
     );
+}
+
+/// The current turn carries its minute and the complete drawing header.
+fn assert_turn_context(context: &str, alt: &str) {
+    let (stamp, drawings) = context
+        .split_once("\nDrawings on screen: ")
+        .expect("drawing context follows time");
+    assert_minute(stamp);
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(drawings).expect("drawing headers"),
         serde_json::json!([{"begin":{"v":1,"scene":"car","surface":"overlay","size":null,"title":null,"alt":alt,"others":"clear"}}])

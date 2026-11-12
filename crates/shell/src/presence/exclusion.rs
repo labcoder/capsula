@@ -8,7 +8,7 @@ use kumochi_protocol::message::{CaptureFor, LeaseGeneration};
 use super::{Context, Presence, platform};
 
 const LIFETIME: Duration = Duration::from_secs(3);
-const SLOTS: [Slot; 7] = [
+const SLOTS: [Slot; 8] = [
     Slot::Dock,
     Slot::Proxy,
     Slot::Status,
@@ -16,6 +16,7 @@ const SLOTS: [Slot; 7] = [
     Slot::Threads,
     Slot::Settings,
     Slot::Drawing,
+    Slot::Onboarding,
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -27,6 +28,7 @@ pub(super) enum Slot {
     Threads,
     Settings,
     Drawing,
+    Onboarding,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,7 +61,7 @@ struct ExclusionLease<R> {
     key: Key,
     deadline: Instant,
     revoked: bool,
-    receipts: [Option<R>; 7],
+    receipts: [Option<R>; 8],
 }
 
 pub(super) struct Exclusion<R> {
@@ -204,7 +206,7 @@ pub(super) use tests::Fake as Fixture;
 
 pub(super) struct Windows<'a> {
     pub(super) native: &'a platform::PresenceNative,
-    pub(super) handles: [Option<AnyWindowHandle>; 7],
+    pub(super) handles: [Option<AnyWindowHandle>; 8],
     pub(super) cx: &'a mut gpui_kit::App,
     #[cfg(test)]
     pub(super) fixture: Option<std::rc::Rc<std::cell::RefCell<Fixture>>>,
@@ -364,7 +366,7 @@ impl Presence {
         )
     }
 
-    pub(super) fn exclusion_handles(&self) -> [Option<AnyWindowHandle>; 7] {
+    pub(super) fn exclusion_handles(&self) -> [Option<AnyWindowHandle>; 8] {
         [
             Some(self.dock_window),
             None,
@@ -373,6 +375,7 @@ impl Presence {
             self.thread_panel.as_ref().map(|panel| panel.window),
             self.settings_panel.as_ref().map(|panel| panel.window),
             self.overlay.window().map(|overlay| overlay.window),
+            self.onboarding.as_ref().map(|panel| panel.window),
         ]
     }
 

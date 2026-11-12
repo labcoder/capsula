@@ -33,7 +33,9 @@ use crate::voice::tts::{Engine, TtsError, TtsHandle};
 use crate::voice::{LoadEvent, Reports};
 
 /// Returns the owner's idle terminal report without applying it to the installer.
-async fn released_input(scratch: &Scratch) -> (Brain, std_mpsc::Sender<()>, Arc<HeldFetch>, Event) {
+pub(super) async fn released_input(
+    scratch: &Scratch,
+) -> (Brain, std_mpsc::Sender<()>, Arc<HeldFetch>, Event) {
     use crate::voice::installer::{Durable, Effect, Installer};
 
     std::fs::create_dir_all(scratch.dir()).expect("scratch folder");
@@ -115,6 +117,41 @@ async fn released_input(scratch: &Scratch) -> (Brain, std_mpsc::Sender<()>, Arc<
 fn queued_control(output: &mut mpsc::Receiver<Vec<u8>>) -> ControlToShell {
     let bytes = output.try_recv().expect("one control frame queued");
     frame::decode(&bytes[frame::HEADER_LEN..]).expect("valid control frame")
+}
+
+#[tokio::test]
+async fn hold_to_talk_off_never_reloads_on_key_down() {
+    let scratch = Scratch::trusted("voice-key-down-disabled");
+    let (mut brain, _release, _fetch, unloaded) = released_input(&scratch).await;
+    brain.voice_event(unloaded, None).unwrap();
+    std::fs::write(
+        scratch.dir().join(CONFIG_FILE),
+        "[voice]\nhold_to_talk = false\n",
+    )
+    .unwrap();
+    brain.config = scratch.config();
+    let (out, mut output) = mpsc::channel(8);
+    let queue = RefCell::new(DataQueue::new(window()));
+    let (ready, mut tap) = (Notify::new(), Tap::from_env());
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    let mut ping = None;
+    for gesture in [1, 2] {
+        assert_eq!(
+            brain.control_frame(
+                ControlToBrain::KeyDown {
+                    gesture: kumochi_protocol::message::GestureId(gesture),
+                    t_qpc: 1,
+                },
+                0,
+                &mut link,
+                &mut ping
+            ),
+            Ok(None)
+        );
+        assert_eq!(brain.hold_voice().0, PartState::Unloaded);
+        assert_eq!(output.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    }
+    brain.close().await;
 }
 
 #[tokio::test]
@@ -445,9 +482,9 @@ async fn idle_policy_reaches_the_owner_only_after_settings_commit_and_installer_
 /// A fetch that has 3 of 9 bytes downloaded, then ends with the result the test sends, or as
 /// cancelled once cancelled. It counts the fetches begun and cancelled, and notifies each start.
 #[derive(Debug)]
-struct HeldFetch {
+pub(in crate::runtime) struct HeldFetch {
     results: tokio::sync::Mutex<mpsc::UnboundedReceiver<Result<(), DownloadError>>>,
-    begun: AtomicUsize,
+    pub(super) begun: AtomicUsize,
     cancelled: AtomicUsize,
     started: tokio::sync::Notify,
 }
@@ -484,7 +521,7 @@ impl Fetch for HeldFetch {
 /// Where a test sends how a held fetch ends.
 type Results = mpsc::UnboundedSender<Result<(), DownloadError>>;
 
-fn held_fetch() -> (Arc<HeldFetch>, Results) {
+pub(super) fn held_fetch() -> (Arc<HeldFetch>, Results) {
     let (results, held) = mpsc::unbounded_channel();
     let fetch = HeldFetch {
         results: tokio::sync::Mutex::new(held),

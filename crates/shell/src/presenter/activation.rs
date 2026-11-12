@@ -162,6 +162,10 @@ impl Presenter {
         if self.generation != Some(generation) {
             return Ok(());
         }
+        self.frames.borrow_mut().expire_retirement(now);
+        if self.frames.borrow().guards_successor(id) {
+            return Ok(());
+        }
         let Some(scene) = self.scenes.get(&id) else {
             return Ok(());
         };
@@ -292,15 +296,18 @@ impl Presenter {
     }
 
     pub(crate) fn next_wake(&self, now: Instant) -> Option<Instant> {
+        let frames = self.frames.borrow();
         self.scenes
-            .values()
-            .filter(|scene| scene.cut == Cut::Open && !scene.skipping)
-            .filter_map(|scene| {
+            .iter()
+            .filter(|(_, scene)| scene.cut == Cut::Open && !scene.skipping)
+            .filter_map(|(id, scene)| {
                 let time = scene.activation.time(now);
                 let head = scene
                     .ready
                     .front()
-                    .filter(|_| scene.pending_consumption.is_none())
+                    .filter(|_| {
+                        scene.pending_consumption.is_none() && !frames.guards_successor(*id)
+                    })
                     .and_then(|head| {
                         scene
                             .activation
@@ -343,11 +350,15 @@ impl Presenter {
         scenes
             .chain(self.lane.as_ref().map(|lane| lane.run))
             .chain(held)
+            .chain(self.frames.borrow().retirement.as_ref().and_then(|r| r.run))
             .filter(|run| self.fenced.is_none_or(|f| *run > f))
             .max()
     }
 
     pub(crate) fn live_work(&self, now: Instant) -> bool {
+        if self.frames.borrow().retirement.is_some() {
+            return true;
+        }
         let open_run = |run| self.fenced.is_none_or(|f| run > f);
         if self.lane.as_ref().is_some_and(|lane| open_run(lane.run))
             || self.held.iter().any(|(frame, _)| matches!(&**frame, DataToShell::SceneStepCommit { run, .. } if open_run(*run)))

@@ -6,7 +6,7 @@
 //! they hide would otherwise leave keys held.
 
 use std::cell::{Cell, OnceCell};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::RemoteDesktop::{
@@ -21,12 +21,14 @@ use windows::Win32::UI::Input::{
     RIDEV_DEVNOTIFY, RIDEV_INPUTSINK, RIDEV_REMOVE, RIM_TYPEKEYBOARD, RegisterRawInputDevices,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EVENT_SYSTEM_DESKTOPSWITCH, GIDC_REMOVAL, KillTimer, PBT_APMSUSPEND, PostMessageW,
-    RI_KEY_BREAK, RI_KEY_E0, RI_KEY_E1, SetTimer, WINEVENT_OUTOFCONTEXT, WM_APP, WM_INPUT,
-    WM_INPUT_DEVICE_CHANGE, WM_POWERBROADCAST, WM_TIMER, WM_WTSSESSION_CHANGE,
+    EVENT_SYSTEM_DESKTOPSWITCH, GIDC_REMOVAL, GetQueueStatus, KillTimer, PBT_APMSUSPEND,
+    PostMessageW, QS_ALLINPUT, RI_KEY_BREAK, RI_KEY_E0, RI_KEY_E1, SetTimer, WINEVENT_OUTOFCONTEXT,
+    WM_APP, WM_INPUT, WM_INPUT_DEVICE_CHANGE, WM_NCDESTROY, WM_POWERBROADCAST, WM_TIMER,
+    WM_WTSSESSION_CHANGE,
 };
 
 use super::presence::{PresenceError, struct_size};
+use crate::input::hold::{InputReason, InputStage};
 use crate::input::{Edge, Event, Key};
 
 /// The proxy's only timer: the gesture's next one-shot deadline.
@@ -39,6 +41,8 @@ const OVERRUN_MAKE_CODE: u16 = 0xFF;
 const KEYBOARD: (u16, u16) = (0x01, 0x06);
 /// Posted to the proxy when the input desktop changes.
 const DESKTOP_SWITCHED: u32 = WM_APP + 2;
+/// How late an armed deadline may be at a chord key before the message queue is logged.
+const OVERDUE: Duration = Duration::from_millis(50);
 
 thread_local! {
     /// The proxy that hears desktop switches; the WinEvent callback has no context of its own.
@@ -60,6 +64,8 @@ pub(super) struct Keys {
     deliver: OnceCell<Deliver>,
     /// The deadline the timer is armed for, if any.
     deadline: Cell<Option<Instant>>,
+    /// The overdue deadline whose message queue was already logged.
+    overdue: Cell<Option<Instant>>,
     sessions: Cell<bool>,
     desktop: Cell<Option<HWINEVENTHOOK>>,
 }
@@ -79,6 +85,7 @@ impl Keys {
             instant: Instant::now(),
         };
         let event = match message {
+            _ if EscapeHotkey::fired(message, wparam) => Event::Escape,
             WM_INPUT => match read_key(lparam) {
                 Some(event) => event,
                 None => return false,
@@ -86,24 +93,56 @@ impl Keys {
             // A stale or early WM_TIMER is harmless: the gesture ignores a deadline it hasn't
             // reached and returns the remaining one, which is armed again below.
             WM_TIMER if wparam.0 == DEADLINE_TIMER => {
+                tracing::debug!(stage = ?InputStage::Native, reason = ?InputReason::DeadlineDelivered, "held speech input boundary");
                 self.disarm(hwnd);
                 Event::Deadline
             }
             WM_INPUT_DEVICE_CHANGE if wparam.0 == usize::try_from(GIDC_REMOVAL).unwrap_or(0) => {
                 Event::Reset
             }
-            WM_WTSSESSION_CHANGE | DESKTOP_SWITCHED => Event::Reset,
+            WM_WTSSESSION_CHANGE | DESKTOP_SWITCHED | WM_NCDESTROY => Event::Reset,
             WM_POWERBROADCAST if wparam.0 == usize::try_from(PBT_APMSUSPEND).unwrap_or(0) => {
                 Event::Reset
             }
             _ => return false,
         };
+        if self.overdue(event, at.instant) {
+            // SAFETY: reads only this thread's own message queue state.
+            let queue = unsafe { GetQueueStatus(QS_ALLINPUT) };
+            tracing::debug!(stage = ?InputStage::Native, reason = ?InputReason::DeadlineOverdue, queue, "held speech input boundary");
+        }
         if let Some(deliver) = self.deliver.get() {
             // `at` stays the event's time; the timer counts from now, since delivery takes time.
             let deadline = deliver(event, at);
             self.arm(hwnd, deadline, Instant::now());
+        } else if matches!(
+            event,
+            Event::Deadline
+                | Event::Key {
+                    key: Key::LeftControl | Key::LeftAlt,
+                    ..
+                }
+        ) {
+            tracing::warn!(stage = ?InputStage::Native, reason = ?InputReason::CallbackMissing, "held speech input failed");
         }
-        message == WM_TIMER || message == DESKTOP_SWITCHED
+        message == WM_TIMER
+            || message == DESKTOP_SWITCHED
+            || (event == Event::Escape && self.deliver.get().is_some())
+    }
+
+    /// True once per armed deadline, when a chord key arrives more than `OVERDUE` after it.
+    fn overdue(&self, event: Event, at: Instant) -> bool {
+        matches!(
+            event,
+            Event::Key {
+                key: Key::LeftControl | Key::LeftAlt,
+                ..
+            }
+        ) && self
+            .deadline
+            .get()
+            .filter(|deadline| at.saturating_duration_since(*deadline) > OVERDUE)
+            .is_some_and(|deadline| self.overdue.replace(Some(deadline)) != Some(deadline))
     }
 
     fn arm(&self, hwnd: HWND, deadline: Option<Instant>, now: Instant) {
@@ -119,10 +158,12 @@ impl Keys {
         let millis = u32::try_from(millis).unwrap_or(u32::MAX).max(1);
         // SAFETY: `hwnd` is the proxy on this thread; replacing the same id rearms it.
         if unsafe { SetTimer(Some(hwnd), DEADLINE_TIMER, millis, None) } == 0 {
-            tracing::warn!("can't arm the gesture deadline");
+            tracing::warn!(stage = ?InputStage::Native, reason = ?InputReason::DeadlineArm, "held speech input failed");
             return;
         }
-        self.deadline.set(Some(deadline));
+        if self.deadline.replace(Some(deadline)) != Some(deadline) {
+            tracing::debug!(stage = ?InputStage::Native, reason = ?InputReason::DeadlineArmed, "held speech input boundary");
+        }
     }
 
     fn disarm(&self, hwnd: HWND) {
@@ -144,15 +185,21 @@ impl Keys {
 /// Fails when it was already armed or Windows refuses Raw Input or a watcher.
 pub(super) fn arm(hwnd: HWND, keys: &Keys, deliver: Deliver) -> Result<(), PresenceError> {
     if keys.deliver.get().is_some() {
+        tracing::warn!(stage = ?InputStage::Native, reason = ?InputReason::AlreadyArmed, "held speech input failed");
         return Err(PresenceError::KeyboardArmed);
     }
     if let Err(error) = watch(hwnd, keys) {
         disarm(hwnd, keys);
         return Err(error);
     }
-    keys.deliver
+    let armed = keys
+        .deliver
         .set(deliver)
-        .map_err(|_| PresenceError::KeyboardArmed)
+        .map_err(|_| PresenceError::KeyboardArmed);
+    if armed.is_ok() {
+        tracing::info!(stage = ?InputStage::Native, reason = ?InputReason::Armed, "held speech input boundary");
+    }
+    armed
 }
 
 fn watch(hwnd: HWND, keys: &Keys) -> Result<(), PresenceError> {
@@ -163,9 +210,11 @@ fn watch(hwnd: HWND, keys: &Keys) -> Result<(), PresenceError> {
         hwndTarget: hwnd,
     };
     // SAFETY: one valid device record for this thread's live window.
-    unsafe { RegisterRawInputDevices(&[device], struct_size::<RAWINPUTDEVICE>()) }?;
+    unsafe { RegisterRawInputDevices(&[device], struct_size::<RAWINPUTDEVICE>()) }
+        .inspect_err(|_| tracing::warn!(stage = ?InputStage::Native, reason = ?InputReason::RawInputRegistration, "held speech input failed"))?;
     // SAFETY: `hwnd` is live; the proxy unregisters it before it's destroyed.
     unsafe { WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) }
+        .inspect_err(|_| tracing::warn!(stage = ?InputStage::Native, reason = ?InputReason::SessionWatcher, "held speech input failed"))
         .map_err(PresenceError::SessionWatch)?;
     keys.sessions.set(true);
     PROXY.set(hwnd);
@@ -182,6 +231,7 @@ fn watch(hwnd: HWND, keys: &Keys) -> Result<(), PresenceError> {
         )
     };
     if hook.is_invalid() {
+        tracing::warn!(stage = ?InputStage::Native, reason = ?InputReason::DesktopWatcher, "held speech input failed");
         return Err(PresenceError::DesktopWatch);
     }
     keys.desktop.set(Some(hook));
@@ -190,6 +240,14 @@ fn watch(hwnd: HWND, keys: &Keys) -> Result<(), PresenceError> {
 
 /// Stops what `arm` started, before the proxy window goes away.
 pub(super) fn disarm(hwnd: HWND, keys: &Keys) {
+    if let Some(deliver) = keys.deliver.get() {
+        deliver(
+            Event::Reset,
+            EventTime {
+                instant: Instant::now(),
+            },
+        );
+    }
     keys.disarm(hwnd);
     if let Some(hook) = keys.desktop.take() {
         // SAFETY: the hook was set on this thread by `arm` and is removed once.
@@ -291,7 +349,11 @@ fn read_key(lparam: LPARAM) -> Option<Event> {
             struct_size::<RAWINPUTHEADER>(),
         )
     };
-    if read == u32::MAX || raw.header.dwType != RIM_TYPEKEYBOARD.0 {
+    if read == u32::MAX {
+        tracing::warn!(stage = ?InputStage::Native, reason = ?InputReason::RawInputRead, "held speech input failed");
+        return None;
+    }
+    if raw.header.dwType != RIM_TYPEKEYBOARD.0 {
         return None;
     }
     // SAFETY: the header says this record is a keyboard one.
@@ -423,6 +485,33 @@ mod tests {
         blocked.acquire(|| EscapeHotkey::register(second.0));
         assert!(!blocked.shows_stop(), "releasing the first hold frees Esc");
         blocked.release();
+    }
+
+    #[test]
+    fn an_overdue_deadline_is_reported_once_at_the_first_late_chord_key() {
+        let keys = super::Keys::default();
+        let start = std::time::Instant::now();
+        let at = |millis| start + std::time::Duration::from_millis(millis);
+        let chord = Event::Key {
+            key: Key::LeftAlt,
+            edge: Edge::Down,
+        };
+        assert!(!keys.overdue(chord, at(400)), "nothing armed");
+        keys.deadline.set(Some(at(300)));
+        assert!(!keys.overdue(chord, at(350)), "exactly 50 ms late");
+        let other = Event::Key {
+            key: Key::Other(0x1E),
+            edge: Edge::Down,
+        };
+        assert!(!keys.overdue(other, at(351)), "not a chord key");
+        assert!(!keys.overdue(Event::Deadline, at(351)), "not a key");
+        assert!(keys.overdue(chord, at(351)), "51 ms late");
+        assert!(!keys.overdue(chord, at(900)), "once per deadline");
+        keys.deadline.set(Some(at(1_300)));
+        assert!(
+            keys.overdue(chord, at(1_400)),
+            "the next gesture's deadline"
+        );
     }
 
     #[test]

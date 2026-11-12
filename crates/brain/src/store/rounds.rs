@@ -1,6 +1,7 @@
 //! A stored round's native items and results, each kept as one JSON object in `events.body`
-//! with no searchable text. Each is checked whole when it's written and again, with its bound,
-//! when it's read back, so a bad row fails the read instead of reaching a request.
+//! with no searchable text. An item or result is written only if the reader's own check takes it,
+//! so no row can be stored that fails every later build of its thread; a bad row from an older
+//! build still fails the read instead of reaching a request.
 
 use kumochi_protocol::message::{RunId, ThreadId};
 use serde_json::{Value, json};
@@ -19,8 +20,8 @@ impl Store {
     /// write, the native items in the order given, then each call's answer.
     ///
     /// # Errors
-    /// [`StoreError::RoundRecord`] when an item isn't a JSON object, and whatever
-    /// [`Store::append`] fails with.
+    /// [`StoreError::RoundRecord`] when an item or a result is one the reader would refuse,
+    /// writing nothing; and whatever [`Store::append`] fails with.
     pub(crate) fn append_round(
         &mut self,
         (thread, run): (ThreadId, RunId),
@@ -31,12 +32,20 @@ impl Store {
     ) -> Result<(), StoreError> {
         let natives = items
             .iter()
-            .map(|item| native_body(connection, item))
-            .collect::<Result<Vec<_>, _>>()?;
-        let results: Vec<String> = results
+            .map(|item| {
+                let body = native_body(connection, item)?;
+                native(&body)?;
+                Ok(body)
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        let results = results
             .iter()
-            .map(|(call, output)| result_body(call, output))
-            .collect();
+            .map(|(call, output)| {
+                let body = result_body(call, output);
+                result(&body)?;
+                Ok(body)
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
         let text = text.map(|text| NewEvent {
             kind: EventKind::AssistantText,
             text: Some(text),

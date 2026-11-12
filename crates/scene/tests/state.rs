@@ -490,14 +490,35 @@ fn call_guards_allow_typed_equal_continuations_but_not_records_after_end() {
         call.accept(&item, &header).expect_err("needs begin").code,
         ErrorCode::BeforeBegin
     );
-    let mut different = header.clone();
-    different.alt = "different".to_owned().try_into().expect("bounded text");
+    let different = record(
+        r#"{"begin":{"v":1,"scene":"scene","surface":"overlay","alt":"","size":[600,400]}}"#,
+    );
     assert_eq!(
-        call.accept(&Record::Begin(different), &header)
-            .expect_err("same scene needs same header")
+        call.accept(&different, &header)
+            .expect_err("same scene needs the same canvas")
             .code,
         ErrorCode::HeaderMismatch
     );
+    for (other, reason) in [
+        (
+            r#"{"begin":{"v":1,"scene":"scene","surface":"inline","alt":""}}"#,
+            "same scene needs the same surface",
+        ),
+        (
+            r#"{"begin":{"v":1,"scene":"scene","surface":"overlay","alt":"","others":"keep"}}"#,
+            "same scene needs the same others",
+        ),
+        (
+            r#"{"begin":{"v":1,"scene":"other","surface":"overlay","alt":""}}"#,
+            "a continuation names its own scene",
+        ),
+    ] {
+        assert_eq!(
+            call.accept(&record(other), &header).expect_err(reason).code,
+            ErrorCode::HeaderMismatch,
+            "{reason}"
+        );
+    }
     call.accept(&Record::Begin(header.clone()), &header)
         .expect("begin");
     assert_eq!(
@@ -511,10 +532,13 @@ fn call_guards_allow_typed_equal_continuations_but_not_records_after_end() {
         call.accept(&item, &header).expect_err("after end").code,
         ErrorCode::AfterEnd
     );
+    let mut described = header.clone();
+    described.alt = "now with rain".to_owned().try_into().expect("bounded text");
+    described.title = Some("Rain".to_owned().try_into().expect("bounded text"));
     let mut continuation = CallState::default();
     continuation
-        .accept(&Record::Begin(header.clone()), &header)
-        .expect("new call");
+        .accept(&Record::Begin(described), &header)
+        .expect("a new call may restate the title and alt");
     continuation
         .accept(&item, &header)
         .expect("scene can continue");

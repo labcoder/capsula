@@ -37,6 +37,8 @@ mod deletes;
 mod drawings;
 #[path = "github_tests.rs"]
 mod github;
+#[path = "hold_tests.rs"]
+pub(super) mod holds;
 #[path = "job_tests.rs"]
 mod jobs;
 #[path = "lease_tests.rs"]
@@ -304,6 +306,7 @@ fn scene_v1_control_reaches_the_canonical_drawing_consumer() {
             run: RunId(1),
             scene: SceneId(1),
             index: 0,
+            reason: SceneFailure::Timeout,
             cut: cut.cut,
         }),
     ];

@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
 use kumochi_protocol::message::{
-    AssistantName, DockPosition, ErrorKey, MaxFrameRate, ModelChoice, RepoName, SettingsOp,
-    SettingsView, SttUnload, ThreadId, UserName,
+    AccountView, AssistantName, DockPosition, ErrorKey, MaxFrameRate, ModelChoice, RepoName, RunId,
+    SettingsOp, SettingsView, SttUnload, ThreadId, UserName,
 };
 use kumochi_protocol::voice::VoicePart;
 use toml::{Table, Value};
@@ -32,6 +32,7 @@ const SHOW_IN_TASKBAR: &str = "show_in_taskbar";
 const VOICE: &str = "voice";
 const TALK_BACK: &str = "talk_back";
 const STT_UNLOAD: &str = "stt_unload";
+const HOLD_TO_TALK: &str = "hold_to_talk";
 const INSTALLED: &str = "installed";
 const REMOVING: &str = "removing";
 
@@ -72,6 +73,9 @@ pub(crate) struct Config {
     /// `Err` when the file can't be written over: no home, or unreadable.
     table: Result<Table, Refusal>,
     view: SettingsView,
+    /// What an absent `onboarded` key reads as, fixed at start: true when the profile was
+    /// already in use, or the file can't be written, so neither ever asks for onboarding.
+    in_use: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -129,11 +133,12 @@ impl Config {
                 return Self::refusing(Some(path), Refusal::Unreadable, main_thread);
             }
         };
-        let view = view_of(&table, main_thread);
+        let view = view_of(&table, main_thread, false);
         Self {
             path: Some(path),
             table: Ok(table),
             view,
+            in_use: false,
         }
     }
 
@@ -141,8 +146,20 @@ impl Config {
         Self {
             path,
             table: Err(refusal),
-            view: view_of(&Table::new(), main_thread),
+            view: view_of(&Table::new(), main_thread, true),
+            in_use: true,
         }
+    }
+
+    /// Counts a profile already in use as onboarded while `config.toml` has no `onboarded`
+    /// key: the account's first load is signed in, or a run was ever issued. Called once at
+    /// start, before any shell is served, so a later sign-in or write never changes the answer.
+    pub(crate) fn count_in_use(&mut self, account: &AccountView, high_water: RunId) {
+        let Ok(table) = &self.table else {
+            return;
+        };
+        self.in_use = matches!(account, AccountView::SignedIn { .. }) || high_water.0 > 0;
+        self.view.onboarded = onboarded(table).unwrap_or(self.in_use);
     }
 
     /// The settings now.
@@ -206,7 +223,7 @@ impl Config {
             DEFAULT_REPO.to_owned(),
             Value::String(default.repo.as_str().to_owned()),
         );
-        let view = view_of(&table, self.view.main_thread);
+        let view = view_of(&table, self.view.main_thread, self.in_use);
         Ok(Pending { path, table, view })
     }
 
@@ -251,6 +268,9 @@ impl Config {
             SettingsOp::SetTalkBack(on) => {
                 voice_mut(&mut table).insert(TALK_BACK.to_owned(), Value::Boolean(on));
             }
+            SettingsOp::SetHoldToTalk(on) => {
+                voice_mut(&mut table).insert(HOLD_TO_TALK.to_owned(), Value::Boolean(on));
+            }
             SettingsOp::SetSttUnload(unload) => {
                 let name = match unload {
                     SttUnload::Kept => "kept",
@@ -263,7 +283,7 @@ impl Config {
             | SettingsOp::RemoveVoice(_)
             | SettingsOp::CancelVoiceInstall => return Err(ConfigError::VoiceUnavailable),
         }
-        let view = view_of(&table, self.view.main_thread);
+        let view = view_of(&table, self.view.main_thread, self.in_use);
         Ok(Pending { path, table, view })
     }
 
@@ -311,7 +331,7 @@ impl Config {
         {
             names.retain(|name| name.as_str() != Some(part.dir()));
         }
-        let view = view_of(&table, self.view.main_thread);
+        let view = view_of(&table, self.view.main_thread, self.in_use);
         Ok(Pending { path, table, view })
     }
 
@@ -327,7 +347,7 @@ impl Config {
             voice.insert(TALK_BACK.to_owned(), Value::Boolean(true));
         }
         listed_add(voice, INSTALLED, part);
-        let view = view_of(&table, self.view.main_thread);
+        let view = view_of(&table, self.view.main_thread, self.in_use);
         Ok(Pending { path, table, view })
     }
 
@@ -343,7 +363,7 @@ impl Config {
             names.retain(|name| name.as_str() != Some(part.dir()));
         }
         listed_add(voice, REMOVING, part);
-        let view = view_of(&table, self.view.main_thread);
+        let view = view_of(&table, self.view.main_thread, self.in_use);
         Ok(Pending { path, table, view })
     }
 
@@ -413,7 +433,11 @@ fn voice_mut(table: &mut Table) -> &mut Table {
 
 /// The settings a table holds. A known key with a bad value reads as its default, and stays in
 /// the table untouched until the user sets that key.
-fn view_of(table: &Table, main_thread: ThreadId) -> SettingsView {
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "what an absent onboarded key reads as, fixed at start"
+)]
+fn view_of(table: &Table, main_thread: ThreadId, in_use: bool) -> SettingsView {
     let assistant_name = match table.get(ASSISTANT_NAME) {
         None => None,
         Some(Value::String(text)) => AssistantName::new(text)
@@ -429,11 +453,7 @@ fn view_of(table: &Table, main_thread: ThreadId) -> SettingsView {
         Some(Value::String(text)) => UserName::new(text).ok().or_else(|| invalid(USER_NAME)),
         Some(_) => invalid(USER_NAME),
     };
-    let onboarded = match table.get(ONBOARDED) {
-        None => false,
-        Some(Value::Boolean(done)) => *done,
-        Some(_) => invalid(ONBOARDED).unwrap_or(false),
-    };
+    let onboarded = onboarded(table).unwrap_or(in_use);
     let max_frame_rate = match table.get(MAX_FRAME_RATE) {
         None => MaxFrameRate::AUTOMATIC,
         Some(Value::Integer(fps)) => u16::try_from(*fps)
@@ -480,6 +500,11 @@ fn view_of(table: &Table, main_thread: ThreadId) -> SettingsView {
             _ => invalid(STT_UNLOAD).unwrap_or_default(),
         },
     };
+    let hold_to_talk = match voice.and_then(|voice| voice.get(HOLD_TO_TALK)) {
+        Some(Value::Boolean(on)) => *on,
+        None => kumochi_protocol::message::DEFAULT_HOLD_TO_TALK,
+        Some(_) => invalid(HOLD_TO_TALK).unwrap_or(false),
+    };
     SettingsView {
         assistant_name,
         user_name,
@@ -491,6 +516,16 @@ fn view_of(table: &Table, main_thread: ThreadId) -> SettingsView {
         show_in_taskbar,
         talk_back,
         stt_unload,
+        hold_to_talk,
+    }
+}
+
+/// The `onboarded` key; none when it's absent or bad.
+fn onboarded(table: &Table) -> Option<bool> {
+    match table.get(ONBOARDED) {
+        None => None,
+        Some(Value::Boolean(done)) => Some(*done),
+        Some(_) => invalid(ONBOARDED),
     }
 }
 

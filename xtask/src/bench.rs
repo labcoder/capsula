@@ -13,9 +13,11 @@ use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail, ensure};
-use kumochi_protocol::constants::{BRAIN_EXE, SHELL_EXE};
+use kumochi_protocol::constants::SHELL_EXE;
 
+use crate::hermetic::{self, Folders, Profile, Run};
 use crate::platform::{self, Process};
+use crate::session::{self, Startup, unchanged};
 
 #[derive(Debug)]
 pub(crate) struct GateCpu {
@@ -110,9 +112,7 @@ fn options(mut args: impl Iterator<Item = String>) -> Result<(u64, Option<PathBu
     let mut workload = match args.next().as_deref() {
         Some("idle") => Workload::Idle,
         Some("stretch") => bail!("motion trials return with the pull (C2a)"),
-        _ => bail!(
-            "use cargo xtask bench idle [--duration 1..60] [--baseline <release-directory> | --panel]"
-        ),
+        _ => bail!("use bench idle [--duration 1..60] [--baseline <checkout> | --panel]"),
     };
     let mut duration = None;
     let mut baseline = None;
@@ -131,8 +131,7 @@ fn options(mut args: impl Iterator<Item = String>) -> Result<(u64, Option<PathBu
             }
             "--baseline" if baseline.is_none() => {
                 baseline = Some(PathBuf::from(
-                    args.next()
-                        .context("--baseline needs a release directory")?,
+                    args.next().context("--baseline needs a checkout")?,
                 ));
             }
             "--panel" if workload == Workload::Idle => workload = Workload::Panel,
@@ -146,36 +145,51 @@ fn options(mut args: impl Iterator<Item = String>) -> Result<(u64, Option<PathBu
     Ok((duration.unwrap_or(60), baseline, workload))
 }
 
+/// Measures the gate release shell built from this workspace, or from the `--baseline` checkout.
 pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
     let (seconds, baseline, workload) = options(args)?;
-    let exe = std::env::current_exe()?;
-    let release: PathBuf = exe
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let root = std::env::current_exe()?
         .parent()
-        .and_then(|path| path.parent())
-        .context("xtask executable is not inside a Cargo profile directory")?
-        .join("release");
-    let release = baseline.as_ref().unwrap_or(&release);
-    let shell = release.join(SHELL_EXE);
-    ensure!(
-        shell.is_file() && release.join(BRAIN_EXE).is_file(),
-        "build both release binaries before benchmarking"
-    );
-    let existing = platform::processes().context("checking for existing product processes")?;
-    ensure!(
-        existing.is_empty(),
-        "refusing to run: existing product process PIDs {:?}",
-        existing.iter().map(|entry| entry.pid).collect::<Vec<_>>()
-    );
+        .and_then(Path::parent)
+        .context("xtask is not in a Cargo profile folder")?
+        .join("bench")
+        .join(stamp.to_string());
+    let run = Run::begin(root)?;
+    let measured = (|| {
+        let (release, build) = hermetic::build(
+            &["kumochi-shell", "kumochi-brain"],
+            Profile::Release,
+            baseline.as_deref(),
+        )?;
+        println!("build_seconds={:.1}", build.as_secs_f64());
+        idle(
+            &release.join(SHELL_EXE),
+            &run.folders("app")?,
+            seconds,
+            baseline.as_deref(),
+            workload,
+        )
+    })();
+    run.finish(measured)
+}
 
+fn idle(
+    shell: &Path,
+    folders: &Folders,
+    seconds: u64,
+    baseline: Option<&Path>,
+    workload: Workload,
+) -> Result<()> {
     // A baseline shell may predate the settled-interval count, so only the current one is checked.
-    let paints = if baseline.is_none() {
+    let paints = if baseline.is_some() {
+        None
+    } else {
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let path =
             std::env::temp_dir().join(format!("idle-bench-{}-{nonce}.txt", std::process::id()));
         println!("dock paint diagnostics: {}", path.display());
         Some(path)
-    } else {
-        None
     };
     let mut extra: Vec<OsString> = Vec::new();
     if workload == Workload::Panel {
@@ -189,7 +203,8 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
     }
     println!("workload: {workload:?}; baseline: {}", baseline.is_some());
     let cycle_rate = calibrate_rate()?;
-    let mut child = platform::launch(&shell, (seconds + 40) * 1000, extra)
+    crate::live::refuse_running(&platform::processes()?, std::process::id())?;
+    let mut child = platform::launch(shell, folders, (seconds + 40) * 1000, extra)
         .context("launching release shell at normal priority")?;
     let deadline = Instant::now() + Duration::from_secs(seconds + 60);
     let mut tracked = Vec::new();
@@ -301,7 +316,10 @@ fn track(shell_pid: u32, tracked: &mut Vec<(&'static str, Process)>) -> Result<(
         .iter()
         .map(|entry| Ok((entry.pid, Process::open(entry.pid)?)))
         .collect::<Result<Vec<_>>>()?;
-    let tree = process_tree(shell_pid, &entries, platform::helper_role)?;
+    let tree = match session::product_tree(shell_pid, &entries, platform::helper_role)? {
+        Startup::Complete(tree) => tree,
+        Startup::Missing(role) => bail!("the {role} didn't start within the 30s settle period"),
+    };
     for (role, pid) in tree {
         let at = opened
             .iter()
@@ -310,57 +328,6 @@ fn track(shell_pid: u32, tracked: &mut Vec<(&'static str, Process)>) -> Result<(
         tracked.push((role, opened.swap_remove(at).1));
     }
     Ok(())
-}
-
-fn process_tree(
-    shell_pid: u32,
-    entries: &[platform::Entry],
-    identify: impl Fn(u32) -> Result<&'static str>,
-) -> Result<[(&'static str, u32); 4]> {
-    ensure!(
-        entries.len() == 4,
-        "product process set changed during startup; refusing a contaminated measurement"
-    );
-    ensure!(
-        entries
-            .iter()
-            .any(|entry| entry.pid == shell_pid && entry.shell),
-        "the launched shell is missing"
-    );
-    let brain = entries
-        .iter()
-        .find(|entry| !entry.shell && entry.parent == shell_pid)
-        .context("shell did not start a brain within the 30s settle period")?;
-    let mut tree = [
-        ("shell", shell_pid),
-        ("brain", brain.pid),
-        ("screen-worker", 0),
-        ("speech-worker", 0),
-    ];
-    for entry in entries
-        .iter()
-        .filter(|entry| !entry.shell && entry.parent == brain.pid)
-    {
-        let at = match identify(entry.pid)? {
-            "screen-worker" => 2,
-            "speech-worker" => 3,
-            _ => bail!("unexpected product helper role"),
-        };
-        ensure!(tree[at].1 == 0, "duplicate product helper role");
-        tree[at].1 = entry.pid;
-    }
-    ensure!(
-        tree.iter().all(|(_, pid)| *pid != 0) && unchanged(entries, &tree.map(|(_, pid)| pid)),
-        "product helpers do not form the expected four-process tree"
-    );
-    Ok(tree)
-}
-
-fn unchanged(entries: &[platform::Entry], expected: &[u32]) -> bool {
-    entries.len() == expected.len()
-        && expected
-            .iter()
-            .all(|pid| entries.iter().filter(|entry| entry.pid == *pid).count() == 1)
 }
 
 fn interval(
@@ -548,97 +515,9 @@ fn cycle_percent(cycles: u64, rate: f64, wall: Duration) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Workload, cycle_percent, options, percent, process_tree, settled_paints, unchanged,
-    };
-    use crate::platform::Entry;
+    use super::{Workload, cycle_percent, options, percent, settled_paints};
     use std::path::PathBuf;
     use std::time::Duration;
-
-    fn helper(pid: u32, parent: u32) -> Entry {
-        Entry {
-            pid,
-            parent,
-            shell: false,
-        }
-    }
-
-    #[test]
-    fn both_helpers_are_identified_independently_of_enumeration_order() {
-        let mut entries = vec![
-            helper(40, 20),
-            helper(20, 10),
-            Entry {
-                pid: 10,
-                parent: 1,
-                shell: true,
-            },
-            helper(30, 20),
-        ];
-        let identify = |pid| match pid {
-            30 => Ok("screen-worker"),
-            40 => Ok("speech-worker"),
-            _ => anyhow::bail!("unknown fixture helper"),
-        };
-        assert_eq!(
-            process_tree(10, &entries, identify).expect("four-process tree"),
-            [
-                ("shell", 10),
-                ("brain", 20),
-                ("screen-worker", 30),
-                ("speech-worker", 40)
-            ]
-        );
-        entries.reverse();
-        assert_eq!(
-            process_tree(10, &entries, identify).expect("reordered tree"),
-            [
-                ("shell", 10),
-                ("brain", 20),
-                ("screen-worker", 30),
-                ("speech-worker", 40)
-            ]
-        );
-        assert!(
-            unchanged(&entries, &[10, 20, 30, 40]),
-            "all four PIDs remain"
-        );
-        assert!(
-            !unchanged(&entries, &[10, 20, 30, 41]),
-            "a replacement cannot pass"
-        );
-        assert!(
-            process_tree(10, &entries, |_| Ok("screen-worker")).is_err(),
-            "duplicate roles fail"
-        );
-        assert!(
-            process_tree(10, &entries, |_| Ok("unknown")).is_err(),
-            "unknown helpers fail"
-        );
-        assert!(
-            process_tree(10, &entries[..3], identify).is_err(),
-            "missing helpers fail"
-        );
-        entries.push(helper(50, 1));
-        assert!(
-            process_tree(10, &entries, identify).is_err(),
-            "foreign extra processes fail"
-        );
-        assert!(
-            !unchanged(&entries, &[10, 20, 30, 40]),
-            "an extra PID cannot pass"
-        );
-        entries.pop();
-        entries
-            .iter_mut()
-            .find(|entry| entry.pid == 40)
-            .expect("speech")
-            .parent = 1;
-        assert!(
-            process_tree(10, &entries, identify).is_err(),
-            "a helper owned by another parent fails"
-        );
-    }
 
     #[test]
     fn baseline_and_duration_options_combine_in_either_order() {

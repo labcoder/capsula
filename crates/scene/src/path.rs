@@ -68,6 +68,7 @@ pub(crate) fn walk(
     let mut pen = [0.0; 2];
     let mut start = pen;
     let mut previous = None;
+    let mut last = None;
     let mut commands = 0;
     let mut lines = 0;
     let mut curvature = Vec::new();
@@ -95,7 +96,7 @@ pub(crate) fn walk(
         if commands > MAX_PATH_POINTS {
             return Err(ErrorCode::OverBudget(Budget::PathPoints));
         }
-        let segment = tokens.segment(command, pen)?;
+        let segment = tokens.segment(command, pen, last)?;
         let original = pen;
         let mut include = |p: [f32; 2]| -> Result<(), ErrorCode> {
             if p.iter().any(|v| !v.is_finite() || v.abs() > MAX_COORD) {
@@ -140,6 +141,7 @@ pub(crate) fn walk(
         }
         visit(original, segment)?;
         previous = Some(command);
+        last = Some(segment);
     }
     if commands == 0 {
         return Err(ErrorCode::Malformed);
@@ -162,7 +164,15 @@ struct Tokens<'a> {
     position: usize,
 }
 impl Tokens<'_> {
-    fn segment(&mut self, command: u8, pen: [f32; 2]) -> Result<Segment, ErrorCode> {
+    /// Reads one command's segment. `S` and `T` reflect the previous curve's last control point
+    /// through the pen when that curve was the same degree, and otherwise start at the pen, as SVG does.
+    fn segment(
+        &mut self,
+        command: u8,
+        pen: [f32; 2],
+        last: Option<Segment>,
+    ) -> Result<Segment, ErrorCode> {
+        let reflect = |control: [f32; 2]| [2.0 * pen[0] - control[0], 2.0 * pen[1] - control[1]];
         let base = if command.is_ascii_lowercase() {
             pen
         } else {
@@ -182,6 +192,20 @@ impl Tokens<'_> {
             b'V' => Segment::Line([pen[0], base[1] + self.number()?]),
             b'Q' => Segment::Quad([point(self)?, point(self)?]),
             b'C' => Segment::Cubic([point(self)?, point(self)?, point(self)?]),
+            b'S' => {
+                let first = match last {
+                    Some(Segment::Cubic([_, control, _])) => reflect(control),
+                    _ => pen,
+                };
+                Segment::Cubic([first, point(self)?, point(self)?])
+            }
+            b'T' => {
+                let control = match last {
+                    Some(Segment::Quad([control, _])) => reflect(control),
+                    _ => pen,
+                };
+                Segment::Quad([control, point(self)?])
+            }
             b'Z' => Segment::Close,
             _ => return Err(ErrorCode::Unsupported),
         })
@@ -252,6 +276,69 @@ mod tests {
         assert_eq!(
             compact,
             vec![Segment::Move([0.5, 0.5]), Segment::Line([1.5, -2.5])]
+        );
+    }
+
+    fn segments(source: &str) -> Vec<Segment> {
+        let mut out = Vec::new();
+        walk(source, |_, segment| {
+            out.push(segment);
+            Ok(())
+        })
+        .expect("valid path");
+        out
+    }
+
+    #[test]
+    fn smooth_curves_reflect_the_previous_control_point_of_the_same_degree() {
+        assert_eq!(
+            segments("M0 0 C0 4 4 4 4 0 S8 -4 8 0")[2],
+            Segment::Cubic([[4.0, -4.0], [8.0, -4.0], [8.0, 0.0]])
+        );
+        assert_eq!(
+            segments("M0 0 Q5 5 10 0 T20 0 t10 0")[2..],
+            [
+                Segment::Quad([[15.0, -5.0], [20.0, 0.0]]),
+                Segment::Quad([[25.0, 5.0], [30.0, 0.0]]),
+            ]
+        );
+        assert_eq!(
+            segments("M0 0 C0 4 4 4 4 0 S8 -4 8 0 8 4 12 0")[3],
+            Segment::Cubic([[8.0, 4.0], [8.0, 4.0], [12.0, 0.0]]),
+            "an implicit repeat reflects the S before it"
+        );
+    }
+
+    #[test]
+    fn smooth_curves_without_a_previous_curve_of_their_degree_start_at_the_pen() {
+        assert_eq!(
+            segments("M2 3 T10 10"),
+            [
+                Segment::Move([2.0, 3.0]),
+                Segment::Quad([[2.0, 3.0], [10.0, 10.0]]),
+            ]
+        );
+        assert_eq!(
+            segments("M2 3 s4 4 8 0")[1],
+            Segment::Cubic([[2.0, 3.0], [6.0, 7.0], [10.0, 3.0]])
+        );
+        assert_eq!(
+            segments("M0 0 Q5 5 10 0 S14 4 18 0")[2],
+            Segment::Cubic([[10.0, 0.0], [14.0, 4.0], [18.0, 0.0]]),
+            "S after a quadratic"
+        );
+        assert_eq!(
+            segments("M0 0 C0 4 4 4 4 0 T12 0")[2],
+            Segment::Quad([[4.0, 0.0], [12.0, 0.0]]),
+            "T after a cubic"
+        );
+    }
+
+    #[test]
+    fn a_reflected_control_point_past_the_coordinate_bound_is_out_of_range() {
+        assert_eq!(
+            walk("M19000 0 Q18000 0 19500 0 T20000 0", |_, _| Ok(())).expect_err("reflected past"),
+            ErrorCode::OutOfRange
         );
     }
 

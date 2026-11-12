@@ -17,9 +17,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail, ensure};
-use kumochi_protocol::constants::{BRAIN_EXE, DISPLAY_NAME, SHELL_EXE};
+use kumochi_protocol::constants::{BRAIN_EXE, DATA_DIR, DISPLAY_NAME, SHELL_EXE};
 use windows::Win32::Foundation::{POINT, RECT};
 
+use crate::hermetic::{self, Folders, Profile, Run};
 use crate::platform::{
     self, gate_capture,
     input_session::{self as native, FixtureEscMode, Registry, Session, Window, WindowKind},
@@ -133,27 +134,24 @@ fn evidence_directory(transcript: &Path) -> Result<PathBuf> {
     Ok(transcript.with_file_name(stem))
 }
 
+/// The gate release images this run built, and the folders every launch of them uses.
 #[derive(Debug)]
 struct Images {
     shell: PathBuf,
     brain: PathBuf,
     shell_sha256: String,
     brain_sha256: String,
+    folders: Folders,
+    /// How long building them took inside the run.
+    build: Duration,
 }
 
 impl Images {
-    fn release(exe: &Path) -> Result<Self> {
-        let release = exe
-            .parent()
-            .and_then(Path::parent)
-            .context("xtask is not in a Cargo profile directory")?
-            .join("release");
+    fn build(run: &Run) -> Result<Self> {
+        let (release, build) =
+            hermetic::build(&["kumochi-shell", "kumochi-brain"], Profile::Release, None)?;
         let shell = release.join(SHELL_EXE);
         let brain = release.join(BRAIN_EXE);
-        ensure!(
-            shell.is_file() && brain.is_file(),
-            "build the final-main release before the approved gate session"
-        );
         let shell_sha256 = gate_capture::file_sha256(&shell)?;
         let brain_sha256 = gate_capture::file_sha256(&brain)?;
         Ok(Self {
@@ -161,7 +159,21 @@ impl Images {
             brain,
             shell_sha256,
             brain_sha256,
+            folders: run.folders("app")?,
+            build,
         })
+    }
+
+    /// The run's identity record: the driver, the images and the identity they were built with.
+    fn identity(&self, exe: &Path) -> Result<String> {
+        Ok(format!(
+            "driver_build_id={}\nidentity={DATA_DIR}\ndriver_sha256={}\nshell_sha256={}\nbrain_sha256={}\nbuild_seconds={:.1}\n",
+            kumochi_protocol::BUILD_ID,
+            gate_capture::file_sha256(exe)?,
+            self.shell_sha256,
+            self.brain_sha256,
+            self.build.as_secs_f64()
+        ))
     }
 
     fn unchanged(&self) -> Result<()> {
@@ -174,7 +186,8 @@ impl Images {
     }
 }
 
-fn retained_output(mut args: impl Iterator<Item = String>) -> Result<PathBuf> {
+/// The transcript and its evidence folder, which must not exist yet; the gate run creates it.
+fn retained_output(mut args: impl Iterator<Item = String>) -> Result<(PathBuf, PathBuf)> {
     let transcript = PathBuf::from(
         args.next()
             .context("task needs an existing create-new redirected path-session.txt")?,
@@ -185,15 +198,32 @@ fn retained_output(mut args: impl Iterator<Item = String>) -> Result<PathBuf> {
     );
     gate_capture::require_transcript(&transcript)?;
     let output = evidence_directory(&transcript)?;
-    fs::create_dir(&output)?;
-    fs::write(
+    ensure!(
+        !output.try_exists()?,
+        "{} already exists; use a new transcript name",
+        output.display()
+    );
+    Ok((transcript, output))
+}
+
+/// Begins the gate run in a new evidence folder for the transcript, records the transcript there,
+/// runs `body` with the folder, and ends the run.
+fn retained_run(
+    args: impl Iterator<Item = String>,
+    body: impl FnOnce(&Path, &Run) -> Result<()>,
+) -> Result<()> {
+    let (transcript, output) = retained_output(args)?;
+    let run = Run::begin(output.join("data"))?;
+    let result = fs::write(
         output.join("transcript.txt"),
         format!(
             "path={}\nstdout_and_stderr_verified=true\ncreate_new_redirection_required=true\n",
             transcript.display()
         ),
-    )?;
-    Ok(output)
+    )
+    .map_err(anyhow::Error::from)
+    .and_then(|()| body(&output, &run));
+    run.finish(result)
 }
 
 pub(crate) fn cold(args: impl Iterator<Item = String>) -> Result<()> {
@@ -217,31 +247,27 @@ type Opener = fn(&mut Session, &Images, &Path, Instant) -> Result<()>;
 
 fn session_run(
     args: impl Iterator<Item = String>,
+    opener: (&str, Opener),
+    trials: &[Trial],
+) -> Result<()> {
+    retained_run(args, |output, run| {
+        Images::build(run).and_then(|images| run_session(output, &images, opener, trials))
+    })
+}
+
+fn run_session(
+    output: &Path,
+    images: &Images,
     (opener, open): (&str, Opener),
     trials: &[Trial],
 ) -> Result<()> {
-    let output = retained_output(args)?;
-    ensure!(
-        platform::processes()?.is_empty(),
-        "product processes already exist; gate session refused"
-    );
     let started = Instant::now();
     let end = started
         .checked_add(SESSION_LIMIT)
         .context("session deadline overflow")?;
     let exe = std::env::current_exe()?;
-    let images = Images::release(&exe)?;
     println!("retained gate evidence: {}", output.display());
-    fs::write(
-        output.join("identity.txt"),
-        format!(
-            "driver_build_id={}\ndriver_sha256={}\nshell_sha256={}\nbrain_sha256={}\n",
-            kumochi_protocol::BUILD_ID,
-            gate_capture::file_sha256(&exe)?,
-            images.shell_sha256,
-            images.brain_sha256
-        ),
-    )?;
+    fs::write(output.join("identity.txt"), images.identity(&exe)?)?;
     fs::write(
         output.join("environment-before.txt"),
         gate_capture::desktop_metadata()?,
@@ -258,14 +284,14 @@ fn session_run(
         fixture_window = Some(window);
         session = Some(Session::new(window, end)?);
         let session = session.as_mut().context("persistent session missing")?;
-        open(session, &images, &output, end)?;
+        open(session, images, output, end)?;
         let registry = Registry::snapshot();
         fs::write(output.join("registry-before.txt"), format!("{registry:#?}"))?;
         let measured = (|| {
             for (index, &trial) in trials.iter().enumerate() {
                 session.guard()?;
                 session.set_phase(u8::try_from(index + 1)?)?;
-                run_trial(trial, session, &images, &output, end)?;
+                run_trial(trial, session, images, output, end)?;
             }
             Ok(())
         })();
@@ -322,7 +348,12 @@ fn feel(session: &mut Session, images: &Images, output: &Path, end: Instant) -> 
     let feel_directory = output.join("feel");
     fs::create_dir(&feel_directory)?;
     let diagnostics = Diagnostics::in_directory(&feel_directory);
-    let mut child = platform::launch(&images.shell, 120_000, [diagnostics.argument()])?;
+    let mut child = platform::launch(
+        &images.shell,
+        &images.folders,
+        120_000,
+        [diagnostics.argument()],
+    )?;
     let mut window = None;
     let mut helpers = Vec::new();
     let body = (|| {
@@ -587,6 +618,7 @@ fn run_trial(
     session.guard()?;
     let launched = platform::launch(
         &images.shell,
+        &images.folders,
         u64::try_from(trial.budget().as_millis())?,
         options,
     );

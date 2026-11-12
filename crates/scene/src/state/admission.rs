@@ -200,7 +200,17 @@ impl SceneState {
             expansion.check_target(step, index, &after)?;
         }
         object::acyclic(step, &after)?;
-        object::validate_changes(step, &after, &removal_ids)?;
+        let mut behind = BTreeMap::new();
+        if step.set.iter().any(|change| change.behind.is_some()) {
+            for stored in self.steps.values().filter(|stored| stored.kept) {
+                for change in self.original(stored.event).set.iter() {
+                    if let Some(anchor) = &change.behind {
+                        behind.insert(&change.target, anchor);
+                    }
+                }
+            }
+        }
+        object::validate_changes(step, &after, &removal_ids, &behind)?;
         let mut changed = work::changes(step, &mut after, &mut owned, revision)?;
         metrics::validate(step, &mut after, self.header.surface, |handle| {
             expansion.source_slot(handle, revision)

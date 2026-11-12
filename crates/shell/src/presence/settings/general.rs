@@ -14,12 +14,12 @@ use gpui_kit::{
 };
 use kumochi_protocol::{
     BUILD_ID,
-    message::{DockPosition, MaxFrameRate, NameError},
+    message::{DockPosition, MaxFrameRate},
 };
 
 use super::super::{PresenceEvent, frame_rate, send};
-use super::SettingsView;
-use crate::settings::{Error, Field, Settings, TaskbarChoice};
+use super::{SettingsView, field_status};
+use crate::settings::{Field, Settings, TaskbarChoice};
 use crate::strings::{Strings, Text};
 
 impl SettingsView {
@@ -198,17 +198,7 @@ impl SettingsView {
             Field::Assistant => Text::AssistantName,
             Field::User => Text::UserName,
         });
-        let error = state.field(field).error.as_ref().map(|error| match error {
-            Error::Validation(NameError::Empty) => strings.get(Text::RenameEmpty),
-            Error::Validation(NameError::TooLong) => strings.get(Text::RenameNameTooLong),
-            Error::Validation(NameError::NotOneLine) => strings.get(Text::RenameOneLine),
-            Error::Brain(error) => strings.error(error),
-            Error::Offline => strings.get(if state.view().is_none() {
-                Text::SettingsOffline
-            } else {
-                Text::SettingsUnavailable
-            }),
-        });
+        let (saving, error) = field_status(state, field, strings);
         let ix = usize::from(field == Field::User);
         div()
             .flex()
@@ -227,12 +217,7 @@ impl SettingsView {
                     .text_color(cx.theme().muted_foreground)
                     .child(strings.get(Text::UserNameHelp))
             }))
-            .children(
-                state
-                    .field(field)
-                    .saving
-                    .then(|| div().text_xs().child(strings.get(Text::SettingsSaving))),
-            )
+            .children(saving.map(|saving| div().text_xs().child(saving)))
             .children(error.map(|error| div().text_sm().text_color(cx.theme().danger).child(error)))
     }
 
@@ -454,6 +439,7 @@ pub(super) mod tests {
             show_in_taskbar: false,
             talk_back: false,
             stt_unload: kumochi_protocol::message::SttUnload::Kept,
+            hold_to_talk: kumochi_protocol::message::DEFAULT_HOLD_TO_TALK,
         }
     }
 

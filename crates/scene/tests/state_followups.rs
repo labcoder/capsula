@@ -84,15 +84,7 @@ fn every_positive_dimension_and_box_component_rejects_zero() {
         ),
         (r#"{"path":{"id":"t","d":"M0 0","width":0}}"#, "path.width"),
         (r#"{"path":{"id":"t","d":"M0 0","scale":0}}"#, "path.scale"),
-        (
-            r#"{"shape":{"id":"t","kind":"rect","width":0}}"#,
-            "shape.width",
-        ),
         (r#"{"shape":{"id":"t","kind":"rect","r":0}}"#, "shape.r"),
-        (
-            r#"{"shape":{"id":"t","kind":"rect","radius":0}}"#,
-            "shape.radius",
-        ),
         (
             r#"{"shape":{"id":"t","kind":"rect","size":[0,1]}}"#,
             "shape.size[0]",
@@ -152,6 +144,33 @@ fn every_positive_dimension_and_box_component_rejects_zero() {
             &format!("put[0].{path}"),
         );
     }
+}
+
+#[test]
+fn a_shape_takes_zero_radius_and_outline_width_but_no_negative_and_set_cannot_change_width() {
+    let mut state = scene();
+    let mut global = GlobalBudget::default();
+    for field in ["radius", "width"] {
+        rejected(
+            &state,
+            &global,
+            &format!(
+                r#"{{"id":"bad","put":[{{"shape":{{"id":"t","kind":"rect","{field}":-1}}}}]}}"#
+            ),
+            ErrorCode::OutOfRange,
+            &format!("put[0].shape.{field}"),
+        );
+    }
+    let handles = commit(
+        &mut state,
+        &mut global,
+        r##"{"id":"sky","put":[{"shape":{"id":"skybg","kind":"rect","box":[0,0,480,300],"fill":"#BFE8FF","color":"#BFE8FF","width":0}},{"shape":{"id":"square","kind":"rect","box":[0,0,10,10],"radius":0}}]}"##,
+    );
+    assert_eq!(handles.len(), 2);
+    let error = parse_record(br#"{"step":{"id":"s","set":[{"target":"skybg","width":0}]}}"#)
+        .expect_err("set has no width field");
+    assert_eq!(error.code, ErrorCode::UnknownField);
+    assert_eq!(error.path.as_str(), "set[0].width");
 }
 
 #[test]

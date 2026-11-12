@@ -385,6 +385,8 @@ struct Node {
     /// Put by the step this view activated, so [`SceneView::delay_entrance`] moves its timing.
     fresh: bool,
     owners: [Option<usize>; 10],
+    /// The prepared `set.behind` link, to a live object or a held dropped anchor.
+    behind: Option<Handle>,
 }
 
 fn slot(track: Track) -> usize {
@@ -404,7 +406,7 @@ fn slot(track: Track) -> usize {
 
 /// Orders placed objects parent-first, so one pass composes every world transform.
 fn build_nodes(layout: &LayoutState, timing: impl Fn(&Item) -> Timing) -> Vec<Node> {
-    let items: BTreeMap<Handle, (&Item, Rest, f32, usize, f32)> = layout
+    let items: BTreeMap<Handle, crate::layout::PlacedEntry<'_>> = layout
         .placed()
         .map(|entry| (entry.0.handle, entry))
         .collect();
@@ -431,7 +433,7 @@ fn build_nodes(layout: &LayoutState, timing: impl Fn(&Item) -> Timing) -> Vec<No
     order
         .iter()
         .map(|(_, handle)| {
-            let (item, rest, inherited, label_start, paint_scale) = items[handle];
+            let (item, rest, inherited, label_start, paint_scale, behind) = items[handle];
             Node {
                 handle: *handle,
                 parent: item.parent.and_then(|parent| index.get(&parent).copied()),
@@ -446,6 +448,7 @@ fn build_nodes(layout: &LayoutState, timing: impl Fn(&Item) -> Timing) -> Vec<No
                 timing: timing(item),
                 fresh: false,
                 owners: [None; 10],
+                behind,
             }
         })
         .collect()
@@ -539,7 +542,7 @@ impl Frame {
             generation: None,
         }
     }
-    /// Objects in handle order. Use [`Self::paint_items`] for layered painting.
+    /// Objects in paint order. Use [`Self::paint_items`] for layered painting.
     pub fn items(&self) -> &[FrameItem] {
         &self.items
     }
@@ -650,7 +653,7 @@ impl SceneView {
     pub fn new(at_rest: &LayoutState, activated: u32) -> Self {
         let nodes = build_nodes(at_rest, |_| DONE);
         Self {
-            paint: paint_order(&nodes),
+            paint: paint_order(&nodes, at_rest.held()),
             nodes,
             layout: at_rest.clone(),
             layout_bytes: at_rest.resident_bytes(),
@@ -809,7 +812,7 @@ impl SceneView {
             .map(|geometry| ViewMotion::new(geometry, self.view.as_ref(), Some(now)));
         let (tracks, superseded) = own(&mut nodes, view.as_mut(), candidates);
         let view = Self {
-            paint: paint_order(&nodes),
+            paint: paint_order(&nodes, step.after.held()),
             nodes,
             layout: step.after.clone(),
             layout_bytes: step.retained_bytes(),
@@ -1060,12 +1063,54 @@ fn retired_bytes(superseded: &Vec<Option<Live>>) -> usize {
             .sum::<usize>()
 }
 
-/// Indices of drawable nodes in handle order, the paint order of prepared display lists.
-fn paint_order(nodes: &[Node]) -> Vec<usize> {
-    let mut paint: Vec<usize> = (0..nodes.len())
-        .filter(|index| !nodes[*index].primitives.is_empty())
+/// Indices of drawable nodes in paint order, built once per activation or rest view, never per
+/// frame. Unlinked objects paint in handle order. A linked object paints just below its anchor,
+/// after everything behind it, and one anchor's direct dependants keep handle order. A removed or
+/// cut anchor in `held` keeps its place in that walk without painting. With no links this is the
+/// in-place handle sort.
+fn paint_order(nodes: &[Node], held: &BTreeMap<Handle, Option<Handle>>) -> Vec<usize> {
+    let drawable = |index: usize| !nodes[index].primitives.is_empty();
+    if nodes.iter().all(|node| node.behind.is_none()) {
+        let mut paint: Vec<usize> = (0..nodes.len()).filter(|index| drawable(*index)).collect();
+        paint.sort_unstable_by_key(|index| nodes[*index].handle);
+        return paint;
+    }
+    // Every node and every held anchor by handle: (handle, link, node index when it paints).
+    let mut places: Vec<(Handle, Option<Handle>, Option<usize>)> = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.handle, node.behind, Some(index)))
+        .chain(held.iter().map(|(handle, link)| (*handle, *link, None)))
         .collect();
-    paint.sort_unstable_by_key(|index| nodes[*index].handle);
+    places.sort_unstable_by_key(|place| place.0);
+    let find = |handle: Handle| places.binary_search_by_key(&handle, |place| place.0).ok();
+    // (anchor place, handle, place): unlinked roots first, then each anchor's dependants.
+    let mut links: Vec<(Option<usize>, Handle, usize)> = places
+        .iter()
+        .enumerate()
+        .map(|(at, place)| (place.1.and_then(find), place.0, at))
+        .collect();
+    links.sort_unstable();
+    let dependants = |anchor: usize| {
+        let start = links.partition_point(|link| link.0 < Some(anchor));
+        let end = links.partition_point(|link| link.0 <= Some(anchor));
+        &links[start..end]
+    };
+    let mut paint = Vec::with_capacity(nodes.len());
+    let mut stack = Vec::with_capacity(places.len());
+    for root in links.iter().take_while(|link| link.0.is_none()) {
+        stack.push((root.2, false));
+        while let Some((at, below_done)) = stack.pop() {
+            if below_done {
+                if let Some(index) = places[at].2.filter(|index| drawable(*index)) {
+                    paint.push(index);
+                }
+                continue;
+            }
+            stack.push((at, true));
+            stack.extend(dependants(at).iter().rev().map(|link| (link.2, false)));
+        }
+    }
     paint
 }
 

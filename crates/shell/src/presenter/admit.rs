@@ -117,7 +117,7 @@ impl Presenter {
         let scene = lane.scene;
         out.credit(lane.cancel());
         self.release(scene);
-        self.forget(scene, out);
+        self.forget_failed(scene, out);
     }
 
     /// Applies held frames in arrival order until one enters the lane. A commit for a scene with
@@ -149,7 +149,8 @@ impl Presenter {
         for (frame, _) in &*held {
             match &**frame {
                 DataToShell::SceneBegin { scene, .. } => begun.push(*scene),
-                DataToShell::ScenesRemoved { scenes } => self.removed(scenes, now, out)?,
+                DataToShell::ScenesRemoved { scenes }
+                | DataToShell::ScenesReplaced { scenes, .. } => self.removed(scenes, now, out)?,
                 _ => {}
             }
         }

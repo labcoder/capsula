@@ -48,6 +48,9 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
             return Err(Ended::Broken("more scenes cleared than can be visible"));
         }
         ControlToBrain::ClearDrawing { scene_ids } => Some(Input::Clear { scenes: scene_ids }),
+        ControlToBrain::SceneFailed { scene } => {
+            Some(Input::Drawing(crate::drawing::Input::SceneFailed { scene }))
+        }
         ControlToBrain::DeleteThread {
             thread,
             after_turns,
@@ -70,16 +73,19 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
             run,
             scene,
             index,
+            reason,
             cut,
-            ..
         } => Some(Input::Drawing(crate::drawing::Input::StepFailed {
             run,
             scene,
             index,
+            reason,
             cut,
         })),
         // shortcut: B2a admits holds and consumes focus hints and exclusion lease changes.
         message @ (ControlToBrain::HoldRecognized { .. }
+        | ControlToBrain::VoiceHoldRecognized { .. }
+        | ControlToBrain::VoiceHoldStopped { .. }
         | ControlToBrain::KeyDown { .. }
         | ControlToBrain::KeyUp { .. }
         | ControlToBrain::GestureCancel { .. }
@@ -133,6 +139,13 @@ impl Brain {
     /// Applies a control frame with no shell to tell, as `serve` does once the core has gone.
     pub(super) fn control_offline(&mut self, message: ControlToBrain, len: usize, tap: &mut Tap) {
         tap.record(Pipe::Control, Direction::ToBrain, &message, len);
+        if let ControlToBrain::VoiceHoldStopped { gesture } = &message {
+            self.holds.stopped(crate::coordinator::HoldKey {
+                epoch: self.epoch,
+                gesture: *gesture,
+            });
+            return;
+        }
         if let ControlToBrain::Issue {
             session,
             request,
@@ -181,6 +194,12 @@ impl Brain {
     ) -> Result<Option<Input>, Ended> {
         link.tap
             .record(Pipe::Control, Direction::ToBrain, &message, len);
+        if self
+            .hold_control(&message, link)
+            .map_err(|Full| Ended::Lost)?
+        {
+            return Ok(None);
+        }
         if message == ControlToBrain::Pong {
             *ping_sent = None;
         }
@@ -219,8 +238,10 @@ impl Brain {
             return Ok(None);
         }
         if let ControlToBrain::KeyDown { .. } = message {
-            self.voice_op(Installer::reload_input, Some(link))
-                .map_err(|Full| Ended::Lost)?;
+            if self.hold_to_talk_enabled() {
+                self.voice_op(Installer::reload_input, Some(link))
+                    .map_err(|Full| Ended::Lost)?;
+            }
             return Ok(None);
         }
         control_input(message)

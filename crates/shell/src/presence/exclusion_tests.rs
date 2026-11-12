@@ -8,7 +8,7 @@ use kumochi_protocol::message::GestureId;
 use super::*;
 
 const EXCLUDED: u32 = 17;
-const PRIOR: [u32; 7] = [0, 1, EXCLUDED, 4, 8, 16, 32];
+const PRIOR: [u32; 8] = [0, 1, EXCLUDED, 4, 8, 16, 32, 64];
 
 struct Surface {
     number: u32,
@@ -24,7 +24,7 @@ pub(crate) struct Prior {
 }
 
 pub(crate) struct Fake {
-    surfaces: [Option<Surface>; 7],
+    surfaces: [Option<Surface>; 8],
     get_failure: Option<usize>,
     set_failure: Option<usize>,
     restore_failure: u8,
@@ -56,7 +56,7 @@ impl Fake {
         }
     }
 
-    fn affinities(&self) -> [u32; 7] {
+    fn affinities(&self) -> [u32; 8] {
         std::array::from_fn(|index| self.surfaces[index].as_ref().unwrap().affinity)
     }
 
@@ -217,7 +217,7 @@ fn actual_presence_terminals_match_nonempty_owner_session_input_and_duplicates(
     let key = acquire_presence(&owner, CaptureFor::Turn(7), cx);
     assert_eq!(
         fixture.borrow().affinities(),
-        [EXCLUDED, EXCLUDED, EXCLUDED, EXCLUDED, 8, 16, 32]
+        [EXCLUDED, EXCLUDED, EXCLUDED, EXCLUDED, 8, 16, 32, 64]
     );
     for (generation, capture_for) in [
         (8, CaptureFor::Turn(7)),
@@ -328,7 +328,7 @@ fn actual_timer_uses_original_deadline_and_cannot_retire_a_successor(
     );
     assert_eq!(
         fixture.borrow().affinities(),
-        [EXCLUDED, EXCLUDED, EXCLUDED, EXCLUDED, 8, 16, 32]
+        [EXCLUDED, EXCLUDED, EXCLUDED, EXCLUDED, 8, 16, 32, 64]
     );
     cx.dispatcher
         .scheduler()
@@ -375,7 +375,7 @@ fn actual_timer_retains_restoration_failure_at_its_original_deadline(
     assert!(owner.read_with(cx, |this, _| this.exclusion.lease.as_ref().unwrap().revoked));
     assert_eq!(
         fixture.borrow().affinities(),
-        [0, EXCLUDED, EXCLUDED, 4, 8, 16, 32]
+        [0, EXCLUDED, EXCLUDED, 4, 8, 16, 32, 64]
     );
 }
 
@@ -415,7 +415,7 @@ fn actual_replacement_and_state_keep_old_debt_without_matching_new_sessions(
         );
         assert_eq!(
             fixture.borrow().affinities(),
-            [0, EXCLUDED, EXCLUDED, 4, 8, 16, 32]
+            [0, EXCLUDED, EXCLUDED, 4, 8, 16, 32, 64]
         );
     }
     receive(&owner, LinkEvent::State(LinkState::Reconnecting), cx);
@@ -508,7 +508,7 @@ fn actual_shown_overlay_can_clear_or_disconnect_while_restoration_debt_blocks_sh
             assert!(this.exclusion.lease.as_ref().unwrap().revoked);
             assert_eq!(
                 fixture.borrow().affinities(),
-                [0, EXCLUDED, EXCLUDED, 4, 8, 16, 32]
+                [0, EXCLUDED, EXCLUDED, 4, 8, 16, 32, 64]
             );
             if let Some(session) = this.session.clone() {
                 assert_eq!(
@@ -542,7 +542,7 @@ fn actual_quit_cleans_a_nonempty_owner_and_does_not_forgive_failed_restoration(
                 assert!(this.exclusion.lease.as_ref().unwrap().revoked);
                 assert_eq!(
                     fixture.borrow().affinities(),
-                    [0, EXCLUDED, EXCLUDED, 4, 8, 16, 32]
+                    [0, EXCLUDED, EXCLUDED, 4, 8, 16, 32, 64]
                 );
             } else {
                 assert!(this.exclusion.lease.is_none());
@@ -554,7 +554,7 @@ fn actual_quit_cleans_a_nonempty_owner_and_does_not_forgive_failed_restoration(
 }
 
 #[test]
-fn all_seven_surfaces_restore_their_exact_independent_prior_affinity() {
+fn all_eight_surfaces_restore_their_exact_independent_prior_affinity() {
     let mut owner = Exclusion::default();
     let mut fake = Fake::new();
     let key = acquire(&mut owner, &mut fake, Instant::now());
@@ -566,7 +566,7 @@ fn all_seven_surfaces_restore_their_exact_independent_prior_affinity() {
             generation: LeaseGeneration(1)
         }
     );
-    assert_eq!(fake.affinities(), [EXCLUDED; 7]);
+    assert_eq!(fake.affinities(), [EXCLUDED; 8]);
     assert_eq!(owner.cleanup(&mut fake), Ok(()));
     assert_eq!(fake.affinities(), PRIOR);
     assert!(owner.lease.is_none());
@@ -576,7 +576,7 @@ fn all_seven_surfaces_restore_their_exact_independent_prior_affinity() {
 
 #[test]
 fn every_getter_and_partial_setter_failure_refuses_and_rolls_back() {
-    for index in 0..7 {
+    for index in 0..8 {
         for setter in [false, true] {
             let mut owner = Exclusion::default();
             let mut fake = Fake::new();
@@ -613,7 +613,7 @@ fn rollback_and_final_restore_failures_retain_debt_and_block_regrant() {
         }
         assert_eq!(
             fake.affinities(),
-            [0, EXCLUDED, EXCLUDED, 4, 8, 16, EXCLUDED]
+            [0, EXCLUDED, EXCLUDED, 4, 8, 16, EXCLUDED, 64]
         );
         let lease = owner.lease.as_ref().unwrap();
         assert!(lease.revoked);
@@ -640,7 +640,13 @@ fn rollback_and_final_restore_failures_retain_debt_and_block_regrant() {
 
 #[test]
 fn lazy_surface_attachment_preserves_priors_and_retains_failed_cleanup() {
-    for slot in [Slot::Text, Slot::Threads, Slot::Settings, Slot::Drawing] {
+    for slot in [
+        Slot::Text,
+        Slot::Threads,
+        Slot::Settings,
+        Slot::Drawing,
+        Slot::Onboarding,
+    ] {
         for fail in [false, true] {
             let mut owner = Exclusion::default();
             let mut fake = Fake::new();
@@ -677,13 +683,13 @@ fn destruction_and_recycled_numbers_never_transfer_a_prior_affinity() {
     let _key = acquire(&mut owner, &mut fake, Instant::now());
     fake.replace(Slot::Drawing, 91);
     assert_eq!(owner.cleanup(&mut fake), Ok(()));
-    assert_eq!(fake.affinities(), [0, 1, EXCLUDED, 4, 8, 16, 91]);
+    assert_eq!(fake.affinities(), [0, 1, EXCLUDED, 4, 8, 16, 91, 64]);
     let _next = acquire(&mut owner, &mut fake, Instant::now());
     fake.replace(Slot::Drawing, 92);
     assert_eq!(owner.attach(Slot::Drawing, &mut fake), Ok(()));
-    assert_eq!(fake.affinities(), [EXCLUDED; 7]);
+    assert_eq!(fake.affinities(), [EXCLUDED; 8]);
     assert_eq!(owner.cleanup(&mut fake), Ok(()));
-    assert_eq!(fake.affinities(), [0, 1, EXCLUDED, 4, 8, 16, 92]);
+    assert_eq!(fake.affinities(), [0, 1, EXCLUDED, 4, 8, 16, 92, 64]);
 }
 
 #[test]
@@ -699,7 +705,7 @@ fn an_unconfirmed_lost_instance_keeps_debt_without_touching_a_recycled_number() 
     });
     assert_eq!(owner.attach(Slot::Drawing, &mut fake), Err(Error::Surface));
     assert_eq!(owner.cleanup(&mut fake), Err(Error::Surface));
-    assert_eq!(fake.affinities(), [0, 1, EXCLUDED, 4, 8, 16, 93]);
+    assert_eq!(fake.affinities(), [0, 1, EXCLUDED, 4, 8, 16, 93, 64]);
     assert!(owner.lease.as_ref().unwrap().revoked);
     assert_eq!(
         owner.acquire(10, CaptureFor::Turn(9), Instant::now(), &mut fake),
@@ -707,7 +713,7 @@ fn an_unconfirmed_lost_instance_keeps_debt_without_touching_a_recycled_number() 
     );
     old.destroyed.set(true);
     assert_eq!(owner.cleanup(&mut fake), Ok(()));
-    assert_eq!(fake.affinities(), [0, 1, EXCLUDED, 4, 8, 16, 93]);
+    assert_eq!(fake.affinities(), [0, 1, EXCLUDED, 4, 8, 16, 93, 64]);
     assert!(owner.lease.is_none());
 }
 
@@ -733,7 +739,7 @@ fn full_keys_and_the_exact_deadline_fence_local_cleanup() {
         },
     ] {
         assert_eq!(owner.expire(stale, now + LIFETIME, &mut fake), Ok(()));
-        assert_eq!(fake.affinities(), [EXCLUDED; 7]);
+        assert_eq!(fake.affinities(), [EXCLUDED; 8]);
     }
     assert_eq!(
         owner.expire(
@@ -745,7 +751,7 @@ fn full_keys_and_the_exact_deadline_fence_local_cleanup() {
         ),
         Ok(())
     );
-    assert_eq!(fake.affinities(), [EXCLUDED; 7]);
+    assert_eq!(fake.affinities(), [EXCLUDED; 8]);
     assert_eq!(owner.expire(key, now + LIFETIME, &mut fake), Ok(()));
     assert_eq!(fake.affinities(), PRIOR);
     let next = owner
@@ -753,7 +759,7 @@ fn full_keys_and_the_exact_deadline_fence_local_cleanup() {
         .unwrap();
     assert_eq!(owner.expire(key, now + LIFETIME * 2, &mut fake), Ok(()));
     assert_eq!(owner.lease.as_ref().unwrap().key, next);
-    assert_eq!(fake.affinities(), [EXCLUDED; 7]);
+    assert_eq!(fake.affinities(), [EXCLUDED; 8]);
     assert_eq!(owner.cleanup(&mut fake), Ok(()));
     assert_eq!(owner.cleanup(&mut fake), Ok(()));
     assert_eq!(fake.affinities(), PRIOR);

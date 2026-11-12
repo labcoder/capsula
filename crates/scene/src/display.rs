@@ -123,7 +123,7 @@ pub struct Item {
 /// Prepared object replacements for one step.
 #[derive(Default, Clone, PartialEq)]
 pub struct DisplayList {
-    /// Items in stable paint order.
+    /// Items in handle order; a view's paint order follows `set.behind` links.
     pub items: Vec<Item>,
 }
 

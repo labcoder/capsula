@@ -345,7 +345,7 @@ pub fn server_image(client: &impl AsRawHandle) -> io::Result<PathBuf> {
     process_image(open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)?.as_handle())
 }
 
-fn open_process(pid: u32, rights: PROCESS_ACCESS_RIGHTS) -> io::Result<OwnedHandle> {
+pub(super) fn open_process(pid: u32, rights: PROCESS_ACCESS_RIGHTS) -> io::Result<OwnedHandle> {
     // SAFETY: plain call; a null result is checked below.
     let raw = unsafe { OpenProcess(rights, 0, pid) };
     if raw.is_null() {

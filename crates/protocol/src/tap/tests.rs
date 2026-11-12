@@ -11,6 +11,32 @@ const NAME: &str = "Zqxassistant";
 const USER: &str = "Zqxuser";
 
 #[test]
+fn drawing_failure_controls_record_only_their_closed_kinds() {
+    use crate::message::{RunId, SceneId};
+    let failed = ControlToBrain::SceneFailed { scene: SceneId(9) };
+    let notice = ControlToShell::DrawingReplacementFailed {
+        thread: ThreadId(7),
+        run: RunId(3),
+    };
+    let nothing = ControlToShell::DrawingNotReturned {
+        thread: ThreadId(7),
+        run: RunId(3),
+    };
+    let failed = record(Direction::ToBrain, &failed);
+    let notice = record(Direction::ToShell, &notice);
+    let nothing = record(Direction::ToShell, &nothing);
+    assert_eq!((failed.op.as_str(), failed.payload), ("SceneFailed", None));
+    assert_eq!(
+        (notice.op.as_str(), notice.payload),
+        ("DrawingReplacementFailed", None)
+    );
+    assert_eq!(
+        (nothing.op.as_str(), nothing.payload),
+        ("DrawingNotReturned", None)
+    );
+}
+
+#[test]
 fn github_refusal_is_content_free_while_its_repository_request_remains_redacted() {
     use crate::message::{ErrorKey, GitHubOp, RepoName};
     let marker = "sentinel/private-repository";
@@ -70,6 +96,7 @@ fn view() -> ControlToShell {
             show_in_taskbar: false,
             talk_back: false,
             stt_unload: crate::message::SttUnload::Kept,
+            hold_to_talk: crate::message::DEFAULT_HOLD_TO_TALK,
         },
         answer: true,
     }

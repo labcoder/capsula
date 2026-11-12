@@ -47,6 +47,8 @@ pub enum StoreOp {
     ReadJob(super::ReadJob),
     /// Select a history call on the stamped page reader.
     ReadCall(crate::dispatch::ReadCall),
+    /// Capture a hold's target choice and live deletion identity on the stamped reader.
+    ReadHold(super::HoldRead),
     /// Read an inline compaction's request on the page reader, in one read transaction.
     CompactContext(super::CompactContext),
     /// The turn, its run, and the thread when `title` names a new one.
@@ -185,6 +187,7 @@ impl StoreOp {
             | Self::BuildContext(_)
             | Self::ReadJob(_)
             | Self::ReadCall(_)
+            | Self::ReadHold(_)
             | Self::CompactContext(_)
             | Self::ClearScenes { .. }
             | Self::KeepScene { .. }
@@ -199,6 +202,10 @@ impl StoreOp {
     /// Answers an operation that couldn't reach the store; a heard point has no answer.
     pub fn failed(&self) -> Option<Input> {
         Some(match self {
+            Self::ReadHold(read) => Input::HoldPrepared {
+                key: read.snapshot.key,
+                result: Err(()),
+            },
             Self::Issue { serial, .. } => Input::IssueWritten {
                 serial: *serial,
                 reply: Err(()),

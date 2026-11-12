@@ -91,6 +91,28 @@ pub struct Begin {
     #[serde(default)]
     pub others: Others,
 }
+impl Begin {
+    /// Whether this header continues a scene stored under `stored`. Title and alt describe the
+    /// drawing and may be restated differently; every other field identifies it.
+    #[must_use]
+    pub fn continues(&self, stored: &Self) -> bool {
+        // shortcut: the stored title and alt keep their first text and can go stale after an edit; store the latest once a stale description shows.
+        let Self {
+            v,
+            scene,
+            surface,
+            size,
+            title: _,
+            alt: _,
+            others,
+        } = self;
+        *v == stored.v
+            && *scene == stored.scene
+            && *surface == stored.surface
+            && *size == stored.size
+            && *others == stored.others
+    }
+}
 /// A strict empty call terminator.
 #[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -402,6 +424,9 @@ pub struct Change {
     /// Descriptive text of a solid.
     #[schemars(skip)]
     pub info: Option<Text>,
+    /// Paint the target (not a diagram, table or chart) below this object, which has the same
+    /// parent. Never brings it forward or reverses an earlier link.
+    pub behind: Option<WireId>,
 }
 /// Line record fields.
 #[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -431,7 +456,8 @@ pub struct Line {
     /// via.
     #[serde(default)]
     pub via: Bounded<[Finite; 2], MAX_PATH_POINTS>,
-    /// width.
+    /// Stroke width, above 0.
+    #[schemars(extend("exclusiveMinimum" = 0))]
     pub width: Option<Finite>,
     /// dash.
     #[serde(default)]
@@ -467,10 +493,12 @@ pub struct PathOp {
     /// at.
     pub at: Option<Anchor>,
     /// scale.
+    #[schemars(extend("exclusiveMinimum" = 0))]
     pub scale: Option<Finite>,
     /// fill.
     pub fill: Option<Color>,
-    /// width.
+    /// Stroke width, above 0.
+    #[schemars(extend("exclusiveMinimum" = 0))]
     pub width: Option<Finite>,
     /// dash.
     #[serde(default)]
@@ -507,15 +535,18 @@ pub struct Shape {
     /// size.
     pub size: Option<[Finite; 2]>,
     /// r.
+    #[schemars(extend("exclusiveMinimum" = 0))]
     pub r: Option<Finite>,
     /// points.
     #[serde(default)]
     pub points: Bounded<[Finite; 2], MAX_PATH_POINTS>,
     /// radius.
+    #[schemars(extend("minimum" = 0))]
     pub radius: Option<Finite>,
     /// fill.
     pub fill: Option<Color>,
-    /// width.
+    /// Outline width; 0 draws no outline.
+    #[schemars(extend("minimum" = 0))]
     pub width: Option<Finite>,
     /// dash.
     #[serde(default)]
@@ -549,6 +580,7 @@ pub struct TextOp {
     /// text.
     pub text: Text,
     /// size.
+    #[schemars(extend("exclusiveMinimum" = 0))]
     pub size: Option<Finite>,
     /// bold.
     #[serde(default)]
@@ -557,6 +589,7 @@ pub struct TextOp {
     #[serde(default)]
     pub align: Align,
     /// max width.
+    #[schemars(extend("exclusiveMinimum" = 0))]
     pub max_width: Option<Finite>,
 }
 /// Callout record fields.
@@ -589,6 +622,7 @@ pub struct Callout {
     /// at.
     pub at: Option<Anchor>,
     /// max width.
+    #[schemars(extend("exclusiveMinimum" = 0))]
     pub max_width: Option<Finite>,
 }
 /// Highlight record fields.
@@ -618,6 +652,7 @@ pub struct Highlight {
     #[serde(default)]
     pub style: HighlightStyle,
     /// pad.
+    #[schemars(extend("exclusiveMinimum" = 0))]
     pub pad: Option<Finite>,
 }
 /// Diagram record fields.

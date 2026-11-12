@@ -81,7 +81,9 @@ impl Accounts {
             | ErrorKey::VoiceLoad
             | ErrorKey::VoiceUnavailable
             | ErrorKey::VoiceModelPath
-            | ErrorKey::GitHubUnavailable => {}
+            | ErrorKey::GitHubUnavailable
+            | ErrorKey::DrawingReplacementFailed
+            | ErrorKey::DrawingNotReturned => {}
             ErrorKey::SignInTimedOut
             | ErrorKey::SignInFailed
             | ErrorKey::SignInOtherAccount

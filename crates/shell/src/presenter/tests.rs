@@ -110,6 +110,9 @@ mod frames;
 #[path = "retirement_tests.rs"]
 mod retirement;
 
+#[path = "swap_tests.rs"]
+mod swap;
+
 #[path = "dead_dropper_tests.rs"]
 mod dead_dropper;
 
@@ -283,7 +286,7 @@ impl TextMeasure for Shaper {
     }
 }
 
-fn header() -> SceneHeader {
+pub(crate) fn header() -> SceneHeader {
     let source = br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":"diagram"}}"#;
     let Ok(Record::Begin(begin)) = parse_record(source) else {
         panic!("a begin record");
@@ -1086,7 +1089,10 @@ fn an_admission_that_finds_every_worker_slot_held_clears_its_scene_at_its_deadli
     assert!(presenter.tick(ms(now, 249)).expect("a tick").is_empty());
     let effects = presenter.tick(ms(now, 250)).expect("a tick");
     assert_eq!(credit(&effects), FRAME);
-    assert_eq!(controls(&effects), [&clear_drawing(vec![LIVE])]);
+    assert_eq!(
+        controls(&effects),
+        [&ControlToBrain::SceneFailed { scene: LIVE }]
+    );
     assert!(!presenter.holds_scenes());
     assert_eq!(presenter.deadline(), None);
     let late = commit(&mut presenter, LIVE, 0, rect("b"), now).expect("a cleared scene");
@@ -1130,7 +1136,7 @@ fn a_slot_freed_at_or_after_the_waiting_admission_s_deadline_clears_its_scene() 
         assert_eq!(credit(&effects), FRAME, "a slot freed at {at} ms");
         assert_eq!(
             controls(&effects),
-            [&clear_drawing(vec![LIVE])],
+            [&ControlToBrain::SceneFailed { scene: LIVE }],
             "a slot freed at {at} ms"
         );
         assert!(admissions(effects).is_empty(), "a slot freed at {at} ms");

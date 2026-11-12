@@ -314,6 +314,17 @@ pub fn prepare(
         after.handles.insert(*handle, id.clone());
         after.objects.insert(id, object);
     }
+    for change in ticket.run.set.iter() {
+        if let Some(anchor) = &change.behind {
+            let anchor = after.objects.get(anchor).ok_or_else(invariant)?.item.handle;
+            after
+                .objects
+                .get_mut(&change.target)
+                .ok_or_else(invariant)?
+                .behind = Some(anchor);
+        }
+    }
+    after.hold_dropped_anchors(&before);
     edges::route(&mut after, &build)?;
     update_group_bounds(&mut after);
     edge_labels::separate(&mut after, &build)?;
@@ -333,7 +344,7 @@ pub fn prepare(
         if let Prim::Fill { points, .. } = primitive
             && points.len() > crate::limits::MAX_GLOBAL_FILL_VERTICES
         {
-            return Err(PrepareError::OverResidency);
+            return Err(PrepareError::OverPaintWork);
         }
     }
     // A capped scene whose own work passes its cap can never be admitted: stop counting there.
@@ -355,12 +366,12 @@ pub fn prepare(
             }
             (_, None) => PaintWork::of(&object.item.primitives, scale),
             (_, Some(cap)) => PaintWork::within(&object.item.primitives, total, cap, scale)
-                .ok_or(PrepareError::OverResidency)?,
+                .ok_or(PrepareError::OverPaintWork)?,
         };
         object.paint_scale = scale;
         total = total + object.work;
         if !object.work.fits_builds() || paint_cap.is_some_and(|cap| !total.fits(cap)) {
-            return Err(PrepareError::OverResidency);
+            return Err(PrepareError::OverPaintWork);
         }
     }
     if after.objects.is_empty() {
@@ -702,10 +713,21 @@ fn patch(source: &Op, change: &Change) -> Op {
                 $value.color = Some(color.clone())
             };
         }
+        // A filled object's colour is its fill too, as an `anim` colour track paints fill and
+        // outline; unlike a track, a set leaves a shape's label at the theme foreground.
+        // shortcut: a set cannot give a filled shape an outline unlike its fill; remove and put it.
+        macro_rules! filled {
+            ($value:expr) => {{
+                color!($value);
+                if $value.fill.is_some() {
+                    $value.fill = Some(color.clone());
+                }
+            }};
+        }
         match &mut source {
             Op::Line(value) | Op::Arrow(value) => color!(value),
-            Op::Path(value) => color!(value),
-            Op::Shape(value) => color!(value),
+            Op::Path(value) => filled!(value),
+            Op::Shape(value) => filled!(value),
             Op::Text(value) => color!(value),
             Op::Callout(value) => color!(value),
             Op::Highlight(value) => color!(value),

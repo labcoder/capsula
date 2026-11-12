@@ -211,6 +211,13 @@ fn whole(models: &Path, part: VoicePart) -> Result<bool, ErrorKey> {
 }
 
 impl Brain {
+    pub(super) fn hold_voice(&self) -> (kumochi_protocol::message::PartState, Option<&SttHandle>) {
+        self.voice.as_ref().map_or(
+            (kumochi_protocol::message::PartState::NotInstalled, None),
+            |voice| (voice.installer.view().speech_input, voice.stt.as_ref()),
+        )
+    }
+
     #[cfg(test)]
     pub(super) fn voice_deleting(&self, part: VoicePart) -> bool {
         self.voice
@@ -341,10 +348,13 @@ impl Brain {
         &mut self,
         before: VoiceView,
         effects: Vec<Effect>,
-        link: Option<&mut Link<'_, '_>>,
+        mut link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
         self.run(effects);
         self.voice_policy();
+        if let Some(link) = link.as_deref_mut() {
+            self.hold_voice_changed(link)?;
+        }
         let Some(voice) = &self.voice else {
             return Ok(());
         };

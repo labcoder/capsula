@@ -51,8 +51,8 @@ pub use scenes::{
     SceneDataError, SceneDescriptorV1, SceneFailure, SceneHeader, SceneSnapshotChunk,
 };
 pub use settings::{
-    AssistantName, DockPosition, MAX_NAME_CHARS, MaxFrameRate, NameError, NotACap, SettingsOp,
-    SettingsView, SttUnload, UserName,
+    AssistantName, DEFAULT_HOLD_TO_TALK, DockPosition, MAX_NAME_CHARS, MaxFrameRate, NameError,
+    NotACap, SettingsOp, SettingsView, SttUnload, UserName,
 };
 pub use threads::{
     Effort, LISTED_MODELS_CALL_TOOLS, MAX_MODEL_NAME_CHARS, MAX_MODELS, MAX_SLUG_BYTES,
@@ -60,7 +60,8 @@ pub use threads::{
     ThreadTitle,
 };
 pub use voice::{
-    Cursor, MAX_AHEAD_SEGMENTS, MAX_HOLD_CHUNKS, MAX_MIC_SAMPLES, MAX_RATE, MAX_SAY_BYTES,
+    Cursor, HOLD_DRAIN_TIMEOUT_MS, HOLD_START_TIMEOUT_MS, HoldFailure, HoldStatus,
+    MAX_AHEAD_SEGMENTS, MAX_HOLD_CHUNKS, MAX_MIC_SAMPLES, MAX_RATE, MAX_SAY_BYTES,
     MAX_SEGMENT_SECONDS, MAX_SEGMENTS_PER_RUN, MAX_SPEECH_SAMPLES, MAX_TRANSCRIPT_BYTES,
     MAX_UNPLAYED_SECONDS, MIN_RATE, MicPcm, OutputGeneration, PROGRESS_INTERVAL_MS, PartState,
     SegmentId, SpeechPcm, StepRef, Transcript, VoiceBound, VoiceView, check_rate,
@@ -431,6 +432,25 @@ pub enum ControlToBrain {
         /// The content-bound operation.
         op: IssueOp,
     },
+    /// The shell refused an entire scene, possibly before its first run was known.
+    SceneFailed {
+        /// The committed scene to clear, without treating this as an explicit user clear.
+        scene: SceneId,
+    },
+    /// A recognized voice-only hold, without screen capture or an exclusion lease.
+    VoiceHoldRecognized {
+        /// The checked connection-local gesture.
+        gesture: GestureId,
+        /// The exact target, or New when absent; no thread is stored by this request.
+        thread: Option<ThreadId>,
+        /// The Shell selection revision, including changes away and back.
+        selection: u64,
+    },
+    /// The source generation physically stopped and joined; never inferred from `KeyUp` or EOF.
+    VoiceHoldStopped {
+        /// The generation whose stop completed.
+        gesture: GestureId,
+    },
 }
 
 /// What a thread's delete came to.
@@ -620,6 +640,27 @@ pub enum ControlToShell {
     },
     /// A GitHub connection error, independent of generic account errors.
     GitHubError(UserError),
+    /// A committed replacement failed before its first successful paint.
+    DrawingReplacementFailed {
+        /// The conversation that requested replacement, even after its call ended.
+        thread: ThreadId,
+        /// Its original run, not a later continuation's run.
+        run: RunId,
+    },
+    /// A run that called `draw` finished with no committed step.
+    DrawingNotReturned {
+        /// The run's conversation.
+        thread: ThreadId,
+        /// The run whose calls drew nothing.
+        run: RunId,
+    },
+    /// Voice-only input authority/status, scoped to this connection and gesture.
+    VoiceHoldStatus {
+        /// The hold this status belongs to.
+        gesture: GestureId,
+        /// Admission or a content-free outcome; it cannot itself claim a running microphone.
+        status: HoldStatus,
+    },
     /// An operation ended without an authoritative stored answer; no card state is implied.
     IssueUnavailable {
         /// The original shell operation identity.
@@ -844,6 +885,13 @@ pub enum DataToShell {
         request: u32,
         /// Fixed, content-free completion status.
         status: IssueCardsStatus,
+    },
+    /// Committed removals whose successor follows on this FIFO; presentation may bridge them.
+    ScenesReplaced {
+        /// One to four unique victims, never the successor.
+        scenes: Vec<SceneId>,
+        /// The new scene whose first sampled frame ends the visual hold.
+        successor: SceneId,
     },
     /// A newly saved review; only its matching live opener may arm a confirmation.
     IssueReview {

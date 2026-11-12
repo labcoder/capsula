@@ -214,6 +214,19 @@ voice-downloading = Downloading speech input…
 voice-loading = Loading or stopping speech input…
 voice-ready = Installed · ready
 voice-unloaded = Installed · unloaded
+hold-preparing = Preparing speech input…
+hold-to-talk = Hold to talk
+hold-to-talk-help = Hold left Ctrl+Alt to speak, then release to send. Requires an installed speech input model.
+hold-disabled = Hold to talk is off. Turn it on in Settings → Voice.
+hold-listening = Listening…
+hold-stopping = Stopping microphone…
+hold-transcribing = Transcribing…
+hold-thinking = Thinking…
+hold-empty = No speech detected. Try again.
+hold-cancelled = Speech input cancelled.
+hold-unavailable = Speech input unavailable. Restart the app if the microphone stays active.
+hold-microphone-unavailable = Microphone unavailable. Check microphone access and your input device, then try again.
+hold-failed = Speech input failed. Try again.
 voice-restart-required = Speech input unavailable. Restart the app.
 voice-installed-failed = Installed · speech input unavailable
 voice-not-installed-failed = Not installed · speech input unavailable
@@ -245,6 +258,17 @@ settings-unavailable = Couldn't send that change. Try again in a moment.
 settings-not-saved = Settings not saved
 error-settings-refused = Couldn't save that setting. Try again.
 error-config-unreadable = Your settings file can't be read, so changes aren't saved. Repair or delete config.toml, then restart.
+
+# Onboarding
+
+onboarding-title = Welcome to { $app }
+onboarding-close = Finish later
+onboarding-continue = Continue
+# { $name } marks where the name input sits; text may come before or after it.
+onboarding-welcome = Hi, I'm { $name }
+onboarding-welcome-help = Call me something else if you like. You can change it later in Settings.
+onboarding-user = What should { $assistant } call you?
+onboarding-user-help = Optional. It's sent to the model you chat with, so { $assistant } can use it.
 
 # ChatGPT accounts
 
@@ -391,4 +415,6 @@ error-voice-corrupt = A voice file didn't match what Kumochi expected, so it was
 error-voice-storage = Kumochi couldn't read, write or delete its voice files.
 error-voice-load = Voice couldn't start.
 error-voice-model-path = The speech model folder goes through a link or network location, or has unsafe permissions. Use an ordinary local folder.
+error-drawing-replacement-failed = The replacement couldn't be drawn. Your previous drawings were removed.
+error-drawing-not-returned = No drawing came back.
 error-voice-unavailable = Voice can't be installed or removed right now.

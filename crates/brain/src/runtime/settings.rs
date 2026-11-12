@@ -54,6 +54,8 @@ pub(super) struct Queued {
 #[derive(Debug)]
 pub(super) struct Write {
     epoch: u64,
+    model: bool,
+    disables_hold: bool,
     voice: Option<VoiceWrite>,
     github: Option<GitHubWrite>,
     handle: JoinHandle<(Pending, Result<(), ConfigError>)>,
@@ -95,6 +97,28 @@ pub(super) type Written = (
 );
 
 impl Brain {
+    pub(super) fn hold_to_talk_enabled(&self) -> bool {
+        self.config.view().hold_to_talk
+            && self
+                .config_write
+                .as_ref()
+                .is_none_or(|write| !write.disables_hold)
+            && !self.settings_ops.iter().any(|queued| {
+                matches!(
+                    queued.change,
+                    Change::User(SettingsOp::SetHoldToTalk(false))
+                )
+            })
+    }
+
+    pub(super) fn changing_model(&self) -> bool {
+        self.config_write.as_ref().is_some_and(|write| write.model)
+            || self
+                .settings_ops
+                .iter()
+                .any(|queued| matches!(queued.change, Change::User(SettingsOp::SetDefaultModel(_))))
+    }
+
     /// Holds the next settings write before it touches the file, until the returned sender
     /// sends or drops.
     #[cfg(test)]
@@ -139,10 +163,16 @@ impl Brain {
         }
     }
 
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the model-operation bit remains in flight through this settings write"
+    )]
     fn start_settings_write(
         &mut self,
         pending: Pending,
         epoch: u64,
+        model: bool,
+        disables_hold: bool,
         voice: Option<VoiceWrite>,
         github: Option<GitHubWrite>,
     ) {
@@ -162,6 +192,8 @@ impl Brain {
         });
         self.config_write = Some(Write {
             epoch,
+            model,
+            disables_hold,
             voice,
             github,
             handle,
@@ -170,6 +202,7 @@ impl Brain {
 
     /// Starts the next waiting settings change, unless a write is in flight. A refused one is
     /// settled at once with the settings unchanged.
+    #[expect(clippy::too_many_lines, reason = "one ordered settings write pump")]
     pub(super) fn pump_settings(
         &mut self,
         mut link: Option<&mut Link<'_, '_>>,
@@ -178,6 +211,19 @@ impl Brain {
             let Some(Queued { change, epoch }) = self.settings_ops.pop_front() else {
                 break;
             };
+            let model = matches!(&change, Change::User(SettingsOp::SetDefaultModel(_)));
+            let disables_hold = matches!(&change, Change::User(SettingsOp::SetHoldToTalk(false)));
+            if model {
+                self.holds
+                    .invalidate(kumochi_protocol::message::HoldStatus::Failed(
+                        kumochi_protocol::message::HoldFailure::ChoiceChanged,
+                    ));
+                if let Some(link) = link.as_deref_mut() {
+                    self.hold_voice_changed(link)?;
+                }
+                let effects = self.coordinator.cancel_current_hold();
+                self.apply(effects, link.as_deref_mut()).map_err(|_| Full)?;
+            }
             let (staged, voice, github) = match change {
                 // Popped, so it applies even when its answer can't be sent; no Voice frame
                 // goes ahead of a missing answer.
@@ -253,7 +299,7 @@ impl Brain {
             };
             match staged {
                 Ok(pending) => {
-                    self.start_settings_write(pending, epoch, voice, github);
+                    self.start_settings_write(pending, epoch, model, disables_hold, voice, github);
                 }
                 Err(error) => {
                     tracing::warn!(%error, "settings change refused");
@@ -411,6 +457,7 @@ pub(super) async fn written(write: &mut Option<Write>) -> Written {
         voice,
         github,
         handle,
+        ..
     }) = write.as_mut()
     else {
         return std::future::pending().await;

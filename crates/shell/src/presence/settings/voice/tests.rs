@@ -40,6 +40,60 @@ fn open(
 }
 
 #[gpui::test]
+fn hold_to_talk_is_keyboard_operable_and_waits_for_the_saved_answer(cx: &mut TestAppContext) {
+    use crate::link::{Batch, LinkEvent, Session};
+    use kumochi_protocol::message::{ControlToBrain, Incarnation, SettingsOp};
+
+    let (window, view) = open(cx);
+    let owner = crate::presence::test_fixture::presence(cx);
+    let controls = view.update(cx, |view, cx| {
+        view.owner = owner.downgrade();
+        owner.update(cx, |owner, _| {
+            owner.settings = view.model.clone();
+            owner.session = Some(Session::detached(7, Incarnation(1)));
+            owner.link.record_controls()
+        })
+    });
+    let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+    frame.update(|window, cx| {
+        view.update(cx, |view, cx| view.focus(window, cx));
+        assert!(view.read(cx).model.read(cx).hold_to_talk_enabled());
+        window.draw(cx).clear(cx);
+    });
+    assert!(frame.debug_bounds("hold-to-talk").is_some());
+    press(&mut frame, "tab tab space");
+    assert_eq!(
+        controls.try_recv().unwrap(),
+        ControlToBrain::Settings(SettingsOp::SetHoldToTalk(false))
+    );
+    frame.update(|_, cx| {
+        let state = view.read(cx).model.read(cx);
+        assert!(state.hold_to_talk_pending());
+        assert!(!state.hold_to_talk_enabled());
+        assert!(state.view().unwrap().hold_to_talk);
+    });
+    frame.update(|_, cx| {
+        let mut saved = view.read(cx).model.read(cx).view().unwrap().clone();
+        saved.hold_to_talk = false;
+        owner.update(cx, |owner, cx| {
+            owner
+                .link_events(
+                    Batch::Plain(vec![LinkEvent::Settings {
+                        generation: 7,
+                        view: saved,
+                        answer: true,
+                    }]),
+                    cx,
+                )
+                .unwrap();
+        });
+        assert!(!view.read(cx).model.read(cx).hold_to_talk_pending());
+        assert!(!view.read(cx).model.read(cx).hold_to_talk_enabled());
+    });
+    assert!(controls.is_empty());
+}
+
+#[gpui::test]
 fn clicking_a_voice_radio_uses_the_owner_path_and_explains_a_failed_send(cx: &mut TestAppContext) {
     let (window, view) = open(cx);
     let owner = crate::presence::test_fixture::presence(cx);
@@ -104,7 +158,7 @@ fn keyboard_voice_choice_sends_the_exact_policy_and_waits_for_its_ordered_answer
             window.draw(cx).clear(cx);
         });
     }
-    press(&mut frame, "tab tab tab space");
+    press(&mut frame, "tab tab tab tab space");
     frame.run_until_parked();
     assert!(matches!(
         control.try_recv(),
@@ -478,7 +532,7 @@ fn model_buttons_use_pointer_and_space_but_cancel_acceptance_does_not_mean_cance
         });
         assert!(frame.debug_bounds("speech-model-cancel-help").is_some());
         assert!(frame.debug_bounds("speech-model-pending").is_none());
-        press(&mut frame, "tab tab space");
+        press(&mut frame, "tab tab tab space");
         frame.run_until_parked();
         assert_eq!(
             controls.try_recv(),
@@ -519,7 +573,7 @@ fn model_buttons_use_pointer_and_space_but_cancel_acceptance_does_not_mean_cance
             );
             view.update(cx, |view, cx| view.focus(window, cx));
         });
-        press(&mut frame, "tab tab");
+        press(&mut frame, "tab tab tab");
         let unpressed = frame.update(|window, cx| {
             assert!(!view.read(cx).focus.is_focused(window));
             window.focused(cx).expect("unpressed model button focus")
@@ -555,7 +609,7 @@ fn model_buttons_use_pointer_and_space_but_cancel_acceptance_does_not_mean_cance
         press(&mut frame, "ctrl-shift-tab");
         frame.run_until_parked();
         if action_present {
-            press(&mut frame, "tab tab");
+            press(&mut frame, "tab tab tab");
             frame.update(|window, cx| assert!(!view.read(cx).focus.is_focused(window)));
         }
         deliver(&owner, vec![LinkEvent::State(LinkState::Reconnecting)], cx);
@@ -634,7 +688,7 @@ fn reload_enter_refusal_and_captured_intents_stay_fenced_before_the_recording_se
             .speech_input_intent()
             .expect("reload")
     });
-    press(&mut frame, "tab tab enter");
+    press(&mut frame, "tab tab tab enter");
     frame.run_until_parked();
     assert_eq!(
         controls.try_recv(),

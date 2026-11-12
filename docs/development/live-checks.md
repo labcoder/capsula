@@ -23,8 +23,10 @@ flowchart LR
   it and itself, renamed `kumochi.exe`, into a fresh folder, then runs that copy. Unlike the slice 2
   gate, the brain uses the developer's real `%LOCALAPPDATA%` and the dev credential service, since
   the point is a signed-in dev account that later checks and the dev shell use. Debug names keep it
-  away from an installed Kumochi, and a release xtask refuses to run.
-- Both sides refuse a release build, and the copied harness takes no folder: it runs only the
+  away from an installed Kumochi, and a release or gate xtask refuses to run.
+- Both sides refuse anything but the dev identity: a release build uses the installed product's
+  names, and the [gate identity](gate-identity.md) never signs in, since its runs delete what
+  they leave in Credential Manager. The copied harness takes no folder: it runs only the
   brain beside its own executable. It refuses to start while any `kumochi.exe` or `kumochid.exe`
   runs, and the copy checks again, leaving out itself, right before it starts the brain, since a
   dev brain holds the session's pipes and the account's session lock.
@@ -35,6 +37,9 @@ flowchart LR
   Manager read is the per-session instance capability the dev brain has just written, which
   authenticates the pipe exactly as the shell does. It never reads another service: no spike's,
   and nothing Claude Code, Codex, gh or a browser holds.
+- These checks run xtask as the client, so no onboarding window shows. A scratch profile that
+  runs the dev shell needs `onboarded = true` in its `config.toml`, or the onboarding window
+  opens, takes focus and uses up the double-tap.
 - `KUMOCHI_LIVE_BUDGET` is set on the brain's environment only. These checks set it to 0;
   the model request budget refuses inference once that cap is spent.
 

@@ -397,6 +397,58 @@ fn dismissal_with_a_full_control_queue_keeps_the_error_and_ends_the_link(cx: &mu
 }
 
 #[gpui::test]
+fn rejected_speech_input_keeps_the_settings_panel_open(cx: &mut TestAppContext) {
+    use crate::input::hold::Intent;
+    use crate::presence::voice::Stamp;
+    use crate::strings::Text;
+    use kumochi_protocol::message::{GestureId, PartState};
+
+    let (owner, _data, _controls) = crate::presence::voice_wiring_tests::ready(cx);
+    owner.update(cx, |owner, cx| {
+        let model = owner.settings.clone();
+        let weak = cx.weak_entity();
+        let events = owner.events.clone();
+        let (window, view) = gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+            cx.new(|cx| SettingsView::new(model, weak, events, window, cx))
+        })
+        .unwrap();
+        owner.settings_panel = Some(SettingsPanel {
+            window,
+            view,
+            visible: true,
+            focused: true,
+            bounds: [0; 4],
+            previous: None,
+            activation: None,
+        });
+        owner.settings.update(cx, |settings, _| {
+            settings.receive_speech_input(Some(1), 1, PartState::NotInstalled);
+        });
+        assert!(owner.settings_open());
+        let token = owner.link.microphone_gate().arm(GestureId(1)).unwrap();
+        owner.link.track_input(GestureId(1));
+        let stamp = Stamp {
+            target: owner.voice.target.get(),
+            session: 1,
+            choice: owner.link.choice_revision(),
+        };
+        owner.voice_intent(
+            Intent::Recognized {
+                gesture: GestureId(1),
+                generation: Ok(token),
+            },
+            stamp,
+            0,
+            cx,
+        );
+        assert!(owner.settings_open());
+        assert!(owner.settings_focused());
+        assert_eq!(owner.voice.status, Some(Text::VoiceNotInstalled));
+        assert!(owner.voice.pending.is_none());
+    });
+}
+
+#[gpui::test]
 fn recovery_settings_clicks_open_the_exact_tab_through_the_hidden_panel_path(
     cx: &mut TestAppContext,
 ) {

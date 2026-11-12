@@ -425,7 +425,7 @@ async fn staged_issue_data_is_dropped_without_blocking_credit() {
     let (turns_tx, mut turns) = mpsc::channel(1);
     let (pages_tx, mut pages) = mpsc::channel(1);
     let (mut input, mut shell) = tokio::io::duplex(DUPLEX_BUFFER);
-    let reader = super::super::read_data(&mut input, &turns_tx, &pages_tx, &queue, &ready, 0);
+    let reader = super::super::read_data(&mut input, &turns_tx, &pages_tx, &queue, &ready, 0, None);
     let writer = async {
         for message in [
             DataToBrain::IssueEdit {
@@ -463,7 +463,7 @@ async fn uncorrelated_cards_are_a_protocol_error_not_an_ignored_read() {
     let (turns, _turns) = mpsc::channel(1);
     let (pages, mut requests) = mpsc::channel(1);
     let (mut input, mut shell) = tokio::io::duplex(DUPLEX_BUFFER);
-    let reader = super::super::read_data(&mut input, &turns, &pages, &queue, &ready, 1);
+    let reader = super::super::read_data(&mut input, &turns, &pages, &queue, &ready, 1, None);
     let writer = async {
         let bytes = frame::encode(
             &DataToBrain::IssueCards {
@@ -490,7 +490,7 @@ async fn correlated_card_admission_never_holds_up_credit() {
     let (turns, _turns) = mpsc::channel(1);
     let (pages, mut requests) = mpsc::channel(1);
     let (mut input, mut shell) = tokio::io::duplex(DUPLEX_BUFFER);
-    let reader = super::super::read_data(&mut input, &turns, &pages, &queue, &ready, 3);
+    let reader = super::super::read_data(&mut input, &turns, &pages, &queue, &ready, 3, None);
     let writer = async {
         for message in [
             DataToBrain::IssueCardsRequest {
@@ -609,7 +609,7 @@ async fn a_repeated_active_page_id_breaks_before_a_second_read_is_forwarded() {
     let (turns_tx, _turns) = mpsc::channel(1);
     let (pages_tx, mut pages) = mpsc::channel(MAX_PENDING_PAGES);
     let (mut input, mut client) = tokio::io::duplex(DUPLEX_BUFFER);
-    let reader = super::super::read_data(&mut input, &turns_tx, &pages_tx, &queue, &ready, 9);
+    let reader = super::super::read_data(&mut input, &turns_tx, &pages_tx, &queue, &ready, 9, None);
     let send = async {
         let request = DataToBrain::PageRequest {
             request: 7,
@@ -648,7 +648,7 @@ async fn a_fifth_unanswered_page_breaks_the_connection_even_after_reads_finish()
     let mut tap = Tap::from_env();
     let link = Link::new(&out, &queue, &ready, &mut tap);
     let core = brain.core(&mut controls, &mut turns, &mut pages, &room, link);
-    let reader = super::super::read_data(&mut input, &turns_tx, &pages_tx, &queue, &ready, 0);
+    let reader = super::super::read_data(&mut input, &turns_tx, &pages_tx, &queue, &ready, 0, None);
     let client = async {
         for request in 0..u32::try_from(MAX_PENDING_PAGES).expect("small") {
             let frame = frame::encode(
@@ -962,6 +962,7 @@ async fn read_pages_and_text(
             | DataToShell::PageFailed { .. }
             | DataToShell::SceneSnapshot { .. }
             | DataToShell::ScenesRemoved { .. }
+            | DataToShell::ScenesReplaced { .. }
             | DataToShell::SceneBegin { .. }
             | DataToShell::SceneStepCommit { .. }
             | DataToShell::SceneSnapshotV1 { .. }

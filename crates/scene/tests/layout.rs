@@ -586,9 +586,52 @@ fn path_paint_changes_reuse_geometry_without_requesting_new_sizing_facts() {
     assert!(Arc::ptr_eq(old, new));
     assert_eq!(color.rgb.get(), 0x00ff_6b7d);
     let Prim::Fill { color, .. } = &next.display.items[0].primitives[0] else {
-        panic!("unchanged fill");
+        panic!("recolored fill");
     };
-    assert_eq!(color.rgb.get(), 0x005f_d39a);
+    assert_eq!(
+        color.rgb.get(),
+        0x00ff_6b7d,
+        "a set color recolors the fill too"
+    );
+}
+
+#[test]
+fn set_color_recolors_a_filled_shape_and_leaves_an_unfilled_one_unfilled() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let mut measure = Measure::default();
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[
+            {"shape":{"id":"puff","kind":"circle","at":[50,50],"r":20,"color":"#ffffff","fill":"#ffffff","width":1}},
+            {"shape":{"id":"ring","kind":"circle","at":[120,50],"r":20,"color":"#ffffff"}}
+        ]}),
+    );
+    let first = picture(&scene, first, &before, &mut measure).expect("shapes");
+    let next = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"red","set":[{"target":"puff","color":"#ff0000"},{"target":"ring","color":"#ff0000"}]}),
+    );
+    let next = picture(&scene, next, &first.after, &mut measure).expect("recolored");
+    let items = next.after.items();
+    let [
+        Prim::Fill { color: fill, .. },
+        Prim::Line { color: outline, .. },
+    ] = &*items[0].primitives
+    else {
+        panic!("a filled circle keeps its fill and outline");
+    };
+    assert_eq!(
+        (fill.rgb.get(), outline.rgb.get()),
+        (0x00ff_0000, 0x00ff_0000)
+    );
+    let [Prim::Line { color: ring, .. }] = &*items[1].primitives else {
+        panic!("an unfilled circle gains no fill");
+    };
+    assert_eq!(ring.rgb.get(), 0x00ff_0000);
 }
 
 #[test]
@@ -993,6 +1036,115 @@ fn detached_edges_can_be_updated_without_resurrecting_their_endpoints() {
     )
     .expect("updated detached replay");
     assert_eq!(recovered.items(), next.after.items());
+}
+
+#[test]
+fn a_zero_width_shape_keeps_its_fill_and_draws_no_outline() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"sky","put":[
+            {"shape":{"id":"skybg","kind":"rect","box":[0,0,480,300],"fill":"#BFE8FF","color":"#BFE8FF","width":0}},
+            {"shape":{"id":"sun","kind":"circle","at":[400,60],"r":30,"fill":"#FFD700","width":0}}
+        ]}),
+    );
+    let prepared =
+        picture(&scene, first, &before, &mut Measure::default()).expect("zero-width shapes");
+    let primitives = |name: &'static str| {
+        let handle = prepared.after.handle(&id(name));
+        let item = prepared
+            .display
+            .items
+            .iter()
+            .find(|item| Some(item.handle) == handle)
+            .expect("prepared item");
+        Arc::clone(&item.primitives)
+    };
+    assert!(matches!(
+        &*primitives("skybg"),
+        [Prim::Rect {
+            fill: Some(_),
+            border: None,
+            ..
+        }]
+    ));
+    assert!(matches!(&*primitives("sun"), [Prim::Fill { .. }]));
+}
+
+#[test]
+fn a_zero_width_dashed_shape_reserves_no_dash_and_draws_no_outline() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    // Its 8,000-long dashed outline needs 513 pieces, one past the global cap.
+    let outlined = step(json!({"id":"big","put":[
+        {"shape":{"id":"big","kind":"rect","box":[0,0,2000,2000],"fill":"blue","dash":true}}
+    ]}));
+    assert!(matches!(
+        scene.admit(&outlined, &budget),
+        Err(error) if error.code == ErrorCode::OverBudget(Budget::DashPieces)
+    ));
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"big","put":[
+            {"shape":{"id":"big","kind":"rect","box":[0,0,2000,2000],"fill":"blue","width":0,"dash":true}}
+        ]}),
+    );
+    assert_eq!(budget.usage().dash_pieces, 0);
+    let prepared =
+        picture(&scene, first, &before, &mut Measure::default()).expect("no dashed outline");
+    assert_eq!(prepared.after.paint_work().dash_pieces, 0);
+    let handle = prepared.after.handle(&id("big"));
+    let item = prepared
+        .display
+        .items
+        .iter()
+        .find(|item| Some(item.handle) == handle)
+        .expect("prepared item");
+    assert!(matches!(
+        &*item.primitives,
+        [Prim::Rect {
+            fill: Some(_),
+            border: None,
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn a_zero_radius_rect_prepares_as_a_plain_square_cornered_rect() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"rects","put":[
+            {"shape":{"id":"square","kind":"rect","box":[20,20,100,60],"radius":0}},
+            {"shape":{"id":"plain","kind":"rect","box":[20,20,100,60]}}
+        ]}),
+    );
+    let prepared = picture(&scene, first, &before, &mut Measure::default()).expect("zero radius");
+    let primitives = |name: &'static str| {
+        let handle = prepared.after.handle(&id(name));
+        let item = prepared
+            .display
+            .items
+            .iter()
+            .find(|item| Some(item.handle) == handle)
+            .expect("prepared item");
+        Arc::clone(&item.primitives)
+    };
+    let square = primitives("square");
+    assert!(matches!(
+        &*square,
+        [Prim::Rect { radius, border: Some(_), .. }] if radius.to_bits() == 0.0_f32.to_bits()
+    ));
+    assert_eq!(square, primitives("plain"));
 }
 
 #[test]
@@ -2970,7 +3122,7 @@ fn preparation_counts_paint_work_once_and_refuses_an_unbuildable_fill() {
     // 331 points + 331 · 65 crossings is one vertex past a single build.
     assert!(matches!(
         picture(&scene, next, &first.after, &mut measure),
-        Err(PrepareError::OverResidency)
+        Err(PrepareError::OverPaintWork)
     ));
 }
 
@@ -2994,7 +3146,7 @@ fn generated_fill_points_refuse_before_crossing_count_above_the_global_cap() {
             };
             assert_eq!(points.len(), 505);
         } else {
-            assert!(matches!(prepared, Err(PrepareError::OverResidency)));
+            assert!(matches!(prepared, Err(PrepareError::OverPaintWork)));
         }
     }
 }
@@ -3099,7 +3251,7 @@ fn a_later_ancestor_track_recharges_shared_rects_and_refuses_growth_past_the_cap
     let over = committed(&mut scene, &mut budget, scaled(32));
     assert!(matches!(
         capped(over, &next.after, &mut measure),
-        Err(PrepareError::OverResidency)
+        Err(PrepareError::OverPaintWork)
     ));
     assert_eq!(
         first.after.paint_work(),
@@ -3156,7 +3308,7 @@ fn bounded_preparation_refuses_once_the_scene_s_own_work_passes_the_cap() {
                     .fill_vertices,
                 fill
             ),
-            None => assert!(matches!(prepared, Err(PrepareError::OverResidency))),
+            None => assert!(matches!(prepared, Err(PrepareError::OverPaintWork))),
         }
     }
     let (scene, commit) = fill_scene(&[convex("a", 300), convex("b", 213)]);
@@ -3194,7 +3346,7 @@ fn bounded_recovery_refuses_a_scene_over_the_cap() {
                 result,
                 Err(kumochi_scene::layout::RecoveryError {
                     revision: 1,
-                    error: PrepareError::OverResidency,
+                    error: PrepareError::OverPaintWork,
                 })
             ));
         } else {
@@ -3245,7 +3397,7 @@ fn bounded_second_step_counts_reused_fill_work_before_new_objects() {
             };
             assert!(Arc::ptr_eq(old, reused));
         } else {
-            assert!(matches!(result, Err(PrepareError::OverResidency)));
+            assert!(matches!(result, Err(PrepareError::OverPaintWork)));
         }
         assert_eq!(first.after.paint_work().fill_vertices, 300);
     }

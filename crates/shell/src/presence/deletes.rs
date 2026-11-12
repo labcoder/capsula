@@ -15,6 +15,7 @@ const DELETE_RETRY: Duration = Duration::from_millis(250);
 impl Presence {
     /// The user confirmed deleting `thread`. Nothing happens when every slot is held.
     pub(super) fn delete_thread(&mut self, thread: ThreadId, cx: &mut Context<'_, Self>) {
+        self.cancel_voice(cx);
         if !self.runs.confirm_delete(thread) {
             return;
         }
@@ -65,6 +66,10 @@ impl Presence {
         let credit = self.runs.deleted(thread, outcome, last_run);
         self.grant(credit);
         self.link.settle_delete(thread);
+        if outcome != Deleted::NotHidden {
+            self.presenter.discard_replacement();
+            self.draw_changed(cx);
+        }
         if held {
             for model in [&self.threads, &self.chat] {
                 model.update(cx, |state, cx| {

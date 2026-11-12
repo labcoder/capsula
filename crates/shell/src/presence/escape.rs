@@ -3,8 +3,25 @@
 use super::drag::Event;
 use super::{Activity, Context, Escape, EscapePanel, OpenError, Presence, diagnostics};
 use crate::escape;
+use kumochi_protocol::message::GestureId;
 
 impl Presence {
+    pub(super) fn native_escape(
+        &mut self,
+        gesture: Option<GestureId>,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
+        if let Some(gesture) = gesture
+            && self.cancel_voice_gesture(gesture, cx)
+        {
+            return Ok(());
+        }
+        if self.voice_working() {
+            return Ok(());
+        }
+        self.escape(cx)
+    }
+
     /// One Esc press, from the hotkey, the typing panel or Stop. The local effect happens here,
     /// and only then is `Stop` or `ClearDrawing` queued for the brain, which nothing waits on.
     #[expect(
@@ -12,6 +29,10 @@ impl Presence {
         reason = "one Esc press keeps its local decision and every effect of it in order"
     )]
     pub(super) fn escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        if self.voice_working() {
+            self.cancel_voice(cx);
+            return Ok(());
+        }
         if self.presenter.input.selection().is_some() {
             self.end_selection(crate::presenter::overlay_input::ExitCause::Escape, cx);
             return Ok(());
@@ -36,6 +57,12 @@ impl Presence {
             } else {
                 EscapePanel::Threads
             }
+        } else if self.onboarding.is_some() {
+            if self.onboarding_editing(cx) {
+                EscapePanel::OnboardingEdit
+            } else {
+                EscapePanel::Onboarding
+            }
         } else if self.text_open() {
             EscapePanel::Open
         } else {
@@ -51,12 +78,15 @@ impl Presence {
             Escape::Stop => {
                 if let Some(message) = self.runs.stop() {
                     self.stop_run(message, cx);
-                } else if let Some(run) = self.presenter.stoppable_run()
-                    && self.presenter.live_work(std::time::Instant::now())
-                {
+                } else if self.presenter.live_work(std::time::Instant::now()) {
                     self.place_drawings(cx.weak_entity(), cx);
-                    let effects = self.presenter.stop(run, std::time::Instant::now());
-                    self.scene_effects(effects, cx);
+                    if let Some(run) = self.presenter.stoppable_run() {
+                        let effects = self.presenter.stop(run, std::time::Instant::now());
+                        self.scene_effects(effects, cx);
+                    } else {
+                        self.presenter.discard_replacement();
+                        self.draw_changed(cx);
+                    }
                 }
                 None
             }
@@ -79,6 +109,8 @@ impl Presence {
                     }
                 } else if panel == EscapePanel::Threads {
                     self.dismiss_threads(cx)?;
+                } else if panel == EscapePanel::Onboarding {
+                    self.dismiss_onboarding(cx)?;
                 } else {
                     self.dismiss_text(cx)?;
                 }
@@ -87,6 +119,8 @@ impl Presence {
             Escape::CancelEdit => {
                 if panel == EscapePanel::SettingsEdit {
                     self.cancel_settings_edit(cx)?;
+                } else if panel == EscapePanel::OnboardingEdit {
+                    self.cancel_onboarding_edit(cx);
                 } else if let Some(panel) = &self.thread_panel {
                     panel
                         .window

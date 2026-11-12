@@ -31,7 +31,9 @@ impl Presence {
         for event in events.drain(..) {
             if let LinkEvent::RunState { generation, .. }
             | LinkEvent::TurnRefused { generation, .. }
+            | LinkEvent::VoiceHold { generation, .. }
             | LinkEvent::CaptureDone { generation, .. }
+            | LinkEvent::DrawingNotice { generation, .. }
             | LinkEvent::CaptureFailed { generation, .. } = &event
                 && self
                     .session
@@ -41,13 +43,18 @@ impl Presence {
                 continue;
             }
             match event {
+                LinkEvent::DrawingNotice {
+                    key, thread, run, ..
+                } => self.show_error(&key.into(), Source::Drawing { thread, run }, cx),
                 LinkEvent::State(state) => {
+                    self.cancel_voice(cx);
                     self.retire_issue_review(cx);
                     self.revoke_exclusion(cx);
                     self.session = None;
                     self.link_state(state, cx);
                 }
                 LinkEvent::Connected(session) => {
+                    self.cancel_voice(cx);
                     self.retire_issue_review(cx);
                     self.settings.update(cx, |state, cx| {
                         state.github.disconnected();
@@ -73,6 +80,11 @@ impl Presence {
                         cx,
                     );
                 }
+                LinkEvent::VoiceHold {
+                    generation,
+                    gesture,
+                    status,
+                } => self.voice_status(generation, gesture, status, cx),
                 LinkEvent::Voice {
                     generation,
                     speech_input,
@@ -282,6 +294,7 @@ impl Presence {
         cx: &mut Context<'_, Self>,
     ) {
         let (applied, notice) = self.runs.apply_run_state(run, thread, phase, error, origin);
+        self.voice_run(run, origin, phase, &applied, cx);
         diagnostics::record(cx, format_args!("run phase={phase:?}"));
         if let Some(restore) = applied.restore
             && let Some(text) = &self.text
@@ -397,7 +410,8 @@ impl Presence {
         {
             self.place_drawings(cx.weak_entity(), cx);
         }
-        if let DataToShell::ScenesRemoved { scenes } = &*frame
+        if let DataToShell::ScenesRemoved { scenes } | DataToShell::ScenesReplaced { scenes, .. } =
+            &*frame
             && self
                 .session
                 .as_ref()
@@ -506,6 +520,9 @@ impl Presence {
             return;
         }
         self.runs.settings(view.main_thread);
+        if !view.hold_to_talk {
+            self.cancel_voice(cx);
+        }
         self.clear_refusal(cx);
         self.sync_settings_notice(cx);
         if matches!(
@@ -528,6 +545,9 @@ impl Presence {
             self.restore_dock_position(self.settings.read(cx).dock_position_choice(), cx)
         {
             tracing::warn!(%error, "can't restore the saved dock position");
+        }
+        if let Err(error) = self.onboarding_changed(cx) {
+            tracing::error!(%error, "can't show onboarding");
         }
     }
 
@@ -606,6 +626,8 @@ impl Presence {
             self.runs.met(session.incarnation());
             self.runs.connected(session.generation());
             self.presenter.connected(session.generation());
+            // Recovered drawings start on a cleared screen, so none keeps the old stage.
+            self.drawing_placement = None;
             for model in [&self.threads, &self.chat] {
                 model.update(cx, |state, cx| {
                     state.connected();
@@ -638,6 +660,9 @@ impl Presence {
         self.draw_changed(cx);
         diagnostics::record(cx, format_args!("link state={state:?}"));
         self.state = state;
+        if let Err(error) = self.onboarding_changed(cx) {
+            tracing::error!(%error, "can't show onboarding");
+        }
         self.refresh_dock(cx);
         self.panel.update(cx, |panel, cx| {
             panel.state = state;
