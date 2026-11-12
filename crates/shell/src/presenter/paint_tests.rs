@@ -133,6 +133,34 @@ fn anchored_prepared_work_fits_at_the_limit_and_fails_one_over() {
 }
 
 #[test]
+fn a_scene_past_the_work_left_by_another_fails_as_paint_work() {
+    let half = MAX_GLOBAL_DASH_PIECES / 2;
+    let other = SceneId(LIVE.0 + 1);
+    let (mut presenter, now) = live();
+    begin(&mut presenter, LIVE, now);
+    begin(&mut presenter, other, now);
+    let first = only_job(commit(&mut presenter, LIVE, 0, anchored(half), now).expect("admit"));
+    let effects = presenter
+        .completed(first.run(&mut Shaper), now)
+        .expect("current answer");
+    assert!(controls(&effects).is_empty());
+    let second =
+        only_job(commit(&mut presenter, other, 0, anchored(half + 1), now).expect("admit"));
+    let done = second.run(&mut Shaper);
+    let Completion::Prepared { result, .. } = &done else {
+        panic!("a prepared answer");
+    };
+    let prepared = result.as_ref().expect("its own work fits the cap");
+    assert_eq!(prepared.after.paint_work().dash_pieces, half + 1);
+    let effects = presenter.completed(done, now).expect("current answer");
+    assert_eq!(
+        controls(&effects),
+        [&failed(other, 0, SceneFailure::PaintWork)]
+    );
+    assert_eq!(presenter.paint_work().dash_pieces, half);
+}
+
+#[test]
 fn anchored_recovery_checks_exact_work_and_remembers_its_refusal() {
     let limit = MAX_GLOBAL_DASH_PIECES;
     for over in [0, 1] {
