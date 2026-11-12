@@ -847,7 +847,7 @@ async fn a_cancel_that_ends_signed_in_keeps_the_sign_in() {
 async fn a_job_after_a_cancel_starts_without_its_cleanup() {
     let base = Base::new("cancel-then-find");
     let mut claude = signed_out(&base, "out").await;
-    claude.cancelled = true;
+    claude.cancelled = Some(claude.generation);
     claude.op(ConnectionOp::FindClaudeCode);
     settle(&mut claude).await;
     assert!(claude.close(soon()).await);
