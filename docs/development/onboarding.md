@@ -64,6 +64,12 @@ flowchart TD
   `Panel::OnboardingEdit` (restore the saved name) or `Panel::Onboarding` (Finish later); see
   [input](input.md#esc).
 - No name is read from the machine, and none is logged: log lines are fixed text with a step kind.
+- **Kumo under the welcome** is a still image, not the peek's `KumoView`: no animator, frame loop,
+  hit test or pull. When the window opens, the background executor bakes the body at the peek's
+  64 px for the window's scale and shades `FrameState::IDLE` once (`kumo_view::still`); the view
+  keeps the one `RenderImage`. Its 64 px box is laid out from the start, so the welcome doesn't
+  move when the image lands. Nothing is shaded or allocated per frame, and the image leaves GPUI's
+  atlas with the window's renderer when the window closes.
 
 ## Hold to talk
 
