@@ -6,7 +6,7 @@ use gpui_kit::{
 };
 use kumochi_protocol::message::{
     AssistantName, ControlToBrain, DockPosition, Incarnation, MaxFrameRate, SettingsOp,
-    SettingsView, SttUnload, ThreadId,
+    SettingsView, SttUnload, ThreadId, UserName,
 };
 
 use super::{OnboardingPanel, OnboardingView, Select};
@@ -144,6 +144,42 @@ fn enter_with_the_saved_name_moves_focus_to_the_next_steps_input(cx: &mut TestAp
         assert!(input.is_focused(window), "focus is in the name input");
     });
     assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+}
+
+fn selected(owner: &Entity<Presence>, cx: &mut TestAppContext) -> std::ops::Range<usize> {
+    owner.read_with(cx, |owner, cx| {
+        owner
+            .onboarding
+            .as_ref()
+            .expect("showing")
+            .view
+            .read(cx)
+            .input()
+            .read(cx)
+            .selected_range()
+    })
+}
+
+#[gpui::test]
+fn moving_to_a_step_selects_its_saved_name(cx: &mut TestAppContext) {
+    let (owner, window, _) = showing(cx);
+    owner.update(cx, |owner, cx| {
+        owner.settings.update(cx, |state, cx| {
+            state.set_view(
+                SettingsView {
+                    user_name: Some(UserName::new("Oscar").expect("valid user name")),
+                    ..view("Kumo", false)
+                },
+                Update::Unsolicited,
+            );
+            cx.notify();
+        });
+    });
+    cx.run_until_parked();
+    VisualTestContext::from_window(window, cx).simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(step(&owner, cx), Step::YourName);
+    assert_eq!(selected(&owner, cx), 0..5);
 }
 
 #[gpui::test]

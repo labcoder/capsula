@@ -374,7 +374,7 @@ impl Presence {
                     .update(cx, |_, window, cx| {
                         panel
                             .view
-                            .update(cx, |view, cx| view.focus_input(Select::Keep, window, cx));
+                            .update(cx, |view, cx| view.focus_input(Select::All, window, cx));
                     })
                     .map_err(|error| OpenError::Gpui(error.into()))
             }
