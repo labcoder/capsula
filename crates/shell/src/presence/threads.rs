@@ -333,7 +333,7 @@ mod tests {
             .expect("tasks window");
         assert!(matches!(hidden, Err(OpenError::Gpui(_))));
         owner.update(cx, |owner, cx| {
-            assert!(owner.threads_focused(), "Tasks is still on screen and focused");
+            assert!(owner.threads_focused(), "Tasks is still open and focused");
             owner.escape(cx).expect("Esc");
             assert!(!owner.threads_open(), "Esc hid Tasks");
         });
