@@ -420,6 +420,9 @@ pub(super) fn validate_changes<'a>(
         if below.kind.three_dimensional() {
             return Err(fail("behind", ErrorCode::Unsupported));
         }
+        if below.parent != target.parent {
+            return Err(fail("behind", ErrorCode::KindChanged));
+        }
         // Admitted chains are acyclic and at most MAX_OBJECT_DEPTH links long, so both walks stop.
         let mut above = 0;
         let mut at = anchor;

@@ -393,6 +393,29 @@ fn a_chain_may_hold_sixteen_links_but_not_seventeen() {
 }
 
 #[test]
+fn links_stay_between_objects_with_the_same_parent() {
+    let base = [cloud()];
+    let diagram = |set: Value| {
+        json!({"id":"x","put":[{"diagram":{"id":"d"}},
+            {"node":{"id":"n","in":"d","label":"N"}},{"node":{"id":"m","in":"d","label":"M"}}],
+            "set":set})
+    };
+    refused(
+        &base,
+        &diagram(json!([{"target":"n","behind":"c1"}])),
+        ErrorCode::KindChanged,
+        "set[0].behind",
+    );
+    refused(
+        &base,
+        &diagram(json!([{"target":"c1","behind":"n"}])),
+        ErrorCode::KindChanged,
+        "set[0].behind",
+    );
+    admitted(&base, &diagram(json!([{"target":"m","behind":"n"}])));
+}
+
+#[test]
 fn unknown_removed_container_and_three_dimensional_links_are_refused() {
     let cloud = cloud();
     let base = std::slice::from_ref(&cloud);
