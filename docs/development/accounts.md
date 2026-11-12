@@ -85,7 +85,8 @@ is enabled by this backend/stager prerequisite.
 
 `protocol::constants::ProductIdentity` exposes `RELEASE` and `DEV` independently of the
 caller's build profile. The app's existing constants select `ACTIVE` (Dev for debug,
-release otherwise). Release tooling must select `RELEASE` explicitly, even when xtask
+release otherwise). `GATE` is the gate tools' own identity, selected only by the protocol's
+`gate-identity` feature on a gate tool's command line (see [the gate identity](gate-identity.md)). Release tooling must select `RELEASE` explicitly, even when xtask
 itself is built in debug. Stored spellings are unchanged; there is no migration.
 
 The vault writes only write-once generation names, `<service>/gen/<kind>/<generation>/<index>`

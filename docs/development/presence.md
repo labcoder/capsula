@@ -110,7 +110,8 @@ graceful Quit after ten seconds, without moving the pointer or sending input. In
 small even before placement, so a transparency failure cannot cover the desktop. This is a
 bounded launch check, not a performance benchmark or permission to inject input.
 
-For idle measurements, build the workspace in release mode, then run `cargo xtask bench idle`.
+For idle measurements, run `bench idle` as the gate identity (see
+[the gate identity](gate-identity.md)); it builds the release shell and brain it measures.
 Before launching the shell, the benchmark spins one thread in three two-second trials,
 measuring `QueryThreadCycleTime` divided by wall time and printing each rate and the highest.
 Each role and the process-tree total report calibrated cycle CPU as
