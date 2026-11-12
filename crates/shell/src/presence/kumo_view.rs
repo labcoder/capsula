@@ -365,8 +365,7 @@ pub(super) fn still(scale: f32) -> Option<RenderImage> {
         tracing::error!(%error, "can't shade the still Kumo");
         return None;
     }
-    let side = u32::from(size);
-    image::RgbaImage::from_raw(side, side, pixels)
+    image::RgbaImage::from_raw(u32::from(size), u32::from(size), pixels)
         .map(|buffer| RenderImage::new([image::Frame::new(buffer)]))
 }
 
