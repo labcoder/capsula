@@ -28,6 +28,10 @@ impl Render for Blank {
 
 /// Presence as `open` builds it, minus every native surface, with its typing panel created and
 /// hidden. Its status panel and dock are plain entities behind blank GPUI test windows.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one line per Presence field, as `open` builds it"
+)]
 pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
     cx.update(|cx| {
         gpui_kit::init(cx);
@@ -71,6 +75,8 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             onboarding_run: crate::onboarding::ThisRun::Owed,
             onboarding_chatgpt: crate::sign_in_mark::SignInMark::Settled,
             onboarding_claude: crate::sign_in_mark::SignInMark::Settled,
+            settings_chatgpt: crate::sign_in_mark::SignInMark::Settled,
+            settings_claude: crate::sign_in_mark::SignInMark::Settled,
             settings: cx.new(|_| Settings::default()),
             threads: cx.new(|_| threads),
             chat: cx.new(|_| chat),

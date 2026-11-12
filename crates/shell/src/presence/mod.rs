@@ -46,6 +46,7 @@ mod pull_dock;
 mod pull_picture;
 mod pulling;
 mod settings;
+mod sign_ins;
 mod stage;
 #[cfg(test)]
 mod test_fixture;
@@ -135,6 +136,9 @@ struct Presence {
     /// an owed cancel outlives the window.
     onboarding_chatgpt: crate::sign_in_mark::SignInMark,
     onboarding_claude: crate::sign_in_mark::SignInMark,
+    /// The same for Settings: its own sign-ins, cancelled when it closes.
+    settings_chatgpt: crate::sign_in_mark::SignInMark,
+    settings_claude: crate::sign_in_mark::SignInMark,
     settings: Entity<Settings>,
     threads: Entity<Threads>,
     chat: Entity<Threads>,
@@ -994,6 +998,8 @@ pub(crate) fn open(
             onboarding_run: crate::onboarding::ThisRun::Owed,
             onboarding_chatgpt: crate::sign_in_mark::SignInMark::Settled,
             onboarding_claude: crate::sign_in_mark::SignInMark::Settled,
+            settings_chatgpt: crate::sign_in_mark::SignInMark::Settled,
+            settings_claude: crate::sign_in_mark::SignInMark::Settled,
             settings: cx.new(|_| Settings::default()),
             threads: cx.new(|_| threads),
             chat: cx.new(|_| chat),

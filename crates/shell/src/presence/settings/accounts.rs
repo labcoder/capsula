@@ -35,7 +35,7 @@ impl SettingsView {
         account_section(
             model,
             move |op, cx| {
-                let _gone = owner.update(cx, |owner, cx| owner.account_op(op, cx));
+                let _gone = owner.update(cx, |owner, cx| owner.settings_account_op(op, cx));
             },
             fixture,
             Some(sign_out),
@@ -193,6 +193,7 @@ fn account_actions(
     let button = |id: &'static str, label: Text, op: AccountOp| {
         let route = route.clone();
         Button::new(id)
+            .debug_selector(move || id.into())
             .label(strings.get(label))
             .disabled(!state.allows(op))
             .on_click(move |_, _, cx| route(op, cx))

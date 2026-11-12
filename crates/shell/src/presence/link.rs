@@ -375,7 +375,7 @@ impl Presence {
             (false, false)
         });
         if accepted {
-            self.onboarding_account_seen(generation, previous, cx);
+            self.account_seen(generation, previous, cx);
         }
         if recovered {
             self.chat_notice.recovered();
@@ -404,7 +404,7 @@ impl Presence {
             accepted
         });
         if accepted {
-            self.onboarding_claude_seen(generation, previous, cx);
+            self.claude_seen(generation, previous, cx);
         }
     }
 
@@ -566,7 +566,7 @@ impl Presence {
 
     /// Shows the brain's error in both panels and on the connected dock.
     fn show_error(&mut self, error: &UserError, source: Source, cx: &mut Context<'_, Self>) {
-        self.onboarding_sign_in_failed(error);
+        self.chatgpt_sign_in_failed(error);
         let field = self.settings.update(cx, |state, cx| {
             state.accounts.error(error);
             let field = state.error(error.clone());

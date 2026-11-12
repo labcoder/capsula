@@ -20,10 +20,11 @@ brain decides whether onboarding is owed and remembers which steps were complete
   log.
 - `shell/sign_in_mark.rs` is a sign-in one surface asked for, until it ends: `Settled`,
   `Open { generation, shown }` or `CancelOwed`. `Presence` keeps one per connection for the
-  window (`onboarding_chatgpt`, `onboarding_claude`).
+  window (`onboarding_chatgpt`, `onboarding_claude`) and one for Settings; `presence/sign_ins.rs`
+  moves them on each view and error, and sends the cancels.
 - `presence/onboarding/accounts.rs` draws the account step from Settings' own sections
   (`account_section`, `claude_section`) without Sign out or Disconnect, routes their buttons
-  through the marks, and sends the cancels.
+  through the marks.
 - `presence/onboarding.rs` owns the window (`Presence.onboarding`), the launch decision, and
   whether it may still open this run (`Presence.onboarding_run`, put off by Finish later).
 

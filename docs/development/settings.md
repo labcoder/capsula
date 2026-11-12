@@ -107,6 +107,11 @@ there (Retry is also in the dock's native menu). General has Quit on the same gu
 path as the tray. Opening the typing panel or Tasks, or choosing a tray position, uses the same
 dismissal path: save an active edit as a blur would, hide the window, and use the
 existing platform presence functions to restore the previous foreground when still owned.
+Every one of those closes, a hold's start included, also cancels a `ChatGPT` or Claude Code
+sign-in that Settings' own buttons started and that hasn't ended (`settings_chatgpt` and
+`settings_claude`, with the marks and rules of [onboarding](onboarding.md#rules), but no
+adoption after a restart).
+A sign-in started from chat isn't Settings', so it's never cancelled here.
 Local validation or send errors keep **Settings not saved** on the dock even after dismissal.
 The retained draft and inline error remain available on reopening; correcting or cancelling
 the edit clears the local indicator. General brain errors use **Needs attention**, not
