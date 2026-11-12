@@ -259,10 +259,10 @@ fn ready_states_reserve_componentwise_maxima_until_the_old_rest_is_replaced() {
         .expect("second answer");
     let both = PaintWork {
         dash_pieces: 12,
-        fill_vertices: 121,
-        largest_fill: 121,
-        outline_points: 121,
-        largest_outline: 121,
+        fill_vertices: 25,
+        largest_fill: 25,
+        outline_points: 25,
+        largest_outline: 25,
     };
     assert_eq!(presenter.paint_work(), both);
     let consumed = presenter

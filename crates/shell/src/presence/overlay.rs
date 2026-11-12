@@ -642,10 +642,15 @@ fn assemble(
                             .map(|path| Pending::Path(path, *color)),
                         None,
                     ],
-                    _ => {
-                        paint_geometry::paths(scratch, prim, item.transform, item.draw, item.flow)?
-                            .map(|each| each.map(|(path, paint)| Pending::Path(path, paint)))
-                    }
+                    _ => paint_geometry::paths(
+                        scratch,
+                        prim,
+                        item.transform,
+                        item.draw,
+                        item.flow,
+                        item.paint_scale,
+                    )?
+                    .map(|each| each.map(|(path, paint)| Pending::Path(path, paint))),
                 }
             };
             for piece in pieces.into_iter().flatten() {

@@ -755,7 +755,7 @@ Prepared residency remains the preparation layer's separate limit.
 | Path | 512 points, 4,096 flattened segments | 20,000 segments |
 | Dash pieces | Explicit geometry preflighted; generated geometry counted at preparation | 512 |
 | Fill vertices | Points plus crossing pairs, at most 21,845 per build | 512 |
-| Bordered-rect outline points | Rounded fallback at maximum admitted scale | 512 |
+| Bordered-rect outline points | Rounded fallback at the object's charged scale | 512 |
 | Motion | 256 tracks, 32 keys/track, 60 s/track and after last activation | — |
 | Object graph | Depth 16 | — |
 | Coordinates | Finite, absolute value ≤20,000 after composition | — |
@@ -788,8 +788,8 @@ painter is implemented here.
 ### Paint work
 
 Preparation counts each new or replaced item's `display::PaintWork` once, when its primitives
-change, and `LayoutState::paint_work` sums them in O(objects) for the shell's guard. None of
-the counts depends on display, pose or reveal, and sums saturate.
+or its charged scale change, and `LayoutState::paint_work` sums them in O(objects) for the
+shell's guard. None of the counts depends on display, pose or reveal, and sums saturate.
 
 - Dashed lines count `dash_pieces`: an edge of length l meets at most floor(l / 10) + 2 dashes
   at any flow phase or reveal.
@@ -802,9 +802,16 @@ the counts depends on display, pose or reveal, and sums saturate.
   rounding cannot introduce uncounted tessellation work. Numeric ceiling fixtures check lyon's
   vertex-count assumptions; any build error fails loudly rather than dropping a primitive.
 - Every `Prim::Rect` is charged as the painter's path fallback, which rotation and partial
-  reveals trigger: `corner_segments(radius · 64)` pieces per corner, the largest admitted
-  composed scale, and 4(n + 1) + 1 points. Filled rects add them to the fill counts, bordered
-  rects to the outline counts. The painter must refuse a pose that needs more pieces.
+  reveals trigger: `corner_segments(radius · c)` pieces per corner and 4(n + 1) + 1 points.
+  c is its object's charged scale: the composed-scale envelope of the object and its
+  ancestors, times the surface limit (2 on an overlay, 1 inline), times 1 + 2⁻¹⁶, then capped
+  at 64. The 2⁻¹⁶ is a conservative allowance for f32 drift between that envelope and a
+  frame's composed matrix along an admitted chain, not a proof. Preparation recomputes c for
+  every retained object after the step's motion updates and keeps a count only when both its
+  primitives and c are unchanged, so a later track on an ancestor recounts its descendants.
+  Filled rects add the points to the fill counts, bordered rects to the outline counts. Frame
+  items carry c, and the painter's fallback refuses with `OverCharge` a pose that needs more
+  pieces than c buys.
 
 lyon_tessellation's debug tessellator prints every point it fills to stdout when
 `LYON_FORCE_LOGGING` is set (`fill.rs:77-95`, `:563-566`), and `set_logging(false)` can't turn
@@ -834,8 +841,8 @@ the longest run, closed, costs 4 × 4,098 + 4 = 16,396 of a build's 21,845 verti
 The painter still refuses a longer run loudly.
 
 The global limits are 512 dash pieces, 512 fill vertices and 512 outline points, shared
-across all visible scenes and reserved ready/rest states. Four radius-8 filled and bordered
-boxes cost 436 fill and outline points, leaving room for labels and dashed connectors;
+across all visible scenes and reserved ready/rest states. On an overlay, four radius-8 filled
+and bordered boxes cost 100 fill and outline points, leaving room for labels and dashed connectors;
 labels remain subject to the existing text and object limits. A drawing beyond the limits
 fails explicitly through the scene's residency failure or recovery clear, without simplifying
 its geometry. Before counting crossings, preparation refuses any one generated fill with

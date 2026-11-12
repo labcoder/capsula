@@ -6,6 +6,7 @@ use std::{
 use kumochi_scene::{
     Step,
     display::{MeasureError, TextMeasure, TextStyle},
+    limits::MAX_COMPOSED_SCALE,
 };
 
 use super::{Charged, LIVE, Shaper, begin, commit, controls, failed, live, only_job, step};
@@ -32,6 +33,15 @@ fn drawing_put(iteration: usize, extra_labels: usize) -> Vec<String> {
     let mut put = Vec::new();
     for index in 0..4 {
         put.push(format!(r#"{{"shape":{{"id":"box{index}","kind":"rect","box":[{},150,120,80],"radius":8,"fill":"blue","label":"{}"}}}}"#,40 + index * 300,label(index)));
+    }
+    // At the overlay's charge a labelled box costs 25 points, so twelve more radius-8 rects and
+    // four of 9 points fill what is left of the fill and outline caps.
+    for index in 0..16 {
+        let radius = if index < 12 { 8.0 } else { 0.001 };
+        put.push(format!(
+            r#"{{"shape":{{"id":"cap{index}","kind":"rect","box":[{},400,48,32],"radius":{radius},"fill":"blue"}}}}"#,
+            40 + index * 60
+        ));
     }
     for index in 0..25 {
         let points = if index == 24 {
@@ -521,7 +531,7 @@ fn measure_worst_case_fill_crossings() {
         color: Paint::from(Rgb::try_from(0x003b_82f6).expect("RGB")),
     };
     assert_eq!(
-        PaintWork::of(std::slice::from_ref(&fill)).largest_fill,
+        PaintWork::of(std::slice::from_ref(&fill), MAX_COMPOSED_SCALE).largest_fill,
         512 + 509
     );
     let cases = [
@@ -535,7 +545,10 @@ fn measure_worst_case_fill_crossings() {
             let case = (trial + slot) % 4;
             if let Some((name, primitives)) = cases.get(case) {
                 let start = Instant::now();
-                let work = std::hint::black_box(PaintWork::of(std::hint::black_box(primitives)));
+                let work = std::hint::black_box(PaintWork::of(
+                    std::hint::black_box(primitives),
+                    MAX_COMPOSED_SCALE,
+                ));
                 rows.push((*name, primitives.len(), trial, start.elapsed().as_nanos()));
                 assert_eq!(work.largest_fill, 512 + 509);
                 continue;

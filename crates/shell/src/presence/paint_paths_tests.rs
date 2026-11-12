@@ -5,14 +5,15 @@ use kumochi_scene::{
     Handle, Text,
     display::{
         BUILD_VERTEX_LIMIT, Contour, FILL_VERTEX_LIMIT, Paint, PaintWork, Prim, TextStyle,
-        corner_segments, crossings,
+        corner_segments, crossings, fallback_corner_segments,
     },
     geom::{Affine, Rect, Vec2},
+    limits::MAX_COMPOSED_SCALE,
     record::{Align, Rgb},
 };
 
 use super::super::paint_cache::PaintScene;
-use super::{BuildError, Strokes, paths, rounded};
+use super::{BuildError, Strokes, corners, paths, rounded, scale};
 
 fn ink() -> Paint {
     Paint::from(Rgb::try_from(0x33_66_99).expect("a packed RGB value"))
@@ -50,7 +51,8 @@ fn zigzag(count: u16, y: f32) -> Vec<(f32, f32)> {
 }
 
 fn built(prim: &Prim, draw: f32, flow: f32) -> Path<Pixels> {
-    let mut built = paths(prim, Affine::default(), draw, flow).expect("bounded geometry builds");
+    let mut built = paths(prim, Affine::default(), draw, flow, MAX_COMPOSED_SCALE)
+        .expect("bounded geometry builds");
     assert_eq!(built.len(), 1, "a line builds one merged path");
     built.remove(0).0
 }
@@ -107,7 +109,7 @@ fn dashes_follow_the_prim_pattern_and_its_flow() {
         &reference(&runs(&moved), Contour::Open),
     );
     assert_eq!(
-        PaintWork::of(std::slice::from_ref(&dashed)).dash_pieces,
+        PaintWork::of(std::slice::from_ref(&dashed), MAX_COMPOSED_SCALE).dash_pieces,
         14,
         "half a period of flow paints exactly the charged pieces"
     );
@@ -153,7 +155,8 @@ fn solid_closed_strokes_close_only_when_whole() {
         &built(&closed, 0.5, 0.0),
         &reference(&[pts(&square[..3])], Contour::Open),
     );
-    let drawn = paths(&closed, Affine::default(), 0.0, 0.0).expect("an unrevealed stroke builds");
+    let drawn = paths(&closed, Affine::default(), 0.0, 0.0, MAX_COMPOSED_SCALE)
+        .expect("an unrevealed stroke builds");
     assert_eq!(drawn.len(), 0, "nothing of a stroke is revealed at draw 0");
 }
 
@@ -211,13 +214,13 @@ fn a_long_dashed_line_merges_its_chunks_into_one_build() {
 fn one_run_past_the_build_limit_is_refused() {
     let at_limit = solid_line(&zigzag(5_460, 0.0), Contour::Open);
     assert_eq!(
-        paths(&at_limit, Affine::default(), 1.0, 0.0).map(|built| built.len()),
+        paths(&at_limit, Affine::default(), 1.0, 0.0, MAX_COMPOSED_SCALE).map(|built| built.len()),
         Ok(1),
         "4 * 5_460 + 4 = 21_844 builds"
     );
     let over = solid_line(&zigzag(5_461, 0.0), Contour::Open);
     assert_eq!(
-        paths(&over, Affine::default(), 1.0, 0.0).map(|built| built.len()),
+        paths(&over, Affine::default(), 1.0, 0.0, MAX_COMPOSED_SCALE).map(|built| built.len()),
         Err(BuildError::OverCharge),
         "4 * 5_461 + 4 = 21_848 is past the limit"
     );
@@ -243,12 +246,26 @@ fn fills_are_refused_past_their_point_limit() {
         "the fill limit is the build limit"
     );
     assert_eq!(
-        paths(&fill(21_845), Affine::default(), 1.0, 0.0).map(|built| built.len()),
+        paths(
+            &fill(21_845),
+            Affine::default(),
+            1.0,
+            0.0,
+            MAX_COMPOSED_SCALE
+        )
+        .map(|built| built.len()),
         Ok(1),
         "a fill at the limit builds"
     );
     assert_eq!(
-        paths(&fill(21_846), Affine::default(), 1.0, 0.0).map(|built| built.len()),
+        paths(
+            &fill(21_846),
+            Affine::default(),
+            1.0,
+            0.0,
+            MAX_COMPOSED_SCALE
+        )
+        .map(|built| built.len()),
         Err(BuildError::OverCharge),
         "one point over is refused"
     );
@@ -306,7 +323,7 @@ fn lyon_fills_stay_within_points_and_crossings_at_the_u16_ceiling() {
         color: ink(),
     };
     assert_eq!(
-        PaintWork::of(&[star_fill]).largest_fill,
+        PaintWork::of(&[star_fill], MAX_COMPOSED_SCALE).largest_fill,
         21_846,
         "the guard refuses the 361-point star the painter's point check would pass"
     );
@@ -410,7 +427,7 @@ fn corners_flatten_from_the_world_radius_without_coarsening() {
         border: Some((ink(), 2.0)),
     };
     assert_eq!(
-        paths(&rect, Affine::default(), 0.5, 0.0).map(|built| built.len()),
+        paths(&rect, Affine::default(), 0.5, 0.0, MAX_COMPOSED_SCALE).map(|built| built.len()),
         Ok(2),
         "the largest rect's fill and partly drawn border build"
     );
@@ -435,31 +452,46 @@ fn corners_flatten_from_the_world_radius_without_coarsening() {
 }
 
 #[test]
-fn a_scale_past_the_charge_fails_instead_of_coarsening() {
-    let rect = Prim::Rect {
-        rect: Rect {
-            origin: Vec2::new(0.0, 0.0),
-            size: Vec2::new(1_000.0, 1_000.0),
-        },
+fn a_pose_past_the_charged_scale_fails_instead_of_coarsening() {
+    let rect = Rect {
+        origin: Vec2::new(0.0, 0.0),
+        size: Vec2::new(1_000.0, 1_000.0),
+    };
+    let prim = Prim::Rect {
+        rect,
         radius: 400.0,
         fill: Some(ink()),
-        border: None,
+        border: Some((ink(), 4.0)),
     };
-    let scaled = |zoom| Affine::pose(zoom, 0.5, Vec2::new(0.0, 0.0));
-    assert!(
-        corner_segments(400.0 * 65.0) > corner_segments(400.0 * 64.0),
-        "the fixture's two scales need different corner counts"
-    );
     assert_eq!(
-        paths(&rect, scaled(64.0), 1.0, 0.0).map(|built| built.len()),
-        Ok(1),
-        "the largest composed scale was charged"
+        [2.0, 2.07, 2.08].map(|zoom: f32| corner_segments(400.0 * f64::from(zoom))),
+        [32, 32, 33],
+        "2.07 stays within the pieces charged at 2 and 2.08 crosses a subdivision"
     );
-    assert_eq!(
-        paths(&rect, scaled(65.0), 1.0, 0.0).map(|built| built.len()),
-        Err(BuildError::OverCharge),
-        "a larger scale isn't coarsened to fit"
-    );
+    let charge = fallback_corner_segments(rect, 400.0, 2.0);
+    let mut scratch = super::super::paint_stroke::Scratch::new();
+    for (zoom, pieces, built) in [
+        (2.0, Ok(32), Ok(2)),
+        (2.07, Ok(32), Ok(2)),
+        (
+            2.08,
+            Err(BuildError::OverCharge),
+            Err(BuildError::OverCharge),
+        ),
+    ] {
+        // Turned and half drawn, so the painter takes the path fallback, not a native quad.
+        let turned = Affine::pose(zoom, 0.5, Vec2::new(0.0, 0.0));
+        assert_eq!(
+            corners(rect, 400.0, scale(turned), charge).map(|(_, segments)| segments),
+            pieces
+        );
+        assert_eq!(
+            super::super::paint_geometry::paths(&mut scratch, &prim, turned, 0.5, 0.0, 2.0)
+                .map(|paths| paths.into_iter().flatten().count()),
+            built,
+            "a pose needing more pieces than charged isn't coarsened to fit"
+        );
+    }
 }
 
 #[test]
@@ -476,13 +508,20 @@ fn text_is_refused_and_an_unusable_phase_paints_nothing() {
         align: Align::Left,
     };
     assert_eq!(
-        paths(&text, Affine::default(), 1.0, 0.0).map(|built| built.len()),
+        paths(&text, Affine::default(), 1.0, 0.0, MAX_COMPOSED_SCALE).map(|built| built.len()),
         Err(BuildError::Text),
         "text is painted outside"
     );
     let dashed = dashed_line(&[(0.0, 0.0), (128.0, 0.0)]);
     assert_eq!(
-        paths(&dashed, Affine::default(), 1.0, f32::NAN).map(|built| built.len()),
+        paths(
+            &dashed,
+            Affine::default(),
+            1.0,
+            f32::NAN,
+            MAX_COMPOSED_SCALE
+        )
+        .map(|built| built.len()),
         Ok(0),
         "a NaN phase ends the walk"
     );
@@ -496,7 +535,13 @@ fn text_is_refused_and_an_unusable_phase_paints_nothing() {
         border: None,
     };
     let (result, counts, bytes) = crate::allocation::usage(|| {
-        paths(&empty, Affine::pose(65.0, 0.0, Vec2::default()), 1.0, 0.0)
+        paths(
+            &empty,
+            Affine::pose(65.0, 0.0, Vec2::default()),
+            1.0,
+            0.0,
+            MAX_COMPOSED_SCALE,
+        )
     });
     assert_eq!(result.map(|built| built.len()), Ok(0));
     assert_eq!(
@@ -538,7 +583,8 @@ fn bordered(size: Vec2, radius: f32, width: f32) -> Prim {
 }
 
 fn border_path(prim: &Prim, transform: Affine) -> Path<Pixels> {
-    let mut built = paths(prim, transform, 1.0, 0.0).expect("a bordered rect builds");
+    let mut built =
+        paths(prim, transform, 1.0, 0.0, MAX_COMPOSED_SCALE).expect("a bordered rect builds");
     assert_eq!(built.len(), 1, "the primitive builds one path");
     built.remove(0).0
 }
@@ -688,7 +734,8 @@ fn a_border_covers_what_its_quad_would() {
 }
 
 fn drawn(prim: &Prim, draw: f32) -> Option<Path<Pixels>> {
-    let mut built = paths(prim, Affine::default(), draw, 0.0).expect("a bordered rect builds");
+    let mut built = paths(prim, Affine::default(), draw, 0.0, MAX_COMPOSED_SCALE)
+        .expect("a bordered rect builds");
     assert!(built.len() <= 1, "a border builds at most one path");
     built.pop().map(|(path, _)| path)
 }
@@ -828,8 +875,14 @@ fn ring_borders_build_within_the_fill_limit_at_the_largest_charge() {
     ];
     for (index, (height, width)) in cases.into_iter().enumerate() {
         for draw in [1.0, 0.999, 0.5] {
-            let built = paths(&largest(height, width), charged, draw, 0.0)
-                .expect("the largest border builds");
+            let built = paths(
+                &largest(height, width),
+                charged,
+                draw,
+                0.0,
+                MAX_COMPOSED_SCALE,
+            )
+            .expect("the largest border builds");
             if index < 3 {
                 assert_eq!(built.len(), 1, "a control border builds one path");
             }
@@ -843,7 +896,7 @@ fn ring_borders_build_within_the_fill_limit_at_the_largest_charge() {
     }
     let past = Affine::pose(65.0, 0.3, Vec2::new(0.0, 0.0));
     assert_eq!(
-        paths(&largest(40_000.0, 2.0), past, 1.0, 0.0).map(|built| built.len()),
+        paths(&largest(40_000.0, 2.0), past, 1.0, 0.0, MAX_COMPOSED_SCALE).map(|built| built.len()),
         Err(BuildError::OverCharge),
         "a scale past the charge isn't coarsened"
     );
@@ -956,8 +1009,15 @@ fn lyon_logging_child() {
     let turned = Affine::pose(1.0, 0.3, Vec2::new(0.0, 0.0));
     let mut scratch = super::super::paint_stroke::Scratch::new();
     let fallback = [1.0, 0.5].map(|draw| {
-        super::super::paint_geometry::paths(&mut scratch, &rect, turned, draw, 0.0)
-            .map(|paths| paths.into_iter().flatten().count())
+        super::super::paint_geometry::paths(
+            &mut scratch,
+            &rect,
+            turned,
+            draw,
+            0.0,
+            MAX_COMPOSED_SCALE,
+        )
+        .map(|paths| paths.into_iter().flatten().count())
     });
     assert_eq!(
         fallback,
@@ -965,9 +1025,9 @@ fn lyon_logging_child() {
         "transient fallback keeps logging compiled out"
     );
     let built = [
-        paths(&star, Affine::default(), 1.0, 0.0),
-        paths(&rect, turned, 1.0, 0.0),
-        paths(&rect, turned, 0.5, 0.0),
+        paths(&star, Affine::default(), 1.0, 0.0, MAX_COMPOSED_SCALE),
+        paths(&rect, turned, 1.0, 0.0, MAX_COMPOSED_SCALE),
+        paths(&rect, turned, 0.5, 0.0, MAX_COMPOSED_SCALE),
     ]
     .map(|result| result.map(|list| list.len()));
     assert_eq!(

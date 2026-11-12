@@ -2881,17 +2881,17 @@ fn preparation_counts_paint_work_once_and_refuses_an_unbuildable_fill() {
         ]}),
     );
     let first = picture(&scene, first, &before, &mut measure).expect("buildable paint work");
-    // The dash: floor(100 / 10) + 2. The rect: radius 10 at scale 64 needs 29 pieces per
-    // corner, so 4 · 30 + 1 points, filled and bordered. The star: 257 points + 257 · 84
+    // The dash: floor(100 / 10) + 2. The rect: radius 10 at the inline scale needs 4 pieces per
+    // corner, so 4 · 5 + 1 points, filled and bordered. The star: 257 points + 257 · 84
     // crossings, exactly one build.
     assert_eq!(
         first.after.paint_work(),
         kumochi_scene::display::PaintWork {
             dash_pieces: 12,
-            fill_vertices: 121 + 21_845,
+            fill_vertices: 21 + 21_845,
             largest_fill: 21_845,
-            outline_points: 121,
-            largest_outline: 121,
+            outline_points: 21,
+            largest_outline: 21,
         }
     );
     let next = committed(
@@ -2955,9 +2955,9 @@ fn a_replaced_item_is_recounted_and_an_unchanged_one_keeps_its_count() {
     );
     let next = picture(&scene, next, &first.after, &mut measure).expect("two markers");
     let two = next.after.paint_work();
-    // A scatter marker is a filled 8-unit rect of radius 4: 18 pieces per corner at scale 64,
-    // so 4 · 19 + 1 points. The untouched dashed path keeps floor(100 / 10) + 2.
-    assert_eq!(three.fill_vertices - two.fill_vertices, 77);
+    // A scatter marker is a filled 8-unit rect of radius 4: 3 pieces per corner at the inline
+    // scale, so 4 · 4 + 1 points. The untouched dashed path keeps floor(100 / 10) + 2.
+    assert_eq!(three.fill_vertices - two.fill_vertices, 17);
     assert_eq!((three.dash_pieces, two.dash_pieces), (12, 12));
     assert_eq!(
         first.after.paint_work(),

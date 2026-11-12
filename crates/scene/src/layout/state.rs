@@ -81,8 +81,10 @@ pub(super) struct Placed {
     pub inherited_opacity: f32,
     /// The measured size of a group's private title, which its band reserves.
     pub title: Option<Vec2>,
-    /// Paint work of `item.primitives`, set once at the step that built them.
+    /// Paint work of `item.primitives`, recounted when they or `paint_scale` change.
     pub work: PaintWork,
+    /// Composed scale `work` charged the rect fallbacks at; the painter refuses a pose past it.
+    pub paint_scale: f32,
 }
 
 impl Placed {
@@ -102,6 +104,7 @@ impl Placed {
             inherited_opacity: cached.map_or(1.0, |old| old.inherited_opacity),
             title: cached.and_then(|old| old.title),
             work: PaintWork::default(),
+            paint_scale: 0.0,
         }
     }
 }
@@ -195,7 +198,7 @@ impl LayoutState {
         }
     }
     /// Every placed item with its resting values and inherited opacity, for activation.
-    pub(crate) fn placed(&self) -> impl Iterator<Item = (&Item, Rest, f32, usize)> {
+    pub(crate) fn placed(&self) -> impl Iterator<Item = (&Item, Rest, f32, usize, f32)> {
         self.objects.values().map(|object| {
             let primitives = &object.item.primitives;
             let label_start = if matches!(&*object.source, Op::Edge(_)) {
@@ -211,6 +214,7 @@ impl LayoutState {
                 object.rest,
                 object.inherited_opacity,
                 label_start,
+                object.paint_scale,
             )
         })
     }
