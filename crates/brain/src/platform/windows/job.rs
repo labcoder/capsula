@@ -11,7 +11,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
-    FALSE, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, TRUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_ACCESS_DENIED, FALSE, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, TRUE,
+    WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::System::JobObjects::{
     CreateJobObjectW, IsProcessInJob, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -260,21 +261,39 @@ impl Helper {
         Self { process, pid }
     }
 
+    /// A helper for process `pid` through a handle that can wait on it but not terminate it.
+    #[cfg(test)]
+    pub(crate) fn watching(pid: u32) -> io::Result<Self> {
+        use windows_sys::Win32::System::Threading::{
+            PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        };
+        let process = super::pipe::open_process(
+            pid,
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+        )?;
+        Ok(Self::new(process, pid))
+    }
+
     /// The helper's process id.
     pub const fn pid(&self) -> u32 {
         self.pid
     }
 
-    /// Requests termination; an already exited process counts as success.
+    /// Requests termination; a process that has exited, or is already exiting, counts as success.
+    /// Only [`Helper::exits_within`] shows that it ended.
     ///
     /// # Errors
-    /// Fails when termination fails and the process isn't confirmed exited.
+    /// Fails when Windows refuses for any reason but access denied and the process hasn't exited.
     pub fn terminate(&self) -> io::Result<()> {
         // SAFETY: the process handle is open for the borrow and has termination access.
         if unsafe { TerminateProcess(self.process.as_raw_handle(), TERMINATED) } != FALSE {
             return Ok(());
         }
         let error = io::Error::last_os_error();
+        // Windows refuses a process that is already exiting, until its exit completes.
+        if error.raw_os_error() == Some(ERROR_ACCESS_DENIED.cast_signed()) {
+            return Ok(());
+        }
         match self.exits_within(Duration::ZERO) {
             Ok(true) => Ok(()),
             _ => Err(error),
