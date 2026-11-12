@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
 use kumochi_protocol::message::{
-    AccountView, AssistantName, DockPosition, ErrorKey, MaxFrameRate, ModelChoice, RepoName, RunId,
-    SettingsOp, SettingsView, SttUnload, ThreadId, UserName,
+    AccountView, AssistantName, DockPosition, ErrorKey, MaxFrameRate, ModelChoice, OnboardingStep,
+    RepoName, RunId, SettingsOp, SettingsView, SttUnload, ThreadId, UserName,
 };
 use kumochi_protocol::voice::VoicePart;
 use toml::{Table, Value};
@@ -21,6 +21,7 @@ use crate::connections::github::device::DefaultRepo;
 const ASSISTANT_NAME: &str = "assistant_name";
 const USER_NAME: &str = "user_name";
 const ONBOARDED: &str = "onboarded";
+const ONBOARDING_FROM: &str = "onboarding_from";
 const MAX_FRAME_RATE: &str = "max_frame_rate";
 const DEFAULT_MODEL: &str = "default_model";
 const CLAUDE_CODE: &str = "claude_code";
@@ -245,6 +246,13 @@ impl Config {
             }
             SettingsOp::FinishOnboarding => {
                 table.insert(ONBOARDED.to_owned(), Value::Boolean(true));
+                table.remove(ONBOARDING_FROM);
+            }
+            SettingsOp::CompleteOnboardingStep(step) => {
+                if let Some(next) = step.next().filter(|next| *next > onboarding_from(&table)) {
+                    let value = Value::try_from(next).expect("an onboarding step is a string");
+                    table.insert(ONBOARDING_FROM.to_owned(), value);
+                }
             }
             SettingsOp::SetMaxFrameRate(rate) => match rate.fps() {
                 Some(fps) => {
@@ -509,6 +517,7 @@ fn view_of(table: &Table, main_thread: ThreadId, in_use: bool) -> SettingsView {
         assistant_name,
         user_name,
         onboarded,
+        onboarding_from: onboarding_from(table),
         main_thread,
         max_frame_rate,
         default_model,
@@ -527,6 +536,16 @@ fn onboarded(table: &Table) -> Option<bool> {
         Some(Value::Boolean(done)) => Some(*done),
         Some(_) => invalid(ONBOARDED),
     }
+}
+
+/// The `onboarding_from` key; the first step when it's absent or bad.
+fn onboarding_from(table: &Table) -> OnboardingStep {
+    table
+        .get(ONBOARDING_FROM)
+        .and_then(|value| {
+            (value.clone().try_into::<OnboardingStep>().ok()).or_else(|| invalid(ONBOARDING_FROM))
+        })
+        .unwrap_or_default()
 }
 
 fn invalid<T>(key: &str) -> Option<T> {

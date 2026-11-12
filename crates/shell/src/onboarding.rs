@@ -1,7 +1,7 @@
 //! First-run onboarding's plain state: which step shows and what it waits for. No GPUI, no
 //! transport and no text: the names stay in [`Settings`], so nothing here can log one.
 
-use kumochi_protocol::message::SettingsView;
+use kumochi_protocol::message::{OnboardingStep, SettingsView};
 
 use crate::settings::{Error, Field, Settings};
 
@@ -20,6 +20,25 @@ impl Step {
         match self {
             Self::Welcome => Field::Assistant,
             Self::YourName => Field::User,
+        }
+    }
+
+    /// The step the brain remembers once this one is completed.
+    pub(crate) fn recorded(self) -> OnboardingStep {
+        match self {
+            Self::Welcome => OnboardingStep::Welcome,
+            Self::YourName => OnboardingStep::YourName,
+        }
+    }
+
+    /// Where a launch resumes: the first step not yet completed, or the last step this build
+    /// has when the brain remembers one beyond it.
+    fn resume(from: OnboardingStep) -> Self {
+        match from {
+            OnboardingStep::Welcome => Self::Welcome,
+            OnboardingStep::YourName | OnboardingStep::Accounts | OnboardingStep::Shortcut => {
+                Self::YourName
+            }
         }
     }
 }
@@ -65,11 +84,11 @@ pub(crate) struct Onboarding {
 }
 
 impl Onboarding {
-    /// What a settings view opens: none once the brain says onboarding isn't owed, or once it
-    /// was put off this run.
+    /// What a settings view opens, at the first step not yet completed: none once the brain says
+    /// onboarding isn't owed, or once it was put off this run.
     pub(crate) fn begin(view: &SettingsView, run: ThisRun) -> Option<Self> {
         (!view.onboarded && run == ThisRun::Owed).then_some(Self {
-            step: Step::Welcome,
+            step: Step::resume(view.onboarding_from),
             awaiting: None,
             finishing: None,
         })

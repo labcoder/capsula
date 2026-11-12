@@ -432,6 +432,7 @@ pub(super) mod tests {
             assistant_name: AssistantName::new("Kumo").expect("valid"),
             user_name: None,
             onboarded: true,
+            onboarding_from: kumochi_protocol::message::OnboardingStep::Welcome,
             main_thread: ThreadId(1),
             max_frame_rate: MaxFrameRate::AUTOMATIC,
             default_model: None,

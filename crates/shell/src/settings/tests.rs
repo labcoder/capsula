@@ -12,6 +12,7 @@ fn view(assistant: &str, user: Option<&str>) -> SettingsView {
         assistant_name: AssistantName::new(assistant).expect("valid assistant name"),
         user_name: user.map(|name| UserName::new(name).expect("valid user name")),
         onboarded: true,
+        onboarding_from: kumochi_protocol::message::OnboardingStep::Welcome,
         main_thread: ThreadId(1),
         max_frame_rate: kumochi_protocol::message::MaxFrameRate::AUTOMATIC,
         default_model: None,

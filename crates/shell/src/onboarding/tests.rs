@@ -1,6 +1,6 @@
 use kumochi_protocol::message::{
-    AssistantName, DockPosition, ErrorKey, MaxFrameRate, NameError, SettingsOp, SettingsView,
-    SttUnload, ThreadId, UserName,
+    AssistantName, DockPosition, ErrorKey, MaxFrameRate, NameError, OnboardingStep, SettingsOp,
+    SettingsView, SttUnload, ThreadId, UserName,
 };
 
 use super::{Landing, Next, Onboarding, Step, ThisRun};
@@ -15,6 +15,7 @@ fn view(assistant: &str, user: Option<&str>, onboarded: bool) -> SettingsView {
         assistant_name: AssistantName::new(assistant).expect("valid assistant name"),
         user_name: user.map(|name| UserName::new(name).expect("valid user name")),
         onboarded,
+        onboarding_from: kumochi_protocol::message::OnboardingStep::Welcome,
         main_thread: ThreadId(1),
         max_frame_rate: MaxFrameRate::AUTOMATIC,
         default_model: None,
@@ -54,6 +55,25 @@ fn on_your_name(user: Option<&str>) -> (Settings, Onboarding) {
     assert_eq!(press(&mut settings, &mut onboarding), (vec![], Next::Moved));
     assert_eq!(onboarding.step(), Step::YourName);
     (settings, onboarding)
+}
+
+#[test]
+fn begin_resumes_at_the_first_step_not_completed_and_never_past_the_last_it_has() {
+    for (from, step) in [
+        (OnboardingStep::Welcome, Step::Welcome),
+        (OnboardingStep::YourName, Step::YourName),
+        (OnboardingStep::Accounts, Step::YourName),
+        (OnboardingStep::Shortcut, Step::YourName),
+    ] {
+        let view = SettingsView {
+            onboarding_from: from,
+            ..view("Kumo", None, false)
+        };
+        let onboarding = Onboarding::begin(&view, ThisRun::Owed).expect("onboarding is owed");
+        assert_eq!(onboarding.step(), step, "{from:?}");
+    }
+    assert_eq!(Step::Welcome.recorded(), OnboardingStep::Welcome);
+    assert_eq!(Step::YourName.recorded(), OnboardingStep::YourName);
 }
 
 #[test]
