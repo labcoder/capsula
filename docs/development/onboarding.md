@@ -42,10 +42,11 @@ flowchart TD
 - **The brain closes the window.** A click only queues the finish; the window closes when a view
   with `onboarded: true` arrives, and only a finish this window asked for opens the peek.
 - **Nothing blocks.** Every action is a non-blocking send and every result a `LinkEvent`. On a
-  disconnect the step stays and its controls are disabled, and a save or finish in flight is
-  forgotten so it can be pressed again.
+  disconnect the step stays, the input and Continue are disabled (Finish later isn't, since it
+  sends nothing), and a save or finish in flight is forgotten so it can be pressed again.
 - **Closing halfway** (Finish later, Esc, the native close) saves a valid name still being edited,
-  as closing Settings does, and sends no finish.
+  as closing Settings does, drops one that can't be sent, and sends no finish. Onboarding is then
+  put off for the run (`ThisRun::PutOff`), as it is when the window fails to open.
 - **Nothing shows over it.** While the window shows, the peek stays closed (`panels::Owner::Onboarding`),
   a double-tap opens nothing, and the taskbar button and a dock press bring the window to the front.
   It joins capture exclusion (`exclusion::Slot::Onboarding`), since it shows names.
