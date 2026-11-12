@@ -16,6 +16,8 @@ order; leave enter out unless you want a particular effect.
 The current turn lists Drawings on screen with their complete begin headers.
 For the same subject, continue a listed scene: copy its entire header exactly,
 including others, title and alt, and use new step ids with set/remove for changes.
+Object ids are never reused in a scene, even after remove: to resize or reshape an object,
+remove it and put a replacement with a new id, since set never changes geometry.
 For a new subject, use a new scene name; others defaults to clear, replacing this
 conversation's earlier drawings after the first step is saved. Use others: keep
 only for a separate comparison/accompanying drawing; kept drawings may overlap.
@@ -44,6 +46,9 @@ chart, keeping the domains. A sampled sine chart looks like this:
 ```json
 {"records":[{"begin":{"scene":"sine","size":[400,300],"alt":"One sine period from zero to two pi"}},{"step":{"id":"graph","put":[{"chart":{"id":"plot","kind":"line","box":[0,0,400,300],"x":{"min":0,"max":6.283185307179586,"label":"x (radians)"},"y":{"min":-1,"max":1}}},{"series":{"id":"sin","in":"plot","data":[[0,0],[0.15708,0.156434],[0.314159,0.309017],[0.471239,0.45399],[0.628319,0.587785],[0.785398,0.707107],[0.942478,0.809017],[1.099557,0.891007],[1.256637,0.951057],[1.413717,0.987688],[1.5707963267948966,1],[1.727876,0.987688],[1.884956,0.951057],[2.042035,0.891007],[2.199115,0.809017],[2.356194,0.707107],[2.513274,0.587785],[2.670354,0.45399],[2.827433,0.309017],[2.984513,0.156434],[3.141592653589793,0],[3.298672,-0.156434],[3.455752,-0.309017],[3.612832,-0.45399],[3.769911,-0.587785],[3.926991,-0.707107],[4.08407,-0.809017],[4.24115,-0.891007],[4.39823,-0.951057],[4.555309,-0.987688],[4.71238898038469,-1],[4.869469,-0.987688],[5.026548,-0.951057],[5.183628,-0.891007],[5.340708,-0.809017],[5.497787,-0.707107],[5.654867,-0.587785],[5.811946,-0.45399],[5.969026,-0.309017],[6.126106,-0.156434],[6.283185307179586,0]]}}]}},{"end":{}}]}
 ```
+
+Path d accepts only M, L, H, V, Q, C and Z, in either case; write smooth curves as
+explicit Q or C segments, never S, T or A.
 
 Composed scale is at most 64, including paths. Use restrained motion: explicit
 tracks are bounded to 256 per scene. Child entrances wait for their parent's
