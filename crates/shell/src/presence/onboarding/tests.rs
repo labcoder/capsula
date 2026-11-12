@@ -188,6 +188,27 @@ fn finish_later_saves_a_valid_edited_name_and_sends_no_finish(cx: &mut TestAppCo
 }
 
 #[gpui::test]
+fn finish_later_drops_a_name_that_cant_be_saved(cx: &mut TestAppContext) {
+    let (owner, window, controls) = showing(cx);
+    rename(&owner, "", cx);
+    let mut frame = VisualTestContext::from_window(window, cx);
+    frame.update(|window, cx| window.draw(cx).clear(cx));
+    let close = frame
+        .debug_bounds("onboarding-close")
+        .expect("the Finish later button");
+    frame.simulate_click(close.center(), gpui_kit::Modifiers::default());
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, cx| {
+        assert!(owner.onboarding.is_none());
+        let settings = owner.settings.read(cx);
+        assert_eq!(settings.value(Field::Assistant), "Kumo");
+        assert_eq!(settings.field(Field::Assistant).error, None);
+        assert_eq!(settings.dock_notice(), None);
+    });
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+}
+
+#[gpui::test]
 fn an_onboarded_view_closes_the_window_quietly(cx: &mut TestAppContext) {
     let (owner, _, _) = showing(cx);
     owner.update(cx, |owner, cx| {

@@ -392,6 +392,7 @@ impl Presence {
                 Ok(())
             }
             Next::Close(landing) => {
+                self.cancel_onboarding_edit(cx);
                 self.close_onboarding(cx)?;
                 if landing == Landing::Peek {
                     self.set_panel(PanelVisibility::Visible, cx)?;
@@ -484,7 +485,8 @@ impl Presence {
     }
 
     /// Finish later, Esc at the top level or the native close: the window goes for this run and
-    /// no finish is sent. A name edit still in the field is saved, as closing Settings saves one.
+    /// no finish is sent. A name edit still in the field is saved, as closing Settings saves one;
+    /// one that can't be sent is dropped, so no draft or notice outlives the window.
     pub(super) fn dismiss_onboarding(
         &mut self,
         cx: &mut Context<'_, Self>,
@@ -495,6 +497,7 @@ impl Presence {
         let field = panel.view.read(cx).state.step().field();
         if self.settings.read(cx).editing(field) {
             self.save_setting(field, cx);
+            self.cancel_onboarding_edit(cx);
         }
         self.onboarding_later = true;
         tracing::info!("onboarding put off for this run");
