@@ -734,7 +734,8 @@ floor(length / 10) + 2 per segment + 1, with 6-unit dashes and 4-unit gaps in pr
 path's control polygon times its `scale`, a line's from, vias or bend control and to, a rect's
 or ellipse's box perimeter 2(w + h), and a polygon's own closed point sequence, never its box.
 The extra piece covers f32 rounding of prepared points and applies only when there is an edge,
-so an op without one, such as a path of only moves, charges 0. A line with a `ref` end and a diagram
+so an op without one, such as a path of only moves or a shape of `width` 0, charges 0. A line with
+a `ref` end and a diagram
 edge charge 0, because their geometry needs fonts; preparation counts them exactly (Paint work
 below). Past the global cap, admission fails with `OverBudget(DashPieces)`.
 
