@@ -429,6 +429,35 @@ fn complete_drawing_headers_count_outer_escaping_before_the_request_bound() {
 }
 
 #[test]
+fn the_names_in_settings_win_over_names_in_earlier_turns() {
+    const ASSISTANT: &str = "\nIf an earlier message or summary calls you something other than Kumo, it's out of date: Kumo is your name in the user's settings now.\n";
+    const USER: &str = "\nIf an earlier message or summary calls the user something other than Oscar, it's out of date: Oscar is their name in their settings now.\n";
+    let mut world = world("ctx-current-names");
+    let main = world.main;
+    let (_, current) = world.run(Some(main), "ask", None);
+    for (user, says_user) in [(Some("Oscar"), true), (None, false)] {
+        let built = world
+            .build(
+                &snapshot(Origin::Kumo, user),
+                (main, current),
+                Supplied::default(),
+                BOUND,
+            )
+            .expect("built");
+        let instructions = &built.request.instructions;
+        assert!(
+            instructions.contains(ASSISTANT),
+            "assistant: {instructions}"
+        );
+        assert_eq!(
+            instructions.contains(USER),
+            says_user,
+            "user: {instructions}"
+        );
+    }
+}
+
+#[test]
 fn an_unset_user_name_adds_nothing_and_a_name_is_never_read_as_a_placeholder() {
     let mut world = world("ctx-names");
     let main = world.main;
