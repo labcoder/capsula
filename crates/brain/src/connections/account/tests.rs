@@ -956,21 +956,54 @@ fn cancel_closes_the_listener_and_a_late_callback_does_nothing() {
     assert!(h.errors.is_empty());
 }
 
+/// Once the browser has finished, a cancel no longer stops the sign-in: whether the new client
+/// is still being saved or the code is out for its tokens, the account is saved.
 #[test]
-fn a_cancelled_attempts_sent_exchange_lands_in_the_revocation_list() {
-    let mut h = Harness::seeded("account-cancel-sent", |vault| {
-        committed(&vault.save_account(&saved_account("subject-1", "refresh-old")));
-    });
+fn a_cancel_after_the_browser_finished_keeps_the_sign_in() {
+    for registering in [true, false] {
+        let mut h = Harness::new("account-cancel-finished");
+        h.op(AccountOp::SignIn);
+        h.hold = registering;
+        h.callback("client-issued");
+        h.op(AccountOp::CancelSignIn);
+        if registering {
+            h.release();
+        }
+        assert_eq!(h.closed, 0, "registering: {registering}");
+        assert_eq!(
+            h.view(),
+            &AccountView::SigningIn,
+            "registering: {registering}"
+        );
+        h.reply(received(Some("refresh-new"), "subject-1", PLAN));
+        assert_eq!(
+            h.view(),
+            &signed_in(PlanState::Enabled, None),
+            "registering: {registering}"
+        );
+        assert_eq!(h.refresh_token().as_deref(), Some("refresh-new"));
+        assert!(h.revocations().is_empty(), "registering: {registering}");
+        assert_eq!(h.marker(), None, "the pending flag is cleared");
+        assert!(h.errors.is_empty(), "{:?}", h.errors);
+    }
+}
+
+/// A cancel while the set is saved keeps it, and drops an Open again that waited for the save:
+/// no new browser opens after the user's last word was Cancel.
+#[test]
+fn a_cancel_during_the_save_keeps_the_set_and_drops_a_waiting_open_again() {
+    let mut h = Harness::new("account-cancel-saving");
     h.op(AccountOp::SignIn);
-    h.callback("client-saved");
+    h.callback("client-issued");
+    h.hold = true;
+    h.reply(received(Some("refresh-new"), "subject-1", PLAN));
+    h.op(AccountOp::SignIn);
     h.op(AccountOp::CancelSignIn);
+    h.release();
+    assert_eq!(h.listening.len(), 1, "no new browser after the cancel");
     assert_eq!(h.view(), &signed_in(PlanState::Enabled, None));
-    h.reply(received(Some("refresh-cancelled"), "subject-1", PLAN));
-    assert!(h.errors.is_empty());
-    assert_eq!(h.refresh_token().as_deref(), Some("refresh-old"));
-    assert_eq!(h.revocations().len(), 1);
-    assert_eq!(h.revocations()[0].1, "refresh-cancelled");
-    assert_eq!(h.marker(), marker(&["sweep"]));
+    assert_eq!(h.refresh_token().as_deref(), Some("refresh-new"));
+    assert!(h.revocations().is_empty());
 }
 
 #[test]

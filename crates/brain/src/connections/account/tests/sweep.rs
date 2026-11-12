@@ -214,7 +214,8 @@ fn a_listing_during_an_active_pass_counts_at_once() {
 }
 
 /// M1 (CAPS-131): Cancel during a full list's age check means the sign-in waiting on it never
-/// starts, though the check itself still finishes.
+/// starts, though the check itself still finishes. The earlier attempt, whose browser finished,
+/// goes on.
 #[test]
 fn cancel_during_the_age_check_never_starts_the_waiting_sign_in() {
     let mut h = Harness::seeded(
@@ -234,11 +235,13 @@ fn cancel_during_the_age_check_never_starts_the_waiting_sign_in() {
     h.op(AccountOp::SignIn);
     assert!(matches!(h.held, Some(Job::Relist { age_out: true, .. })));
     h.op(AccountOp::CancelSignIn);
-    assert_eq!(h.view(), &signed_out());
+    assert_eq!(h.view(), &AccountView::SigningIn);
     h.release();
     assert_eq!(listed_tokens(&h), ["refresh-a", "refresh-b"]);
     assert_eq!(h.listening.len(), 1, "the waiting sign-in never started");
-    assert_eq!(h.view(), &signed_out());
+    h.reply(received(Some("refresh-new"), "subject-1", PLAN));
+    assert_eq!(h.view(), &signed_in(PlanState::Enabled, None));
+    assert_eq!(h.refresh_token().as_deref(), Some("refresh-new"));
 }
 
 /// M1 (CAPS-131): a sign-in that starts while an older one waits for its age check replaces
