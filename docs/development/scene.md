@@ -574,34 +574,55 @@ and slots beyond the 856-operation bound.
 ### Paint order and `set.behind`
 
 Objects paint in handle order, so a new object lands on top. `{"target":"sun","behind":"c1"}`
-in a step's `set` paints the target just below `c1` instead, whether the target is new in that
-step or already drawn. Each prepared object carries a paint key (anchor handle, behind depth,
-own handle), compared in that order with deeper depths first: an object paints at its own handle
-until a `set` gives it the anchor's key one level deeper. A chain (moon behind sun behind `c1`)
-stacks downwards, and two objects put behind one anchor at the same depth keep handle order, so
-the newer paints higher, still below the anchor.
+in a step's `set` links the target to `c1`, whether the target is new in that step or already
+drawn; a later link for the same target replaces the earlier one. Each prepared object keeps its
+latest link as an anchor handle (`Placed.behind`).
 
-- **Refusals.** The target may not be a container (diagram, table or chart, whose children would
-  stay on top) or a 3D object (`KindChanged` at `set[i].behind`). The anchor must be a surviving
-  2D object or one put in the same step (`UnknownRef`), not removed by that step
-  (`RemovedInStep`) and not 3D (`Unsupported`). A link that would close a cycle, directly, through a
-  chain or within one step's `set` list, is `ReferenceCycle` at the link that closes it. Admission
-  rebuilds each target's latest anchor from the kept steps in the log only when a step names
-  `behind`, so no admission state is stored for it; a chain ends at an anchor that is no longer live.
-- **A removed or cut anchor.** The target keeps the key it was given, so it still paints where the
-  anchor painted: below everything that was above the anchor and above everything below it. Replay
-  and recovery prepare the same steps and cuts in the same order, and a cut keeps each survivor's
-  key, so they reach the same order.
+Paint order follows the live links, not the order they were written. An object with a live link
+paints immediately below its anchor. Everything behind `c1`, directly or through a chain (moon
+behind sun behind `c1`), paints as one group just before `c1`, and `c1`'s direct dependants keep
+handle order among themselves, so the newer one paints higher. Objects with no live link paint in
+handle order. The same links give the same picture whatever order they were set in, within one
+step or across steps.
+
+- **Refusals**, all at `set[i].behind`:
+  - the target is a container (diagram, table or chart, whose children would stay on top) or a 3D
+    object: `KindChanged`;
+  - the anchor is unknown (`UnknownRef`), removed by the same step (`RemovedInStep`) or 3D
+    (`Unsupported`);
+  - the target and the anchor have different parents: both must be top-level, or siblings in one
+    container (`KindChanged`);
+  - the link would close a cycle, directly, through a chain, through a removed anchor or within one
+    step's `set` list (`ReferenceCycle`, at the link that closes it), so an earlier link can't be
+    reversed;
+  - the link would make a chain longer than `MAX_OBJECT_DEPTH` (16) links (`TooDeep`).
+
+  Admission rebuilds each target's latest anchor from the kept steps only when a step names
+  `behind`, so no admission state is stored. Removed objects keep their links in that map, so the
+  cycle walk passes through them the way their dependants do, and they count towards a chain's
+  length.
+- **A removed or cut anchor.** Its dependants take its place: if the anchor was behind something,
+  they are now behind that; if it wasn't, they hold its position among the unlinked objects.
+  `prepare` and `LayoutState::cut` hand the links on in the same way, and replay and recovery
+  prepare the same steps and cuts in the same order, so the live view, replay and `recover` agree.
+  A cut that drops the step that named `behind` drops its links with it, because a dropped step
+  never reaches the layout or admission's map.
 - **Stored records.** `behind` is an appended optional field of `Change`. Stored steps are JSON,
   where an absent field decodes as none, so every step stored before it still decodes
   (`a_stored_step_written_before_behind_existed_still_decodes`). Postcard only crosses the
-  brain–shell pipe between one build's two processes and is never stored.
-- **Cost.** Preparation sets the key once per step that names `behind`; `SceneView` sorts its
-  paint order when it activates a step or installs a rest view. Sampling and paint read that order
-  and add nothing per frame.
+  brain–shell pipe between one build's two processes and is never stored. The other way round
+  doesn't hold: this build writes `"behind":null` into every `set` entry and `Change` denies
+  unknown fields, so an older build can't decode a stored step with a non-empty `set` written by
+  this one, and its recovery leaves that scene out and clears it.
+- **Cost.** Nothing is added per frame: sampling and paint read the order `SceneView` builds when
+  it activates a step or installs a rest view. With no link in the scene that order is the
+  in-place handle sort, with no added allocation or lookup. With links it is built once, with four
+  allocations bounded by the node count (a handle index, the sorted links, the walk stack and the
+  order). Admission's walk up from an anchor stops at 16 links, and the walk down from a target
+  visits only its dependants.
 
-`behind` can't bring an object forward: moving an existing object in front of a newer one
-needs a remove and a new put (`shortcut:`, until someone asks for "in front").
+`behind` can't bring an object forward: moving an existing object in front of a newer one, or
+undoing a link, needs a remove and a new put (`shortcut:`, until someone asks for "in front").
 
 ### Bounded Mermaid flowcharts
 
