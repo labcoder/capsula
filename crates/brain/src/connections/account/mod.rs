@@ -1,12 +1,13 @@
 //! The account state machine (design §3): inputs in, effects out, no I/O. The runtime runs
 //! its effects: the listener, the exchange, and credential jobs on one serialized lane.
 //!
-//! Two kinds of ownership drive it. `attempt` names the one live sign-in; every `SignIn`,
-//! `EnablePlan` and `CancelSignIn` moves it. The token lane admits one token request at a time,
-//! and a request holds it until its result has a durable owner: the account, the revocation
-//! list, or the knowledge that nothing was issued. A received set never has two owners and never
-//! none: a stale attempt's set goes to the revocation list, and a set whose save was refused stays
-//! in memory, still holding the lane, until a save succeeds.
+//! Two kinds of ownership drive it. `attempt` names the one live sign-in; every `SignIn` and
+//! `EnablePlan` moves it, and so does a `CancelSignIn` before the browser has finished. The
+//! token lane admits one token request at a time, and a request holds it until its result has a
+//! durable owner: the account, the revocation list, or the knowledge that nothing was issued. A
+//! received set never has two owners and never none: a stale attempt's set goes to the revocation
+//! list, and a set whose save was refused stays in memory, still holding the lane, until a save
+//! succeeds.
 
 mod job;
 mod lane;
@@ -493,6 +494,16 @@ impl AccountState {
     fn cancel(&mut self, effects: &mut Vec<Effect>) {
         // A sign-in waiting for its age check is cancelled too, before it can start.
         self.admitting = None;
+        // The browser already finished: the sign-in completes, and an Open again waiting for
+        // its save never starts.
+        if self
+            .live
+            .as_ref()
+            .is_some_and(|live| !matches!(live.step, Step::Listening))
+        {
+            self.deferred = None;
+            return;
+        }
         if self.saving_current() {
             self.deferred = Some(Deferred::Cancel);
             return;
@@ -501,7 +512,7 @@ impl AccountState {
         if self.live.is_none() && !held {
             return;
         }
-        // A sent exchange still finishes; its set then goes to the revocation list.
+        // A held set then goes to the revocation list.
         self.attempt += 1;
         if self.live.take().is_some() {
             effects.push(Effect::Close);

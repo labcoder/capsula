@@ -1,7 +1,8 @@
 # ChatGPT accounts
 
 Open the dock's **Settings…**, then **Accounts**. Choose **Continue with ChatGPT** to sign
-in using your browser. Finish there, then return to the app. **Cancel** stops waiting;
+in using your browser. Finish there, then return to the app. **Cancel** stops waiting for the
+browser; once you've finished there, the sign-in completes even if you press Cancel.
 **Open again** replaces the waiting sign-in attempt. Closing Settings doesn't cancel it.
 
 The connected account shows its email, when provided, and **Using ChatGPT plan** when plan
