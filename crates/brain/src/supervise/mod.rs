@@ -778,7 +778,11 @@ async fn run<K: Kind>(
             &mut intents,
         )
         .await;
-        tracing::warn!(kind = K::NAME, ?reason, "worker lost");
+        if let Some(reason) = reason {
+            tracing::warn!(kind = K::NAME, ?reason, "worker lost");
+        } else {
+            tracing::debug!(kind = K::NAME, "worker stopped");
+        }
         let process = worker.process.take();
         drop(worker);
         terminate::<K>(process.as_deref());
