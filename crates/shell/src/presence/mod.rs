@@ -17,6 +17,7 @@ mod exclusion;
 mod frame_rate;
 mod geometry;
 mod gesture;
+mod issue_review;
 mod kumo;
 mod kumo_view;
 mod launch;
@@ -134,7 +135,7 @@ struct Presence {
     /// The connection the UI last applied `Connected` for, until its next state.
     session: Option<Session>,
     issue_request: u64,
-    issue_review: Option<messages::consent::Route>,
+    issue_review: Option<issue_review::Route>,
     state: LinkState,
     /// The canonical gesture; the Raw Input callback reduces it before GPUI sees anything.
     gesture: Rc<Cell<Gesture>>,
