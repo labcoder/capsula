@@ -177,7 +177,7 @@ fn prepare(check: Check) -> Result<()> {
 }
 
 /// Starts `command` and waits for it as [`bounded`] does.
-fn run_bounded(mut command: Command, limit: Duration, what: &str) -> Result<ExitStatus> {
+pub(crate) fn run_bounded(mut command: Command, limit: Duration, what: &str) -> Result<ExitStatus> {
     let child = command
         .spawn()
         .with_context(|| format!("starting {what}"))?;

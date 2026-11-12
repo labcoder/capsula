@@ -50,7 +50,8 @@ flowchart LR
   known drawings. The real shell's install logic is covered by its unit tests, as its fence is.
 - `Stale` is the brain's own verdict and isn't on the pipe, so the late-step item checks its effects.
 - Every pipe write, and the wait for `Welcome`, is bounded; a stuck transfer is cancelled and
-  waited for before its buffer goes. The whole gate is killed, with its brains, after 20 minutes.
+  waited for before its buffer goes. The brain build is killed, with everything it started, after
+  20 minutes, and the whole gate, with its brains, after another 20.
   It refuses to run from a release xtask, whose brain would use the installed product's names.
 - shortcut: one scene can't reach three snapshot chunks today (32 KiB target, at most 64 steps of
   256 B), so the reconnect item's chunks span four scenes; chunking inside a scene is covered by

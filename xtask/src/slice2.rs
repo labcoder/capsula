@@ -28,7 +28,7 @@ use anyhow::{Context as _, Result, bail, ensure};
 use kumochi_protocol::constants::{BRAIN_EXE, SHELL_EXE};
 use kumochi_protocol::message::{ControlToShell, DataToBrain, DataToShell, Phase, RunId, ThreadId};
 
-use crate::platform;
+use crate::{live, platform};
 use client::{Client, Frame};
 
 /// One gate item, run in its own folder.
@@ -36,6 +36,9 @@ type Item = fn(&Path) -> Result<Row>;
 
 /// The argument the copied gate runs with.
 const INNER: &str = "--inner";
+/// How long building the brain may take before the build and everything it started are killed
+/// [guess: a cold build on Rez takes a few minutes].
+const BUILD_LIMIT: Duration = Duration::from_mins(20);
 /// How long the whole gate may run before it and its brains are killed.
 const GATE_LIMIT: Duration = Duration::from_mins(20);
 /// How long one expected frame may take before the item fails.
@@ -103,11 +106,9 @@ fn prepare(only: Option<&str>) -> Result<()> {
         platform::processes()?.is_empty(),
         "close every {SHELL_EXE} and {BRAIN_EXE} first: a dev brain holds the pipes the gate uses"
     );
-    let built = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
-        .args(["build", "--quiet", "--package", "kumochi-brain"])
-        .status()
-        .context("building the brain")?;
-    ensure!(built.success(), "the brain didn't build");
+    let mut cargo = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    cargo.args(["build", "--quiet", "--package", "kumochi-brain"]);
+    build(cargo, BUILD_LIMIT)?;
     let me = std::env::current_exe()?;
     let target = me.parent().context("xtask has a folder")?;
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -146,6 +147,13 @@ fn prepare(only: Option<&str>) -> Result<()> {
         thread::sleep(Duration::from_millis(200));
     }
     ensure!(gate.wait()?.success(), "the gate failed");
+    Ok(())
+}
+
+/// Runs the brain build, ending it and everything it started past `limit`.
+fn build(cargo: Command, limit: Duration) -> Result<()> {
+    let built = live::run_bounded(cargo, limit, "the brain build")?;
+    ensure!(built.success(), "the brain didn't build ({built})");
     Ok(())
 }
 
@@ -273,9 +281,36 @@ fn marker() -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
 
-    use super::percentile;
+    use super::{build, percentile};
+
+    const SHORT: Duration = Duration::from_millis(200);
+
+    /// A harmless child that waits on its stdin, which stays open while the command or child lives.
+    fn held() -> Command {
+        let mut command = Command::new("cmd");
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
+    #[test]
+    fn a_build_past_its_limit_is_ended() {
+        let start = Instant::now();
+        let error = build(held(), SHORT).expect_err("a hung build fails");
+        assert_eq!(
+            format!("{error:#}"),
+            "the brain build didn't finish in 200ms"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "it returned in bound"
+        );
+    }
 
     #[test]
     fn percentiles_take_the_nearest_rank() {
