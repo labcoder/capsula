@@ -384,16 +384,32 @@ fn validate_dimensions(op: &Op, prefix: &FieldPath, step: &Step) -> Result<(), S
     Ok(())
 }
 
-/// `behind` holds each target's latest anchor from kept earlier steps, removed objects included,
-/// since a removed anchor hands its link on. This step's links join it in set order, so a link
-/// that would close a cycle or make a chain longer than `MAX_OBJECT_DEPTH` is refused where it
-/// appears.
+/// `history` holds each target's latest anchor from kept earlier steps. A removed object keeps its
+/// link only while something live is behind it, as the layout holds it in the paint walk. This
+/// step's links join them in set order, so a link that would close a cycle or make a chain longer
+/// than `MAX_OBJECT_DEPTH` is refused where it appears.
 pub(super) fn validate_changes<'a>(
     step: &'a Step,
     objects: &BTreeMap<WireId, Object>,
     removed: &HashSet<&WireId>,
-    mut behind: BTreeMap<&'a WireId, &'a WireId>,
+    history: &BTreeMap<&'a WireId, &'a WireId>,
 ) -> Result<(), StepError> {
+    let mut behind = BTreeMap::new();
+    for (&target, &anchor) in history
+        .iter()
+        .filter(|(target, _)| objects.contains_key(**target))
+    {
+        let mut link = Some((target, anchor));
+        while let Some((target, anchor)) = link {
+            if behind.insert(target, anchor).is_some() {
+                break;
+            }
+            link = history
+                .get(anchor)
+                .filter(|_| !objects.contains_key(anchor))
+                .map(|next| (anchor, *next));
+        }
+    }
     let mut dependants: BTreeMap<&WireId, Vec<&WireId>> = BTreeMap::new();
     for (target, anchor) in &behind {
         dependants.entry(*anchor).or_default().push(*target);

@@ -317,6 +317,33 @@ fn two_cuts_hand_on_links_and_drop_unshown_links_alike_live_and_recovered() {
     assert_eq!(painted(&recovered(&scene), ALL), ["star", "sky", "c1"]);
 }
 
+#[test]
+fn a_cut_that_restores_a_removed_anchor_restores_its_links() {
+    let (mut scene, mut budget, view) = drawn(vec![
+        cloud(),
+        json!({"id":"sun","put":[circle("sun")],"set":[{"target":"sun","behind":"c1"}]}),
+    ]);
+    drop(prepared(
+        &mut scene,
+        &mut budget,
+        view.layout(),
+        json!({"id":"drop","remove":["c1"]}),
+    ));
+    let view = cut(&mut scene, &mut budget, &view, 2, &[]);
+    assert_eq!(painted(&view, ALL), ["sky", "sun", "c1", "c2"]);
+    assert_eq!(painted(&recovered(&scene), ALL), ["sky", "sun", "c1", "c2"]);
+    let error = scene
+        .admit(
+            &typed(&json!({"id":"back","set":[{"target":"c1","behind":"sun"}]})),
+            &budget,
+        )
+        .expect_err("a cycle through the restored anchor");
+    assert_eq!(
+        (error.code, error.path.as_str()),
+        (ErrorCode::ReferenceCycle, "set[0].behind")
+    );
+}
+
 fn refused(steps: &[Value], last: &Value, code: ErrorCode, path: &str) {
     let (scene, budget, _) = drawn(steps.to_vec());
     let error = scene.admit(&typed(last), &budget).expect_err("refused");
@@ -454,6 +481,39 @@ fn a_re_pointed_target_no_longer_counts_below_its_old_anchor() {
     admitted(
         &[json!({"id":"both","put":put,"set":set})],
         &json!({"id":"move","set":[{"target":"b0","behind":"q"},{"target":"p","behind":"a8"}]}),
+    );
+}
+
+#[test]
+fn a_removed_object_inside_a_chain_still_counts_towards_sixteen() {
+    let (put, set) = chain("o", 18);
+    let chain = [
+        json!({"id":"chain","put":put,"set":&set[..16]}),
+        json!({"id":"drop","remove":["o8"]}),
+    ];
+    admitted(
+        &chain,
+        &json!({"id":"same","set":[{"target":"o16","behind":"o15"}]}),
+    );
+    refused(
+        &chain,
+        &json!({"id":"more","set":[set[16]]}),
+        ErrorCode::TooDeep,
+        "set[0].behind",
+    );
+}
+
+#[test]
+fn a_removed_stack_with_nothing_live_behind_it_no_longer_counts() {
+    let (mut put, set) = chain("o", 17);
+    put.push(circle("x"));
+    let removed: Vec<String> = (1..17).map(|index| format!("o{index}")).collect();
+    admitted(
+        &[
+            json!({"id":"chain","put":put,"set":set}),
+            json!({"id":"drop","remove":removed}),
+        ],
+        &json!({"id":"move","set":[{"target":"o0","behind":"x"}]}),
     );
 }
 

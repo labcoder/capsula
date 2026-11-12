@@ -210,7 +210,7 @@ impl SceneState {
                 }
             }
         }
-        object::validate_changes(step, &after, &removal_ids, behind)?;
+        object::validate_changes(step, &after, &removal_ids, &behind)?;
         let mut changed = work::changes(step, &mut after, &mut owned, revision)?;
         metrics::validate(step, &mut after, self.header.surface, |handle| {
             expansion.source_slot(handle, revision)
