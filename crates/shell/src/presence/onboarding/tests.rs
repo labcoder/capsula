@@ -170,6 +170,30 @@ fn enter_with_the_saved_name_moves_focus_to_the_next_steps_input(cx: &mut TestAp
     assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
 }
 
+/// The welcome gets Kumo's still pose once its bake lands: the peek's 64 px at a test window's
+/// scale of 2.
+#[gpui::test]
+fn the_welcome_shows_a_still_kumo_at_the_peeks_size(cx: &mut TestAppContext) {
+    let (owner, window, _controls) = showing(cx);
+    let scale =
+        VisualTestContext::from_window(window, cx).update(|window, _| window.scale_factor());
+    assert!((scale - 2.0).abs() < f32::EPSILON, "a test window's scale");
+    let image = owner
+        .read_with(cx, |owner, cx| {
+            owner
+                .onboarding
+                .as_ref()
+                .expect("showing")
+                .view
+                .read(cx)
+                .kumo
+                .clone()
+        })
+        .expect("the bake landed");
+    let pixels = gpui::DevicePixels(128);
+    assert_eq!(image.size(0), gpui::size(pixels, pixels));
+}
+
 fn selected(owner: &Entity<Presence>, cx: &mut TestAppContext) -> std::ops::Range<usize> {
     owner.read_with(cx, |owner, cx| {
         owner
