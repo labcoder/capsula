@@ -225,6 +225,17 @@ settings-not-saved = Settings not saved
 error-settings-refused = Couldn't save that setting. Try again.
 error-config-unreadable = Your settings file can't be read, so changes aren't saved. Repair or delete config.toml, then restart.
 
+# Onboarding
+
+onboarding-title = Welcome to { $app }
+onboarding-close = Finish later
+onboarding-continue = Continue
+# { $name } marks where the name input sits; text may come before or after it.
+onboarding-welcome = Hi, I'm { $name }
+onboarding-welcome-help = Call me something else if you like. You can change it later in Settings.
+onboarding-user = What should { $assistant } call you?
+onboarding-user-help = Optional. It's sent to the model you chat with, so { $assistant } can use it.
+
 # ChatGPT accounts
 
 accounts-provider = ChatGPT

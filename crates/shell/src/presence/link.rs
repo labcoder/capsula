@@ -486,6 +486,9 @@ impl Presence {
         {
             tracing::warn!(%error, "can't restore the saved dock position");
         }
+        if let Err(error) = self.onboarding_changed(cx) {
+            tracing::error!(%error, "can't show onboarding");
+        }
     }
 
     /// Shows the brain's error in both panels and on the connected dock.
@@ -597,6 +600,9 @@ impl Presence {
         self.draw_changed(cx);
         diagnostics::record(cx, format_args!("link state={state:?}"));
         self.state = state;
+        if let Err(error) = self.onboarding_changed(cx) {
+            tracing::error!(%error, "can't show onboarding");
+        }
         self.refresh_dock(cx);
         self.panel.update(cx, |panel, cx| {
             panel.state = state;

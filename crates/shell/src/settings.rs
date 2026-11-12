@@ -81,6 +81,8 @@ enum Slot {
     Taskbar(TaskbarChoice),
     SttUnload(SttUnload),
     SpeechInput(SpeechInputAction),
+    /// `FinishOnboarding`: no field and no draft.
+    Onboarding,
 }
 
 impl Slot {
@@ -91,7 +93,8 @@ impl Slot {
             | (Self::Dock(_), Self::Dock(_))
             | (Self::Taskbar(_), Self::Taskbar(_))
             | (Self::SttUnload(_), Self::SttUnload(_))
-            | (Self::SpeechInput(_), Self::SpeechInput(_)) => true,
+            | (Self::SpeechInput(_), Self::SpeechInput(_))
+            | (Self::Onboarding, Self::Onboarding) => true,
             _ => false,
         }
     }
@@ -103,7 +106,8 @@ impl Slot {
             | Self::Dock(_)
             | Self::Taskbar(_)
             | Self::SttUnload(_)
-            | Self::SpeechInput(_) => None,
+            | Self::SpeechInput(_)
+            | Self::Onboarding => None,
         }
     }
 }
@@ -371,7 +375,8 @@ impl Settings {
                 | Slot::Dock(_)
                 | Slot::Taskbar(_)
                 | Slot::SttUnload(_)
-                | Slot::SpeechInput(_) => None,
+                | Slot::SpeechInput(_)
+                | Slot::Onboarding => None,
             });
         queued.or(self.view.as_ref().map(|view| view.max_frame_rate))
     }
@@ -436,6 +441,35 @@ impl Settings {
             reset_draft: false,
         });
         true
+    }
+
+    /// Queues `FinishOnboarding` in the ordered answer queue, so the brain's one answer to it
+    /// completes it and no other change. False when offline, when one is already queued, or when
+    /// the send fails.
+    pub(crate) fn finish_onboarding(&mut self, send: impl FnOnce(SettingsOp) -> bool) -> bool {
+        if self.view.is_none() || self.finishing() || !send(SettingsOp::FinishOnboarding) {
+            return false;
+        }
+        self.pending.push_back(Pending {
+            slot: Slot::Onboarding,
+            failed: false,
+            reset_draft: false,
+        });
+        true
+    }
+
+    /// Whether a `FinishOnboarding` is queued and unanswered.
+    pub(crate) fn finishing(&self) -> bool {
+        self.pending
+            .iter()
+            .any(|pending| pending.slot == Slot::Onboarding)
+    }
+
+    /// The brain's refusal of the last `FinishOnboarding`, until another change clears it.
+    pub(crate) fn finish_refusal(&self) -> Option<&UserError> {
+        self.notice
+            .as_ref()
+            .filter(|_| self.notice_slot == Some(Slot::Onboarding))
     }
 
     pub(crate) fn rename_refusal(&self) -> Text {
@@ -530,6 +564,9 @@ mod session_tests;
 
 #[cfg(test)]
 mod followup_tests;
+
+#[cfg(test)]
+mod onboarding_tests;
 
 #[cfg(test)]
 mod tests;

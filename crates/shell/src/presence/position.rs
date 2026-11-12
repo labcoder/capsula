@@ -105,12 +105,20 @@ impl Presence {
         let threads_open = self.threads_open();
         let text_open = self.text_open();
         let status_open = self.panel_visibility == PanelVisibility::Visible;
-        if !settings_open && !threads_open && !text_open && !status_open {
+        if !settings_open
+            && !threads_open
+            && !text_open
+            && !status_open
+            && self.onboarding.is_none()
+        {
             return Ok(());
         }
         let area = platform::work_area()?;
         let mut status_bounds = self.layout.panel;
         let panels = [
+            self.onboarding
+                .as_mut()
+                .map(|panel| (true, panel.window, &mut panel.bounds)),
             self.settings_panel
                 .as_mut()
                 .map(|panel| (settings_open, panel.window, &mut panel.bounds)),

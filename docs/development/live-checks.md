@@ -35,6 +35,9 @@ flowchart LR
   Manager read is the per-session instance capability the dev brain has just written, which
   authenticates the pipe exactly as the shell does. It never reads another service: no spike's,
   and nothing Claude Code, Codex, gh or a browser holds.
+- These checks run xtask as the client, so no onboarding window shows. A scratch profile that
+  runs the dev shell needs `onboarded = true` in its `config.toml`, or the onboarding window
+  opens, takes focus and uses up the double-tap.
 - `KUMOCHI_LIVE_BUDGET` is set on the brain's environment only. These checks set it to 0;
   the model request budget refuses inference once that cap is spent.
 

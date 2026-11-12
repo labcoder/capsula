@@ -230,7 +230,7 @@ impl SettingsView {
 }
 
 /// A name input's events, for every view that edits a name: Focus marks the field edited, Change
-/// drafts it, and Enter or Blur saves it; Enter then puts focus back on the view's root.
+/// drafts it, and Enter or Blur saves it; Enter then focuses `after_enter`.
 #[expect(
     clippy::too_many_arguments,
     reason = "the editing view's own state, passed through"
@@ -240,7 +240,7 @@ pub(in crate::presence) fn name_input_event(
     input: &Entity<InputState>,
     event: &InputEvent,
     editing: &mut Option<Field>,
-    focus: &FocusHandle,
+    after_enter: &FocusHandle,
     model: &Entity<Settings>,
     owner: &WeakEntity<Presence>,
     window: &mut Window,
@@ -261,7 +261,7 @@ pub(in crate::presence) fn name_input_event(
             }
             let _gone = owner.update(cx, |owner, cx| owner.save_setting(field, cx));
             if matches!(event, InputEvent::PressEnter { .. }) {
-                window.focus(focus, cx);
+                window.focus(after_enter, cx);
             }
         }
         InputEvent::PressEnter { .. } => {}

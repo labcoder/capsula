@@ -36,6 +36,12 @@ impl Presence {
             } else {
                 EscapePanel::Threads
             }
+        } else if self.onboarding.is_some() {
+            if self.onboarding_editing(cx) {
+                EscapePanel::OnboardingEdit
+            } else {
+                EscapePanel::Onboarding
+            }
         } else if self.text_open() {
             EscapePanel::Open
         } else {
@@ -82,6 +88,8 @@ impl Presence {
                     }
                 } else if panel == EscapePanel::Threads {
                     self.dismiss_threads(cx)?;
+                } else if panel == EscapePanel::Onboarding {
+                    self.dismiss_onboarding(cx)?;
                 } else {
                     self.dismiss_text(cx)?;
                 }
@@ -90,6 +98,8 @@ impl Presence {
             Escape::CancelEdit => {
                 if panel == EscapePanel::SettingsEdit {
                     self.cancel_settings_edit(cx)?;
+                } else if panel == EscapePanel::OnboardingEdit {
+                    self.cancel_onboarding_edit(cx);
                 } else if let Some(panel) = &self.thread_panel {
                     panel
                         .window
