@@ -1307,6 +1307,10 @@ fn older_button_continues_pages_that_only_extend_a_drawing_row(cx: &mut TestAppC
 }
 
 #[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "keep both failure-masking orders and the later viewport assertion in one paging flow"
+)]
 fn older_failure_stays_cancelled_after_list_or_repair_success(cx: &mut TestAppContext) {
     use gpui_kit::VisualTestContext;
     use kumochi_protocol::message::{DataToShell, EventId, PageEvent, PageEventKind, PageOf};
@@ -1462,6 +1466,10 @@ fn older_failure_stays_cancelled_after_list_or_repair_success(cx: &mut TestAppCo
 }
 
 #[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one visible-result flow covers preview suppression and both older page replies"
+)]
 fn older_button_skips_assistant_segments_hidden_by_the_provisional_preview(
     cx: &mut TestAppContext,
 ) {
