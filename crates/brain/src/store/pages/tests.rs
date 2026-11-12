@@ -734,6 +734,7 @@ fn typed_scene(store: &mut Store, thread: ThreadId, run: RunId) -> SceneId {
         .drawing_write(&Write::Step {
             thread,
             run,
+            clear: Vec::new(),
             target: Target::New(header),
             revision: 1,
             layout_version: 2,

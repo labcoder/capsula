@@ -275,6 +275,7 @@ fn known_field(key: &str) -> bool {
             | "v"
             | "scene"
             | "surface"
+            | "others"
             | "size"
             | "title"
             | "alt"

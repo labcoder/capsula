@@ -247,7 +247,9 @@ fn text(step: &str, object: &str) -> String {
 }
 
 fn begin(scene: &str, alt: &str) -> String {
-    format!(r#"{{"begin":{{"v":1,"scene":"{scene}","surface":"overlay","alt":"{alt}"}}}}"#)
+    format!(
+        r#"{{"begin":{{"v":1,"scene":"{scene}","surface":"overlay","alt":"{alt}","others":"keep"}}}}"#
+    )
 }
 
 fn envelope(begin: &str, steps: &[String]) -> Vec<u8> {
@@ -259,6 +261,13 @@ fn envelope(begin: &str, steps: &[String]) -> Vec<u8> {
 
 fn args(scene: &str, steps: &[String]) -> Vec<u8> {
     envelope(&begin(scene, ""), steps)
+}
+
+fn replacement_args(scene: &str, steps: &[String]) -> Vec<u8> {
+    envelope(
+        &format!(r#"{{"begin":{{"v":1,"scene":"{scene}","surface":"overlay","alt":""}}}}"#),
+        steps,
+    )
 }
 
 fn call(run: u64, call: &str, args: Vec<u8>) -> Input {
@@ -412,6 +421,7 @@ impl Store {
             Write::Step {
                 thread,
                 target,
+                clear,
                 revision,
                 step,
                 ..
@@ -435,6 +445,7 @@ impl Store {
                     revision: *revision,
                     step: Arc::new(step),
                 });
+                self.cleared.extend(clear.iter().copied());
                 Reply::Step(scene)
             }
             Write::Cut { scene, cut, .. } => {
@@ -527,6 +538,295 @@ fn error(end: &CallEnd) -> ErrorCode {
     match &end.error {
         Some(CallError::Step(error)) => error.code,
         other => panic!("a rejected record, not {other:?}"),
+    }
+}
+
+#[test]
+fn unsaved_default_replacements_preserve_existing_drawings() {
+    let forward = r#"{"id":"a","start":{"after":"later","ms":0}}"#.to_owned();
+    for (args, expected, trace_expected) in [
+        (
+            replacement_args("new", &[forward]),
+            Some(ErrorCode::ForwardRef),
+            vec!["lookup"],
+        ),
+        (
+            br#"{"records":[]}"#.to_vec(),
+            Some(ErrorCode::BeforeBegin),
+            vec![],
+        ),
+        (
+            br#"{"records":[{"begin":{"v":1,"scene":"new","surface":"overlay","alt":""}}]}"#
+                .to_vec(),
+            Some(ErrorCode::MissingField),
+            vec!["lookup"],
+        ),
+        (replacement_args("new", &[]), None, vec!["lookup"]),
+    ] {
+        let mut drawing = Drawing::default();
+        let mut store = Store::default();
+        four(&mut store, &mut drawing);
+        let before = drawing.snapshot();
+        let stored = store.visible();
+        let budget = (drawing.global.usage(), drawing.global.generation());
+        assert_eq!(
+            before
+                .scenes
+                .iter()
+                .map(|scene| scene.scene)
+                .collect::<Vec<_>>(),
+            [SceneId(1), SceneId(2), SceneId(3), SceneId(4)]
+        );
+        let out = store.run(&mut drawing, call(1, "new", args));
+        assert_eq!(trace(&out), trace_expected);
+        assert!(
+            !out.effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Data(_) | Effect::RevokeScenes { .. }))
+        );
+        assert_eq!(out.calls.len(), 1);
+        assert_eq!(
+            out.calls[0].error.as_ref().map(|_| error(&out.calls[0])),
+            expected
+        );
+        assert_eq!(out.calls[0].drawn, []);
+        assert_eq!(out.calls[0].scene, None);
+        let after = drawing.snapshot();
+        assert_eq!(after.scenes, before.scenes);
+        assert_eq!(after.chunks, before.chunks);
+        assert_eq!(after.skipped, []);
+        assert_eq!(store.visible(), stored);
+        assert_eq!(store.scenes, stored);
+        assert_eq!(store.cleared, []);
+        assert_eq!(
+            (drawing.global.usage(), drawing.global.generation()),
+            budget
+        );
+        assert_eq!(
+            (
+                drawing.global.usage().scenes,
+                drawing.global.usage().objects
+            ),
+            (4, 4)
+        );
+    }
+}
+
+#[test]
+fn default_replacement_clears_once_but_continuing_its_header_preserves_a_kept_scene() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    four(&mut store, &mut drawing);
+    let out = store.run(
+        &mut drawing,
+        call(
+            1,
+            "new",
+            replacement_args("new", &[text("a", "x"), text("b", "y")]),
+        ),
+    );
+    assert_eq!(
+        trace(&out),
+        [
+            "lookup",
+            "write step 1",
+            "revoke 1,2,3,4",
+            "removed 1,2,3,4",
+            "begin 5",
+            "step 5#0",
+            "write step 2",
+            "step 5#1",
+            "end 5 true"
+        ]
+    );
+    assert_eq!(
+        store.cleared,
+        [SceneId(1), SceneId(2), SceneId(3), SceneId(4)]
+    );
+    assert_eq!(
+        (
+            drawing.global.usage().scenes,
+            drawing.global.usage().objects
+        ),
+        (1, 2)
+    );
+    store.run(
+        &mut drawing,
+        call(1, "compare", args("compare", &[text("a", "z")])),
+    );
+    let continued = store.run(
+        &mut drawing,
+        call(1, "continue", replacement_args("new", &[text("c", "v")])),
+    );
+    assert_eq!(
+        trace(&continued),
+        ["write step 3", "step 5#2", "end 5 true"]
+    );
+    assert_eq!(
+        drawing
+            .scenes
+            .iter()
+            .map(|held| held.scene.0)
+            .collect::<Vec<_>>(),
+        [5, 6]
+    );
+    assert_eq!(drawing.global.usage().objects, 4);
+}
+
+#[test]
+fn stop_or_clear_before_replacement_submission_never_writes_the_first_step() {
+    for clear in [false, true] {
+        let mut drawing = Drawing::default();
+        let mut store = Store::default();
+        four(&mut store, &mut drawing);
+        let lookup = drawing
+            .handle(call(1, "new", replacement_args("new", &[text("a", "x")])))
+            .expect("lookup");
+        let interrupt = if clear {
+            Input::Clear {
+                scenes: (1..=4).map(SceneId).collect(),
+            }
+        } else {
+            Input::CallFinished {
+                thread: THREAD,
+                run: RunId(1),
+                call: CallId::new("new").expect("id"),
+                error: Some(CallError::Interrupted),
+            }
+        };
+        let out = store.run(&mut drawing, interrupt);
+        assert_eq!(out.calls.len(), 1);
+        assert_eq!(out.calls[0].error, Some(CallError::Interrupted));
+        let answer = store.answer(&sent(&lookup).expect("lookup write").1);
+        let out = reply(&mut drawing, &lookup, Ok(answer));
+        assert_eq!(trace(&out), Vec::<String>::new());
+        assert_eq!(store.scenes.len(), 4);
+        assert_eq!(drawing.scenes.len(), if clear { 0 } else { 4 });
+        assert_eq!(drawing.global.usage().scenes, if clear { 0 } else { 4 });
+    }
+}
+
+#[test]
+fn clear_or_stop_after_submission_settles_replacement_even_before_reply_delivery() {
+    for clear in [false, true] {
+        for committed in [false, true] {
+            let mut drawing = Drawing::default();
+            let mut store = Store::default();
+            four(&mut store, &mut drawing);
+            let lookup = drawing
+                .handle(call(1, "new", replacement_args("new", &[text("a", "x")])))
+                .expect("lookup");
+            let answer = store.answer(&sent(&lookup).expect("lookup").1);
+            let pending = reply(&mut drawing, &lookup, Ok(answer));
+            let write = sent(&pending).expect("first-step write").1;
+            let saved = committed.then(|| store.answer(&write));
+            if clear {
+                store.run(
+                    &mut drawing,
+                    Input::Clear {
+                        scenes: (1..=4).map(SceneId).collect(),
+                    },
+                );
+            } else {
+                store.run(
+                    &mut drawing,
+                    Input::CallFinished {
+                        thread: THREAD,
+                        run: RunId(1),
+                        call: CallId::new("new").expect("id"),
+                        error: Some(CallError::Interrupted),
+                    },
+                );
+                store.run(
+                    &mut drawing,
+                    Input::StopScenes {
+                        run: RunId(1),
+                        cuts: SceneCuts::default(),
+                    },
+                );
+            }
+            let answer = saved.unwrap_or_else(|| store.answer(&write));
+            let out = reply(&mut drawing, &pending, Ok(answer));
+            if clear {
+                assert!(
+                    !trace(&out)
+                        .iter()
+                        .any(|item| item.starts_with("begin ") || item.starts_with("step "))
+                );
+            }
+            store.settle(&mut drawing, out);
+            assert_eq!(
+                drawing.scenes.len(),
+                0,
+                "clear={clear} committed={committed}"
+            );
+            assert_eq!(
+                drawing.global.usage(),
+                kumochi_scene::budget::Usage::default()
+            );
+            assert_eq!(store.visible(), []);
+            for id in 1..=5 {
+                assert!(store.cleared.contains(&SceneId(id)));
+            }
+        }
+    }
+}
+
+#[test]
+fn deleted_replacement_settles_a_cross_thread_cap_victim_only_when_the_write_committed() {
+    for committed in [false, true] {
+        let mut drawing = Drawing::default();
+        let mut store = Store::default();
+        for n in 1..=4 {
+            let mut input = call(
+                1,
+                &format!("c{n}"),
+                args(&format!("s{n}"), &[text("a", "x")]),
+            );
+            let Input::Call { thread, .. } = &mut input else {
+                panic!("call")
+            };
+            *thread = ThreadId(8);
+            store.run(&mut drawing, input);
+        }
+        store.run(&mut drawing, Input::RunClosed { run: RunId(1) });
+        let lookup = drawing
+            .handle(call(2, "new", replacement_args("new", &[text("a", "x")])))
+            .expect("lookup");
+        let answer = store.answer(&sent(&lookup).expect("lookup").1);
+        let pending = reply(&mut drawing, &lookup, Ok(answer));
+        let answer = if committed {
+            Ok(store.answer(&sent(&pending).expect("step").1))
+        } else {
+            Err(())
+        };
+        store.run(&mut drawing, Input::ThreadDeleted { thread: THREAD });
+        let out = reply(&mut drawing, &pending, answer);
+        assert_eq!(
+            trace(&out),
+            if committed {
+                vec!["revoke 1", "removed 1"]
+            } else {
+                vec![]
+            }
+        );
+        assert_eq!(
+            drawing
+                .scenes
+                .iter()
+                .map(|held| held.scene.0)
+                .collect::<Vec<_>>(),
+            if committed {
+                vec![2, 3, 4]
+            } else {
+                vec![1, 2, 3, 4]
+            }
+        );
+        assert_eq!(drawing.global.usage().scenes, if committed { 3 } else { 4 });
+        assert_eq!(
+            drawing.global.usage().objects,
+            if committed { 3 } else { 4 }
+        );
     }
 }
 
@@ -1222,17 +1522,21 @@ fn a_deletion_removes_the_thread_s_scenes_at_once() {
 }
 
 #[test]
-fn a_fifth_scene_evicts_the_oldest_even_when_its_first_step_is_rejected() {
+fn a_refused_fifth_scene_preserves_every_old_drawing() {
     let mut drawing = Drawing::default();
     let mut store = Store::default();
     four(&mut store, &mut drawing);
     let forward = r#"{"id":"a","start":{"after":"later","ms":0}}"#.to_owned();
     let out = store.run(&mut drawing, call(1, "c5", args("s5", &[forward])));
-    assert_eq!(trace(&out), ["lookup", "revoke 1", "removed 1", "clear 1"]);
+    assert_eq!(trace(&out), ["lookup"]);
     assert_eq!(error(&out.calls[0]), ErrorCode::ForwardRef);
     let visible: Vec<u64> = drawing.scenes.iter().map(|held| held.scene.0).collect();
-    assert_eq!(visible, [2, 3, 4], "the eviction stays applied and durable");
-    assert_eq!(store.cleared, [SceneId(1)]);
+    assert_eq!(
+        visible,
+        [1, 2, 3, 4],
+        "refusal never applies the selected eviction"
+    );
+    assert_eq!(store.cleared, []);
 }
 
 #[test]
@@ -1247,7 +1551,7 @@ fn three_dimensional_steps_wait_for_prepared_views() {
 }
 
 #[test]
-fn a_failed_fifth_scene_write_keeps_its_eviction_and_the_retry_fits() {
+fn a_failed_fifth_scene_write_preserves_its_victim_and_a_new_call_can_replace_it() {
     let mut drawing = Drawing::default();
     let mut store = Store::default();
     four(&mut store, &mut drawing);
@@ -1258,21 +1562,25 @@ fn a_failed_fifth_scene_write_keeps_its_eviction_and_the_retry_fits() {
     let out = reply(&mut drawing, &out, Ok(store.answer(&lookup)));
     assert_eq!(
         trace(&out),
-        ["revoke 1", "removed 1", "clear 1"],
-        "the new scene's first step waits for the eviction's clear"
+        ["write step 1"],
+        "eviction and the new first step share one write"
     );
-    assert!(drawing.clears_pending(1).effects.is_empty());
-    let out = drawing.clears_pending(0);
-    assert_eq!(trace(&out), ["write step 1"]);
     let out = reply(&mut drawing, &out, Err(()));
     assert_eq!(out.calls[0].error, Some(CallError::Store));
-    assert_eq!(drawing.scenes.len(), 3, "the eviction isn't undone");
+    assert_eq!(
+        drawing.scenes.len(),
+        4,
+        "a failed transaction changes no victim"
+    );
+    assert_eq!(store.cleared, []);
     let out = store.run(&mut drawing, call(1, "c6", args("s5", &[text("a", "x")])));
     assert_eq!(
         trace(&out),
         [
             "lookup",
             "write step 1",
+            "revoke 1",
+            "removed 1",
             "begin 5",
             "step 5#0",
             "end 5 true"
@@ -1533,8 +1841,8 @@ fn clearing_everything_during_a_first_step_write_clears_its_scene_once_it_lands(
     let out = reply(&mut drawing, &out, Ok(store.answer(&write)));
     assert_eq!(
         trace(&out),
-        ["begin 2", "step 2#0", "end 2 true", "clear 2"],
-        "the scene the write began is cleared after it"
+        ["clear 2"],
+        "the latched clear suppresses late painting and clears the allocated scene"
     );
     assert!(drawing.settled() && drawing.scenes.is_empty());
 }
@@ -1797,6 +2105,7 @@ fn debug_and_display_never_carry_drawing_content() {
         Write::Step {
             thread: THREAD,
             run: RunId(1),
+            clear: Vec::new(),
             target: Target::New(header.clone()),
             revision: 1,
             layout_version: 2,

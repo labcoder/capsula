@@ -254,17 +254,23 @@ struct StepWait {
     call: CallId,
     thread: ThreadId,
     scene: Pend,
-    admitted: Admitted,
     step: Arc<Step>,
-    /// Its thread was deleted: the answer changes nothing.
+    /// Its thread was deleted: suppress the newcomer but settle committed replacement victims.
     fenced: bool,
+    clear_requested: bool,
     interrupted: Option<CallError>,
 }
 
 /// The scene a pending step goes into.
 enum Pend {
-    Held(SceneId),
-    New(Box<SceneState>),
+    Held {
+        scene: SceneId,
+        admitted: Admitted,
+    },
+    New {
+        admission: Box<kumochi_scene::ReplacementAdmission>,
+        victims: Vec<SceneId>,
+    },
 }
 
 impl Drawing {
@@ -596,11 +602,6 @@ impl Drawing {
         match (pending.wait, reply) {
             (Wait::Lookup { run, call, begin }, Ok(Reply::Lookup(found))) => {
                 self.looked_up(run, &call, *begin, found, out);
-            }
-            (Wait::Step(write), Ok(_)) if write.fenced => {
-                if let Some(error) = write.interrupted {
-                    self.finish(write.run, &write.call, Some(error), out);
-                }
             }
             (Wait::Step(write), Ok(Reply::Step(id))) => self.stored(*write, id, out),
             (

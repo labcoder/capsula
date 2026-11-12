@@ -1,7 +1,7 @@
 //! Expanded-work admission, retirement and final-result replay budgets.
 use kumochi_scene::{
-    Admission, Begin, Budget, ErrorCode, GlobalBudget, Handle, Record, SceneEvent, SceneState,
-    Step, StepError, StopCut, WireId, parse_record, text::Bounded,
+    Admission, Begin, Budget, ErrorCode, GlobalBudget, Handle, Record, ReplacementDisposition,
+    SceneEvent, SceneState, Step, StepError, StopCut, WireId, parse_record, text::Bounded,
 };
 use serde_json::{Value, json};
 
@@ -85,6 +85,249 @@ fn cut(revision: u32, handles: Vec<Handle>) -> StopCut {
         activated: revision,
         revealed: Bounded::new(handles).expect("bounded revealed"),
     }
+}
+
+#[test]
+fn replacement_at_the_cap_is_owned_atomic_and_does_not_release_twice() {
+    let mut global = GlobalBudget::default();
+    let mut scenes: Vec<_> = (0..4).map(|n| scene(&format!("old{n}"))).collect();
+    for state in &mut scenes {
+        put(state, &mut global, texts(0, 1));
+    }
+    let next = scene("next");
+    let first = step(json!({"id":"first","put":texts(0,1)}));
+    assert_eq!(
+        next.admit_checked(&first, &global)
+            .expect_err("fifth scene")
+            .code,
+        ErrorCode::OverBudget(Budget::VisibleScenes)
+    );
+    let generation = global.generation();
+    let admission = kumochi_scene::ReplacementAdmission::checked(
+        next,
+        &first,
+        &[&scenes[0], &scenes[0]],
+        &global,
+    )
+    .expect("the duplicated victim leaves once");
+    assert_eq!(
+        (
+            global.usage().scenes,
+            global.usage().objects,
+            global.generation()
+        ),
+        (4, 4, generation)
+    );
+    assert_eq!(scenes[0].object_count(), 1);
+    let (mut next, committed) = admission
+        .settle(
+            &mut [&mut scenes[0]],
+            &mut global,
+            ReplacementDisposition::Install,
+        )
+        .expect("sealed transition")
+        .expect("installed");
+    assert_eq!(committed.index, 0);
+    assert!(scenes[0].is_cleared());
+    assert_eq!(
+        (
+            global.usage().scenes,
+            global.usage().objects,
+            global.generation()
+        ),
+        (4, 4, generation + 1)
+    );
+    scenes[0].clear(&mut global).expect("already cleared");
+    assert_eq!(
+        (
+            global.usage().scenes,
+            global.usage().objects,
+            global.generation()
+        ),
+        (4, 4, generation + 1)
+    );
+    next.clear(&mut global).expect("new scene leaves");
+    assert_eq!((global.usage().scenes, global.usage().objects), (3, 3));
+}
+
+#[test]
+fn replacement_refusal_and_stale_settlement_preserve_the_victims() {
+    let mut global = GlobalBudget::default();
+    let mut old = scene("old");
+    put(&mut old, &mut global, texts(0, 1));
+    let first = step(json!({"id":"first","put":texts(0,1)}));
+    let rejected = step(json!({"id":"bad","remove":["missing"]}));
+    let usage = global.usage();
+    let generation = global.generation();
+    assert_eq!(
+        kumochi_scene::ReplacementAdmission::checked(scene("bad"), &rejected, &[&old], &global)
+            .expect_err("missing removal target")
+            .code,
+        ErrorCode::UnknownRef
+    );
+    assert_eq!(
+        (old.object_count(), global.usage(), global.generation()),
+        (1, usage, generation)
+    );
+    let admission =
+        kumochi_scene::ReplacementAdmission::checked(scene("next"), &first, &[&old], &global)
+            .expect("valid admission");
+    put(&mut old, &mut global, texts(1, 1));
+    let changed = (global.usage(), global.generation());
+    assert_eq!(
+        admission
+            .settle(
+                &mut [&mut old],
+                &mut global,
+                ReplacementDisposition::Install
+            )
+            .expect_err("stale original stamp"),
+        kumochi_scene::StaleAdmission
+    );
+    assert_eq!(
+        (
+            old.object_count(),
+            old.is_cleared(),
+            global.usage(),
+            global.generation()
+        ),
+        (2, false, changed.0, changed.1)
+    );
+}
+
+#[test]
+fn suppressed_replacement_settles_only_the_frozen_victims() {
+    let mut global = GlobalBudget::default();
+    let mut old = scene("old");
+    put(&mut old, &mut global, texts(0, 1));
+    let first = step(json!({"id":"first","put":texts(0,1)}));
+    let admission =
+        kumochi_scene::ReplacementAdmission::checked(scene("next"), &first, &[&old], &global)
+            .expect("valid admission");
+    let generation = global.generation();
+    assert!(
+        admission
+            .settle(
+                &mut [&mut old],
+                &mut global,
+                ReplacementDisposition::Discard
+            )
+            .expect("suppressed")
+            .is_none()
+    );
+    assert!(old.is_cleared());
+    assert_eq!(global.usage(), kumochi_scene::budget::Usage::default());
+    assert_eq!(global.generation(), generation + 1);
+    old.clear(&mut global).expect("later sweep");
+    assert_eq!(global.generation(), generation + 1);
+}
+
+#[test]
+fn replacement_reuses_victim_capacity_at_the_global_object_limit() {
+    let mut global = GlobalBudget::default();
+    let mut old = scene("old");
+    let mut retained = scene("retained");
+    let mut tail = scene("tail");
+    for state in [&mut old, &mut retained] {
+        put(state, &mut global, texts(0, 300));
+        put(state, &mut global, texts(300, 300));
+    }
+    put(&mut tail, &mut global, texts(0, 300));
+    assert_eq!(global.usage().objects, 1500);
+    let new = scene("new");
+    let first = step(json!({"id":"first","put":texts(0,300)}));
+    assert_eq!(
+        new.admit_checked(&first, &global)
+            .expect_err("ordinary early check is full")
+            .code,
+        ErrorCode::OverBudget(Budget::LiveObjects)
+    );
+    let admitted = kumochi_scene::ReplacementAdmission::checked(new, &first, &[&tail], &global)
+        .expect("replacement uses released capacity");
+    let (new, _) = admitted
+        .settle(
+            &mut [&mut tail],
+            &mut global,
+            ReplacementDisposition::Install,
+        )
+        .expect("sealed")
+        .expect("installed");
+    assert_eq!(new.object_count(), 300);
+    assert_eq!((global.usage().objects, global.usage().scenes), (1500, 3));
+    assert_eq!(retained.object_count(), 600);
+    assert!(tail.is_cleared());
+}
+
+#[test]
+fn replacement_checks_every_victim_and_context_before_mutation() {
+    let mut global = GlobalBudget::default();
+    let mut one = scene("one");
+    let mut two = scene("two");
+    put(&mut one, &mut global, texts(0, 1));
+    put(&mut two, &mut global, texts(0, 1));
+    let before = (global.usage(), global.generation());
+    let first = step(json!({"id":"first","put":texts(0,1)}));
+    let admission =
+        kumochi_scene::ReplacementAdmission::checked(scene("new"), &first, &[&one], &global)
+            .expect("admission");
+    assert_eq!(
+        admission
+            .settle(
+                &mut [&mut two],
+                &mut global,
+                ReplacementDisposition::Install
+            )
+            .expect_err("wrong victim identity"),
+        kumochi_scene::StaleAdmission
+    );
+    assert_eq!(
+        (
+            one.is_cleared(),
+            two.is_cleared(),
+            global.usage(),
+            global.generation()
+        ),
+        (false, false, before.0, before.1)
+    );
+    let mut foreign = GlobalBudget::default();
+    let mut foreign_scene = scene("foreign");
+    put(&mut foreign_scene, &mut foreign, texts(0, 1));
+    put(&mut foreign_scene, &mut foreign, texts(1, 1));
+    assert_eq!(foreign.generation(), global.generation());
+    let admission =
+        kumochi_scene::ReplacementAdmission::checked(scene("new"), &first, &[&one], &global)
+            .expect("admission");
+    let foreign_before = (foreign.usage(), foreign.generation());
+    assert_eq!(
+        admission
+            .settle(
+                &mut [&mut one],
+                &mut foreign,
+                ReplacementDisposition::Install
+            )
+            .expect_err("wrong global identity"),
+        kumochi_scene::StaleAdmission
+    );
+    assert_eq!((global.usage(), global.generation()), before);
+    assert_eq!((foreign.usage(), foreign.generation()), foreign_before);
+    assert!(!one.is_cleared());
+    assert_eq!(
+        kumochi_scene::ReplacementAdmission::checked(
+            scene("new"),
+            &first,
+            &[&foreign_scene],
+            &global
+        )
+        .expect_err("foreign victim")
+        .code,
+        ErrorCode::BudgetContext
+    );
+    assert_eq!(
+        kumochi_scene::ReplacementAdmission::checked(scene("new"), &first, &[&one; 5], &global)
+            .expect_err("victim bound")
+            .code,
+        ErrorCode::OverBudget(Budget::VisibleScenes)
+    );
 }
 
 #[test]

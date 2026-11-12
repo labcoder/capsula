@@ -56,7 +56,10 @@ and never returns a thread being deleted.
 
 `store/drawing.rs` keeps typed drawings separate from the staged labelled placeholders above.
 A typed `scene_begin` stores the immutable header and layout version in `body`; its first
-`scene_step` is in the same transaction. Later steps carry the scene id, lifetime revision,
+`scene_step` and its selected `scene_cleared` rows are in the same immediate transaction.
+Each clear uses its victim's own thread. Any failed insertion or commit rolls back all rows;
+a commit whose reply is lost is reconciled by recovery, never by retrying the call. The dying
+memory/shell need not match the committed set before disconnect. Later steps carry the scene id, lifetime revision,
 layout version and original typed step. An effective `scene_cut` stores the authoritative
 activated bound and finished handles. Identical cut retries are idempotent. All these rows
 have NULL `text`: drawing content never enters FTS or a page's text, and pages omit cut metadata.
@@ -66,7 +69,19 @@ The canonical reducer is the single writer and validates admission and cuts. The
 run/thread membership, first-step name reservation, the encoded-body cap and retry identity
 by scene/revision; appends and cuts do not reload or replay earlier drawing content. A new
 scene's first step waits for every earlier typed clear to commit, including a failed user
-clear or eviction, so recovery never has to hide an uncleared visible scene to fit the cap.
+clear. Replacement/cap eviction itself is atomic with the first step, so recovery never has
+to hide an uncleared visible scene to fit the cap.
+
+Turn context reads the same globally eligible newest-four typed set in its existing snapshot,
+then filters by thread. It includes complete begin headers only, never drawing steps, in
+`Drawings on screen: [...]` after Local time in the current user item. The empty `[]` line
+overrides stale references after Esc. The complete rendered item, including outer JSON
+escaping, counts against the ordinary request bound; headers are never truncated or logged.
+Discovery and the bounded header reads use the existing cancellation/deadline scope, with
+the context reader's absolute two-second deadline. Four returned headers do not bound SQL
+work: discovery can scan all retained events and, for each begin, its later same-thread
+history looking for a clear or zero cut. Worst-case row work is quadratic in retained history;
+the scoped SQLite progress handler interrupts cancellation or expiry without adding a cache.
 
 Recovery reads the newest four uncleared scenes of live threads and their full ordered logs,
 then replays the survivors together against one global budget. A corrupt, oversized,

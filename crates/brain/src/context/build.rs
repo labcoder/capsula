@@ -81,7 +81,25 @@ fn assemble(
     let summary = supplied
         .summary
         .map(|summary| summary_item(summary.first, summary.last, &summary.text));
-    let current = render(snapshot, run, current, Some(turn.local_time), &mut sources)?;
+    let mut current = render(snapshot, run, current, Some(turn.local_time), &mut sources)?;
+    let drawings: Vec<_> = snapshot
+        .drawing_headers(turn.thread)?
+        .into_iter()
+        .map(|begin| json!({"begin":begin}))
+        .collect();
+    let drawings = serde_json::to_string(&drawings).map_err(|_| StoreError::Read)?;
+    if let Some(InputItem::Message { text, .. }) = current.iter_mut().find(|item| {
+        matches!(
+            item,
+            InputItem::Message {
+                role: Role::User,
+                ..
+            }
+        )
+    }) {
+        text.push_str("\nDrawings on screen: ");
+        text.push_str(&drawings);
+    }
     let unsummarized =
         fixed_bytes(&instructions, &tools) + current.iter().map(item_bytes).sum::<usize>();
     let mut total = unsummarized + summary.iter().map(item_bytes).sum::<usize>();

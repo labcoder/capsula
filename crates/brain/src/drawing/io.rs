@@ -38,6 +38,8 @@ pub enum Write {
         run: RunId,
         /// The scene.
         target: Target,
+        /// Frozen victims cleared in the new scene's first-step transaction, at most four.
+        clear: Vec<SceneId>,
         /// One-based lifetime commit revision.
         revision: u32,
         /// The layout version the scene was begun with.
@@ -104,6 +106,7 @@ impl fmt::Debug for Write {
                 target,
                 revision,
                 layout_version,
+                clear,
                 ..
             } => f
                 .debug_struct("Step")
@@ -112,6 +115,7 @@ impl fmt::Debug for Write {
                 .field("target", target)
                 .field("revision", revision)
                 .field("layout_version", layout_version)
+                .field("cleared", &clear.len())
                 .finish_non_exhaustive(),
             Self::Cut {
                 scene,

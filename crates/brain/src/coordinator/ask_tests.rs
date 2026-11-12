@@ -33,6 +33,7 @@ fn drawn(scratch: &Scratch) -> (Coordinator, SceneId) {
         .drawing_write(&Write::Step {
             thread: T,
             run: R,
+            clear: Vec::new(),
             target: Target::New(header),
             revision: 1,
             layout_version: 2,

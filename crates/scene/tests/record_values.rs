@@ -34,6 +34,11 @@ fn header_and_step_defaults_are_exact() {
     );
     assert_eq!(header.size, None);
     assert_eq!(header.title, None);
+    assert_eq!(header.others, kumochi_scene::Others::Clear);
+    assert_eq!(
+        serde_json::to_value(&header).expect("header JSON")["others"],
+        "clear"
+    );
     let value = step(r#"{"step":{"id":"s"}}"#);
     assert!(value.id.as_str() == "s", "parsed text matches the fixture");
     assert_eq!(value.say, None);
@@ -51,6 +56,39 @@ fn header_and_step_defaults_are_exact() {
         "parsed text matches the fixture"
     );
     assert_eq!(ms.get(), 200);
+}
+
+#[test]
+fn others_is_closed_and_always_serialized_for_continuation() {
+    let Record::Begin(header) = parse_record(
+        br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":"","others":"keep"}}"#,
+    )
+    .expect("keep") else {
+        panic!("header")
+    };
+    assert_eq!(header.others, kumochi_scene::Others::Keep);
+    assert_eq!(
+        serde_json::to_value(&header).expect("header JSON")["others"],
+        "keep"
+    );
+    for (invalid, code) in [
+        (serde_json::json!(null), kumochi_scene::ErrorCode::Malformed),
+        (serde_json::json!(""), kumochi_scene::ErrorCode::OutOfRange),
+        (
+            serde_json::json!("both"),
+            kumochi_scene::ErrorCode::OutOfRange,
+        ),
+        (serde_json::json!(1), kumochi_scene::ErrorCode::Malformed),
+        (
+            serde_json::json!(["keep"]),
+            kumochi_scene::ErrorCode::Malformed,
+        ),
+    ] {
+        let bytes = serde_json::to_vec(&serde_json::json!({"begin":{"v":1,"scene":"s","surface":"overlay","alt":"","others":invalid}})).expect("JSON");
+        let error = parse_record(&bytes).expect_err("closed others vocabulary");
+        assert_eq!(error.code, code);
+        assert_eq!(error.path.as_str(), "others");
+    }
 }
 
 #[test]
