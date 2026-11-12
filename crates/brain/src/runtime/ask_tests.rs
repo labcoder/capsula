@@ -80,6 +80,7 @@ fn seed(scratch: &Scratch, [label, info, alt]: [&str; 3], choice: &ModelChoice) 
         .drawing_write(&Write::Step {
             thread: T,
             run: RunId(1),
+            clear: Vec::new(),
             target: Target::New(header),
             revision: 1,
             layout_version: 2,
@@ -102,8 +103,11 @@ fn seed(scratch: &Scratch, [label, info, alt]: [&str; 3], choice: &ModelChoice) 
     scene
 }
 
-/// `stamp` reads as `YYYY-MM-DD HH:MM`.
-fn assert_minute(stamp: &str) {
+/// The current turn carries its minute and the complete drawing header.
+fn assert_turn_context(context: &str, alt: &str) {
+    let (stamp, drawings) = context
+        .split_once("\nDrawings on screen: ")
+        .expect("drawing context follows time");
     assert_eq!(stamp.len(), 16, "YYYY-MM-DD HH:MM");
     assert!(
         stamp.char_indices().all(|(at, c)| match at {
@@ -113,6 +117,10 @@ fn assert_minute(stamp: &str) {
             _ => c.is_ascii_digit(),
         }),
         "YYYY-MM-DD HH:MM"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(drawings).expect("drawing headers"),
+        serde_json::json!([{"begin":{"v":1,"scene":"car","surface":"overlay","size":null,"title":null,"alt":alt,"others":"clear"}}])
     );
 }
 
@@ -206,7 +214,7 @@ async fn an_ask_reaches_the_engine_in_the_scenes_thread_on_its_model_with_its_hi
         .last()
         .and_then(|last| last.strip_prefix(&format!("{literal}\n\nLocal time: ")))
         .expect("the ask is the last user message");
-    assert_minute(stamp);
+    assert_turn_context(stamp, &alt);
     assert!(!format!("{input:?}").contains("U-SENTINEL"));
     assert!(input.iter().all(|item| match item {
         InputItem::Message { text, .. } => !text.contains("U-SENTINEL"),

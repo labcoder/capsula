@@ -512,6 +512,19 @@ serialize drawing content into logs, or trace a model-facing tool reply.
 guards one call's begin/step/end order; a new call gets a fresh guard and must
 repeat the stored header with typed equality. Ending a call does not end its scene.
 
+`begin.others` is the closed vocabulary `clear` (default) or `keep`. Old stored headers
+decode to `clear`, and serialization always includes it. Only a new scene applies this
+policy: a continuation with an identical stored header never clears another scene.
+
+`ReplacementAdmission` owns a newcomer, its checked candidate and at most four deduplicated
+victims with their original identities, revisions, mutations and charges. All early and
+final caps use current global usage minus victims plus the candidate, without changing the
+victims. The existing single pending-write seal prevents other budget mutations. After the
+durable reply, consuming settlement validates every original stamp before mutation, marks
+victims terminal and installs one combined global-budget transition. A suppressed newcomer
+never acquires a charge. Later clear/sweep calls cannot release a victim twice. The projected
+logical charge does not eliminate transient physical ownership of the old set and candidate.
+
 `admit` resolves references against earlier surviving objects plus every object
 declared in the same step, independent of put order. `start.after` must name an
 earlier kept step, never one dropped by a cut. Admission rejects cycles, missing

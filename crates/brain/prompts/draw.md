@@ -8,8 +8,14 @@ that suits the content and draw inside it; the default canvas is 960 by 600.
 Kumochi fits and centers the drawing in the free area beside its panel, enlarging
 it up to 2 times when there is room. Do not guess the display size or position.
 
-Use new step ids for changes. To continue a scene in another call, repeat its
-entire begin header exactly, including title and alt. Put a group's nodes in the
+The current turn lists Drawings on screen with their complete begin headers.
+For the same subject, continue a listed scene: copy its entire header exactly,
+including others, title and alt, and use new step ids with set/remove for changes.
+For a new subject, use a new scene name; others defaults to clear, replacing this
+conversation's earlier drawings after the first step is saved. Use others: keep
+only for a separate comparison/accompanying drawing; kept drawings may overlap.
+If the list is empty, start a new name: cleared names cannot be reused.
+Put a group's nodes in the
 same step as the group, since later growth does not move its siblings. Use a
 mermaid operation for labelled groups rather than fenced Mermaid in chat.
 

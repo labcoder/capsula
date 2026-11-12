@@ -101,9 +101,9 @@ no `scene_cleared` event. Every way a scene leaves the set writes that event, so
 back at start the set it held in memory:
 
 - the user clears it (`ClearDrawing`);
-- a fifth scene begins: labelled placeholders clear the oldest in the new first step's
-  transaction; typed v1 drawings instead wait for that clear and every earlier typed clear
-  to be acknowledged before writing the new first step;
+- a new typed drawing replaces its thread's other drawings, unless its header says `keep`;
+- a fifth surviving scene begins: the oldest leaves. Typed replacement/cap victims clear in
+  the new first-step transaction, as labelled placeholders already do for their cap eviction;
 - a Stop keeps none of a scene's steps: a labelled scene clears with the run's outcome;
   a typed scene's zero cut commits before its acknowledgement, followed by its clear;
 - the user quits.

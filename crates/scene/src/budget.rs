@@ -156,6 +156,15 @@ impl Default for GlobalBudget {
     }
 }
 impl GlobalBudget {
+    pub(crate) fn without(&self, removed: Usage) -> Self {
+        Self {
+            identity: Arc::clone(&self.identity),
+            generation: self.generation,
+            usage: self.usage.subtract(removed),
+            replaying: self.replaying,
+        }
+    }
+
     /// Returns the local generation used to reject stale admissions.
     pub fn generation(&self) -> u64 {
         self.generation

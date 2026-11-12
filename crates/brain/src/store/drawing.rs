@@ -114,13 +114,14 @@ impl Store {
                 thread,
                 run,
                 target,
+                clear,
                 revision,
                 layout_version,
                 step,
             } => write_step(
                 &tx,
                 (*thread, *run),
-                target,
+                (target, clear),
                 (*revision, *layout_version),
                 step,
                 now,
@@ -149,14 +150,50 @@ impl Store {
     }
 }
 
+impl super::context::Snapshot<'_> {
+    pub(crate) fn drawing_headers(&self, thread: ThreadId) -> Result<Vec<Begin>, StoreError> {
+        let cap = body_cap()?;
+        let limit = i64::try_from(MAX_VISIBLE_SCENES).map_err(|_| StoreError::Drawing)?;
+        let thread = sql_id(thread.0, StoreError::NoThread)?;
+        let mut begins: Vec<(i64, i64)> = self
+            .0
+            .prepare(CANDIDATES)
+            .and_then(|mut query| {
+                query
+                    .query_map(params![cap, limit], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect()
+            })
+            .map_err(|_| StoreError::Drawing)?;
+        begins.reverse();
+        let mut headers = Vec::new();
+        for (id, owner) in begins {
+            if owner == thread
+                && let Some(reading) = header(&self.0, id, cap).map_err(redact)?
+            {
+                headers.push(reading.header.begin);
+            }
+        }
+        Ok(headers)
+    }
+}
+
 fn write_step(
     conn: &Connection,
     (thread, run): (ThreadId, RunId),
-    target: &Target,
+    (target, clear): (&Target, &[SceneId]),
     (revision, layout_version): (u32, u32),
     step: &Step,
     now: i64,
 ) -> Result<Reply, StoreError> {
+    if clear.len() > MAX_VISIBLE_SCENES
+        || (!clear.is_empty() && !matches!(target, Target::New(_)))
+        || clear
+            .iter()
+            .enumerate()
+            .any(|(index, id)| clear[..index].contains(id))
+    {
+        return Err(StoreError::Drawing);
+    }
     let thread = sql_id(thread.0, StoreError::NoThread)?;
     let run = sql_id(run.0, StoreError::NoRun)?;
     insert_events(conn, thread, run, &[], now)?;
@@ -199,6 +236,9 @@ fn write_step(
         Some(&body),
         now,
     )?;
+    for &victim in clear {
+        super::scenes::clear(conn, victim, now)?;
+    }
     Ok(Reply::Step(scene))
 }
 

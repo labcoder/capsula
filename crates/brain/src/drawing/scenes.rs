@@ -5,7 +5,7 @@ use kumochi_protocol::message::{
     DataToShell, MAX_VISIBLE_SCENES, RunId, SceneHeader, SceneId, ThreadId,
 };
 use kumochi_scene::text::Bounded;
-use kumochi_scene::{Step, StopCut};
+use kumochi_scene::{ReplacementDisposition, Step, StopCut};
 
 use super::io::Write;
 use super::{CutKind, Drawing, Held, Job, LAYOUT_VERSION, Output, Pend, Pending, StepWait, Wait};
@@ -43,14 +43,15 @@ impl Drawing {
             call,
             thread,
             scene,
-            admitted,
             step,
+            fenced,
+            clear_requested,
             interrupted,
             ..
         } = write;
-        let begun = matches!(scene, Pend::New(_));
-        let at = match scene {
-            Pend::Held(scene) => {
+        let begun = matches!(scene, Pend::New { .. });
+        let (scene, index) = match scene {
+            Pend::Held { scene, admitted } => {
                 let Some(at) = self.live(scene) else {
                     // Cleared meanwhile, but the step is durable, so it spends the run's budget.
                     self.drew(run, &call, scene, &step);
@@ -59,9 +60,53 @@ impl Drawing {
                     }
                     return;
                 };
-                at
+                if fenced {
+                    return;
+                }
+                let held = &mut self.scenes[at];
+                let committed = held
+                    .state
+                    .commit(admitted, &mut self.global)
+                    .expect("the pending write sealed its scene and the global budget");
+                held.committers.push(Some(run));
+                (scene, committed.index)
             }
-            Pend::New(state) => {
+            Pend::New { admission, victims } => {
+                let mut states: Vec<_> = self
+                    .scenes
+                    .iter_mut()
+                    .filter(|held| victims.contains(&held.scene))
+                    .map(|held| &mut held.state)
+                    .collect();
+                let disposition = if fenced || clear_requested {
+                    ReplacementDisposition::Discard
+                } else {
+                    ReplacementDisposition::Install
+                };
+                let installed = (*admission)
+                    .settle(&mut states, &mut self.global, disposition)
+                    .expect("the pending replacement sealed every victim and the global budget");
+                self.scenes.retain(|held| !victims.contains(&held.scene));
+                if !victims.is_empty() {
+                    out.effects.push(Effect::RevokeScenes {
+                        scenes: victims.clone(),
+                    });
+                    out.effects
+                        .push(Effect::Data(DataToShell::ScenesRemoved { scenes: victims }));
+                }
+                let Some((state, committed)) = installed else {
+                    self.drew(run, &call, id, &step);
+                    if clear_requested {
+                        self.clear_stored(vec![id], out);
+                    }
+                    self.finish(
+                        run,
+                        &call,
+                        Some(interrupted.unwrap_or(super::CallError::Interrupted)),
+                        out,
+                    );
+                    return;
+                };
                 let header = SceneHeader {
                     begin: state.header().clone(),
                     layout_version: LAYOUT_VERSION,
@@ -72,24 +117,17 @@ impl Drawing {
                     scene: id,
                     thread,
                     layout_version: LAYOUT_VERSION,
-                    state: *state,
-                    committers: Vec::new(),
+                    state,
+                    committers: vec![Some(run)],
                     gone: false,
                 });
-                self.scenes.len() - 1
+                (id, committed.index)
             }
         };
-        let held = &mut self.scenes[at];
-        let committed = held
-            .state
-            .commit(admitted, &mut self.global)
-            .expect("the pending write sealed its scene and the global budget");
-        held.committers.push(Some(run));
-        let scene = held.scene;
         out.effects.push(Effect::Data(DataToShell::SceneStepCommit {
             run,
             scene,
-            index: committed.index,
+            index,
             step: Step::clone(&step),
         }));
         self.drew(run, &call, scene, &step);
@@ -208,25 +246,26 @@ impl Drawing {
         }
     }
 
-    /// A new scene's first step makes room: the oldest of four visible scenes leaves now, in a
-    /// write of its own ahead of the step's, so the shell drops it before the new one begins.
-    pub(super) fn evict(&mut self, out: &mut Output) {
-        if self.scenes.len() < MAX_VISIBLE_SCENES {
-            return;
-        }
-        let mut oldest = self.scenes.remove(0);
-        oldest
-            .state
-            .clear(&mut self.global)
-            .expect("visible scenes share the one budget");
-        let scenes = vec![oldest.scene];
-        out.effects.push(Effect::RevokeScenes {
-            scenes: scenes.clone(),
-        });
-        out.effects.push(Effect::Data(DataToShell::ScenesRemoved {
-            scenes: scenes.clone(),
-        }));
-        self.clear_stored(scenes, out);
+    pub(super) fn replacement_victims(
+        &self,
+        thread: ThreadId,
+        others: kumochi_scene::Others,
+    ) -> Vec<SceneId> {
+        let replaces =
+            |held: &&Held| others == kumochi_scene::Others::Clear && held.thread == thread;
+        let survivors: Vec<_> = self
+            .scenes
+            .iter()
+            .filter(|held| !held.gone)
+            .filter(|held| !replaces(held))
+            .collect();
+        let evict = (survivors.len() >= MAX_VISIBLE_SCENES).then(|| survivors[0].scene);
+        self.scenes
+            .iter()
+            .filter(|held| !held.gone)
+            .filter(|held| replaces(held) || Some(held.scene) == evict)
+            .map(|held| held.scene)
+            .collect()
     }
 
     /// Writes a clear, which every new scene's first step then waits for.
@@ -239,6 +278,7 @@ impl Drawing {
     /// The user cleared scenes: their unsent frames go and their clear is written now; their
     /// charges are released once no write is pending.
     pub(super) fn clear(&mut self, scenes: &[SceneId], out: &mut Output) {
+        self.clear_newcomers(out);
         let left = self.leave(|held| scenes.contains(&held.scene));
         if left.is_empty() {
             return;
@@ -251,6 +291,7 @@ impl Drawing {
 
     /// Quit: every scene is cleared now, superseding any cut owed for it.
     pub(super) fn clear_visible(&mut self, out: &mut Output) {
+        self.clear_newcomers(out);
         let left = self.leave(|_| true);
         if !left.is_empty() {
             self.clear_stored(left, out);
@@ -258,7 +299,7 @@ impl Drawing {
     }
 
     /// The thread's rows are gone: its scenes leave without a clear, and a step of it still in
-    /// the store changes nothing when answered.
+    /// the store suppresses its newcomer but still settles committed replacement victims.
     pub(super) fn deleted(&mut self, thread: ThreadId, out: &mut Output) {
         if let Some(Pending {
             wait: Wait::Step(write),

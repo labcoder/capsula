@@ -8,6 +8,12 @@ When Kumochi draws a 2D diagram, each step appears on screen once it is prepared
 that were on screen come back after Kumochi reconnects. If you stop a drawing, the parts that
 had already finished appearing stay on screen.
 
+Asking for a change to the same subject continues its drawing. A new subject normally
+replaces this conversation's earlier drawings once the new drawing's first step is saved.
+If the new drawing then cannot be drawn, the old drawings may already be gone and the
+screen may be left empty. Separate drawings can be kept for comparison, up to four on
+screen; they can still overlap until side-by-side arrangement is available.
+
 Simple node-and-arrow diagrams do not need a separate container: their nodes belong to
 the scene itself, and each arrow follows the diagram shared by its endpoints. These
 diagrams have the same 48-node and 96-arrow limits as explicitly grouped diagrams.

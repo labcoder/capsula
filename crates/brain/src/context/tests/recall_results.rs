@@ -171,7 +171,7 @@ fn metadata_only_native_replay_is_source_fenced_and_other_connections_do_not_rep
         built.request.input,
         vec![message(
             Role::User,
-            &format!("list tasks\n\nLocal time: {TIME}")
+            &format!("list tasks\n\nLocal time: {TIME}\nDrawings on screen: []")
         )]
     );
     assert_eq!(

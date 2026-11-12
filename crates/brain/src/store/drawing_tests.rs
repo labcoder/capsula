@@ -142,6 +142,7 @@ fn write(
     store.drawing_write(&Write::Step {
         thread: ids.0,
         run: ids.1,
+        clear: Vec::new(),
         target,
         revision,
         layout_version: 2,
@@ -156,6 +157,174 @@ fn first(store: &mut Store, ids: (ThreadId, RunId), name: &str) -> SceneId {
         panic!("wrong reply");
     };
     scene
+}
+
+#[test]
+fn replacement_clear_lists_are_bounded_unique_and_only_for_new_scenes() {
+    let scratch = Scratch::new("drawing-replacement-list");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let old: Vec<_> = (0..5)
+        .map(|n| {
+            let ids = begin(&mut store);
+            first(&mut store, ids, &format!("old{n}"))
+        })
+        .collect();
+    let ids = begin(&mut store);
+    for (target, clear) in [
+        (Target::New(header("new")), old.clone()),
+        (Target::New(header("new")), vec![old[0], old[0]]),
+        (Target::Existing(old[0]), vec![old[1]]),
+    ] {
+        assert!(matches!(
+            store.drawing_write(&Write::Step {
+                thread: ids.0,
+                run: ids.1,
+                target,
+                clear,
+                revision: 1,
+                layout_version: 2,
+                step: step("first"),
+            }),
+            Err(StoreError::Drawing)
+        ));
+        assert_eq!(count(&store, "scene_begin"), 5);
+        assert_eq!(count(&store, "scene_step"), 5);
+        assert_eq!(count(&store, "scene_cleared"), 0);
+    }
+    let Reply::Step(new) = store
+        .drawing_write(&Write::Step {
+            thread: ids.0,
+            run: ids.1,
+            target: Target::New(header("new")),
+            clear: old[..4].to_vec(),
+            revision: 1,
+            layout_version: 2,
+            step: step("first"),
+        })
+        .expect("four distinct victims are accepted")
+    else {
+        panic!("step reply")
+    };
+    assert_eq!(count(&store, "scene_cleared"), 4);
+    assert_eq!(
+        store
+            .drawing_scenes()
+            .expect("replacement")
+            .scenes
+            .iter()
+            .map(|scene| scene.scene)
+            .collect::<Vec<_>>(),
+        [old[4], new]
+    );
+}
+
+#[test]
+fn a_selected_clear_failure_rolls_back_the_entire_replacement_transaction() {
+    let scratch = Scratch::new("drawing-replacement-rollback");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let first_thread = begin(&mut store);
+    let old_one = first(&mut store, first_thread, "old_one");
+    let second_thread = begin(&mut store);
+    let old_two = first(&mut store, second_thread, "old_two");
+    let ids = begin(&mut store);
+    let before: i64 = store
+        .conn_for_tests()
+        .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
+        .expect("count");
+    store.conn_for_tests().execute_batch(&format!(
+        "CREATE TRIGGER fail_selected_clear BEFORE INSERT ON events WHEN new.kind='scene_cleared' AND json_extract(new.body,'$.scene')={} BEGIN SELECT RAISE(FAIL,'private replacement'); END;", old_two.0
+    )).expect("failure trigger");
+    let error = store
+        .drawing_write(&Write::Step {
+            thread: ids.0,
+            run: ids.1,
+            target: Target::New(header("new")),
+            clear: vec![old_one, old_two],
+            revision: 1,
+            layout_version: 2,
+            step: step("first"),
+        })
+        .expect_err("selected clear fails");
+    assert!(!format!("{error:?}").contains("private replacement"));
+    let after: i64 = store
+        .conn_for_tests()
+        .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
+        .expect("count");
+    assert_eq!(after, before);
+    assert_eq!(
+        store
+            .drawing_write(&Write::Lookup {
+                thread: ids.0,
+                name: "new".to_owned().try_into().expect("id")
+            })
+            .expect("lookup"),
+        Reply::Lookup(None)
+    );
+    assert_eq!(
+        store
+            .drawing_scenes()
+            .expect("old set")
+            .scenes
+            .iter()
+            .map(|scene| scene.scene)
+            .collect::<Vec<_>>(),
+        [old_one, old_two]
+    );
+}
+
+#[test]
+fn recovery_reconciles_a_committed_replacement_without_a_delivered_reply() {
+    let scratch = Scratch::new("drawing-replacement-lost-reply");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let first_thread = begin(&mut store);
+    let old_one = first(&mut store, first_thread, "old_one");
+    let second_thread = begin(&mut store);
+    let old_two = first(&mut store, second_thread, "old_two");
+    let ids = begin(&mut store);
+    let Reply::Step(new) = store
+        .drawing_write(&Write::Step {
+            thread: ids.0,
+            run: ids.1,
+            target: Target::New(header("new")),
+            clear: vec![old_one, old_two],
+            revision: 1,
+            layout_version: 2,
+            step: step("first"),
+        })
+        .expect("committed before losing delivery")
+    else {
+        panic!("step reply")
+    };
+    let rows: Vec<(i64, i64)> = store.conn_for_tests().prepare(
+        "SELECT thread, json_extract(body,'$.scene') FROM events WHERE kind='scene_cleared' ORDER BY id"
+    ).expect("clear rows").query_map([], |row| Ok((row.get(0)?,row.get(1)?))).expect("rows")
+        .collect::<Result<_,_>>().expect("typed rows");
+    assert_eq!(
+        rows,
+        [
+            (
+                i64::try_from(first_thread.0.0).expect("thread"),
+                i64::try_from(old_one.0).expect("scene")
+            ),
+            (
+                i64::try_from(second_thread.0.0).expect("thread"),
+                i64::try_from(old_two.0).expect("scene")
+            )
+        ]
+    );
+    drop(store);
+    let store = Store::open(&scratch.db()).expect("restart without retrying the call");
+    let recovered = store.drawing_scenes().expect("recovery");
+    assert_eq!(
+        recovered
+            .scenes
+            .iter()
+            .map(|scene| scene.scene)
+            .collect::<Vec<_>>(),
+        [new]
+    );
+    assert_eq!(recovered.scenes[0].log.len(), 1);
+    assert_eq!(recovered.scenes[0].thread, ids.0);
 }
 
 fn cut(

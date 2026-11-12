@@ -26,12 +26,12 @@ pub use error::{Budget, ErrorCode, FieldPath, StepError};
 pub use id::{Handle, Ms, WireId};
 pub use motion::{Frame, FrameItem, PreparedActivation, SceneView, ViewFrame};
 pub use parse::{parse_draw_record, parse_record};
-pub use record::{Begin, End, Op, Record, Step};
+pub use record::{Begin, End, Op, Others, Record, Step};
 pub use schema::draw_schema;
 pub use state::{
     Admission, Admitted, BindingError, CallState, Committed, DetachedCandidate, Part, Preparation,
-    SceneBinding, SceneEvent, SceneRead, SceneState, StaleAdmission, StopCut, StopOutcome,
-    refuse_three_dimensional,
+    ReplacementAdmission, ReplacementDisposition, SceneBinding, SceneEvent, SceneRead, SceneState,
+    StaleAdmission, StopCut, StopOutcome, refuse_three_dimensional,
 };
 pub use text::{Finite, Source, Text};
 pub use tokenize::{ClosedRecord, TokenError, Tokenizer};

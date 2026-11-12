@@ -59,6 +59,18 @@ pub enum Surface {
     /// Inline.
     Inline,
 }
+/// What a new drawing does with this thread's other visible drawings.
+#[derive(
+    schemars::JsonSchema, Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Others {
+    /// Replace this thread's other drawings after the first step commits.
+    #[default]
+    Clear,
+    /// Keep other drawings, subject to the global four-scene limit.
+    Keep,
+}
 /// Begin record fields.
 #[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -75,6 +87,9 @@ pub struct Begin {
     pub title: Option<Text>,
     /// alt.
     pub alt: Text,
+    /// Whether a new scene replaces or keeps this thread's other drawings.
+    #[serde(default)]
+    pub others: Others,
 }
 /// A strict empty call terminator.
 #[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -471,8 +471,7 @@ impl Drawing {
         Ok(())
     }
 
-    /// Admits a step and writes it. A new scene's first step evicts the oldest of four visible
-    /// scenes first, as its own write, whatever admission then decides.
+    /// Admits a step and writes its first-step replacements in the same durable transaction.
     fn step(&mut self, at: usize, step: Step, out: &mut Output) -> Result<(), StepError> {
         let (run, thread) = (self.calls[at].run, self.calls[at].thread);
         let existing = match &self.calls[at].scene {
@@ -484,7 +483,6 @@ impl Drawing {
             if full {
                 return Err(in_step(&step, ErrorCode::OverBudget(Budget::Steps)));
             }
-            self.evict(out);
             if self.clearing {
                 let job = Job::Record {
                     run,
@@ -496,29 +494,20 @@ impl Drawing {
             }
         }
         kumochi_scene::refuse_three_dimensional(&step)?;
-        let admission = match (existing, &self.calls[at].scene) {
-            (Some(scene), _) => {
-                let at = self
-                    .live(scene)
-                    .ok_or_else(|| in_step(&step, ErrorCode::SceneCleared))?;
-                self.scenes[at].state.admit_checked(&step, &self.global)?
-            }
-            (None, Bound::New(state)) => state.admit_checked(&step, &self.global)?,
-            (None, _) => return Err(in_step(&step, ErrorCode::BeforeBegin)),
-        };
-        let Admission::New(admitted) = admission else {
-            return Ok(());
-        };
-        if full {
-            return Err(in_step(&step, ErrorCode::OverBudget(Budget::Steps)));
-        }
-        let (scene, target, revision, layout_version) = if let Some(scene) = existing {
+        let (scene, target, clear, revision, layout_version) = if let Some(scene) = existing {
             let held = &self.scenes[self
                 .live(scene)
                 .ok_or_else(|| in_step(&step, ErrorCode::SceneCleared))?];
+            let Admission::New(admitted) = held.state.admit_checked(&step, &self.global)? else {
+                return Ok(());
+            };
+            if full {
+                return Err(in_step(&step, ErrorCode::OverBudget(Budget::Steps)));
+            }
             (
-                Pend::Held(scene),
+                Pend::Held { scene, admitted },
                 Target::Existing(scene),
+                Vec::new(),
                 held.state.revision() + 1,
                 held.layout_version,
             )
@@ -530,13 +519,32 @@ impl Drawing {
                 begin: state.header().clone(),
                 layout_version: LAYOUT_VERSION,
             };
-            (Pend::New(state), Target::New(header), 1, LAYOUT_VERSION)
+            let victims = self.replacement_victims(thread, header.begin.others);
+            let states: Vec<_> = self
+                .scenes
+                .iter()
+                .filter(|held| victims.contains(&held.scene))
+                .map(|held| &held.state)
+                .collect();
+            let admission =
+                kumochi_scene::ReplacementAdmission::checked(*state, &step, &states, &self.global)?;
+            (
+                Pend::New {
+                    admission: Box::new(admission),
+                    victims: victims.clone(),
+                },
+                Target::New(header),
+                victims,
+                1,
+                LAYOUT_VERSION,
+            )
         };
         let step = Arc::new(step);
         let write = Write::Step {
             thread,
             run,
             target,
+            clear,
             revision,
             layout_version,
             step: Arc::clone(&step),
@@ -546,9 +554,9 @@ impl Drawing {
             call: self.calls[at].id.clone(),
             thread,
             scene,
-            admitted,
             step,
             fenced: false,
+            clear_requested: false,
             interrupted: None,
         };
         self.write(Wait::Step(Box::new(wait)), write, out);
@@ -729,6 +737,26 @@ impl Drawing {
             return;
         }
         self.end(at, Some(error), out);
+    }
+
+    pub(super) fn clear_newcomers(&mut self, out: &mut Output) {
+        if let Some(super::Pending {
+            wait: Wait::Step(write),
+            ..
+        }) = &mut self.pending
+            && matches!(write.scene, Pend::New { .. })
+        {
+            write.clear_requested = true;
+        }
+        let calls: Vec<_> = self
+            .calls
+            .iter()
+            .filter(|call| !call.done && !matches!(call.scene, Bound::Held(_)))
+            .map(|call| (call.run, call.id.clone()))
+            .collect();
+        for (run, call) in calls {
+            self.interrupt(run, &call, out);
+        }
     }
 
     pub(super) fn close(&mut self, run: RunId, out: &mut Output) {
