@@ -431,11 +431,7 @@ impl Drawing {
                 }
             }
             Input::Clear { scenes } => self.clear(&scenes, &mut out),
-            Input::SceneFailed { scene } => {
-                self.replacement_failed(scene, &mut out);
-                self.end_calls_in(scene, &mut out);
-                self.clear(&[scene], &mut out);
-            }
+            Input::SceneFailed { scene } => self.scene_failed(scene, &mut out),
             Input::ClearVisible => {
                 self.clear_visible(&mut out);
                 if !self.settled() {

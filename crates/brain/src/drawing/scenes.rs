@@ -308,6 +308,19 @@ impl Drawing {
     /// charges are released once no write is pending.
     pub(super) fn clear(&mut self, scenes: &[SceneId], out: &mut Output) {
         self.clear_newcomers(out);
+        self.clear_scenes(scenes, out);
+    }
+
+    pub(super) fn scene_failed(&mut self, scene: SceneId, out: &mut Output) {
+        if self.live(scene).is_none() {
+            return;
+        }
+        self.replacement_failed(scene, out);
+        self.end_calls_in(scene, out);
+        self.clear_scenes(&[scene], out);
+    }
+
+    fn clear_scenes(&mut self, scenes: &[SceneId], out: &mut Output) {
         let left = self.leave(|held| scenes.contains(&held.scene));
         if left.is_empty() {
             return;

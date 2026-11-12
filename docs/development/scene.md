@@ -1799,6 +1799,8 @@ Header, admission-expiry, sample, paint and host-show refusals use the content-f
 clear instead of an explicit user clear. The brain derives replacement-loss feedback from the
 committed scene, so neither an unbegun successor nor a recovered owner needs the shell to guess
 its original run.
+Whole-scene refusals ignore unknown or gone ids and clear only their live target; they never
+cancel unrelated newcomers as an explicit user clear does.
 Esc without a known run disposes the visual hold without inventing a run id; pending typed
 cancellation and later named runs still use ordinary fencing.
 

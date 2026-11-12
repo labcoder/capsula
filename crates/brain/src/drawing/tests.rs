@@ -271,6 +271,76 @@ fn replacement_args(scene: &str, steps: &[String]) -> Vec<u8> {
 }
 
 #[test]
+fn a_scene_refusal_never_cancels_an_unrelated_pending_replacement() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    let mut other = call(1, "other", args("other", &[text("other", "other")]));
+    if let Input::Call { thread, .. } = &mut other {
+        *thread = ThreadId(8);
+    }
+    store.run(&mut drawing, other);
+    store.run(
+        &mut drawing,
+        call(1, "old", args("old", &[text("old", "old")])),
+    );
+    let lookup = drawing
+        .handle(call(
+            2,
+            "new",
+            replacement_args("new", &[text("next", "next")]),
+        ))
+        .expect("lookup");
+    let answer = store.answer(&sent(&lookup).expect("lookup").1);
+    let pending = reply(&mut drawing, &lookup, Ok(answer));
+    let write = sent(&pending).expect("first-step write").1;
+    let Write::Step { clear, .. } = &write else {
+        panic!("first-step write");
+    };
+    assert_eq!(clear, &[SceneId(2)]);
+
+    let refused = store.run(&mut drawing, Input::SceneFailed { scene: SceneId(1) });
+    assert_eq!(trace(&refused), ["revoke 1", "clear 1"]);
+    assert_eq!(refused.calls, []);
+    for scene in [SceneId(1), SceneId(99), SceneId(1)] {
+        let stale = drawing
+            .handle(Input::SceneFailed { scene })
+            .expect("stale refusal");
+        assert!(stale.effects.is_empty());
+        assert_eq!(stale.calls, []);
+    }
+    let answer = store.answer(&write);
+    let committed = reply(&mut drawing, &pending, Ok(answer));
+    let committed = store.settle(&mut drawing, committed);
+    assert_eq!(
+        trace(&committed),
+        [
+            "revoke 2",
+            "replaced 2 by 3",
+            "begin 3",
+            "step 3#0",
+            "end 3 true"
+        ]
+    );
+    assert_eq!(committed.calls.len(), 1);
+    assert_eq!(committed.calls[0].run, RunId(2));
+    assert_eq!(committed.calls[0].scene, Some(SceneId(3)));
+    assert_eq!(committed.calls[0].drawn, [wire("next")]);
+    assert_eq!(committed.calls[0].error, None);
+    assert_eq!(store.cleared, [SceneId(1), SceneId(2)]);
+    let (recovered, skipped) = Drawing::recover(store.visible());
+    assert_eq!(skipped, []);
+    assert_eq!(
+        recovered
+            .snapshot()
+            .scenes
+            .iter()
+            .map(|scene| scene.scene)
+            .collect::<Vec<_>>(),
+        [SceneId(3)]
+    );
+}
+
+#[test]
 fn replacement_failure_reports_loss_once_after_the_call_and_original_run_ended() {
     use kumochi_protocol::message::ControlToShell;
     let mut drawing = Drawing::default();
