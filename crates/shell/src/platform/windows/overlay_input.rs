@@ -16,7 +16,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use super::presence::{PresenceError, hwnd_of};
 use crate::presenter::overlay_input::{InputPlatform, Layer, OverlayInput, RegionId, Regions};
 
-/// UI-thread bindings; detach a region before its window closes, then remove its registration.
+/// UI-thread bindings for windows created topmost, including native input proxies.
+/// Detach a region before its window closes, then remove its registration.
 #[derive(Default)]
 pub(crate) struct OverlayWindows {
     layers: BTreeMap<Layer, Vec<HWND>>,
