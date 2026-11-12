@@ -346,7 +346,13 @@ fn read(
         }
         first = false;
         if bad {
-            return Err(MicError::Discontinuity);
+            return Err(
+                if flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0.cast_unsigned() != 0 {
+                    MicError::Timestamp
+                } else {
+                    MicError::Discontinuity
+                },
+            );
         }
         if bytes.is_none_or(|n| n > raw.len())
             || allowed && frames != 0 && !silent && data.is_null()

@@ -20,6 +20,23 @@ use super::{Brain, Effect, Full, Input, Link, Origin};
 use crate::coordinator::{HoldKey, HoldSnapshot};
 use crate::voice::stt::{Decode, SttHandle, SttResult};
 
+#[derive(Debug)]
+enum FailureStage {
+    Status,
+    Admission,
+    Preparation,
+    ReleaseDebt,
+    VoiceAvailability,
+    Decode,
+}
+
+#[derive(Debug)]
+enum Refusal {
+    StaleGesture,
+    StaleCompletion,
+    ReadOrCancellation,
+}
+
 #[derive(Debug, Default)]
 struct Gate {
     active: AtomicU32,
@@ -186,6 +203,11 @@ pub(super) async fn next(holds: &mut Holds) -> Event {
 
 impl Brain {
     fn hold_status(key: HoldKey, status: HoldStatus, link: &mut Link<'_, '_>) -> Result<(), Full> {
+        if let HoldStatus::Failed(reason) = status {
+            tracing::warn!(stage = ?FailureStage::Status, ?reason, "held speech input failed");
+        } else {
+            tracing::debug!(stage = ?FailureStage::Status, reason = ?status, "held speech input boundary");
+        }
         link.control(&ControlToShell::VoiceHoldStatus {
             gesture: key.gesture,
             status,
@@ -243,6 +265,7 @@ impl Brain {
             } => {
                 let key = key(*gesture);
                 if gesture.0 <= self.holds.high {
+                    tracing::debug!(stage = ?FailureStage::Admission, reason = ?Refusal::StaleGesture, "held speech input refused");
                     return Ok(true);
                 }
                 self.holds.high = gesture.0;
@@ -251,6 +274,7 @@ impl Brain {
                     return Ok(true);
                 }
                 if self.holds.debt.is_some_and(|debt| debt.epoch != self.epoch) {
+                    tracing::warn!(stage = ?FailureStage::ReleaseDebt, reason = ?HoldFailure::Unavailable, "held speech input failed");
                     Self::hold_status(key, HoldStatus::Failed(HoldFailure::Unavailable), link)?;
                     return Ok(true);
                 }
@@ -263,6 +287,7 @@ impl Brain {
                 }
                 let (state, _) = self.hold_voice();
                 if !matches!(state, PartState::Ready | PartState::Loading) {
+                    tracing::warn!(stage = ?FailureStage::VoiceAvailability, reason = ?state, "held speech input failed");
                     let failure = if state == PartState::Unavailable {
                         HoldFailure::Unavailable
                     } else {
@@ -381,6 +406,7 @@ impl Brain {
         link: &mut Link<'_, '_>,
     ) -> Result<(), Full> {
         let Some(hold) = self.holds.pending.as_mut().filter(|hold| hold.key == key) else {
+            tracing::debug!(stage = ?FailureStage::Preparation, reason = ?Refusal::StaleCompletion, "held speech input refused");
             return Ok(());
         };
         if Instant::now() >= hold.deadline {
@@ -388,7 +414,10 @@ impl Brain {
         }
         match result {
             Ok(snapshot) if !hold.cancel.load(Ordering::SeqCst) => hold.snapshot = Some(snapshot),
-            _ => return self.hold_end(HoldStatus::Failed(HoldFailure::ChoiceChanged), link),
+            _ => {
+                tracing::debug!(stage = ?FailureStage::Preparation, reason = ?Refusal::ReadOrCancellation, "held speech input refused");
+                return self.hold_end(HoldStatus::Failed(HoldFailure::ChoiceChanged), link);
+            }
         }
         hold.deadline = Instant::now() + crate::speech::DEADLINES.load;
         self.hold_voice_changed(link)
@@ -416,6 +445,7 @@ impl Brain {
             return Ok(());
         }
         if state != PartState::Ready {
+            tracing::warn!(stage = ?FailureStage::VoiceAvailability, reason = ?state, "held speech input failed");
             let failure = if state == PartState::Unavailable {
                 HoldFailure::Unavailable
             } else {
@@ -511,6 +541,7 @@ impl Brain {
                 .as_ref()
                 .is_none_or(|hold| hold.key != *key)
         {
+            tracing::debug!(stage = ?FailureStage::Decode, reason = ?Refusal::StaleCompletion, "held speech input refused");
             return Ok(());
         }
         if self
@@ -583,7 +614,8 @@ impl Brain {
             Event::Decoded(_, SttResult::NotLoaded | SttResult::Stale) => {
                 self.hold_end(HoldStatus::Failed(HoldFailure::NotLoaded), link)
             }
-            Event::Decoded(_, SttResult::Failed(_)) => {
+            Event::Decoded(_, SttResult::Failed(reason)) => {
+                tracing::warn!(stage = ?FailureStage::Decode, ?reason, "held speech input failed");
                 self.hold_end(HoldStatus::Failed(HoldFailure::DecodeFailed), link)
             }
         }

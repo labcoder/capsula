@@ -9,6 +9,18 @@ Voice is optional. A user installs two parts separately, and each runs locally i
 
 Sizes are decimal megabytes of the exact bytes installed.
 
+Hold-to-talk failures log a closed stage and reason at shell admission, capture completion,
+and brain hold status/decode boundaries. These diagnostics contain no audio, recognized text,
+gesture/session identifiers, device names, paths or foreign error text. A microphone receipt
+distinguishes unsupported/unavailable input from discontinuity, capacity and cleanup failures;
+the generic user-facing notice does not identify the failed boundary by itself.
+Debug builds also record the chord/hold, deferred delivery and stale-admission boundaries,
+including a chord suppressed by outstanding key state. They never record key identities or
+ordinary typing. Native keyboard registration and capture start remain separate boundaries.
+The native gesture deadline records arming and delivery independently, so a delayed deadline
+can be distinguished from an admission refusal. Capture receipts distinguish unreliable driver
+timestamps from discontinuous audio; both still fail closed after releasing the native buffer.
+
 ## The manifest
 
 `kumochi_protocol::voice` is the only list of voice files. Each model file has an immutable

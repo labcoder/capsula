@@ -58,6 +58,8 @@ pub(crate) enum MicError {
     Format,
     #[error("microphone data is discontinuous")]
     Discontinuity,
+    #[error("microphone timestamp is unreliable")]
+    Timestamp,
     #[error("microphone capacity exceeded")]
     Overflow,
     #[error("microphone shutdown is unconfirmed")]

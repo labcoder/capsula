@@ -15,7 +15,7 @@ use gpui_kit::{AnyWindowHandle, App, AppContext as _, AsyncApp, WeakEntity};
 use super::{Presence, voice::Stamp};
 use crate::input::{
     Edge, Event, Gesture, Key,
-    hold::{Delivery, Fence, Intent},
+    hold::{Delivery, Fence, InputReason, InputStage, Intent},
 };
 use crate::link::LinkHandle;
 use crate::platform::{Deliver, EventTime, performance_counter};
@@ -63,7 +63,10 @@ pub(super) fn deliver(
             loop {
                 match apply(cx, dock, &owner, &pending) {
                     Applied::Yes => break,
-                    Applied::Gone => return,
+                    Applied::Gone => {
+                        tracing::debug!(stage = ?InputStage::Delivery, reason = ?InputReason::OwnerGone, "held speech input boundary");
+                        return;
+                    }
                     Applied::Busy => cx.background_executor().timer(RETRY).await,
                 }
             }
@@ -77,6 +80,7 @@ pub(super) fn deliver(
     let escape_down = Cell::new(false);
     Box::new(move |event, at| {
         let Ok(qpc) = u64::try_from(performance_counter()) else {
+            tracing::warn!(stage = ?InputStage::Delivery, reason = ?InputReason::ClockUnavailable, "held speech input failed");
             link.cancel_input();
             let mut state = gesture.get();
             let _cancelled = fence
@@ -163,10 +167,11 @@ pub(super) fn deliver(
             return state.deadline();
         }
         backlog.set(backlog.get() + 1);
+        tracing::debug!(stage = ?InputStage::Delivery, reason = ?InputReason::Deferred, "held speech input boundary");
         if deferred.try_send(pending).is_err() {
             link.cancel_input();
             backlog.set(backlog.get() - 1);
-            tracing::debug!("presence closed; gesture effects dropped");
+            tracing::debug!(stage = ?InputStage::Delivery, reason = ?InputReason::QueueClosed, "held speech input boundary");
         }
         state.deadline()
     })

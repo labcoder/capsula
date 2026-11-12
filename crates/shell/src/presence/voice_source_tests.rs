@@ -12,6 +12,265 @@ use crate::link::{Batch, LinkEvent};
 use crate::platform::microphone::{MicError, Running};
 use crate::platform::{Deliver, EventTime};
 
+#[derive(Clone, Default)]
+struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn capture() -> (
+    Captured,
+    tracing::subscriber::DefaultGuard,
+    tracing::Dispatch,
+) {
+    let captured = Captured::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(move || writer.clone())
+        .finish();
+    let second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let logging = tracing::subscriber::set_default(subscriber);
+    (captured, logging, second)
+}
+
+#[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one captured log checks the independent capture and brain failure boundaries"
+)]
+fn hold_failures_log_closed_stages_and_reasons_without_user_content(cx: &mut TestAppContext) {
+    cx.background_executor.allow_parking();
+    let (captured, _logging, _second) = capture();
+    for (worker, error) in [
+        (false, MicError::Unavailable),
+        (true, MicError::Format),
+        (true, MicError::Deadline),
+        (true, MicError::Stale),
+        (true, MicError::Discontinuity),
+        (true, MicError::Timestamp),
+        (true, MicError::Overflow),
+        (true, MicError::Unconfirmed),
+    ] {
+        let (owner, data, _controls) = ready(cx);
+        hold(&owner, 1, cx);
+        owner.update(cx, |owner, _| {
+            owner.voice.start = Some(Box::new(move |token, session| {
+                if worker {
+                    MicOwner::start_with(token, session, move |_, _, _, _| {
+                        if error == MicError::Unconfirmed {
+                            Err(error)
+                        } else {
+                            Ok(Finalization::Discarded(error))
+                        }
+                    })
+                } else {
+                    Err(error)
+                }
+            }));
+        });
+        status(&owner, 1, 1, HoldStatus::Admitted, cx);
+        until(cx, |cx| {
+            owner.read_with(cx, |owner, _| {
+                if error == MicError::Unconfirmed {
+                    owner
+                        .voice
+                        .pending
+                        .as_ref()
+                        .is_some_and(|hold| hold.terminal == Some(Text::HoldUnavailable))
+                } else {
+                    owner.voice.pending.is_none()
+                }
+            })
+        });
+        assert!(data.is_empty());
+    }
+    let (owner, _data, _controls) = ready(cx);
+    let (_, stamp) = hold(&owner, 1, cx);
+    owner.update(cx, |owner, cx| {
+        owner.voice_intent(Intent::Unavailable, stamp, 0, cx)
+    });
+    for reason in [
+        HoldFailure::NotLoaded,
+        HoldFailure::Busy,
+        HoldFailure::Unavailable,
+        HoldFailure::InvalidAudio,
+        HoldFailure::TooLong,
+        HoldFailure::TimedOut,
+        HoldFailure::ChoiceChanged,
+        HoldFailure::DecodeFailed,
+    ] {
+        let (owner, _data, _controls) = ready(cx);
+        hold(&owner, 1, cx);
+        status(&owner, 1, 1, HoldStatus::Failed(reason), cx);
+    }
+    let bytes = captured.0.lock().unwrap();
+    let text = std::str::from_utf8(&bytes).unwrap();
+    let diagnostics = text
+        .lines()
+        .filter_map(|line| {
+            line.split("held speech input failed ")
+                .nth(1)
+                .or_else(|| line.split("held speech input ended ").nth(1))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        diagnostics,
+        [
+            "stage=CaptureStart reason=Unavailable",
+            "stage=CaptureReceipt reason=Format",
+            "stage=CaptureReceipt reason=Deadline",
+            "stage=CaptureReceipt reason=Stale",
+            "stage=CaptureReceipt reason=Discontinuity",
+            "stage=CaptureReceipt reason=Timestamp",
+            "stage=CaptureReceipt reason=Overflow",
+            "stage=CaptureReceipt reason=Unconfirmed",
+            "stage=Input reason=GestureUnavailable",
+            "stage=Brain reason=NotLoaded",
+            "stage=Brain reason=Busy",
+            "stage=Brain reason=Unavailable",
+            "stage=Brain reason=InvalidAudio",
+            "stage=Brain reason=TooLong",
+            "stage=Brain reason=TimedOut",
+            "stage=Brain reason=ChoiceChanged",
+            "stage=Brain reason=DecodeFailed",
+        ]
+    );
+}
+
+#[gpui::test]
+fn silent_hold_admission_exits_report_why_without_identifiers(cx: &mut TestAppContext) {
+    let (captured, _logging, _second) = capture();
+    for cut in 0..5 {
+        let (owner, _data, _controls) = ready(cx);
+        owner.update(cx, |owner, cx| {
+            let token = owner.link.microphone_gate().arm(GestureId(7)).unwrap();
+            owner.link.track_input(GestureId(7));
+            let mut stamp = Stamp {
+                target: owner.voice.target.get(),
+                session: 1,
+                choice: owner.link.choice_revision(),
+            };
+            match cut {
+                0 => owner.session = None,
+                1 => stamp.session = 2,
+                2 => owner.link.clear_input(GestureId(7)),
+                3 => owner.link.microphone_gate().release(GestureId(7)),
+                4 => {
+                    owner.runs.disconnected();
+                    stamp.target = (owner.runs.thread(), owner.runs.revision());
+                }
+                _ => unreachable!("five admission cuts"),
+            }
+            owner.voice_intent(
+                Intent::Recognized {
+                    gesture: GestureId(7),
+                    generation: Ok(token),
+                },
+                stamp,
+                0,
+                cx,
+            );
+            assert!(owner.voice.pending.is_none());
+        });
+    }
+    let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    let diagnostics = text
+        .lines()
+        .filter_map(|line| {
+            line.split("held speech input refused ")
+                .nth(1)
+                .or_else(|| line.split("held speech input failed ").nth(1))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        diagnostics,
+        [
+            "stage=Admission reason=NoSession",
+            "stage=Admission reason=StaleContext",
+            "stage=Admission reason=InputFence",
+            "stage=Admission reason=GenerationNotPreparing",
+            "stage=Admission reason=Offline",
+        ]
+    );
+}
+
+#[gpui::test]
+fn blocked_hold_chords_and_refused_collection_arms_log_no_key_codes(cx: &mut TestAppContext) {
+    let (captured, _logging, _second) = capture();
+    let (owner, _data, controls) = ready(cx);
+    let deliver = native(&owner, cx);
+    let at = Instant::now();
+    deliver(
+        Event::Key {
+            key: Key::Other(42),
+            edge: Edge::Down,
+        },
+        EventTime { instant: at },
+    );
+    chord(&deliver, Edge::Down, at);
+    deliver(
+        Event::Deadline,
+        EventTime {
+            instant: at + Duration::from_millis(301),
+        },
+    );
+    cx.run_until_parked();
+    assert!(controls.is_empty());
+    owner.read_with(cx, |owner, _| assert!(owner.voice.pending.is_none()));
+    let (owner, _data, controls) = ready(cx);
+    owner.read_with(cx, |owner, _| {
+        owner.link.microphone_gate().arm(GestureId(7)).unwrap();
+    });
+    let deliver = native(&owner, cx);
+    chord(&deliver, Edge::Down, at);
+    deliver(
+        Event::Deadline,
+        EventTime {
+            instant: at + Duration::from_millis(301),
+        },
+    );
+    cx.run_until_parked();
+    assert!(matches!(
+        controls.try_recv().unwrap(),
+        ControlToBrain::KeyDown { .. }
+    ));
+    assert!(controls.is_empty());
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.voice.status, Some(Text::TurnBusy))
+    });
+    let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    let diagnostics = text
+        .lines()
+        .filter_map(|line| {
+            line.split("held speech input boundary ")
+                .nth(1)
+                .or_else(|| line.split("held speech input refused ").nth(1))
+                .or_else(|| line.split("held speech input failed ").nth(1))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        diagnostics,
+        [
+            "stage=Gesture reason=ChordSuppressed",
+            "stage=Gesture reason=ChordStarted",
+            "stage=Gesture reason=HoldRecognized",
+            "stage=Gesture reason=Stale",
+            "stage=Admission reason=Stale",
+        ]
+    );
+}
+
 fn native(owner: &Entity<Presence>, cx: &mut TestAppContext) -> Deliver {
     let weak = owner.downgrade();
     owner.update(cx, |owner, cx| {
@@ -30,6 +289,80 @@ fn chord(deliver: &Deliver, edge: Edge, at: Instant) {
     for key in [Key::LeftControl, Key::LeftAlt] {
         deliver(Event::Key { key, edge }, EventTime { instant: at });
     }
+}
+
+#[gpui::test]
+fn a_successful_drawing_and_focus_keep_the_next_native_hold_admissible(cx: &mut TestAppContext) {
+    let (owner, _data, controls) = ready(cx);
+    let deliver = native(&owner, cx);
+    owner.update(cx, |owner, cx| {
+        assert!(owner.runs.select_thread(None));
+        owner.runs.submit("draw a shape", |_| true).unwrap();
+        owner
+            .link_events(
+                Batch::Plain(vec![
+                    LinkEvent::RunState {
+                        generation: 1,
+                        run: RunId(1),
+                        thread: ThreadId(9),
+                        phase: Phase::Thinking,
+                        error: None,
+                        origin: Some(RunOrigin::Typed { turn: 1 }),
+                    },
+                    LinkEvent::Focus {
+                        generation: 1,
+                        run: RunId(1),
+                        thread: ThreadId(9),
+                    },
+                    LinkEvent::RunState {
+                        generation: 1,
+                        run: RunId(1),
+                        thread: ThreadId(9),
+                        phase: Phase::Done,
+                        error: None,
+                        origin: Some(RunOrigin::Typed { turn: 1 }),
+                    },
+                ]),
+                cx,
+            )
+            .unwrap();
+        owner.presenter =
+            crate::presenter::tests::painter_fixture(Box::new(crate::presenter::tests::Charged(0)))
+                .0;
+        owner.presenter.frames().borrow_mut().shown = true;
+        owner.runs_changed(cx).unwrap();
+        assert!(owner.activity.drawing);
+        assert_eq!(owner.runs.thread(), Some(ThreadId(9)));
+    });
+    let at = Instant::now();
+    chord(&deliver, Edge::Down, at);
+    deliver(
+        Event::Deadline,
+        EventTime {
+            instant: at + Duration::from_millis(301),
+        },
+    );
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.voice.status, Some(Text::HoldPreparing));
+        assert!(owner.voice.pending.is_some());
+    });
+    assert!(matches!(
+        controls.try_recv().unwrap(),
+        ControlToBrain::KeyDown {
+            gesture: GestureId(1),
+            ..
+        }
+    ));
+    assert_eq!(
+        controls.try_recv().unwrap(),
+        ControlToBrain::VoiceHoldRecognized {
+            gesture: GestureId(1),
+            thread: Some(ThreadId(9)),
+            selection: 3,
+        }
+    );
+    assert!(controls.is_empty());
 }
 
 #[gpui::test]

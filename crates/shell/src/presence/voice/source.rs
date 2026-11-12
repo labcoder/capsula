@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use kumochi_protocol::message::{ControlToBrain, DataToBrain, HOLD_DRAIN_TIMEOUT_MS};
 use zeroize::Zeroize as _;
 
-use super::{Context, Presence, Source};
+use super::{Context, FailureReason, FailureStage, Presence, Source};
 use crate::platform::microphone::{Finalization, MicOwner, Mode, StopReason};
 use crate::strings::Text;
 
@@ -19,6 +19,7 @@ impl Presence {
             || !self.link.input_is(hold.token.gesture())
             || hold.token.mode(&hold.session.alive(), Instant::now()) != Ok(Mode::Preparing)
         {
+            tracing::debug!(stage = ?FailureStage::CaptureStart, reason = ?FailureReason::StaleContext, "held speech input refused");
             self.end_voice(Text::HoldCancelled, cx);
             return;
         }
@@ -30,9 +31,13 @@ impl Presence {
         };
         #[cfg(not(test))]
         let source = MicOwner::start(token.clone(), session.alive());
-        let Ok(mut mic) = source else {
-            self.end_voice(Text::HoldMicrophoneUnavailable, cx);
-            return;
+        let mut mic = match source {
+            Ok(mic) => mic,
+            Err(reason) => {
+                tracing::warn!(stage = ?FailureStage::CaptureStart, ?reason, "held speech input failed");
+                self.end_voice(Text::HoldMicrophoneUnavailable, cx);
+                return;
+            }
         };
         self.voice.pending.as_mut().expect("admitted hold").source = Source::Recording;
         let link = self.link.clone();
@@ -77,6 +82,7 @@ impl Presence {
                 .unwrap_or(false)
             });
             if running.is_ok_and(|running| !accepted || mic.accept_running(running).is_err()) {
+                tracing::debug!(stage = ?FailureStage::CaptureStart, reason = ?FailureReason::RunningRejected, "held speech input refused");
                 mic.stop(StopReason::Cancel);
                 let _applied = this.update(cx, |this, cx| {
                     if this
@@ -126,6 +132,7 @@ impl Presence {
             if receipt.is_ok()
                 && !link.send_control(&session, ControlToBrain::VoiceHoldStopped { gesture })
             {
+                tracing::warn!(stage = ?FailureStage::CaptureReceipt, reason = ?FailureReason::StopSend, "held speech input failed");
                 link.end(&session);
             }
             let _applied = this.update(cx, |this, cx| {
@@ -135,10 +142,20 @@ impl Presence {
                     .as_mut()
                     .filter(|h| h.token.gesture() == gesture)
                 else {
+                    tracing::debug!(stage = ?FailureStage::CaptureReceipt, reason = ?FailureReason::StaleReceipt, "held speech input refused");
                     return;
                 };
                 match receipt {
                     Ok(receipt) => {
+                        match receipt.finalization {
+                            Finalization::Discarded(reason) => {
+                                tracing::warn!(stage = ?FailureStage::CaptureReceipt, ?reason, "held speech input ended");
+                            }
+                            Finalization::Released { packets } if packets != count => {
+                                tracing::warn!(stage = ?FailureStage::CaptureReceipt, reason = ?FailureReason::PacketCountMismatch, "held speech input failed");
+                            }
+                            Finalization::Released { .. } => {}
+                        }
                         let notice = match receipt.finalization {
                             Finalization::Discarded(
                                 crate::platform::microphone::MicError::Cancelled
@@ -169,7 +186,10 @@ impl Presence {
                             this.end_voice(notice, cx);
                         }
                     }
-                    Err(_) => this.end_voice(Text::HoldUnavailable, cx),
+                    Err(reason) => {
+                        tracing::warn!(stage = ?FailureStage::CaptureReceipt, ?reason, "held speech input failed");
+                        this.end_voice(Text::HoldUnavailable, cx);
+                    }
                 }
             });
         })

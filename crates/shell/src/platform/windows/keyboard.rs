@@ -27,6 +27,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::presence::{PresenceError, struct_size};
+use crate::input::hold::{InputReason, InputStage};
 use crate::input::{Edge, Event, Key};
 
 /// The proxy's only timer: the gesture's next one-shot deadline.
@@ -87,6 +88,7 @@ impl Keys {
             // A stale or early WM_TIMER is harmless: the gesture ignores a deadline it hasn't
             // reached and returns the remaining one, which is armed again below.
             WM_TIMER if wparam.0 == DEADLINE_TIMER => {
+                tracing::debug!(stage = ?InputStage::Native, reason = ?InputReason::DeadlineDelivered, "held speech input boundary");
                 self.disarm(hwnd);
                 Event::Deadline
             }
@@ -103,6 +105,15 @@ impl Keys {
             // `at` stays the event's time; the timer counts from now, since delivery takes time.
             let deadline = deliver(event, at);
             self.arm(hwnd, deadline, Instant::now());
+        } else if matches!(
+            event,
+            Event::Deadline
+                | Event::Key {
+                    key: Key::LeftControl | Key::LeftAlt,
+                    ..
+                }
+        ) {
+            tracing::warn!(stage = ?InputStage::Native, reason = ?InputReason::CallbackMissing, "held speech input failed");
         }
         message == WM_TIMER
             || message == DESKTOP_SWITCHED
@@ -122,10 +133,12 @@ impl Keys {
         let millis = u32::try_from(millis).unwrap_or(u32::MAX).max(1);
         // SAFETY: `hwnd` is the proxy on this thread; replacing the same id rearms it.
         if unsafe { SetTimer(Some(hwnd), DEADLINE_TIMER, millis, None) } == 0 {
-            tracing::warn!("can't arm the gesture deadline");
+            tracing::warn!(stage = ?InputStage::Native, reason = ?InputReason::DeadlineArm, "held speech input failed");
             return;
         }
-        self.deadline.set(Some(deadline));
+        if self.deadline.replace(Some(deadline)) != Some(deadline) {
+            tracing::debug!(stage = ?InputStage::Native, reason = ?InputReason::DeadlineArmed, "held speech input boundary");
+        }
     }
 
     fn disarm(&self, hwnd: HWND) {
@@ -147,15 +160,21 @@ impl Keys {
 /// Fails when it was already armed or Windows refuses Raw Input or a watcher.
 pub(super) fn arm(hwnd: HWND, keys: &Keys, deliver: Deliver) -> Result<(), PresenceError> {
     if keys.deliver.get().is_some() {
+        tracing::warn!(stage = ?InputStage::Native, reason = ?InputReason::AlreadyArmed, "held speech input failed");
         return Err(PresenceError::KeyboardArmed);
     }
     if let Err(error) = watch(hwnd, keys) {
         disarm(hwnd, keys);
         return Err(error);
     }
-    keys.deliver
+    let armed = keys
+        .deliver
         .set(deliver)
-        .map_err(|_| PresenceError::KeyboardArmed)
+        .map_err(|_| PresenceError::KeyboardArmed);
+    if armed.is_ok() {
+        tracing::info!(stage = ?InputStage::Native, reason = ?InputReason::Armed, "held speech input boundary");
+    }
+    armed
 }
 
 fn watch(hwnd: HWND, keys: &Keys) -> Result<(), PresenceError> {
@@ -166,9 +185,11 @@ fn watch(hwnd: HWND, keys: &Keys) -> Result<(), PresenceError> {
         hwndTarget: hwnd,
     };
     // SAFETY: one valid device record for this thread's live window.
-    unsafe { RegisterRawInputDevices(&[device], struct_size::<RAWINPUTDEVICE>()) }?;
+    unsafe { RegisterRawInputDevices(&[device], struct_size::<RAWINPUTDEVICE>()) }
+        .inspect_err(|_| tracing::warn!(stage = ?InputStage::Native, reason = ?InputReason::RawInputRegistration, "held speech input failed"))?;
     // SAFETY: `hwnd` is live; the proxy unregisters it before it's destroyed.
     unsafe { WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) }
+        .inspect_err(|_| tracing::warn!(stage = ?InputStage::Native, reason = ?InputReason::SessionWatcher, "held speech input failed"))
         .map_err(PresenceError::SessionWatch)?;
     keys.sessions.set(true);
     PROXY.set(hwnd);
@@ -185,6 +206,7 @@ fn watch(hwnd: HWND, keys: &Keys) -> Result<(), PresenceError> {
         )
     };
     if hook.is_invalid() {
+        tracing::warn!(stage = ?InputStage::Native, reason = ?InputReason::DesktopWatcher, "held speech input failed");
         return Err(PresenceError::DesktopWatch);
     }
     keys.desktop.set(Some(hook));
@@ -302,7 +324,11 @@ fn read_key(lparam: LPARAM) -> Option<Event> {
             struct_size::<RAWINPUTHEADER>(),
         )
     };
-    if read == u32::MAX || raw.header.dwType != RIM_TYPEKEYBOARD.0 {
+    if read == u32::MAX {
+        tracing::warn!(stage = ?InputStage::Native, reason = ?InputReason::RawInputRead, "held speech input failed");
+        return None;
+    }
+    if raw.header.dwType != RIM_TYPEKEYBOARD.0 {
         return None;
     }
     // SAFETY: the header says this record is a keyboard one.

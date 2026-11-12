@@ -12,6 +12,99 @@ const KEY: HoldKey = HoldKey {
     gesture: GestureId(9),
 };
 
+#[test]
+fn failed_hold_status_logs_only_closed_reason_without_identifiers() {
+    let captured = test_support::Captured::default();
+    let _logging = captured.install();
+    let (out, mut output) = mpsc::channel(8);
+    let queue = RefCell::new(DataQueue::new(0));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    for reason in [
+        HoldFailure::NotLoaded,
+        HoldFailure::Busy,
+        HoldFailure::Unavailable,
+        HoldFailure::InvalidAudio,
+        HoldFailure::TooLong,
+        HoldFailure::TimedOut,
+        HoldFailure::ChoiceChanged,
+        HoldFailure::DecodeFailed,
+    ] {
+        Brain::hold_status(KEY, HoldStatus::Failed(reason), &mut link).unwrap();
+        assert_eq!(status(&mut output), HoldStatus::Failed(reason));
+    }
+    let text = captured.text();
+    let reasons = [
+        "NotLoaded",
+        "Busy",
+        "Unavailable",
+        "InvalidAudio",
+        "TooLong",
+        "TimedOut",
+        "ChoiceChanged",
+        "DecodeFailed",
+    ];
+    let diagnostics = text.lines().collect::<Vec<_>>();
+    assert_eq!(diagnostics.len(), reasons.len());
+    for (line, reason) in diagnostics.iter().zip(reasons) {
+        let message = line.split("held speech input failed ").nth(1).unwrap();
+        assert_eq!(message, format!("stage=Status reason={reason}"));
+    }
+}
+
+#[tokio::test]
+async fn stale_recognition_and_failed_preparation_log_fixed_refusals() {
+    let scratch = Scratch::new("hold-refusal-diagnostics");
+    let mut brain = test_support::brain(&scratch, "");
+    let captured = test_support::Captured::default();
+    let _logging = captured.install();
+    let (out, mut output) = mpsc::channel(8);
+    let queue = RefCell::new(DataQueue::new(0));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    brain.holds.high = KEY.gesture.0;
+    brain
+        .hold_control(
+            &ControlToBrain::VoiceHoldRecognized {
+                gesture: KEY.gesture,
+                thread: None,
+                selection: 1,
+            },
+            &mut link,
+        )
+        .unwrap();
+    assert!(output.is_empty());
+    brain.hold_prepared(KEY, Err(()), &mut link).unwrap();
+    assert!(output.is_empty());
+    recording(&mut brain);
+    brain.hold_prepared(KEY, Err(()), &mut link).unwrap();
+    assert_eq!(
+        status(&mut output),
+        HoldStatus::Failed(HoldFailure::ChoiceChanged)
+    );
+    let text = captured.text();
+    let diagnostics = text
+        .lines()
+        .filter_map(|line| {
+            line.split("held speech input refused ")
+                .nth(1)
+                .or_else(|| line.split("held speech input failed ").nth(1))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        diagnostics,
+        [
+            "stage=Admission reason=StaleGesture",
+            "stage=Preparation reason=StaleCompletion",
+            "stage=Preparation reason=ReadOrCancellation",
+            "stage=Status reason=ChoiceChanged",
+        ]
+    );
+    brain.close().await;
+}
+
 #[tokio::test]
 async fn hold_to_talk_off_refuses_before_admission() {
     let scratch = Scratch::new("hold-disabled");

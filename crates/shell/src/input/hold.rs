@@ -5,6 +5,36 @@ use kumochi_protocol::message::GestureId;
 use super::{Effect, Event, Gesture, Key};
 use crate::platform::microphone::{CollectionGate, Generation, MicError};
 
+#[derive(Debug)]
+pub(crate) enum InputStage {
+    Native,
+    Gesture,
+    Delivery,
+}
+
+#[derive(Debug)]
+pub(crate) enum InputReason {
+    Armed,
+    AlreadyArmed,
+    RawInputRegistration,
+    SessionWatcher,
+    DesktopWatcher,
+    DeadlineArm,
+    DeadlineArmed,
+    DeadlineDelivered,
+    RawInputRead,
+    CallbackMissing,
+    ClockUnavailable,
+    ChordStarted,
+    ChordSuppressed,
+    HoldRecognized,
+    Interrupted,
+    Reset,
+    Deferred,
+    OwnerGone,
+    QueueClosed,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum Intent {
     Warm(GestureId),
@@ -64,13 +94,16 @@ impl Fence {
                     }
                     Some(self.current.map_or(Intent::Unavailable, Intent::Warm))
                 }
-                Some(Effect::HoldStarted) => Some(self.current.map_or(
-                    Intent::Unavailable,
-                    |gesture| Intent::Recognized {
-                        gesture,
-                        generation: self.gate.arm(gesture),
-                    },
-                )),
+                Some(Effect::HoldStarted) => {
+                    tracing::debug!(stage = ?InputStage::Gesture, reason = ?InputReason::HoldRecognized, "held speech input boundary");
+                    Some(self.current.map_or(Intent::Unavailable, |gesture| {
+                        let generation = self.gate.arm(gesture);
+                        if let Err(reason) = generation {
+                            tracing::warn!(stage = ?InputStage::Gesture, ?reason, "held speech input failed");
+                        }
+                        Intent::Recognized { gesture, generation }
+                    }))
+                }
                 Some(Effect::HoldEnded) => self.current.map(|gesture| {
                     if cancelled {
                         self.gate.cancel(gesture);

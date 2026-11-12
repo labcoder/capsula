@@ -14,6 +14,42 @@ use crate::strings::Text;
 
 mod source;
 
+#[derive(Debug)]
+enum FailureStage {
+    Input,
+    Admission,
+    CaptureStart,
+    CaptureReceipt,
+    Release,
+    Run,
+    Brain,
+    Notice,
+}
+
+#[derive(Debug)]
+enum FailureReason {
+    GestureUnavailable,
+    DismissPanels,
+    CancelDrain,
+    RecognitionSend,
+    PacketCountMismatch,
+    RunBeforeStop,
+    RunFailed,
+    NoSession,
+    PendingHold,
+    StaleContext,
+    InputFence,
+    GenerationNotPreparing,
+    NoPendingHold,
+    StaleStatus,
+    TerminalStatus,
+    RunningRejected,
+    WarmSend,
+    StopSend,
+    ReleaseSend,
+    StaleReceipt,
+}
+
 #[cfg(test)]
 use crate::platform::microphone::{Finalization, MicOwner};
 #[cfg(test)]
@@ -94,6 +130,7 @@ impl Presence {
             return;
         };
         if !matches!(hold.source, Source::Sent) {
+            tracing::warn!(stage = ?FailureStage::Run, reason = ?FailureReason::RunBeforeStop, "held speech input failed");
             self.end_voice(Text::HoldFailed, cx);
             if let Some(session) = &self.session {
                 self.link.end(session);
@@ -114,7 +151,10 @@ impl Presence {
                 self.voice.status = None;
                 self.refresh_dock(cx);
             }
-            Phase::Failed => self.end_voice(Text::HoldFailed, cx),
+            Phase::Failed => {
+                tracing::warn!(stage = ?FailureStage::Run, reason = ?FailureReason::RunFailed, "held speech input failed");
+                self.end_voice(Text::HoldFailed, cx);
+            }
             Phase::Interrupted => self.end_voice(Text::HoldCancelled, cx),
             _ => {}
         }
@@ -129,6 +169,7 @@ impl Presence {
     }
 
     fn voice_notice(&mut self, text: Text, cx: &mut Context<'_, Self>) {
+        tracing::debug!(stage = ?FailureStage::Notice, reason = ?text, "held speech input notice");
         self.voice.status = Some(text);
         self.refresh_dock(cx);
         if self
@@ -149,6 +190,7 @@ impl Presence {
                 },
             )
         {
+            tracing::warn!(stage = ?FailureStage::Release, reason = ?FailureReason::StopSend, "held speech input failed");
             self.link.end(session);
         }
     }
@@ -158,6 +200,7 @@ impl Presence {
             self.session.as_ref().is_some_and(|s| {
                 let sent = self.link.send_control(s, message);
                 if !sent {
+                    tracing::warn!(stage = ?FailureStage::Release, reason = ?FailureReason::CancelDrain, "held speech input failed");
                     self.link.end(s);
                 }
                 sent
@@ -219,7 +262,8 @@ impl Presence {
     ) {
         match intent {
             Intent::Warm(gesture) => {
-                if self.settings.read(cx).hold_to_talk_notice().is_some() {
+                if let Some(reason) = self.settings.read(cx).hold_to_talk_notice() {
+                    tracing::debug!(stage = ?FailureStage::Admission, ?reason, "held speech input refused");
                     return;
                 }
                 if let Some(session) = self
@@ -227,13 +271,17 @@ impl Presence {
                     .as_ref()
                     .filter(|s| s.generation() == stamp.session)
                 {
-                    self.link.send_control(
+                    if !self.link.send_control(
                         session,
                         ControlToBrain::KeyDown {
                             gesture,
                             t_qpc: qpc,
                         },
-                    );
+                    ) {
+                        tracing::debug!(stage = ?FailureStage::Admission, reason = ?FailureReason::WarmSend, "held speech input refused");
+                    }
+                } else {
+                    tracing::debug!(stage = ?FailureStage::Admission, reason = ?FailureReason::NoSession, "held speech input refused");
                 }
             }
             Intent::Recognized {
@@ -249,6 +297,7 @@ impl Presence {
                     .as_mut()
                     .filter(|hold| hold.token.gesture() == gesture)
                 else {
+                    tracing::debug!(stage = ?FailureStage::Release, reason = ?FailureReason::NoPendingHold, "held speech input refused");
                     return;
                 };
                 if cancelled || self.voice.status != Some(Text::HoldListening) {
@@ -259,10 +308,17 @@ impl Presence {
                     self.finish_voice();
                 }
             }
-            Intent::Unavailable => self.voice_notice(Text::HoldFailed, cx),
+            Intent::Unavailable => {
+                tracing::warn!(stage = ?FailureStage::Input, reason = ?FailureReason::GestureUnavailable, "held speech input failed");
+                self.voice_notice(Text::HoldFailed, cx);
+            }
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "admission keeps each fixed refusal diagnostic beside its cleanup"
+    )]
     fn recognize_voice(
         &mut self,
         gesture: GestureId,
@@ -271,6 +327,9 @@ impl Presence {
         cx: &mut Context<'_, Self>,
     ) {
         let Ok(token) = generation else {
+            if let Err(reason) = generation {
+                tracing::warn!(stage = ?FailureStage::Admission, ?reason, "held speech input refused");
+            }
             let notice = if self.voice.status == Some(Text::HoldUnavailable) {
                 Text::HoldUnavailable
             } else {
@@ -280,6 +339,7 @@ impl Presence {
             return;
         };
         if let Some(notice) = self.settings.read(cx).hold_to_talk_notice() {
+            tracing::debug!(stage = ?FailureStage::Admission, reason = ?notice, "held speech input refused");
             if let Some(session) = &self.session {
                 self.unused_voice(&token, session);
             } else if token.discard_unstarted().is_err() {
@@ -295,6 +355,7 @@ impl Presence {
             self.end_voice(Text::HoldCancelled, cx);
         }
         let Some(session) = self.session.clone() else {
+            tracing::debug!(stage = ?FailureStage::Admission, reason = ?FailureReason::NoSession, "held speech input refused");
             if token.discard_unstarted().is_err() {
                 self.link.microphone_gate().cancel(gesture);
             }
@@ -307,16 +368,25 @@ impl Presence {
             .and_then(|()| self.dismiss_text(cx))
             .is_err()
         {
+            tracing::warn!(stage = ?FailureStage::Admission, reason = ?FailureReason::DismissPanels, "held speech input failed");
             self.unused_voice(&token, &session);
             self.link.clear_input(gesture);
             self.voice_notice(Text::HoldFailed, cx);
             return;
         }
-        if self.voice.pending.is_some()
-            || !self.voice_current(stamp)
-            || !self.link.input_is(gesture)
-            || token.mode(&session.alive(), Instant::now()) != Ok(Mode::Preparing)
-        {
+        let refused = if self.voice.pending.is_some() {
+            Some(FailureReason::PendingHold)
+        } else if !self.voice_current(stamp) {
+            Some(FailureReason::StaleContext)
+        } else if !self.link.input_is(gesture) {
+            Some(FailureReason::InputFence)
+        } else if token.mode(&session.alive(), Instant::now()) != Ok(Mode::Preparing) {
+            Some(FailureReason::GenerationNotPreparing)
+        } else {
+            None
+        };
+        if let Some(reason) = refused {
+            tracing::debug!(stage = ?FailureStage::Admission, ?reason, "held speech input refused");
             self.unused_voice(&token, &session);
             self.link.clear_input(gesture);
             return;
@@ -327,10 +397,24 @@ impl Presence {
         } else {
             Text::HoldFailed
         };
-        if let Ok(request) = request
-            && self.drain_voice_cancel()
-            && self.link.send_control(&session, request)
-        {
+        let sent = match request {
+            Err(reason) => {
+                tracing::warn!(stage = ?FailureStage::Admission, ?reason, "held speech input failed");
+                false
+            }
+            Ok(_) if !self.drain_voice_cancel() => {
+                tracing::warn!(stage = ?FailureStage::Admission, reason = ?FailureReason::CancelDrain, "held speech input failed");
+                false
+            }
+            Ok(request) => {
+                let sent = self.link.send_control(&session, request);
+                if !sent {
+                    tracing::warn!(stage = ?FailureStage::Admission, reason = ?FailureReason::RecognitionSend, "held speech input failed");
+                }
+                sent
+            }
+        };
+        if sent {
             self.voice.pending = Some(Hold {
                 token,
                 stamp,
@@ -365,6 +449,7 @@ impl Presence {
                     chunks,
                 },
             ) {
+                tracing::warn!(stage = ?FailureStage::Release, reason = ?FailureReason::ReleaseSend, "held speech input failed");
                 self.link.end(&hold.session);
             }
         }
@@ -383,9 +468,11 @@ impl Presence {
             .as_ref()
             .filter(|h| h.stamp.session == generation && h.token.gesture() == gesture)
         else {
+            tracing::debug!(stage = ?FailureStage::Brain, reason = ?FailureReason::StaleStatus, "held speech input refused");
             return;
         };
         if hold.terminal.is_some() {
+            tracing::debug!(stage = ?FailureStage::Brain, reason = ?FailureReason::TerminalStatus, "held speech input refused");
             return;
         }
         match status {
@@ -397,17 +484,22 @@ impl Presence {
             HoldStatus::Transcribing => self.voice_notice(Text::HoldTranscribing, cx),
             HoldStatus::Empty => self.end_voice(Text::HoldEmpty, cx),
             HoldStatus::Cancelled => self.end_voice(Text::HoldCancelled, cx),
-            HoldStatus::Failed(reason) => self.end_voice(
-                match reason {
-                    HoldFailure::NotLoaded => match self.settings.read(cx).speech_input_status() {
-                        text @ (Text::VoiceNotInstalled | Text::VoiceUnloaded) => text,
-                        _ => Text::VoiceStatusUnknown,
+            HoldStatus::Failed(reason) => {
+                tracing::warn!(stage = ?FailureStage::Brain, ?reason, "held speech input failed");
+                self.end_voice(
+                    match reason {
+                        HoldFailure::NotLoaded => {
+                            match self.settings.read(cx).speech_input_status() {
+                                text @ (Text::VoiceNotInstalled | Text::VoiceUnloaded) => text,
+                                _ => Text::VoiceStatusUnknown,
+                            }
+                        }
+                        HoldFailure::Busy => Text::TurnBusy,
+                        _ => Text::HoldFailed,
                     },
-                    HoldFailure::Busy => Text::TurnBusy,
-                    _ => Text::HoldFailed,
-                },
-                cx,
-            ),
+                    cx,
+                );
+            }
         }
     }
 }

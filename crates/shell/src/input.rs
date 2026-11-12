@@ -115,6 +115,9 @@ impl Gesture {
 
     fn recognize(&mut self, event: Event, now: Instant) -> [Option<Effect>; 3] {
         if matches!(event, Event::Reset | Event::Escape) {
+            if !matches!(self.phase, Phase::Ready) {
+                tracing::debug!(stage = ?hold::InputStage::Gesture, reason = ?hold::InputReason::Reset, "held speech input boundary");
+            }
             let effects = self.cancel();
             self.reset();
             return effects;
@@ -133,6 +136,14 @@ impl Gesture {
         }
         let threshold = self.advance(now);
         self.down[index] = down;
+        if down && self.down == [true; 2] {
+            let reason = if matches!(self.phase, Phase::Ready) && self.other == [0; 16] {
+                hold::InputReason::ChordStarted
+            } else {
+                hold::InputReason::ChordSuppressed
+            };
+            tracing::debug!(stage = ?hold::InputStage::Gesture, ?reason, "held speech input boundary");
+        }
         if down
             && matches!(self.phase, Phase::Ready)
             && self.down == [true; 2]
@@ -177,6 +188,9 @@ impl Gesture {
     }
 
     fn other_key(&mut self, code: u16, edge: Edge) -> [Option<Effect>; 3] {
+        if edge == Edge::Down && matches!(self.phase, Phase::Active { .. }) {
+            tracing::debug!(stage = ?hold::InputStage::Gesture, reason = ?hold::InputReason::Interrupted, "held speech input boundary");
+        }
         if code >= 1024 {
             let effects = self.cancel();
             self.reset();
