@@ -53,6 +53,7 @@ pub(super) struct OnboardingView {
     plan: bool,
     _events: Vec<Subscription>,
     _watch: Subscription,
+    _focus_lost: Subscription,
 }
 
 impl OnboardingView {
@@ -111,6 +112,10 @@ impl OnboardingView {
             }
             cx.notify();
         });
+        let focus_lost = cx.on_focus_lost(window, |view, window, cx| {
+            super::settings::restore_lost_focus(&view.focus, window, cx);
+            cx.notify();
+        });
         Self {
             state,
             link: LinkState::Connected,
@@ -124,6 +129,7 @@ impl OnboardingView {
             plan: false,
             _events: subscriptions,
             _watch: watch,
+            _focus_lost: focus_lost,
         }
     }
 

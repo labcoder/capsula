@@ -4,8 +4,8 @@ Open the dock's **Settings…**, then **Accounts**. Choose **Continue with ChatG
 in using your browser. Finish there, then return to the app. **Cancel** stops waiting for the
 browser; once you've finished there, the sign-in completes even if you press Cancel.
 **Open again** replaces the waiting sign-in attempt. Closing Settings doesn't cancel it.
-Onboarding's account step offers the same buttons; closing that window cancels a sign-in it
-started that hasn't finished.
+Onboarding's account step offers the same sign-in buttons; closing that window cancels a
+sign-in it started that hasn't finished.
 
 The connected account shows its email, when provided, and **Using ChatGPT plan** when plan
 use is enabled. If plan use is off, **Enable** asks for permission in your browser. If the

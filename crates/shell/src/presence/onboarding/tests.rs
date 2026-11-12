@@ -1092,3 +1092,60 @@ fn a_refused_sign_in_opens_no_mark(cx: &mut TestAppContext) {
     escape(&owner, window, cx);
     assert_eq!(drain(&controls), []);
 }
+
+/// Tab and Enter on a section button replace it: focus must come back to the window, so Esc
+/// still dismisses it.
+#[gpui::test]
+fn esc_still_dismisses_after_enter_replaces_a_section_button(cx: &mut TestAppContext) {
+    let (owner, window, controls) = on_accounts(cx);
+    press(window, "tab tab enter", cx);
+    cx.run_until_parked();
+    assert!(
+        owner.read_with(cx, |owner, cx| owner
+            .settings
+            .read(cx)
+            .claude
+            .connect_screen),
+        "Enter reached Connect…"
+    );
+    escape(&owner, window, cx);
+    assert!(owner.read_with(cx, |owner, _| owner.onboarding.is_none()));
+    assert_eq!(drain(&controls), []);
+}
+
+#[gpui::test]
+fn esc_cancels_a_keyboard_started_sign_in_once_the_browser_waits(cx: &mut TestAppContext) {
+    let (owner, window, controls) = on_accounts(cx);
+    press(window, "tab enter", cx);
+    cx.run_until_parked();
+    assert_eq!(
+        drain(&controls),
+        [ControlToBrain::AccountOp(AccountOp::SignIn)]
+    );
+    account(&owner, 7, AccountView::SigningIn, cx);
+    escape(&owner, window, cx);
+    assert!(owner.read_with(cx, |owner, _| owner.onboarding.is_none()));
+    assert_eq!(
+        drain(&controls),
+        [ControlToBrain::AccountOp(AccountOp::CancelSignIn)]
+    );
+}
+
+/// Keys after a paint, so the window knows its tab stops.
+fn press(window: AnyWindowHandle, keys: &str, cx: &mut TestAppContext) {
+    let mut frame = VisualTestContext::from_window(window, cx);
+    frame.update(|window, cx| window.draw(cx).clear(cx));
+    for key in keys.split_whitespace() {
+        let keystroke = frame.update(|_, cx| {
+            gpui_kit::Keystroke::parse_with_os(key, cx.platform_info().os).expect("test key")
+        });
+        frame.simulate_event(gpui_kit::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        frame.simulate_event(gpui_kit::KeyUpEvent { keystroke });
+        frame.update(|window, cx| window.draw(cx).clear(cx));
+    }
+    frame.run_until_parked();
+}
