@@ -14,7 +14,8 @@ including others, title and alt, and use new step ids with set/remove for change
 For a new subject, use a new scene name; others defaults to clear, replacing this
 conversation's earlier drawings after the first step is saved. Use others: keep
 only for a separate comparison/accompanying drawing; kept drawings may overlap.
-If the list is empty, start a new name: cleared names cannot be reused.
+If a drawing is not listed, start a new scene with a fresh name every time:
+cleared names cannot be reused.
 Put a group's nodes in the
 same step as the group, since later growth does not move its siblings. Use a
 mermaid operation for labelled groups rather than fenced Mermaid in chat.
