@@ -19,7 +19,17 @@ including a chord suppressed by outstanding key state. They never record key ide
 ordinary typing. Native keyboard registration and capture start remain separate boundaries.
 The native gesture deadline records arming and delivery independently, so a delayed deadline
 can be distinguished from an admission refusal. Capture receipts distinguish unreliable driver
-timestamps from discontinuous audio; both still fail closed after releasing the native buffer.
+timestamps from a gap between retained native packets. `Timestamp` always fails closed.
+`Discontinuity` means a flag on the second or later kept packet, never discarded startup audio
+or the first kept packet, which has no retained predecessor. Those startup flags are ignored
+without counters or additional logging. Both errors propagate only after releasing the native
+buffer. The queue must still drain after Listening, and the next nonempty packet is still
+discarded before any audio is kept; no pre-Listening or prior-hold audio becomes eligible.
+This decision lives in the shared microphone `PacketBoundary`, tested with a fake packet
+source without Windows types. A native adapter supplies frame count, discontinuity and
+timestamp-error facts, collection authority and a drained-queue observation after Listening.
+WASAPI alone translates its flag bits and owns the acquire/release calls; a Core Audio adapter
+would supply the same facts and retain the same consent, cancellation and cleanup guarantees.
 
 ## The manifest
 

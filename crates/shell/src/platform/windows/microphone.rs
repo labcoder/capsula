@@ -19,7 +19,8 @@ use windows::core::{GUID, Interface};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::platform::microphone::{
-    Finalization, Format, Generation, MicError, Mode, POLL, Packetizer, Running, Sample,
+    Finalization, Format, Generation, MicError, Mode, POLL, PacketBoundary, PacketStatus,
+    Packetizer, Running, Sample,
 };
 
 struct Apartment;
@@ -265,8 +266,7 @@ fn read(
     raw: &mut [u8],
 ) -> Result<(), MicError> {
     let mut ready = false;
-    let mut first = true;
-    let mut skip_startup = true;
+    let mut boundary = PacketBoundary::default();
     loop {
         let mode = token.mode(session, Instant::now())?;
         if mode == Mode::Release {
@@ -311,13 +311,19 @@ fn read(
         let bytes = usize::try_from(frames).ok().and_then(|n| {
             n.checked_mul(usize::from(source.format.channels) * source.format.bytes())
         });
-        let bad = flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0.cast_unsigned() != 0
-            || !first && flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0.cast_unsigned() != 0;
         let silent = flags & AUDCLNT_BUFFERFLAGS_SILENT.0.cast_unsigned() != 0;
-        let allowed =
-            post_start_packet(token.collecting(session), ready, &mut skip_startup, frames);
+        let allowed = boundary.packet(
+            token.collecting(session),
+            ready,
+            PacketStatus {
+                frames,
+                discontinuity: flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0.cast_unsigned()
+                    != 0,
+                timestamp_error: flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0.cast_unsigned() != 0,
+            },
+        );
         let copied = match bytes {
-            Some(n) if n <= raw.len() && !bad && allowed && (silent || !data.is_null()) => {
+            Some(n) if n <= raw.len() && allowed == Ok(true) && (silent || !data.is_null()) => {
                 let borrowed = if silent {
                     None
                 } else {
@@ -344,16 +350,7 @@ fn read(
         if released.is_err() {
             return Err(MicError::Unconfirmed);
         }
-        first = false;
-        if bad {
-            return Err(
-                if flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0.cast_unsigned() != 0 {
-                    MicError::Timestamp
-                } else {
-                    MicError::Discontinuity
-                },
-            );
-        }
+        let allowed = allowed?;
         if bytes.is_none_or(|n| n > raw.len())
             || allowed && frames != 0 && !silent && data.is_null()
         {
@@ -392,34 +389,5 @@ pub(in crate::platform) fn copy_batch(
     } else {
         raw.zeroize();
         0
-    }
-}
-
-#[expect(
-    clippy::fn_params_excessive_bools,
-    reason = "the predicates fence one native startup packet"
-)]
-fn post_start_packet(live: bool, drained: bool, first: &mut bool, frames: u32) -> bool {
-    if !live || !drained || frames == 0 {
-        return false;
-    }
-    let allowed = !*first;
-    *first = false;
-    allowed
-}
-
-#[cfg(test)]
-mod tests {
-    use super::post_start_packet;
-
-    #[test]
-    fn startup_discards_the_packet_that_may_straddle_collection_acceptance() {
-        let mut first = true;
-        assert!(!post_start_packet(false, false, &mut first, 7));
-        assert!(!post_start_packet(true, false, &mut first, 7));
-        assert!(!post_start_packet(true, true, &mut first, 0));
-        assert!(!post_start_packet(true, true, &mut first, 7));
-        assert!(post_start_packet(true, true, &mut first, 7));
-        assert!(!post_start_packet(false, true, &mut first, 7));
     }
 }

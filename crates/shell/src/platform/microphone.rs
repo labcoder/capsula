@@ -66,6 +66,53 @@ pub(crate) enum MicError {
     Unconfirmed,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct PacketStatus {
+    pub(super) frames: u32,
+    pub(super) discontinuity: bool,
+    pub(super) timestamp_error: bool,
+}
+
+#[derive(Default)]
+pub(super) enum PacketBoundary {
+    #[default]
+    Discard,
+    FirstKept,
+    Contiguous,
+}
+
+impl PacketBoundary {
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "collection authority and the drained queue fence one startup packet"
+    )]
+    pub(super) fn packet(
+        &mut self,
+        live: bool,
+        drained: bool,
+        packet: PacketStatus,
+    ) -> Result<bool, MicError> {
+        if packet.timestamp_error {
+            return Err(MicError::Timestamp);
+        }
+        if !live || !drained || packet.frames == 0 {
+            return Ok(false);
+        }
+        match self {
+            Self::Discard => {
+                *self = Self::FirstKept;
+                Ok(false)
+            }
+            Self::FirstKept => {
+                *self = Self::Contiguous;
+                Ok(true)
+            }
+            Self::Contiguous if packet.discontinuity => Err(MicError::Discontinuity),
+            Self::Contiguous => Ok(true),
+        }
+    }
+}
+
 /// Native input closes this atomic fence without borrowing GPUI.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CollectionGate(Arc<AtomicU64>);

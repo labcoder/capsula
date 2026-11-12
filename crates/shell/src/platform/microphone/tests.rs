@@ -806,3 +806,121 @@ fn outer_audio_carriers_redact_text_and_byte_list_sentinels() {
     assert!(!debug.contains(&format!("{samples:?}")));
     assert!(!debug.contains(&format!("{marker:?}")));
 }
+
+const CLEAN: PacketStatus = PacketStatus {
+    frames: 0,
+    discontinuity: false,
+    timestamp_error: false,
+};
+const GAP: PacketStatus = PacketStatus {
+    discontinuity: true,
+    ..CLEAN
+};
+const CLOCK: PacketStatus = PacketStatus {
+    timestamp_error: true,
+    ..CLEAN
+};
+
+fn collect(packets: &[(bool, bool, &[i16], PacketStatus)]) -> Result<Vec<i16>, MicError> {
+    let mut boundary = PacketBoundary::default();
+    let mut pcm = Vec::new();
+    for &(live, drained, samples, flags) in packets {
+        let frames = u32::try_from(samples.len()).unwrap();
+        if boundary.packet(live, drained, PacketStatus { frames, ..flags })? {
+            pcm.extend_from_slice(samples);
+        }
+    }
+    Ok(pcm)
+}
+
+#[test]
+fn startup_discards_the_packet_that_may_straddle_collection_acceptance() {
+    let mut boundary = PacketBoundary::default();
+    let mut packet =
+        |live, drained, frames| boundary.packet(live, drained, PacketStatus { frames, ..CLEAN });
+    assert_eq!(packet(false, false, 7), Ok(false));
+    assert_eq!(packet(true, false, 7), Ok(false));
+    assert_eq!(packet(true, true, 0), Ok(false));
+    assert_eq!(packet(true, true, 7), Ok(false));
+    assert_eq!(packet(true, true, 7), Ok(true));
+    assert_eq!(packet(false, true, 7), Ok(false));
+}
+
+#[test]
+fn discarded_and_first_kept_discontinuities_preserve_every_later_packet() {
+    assert_eq!(
+        collect(&[
+            (false, false, &[91], GAP),
+            (false, false, &[92], GAP),
+            (true, false, &[93], GAP),
+            (true, true, &[], GAP),
+            (true, true, &[11], GAP),
+            (true, true, &[21, 22], GAP),
+            (true, true, &[31], CLEAN),
+            (true, true, &[41, 42], CLEAN),
+        ]),
+        Ok(vec![21, 22, 31, 41, 42])
+    );
+}
+
+#[test]
+fn first_kept_packet_can_be_flagged_after_a_clean_or_empty_startup() {
+    for empty in [false, true] {
+        let mut packets: Vec<(bool, bool, &[i16], PacketStatus)> = Vec::new();
+        if empty {
+            packets.push((true, true, &[], CLEAN));
+        }
+        packets.extend_from_slice(&[
+            (true, true, &[11], CLEAN),
+            (true, true, &[21], GAP),
+            (true, true, &[31, 32], CLEAN),
+            (true, true, &[41], CLEAN),
+        ]);
+        assert_eq!(collect(&packets), Ok(vec![21, 31, 32, 41]));
+    }
+}
+
+#[test]
+fn later_kept_discontinuity_ends_the_sequence_before_clean_audio() {
+    for clean in [0, 1] {
+        let mut packets: Vec<(bool, bool, &[i16], PacketStatus)> =
+            vec![(true, true, &[11], GAP), (true, true, &[21], CLEAN)];
+        for _ in 0..clean {
+            packets.push((true, true, &[31], CLEAN));
+        }
+        packets.extend_from_slice(&[(true, true, &[41], GAP), (true, true, &[51], CLEAN)]);
+        assert_eq!(collect(&packets), Err(MicError::Discontinuity));
+    }
+}
+
+#[test]
+fn timestamps_remain_fatal_before_during_and_after_the_boundary() {
+    for flags in [
+        CLOCK,
+        PacketStatus {
+            discontinuity: true,
+            ..CLOCK
+        },
+    ] {
+        assert_eq!(
+            collect(&[(false, false, &[], flags)]),
+            Err(MicError::Timestamp)
+        );
+        for prefix in 0..=4 {
+            let packets: Vec<_> = [
+                (false, false, &[91][..], CLEAN),
+                (true, false, &[92][..], CLEAN),
+                (true, true, &[11][..], CLEAN),
+                (true, true, &[21][..], CLEAN),
+            ]
+            .into_iter()
+            .take(prefix)
+            .chain([
+                (true, true, &[31][..], flags),
+                (true, true, &[41][..], CLEAN),
+            ])
+            .collect();
+            assert_eq!(collect(&packets), Err(MicError::Timestamp));
+        }
+    }
+}
