@@ -1022,3 +1022,112 @@ fn a_bad_stored_row_cannot_wedge_a_valid_live_append_or_cut() {
     assert!(recovery.scenes.is_empty());
     assert_eq!(recovery.skipped, [scene]);
 }
+
+fn not_returned(effects: &[Effect]) -> usize {
+    effects
+        .iter()
+        .filter(|effect| {
+            matches!(
+                effect,
+                Effect::Control(ControlToShell::DrawingNotReturned { thread: T, run: R })
+            )
+        })
+        .count()
+}
+
+fn call(core: &mut Coordinator, args: &[u8]) -> Vec<Effect> {
+    core.handle(Input::Drawing(drawing::Input::Call {
+        thread: T,
+        run: R,
+        call: CallId::new("draw").expect("call"),
+        args: args.to_vec(),
+    }))
+    .expect("fresh call")
+}
+
+fn finish(core: &mut Coordinator, finish: Finish) -> Vec<Effect> {
+    core.handle(Input::Engine {
+        key: super::engine_key(core, R),
+        event: TurnEvent::Finished(finish),
+    })
+    .expect("round finished")
+}
+
+#[test]
+fn a_finished_run_whose_draw_calls_committed_no_step_says_so_once() {
+    for args in [
+        &br#"{"records":[]}"#[..],
+        b"not an envelope",
+        br#"{"records":[{"step":{"id":"s1","put":[]}}]}"#,
+    ] {
+        let mut core = started();
+        let mut effects = call(&mut core, args);
+        effects.extend(finish(&mut core, Finish::Completed));
+        assert_eq!(not_returned(&effects), 1);
+    }
+}
+
+#[test]
+fn a_committed_step_a_stop_or_a_failed_run_adds_no_drawing_notice() {
+    let scratch = Scratch::new("drawing-returned");
+    let mut store = open(&scratch);
+    let mut core = started();
+    let lookup = draw(&mut core);
+    let first = commit(&mut core, &mut store, &lookup);
+    let mut effects = finish(&mut core, Finish::Completed);
+    let second = commit(&mut core, &mut store, &first);
+    let last = commit(&mut core, &mut store, &second);
+    assert!(last.iter().any(|effect| matches!(
+        effect,
+        Effect::Store(StoreOp::EndRun {
+            end: RunEnd::Done,
+            ..
+        })
+    )));
+    effects.extend(first.into_iter().chain(second).chain(last));
+    assert_eq!(not_returned(&effects), 0);
+
+    let scratch = Scratch::new("drawing-cleared");
+    let mut store = open(&scratch);
+    let mut core = started();
+    let lookup = draw(&mut core);
+    let mut batch = commit(&mut core, &mut store, &lookup);
+    batch.extend(core.handle(Input::ClearVisible).expect("user clear"));
+    batch.extend(finish(&mut core, Finish::Completed));
+    let mut effects = Vec::new();
+    while batch
+        .iter()
+        .any(|effect| matches!(effect, Effect::Store(StoreOp::Drawing { .. })))
+    {
+        effects.extend(batch.iter().cloned());
+        batch = commit(&mut core, &mut store, &batch);
+    }
+    effects.extend(batch);
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Store(StoreOp::EndRun {
+            end: RunEnd::Done,
+            ..
+        })
+    )));
+    assert_eq!(not_returned(&effects), 0);
+
+    let mut core = started();
+    let mut effects = call(&mut core, br#"{"records":[]}"#);
+    effects.extend(
+        core.handle(Input::Stop {
+            run: R,
+            revealed: vec![],
+        })
+        .expect("stop"),
+    );
+    assert_eq!(not_returned(&effects), 0);
+
+    let mut core = started();
+    let mut effects = call(&mut core, br#"{"records":[]}"#);
+    effects.extend(finish(
+        &mut core,
+        Finish::Failed(crate::engines::EngineFailure::Provider),
+    ));
+    assert_eq!(not_returned(&effects), 0);
+}

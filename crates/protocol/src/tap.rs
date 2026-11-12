@@ -139,6 +139,7 @@ impl Tapped for ControlToShell {
             Self::Voice(_) => "Voice",
             Self::GitHubError(_) => "GitHubError",
             Self::DrawingReplacementFailed { .. } => "DrawingReplacementFailed",
+            Self::DrawingNotReturned { .. } => "DrawingNotReturned",
         }
     }
 

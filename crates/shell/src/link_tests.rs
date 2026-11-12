@@ -1957,3 +1957,37 @@ fn measure_control_round_trip_and_data_throughput() {
         );
     }
 }
+
+#[test]
+fn both_drawing_controls_reach_the_ui_as_notices_with_their_own_keys() {
+    let link = attended("drawing-notices");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    for (control, expected) in [
+        (
+            ControlToShell::DrawingReplacementFailed {
+                thread: ThreadId(3),
+                run: RunId(2),
+            },
+            ErrorKey::DrawingReplacementFailed,
+        ),
+        (
+            ControlToShell::DrawingNotReturned {
+                thread: ThreadId(3),
+                run: RunId(2),
+            },
+            ErrorKey::DrawingNotReturned,
+        ),
+    ] {
+        frame::write(&mut &link.control, &control, Pipe::Control).expect("drawing notice");
+        assert!(matches!(
+            next(&events),
+            LinkEvent::DrawingNotice {
+                generation,
+                key,
+                thread: ThreadId(3),
+                run: RunId(2),
+            } if generation == session.generation() && key == expected
+        ));
+    }
+}

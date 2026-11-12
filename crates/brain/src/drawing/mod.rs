@@ -480,6 +480,13 @@ impl Drawing {
         })]
     }
 
+    /// Whether `run` called `draw` and committed no step.
+    pub fn drew_nothing(&self, run: RunId) -> bool {
+        self.runs
+            .iter()
+            .any(|ledger| ledger.run == run && ledger.drew_nothing())
+    }
+
     /// Work of `run` is in the store or queued behind it, so the run's outcome waits for it.
     pub fn pending_for(&self, run: RunId) -> bool {
         let writing = self

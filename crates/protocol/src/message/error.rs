@@ -102,6 +102,8 @@ pub enum ErrorKey {
     VoiceModelPath,
     /// The replacement failed after the previous drawings were durably removed.
     DrawingReplacementFailed,
+    /// A run that called `draw` finished with no committed step.
+    DrawingNotReturned,
 }
 
 macro_rules! catalog {
@@ -168,6 +170,7 @@ impl ErrorKey {
 
         GitHubUnavailable,
         DrawingReplacementFailed,
+        DrawingNotReturned,
     }
 }
 

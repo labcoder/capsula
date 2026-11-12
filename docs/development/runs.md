@@ -133,6 +133,14 @@ identity here even when the shell had no run at header refusal; they are distinc
 conversation and localizes its fixed text; it never attaches late loss
 to whichever conversation happens to be open. Recovery creates no pending replacement fact.
 
+A run that ends `done` after calling `draw` without committing a step sends one
+`DrawingNotReturned` for its thread/run, which the shell shows as "No drawing came back" through
+the same single notice. This covers every call refused and calls that came back empty. A
+committed step never triggers it, because that step is either shown, fails with its own
+notice, or is cleared by the user; Stop and failed runs, which report their own ending, don't
+either. A run that never calls `draw` gets no notice: the brain doesn't guess intent from the
+request.
+
 `StepShown` and `StepFailed` validate lifetime indices and the run that committed the step.
 Bad observations or held-scene cuts break the connection; removed scenes are stale. Pending
 thread deletion holds late drawing frames until the outcome: a refusal releases them in

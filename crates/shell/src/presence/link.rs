@@ -32,7 +32,7 @@ impl Presence {
             if let LinkEvent::RunState { generation, .. }
             | LinkEvent::TurnRefused { generation, .. }
             | LinkEvent::CaptureDone { generation, .. }
-            | LinkEvent::DrawingReplacementFailed { generation, .. }
+            | LinkEvent::DrawingNotice { generation, .. }
             | LinkEvent::CaptureFailed { generation, .. } = &event
                 && self
                     .session
@@ -42,11 +42,9 @@ impl Presence {
                 continue;
             }
             match event {
-                LinkEvent::DrawingReplacementFailed { thread, run, .. } => self.show_error(
-                    &kumochi_protocol::message::ErrorKey::DrawingReplacementFailed.into(),
-                    Source::Drawing { thread, run },
-                    cx,
-                ),
+                LinkEvent::DrawingNotice {
+                    key, thread, run, ..
+                } => self.show_error(&key.into(), Source::Drawing { thread, run }, cx),
                 LinkEvent::State(state) => {
                     self.revoke_exclusion(cx);
                     self.session = None;

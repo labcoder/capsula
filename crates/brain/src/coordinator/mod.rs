@@ -1223,6 +1223,12 @@ impl Coordinator {
         if outcome != RunEnd::Done {
             speech::revoke(&mut run, crate::voice::reply::Revoker::Brain, effects);
         }
+        if outcome == RunEnd::Done && self.drawing.drew_nothing(run.id) {
+            effects.push(Effect::Control(ControlToShell::DrawingNotReturned {
+                thread: run.thread,
+                run: run.id,
+            }));
+        }
         self.drawing_closed(run.id, effects);
         run.tools.drop_round();
         if run.turn_stored && outcome != RunEnd::Done {

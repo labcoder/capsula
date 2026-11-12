@@ -150,6 +150,12 @@ pub(super) struct RunLedger {
     exhausted: bool,
 }
 
+impl RunLedger {
+    pub(super) fn drew_nothing(&self) -> bool {
+        self.calls > 0 && self.steps == 0
+    }
+}
+
 /// The step id a record that didn't parse still names, for the tool result.
 #[derive(Deserialize)]
 struct Named {
