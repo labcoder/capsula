@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::time::Instant;
 
 use kumochi_protocol::message::GestureId;
@@ -91,8 +92,9 @@ impl Fence {
         state: &mut Gesture,
         event: Event,
         now: Instant,
-        paused: bool,
+        paused: &Cell<bool>,
     ) -> Delivery {
+        let paused = paused.get();
         let reduced = state.recognize(event, now);
         let cancelled = matches!(
             event,
@@ -182,7 +184,7 @@ mod tests {
     use crate::platform::microphone::Mode;
 
     fn key(fence: &mut Fence, state: &mut Gesture, key: Key, edge: Edge, at: Instant) -> Delivery {
-        fence.reduce(state, Event::Key { key, edge }, at, false)
+        fence.reduce(state, Event::Key { key, edge }, at, &Cell::new(false))
     }
 
     fn begin() -> (Fence, Gesture, Instant) {
@@ -250,10 +252,15 @@ mod tests {
                 &mut state,
                 Event::Deadline,
                 at + Duration::from_millis(300),
-                false,
+                &Cell::new(false),
             );
             let generation = recognized(&delivery);
-            let terminal = fence.reduce(&mut state, event, at + Duration::from_millis(301), false);
+            let terminal = fence.reduce(
+                &mut state,
+                event,
+                at + Duration::from_millis(301),
+                &Cell::new(false),
+            );
             assert!(matches!(
                 terminal.intents[0],
                 Some(Intent::End {
@@ -284,7 +291,7 @@ mod tests {
             &mut state,
             Event::Reset,
             at + Duration::from_millis(301),
-            false,
+            &Cell::new(false),
         );
         assert!(matches!(
             reset.intents[0],
@@ -312,7 +319,7 @@ mod tests {
             &mut state,
             Event::Deadline,
             at + Duration::from_millis(300),
-            false,
+            &Cell::new(false),
         );
         assert!(matches!(hold.intents[0], Some(Intent::Unavailable)));
         assert_eq!(fence.last, u32::MAX);
@@ -330,13 +337,23 @@ mod tests {
         let mut delivered = Vec::new();
         for key in [Key::LeftControl, Key::LeftAlt] {
             let edge = Edge::Down;
-            delivered.push(fence.reduce(state, Event::Key { key, edge }, at, paused[0]));
+            delivered.push(fence.reduce(
+                state,
+                Event::Key { key, edge },
+                at,
+                &Cell::new(paused[0]),
+            ));
         }
         let crossed = at + Duration::from_millis(300);
-        delivered.push(fence.reduce(state, threshold, crossed, paused[1]));
+        delivered.push(fence.reduce(state, threshold, crossed, &Cell::new(paused[1])));
         for key in [Key::LeftAlt, Key::LeftControl] {
             let (edge, released) = (Edge::Up, at + Duration::from_millis(400));
-            delivered.push(fence.reduce(state, Event::Key { key, edge }, released, paused[2]));
+            delivered.push(fence.reduce(
+                state,
+                Event::Key { key, edge },
+                released,
+                &Cell::new(paused[2]),
+            ));
         }
         delivered
     }

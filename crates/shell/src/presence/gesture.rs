@@ -87,7 +87,7 @@ pub(super) fn deliver(
             let _cancelled =
                 fence
                     .borrow_mut()
-                    .reduce(&mut state, Event::Reset, at.instant, paused.get());
+                    .reduce(&mut state, Event::Reset, at.instant, &paused);
             gesture.set(state);
             return None;
         };
@@ -116,7 +116,7 @@ pub(super) fn deliver(
         let mut state = gesture.get();
         let delivery = fence
             .borrow_mut()
-            .reduce(&mut state, event, at.instant, paused.get());
+            .reduce(&mut state, event, at.instant, &paused);
         gesture.set(state);
         for intent in delivery.intents.iter().flatten() {
             match intent {
