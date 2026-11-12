@@ -313,6 +313,7 @@ impl Presence {
 #[cfg(test)]
 mod tests {
     use gpui_kit::TestAppContext;
+    use kumochi_protocol::message::ThreadId;
 
     use super::{OpenError, Presence, ThreadsPanel};
 
@@ -324,6 +325,7 @@ mod tests {
         let owner = crate::presence::test_fixture::presence(cx);
         let window = owner.update(cx, |owner, cx| {
             owner.thread_panel = Some(ThreadsPanel::detached(owner.threads.clone(), cx));
+            owner.select_thread(Some(ThreadId(3)), cx);
             owner.open_threads(cx).expect("open tasks");
             let panel = owner.thread_panel.as_mut().expect("tasks fixture");
             // As its window's activation reports once it's in front.
@@ -338,8 +340,10 @@ mod tests {
         assert!(matches!(hidden, Err(OpenError::Gpui(_))));
         owner.update(cx, |owner, cx| {
             assert!(owner.threads_focused(), "Tasks is still open and focused");
+            assert_eq!(owner.threads.read(cx).open, Some(ThreadId(3)));
             owner.escape(cx).expect("Esc");
             assert!(!owner.threads_open(), "Esc hid Tasks");
+            assert_eq!(owner.threads.read(cx).open, None);
         });
     }
 }
