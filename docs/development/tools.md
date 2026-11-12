@@ -133,6 +133,13 @@ path and step id, spends the existing drawing rejection/repair budget, and admit
 scene record. Its refusal stays final for the caller's key. Semantic admission still
 runs once in the drawing reducer; a semantic failure can retain earlier committed steps.
 
+A result that stopped early ends with a fixed phrase saying what follows. After a record or
+envelope error while the run still has its repair call, it adds `; steps not in drawn were
+not shown; correct this and call draw again`. Once the run accepts no further draw call,
+because its repair round, rejected records or calls are spent, it adds `; no further draw call
+will be accepted in this turn`. A refused new scene saved nothing, so the repair call may
+reuse its name and header. The coordinator's round and tool-call budgets are not reflected.
+
 An offered provider `draw` instead admits closed records while arguments stream. The same
 dispatcher checks the caller, offered tool and current admitted build before every handoff;
 the 2D record parser runs before the reducer's semantic admission. An open object has no effect.

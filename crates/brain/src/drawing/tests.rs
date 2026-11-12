@@ -2030,6 +2030,33 @@ fn a_failed_repair_round_spends_the_run_s_drawing_budget() {
 }
 
 #[test]
+fn a_refusal_says_whether_a_repair_follows_and_the_repair_reuses_the_unsaved_scene_name() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    let refused =
+        || r#"{"id":"a","put":[{"text":{"id":"x","text":"","at":[0,0],"size":0}}]}"#.to_owned();
+    let stopped = "drawn: []; stopped: step a: put[0].text.size: scene.OutOfRange";
+    let first = store.run(&mut drawing, call(1, "c1", args("sky", &[refused()])));
+    assert_eq!(
+        first.calls[0].tool_text(),
+        format!("{stopped}; steps not in drawn were not shown; correct this and call draw again")
+    );
+    assert!(store.scenes.is_empty(), "the refused call saved no scene");
+    let repaired = store.run(&mut drawing, call(1, "c2", args("sky", &[text("a", "x")])));
+    assert_eq!(repaired.calls[0].tool_text(), "drawn: [a]");
+    assert_eq!(store.scenes.len(), 1);
+    let spent = "; no further draw call will be accepted in this turn";
+    store.run(&mut drawing, call(2, "c3", args("sea", &[refused()])));
+    let repair = store.run(&mut drawing, call(2, "c4", args("sea", &[refused()])));
+    assert_eq!(repair.calls[0].tool_text(), format!("{stopped}{spent}"));
+    let late = store.run(&mut drawing, call(2, "c5", args("sea", &[text("a", "x")])));
+    assert_eq!(
+        late.calls[0].tool_text(),
+        format!("drawn: []; stopped: drawing.BudgetSpent{spent}")
+    );
+}
+
+#[test]
 fn snapshots_carry_whole_logs_in_checked_chunks() {
     let mut drawing = Drawing::default();
     let mut store = Store::default();
@@ -2122,6 +2149,7 @@ fn debug_and_display_never_carry_drawing_content() {
             path: kumochi_scene::FieldPath::default(),
             code: ErrorCode::IdReused,
         })),
+        spent: false,
     };
     let stored = StoredScene {
         scene: SceneId(1),
