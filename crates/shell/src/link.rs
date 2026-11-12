@@ -622,7 +622,7 @@ impl LinkHandle {
     /// when the brain has stopped reading. Never blocks.
     pub(crate) fn send_control(&self, session: &Session, message: ControlToBrain) -> bool {
         if let ControlToBrain::VoiceHoldStopped { gesture } = &message
-            && let Some(retained) = self.retain_microphone_stop(session, *gesture)
+            && let Some(retained) = self.retain_microphone_stop(*gesture)
         {
             return retained;
         }

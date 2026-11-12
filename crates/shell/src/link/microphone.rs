@@ -1,4 +1,4 @@
-use super::{ControlToBrain, GestureId, LinkHandle, PoisonError, Sender, Session, Shared};
+use super::{ControlToBrain, GestureId, LinkHandle, PoisonError, Sender, Shared};
 
 #[derive(Debug)]
 pub(super) enum Stop {
@@ -91,12 +91,7 @@ impl LinkHandle {
             .is_some()
     }
 
-    pub(super) fn retain_microphone_stop(
-        &self,
-        session: &Session,
-        gesture: GestureId,
-    ) -> Option<bool> {
-        let _ = session;
+    pub(super) fn retain_microphone_stop(&self, gesture: GestureId) -> Option<bool> {
         let outbox = self
             .shared
             .outbox
@@ -125,7 +120,7 @@ impl LinkHandle {
         }
         #[cfg(test)]
         if let Some(recording) = &self.control_recording {
-            return Some(stop.queue(recording, session.generation()));
+            return Some(stop.queue(recording, self.link_generation()));
         }
         if let Some(outbox) = outbox.as_ref()
             && !stop.queue(&outbox.control, outbox.generation)
