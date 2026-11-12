@@ -77,6 +77,11 @@ then filters by thread. It includes complete begin headers only, never drawing s
 `Drawings on screen: [...]` after Local time in the current user item. The empty `[]` line
 overrides stale references after Esc. The complete rendered item, including outer JSON
 escaping, counts against the ordinary request bound; headers are never truncated or logged.
+Discovery and the bounded header reads use the existing cancellation/deadline scope, with
+the context reader's absolute two-second deadline. Four returned headers do not bound SQL
+work: discovery can scan all retained events and, for each begin, its later same-thread
+history looking for a clear or zero cut. Worst-case row work is quadratic in retained history;
+the scoped SQLite progress handler interrupts cancellation or expiry without adding a cache.
 
 Recovery reads the newest four uncleared scenes of live threads and their full ordered logs,
 then replays the survivors together against one global budget. A corrupt, oversized,
