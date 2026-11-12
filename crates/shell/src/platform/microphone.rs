@@ -28,6 +28,8 @@ use zeroize::Zeroize;
 
 pub(super) use pcm::{Format, Packetizer, Sample};
 
+/// The capture pump's sleep while the endpoint is empty, one wire chunk long; the reaper and
+/// the UI's hold watcher reuse it as their check interval.
 pub(crate) const POLL: Duration = Duration::from_millis(20);
 /// One wire chunk, as the packetizer cuts them.
 const CHUNK: Duration = Duration::from_millis(20);
@@ -83,6 +85,8 @@ pub(super) struct PacketStatus {
     pub(super) timestamp_error: bool,
 }
 
+/// The endpoint buffer the adapter asks for: five polls, so the pump can stall up to about
+/// 100 ms before the device overruns and drops audio.
 pub(super) const CAPTURE_BUFFER: Duration = Duration::from_millis(100);
 
 /// A hold fails when more than one frame in this many of its span, from the first kept frame
