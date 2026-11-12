@@ -729,6 +729,107 @@ fn every_operation_gets_one_reply_in_order() {
 }
 
 #[test]
+fn a_round_the_reader_would_refuse_fails_its_run_and_the_thread_goes_on() {
+    use crate::coordinator::RoundItems;
+    use crate::dispatch::ToolOutput;
+    use crate::engines::{CallId, Opaque};
+    let scratch = Scratch::new("refused-round");
+    let store = Store::open(&scratch.db()).expect("store");
+    let thread = ThreadId(1);
+    let (acks, mut replies) = mpsc::unbounded_channel();
+    let store = StoreThread::spawn(store, acks, Schedule::default()).expect("thread");
+    let round = |run, item: &str, output| {
+        StoreOp::RoundItems(RoundItems {
+            thread,
+            run,
+            round: 1,
+            connection: crate::context::ConnectionTag(7),
+            text: None,
+            items: vec![Opaque::new(item.as_bytes().to_vec()).expect("small")],
+            calls: vec![(CallId::new("c1").expect("short"), output)],
+        })
+    };
+    let item = r#"{"type":"message"}"#;
+    // `1e5` reads back as `100000.0`, so this legal item grows past 256 KiB.
+    let growing = format!(r#"{{"n":[{}1e5]}}"#, "1e5,".repeat(59_999));
+    let ok = || ToolOutput::Text("ok".into());
+    let end = |run, end| StoreOp::EndRun {
+        thread,
+        run,
+        text: None,
+        revealed: None,
+        clear: None,
+        end,
+    };
+    let over = ToolOutput::Text("x".repeat(65 * 1024));
+    for op in [
+        StoreOp::BeginTurn {
+            thread,
+            title: Some("t".into()),
+            run: RunId(1),
+            text: "hi".into(),
+        },
+        round(RunId(1), item, over),
+        end(RunId(1), RunEnd::Failed(crate::store::Failure::Store)),
+        StoreOp::BeginTurn {
+            thread,
+            title: None,
+            run: RunId(2),
+            text: "again".into(),
+        },
+        round(RunId(2), &growing, ok()),
+        end(RunId(2), RunEnd::Failed(crate::store::Failure::Store)),
+        StoreOp::BeginTurn {
+            thread,
+            title: None,
+            run: RunId(3),
+            text: "once more".into(),
+        },
+        round(RunId(3), item, ok()),
+        end(RunId(3), RunEnd::Done),
+    ] {
+        assert!(store.send(op));
+    }
+    store.close().blocking_recv().expect("closed");
+    let mut got = Vec::new();
+    while let Ok(reply) = replies.try_recv() {
+        got.push(reply);
+    }
+    assert_eq!(
+        got,
+        [
+            Input::TurnStored { run: RunId(1) },
+            Input::StoreFailed { run: RunId(1) },
+            Input::RunStored { run: RunId(1) },
+            Input::TurnStored { run: RunId(2) },
+            Input::StoreFailed { run: RunId(2) },
+            Input::RunStored { run: RunId(2) },
+            Input::TurnStored { run: RunId(3) },
+            Input::RoundStored {
+                run: RunId(3),
+                round: 1
+            },
+            Input::RunStored { run: RunId(3) },
+        ]
+    );
+    let conn = Connection::open(scratch.db()).expect("open");
+    let rows: Vec<(String, i64)> = conn
+        .prepare(
+            "SELECT kind, run FROM events WHERE kind IN ('output_item', 'tool_result') ORDER BY id",
+        )
+        .expect("query")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("rows")
+        .collect::<Result<_, _>>()
+        .expect("read");
+    assert_eq!(
+        rows,
+        [("output_item".to_owned(), 3), ("tool_result".to_owned(), 3)],
+        "only the third run's round was written"
+    );
+}
+
+#[test]
 fn a_heard_point_is_stored_and_answers_nothing() {
     let scratch = Scratch::new("heard-op");
     let store = Store::open(&scratch.db()).expect("store");
