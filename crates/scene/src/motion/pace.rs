@@ -70,6 +70,7 @@ pub(crate) fn pace(objects: &[Authored]) -> Vec<Paced> {
             continue;
         };
         if !timed
+            && left > 0
             && scaled > 0
             && u128::from(left) * u128::from(span) < u128::from(room) * u128::from(scaled)
         {
@@ -219,6 +220,45 @@ mod tests {
                 paced(0, Enter::Draw, 600),
                 paced(360, Enter::Draw, 5_000),
                 paced(3_360, Enter::Fade, 350),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_authored_length_of_4_s_or_more_ends_late_and_just_under_squeezes_the_defaults() {
+        let around = |dur| {
+            pace(&[
+                stroke(600),
+                Authored {
+                    dur: Some(dur),
+                    ..stroke(600)
+                },
+                other(350),
+            ])
+        };
+        assert_eq!(
+            around(3_999),
+            [
+                paced(0, Enter::Draw, 1),
+                paced(1, Enter::Draw, 3_999),
+                paced(7, Enter::Fade, 0),
+            ],
+            "scaled by 1/360 so the authored entrance ends at exactly 4,000"
+        );
+        assert_eq!(
+            around(4_000),
+            [
+                paced(0, Enter::Draw, 600),
+                paced(360, Enter::Draw, 4_000),
+                paced(2_760, Enter::Fade, 350),
+            ]
+        );
+        assert_eq!(
+            around(4_001),
+            [
+                paced(0, Enter::Draw, 600),
+                paced(360, Enter::Draw, 4_001),
+                paced(2_760, Enter::Fade, 350),
             ]
         );
     }
