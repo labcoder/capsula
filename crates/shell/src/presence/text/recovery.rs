@@ -92,6 +92,10 @@ impl Presence {
 }
 
 impl TextView {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one notice keeps each control beside its deferred dispatch"
+    )]
     pub(super) fn recovery(&self, cx: &Context<'_, Self>) -> Option<gpui_kit::AnyElement> {
         let notice = self.recovery.as_ref().filter(|_| self.refusal.is_none())?;
         let strings = cx.global::<Strings>();
