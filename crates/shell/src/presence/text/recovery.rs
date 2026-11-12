@@ -150,11 +150,16 @@ impl TextView {
                     .label(strings.get(label))
                     .disabled(!enabled)
                     .on_click(move |_, window, cx| {
-                        if let Ok(Err(_)) =
-                            owner.update(cx, |this, cx| this.recover(source, action, cx))
-                        {
-                            tracing::warn!("can't apply chat recovery");
-                        }
+                        let owner = owner.clone();
+                        // Settings hides this window, which GPUI can't update while it
+                        // dispatches this click.
+                        cx.defer(move |cx| {
+                            if let Ok(Err(_)) =
+                                owner.update(cx, |this, cx| this.recover(source, action, cx))
+                            {
+                                tracing::warn!("can't apply chat recovery");
+                            }
+                        });
                         if action == Action::Retry {
                             input.update(cx, |input, cx| input.focus(window, cx));
                         }
