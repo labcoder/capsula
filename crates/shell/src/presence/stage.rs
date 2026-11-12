@@ -67,7 +67,10 @@ impl Presence {
             scale: self.scale,
             stage: stage(area, self.layout, self.scale, panel),
         };
-        let placed = settle(self.drawing_placement, next, self.presenter.holds_scenes());
+        let shown = self
+            .drawing_placement
+            .filter(|_| self.presenter.holds_scenes());
+        let placed = settle(shown, next);
         self.drawing_placement = Some(placed);
         if self.presenter.set_stage(placed.stage) {
             cx.defer(move |cx| {
@@ -90,15 +93,15 @@ pub(super) struct Placed {
 
 /// Drawings on screen keep their stage while it still fits inside the best one for the same
 /// work area, dock and scale, so a panel closing never moves them; anything else re-places them.
-fn settle(kept: Option<Placed>, next: Placed, holding: bool) -> Placed {
-    let Some(kept) = kept else {
+fn settle(shown: Option<Placed>, next: Placed) -> Placed {
+    let Some(kept) = shown else {
         return next;
     };
     let same_geometry = Placed {
         stage: next.stage,
         ..kept
     } == next;
-    if holding && same_geometry && contains(next.stage, kept.stage) {
+    if same_geometry && contains(next.stage, kept.stage) {
         kept
     } else {
         next
@@ -665,14 +668,13 @@ mod tests {
             stage: PEEK_STAGE,
             ..kept
         };
-        assert_eq!(settle(Some(kept), closed, true), kept);
-        assert_eq!(settle(Some(kept), closed, false), closed);
-        assert_eq!(settle(None, closed, true), closed);
+        assert_eq!(settle(Some(kept), closed), kept);
+        assert_eq!(settle(None, closed), closed);
         let reopened = Placed {
             stage: PEEK_STAGE,
             ..kept
         };
-        assert_eq!(settle(Some(reopened), kept, true), kept);
+        assert_eq!(settle(Some(reopened), kept), kept);
         let right = Position::TopRight.layout(AREA, [58, 21], [380, 124], 0);
         let moved = Placed {
             layout: right,
@@ -680,13 +682,13 @@ mod tests {
             ..kept
         };
         assert_eq!(moved.stage, rect(32.0, 177.0, 2496.0, 1191.0));
-        assert_eq!(settle(Some(kept), moved, true), moved);
+        assert_eq!(settle(Some(kept), moved), moved);
         let scaled = Placed {
             scale: 1.25,
             stage: PEEK_STAGE,
             ..kept
         };
-        assert_eq!(settle(Some(kept), scaled, true), scaled);
+        assert_eq!(settle(Some(kept), scaled), scaled);
         let wider = [0, 0, 3840, 1400];
         let resized = Placed {
             area: wider,
@@ -694,6 +696,6 @@ mod tests {
             stage: rect(32.0, 177.0, 3776.0, 1191.0),
             ..kept
         };
-        assert_eq!(settle(Some(kept), resized, true), resized);
+        assert_eq!(settle(Some(kept), resized), resized);
     }
 }
