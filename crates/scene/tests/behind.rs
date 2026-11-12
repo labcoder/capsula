@@ -440,6 +440,19 @@ fn unknown_removed_container_and_three_dimensional_links_are_refused() {
 }
 
 #[test]
+fn a_behind_id_is_never_given_to_a_generated_mermaid_object() {
+    refused(
+        &[cloud()],
+        &json!({"id":"graph","put":[
+            {"diagram":{"id":"target"}},
+            {"mermaid":{"in":"target","src":"flowchart TB\nA\n"}}
+        ],"set":[{"target":"c1","behind":"--2.0"}]}),
+        ErrorCode::UnknownRef,
+        "set[0].behind",
+    );
+}
+
+#[test]
 fn a_stored_step_written_before_behind_existed_still_decodes() {
     // A step event exactly as the format before `behind` serialized it into the store.
     let stored = r##"{"step":{"revision":3,"step":{"id":"red","say":null,"put":[],"set":[{"target":"c1","text":null,"label":null,"color":"#ff0000","cells":null,"data":null,"emphasis":null,"info":null}],"remove":[],"start":"speech"}}}"##;
