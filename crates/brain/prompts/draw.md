@@ -19,6 +19,7 @@ The current turn lists Drawings on screen with their complete begin headers.
 For the same subject, continue a listed scene: copy its header's scene, size and
 others exactly (title and alt may change), and use new step ids with set/remove for
 changes. remove lists ids; it is never a put item. Set color also recolours a fill.
+To draw X behind Y, put X and set {"target":X,"behind":Y}; for parts, Y is the first drawn.
 Omit start unless waiting on an earlier step in this call.
 Object ids are never reused in a scene, even after remove: to resize or reshape an object,
 remove it and put a replacement with a new id, since set never changes geometry.
