@@ -205,10 +205,11 @@ The local effect always happens first, and nothing waits on the brain:
 - With no brain connected, or a control queue the brain isn't reading, the local effect still
   happens and the unsent message is logged, without content.
 
-Esc is held system-wide with `RegisterHotKey` while held voice is active, Kumochi speaks or
-shows a drawing. An open status panel alone never holds it. Until B5 paints v1 scenes on the overlay,
-only placeholder steps shown in the typing panel count as a drawing; mirrored, preparing and
-recovering v1 scenes do not hold global Esc. Panel Esc still reaches the presenter.
+Esc is held system-wide with `RegisterHotKey` while held voice is active or a drawing is shown:
+the overlay is showing scene frames (`Presenter::drawn`), or run steps show in the open typing
+panel. Mirrored, preparing and recovering scenes that aren't painted yet don't hold it, and an
+open status panel alone never does. Spoken replies don't hold it yet; `Activity::speaking` is
+always false.
 Held voice additionally owns global Esc through preparation and pre-answer work. A raw Escape
 revokes collection before deferred UI; its hotkey delivery consumes one marker so that the
 same press cannot also dismiss typing. Cleanup debt alone does not capture Esc from newer
