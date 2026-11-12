@@ -24,8 +24,8 @@ fn voice_only_hold_controls_append_tags_without_screen_authority() {
     };
     let stopped = ControlToBrain::VoiceHoldStopped { gesture: GESTURE };
     for (message, tag, size, op) in [
-        (recognized, 26, 27, "VoiceHoldRecognized"),
-        (stopped, 27, 6, "VoiceHoldStopped"),
+        (recognized, 27, 27, "VoiceHoldRecognized"),
+        (stopped, 28, 6, "VoiceHoldStopped"),
     ] {
         assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], tag);
         round_trip(&message, Pipe::Control, size);
@@ -55,7 +55,7 @@ fn voice_only_hold_controls_append_tags_without_screen_authority() {
         } else {
             7
         };
-        assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], 26);
+        assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], 28);
         round_trip(&message, Pipe::Control, size);
         redacted(&message, Direction::ToShell, "VoiceHoldStatus", size);
     }
