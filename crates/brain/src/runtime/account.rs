@@ -398,6 +398,11 @@ impl Accounts {
         Availability::Unavailable(reason)
     }
 
+    /// Whether an account is signed in, usable or not.
+    pub(crate) fn signed_in(&self) -> bool {
+        matches!(self.state.view(), AccountView::SignedIn { .. })
+    }
+
     /// The account's catalog epoch while it can send model requests: its generation for jobs.
     pub(super) fn sendable(&self) -> Option<u64> {
         self.catalog.usable.then_some(self.catalog.epoch)

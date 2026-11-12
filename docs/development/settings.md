@@ -233,13 +233,19 @@ than growing the window with the text. The existing Settings content region owns
 |---|---|---|
 | `assistant_name` | 1–24 characters | `Kumo` |
 | `user_name` | 1–24 characters, or absent | absent (unset) |
-| `onboarded` | boolean | `false` |
+| `onboarded` | boolean | absent: `true` for a profile in use at start, else `false` |
 | `max_frame_rate` | 30, 60, 72, 120 or 144, or absent | absent (Automatic) |
 | `default_model` | a table: `model` (a model slug) and `effort` (`Low` to `Max`), or absent | absent until a catalog is read |
 | `dock_position` | `top_left`, `top_center`, `top_right`, `middle_left`, `center`, `middle_right`, `bottom_left`, `bottom_center` or `bottom_right` | `top_center` |
 | `show_in_taskbar` | boolean | `false` |
 | `[voice] talk_back` | boolean | `false` |
 | `[voice] stt_unload` | `kept`, `15m` or `1h` | `kept` |
+
+**Onboarding** is owed while `onboarded` reads `false`. With no `onboarded` key, a profile
+already in use counts as onboarded: at start the account's first load is a signed-in ChatGPT
+account, or the store has ever issued a run. The brain works this out once, before any shell is
+served, so a later sign-in or a write of another setting never changes it. `FinishOnboarding`
+writes `onboarded = true`; `onboarded = false` asks for onboarding again.
 
 **Voice settings** live in a `[voice]` table. `SetTalkBack` and `SetSttUnload` save
 `talk_back` and `stt_unload` through the same queue and atomic save as every other change, and
@@ -342,7 +348,8 @@ no shell is connected, and Quit and close write what's left before they end.
 - **A known key with a bad value:** that key reads as its default and stays in the file as it is
   until the user sets it.
 - **Unreadable or not TOML:** the brain runs on the defaults and refuses every change, so the file
-  is never overwritten. Repair or delete it, then restart Kumochi.
+  is never overwritten. Repair or delete it, then restart Kumochi. `onboarded` reads `true`
+  here, and with no absolute `%APPDATA%`, so a file Kumochi can't save never asks for onboarding.
 - **No absolute `%APPDATA%`:** the defaults, and changes are refused.
 
 ## Claude Code

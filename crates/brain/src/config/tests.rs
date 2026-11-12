@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
 use kumochi_protocol::message::{
     AssistantName, DockPosition, Effort, ErrorKey, MAX_SLUG_BYTES, MaxFrameRate, ModelChoice,
-    ModelSlug, RepoName, SettingsOp, SttUnload, ThreadId, UserName,
+    ModelSlug, RepoName, RunId, SettingsOp, SttUnload, ThreadId, UserName,
 };
 use kumochi_protocol::voice::VoicePart;
 
@@ -1061,4 +1061,115 @@ fn a_removal_intent_with_no_lists_starts_removing() {
         voice["removing"],
         toml::Value::Array(vec!["spoken-replies".into()])
     );
+}
+
+#[test]
+fn an_absent_onboarded_key_counts_a_profile_in_use_and_a_saved_value_wins() {
+    let scratch = Scratch::new("config-onboarded-in-use");
+    for (row, (text, signed_in, high_water, onboarded)) in [
+        ("future_key = 1\n", false, 0, false),
+        ("future_key = 1\n", true, 0, true),
+        ("future_key = 1\n", false, 1, true),
+        ("onboarded = false\n", true, 5, false),
+        ("onboarded = true\n", false, 0, true),
+        ("onboarded = \"yes\"\n", false, 0, false),
+        ("onboarded = \"yes\"\n", true, 0, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let dir = dir(&scratch).join(row.to_string());
+        std::fs::create_dir_all(&dir).expect("row folder");
+        std::fs::write(dir.join(CONFIG_FILE), text).expect("seeded");
+        let mut config = Config::load(Some(dir), ThreadId(1));
+        config.count_in_use(signed_in, RunId(high_water));
+        assert_eq!(
+            config.view().onboarded,
+            onboarded,
+            "{text} signed_in={signed_in} high_water={high_water}"
+        );
+    }
+}
+
+#[test]
+fn the_start_answer_outlives_other_writes_and_finishing_onboarding_is_saved() {
+    let scratch = Scratch::new("config-onboarded-kept");
+    let used = dir(&scratch);
+    let path = used.join(CONFIG_FILE);
+    std::fs::write(&path, "future_key = 1\n").expect("seeded");
+    let mut config = Config::load(Some(used), ThreadId(1));
+    config.count_in_use(false, RunId(3));
+    assert!(config.view().onboarded);
+    apply(&mut config, SettingsOp::SetTaskbar(true));
+    assert!(config.view().onboarded);
+    assert!(config.view().show_in_taskbar);
+    assert_eq!(saved(&path).get("onboarded"), None);
+
+    let fresh = dir(&scratch).join("fresh");
+    let mut config = Config::load(Some(fresh.clone()), ThreadId(1));
+    config.count_in_use(false, RunId(0));
+    assert!(!config.view().onboarded);
+    apply(&mut config, SettingsOp::FinishOnboarding);
+    assert!(config.view().onboarded);
+    assert_eq!(
+        saved(&fresh.join(CONFIG_FILE))["onboarded"].as_bool(),
+        Some(true)
+    );
+    assert!(Config::load(Some(fresh), ThreadId(1)).view().onboarded);
+}
+
+#[test]
+fn a_config_that_cant_be_written_serves_onboarded_and_still_refuses_every_write() {
+    let scratch = Scratch::new("config-onboarded-refusing");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    let broken = "onboarded = false\nnot toml [";
+    std::fs::write(&path, broken).expect("seeded");
+    let default = DefaultRepo {
+        account: 1,
+        repo: RepoName::new("owner/repo").expect("valid repo"),
+    };
+    for (mut config, refusal) in [
+        (
+            Config::load(Some(dir), ThreadId(1)),
+            ConfigError::Unreadable,
+        ),
+        (Config::load(None, ThreadId(1)), ConfigError::NoHome),
+    ] {
+        assert!(config.view().onboarded, "{refusal}");
+        config.count_in_use(false, RunId(0));
+        assert!(config.view().onboarded, "{refusal}");
+        let view = config.view().clone();
+        let ops = [
+            SettingsOp::SetAssistantName(name("Nimbus")),
+            SettingsOp::SetUserName(Some(UserName::new("Oscar").expect("valid"))),
+            SettingsOp::SetUserName(None),
+            SettingsOp::FinishOnboarding,
+            SettingsOp::SetMaxFrameRate(MaxFrameRate::AUTOMATIC),
+            SettingsOp::SetDefaultModel(choice("gpt-6-luna", Effort::Low)),
+            SettingsOp::SetDockPosition(DockPosition::Center),
+            SettingsOp::SetTaskbar(true),
+            SettingsOp::SetTalkBack(true),
+            SettingsOp::SetSttUnload(SttUnload::After1Hour),
+            SettingsOp::InstallVoice(VoicePart::SpeechInput),
+            SettingsOp::RemoveVoice(VoicePart::SpokenReplies),
+            SettingsOp::CancelVoiceInstall,
+        ];
+        let staged = ops.into_iter().map(|op| config.stage(op)).chain([
+            config.stage_github_default(&default),
+            config.stage_activate(VoicePart::SpeechInput),
+            config.stage_remove_intent(VoicePart::SpeechInput),
+            config.stage_remove_done(VoicePart::SpeechInput),
+        ]);
+        for (index, staged) in staged.enumerate() {
+            let error = staged.expect_err("refused");
+            assert_eq!(
+                std::mem::discriminant(&error),
+                std::mem::discriminant(&refusal),
+                "{refusal} write {index}"
+            );
+        }
+        assert_eq!(config.view(), &view);
+    }
+    assert_eq!(std::fs::read_to_string(&path).expect("readable"), broken);
 }
