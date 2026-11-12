@@ -237,6 +237,7 @@ fn claim(lock: &mut File, path: &Path, root: &Path, store: &mut impl Credentials
                 path.display()
             )
         })?;
+        lock.set_len(0)?;
     }
     if let Some(parent) = root.parent() {
         fs::create_dir_all(parent)?;
@@ -605,6 +606,25 @@ mod tests {
             assert!(!root.exists(), "{case}");
             assert_eq!(fs::read_to_string(&path).expect("lock"), line, "{case}");
         }
+    }
+
+    #[test]
+    fn a_recovered_run_is_forgotten_even_when_the_new_folder_cannot_be_made() {
+        let dir = scratch::dir("gate-recovered");
+        let (earlier, line) = interrupted_run(&dir);
+        let mut store = Fake([HELD.to_owned()].into());
+        let path = dir.join("run.lock");
+        fs::write(&path, line).expect("an interrupted run's lock");
+        fs::write(dir.join("file"), "").expect("a file where a folder would go");
+        let mut lock = take(&path).expect("lock");
+        claim(&mut lock, &path, &dir.join("file/now"), &mut store)
+            .expect_err("no folder in a file");
+        assert_eq!(store.0, BTreeSet::new());
+        assert!(!earlier.exists());
+        drop(lock);
+        assert_eq!(fs::read_to_string(&path).expect("lock"), "");
+        let mut lock = take(&path).expect("the next run's lock");
+        claim(&mut lock, &path, &dir.join("now"), &mut store).expect("the next claim goes through");
     }
 
     #[test]
