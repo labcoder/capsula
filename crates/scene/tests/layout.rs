@@ -996,6 +996,115 @@ fn detached_edges_can_be_updated_without_resurrecting_their_endpoints() {
 }
 
 #[test]
+fn a_zero_width_shape_keeps_its_fill_and_draws_no_outline() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"sky","put":[
+            {"shape":{"id":"skybg","kind":"rect","box":[0,0,480,300],"fill":"#BFE8FF","color":"#BFE8FF","width":0}},
+            {"shape":{"id":"sun","kind":"circle","at":[400,60],"r":30,"fill":"#FFD700","width":0}}
+        ]}),
+    );
+    let prepared =
+        picture(&scene, first, &before, &mut Measure::default()).expect("zero-width shapes");
+    let primitives = |name: &'static str| {
+        let handle = prepared.after.handle(&id(name));
+        let item = prepared
+            .display
+            .items
+            .iter()
+            .find(|item| Some(item.handle) == handle)
+            .expect("prepared item");
+        Arc::clone(&item.primitives)
+    };
+    assert!(matches!(
+        &*primitives("skybg"),
+        [Prim::Rect {
+            fill: Some(_),
+            border: None,
+            ..
+        }]
+    ));
+    assert!(matches!(&*primitives("sun"), [Prim::Fill { .. }]));
+}
+
+#[test]
+fn a_zero_width_dashed_shape_reserves_no_dash_and_draws_no_outline() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    // Its 8,000-long dashed outline needs 513 pieces, one past the global cap.
+    let outlined = step(json!({"id":"big","put":[
+        {"shape":{"id":"big","kind":"rect","box":[0,0,2000,2000],"fill":"blue","dash":true}}
+    ]}));
+    assert!(matches!(
+        scene.admit(&outlined, &budget),
+        Err(error) if error.code == ErrorCode::OverBudget(Budget::DashPieces)
+    ));
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"big","put":[
+            {"shape":{"id":"big","kind":"rect","box":[0,0,2000,2000],"fill":"blue","width":0,"dash":true}}
+        ]}),
+    );
+    assert_eq!(budget.usage().dash_pieces, 0);
+    let prepared =
+        picture(&scene, first, &before, &mut Measure::default()).expect("no dashed outline");
+    assert_eq!(prepared.after.paint_work().dash_pieces, 0);
+    let handle = prepared.after.handle(&id("big"));
+    let item = prepared
+        .display
+        .items
+        .iter()
+        .find(|item| Some(item.handle) == handle)
+        .expect("prepared item");
+    assert!(matches!(
+        &*item.primitives,
+        [Prim::Rect {
+            fill: Some(_),
+            border: None,
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn a_zero_radius_rect_prepares_as_a_plain_square_cornered_rect() {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"rects","put":[
+            {"shape":{"id":"square","kind":"rect","box":[20,20,100,60],"radius":0}},
+            {"shape":{"id":"plain","kind":"rect","box":[20,20,100,60]}}
+        ]}),
+    );
+    let prepared = picture(&scene, first, &before, &mut Measure::default()).expect("zero radius");
+    let primitives = |name: &'static str| {
+        let handle = prepared.after.handle(&id(name));
+        let item = prepared
+            .display
+            .items
+            .iter()
+            .find(|item| Some(item.handle) == handle)
+            .expect("prepared item");
+        Arc::clone(&item.primitives)
+    };
+    let square = primitives("square");
+    assert!(matches!(
+        &*square,
+        [Prim::Rect { radius, border: Some(_), .. }] if radius.to_bits() == 0.0_f32.to_bits()
+    ));
+    assert_eq!(square, primitives("plain"));
+}
+
+#[test]
 fn procedural_outputs_fit_the_admission_reservations_and_share_stroked_vertices() {
     let mut scene = SceneState::begin(header()).expect("scene");
     let mut budget = GlobalBudget::default();

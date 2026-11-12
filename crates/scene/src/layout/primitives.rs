@@ -505,6 +505,7 @@ impl Build<'_> {
             .as_ref()
             .map(|fill| self.theme.resolve(fill).into());
         let width = shape.width.map_or(2.0, crate::Finite::get);
+        let outlined = width > 0.0;
         let mut bounds = rect;
         match shape.kind {
             ShapeKind::Rect => {
@@ -516,9 +517,9 @@ impl Build<'_> {
                     rect,
                     radius,
                     fill,
-                    border: (!shape.dash).then_some((color, width)),
+                    border: (outlined && !shape.dash).then_some((color, width)),
                 });
-                if shape.dash {
+                if outlined && shape.dash {
                     output.push(Prim::Line {
                         points: rounded_rect(rect, radius),
                         closed: true,
@@ -536,13 +537,15 @@ impl Build<'_> {
                         color,
                     });
                 }
-                output.push(Prim::Line {
-                    points,
-                    closed: true,
-                    color,
-                    width,
-                    dashed: shape.dash,
-                });
+                if outlined {
+                    output.push(Prim::Line {
+                        points,
+                        closed: true,
+                        color,
+                        width,
+                        dashed: shape.dash,
+                    });
+                }
             }
             ShapeKind::Polygon => {
                 let points: Arc<[Vec2]> = shape
@@ -560,13 +563,15 @@ impl Build<'_> {
                         color,
                     });
                 }
-                output.push(Prim::Line {
-                    points,
-                    closed: true,
-                    color,
-                    width,
-                    dashed: shape.dash,
-                });
+                if outlined {
+                    output.push(Prim::Line {
+                        points,
+                        closed: true,
+                        color,
+                        width,
+                        dashed: shape.dash,
+                    });
+                }
             }
         }
 
