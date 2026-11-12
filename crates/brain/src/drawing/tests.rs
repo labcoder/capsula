@@ -1566,7 +1566,11 @@ fn a_draw_call_puts_an_object_behind_an_earlier_one_and_refuses_a_cycle() {
     assert_eq!(trace(&out), ["write step 3", "step 1#2", "end 1 true"]);
     let cycle = r#"{"id":"d","set":[{"target":"x","behind":"z"}]}"#;
     let out = store.run(&mut drawing, call(3, "c3", args("s", &[cycle.to_owned()])));
-    assert_eq!(trace(&out), ["end 1 false"], "the refused step writes nothing");
+    assert_eq!(
+        trace(&out),
+        ["end 1 false"],
+        "the refused step writes nothing"
+    );
     assert_eq!(error(&out.calls[0]), ErrorCode::ReferenceCycle);
 }
 
