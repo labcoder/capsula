@@ -160,7 +160,7 @@ impl OnboardingView {
                             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                             .child(before)
                             .child(div().flex_1().min_w(rems(12.0)).child(input.large()))
-                            .child(after),
+                            .children((!after.is_empty()).then_some(after)),
                     )
                     .child(help(strings.get(Text::OnboardingWelcomeHelp)))
             }

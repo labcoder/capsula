@@ -808,14 +808,15 @@ impl Strings {
         self.format("onboarding-title", Some(&args))
     }
 
-    /// The welcome's words before and after the name input, which may sit anywhere in it.
+    /// The welcome's words before and after the name input, which may sit anywhere in it. Both
+    /// are trimmed, since the row spaces the input itself.
     pub(crate) fn onboarding_welcome(&self) -> (String, String) {
         const SPOT: &str = "\u{E000}";
         let mut args = FluentArgs::new();
         args.set("name", SPOT);
         let text = self.format("onboarding-welcome", Some(&args));
         match text.split_once(SPOT) {
-            Some((before, after)) => (before.to_owned(), after.to_owned()),
+            Some((before, after)) => (before.trim().to_owned(), after.trim().to_owned()),
             None => (text, String::new()),
         }
     }
@@ -989,7 +990,7 @@ mod tests {
         let strings = Strings::english();
         assert_eq!(
             strings.onboarding_welcome(),
-            ("Hi, I'm ".to_owned(), String::new())
+            ("Hi, I'm".to_owned(), String::new())
         );
         assert_eq!(
             strings.onboarding_title(),
