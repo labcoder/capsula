@@ -36,7 +36,6 @@ const CHUNK: Duration = Duration::from_millis(20);
 /// A whole capture buffer drained in one pass, plus three chunks for the forwarder to lag.
 #[expect(
     clippy::as_conversions,
-    clippy::cast_possible_truncation,
     reason = "a chunk count of a 100 ms buffer fits usize"
 )]
 const PCM_QUEUE: usize = (CAPTURE_BUFFER.as_millis() / CHUNK.as_millis()) as usize + 3;
