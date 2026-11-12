@@ -50,6 +50,9 @@ pub enum CallError {
     /// The shell couldn't prepare a step of the call's scene.
     #[error("drawing.PreparationFailed")]
     Failed,
+    /// A replacement couldn't be drawn after its committed clear removed previous drawings.
+    #[error("drawing.ReplacementFailedPreviousRemoved")]
+    ReplacementFailed,
     /// The owner stopped; submitted writes still settle without accepting queued records.
     #[error("drawing.Interrupted")]
     Interrupted,
@@ -712,6 +715,14 @@ impl Drawing {
 
     /// Ends every open call drawing in `scene`, whose step the shell couldn't prepare.
     pub(super) fn end_calls_in(&mut self, scene: SceneId, out: &mut Output) {
+        let error = if self
+            .live(scene)
+            .is_some_and(|at| self.scenes[at].replacement == Some(super::ReplacementLoss::Failed))
+        {
+            CallError::ReplacementFailed
+        } else {
+            CallError::Failed
+        };
         let failing: Vec<usize> = (0..self.calls.len())
             .filter(|&at| {
                 let call = &self.calls[at];
@@ -719,7 +730,7 @@ impl Drawing {
             })
             .collect();
         for at in failing {
-            self.end(at, Some(CallError::Failed), out);
+            self.end(at, Some(error.clone()), out);
         }
     }
 

@@ -870,6 +870,7 @@ fn a_failed_replacement_transaction_preserves_its_cap_victim() {
             DataToShell::SceneBegin { .. }
                 | DataToShell::SceneStepCommit { .. }
                 | DataToShell::ScenesRemoved { .. }
+                | DataToShell::ScenesReplaced { .. }
         )
     )));
     assert_eq!(core.debt(), 0);

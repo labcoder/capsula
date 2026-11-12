@@ -504,9 +504,7 @@ fn a_new_empty_rest_also_respects_returned_owners_at_the_cap() {
             } else {
                 assert_eq!(
                     controls(&effects),
-                    [&ControlToBrain::ClearDrawing {
-                        scene_ids: vec![LIVE]
-                    }]
+                    [&ControlToBrain::SceneFailed { scene: LIVE }]
                 );
                 assert!(presenter.scenes.is_empty());
                 assert_eq!(presenter.residency(), MAX_RESIDENT_BYTES - empty + 1);

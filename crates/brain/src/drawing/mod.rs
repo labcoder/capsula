@@ -121,6 +121,11 @@ pub enum Input {
         /// The scenes.
         scenes: Vec<SceneId>,
     },
+    /// A terminal whole-scene refusal, including a header rejected before its run was known.
+    SceneFailed {
+        /// The committed scene.
+        scene: SceneId,
+    },
     /// Quit: every scene is cleared once the write in the store is answered.
     ClearVisible,
     /// The run ended: its later input, and any earlier run's, is stale. Its scenes stay.
@@ -181,6 +186,13 @@ struct Held {
     committers: Vec<Option<RunId>>,
     /// Cleared or deleted: no frame of it goes out, and it leaves once no write is pending.
     gone: bool,
+    replacement: Option<ReplacementLoss>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReplacementLoss {
+    Pending,
+    Failed,
 }
 
 /// Work that waits for the store to answer.
@@ -332,6 +344,7 @@ impl Drawing {
                 committers: vec![None; usize::try_from(state.revision()).unwrap_or_default()],
                 state,
                 gone: false,
+                replacement: None,
             });
         }
         skipped.sort_unstable();
@@ -393,6 +406,11 @@ impl Drawing {
             }
             Input::StepShown { run, scene, index } => {
                 if self.committed_by(run, scene, index, &mut out) {
+                    if let Some(at) = self.live(scene)
+                        && self.scenes[at].replacement == Some(ReplacementLoss::Pending)
+                    {
+                        self.scenes[at].replacement = None;
+                    }
                     self.enqueue(Job::Shown { scene, index }, &mut out);
                 }
             }
@@ -403,6 +421,7 @@ impl Drawing {
                 cut,
             } => {
                 if self.committed_by(run, scene, index, &mut out) {
+                    self.replacement_failed(scene, &mut out);
                     let job = Job::Cut {
                         scene,
                         cut,
@@ -412,6 +431,11 @@ impl Drawing {
                 }
             }
             Input::Clear { scenes } => self.clear(&scenes, &mut out),
+            Input::SceneFailed { scene } => {
+                self.replacement_failed(scene, &mut out);
+                self.end_calls_in(scene, &mut out);
+                self.clear(&[scene], &mut out);
+            }
             Input::ClearVisible => {
                 self.clear_visible(&mut out);
                 if !self.settled() {
@@ -650,6 +674,7 @@ impl fmt::Debug for Input {
             Self::StepShown { .. } => "StepShown",
             Self::StepFailed { .. } => "StepFailed",
             Self::Clear { .. } => "Clear",
+            Self::SceneFailed { .. } => "SceneFailed",
             Self::ClearVisible => "ClearVisible",
             Self::RunClosed { .. } => "RunClosed",
             Self::ThreadDeleted { .. } => "ThreadDeleted",

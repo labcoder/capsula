@@ -886,6 +886,74 @@ fn first_paint_control_refusal_ends_the_real_owner_and_cancels_its_scene_wake(
 }
 
 #[gpui::test]
+fn replacement_selects_the_successor_on_the_same_shown_host_without_an_old_ack(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    use kumochi_protocol::message::{ControlToBrain, DataToShell, RunId, SceneHeader, SceneId};
+    use kumochi_scene::{Record, deferred::Deferred, parse_record};
+    let (owner, window, controls) = super::owned_static_canvas(cx);
+    let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::StepShown {
+            run: RunId(6),
+            scene: SceneId(1),
+            index: 0
+        })
+    );
+    let script = HostGuard::install(&[]);
+    let now = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    owner.update(&mut visual, |this, cx| {
+        let effects = this.presenter.data(
+            1,
+            Deferred::new(
+                DataToShell::ScenesReplaced {
+                    scenes: vec![SceneId(1)],
+                    successor: SceneId(2),
+                },
+                0,
+            ),
+            0,
+            now,
+        );
+        assert!(!this.scene_effects_at(effects, now, cx));
+        assert_eq!(
+            this.overlay.window().expect("shown old picture").window,
+            window
+        );
+        assert!(this.presenter.drawn());
+    });
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+    owner.update(&mut visual, |this, cx| {
+        let Record::Begin(begin) = parse_record(br#"{"begin":{"v":1,"scene":"next","surface":"overlay","alt":"new"}}"#).expect("header") else { panic!("begin"); };
+        let effects = this.presenter.data(1, Deferred::new(DataToShell::SceneBegin {
+            scene: SceneId(2), header: SceneHeader { begin, layout_version: 2 },
+        }, 0), 0, now);
+        assert!(!this.scene_effects_at(effects, now, cx));
+        super::prepare_scene_step_at(&mut this.presenter, SceneId(2), 0,
+            br#"{"step":{"id":"new","put":[{"shape":{"id":"new","kind":"rect","box":[0,0,30,30],"enter":"none"}}]}}"#, now);
+        assert!(!this.scene_effects_at(Ok(Vec::new()), now, cx));
+        assert_eq!(this.overlay.window().expect("shown successor").window, window);
+        assert!(this.presenter.drawn());
+        assert_eq!(this.presenter.frames().borrow().painted(SceneId(1)), None);
+    });
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::StepShown {
+            run: RunId(6),
+            scene: SceneId(2),
+            index: 0
+        })
+    );
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+    script.finish();
+    close_callback_scene(&owner, cx);
+}
+
+#[gpui::test]
 fn a_failure_after_success_is_drained_before_any_paint_acknowledgement(
     cx: &mut gpui_kit::TestAppContext,
 ) {
@@ -911,9 +979,7 @@ fn a_failure_after_success_is_drained_before_any_paint_acknowledgement(
     script.finish();
     assert_eq!(
         controls.try_recv(),
-        Ok(ControlToBrain::ClearDrawing {
-            scene_ids: vec![SceneId(1)]
-        })
+        Ok(ControlToBrain::SceneFailed { scene: SceneId(1) })
     );
     assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
     owner.update(&mut visual, |this, cx| {

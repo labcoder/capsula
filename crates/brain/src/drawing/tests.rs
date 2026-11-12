@@ -270,6 +270,178 @@ fn replacement_args(scene: &str, steps: &[String]) -> Vec<u8> {
     )
 }
 
+#[test]
+fn replacement_failure_reports_loss_once_after_the_call_and_original_run_ended() {
+    use kumochi_protocol::message::ControlToShell;
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    store.run(
+        &mut drawing,
+        call(1, "old", args("old", &[text("old", "old")])),
+    );
+    let ended = store.run(
+        &mut drawing,
+        call(1, "new", replacement_args("new", &[text("new", "new")])),
+    );
+    assert_eq!(ended.calls.len(), 1);
+    assert_eq!(ended.calls[0].error, None);
+    store.run(&mut drawing, Input::RunClosed { run: RunId(1) });
+    let mut another = call(2, "other", args("other", &[text("other", "other")]));
+    if let Input::Call { thread, .. } = &mut another {
+        *thread = ThreadId(8);
+    }
+    store.run(&mut drawing, another);
+    let failed = store.run(
+        &mut drawing,
+        Input::StepFailed {
+            run: RunId(1),
+            scene: SceneId(2),
+            index: 0,
+            cut: cut(0, vec![]),
+        },
+    );
+    assert_eq!(failed.calls, []);
+    let notices: Vec<_> = failed
+        .effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Control(ControlToShell::DrawingReplacementFailed { thread, run }) => {
+                Some((*thread, *run))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notices, [(THREAD, RunId(1))]);
+    let repeated = store.run(
+        &mut drawing,
+        Input::StepFailed {
+            run: RunId(1),
+            scene: SceneId(2),
+            index: 0,
+            cut: cut(0, vec![]),
+        },
+    );
+    assert!(!repeated.effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Control(ControlToShell::DrawingReplacementFailed { .. })
+    )));
+}
+
+#[test]
+fn a_whole_scene_refusal_reports_late_loss_but_an_explicit_clear_does_not() {
+    use kumochi_protocol::message::ControlToShell;
+    for failed in [false, true] {
+        let mut drawing = Drawing::default();
+        let mut store = Store::default();
+        store.run(
+            &mut drawing,
+            call(1, "old", args("old", &[text("old", "old")])),
+        );
+        store.run(
+            &mut drawing,
+            call(1, "new", replacement_args("new", &[text("new", "new")])),
+        );
+        let out = store.run(
+            &mut drawing,
+            if failed {
+                Input::SceneFailed { scene: SceneId(2) }
+            } else {
+                Input::Clear {
+                    scenes: vec![SceneId(2)],
+                }
+            },
+        );
+        assert_eq!(
+            out.effects
+                .iter()
+                .filter(|effect| matches!(
+                    effect,
+                    Effect::Control(ControlToShell::DrawingReplacementFailed {
+                        thread: THREAD,
+                        run: RunId(1)
+                    })
+                ))
+                .count(),
+            usize::from(failed)
+        );
+        assert_eq!(drawing.scenes.len(), 0);
+        assert_eq!(store.cleared, [SceneId(1), SceneId(2)]);
+    }
+}
+
+#[test]
+fn an_open_replacement_call_returns_the_loss_code_and_a_painted_one_does_not() {
+    use kumochi_protocol::message::ControlToShell;
+    for painted in [false, true] {
+        let mut drawing = Drawing::default();
+        let mut store = Store::default();
+        store.run(
+            &mut drawing,
+            call(1, "old", args("old", &[text("old", "old")])),
+        );
+        store.run(
+            &mut drawing,
+            streamed(
+                "new",
+                0,
+                r#"{"begin":{"v":1,"scene":"new","surface":"overlay","alt":""}}"#,
+            ),
+        );
+        store.run(
+            &mut drawing,
+            streamed("new", 1, &format!(r#"{{"step":{}}}"#, text("new", "new"))),
+        );
+        let cut = if painted {
+            store.run(
+                &mut drawing,
+                Input::StepShown {
+                    run: RunId(1),
+                    scene: SceneId(2),
+                    index: 0,
+                },
+            );
+            cut(1, vec![handle(&drawing, 2, "new")])
+        } else {
+            cut(0, vec![])
+        };
+        let failed = store.run(
+            &mut drawing,
+            Input::StepFailed {
+                run: RunId(1),
+                scene: SceneId(2),
+                index: 0,
+                cut,
+            },
+        );
+        assert_eq!(failed.calls.len(), 1);
+        assert_eq!(
+            failed.calls[0].error,
+            Some(if painted {
+                CallError::Failed
+            } else {
+                CallError::ReplacementFailed
+            })
+        );
+        assert_eq!(
+            failed
+                .effects
+                .iter()
+                .filter(|effect| matches!(
+                    effect,
+                    Effect::Control(ControlToShell::DrawingReplacementFailed { .. })
+                ))
+                .count(),
+            usize::from(!painted)
+        );
+        if !painted {
+            assert_eq!(
+                failed.calls[0].tool_text(),
+                "drawn: [new]; stopped: drawing.ReplacementFailedPreviousRemoved"
+            );
+        }
+    }
+}
+
 fn call(run: u64, call: &str, args: Vec<u8>) -> Input {
     Input::Call {
         thread: THREAD,
@@ -348,6 +520,9 @@ fn trace(out: &Output) -> Vec<String> {
             Effect::RevokeScenes { scenes } => Some(format!("revoke {}", ids(scenes))),
             Effect::Data(DataToShell::ScenesRemoved { scenes }) => {
                 Some(format!("removed {}", ids(scenes)))
+            }
+            Effect::Data(DataToShell::ScenesReplaced { scenes, successor }) => {
+                Some(format!("replaced {} by {}", ids(scenes), successor.0))
             }
             Effect::Data(DataToShell::SceneBegin { scene, .. }) => {
                 Some(format!("begin {}", scene.0))
@@ -631,7 +806,7 @@ fn default_replacement_clears_once_but_continuing_its_header_preserves_a_kept_sc
             "lookup",
             "write step 1",
             "revoke 1,2,3,4",
-            "removed 1,2,3,4",
+            "replaced 1,2,3,4 by 5",
             "begin 5",
             "step 5#0",
             "write step 2",
@@ -1580,7 +1755,7 @@ fn a_failed_fifth_scene_write_preserves_its_victim_and_a_new_call_can_replace_it
             "lookup",
             "write step 1",
             "revoke 1",
-            "removed 1",
+            "replaced 1 by 5",
             "begin 5",
             "step 5#0",
             "end 5 true"
@@ -1936,6 +2111,7 @@ fn a_snapshot_leaves_out_a_scene_the_shell_would_refuse_and_keeps_the_rest() {
         state: SceneState::begin(begin).expect("a valid header"),
         committers: Vec::new(),
         gone: false,
+        replacement: None,
     });
     let snapshot = drawing.snapshot();
     assert_eq!(snapshot.skipped, [SceneId(9)]);
@@ -1961,6 +2137,7 @@ fn a_snapshot_leaves_out_a_scene_the_shell_would_refuse_and_keeps_the_rest() {
             state,
             committers: vec![None],
             gone: false,
+            replacement: None,
         });
     }
     let snapshot = drawing.snapshot();

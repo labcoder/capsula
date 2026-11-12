@@ -37,6 +37,7 @@ mod prepare;
 mod recovery;
 mod scene;
 mod snapshot;
+mod swap;
 mod window;
 
 use std::{
@@ -212,6 +213,7 @@ impl Presenter {
 
     /// The connection ended: every job is cancelled and every scene, charge and held frame goes.
     pub(crate) fn disconnected(&mut self) {
+        self.discard_replacement();
         if let Phase::Recovering(recovery) = std::mem::replace(&mut self.phase, Phase::Offline) {
             recovery.cancel.store(true, Ordering::Relaxed);
         }
@@ -299,7 +301,10 @@ impl Presenter {
                 self.assembled(effect, now, &mut out)?;
             }
             Err(frame) if current => {
-                let removed = matches!(&*frame, DataToShell::ScenesRemoved { .. });
+                let removed = matches!(
+                    &*frame,
+                    DataToShell::ScenesRemoved { .. } | DataToShell::ScenesReplaced { .. }
+                );
                 let scene = removed
                     || matches!(
                         &*frame,
@@ -404,6 +409,7 @@ impl Presenter {
     /// # Errors
     /// [`Broken`] when a held frame applied after abandoning recovery can't be mirrored.
     pub(crate) fn tick(&mut self, now: Instant) -> Result<Vec<Effect>, Broken> {
+        self.frames.borrow_mut().expire_retirement(now);
         let mut out = Out::default();
         let late: Vec<_> = self
             .scenes
@@ -436,17 +442,26 @@ impl Presenter {
             .map(|(since, ..)| since + DEADLINE)
             .chain(self.lane.as_ref().map(Lane::deadline))
             .chain(recovering)
+            .chain(self.frames.borrow().retirement.as_ref().map(|r| r.expires))
             .min()
     }
 
     fn stop_membership(&self) -> Result<[Option<SceneId>; MAX_VISIBLE_SCENES], Broken> {
         let mut visible = [None; MAX_VISIBLE_SCENES];
+        let mut pending = self
+            .frames
+            .borrow()
+            .successor()
+            .filter(|id| !self.scenes.contains_key(id));
         for (slot, id) in visible.iter_mut().zip(self.scenes.keys()) {
             *slot = Some(*id);
         }
         for (frame, _) in &self.held {
             match &**frame {
                 DataToShell::SceneBegin { scene, .. } if !self.cleared.contains(scene) => {
+                    if pending == Some(*scene) {
+                        pending = None;
+                    }
                     if visible.contains(&Some(*scene)) {
                         return Err(Broken::Order);
                     }
@@ -456,7 +471,11 @@ impl Presenter {
                         .ok_or(Broken::Scenes)?;
                     *slot = Some(*scene);
                 }
-                DataToShell::ScenesRemoved { scenes } => {
+                DataToShell::ScenesRemoved { scenes }
+                | DataToShell::ScenesReplaced { scenes, .. } => {
+                    if pending.is_some_and(|id| scenes.contains(&id)) {
+                        pending = None;
+                    }
                     for slot in &mut visible {
                         if slot.is_some_and(|id| scenes.contains(&id)) {
                             *slot = None;
@@ -472,6 +491,12 @@ impl Presenter {
                 }
                 _ => {}
             }
+        }
+        if let Some(id) = pending {
+            *visible
+                .iter_mut()
+                .find(|slot| slot.is_none())
+                .ok_or(Broken::Scenes)? = Some(id);
         }
         Ok(visible)
     }
@@ -491,6 +516,7 @@ impl Presenter {
         }
         out.flush();
         let visible = self.stop_membership()?;
+        self.discard_replacement();
         for pending in &mut self.stopped_begins {
             if !visible.contains(pending) {
                 *pending = None;
@@ -542,6 +568,8 @@ impl Presenter {
     /// # Errors
     /// [`Broken`] when a held frame applied after clearing recovery can't be mirrored.
     pub(crate) fn clear(&mut self, now: Instant) -> Result<Vec<Effect>, Broken> {
+        let successor = self.frames.borrow().successor();
+        self.discard_replacement();
         self.stopped_begins = [None; MAX_VISIBLE_SCENES];
         let mut out = Out::default();
         if self.recovery_incomplete() {
@@ -561,6 +589,11 @@ impl Presenter {
             self.release(id);
             self.forget(id, &mut out);
         }
+        if let Some(id) = successor
+            && !self.cleared.contains(&id)
+        {
+            self.forget(id, &mut out);
+        }
         Ok(out.finish())
     }
 
@@ -571,7 +604,8 @@ impl Presenter {
 
     /// Whether a v1 scene is mirrored or recovering, so Esc sends v1 cuts, not the placeholder Stop.
     pub(crate) fn holds_scenes(&self) -> bool {
-        !self.scenes.is_empty()
+        self.frames.borrow().retirement.is_some()
+            || !self.scenes.is_empty()
             || matches!(self.phase, Phase::Recovering(_))
             || self.assembler.described() && self.assembler.pending()
     }
@@ -582,6 +616,7 @@ impl Presenter {
         self.scenes.values().map(Scene::residency).fold(
             self.returned
                 .load(Ordering::Relaxed)
+                .saturating_add(self.frames.borrow().retirement_bytes())
                 .saturating_add(self.stage.fixed_bytes()),
             usize::saturating_add,
         )
@@ -590,7 +625,9 @@ impl Presenter {
     fn paint_work(&self) -> PaintWork {
         self.scenes
             .values()
-            .fold(PaintWork::default(), |sum, scene| sum + scene.paint)
+            .fold(self.frames.borrow().retirement_work(), |sum, scene| {
+                sum + scene.paint
+            })
     }
 }
 
@@ -609,6 +646,14 @@ impl std::fmt::Debug for Presenter {
 impl Presenter {
     /// The brain removed scenes: they go now, in any phase, and nothing of them installs later.
     fn removed(&mut self, scenes: &[SceneId], now: Instant, out: &mut Out) -> Result<(), Broken> {
+        if self
+            .frames
+            .borrow()
+            .successor()
+            .is_some_and(|id| scenes.contains(&id))
+        {
+            self.discard_replacement();
+        }
         let effect = self.assembler.remove(scenes);
         for scene in scenes {
             self.release(*scene);
@@ -635,6 +680,12 @@ impl Presenter {
             _ => None,
         };
         if let Some(commit) = commit {
+            self.frames.borrow_mut().bind_successor(commit.1, commit.0);
+            if self.fenced.is_some_and(|f| commit.0 <= f)
+                && self.frames.borrow().successor() == Some(commit.1)
+            {
+                self.discard_replacement();
+            }
             return self.admit(commit, frame, bytes, now, out);
         }
         out.credit(bytes);
@@ -664,6 +715,10 @@ impl Presenter {
                     + Frames::reservation(&frame)
                     + cache.bytes()
                     + Activation::BYTES;
+                self.make_room(
+                    self.residency().saturating_add(picture),
+                    self.paint_work() + rest.paint_work(),
+                );
                 if self.residency().saturating_add(picture) > MAX_RESIDENT_BYTES
                     || !(self.paint_work() + rest.paint_work()).within_limits()
                 {
@@ -672,7 +727,7 @@ impl Presenter {
                         (state, rest, view, frame, cache, activation),
                         bytes,
                     ));
-                    self.forget(*scene, out);
+                    self.forget_failed(*scene, out);
                     return Ok(());
                 }
                 let bytes = state.attributed_bytes();
@@ -681,6 +736,7 @@ impl Presenter {
                 self.install(
                     *scene, state, rest, retained, view, frame, cache, activation,
                 );
+                self.make_room(self.residency(), self.paint_work());
                 Ok(())
             }
             DataToShell::SceneCutApplied {
@@ -689,6 +745,9 @@ impl Presenter {
                 cut,
             } => self.cut_applied(*scene, *revision, cut, out),
             DataToShell::ScenesRemoved { scenes } => self.removed(scenes, now, out),
+            DataToShell::ScenesReplaced { scenes, successor } => {
+                self.replaced(scenes, *successor, now, out)
+            }
             _ => Ok(()),
         }
     }
@@ -765,6 +824,7 @@ impl Presenter {
             eligible_at,
             preparation,
         });
+        self.make_room(self.residency(), self.paint_work());
         Ok(())
     }
 
@@ -942,12 +1002,29 @@ impl Presenter {
         out: &mut Out,
     ) {
         let elapsed = now.saturating_duration_since(running.eligible_at);
+        if let Ok(prepared) = &*result
+            && let Some(scene) = self.scenes.get(&id)
+        {
+            let other = self
+                .scenes
+                .iter()
+                .filter(|(scene, _)| **scene != id)
+                .fold(self.frames.borrow().retirement_work(), |sum, (_, scene)| {
+                    sum + scene.paint
+                });
+            self.make_room(
+                self.residency().saturating_add(prepared.resident_bytes),
+                other + scene.paint.max(prepared.after.paint_work()),
+            );
+        }
         let total = self.residency();
         let other_work = self
             .scenes
             .iter()
             .filter(|(scene, _)| **scene != id)
-            .fold(PaintWork::default(), |sum, (_, scene)| sum + scene.paint);
+            .fold(self.frames.borrow().retirement_work(), |sum, (_, scene)| {
+                sum + scene.paint
+            });
         let Some(scene) = self.scenes.get_mut(&id) else {
             return;
         };
@@ -990,6 +1067,9 @@ impl Presenter {
     /// A step failed: its scene drops its work and, unless already cut since its last commit,
     /// sends the cut at its activated bound and waits for the brain to acknowledge it.
     fn fail(&mut self, id: SceneId, run: RunId, index: u32, reason: SceneFailure, out: &mut Out) {
+        if self.frames.borrow().successor() == Some(id) {
+            self.discard_replacement();
+        }
         let Some(scene) = self.scenes.get_mut(&id) else {
             return;
         };
@@ -1012,6 +1092,9 @@ impl Presenter {
 
     /// Drops a scene and releases its budget, residency and work.
     fn release(&mut self, id: SceneId) {
+        if self.frames.borrow().successor() == Some(id) {
+            self.discard_replacement();
+        }
         if let Some(mut scene) = self.scenes.remove(&id) {
             scene.halt();
             let bytes = scene.held();
@@ -1025,6 +1108,15 @@ impl Presenter {
             state.release(&mut self.global).expect(BOUND);
             let frame = self.frames.borrow_mut().take(id);
             drop(Deferred::new((rest, view, frame, activation), bytes));
+        }
+    }
+
+    /// A terminal whole-scene refusal, distinct from an explicit user clear.
+    fn forget_failed(&mut self, id: SceneId, out: &mut Out) {
+        if !self.cleared.contains(&id) {
+            self.remember(id);
+            out.effects
+                .push(Effect::Control(ControlToBrain::SceneFailed { scene: id }));
         }
     }
 

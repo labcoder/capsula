@@ -2,14 +2,13 @@
 
 use std::{sync::Arc, time::Instant};
 
-use kumochi_protocol::message::{DataToShell, RunId, SceneId};
+use kumochi_protocol::message::{ControlToBrain, DataToShell, RunId, SceneId};
 use kumochi_scene::{SceneView, Step};
 
 use super::super::{SceneCache, paint::Sample};
 use super::{
-    LIVE, Presenter, Probed, RUN, Shaper, Witness, acknowledge, begin, bound_everywhere,
-    clear_drawing, commit_as, controls, data, drained, hold_dropper, kept, live, only_job,
-    recovering, rect, step,
+    LIVE, Presenter, Probed, RUN, Shaper, Witness, acknowledge, begin, bound_everywhere, commit_as,
+    controls, data, drained, hold_dropper, kept, live, only_job, recovering, rect, step,
 };
 
 fn pair() -> Step {
@@ -241,7 +240,10 @@ fn a_frame_its_view_refuses_clears_its_scene_and_stays_cleared() {
     let unannounced = std::mem::replace(&mut scene.view, replacement);
     let (sampled, effects) = presenter.sample(0);
     drop(unannounced);
-    assert_eq!(controls(&effects), [&clear_drawing(vec![LIVE])]);
+    assert_eq!(
+        controls(&effects),
+        [&ControlToBrain::SceneFailed { scene: LIVE }]
+    );
     assert_eq!(
         sampled,
         Sample {
@@ -273,7 +275,10 @@ fn a_frame_that_fails_to_paint_paints_no_more_and_clears_its_scene_once() {
     assert_eq!(calls, 1, "a failed frame paints no more");
     assert_eq!(frames.borrow().painted(LIVE), None);
     let effects = presenter.paint_failed();
-    assert_eq!(controls(&effects), [&clear_drawing(vec![LIVE])]);
+    assert_eq!(
+        controls(&effects),
+        [&ControlToBrain::SceneFailed { scene: LIVE }]
+    );
     assert!(presenter.scenes.is_empty());
     assert_eq!(presenter.frames.borrow().ids(), [None; 4]);
     assert!(presenter.paint_failed().is_empty(), "cleared once");

@@ -12,6 +12,22 @@ use super::{CutKind, Drawing, Held, Job, LAYOUT_VERSION, Output, Pend, Pending, 
 use crate::coordinator::{Effect, StoreOp};
 
 impl Drawing {
+    pub(super) fn replacement_failed(&mut self, scene: SceneId, out: &mut Output) {
+        if let Some(at) = self.live(scene)
+            && self.scenes[at].replacement == Some(super::ReplacementLoss::Pending)
+        {
+            let held = &mut self.scenes[at];
+            held.replacement = Some(super::ReplacementLoss::Failed);
+            let run = held.committers[0].expect("replacement's first step was committed live");
+            out.effects.push(Effect::Control(
+                kumochi_protocol::message::ControlToShell::DrawingReplacementFailed {
+                    thread: held.thread,
+                    run,
+                },
+            ));
+        }
+    }
+
     /// `run` committed `scene`'s step `index`. A scene the brain doesn't hold is stale; any
     /// other mismatch would retire or cut a step the shell was never sent.
     pub(super) fn committed_by(
@@ -72,6 +88,7 @@ impl Drawing {
                 (scene, committed.index)
             }
             Pend::New { admission, victims } => {
+                let replacement = (!victims.is_empty()).then_some(super::ReplacementLoss::Pending);
                 let mut states: Vec<_> = self
                     .scenes
                     .iter_mut()
@@ -91,8 +108,15 @@ impl Drawing {
                     out.effects.push(Effect::RevokeScenes {
                         scenes: victims.clone(),
                     });
-                    out.effects
-                        .push(Effect::Data(DataToShell::ScenesRemoved { scenes: victims }));
+                    let message = if installed.is_some() {
+                        DataToShell::ScenesReplaced {
+                            scenes: victims,
+                            successor: id,
+                        }
+                    } else {
+                        DataToShell::ScenesRemoved { scenes: victims }
+                    };
+                    out.effects.push(Effect::Data(message));
                 }
                 let Some((state, committed)) = installed else {
                     self.drew(run, &call, id, &step);
@@ -120,6 +144,7 @@ impl Drawing {
                     state,
                     committers: vec![Some(run)],
                     gone: false,
+                    replacement,
                 });
                 (id, committed.index)
             }

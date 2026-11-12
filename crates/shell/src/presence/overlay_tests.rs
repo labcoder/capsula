@@ -62,6 +62,16 @@ fn prepare_canvas_step(presenter: &mut Presenter, index: u32, record: &[u8]) {
 }
 
 fn prepare_canvas_step_at(presenter: &mut Presenter, index: u32, record: &[u8], now: Instant) {
+    prepare_scene_step_at(presenter, TWINNED, index, record, now);
+}
+
+fn prepare_scene_step_at(
+    presenter: &mut Presenter,
+    scene: SceneId,
+    index: u32,
+    record: &[u8],
+    now: Instant,
+) {
     let Record::Step(step) = parse_record(record).expect("fixture step") else {
         panic!("step");
     };
@@ -71,7 +81,7 @@ fn prepare_canvas_step_at(presenter: &mut Presenter, index: u32, record: &[u8], 
             Deferred::new(
                 DataToShell::SceneStepCommit {
                     run: kumochi_protocol::message::RunId(6),
-                    scene: TWINNED,
+                    scene,
                     index,
                     step,
                 },
@@ -828,7 +838,7 @@ fn cleared(presenter: &mut Presenter) -> Vec<Vec<SceneId>> {
         .paint_failed()
         .into_iter()
         .filter_map(|effect| match effect {
-            Effect::Control(ControlToBrain::ClearDrawing { scene_ids }) => Some(scene_ids),
+            Effect::Control(ControlToBrain::SceneFailed { scene }) => Some(vec![scene]),
             _ => None,
         })
         .collect()

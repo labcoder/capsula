@@ -209,6 +209,10 @@ impl Coordinator {
                 && let Some(thread) = scene_id(message).and_then(|scene| self.drawing.thread(scene))
                 && self.deleting_thread(thread)
             {
+                if let Effect::Data(DataToShell::ScenesReplaced { scenes, .. }) = effect {
+                    effects.push(Effect::Data(DataToShell::ScenesRemoved { scenes }));
+                    continue;
+                }
                 if self.drawing_held.len() >= MAX_RESULTS {
                     effects.push(Effect::Broken("too many drawing frames await deletion"));
                 } else if let Effect::Data(message) = effect {
@@ -344,7 +348,10 @@ impl Coordinator {
 fn scene_id(message: &kumochi_protocol::message::DataToShell) -> Option<SceneId> {
     use kumochi_protocol::message::DataToShell;
     match message {
-        DataToShell::SceneBegin { scene, .. }
+        DataToShell::ScenesReplaced {
+            successor: scene, ..
+        }
+        | DataToShell::SceneBegin { scene, .. }
         | DataToShell::SceneStepCommit { scene, .. }
         | DataToShell::SceneCutApplied { scene, .. }
         | DataToShell::SceneEnd { scene, .. } => Some(*scene),
