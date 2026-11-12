@@ -17,12 +17,12 @@ the generic user-facing notice does not identify the failed boundary by itself.
 Debug builds also record the chord/hold, deferred delivery and stale-admission boundaries,
 including a chord suppressed by outstanding key state. They record no key beyond the left Ctrl+Alt
 chord itself and no ordinary typing, though debug builds stamp every left Ctrl+Alt chord,
-including other apps' Ctrl+Alt shortcuts. Native keyboard registration and capture start remain separate boundaries.
-The native gesture deadline records arming and delivery independently, so a delayed deadline
+including other apps' Ctrl+Alt shortcuts. Native keyboard registration and capture start
+remain separate boundaries. The native gesture deadline records arming and delivery independently, so a delayed deadline
 can be distinguished from an admission refusal. The recognition line names what reached the
 threshold, `by=Deadline`, `Repeat` or `Release`, and a chord key arriving more than 50 ms after
-an armed deadline logs the thread's message queue status bits as one number, once per gesture. Capture receipts distinguish unreliable driver
-timestamps from gaps in retained native packets. `Timestamp` always fails closed. Isolated
+an armed deadline logs the thread's message queue status bits as one number, once per gesture.
+Capture receipts distinguish unreliable driver timestamps from gaps in retained native packets. `Timestamp` always fails closed. Isolated
 discontinuities no longer discard an utterance. The adapter reports each packet's device
 position, and after physical stop shared `PacketBoundary` sums the frames missing between kept
 packets and rejects the hold when they exceed 25% of its span, kept plus missing frames. Frames
@@ -46,8 +46,8 @@ existing monotonic time. Timestamp and over-budget holds are discarded, not tran
 
 The fake-source policy tests contain no Windows types. Native adapters supply frame count,
 first-frame device position, discontinuity and timestamp-error facts, collection authority and a
-post-Listening drained-queue observation. WASAPI alone translates flag bits and owns acquire/release calls; a Core Audio
-adapter must supply equivalent facts and the same consent, cancellation and cleanup guarantees.
+post-Listening drained-queue observation. WASAPI alone translates flag bits and owns
+acquire/release calls; a Core Audio adapter must supply equivalent facts and the same consent, cancellation and cleanup guarantees.
 WASAPI requests at least 100 ms of buffering for its 20 ms polling interval. The wire queue is
 sized from that buffer, room for all of it drained in one pass plus three chunks, so a stall the
 buffer absorbs can't overflow the queue instead. The adapter allocates scratch
