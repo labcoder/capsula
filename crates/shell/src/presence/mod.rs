@@ -148,6 +148,8 @@ struct Presence {
     /// `--esc-fixture`: hold global Esc from startup until the first Esc, with no fake work.
     escape_fixture: bool,
     layout: Layout,
+    /// The stage drawings were last given, and the geometry it was chosen from.
+    drawing_placement: Option<stage::Placed>,
     panel_visibility: PanelVisibility,
     scale: f32,
     pointer_settle: Option<Task<()>>,
@@ -944,6 +946,7 @@ pub(crate) fn open(
             escape_hold: EscapeHold::default(),
             escape_fixture: flags.escape_fixture,
             layout: Layout::default(),
+            drawing_placement: None,
             panel_visibility: PanelVisibility::Hidden,
             scale,
             pointer_settle: None,

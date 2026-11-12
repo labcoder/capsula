@@ -563,6 +563,8 @@ impl Presence {
             self.runs.met(session.incarnation());
             self.runs.connected(session.generation());
             self.presenter.connected(session.generation());
+            // Recovered drawings start on a cleared screen, so none keeps the old stage.
+            self.drawing_placement = None;
             for model in [&self.threads, &self.chat] {
                 model.update(cx, |state, cx| {
                     state.connected();

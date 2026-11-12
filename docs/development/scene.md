@@ -102,7 +102,8 @@ retain at least 240×160 logical pixels; the small-display fallback is described
 [presence.md](presence.md). Physical work-area, dock and accepted panel bounds use the window
 scale. Panel open/close,
 dock placement (after re-anchoring panels) and GPUI display-change events refresh the
-stage before repaint. Activation, step installation, Stop and recovery also read the work area
+stage before repaint; a drawing already on screen keeps a stage that still fits, as
+[presence.md](presence.md) describes. Activation, step installation, Stop and recovery also read the work area
 fresh before placing their views; ordinary animation frames do not poll it.
 Work-area-only changes wait for the next placement; add a work-area notification through
 the presence adapter. Per-display overlays are not implemented.

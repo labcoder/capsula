@@ -97,6 +97,7 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             escape_hold: EscapeHold::default(),
             escape_fixture: false,
             layout: Layout::default(),
+            drawing_placement: None,
             panel_visibility: PanelVisibility::Hidden,
             scale: 1.0,
             pointer_settle: None,

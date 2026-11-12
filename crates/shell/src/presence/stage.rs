@@ -61,10 +61,18 @@ impl Presence {
                     .filter(|panel| panel.typing.visible)
                     .map(|panel| panel.bounds)
             });
-        if self
-            .presenter
-            .set_stage(stage(area, self.layout, self.scale, panel))
-        {
+        let next = Placed {
+            area,
+            layout: self.layout,
+            scale: self.scale,
+            stage: stage(area, self.layout, self.scale, panel),
+        };
+        let shown = self
+            .drawing_placement
+            .filter(|_| self.presenter.holds_scenes());
+        let placed = settle(shown, next);
+        self.drawing_placement = Some(placed);
+        if self.presenter.set_stage(placed.stage) {
             cx.defer(move |cx| {
                 if owner.update(cx, Presence::want_frames).is_err() {
                     tracing::debug!("drawing stage owner closed");
@@ -72,6 +80,39 @@ impl Presence {
             });
         }
     }
+}
+
+/// The stage drawings were given and the physical geometry it was chosen from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Placed {
+    area: [i32; 4],
+    layout: Layout,
+    scale: f32,
+    stage: Rect,
+}
+
+/// Drawings on screen keep their stage while it still fits inside the best one for the same
+/// work area, dock and scale, so a panel closing never moves them; anything else re-places them.
+fn settle(shown: Option<Placed>, next: Placed) -> Placed {
+    let Some(kept) = shown else {
+        return next;
+    };
+    let same_geometry = Placed {
+        stage: next.stage,
+        ..kept
+    } == next;
+    if same_geometry && contains(next.stage, kept.stage) {
+        kept
+    } else {
+        next
+    }
+}
+
+fn contains(outer: Rect, inner: Rect) -> bool {
+    outer.origin.x <= inner.origin.x
+        && outer.origin.y <= inner.origin.y
+        && inner.max().x <= outer.max().x
+        && inner.max().y <= outer.max().y
 }
 
 #[expect(
@@ -172,7 +213,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn opening_and_closing_typing_repositions_a_resting_drawing(cx: &mut gpui_kit::TestAppContext) {
+    fn opening_typing_repositions_and_closing_it_keeps_a_resting_drawing(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
         let area = [0, 0, 2560, 1400];
         let _area = crate::platform::work_area_fixture::set(area);
         let owner = crate::presence::test_fixture::presence(cx);
@@ -211,7 +254,7 @@ mod tests {
             presence.place_drawings(cx.weak_entity(), cx);
             assert_eq!(transforms(presence, 2), open);
             presence.dismiss_text(cx).expect("close typing");
-            assert_eq!(transforms(presence, 2), closed);
+            assert_eq!(transforms(presence, 2), open);
         });
     }
 
@@ -238,7 +281,8 @@ mod tests {
                 [1040, 21, 480, 544]
             );
             presence.presenter.frames().borrow_mut().shown = true;
-            assert_ne!(transforms(presence, 1), closed);
+            let open = transforms(presence, 1);
+            assert_ne!(open, closed);
             let observation = presence
                 .presenter
                 .frames()
@@ -254,7 +298,7 @@ mod tests {
                     .painted(crate::presenter::tests::LIVE),
                 Some(observation)
             );
-            assert_eq!(transforms(presence, 1), closed);
+            assert_eq!(transforms(presence, 1), open);
             assert!(presence.presenter.begin_painted(now));
             assert!(!presence.presenter.begin_painted(now));
         });
@@ -468,5 +512,279 @@ mod tests {
                 size: Vec2::new(1.0, 1.0)
             }
         );
+    }
+
+    fn rect(x: f32, y: f32, width: f32, height: f32) -> Rect {
+        Rect {
+            origin: Vec2::new(x, y),
+            size: Vec2::new(width, height),
+        }
+    }
+
+    const AREA: [i32; 4] = [0, 0, 2560, 1400];
+    const PEEK_STAGE: Rect = Rect {
+        origin: Vec2::new(32.0, 177.0),
+        size: Vec2::new(2496.0, 1191.0),
+    };
+    const TYPING_STAGE: Rect = Rect {
+        origin: Vec2::new(32.0, 597.0),
+        size: Vec2::new(2496.0, 771.0),
+    };
+
+    fn top_center(area: [i32; 4]) -> Layout {
+        Position::TopCenter.layout(area, [58, 21], [380, 124], 0)
+    }
+
+    fn drawn(presence: &mut Presence) {
+        presence.layout = top_center(AREA);
+        presence.presenter =
+            crate::presenter::tests::painter_fixture(Box::new(crate::presenter::tests::Charged(0)))
+                .0;
+    }
+
+    fn stage_of(presence: &Presence) -> Option<Rect> {
+        presence.drawing_placement.map(|placed| placed.stage)
+    }
+
+    fn run_state(
+        presence: &mut Presence,
+        phase: kumochi_protocol::message::Phase,
+        cx: &mut Context<'_, Presence>,
+    ) {
+        use kumochi_protocol::message::{RunId, RunOrigin, ThreadId};
+        presence
+            .link_events(
+                crate::link::Batch::Plain(vec![crate::link::LinkEvent::RunState {
+                    generation: 1,
+                    origin: Some(RunOrigin::Typed { turn: 1 }),
+                    run: RunId(1),
+                    thread: ThreadId(1),
+                    phase,
+                    error: None,
+                }]),
+                cx,
+            )
+            .expect("run state applies");
+    }
+
+    #[gpui::test]
+    fn a_drawing_keeps_its_place_while_a_request_is_pending(cx: &mut gpui_kit::TestAppContext) {
+        use kumochi_protocol::message::{Incarnation, Phase, ThreadId};
+        let _area = crate::platform::work_area_fixture::set(AREA);
+        let owner = crate::presence::test_fixture::presence(cx);
+        owner.update(cx, |presence, cx| {
+            drawn(presence);
+            presence.open_text(cx).expect("open typing");
+            assert_eq!(stage_of(presence), Some(TYPING_STAGE));
+            let placed = transforms(presence, 2);
+            // A held voice request hides the chat panel before it starts its run.
+            presence.dismiss_text(cx).expect("the hold hides typing");
+            assert_eq!(transforms(presence, 2), placed);
+            let (link, _requests) = crate::link::LinkHandle::recording();
+            presence.link = link;
+            presence.session = Some(crate::link::Session::detached(1, Incarnation(1)));
+            presence.runs.met(Incarnation(1));
+            presence.runs.connected(1);
+            presence.runs.settings(ThreadId(1));
+            presence
+                .runs
+                .submit("a pending request", |_| true)
+                .expect("submitted");
+            presence.runs_changed(cx).expect("the run starts");
+            run_state(presence, Phase::Thinking, cx);
+            // Every scene frame re-places drawings before the presenter reads it.
+            presence.place_drawings(cx.weak_entity(), cx);
+            assert_eq!(transforms(presence, 2), placed);
+            presence
+                .open_text(cx)
+                .expect("the answer shows typing again");
+            assert_eq!(transforms(presence, 2), placed);
+            run_state(presence, Phase::Done, cx);
+            presence.place_drawings(cx.weak_entity(), cx);
+            assert_eq!(stage_of(presence), Some(TYPING_STAGE));
+            assert_eq!(transforms(presence, 2), placed);
+        });
+    }
+
+    #[gpui::test]
+    fn a_panel_opening_over_a_kept_drawing_moves_it_clear(cx: &mut gpui_kit::TestAppContext) {
+        let _area = crate::platform::work_area_fixture::set(AREA);
+        let owner = crate::presence::test_fixture::presence(cx);
+        owner.update(cx, |presence, cx| {
+            drawn(presence);
+            presence.place_drawings(cx.weak_entity(), cx);
+            assert_eq!(stage_of(presence), Some(PEEK_STAGE));
+            presence.open_text(cx).expect("open typing");
+            assert_eq!(stage_of(presence), Some(TYPING_STAGE));
+            let panel = logical(presence.text.as_ref().expect("typing").bounds, 1.0);
+            let canvas = rect(0.0, 0.0, 50.0, 20.0);
+            for transform in transforms(presence, 2) {
+                assert!(!transform.bounds(canvas).intersects(panel));
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn a_kept_stage_yields_to_a_display_change_and_a_cleared_screen(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let area = crate::platform::work_area_fixture::set(AREA);
+        let owner = crate::presence::test_fixture::presence(cx);
+        owner.update(cx, |presence, cx| {
+            drawn(presence);
+            presence.open_text(cx).expect("open typing");
+            presence.dismiss_text(cx).expect("close typing");
+            assert_eq!(stage_of(presence), Some(TYPING_STAGE));
+            presence
+                .presenter
+                .clear(std::time::Instant::now())
+                .expect("clear the screen");
+            presence.place_drawings(cx.weak_entity(), cx);
+            assert_eq!(stage_of(presence), Some(PEEK_STAGE));
+            drawn(presence);
+            presence.open_text(cx).expect("open typing again");
+            presence.dismiss_text(cx).expect("close typing again");
+            assert_eq!(stage_of(presence), Some(TYPING_STAGE));
+        });
+        drop(area);
+        let smaller = [0, 0, 1920, 1080];
+        let _smaller = crate::platform::work_area_fixture::set(smaller);
+        owner.update(cx, |presence, cx| {
+            presence.layout = top_center(smaller);
+            presence.place_drawings(cx.weak_entity(), cx);
+            assert_eq!(stage_of(presence), Some(rect(32.0, 177.0, 1856.0, 871.0)));
+        });
+    }
+
+    fn scene_frame(
+        presence: &mut Presence,
+        message: kumochi_protocol::message::DataToShell,
+        cx: &mut Context<'_, Presence>,
+    ) {
+        let frame = kumochi_scene::deferred::Deferred::new(message, 64);
+        presence
+            .link_events(
+                crate::link::Batch::Plain(vec![crate::link::LinkEvent::SceneData {
+                    generation: 1,
+                    frame,
+                    bytes: 64,
+                }]),
+                cx,
+            )
+            .expect("scene frame applies");
+    }
+
+    fn kept_below_typing(presence: &mut Presence, cx: &mut Context<'_, Presence>) {
+        use kumochi_protocol::message::Incarnation;
+        drawn(presence);
+        presence.session = Some(crate::link::Session::detached(1, Incarnation(1)));
+        presence.open_text(cx).expect("open typing");
+        presence.dismiss_text(cx).expect("close typing");
+        assert_eq!(stage_of(presence), Some(TYPING_STAGE));
+    }
+
+    #[gpui::test]
+    fn a_new_scene_after_a_removal_takes_the_best_stage(cx: &mut gpui_kit::TestAppContext) {
+        use kumochi_protocol::message::{DataToShell, SceneId};
+        let _area = crate::platform::work_area_fixture::set(AREA);
+        let owner = crate::presence::test_fixture::presence(cx);
+        owner.update(cx, |presence, cx| {
+            kept_below_typing(presence, cx);
+            scene_frame(
+                presence,
+                DataToShell::ScenesRemoved {
+                    scenes: vec![crate::presenter::tests::LIVE],
+                },
+                cx,
+            );
+            assert!(!presence.presenter.holds_scenes());
+            scene_frame(
+                presence,
+                DataToShell::SceneBegin {
+                    scene: SceneId(21),
+                    header: crate::presenter::tests::header(),
+                },
+                cx,
+            );
+            assert!(presence.presenter.holds_scenes());
+            assert_eq!(stage_of(presence), Some(PEEK_STAGE));
+        });
+    }
+
+    #[gpui::test]
+    fn a_drawing_recovered_after_a_reconnect_takes_the_best_stage(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use kumochi_protocol::message::{Incarnation, SceneDescriptorV1};
+        let _area = crate::platform::work_area_fixture::set(AREA);
+        let owner = crate::presence::test_fixture::presence(cx);
+        owner.update(cx, |presence, cx| {
+            kept_below_typing(presence, cx);
+            let descriptor = SceneDescriptorV1::new(crate::presenter::tests::LIVE, 1, 1, 1)
+                .expect("one recovered scene");
+            presence
+                .link_events(
+                    crate::link::Batch::Plain(vec![
+                        crate::link::LinkEvent::State(crate::link::LinkState::Reconnecting),
+                        crate::link::LinkEvent::Connected(crate::link::Session::detached(
+                            2,
+                            Incarnation(1),
+                        )),
+                        crate::link::LinkEvent::ScenesV1 {
+                            generation: 2,
+                            scenes: kumochi_scene::text::Bounded::new(vec![descriptor])
+                                .expect("one descriptor"),
+                        },
+                    ]),
+                    cx,
+                )
+                .expect("the link drops, reconnects and describes its scene");
+            assert!(presence.presenter.holds_scenes());
+            presence.place_drawings(cx.weak_entity(), cx);
+            assert_eq!(stage_of(presence), Some(PEEK_STAGE));
+        });
+    }
+
+    #[test]
+    fn only_a_panel_closing_keeps_the_stage_of_a_shown_drawing() {
+        let kept = Placed {
+            area: AREA,
+            layout: top_center(AREA),
+            scale: 1.0,
+            stage: TYPING_STAGE,
+        };
+        let closed = Placed {
+            stage: PEEK_STAGE,
+            ..kept
+        };
+        assert_eq!(settle(Some(kept), closed), kept);
+        assert_eq!(settle(None, closed), closed);
+        let reopened = Placed {
+            stage: PEEK_STAGE,
+            ..kept
+        };
+        assert_eq!(settle(Some(reopened), kept), kept);
+        let right = Position::TopRight.layout(AREA, [58, 21], [380, 124], 0);
+        let moved = Placed {
+            layout: right,
+            stage: stage(AREA, right, 1.0, None),
+            ..kept
+        };
+        assert_eq!(moved.stage, rect(32.0, 177.0, 2496.0, 1191.0));
+        assert_eq!(settle(Some(kept), moved), moved);
+        let scaled = Placed {
+            scale: 1.25,
+            stage: PEEK_STAGE,
+            ..kept
+        };
+        assert_eq!(settle(Some(kept), scaled), scaled);
+        let wider = [0, 0, 3840, 1400];
+        let resized = Placed {
+            area: wider,
+            layout: top_center(wider),
+            stage: rect(32.0, 177.0, 3776.0, 1191.0),
+            ..kept
+        };
+        assert_eq!(settle(Some(kept), resized), resized);
     }
 }
