@@ -1540,6 +1540,13 @@ use an `anim` opacity track, not `set.opacity`, which the strict schema rejects.
 
 Charts prepare bar, line, area, scatter and pie geometry with measured nice-axis
 labels. Numeric point pairs retain their x coordinates; scalar points use indices.
+Function graphs use line charts with sampled `[x,y]` values in mathematical coordinates
+and explicit `x.min/max` and `y.min/max`: preparation maps positive y upward. The drawing
+prompt asks for radians, endpoints, zeros and extrema, not canvas-space Bézier controls.
+Line segments connect samples in order; separate series represent discontinuous branches
+such as 1/x across zero. Samples outside the domains map to their boundaries, so the model
+must choose in-range samples and correct values; Kumochi does not evaluate expressions.
+Series draw in by default, without an explicit `enter`.
 Log ticks use whole decades. Automatic log domains round out to decades; an explicit
 window containing no whole decade has no tick labels.
 Stacks accumulate positive and negative bar values separately. Pie normalization

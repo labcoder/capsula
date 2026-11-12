@@ -2114,6 +2114,47 @@ fn grouped_and_stacked_bars_use_series_slots_and_signed_baselines() {
 }
 
 #[test]
+fn sampled_sine_maps_one_period_with_positive_y_upward() {
+    use std::f64::consts::{FRAC_PI_2, PI, TAU};
+
+    let result = chart_picture(&json!([
+        {"chart":{"id":"c","kind":"line","box":[0,0,400,300],
+            "x":{"min":0,"max":TAU},"y":{"min":-1,"max":1}}},
+        {"series":{"id":"s","in":"c","data":[
+            [0,0],[FRAC_PI_2,1],[PI,0],[3.0 * FRAC_PI_2,-1],[TAU,0]
+        ]}}
+    ]));
+    let items = result.after.items();
+    let handle = result.after.handle(&id("s")).expect("sine handle");
+    let series = items
+        .iter()
+        .find(|item| item.handle == handle)
+        .expect("sine series");
+    let lines: Vec<_> = series
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Prim::Line { points, closed, .. } => Some((points, closed)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lines.len(), 1);
+    let (points, closed) = lines[0];
+    assert!(!closed, "a sine period is an open curve");
+    let expected = [
+        [54.0, 142.2],
+        [136.0, 16.0],
+        [218.0, 142.2],
+        [300.0, 268.4],
+        [382.0, 142.2],
+    ];
+    assert_eq!(points.len(), expected.len());
+    for (actual, expected) in points.iter().zip(expected) {
+        assert_vec2_near(*actual, expected);
+    }
+}
+
+#[test]
 fn pair_x_scatter_uses_uneven_numeric_spacing_and_log_y_midpoints() {
     let result = chart_picture(&json!([
         {"chart":{"id":"c","kind":"scatter","box":[0,0,400,300],"y":{"min":1,"max":100,"scale":"log"}}},
