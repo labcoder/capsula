@@ -525,3 +525,21 @@ fn launch_and_spawned_debug_show_counts_not_values() {
         r#"Launch { exe: "C:\\k.exe", args: 1, env: 1, stdio: Null, jobs: 1, .. }"#
     );
 }
+
+#[test]
+fn terminating_a_helper_that_is_already_exiting_succeeds() {
+    let job = Job::new().expect("job");
+    let child = start("park", &[], &base_env(), Stdio::Null, &job).expect("spawn");
+    child.process.terminate().expect("terminating");
+    child
+        .process
+        .terminate()
+        .expect("a second request while it exits");
+    assert!(
+        child
+            .process
+            .exits_within(Duration::from_secs(2))
+            .expect("wait")
+    );
+    job.terminate().expect("job ends");
+}

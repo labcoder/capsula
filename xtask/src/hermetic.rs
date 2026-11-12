@@ -157,20 +157,11 @@ impl Run {
     /// and the gate's folder in the real `LocalAppData`. After a success it also deletes the
     /// run's folders; after a failure it keeps them, with the product logs, until the next run.
     pub(crate) fn finish(self, result: Result<()>) -> Result<()> {
-        let kept = format!(
-            "the run's folders stay in {} until the next gate run deletes them",
-            self.root.display()
-        );
         if let Err(running) = live::refuse_running(&platform::processes()?, std::process::id()) {
-            return crate::session::combine([result, Err(running.context(kept))]);
+            return crate::session::combine([result, Err(running.context(kept(&self.root)))]);
         }
-        let keep = if result.is_ok() {
-            Keep::Nothing
-        } else {
-            Keep::Folders
-        };
         let mut store = CredentialManager;
-        let entries = remove_entries(&self.root, &mut store, keep);
+        let ended = end(&self.root, &self.alone, result, &mut store);
         let instance = platform::gate_pipe::session_id()
             .map_err(anyhow::Error::from)
             .and_then(|session| store.delete(&instance_target(GATE.instance_service, session)));
@@ -182,14 +173,32 @@ impl Run {
             }
             Ok(())
         });
-        // The lock names the root until its folders are gone, so the next run deletes them.
-        let released = match (keep, &entries) {
-            (Keep::Nothing, Ok(())) => self.alone.set_len(0).map_err(anyhow::Error::from),
-            (Keep::Folders, _) => Err(anyhow!("{kept}")),
-            (Keep::Nothing, Err(_)) => Ok(()),
-        };
-        crate::session::combine([result, entries, instance, known, released])
+        crate::session::combine([ended, instance, known])
     }
+}
+
+fn kept(root: &Path) -> String {
+    format!(
+        "the run's folders stay in {} until the next gate run deletes them",
+        root.display()
+    )
+}
+
+/// Deletes what the run's launches stored and, after a success, its folders; then empties the
+/// held `lock` only once they're gone, so the next run deletes whatever is left.
+fn end(root: &Path, lock: &File, result: Result<()>, store: &mut impl Credentials) -> Result<()> {
+    let keep = if result.is_ok() {
+        Keep::Nothing
+    } else {
+        Keep::Folders
+    };
+    let entries = remove_entries(root, store, keep);
+    let released = match (keep, &entries) {
+        (Keep::Nothing, Ok(())) => lock.set_len(0).map_err(anyhow::Error::from),
+        (Keep::Folders, _) => Err(anyhow!("{}", kept(root))),
+        (Keep::Nothing, Err(_)) => Ok(()),
+    };
+    crate::session::combine([result, entries, released])
 }
 
 /// Takes the gate-run lock at `path`, or refuses while another run holds it.
@@ -494,6 +503,65 @@ mod tests {
                 .join(AUTHORITY_FILE)
                 .is_file()
         );
+    }
+
+    #[test]
+    fn the_lock_is_emptied_only_after_a_success_whose_cleanup_finished() {
+        let line = "kumochi-gate-run 0123456789abcdef0123456789abcdef C:/run\n";
+        let held = |name: &str| {
+            let path = scratch::dir(name).join("run.lock");
+            fs::write(&path, line).expect("a run's lock");
+            take(&path).expect("lock")
+        };
+        let length = |lock: &File| lock.metadata().expect("lock").len();
+        let whole = u64::try_from(line.len()).expect("a short line");
+        let root = scratch::dir("gate-end-success");
+        authority(&root.join("app"), &[[0x07; 16]]);
+        let mut store = Fake([HELD.to_owned()].into());
+        let lock = held("gate-end-success-lock");
+        end(&root, &lock, Ok(()), &mut store).expect("ended");
+        assert_eq!(length(&lock), 0);
+        assert!(!root.exists());
+        assert_eq!(store.0, BTreeSet::new());
+
+        let root = scratch::dir("gate-end-failed");
+        authority(&root.join("app"), &[[0x07; 16]]);
+        let mut store = Fake([HELD.to_owned()].into());
+        let lock = held("gate-end-failed-lock");
+        let error = end(&root, &lock, Err(anyhow!("an item failed")), &mut store)
+            .expect_err("the run failed");
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "an item failed; the run's folders stay in {} until the next gate run deletes \
+                 them",
+                root.display()
+            )
+        );
+        assert_eq!(length(&lock), whole);
+        assert!(
+            root.join("app/local/Kumochi Gate")
+                .join(AUTHORITY_FILE)
+                .is_file()
+        );
+        assert_eq!(store.0, BTreeSet::new());
+
+        let root = scratch::dir("gate-end-unclean");
+        authority(&root.join("app"), &[[0x07; 16]]);
+        fs::create_dir(root.join("app/local/Kumochi")).expect("another identity's folder");
+        let mut store = Fake([HELD.to_owned()].into());
+        let lock = held("gate-end-unclean-lock");
+        let error = end(&root, &lock, Ok(()), &mut store).expect_err("cleanup failed");
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "kept for a manual cleanup: {}: its data folder holds Kumochi, which no gate image \
+                 writes",
+                root.join("app").display()
+            )
+        );
+        assert_eq!(length(&lock), whole);
+        assert!(root.join("app").is_dir());
     }
 
     #[test]

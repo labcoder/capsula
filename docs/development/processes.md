@@ -32,6 +32,15 @@ flowchart LR
   worker's process to exit before it reports the loss, and replaces it only when the exit was seen.
 - **The speech worker** sits there too, under the same supervisor. It's the only process that
   loads sherpa-onnx (see [voice.md](voice.md), "The speech worker").
+- **Ending a worker** asks Windows to terminate it, and only a wait shows that it ended. At quit
+  the brain ends its job while each supervisor, seeing its command lane close, drops its worker's
+  pipes and then terminates it. Either can start the worker's exit first, and Windows refuses
+  `TerminateProcess` on a process that is already exiting with access denied, so
+  `Helper::terminate` counts that refusal as a request already under way. Exit is still proved by
+  a wait. The supervisor waits 2 s, and a worker still running then is reported as `worker exit
+  unconfirmed` and never replaced. At quit the brain may exit before that wait ends, so the
+  report can instead be only the job's: `couldn't end the helpers; closing the job ends them`
+  when the job isn't empty after 5 s. Closing the job ends the worker when the brain exits.
 - Helpers inherit no handles except each worker's two explicit stdin/stdout handles. A worker's
   stderr is disconnected.
   Nothing secret is ever on their command lines.

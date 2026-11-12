@@ -493,6 +493,53 @@ async fn an_unseen_exit_refuses_held_and_later_requests_by_type_without_a_respaw
     );
 }
 
+#[cfg(windows)]
+#[tokio::test]
+#[expect(clippy::disallowed_methods, reason = "spawns while holding spawn_lock")]
+async fn a_live_worker_that_refuses_termination_is_reported_unconfirmed() {
+    let mut child = {
+        let _spawning = crate::platform::spawn_lock();
+        std::process::Command::new("cmd")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("cmd starts")
+    };
+    let process = Helper::watching(child.id()).expect("a handle without termination rights");
+    let (worker, (_written, lose)) = staged(Some(Box::new(process)));
+    let (handle, receive, intents) = handle();
+    let mut exits = handle.exits();
+    let running = tokio::spawn(run(
+        || -> io::Result<Worker<Test>> { Err(io::Error::other("no replacement")) },
+        worker,
+        receive,
+        handle.notices.clone(),
+        intents,
+        Generation(0),
+    ));
+    lose.send(None).await.expect("the supervisor reads");
+    tokio::time::timeout(Duration::from_secs(10), running)
+        .await
+        .expect("the supervisor ends")
+        .expect("joined");
+    assert_eq!(
+        exits.try_recv(),
+        Ok(Exit {
+            generation: Generation(0),
+            confirmed: false
+        })
+    );
+    let until = Instant::now() + Duration::from_secs(60);
+    assert_eq!(
+        handle.request(vec![], until).await,
+        Err(WorkerLost::ExitUnconfirmed)
+    );
+    assert!(child.try_wait().expect("cmd").is_none(), "still running");
+    child.kill().expect("cmd ends");
+    child.wait().expect("cmd ends");
+}
+
 /// A waker that records what the exit channel holds at the instant a loss wakes it, which is
 /// inside the loss's send, before the sender runs another line.
 struct Peek(Mutex<(broadcast::Receiver<Exit>, Seen)>);
