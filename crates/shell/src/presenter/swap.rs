@@ -2,13 +2,13 @@
 
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::message::{MAX_VISIBLE_SCENES, RunId, SceneId};
+use kumochi_protocol::message::{ControlToBrain, MAX_VISIBLE_SCENES, RunId, SceneId};
 use kumochi_scene::{
     SceneView, budget::Usage, deferred::Deferred, display::PaintWork, layout::LayoutState,
     limits::MAX_RESIDENT_BYTES,
 };
 
-use super::{Activation, BOUND, Broken, Frames, Out, Presenter, paint::Slot, scene::Scene};
+use super::{Activation, BOUND, Broken, Effect, Frames, Out, Presenter, paint::Slot, scene::Scene};
 
 pub(super) struct FrozenPicture {
     pub(super) id: SceneId,
@@ -241,5 +241,22 @@ impl Presenter {
 
     pub(crate) fn discard_replacement(&mut self) {
         self.frames.borrow_mut().discard_retirement();
+    }
+
+    /// A refused host clears current scenes as failures, not as an explicit user clear.
+    pub(crate) fn refuse_all(&mut self, now: Instant) -> Result<Vec<Effect>, Broken> {
+        let mut out = Out::default();
+        for effect in self.clear(now)? {
+            if let Effect::Control(ControlToBrain::ClearDrawing { scene_ids }) = effect {
+                out.effects.extend(
+                    scene_ids
+                        .into_iter()
+                        .map(|scene| Effect::Control(ControlToBrain::SceneFailed { scene })),
+                );
+            } else {
+                out.effects.push(effect);
+            }
+        }
+        Ok(out.finish())
     }
 }

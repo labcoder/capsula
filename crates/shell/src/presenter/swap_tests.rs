@@ -245,6 +245,24 @@ fn clear_before_successor_begin_preserves_the_clear_intent_for_late_traffic() {
 }
 
 #[test]
+fn a_refused_host_reports_only_current_members_and_the_unbegun_successor_as_failures() {
+    use kumochi_protocol::message::ControlToBrain;
+    let (mut presenter, now) = fixture(&[SceneId(10), LIVE]);
+    replace(&mut presenter, &[LIVE], NEXT, now);
+    let effects = presenter.refuse_all(now).expect("refused host");
+    assert_eq!(
+        controls(&effects),
+        [
+            &ControlToBrain::SceneFailed { scene: SceneId(10) },
+            &ControlToBrain::SceneFailed { scene: NEXT },
+        ]
+    );
+    begin(&mut presenter, NEXT, now);
+    assert!(!presenter.sample_at(now).0.visible);
+    assert_eq!(presenter.residency(), 0);
+}
+
+#[test]
 fn retained_and_incoming_objects_share_the_cap_without_refusing_the_new_scene() {
     let labels = |count: usize| {
         step(&format!(

@@ -1795,9 +1795,12 @@ late commits without recreating old ink. Any successful thread deletion flushes 
 including an unrelated deletion; ordinary successor removal, terminal failure and disconnect
 also dispose it. Retiring paint failure is local disposal, not an old-scene failure. No retiring
 owner is persisted or recovered, and genuine empty/failure host recreation remains unchanged.
-Header, admission-expiry, sample and paint refusals use the content-free `SceneFailed` clear instead of an explicit
-user clear. The brain derives replacement-loss feedback from the committed scene, so neither
-an unbegun successor nor a recovered owner needs the shell to guess its original run.
+Header, admission-expiry, sample, paint and host-show refusals use the content-free `SceneFailed`
+clear instead of an explicit user clear. The brain derives replacement-loss feedback from the
+committed scene, so neither an unbegun successor nor a recovered owner needs the shell to guess
+its original run.
+Esc without a known run disposes the visual hold without inventing a run id; pending typed
+cancellation and later named runs still use ordinary fencing.
 
 ### Serialized activation and first-paint acknowledgement
 
