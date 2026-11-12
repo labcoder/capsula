@@ -12,9 +12,7 @@ use kumochi_protocol::message::{
 
 use super::brain::Case;
 use super::client::{Client, Frame};
-use super::{
-    GONE, PATIENCE, Row, ended, first_text, marker, percentile, run_end, store, turn,
-};
+use super::{GONE, PATIENCE, Row, ended, first_text, marker, percentile, run_end, store, turn};
 
 /// Stops measured for each kind of pressure.
 const REPEATS: usize = 20;
