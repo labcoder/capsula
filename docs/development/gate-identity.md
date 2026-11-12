@@ -91,12 +91,16 @@ A run creates its root folder, which must not exist yet, writes a new random run
 `gate-run` file, and names both in the lock file, as one line ending in a newline, until it has
 cleaned up. If a run is interrupted (Ctrl-C, a killed xtask, a panic, or a product process still
 running at the end), the next gate run cleans up that folder as above before it starts, so
-rerunning any gate tool clears an interrupted one. It does so only when the lock's line is whole
-and the folder's `gate-run` holds the same id. Anything else, such as a lock cut short or a
-folder without that id, is refused with a message naming the lock and the folder, and nothing is
-deleted. Then look in the named folder: a gate run's launches are its `<launch>\local\Kumochi Gate`
-folders. Delete what you no longer need by hand, and any `Kumochi Gate/gen/...` entries its
-`credentials.db` files name, then delete the lock file and rerun.
+rerunning any gate tool clears an interrupted one. The instance entry and the real `Kumochi Gate`
+folder go at the end of that next run. Recovery starts only when the lock's line is whole and the
+folder's `gate-run` holds the same id. Anything else, such as a lock cut short or a folder without
+that id, is refused with a message naming the lock and the folder, and then nothing is deleted. A
+recovery that starts and then keeps a launch (its authority unreadable, or another identity's
+folder in it) has already deleted the other launches and every readable launch's entries, and
+names what it kept. To finish by hand: with no gate run on, any `Kumochi Gate/gen/...` entry in
+Credential Manager is a gate run's leftover and may be deleted. Delete the kept launch folder, then
+rerun without deleting the lock, which completes the recovery. Delete the lock only after a
+refusal that names a folder no gate run made.
 
 The gate identity never signs in: the `live` checks refuse anything but the dev identity, and no
 gate tool has a path that stores a credential.

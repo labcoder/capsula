@@ -35,6 +35,8 @@ flowchart LR
   time, or keep reading while it withholds credit.
 - It prints a table of verdicts and numbers and writes it to `report.md` in the gate's folder.
   `slice2-gate <words>` runs only the items whose names contain them.
+- `slice2-gate --inner` is internal: it is how the copy runs the items, and it starts brains
+  without the run lock, the process check or the cleanup. Never run it by hand.
 
 ## The items
 
