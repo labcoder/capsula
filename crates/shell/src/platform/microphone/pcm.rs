@@ -83,6 +83,7 @@ pub(crate) struct Packetizer {
     rate: u32,
     held: Vec<i16>,
     count: u32,
+    high_water: usize,
     failed: bool,
 }
 
@@ -105,6 +106,7 @@ impl Packetizer {
                 usize::try_from(format.rate / 50).map_err(|_| MicError::Format)?,
             ),
             count: 0,
+            high_water: 0,
             failed: false,
         })
     }
@@ -159,7 +161,13 @@ impl Packetizer {
             return Err(MicError::Overflow);
         }
         self.count += 1;
+        self.high_water = self.high_water.max(output.len());
         Ok(())
+    }
+
+    /// The most chunks this packetizer has seen waiting in the queue after a send.
+    pub(crate) fn high_water(&self) -> usize {
+        self.high_water
     }
 
     fn full(&self) -> usize {

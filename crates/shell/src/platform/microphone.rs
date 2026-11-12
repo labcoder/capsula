@@ -29,7 +29,15 @@ use zeroize::Zeroize;
 pub(super) use pcm::{Format, Packetizer, Sample};
 
 pub(crate) const POLL: Duration = Duration::from_millis(20);
-const PCM_QUEUE: usize = 4;
+/// One wire chunk, as the packetizer cuts them.
+const CHUNK: Duration = Duration::from_millis(20);
+/// A whole capture buffer drained in one pass, plus three chunks for the forwarder to lag.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "a chunk count of a 100 ms buffer fits usize"
+)]
+const PCM_QUEUE: usize = (CAPTURE_BUFFER.as_millis() / CHUNK.as_millis()) as usize + 3;
 
 /// The existing 60-second hold limit, independent of sample delivery.
 const HOLD_LIMIT: Duration = Duration::from_secs(60);
@@ -93,6 +101,7 @@ pub(super) struct PacketBoundary {
     kept_frames: u64,
     missing_frames: u64,
     next_position: Option<u64>,
+    queue_high_water: usize,
     discarded_before_listening: u32,
 }
 
@@ -110,6 +119,7 @@ impl Default for PacketBoundary {
             kept_frames: 0,
             missing_frames: 0,
             next_position: None,
+            queue_high_water: 0,
             discarded_before_listening: 0,
         }
     }
@@ -178,6 +188,10 @@ impl PacketBoundary {
         }
     }
 
+    pub(super) fn queued(&mut self, high_water: usize) {
+        self.queue_high_water = self.queue_high_water.max(high_water);
+    }
+
     pub(super) fn finish(&mut self, source: Result<(), MicError>) -> Result<(), MicError> {
         if self.failed.is_none() {
             self.failed = source.err();
@@ -202,6 +216,7 @@ impl PacketBoundary {
             kept_packets = self.kept_packets,
             kept_frames = self.kept_frames,
             missing_frames = self.missing_frames,
+            queue_high_water = self.queue_high_water,
             discarded_before_listening = self.discarded_before_listening,
             "held microphone capture summary"
         );

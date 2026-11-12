@@ -245,13 +245,25 @@ fn actual_owner_observes_session_loss_without_ui_or_sample_callbacks() {
 }
 
 #[test]
-fn real_owner_queue_accepts_four_packets_and_fails_on_the_fifth() {
+fn a_capture_buffer_drained_in_one_pass_fits_the_pcm_queue() {
+    let (output, queue) = async_channel::bounded(PCM_QUEUE);
+    let mut packets = Packetizer::new(GestureId(1), format(Sample::I16, 1)).unwrap();
+    for _ in 0..CAPTURE_BUFFER.as_millis() * 8 {
+        packets.push(17, &output).unwrap();
+    }
+    assert_eq!(packets.finish(&output), Ok(5));
+    assert_eq!(packets.high_water(), 5);
+    assert_eq!(queue.len(), 5);
+}
+
+#[test]
+fn real_owner_queue_accepts_a_full_queue_and_fails_on_the_next_packet() {
     let generation = CollectionGate::default().arm(GestureId(1)).unwrap();
     let mut owner = MicOwner::start_with(
         generation,
         Arc::new(AtomicBool::new(true)),
         |_, _, _, output| {
-            for seq in 0..4 {
+            for seq in 0..8 {
                 output
                     .try_send(MicPcm {
                         gesture: GestureId(1),
@@ -265,7 +277,7 @@ fn real_owner_queue_accepts_four_packets_and_fails_on_the_fifth() {
             let error = output
                 .try_send(MicPcm {
                     gesture: GestureId(1),
-                    seq: 4,
+                    seq: 8,
                     rate: 8_000,
                     last: true,
                     samples: vec![19],

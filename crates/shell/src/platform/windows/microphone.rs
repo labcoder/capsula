@@ -231,6 +231,7 @@ fn capture_with(
         &mut packets,
         boundary,
     );
+    boundary.queued(packets.high_water());
     if matches!(result, Err(MicError::Stale | MicError::Cancelled))
         && token.mode(session, Instant::now()) == Ok(Mode::Release)
     {
@@ -252,13 +253,17 @@ fn capture_with(
     }
     match result {
         Ok(()) => match token.mode(session, Instant::now()) {
-            Ok(Mode::Release) => Ok(match packets.finish(output) {
-                Ok(packets) => Finalization::Released { packets },
-                Err(error) => {
-                    token.cancel();
-                    Finalization::Discarded(error)
-                }
-            }),
+            Ok(Mode::Release) => {
+                let finished = packets.finish(output);
+                boundary.queued(packets.high_water());
+                Ok(match finished {
+                    Ok(packets) => Finalization::Released { packets },
+                    Err(error) => {
+                        token.cancel();
+                        Finalization::Discarded(error)
+                    }
+                })
+            }
             Err(error) => Ok(Finalization::Discarded(error)),
             _ => Ok(Finalization::Discarded(MicError::Cancelled)),
         },

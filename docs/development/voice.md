@@ -32,7 +32,8 @@ The queue must still drain after Listening, and the next nonempty packet is stil
 One `held microphone capture summary` is logged after each capture ends, with only numeric
 fields: `discontinuities`, `first_discontinuity_packet` (one-based kept ordinal, zero if none),
 `first_discontinuity_ms` (observed loop time since stream start), `kept_packets`, `kept_frames`,
-`missing_frames` (device frames between kept packets that never arrived) and
+`missing_frames` (device frames between kept packets that never arrived), `queue_high_water`
+(the most wire chunks seen waiting for the forwarder after a send) and
 `discarded_before_listening` (nonempty packets discarded while collection was not live).
 These count native packets/frames, not the subsequently packed wire chunks. Counters commit
 only after an authorized copy and native buffer release. No per-packet allocation, lock,
@@ -43,7 +44,9 @@ The fake-source policy tests contain no Windows types. Native adapters supply fr
 first-frame device position, discontinuity and timestamp-error facts, collection authority and a
 post-Listening drained-queue observation. WASAPI alone translates flag bits and owns acquire/release calls; a Core Audio
 adapter must supply equivalent facts and the same consent, cancellation and cleanup guarantees.
-WASAPI requests at least 100 ms of buffering for its 20 ms polling interval, allocates scratch
+WASAPI requests at least 100 ms of buffering for its 20 ms polling interval. The wire queue is
+sized from that buffer, room for all of it drained in one pass plus three chunks, so a stall the
+buffer absorbs can't overflow the queue instead. The adapter allocates scratch
 before Start, and checks the pinned device/format before Start and after Stop rather than making
 allocating COM queries in the pump. Mid-stream unplug/reconfiguration errors from GetBuffer or
 GetNextPacketSize, or a failed after-Stop check, discard the hold. The initialized stream's
