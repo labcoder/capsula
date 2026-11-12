@@ -14,201 +14,33 @@ use kumochi_protocol::message::{
 
 use super::SettingsView;
 use crate::accounts::Accounts;
+use crate::settings::Settings;
 use crate::strings::{Strings, Text};
 
 impl SettingsView {
-    fn account_button(
-        &self,
-        id: &'static str,
-        label: Text,
-        op: AccountOp,
-        cx: &Context<'_, Self>,
-    ) -> Button {
-        let owner = self.owner.clone();
-        Button::new(id)
-            .label(cx.global::<Strings>().get(label))
-            .disabled(!self.model.read(cx).accounts.allows(op))
-            .on_click(move |_, _, cx| {
-                let _gone = owner.update(cx, |owner, cx| owner.account_op(op, cx));
-            })
-    }
-
-    fn account_actions(&self, cx: &Context<'_, Self>) -> impl IntoElement {
-        let strings = cx.global::<Strings>();
-        let state = &self.model.read(cx).accounts;
-        let mut actions = div()
-            .debug_selector(|| "account-actions".into())
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap_2();
-        match &state.view {
-            Some(AccountView::SignedOut { .. }) => {
-                actions = actions.child(self.account_button(
-                    "account-sign-in",
-                    Text::AccountContinue,
-                    AccountOp::SignIn,
-                    cx,
-                ));
-            }
-            Some(AccountView::SigningIn) => {
-                actions = actions
-                    .child(self.account_button(
-                        "account-cancel",
-                        Text::AccountCancel,
-                        AccountOp::CancelSignIn,
-                        cx,
-                    ))
-                    .child(self.account_button(
-                        "account-open-again",
-                        Text::AccountOpenAgain,
-                        AccountOp::SignIn,
-                        cx,
-                    ));
-            }
-            Some(AccountView::SignedIn { .. }) if state.sign_in_again() => {
-                actions = actions
-                    .debug_selector(|| "account-sign-in-recovery".into())
-                    .child(self.account_button(
-                        "account-sign-in-again",
-                        Text::AccountSignInAgain,
-                        AccountOp::SignIn,
-                        cx,
-                    ));
-            }
-            Some(AccountView::SignedIn {
-                plan: PlanState::Declined,
-                recovery: None,
-                ..
-            }) => {
-                actions = actions.child(self.account_button(
-                    "account-enable",
-                    Text::AccountEnable,
-                    AccountOp::EnablePlan,
-                    cx,
-                ));
-            }
-            _ => {}
-        }
-        if state.allows(AccountOp::Retry) || state.waiting == Some(AccountOp::Retry) {
-            actions = actions.child(self.account_button(
-                "account-retry",
-                if matches!(state.view, Some(AccountView::Busy)) {
-                    Text::AccountTryAgain
-                } else {
-                    Text::Retry
-                },
-                AccountOp::Retry,
-                cx,
-            ));
-        }
-        if matches!(
-            state.view,
-            Some(AccountView::SignedIn {
-                plan: PlanState::Enabled | PlanState::Unavailable,
-                recovery: None,
-                ..
-            })
-        ) {
-            #[cfg(debug_assertions)]
-            let fixture = self.fixture;
-            actions = actions.child(
-                Link::new("account-usage")
-                    .href(MANAGE_USAGE_URL)
-                    .disabled(state.waiting.is_some())
-                    .open_with(move |url, _, _, cx| {
-                        #[cfg(debug_assertions)]
-                        if fixture {
-                            return;
-                        }
-                        cx.open_url(url);
-                    })
-                    .text_color(cx.theme().link)
-                    .underline()
-                    .child(strings.get(Text::AccountManageUsage)),
-            );
-        }
-        actions
-    }
-
     pub(super) fn accounts(&self, cx: &Context<'_, Self>) -> impl IntoElement {
-        let strings = cx.global::<Strings>();
+        let owner = self.owner.clone();
+        #[cfg(debug_assertions)]
+        let fixture = self.fixture;
+        #[cfg(not(debug_assertions))]
+        let fixture = false;
         let model = self.model.read(cx);
-        let state = &model.accounts;
-        let (mut status, lines) = account_status(state);
-        if state.view.is_none() && model.view().is_none() {
-            status = Text::AccountOffline;
-        }
-        let duplicate = state.error.as_ref().is_some_and(|error| {
-            matches!(
-                (error.key(), &state.view),
-                (
-                    ErrorKey::SignOutNotDurable,
-                    Some(AccountView::SigningOut {
-                        cleanup: Cleanup::NotDurable,
-                        ..
-                    })
-                ) | (
-                    ErrorKey::SessionEnded,
-                    Some(AccountView::SignedIn {
-                        recovery: Some(AccountRecovery::SignInAgain),
-                        ..
-                    })
-                ) | (
-                    ErrorKey::PlanUnavailable,
-                    Some(AccountView::SignedIn {
-                        plan: PlanState::Unavailable,
-                        recovery: None,
-                        ..
-                    })
-                )
-            )
-        });
-        div()
-            .flex()
-            .flex_col()
-            .gap_6()
-            .min_w_0()
-            .child(account_header(state, cx))
-            .child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(strings.get(status)),
-            )
-            .children(lines.into_iter().map(|text| account_notice(text, cx)))
-            .children(
-                state
-                    .error
-                    .as_ref()
-                    .filter(|_| !duplicate)
-                    .map(|error| account_error(error, cx)),
-            )
-            .children(state.send_failed.then(|| {
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().danger)
-                    .child(strings.get(Text::AccountSendFailed))
-            }))
-            .child(self.account_actions(cx))
-            .children(
-                matches!(state.view, Some(AccountView::SignedIn { .. })).then(|| {
-                    div()
-                        .flex()
-                        .border_t_1()
-                        .border_color(cx.theme().border)
-                        .pt_4()
-                        .child(
-                            Button::new("account-sign-out")
-                                .outline()
-                                .label(strings.get(Text::AccountSignOut))
-                                .disabled(!state.allows(AccountOp::SignOut))
-                                .on_click(cx.listener(|view, _, window, cx| {
-                                    view.confirm_sign_out(window, cx);
-                                })),
-                        )
-                }),
-            )
+        let sign_out = Button::new("account-sign-out")
+            .outline()
+            .label(cx.global::<Strings>().get(Text::AccountSignOut))
+            .disabled(!model.accounts.allows(AccountOp::SignOut))
+            .on_click(cx.listener(|view, _, window, cx| {
+                view.confirm_sign_out(window, cx);
+            }));
+        account_section(
+            model,
+            move |op, cx| {
+                let _gone = owner.update(cx, |owner, cx| owner.account_op(op, cx));
+            },
+            fixture,
+            Some(sign_out),
+            cx,
+        )
     }
 
     pub(in crate::presence) fn confirm_sign_out(
@@ -259,6 +91,181 @@ impl SettingsView {
             },
         );
     }
+}
+
+/// The ChatGPT section, for every view that shows the account. `route` sends a button's
+/// operation; `fixture` keeps Manage usage inert; `sign_out` shows while signed in.
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "Settings' debug fixture flag, passed through"
+)]
+pub(in crate::presence) fn account_section(
+    model: &Settings,
+    route: impl Fn(AccountOp, &mut App) + Clone + 'static,
+    fixture: bool,
+    sign_out: Option<Button>,
+    cx: &App,
+) -> impl IntoElement {
+    let strings = cx.global::<Strings>();
+    let state = &model.accounts;
+    let button = |id: &'static str, label: Text, op: AccountOp| {
+        let route = route.clone();
+        Button::new(id)
+            .label(strings.get(label))
+            .disabled(!state.allows(op))
+            .on_click(move |_, _, cx| route(op, cx))
+    };
+    let mut actions = div()
+        .debug_selector(|| "account-actions".into())
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_2();
+    match &state.view {
+        Some(AccountView::SignedOut { .. }) => {
+            actions = actions.child(button(
+                "account-sign-in",
+                Text::AccountContinue,
+                AccountOp::SignIn,
+            ));
+        }
+        Some(AccountView::SigningIn) => {
+            actions = actions
+                .child(button(
+                    "account-cancel",
+                    Text::AccountCancel,
+                    AccountOp::CancelSignIn,
+                ))
+                .child(button(
+                    "account-open-again",
+                    Text::AccountOpenAgain,
+                    AccountOp::SignIn,
+                ));
+        }
+        Some(AccountView::SignedIn { .. }) if state.sign_in_again() => {
+            actions = actions
+                .debug_selector(|| "account-sign-in-recovery".into())
+                .child(button(
+                    "account-sign-in-again",
+                    Text::AccountSignInAgain,
+                    AccountOp::SignIn,
+                ));
+        }
+        Some(AccountView::SignedIn {
+            plan: PlanState::Declined,
+            recovery: None,
+            ..
+        }) => {
+            actions = actions.child(button(
+                "account-enable",
+                Text::AccountEnable,
+                AccountOp::EnablePlan,
+            ));
+        }
+        _ => {}
+    }
+    if state.allows(AccountOp::Retry) || state.waiting == Some(AccountOp::Retry) {
+        actions = actions.child(button(
+            "account-retry",
+            if matches!(state.view, Some(AccountView::Busy)) {
+                Text::AccountTryAgain
+            } else {
+                Text::Retry
+            },
+            AccountOp::Retry,
+        ));
+    }
+    if matches!(
+        state.view,
+        Some(AccountView::SignedIn {
+            plan: PlanState::Enabled | PlanState::Unavailable,
+            recovery: None,
+            ..
+        })
+    ) {
+        actions = actions.child(
+            Link::new("account-usage")
+                .href(MANAGE_USAGE_URL)
+                .disabled(state.waiting.is_some())
+                .open_with(move |url, _, _, cx| {
+                    if fixture {
+                        return;
+                    }
+                    cx.open_url(url);
+                })
+                .text_color(cx.theme().link)
+                .underline()
+                .child(strings.get(Text::AccountManageUsage)),
+        );
+    }
+    let (mut status, lines) = account_status(state);
+    if state.view.is_none() && model.view().is_none() {
+        status = Text::AccountOffline;
+    }
+    let duplicate = state.error.as_ref().is_some_and(|error| {
+        matches!(
+            (error.key(), &state.view),
+            (
+                ErrorKey::SignOutNotDurable,
+                Some(AccountView::SigningOut {
+                    cleanup: Cleanup::NotDurable,
+                    ..
+                })
+            ) | (
+                ErrorKey::SessionEnded,
+                Some(AccountView::SignedIn {
+                    recovery: Some(AccountRecovery::SignInAgain),
+                    ..
+                })
+            ) | (
+                ErrorKey::PlanUnavailable,
+                Some(AccountView::SignedIn {
+                    plan: PlanState::Unavailable,
+                    recovery: None,
+                    ..
+                })
+            )
+        )
+    });
+    div()
+        .flex()
+        .flex_col()
+        .gap_6()
+        .min_w_0()
+        .child(account_header(state, cx))
+        .child(
+            div()
+                .text_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .child(strings.get(status)),
+        )
+        .children(lines.into_iter().map(|text| account_notice(text, cx)))
+        .children(
+            state
+                .error
+                .as_ref()
+                .filter(|_| !duplicate)
+                .map(|error| account_error(error, cx)),
+        )
+        .children(state.send_failed.then(|| {
+            div()
+                .text_sm()
+                .text_color(cx.theme().danger)
+                .child(strings.get(Text::AccountSendFailed))
+        }))
+        .child(actions)
+        .children(
+            sign_out
+                .filter(|_| matches!(state.view, Some(AccountView::SignedIn { .. })))
+                .map(|sign_out| {
+                    div()
+                        .flex()
+                        .border_t_1()
+                        .border_color(cx.theme().border)
+                        .pt_4()
+                        .child(sign_out)
+                }),
+        )
 }
 
 fn account_header(state: &Accounts, cx: &App) -> impl IntoElement {

@@ -70,7 +70,9 @@ impl Presence {
                 self.notices_changed(&previous, cx);
                 self.runs_changed(cx)?;
             }
-            Route::Account(op) => self.account_op(op, cx),
+            Route::Account(op) => {
+                let _sent = self.account_op(op, cx);
+            }
             Route::SettingsRetry(field) => {
                 let _sent = self.save_setting(field, cx);
             }

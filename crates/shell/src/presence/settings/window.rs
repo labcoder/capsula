@@ -167,16 +167,21 @@ impl Presence {
                 .unwrap_or(false)
         })
     }
-    pub(in crate::presence) fn account_op(&mut self, op: AccountOp, cx: &mut Context<'_, Self>) {
+    pub(in crate::presence) fn account_op(
+        &mut self,
+        op: AccountOp,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
         let (link, session) = (&self.link, &self.session);
         self.settings.update(cx, |state, cx| {
-            let _sent = state.accounts.send(op, |op| {
+            let sent = state.accounts.send(op, |op| {
                 session.as_ref().is_some_and(|session| {
                     link.send_control(session, ControlToBrain::AccountOp(op))
                 })
             });
             cx.notify();
-        });
+            sent
+        })
     }
     pub(in crate::presence) fn sync_settings_notice(&mut self, cx: &mut Context<'_, Self>) {
         let previous = (self.error.clone(), self.refusal);
