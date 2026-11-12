@@ -69,7 +69,8 @@ flowchart TD
 ```
 
 1. **One at a time, in a new folder.** A run holds an exclusive lock on
-   `%TEMP%\kumochi-gate-run.lock` until it ends, and refuses while any `kumochi.exe` or `kumochid.exe` runs, of any identity. Two gate runs
+   `kumochi-gate-run.lock` in the system's Local AppData (beside, never inside, `Kumochi Gate`)
+   until it ends, and refuses while any `kumochi.exe` or `kumochid.exe` runs, of any identity. Two gate runs
    would share the gate pipes, and the shell's hotkey, raw input and tray icon belong to the
    Windows session, not the identity.
 2. **Nothing outlives it.** The run puts itself in a kill-on-close job that forbids breakaway, so a
@@ -86,10 +87,16 @@ flowchart TD
    - deletes `capability-<session>.Kumochi Gate instance` by its exact name;
    - deletes `Kumochi Gate` in the system's Local AppData, which holds the Claude Code lane's lock.
 
-A run creates its root folder, which must not exist yet, and names it in the lock file until it
-has cleaned up. If a run is interrupted (Ctrl-C, a killed xtask, a panic, or a product process
-still running at the end), the next gate run cleans up what that folder's own `credentials.db`
-names before it starts, so rerunning any gate tool clears an interrupted one.
+A run creates its root folder, which must not exist yet, writes a new random run id into its
+`gate-run` file, and names both in the lock file, as one line ending in a newline, until it has
+cleaned up. If a run is interrupted (Ctrl-C, a killed xtask, a panic, or a product process still
+running at the end), the next gate run cleans up that folder as above before it starts, so
+rerunning any gate tool clears an interrupted one. It does so only when the lock's line is whole
+and the folder's `gate-run` holds the same id. Anything else, such as a lock cut short or a
+folder without that id, is refused with a message naming the lock and the folder, and nothing is
+deleted. Then look in the named folder: a gate run's launches are its `<launch>\local\Kumochi Gate`
+folders. Delete what you no longer need by hand, and any `Kumochi Gate/gen/...` entries its
+`credentials.db` files name, then delete the lock file and rerun.
 
 The gate identity never signs in: the `live` checks refuse anything but the dev identity, and no
 gate tool has a path that stores a credential.
