@@ -47,6 +47,9 @@ pub(super) struct Slot {
     acknowledged: Option<u32>,
     /// A primitive failed to paint, so the scene paints no more and is cleared.
     failed: Cell<bool>,
+    /// The activation this epoch installed hasn't begun: its first sample with something to
+    /// paint is kept until a shown overlay paints it.
+    pending: bool,
 }
 
 /// What one sample found.
@@ -69,8 +72,8 @@ pub(crate) struct Painted {
 pub(crate) struct Frames {
     slots: [Option<(SceneId, Slot)>; MAX_VISIBLE_SCENES],
     epoch: u64,
-    /// A slot left since the last sample.
-    removed: bool,
+    /// A slot left or changed placement since the last sample.
+    invalidated: bool,
     /// Whether the overlay is shown, so only a paint that can reach the screen counts.
     pub(crate) shown: bool,
 }
@@ -120,6 +123,7 @@ impl Frames {
                 painted: Cell::new(None),
                 acknowledged: None,
                 failed: Cell::new(false),
+                pending: false,
             },
         ));
         self.slots
@@ -143,8 +147,9 @@ impl Frames {
     }
 
     /// Installs a staged activation into the scene's view with its own frame, which the view
-    /// clears while the outgoing objects still own the geometry; no earlier paint counts. Binds
-    /// `cache`, staged from the activation's view, and returns the outgoing one.
+    /// clears while the outgoing objects still own the geometry; no earlier paint counts, and its
+    /// first sample with something to paint is kept until it paints. Binds `cache`, staged from
+    /// the activation's view, and returns the outgoing one.
     pub(super) fn activate(
         &mut self,
         scene: SceneId,
@@ -157,6 +162,9 @@ impl Frames {
             .expect("each adopted scene has a frame slot");
         view.install(activation, &mut slot.frame)
             .expect("the presenter staged it from this view in the same update");
+        // shortcut: a predecessor still waiting for its first paint keeps its staged clock; hold
+        // the next activation until that paint if back-to-back steps show the gap.
+        slot.pending = true;
         std::mem::replace(slot.cache.get_mut(), cache)
     }
 
@@ -175,8 +183,24 @@ impl Frames {
         slot.wake = None;
         slot.painted.set(None);
         slot.acknowledged = None;
+        slot.pending = false;
         // `failed` stays set: a paint failure is terminal and paint_failed clears the scene.
         Some(slot)
+    }
+
+    /// Re-places the last sampled pose without beginning or dropping a pending entrance.
+    pub(super) fn reposition(&mut self, scene: SceneId, view: &SceneView) {
+        let (_, slot) = self
+            .slots
+            .iter_mut()
+            .flatten()
+            .find(|(id, _)| *id == scene)
+            .expect("each adopted scene has a frame slot");
+        if let Some(at) = slot.sampled_ms {
+            view.frame(at, &mut slot.frame)
+                .expect("placement preserves the view generation");
+        }
+        self.invalidated = true;
     }
 
     pub(super) fn take(&mut self, scene: SceneId) -> Option<Slot> {
@@ -186,16 +210,19 @@ impl Frames {
             .find(|slot| slot.as_ref().is_some_and(|(id, _)| *id == scene))
             .and_then(Option::take)
             .map(|(_, slot)| slot);
-        self.removed |= slot.is_some();
+        self.invalidated |= slot.is_some();
         slot
     }
 
     pub(super) fn take_all(&mut self) -> [Option<(SceneId, Slot)>; MAX_VISIBLE_SCENES] {
-        self.removed |= self.slots.iter().any(Option::is_some);
+        self.invalidated |= self.slots.iter().any(Option::is_some);
         std::mem::take(&mut self.slots)
     }
 
-    /// Samples each view into its scene's frame at `now_ms`, outside paint.
+    /// Samples each view into its scene's frame at `now_ms`, outside paint. A frame keeping its
+    /// activation's first sample until it paints isn't sampled again, and one still empty after
+    /// its first sample is sampled no later than its step's first appearance, which a late wake
+    /// would otherwise pass.
     ///
     /// # Errors
     /// The first scene whose frame its view refuses as bound to another view; the caller
@@ -206,7 +233,7 @@ impl Frames {
     ) -> Result<Sample, SceneId> {
         let mut sample = Sample {
             visible: false,
-            changed: std::mem::take(&mut self.removed),
+            changed: std::mem::take(&mut self.invalidated),
         };
         for (scene, view, now_ms) in views {
             let (_, slot) = self
@@ -215,6 +242,16 @@ impl Frames {
                 .flatten()
                 .find(|(id, _)| *id == scene)
                 .expect("each adopted scene has a frame slot");
+            if slot.pending && !slot.frame.items().is_empty() {
+                sample.visible = true;
+                continue;
+            }
+            let now_ms = if slot.pending && slot.sampled_ms.is_some() {
+                view.first_appearance()
+                    .map_or(now_ms, |appears| appears.min(now_ms))
+            } else {
+                now_ms
+            };
             if view.frame(now_ms, &mut slot.frame).is_err() {
                 return Err(scene);
             }
@@ -309,6 +346,26 @@ impl Frames {
         Some(slot.epoch)
     }
 
+    pub(super) fn sampled_ms(&self, scene: SceneId) -> Option<u64> {
+        let (_, slot) = self.slots.iter().flatten().find(|(id, _)| *id == scene)?;
+        slot.sampled_ms
+    }
+
+    /// Ends the scene's pending activation once a shown overlay has painted its kept sample,
+    /// returning the scene time of that sample.
+    pub(super) fn begin(&mut self, scene: SceneId) -> Option<u64> {
+        let (_, slot) = self
+            .slots
+            .iter_mut()
+            .flatten()
+            .find(|(id, _)| *id == scene)?;
+        if !slot.pending || slot.painted.get().is_none() {
+            return None;
+        }
+        slot.pending = false;
+        slot.sampled_ms
+    }
+
     pub(crate) fn observations(&self) -> [Option<(SceneId, u64, u32)>; MAX_VISIBLE_SCENES] {
         self.slots.each_ref().map(|slot| {
             let (scene, slot) = slot.as_ref()?;
@@ -368,8 +425,9 @@ impl Presenter {
             let sampled = self.frames.borrow_mut().sample(views);
             match sampled {
                 Ok(sample) => {
-                    for scene in self.scenes.values_mut() {
-                        scene.sampled_ms = Some(at(scene));
+                    let frames = self.frames.borrow();
+                    for (id, scene) in &mut self.scenes {
+                        scene.sampled_ms = frames.sampled_ms(*id);
                     }
                     return (sample, out.finish());
                 }

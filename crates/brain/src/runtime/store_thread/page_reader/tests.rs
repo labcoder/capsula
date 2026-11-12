@@ -100,6 +100,7 @@ fn run_with(
         gates: Some(gates_heard),
         read_gates: Some(read_gates_heard),
         checkpoint_gate,
+        after_close: None,
         pauses,
     };
     Running {
@@ -494,6 +495,10 @@ fn a_build_reads_after_the_ops_queued_before_it_and_takes_the_default_model() {
     let time = text
         .strip_prefix("words\n\nLocal time: ")
         .expect("the turn, then the time");
+    let (time, drawings) = time
+        .split_once("\nDrawings on screen: ")
+        .expect("drawing context follows time");
+    assert_eq!(drawings, "[]");
     assert!(
         time.len() == 16
             && time.chars().enumerate().all(|(at, c)| match at {

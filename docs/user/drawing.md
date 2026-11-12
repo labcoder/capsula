@@ -8,14 +8,29 @@ When Kumochi draws a 2D diagram, each step appears on screen once it is prepared
 that were on screen come back after Kumochi reconnects. If you stop a drawing, the parts that
 had already finished appearing stay on screen.
 
+Asking for a change to the same subject continues its drawing. A new subject normally
+replaces this conversation's earlier drawings once the new drawing's first step is saved.
+If the new drawing then cannot be drawn, the old drawings may already be gone and the
+screen may be left empty. Separate drawings can be kept for comparison, up to four on
+screen; they can still overlap until side-by-side arrangement is available.
+
 Simple node-and-arrow diagrams do not need a separate container: their nodes belong to
 the scene itself, and each arrow follows the diagram shared by its endpoints. These
 diagrams have the same 48-node and 96-arrow limits as explicitly grouped diagrams.
 
 Drawings appear on the main display, over your other windows. They never take focus or catch
 clicks, so the app underneath keeps working. While one is on screen, Esc clears it
-(see [Esc](escape.md)). Any part of a drawing past the edges of the main display is cut off;
-Kumochi doesn't move or shrink it to fit.
+(see [Esc](escape.md)). Kumochi centers each drawing in the free area beside its panel,
+shrinks it to fit, or enlarges it up to twice its canvas size when there is room. A drawing
+uses its declared canvas, or its content bounds when no canvas size was given. Moving the
+dock, opening or closing a typing, Threads or Settings panel, or changing the display
+re-places the drawing immediately, without redrawing its steps. When there is room, the free
+area stays clear of the open panel and reserves room for the smaller status peek even when
+it is hidden. On a display too small for both, an open panel can cover a drawing and its
+entrance can play unseen.
+
+This update changes how drawing coordinates are laid out. Drawings left on screen by an
+older version are cleared on reconnect; conversation history is kept.
 
 A shape whose outline crosses itself, like a star, is filled everywhere inside it, its middle
 included. Labels stay upright even when the shape around them is turned. Where translucent

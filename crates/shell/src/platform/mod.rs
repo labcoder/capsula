@@ -5,6 +5,65 @@ pub(crate) mod host;
 pub(crate) mod input;
 pub(crate) mod microphone;
 
+#[cfg(test)]
+pub(crate) mod work_area_fixture {
+    use std::{cell::Cell, marker::PhantomData, rc::Rc};
+
+    thread_local! {
+        static AREA: Cell<Option<[i32; 4]>> = const { Cell::new(None) };
+    }
+
+    #[derive(Debug)]
+    #[must_use]
+    pub(crate) struct Guard {
+        previous: Option<[i32; 4]>,
+        same_thread: PhantomData<Rc<()>>,
+    }
+
+    pub(crate) fn set(area: [i32; 4]) -> Guard {
+        Guard {
+            previous: AREA.replace(Some(area)),
+            same_thread: PhantomData,
+        }
+    }
+
+    pub(crate) fn get() -> Option<[i32; 4]> {
+        AREA.get()
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            AREA.set(self.previous);
+        }
+    }
+
+    #[test]
+    fn scoped_work_areas_restore_after_panic_and_do_not_cross_threads() {
+        assert_eq!(get(), None);
+        let outer = set([0, 0, 2560, 1400]);
+        assert_eq!(
+            super::work_area().expect("fixed work area"),
+            [0, 0, 2560, 1400]
+        );
+        assert_eq!(std::thread::spawn(get).join().expect("joined thread"), None);
+        let failed = std::panic::catch_unwind(|| {
+            let _inner = set([0, 0, 640, 480]);
+            assert_eq!(
+                super::work_area().expect("nested work area"),
+                [0, 0, 640, 480]
+            );
+            panic!("exercise scoped restoration");
+        });
+        assert!(failed.is_err());
+        assert_eq!(
+            super::work_area().expect("restored work area"),
+            [0, 0, 2560, 1400]
+        );
+        drop(outer);
+        assert_eq!(get(), None);
+    }
+}
+
 #[cfg(windows)]
 #[expect(
     unsafe_code,

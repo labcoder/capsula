@@ -276,6 +276,7 @@ impl Presence {
                 Ok::<_, platform::PresenceError>(())
             })
             .map_err(|error| OpenError::Gpui(error.into()))??;
+        self.place_drawings(cx.weak_entity(), cx);
         Ok(())
     }
 
@@ -372,6 +373,7 @@ impl Presence {
                 Ok::<_, platform::PresenceError>(())
             })
             .map_err(|error| OpenError::Gpui(error.into()))??;
+        self.place_drawings(cx.weak_entity(), cx);
         self.pointer_changed(cx)
     }
 

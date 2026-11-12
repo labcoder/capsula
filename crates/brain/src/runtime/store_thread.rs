@@ -61,6 +61,9 @@ pub(crate) struct Schedule {
     /// Holds the checkpoint helper after each checkpoint.
     #[cfg(test)]
     pub(crate) checkpoint_gate: Option<page_reader::HelperGate>,
+    /// Holds the worker after its close signal, before post-close purge cleanup.
+    #[cfg(test)]
+    pub(crate) after_close: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
     /// Where the first copy pauses.
     #[cfg(test)]
     pub(crate) pauses: Option<crate::store::Pauses>,
@@ -98,6 +101,8 @@ impl Default for Schedule {
             read_gates: None,
             #[cfg(test)]
             checkpoint_gate: None,
+            #[cfg(test)]
+            after_close: None,
             #[cfg(test)]
             pauses: None,
         }
@@ -374,7 +379,7 @@ pub(crate) struct StoreThread {
     reads: mpsc::Sender<Read>,
     /// Ops other than reads queued so far; a read waits until that many have finished.
     accepted: AtomicU64,
-    /// Fires when the thread has run every queued op and read and closed the store.
+    /// Fires after queued ops and reads finish, the store closes and its reply sender drops.
     done: oneshot::Receiver<()>,
 }
 
@@ -420,6 +425,8 @@ impl StoreThread {
                 // shortcut: in a debug build a panic here leaves queued ops unanswered, so their runs
                 // never leave the coordinator and new turns stop once 16 pile up; release builds
                 // abort on panic instead. Restart the brain on a store panic once it has a supervisor.
+                #[cfg(test)]
+                let after_close = schedule.after_close.take();
                 let mut purger = Purger::new(schedule, &store);
                 #[cfg(test)]
                 let mut gates: Vec<Gate> = Vec::new();
@@ -465,9 +472,12 @@ impl StoreThread {
                     tracing::error!("the checkpoint helper panicked");
                 }
                 drop(store);
+                drop(acks);
                 if finished.send(()).is_err() {
                     tracing::debug!("nobody waited for the store to close");
                 }
+                #[cfg(test)]
+                tests::after_close(after_close);
                 // After the store closed: a copy's sync and a removal can't be stopped, and close
                 // needn't wait for them. Files the exit cuts short are removed at the next start.
                 if job.is_some_and(|job| !job.join()) {
@@ -512,8 +522,8 @@ impl StoreThread {
     }
 
     /// Lets the queued operations and reads finish, then closes the store; a running copy stops,
-    /// and the purge stays owed. The receiver fires when it has, and fails if the thread panicked;
-    /// nothing blocks on the thread itself.
+    /// and the purge stays owed. The receiver fires after the store closes and its reply sender
+    /// drops, and fails if the thread panicked; nothing blocks on the thread itself.
     pub(crate) fn close(self) -> oneshot::Receiver<()> {
         drop(self.ops);
         self.done

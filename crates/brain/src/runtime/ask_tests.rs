@@ -72,7 +72,7 @@ fn seed(scratch: &Scratch, [label, info, alt]: [&str; 3], choice: &ModelChoice) 
     store
         .begin_turn(T, Some("task"), RunId(1), "T-HISTORY earlier")
         .expect("turn");
-    let header = serde_json::from_value(serde_json::json!({"begin":{"v":1,"scene":"car","surface":"overlay","alt":alt},"layout_version":1})).expect("header");
+    let header = serde_json::from_value(serde_json::json!({"begin":{"v":1,"scene":"car","surface":"overlay","alt":alt},"layout_version":2})).expect("header");
     let step = serde_json::from_value(serde_json::json!({"id":"s1","put":[{"view3d":{"id":"v"}},
         {"solid":{"in":"v","id":"a","shape":"box","size":[2,2,2],"label":label,"info":info}}]}))
     .expect("typed step");
@@ -80,9 +80,10 @@ fn seed(scratch: &Scratch, [label, info, alt]: [&str; 3], choice: &ModelChoice) 
         .drawing_write(&Write::Step {
             thread: T,
             run: RunId(1),
+            clear: Vec::new(),
             target: Target::New(header),
             revision: 1,
-            layout_version: 1,
+            layout_version: 2,
             step: Arc::new(step),
         })
         .expect("step")
@@ -113,6 +114,18 @@ pub(super) fn assert_minute(stamp: &str) {
             _ => c.is_ascii_digit(),
         }),
         "YYYY-MM-DD HH:MM"
+    );
+}
+
+/// The current turn carries its minute and the complete drawing header.
+fn assert_turn_context(context: &str, alt: &str) {
+    let (stamp, drawings) = context
+        .split_once("\nDrawings on screen: ")
+        .expect("drawing context follows time");
+    assert_minute(stamp);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(drawings).expect("drawing headers"),
+        serde_json::json!([{"begin":{"v":1,"scene":"car","surface":"overlay","size":null,"title":null,"alt":alt,"others":"clear"}}])
     );
 }
 
@@ -206,7 +219,7 @@ async fn an_ask_reaches_the_engine_in_the_scenes_thread_on_its_model_with_its_hi
         .last()
         .and_then(|last| last.strip_prefix(&format!("{literal}\n\nLocal time: ")))
         .expect("the ask is the last user message");
-    assert_minute(stamp);
+    assert_turn_context(stamp, &alt);
     assert!(!format!("{input:?}").contains("U-SENTINEL"));
     assert!(input.iter().all(|item| match item {
         InputItem::Message { text, .. } => !text.contains("U-SENTINEL"),

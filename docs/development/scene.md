@@ -64,11 +64,52 @@ root, anonymous-group and edge ids.
 Ids contain 1–40 ASCII letters, digits, underscores, dots or hyphens. Host handles
 are a separate, opaque `u32` identity.
 
-Points are logical pixels of the inline scene's `size` or the overlay display.
+Points are logical pixels of the drawing's canvas, not of the overlay display.
 Anchors are `[x,y]` or `{"ref":"object-id"}`. Coordinates must be finite and
 within ±20,000. Chart data uses finite f64 values instead of coordinate-bounded
 numbers. Composed transforms and domain-specific ranges are admission checks.
 Screen/capture anchors are absent, not ignored.
+
+### Canvas and overlay placement
+
+Overlay preparation uses `begin.size`, or a 960×600 default canvas. Inline preparation
+keeps its host-width default. Diagram fitting, charts, tables and callouts use that canvas;
+the display size and the free stage are not preparation inputs.
+
+`LayoutState` retains a growing union of prepared primitive bounds in scene-world space,
+including ancestor transforms and final track values. A declared canvas is the fit extent,
+grown by content that overflows it. Without a declared canvas, the content has 24 logical
+pixels of padding on each side. Empty or zero-sized content falls back to the canvas.
+Stop rebuilds the extent from survivors; recovery replays the same preparation and cuts.
+
+The shell reserves the dock, a minimum status peek and whichever typing, Threads or Settings
+panel is visible. It chooses the largest-area usable band below, above, left or right, in
+that tie order, in the primary display's work area, inset by 32 logical pixels. Usable bands
+retain at least 240×160 logical pixels; the small-display fallback is described in
+[presence.md](presence.md). Physical work-area, dock and accepted panel bounds use the window
+scale. Panel open/close,
+dock placement (after re-anchoring panels) and GPUI display-change events refresh the
+stage before repaint. Activation, step installation, Stop and recovery also read the work area
+fresh before placing their views; ordinary animation frames do not poll it.
+Work-area-only changes wait for the next placement; add a work-area notification through
+the presence adapter. Per-display overlays are not implemented.
+
+`layout::place` centers the fit extent in the host-supplied stage with a uniform scale,
+at most 2× and with no lower fit floor. The remaining 64× composed-scale envelope can
+lower that cap. `SceneView` retains the placement independently of its animation clock;
+activation, step installation, Stop, recovery and stage changes all install it before
+sampling. Stage changes and growing steps snap, without preparing again. Only final 2D
+frame-item transforms receive the placement, never ancestor accumulators or 3D/input
+coordinates. Sampling adds one affine composition per painted item and no allocation or lock.
+Translation preserves shaped labels; a scale change invalidates their shaping key once,
+as bounded transition work rather than recurring animation work.
+A placement change re-samples the kept pose but preserves its frame epoch, paint observation
+and pending-start timestamp. A drawing waiting for its first paint is already placed, and
+moving it does not advance or restart that entrance.
+
+The stored layout version is **2**. Version-1 visible scenes are skipped and durably cleared
+by the existing recovery path after upgrading, rather than reinterpreted with new coordinates.
+The drawing record version remains 1; this does not migrate or delete conversation history.
 
 ### The 2D tool contract
 
@@ -471,6 +512,19 @@ serialize drawing content into logs, or trace a model-facing tool reply.
 guards one call's begin/step/end order; a new call gets a fresh guard and must
 repeat the stored header with typed equality. Ending a call does not end its scene.
 
+`begin.others` is the closed vocabulary `clear` (default) or `keep`. Old stored headers
+decode to `clear`, and serialization always includes it. Only a new scene applies this
+policy: a continuation with an identical stored header never clears another scene.
+
+`ReplacementAdmission` owns a newcomer, its checked candidate and at most four deduplicated
+victims with their original identities, revisions, mutations and charges. All early and
+final caps use current global usage minus victims plus the candidate, without changing the
+victims. The existing single pending-write seal prevents other budget mutations. After the
+durable reply, consuming settlement validates every original stamp before mutation, marks
+victims terminal and installs one combined global-budget transition. A suppressed newcomer
+never acquires a charge. Later clear/sweep calls cannot release a victim twice. The projected
+logical charge does not eliminate transient physical ownership of the old set and candidate.
+
 `admit` resolves references against earlier surviving objects plus every object
 declared in the same step, independent of put order. `start.after` must name an
 earlier kept step, never one dropped by a cut. Admission rejects cycles, missing
@@ -660,8 +714,10 @@ zero-period flow and duplicate same-step (target, property) tracks fail with `Ou
 The private SVG walker accepts M/L/H/V/Q/C/Z, absolute or relative, including implicit
 repetitions. It validates coordinates and counts commands before vertices exist.
 Quadratic and cubic second differences determine power-of-two subdivision counts at
-0.25 logical-pixel tolerance after conservative composed scale bounds. Preparation uses
-the same walker and subdivision function when producing vertices. Procedural curves,
+0.25 logical-pixel tolerance after conservative composed scale bounds. SVG admission and
+preparation reserve up to a further 2× presentation scale for overlays, capped at composed scale 64;
+the extra subdivisions count against segment, dash and prepared paint-work budgets.
+Preparation uses the same walker and subdivision function when producing vertices. Procedural curves,
 rounded rectangles, ellipses, cylinder caps, pie arcs and chart axes have shared
 segment reservations in `path.rs`; generated output must stay within them.
 
@@ -803,8 +859,9 @@ using native quads for upright complete rectangles and paths for rotated or reve
 Labels use the preparation font and stay upright at their transformed anchors (OSC-217).
 Fills use the nonzero rule, as SVG and Canvas do, so a self-crossing polygon such as a
 pentagram fills its centre; a border ring fills its two nested outlines even-odd, so the inner
-one is its hole. Content past the primary display's edges is clipped by the overlay window,
-never moved, scaled or fitted; the only bound is |coordinate| ≤ 20,000 after composition.
+one is its hole. Overlay drawings are fitted and centered in the free stage as described
+above; the primary-display overlay window remains the final clip. Model-world coordinates
+remain bounded to ±20,000 before presentation.
 Geometry builds before any of its item's primitives paint; a geometry or label failure clears
 the scene instead of silently skipping it. The overlay is transparent and click-through, covers
 only the primary display from logical origin, and holds Esc only while shown. Its real drawing
@@ -967,6 +1024,12 @@ Each child's entrance starts no earlier than its parent's start, retaining its o
 duration, so delayed diagrams do not hide their children's entrances.
 Explicit tracks retain their step-relative clocks, so a track may finish while a
 delayed parent still hides its target; only entrances are shifted.
+`delay_entrance(by)` starts what the view's own step put `by` ms later: its objects'
+appearances and entrances, its tracks and glides, a newly put view's spin, and the
+deadline. Carried tracks and earlier objects keep their times. A host calls it once, when
+it observes the activation's first paint. `first_appearance()` is the earliest instant an
+object the view's own step put appears with something to paint, clipped to the deadline, or
+`None` when it put none.
 
 After painting at `t`, request another frame when `animating(t)` is true, otherwise
 wake at `next_wake(t)`. This paints the final frame without continuously polling
@@ -1130,8 +1193,8 @@ edge; check clipping with the native painter before expanding routing or the fit
 Every edge whose endpoints still exist is recomputed, even after its last labelled
 partner is removed, so a formerly bowed singleton straightens. Its prepared flow
 axis is retained beside its endpoint anchors rather than read again from the host
-default. The Presenter currently holds one SurfaceGeometry for its lifetime, so a
-changed host default is not a shell-supported transition. Cut-detached edges with
+default. The Presenter keeps the canvas geometry and diagram flow fixed; a changed
+presentation stage only re-places the prepared drawing. Cut-detached edges with
 a nonidentity absorbed transform keep their frozen curves even when both endpoints
 survive; an identity-transform cut can still renumber surviving self-loop lanes.
 Arrowhead primitives are regenerated from the current head style and final tangent,
@@ -1685,8 +1748,10 @@ Presence advances ready heads before sampling. The consume transaction records t
 committer, and the charged returned guard drops before effect dispatch, even on a
 post-install pump error. Residency failure is terminal. Both numeric and Instant sampling
 use the same reserved frames; Outstanding cuts freeze each scene at its last sampled time.
-The shared frame loop supplies motion demand, and one existing watchdog tracks preparation,
-recovery and future scene wakes. Static rest has no polling timer or animation callback.
+The drawing's frame loop, on the dock's window, supplies motion demand (a dock that fails
+closed stalls it; see frame-rate.md), and one existing
+watchdog tracks preparation, recovery and future scene wakes. Static rest has no polling
+timer or animation callback.
 Advance, sample, demand and resting-wake selection share the same Instant, including
 nested effect dispatch. The frame callback retains that sampled demand until its rest
 decision, so a crossed endpoint or delayed appearance receives its catch-up sample even
@@ -1701,6 +1766,20 @@ current host and connection, then `take_shown` revalidates the current epoch, ac
 and installed once-state. A refused control ends the connection. Hidden, empty, failed,
 revoked or superseded observations cannot acknowledge; visibility-only epoch changes never
 reset an already acknowledged activation. Skipped semantic retirement fabricates no paint.
+
+An entrance starts at its first paint, not at consumption. A newly activated frame keeps its
+first sample with something to paint until a shown overlay paints it, and later samples leave it
+unchanged. While that frame is still empty after its first sample, it is sampled no later than
+`SceneView::first_appearance`, so a late wake for a delayed, word-timed or delayed-parent object
+keeps that object's initial pose rather than a pose part-way in. The callback then calls
+`begin_painted` with its observation instant: the step's objects, tracks, spin, deadline and
+segment end move by the time since the kept sample, so the entrance runs its authored duration
+from the observed paint. Other scenes, carried tracks and the scene clock keep their times. The
+callback samples at that instant and rearms the drawing's frames if anything moves, since the
+staged clock may have run out first. Stop latches the kept sample's time, so Esc before the
+first paint reveals only what that sample finished; a cut, clear, newer activation or disconnect
+drops the pending start with its frame epoch. A step activated before its predecessor's first
+paint begins only its own entrance.
 
 The callback does not poll or rearm from unchanged paints. Its Box, effect-deque growth,
 control serialization/outbox work and retained owner state remain application costs requiring

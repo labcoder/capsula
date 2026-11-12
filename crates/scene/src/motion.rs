@@ -20,8 +20,9 @@ use std::{
 pub use three::ViewFrame;
 use three::ViewMotion;
 
+mod frame;
+mod place;
 mod three;
-
 /// K̃ = (1 + K)/S(1) − 1 = 0.375891 rounded up: the normalised spring's largest overshoot.
 pub(crate) const SPRING_OVERSHOOT: f32 = 0.3759;
 const SPRING_DECAY: f64 = 6.0;
@@ -278,6 +279,8 @@ struct Live {
     ease: Ease,
     plays: u32,
     yoyo: bool,
+    /// Started by the step this view activated, so [`SceneView::delay_entrance`] moves it.
+    fresh: bool,
 }
 impl Live {
     fn new(anim: &Anim, target: Handle, origin: u64, theme: &Theme) -> Self {
@@ -293,6 +296,7 @@ impl Live {
             ease: anim.ease,
             plays: plays(anim),
             yoyo: anim.yoyo,
+            fresh: true,
         }
     }
     /// Requested bytes of this holder's key array allocation: the Arc header and the keys,
@@ -376,6 +380,8 @@ struct Node {
     opacity: f32,
     inherited: f32,
     timing: Timing,
+    /// Put by the step this view activated, so [`SceneView::delay_entrance`] moves its timing.
+    fresh: bool,
     owners: [Option<usize>; 10],
 }
 
@@ -435,6 +441,7 @@ fn build_nodes(layout: &LayoutState, timing: impl Fn(&Item) -> Timing) -> Vec<No
                 opacity: item.opacity,
                 inherited,
                 timing: timing(item),
+                fresh: false,
                 owners: [None; 10],
             }
         })
@@ -588,6 +595,7 @@ pub struct SceneView {
     /// The scene's 3D view, if any.
     view: Option<ViewMotion>,
     generation: Arc<()>,
+    placement: place::Placement,
 }
 impl fmt::Debug for SceneView {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -645,6 +653,7 @@ impl SceneView {
             tracks: Vec::new(),
             view: view(at_rest).map(|geometry| ViewMotion::new(geometry, None, None)),
             generation: Arc::new(()),
+            placement: place::Placement::default(),
         }
     }
     /// The revision a host `StopCut` must name.
@@ -744,6 +753,7 @@ impl SceneView {
                 ease: Ease::InOut,
                 plays: 1,
                 yoyo: false,
+                fresh: true,
             })
             .collect();
         let mut candidates = self.carried(now, &recolored);
@@ -778,8 +788,9 @@ impl SceneView {
         });
         let mut starts: Vec<u64> = Vec::with_capacity(nodes.len());
         for node in &mut nodes {
+            node.fresh = born.contains_key(&node.handle);
             if let Some(parent) = node.parent
-                && born.contains_key(&node.handle)
+                && node.fresh
             {
                 let wait = starts[parent].saturating_sub(node.timing.start);
                 node.timing.start = node.timing.start.saturating_add(wait);
@@ -801,6 +812,7 @@ impl SceneView {
             tracks,
             view,
             generation: Arc::new(()),
+            placement: self.placement.for_layout(&step.after),
         };
         let bytes =
             view.attributed_bytes() + retired_bytes(&superseded) + crate::layout::heap::ARC_HEADER;
@@ -838,6 +850,37 @@ impl SceneView {
         Ok(())
     }
 
+    /// Starts what this view's step put `by` ms later than it was staged: its objects' appearances
+    /// and entrances, its tracks and glides, a newly put view's spin and the motion deadline. A
+    /// host that painted the activation late begins it there. Carried tracks and earlier objects
+    /// keep their times.
+    pub fn delay_entrance(&mut self, by: u64) {
+        for node in self.nodes.iter_mut().filter(|node| node.fresh) {
+            node.timing.start = node.timing.start.saturating_add(by);
+            node.timing.end = node.timing.end.saturating_add(by);
+        }
+        for live in self.tracks.iter_mut().filter(|live| live.fresh) {
+            live.origin = live.origin.saturating_add(by);
+        }
+        if let Some(view) = &mut self.view {
+            view.delay(by);
+        }
+        self.deadline = self.deadline.saturating_add(by);
+    }
+
+    /// The earliest instant an object this view's step put appears with something to paint,
+    /// clipped to the deadline, or `None` if it put none; carried objects don't count. A host
+    /// whose first sample of the step had nothing to paint samples it no later than this, so a
+    /// late wake can't take the object's first picture part-way into its entrance.
+    pub fn first_appearance(&self) -> Option<u64> {
+        self.paint
+            .iter()
+            .map(|&index| &self.nodes[index])
+            .filter(|node| node.fresh)
+            .map(|node| node.timing.start.min(self.deadline))
+            .min()
+    }
+
     /// What retiring this view may free: its own bytes plus its layout's cached geometry, which
     /// it may hold last. Counted per holder, from the cache, so retirement walks nothing.
     fn attributed_bytes(&self) -> usize {
@@ -854,7 +897,10 @@ impl SceneView {
                 live.end().min(deadline) > now
                     && (live.track != Track::Color || !recolored.contains(&live.target))
             })
-            .cloned()
+            .map(|live| Live {
+                fresh: false,
+                ..live.clone()
+            })
             .collect()
     }
 
@@ -985,116 +1031,6 @@ impl SceneView {
             .collect();
         handles.sort_unstable();
         handles
-    }
-
-    /// Samples every object at `now` into `out` without allocating, freeing or locking.
-    ///
-    /// A fresh or cleared frame binds to this view's current generation. Reusing a bound frame
-    /// drops only references this view's objects still hold, so nothing is freed here.
-    /// # Errors
-    /// Returns `Stale`, leaving `out` untouched, when `out` is bound to an earlier view or
-    /// generation; clear it outside paint first.
-    pub fn frame(&self, now: u64, out: &mut Frame) -> Result<(), PrepareError> {
-        let bound = out
-            .generation
-            .get_or_insert_with(|| Arc::clone(&self.generation));
-        if !Arc::ptr_eq(bound, &self.generation) {
-            return Err(PrepareError::Stale);
-        }
-        out.items.clear();
-        out.world.clear();
-        let settled = now >= self.deadline;
-        for node in &self.nodes {
-            let parent = node.parent.map(|parent| out.world[parent]);
-            let timing = node.timing;
-            if parent.is_some_and(|parent| !parent.visible) || (!settled && now < timing.start) {
-                out.world.push(HIDDEN);
-                continue;
-            }
-            let progress = if settled || now >= timing.end {
-                1.0
-            } else {
-                fraction(now - timing.start, timing.end - timing.start)
-            };
-            let entering = effect(timing.enter, progress);
-            let mut pose = node.rest;
-            if !settled {
-                for owner in node.owners.iter().flatten() {
-                    let live = &self.tracks[*owner];
-                    match (live.track, live.sample(now)) {
-                        (Track::X, Value::Num(value)) => pose.x = value,
-                        (Track::Y, Value::Num(value)) => pose.y = value,
-                        (Track::Pos, Value::V2(value)) => pose.pos = value,
-                        (Track::Scale, Value::Num(value)) => pose.scale = value,
-                        (Track::Rotate, Value::Num(value)) => pose.rotate = value,
-                        (Track::Opacity, Value::Num(value)) => {
-                            pose.opacity = Some(value.clamp(0.0, 1.0));
-                        }
-                        (Track::Draw, Value::Num(value)) => pose.draw = Some(value.clamp(0.0, 1.0)),
-                        (Track::Color, Value::Color(value)) => pose.color = Some(rgb(value)),
-                        _ => {}
-                    }
-                }
-            }
-            let (pivot, scale) = (node.pivot, entering.scale);
-            let entrance = Affine([
-                scale,
-                0.0,
-                0.0,
-                scale,
-                pivot.x - scale * pivot.x,
-                pivot.y - scale * pivot.y + entering.offset,
-            ]);
-            out.world.push(World {
-                transform: parent
-                    .map_or_else(Affine::default, |parent| parent.transform)
-                    .compose(node.transform)
-                    .compose(pose.transform())
-                    .compose(entrance),
-                opacity: parent.map_or(1.0, |parent| parent.opacity)
-                    * node.inherited
-                    * pose.opacity.unwrap_or(node.opacity)
-                    * entering.alpha,
-                draw: pose.draw.unwrap_or(1.0) * entering.draw,
-                color: pose.color.map(Paint::from),
-                flow: if timing.flow == 0 || settled {
-                    0.0
-                } else {
-                    fraction(
-                        (now - timing.start) % u64::from(timing.flow),
-                        u64::from(timing.flow),
-                    )
-                },
-                visible: true,
-            });
-        }
-        if let Some(motion) = &self.view {
-            let spare = &mut out.poses;
-            let slot = out.view.get_or_insert_with(|| ViewFrame {
-                geometry: Arc::clone(&motion.geometry),
-                camera: None,
-                poses: std::mem::take(spare),
-            });
-            motion.sample(&self.tracks, now, self.deadline, slot);
-        }
-        for &index in &self.paint {
-            let world = out.world[index];
-            if !world.visible {
-                continue;
-            }
-            let node = &self.nodes[index];
-            out.items.push(FrameItem {
-                handle: node.handle,
-                primitives: Arc::clone(&node.primitives),
-                label_start: node.label_start,
-                transform: world.transform,
-                opacity: world.opacity,
-                draw: world.draw,
-                color: world.color,
-                flow: world.flow,
-            });
-        }
-        Ok(())
     }
 }
 
@@ -1307,6 +1243,7 @@ mod tests {
             ease,
             plays,
             yoyo: false,
+            fresh: false,
         }
     }
 

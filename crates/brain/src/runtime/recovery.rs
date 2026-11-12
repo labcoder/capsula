@@ -200,7 +200,7 @@ mod tests {
     fn typed_recovery_debug_is_count_only_and_clear_drops_remaining_scene_chunks() {
         let header: SceneHeader = serde_json::from_value(serde_json::json!({
             "begin": {"v":1,"scene":"private-scene","surface":"overlay","alt":"private-alt"},
-            "layout_version":1
+            "layout_version":2
         }))
         .expect("typed header");
         let event = |revision, id| {

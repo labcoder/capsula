@@ -356,6 +356,13 @@ impl Presence {
         bytes: u32,
         cx: &mut Context<'_, Self>,
     ) {
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.generation() == generation)
+        {
+            self.place_drawings(cx.weak_entity(), cx);
+        }
         if let DataToShell::ScenesRemoved { scenes } = &*frame
             && self
                 .session

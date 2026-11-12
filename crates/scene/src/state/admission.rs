@@ -202,7 +202,7 @@ impl SceneState {
         object::acyclic(step, &after)?;
         object::validate_changes(step, &after, &removal_ids)?;
         let mut changed = work::changes(step, &mut after, &mut owned, revision)?;
-        metrics::validate(step, &mut after, |handle| {
+        metrics::validate(step, &mut after, self.header.surface, |handle| {
             expansion.source_slot(handle, revision)
         })?;
         for (id, object) in after.iter() {

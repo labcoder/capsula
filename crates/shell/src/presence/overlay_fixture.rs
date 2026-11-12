@@ -58,7 +58,7 @@ const TURNED: [(usize, Vec2); 2] = [
 /// in paint order, and the rest's paint work.
 pub(super) fn resting(
     measure: &mut dyn TextMeasure,
-    logical_size: [f32; 2],
+    default_canvas: [f32; 2],
     mode: Mode,
 ) -> (Vec<PaintUnit>, PaintWork) {
     let header =
@@ -82,7 +82,7 @@ pub(super) fn resting(
         panic!("a new step");
     };
     let committed = state.commit(admitted, &mut budget).expect("fixture commit");
-    let surface = SurfaceGeometry::Overlay { logical_size };
+    let surface = SurfaceGeometry::Overlay { default_canvas };
     let theme = Arc::new(Theme::default());
     let Ok(input) = PrepareInput::new(committed.preparation, empty, surface, theme) else {
         panic!("the first step follows the empty layout");

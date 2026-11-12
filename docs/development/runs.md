@@ -110,10 +110,14 @@ queued records but still drains an accepted step transaction before acknowledgin
 An empty Stop received before the first scene id arrives cuts that run's unseen, unactivated
 scene to zero after the step commits. Effective cuts are durable before acknowledgement;
 failed cuts remain owed and block subsequent step writes. A no-op cut is acknowledged without
-adding a log entry. A fifth scene clears the oldest before attempting the new admission, and
-the new first step waits for that clear and any earlier typed clears to commit. A failed
-clear holds the queued first step, not an extra uncleared scene in the store. Replacement
-alone does not cut old scenes. Failed cut retries share the clear backoff, from 500 ms up to
+adding a log entry. A new scene defaults to replacing its thread's visible drawings; `keep`
+retains them. After this selection, exceeding the global four-scene cap selects the oldest
+survivor. Selection changes nothing until admission and the first-step transaction succeed.
+That transaction includes every selected clear, even across threads. Earlier explicit clear
+debt still holds new first steps. A refused step or rolled-back write preserves the old set.
+Every matching successful reply settles victims, even if deletion, interruption or a latched
+user clear suppresses the newcomer. A shell preparation failure after this commit does not
+restore victims and may leave no drawing. Failed cut retries share the clear backoff, from 500 ms up to
 30 seconds [guess], without resetting while a cut is in flight.
 
 `StepShown` and `StepFailed` validate lifetime indices and the run that committed the step.

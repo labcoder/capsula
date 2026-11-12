@@ -322,6 +322,14 @@ impl Presence {
                     break;
                 }
             }
+            let now = Instant::now();
+            // The drawing's loop may have rested while its first paint was outstanding.
+            if self.session.is_some()
+                && self.presenter.begin_painted(now)
+                && self.draw_changed_at(now, cx)
+            {
+                self.want_frames(cx);
+            }
         }
         let result = self.runs_changed(cx);
         #[cfg(test)]
@@ -340,6 +348,9 @@ impl Presence {
     }
 
     pub(super) fn draw_changed_at(&mut self, now: Instant, cx: &mut Context<'_, Self>) -> bool {
+        if self.presenter.placement_due(now) {
+            self.place_drawings(cx.weak_entity(), cx);
+        }
         if let Some(session) = &self.session {
             let effects = self.presenter.advance(session.generation(), now);
             match effects {

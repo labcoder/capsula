@@ -71,7 +71,7 @@ fn draw(core: &mut Coordinator) -> Vec<Effect> {
 
 fn draw_named(core: &mut Coordinator, call: &str, scene: &str) -> Vec<Effect> {
     let args = serde_json::to_vec(&json!({"records":[
-        {"begin":{"v":1,"scene":scene,"surface":"overlay","alt":"test diagram"}},
+        {"begin":{"v":1,"scene":scene,"surface":"overlay","alt":"test diagram","others":"keep"}},
         {"step":{"id":"s1","put":[{"shape":{"id":"a","kind":"rect","box":[0,0,10,10]}}]}},
         {"step":{"id":"s2","put":[{"shape":{"id":"b","kind":"rect","box":[20,0,10,10]}}]}},
         {"end":{}}
@@ -708,7 +708,7 @@ fn clearing_cut_debt_finishes_a_provider_completed_run_without_another_drawing_a
     };
     core.handle(record(
         0,
-        br#"{"begin":{"v":1,"scene":"diagram","surface":"overlay","alt":"test diagram"}}"#,
+        br#"{"begin":{"v":1,"scene":"diagram","surface":"overlay","alt":"test diagram","others":"keep"}}"#,
     ))
     .expect("begin");
     let scene = store.drawing_scenes().expect("scene").scenes[0].scene;
@@ -838,7 +838,7 @@ fn recovered_ids(store: &Store) -> Vec<kumochi_protocol::message::SceneId> {
 }
 
 #[test]
-fn a_failed_eviction_clear_blocks_the_new_scene_then_a_failed_step_cannot_resurrect_it() {
+fn a_failed_replacement_transaction_preserves_its_cap_victim() {
     let scratch = Scratch::new("drawing-eviction-retry");
     let mut store = open(&scratch);
     let mut core = started();
@@ -847,32 +847,39 @@ fn a_failed_eviction_clear_blocks_the_new_scene_then_a_failed_step_cannot_resurr
     store.conn_for_tests().execute_batch("CREATE TRIGGER fail_clear BEFORE INSERT ON events WHEN new.kind='scene_cleared' BEGIN SELECT RAISE(FAIL,'private drawing'); END;").expect("fail clear");
     let lookup = draw_named(&mut core, "fifth", "scene-5");
     let first = commit(&mut core, &mut store, &lookup);
-    assert!(first.contains(&Effect::Store(StoreOp::ClearScenes {
-        scenes: vec![original[0]]
-    })));
-    assert!(!first.iter().any(|effect| matches!(
-        effect,
-        Effect::Store(StoreOp::Drawing {
-            write: Write::Step { .. },
-            ..
-        })
-    )));
+    let (serial, write) = pending(&first);
+    let Write::Step { clear, .. } = &write else {
+        panic!("first-step transaction")
+    };
+    assert_eq!(clear, &[original[0]]);
     assert!(
-        !clear_answer(&mut core, &mut store, original[0])
+        !first
             .iter()
-            .any(|effect| matches!(effect, Effect::Store(StoreOp::Drawing { .. })))
+            .any(|effect| matches!(effect, Effect::Store(StoreOp::ClearScenes { .. })))
     );
-    assert_eq!(core.debt(), 1);
+    assert!(store.drawing_write(&write).is_err());
+    let failed = core
+        .handle(Input::DrawingWritten {
+            serial,
+            reply: Err(()),
+        })
+        .expect("failed atomic clear");
+    assert!(!failed.iter().any(|effect| matches!(
+        effect,
+        Effect::Data(
+            DataToShell::SceneBegin { .. }
+                | DataToShell::SceneStepCommit { .. }
+                | DataToShell::ScenesRemoved { .. }
+        )
+    )));
+    assert_eq!(core.debt(), 0);
     assert_eq!(recovered_ids(&store), original);
     store
         .conn_for_tests()
         .execute_batch("DROP TRIGGER fail_clear;")
-        .expect("allow clear retry");
-    let retried = core.handle(Input::Retry).expect("retry");
-    assert!(retried.contains(&Effect::Store(StoreOp::ClearScenes {
-        scenes: vec![original[0]]
-    })));
-    let first = clear_answer(&mut core, &mut store, original[0]);
+        .expect("allow a fresh replacement call");
+    let lookup = draw_named(&mut core, "step-failure", "scene-5");
+    let first = commit(&mut core, &mut store, &lookup);
     let (serial, write) = pending(&first);
     assert!(matches!(
         write,
@@ -889,7 +896,7 @@ fn a_failed_eviction_clear_blocks_the_new_scene_then_a_failed_step_cannot_resurr
     })
     .expect("failed new step");
     assert_eq!(core.debt(), 0);
-    assert_eq!(recovered_ids(&store), original[1..]);
+    assert_eq!(recovered_ids(&store), original);
     store
         .conn_for_tests()
         .execute_batch("DROP TRIGGER fail_step;")
@@ -971,7 +978,7 @@ fn a_bad_stored_row_cannot_wedge_a_valid_live_append_or_cut() {
     let scene = recovered_ids(&store)[0];
     store.conn_for_tests().execute_batch("DROP TRIGGER events_append_only; UPDATE events SET body='{' WHERE id=(SELECT min(id) FROM events WHERE kind='scene_step');").expect("corrupt stored history after canonical admission");
     let args = serde_json::to_vec(&json!({"records":[
-        {"begin":{"v":1,"scene":"diagram","surface":"overlay","alt":"test diagram"}},
+        {"begin":{"v":1,"scene":"diagram","surface":"overlay","alt":"test diagram","others":"keep"}},
         {"step":{"id":"s3","put":[{"shape":{"id":"c","kind":"rect","box":[40,0,10,10]}}]}},
         {"end":{}}
     ]}))

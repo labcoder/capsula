@@ -289,66 +289,42 @@ impl Render for KumoView {
 }
 
 impl Presence {
-    /// Arms the frame loop on the peek's window, unless it's armed already.
-    pub(super) fn want_frames(&mut self, cx: &mut Context<'_, Self>) {
-        if !self.frames.want(Instant::now()) {
+    /// Arms Kumo's frames on the peek's window, unless they're armed already. A hidden peek
+    /// gets no frames, and Kumo shades nothing while it's hidden.
+    pub(super) fn want_kumo_frames(&mut self, cx: &mut Context<'_, Self>) {
+        if !self.kumo_frames.want(Instant::now()) {
             return;
         }
         let owner = cx.weak_entity();
-        let armed = self
-            .panel_window
-            .update(cx, |_, window, _| on_next_frame(window, owner, Self::frame));
+        let armed = self.panel_window.update(cx, |_, window, _| {
+            on_next_frame(window, owner, Self::kumo_frame);
+        });
         if let Err(error) = armed {
-            self.frames.idle();
+            self.kumo_frames.idle();
             tracing::warn!(%error, "can't animate Kumo");
         }
     }
 
-    /// One frame callback: the pacer first, so a skipped frame does no animation work.
-    fn frame(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        if let Err(error) = self.frame_at(Instant::now(), window, cx) {
-            tracing::error!(%error, "scene frame update failed");
-        }
-    }
-
-    pub(super) fn frame_at(
-        &mut self,
-        now: Instant,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) -> Result<(), super::OpenError> {
-        let mut updated = Ok(());
+    /// One of Kumo's frames: the pacer first, so a skipped frame does no animation work.
+    fn kumo_frame(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let cap = self
             .settings
             .read(cx)
             .view()
             .map(|view| view.max_frame_rate)
             .unwrap_or_default();
-        let wanted = match self.frames.frame(now, cap, window.refresh_interval(cx)) {
+        let wanted = match self
+            .kumo_frames
+            .frame(Instant::now(), cap, window.refresh_interval(cx))
+        {
             None => true,
-            Some(dt) => {
-                let kumo = self.kumo.update(cx, |kumo, cx| kumo.step(dt, window, cx));
-                let scenes = self.draw_changed_at(now, cx);
-                let panel = if self.text_open() {
-                    super::EscapePanel::Open
-                } else {
-                    super::EscapePanel::Closed
-                };
-                let activity = Self::activity_at(&self.runs, panel, &self.presenter, now);
-                if self.activity.working != activity.working
-                    || self.activity.drawing != activity.drawing
-                {
-                    updated = self.runs_changed_in(Some(&mut *window), now, cx);
-                }
-                kumo || (scenes && updated.is_ok())
-            }
+            Some(dt) => self.kumo.update(cx, |kumo, cx| kumo.step(dt, window, cx)),
         };
         if wanted {
-            on_next_frame(window, cx.weak_entity(), Self::frame);
+            on_next_frame(window, cx.weak_entity(), Self::kumo_frame);
         } else {
-            self.frames.idle();
+            self.kumo_frames.idle();
         }
-        updated
     }
 }
 

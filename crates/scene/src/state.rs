@@ -5,6 +5,7 @@ pub(crate) mod metrics;
 pub(crate) mod object;
 mod parents;
 mod part;
+mod replacement;
 mod retire;
 mod three;
 pub(crate) mod work;
@@ -23,6 +24,7 @@ use crate::{
 pub use binding::{BindingError, SceneBinding, SceneRead};
 use object::Object;
 pub use part::Part;
+pub use replacement::{ReplacementAdmission, ReplacementDisposition};
 use retire::{map_bytes, records_bytes, retire_undo};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -444,14 +446,7 @@ impl SceneState {
         admitted: Admitted,
         global: &mut GlobalBudget,
     ) -> Result<Committed, StaleAdmission> {
-        let local = &admitted.local;
-        if self.cleared
-            || local.mutation != self.mutation
-            || local.revision != self.revision
-            || admitted.generation != global.generation()
-            || !Arc::ptr_eq(&local.owner, &self.identity)
-            || !Arc::ptr_eq(&admitted.global, &global.identity)
-        {
+        if !self.admission_matches(&admitted, global) {
             return Err(StaleAdmission);
         }
         let (preparation, created) = self.install(admitted.local, global);
@@ -463,6 +458,15 @@ impl SceneState {
             handles: created,
             preparation,
         })
+    }
+
+    fn admission_matches(&self, admitted: &Admitted, global: &GlobalBudget) -> bool {
+        !self.cleared
+            && admitted.local.mutation == self.mutation
+            && admitted.local.revision == self.revision
+            && admitted.generation == global.generation()
+            && Arc::ptr_eq(&admitted.local.owner, &self.identity)
+            && Arc::ptr_eq(&admitted.global, &global.identity)
     }
 
     /// Installs and charges a candidate whose stamps and budget were checked. The caller
@@ -745,6 +749,12 @@ impl SceneState {
         if self.cleared {
             return Ok(());
         }
+        self.clear_contents();
+        self.apply_usage(global, Usage::default());
+        Ok(())
+    }
+
+    fn clear_contents(&mut self) {
         let objects = take(&mut self.objects);
         drop(Deferred::new(objects, take(&mut self.objects_bytes)));
         self.history_bytes -= retire_undo(self.steps.values_mut().flat_map(|step| {
@@ -752,8 +762,6 @@ impl SceneState {
             [take(&mut step.removed), take(&mut step.changed)]
         }));
         self.cleared = true;
-        self.apply_usage(global, Usage::default());
-        Ok(())
     }
 
     /// Rebuilds a scene in an isolated context from original steps and ordered cuts.

@@ -9,6 +9,10 @@ dock's separate body proxy takes its input. Regions enables only the
 currently registered input windows. The [mode diagram and exit rules](input.md#overlay-pointer-ownership)
 cover the temporary Selecting mode; no production hold enters it yet.
 
+Every bound Windows surface must be created topmost. Both the shared GPUI `PopUp` options and
+the native dock proxy set `WS_EX_TOPMOST` at construction; new native bindings must preserve
+this precondition.
+
 The adapter restacks top-first as panels, dock/body proxy, regional input, drawing overlay,
 then dormant selection. Showing a drawing reapplies this order after its native placement,
 even when the input mode has not changed. A replacement host, including after clearing or
@@ -25,6 +29,23 @@ The shell owns the dock, status panel, typing panel and tray on GPUI's UI thread
 and the keyboard is armed before the brain link starts connecting; [input.md](input.md) covers
 the shortcut, the typing panel and Esc. A link failure shows in the status panel; Retry never sends
 the previous input again.
+
+`presence::stage` unions the accepted dock layout, the status peek's minimum reservation
+and the accepted bounds of the visible typing, Threads or Settings panel. It chooses the
+largest-area usable band below, above, left or right, in that tie order, with a
+32-logical-pixel inset and at least 240×160 logical pixels left after the inset. If no band
+is usable, it retries with only the dock and peek reserved, then uses the inset work area
+as a last resort. On a display too small for both, an open panel can cover a drawing and
+its entrance can play unseen. Opening or closing a panel updates placement before the next paint;
+when the dock lands, panels re-anchor before the stage is recomputed. The typing panel
+retains its accepted size when re-anchored, like Threads and Settings.
+A retained GPUI display observer refreshes the dock's scale and anchor,
+the drawing stage and a shown overlay's bounds after display changes. Existing views snap
+to the new stage; their scene clocks and prepared geometry stay intact. See
+[scene.md](scene.md#canvas-and-overlay-placement) for the canvas and scale-envelope rules.
+The work area is read fresh at placement transitions, not polled while sampling frames.
+Work-area-only changes wait for the next placement; add a work-area notification through
+the presence adapter.
 
 Before the link starts, the shell starts the scene dropper or fails startup. Typed scene frames
 are protected at the pipe reader, including stale frames and queued or undelivered event batches.
@@ -159,7 +180,8 @@ flowchart LR
   without its line. An overlay that won't hide is left empty. A proxy that won't hide has its
   mask emptied instead, and if that's refused too the shell quits with a logged error rather
   than leave a band taking clicks. The dock comes back on the next position choice; a display
-  change doesn't bring it back yet, under the display limitation (OSC-188). The surfaces sit behind a small `Surfaces` trait, so
+  change doesn't bring it back yet, under the display limitation (OSC-188). Drawing frames come from the dock's
+  window, so drawings stop moving while it's hidden (frame-rate.md). The surfaces sit behind a small `Surfaces` trait, so
   the tests run every failure against a fake desktop. Windows may not report the mask moving
   under a still pointer, so the owner rechecks hover after the dock moves.
 - **Painting.** The dock window is the click-through overlay, placed once per accepted

@@ -48,6 +48,43 @@ fn dropping_the_world_removes_its_scratch_folder() {
 }
 
 impl World {
+    fn draw(
+        &mut self,
+        thread: ThreadId,
+        name: &str,
+        alt: &str,
+        title: Option<&str>,
+    ) -> kumochi_protocol::message::SceneId {
+        let (_, high) = self.store.high_water().expect("ids");
+        let run = RunId(high.0 + 1);
+        self.store
+            .begin_turn(thread, None, run, "draw fixture")
+            .expect("turn");
+        let header = serde_json::from_value(json!({"begin":{"v":1,"scene":name,"surface":"overlay","alt":alt,"title":title},"layout_version":2})).expect("header");
+        let kumochi_scene::Record::Step(step) = kumochi_scene::parse_record(
+            br#"{"step":{"id":"first","put":[{"text":{"id":"x","at":[0,0],"text":"PRIVATE_STEP_CONTENT"}}]}}"#
+        ).expect("step") else { panic!("step") };
+        let crate::drawing::Reply::Step(scene) = self
+            .store
+            .drawing_write(&crate::drawing::Write::Step {
+                thread,
+                run,
+                target: crate::drawing::Target::New(header),
+                clear: Vec::new(),
+                revision: 1,
+                layout_version: 2,
+                step: std::sync::Arc::new(step),
+            })
+            .expect("drawing")
+        else {
+            panic!("step reply")
+        };
+        self.store
+            .end_run(thread, run, &[], RunEnd::Done)
+            .expect("end");
+        scene
+    }
+
     /// A finished run: the user's `ask` and, when given, the assistant's `reply`. `None` starts a
     /// new task.
     fn run(
@@ -216,7 +253,10 @@ fn a_kumo_request_states_its_model_names_role_and_ordered_runs() {
         [
             message(Role::User, "first ask"),
             message(Role::Assistant, "first reply"),
-            message(Role::User, &format!("second ask\n\nLocal time: {TIME}")),
+            message(
+                Role::User,
+                &format!("second ask\n\nLocal time: {TIME}\nDrawings on screen: []")
+            ),
         ]
     );
     assert_eq!(
@@ -243,6 +283,136 @@ fn a_kumo_request_states_its_model_names_role_and_ordered_runs() {
         "Kumo's role"
     );
     assert!(!instructions.contains('\r'), "one line ending");
+}
+
+fn drawing_line(built: &Built) -> &str {
+    built
+        .request
+        .input
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            InputItem::Message {
+                role: Role::User,
+                text,
+            } => text
+                .split_once("\nDrawings on screen: ")
+                .map(|(_, line)| line),
+            _ => None,
+        })
+        .expect("current-turn drawing line")
+}
+
+#[test]
+fn drawing_context_uses_global_membership_and_the_same_request_snapshot() {
+    let mut world = world("ctx-visible-drawings");
+    let main = world.main;
+    world.draw(main, "displaced", "old", None);
+    let (task, _) = world.run(None, "task", None);
+    for n in 0..4 {
+        world.draw(task, &format!("foreign{n}"), "foreign", None);
+    }
+    let (_, current) = world.run(Some(main), "ask", None);
+    let run = snapshot(Origin::Kumo, None);
+    let built = world
+        .build(&run, (main, current), Supplied::default(), BOUND)
+        .expect("request");
+    assert_eq!(
+        drawing_line(&built),
+        "[]",
+        "select globally before filtering this thread"
+    );
+    let visible = world.draw(main, "visible", "private_header_marker", None);
+    let (_, current) = world.run(Some(main), "now add", None);
+    let reader = Connection::open(world.scratch.db()).expect("reader");
+    let frozen = Snapshot::begin(&reader).expect("snapshot");
+    world
+        .store
+        .clear_scenes(&[visible])
+        .expect("clear after snapshot");
+    let built = build(
+        frozen,
+        &run,
+        Turn {
+            thread: main,
+            run: current,
+            local_time: TIME,
+        },
+        Supplied::default(),
+        BOUND,
+    )
+    .expect("snapshot request");
+    assert_eq!(
+        serde_json::from_str::<Value>(drawing_line(&built)).expect("JSON"),
+        json!([{"begin":{"v":1,"scene":"visible","surface":"overlay","size":null,"title":null,"alt":"private_header_marker","others":"clear"}}])
+    );
+    assert!(!drawing_line(&built).contains("PRIVATE_STEP_CONTENT"));
+    let after = world
+        .build(&run, (main, current), Supplied::default(), BOUND)
+        .expect("fresh request");
+    assert_eq!(drawing_line(&after), "[]");
+    let diagnostic = format!("{built:?} {:?}", built.request);
+    assert!(!diagnostic.contains("private_header_marker"));
+    assert!(!diagnostic.contains(&format!("{:?}", b"private_header_marker")));
+}
+
+#[test]
+fn complete_drawing_headers_count_outer_escaping_before_the_request_bound() {
+    let mut world = world("ctx-drawing-bound");
+    let main = world.main;
+    let marker = "PRIVATE_HEADER_\"\\\n".repeat(20);
+    for n in 0..4 {
+        world.draw(main, &format!("scene{n}"), &marker, Some(&marker));
+    }
+    let (_, current) = world.run(Some(main), "ask", None);
+    let run = snapshot(Origin::Kumo, None);
+    let built = world
+        .build(&run, (main, current), Supplied::default(), BOUND)
+        .expect("request");
+    let headers: Value = serde_json::from_str(drawing_line(&built)).expect("JSON");
+    assert_eq!(headers.as_array().expect("headers").len(), 4);
+    for (index, header) in headers.as_array().expect("headers").iter().enumerate() {
+        assert_eq!(header["begin"]["scene"], format!("scene{index}"));
+        assert_eq!(header["begin"]["alt"], marker);
+        assert_eq!(header["begin"]["title"], marker);
+        assert_eq!(header["begin"]["others"], "clear");
+    }
+    let current_item = built
+        .request
+        .input
+        .iter()
+        .rev()
+        .find(|item| {
+            matches!(
+                item,
+                InputItem::Message {
+                    role: Role::User,
+                    ..
+                }
+            )
+        })
+        .expect("user item");
+    let InputItem::Message { text, .. } = current_item else {
+        panic!("message")
+    };
+    let escaped = serde_json::to_string(text).expect("escaped message").len();
+    assert!(
+        escaped > text.len(),
+        "outer escaping must not be charged as bare line bytes"
+    );
+    let minimum =
+        super::bound::fixed_bytes(&built.request.instructions, &built.request.tools) + 64 + escaped;
+    let exact = world
+        .build(&run, (main, current), Supplied::default(), minimum)
+        .expect("exact current-item bound");
+    assert_eq!(drawing_line(&exact), drawing_line(&built));
+    assert!(matches!(
+        world.build(&run, (main, current), Supplied::default(), minimum - 1),
+        Err(BuildError::TooLarge { .. })
+    ));
+    let diagnostic = format!("{built:?} {:?}", built.request);
+    assert!(!diagnostic.contains("PRIVATE_HEADER_"));
+    assert!(!diagnostic.contains(&format!("{:?}", marker.as_bytes())));
 }
 
 #[test]
@@ -620,7 +790,10 @@ fn a_summary_states_its_range_and_replaces_the_events_it_covers() {
                     covered[0].0, covered[1].0
                 )
             ),
-            message(Role::User, &format!("new ask\n\nLocal time: {TIME}")),
+            message(
+                Role::User,
+                &format!("new ask\n\nLocal time: {TIME}\nDrawings on screen: []")
+            ),
         ]
     );
 }
@@ -648,7 +821,10 @@ fn the_bound_is_exact_and_older_runs_go_first() {
         over.request.input,
         [
             message(Role::User, "middle"),
-            message(Role::User, &format!("current\n\nLocal time: {TIME}")),
+            message(
+                Role::User,
+                &format!("current\n\nLocal time: {TIME}\nDrawings on screen: []")
+            ),
         ]
     );
     let alone = request_bytes(&ModelRequest {
@@ -662,7 +838,7 @@ fn the_bound_is_exact_and_older_runs_go_first() {
         only.request.input,
         [message(
             Role::User,
-            &format!("current\n\nLocal time: {TIME}")
+            &format!("current\n\nLocal time: {TIME}\nDrawings on screen: []")
         )]
     );
     let too_large = world.build(&run, (main, current), Supplied::default(), alone - 1);
@@ -855,7 +1031,10 @@ fn a_bound_one_byte_short_drops_an_older_tool_pair_whole() {
         "events": [b_ids[0].0, b_ids[0].0], "text": "user: b text", "truncated": false,
         "continue_from": null }] })
     .to_string();
-    let now = message(Role::User, &format!("current ask\n\nLocal time: {TIME}"));
+    let now = message(
+        Role::User,
+        &format!("current ask\n\nLocal time: {TIME}\nDrawings on screen: []"),
+    );
     let full = vec![
         message(Role::User, "older ask"),
         InputItem::FunctionCall {
@@ -1320,7 +1499,10 @@ fn next_input(world: &World, run: RunId, connection: u64) -> Vec<Value> {
 }
 
 fn next_ask() -> Value {
-    said("user", &format!("next\n\nLocal time: {TIME}"))
+    said(
+        "user",
+        &format!("next\n\nLocal time: {TIME}\nDrawings on screen: []"),
+    )
 }
 
 fn partial() -> [NewEvent<'static>; 1] {
@@ -1541,7 +1723,10 @@ fn a_result_of_exactly_65_kib_is_read() {
         .expect("the cap fits");
     assert_eq!(
         built.request.input,
-        [message(Role::User, &format!("ask\n\nLocal time: {TIME}"))],
+        [message(
+            Role::User,
+            &format!("ask\n\nLocal time: {TIME}\nDrawings on screen: []")
+        )],
         "a result with no native call isn't replayed"
     );
 }
@@ -1620,7 +1805,10 @@ fn a_deletion_note_follows_the_run_it_interrupted_and_precedes_the_current_one()
             message(Role::Assistant, "reply two"),
             notes[0].clone(),
             notes[1].clone(),
-            message(Role::User, &format!("ask three\n\nLocal time: {TIME}")),
+            message(
+                Role::User,
+                &format!("ask three\n\nLocal time: {TIME}\nDrawings on screen: []")
+            ),
         ],
         "no run is split, and a note made mid-turn waits before it"
     );
@@ -1645,7 +1833,10 @@ fn a_deletion_note_follows_the_run_it_interrupted_and_precedes_the_current_one()
             notes[0].clone(),
             message(Role::User, "ask three"),
             notes[1].clone(),
-            message(Role::User, &format!("ask four\n\nLocal time: {TIME}")),
+            message(
+                Role::User,
+                &format!("ask four\n\nLocal time: {TIME}\nDrawings on screen: []")
+            ),
         ],
         "once its run ended, the second note follows it"
     );
@@ -1676,7 +1867,10 @@ fn a_summary_covers_the_notes_through_its_cutoff_and_a_later_note_still_renders(
             &format!("Summary of events {}–{}:\nearlier", events[0].0, last.0),
         )
     };
-    let ask = message(Role::User, &format!("ask two\n\nLocal time: {TIME}"));
+    let ask = message(
+        Role::User,
+        &format!("ask two\n\nLocal time: {TIME}\nDrawings on screen: []"),
+    );
     let below = world
         .build(&run, (main, current), through(events[1]), BOUND)
         .expect("built");
@@ -1704,7 +1898,10 @@ fn the_newest_32_notes_are_kept_and_charged_to_the_bound() {
     let (_, current) = world.run(Some(main), "ask three", None);
     let notes = rendered_notes(&world);
     assert_eq!(notes.len(), 33);
-    let ask = message(Role::User, &format!("ask three\n\nLocal time: {TIME}"));
+    let ask = message(
+        Role::User,
+        &format!("ask three\n\nLocal time: {TIME}\nDrawings on screen: []"),
+    );
     let newest: Vec<_> = std::iter::once(message(Role::User, "ask two"))
         .chain(notes[1..].iter().cloned())
         .chain([ask])

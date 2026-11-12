@@ -307,7 +307,7 @@ fn skipped(row: i64) {
 }
 
 /// Writes `scene`'s `scene_cleared` in its own thread, if that thread is live.
-fn clear(conn: &Connection, scene: SceneId, now: i64) -> Result<(), StoreError> {
+pub(super) fn clear(conn: &Connection, scene: SceneId, now: i64) -> Result<(), StoreError> {
     let Ok(id) = i64::try_from(scene.0) else {
         return Ok(());
     };
