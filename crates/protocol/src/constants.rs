@@ -86,6 +86,9 @@ impl ProductIdentity {
 /// The brain's SQLite store, in the [`DATA_DIR`] folder under `%LOCALAPPDATA%`.
 pub const STORE_FILE: &str = "kumochi.db";
 
+/// The brain's credential authority, beside [`STORE_FILE`]; the gate tools' cleanup reads it too.
+pub const AUTHORITY_FILE: &str = "credentials.db";
+
 /// The empty account-session lock file, in the [`DATA_DIR`] folder under `%LOCALAPPDATA%`.
 pub const SESSION_LOCK: &str = "session.lock";
 
