@@ -139,7 +139,7 @@ fn escape(owner: &Entity<Presence>, window: AnyWindowHandle, cx: &mut TestAppCon
 /// Continue or Not now, as the footer button runs it.
 fn press_continue(owner: &Entity<Presence>, cx: &mut TestAppContext) {
     owner.update(cx, |owner, cx| {
-        owner.onboarding_continue(cx).expect("continue")
+        owner.onboarding_continue(cx).expect("continue");
     });
     cx.run_until_parked();
 }
@@ -819,7 +819,7 @@ fn on_accounts(
     (owner, window, controls)
 }
 
-/// Continue with ChatGPT from the step, as its button does.
+/// Continue with `ChatGPT` from the step, as its button does.
 fn sign_in(owner: &Entity<Presence>, cx: &mut TestAppContext) {
     owner.update(cx, |owner, cx| {
         owner.onboarding_account_op(AccountOp::SignIn, cx);
@@ -867,7 +867,7 @@ fn a_dismissal_while_the_browser_waits_cancels_it(cx: &mut TestAppContext) {
     account(&owner, 7, AccountView::SigningIn, cx);
     drain(&controls);
     owner.update(cx, |owner, cx| {
-        owner.dismiss_onboarding(cx).expect("Finish later")
+        owner.dismiss_onboarding(cx).expect("Finish later");
     });
     assert_eq!(
         drain(&controls),
