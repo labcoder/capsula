@@ -62,8 +62,21 @@ impl ProductIdentity {
         shell_lock: "kumochi-dev-shell",
     };
 
+    /// The gate tools' own namespaces (OSC-680), so a gate run never touches either real identity.
+    /// Only the `gate-identity` feature selects them, and only a gate tool's command line enables
+    /// it: never a manifest, a default or another crate.
+    pub const GATE: Self = Self {
+        data_dir: "Kumochi Gate",
+        credential_service: "Kumochi Gate",
+        instance_service: "Kumochi Gate instance",
+        object_prefix: "kumochi-gate",
+        shell_lock: "kumochi-gate-shell",
+    };
+
     /// Names used by the running app, unchanged from the profile-dependent aliases.
-    pub const ACTIVE: Self = if cfg!(debug_assertions) {
+    pub const ACTIVE: Self = if cfg!(feature = "gate-identity") {
+        Self::GATE
+    } else if cfg!(debug_assertions) {
         Self::DEV
     } else {
         Self::RELEASE
