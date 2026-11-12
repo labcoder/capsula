@@ -30,14 +30,14 @@ impl ShellProcess {
     }
 
     pub(crate) fn exited(&self) -> io::Result<bool> {
-        match self.owner.as_ref() {
+        match *self.owner {
             #[cfg(windows)]
-            Owner::Native(handle) => {
+            Owner::Native(ref handle) => {
                 use std::os::windows::io::AsHandle as _;
                 super::has_exited(handle.as_handle())
             }
             #[cfg(test)]
-            Owner::Fixture(state) => match state.load(std::sync::atomic::Ordering::Acquire) {
+            Owner::Fixture(ref state) => match state.load(std::sync::atomic::Ordering::Acquire) {
                 0 => Ok(false),
                 1 => Ok(true),
                 _ => Err(io::ErrorKind::Other.into()),
