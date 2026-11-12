@@ -1229,8 +1229,8 @@ fn the_recorded_graph_finishes_drawing_while_the_status_panel_is_hidden(
     script.finish();
     assert_eq!(
         retained_draw(&owner, cx),
-        [1.0, 1.0, 0.683_830_8, 1.0, 1.0, 1.0, 1.0],
-        "the recorded first frame, the fg labels included"
+        [0.809_890_6],
+        "the recorded first frame: the x axis draws in and the rest wait their turn"
     );
     assert_eq!(vsync_shown(&owner, cx), 1);
     assert_eq!(retained_draw(&owner, cx), [1.0; 7]);

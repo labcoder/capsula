@@ -1022,6 +1022,18 @@ whose own entrance and every ancestor's entrance have finished, each clipped to 
 deadline; the host passes those handles into the authoritative `StopCut`.
 Each child's entrance starts no earlier than its parent's start, retaining its own
 duration, so delayed diagrams do not hide their children's entrances.
+An object that names no `enter` gets a default entrance over its kind's default length:
+lines, arrows, paths, edges and series draw in, and everything else fades in. An explicit
+`"enter":"none"` appears at once. When no object in the step names a `delay` or an
+`at_word`, each starts 60% of the way through the previous object's entrance, in `put`
+order; if the last would end after 4 s, every gap and default length shrinks by one ratio
+to fit, while an authored `dur` keeps its exact length; one that would shrink the gaps and
+default lengths below a quarter ends late instead (`motion::pace`). An object with
+`"enter":"none"` keeps its turn in that order but adds no time, so the next one starts
+as it appears.
+`entrance_end()` is when the last object the step put finishes entering, after parent
+gating and clipped to the deadline. The presenter ends the step at the later of its
+narration segment and that instant, so the next `speech` step waits for the drawing.
 Explicit tracks retain their step-relative clocks, so a track may finish while a
 delayed parent still hides its target; only entrances are shifted.
 `delay_entrance(by)` starts what the view's own step put `by` ms later: its objects'
@@ -1059,7 +1071,8 @@ Synthetic narration takes `max(800, ceil(words * 4000 / 11))` milliseconds, with
 use integer proportional placement within that segment, with u128 multiplication.
 Speech-driven timing and painting belong to their later slices.
 
-Esc during an explicit opacity fade-in without `enter` reveals its final opacity.
+Esc during an explicit opacity fade-in on an object with `"enter":"none"` reveals its final
+opacity.
 Exact interrupted recovery needs timestamps in the log; use entrances for reveals.
 
 ```mermaid

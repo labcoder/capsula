@@ -8,6 +8,10 @@ that suits the content and draw inside it; the default canvas is 960 by 600.
 Kumochi fits and centers the drawing in the free area beside its panel, enlarging
 it up to 2 times when there is room. Do not guess the display size or position.
 
+Build a larger drawing in 3 to 6 steps, in the order you would draw it by hand, each
+with a short say. Without a delay, a step's objects come in one after another in put
+order; leave enter out unless you want a particular effect.
+
 The current turn lists Drawings on screen with their complete begin headers.
 For the same subject, continue a listed scene: copy its entire header exactly,
 including others, title and alt, and use new step ids with set/remove for changes.

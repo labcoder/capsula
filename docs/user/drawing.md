@@ -4,8 +4,9 @@ Conversation history shows **Drawing unavailable in history** for stored drawing
 It keeps surrounding text, but does not reconstruct the picture there. This message does
 not mean a drawing still visible on screen has failed, and reading history does not change it.
 
-When Kumochi draws a 2D diagram, each step appears on screen once it is prepared, and drawings
-that were on screen come back after Kumochi reconnects. If you stop a drawing, the parts that
+When Kumochi draws a 2D diagram, each step appears on screen once it is prepared, and its parts
+draw or fade in one after another unless the drawing times them itself. Drawings that were on
+screen come back after Kumochi reconnects. If you stop a drawing, the parts that
 had already finished appearing stay on screen.
 
 Asking for a change to the same subject continues its drawing. A new subject normally
