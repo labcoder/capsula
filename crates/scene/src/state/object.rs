@@ -400,7 +400,7 @@ pub(super) fn validate_changes(
             return Err(StepError::in_step(
                 &step.id,
                 prefix.field("target"),
-                ErrorCode::UnknownRef,
+                ErrorCode::RemovedInStep,
             ));
         }
     }
@@ -449,12 +449,12 @@ fn validate_anim(
 ) -> Result<(), StepError> {
     let prefix = path(index, "anim");
     let fail = |field, code| StepError::in_step(&step.id, prefix.clone().field(field), code);
-    if removed.contains(&anim.target) {
-        return Err(fail("target", ErrorCode::UnknownRef));
-    }
     let Some(target) = objects.get(&anim.target) else {
         return Err(fail("target", ErrorCode::UnknownRef));
     };
+    if removed.contains(&anim.target) {
+        return Err(fail("target", ErrorCode::RemovedInStep));
+    }
     if anim.track == Track::Draw && !matches!(target.kind, Kind::Line | Kind::Path | Kind::Edge) {
         return Err(fail("track", ErrorCode::PropertyNotOwned));
     }

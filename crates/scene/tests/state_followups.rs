@@ -252,6 +252,11 @@ fn missing_targets_endpoint_kinds_and_duplicate_removals_are_rejected() {
             "put[0].anim.target",
         ),
         (
+            r#"{"id":"bad","put":[{"anim":{"target":"missing","track":"x","keys":[[0,1]]}}],"remove":["missing"]}"#,
+            ErrorCode::UnknownRef,
+            "put[0].anim.target",
+        ),
+        (
             r#"{"id":"bad","remove":["a","a"]}"#,
             ErrorCode::DuplicateKey,
             "remove[1]",

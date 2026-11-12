@@ -539,18 +539,20 @@ fn shown_content_never_clears_via_stop_zero_and_same_step_updates_cannot_outlive
         .expect_err("user clear is a separate transition");
     assert_eq!(error.code, ErrorCode::OutOfRange);
     assert_eq!(error.path.as_str(), "stop.activated");
-    rejected(
+    let set = rejected(
         &state,
         &global,
         json!({"id":"bad","set":[{"target":"t0","text":"change"}],"remove":["t0"]}),
-        ErrorCode::UnknownRef,
+        ErrorCode::RemovedInStep,
     );
-    rejected(
+    assert_eq!(set.path.as_str(), "set[0].target");
+    let anim = rejected(
         &state,
         &global,
         json!({"id":"bad","put":[{"anim":{"target":"t0","track":"opacity","keys":[[0,0],[1,1]]}}],"remove":["t0"]}),
-        ErrorCode::UnknownRef,
+        ErrorCode::RemovedInStep,
     );
+    assert_eq!(anim.path.as_str(), "put[0].anim.target");
 }
 
 fn table_ops(prefix: &str, rows: usize) -> Vec<Value> {
