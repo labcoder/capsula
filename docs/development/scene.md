@@ -571,6 +571,38 @@ Neither Stop nor append renumbers old handles. The returned commit index is
 zero-based over lifetime commits. Handle decoding rejects zero/unused revisions
 and slots beyond the 856-operation bound.
 
+### Paint order and `set.behind`
+
+Objects paint in handle order, so a new object lands on top. `{"target":"sun","behind":"c1"}`
+in a step's `set` paints the target just below `c1` instead, whether the target is new in that
+step or already drawn. Each prepared object carries a paint key (anchor handle, behind depth,
+own handle), compared in that order with deeper depths first: an object paints at its own handle
+until a `set` gives it the anchor's key one level deeper. A chain (moon behind sun behind `c1`)
+stacks downwards, and two objects put behind one anchor at the same depth keep handle order, so
+the newer paints higher, still below the anchor.
+
+- **Refusals.** The target may not be a container (diagram, table or chart, whose children would
+  stay on top) or a 3D object (`KindChanged` at `set[i].behind`). The anchor must be a surviving
+  2D object or one put in the same step (`UnknownRef`), not removed by that step
+  (`RemovedInStep`) and not 3D (`Unsupported`). A link that would close a cycle, directly, through a
+  chain or within one step's `set` list, is `ReferenceCycle` at the link that closes it. Admission
+  rebuilds each target's latest anchor from the kept steps in the log only when a step names
+  `behind`, so no admission state is stored for it; a chain ends at an anchor that is no longer live.
+- **A removed or cut anchor.** The target keeps the key it was given, so it still paints where the
+  anchor painted: below everything that was above the anchor and above everything below it. Replay
+  and recovery prepare the same steps and cuts in the same order, and a cut keeps each survivor's
+  key, so they reach the same order.
+- **Stored records.** `behind` is an appended optional field of `Change`. Stored steps are JSON,
+  where an absent field decodes as none, so every step stored before it still decodes
+  (`a_stored_step_written_before_behind_existed_still_decodes`). Postcard only crosses the
+  brain–shell pipe between one build's two processes and is never stored.
+- **Cost.** Preparation sets the key once per step that names `behind`; `SceneView` sorts its
+  paint order when it activates a step or installs a rest view. Sampling and paint read that order
+  and add nothing per frame.
+
+`behind` can't bring an object forward: moving an existing object in front of a newer one
+needs a remove and a new put (`shortcut:`, until someone asks for "in front").
+
 ### Bounded Mermaid flowcharts
 
 `{"mermaid":{"in":"d","src":"flowchart LR\nA[Start] --> B[Done]"}}`
