@@ -16,7 +16,7 @@ fn circle(name: &str) -> Value {
     json!({"shape":{"id":name,"kind":"circle","at":[50,50],"r":20,"fill":"#ffffff","enter":"none"}})
 }
 
-fn typed(value: Value) -> Step {
+fn typed(value: &Value) -> Step {
     let bytes = serde_json::to_vec(&json!({ "step": value })).expect("step JSON");
     let Record::Step(step) = parse_record(&bytes).expect("typed step") else {
         panic!("step fixture");
@@ -41,14 +41,14 @@ fn drawn(steps: Vec<Value>) -> (SceneState, GlobalBudget, SceneView) {
 fn painted(view: &SceneView, names: &[&str]) -> Vec<String> {
     let mut frame = Frame::new();
     view.frame(120_000, &mut frame).expect("fresh frame");
-    let named: Vec<(Handle, &str)> = names
+    let handles: Vec<(Handle, &str)> = names
         .iter()
         .filter_map(|name| Some((view.layout().handle(&id(name))?, *name)))
         .collect();
     frame
         .items()
         .iter()
-        .filter_map(|item| named.iter().find(|(handle, _)| *handle == item.handle))
+        .filter_map(|item| handles.iter().find(|(handle, _)| *handle == item.handle))
         .map(|(_, name)| (*name).to_owned())
         .collect()
 }
@@ -124,11 +124,15 @@ fn a_removed_anchor_leaves_its_dependant_where_it_painted_and_recovery_agrees() 
     assert_eq!(painted(&recovered, ALL), ["sky", "c3", "sun", "c2", "star"]);
 }
 
-fn refused(steps: &[Value], last: Value, code: ErrorCode, path: &str) {
+fn refused(steps: &[Value], last: &Value, code: ErrorCode, path: &str) {
     let (scene, budget, _) = drawn(steps.to_vec());
     let revision = scene.revision();
     let error = scene.admit(&typed(last), &budget).expect_err("refused");
-    assert_eq!((error.code, error.path.as_str()), (code, path));
+    assert_eq!(
+        (error.code, error.path.as_str()),
+        (code, path),
+        "the refusal names its code and field"
+    );
     assert_eq!(scene.revision(), revision, "a refusal commits nothing");
 }
 
@@ -137,14 +141,14 @@ fn a_link_that_would_close_a_cycle_is_refused_in_the_step_that_closes_it() {
     let cloud = cloud();
     refused(
         std::slice::from_ref(&cloud),
-        json!({"id":"self","set":[{"target":"c1","behind":"c1"}]}),
+        &json!({"id":"self","set":[{"target":"c1","behind":"c1"}]}),
         ErrorCode::ReferenceCycle,
         "set[0].behind",
     );
     let first = json!({"id":"one","set":[{"target":"c1","behind":"c2"}]});
     refused(
         &[cloud.clone(), first.clone()],
-        json!({"id":"two","set":[{"target":"c2","behind":"c1"}]}),
+        &json!({"id":"two","set":[{"target":"c2","behind":"c1"}]}),
         ErrorCode::ReferenceCycle,
         "set[0].behind",
     );
@@ -154,13 +158,13 @@ fn a_link_that_would_close_a_cycle_is_refused_in_the_step_that_closes_it() {
             first,
             json!({"id":"two","set":[{"target":"c2","behind":"sky"}]}),
         ],
-        json!({"id":"three","set":[{"target":"sky","behind":"c1"}]}),
+        &json!({"id":"three","set":[{"target":"sky","behind":"c1"}]}),
         ErrorCode::ReferenceCycle,
         "set[0].behind",
     );
     refused(
         std::slice::from_ref(&cloud),
-        json!({"id":"both","set":[{"target":"c1","behind":"c2"},{"target":"c2","behind":"c1"}]}),
+        &json!({"id":"both","set":[{"target":"c1","behind":"c2"},{"target":"c2","behind":"c1"}]}),
         ErrorCode::ReferenceCycle,
         "set[1].behind",
     );
@@ -183,19 +187,19 @@ fn unknown_removed_container_and_three_dimensional_links_are_refused() {
     let base = std::slice::from_ref(&cloud);
     refused(
         base,
-        json!({"id":"x","set":[{"target":"c1","behind":"nothing"}]}),
+        &json!({"id":"x","set":[{"target":"c1","behind":"nothing"}]}),
         ErrorCode::UnknownRef,
         "set[0].behind",
     );
     refused(
         base,
-        json!({"id":"x","remove":["c2"],"set":[{"target":"c1","behind":"c2"}]}),
+        &json!({"id":"x","remove":["c2"],"set":[{"target":"c1","behind":"c2"}]}),
         ErrorCode::RemovedInStep,
         "set[0].behind",
     );
     refused(
         base,
-        json!({"id":"x","put":[{"diagram":{"id":"d"}}],"set":[{"target":"d","behind":"c1"}]}),
+        &json!({"id":"x","put":[{"diagram":{"id":"d"}}],"set":[{"target":"d","behind":"c1"}]}),
         ErrorCode::KindChanged,
         "set[0].behind",
     );
