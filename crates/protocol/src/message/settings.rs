@@ -140,6 +140,34 @@ impl DockPosition {
     ];
 }
 
+/// First-run onboarding's steps, in order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnboardingStep {
+    /// The welcome, with the assistant's name.
+    #[default]
+    Welcome,
+    /// What the assistant calls the user.
+    YourName,
+    /// Connecting accounts.
+    Accounts,
+    /// The shortcut, which finishes onboarding.
+    Shortcut,
+}
+
+impl OnboardingStep {
+    /// The step after this one; none after the last.
+    #[must_use]
+    pub fn next(self) -> Option<Self> {
+        match self {
+            Self::Welcome => Some(Self::YourName),
+            Self::YourName => Some(Self::Accounts),
+            Self::Accounts => Some(Self::Shortcut),
+            Self::Shortcut => None,
+        }
+    }
+}
+
 /// A settings change, shell to brain. Each one is answered by exactly one
 /// [`super::ControlToShell::Settings`] with `answer` set, in order, while its connection lasts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +200,9 @@ pub enum SettingsOp {
     CancelVoiceInstall,
     /// Allow deliberate held speech input.
     SetHoldToTalk(bool),
+    /// An onboarding step was completed, so the next launch starts after it. The last step is
+    /// completed only by [`Self::FinishOnboarding`]: completing it here changes nothing.
+    CompleteOnboardingStep(OnboardingStep),
 }
 
 /// The initial held-speech choice, also used by older settings files without the key.
@@ -220,6 +251,8 @@ pub struct SettingsView {
     pub stt_unload: SttUnload,
     /// Whether deliberate held speech input is enabled.
     pub hold_to_talk: bool,
+    /// The first onboarding step not yet completed.
+    pub onboarding_from: OnboardingStep,
 }
 
 /// The most frames a second Kumo draws. The shell paces to the display, so the rate it runs at
@@ -287,6 +320,7 @@ mod tests {
             assistant_name: AssistantName::new("Sentinelname").expect("valid"),
             user_name: Some(UserName::new("Sentineluser").expect("valid")),
             onboarded: true,
+            onboarding_from: crate::message::OnboardingStep::Welcome,
             main_thread: ThreadId(1),
             max_frame_rate: MaxFrameRate::AUTOMATIC,
             default_model: None,
@@ -387,6 +421,7 @@ mod tests {
                     assistant_name: AssistantName::new("Sentinelname").expect("valid"),
                     user_name: Some(UserName::new("Sentineluser").expect("valid")),
                     onboarded: true,
+                    onboarding_from: crate::message::OnboardingStep::Welcome,
                     main_thread: ThreadId(1),
                     max_frame_rate: MaxFrameRate::AUTOMATIC,
                     default_model: None,

@@ -276,6 +276,7 @@ mod tests {
             assistant_name: AssistantName::new(NAME).expect("a valid name"),
             user_name: Some(UserName::new(NAME).expect("a valid name")),
             onboarded: true,
+            onboarding_from: kumochi_protocol::message::OnboardingStep::Welcome,
             main_thread: ThreadId(1),
             max_frame_rate: MaxFrameRate::default(),
             default_model: None,

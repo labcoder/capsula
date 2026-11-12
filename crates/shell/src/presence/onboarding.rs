@@ -321,12 +321,15 @@ impl Presence {
         let settings = self.settings.clone();
         let link = self.state;
         if let Some(panel) = &self.onboarding {
-            let next = panel.view.update(cx, |view, cx| {
+            let (from, next) = panel.view.update(cx, |view, cx| {
                 view.link = link;
                 cx.notify();
-                view.state.settings_changed(settings.read(cx))
+                (
+                    view.state.step(),
+                    view.state.settings_changed(settings.read(cx)),
+                )
             });
-            return self.onboarding_next(next, cx);
+            return self.onboarding_next(from, next, cx);
         }
         let Some(state) = settings
             .read(cx)
@@ -357,18 +360,37 @@ impl Presence {
         let view = panel.view.clone();
         self.save_setting(view.read(cx).state.step().field(), cx);
         let settings = self.settings.clone();
-        let next = view.update(cx, |view, cx| {
+        let (from, next) = view.update(cx, |view, cx| {
             view.unsent = false;
             cx.notify();
-            view.state.submit(settings.read(cx))
+            (view.state.step(), view.state.submit(settings.read(cx)))
         });
-        self.onboarding_next(next, cx)
+        self.onboarding_next(from, next, cx)
     }
 
-    fn onboarding_next(&mut self, next: Next, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+    /// What the plain state decided, `from` being the step that was showing when it decided.
+    fn onboarding_next(
+        &mut self,
+        from: Step,
+        next: Next,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
         let Some(panel) = &self.onboarding else {
             return Ok(());
         };
+        if matches!(next, Next::Moved | Next::Finish) {
+            let (link, session) = (&self.link, &self.session);
+            let recorded = self.settings.update(cx, |state, _| {
+                state.complete_onboarding_step(from.recorded(), |op| {
+                    session.as_ref().is_some_and(|session| {
+                        link.send_control(session, ControlToBrain::Settings(op))
+                    })
+                })
+            });
+            if !recorded {
+                tracing::info!(step = ?from, "onboarding step not recorded");
+            }
+        }
         match next {
             Next::Stay => Ok(()),
             Next::Moved => {

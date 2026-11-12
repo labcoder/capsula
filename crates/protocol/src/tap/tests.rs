@@ -89,6 +89,7 @@ fn view() -> ControlToShell {
             assistant_name: AssistantName::new(NAME).expect("valid"),
             user_name: Some(UserName::new(USER).expect("valid")),
             onboarded: true,
+            onboarding_from: crate::message::OnboardingStep::Welcome,
             main_thread: ThreadId(1),
             max_frame_rate: crate::message::MaxFrameRate::AUTOMATIC,
             default_model: None,

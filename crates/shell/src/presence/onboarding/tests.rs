@@ -7,7 +7,7 @@ use gpui_kit::{
 };
 use kumochi_protocol::message::{
     AssistantName, ControlToBrain, DockPosition, GestureId, Incarnation, MaxFrameRate, NameError,
-    SettingsOp, SettingsView, SttUnload, ThreadId, UserName,
+    OnboardingStep, SettingsOp, SettingsView, SttUnload, ThreadId, UserName,
 };
 
 use super::{OnboardingPanel, OnboardingView, Select};
@@ -30,6 +30,7 @@ fn view(assistant: &str, onboarded: bool) -> SettingsView {
         assistant_name: AssistantName::new(assistant).expect("valid assistant name"),
         user_name: None,
         onboarded,
+        onboarding_from: kumochi_protocol::message::OnboardingStep::Welcome,
         main_thread: ThreadId(1),
         max_frame_rate: MaxFrameRate::AUTOMATIC,
         default_model: None,
@@ -160,6 +161,12 @@ fn enter_with_the_saved_name_moves_focus_to_the_next_steps_input(cx: &mut TestAp
         let input = view.read(cx).inputs[1].read(cx).focus_handle(cx);
         assert!(input.is_focused(window), "focus is in the name input");
     });
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::Settings(
+            SettingsOp::CompleteOnboardingStep(OnboardingStep::Welcome)
+        ))
+    );
     assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
 }
 
@@ -236,6 +243,12 @@ fn an_unsent_finish_says_so_and_can_be_pressed_again(cx: &mut TestAppContext) {
     let (owner, window, controls) = showing(cx);
     VisualTestContext::from_window(window, cx).simulate_keystrokes("enter");
     cx.run_until_parked();
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::Settings(
+            SettingsOp::CompleteOnboardingStep(OnboardingStep::Welcome)
+        ))
+    );
     let session = owner.update(cx, |owner, _| owner.session.take());
     VisualTestContext::from_window(window, cx).simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -256,6 +269,12 @@ fn an_unsent_finish_says_so_and_can_be_pressed_again(cx: &mut TestAppContext) {
     VisualTestContext::from_window(window, cx).simulate_keystrokes("enter");
     cx.run_until_parked();
     assert!(!unsent(&owner, cx));
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::Settings(
+            SettingsOp::CompleteOnboardingStep(OnboardingStep::YourName)
+        ))
+    );
     assert_eq!(
         controls.try_recv(),
         Ok(ControlToBrain::Settings(SettingsOp::FinishOnboarding))
@@ -355,18 +374,88 @@ fn an_onboarded_view_closes_the_window_quietly(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn an_onboarded_view_drops_an_unsaved_edit_as_it_closes(cx: &mut TestAppContext) {
+    let (owner, _, controls) = showing(cx);
+    rename(&owner, "Mochi", cx);
+    owner.update(cx, |owner, cx| {
+        owner
+            .link_events(
+                Batch::Plain(vec![LinkEvent::Settings {
+                    generation: 7,
+                    view: view("Kumo", true),
+                    answer: false,
+                }]),
+                cx,
+            )
+            .expect("an unsolicited view");
+        assert!(owner.onboarding.is_none());
+        assert_eq!(owner.settings.read(cx).value(Field::Assistant), "Kumo");
+    });
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+}
+
+#[gpui::test]
+fn after_finish_later_a_view_that_owes_onboarding_opens_nothing_this_run(cx: &mut TestAppContext) {
+    let (owner, _data, controls) = ready(cx);
+    let deliver = native(&owner, cx);
+    open_over(&owner, cx);
+    owner.update(cx, |owner, cx| {
+        owner.dismiss_onboarding(cx).expect("Finish later");
+    });
+    let (_, sent) = recognised(&deliver, &controls, cx);
+    assert_eq!(sent.len(), 2, "the hold is recognised");
+    owner.update(cx, |owner, cx| {
+        owner
+            .link_events(
+                Batch::Plain(vec![LinkEvent::Settings {
+                    generation: 1,
+                    view: view("Kumo", false),
+                    answer: false,
+                }]),
+                cx,
+            )
+            .expect("a view that owes onboarding");
+        assert!(owner.onboarding.is_none());
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        controls.try_recv(),
+        Err(async_channel::TryRecvError::Empty),
+        "an opening window would have cancelled the hold"
+    );
+}
+
+#[gpui::test]
 fn the_finish_lands_on_the_peek_only_when_the_brain_says_so(cx: &mut TestAppContext) {
     let (owner, window, controls) = showing(cx);
     VisualTestContext::from_window(window, cx).simulate_keystrokes("enter");
     cx.run_until_parked();
     VisualTestContext::from_window(window, cx).simulate_keystrokes("enter");
     cx.run_until_parked();
+    let sent = std::iter::from_fn(|| controls.try_recv().ok()).collect::<Vec<_>>();
     assert_eq!(
-        controls.try_recv(),
-        Ok(ControlToBrain::Settings(SettingsOp::FinishOnboarding))
+        sent,
+        [OnboardingStep::Welcome, OnboardingStep::YourName]
+            .map(|step| ControlToBrain::Settings(SettingsOp::CompleteOnboardingStep(step)))
+            .into_iter()
+            .chain([ControlToBrain::Settings(SettingsOp::FinishOnboarding)])
+            .collect::<Vec<_>>()
     );
-    owner.read_with(cx, |owner, _| assert!(owner.onboarding.is_some()));
     owner.update(cx, |owner, cx| {
+        for _ in 0..2 {
+            owner
+                .link_events(
+                    Batch::Plain(vec![LinkEvent::Settings {
+                        generation: 7,
+                        view: view("Kumo", false),
+                        answer: true,
+                    }]),
+                    cx,
+                )
+                .expect("a step's answer");
+        }
+        assert!(owner.onboarding.is_some());
+        assert!(owner.settings.read(cx).finishing(), "still the finish's");
         owner
             .link_events(
                 Batch::Plain(vec![LinkEvent::Settings {

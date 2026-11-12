@@ -1154,6 +1154,7 @@ fn settings(name: &str) -> SettingsView {
         assistant_name: kumochi_protocol::message::AssistantName::new(name).expect("valid"),
         user_name: None,
         onboarded: true,
+        onboarding_from: kumochi_protocol::message::OnboardingStep::Welcome,
         main_thread: ThreadId(1),
         max_frame_rate: kumochi_protocol::message::MaxFrameRate::AUTOMATIC,
         default_model: None,

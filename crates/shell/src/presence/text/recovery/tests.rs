@@ -851,6 +851,7 @@ fn settings_retry_rechecks_its_captured_field_and_waits_for_the_matching_answer(
         assistant_name: AssistantName::new("Kumo").expect("valid name"),
         user_name: None,
         onboarded: true,
+        onboarding_from: kumochi_protocol::message::OnboardingStep::Welcome,
         main_thread: ThreadId(1),
         max_frame_rate: MaxFrameRate::AUTOMATIC,
         default_model: None,

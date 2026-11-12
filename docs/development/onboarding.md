@@ -3,14 +3,18 @@
 On a launch where the brain's first `SettingsView` says `onboarded: false`, the shell opens one
 window under the dock: the welcome, where the assistant's name can change, then the user's own
 name. Sign-in and the shortcut steps come later. The brain decides whether onboarding is owed
-(see [settings](settings.md)); the shell keeps nothing durable.
+and remembers which steps were completed (see [settings](settings.md)); the shell keeps nothing
+durable.
 
 ## Who owns what
 
-- The brain owns the `onboarded` flag and both names in `config.toml`.
+- The brain owns the `onboarded` flag, `onboarding_from` (the first step not yet completed) and
+  both names in `config.toml`.
 - `shell/settings.rs` owns the name drafts, their validation and saves, as for Settings, and
   `Settings::finish_onboarding`, which puts `FinishOnboarding` in the same ordered answer queue
-  (`Slot::Onboarding`), so the brain's one answer completes it and no other change.
+  (`Slot::Onboarding`), so the brain's one answer completes it and no other change. A completed
+  step is recorded with `CompleteOnboardingStep` in its own slot (`Slot::OnboardingStep`), which
+  never counts as the finish, so a record queued just before it can't refuse it.
 - `shell/onboarding.rs` is the plain state: the step, the field whose save it waits for, and
   whether a finish is queued. It holds no text, so it has nothing to log.
 - `presence/onboarding.rs` owns the window (`Presence.onboarding`), the launch decision, and
@@ -33,6 +37,10 @@ flowchart TD
 
 ## Rules
 
+- **A launch resumes at `onboarding_from`,** clamped to the last step this build has. A step is
+  recorded as the window moves on from it; the brain keeps only the furthest, and
+  `FinishOnboarding` removes the key. A record that's refused or can't be sent shows nothing:
+  at worst that step shows again next launch.
 - **Continue reads the field, not `save`'s answer.** `save` returns false for an unchanged
   value, a save in flight and an unsent one alike. So a field still saving waits for its answer
   (blur may have started the save), a validation or offline error stays, and anything else goes

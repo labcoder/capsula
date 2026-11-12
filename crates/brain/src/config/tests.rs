@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
 use kumochi_protocol::message::{
     AccountView, AssistantName, DockPosition, Effort, ErrorKey, MAX_SLUG_BYTES, MaxFrameRate,
-    ModelChoice, ModelSlug, PlanState, RepoName, RunId, SettingsOp, SttUnload, ThreadId, UserName,
+    ModelChoice, ModelSlug, OnboardingStep, PlanState, RepoName, RunId, SettingsOp, SttUnload,
+    ThreadId, UserName,
 };
 use kumochi_protocol::voice::VoicePart;
 
@@ -1172,6 +1173,45 @@ fn the_start_answer_outlives_other_writes_and_finishing_onboarding_is_saved() {
         Some(true)
     );
     assert!(Config::load(Some(fresh), ThreadId(1)).view().onboarded);
+}
+
+#[test]
+fn completed_onboarding_steps_only_move_forward_and_the_finish_clears_them() {
+    let scratch = Scratch::new("config-onboarding-from");
+    let fresh = dir(&scratch);
+    let path = fresh.join(CONFIG_FILE);
+    let mut config = Config::load(Some(fresh.clone()), ThreadId(1));
+    assert_eq!(config.view().onboarding_from, OnboardingStep::Welcome);
+    apply(
+        &mut config,
+        SettingsOp::CompleteOnboardingStep(OnboardingStep::YourName),
+    );
+    assert_eq!(config.view().onboarding_from, OnboardingStep::Accounts);
+    for done in [OnboardingStep::Welcome, OnboardingStep::Shortcut] {
+        apply(&mut config, SettingsOp::CompleteOnboardingStep(done));
+        assert_eq!(
+            config.view().onboarding_from,
+            OnboardingStep::Accounts,
+            "{done:?}"
+        );
+    }
+    assert_eq!(saved(&path)["onboarding_from"].as_str(), Some("accounts"));
+    assert_eq!(saved(&path).get("onboarded"), None);
+    assert_eq!(
+        Config::load(Some(fresh.clone()), ThreadId(1))
+            .view()
+            .onboarding_from,
+        OnboardingStep::Accounts
+    );
+    apply(&mut config, SettingsOp::FinishOnboarding);
+    assert_eq!(saved(&path).get("onboarding_from"), None);
+    std::fs::write(&path, "onboarding_from = \"later\"\n").expect("seeded");
+    assert_eq!(
+        Config::load(Some(fresh), ThreadId(1))
+            .view()
+            .onboarding_from,
+        OnboardingStep::Welcome
+    );
 }
 
 #[test]

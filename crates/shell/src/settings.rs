@@ -4,8 +4,8 @@ use std::collections::VecDeque;
 use std::fmt;
 
 use kumochi_protocol::message::{
-    AssistantName, DockPosition, ErrorKey, MaxFrameRate, NameError, PartState, SettingsOp,
-    SettingsView, SttUnload, UserError, UserName,
+    AssistantName, DockPosition, ErrorKey, MaxFrameRate, NameError, OnboardingStep, PartState,
+    SettingsOp, SettingsView, SttUnload, UserError, UserName,
 };
 
 use crate::strings::Text;
@@ -84,6 +84,8 @@ enum Slot {
     SpeechInput(SpeechInputAction),
     /// `FinishOnboarding`: no field and no draft.
     Onboarding,
+    /// `CompleteOnboardingStep`: no field, and never counted as the finish.
+    OnboardingStep,
 }
 
 impl Slot {
@@ -96,7 +98,8 @@ impl Slot {
             | (Self::SttUnload(_), Self::SttUnload(_))
             | (Self::HoldToTalk(_), Self::HoldToTalk(_))
             | (Self::SpeechInput(_), Self::SpeechInput(_))
-            | (Self::Onboarding, Self::Onboarding) => true,
+            | (Self::Onboarding, Self::Onboarding)
+            | (Self::OnboardingStep, Self::OnboardingStep) => true,
             _ => false,
         }
     }
@@ -110,7 +113,8 @@ impl Slot {
             | Self::SttUnload(_)
             | Self::HoldToTalk(_)
             | Self::SpeechInput(_)
-            | Self::Onboarding => None,
+            | Self::Onboarding
+            | Self::OnboardingStep => None,
         }
     }
 }
@@ -380,7 +384,8 @@ impl Settings {
                 | Slot::SttUnload(_)
                 | Slot::HoldToTalk(_)
                 | Slot::SpeechInput(_)
-                | Slot::Onboarding => None,
+                | Slot::Onboarding
+                | Slot::OnboardingStep => None,
             });
         queued.or(self.view.as_ref().map(|view| view.max_frame_rate))
     }
@@ -462,6 +467,24 @@ impl Settings {
         true
     }
 
+    /// Queues `CompleteOnboardingStep` in the ordered answer queue, apart from the finish. False
+    /// when offline or the send fails.
+    pub(crate) fn complete_onboarding_step(
+        &mut self,
+        step: OnboardingStep,
+        send: impl FnOnce(SettingsOp) -> bool,
+    ) -> bool {
+        if self.view.is_none() || !send(SettingsOp::CompleteOnboardingStep(step)) {
+            return false;
+        }
+        self.pending.push_back(Pending {
+            slot: Slot::OnboardingStep,
+            failed: false,
+            reset_draft: false,
+        });
+        true
+    }
+
     /// Whether a `FinishOnboarding` is queued and unanswered.
     pub(crate) fn finishing(&self) -> bool {
         self.pending
@@ -509,6 +532,16 @@ impl Settings {
     }
 
     pub(crate) fn error(&mut self, error: UserError) -> Option<Field> {
+        // A step that isn't remembered only shows again next launch, so it raises no notice.
+        if settings_error(error.key())
+            && let Some(pending) = self
+                .pending
+                .front_mut()
+                .filter(|pending| pending.slot == Slot::OnboardingStep)
+        {
+            pending.failed = true;
+            return None;
+        }
         self.notice = Some(error.clone());
         self.notice_slot = self
             .pending
