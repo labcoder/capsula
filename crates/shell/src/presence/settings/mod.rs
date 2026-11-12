@@ -81,18 +81,7 @@ impl SettingsView {
             .zip(&inputs)
             .map(|(field, input)| {
                 cx.subscribe_in(input, window, move |view, input, event, window, cx| {
-                    name_input(
-                        field,
-                        input,
-                        event,
-                        &mut view.editing,
-                        &view.focus,
-                        &view.model,
-                        &view.owner,
-                        window,
-                        cx,
-                    );
-                    cx.notify();
+                    view.name_input(field, input, event, window, cx);
                 })
             })
             .collect();
@@ -171,6 +160,28 @@ impl SettingsView {
         self.editing
     }
 
+    fn name_input(
+        &mut self,
+        field: Field,
+        input: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        name_input_event(
+            field,
+            input,
+            event,
+            &mut self.editing,
+            &self.focus,
+            &self.model,
+            &self.owner,
+            window,
+            cx,
+        );
+        cx.notify();
+    }
+
     pub(super) fn select_tab(
         &mut self,
         tab: usize,
@@ -224,7 +235,7 @@ impl SettingsView {
     clippy::too_many_arguments,
     reason = "the editing view's own state, passed through"
 )]
-pub(in crate::presence) fn name_input(
+pub(in crate::presence) fn name_input_event(
     field: Field,
     input: &Entity<InputState>,
     event: &InputEvent,

@@ -93,7 +93,7 @@ impl SettingsView {
     }
 }
 
-/// The ChatGPT section, for every view that shows the account. `route` sends a button's
+/// The `ChatGPT` section, for every view that shows the account. `route` sends a button's
 /// operation; `fixture` keeps Manage usage inert; `sign_out` shows while signed in.
 #[expect(
     clippy::fn_params_excessive_bools,
@@ -108,6 +108,88 @@ pub(in crate::presence) fn account_section(
 ) -> impl IntoElement {
     let strings = cx.global::<Strings>();
     let state = &model.accounts;
+    let (mut status, lines) = account_status(state);
+    if state.view.is_none() && model.view().is_none() {
+        status = Text::AccountOffline;
+    }
+    let duplicate = state.error.as_ref().is_some_and(|error| {
+        matches!(
+            (error.key(), &state.view),
+            (
+                ErrorKey::SignOutNotDurable,
+                Some(AccountView::SigningOut {
+                    cleanup: Cleanup::NotDurable,
+                    ..
+                })
+            ) | (
+                ErrorKey::SessionEnded,
+                Some(AccountView::SignedIn {
+                    recovery: Some(AccountRecovery::SignInAgain),
+                    ..
+                })
+            ) | (
+                ErrorKey::PlanUnavailable,
+                Some(AccountView::SignedIn {
+                    plan: PlanState::Unavailable,
+                    recovery: None,
+                    ..
+                })
+            )
+        )
+    });
+    div()
+        .flex()
+        .flex_col()
+        .gap_6()
+        .min_w_0()
+        .child(account_header(state, cx))
+        .child(
+            div()
+                .text_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .child(strings.get(status)),
+        )
+        .children(lines.into_iter().map(|text| account_notice(text, cx)))
+        .children(
+            state
+                .error
+                .as_ref()
+                .filter(|_| !duplicate)
+                .map(|error| account_error(error, cx)),
+        )
+        .children(state.send_failed.then(|| {
+            div()
+                .text_sm()
+                .text_color(cx.theme().danger)
+                .child(strings.get(Text::AccountSendFailed))
+        }))
+        .child(account_actions(state, route, fixture, cx))
+        .children(
+            sign_out
+                .filter(|_| matches!(state.view, Some(AccountView::SignedIn { .. })))
+                .map(|sign_out| {
+                    div()
+                        .flex()
+                        .border_t_1()
+                        .border_color(cx.theme().border)
+                        .pt_4()
+                        .child(sign_out)
+                }),
+        )
+}
+
+/// The section's buttons, each sending its operation through `route`, and Manage usage.
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "Settings' debug fixture flag, passed through"
+)]
+fn account_actions(
+    state: &Accounts,
+    route: impl Fn(AccountOp, &mut App) + Clone + 'static,
+    fixture: bool,
+    cx: &App,
+) -> impl IntoElement {
+    let strings = cx.global::<Strings>();
     let button = |id: &'static str, label: Text, op: AccountOp| {
         let route = route.clone();
         Button::new(id)
@@ -198,74 +280,7 @@ pub(in crate::presence) fn account_section(
                 .child(strings.get(Text::AccountManageUsage)),
         );
     }
-    let (mut status, lines) = account_status(state);
-    if state.view.is_none() && model.view().is_none() {
-        status = Text::AccountOffline;
-    }
-    let duplicate = state.error.as_ref().is_some_and(|error| {
-        matches!(
-            (error.key(), &state.view),
-            (
-                ErrorKey::SignOutNotDurable,
-                Some(AccountView::SigningOut {
-                    cleanup: Cleanup::NotDurable,
-                    ..
-                })
-            ) | (
-                ErrorKey::SessionEnded,
-                Some(AccountView::SignedIn {
-                    recovery: Some(AccountRecovery::SignInAgain),
-                    ..
-                })
-            ) | (
-                ErrorKey::PlanUnavailable,
-                Some(AccountView::SignedIn {
-                    plan: PlanState::Unavailable,
-                    recovery: None,
-                    ..
-                })
-            )
-        )
-    });
-    div()
-        .flex()
-        .flex_col()
-        .gap_6()
-        .min_w_0()
-        .child(account_header(state, cx))
-        .child(
-            div()
-                .text_sm()
-                .font_weight(FontWeight::MEDIUM)
-                .child(strings.get(status)),
-        )
-        .children(lines.into_iter().map(|text| account_notice(text, cx)))
-        .children(
-            state
-                .error
-                .as_ref()
-                .filter(|_| !duplicate)
-                .map(|error| account_error(error, cx)),
-        )
-        .children(state.send_failed.then(|| {
-            div()
-                .text_sm()
-                .text_color(cx.theme().danger)
-                .child(strings.get(Text::AccountSendFailed))
-        }))
-        .child(actions)
-        .children(
-            sign_out
-                .filter(|_| matches!(state.view, Some(AccountView::SignedIn { .. })))
-                .map(|sign_out| {
-                    div()
-                        .flex()
-                        .border_t_1()
-                        .border_color(cx.theme().border)
-                        .pt_4()
-                        .child(sign_out)
-                }),
-        )
+    actions
 }
 
 fn account_header(state: &Accounts, cx: &App) -> impl IntoElement {
