@@ -471,7 +471,7 @@ async fn check_reports_candidates_and_ambiguity_without_ever_returning_a_receipt
         ));
         let (http, control, script) = bounded(steps);
         let action = unknown();
-        let result = check(&http, &token(), &action, &control).await.unwrap();
+        let result = check(&http, &token(), &action).await.unwrap();
         match (expected, result) {
             ("one", Lookup::Unplaced(number)) => assert_eq!(number.get(), 77),
             ("none", Lookup::None) | ("failed", Lookup::Failed) | ("several", Lookup::Several) => {}
@@ -495,9 +495,9 @@ async fn check_requires_a_positive_page_one_date_not_before_the_stored_mark() {
             date,
             json!([]),
         ));
-        let (http, control, script) = bounded(steps);
+        let (http, _, script) = bounded(steps);
         assert!(matches!(
-            check(&http, &token(), &unknown(), &control).await.unwrap(),
+            check(&http, &token(), &unknown()).await.unwrap(),
             Lookup::Failed
         ));
         assert_eq!(script.calls.load(Ordering::SeqCst), 4);
@@ -523,7 +523,7 @@ async fn a_full_second_page_is_inconclusive_for_both_preflight_and_check() {
         let (http, control, script) = bounded(steps);
         if recovering {
             assert!(matches!(
-                check(&http, &token(), &unknown(), &control).await.unwrap(),
+                check(&http, &token(), &unknown()).await.unwrap(),
                 Lookup::Failed
             ));
         } else {
@@ -544,11 +544,9 @@ async fn a_full_second_page_is_inconclusive_for_both_preflight_and_check() {
 
 #[tokio::test(start_paused = true)]
 async fn check_rejects_non_unknown_actions_and_marks_actual_401_without_guessing() {
-    let (http, control, script) = bounded(Vec::new());
+    let (http, _, script) = bounded(Vec::new());
     assert_eq!(
-        check(&http, &token(), &action(), &control)
-            .await
-            .unwrap_err(),
+        check(&http, &token(), &action()).await.unwrap_err(),
         Failure {
             reason: FailReason::PreflightFailed,
             unauthorized: false,
@@ -563,11 +561,9 @@ async fn check_rejects_non_unknown_actions_and_marks_actual_401_without_guessing
             steps[0].status = 401;
         }
         steps.truncate(1);
-        let (http, control, script) = bounded(steps);
+        let (http, _, script) = bounded(steps);
         assert_eq!(
-            check(&http, &token(), &unknown(), &control)
-                .await
-                .unwrap_err(),
+            check(&http, &token(), &unknown()).await.unwrap_err(),
             Failure {
                 reason: FailReason::NotConnected,
                 unauthorized: !mismatch,
