@@ -59,6 +59,10 @@ flowchart LR
 - shortcut: one scene can't reach three snapshot chunks today (32 KiB target, at most 64 steps of
   256 B), so the reconnect item's chunks span four scenes; chunking inside a scene is covered by
   the brain's recovery tests. Use one scene once slice 4's steps are bigger.
+- The deleted and kept markers start with letters no fixture word starts with (`qgone…` and
+  `zkept…`). FTS5 stores a term after the first on an index page only as what it adds to the term
+  before it, so a marker sharing a prefix with its neighbour would never appear whole in the raw
+  bytes, and a stale one would pass the scan.
 - Retrieval, summaries and Claude Code also hold thread content; slices 3 and 8 add them to the
   deletion item.
 - The brain is a dev build, because only dev builds read `KUMOCHI_FIXTURE`, so its timings are

@@ -10,7 +10,7 @@ use kumochi_protocol::message::{ControlToBrain, ControlToShell, Deleted, Phase, 
 
 use super::brain::Case;
 use super::client::{Client, Frame};
-use super::{PATIENCE, Row, ended, marker, run_end, store, turn};
+use super::{GONE, KEPT, PATIENCE, Row, ended, marker, run_end, store, turn};
 
 /// How long a restarted brain gets to purge before it's asked to quit.
 const PURGE_WAIT: Duration = Duration::from_secs(2);
@@ -18,9 +18,9 @@ const PURGE_WAIT: Duration = Duration::from_secs(2);
 const ATTEMPTS: usize = 3;
 
 pub(super) fn run(folder: &Path) -> Result<Row> {
-    let gone = marker();
-    let kept = marker();
-    let mixed = format!("CapsGate{}", &gone["capsgate".len()..]);
+    let gone = marker(GONE);
+    let kept = marker(KEPT);
+    let mixed = format!("{}{}", gone[..1].to_ascii_uppercase(), &gone[1..]);
     let upper = gone.to_ascii_uppercase();
     let case = Case::new(
         folder,

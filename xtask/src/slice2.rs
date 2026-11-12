@@ -40,6 +40,11 @@ const INNER: &str = "--inner";
 const BUILD_LIMIT: Duration = Duration::from_mins(20);
 /// How long the whole gate may run before it and its brains are killed.
 const GATE_LIMIT: Duration = Duration::from_mins(20);
+/// Prefixes of the markers an item expects gone and kept. FTS5 stores a term after the first on an
+/// index page only as what it adds to the term before it, so the raw byte scan sees a whole marker
+/// only when no other indexed term shares its first letter; no fixture word starts with these.
+const GONE: &str = "qgone";
+const KEPT: &str = "zkept";
 /// How long one expected frame may take before the item fails.
 const PATIENCE: Duration = Duration::from_secs(10);
 
@@ -274,11 +279,11 @@ fn first_text(client: &mut Client, run: RunId) -> Result<()> {
     })
 }
 
-/// A random lowercase word no fixture or store holds by chance.
-fn marker() -> String {
+/// A random lowercase word starting with `prefix` that no fixture or store holds by chance.
+fn marker(prefix: &str) -> String {
     use std::hash::{BuildHasher as _, RandomState};
     format!(
-        "capsgate{:016x}",
+        "{prefix}{:016x}",
         RandomState::new().hash_one(SystemTime::now())
     )
 }
@@ -288,7 +293,7 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
-    use super::{build, end_survivors, percentile};
+    use super::{GONE, KEPT, build, end_survivors, marker, percentile};
 
     const SHORT: Duration = Duration::from_millis(200);
 
@@ -344,6 +349,17 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn the_gone_and_kept_markers_share_no_prefix() {
+        let (gone, kept) = (marker(GONE), marker(KEPT));
+        let shared = gone
+            .bytes()
+            .zip(kept.bytes())
+            .take_while(|(a, b)| a == b)
+            .count();
+        assert_eq!(shared, 0, "{gone} and {kept}");
     }
 
     #[test]
