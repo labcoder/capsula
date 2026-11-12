@@ -213,6 +213,83 @@ fn users(scratch: &Scratch) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn first_speech_setup_loads_and_holds_without_restarting_the_brain() {
+    use kumochi_protocol::message::{PartState, SettingsOp};
+    use kumochi_protocol::voice::VoicePart;
+
+    let scratch = Scratch::trusted("hold-first-setup");
+    let mut brain = test_support::brain(&scratch, "0 text first setup answer");
+    let (release, held) = std::sync::mpsc::channel();
+    let (began, mut decoded) = mpsc::unbounded_channel();
+    let (reports, heard) = Reports::new();
+    let (stt, _policy) = held_for_runtime_checked(reports, held, move |rate, samples| {
+        assert_eq!(rate, 16_000);
+        assert_eq!(samples, [73, -19]);
+        began.send(()).unwrap();
+        "first setup transcript".into()
+    });
+    let (_, tts) = Reports::new();
+    let (fetch, fetched) = super::voice::held_fetch();
+    brain.attach_voice(
+        scratch.dir().join("models"),
+        &[],
+        (Some(stt), None),
+        [heard, tts],
+        fetch.clone(),
+    );
+    assert_eq!(brain.hold_voice().0, PartState::NotInstalled);
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        opened(&mut shell).await;
+        shell
+            .send(&ControlToBrain::Settings(SettingsOp::InstallVoice(
+                VoicePart::SpeechInput,
+            )))
+            .await;
+        let Some(ControlToShell::Voice(view)) = shell.control().await else {
+            panic!("initial install view");
+        };
+        assert_eq!(view.speech_input, PartState::Verifying);
+        let Some(ControlToShell::Voice(view)) = shell.control().await else {
+            panic!("download view");
+        };
+        assert_eq!(
+            view.speech_input,
+            PartState::Downloading { done: 3, total: 9 }
+        );
+        fetched.send(Ok(())).unwrap();
+        let Some(ControlToShell::Voice(view)) = shell.control().await else {
+            panic!("load view");
+        };
+        assert_eq!(view.speech_input, PartState::Loading);
+        release.send(()).unwrap();
+        let Some(ControlToShell::Voice(view)) = shell.control().await else {
+            panic!("ready view after activation");
+        };
+        assert_eq!(view.speech_input, PartState::Ready);
+        recognize(&mut shell).await;
+        packet(&mut shell, 16_000, 0, true, vec![73, -19]).await;
+        release_source(&mut shell, 1).await;
+        status(&mut shell, HoldStatus::Transcribing).await;
+        assert_eq!(decoded.recv().await, Some(()));
+        release.send(()).unwrap();
+        let (run, _) = shell.state().await;
+        shell.read_to_end(run).await;
+        drop(shell);
+    };
+    let (_, ()) = tokio::time::timeout(super::PATIENCE, async {
+        tokio::join!(brain.serve(control, data, &mut tap), client)
+    })
+    .await
+    .unwrap();
+    assert_eq!(brain.hold_voice().0, PartState::Ready);
+    assert_eq!(fetch.begun.load(Ordering::SeqCst), 1);
+    brain.close().await;
+    assert_eq!(users(&scratch), ["first setup transcript"]);
+}
+
+#[tokio::test]
 async fn exact_ordered_pcm_and_independent_resampling_tail_reach_one_real_hold_run() {
     for controls_first in [false, true] {
         for resampled in [false, true] {
