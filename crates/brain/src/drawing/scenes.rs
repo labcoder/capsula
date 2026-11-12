@@ -53,6 +53,10 @@ impl Drawing {
 
     /// A step's write committed, so its admission commits too and the shell gets it, after the
     /// header for a new scene. A scene that left meanwhile drops it.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one committed write keeps victim retirement and successor installation ordered"
+    )]
     pub(super) fn stored(&mut self, write: StepWait, id: SceneId, out: &mut Output) {
         let StepWait {
             run,

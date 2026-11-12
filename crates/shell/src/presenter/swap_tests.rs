@@ -87,6 +87,10 @@ fn replacement_keeps_the_exact_old_sample_until_one_atomic_successor_selection()
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "the authored entrance endpoints must be exactly zero and one"
+)]
 fn a_zero_alpha_first_sample_hands_off_and_its_paint_starts_the_entrance_clock() {
     let (mut presenter, now) = fixture(&[LIVE]);
     replace(&mut presenter, &[LIVE], NEXT, now);

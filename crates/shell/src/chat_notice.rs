@@ -56,8 +56,7 @@ impl Notice {
                 Source::Run(run) => Route::RunRetry(run),
                 Source::Account => Route::Account(AccountOp::Retry),
                 Source::Settings(Some(field)) => Route::SettingsRetry(field),
-                Source::Settings(None) => return None,
-                Source::Drawing { .. } => return None,
+                Source::Settings(None) | Source::Drawing { .. } => return None,
             },
             Action::SignIn => match self.error.key() {
                 ErrorKey::ClaudeCodeSignedOut | ErrorKey::AnthropicKeyRejected => Route::Accounts,

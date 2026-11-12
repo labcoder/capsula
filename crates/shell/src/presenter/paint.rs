@@ -301,7 +301,7 @@ impl Frames {
             let result = paint(&slot.frame, &mut **slot.cache.borrow_mut());
             match result {
                 Ok(()) if live && shown && !slot.frame.items().is_empty() => {
-                    slot.painted.set(slot.sampled)
+                    slot.painted.set(slot.sampled);
                 }
                 Ok(()) => {}
                 Err(_) => {
