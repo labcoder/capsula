@@ -105,3 +105,43 @@ async fn stop_acceptance_does_not_borrow_another_authenticated_process_receipt()
     }
     brain.close().await;
 }
+
+#[tokio::test]
+async fn unreadable_shell_process_leaves_the_receipt_unacknowledged() {
+    use crate::runtime::data::DataQueue;
+    use crate::tap::Tap;
+    use crate::test_support::{self, Scratch};
+    use std::cell::RefCell;
+    let scratch = Scratch::new("hold-stop-unreadable-peer");
+    let mut brain = test_support::brain(&scratch, "");
+    let (holds, old) = debt(0);
+    brain.holds = holds;
+    brain.epoch = 2;
+    brain.connected_shell(ShellProcess::fixture(10, Arc::clone(&old)));
+    let (out, mut output) = mpsc::channel(4);
+    let queue = RefCell::new(DataQueue::new(0));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    let stop = ControlToBrain::VoiceHoldStopped {
+        gesture: KEY.gesture,
+    };
+    old.store(2, Ordering::Release);
+    assert!(brain.hold_control(&stop, &mut link).unwrap());
+    assert_eq!(output.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    assert_eq!(brain.holds.debt, Some(KEY));
+    old.store(0, Ordering::Release);
+    assert!(brain.hold_control(&stop, &mut link).unwrap());
+    let bytes = output.try_recv().unwrap();
+    assert_eq!(
+        kumochi_protocol::frame::decode::<ControlToShell>(
+            &bytes[kumochi_protocol::frame::HEADER_LEN..]
+        )
+        .unwrap(),
+        ControlToShell::VoiceHoldStopAccepted {
+            gesture: KEY.gesture
+        }
+    );
+    assert_eq!(brain.holds.debt, None);
+    brain.close().await;
+}

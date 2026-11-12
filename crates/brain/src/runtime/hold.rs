@@ -185,20 +185,22 @@ impl Holds {
         self.high = 0;
     }
 
-    pub(super) fn stopped(&mut self, key: HoldKey) -> bool {
-        let same_peer = self
-            .debt_peer
-            .as_ref()
-            .zip(self.peer.as_ref())
-            .is_some_and(|(old, current)| old.same_live_process(current).unwrap_or(false));
-        if self.debt == Some(key)
-            || (same_peer && self.debt.is_some_and(|debt| debt.gesture == key.gesture))
-        {
-            self.debt = None;
-            self.debt_peer = None;
-            return true;
+    /// None when the shell process could not be checked, so the receipt stays unacknowledged.
+    pub(super) fn stopped(&mut self, key: HoldKey) -> Option<bool> {
+        let Some(debt) = self.debt.filter(|debt| debt.gesture == key.gesture) else {
+            return Some(false);
+        };
+        if debt != key {
+            let (Some(old), Some(current)) = (&self.debt_peer, &self.peer) else {
+                return Some(false);
+            };
+            if !old.same_live_process(current).ok()? {
+                return Some(false);
+            }
         }
-        false
+        self.debt = None;
+        self.debt_peer = None;
+        Some(true)
     }
 }
 
@@ -382,7 +384,9 @@ impl Brain {
                 self.holds.high = self.holds.high.max(gesture.0);
                 let key = key(*gesture);
                 if matches!(message, ControlToBrain::VoiceHoldStopped { .. }) {
-                    let accepted = self.holds.stopped(key);
+                    let Some(accepted) = self.holds.stopped(key) else {
+                        return Ok(true);
+                    };
                     link.control(&ControlToShell::VoiceHoldStopAccepted { gesture: *gesture })?;
                     if !accepted
                         && self
