@@ -915,6 +915,7 @@ const fn error_id(key: ErrorKey) -> &'static str {
         ErrorKey::VoiceUnavailable => "error-voice-unavailable",
         ErrorKey::VoiceModelPath => "error-voice-model-path",
         ErrorKey::GitHubUnavailable => "github-unavailable",
+        ErrorKey::DrawingReplacementFailed => "error-drawing-replacement-failed",
     }
 }
 

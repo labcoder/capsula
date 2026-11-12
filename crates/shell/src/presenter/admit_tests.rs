@@ -267,7 +267,11 @@ fn a_late_admission_clears_only_its_scene_and_releases_exactly_what_was_mirrored
             effects.extend(presenter.tick(ms(now, 250)).expect("a tick"));
         }
         let case = format!("tick first {tick_first}");
-        assert_eq!(controls(&effects), [&clear_drawing(vec![LIVE])], "{case}");
+        assert_eq!(
+            controls(&effects),
+            [&ControlToBrain::SceneFailed { scene: LIVE }],
+            "{case}"
+        );
         assert_eq!(credit(&effects), FRAME, "{case}");
         assert_eq!(
             admissions(effects).len(),
@@ -946,7 +950,10 @@ fn a_late_admission_on_a_recovered_scene_releases_its_rest_and_resends_its_clear
     assert!(presenter.tick(ms(now, 279)).expect("a tick").is_empty());
     let effects = presenter.tick(ms(now, 280)).expect("a tick");
     assert_eq!(credit(&effects), FRAME);
-    assert_eq!(controls(&effects), [&clear_drawing(vec![LIVE])]);
+    assert_eq!(
+        controls(&effects),
+        [&ControlToBrain::SceneFailed { scene: LIVE }]
+    );
     assert_eq!(presenter.residency(), kept);
     let one = presenter.global.usage();
     assert_eq!((one.objects, one.scenes), (1, 1));

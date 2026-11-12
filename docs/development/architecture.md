@@ -146,6 +146,12 @@ flowchart LR
 - **Speech waits for its picture.** A step's sentence plays only once the shell has prepared the step, after a wait of up to 250 ms. A step that isn't prepared by then shows as failed and is never spoken, and the rest of that drawing's queued speech is dropped.
 - **Caps** are checked on expanded work before anything is allocated, and nothing is silently truncated.
 
+A committed replacement removes its victims durably. The shell can keep only their frozen
+presentation owners for up to 250 ms while preparing the successor, then select its first
+nonempty sample on the same shown host. Capacity pressure releases this visual hold instead
+of refusing an otherwise-fitting successor. Expiry and late failure do not restore old scenes;
+fixed original-thread feedback reports when a replacement failed after removing them.
+
 **3D** uses a CPU depth-buffered raster; the planned shell host paints its BGRA image because
 GPUI on Windows has no depth buffer for element content. Opaque solids write per-sample depth;
 translucent polygons follow in centroid order without writing depth, which can blend intersecting

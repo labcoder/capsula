@@ -191,9 +191,7 @@ fn a_failed_epoch_cannot_deliver_an_earlier_success() {
     assert_eq!(presenter.take_shown(GENERATION), [None; 4]);
     assert_eq!(
         controls(&presenter.paint_failed()),
-        [&ControlToBrain::ClearDrawing {
-            scene_ids: vec![LIVE],
-        }]
+        [&ControlToBrain::SceneFailed { scene: LIVE }]
     );
     assert_eq!(presenter.stoppable_run(), None);
     assert_eq!(presenter.residency(), 0);

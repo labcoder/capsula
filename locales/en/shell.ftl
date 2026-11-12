@@ -370,4 +370,5 @@ error-voice-corrupt = A voice file didn't match what Kumochi expected, so it was
 error-voice-storage = Kumochi couldn't read, write or delete its voice files.
 error-voice-load = Voice couldn't start.
 error-voice-model-path = The speech model folder goes through a link or network location, or has unsafe permissions. Use an ordinary local folder.
+error-drawing-replacement-failed = The replacement couldn't be drawn. Your previous drawings were removed.
 error-voice-unavailable = Voice can't be installed or removed right now.

@@ -125,12 +125,17 @@ impl Presenter {
             .saturating_add(scene.view_bytes)
             .saturating_add(scene.cache_bytes)
             .saturating_add(head.step.resident_bytes);
-        let after = total
+        let mut after = total
             .saturating_sub(outgoing)
             .saturating_add(head.full_after)
             .saturating_add(view_bytes)
             .saturating_add(cache_bytes)
             .saturating_add(bytes);
+        if after > MAX_RESIDENT_BYTES {
+            let mut frames = self.frames.borrow_mut();
+            after = after.saturating_sub(frames.retirement_bytes());
+            frames.discard_retirement();
+        }
         if after > MAX_RESIDENT_BYTES {
             drop(Deferred::new(cache, cache_bytes));
             return Err(ConsumeError::Residency);

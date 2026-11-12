@@ -32,6 +32,7 @@ impl Presence {
             if let LinkEvent::RunState { generation, .. }
             | LinkEvent::TurnRefused { generation, .. }
             | LinkEvent::CaptureDone { generation, .. }
+            | LinkEvent::DrawingReplacementFailed { generation, .. }
             | LinkEvent::CaptureFailed { generation, .. } = &event
                 && self
                     .session
@@ -41,6 +42,11 @@ impl Presence {
                 continue;
             }
             match event {
+                LinkEvent::DrawingReplacementFailed { thread, run, .. } => self.show_error(
+                    &kumochi_protocol::message::ErrorKey::DrawingReplacementFailed.into(),
+                    Source::Drawing { thread, run },
+                    cx,
+                ),
                 LinkEvent::State(state) => {
                     self.revoke_exclusion(cx);
                     self.session = None;
@@ -354,7 +360,8 @@ impl Presence {
         {
             self.place_drawings(cx.weak_entity(), cx);
         }
-        if let DataToShell::ScenesRemoved { scenes } = &*frame
+        if let DataToShell::ScenesRemoved { scenes } | DataToShell::ScenesReplaced { scenes, .. } =
+            &*frame
             && self
                 .session
                 .as_ref()

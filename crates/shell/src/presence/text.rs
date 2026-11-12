@@ -187,7 +187,9 @@ impl Presence {
         let close_events = self.events.clone();
         let owner = cx.weak_entity();
         let notice = typing_notice(
-            self.chat_notice.shown().and(self.error.as_ref()),
+            self.chat_notice
+                .for_thread(self.runs.thread())
+                .and(self.error.as_ref()),
             self.refusal,
             cx.global::<Strings>(),
         );
@@ -350,7 +352,9 @@ impl Presence {
     ) {
         let strings = cx.global::<Strings>();
         let notice = typing_notice(
-            self.chat_notice.shown().and(self.error.as_ref()),
+            self.chat_notice
+                .for_thread(self.runs.thread())
+                .and(self.error.as_ref()),
             self.refusal,
             strings,
         );
@@ -409,7 +413,7 @@ impl Presence {
         };
         let answer = self.runs.shown();
         let target = self.runs.target();
-        let recovery = self.chat_notice.shown().cloned();
+        let recovery = self.chat_notice.for_thread(self.runs.thread()).cloned();
         let notice = typing_notice(
             recovery.as_ref().and(self.error.as_ref()),
             self.refusal,

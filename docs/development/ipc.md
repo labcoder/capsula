@@ -570,6 +570,16 @@ tags and bytes do not change. Mixed builds still fail their build-id handshake.
 | Data, brain to shell | `SceneSnapshotV1` | Complete ordered original steps and effective cuts, packed as whole events. Chunk zero alone carries the header. |
 | Data, brain to shell | `SceneCutApplied` | Authoritative cut, after every step committed before it; the last committed revision is included for a cheap consistency check. |
 | Data, brain to shell | `SceneEnd` | A call completed or ended incomplete; already committed history remains. |
+| Data, brain to shell | `ScenesReplaced` | One to four unique removed ids and a distinct successor, before its begin/first step; a bounded presentation bridge, not a transaction acknowledgement. |
+| Control, brain to shell | `DrawingReplacementFailed` | Fixed localized loss feedback for the original thread/run, including after its tool result ended. |
+| Control, shell to brain | `SceneFailed` | A terminal whole-scene refusal, distinct from a user clear; the brain already owns its originating run/thread. |
+
+`SceneFailed` reports a cause to the brain, including a header refused before the shell knows
+its run. `DrawingReplacementFailed` returns fixed localized feedback to the original conversation
+after the brain resolves that identity; it can arrive after the tool result ended. One cannot
+serve for the other: they travel in opposite directions and only the brain owns the original
+binding. Both appended controls carry identifiers only, are not persisted, and expose only a
+closed kind to diagnostics. Neither changes the first-step commit as the replacement boundary.
 
 History does not reconstruct typed visuals. A stored step with usable bounded scene metadata
 is returned in its ordinary `Page` as `PageEventKind::NoVisual { scene }`, with its original
@@ -603,6 +613,10 @@ step. Live scene headers, steps, snapshot chunks, cut acknowledgements and call-
 scene-owned, not run-owned: Stop never revokes them. A durable step whose store acknowledgement
 arrives after Stop still travels before the cut acknowledgement. `ScenesRemoved` remains the
 non-revocable FIFO removal marker, so clearing the scene cannot discard the removal itself.
+`ScenesReplaced` is also non-revocable and appended to the data enum. It replaces the removal
+marker only when the successor will be delivered; fenced, cleared or deletion-held successors
+use immediate `ScenesRemoved`. The shell validates the victim count, uniqueness, distinct
+successor and connection generation. Retaining a frozen picture never retains semantic membership.
 The shell drains fenced commits into its semantic mirror without preparing or activating them,
 then applies the acknowledged cut. While any cut is outstanding, no run activates more work in
 that scene. A cut for an already removed scene is stale. The shell sends at most one cut per

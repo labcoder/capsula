@@ -414,6 +414,11 @@ pub enum ControlToBrain {
     GitHub(GitHubOp),
     /// Consent or another explicit issue-card action.
     Issue(IssueOp),
+    /// The shell refused an entire scene, possibly before its first run was known.
+    SceneFailed {
+        /// The committed scene to clear, without treating this as an explicit user clear.
+        scene: SceneId,
+    },
 }
 
 /// What a thread's delete came to.
@@ -593,6 +598,13 @@ pub enum ControlToShell {
     },
     /// A GitHub connection error, independent of generic account errors.
     GitHubError(UserError),
+    /// A committed replacement failed before its first successful paint.
+    DrawingReplacementFailed {
+        /// The conversation that requested replacement, even after its call ended.
+        thread: ThreadId,
+        /// Its original run, not a later continuation's run.
+        run: RunId,
+    },
 }
 
 /// Shell to brain, on the data pipe.
@@ -808,6 +820,13 @@ pub enum DataToShell {
         request: u32,
         /// Fixed, content-free completion status.
         status: IssueCardsStatus,
+    },
+    /// Committed removals whose successor follows on this FIFO; presentation may bridge them.
+    ScenesReplaced {
+        /// One to four unique victims, never the successor.
+        scenes: Vec<SceneId>,
+        /// The new scene whose first sampled frame ends the visual hold.
+        successor: SceneId,
     },
 }
 

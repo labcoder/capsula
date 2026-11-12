@@ -63,6 +63,11 @@ pub(crate) enum LinkState {
 /// before `Connected`, and none of a connection's messages after its next state.
 #[derive(Debug)]
 pub(crate) enum LinkEvent {
+    DrawingReplacementFailed {
+        generation: u64,
+        thread: ThreadId,
+        run: RunId,
+    },
     CaptureDone {
         generation: u64,
         capture_for: kumochi_protocol::message::CaptureFor,
@@ -912,6 +917,7 @@ fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
             | ControlToShell::ThreadModelSet { .. }
             | ControlToShell::GitHub(_)
             | ControlToShell::GitHubError(_)
+            | ControlToShell::DrawingReplacementFailed { .. }
             | ControlToShell::ActionState { .. }
             | ControlToShell::IssueRefused { .. }
             | ControlToShell::Connections(_)
@@ -1086,6 +1092,18 @@ fn watch(
                     return;
                 }
             }
+            Ok(Some(ControlToShell::DrawingReplacementFailed { thread, run })) => {
+                if events
+                    .send_blocking(LinkEvent::DrawingReplacementFailed {
+                        generation,
+                        thread,
+                        run,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             Ok(Some(ControlToShell::Account(view))) => {
                 if events
                     .send_blocking(LinkEvent::Account { generation, view })
@@ -1229,6 +1247,7 @@ fn read_data(data: &PipeClient, control: &PipeClient, events: &Sender<LinkEvent>
                         | DataToShell::SceneCutApplied { .. }
                         | DataToShell::SceneEnd { .. }
                         | DataToShell::ScenesRemoved { .. }
+                        | DataToShell::ScenesReplaced { .. }
                 ) {
                     LinkEvent::SceneData {
                         generation,

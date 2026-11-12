@@ -685,11 +685,18 @@ impl Drawing {
 
     /// Ends a call: its scene hears whether it completed, and the coordinator gets its result.
     pub(super) fn end(&mut self, at: usize, error: Option<CallError>, out: &mut Output) {
-        let call = &self.calls[at];
-        let scene = match call.scene {
+        let scene = match self.calls[at].scene {
             Bound::Held(scene) => Some(scene),
             Bound::None | Bound::New(_) => None,
         };
+        if error
+            .as_ref()
+            .is_some_and(|error| *error != CallError::Interrupted)
+            && let Some(scene) = scene
+        {
+            self.replacement_failed(scene, out);
+        }
+        let call = &self.calls[at];
         if let Some(scene) = scene.filter(|scene| self.live(*scene).is_some()) {
             out.effects.push(Effect::Data(DataToShell::SceneEnd {
                 run: call.run,

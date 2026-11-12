@@ -54,6 +54,34 @@ fn round_trip<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(
     );
 }
 
+#[test]
+fn replacement_marker_round_trips_four_victims_and_rejects_truncation() {
+    let marker = DataToShell::ScenesReplaced {
+        scenes: vec![SceneId(1), SceneId(2), SceneId(3), SceneId(4)],
+        successor: SceneId(5),
+    };
+    round_trip(&marker, Pipe::Data);
+    let encoded = frame::encode(&marker, Pipe::Data).expect("bounded marker");
+    assert_eq!(encoded.len() - HEADER_LEN, 7);
+    for end in HEADER_LEN..encoded.len() {
+        assert!(frame::decode::<DataToShell>(&encoded[HEADER_LEN..end]).is_err());
+    }
+}
+
+#[test]
+fn drawing_failure_controls_append_tags_and_keep_their_opposite_bindings() {
+    use super::{ControlToShell, ThreadId};
+    let failed = ControlToBrain::SceneFailed { scene: SceneId(9) };
+    let notice = ControlToShell::DrawingReplacementFailed {
+        thread: ThreadId(7),
+        run: RunId(3),
+    };
+    round_trip(&failed, Pipe::Control);
+    round_trip(&notice, Pipe::Control);
+    assert_eq!(postcard::to_allocvec(&failed).expect("failure"), [26, 9]);
+    assert_eq!(postcard::to_allocvec(&notice).expect("notice"), [26, 7, 3]);
+}
+
 fn snapshot(begin: SceneHeader, step: Step) -> DataToShell {
     DataToShell::SceneSnapshotV1 {
         chunk: SceneSnapshotChunk {

@@ -100,6 +100,8 @@ pub enum ErrorKey {
     GitHubUnavailable,
     /// The speech model location isn't an ordinary trusted local path.
     VoiceModelPath,
+    /// The replacement failed after the previous drawings were durably removed.
+    DrawingReplacementFailed,
 }
 
 macro_rules! catalog {
@@ -165,6 +167,7 @@ impl ErrorKey {
         VoiceModelPath,
 
         GitHubUnavailable,
+        DrawingReplacementFailed,
     }
 }
 

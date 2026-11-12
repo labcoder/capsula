@@ -368,7 +368,7 @@ impl Presence {
             tracing::error!(%error, "the drawing overlay couldn't update");
             // A drawing that can't be shown is cleared rather than kept off screen.
             if sample.visible {
-                let effects = self.presenter.clear(now);
+                let effects = self.presenter.refuse_all(now);
                 return self.scene_effects_at(effects, now, cx);
             }
         }

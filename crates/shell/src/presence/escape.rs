@@ -51,12 +51,15 @@ impl Presence {
             Escape::Stop => {
                 if let Some(message) = self.runs.stop() {
                     self.stop_run(message, cx);
-                } else if let Some(run) = self.presenter.stoppable_run()
-                    && self.presenter.live_work(std::time::Instant::now())
-                {
+                } else if self.presenter.live_work(std::time::Instant::now()) {
                     self.place_drawings(cx.weak_entity(), cx);
-                    let effects = self.presenter.stop(run, std::time::Instant::now());
-                    self.scene_effects(effects, cx);
+                    if let Some(run) = self.presenter.stoppable_run() {
+                        let effects = self.presenter.stop(run, std::time::Instant::now());
+                        self.scene_effects(effects, cx);
+                    } else {
+                        self.presenter.discard_replacement();
+                        self.draw_changed(cx);
+                    }
                 }
                 None
             }
