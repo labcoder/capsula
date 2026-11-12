@@ -24,6 +24,33 @@ pub(super) struct ThreadsPanel {
     activation: Option<Subscription>,
 }
 
+#[cfg(test)]
+impl ThreadsPanel {
+    /// A hidden tasks panel with its real view in a GPUI test window, without
+    /// `create_threads`' native surface, capture or activation wiring.
+    pub(super) fn detached(
+        model: Entity<crate::threads::Threads>,
+        cx: &mut Context<'_, Presence>,
+    ) -> Self {
+        let (events, _closed) = async_channel::unbounded();
+        let owner = cx.weak_entity();
+        let (window, view) =
+            gpui_kit::open_window(gpui_kit::WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| ThreadsView::new(model, owner, None, events, window, cx))
+            })
+            .expect("a GPUI test window opens");
+        Self {
+            window,
+            view,
+            typing: Typing::default(),
+            focused: false,
+            bounds: [0; 4],
+            previous: None,
+            activation: None,
+        }
+    }
+}
+
 impl Presence {
     pub(super) fn threads_open(&self) -> bool {
         self.thread_panel

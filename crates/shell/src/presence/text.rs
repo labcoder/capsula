@@ -28,7 +28,7 @@ pub(super) enum Hide {
     Deactivated,
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(super) struct Typing {
     pub(super) visible: bool,
     active_seen: bool,
@@ -280,10 +280,26 @@ impl Presence {
         let Some(text) = self.text.as_mut() else {
             return Ok(());
         };
+        let shown = (text.typing, text.previous);
         // shortcut: rapid native away/back within one queued GPUI activation can hide an active box, revisit if reproducible.
         if !text.typing.close(reason) {
             return Ok(());
         }
+        let previous = text
+            .previous
+            .take()
+            .filter(|_| matches!(reason, Hide::Dismiss));
+        let hidden = text.window.update(cx, |_, window, _| {
+            if let Some(previous) = previous {
+                platform::restore_foreground(window, previous);
+            }
+            platform::hide_presence_window(window)
+        });
+        // A panel still on screen must stay open, so Esc and its close button can try again.
+        if !matches!(hidden, Ok(Ok(()))) {
+            (text.typing, text.previous) = shown;
+        }
+        hidden.map_err(|error| OpenError::Gpui(error.into()))??;
         self.chat.update(cx, |state, cx| {
             state.hide();
             cx.notify();
@@ -291,19 +307,6 @@ impl Presence {
         if cx.has_global::<Diagnostics>() {
             text.draft = Some(text.input.read(cx).value());
         }
-        let previous = text
-            .previous
-            .take()
-            .filter(|_| matches!(reason, Hide::Dismiss));
-        text.window
-            .update(cx, |_, window, _| {
-                if let Some(previous) = previous {
-                    platform::restore_foreground(window, previous);
-                }
-                platform::hide_presence_window(window)?;
-                Ok::<_, platform::PresenceError>(())
-            })
-            .map_err(|error| OpenError::Gpui(error.into()))??;
         diagnostics::record(cx, format_args!("input dismissed"));
         self.place_drawings(cx.weak_entity(), cx);
         // The typing panel was covering the status panel's Stop.
@@ -565,13 +568,20 @@ impl TextView {
                     })
             }))
             .child(
-                Button::new("chat-tasks")
-                    .label(cx.global::<Strings>().get(Text::OpenThreads))
-                    .on_click(move |_, _, cx| {
-                        if let Ok(Err(_)) = tasks_owner.update(cx, Presence::open_threads) {
-                            tracing::warn!("can't open tasks from chat");
-                        }
-                    }),
+                div().debug_selector(|| "chat-tasks-control".into()).child(
+                    Button::new("chat-tasks")
+                        .label(cx.global::<Strings>().get(Text::OpenThreads))
+                        .on_click(move |_, _, cx| {
+                            let owner = tasks_owner.clone();
+                            // Opening Tasks hides this window, which GPUI can't update while it
+                            // dispatches this click.
+                            cx.defer(move |cx| {
+                                if let Ok(Err(_)) = owner.update(cx, Presence::open_threads) {
+                                    tracing::warn!("can't open tasks from chat");
+                                }
+                            });
+                        }),
+                ),
             )
             .into_any_element()
     }
@@ -761,7 +771,8 @@ mod tests {
         WeakEntity, WindowOptions,
     };
 
-    use super::{Hide, TextView, Typing};
+    use super::{Hide, Presence, TextView, Typing};
+    use crate::presence::threads::ThreadsPanel;
     use crate::strings::Strings;
 
     /// The typing panel as the shell opens it, with a pushed notice and no readable presence.
@@ -1050,6 +1061,65 @@ mod tests {
             super::typing_notice(error.as_ref(), refusal, &strings).as_deref(),
             Some("Not sent: the background process isn't connected.")
         );
+    }
+
+    /// The headless presence with its chat open on task 3, as a double tap leaves it.
+    fn chat_on_a_task(cx: &mut TestAppContext) -> (Entity<Presence>, AnyWindowHandle) {
+        use kumochi_protocol::message::ThreadId;
+        let owner = crate::presence::test_fixture::presence(cx);
+        let window = owner.update(cx, |owner, cx| {
+            owner.thread_panel = Some(ThreadsPanel::detached(owner.threads.clone(), cx));
+            assert!(owner.runs.select_thread(Some(ThreadId(3))));
+            owner.open_text(cx).expect("open chat");
+            assert!(owner.text_open());
+            assert_eq!(owner.chat.read(cx).open, Some(ThreadId(3)));
+            owner.text.as_ref().expect("typing fixture").window
+        });
+        cx.run_until_parked();
+        (owner, window)
+    }
+
+    #[gpui::test]
+    fn tasks_in_the_chat_header_swaps_the_chat_for_the_task_list(cx: &mut TestAppContext) {
+        let _area = crate::platform::work_area_fixture::set([0, 0, 2560, 1400]);
+        let (owner, window) = chat_on_a_task(cx);
+        {
+            let mut frame = VisualTestContext::from_window(window, cx);
+            let bounds = frame
+                .debug_bounds("chat-tasks-control")
+                .expect("Tasks… in the chat header");
+            frame.simulate_click(
+                gpui_kit::point(bounds.left() + gpui_kit::px(10.0), bounds.center().y),
+                gpui_kit::Modifiers::default(),
+            );
+        }
+        cx.run_until_parked();
+        owner.read_with(cx, |owner, cx| {
+            assert!(owner.threads_open(), "the task list is shown");
+            assert!(!owner.text_open(), "the chat is hidden");
+            assert_eq!(owner.chat.read(cx).open, None);
+        });
+    }
+
+    #[gpui::test]
+    fn a_chat_that_failed_to_hide_keeps_its_task_and_esc_still_closes_it(cx: &mut TestAppContext) {
+        let _area = crate::platform::work_area_fixture::set([0, 0, 2560, 1400]);
+        let (owner, window) = chat_on_a_task(cx);
+        // GPUI refuses to update a window from inside its own update, as a click on it would.
+        let hidden = window
+            .update(cx, |_, _, cx| owner.update(cx, Presence::dismiss_text))
+            .expect("chat window");
+        assert!(matches!(hidden, Err(super::OpenError::Gpui(_))));
+        owner.update(cx, |owner, cx| {
+            assert!(owner.text_open(), "the chat is still on screen");
+            assert_eq!(
+                owner.chat.read(cx).open,
+                Some(kumochi_protocol::message::ThreadId(3))
+            );
+            owner.escape(cx).expect("Esc");
+            assert!(!owner.text_open(), "Esc hid the chat");
+            assert_eq!(owner.chat.read(cx).open, None);
+        });
     }
 
     #[test]
