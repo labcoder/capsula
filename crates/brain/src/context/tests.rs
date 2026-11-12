@@ -288,6 +288,13 @@ fn a_kumo_request_states_its_model_names_role_and_ordered_runs() {
         instructions.contains("This is your main conversation"),
         "Kumo's role"
     );
+    assert!(
+        instructions.contains(
+            "When the user asks you to file, open or report a GitHub issue and you have the \
+             draft_issue tool, call\nit"
+        ),
+        "issue line"
+    );
     assert!(!instructions.contains('\r'), "one line ending");
 }
 

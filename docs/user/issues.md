@@ -4,6 +4,9 @@ Ask Kumochi to draft an issue to save it locally for review. Drafting does not
 file anything on GitHub. Filing requires your own GitHub connection and the
 explicit confirmation below; no screenshot or attachment is sent.
 
+Drafting from chat works with ChatGPT models for now. Claude Code and Anthropic
+key models can't draft an issue yet.
+
 When a saved issue appears in a task or chat history, its card shows the saved
 title, body, repository and bound account. The bound account is part of the
 saved record, not proof that the account is still signed in.

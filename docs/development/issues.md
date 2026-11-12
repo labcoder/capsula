@@ -4,6 +4,7 @@ The model's `draft_issue` tool creates a local draft for user review. Its checke
 contain only a title, body and optional repository; the dispatcher supplies the caller's
 conversation and any account metadata. There is no model-supplied thread, account or approval,
 and MCP drafting is not enabled. Creating a draft grants no consent and sends no HTTP request.
+The instructions tell a model that has the tool to call it when asked to file an issue.
 
 Before the store write, the account owner supplies binding metadata only while its verified
 numeric user, access lifetime and complete repository listing remain current. An explicit
