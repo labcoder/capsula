@@ -295,6 +295,7 @@ fn either_available_slot_loss_is_observed_before_any_sibling_success() {
                 want: Some(("models".into(), 1)),
                 current: Some(1),
                 ready: true,
+                decoding: 2,
                 waiting: None,
                 finished: [None, None],
                 decode_cut: None,

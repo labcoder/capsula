@@ -46,6 +46,7 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
         let panel = cx.new(|_| Panel {
             kumo: kumo.clone(),
             state: LinkState::Connecting,
+            voice: None,
             notice: None,
             stop: false,
             events: events.clone(),
@@ -79,6 +80,7 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             session: None,
             state: LinkState::Connecting,
             gesture: Rc::new(Cell::new(Gesture::default())),
+            voice: super::voice::Voice::default(),
             activity: Activity::default(),
             runs: Runs::default(),
             paint_scratch: Rc::new(std::cell::RefCell::new(super::paint_stroke::Scratch::new())),

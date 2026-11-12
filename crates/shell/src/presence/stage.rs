@@ -264,6 +264,42 @@ mod tests {
     }
 
     #[gpui::test]
+    fn the_voice_answer_panel_moves_a_resting_drawing_before_the_next_paint(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let area = [0, 0, 2560, 1400];
+        let _area = crate::platform::work_area_fixture::set(area);
+        let owner = crate::presence::test_fixture::presence(cx);
+        owner.update(cx, |presence, cx| {
+            presence.layout = Position::TopCenter.layout(area, [58, 21], [380, 124], 0);
+            presence.presenter = crate::presenter::tests::painter_fixture(Box::new(
+                crate::presenter::tests::Charged(0),
+            ))
+            .0;
+            presence.place_drawings(cx.weak_entity(), cx);
+            let hidden = transforms(presence, 2);
+            presence
+                .show_voice_answer(cx)
+                .expect("show the voice answer");
+            let bounds = presence.text.as_ref().expect("typing").bounds;
+            assert_eq!(bounds, [1040, 21, 480, 544]);
+            let shown = transforms(presence, 2);
+            assert_ne!(shown, hidden);
+            let panel = logical(bounds, presence.scale);
+            for transform in &shown {
+                assert!(
+                    !transform
+                        .bounds(Rect {
+                            origin: Vec2::new(0.0, 0.0),
+                            size: Vec2::new(50.0, 20.0),
+                        })
+                        .intersects(panel)
+                );
+            }
+        });
+    }
+
+    #[gpui::test]
     fn panel_transitions_preserve_a_pending_first_paint(cx: &mut gpui_kit::TestAppContext) {
         let area = [0, 0, 2560, 1400];
         let _area = crate::platform::work_area_fixture::set(area);

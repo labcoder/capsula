@@ -69,6 +69,8 @@ impl Tapped for ControlToBrain {
             Self::AudioOutput { .. } => "AudioOutput",
             Self::GitHub(_) => "GitHub",
             Self::Issue(_) => "Issue",
+            Self::VoiceHoldRecognized { .. } => "VoiceHoldRecognized",
+            Self::VoiceHoldStopped { .. } => "VoiceHoldStopped",
         }
     }
 
@@ -140,6 +142,7 @@ impl Tapped for ControlToShell {
             Self::GitHubError(_) => "GitHubError",
             Self::DrawingReplacementFailed { .. } => "DrawingReplacementFailed",
             Self::DrawingNotReturned { .. } => "DrawingNotReturned",
+            Self::VoiceHoldStatus { .. } => "VoiceHoldStatus",
         }
     }
 

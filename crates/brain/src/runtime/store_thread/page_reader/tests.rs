@@ -17,6 +17,7 @@ use crate::store::{Cancel, Pause, Pauses, Point, RunEnd, Store, StoreError};
 use crate::test_support::Scratch;
 
 mod history;
+mod hold;
 
 #[test]
 fn card_reads_keep_the_original_cancel_deadline_and_fixed_failure() {

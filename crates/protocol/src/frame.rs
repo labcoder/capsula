@@ -1,4 +1,4 @@
-//! Framing: `u32` little-endian length, then a `postcard` payload. The length is checked
+//! Framing: `u32` little-endian length, then a `postcard` payload. Incoming length is checked
 //! against the pipe's cap before anything is allocated.
 
 use std::io::{self, Read, Write};
@@ -79,7 +79,24 @@ pub fn encode_payload<T: Serialize>(message: &T) -> Result<Vec<u8>, FrameError> 
 /// # Errors
 /// Fails when the message is over the pipe's cap or can't be encoded.
 pub fn encode<T: Serialize>(message: &T, pipe: Pipe) -> Result<Vec<u8>, FrameError> {
-    let mut frame = postcard::to_extend(message, vec![0; HEADER_LEN])?;
+    let mut frame = Vec::new();
+    encode_into(message, pipe, &mut frame)?;
+    Ok(frame)
+}
+
+/// Encodes one frame into caller-owned storage, replacing its previous contents.
+/// Partial or over-cap bytes remain on error; the caller owns any private-buffer cleanup.
+///
+/// # Errors
+/// Fails when the message is over the pipe's cap or can't be encoded.
+pub fn encode_into<T: Serialize>(
+    message: &T,
+    pipe: Pipe,
+    frame: &mut Vec<u8>,
+) -> Result<(), FrameError> {
+    frame.clear();
+    frame.resize(HEADER_LEN, 0);
+    postcard::to_io(message, &mut *frame)?;
     let len = frame.len() - HEADER_LEN;
     let max = pipe.max_payload();
     let declared = u32::try_from(len)
@@ -87,7 +104,7 @@ pub fn encode<T: Serialize>(message: &T, pipe: Pipe) -> Result<Vec<u8>, FrameErr
         .filter(|_| len <= max)
         .ok_or(FrameError::TooLarge { len, max })?;
     frame[..HEADER_LEN].copy_from_slice(&declared.to_le_bytes());
-    Ok(frame)
+    Ok(())
 }
 
 /// The payload length a header declares, checked against `pipe`'s cap.
@@ -163,7 +180,7 @@ pub fn write<T: Serialize>(
 
 #[cfg(test)]
 mod tests {
-    use super::{FrameError, HEADER_LEN, Pipe, decode, encode, payload_len, read};
+    use super::{FrameError, HEADER_LEN, Pipe, decode, encode, encode_into, payload_len, read};
     use crate::Secret;
     use crate::message::{ControlToBrain, Hello};
 
@@ -172,6 +189,15 @@ mod tests {
             build_id: "0.1.0+abc".to_owned(),
             capability: Secret::new([7; 32]),
         })
+    }
+
+    #[test]
+    fn caller_owned_frames_replace_previous_bytes_without_changing_the_wire() {
+        let mut frame = vec![88; 32];
+        encode_into(&513_u16, Pipe::Control, &mut frame).expect("first frame");
+        assert_eq!(frame, [2, 0, 0, 0, 129, 4]);
+        encode_into(&0_u8, Pipe::Data, &mut frame).expect("replacement frame");
+        assert_eq!(frame, [1, 0, 0, 0, 0]);
     }
 
     #[test]

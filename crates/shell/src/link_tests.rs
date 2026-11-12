@@ -365,6 +365,7 @@ fn settings_frames_keep_their_connection_generation_and_authoritative_view() {
         show_in_taskbar: false,
         talk_back: false,
         stt_unload: kumochi_protocol::message::SttUnload::Kept,
+        hold_to_talk: kumochi_protocol::message::DEFAULT_HOLD_TO_TALK,
     };
     frame::write(
         &mut &link.control,
@@ -1355,6 +1356,7 @@ fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
         show_in_taskbar: false,
         talk_back: false,
         stt_unload: kumochi_protocol::message::SttUnload::Kept,
+        hold_to_talk: kumochi_protocol::message::DEFAULT_HOLD_TO_TALK,
     };
     for message in [
         ControlToShell::Welcome {
@@ -1991,3 +1993,6 @@ fn both_drawing_controls_reach_the_ui_as_notices_with_their_own_keys() {
         ));
     }
 }
+
+#[path = "link_hold_tests.rs"]
+mod hold_tests;

@@ -42,8 +42,8 @@ all effects run, then the first error is reported. New bindings prune dead nativ
 skip duplicates within their layer.
 
 The shell recognizes one shortcut, left Ctrl plus left Alt, with Raw Input and no low-level
-keyboard hook. It also decides locally what Esc does, before the brain hears of it. Voice arrives
-in slice 7 and screen capture in slice 6.
+keyboard hook. It also decides locally what Esc does, before the brain hears of it. Holding
+the shortcut admits voice-only input; it grants no screen capture authority.
 
 ## From key to Listening
 
@@ -55,8 +55,9 @@ sequenceDiagram
     participant O as Presence owner (GPUI)
     W->>P: WM_INPUT (RIDEV_INPUTSINK)
     P->>P: stamp Instant, read make code and E0/E1
-    P->>G: handle(event, time)
-    G-->>P: effects, next deadline
+    P->>G: Fence.reduce(event, time)
+    G->>G: revoke collection synchronously on release/reset
+    G-->>P: voice intents, effects, next deadline
     P->>O: update_window (try-borrow) applies effects
     Note over P,O: App busy: effects queue in order with their times
     P->>W: SetTimer for the one-shot deadline, or KillTimer
@@ -71,8 +72,10 @@ sequenceDiagram
   that follows still cancels. Pause (E1) resets, because it has no dependable key-up. A keyboard
   overrun resets. A key with no make code is named through `MapVirtualKeyW`.
 - **Same callback.** The gesture lives in an `Rc<Cell<Gesture>>` shared by the native callback
-  and the owner. The callback reduces it before anything else, with holds and Listening disabled.
-  Double-tap effects reach the owner through `AsyncApp::update_window`, which
+  and the owner. The callback installs the shared hold fence and revokes collection before
+  deferring anything. Voice intents capture the target revision, session generation, choice
+  revision and original QPC; double-tap effects retain their ordinary typing path.
+  Both reach the owner through `AsyncApp::update_window`, which
   only tries to borrow GPUI. If GPUI is already borrowed, because a nested message loop
   dispatched the callback, the effects wait in an ordered queue with their original times, and
   a foreground task retries them every millisecond until they apply or the owner is gone.
@@ -83,7 +86,14 @@ sequenceDiagram
   when it's gone. There's no polling and no timer while nothing is pending. `KillTimer` can leave
   a WM_TIMER already queued; delivering it is harmless, because the gesture ignores a deadline it
   hasn't reached and returns the remaining one. Timer resolution is the system tick, about
-  16 ms [guess, unmeasured on Rez].
+  16 ms [guess, unmeasured on Rez]. WM_TIMER is the lowest priority message, so a busy thread
+  can delay it past the release. The shared delivery code also schedules each new deadline on
+  GPUI's timer, which wakes the UI thread with a posted message that paint and timer messages
+  can't starve. It reduces through the same path, and whichever timer arrives first wins; the
+  other finds nothing due. A held chord key's auto-repeat also advances the gesture, a backstop
+  that comes only after the keyboard's repeat delay. The recognition line logs whether the native
+  deadline, the scheduled one, a repeat or the release reached the threshold, and a chord key
+  more than 50 ms past an armed deadline logs the thread's message queue status once per gesture.
 - **Resets.** Device removal, any session change (lock or unlock), a desktop switch such as
   Ctrl+Alt+Del's secure desktop, suspend, an overrun and Pause all reset the gesture. Keys
   released while Kumochi couldn't see them would otherwise stay held. A desktop switch arrives
@@ -96,15 +106,18 @@ sequenceDiagram
 
 | Effect | Current shell action |
 |---|---|
-| Listening | Disabled in production, including deferred delivery and later dock refreshes |
+| Listening | Legacy effect ignored; only an admitted source's accepted Running receipt sets Listening |
 | Resting | The dock's line returns to its resting fill |
-| HoldStarted | Disabled; no exclusion acquisition, capture request or hold announcement |
+| HoldStarted | Legacy effect ignored; recognized voice intent requests Brain admission, not screen authority |
 | HoldEnded | Ignored; releasing a key is not capture retirement |
 | OpenInput | The typing panel opens and takes focus (see [Taking the front](#taking-the-front)) |
 
-The recognizer still measures short taps and rejects long presses as taps. Production holds
-emit no effects and expose neither holding nor Listening state. Recognition-only tests use an
-explicit legacy fixture; this is not a production setting. Typed submissions remain text-only
+The recognizer still measures short taps and rejects long presses as taps. Presence owns one
+pending voice handoff: exact live Admitted permits source start; Loading never does. Running
+is published before collection acceptance. Physical stop, successfully forwarded packet count
+and native key-up rendezvous once before KeyUp is sent, regardless of UI delivery order.
+Committed PCM may drain after native retirement; logical input/session/choice fences still
+discard stale packets. Typed submissions remain text-only
 (`ScreenChoice::None`). The separate [local exclusion transaction](screen.md#local-shell-exclusion)
 has no production acquisition caller and never announces a lease.
 
@@ -195,11 +208,15 @@ The local effect always happens first, and nothing waits on the brain:
 - With no brain connected, or a control queue the brain isn't reading, the local effect still
   happens and the unsent message is logged, without content.
 
-Esc is held system-wide with `RegisterHotKey` only while Kumochi speaks or shows a drawing.
-Listening and an open status panel never hold it. Until B5 paints v1 scenes on the overlay,
-only placeholder steps shown in the typing panel count as a drawing; mirrored, preparing and
-recovering v1 scenes do not hold global Esc. Panel Esc still reaches the presenter. There's no
-speech yet, so Esc is held only for those shown placeholder steps. If registration is refused,
+Esc is held system-wide with `RegisterHotKey` while held voice is active or a drawing is shown:
+the overlay is showing scene frames (`Presenter::drawn`), or run steps show in the open typing
+panel. Mirrored, preparing and recovering scenes that aren't painted yet don't hold it, and an
+open status panel alone never does. Spoken replies don't hold it yet; `Activity::speaking` is
+always false.
+Held voice additionally owns global Esc through preparation and pre-answer work. A raw Escape
+revokes collection before deferred UI; its hotkey delivery consumes one marker so that the
+same press cannot also dismiss typing. Cleanup debt alone does not capture Esc from newer
+ordinary work. If registration is refused,
 the status panel shows Stop instead, and the refusal is logged without key or text content.
 An ignored fixture,
 `cargo test -p kumochi-shell -- --ignored escape_hold`, registers Esc on a hidden window, sees a
@@ -214,8 +231,8 @@ creates no file.
 - `--input-diagnostics=<file>` writes one line per input milestone, flushed as it happens, as
   `qpc=<QueryPerformanceCounter> <event> key=value…`. Durations are in microseconds since the
   native callback's entry. Lines carry no keys and no text:
-  - Listening and hold effects are currently inactive in the production gesture adapter.
-    It retains an `Instant` for gesture timing, not a callback QPC for a listening paint join.
+  - Legacy Listening and capture effects are inactive. The adapter retains gesture `Instant`
+    and callback QPC for voice controls, but does not log a listening-paint timing join.
   - `resting`
   - `hold excluded=true|false` and `hold ended restored=true|false`: whether every surface,
     the dock's native proxy included, took the capture affinity
@@ -516,3 +533,19 @@ desktop is `Default`. Unavailable queries are reported as absent values, not tre
 No window title, full executable path or desktop name is logged. A physical Ready press during
 this task is refused. `gate-session` keeps its existing physical Ready path and feel verdicts;
 this separate admission never opens its keyboard gate early.
+
+## Voice hold authority
+
+The shared hold fence gives each chord a checked, never-wrapping gesture number.
+Recognition at 300 ms requests admission; chord make only warms speech input.
+It never turns the legacy Listening effect into recording authority. Normal release
+and cancellation are distinct intents. The native reducer closes the atomic collection
+gate before queuing UI delivery, so a delayed recognition cannot reopen released input.
+Reset also cancels released speech that has not yet become a run. While the onboarding window
+shows, the fence drops a hold before it warms or arms anything, on every recognition path
+([onboarding](onboarding.md#hold-to-talk)).
+
+The microphone generation remains occupied until its matching stop/join receipt or
+proof it was never started. Cancellation and startup/hold deadlines are not release
+receipts. The shared gate, source lifecycle and fixed failures are in
+`platform/microphone.rs`; device APIs stay behind its native adapter.

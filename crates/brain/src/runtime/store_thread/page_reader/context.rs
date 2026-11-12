@@ -20,6 +20,44 @@ fn closed(control: &crate::recall::control::Control) -> StoreError {
         .map_or(StoreError::Closed, StoreError::from)
 }
 
+pub(super) fn read_hold(
+    side: Option<&Side>,
+    job: crate::coordinator::HoldRead,
+    #[cfg(test)] hold: impl FnOnce(),
+) -> Result<crate::coordinator::HoldSnapshot, ()> {
+    let crate::coordinator::HoldRead {
+        control,
+        mut snapshot,
+    } = job;
+    let result = side.map_or(Err(closed(&control)), |side| {
+        side.read_until(&control, |conn, control| {
+            control
+                .until(Instant::now() + READ_TIME)
+                .with_handler(conn, |conn, scope| {
+                    scope
+                        .query(conn, || {
+                            let read = Snapshot::begin(conn)?;
+                            #[cfg(test)]
+                            hold();
+                            if let Some(thread) = snapshot.thread {
+                                snapshot.generation =
+                                    Some(read.generation(thread)?.ok_or(StoreError::NoThread)?);
+                                snapshot.defaults.choice =
+                                    read.choice(thread)?.or(snapshot.defaults.choice.take());
+                            }
+                            read.end()?;
+                            Ok(())
+                        })
+                        .map_err(StoreError::from)
+                })
+                .map_err(StoreError::from)?
+        })
+    });
+    result.map_err(|_| ())?;
+    control.check().map_err(|_| ())?;
+    Ok(snapshot)
+}
+
 pub(super) fn read_call(
     side: Result<&Side, crate::recall::Error>,
     call: crate::dispatch::ReadCall,

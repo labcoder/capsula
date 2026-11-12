@@ -10,11 +10,14 @@
 use std::collections::VecDeque;
 use std::fmt;
 
+mod hold;
+use hold::Hold;
+
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{
-    Action, Content, ControlToBrain, DataToBrain, DataToShell, Deleted, ErrorKey, Incarnation,
-    MAX_PENDING_DELETES, MAX_PENDING_TURNS, Phase, RunId, RunOrigin, SceneDescriptor, SceneId,
-    ThreadId, ThreadKind, ThreadRow, UserError,
+    Action, Content, ControlToBrain, DataToBrain, DataToShell, Deleted, ErrorKey, GestureId,
+    Incarnation, MAX_PENDING_DELETES, MAX_PENDING_TURNS, Phase, RunId, RunOrigin, SceneDescriptor,
+    SceneId, ThreadId, ThreadKind, ThreadRow, UserError,
 };
 
 #[cfg(test)]
@@ -144,6 +147,9 @@ pub(crate) enum Target {
 #[derive(Default)]
 pub(crate) struct Runs {
     connected: bool,
+    hold: Option<Hold>,
+    hold_high: u32,
+    hold_cancel: Option<GestureId>,
     turns_sent: u32,
     /// The newest named run while its output may still arrive.
     live: Option<Live>,
@@ -183,6 +189,7 @@ impl fmt::Debug for Runs {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Runs")
             .field("connected", &self.connected)
+            .field("hold", &self.hold)
             .field("turns_sent", &self.turns_sent)
             .field("live", &self.live)
             .field("fence", &self.fence)
@@ -221,6 +228,7 @@ impl Runs {
         if thread.is_some_and(|thread| self.holds(thread)) {
             return false;
         }
+        self.cancel_hold();
         self.target = match thread {
             Some(thread) if Some(thread) == self.main => Target::Kumo,
             Some(thread) => Target::Task(thread),
@@ -236,7 +244,6 @@ impl Runs {
         self.target
     }
 
-    #[cfg(test)]
     pub(crate) fn revision(&self) -> u64 {
         self.revision
     }
@@ -257,6 +264,7 @@ impl Runs {
     }
 
     pub(crate) fn back_to_kumo(&mut self) {
+        self.cancel_hold();
         self.target = Target::Kumo;
         self.durable = true;
         self.revision = self.revision.wrapping_add(1);
@@ -322,7 +330,7 @@ impl Runs {
 
     /// A run is moving that Esc hasn't stopped, or a turn is waiting for its run.
     pub(crate) fn working(&self) -> bool {
-        self.stoppable().is_some() || self.submitted.len() > self.cancelled
+        self.hold.is_some() || self.stoppable().is_some() || self.submitted.len() > self.cancelled
     }
 
     /// Steps are on screen, or a recovery Esc could cancel is under way.
@@ -383,9 +391,11 @@ impl Runs {
     /// finished entering), and returns the `Stop` to send after. A cancelled turn's `Stop`
     /// comes from [`Runs::apply_state`] once its run is named.
     pub(crate) fn stop(&mut self) -> Option<ControlToBrain> {
+        let run = self.stoppable();
+        self.cancel_hold();
         self.forget_texts(|_| true);
         self.cancelled = self.submitted.len();
-        let run = self.stoppable()?;
+        let run = run?;
         self.fence = run;
         Some(ControlToBrain::Stop {
             run,
@@ -396,6 +406,7 @@ impl Runs {
     /// The second Esc, or Esc while nothing moves: clears the drawing, recovery included, and
     /// returns the `ClearDrawing` to send after. The text stays.
     pub(crate) fn clear(&mut self) -> Effect {
+        self.cancel_hold();
         self.forget_texts(|_| true);
         self.drawing.clear()
     }
@@ -426,6 +437,7 @@ impl Runs {
         text: &str,
         send: impl FnOnce(DataToBrain) -> bool,
     ) -> Result<(), Refused> {
+        self.cancel_hold();
         self.forget_texts(|_| true);
         if text.trim().is_empty() {
             return Err(Refused::Blank);
@@ -435,6 +447,9 @@ impl Runs {
         }
         let (message, turn, revision) = self.capture(text)?;
         if self.submitted.len() + 1 >= MAX_PENDING_TURNS {
+            return Err(Refused::Busy);
+        }
+        if self.hold_cancel.is_some() {
             return Err(Refused::Busy);
         }
         if !send(message) {
@@ -470,6 +485,8 @@ impl Runs {
         if self.incarnation.replace(incarnation) == Some(incarnation) {
             return;
         }
+        self.cancel_hold();
+        self.hold_cancel = None;
         self.answered = RunId(0);
         self.fence = RunId(0);
         self.forget_texts(|_| true);
@@ -510,6 +527,9 @@ impl Runs {
             return false;
         }
         self.deleting.push(thread);
+        if self.hold.is_some_and(|hold| hold.thread == Some(thread)) {
+            self.cancel_hold();
+        }
         self.forget_texts(|owner| owner == Some(thread));
         if self.target == Target::Task(thread) {
             self.back_to_kumo();
@@ -608,6 +628,8 @@ impl Runs {
     /// The link lost the brain: nothing of the runs it knew can arrive any more, and the turns
     /// it hadn't answered never will be.
     pub(crate) fn disconnected(&mut self) {
+        self.cancel_hold();
+        self.hold_cancel = None;
         self.connected = false;
         if let Some(shown) = &mut self.shown {
             shown.thread = None;
@@ -665,6 +687,7 @@ impl Runs {
         origin: Option<RunOrigin>,
     ) -> Applied {
         let mut applied = Applied::default();
+        self.apply_hold_state(run, thread, origin, &mut applied);
         if run > self.answered {
             self.answered = run;
             // A turn sent before its thread's delete never targets it, and shows nothing.
@@ -712,6 +735,13 @@ impl Runs {
                     data_ended: false,
                 });
             }
+        }
+        if matches!(
+            phase,
+            Phase::Answering | Phase::Done | Phase::Interrupted | Phase::Failed
+        ) && self.hold.is_some_and(|hold| hold.run == Some(run))
+        {
+            self.hold = None;
         }
         if phase == Phase::Answering
             && let Some((_, submitted)) = self.named.as_mut().filter(|(named, _)| *named == run)
@@ -921,3 +951,7 @@ mod recovery_tests;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "runs_hold_tests.rs"]
+mod hold_tests;

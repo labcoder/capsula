@@ -16,6 +16,7 @@ mod calls;
 mod cards;
 mod delete;
 mod drawing;
+mod hold;
 mod inline;
 mod job;
 mod lease;
@@ -43,6 +44,7 @@ use crate::store::{Failure, Interruption, RunEnd, SceneState};
 pub use admission::{BuildContext, BuildKey, ContextBuilt, Unbuilt};
 pub use availability::{Availability, Ready};
 pub use cards::{CardRead, Cards};
+pub use hold::{HoldKey, HoldRead, HoldSnapshot};
 pub use inline::{CompactBuilt, CompactContext};
 pub(crate) use job::JobAsk;
 pub use job::{JobBuilt, JobKey, JobKind, JobOutput, ReadJob};
@@ -65,6 +67,13 @@ const TITLE_CHARS: usize = 80;
 /// Something that happened, for the coordinator to act on.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Input {
+    /// A recognition-time snapshot; intercepted by the runtime's hold owner.
+    HoldPrepared {
+        /// The exact pending gesture.
+        key: HoldKey,
+        /// Pinned admission data, or a content-free read failure.
+        result: Result<HoldSnapshot, ()>,
+    },
     /// Fence a run immediately and apply scene-wide activated cuts in control-pipe order.
     StopScenes {
         /// The locally fenced run.
@@ -533,6 +542,7 @@ struct Run {
     held: VecDeque<Vec<DataToShell>>,
     /// What the run read when its first build began, reused by every later build.
     snapshot: Option<crate::context::RunSnapshot>,
+    hold: Option<HoldSnapshot>,
     /// The round's current build; the engine starts once it's admitted.
     build: Option<admission::Build>,
     /// The connection that was ready when the run's turn arrived; none means the run failed
@@ -758,8 +768,10 @@ impl Coordinator {
         reason = "one exhaustive input router; handlers live in dedicated modules"
     )]
     pub fn handle(&mut self, input: Input) -> Result<Vec<Effect>, Stale> {
+        self.fence_hold_input(&input);
         let mut effects = Vec::new();
         match input {
+            Input::HoldPrepared { .. } => return Err(Stale),
             Input::StopScenes { run, .. } if run < self.session_start || run > self.last_run => {
                 return Err(Stale);
             }
@@ -1050,6 +1062,23 @@ impl Coordinator {
         text: Content,
         effects: &mut Vec<Effect>,
     ) -> RunId {
+        self.start_turn(
+            kumochi_protocol::message::RunOrigin::Typed { turn },
+            thread,
+            text,
+            None,
+            effects,
+        )
+    }
+
+    fn start_turn(
+        &mut self,
+        origin: kumochi_protocol::message::RunOrigin,
+        thread: Option<ThreadId>,
+        text: Content,
+        mut hold: Option<HoldSnapshot>,
+        effects: &mut Vec<Effect>,
+    ) -> RunId {
         self.cancel_job(effects);
         if let Some(current) = self.current.take() {
             let replaced = RunEnd::Interrupted(Interruption::Replaced);
@@ -1069,10 +1098,16 @@ impl Coordinator {
             run,
             text,
         };
+        if let Some(hold) = &mut hold {
+            hold.defaults.origin = admission::origin(thread, self.main_thread);
+        }
+        let mut control =
+            crate::recall::control::Control::new(std::time::Instant::now() + WALL_CLOCK);
+        if let Some(hold) = &hold {
+            control = control.observe(std::sync::Arc::clone(&hold.cancel));
+        }
         self.current = Some(Run {
-            control: crate::recall::control::CancelOnDrop(crate::recall::control::Control::new(
-                std::time::Instant::now() + WALL_CLOCK,
-            )),
+            control: crate::recall::control::CancelOnDrop(control),
             id: run,
             thread,
             turn_stored: false,
@@ -1086,7 +1121,8 @@ impl Coordinator {
             evict: None,
             waiting: VecDeque::new(),
             held: VecDeque::new(),
-            snapshot: None,
+            snapshot: hold.as_ref().map(|hold| hold.defaults.clone()),
+            hold,
             build: None,
             connection: self.connection(),
             compacted: None,
@@ -1111,7 +1147,7 @@ impl Coordinator {
             thread,
             phase: Phase::Thinking,
             error: None,
-            origin: Some(kumochi_protocol::message::RunOrigin::Typed { turn }),
+            origin: Some(origin),
         }));
         effects.push(Effect::ArmDeadline {
             run,

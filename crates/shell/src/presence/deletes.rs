@@ -15,6 +15,7 @@ const DELETE_RETRY: Duration = Duration::from_millis(250);
 impl Presence {
     /// The user confirmed deleting `thread`. Nothing happens when every slot is held.
     pub(super) fn delete_thread(&mut self, thread: ThreadId, cx: &mut Context<'_, Self>) {
+        self.cancel_voice(cx);
         if !self.runs.confirm_delete(thread) {
             return;
         }

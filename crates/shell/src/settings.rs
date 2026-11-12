@@ -80,6 +80,7 @@ enum Slot {
     Dock(DockPosition),
     Taskbar(TaskbarChoice),
     SttUnload(SttUnload),
+    HoldToTalk(bool),
     SpeechInput(SpeechInputAction),
     /// `FinishOnboarding`: no field and no draft.
     Onboarding,
@@ -93,6 +94,7 @@ impl Slot {
             | (Self::Dock(_), Self::Dock(_))
             | (Self::Taskbar(_), Self::Taskbar(_))
             | (Self::SttUnload(_), Self::SttUnload(_))
+            | (Self::HoldToTalk(_), Self::HoldToTalk(_))
             | (Self::SpeechInput(_), Self::SpeechInput(_))
             | (Self::Onboarding, Self::Onboarding) => true,
             _ => false,
@@ -106,6 +108,7 @@ impl Slot {
             | Self::Dock(_)
             | Self::Taskbar(_)
             | Self::SttUnload(_)
+            | Self::HoldToTalk(_)
             | Self::SpeechInput(_)
             | Self::Onboarding => None,
         }
@@ -375,6 +378,7 @@ impl Settings {
                 | Slot::Dock(_)
                 | Slot::Taskbar(_)
                 | Slot::SttUnload(_)
+                | Slot::HoldToTalk(_)
                 | Slot::SpeechInput(_)
                 | Slot::Onboarding => None,
             });

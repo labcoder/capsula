@@ -8,6 +8,7 @@ mod tests;
 
 use std::f64::consts::PI;
 use std::sync::LazyLock;
+use zeroize::Zeroize;
 
 /// Zero crossings of the kernel on each side.
 const ZEROS: u32 = 16;
@@ -49,6 +50,12 @@ pub(crate) struct Resampler {
     made: u64,
 }
 
+impl Drop for Resampler {
+    fn drop(&mut self) {
+        self.history.zeroize();
+    }
+}
+
 impl Resampler {
     /// From `from` Hz to `to` Hz; both are checked rates, so neither is 0.
     pub(crate) fn new(from: u32, to: u32) -> Self {
@@ -69,6 +76,12 @@ impl Resampler {
             taken: 0,
             made: 0,
         }
+    }
+
+    /// Reserves a whole packet and retained kernel before the first private sample.
+    pub(crate) fn reserve_input(&mut self, maximum: usize) {
+        let reach = usize::try_from(self.reach).expect("a bounded kernel");
+        self.history.reserve(maximum + reach);
     }
 
     /// Takes more input and appends every output sample it completes.

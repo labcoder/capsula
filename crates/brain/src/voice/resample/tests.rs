@@ -2,6 +2,29 @@ use std::f64::consts::TAU;
 
 use super::Resampler;
 
+#[test]
+fn held_maximum_packets_and_final_padding_keep_the_reserved_history_allocation() {
+    use kumochi_protocol::message::MAX_MIC_SAMPLES;
+    for (rate, expected) in [(48_000, 1286), (192_000, 1282)] {
+        let mut resampler = Resampler::new(rate, 16_000);
+        resampler.reserve_input(MAX_MIC_SAMPLES);
+        let capacity = resampler.history.capacity();
+        let allocation = resampler.history.as_ptr();
+        let packet = vec![0.125; usize::try_from(rate / 50).unwrap()];
+        let mut output = Vec::new();
+        for _ in 0..4 {
+            resampler.push(&packet, &mut output);
+            assert_eq!(resampler.history.capacity(), capacity);
+            assert_eq!(resampler.history.as_ptr(), allocation);
+        }
+        resampler.push(&packet[..17], &mut output);
+        resampler.finish(&mut output);
+        assert_eq!(resampler.history.capacity(), capacity);
+        assert_eq!(resampler.history.as_ptr(), allocation);
+        assert_eq!(output.len(), expected);
+    }
+}
+
 fn tone(hz: f64, rate: u32, samples: usize) -> Vec<f32> {
     (0..samples)
         .map(|n| {

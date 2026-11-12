@@ -15,6 +15,52 @@ const RECT: PhysicalRect = PhysicalRect {
     size: [u32::MAX; 2],
 };
 
+#[test]
+fn voice_only_hold_controls_append_tags_without_screen_authority() {
+    let recognized = ControlToBrain::VoiceHoldRecognized {
+        gesture: GESTURE,
+        thread: Some(ThreadId(u64::MAX)),
+        selection: u64::MAX,
+    };
+    let stopped = ControlToBrain::VoiceHoldStopped { gesture: GESTURE };
+    for (message, tag, size, op) in [
+        (recognized, 27, 27, "VoiceHoldRecognized"),
+        (stopped, 28, 6, "VoiceHoldStopped"),
+    ] {
+        assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], tag);
+        round_trip(&message, Pipe::Control, size);
+        redacted(&message, Direction::ToBrain, op, size);
+    }
+    for status in [
+        super::HoldStatus::Admitted,
+        super::HoldStatus::Loading,
+        super::HoldStatus::Transcribing,
+        super::HoldStatus::Empty,
+        super::HoldStatus::Cancelled,
+        super::HoldStatus::Failed(super::HoldFailure::NotLoaded),
+        super::HoldStatus::Failed(super::HoldFailure::Busy),
+        super::HoldStatus::Failed(super::HoldFailure::Unavailable),
+        super::HoldStatus::Failed(super::HoldFailure::InvalidAudio),
+        super::HoldStatus::Failed(super::HoldFailure::TooLong),
+        super::HoldStatus::Failed(super::HoldFailure::TimedOut),
+        super::HoldStatus::Failed(super::HoldFailure::ChoiceChanged),
+        super::HoldStatus::Failed(super::HoldFailure::DecodeFailed),
+    ] {
+        let message = ControlToShell::VoiceHoldStatus {
+            gesture: GESTURE,
+            status,
+        };
+        let size = if matches!(status, super::HoldStatus::Failed(_)) {
+            8
+        } else {
+            7
+        };
+        assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], 28);
+        round_trip(&message, Pipe::Control, size);
+        redacted(&message, Direction::ToShell, "VoiceHoldStatus", size);
+    }
+}
+
 fn round_trip<M: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(
     message: &M,
     pipe: Pipe,
