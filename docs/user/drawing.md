@@ -18,6 +18,8 @@ replacement then fails, the screen may be left empty and its conversation gets o
 the previous drawings were removed, even if the drawing call had already ended. This includes
 a rejected later drawing record or a failed save after the replacement's first step was saved;
 the error keeps its specific cause. Stopping a drawing yourself does not report a drawing failure.
+The notice appears as soon as the replacement fails. Kumochi may still correct the drawing in
+the same reply, so a new drawing can appear after the notice; the earlier drawings stay removed.
 Separate drawings can be kept for comparison, up to four on
 screen; they can still overlap until side-by-side arrangement is available.
 

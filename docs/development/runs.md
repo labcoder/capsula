@@ -119,9 +119,14 @@ restore victims and may leave no drawing. Failed cut retries share the clear bac
 
 A successor keeps one bounded pending-replacement fact until its first validated `StepShown`.
 A terminal brain validation/store error or shell refusal before that paint emits one content-free
-`DrawingReplacementFailed` for the replacement's original thread/run. Tool results retain their
-specific validation, store or preparation error; they do not duplicate the loss notice. User
-cancellation reports no drawing failure, and already-ended results are not rewritten.
+`DrawingReplacementFailed` for the replacement's original thread/run. Validation and preparation
+tool results keep their specific cause; a store failure instead ends the run as `failed(store)`.
+Both keep the single separate loss notice, and neither result duplicates it. User cancellation
+reports no drawing failure, and already-ended results are not rewritten.
+The notice is immediate, not deferred until the run can no longer draw. When a committed first
+step is empty or still unpainted and a later record of that successor fails, the notice says the
+earlier drawings are gone even though a corrected call in the same run may still draw. A silent
+loss would be worse; run-owned loss accounting is a separate follow-up.
 Whole-scene `SceneFailed` refusals derive their original
 identity here even when the shell had no run at header refusal; they are distinct from explicit
 `ClearDrawing` requests. The shell retains only its existing single notice, filters it by
