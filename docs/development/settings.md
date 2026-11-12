@@ -234,7 +234,7 @@ than growing the window with the text. The existing Settings content region owns
 | `assistant_name` | 1–24 characters | `Kumo` |
 | `user_name` | 1–24 characters, or absent | absent (unset) |
 | `onboarded` | boolean | absent: `true` for a profile in use at start, else `false` |
-| `onboarding_from` | `welcome`, `your_name`, `accounts` or `shortcut` | absent (`welcome`) |
+| `onboarding_from` | `welcome`, `your_name`, `accounts` or `shortcut` | absent or invalid: `welcome` |
 | `max_frame_rate` | 30, 60, 72, 120 or 144, or absent | absent (Automatic) |
 | `default_model` | a table: `model` (a model slug) and `effort` (`Low` to `Max`), or absent | absent until a catalog is read |
 | `dock_position` | `top_left`, `top_center`, `top_right`, `middle_left`, `center`, `middle_right`, `bottom_left`, `bottom_center` or `bottom_right` | `top_center` |
