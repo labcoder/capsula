@@ -21,9 +21,9 @@ use kumochi_protocol::constants::BRAIN_EXE;
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
     AccountView, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain, DataToShell,
-    Deleted, ErrorKey, GestureId, GitHubView, Hello, HoldStatus, Incarnation, MAX_PENDING_TURNS,
-    MAX_VISIBLE_SCENES, Phase, RunId, RunOrigin, SceneDescriptor, SceneDescriptorV1, SettingsOp,
-    SettingsView, ThreadId, ThreadOp, UserError,
+    Deleted, ErrorKey, GestureId, GitHubView, Hello, HoldStatus, Incarnation, IssueSession,
+    MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase, RunId, RunOrigin, SceneDescriptor,
+    SceneDescriptorV1, SettingsOp, SettingsView, ThreadId, ThreadOp, UserError,
 };
 use kumochi_protocol::voice::VoicePart;
 
@@ -122,10 +122,25 @@ pub(crate) enum LinkEvent {
     },
     ActionState {
         generation: u64,
+        request: Option<u64>,
         draft: kumochi_protocol::message::DraftId,
         version: kumochi_protocol::message::StateVersion,
         state: kumochi_protocol::message::ActionState,
         approval: Option<kumochi_protocol::message::ApprovalRev>,
+    },
+    IssueRefused {
+        generation: u64,
+        request: u64,
+        draft: kumochi_protocol::message::DraftId,
+        version: kumochi_protocol::message::StateVersion,
+        approval: Option<kumochi_protocol::message::ApprovalRev>,
+        reason: kumochi_protocol::message::IssueRefused,
+    },
+    IssueUnavailable {
+        generation: u64,
+        request: u64,
+        draft: kumochi_protocol::message::DraftId,
+        kind: kumochi_protocol::message::IssueUnavailableKind,
     },
     /// A run's phase changed, from the control pipe.
     RunState {
@@ -270,8 +285,8 @@ pub(crate) struct Session {
     /// be reconnected to.
     generation: u64,
     credit: Arc<Credit>,
-    /// The brain it reached.
-    incarnation: Incarnation,
+    /// The brain and authenticated connection it reached.
+    issue_origin: IssueSession,
 }
 
 impl Session {
@@ -284,7 +299,11 @@ impl Session {
     }
 
     pub(crate) fn incarnation(&self) -> Incarnation {
-        self.incarnation
+        self.issue_origin.incarnation
+    }
+
+    pub(crate) fn issue_session(&self) -> IssueSession {
+        self.issue_origin
     }
 
     /// Grants this connection's brain `bytes` more of data frames, once the UI has taken a frame
@@ -347,7 +366,7 @@ enum LinkError {
 struct Connection {
     control: Arc<PipeClient>,
     data: Arc<PipeClient>,
-    incarnation: Incarnation,
+    issue_origin: IssueSession,
 }
 
 /// What the data writer sends.
@@ -772,7 +791,10 @@ impl Session {
                 bytes: AtomicU32::new(0),
                 wake: wake.downgrade(),
             }),
-            incarnation,
+            issue_origin: IssueSession {
+                incarnation,
+                epoch: generation,
+            },
         }
     }
 
@@ -879,7 +901,7 @@ impl Link {
                     continue;
                 }
             };
-            tracing::info!(incarnation = ?connection.incarnation, "connected to the brain");
+            tracing::info!(incarnation = ?connection.issue_origin.incarnation, "connected to the brain");
             if !self.attend(connection, events) || self.quitting() {
                 return;
             }
@@ -910,7 +932,7 @@ impl Link {
         let Connection {
             control,
             data,
-            incarnation,
+            issue_origin,
         } = connection;
         let (control_out, control_queue) = async_channel::bounded(CONTROL_QUEUE);
         let (data_out, data_queue) = async_channel::bounded(DATA_QUEUE);
@@ -976,7 +998,7 @@ impl Link {
                 alive: Arc::clone(&ended.0),
                 generation,
                 credit,
-                incarnation,
+                issue_origin,
             }))
             .is_ok();
         let read = spawned.and_then(|()| {
@@ -1067,20 +1089,20 @@ impl Link {
             &ControlToBrain::Hello(hello.clone()),
             Pipe::Control,
         )?;
-        let incarnation = welcome(&control)?;
+        let issue_origin = welcome(&control)?;
         let data = open(&Pipe::Data.name(self.session), &self.brain)?;
         frame::write(&mut &data, &DataToBrain::Hello(hello), Pipe::Data)?;
         control.set_timeout(None);
         Ok(Connection {
             control: Arc::new(control),
             data: Arc::new(data),
-            incarnation,
+            issue_origin,
         })
     }
 }
 
-/// The brain's answer to Hello: its incarnation, or why this brain can't be used.
-fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
+/// The brain's answer to Hello: its issue session, or why this brain can't be used.
+fn welcome(control: &PipeClient) -> Result<IssueSession, LinkError> {
     match frame::read::<ControlToShell>(&mut &*control, Pipe::Control)? {
         None
         | Some(
@@ -1105,6 +1127,7 @@ fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
             | ControlToShell::DrawingNotReturned { .. }
             | ControlToShell::ActionState { .. }
             | ControlToShell::IssueRefused { .. }
+            | ControlToShell::IssueUnavailable { .. }
             | ControlToShell::Connections(_)
             | ControlToShell::AnthropicKeyStage { .. }
             | ControlToShell::AnthropicKeyStageDone { .. }
@@ -1120,7 +1143,13 @@ fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
             );
             Err(LinkError::BuildMismatch)
         }
-        Some(ControlToShell::Welcome { incarnation }) => Ok(incarnation),
+        Some(ControlToShell::Welcome {
+            incarnation,
+            issue_epoch,
+        }) => Ok(IssueSession {
+            incarnation,
+            epoch: issue_epoch,
+        }),
     }
 }
 
@@ -1370,6 +1399,7 @@ fn watch(
                 }
             }
             Ok(Some(ControlToShell::ActionState {
+                request,
                 draft,
                 version,
                 state,
@@ -1378,6 +1408,7 @@ fn watch(
                 if events
                     .send_blocking(LinkEvent::ActionState {
                         generation,
+                        request,
                         draft,
                         version,
                         state,
@@ -1414,10 +1445,47 @@ fn watch(
                     return;
                 }
             }
+            Ok(Some(ControlToShell::IssueRefused {
+                request,
+                draft,
+                version,
+                approval,
+                reason,
+            })) => {
+                if events
+                    .send_blocking(LinkEvent::IssueRefused {
+                        generation,
+                        request,
+                        draft,
+                        version,
+                        approval,
+                        reason,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Ok(Some(ControlToShell::IssueUnavailable {
+                request,
+                draft,
+                kind,
+            })) => {
+                if events
+                    .send_blocking(LinkEvent::IssueUnavailable {
+                        generation,
+                        request,
+                        draft,
+                        kind,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             // Slice 7's PR 6 stops playback on SpeechRevoked; nothing plays yet.
             Ok(Some(
-                ControlToShell::IssueRefused { .. }
-                | ControlToShell::SpeechRevoked { .. }
+                ControlToShell::SpeechRevoked { .. }
                 | ControlToShell::ThreadModelSet { .. }
                 | ControlToShell::NoVisual { .. },
             )) => {}

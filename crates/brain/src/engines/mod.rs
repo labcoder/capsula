@@ -403,6 +403,8 @@ pub(crate) const DRAW: &str = "draw";
 /// The tools a call can name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolName {
+    /// Saves a local issue draft for explicit user review.
+    DraftIssue,
     /// Draws on the overlay.
     Draw,
     /// Moves the user's typed input to a task, or back to Kumo.

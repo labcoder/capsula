@@ -17,6 +17,7 @@ mod exclusion;
 mod frame_rate;
 mod geometry;
 mod gesture;
+mod issue_review;
 mod kumo;
 mod kumo_view;
 mod launch;
@@ -142,6 +143,8 @@ struct Presence {
     link: LinkHandle,
     /// The connection the UI last applied `Connected` for, until its next state.
     session: Option<Session>,
+    issue_request: u64,
+    issue_review: Option<issue_review::Route>,
     state: LinkState,
     /// The canonical gesture; the Raw Input callback reduces it before GPUI sees anything.
     gesture: Rc<Cell<Gesture>>,
@@ -994,6 +997,8 @@ pub(crate) fn open(
             carry: carry::Carry::default(),
             link,
             session: None,
+            issue_request: 0,
+            issue_review: None,
             state: LinkState::Connecting,
             gesture: Rc::clone(&gesture),
             voice: voice::Voice::default(),

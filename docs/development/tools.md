@@ -7,9 +7,15 @@ call only after the store has acknowledged the call's write.
 
 Slice 3's 13b-2 tool loop and slice 8's C4b-2 MCP listener hand calls to
 `Coordinator::tool_call`. The catalog contains drawing, local writes and history reads.
-Model requests offer `draw`, `search_history` and `read_history`; Kumo also gets `list_tasks`.
+Model requests offer `draw`, `draft_issue`, `search_history` and `read_history`; Kumo also gets `list_tasks`.
 Create/focus remain unoffered. MCP gets only `draw`, the intersection of model offers and
 the catalog's MCP permissions. The test tools in `dispatch/tests.rs` exercise the rest of the path.
+
+`draft_issue` stores checked title/body and an optional repository proposal in the caller's
+conversation, not a model-supplied destination thread. Its action, event, approval and ledger
+result commit atomically; only then does the model receive the fixed local-draft result. A
+durable draft still refreshes history if its model run ended while the acknowledgment was in
+flight. It grants no consent or HTTP authority; [issue actions](issues.md) describes the limits.
 
 ## History reads
 

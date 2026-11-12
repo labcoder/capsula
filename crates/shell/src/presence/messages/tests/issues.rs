@@ -132,7 +132,13 @@ fn a_batched_prepend_and_card_shrink_clamp_the_retained_event_anchor(cx: &mut Te
             events: vec![event(6)],
             before: None,
         });
-        state.action_state(DraftId(9), StateVersion(2), ActionState::Sending, None);
+        state.action_state(
+            DraftId(9),
+            StateVersion(2),
+            ActionState::Sending,
+            None,
+            None,
+        );
         cx.notify();
     });
     cx.run_until_parked();
@@ -302,7 +308,7 @@ fn actual_card_batches_notify_both_histories_and_grant_credit_once(cx: &mut Test
         view.read_with(cx, |view, _| {
             assert_eq!(view.rows[0].text.as_ref(), "Issue: saved title");
             assert_eq!(view.rows[0].label.as_deref(), Some("Draft"));
-            assert_eq!(view.rows[0].details.as_deref(), Some("Repository: o/r\nBound account: octo\n\nshared saved body\n\nThis saved issue is read-only here. Filing and changes aren't available."));
+            assert_eq!(view.rows[0].details.as_deref(), Some("Repository: o/r\nBound account: octo\n\nshared saved body\n\nSaved details stay unchanged. Filing requires your explicit confirmation."));
         });
     }
     owner.update(cx, |owner, cx| {
@@ -340,6 +346,7 @@ fn actual_card_batches_notify_both_histories_and_grant_credit_once(cx: &mut Test
             .link_events(
                 Batch::Plain(vec![
                     LinkEvent::ActionState {
+                        request: None,
                         generation: 1,
                         draft: DraftId(9),
                         version: StateVersion(2),
@@ -372,7 +379,7 @@ fn actual_card_batches_notify_both_histories_and_grant_credit_once(cx: &mut Test
     assert!(requests.try_recv().is_err());
     cx.run_until_parked();
     for view in &views {
-        view.read_with(cx, |view, _| assert_eq!(view.rows[0].details.as_deref(), Some("Loading saved details…\n\nThis saved issue is read-only here. Filing and changes aren't available.")));
+        view.read_with(cx, |view, _| assert_eq!(view.rows[0].details.as_deref(), Some("Loading saved details…\n\nSaved details stay unchanged. Filing requires your explicit confirmation.")));
     }
     owner.update(cx, |owner, cx| {
         owner
@@ -404,7 +411,7 @@ fn actual_card_batches_notify_both_histories_and_grant_credit_once(cx: &mut Test
     for view in &views {
         view.read_with(cx, |view, _| {
             assert_eq!(view.rows[0].label.as_deref(), Some("Preparing or sending"));
-            assert_eq!(view.rows[0].details.as_deref(), Some("The saved details aren't available in this view.\n\nThis saved issue is read-only here. Filing and changes aren't available."));
+            assert_eq!(view.rows[0].details.as_deref(), Some("The saved details aren't available in this view.\n\nSaved details stay unchanged. Filing requires your explicit confirmation."));
         });
     }
     assert!(requests.try_recv().is_err());
@@ -469,13 +476,13 @@ fn saved_issue_rows_hydrate_remeasure_and_keep_unknown_or_unavailable_truthful(
         assert_eq!(view.rows[0].id, ("event", 7));
         assert_eq!(view.rows[0].label.as_deref(), Some("Loading saved issue"));
         assert_eq!(view.rows[0].text.as_ref(), "Issue: old title");
-        assert_eq!(view.rows[0].details.as_deref(), Some("Loading saved details…\n\nThis saved issue is read-only here. Filing and changes aren't available."));
+        assert_eq!(view.rows[0].details.as_deref(), Some("Loading saved details…\n\nSaved details stay unchanged. Filing requires your explicit confirmation."));
         assert_eq!(view.rows[0].warning, None);
         let row = &view.rows[0];
         for (field, value, expected) in [
             ("issue-status", row.label.clone().unwrap(), "Loading saved issue"),
             ("issue-title", row.text.clone(), "Issue: old title"),
-            ("issue-details", row.details.clone().unwrap(), "Loading saved details…\n\nThis saved issue is read-only here. Filing and changes aren't available."),
+            ("issue-details", row.details.clone().unwrap(), "Loading saved details…\n\nSaved details stay unchanged. Filing requires your explicit confirmation."),
         ] {
             let text = message_text(row, field, value);
             assert_eq!(text.id(), Some(&gpui_kit::ElementId::from(field)));
@@ -518,11 +525,11 @@ fn saved_issue_rows_hydrate_remeasure_and_keep_unknown_or_unavailable_truthful(
     view.read_with(cx, |view, _| {
         assert_eq!(view.rows[0].text.as_ref(), "Issue: saved title");
         assert_eq!(view.rows[0].label.as_deref(), Some("Filed #7\nConfirmed by you.\nhttps://github.com/o/r/issues/7"));
-        assert_eq!(view.rows[0].details.as_deref(), Some(format!("Repository: o/r\nBound account: octo\n\n{body}\n\nThis saved issue is read-only here. Filing and changes aren't available.").as_str()));
+        assert_eq!(view.rows[0].details.as_deref(), Some(format!("Repository: o/r\nBound account: octo\n\n{body}\n\nSaved details stay unchanged. Filing requires your explicit confirmation.").as_str()));
         assert_eq!(view.rows[0].warning.as_deref(), Some("More than one issue may exist on GitHub."));
         assert_eq!(view.rows[0].cut, None);
         let row = &view.rows[0];
-        let details = format!("Repository: o/r\nBound account: octo\n\n{body}\n\nThis saved issue is read-only here. Filing and changes aren't available.");
+        let details = format!("Repository: o/r\nBound account: octo\n\n{body}\n\nSaved details stay unchanged. Filing requires your explicit confirmation.");
         for (field, value, expected) in [
             ("issue-status", row.label.clone().unwrap(), "Filed #7\nConfirmed by you.\nhttps://github.com/o/r/issues/7"),
             ("issue-title", row.text.clone(), "Issue: saved title"),
@@ -553,6 +560,7 @@ fn saved_issue_rows_hydrate_remeasure_and_keep_unknown_or_unavailable_truthful(
                 maybe_duplicate: false,
             },
             None,
+            None,
         );
         state.apply(DataToShell::IssueCardsDone {
             request: 3,
@@ -575,7 +583,7 @@ fn saved_issue_rows_hydrate_remeasure_and_keep_unknown_or_unavailable_truthful(
     cx.run_until_parked();
     view.read_with(cx, |view, _| {
         assert_eq!(view.rows[0].label.as_deref(), Some("Outcome unknown. An issue may already exist on GitHub.\nCandidate #7 is not confirmed as this issue.\nhttps://github.com/o/r/issues/7"));
-        assert_eq!(view.rows[0].details.as_deref(), Some("The saved details aren't available in this view.\n\nThis saved issue is read-only here. Filing and changes aren't available."));
+        assert_eq!(view.rows[0].details.as_deref(), Some("The saved details aren't available in this view.\n\nSaved details stay unchanged. Filing requires your explicit confirmation."));
         assert_eq!(view.rows[0].warning, None);
     });
     model.update(cx, |state, cx| {

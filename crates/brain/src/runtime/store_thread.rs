@@ -533,6 +533,22 @@ impl StoreThread {
 #[expect(clippy::too_many_lines, reason = "one short arm per store op")]
 fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input>, op: StoreOp) {
     match op {
+        StoreOp::Issue {
+            serial,
+            write,
+            scope,
+        } => {
+            purger.op_arriving();
+            let reply = store
+                .reconnect()
+                .and_then(|()| store.issue_write(&write, scope.as_ref()))
+                .map_err(|_| ());
+            if reply.is_err() {
+                tracing::warn!("an issue store operation failed");
+            }
+            answer(acks, Input::IssueWritten { serial, reply });
+            purger.op_arrived(store);
+        }
         StoreOp::Drawing { serial, write } => {
             purger.op_arriving();
             let reply = store

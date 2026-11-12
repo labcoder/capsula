@@ -14,6 +14,9 @@ use sha2::{Digest as _, Sha256};
 
 use crate::connections::github::{api::GitHubUser, issues::CreateOutcome};
 
+mod io;
+pub use io::{Snapshot, Write, WriteScope};
+
 /// The most already-matching issue numbers a mark keeps (guess).
 pub const MAX_PRESEND: usize = 200;
 
@@ -98,6 +101,7 @@ pub struct Mark {
 }
 
 /// What an action op came to.
+#[derive(Clone, PartialEq, Eq)]
 pub enum Answer {
     /// Committed; the action as it now stands.
     Changed(Action),
@@ -111,6 +115,8 @@ pub enum Answer {
 
 /// What admission checks a decision against, from the GitHub connection as it stands.
 pub struct Live<'a> {
+    /// The runtime reserved the one operation slot before this admission.
+    pub capacity: bool,
     /// The verified connected user, from the device machine's `user()`.
     pub account: Option<&'a GitHubUser>,
     /// The repositories the connection lists.
@@ -118,7 +124,7 @@ pub struct Live<'a> {
 }
 
 /// A lookup's verdict on an action's uncertain attempts.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lookup {
     /// One match, placed after the mark.
     Placed(NonZeroU64),
@@ -206,6 +212,9 @@ impl Action {
             return Err(IssueRefused::StaleApproval);
         }
         self.consumed = Some(approval);
+        if !live.capacity {
+            return Err(IssueRefused::NotAllowedNow);
+        }
         let next = match (decision, &self.stage) {
             (Decision::File, Stage::Draft | Stage::Failed { .. }) => {
                 Stage::Preflight { unresolved: None }
@@ -316,6 +325,23 @@ impl Action {
             }
         }
         Some(Ok(()))
+    }
+
+    /// Ends an attempt whose transport handoff definitely never happened.
+    pub(crate) fn not_sent(
+        &mut self,
+        at: StateVersion,
+        reason: FailReason,
+    ) -> Result<(), IssueRefused> {
+        if self.version != at {
+            return Err(IssueRefused::NotAllowedNow);
+        }
+        let (Stage::Preflight { unresolved } | Stage::Posting { unresolved, .. }) = &self.stage
+        else {
+            return Err(IssueRefused::NotAllowedNow);
+        };
+        self.stage = Stage::unsent(unresolved.clone(), reason);
+        Ok(())
     }
 
     /// Ends the send dispatched at `at` that the runtime gave up on, as recovery would.
@@ -480,6 +506,7 @@ impl fmt::Debug for Stage {
 impl fmt::Debug for Live<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Live")
+            .field("capacity", &self.capacity)
             .field("connected", &self.account.is_some())
             .field("repos", &self.repos.len())
             .finish()

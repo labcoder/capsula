@@ -13,6 +13,7 @@ mod data;
 #[cfg(test)]
 mod draw_stream_tests;
 mod hold;
+mod issues;
 mod recovery;
 mod settings;
 mod store_thread;
@@ -197,6 +198,7 @@ pub(crate) struct Brain {
     config_write: Option<settings::Write>,
     /// The account system; its credential work runs on its own thread.
     account: Accounts,
+    filing: issues::Filing,
     /// Claude Code's connection; its calls run on its own lane.
     claude: claude::Claude,
     /// Holds the next settings write until it sends or drops.
@@ -317,6 +319,7 @@ impl Brain {
             settings_ops: VecDeque::new(),
             config_write: None,
             account,
+            filing: issues::Filing::default(),
             claude: claude::Claude::default(),
             #[cfg(test)]
             config_gate: None,
@@ -412,6 +415,7 @@ impl Brain {
         self.offline(Input::ShellLost);
         self.voice_quit();
         self.pump_settings_offline();
+        let filing_in_time = self.finish_filing(deadline).await;
         #[cfg(test)]
         self.observer.send(Seen::QuitDraining).ok();
         let mut undeleted = self.coordinator.refused_delete();
@@ -467,7 +471,7 @@ impl Brain {
         self.account
             .close(deadline, Instant::now() + REFRESH_WAIT)
             .await;
-        if cleared && !undeleted {
+        if cleared && !undeleted && filing_in_time {
             Quit::Complete
         } else {
             tracing::warn!(
@@ -479,12 +483,14 @@ impl Brain {
     }
 
     /// Lets runs that ended reach the store, then lets its queued writes finish. Each wait is
-    /// bounded, so a hung store can't hold the brain open. At the next start, runs still active in
-    /// the store become `failed(crash)`; committed outcomes stay, and uncommitted work may be lost.
+    /// bounded except for an unabortable issue phase, whose owner must settle before the writer
+    /// closes. At the next start, runs still active in the store become `failed(crash)`;
+    /// committed outcomes stay, and uncommitted work may be lost.
     pub(crate) async fn close(mut self) {
         let deadline = Instant::now() + close_wait();
         self.voice_quit();
         self.pump_settings_offline();
+        self.finish_filing(deadline).await;
         let settled = tokio::time::timeout(close_wait(), async {
             while self.coordinator.ending_runs() > 0 {
                 let Some(input) = self.inputs.recv().await else {
@@ -522,6 +528,11 @@ impl Brain {
         loop {
             let send_due = self.next_send_deadline();
             let input = tokio::select! {
+                event = self.filing.next() => {
+                    let effects = self.issue_event(event);
+                    self.apply(effects, None).expect("offline issue effects cannot fill a shell queue");
+                    continue;
+                }
                 Some(input) = self.inputs.recv() => input,
                 // Engines run only for a current run, and nothing is current without a shell.
                 Some(input) = self.engine_events.recv() => input,
@@ -593,6 +604,12 @@ impl Brain {
 
     fn handle(&mut self, input: Input) -> Option<Vec<Effect>> {
         self.hold_fence(&input);
+        if let Input::IssueWritten { serial, reply } = input {
+            return Some(self.issue_written(serial, reply));
+        }
+        if matches!(input, Input::ShellLost) {
+            self.filing.cancel();
+        }
         if let Input::ScenesCleared { scenes, ok: true } = &input {
             self.crashes.cleared(scenes);
         }
@@ -670,6 +687,7 @@ impl Brain {
             }
         };
         self.holds.lost();
+        self.filing.cancel();
         queue.borrow_mut().end_reads();
         if reading && quit.get().is_none() {
             #[cfg(test)]
@@ -703,6 +721,7 @@ impl Brain {
         self.deadline = None;
         self.drain = None;
         self.quiet.clear();
+        self.filing.session = None;
         ended
     }
 
@@ -812,6 +831,13 @@ impl Brain {
                 input = self.account.next() => {
                     if self.account_input(input, Some(&mut link)).is_err() {
                         return Ended::Lost;
+                    }
+                    continue;
+                }
+                event = self.filing.next() => {
+                    let effects = self.issue_event(event);
+                    if let Err(ended) = self.apply(effects, Some(&mut link)) {
+                        return ended;
                     }
                     continue;
                 }
@@ -1063,6 +1089,30 @@ impl Brain {
                 Effect::Store(mut op) => {
                     self.claude.deleting(&op);
                     self.seed_op(&mut op);
+                    if let StoreOp::CommitCall(call) = &mut op
+                        && let crate::dispatch::LocalWrite::DraftIssue { repo, account, .. } =
+                            &mut call.write
+                    {
+                        match self
+                            .account
+                            .github
+                            .draft_binding(repo.as_ref(), self.config.github_default())
+                        {
+                            Ok(binding) => (*repo, *account) = binding,
+                            Err(error) => {
+                                let sent = self
+                                    .inputs_tx
+                                    .send(Input::CallCommitted {
+                                        key: call.key.clone(),
+                                        outcome: crate::dispatch::Committed::Refused(error),
+                                        then: call.then,
+                                    })
+                                    .is_ok();
+                                debug_assert!(sent, "the brain holds its own receiver");
+                                continue;
+                            }
+                        }
+                    }
                     #[cfg(test)]
                     self.observer.send(Seen::StoreOpQueued(op.clone())).ok();
                     let failure = op.failed();
@@ -1493,7 +1543,8 @@ impl<'a, 't> Link<'a, 't> {
             DataToShell::ScenesRemoved { .. }
             | DataToShell::ScenesReplaced { .. }
             | DataToShell::Models { .. }
-            | DataToShell::IssueCard(_) => Owner::Marker,
+            | DataToShell::IssueCard(_)
+            | DataToShell::IssueReview { .. } => Owner::Marker,
             DataToShell::SceneSnapshot { scene, .. }
             | DataToShell::SceneBegin { scene, .. }
             | DataToShell::SceneStepCommit { scene, .. }
@@ -1505,7 +1556,11 @@ impl<'a, 't> Link<'a, 't> {
             tracing::error!("a data message didn't encode");
             return Err(Full);
         };
-        self.queue.borrow_mut().push(owner, frame);
+        if matches!(message, DataToShell::IssueReview { .. }) {
+            self.queue.borrow_mut().push_review(frame)?;
+        } else {
+            self.queue.borrow_mut().push(owner, frame);
+        }
         self.ready.notify_one();
         Ok(())
     }

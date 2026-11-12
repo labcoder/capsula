@@ -44,5 +44,6 @@ Settings does not cancel these background checks or renewal.
 credential cleanup fails, the section explains the problem and offers a retry.
 Closing Settings or reconnecting the background process is not sign-out.
 
-Connecting does not create or file an issue. Local drafting and filing are not
-available in this build; [saved issue cards](issues.md) remain read-only.
+Connecting does not create or file an issue. Ask Kumochi to save a local draft;
+[saved issue cards](issues.md) offer explicit filing confirmation,
+dismissal and GET-only checks of uncertain outcomes.

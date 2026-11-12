@@ -14,6 +14,7 @@
 )]
 
 mod create_task;
+mod draft_issue;
 mod draw;
 mod focus;
 mod history;
@@ -23,7 +24,7 @@ mod tests;
 
 use std::fmt;
 
-use kumochi_protocol::message::{RunId, ThreadId, ThreadTitle};
+use kumochi_protocol::message::{IssueBody, IssueTitle, RepoName, RunId, ThreadId, ThreadTitle};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -276,6 +277,13 @@ pub(crate) enum LocalWrite {
         title: ThreadTitle,
         focus: bool,
     },
+    /// Insert a local draft in the caller's thread without granting sending authority.
+    DraftIssue {
+        title: IssueTitle,
+        body: IssueBody,
+        repo: Option<RepoName>,
+        account: Option<crate::connections::github::api::GitHubUser>,
+    },
     /// Renames the run's thread; only the test tool writes it.
     #[cfg(test)]
     Title(String),
@@ -295,6 +303,18 @@ impl fmt::Debug for LocalWrite {
                 .field("thread", thread)
                 .field("title", title)
                 .field("focus", focus)
+                .finish(),
+            Self::DraftIssue {
+                title,
+                body,
+                repo,
+                account,
+            } => f
+                .debug_struct("DraftIssue")
+                .field("title_bytes", &title.as_str().len())
+                .field("body_bytes", &body.as_str().len())
+                .field("has_repo", &repo.is_some())
+                .field("has_account", &account.is_some())
                 .finish(),
             #[cfg(test)]
             Self::Title(title) => f
@@ -346,6 +366,8 @@ pub(crate) enum Dispatch {
 /// acknowledgement, so nothing has to be read back from the answer. It holds ids only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Then {
+    /// A local issue draft committed; reread history without granting consent.
+    IssueDrafted,
     /// Move the user's input to the task, if the shell still agrees.
     Focus(ThreadId),
     /// The task exists: the shell reads its list again, and the input moves when `focus`.
@@ -477,6 +499,7 @@ struct Tool {
 /// Tools admitted by reach and route; model offers use the allowlist below.
 const TOOLS: &[Tool] = &[
     draw::DRAW,
+    draft_issue::DRAFT_ISSUE,
     create_task::CREATE_TASK,
     focus::FOCUS,
     history::SEARCH,
@@ -518,6 +541,7 @@ pub(crate) fn schemas(reach: Origin, route: Route) -> Vec<ToolSchema> {
 pub(crate) fn model_schemas(origin: Origin) -> Vec<ToolSchema> {
     const OFFERED: &[ToolName] = &[
         ToolName::Draw,
+        ToolName::DraftIssue,
         ToolName::SearchHistory,
         ToolName::ReadHistory,
         ToolName::ListTasks,
@@ -633,6 +657,7 @@ pub(crate) fn call<'a>(
             },
         )) => {
             let then = match &mut write {
+                LocalWrite::DraftIssue { .. } => Some(Then::IssueDrafted),
                 LocalWrite::Focus(thread) => Some(Then::Focus(*thread)),
                 LocalWrite::CreateTask { thread, focus, .. } => {
                     *thread = run.fresh;

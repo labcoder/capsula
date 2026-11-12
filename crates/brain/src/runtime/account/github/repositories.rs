@@ -26,7 +26,12 @@ mod tests;
 const MAX_PAGE_REQUESTS: usize = 12;
 const REFRESH_BUDGET: Duration = Duration::from_secs(60);
 
-pub(super) async fn fetch(
+/// Provisional whole-operation filing deadline, awaiting the owner's review.
+pub(in crate::runtime) const FILING_DEADLINE: Duration = Duration::from_secs(60);
+/// Provisional counted filing request cap, awaiting the owner's review.
+pub(in crate::runtime) const MAX_FILING_REQUESTS: usize = 16;
+
+pub(in crate::runtime) async fn fetch(
     http: &impl Http,
     token: &Secret<GitHubToken>,
 ) -> Result<device::Repositories, ApiError> {

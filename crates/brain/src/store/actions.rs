@@ -9,9 +9,145 @@ use rusqlite::{Connection, OptionalExtension as _, Row, Transaction, params};
 
 use super::{Store, StoreError, now_ms, sql_id};
 use crate::connections::github::{api::GitHubUser, issues::CreateOutcome};
-use crate::issues::{Action, Answer, Live, Lookup, Mark, Stage};
+use crate::issues::{Action, Answer, Live, Lookup, Mark, Stage, Write, WriteScope};
 
 impl Store {
+    /// Executes one operation on the existing ordered store writer.
+    ///
+    /// # Errors
+    /// Returns a content-free store failure with no partial transaction acknowledged.
+    pub fn issue_write(
+        &mut self,
+        write: &crate::issues::Write,
+        scope: Option<&WriteScope>,
+    ) -> Result<Answer, StoreError> {
+        let busy: u64 = self
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+            .map_err(quiet)?
+            .try_into()
+            .map_err(|_| StoreError::Issue)?;
+        self.conn
+            .busy_timeout(std::time::Duration::ZERO)
+            .map_err(quiet)?;
+        let installed = if let Some(scope) = scope {
+            let scope = scope.clone();
+            self.conn
+                .progress_handler(1000, Some(move || scope.stopped()))
+        } else {
+            Ok(())
+        };
+        self.issue_scope = scope.cloned();
+        let reply = installed
+            .map_err(quiet)
+            .and_then(|()| self.apply_issue_write(write));
+        self.issue_scope = None;
+        let removed = if scope.is_some() {
+            self.conn.progress_handler(0, None::<fn() -> bool>)
+        } else {
+            Ok(())
+        };
+        let restored = self
+            .conn
+            .busy_timeout(std::time::Duration::from_millis(busy));
+        if removed.is_err() || restored.is_err() {
+            self.serving = false;
+            tracing::warn!("the issue SQL scope could not be restored; the writer must reopen");
+        }
+        // A committed answer stays durable even if cancellation arrives during COMMIT.
+        reply
+    }
+
+    fn apply_issue_write(&mut self, write: &crate::issues::Write) -> Result<Answer, StoreError> {
+        if self.issue_scope.as_ref().is_some_and(WriteScope::stopped) {
+            return Err(StoreError::Issue);
+        }
+        match write {
+            Write::Read(draft) => Ok(self.action(*draft)?.map_or(Answer::Gone, Answer::Unchanged)),
+            Write::Rearm { draft, at, hash } => {
+                let Ok(id) = i64::try_from(draft.0) else {
+                    return Ok(Answer::Gone);
+                };
+                self.action_tx(|tx| {
+                    let Some(action) = load(tx, id)? else {
+                        return Ok(Answer::Gone);
+                    };
+                    if action.version != *at {
+                        return Ok(Answer::Refused(IssueRefused::StaleApproval, action));
+                    }
+                    if action.hash() != *hash {
+                        return Ok(Answer::Refused(IssueRefused::ContentChanged, action));
+                    }
+                    if !matches!(action.stage, Stage::Draft | Stage::Failed { .. }) {
+                        return Ok(Answer::Refused(IssueRefused::NotAllowedNow, action));
+                    }
+                    commit_stage(tx, id, &action.stage, action.uncertain)?;
+                    Ok(Answer::Changed(load(tx, id)?.ok_or(StoreError::Issue)?))
+                })
+            }
+            Write::Consent {
+                draft,
+                at,
+                hash,
+                approval,
+                decision,
+                live,
+            } => {
+                let Ok(id) = i64::try_from(draft.0) else {
+                    return Ok(Answer::Gone);
+                };
+                self.action_tx(|tx| {
+                    consent_row(tx, id, Some(*at), hash, *approval, *decision, &live.live())
+                })
+            }
+            Write::CancelledConsent {
+                draft,
+                at,
+                hash,
+                approval,
+                live,
+            } => {
+                let Ok(id) = i64::try_from(draft.0) else {
+                    return Ok(Answer::Gone);
+                };
+                self.action_tx(|tx| {
+                    match consent_row(
+                        tx,
+                        id,
+                        Some(*at),
+                        hash,
+                        *approval,
+                        Decision::File,
+                        &live.live(),
+                    )? {
+                        Answer::Changed(action)
+                            if matches!(action.stage, Stage::Preflight { .. }) =>
+                        {
+                            change_row(tx, id, |current| {
+                                Some(current.not_sent(action.version, FailReason::Interrupted))
+                            })
+                        }
+                        answer => Ok(answer),
+                    }
+                })
+            }
+            Write::Preflighted { draft, at, result } => {
+                self.preflighted(*draft, *at, result.clone())
+            }
+            Write::Posted { draft, at, outcome } => self.posted(*draft, *at, outcome),
+            Write::Interrupted { draft, at } => self.interrupted(*draft, *at),
+            Write::NotSent { draft, at, reason } => {
+                self.change(*draft, |action| Some(action.not_sent(*at, *reason)))
+            }
+            Write::LookedUp {
+                draft,
+                episode,
+                lookup,
+            } => self.looked_up(*draft, *episode, *lookup),
+            Write::Discard(draft) => self.discard_draft(*draft),
+        }
+    }
+
     /// Stores a new draft in a live thread, with its first approval revision.
     ///
     /// # Errors
@@ -55,6 +191,7 @@ impl Store {
     }
 
     /// Applies the user's decision, checked against `live` (docs/development/issues.md#consent).
+    /// File cannot bypass an exact unresolved attempt in another local draft.
     ///
     /// # Errors
     /// [`StoreError::Issue`] when the write fails, with nothing written.
@@ -66,9 +203,10 @@ impl Store {
         decision: Decision,
         live: &Live<'_>,
     ) -> Result<Answer, StoreError> {
-        self.change(draft, |action| {
-            Some(action.consent(hash, approval, decision, live))
-        })
+        let Ok(id) = i64::try_from(draft.0) else {
+            return Ok(Answer::Gone);
+        };
+        self.action_tx(|tx| consent_row(tx, id, None, hash, approval, decision, live))
     }
 
     /// Binds the account, and the repository where none is chosen, to every Draft and Failed
@@ -196,8 +334,14 @@ impl Store {
         &mut self,
         op: impl FnOnce(&Transaction<'_>) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
+        if self.issue_scope.as_ref().is_some_and(WriteScope::stopped) {
+            return Err(StoreError::Issue);
+        }
         let tx = self.conn.transaction().map_err(quiet)?;
         let value = op(&tx).map_err(quiet)?;
+        if self.issue_scope.as_ref().is_some_and(WriteScope::stopped) {
+            return Err(StoreError::Issue);
+        }
         tx.commit().map_err(quiet)?;
         Ok(value)
     }
@@ -211,7 +355,7 @@ fn quiet(error: impl Into<StoreError>) -> StoreError {
     }
 }
 
-fn insert_draft(
+pub(super) fn insert_draft(
     tx: &Connection,
     thread: i64,
     title: &IssueTitle,
@@ -256,6 +400,57 @@ fn event(tx: &Connection, id: i64, kind: &str) -> Result<(), StoreError> {
     } else {
         Err(StoreError::Issue)
     }
+}
+
+fn consent_row(
+    tx: &Connection,
+    id: i64,
+    at: Option<StateVersion>,
+    hash: &ContentHash,
+    approval: ApprovalRev,
+    decision: Decision,
+    live: &Live<'_>,
+) -> Result<Answer, StoreError> {
+    change_row(tx, id, |action| {
+        if at.is_some_and(|at| action.version != at) {
+            return Some(Err(IssueRefused::StaleApproval));
+        }
+        let before = action.stage.clone();
+        let consent = action.consent(hash, approval, decision, live);
+        if decision != Decision::File || consent.is_err() || action.stage == before {
+            return Some(consent);
+        }
+        let account = action.account.as_ref()?;
+        let repo = action.repo.as_ref()?;
+        // shortcut: only repository names are retained; store numeric IDs to recognize full renames.
+        let other: Option<i64> = tx
+            .query_row(
+                "SELECT a.id FROM actions a
+                     WHERE a.id <> ?1
+                     AND a.account_id = ?2 AND a.repo = ?3 COLLATE NOCASE AND a.title = ?4 AND a.body = ?5
+                     AND (json_extract(a.stage, '$.kind') IN ('preflight', 'posting', 'unknown')
+                          OR (json_extract(a.stage, '$.kind') = 'discarded' AND a.uncertain > 0))
+                     ORDER BY a.id LIMIT 1",
+                params![
+                    id,
+                    account.id.to_string(),
+                    repo.as_str(),
+                    action.title.as_str(),
+                    action.body.as_str()
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .ok()?;
+        if let Some(other) = other {
+            let draft = u64::try_from(other).ok().filter(|id| *id != 0)?;
+            action.stage = before;
+            return Some(Err(IssueRefused::UnresolvedDraft {
+                draft: DraftId(draft),
+            }));
+        }
+        Some(consent)
+    })
 }
 
 /// Applies a transition to the live row `id` and writes only a change. A refusal that used up the

@@ -120,7 +120,7 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
             segment,
             samples,
         }),
-        message @ (ControlToBrain::GitHub(_) | ControlToBrain::Issue(_)) => {
+        message @ (ControlToBrain::GitHub(_) | ControlToBrain::Issue { .. }) => {
             tracing::debug!(op = message.op(), "github or issue control ignored");
             None
         }
@@ -144,6 +144,18 @@ impl Brain {
                 epoch: self.epoch,
                 gesture: *gesture,
             });
+            return;
+        }
+        if let ControlToBrain::Issue {
+            session,
+            request,
+            op,
+        } = message
+        {
+            if let Some(effects) = self.issue_op(session, request, &op, None) {
+                self.apply(effects, None)
+                    .expect("offline issue effects cannot fill a shell queue");
+            }
             return;
         }
         if let ControlToBrain::AccountOp(op) = message {
@@ -190,6 +202,18 @@ impl Brain {
         }
         if message == ControlToBrain::Pong {
             *ping_sent = None;
+        }
+        if let ControlToBrain::Issue {
+            session,
+            request,
+            op,
+        } = message
+        {
+            let effects = self
+                .issue_op(session, request, &op, Some(self.epoch))
+                .ok_or(Ended::Lost)?;
+            self.apply(effects, Some(link))?;
+            return Ok(None);
         }
         if let ControlToBrain::GitHub(op) = message {
             self.github_op(op, Some(link)).map_err(|Full| Ended::Lost)?;
