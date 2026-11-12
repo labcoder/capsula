@@ -1769,6 +1769,36 @@ Clear intent made while scenes are mirrored survives brain restarts because scen
 durable event ids; membership
 that still names a locally cleared scene causes its idempotent clear to be sent again.
 
+### Bounded visual replacement
+
+`ScenesReplaced` ends old semantic bindings and tombstones their ids immediately. The UI-owned
+shared `Frames` bank moves up to four sampled frames, their caches and required layout/view
+owners into one retirement attempt. Those pictures never resample, animate, accept input or
+acknowledge old steps. Survivors plus outgoing pictures retain scene order; the incoming target
+does not paint beside them. Its first current sample with items atomically replaces the outgoing
+set, including a zero-alpha or zero-length entrance pose. Waiting for positive ink would prevent
+the first paint from starting that entrance's clock.
+
+The frozen owners remain charged against combined logical object/work caps and the unchanged
+64 MiB presenter residency allowance, including fixed staging and returned owners. If a new
+admission, preparation or activation would fit only without retirement, the bank relinquishes
+its frozen owners through the existing dropper and continues the ordinary replacement. It never
+adds a new capacity refusal. Worker answers and physical dropper retention remain separate from
+that presenter allowance. At most four frames are selected, never outgoing plus incoming.
+
+One watchdog deadline, 250 ms from marker processing, releases the visual hold without failing
+the newcomer. Continuations do not reset it. After handoff the successor epoch is guarded only
+until first paint or that original expiry; structurally empty prefixes can advance. A second
+replacement disposes the first attempt. Stop includes an unbegun successor in the existing
+pending zero-cut membership; clear remembers its id before disposing the bank. Either can drain
+late commits without recreating old ink. Any successful thread deletion flushes retirement,
+including an unrelated deletion; ordinary successor removal, terminal failure and disconnect
+also dispose it. Retiring paint failure is local disposal, not an old-scene failure. No retiring
+owner is persisted or recovered, and genuine empty/failure host recreation remains unchanged.
+Header, admission-expiry, sample and paint refusals use the content-free `SceneFailed` clear instead of an explicit
+user clear. The brain derives replacement-loss feedback from the committed scene, so neither
+an unbegun successor nor a recovered owner needs the shell to guess its original run.
+
 ### Serialized activation and first-paint acknowledgement
 
 Each scene owns one adoption clock, 64 fixed lifetime segment-end slots and its installed

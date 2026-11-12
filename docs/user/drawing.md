@@ -11,8 +11,12 @@ had already finished appearing stay on screen.
 
 Asking for a change to the same subject continues its drawing. A new subject normally
 replaces this conversation's earlier drawings once the new drawing's first step is saved.
-If the new drawing then cannot be drawn, the old drawings may already be gone and the
-screen may be left empty. Separate drawings can be kept for comparison, up to four on
+Normally their last picture stays briefly until the new drawing starts on the same drawing
+layer. This visual hold lasts at most 250 ms while the interface is running and can end sooner
+when space is tight; it does not keep the old drawings available for further changes. If the
+replacement then fails, the screen may be left empty and its conversation reports that the
+previous drawings were removed, even if the drawing call had already ended.
+Separate drawings can be kept for comparison, up to four on
 screen; they can still overlap until side-by-side arrangement is available.
 
 Simple node-and-arrow diagrams do not need a separate container: their nodes belong to

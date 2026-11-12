@@ -117,6 +117,15 @@ user clear suppresses the newcomer. A shell preparation failure after this commi
 restore victims and may leave no drawing. Failed cut retries share the clear backoff, from 500 ms up to
 30 seconds [guess], without resetting while a cut is in flight.
 
+A successor keeps one bounded pending-replacement fact until its first validated `StepShown`.
+A terminal failure before that paint ends open calls with `drawing.ReplacementFailedPreviousRemoved`
+and emits one content-free `DrawingReplacementFailed` for the replacement's original thread/run.
+Already-ended results are not rewritten. Whole-scene `SceneFailed` refusals derive their original
+identity here even when the shell had no run at header refusal; they are distinct from explicit
+`ClearDrawing` requests. The shell retains only its existing single notice, filters it by
+conversation and localizes its fixed text; it never attaches late loss
+to whichever conversation happens to be open. Recovery creates no pending replacement fact.
+
 `StepShown` and `StepFailed` validate lifetime indices and the run that committed the step.
 Bad observations or held-scene cuts break the connection; removed scenes are stale. Pending
 thread deletion holds late drawing frames until the outcome: a refusal releases them in
