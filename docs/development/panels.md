@@ -279,5 +279,6 @@ then dismisses the tasks panel while it is focused. Stop or clear leaves the edi
 cancel, another Esc dismisses. The panel counts as focused only once its window reports
 activation, as the typing panel does, so a deactivation that arrives before then can't hide a panel that just
 opened. Blur hides it without restoring the old foreground; ordinary dismissal restores
-the previous foreground when Kumochi still owns it. Newly created panels inherit an active
+the previous foreground when Kumochi still owns it. A hide that fails leaves the panel open
+and focused, so Esc and Close still work. Newly created panels inherit an active
 hold's capture exclusion. The initial panel size, 48 by 34 interface rems, is a [guess].

@@ -92,6 +92,10 @@ impl Presence {
 }
 
 impl TextView {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one notice keeps each control beside its deferred dispatch"
+    )]
     pub(super) fn recovery(&self, cx: &Context<'_, Self>) -> Option<gpui_kit::AnyElement> {
         let notice = self.recovery.as_ref().filter(|_| self.refusal.is_none())?;
         let strings = cx.global::<Strings>();
@@ -150,11 +154,15 @@ impl TextView {
                     .label(strings.get(label))
                     .disabled(!enabled)
                     .on_click(move |_, window, cx| {
-                        if let Ok(Err(_)) =
-                            owner.update(cx, |this, cx| this.recover(source, action, cx))
-                        {
-                            tracing::warn!("can't apply chat recovery");
-                        }
+                        let owner = owner.clone();
+                        // Settings hides this window, which GPUI can't update mid-click.
+                        cx.defer(move |cx| {
+                            if let Ok(Err(_)) =
+                                owner.update(cx, |this, cx| this.recover(source, action, cx))
+                            {
+                                tracing::warn!("can't apply chat recovery");
+                            }
+                        });
                         if action == Action::Retry {
                             input.update(cx, |input, cx| input.focus(window, cx));
                         }
