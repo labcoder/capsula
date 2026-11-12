@@ -24,7 +24,7 @@ impl Presence {
                 ControlToBrain::Issue {
                     session: session.issue_session(),
                     request,
-                    op,
+                    op: Box::new(op),
                 },
             )
             .then_some(request)

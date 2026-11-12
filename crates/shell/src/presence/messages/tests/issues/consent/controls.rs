@@ -175,7 +175,7 @@ fn storage_error_allows_only_manual_check_or_dismiss_and_never_schedules_a_reque
                     epoch: 1
                 },
                 request: 1,
-                op: op.clone()
+                op: Box::new(op.clone())
             }
         );
         deliver(
@@ -206,7 +206,7 @@ fn storage_error_allows_only_manual_check_or_dismiss_and_never_schedules_a_reque
                     epoch: 1
                 },
                 request: 2,
-                op
+                op: Box::new(op)
             }
         );
         assert!(f.controls.try_recv().is_err());
@@ -482,7 +482,7 @@ fn unknown_check_again_is_get_only_and_final_unchanged_busy_or_offline_replies_r
                     epoch: 1
                 },
                 request: 1,
-                op: IssueOp::CheckAgain { draft: DraftId(9) }
+                op: Box::new(IssueOp::CheckAgain { draft: DraftId(9) })
             }
         );
         deliver(
@@ -550,7 +550,7 @@ fn unknown_check_again_is_get_only_and_final_unchanged_busy_or_offline_replies_r
                     epoch: 1
                 },
                 request: 2,
-                op: IssueOp::CheckAgain { draft: DraftId(9) }
+                op: Box::new(IssueOp::CheckAgain { draft: DraftId(9) })
             }
         );
     }
@@ -597,7 +597,7 @@ fn unusable_bound_drafts_offer_replacement_guidance_and_dismiss_without_retarget
                 epoch: 1
             },
             request: 1,
-            op: IssueOp::Discard { draft: DraftId(9) }
+            op: Box::new(IssueOp::Discard { draft: DraftId(9) })
         }
     );
     assert!(f.models[1].read_with(cx, |model, _| model.issue(DraftId(9)).unwrap().pending()));
@@ -740,7 +740,7 @@ fn reconnect_drops_feedback_and_old_session_refusals_cannot_finish_a_new_attempt
                 epoch: 1
             },
             request: 1,
-            op: IssueOp::CheckAgain { draft: DraftId(9) }
+            op: Box::new(IssueOp::CheckAgain { draft: DraftId(9) })
         }
     );
     deliver(
@@ -832,12 +832,12 @@ fn reconnect_drops_feedback_and_old_session_refusals_cannot_finish_a_new_attempt
                 epoch: 2
             },
             request: 3,
-            op: IssueOp::Consent {
+            op: Box::new(IssueOp::Consent {
                 draft: DraftId(9),
                 hash: ContentHash([7; 32]),
                 approval: ApprovalRev(2),
                 decision: Decision::File,
-            },
+            }),
         }
     );
     deliver(

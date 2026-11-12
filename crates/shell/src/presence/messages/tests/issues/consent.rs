@@ -195,11 +195,11 @@ fn open(f: &Fixture, at: usize, cx: &mut TestAppContext) {
         ControlToBrain::Issue {
             session,
             request,
-            op: IssueOp::Rearm {
+            op: Box::new(IssueOp::Rearm {
                 draft: DraftId(9),
                 version: card.version,
                 hash: card.hash
-            },
+            }),
         }
     );
     assert!(
@@ -237,10 +237,10 @@ fn cancelled(f: &Fixture, request: u64, review: u64) {
                 epoch: 1
             },
             request,
-            op: IssueOp::CancelReview {
+            op: Box::new(IssueOp::CancelReview {
                 draft: DraftId(9),
                 review
-            },
+            }),
         }
     );
     assert!(f.controls.try_recv().is_err());
@@ -253,12 +253,12 @@ fn payload(request: u64, approval: u64) -> ControlToBrain {
             epoch: 1,
         },
         request,
-        op: IssueOp::Consent {
+        op: Box::new(IssueOp::Consent {
             draft: DraftId(9),
             hash: ContentHash([7; 32]),
             approval: ApprovalRev(approval),
             decision: Decision::File,
-        },
+        }),
     }
 }
 
@@ -784,12 +784,12 @@ fn queue_refusal_is_not_replayed_by_later_valid_input(cx: &mut TestAppContext) {
                 epoch: 2,
             },
             request: 5,
-            op: IssueOp::Consent {
+            op: Box::new(IssueOp::Consent {
                 draft: DraftId(9),
                 hash: ContentHash([7; 32]),
                 approval: ApprovalRev(2),
                 decision: Decision::File,
-            },
+            }),
         }
     );
     assert!(f.controls.try_recv().is_err());
@@ -991,11 +991,11 @@ fn the_ordinary_history_rearms_before_opening_the_real_confirmation(cx: &mut Tes
                 epoch: 1
             },
             request: 1,
-            op: IssueOp::Rearm {
+            op: Box::new(IssueOp::Rearm {
                 draft: DraftId(9),
                 version: StateVersion(1),
                 hash: ContentHash([7; 32])
-            },
+            }),
         }
     );
     let DataToShell::IssueCardRead { mut card, .. } = issue_frame(5, 2, "saved body") else {

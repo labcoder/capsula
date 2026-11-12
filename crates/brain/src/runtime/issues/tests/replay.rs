@@ -42,7 +42,7 @@ async fn wire_replay_after_both_approval_writes_fail_requires_a_new_request() {
     let original = ControlToBrain::Issue {
         session: brain.issue_session().unwrap(),
         request: 904,
-        op: consent.clone(),
+        op: Box::new(consent.clone()),
     };
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
@@ -112,7 +112,7 @@ async fn wire_replay_after_both_approval_writes_fail_requires_a_new_request() {
             .send(&ControlToBrain::Issue {
                 session,
                 request: 0,
-                op: consent.clone(),
+                op: Box::new(consent.clone()),
             })
             .await;
         let frames = final_reply(&mut fresh_shell).await;

@@ -31,12 +31,12 @@ async fn a_replacement_hydrated_while_construction_waits_receives_the_old_settle
             .send(&ControlToBrain::Issue {
                 session,
                 request: 1001,
-                op: IssueOp::Consent {
+                op: Box::new(IssueOp::Consent {
                     draft: action.draft,
                     hash: action.hash(),
                     approval: ApprovalRev(2),
                     decision: Decision::File,
-                },
+                }),
             })
             .await;
         assert_eq!(

@@ -429,8 +429,8 @@ pub enum ControlToBrain {
         session: IssueSession,
         /// The shell's connection-lifetime operation identity.
         request: u64,
-        /// The content-bound operation.
-        op: IssueOp,
+        /// The content-bound operation, boxed so this rare variant doesn't widen every control.
+        op: Box<IssueOp>,
     },
     /// The shell refused an entire scene, possibly before its first run was known.
     SceneFailed {
@@ -1142,5 +1142,15 @@ mod tests {
         // Tag, the connection's tag and a two-byte count, then 200 times a one-byte slug length,
         // 64 bytes of slug, a two-byte name length and 80 four-byte characters.
         assert_eq!(payload(&models, Pipe::Data), 77_404);
+    }
+
+    /// Every queued control pays for the largest variant, and the shell's recovery bounds count it.
+    #[test]
+    fn a_control_to_the_brain_stays_within_64_bytes() {
+        let size = std::mem::size_of::<ControlToBrain>();
+        assert!(
+            size <= 64,
+            "ControlToBrain is {size} bytes; box the payload of the variant that grew it"
+        );
     }
 }

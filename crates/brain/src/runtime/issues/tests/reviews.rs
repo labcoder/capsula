@@ -971,12 +971,12 @@ async fn ordinary_saved_card_reads_never_rebuild_an_offer_after_reconnect_or_res
                 .send(&ControlToBrain::Issue {
                     session,
                     request: 0,
-                    op: IssueOp::Consent {
+                    op: Box::new(IssueOp::Consent {
                         draft: action.draft,
                         hash: action.hash(),
                         approval: ApprovalRev(2),
                         decision: Decision::File,
-                    },
+                    }),
                 })
                 .await;
             assert_eq!(

@@ -445,12 +445,12 @@ fn largest_issue_and_connection_frames_fit_their_exact_budgets() {
                 epoch: u64::MAX,
             },
             request: u64::MAX,
-            op: IssueOp::Consent {
+            op: Box::new(IssueOp::Consent {
                 draft: card.draft,
                 hash: card.hash,
                 approval: card.approval.unwrap(),
                 decision: Decision::File,
-            },
+            }),
         },
         Pipe::Control,
         89,
@@ -546,7 +546,7 @@ fn largest_review_frames_fit_their_exact_budgets() {
                     epoch: u64::MAX,
                 },
                 request: u64::MAX,
-                op,
+                op: Box::new(op),
             },
             Pipe::Control,
             length,
@@ -624,7 +624,7 @@ fn issue_provenance_round_trips_exactly_through_welcome_and_operation_prefixes()
         let issue = ControlToBrain::Issue {
             session,
             request: 0,
-            op: IssueOp::Discard { draft: DraftId(9) },
+            op: Box::new(IssueOp::Discard { draft: DraftId(9) }),
         };
         let wire = encode(&issue, Pipe::Control).unwrap();
         let mut payload = vec![25];
@@ -727,7 +727,7 @@ fn issue_operation_identity_preserves_inner_tags_and_exact_wire_fields() {
                     epoch: 2,
                 },
                 request,
-                op: op.clone(),
+                op: Box::new(op.clone()),
             };
             let mut expected = vec![25, 1, 2];
             expected.extend(identity);
@@ -759,7 +759,7 @@ fn issue_operation_identity_preserves_inner_tags_and_exact_wire_fields() {
                 epoch: 2
             },
             request: 128,
-            op: IssueOp::Discard { draft: DraftId(2) }
+            op: Box::new(IssueOp::Discard { draft: DraftId(2) })
         })
         .unwrap(),
         serde_json::json!({"Issue":{"session":{"incarnation":1,"epoch":2},"request":128,"op":{"Discard":{"draft":2}}}})
@@ -775,12 +775,12 @@ fn issue_operation_unknown_tags_and_overflow_are_rejected_without_changing_decis
                 epoch: 2,
             },
             request: 1,
-            op: IssueOp::Consent {
+            op: Box::new(IssueOp::Consent {
                 draft: DraftId(2),
                 hash: ContentHash([91; 32]),
                 approval: ApprovalRev(3),
                 decision,
-            },
+            }),
         };
         assert_eq!(
             postcard::from_bytes::<ControlToBrain>(&postcard::to_allocvec(&message).unwrap())
@@ -1121,12 +1121,12 @@ fn outer_wire_carriers_and_tap_never_format_issue_or_device_content() {
                 epoch: u64::MAX,
             },
             request: u64::MAX,
-            op: IssueOp::Consent {
+            op: Box::new(IssueOp::Consent {
                 draft: card.draft,
                 hash: card.hash,
                 approval: card.approval.expect("approval"),
                 decision: Decision::File,
-            },
+            }),
         },
         Pipe::Control,
         Direction::ToBrain,

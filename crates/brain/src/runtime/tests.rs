@@ -192,7 +192,7 @@ fn staged_github_and_issue_controls_do_not_admit_or_change_a_run() {
                 epoch: 1,
             },
             request: 1,
-            op: IssueOp::Discard { draft: DraftId(9) },
+            op: Box::new(IssueOp::Discard { draft: DraftId(9) }),
         },
     ] {
         assert_eq!(super::controls::control_input(message), Ok(None));

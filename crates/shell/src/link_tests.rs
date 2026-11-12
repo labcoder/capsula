@@ -1639,12 +1639,12 @@ fn an_ended_connection_s_sends_and_credit_never_reach_the_next() {
     let original = ControlToBrain::Issue {
         session: a.issue_session(),
         request: 0,
-        op: IssueOp::Consent {
+        op: Box::new(IssueOp::Consent {
             draft: DraftId(9),
             hash: ContentHash([7; 32]),
             approval: ApprovalRev(1),
             decision: Decision::File,
-        },
+        }),
     };
     assert!(!handle.send_control(&a, original.clone()));
     assert!(handle.send_control(&b, original.clone()));
@@ -1656,7 +1656,7 @@ fn an_ended_connection_s_sends_and_credit_never_reach_the_next() {
     let fresh = ControlToBrain::Issue {
         session: b.issue_session(),
         request: 0,
-        op: IssueOp::Discard { draft: DraftId(9) },
+        op: Box::new(IssueOp::Discard { draft: DraftId(9) }),
     };
     assert!(handle.send_control(&b, fresh.clone()));
     assert_eq!(

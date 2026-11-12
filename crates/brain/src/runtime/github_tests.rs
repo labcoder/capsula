@@ -87,12 +87,12 @@ async fn live_refusals_and_offline_controls_never_start_work_or_change_approval(
     let issue = ControlToBrain::Issue {
         session,
         request: 1,
-        op: IssueOp::Consent {
+        op: Box::new(IssueOp::Consent {
             draft: action.draft,
             hash: action.hash(),
             approval: action.approval.unwrap(),
             decision: Decision::File,
-        },
+        }),
     };
     let mut tap = Tap::from_env();
     let ((control, data), mut shell) = duplex();

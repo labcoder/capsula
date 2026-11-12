@@ -9,11 +9,11 @@ fn rearm(request: u64) -> ControlToBrain {
             epoch: 1,
         },
         request,
-        op: IssueOp::Rearm {
+        op: Box::new(IssueOp::Rearm {
             draft: DraftId(9),
             version: StateVersion(1),
             hash: ContentHash([7; 32]),
-        },
+        }),
     }
 }
 
@@ -157,10 +157,10 @@ fn cancelling_before_mint_and_superseding_in_the_peer_view_leave_no_old_authorit
                 epoch: 1
             },
             request: 4,
-            op: IssueOp::CancelReview {
+            op: Box::new(IssueOp::CancelReview {
                 draft: DraftId(9),
                 review: 3
-            },
+            }),
         }
     );
     assert_eq!(f.controls.try_recv().unwrap(), rearm(5));

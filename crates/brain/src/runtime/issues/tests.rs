@@ -306,12 +306,12 @@ async fn wire_file_commits_one_literal_post_and_replayed_consent_cannot_send_aga
     let consent = ControlToBrain::Issue {
         session,
         request: 101,
-        op: IssueOp::Consent {
+        op: Box::new(IssueOp::Consent {
             draft: action.draft,
             hash: action.hash(),
             approval: ApprovalRev(2),
             decision: Decision::File,
-        },
+        }),
     };
     let filed = Some(ControlToShell::ActionState {
         request: Some(101),
@@ -334,11 +334,11 @@ async fn wire_file_commits_one_literal_post_and_replayed_consent_cannot_send_aga
             .send(&ControlToBrain::Issue {
                 session,
                 request: 100,
-                op: IssueOp::Rearm {
+                op: Box::new(IssueOp::Rearm {
                     draft: action.draft,
                     version: StateVersion(1),
                     hash: action.hash(),
-                },
+                }),
             })
             .await;
         assert_eq!(
@@ -413,12 +413,12 @@ async fn wire_file_commits_one_literal_post_and_replayed_consent_cannot_send_aga
             .send(&ControlToBrain::Issue {
                 session: replacement_session,
                 request: 0,
-                op: IssueOp::Consent {
+                op: Box::new(IssueOp::Consent {
                     draft: action.draft,
                     hash: action.hash(),
                     approval: ApprovalRev(2),
                     decision: Decision::File,
-                },
+                }),
             })
             .await;
         assert_eq!(
@@ -487,12 +487,12 @@ async fn wire_eof_during_held_consent_consumes_approval_and_records_known_unsent
             .send(&ControlToBrain::Issue {
                 session,
                 request: 301,
-                op: IssueOp::Consent {
+                op: Box::new(IssueOp::Consent {
                     draft: action.draft,
                     hash: action.hash(),
                     approval: ApprovalRev(2),
                     decision: Decision::File,
-                },
+                }),
             })
             .await;
         timeout(PATIENCE, async {
@@ -579,12 +579,12 @@ async fn wire_eof_before_handoff_is_failed_but_a_lost_post_stays_unknown_without
         let consent = ControlToBrain::Issue {
             session: brain.issue_session().unwrap(),
             request: if after_handoff { 201 } else { 200 },
-            op: IssueOp::Consent {
+            op: Box::new(IssueOp::Consent {
                 draft: action.draft,
                 hash: action.hash(),
                 approval: ApprovalRev(2),
                 decision: Decision::File,
-            },
+            }),
         };
         let ((control, data), mut shell) = duplex();
         let mut tap = Tap::from_env();
@@ -705,12 +705,12 @@ async fn wire_eof_before_handoff_is_failed_but_a_lost_post_stays_unknown_without
                 .send(&ControlToBrain::Issue {
                     session: replacement_session,
                     request: 0,
-                    op: IssueOp::Consent {
+                    op: Box::new(IssueOp::Consent {
                         draft: action.draft,
                         hash: action.hash(),
                         approval: ApprovalRev(2),
                         decision: Decision::File,
-                    },
+                    }),
                 })
                 .await;
             assert_eq!(replacement.control().await, terminal);
@@ -719,9 +719,9 @@ async fn wire_eof_before_handoff_is_failed_but_a_lost_post_stays_unknown_without
                     .send(&ControlToBrain::Issue {
                         session: replacement_session,
                         request: 202,
-                        op: IssueOp::CheckAgain {
+                        op: Box::new(IssueOp::CheckAgain {
                             draft: action.draft,
-                        },
+                        }),
                     })
                     .await;
                 assert_eq!(
@@ -758,9 +758,9 @@ async fn wire_eof_before_handoff_is_failed_but_a_lost_post_stays_unknown_without
                     .send(&ControlToBrain::Issue {
                         session: replacement_session,
                         request: 203,
-                        op: IssueOp::CheckAgain {
+                        op: Box::new(IssueOp::CheckAgain {
                             draft: action.draft,
-                        },
+                        }),
                     })
                     .await;
                 assert_eq!(replacement.control().await, candidate_state(None));
