@@ -757,25 +757,59 @@ fn the_prompt_example_draws_two_steps_without_promising_an_overlay_canvas() {
         !prompt.contains("the size is its drawing canvas"),
         "overlay size comes from the host"
     );
-    let (_, example) = prompt.split_once("```json").expect("worked JSON example");
-    let (args, _) = example.split_once("```").expect("closed example");
-    let args = args.trim();
-    let envelope: Value = serde_json::from_str(args).expect("example JSON");
-    assert_eq!(envelope["records"][0]["begin"]["size"], json!([600, 360]));
-    let scratch = Scratch::new("prompt-example");
-    let mut store = store(&scratch);
-    let mut core = offered(vec![T]);
-    start(&mut core, "prompt-example");
-    let mut streamed = delta(&mut core, "prompt-example", args);
-    streamed.extend(ready(&mut core, "prompt-example", args));
-    let mut effects = drain(&mut core, &mut store, streamed);
-    effects.extend(send(&mut core, TurnEvent::Finished(Finish::Completed)));
-    assert_eq!(
-        result(&effects).output.json()["text"],
-        "drawn: [cycle, heat]"
+    let examples: Vec<_> = prompt
+        .split("```json")
+        .skip(1)
+        .map(|example| example.split_once("```").expect("closed example").0.trim())
+        .collect();
+    let cases = [
+        (
+            "prompt-diagram",
+            [600, 360],
+            &["cycle", "heat"][..],
+            "drawn: [cycle, heat]",
+        ),
+        ("prompt-sine", [400, 300], &["graph"][..], "drawn: [graph]"),
+    ];
+    assert_eq!(examples.len(), cases.len());
+    for (args, (call, size, steps, expected)) in examples.iter().zip(cases) {
+        assert!(
+            args.len() <= 16 * 1024,
+            "example fits the prompt's call target"
+        );
+        let envelope: Value = serde_json::from_str(args).expect("example JSON");
+        assert_eq!(envelope["records"][0]["begin"]["size"], json!(size));
+        let scratch = Scratch::new(call);
+        let mut store = store(&scratch);
+        let mut core = offered(vec![T]);
+        start(&mut core, call);
+        let mut streamed = delta(&mut core, call, args);
+        streamed.extend(ready(&mut core, call, args));
+        let mut effects = drain(&mut core, &mut store, streamed);
+        effects.extend(send(&mut core, TurnEvent::Finished(Finish::Completed)));
+        assert_eq!(result(&effects).output.json()["text"], expected);
+        assert_eq!(ends(&effects), [true]);
+        assert_prefix(&store, steps);
+    }
+    let sine: Value = serde_json::from_str(examples[1]).expect("sine JSON");
+    let data = sine["records"][1]["step"]["put"][1]["series"]["data"]
+        .as_array()
+        .expect("sine data");
+    assert_eq!(data.len(), 41);
+    assert!(
+        data.iter()
+            .all(|point| point.as_array().is_some_and(|p| p.len() == 2))
     );
-    assert_eq!(ends(&effects), [true]);
-    assert_prefix(&store, &["cycle", "heat"]);
+    assert_eq!(
+        [0, 10, 20, 30, 40].map(|index| data[index].clone()),
+        [
+            json!([0, 0]),
+            json!([std::f64::consts::FRAC_PI_2, 1]),
+            json!([std::f64::consts::PI, 0]),
+            json!([3.0 * std::f64::consts::FRAC_PI_2, -1]),
+            json!([std::f64::consts::TAU, 0]),
+        ]
+    );
 }
 
 #[test]
