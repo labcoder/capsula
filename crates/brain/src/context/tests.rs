@@ -432,8 +432,15 @@ fn the_names_in_settings_win_over_names_in_earlier_turns() {
             )
             .expect("built");
         let instructions = &built.request.instructions;
-        assert!(instructions.contains(ASSISTANT), "assistant: {instructions}");
-        assert_eq!(instructions.contains(USER), says_user, "user: {instructions}");
+        assert!(
+            instructions.contains(ASSISTANT),
+            "assistant: {instructions}"
+        );
+        assert_eq!(
+            instructions.contains(USER),
+            says_user,
+            "user: {instructions}"
+        );
     }
 }
 
