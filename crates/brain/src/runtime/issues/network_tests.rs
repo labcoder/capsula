@@ -1,5 +1,4 @@
 use super::*;
-use std::collections::VecDeque;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -32,7 +31,7 @@ struct Step {
 }
 
 struct Script {
-    steps: Mutex<VecDeque<Step>>,
+    steps: Mutex<Vec<Step>>,
     calls: AtomicUsize,
 }
 
@@ -40,49 +39,45 @@ impl Http for Arc<Script> {
     fn execute(&self, request: Request) -> impl Future<Output = Result<Response, HttpError>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert!(request.fields.is_empty());
-        let step = self
-            .steps
-            .lock()
-            .unwrap()
-            .pop_front()
-            .expect("one scripted request");
-        match (&step.endpoint, request.endpoint) {
-            (Expected::User, Endpoint::GitHub(GitHubEndpoint::User { .. })) => {}
-            (
-                Expected::Installations,
-                Endpoint::GitHub(GitHubEndpoint::Installations { page, .. }),
-            ) => {
-                assert_eq!(page, Page::new(1).unwrap());
-            }
-            (
-                Expected::Repositories,
-                Endpoint::GitHub(GitHubEndpoint::Repositories {
-                    installation, page, ..
-                }),
-            ) => {
-                assert_eq!(installation, 9);
-                assert_eq!(page, Page::new(1).unwrap());
-            }
-            (
-                Expected::Issues {
-                    since,
-                    page: expected,
-                },
-                Endpoint::GitHub(GitHubEndpoint::Issues {
-                    repo,
-                    creator,
-                    since_s,
-                    page,
-                    ..
-                }),
-            ) => {
-                assert_eq!(repo.as_str(), "owner/repo");
-                assert_eq!(creator.as_str(), "verified-owner");
-                assert_eq!(since_s, *since);
-                assert_eq!(page, Page::new(*expected).unwrap());
-            }
-            _ => panic!("unexpected typed GitHub endpoint"),
-        }
+        let step = {
+            let mut steps = self.steps.lock().unwrap();
+            let at = steps
+                .iter()
+                .position(|step| match (&step.endpoint, &request.endpoint) {
+                    (Expected::User, Endpoint::GitHub(GitHubEndpoint::User { .. })) => true,
+                    (
+                        Expected::Installations,
+                        Endpoint::GitHub(GitHubEndpoint::Installations { page, .. }),
+                    ) => *page == Page::new(1).unwrap(),
+                    (
+                        Expected::Repositories,
+                        Endpoint::GitHub(GitHubEndpoint::Repositories {
+                            installation, page, ..
+                        }),
+                    ) => *installation == 9 && *page == Page::new(1).unwrap(),
+                    (
+                        Expected::Issues {
+                            since,
+                            page: expected,
+                        },
+                        Endpoint::GitHub(GitHubEndpoint::Issues {
+                            repo,
+                            creator,
+                            since_s,
+                            page,
+                            ..
+                        }),
+                    ) => {
+                        repo.as_str() == "owner/repo"
+                            && creator.as_str() == "verified-owner"
+                            && since_s == since
+                            && *page == Page::new(*expected).unwrap()
+                    }
+                    _ => false,
+                })
+                .expect("one scripted response for this typed endpoint and page");
+            steps.remove(at)
+        };
         std::future::ready(Ok(Response {
             status: step.status,
             request_id: Some(SENTINEL.to_owned()),
@@ -128,7 +123,7 @@ fn authority(date: Option<u64>) -> Vec<Step> {
 
 fn bounded(steps: Vec<Step>) -> (BoundedHttp, Arc<Control>, Arc<Script>) {
     let script = Arc::new(Script {
-        steps: Mutex::new(steps.into()),
+        steps: Mutex::new(steps),
         calls: AtomicUsize::new(0),
     });
     let control = Control::new();
@@ -177,6 +172,38 @@ fn unknown() -> Action {
 
 fn row(number: u64, created_at: &str) -> Value {
     json!({"number":number,"title":"  Local café  ","body":"first\n\tcafé\n","created_at":created_at})
+}
+
+#[tokio::test(start_paused = true)]
+async fn scripted_authority_responses_are_independent_of_request_order() {
+    let (http, control, script) = bounded(authority(Some(100)));
+    let token = token();
+    let installations = api::installations(&http, &token, Page::new(1).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(installations.installations, [9]);
+    assert_eq!(installations.total_count, 1);
+    assert_eq!(control.server_date_s(), None);
+    let user = api::user(&http, &token).await.unwrap();
+    assert_eq!(user.id, 7);
+    assert_eq!(user.login.as_str(), "verified-owner");
+    assert_eq!(control.server_date_s(), Some(100));
+    let repositories = api::repositories(&http, &token, 9, Page::new(1).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(repositories.total_count, 2);
+    assert_eq!(
+        repositories
+            .repositories
+            .iter()
+            .map(RepoName::as_str)
+            .collect::<Vec<_>>(),
+        ["owner/repo", "owner/other"]
+    );
+    assert_eq!(control.server_date_s(), Some(100));
+    assert_eq!(script.calls.load(Ordering::SeqCst), 3);
+    assert!(script.steps.lock().unwrap().is_empty());
+    assert!(!control.may_have_sent());
 }
 
 #[tokio::test(start_paused = true)]
