@@ -159,9 +159,11 @@ fn replacement_refusal_and_stale_settlement_preserve_the_victims() {
     let rejected = step(json!({"id":"bad","remove":["missing"]}));
     let usage = global.usage();
     let generation = global.generation();
-    assert!(
+    assert_eq!(
         kumochi_scene::ReplacementAdmission::checked(scene("bad"), &rejected, &[&old], &global)
-            .is_err()
+            .expect_err("missing removal target")
+            .code,
+        ErrorCode::UnknownRef
     );
     assert_eq!(
         (old.object_count(), global.usage(), global.generation()),

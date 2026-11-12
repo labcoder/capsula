@@ -542,6 +542,77 @@ fn error(end: &CallEnd) -> ErrorCode {
 }
 
 #[test]
+fn unsaved_default_replacements_preserve_existing_drawings() {
+    let forward = r#"{"id":"a","start":{"after":"later","ms":0}}"#.to_owned();
+    for (args, expected, trace_expected) in [
+        (
+            replacement_args("new", &[forward]),
+            Some(ErrorCode::ForwardRef),
+            vec!["lookup"],
+        ),
+        (
+            br#"{"records":[]}"#.to_vec(),
+            Some(ErrorCode::BeforeBegin),
+            vec![],
+        ),
+        (
+            br#"{"records":[{"begin":{"v":1,"scene":"new","surface":"overlay","alt":""}}]}"#
+                .to_vec(),
+            Some(ErrorCode::MissingField),
+            vec!["lookup"],
+        ),
+        (replacement_args("new", &[]), None, vec!["lookup"]),
+    ] {
+        let mut drawing = Drawing::default();
+        let mut store = Store::default();
+        four(&mut store, &mut drawing);
+        let before = drawing.snapshot();
+        let stored = store.visible();
+        let budget = (drawing.global.usage(), drawing.global.generation());
+        assert_eq!(
+            before
+                .scenes
+                .iter()
+                .map(|scene| scene.scene)
+                .collect::<Vec<_>>(),
+            [SceneId(1), SceneId(2), SceneId(3), SceneId(4)]
+        );
+        let out = store.run(&mut drawing, call(1, "new", args));
+        assert_eq!(trace(&out), trace_expected);
+        assert!(
+            !out.effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Data(_) | Effect::RevokeScenes { .. }))
+        );
+        assert_eq!(out.calls.len(), 1);
+        assert_eq!(
+            out.calls[0].error.as_ref().map(|_| error(&out.calls[0])),
+            expected
+        );
+        assert_eq!(out.calls[0].drawn, []);
+        assert_eq!(out.calls[0].scene, None);
+        let after = drawing.snapshot();
+        assert_eq!(after.scenes, before.scenes);
+        assert_eq!(after.chunks, before.chunks);
+        assert_eq!(after.skipped, []);
+        assert_eq!(store.visible(), stored);
+        assert_eq!(store.scenes, stored);
+        assert_eq!(store.cleared, []);
+        assert_eq!(
+            (drawing.global.usage(), drawing.global.generation()),
+            budget
+        );
+        assert_eq!(
+            (
+                drawing.global.usage().scenes,
+                drawing.global.usage().objects
+            ),
+            (4, 4)
+        );
+    }
+}
+
+#[test]
 fn default_replacement_clears_once_but_continuing_its_header_preserves_a_kept_scene() {
     let mut drawing = Drawing::default();
     let mut store = Store::default();
