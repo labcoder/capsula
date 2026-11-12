@@ -144,6 +144,7 @@ impl Tapped for ControlToShell {
             Self::DrawingReplacementFailed { .. } => "DrawingReplacementFailed",
             Self::DrawingNotReturned { .. } => "DrawingNotReturned",
             Self::VoiceHoldStatus { .. } => "VoiceHoldStatus",
+            Self::VoiceHoldStopAccepted { .. } => "VoiceHoldStopAccepted",
         }
     }
 

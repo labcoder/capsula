@@ -898,10 +898,23 @@ controls drain. Only the matching authenticated physical-stop receipt clears
 admitted device debt, including during grace; failure, timeout or a new session
 cannot borrow uncertain ownership. A failed status write closes the connection.
 
-Known limit: losing a connection during an admitted hold can retain device debt across
-reconnect even after the Shell stops. Later holds then remain unavailable until Kumochi
-restarts. Recovery needs authenticated peer-lifetime and receipt proof, not a timeout,
-single-instance lock or new connection.
+Device debt retains the authenticated Shell process handle separately from the current
+connection. Confirmed exit of that exact process clears its old debt; a live replacement,
+reused PID or failed exit query cannot borrow that proof. The current process is checked
+live before the retained old process when comparing a same-process reconnect.
+
+The Shell reserves one metadata-only stop slot before queueing recognition. Confirmed
+source completion changes it to a retained receipt, which is queued on the current outbox
+even if its original Session has ended. Each new connection replays it once, including
+after a Brain restart. Only `VoiceHoldStopAccepted` for that receipt, read on the connection that last
+carried it, frees the slot; queueing, EOF and a new incarnation do not. While it is occupied,
+another hold is Busy without hiding typing or opening another source. No PCM, KeyUp,
+recognition or text is replayed. A redundant accepted receipt never restarts decode.
+
+The Brain accepts a same-live-process matching gesture across epochs and acknowledges
+processed receipts even when its debt is already clear. A different process's receipt
+cannot clear a retained live peer's debt. During grace the stopped core can apply real
+proof without an outgoing link; the Shell still replays until a later connection accepts it.
 
 Held input uses the ordinary runtime turn-admission gate both before a microphone
 permit and before decoded text becomes a run: initial scene recovery must be

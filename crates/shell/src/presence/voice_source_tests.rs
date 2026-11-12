@@ -430,6 +430,85 @@ fn a_successful_drawing_and_focus_keep_the_next_native_hold_admissible(cx: &mut 
 }
 
 #[gpui::test]
+fn microphone_stop_acceptance_wait_keeps_typing_and_does_not_open_another_source(
+    cx: &mut TestAppContext,
+) {
+    let (owner, data, controls) = ready(cx);
+    let (old, _) = hold(&owner, 1, cx);
+    assert!(matches!(
+        controls.try_recv().unwrap(),
+        ControlToBrain::VoiceHoldRecognized {
+            gesture: GestureId(1),
+            ..
+        }
+    ));
+    status(&owner, 1, 1, HoldStatus::Cancelled, cx);
+    assert!(old.retired());
+    assert_eq!(
+        controls.try_recv().unwrap(),
+        ControlToBrain::VoiceHoldStopped {
+            gesture: GestureId(1)
+        }
+    );
+    assert_eq!(
+        controls.try_recv().unwrap(),
+        ControlToBrain::GestureCancel {
+            gesture: GestureId(1)
+        }
+    );
+    let starts = Rc::new(Cell::new(0));
+    let attempts = Rc::clone(&starts);
+    owner.update(cx, |owner, cx| {
+        let text = owner.text.as_mut().unwrap();
+        text.typing.open();
+        text.window
+            .update(cx, |_, window, cx| {
+                text.input
+                    .update(cx, |input, cx| input.set_value("unsent draft", window, cx));
+            })
+            .unwrap();
+        owner.voice.start = Some(Box::new(move |_, _| {
+            attempts.set(attempts.get() + 1);
+            Err(MicError::Unavailable)
+        }));
+        let token = owner.link.microphone_gate().arm(GestureId(2)).unwrap();
+        owner.link.track_input(GestureId(2));
+        let stamp = Stamp {
+            target: owner.voice.target.get(),
+            session: 1,
+            choice: owner.link.choice_revision(),
+        };
+        owner.voice_intent(
+            Intent::Recognized {
+                gesture: GestureId(2),
+                generation: Ok(token.clone()),
+            },
+            stamp,
+            0,
+            cx,
+        );
+        assert!(token.retired());
+        assert!(owner.text_open());
+        assert_eq!(
+            owner.text.as_ref().unwrap().input.read(cx).value().as_str(),
+            "unsent draft"
+        );
+        assert_eq!(owner.voice.status, Some(Text::TurnBusy));
+        assert!(owner.voice.pending.is_none());
+        assert!(owner.link.voice_stop_pending());
+    });
+    assert_eq!(starts.get(), 0);
+    assert!(data.is_empty());
+    assert_eq!(
+        controls.try_recv().unwrap(),
+        ControlToBrain::VoiceHoldStopped {
+            gesture: GestureId(2)
+        }
+    );
+    assert!(controls.is_empty());
+}
+
+#[gpui::test]
 fn microphone_start_without_running_reports_unavailable_not_cancellation(cx: &mut TestAppContext) {
     cx.background_executor.allow_parking();
     for (worker, error) in [
@@ -764,6 +843,14 @@ fn stale_deferred_escape_cannot_cancel_a_new_native_hold(cx: &mut TestAppContext
             .token
             .discard_unstarted()
             .unwrap();
+        assert!(owner.link.send_control(
+            owner.session.as_ref().unwrap(),
+            ControlToBrain::VoiceHoldStopped {
+                gesture: GestureId(1)
+            }
+        ));
+        owner.link.accept_recorded_microphone_stop(1, GestureId(1));
+        assert!(!owner.link.voice_stop_pending());
     });
     cx.update(|_| {
         deliver(
@@ -1301,6 +1388,15 @@ fn a_stalled_open_or_stop_warns_without_releasing_its_generation(cx: &mut TestAp
     }
 }
 
+/// The brain acknowledging the stop receipt of `gesture`, which the next hold waits for.
+fn accepted(owner: &Entity<Presence>, gesture: u32, cx: &mut TestAppContext) {
+    owner.update(cx, |owner, _| {
+        owner
+            .link
+            .accept_recorded_microphone_stop(1, GestureId(gesture));
+    });
+}
+
 fn after(at: Instant, millis: u64) -> EventTime {
     EventTime {
         instant: at + Duration::from_millis(millis),
@@ -1412,6 +1508,7 @@ fn esc_after_a_finished_hold_run_leaves_voice_alone_and_the_next_hold_listens(
             .all(|control| !matches!(control, ControlToBrain::GestureCancel { .. }))
     );
     let at = at + Duration::from_secs(3);
+    accepted(&owner, 1, cx);
     let finish = listen(&owner, &deliver, 2, at, cx);
     release(
         &owner,
@@ -1511,6 +1608,7 @@ fn a_run_that_fails_or_stops_after_thinking_ends_the_hold_quietly(cx: &mut TestA
                 .all(|control| !matches!(control, ControlToBrain::GestureCancel { .. }))
         );
         let at = at + Duration::from_secs(3);
+        accepted(&owner, 1, cx);
         let finish = listen(&owner, &deliver, 2, at, cx);
         release(
             &owner,
@@ -1538,6 +1636,7 @@ fn esc_during_listening_cancels_that_hold_and_the_next_hold_listens(cx: &mut Tes
     });
     chord(&deliver, Edge::Up, at + Duration::from_millis(900));
     let at = at + Duration::from_secs(2);
+    accepted(&owner, 1, cx);
     let finish = listen(&owner, &deliver, 2, at, cx);
     release(
         &owner,

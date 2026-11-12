@@ -8,6 +8,11 @@ preparation, not Listening: collection also needs the matching running/UI receip
 `VoiceHoldStopped` means that source generation physically stopped and joined; KeyUp,
 cancel, EOF and deadlines are not substitutes. These appended messages preserve old tags
 and remain payload-redacted in the pipe tap. Existing `MicPcm` and KeyUp shapes stay unchanged.
+The appended `VoiceHoldStopAccepted` acknowledges a processed receipt. The Shell retains
+one reserved/completed receipt until acceptance of its gesture on the connection that last carried it,
+replaying only completed metadata on reconnect, never audio or input. Brain device debt
+keeps its authenticated process handle: a matching same-live-process receipt or confirmed
+old-process exit can release it, not a timeout or connection replacement.
 The provisional 10-second startup and 2-second final-PCM drain bounds are unmeasured;
 expiry is terminal but never releases an unconfirmed device owner.
 
