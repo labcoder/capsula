@@ -118,7 +118,7 @@ impl PrepareInput {
             paint_cap: None,
         })
     }
-    /// Refuses the step with `OverResidency` once the scene's own paint work passes `cap`,
+    /// Refuses the step with `OverPaintWork` once the scene's own paint work passes `cap`,
     /// counting no further crossings; without one, preparation charges its work exactly.
     #[must_use]
     pub fn with_paint_cap(self, paint_cap: Option<crate::display::PaintWork>) -> Self {
@@ -234,10 +234,13 @@ pub enum PrepareError {
     /// Host text shaping failed.
     #[error("scene.TextMeasure")]
     TextMeasure,
-    /// Owned output exceeds the preparation residency limit, or one item's fill or rect
-    /// outline exceeds a single tessellation build.
+    /// Owned output exceeds the preparation residency limit.
     #[error("scene.OverResidency")]
     OverResidency,
+    /// The step's paint work passes the cap the host passes, or one item's fill or rect
+    /// outline exceeds a single tessellation build.
+    #[error("scene.OverPaintWork")]
+    OverPaintWork,
     /// Semantic or measured geometry validation failed.
     #[error(transparent)]
     Layout(#[from] StepError),

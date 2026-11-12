@@ -76,10 +76,19 @@ fn drawing_failure_controls_append_tags_and_keep_their_opposite_bindings() {
         thread: ThreadId(7),
         run: RunId(3),
     };
+    let nothing = ControlToShell::DrawingNotReturned {
+        thread: ThreadId(7),
+        run: RunId(3),
+    };
     round_trip(&failed, Pipe::Control);
     round_trip(&notice, Pipe::Control);
+    round_trip(&nothing, Pipe::Control);
     assert_eq!(postcard::to_allocvec(&failed).expect("failure"), [26, 9]);
     assert_eq!(postcard::to_allocvec(&notice).expect("notice"), [26, 7, 3]);
+    assert_eq!(
+        postcard::to_allocvec(&nothing).expect("nothing"),
+        [27, 7, 3]
+    );
 }
 
 fn snapshot(begin: SceneHeader, step: Step) -> DataToShell {

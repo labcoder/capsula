@@ -563,7 +563,7 @@ tags and bytes do not change. Mixed builds still fail their build-id handshake.
 | Pipe | Messages | Meaning |
 | --- | --- | --- |
 | Control, shell to brain | `StopScenes { run, cuts }` | Fence the run and apply each scene's activated revision and finished handles. A scene can span runs. |
-| Control, shell to brain | `StepShown`, `StepFailed` | First paint containing a lifetime step index, or a content-free preparation failure with its scene-wide cut. Control order keeps these observations ahead of later Stop cuts. |
+| Control, shell to brain | `StepShown`, `StepFailed` | First paint containing a lifetime step index, or a content-free preparation failure with its scene-wide cut; the appended `PaintWork` reason marks a step past the shell's paint-work cap, which the brain reports to the model as `drawing.TooMuchToPaint` only while the step's draw call is still open. Control order keeps these observations ahead of later Stop cuts. |
 | Control, brain to shell | `ScenesV1` | Authoritative visible membership and each scene's lifetime revision, retained count and full log-entry count. |
 | Control, brain to shell | `NoVisual` | Legacy run-level advisory, consumed without changing state. |
 | Data, brain to shell | `SceneBegin`, `SceneStepCommit` | An immutable typed header/layout version, then original typed steps after durable commit. |
@@ -572,6 +572,7 @@ tags and bytes do not change. Mixed builds still fail their build-id handshake.
 | Data, brain to shell | `SceneEnd` | A call completed or ended incomplete; already committed history remains. |
 | Data, brain to shell | `ScenesReplaced` | One to four unique removed ids and a distinct successor, before its begin/first step; a bounded presentation bridge, not a transaction acknowledgement. |
 | Control, brain to shell | `DrawingReplacementFailed` | Fixed localized loss feedback for the original thread/run, including after its tool result ended. |
+| Control, brain to shell | `DrawingNotReturned` | A run whose `done` outcome is stored called `draw`, and the shell refused every step it committed, if any; fixed localized feedback for its thread/run. |
 | Control, shell to brain | `SceneFailed` | A terminal whole-scene refusal, distinct from a user clear; the brain already owns its originating run/thread. |
 
 `SceneFailed` reports a cause to the brain, including a header refused before the shell knows
@@ -605,7 +606,7 @@ ordinary reconnect recovery rebuilds all four scenes together, not one against a
 If a stored scene cannot replay or the brain builds an invalid descriptor, chunk or encoded
 frame, that whole scene is omitted and cleared durably before membership is sent. Other scenes
 recover against one shared budget; the failure does not force a reconnect loop. A recovered
-scene that B4 cannot prepare is cleared through `ClearDrawing`, retaining its stored history,
+scene that the shell cannot prepare is refused through `SceneFailed` and cleared, retaining its stored history,
 not cut through a stale run's `StepFailed` observation.
 
 The data FIFO orders removal of an evicted scene before the next scene's header and first

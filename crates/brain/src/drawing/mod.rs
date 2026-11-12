@@ -19,7 +19,7 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
 
-use kumochi_protocol::message::{RunId, SceneCuts, SceneId, ThreadId};
+use kumochi_protocol::message::{RunId, SceneCuts, SceneFailure, SceneId, ThreadId};
 use kumochi_scene::{Admitted, Begin, GlobalBudget, Record, SceneState, Step, StopCut};
 
 use crate::coordinator::{Effect, Stale, StoreOp};
@@ -113,6 +113,8 @@ pub enum Input {
         scene: SceneId,
         /// Its zero-based lifetime index.
         index: u32,
+        /// Why, without content.
+        reason: SceneFailure,
         /// The cut at the last activated revision.
         cut: StopCut,
     },
@@ -184,6 +186,8 @@ struct Held {
     state: SceneState,
     /// The run that committed each lifetime revision; `None` for recovered steps.
     committers: Vec<Option<RunId>>,
+    /// Revisions a failed cut already counted as refused, so a later one counts only newer ones.
+    refused_through: usize,
     /// Cleared or deleted: no frame of it goes out, and it leaves once no write is pending.
     gone: bool,
     replacement: Option<ReplacementLoss>,
@@ -235,7 +239,7 @@ enum CutKind {
     /// A run stopped.
     Stop,
     /// The shell couldn't prepare a step, so the calls drawing in the scene end too.
-    Failed,
+    Failed(SceneFailure),
 }
 
 /// The one write in the store.
@@ -342,6 +346,7 @@ impl Drawing {
                 thread: stored.thread,
                 layout_version: stored.header.layout_version,
                 committers: vec![None; usize::try_from(state.revision()).unwrap_or_default()],
+                refused_through: 0,
                 state,
                 gone: false,
                 replacement: None,
@@ -418,6 +423,7 @@ impl Drawing {
                 run,
                 scene,
                 index,
+                reason,
                 cut,
             } => {
                 if self.committed_by(run, scene, index, &mut out) {
@@ -425,7 +431,7 @@ impl Drawing {
                     let job = Job::Cut {
                         scene,
                         cut,
-                        kind: CutKind::Failed,
+                        kind: CutKind::Failed(reason),
                     };
                     self.enqueue(job, &mut out);
                 }
@@ -478,6 +484,13 @@ impl Drawing {
             serial: self.serial,
             write,
         })]
+    }
+
+    /// Whether `run` called `draw` and every step it committed was refused by the shell.
+    pub fn drew_nothing(&self, run: RunId) -> bool {
+        self.runs
+            .iter()
+            .any(|ledger| ledger.run == run && ledger.drew_nothing())
     }
 
     /// Work of `run` is in the store or queued behind it, so the run's outcome waits for it.

@@ -854,7 +854,7 @@ overlaps as weak. There is no union pass or extra paint charge for isolation.
 
 A fill over `FILL_VERTEX_LIMIT` (21,845, a third of the u16 index space) or a rect outline over
 `OUTLINE_POINT_LIMIT` (5,460) can't be one tessellation build, so preparation fails with
-`OverResidency`. `PaintWork::within_limits` also checks the global dash, fill-vertex and
+`OverPaintWork`. `PaintWork::within_limits` also checks the global dash, fill-vertex and
 outline budgets, which are measured on Rez. Solid strokes carry no paint charge because
 construction bounds every generated line: a flattened path has at most 4,096 segments and
 every other line at most 513 points including a closed outline's repeated first point, so
@@ -865,12 +865,12 @@ The global limits are 512 dash pieces, 512 fill vertices and 512 outline points,
 across all visible scenes and reserved ready/rest states. On an overlay, four radius-8 filled
 and bordered boxes cost 100 fill and outline points, leaving room for labels and dashed connectors;
 labels remain subject to the existing text and object limits. A drawing beyond the limits
-fails explicitly through the scene's residency failure or recovery clear, without simplifying
+fails explicitly through the scene's `PaintWork` failure or recovery clear, without simplifying
 its geometry. Before counting crossings, preparation refuses any one generated fill with
 more than 512 points, which cannot fit even without a crossing. Given a paint cap
 (`PrepareInput::with_paint_cap`, and the `paint_cap` of `recover` and `recover_all`; the
 shell's worker and recovery pass `PaintWork::LIMITS`), it also keeps a running total of the
-scene's own paint work and refuses with `OverResidency` once that passes the cap, which no
+scene's own paint work and refuses with `OverPaintWork` once that passes the cap, which no
 admission could accept. Each fill then counts crossings only up to the fill budget left, so a
 refused scene costs at most about 512²/2 crossing tests. Without a cap the charge stays exact.
 
@@ -1657,7 +1657,8 @@ unconsumed ready successors plus a running position, not the gap between lifetim
 At most eight jobs or undelivered answers retain worker slots; dropping an unspawned job
 releases its slot too. Recovered layouts, ready deltas and returned consumption owners
 share the unchanged 64 MiB allowance. An over-cap answer fails with `Residency` rather than
-waiting indefinitely for bytes. Clearing, removal and disconnect release the presenter's
+waiting indefinitely for bytes; one whose paint work, with the other scenes', passes
+`PaintWork::LIMITS` fails with `PaintWork`. Clearing, removal and disconnect release the presenter's
 ownership but cannot release a result still held by its caller. Each mirrored scene also
 reserves a resting view and a frame inside this allowance: the view's cloned layout index,
 node/paint/track storage and generation, plus both frame buffers, and the frame's paint cache
@@ -1719,6 +1720,17 @@ latency, real Win32 HWND/DWM/capture-exclusion behavior and native Rez before-an
 measurements remain unmeasured; a `160..161` count alone does not close the recovery or
 acceptance gates.
 
+The five episodes run in plain `cargo test`: `the_recovery_episodes_pass_in_fresh_processes`
+reruns each alone in a child process of the test binary, because the deferred dropper's pending
+counts and the recorder's start order are process-wide. In the steady-state draws, an allocation
+outside Kumochi's own `App` paint scopes is GPUI's: it is counted and held to its measured
+ceiling of 91 allocations and 23,137 bytes, while Kumochi's own scopes still add none. The whole
+interval from the first draw (`162`) through the terminal apply (`161`) counts as `App` and is
+held to measured per-case bounds, at most 395 allocations and 130,961 bytes, of which at most
+172 allocations and 65,598 bytes outlive the interval. The real typing panel's gpui-kit text
+input keeps the text system alive after teardown, so the episodes expect two holders of it; this
+is an accepted exception to raise with gpui-kit.
+
 Fixed four-slot cache
 metadata is conservatively charged in full to each scene, rather than adding an unmetered
 index allocation. Begin, recovery and acknowledged-cut adoption check the combined charge.
@@ -1764,7 +1776,8 @@ Recovery waits for a free worker slot under one unchanged two-second deadline fo
 a conservative margin over the measured core recovery fixtures (below 86 ms on Rez with
 fixed text measurement). Full cap recovery
 with real fonts remains a B9 measurement, not a claim made by the fixed-measurement fixture.
-A failed recovered scene is cleared through `ClearDrawing`, retaining its typed history and
+A failed recovered scene is refused through `SceneFailed`, which the brain clears without
+treating it as a user clear, retaining its typed history and
 allowing successful scenes to install. If the whole batch misses its deadline, its pending
 scenes clear and late answers cannot restore them. Stop clears incomplete recovery first,
 then cuts every known v1 scene at its activated bound. Cuts remain held until the data-pipe

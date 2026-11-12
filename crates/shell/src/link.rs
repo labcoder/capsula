@@ -20,8 +20,8 @@ use kumochi_protocol::constants::BRAIN_EXE;
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
     AccountView, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain, DataToShell,
-    Deleted, GitHubView, Hello, Incarnation, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase, RunId,
-    RunOrigin, SceneDescriptor, SceneDescriptorV1, SettingsView, ThreadId, UserError,
+    Deleted, ErrorKey, GitHubView, Hello, Incarnation, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES,
+    Phase, RunId, RunOrigin, SceneDescriptor, SceneDescriptorV1, SettingsView, ThreadId, UserError,
 };
 
 use kumochi_scene::deferred::Deferred;
@@ -63,8 +63,9 @@ pub(crate) enum LinkState {
 /// before `Connected`, and none of a connection's messages after its next state.
 #[derive(Debug)]
 pub(crate) enum LinkEvent {
-    DrawingReplacementFailed {
+    DrawingNotice {
         generation: u64,
+        key: ErrorKey,
         thread: ThreadId,
         run: RunId,
     },
@@ -918,6 +919,7 @@ fn welcome(control: &PipeClient) -> Result<Incarnation, LinkError> {
             | ControlToShell::GitHub(_)
             | ControlToShell::GitHubError(_)
             | ControlToShell::DrawingReplacementFailed { .. }
+            | ControlToShell::DrawingNotReturned { .. }
             | ControlToShell::ActionState { .. }
             | ControlToShell::IssueRefused { .. }
             | ControlToShell::Connections(_)
@@ -1094,8 +1096,22 @@ fn watch(
             }
             Ok(Some(ControlToShell::DrawingReplacementFailed { thread, run })) => {
                 if events
-                    .send_blocking(LinkEvent::DrawingReplacementFailed {
+                    .send_blocking(LinkEvent::DrawingNotice {
                         generation,
+                        key: ErrorKey::DrawingReplacementFailed,
+                        thread,
+                        run,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Ok(Some(ControlToShell::DrawingNotReturned { thread, run })) => {
+                if events
+                    .send_blocking(LinkEvent::DrawingNotice {
+                        generation,
+                        key: ErrorKey::DrawingNotReturned,
                         thread,
                         run,
                     })

@@ -613,7 +613,7 @@ fn the_worker_prepares_under_the_d1_cap() {
     let super::Completion::Prepared { result, .. } = job.run(&mut Shaper) else {
         panic!("a preparation");
     };
-    assert!(matches!(&*result, Err(PrepareError::OverResidency)));
+    assert!(matches!(&*result, Err(PrepareError::OverPaintWork)));
 }
 
 #[test]
@@ -635,9 +635,9 @@ fn the_worker_recovers_under_the_d1_cap() {
             scenes[0].1,
             Err(RecoveryError {
                 revision: 1,
-                error: PrepareError::OverResidency
+                error: PrepareError::OverPaintWork
             })
         ),
-        "recovery must refuse revision one with OverResidency"
+        "recovery must refuse revision one with OverPaintWork"
     );
 }

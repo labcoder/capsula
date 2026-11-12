@@ -2,7 +2,7 @@
 //! fifth-scene eviction.
 
 use kumochi_protocol::message::{
-    DataToShell, MAX_VISIBLE_SCENES, RunId, SceneHeader, SceneId, ThreadId,
+    DataToShell, MAX_VISIBLE_SCENES, RunId, SceneFailure, SceneHeader, SceneId, ThreadId,
 };
 use kumochi_scene::text::Bounded;
 use kumochi_scene::{ReplacementDisposition, Step, StopCut};
@@ -147,6 +147,7 @@ impl Drawing {
                     layout_version: LAYOUT_VERSION,
                     state,
                     committers: vec![Some(run)],
+                    refused_through: 0,
                     gone: false,
                     replacement,
                 });
@@ -175,8 +176,25 @@ impl Drawing {
         let Some(at) = self.live(scene) else {
             return;
         };
-        if kind == CutKind::Failed {
-            self.end_calls_in(scene, out);
+        if let CutKind::Failed(reason) = kind {
+            let held = &mut self.scenes[at];
+            let from = usize::try_from(cut.activated)
+                .unwrap_or(usize::MAX)
+                .max(held.refused_through);
+            for run in held.committers.iter().skip(from).flatten() {
+                if let Some(ledger) = self.runs.iter_mut().find(|ledger| ledger.run == *run) {
+                    ledger.refuse_step();
+                }
+            }
+            held.refused_through = held.committers.len();
+            let error = if reason == SceneFailure::PaintWork {
+                super::CallError::TooMuchToPaint {
+                    cleared: cut.activated == 0,
+                }
+            } else {
+                super::CallError::Failed
+            };
+            self.end_calls_in(scene, &error, out);
         }
         let held = &mut self.scenes[at];
         let logged = held.state.recovery_log().len();
@@ -316,7 +334,7 @@ impl Drawing {
             return;
         }
         self.replacement_failed(scene, out);
-        self.end_calls_in(scene, out);
+        self.end_calls_in(scene, &super::CallError::Failed, out);
         self.clear_scenes(&[scene], out);
     }
 

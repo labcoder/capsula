@@ -73,12 +73,13 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
             run,
             scene,
             index,
+            reason,
             cut,
-            ..
         } => Some(Input::Drawing(crate::drawing::Input::StepFailed {
             run,
             scene,
             index,
+            reason,
             cut,
         })),
         // shortcut: B2a admits holds and consumes focus hints and exclusion lease changes.

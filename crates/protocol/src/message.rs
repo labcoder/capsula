@@ -605,6 +605,13 @@ pub enum ControlToShell {
         /// Its original run, not a later continuation's run.
         run: RunId,
     },
+    /// A run that called `draw` finished with no committed step.
+    DrawingNotReturned {
+        /// The run's conversation.
+        thread: ThreadId,
+        /// The run whose calls drew nothing.
+        run: RunId,
+    },
 }
 
 /// Shell to brain, on the data pipe.

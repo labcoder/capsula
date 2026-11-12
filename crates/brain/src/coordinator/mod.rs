@@ -587,6 +587,8 @@ struct Ending {
     quieting: bool,
     /// The store has the outcome.
     stored: bool,
+    /// It called `draw` and none of its steps survived, told once `Done` is stored.
+    drew_nothing: bool,
 }
 
 impl Run {
@@ -1027,9 +1029,16 @@ impl Coordinator {
             outcome: RunEnd::Done,
             notify: Notify::Shell,
             failed: false,
+            drew_nothing,
             ..
         }) = done.ending
         {
+            if drew_nothing {
+                effects.push(Effect::Control(ControlToShell::DrawingNotReturned {
+                    thread: done.thread,
+                    run: done.id,
+                }));
+            }
             told(&done, Phase::Done, effects);
         }
     }
@@ -1223,6 +1232,7 @@ impl Coordinator {
         if outcome != RunEnd::Done {
             speech::revoke(&mut run, crate::voice::reply::Revoker::Brain, effects);
         }
+        let drew_nothing = outcome == RunEnd::Done && self.drawing.drew_nothing(run.id);
         self.drawing_closed(run.id, effects);
         run.tools.drop_round();
         if run.turn_stored && outcome != RunEnd::Done {
@@ -1266,6 +1276,7 @@ impl Coordinator {
             deferred_data,
             quieting,
             stored: false,
+            drew_nothing,
         });
         let id = run.id;
         self.ending.push(run);
