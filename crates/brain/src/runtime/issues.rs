@@ -571,7 +571,7 @@ impl Brain {
                     let check = job.check;
                     job.phase = Phase::Network(tokio::spawn(async move {
                         if check {
-                            Outcome::Checked(network::check(&http, &token, &action, &control).await)
+                            Outcome::Checked(network::check(&http, &token, &action).await)
                         } else {
                             Outcome::Preflight(
                                 network::preflight(http, token, &action, &control).await,

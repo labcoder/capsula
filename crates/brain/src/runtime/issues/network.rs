@@ -129,7 +129,6 @@ pub(super) async fn check(
     http: &BoundedHttp,
     token: &Secret<GitHubToken>,
     action: &Action,
-    _control: &Control,
 ) -> Result<Lookup, Failure> {
     let Stage::Unknown { mark, .. } = &action.stage else {
         return Err(INCONCLUSIVE);
