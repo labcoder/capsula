@@ -88,8 +88,8 @@ pub(super) struct Placed {
     pub work: PaintWork,
     /// Composed scale `work` charged the rect fallbacks at; the painter refuses a pose past it.
     pub paint_scale: f32,
-    /// The latest `set.behind` anchor. A removed or cut anchor hands on its own link, or its
-    /// handle stays here as the position the object holds.
+    /// The latest `set.behind` anchor. Once it is removed or cut, `LayoutState::held` keeps its
+    /// place.
     pub behind: Option<Handle>,
 }
 
@@ -134,6 +134,9 @@ pub struct LayoutState {
     pub(super) content: Option<Rect>,
     pub(super) presentation_scale: f32,
     pub(super) presentation_limit: f32,
+    /// Removed or cut `set.behind` anchors that live links still reach, directly or through
+    /// each other, with each one's own last link: unpainted places in the paint walk.
+    pub(super) held: BTreeMap<Handle, Option<Handle>>,
 }
 impl fmt::Debug for LayoutState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -155,6 +158,7 @@ impl LayoutState {
             handles: BTreeMap::new(),
             extras: BTreeMap::new(),
             views: BTreeMap::new(),
+            held: BTreeMap::new(),
             canvas: Rect {
                 origin: Vec2::default(),
                 size: scene.header().size.map_or(
@@ -256,6 +260,7 @@ impl LayoutState {
             + heap::btree::<Handle, WireId>(self.handles.len())
             + heap::btree::<u32, Arc<BTreeMap<usize, Extra>>>(self.extras.len())
             + heap::btree::<WireId, Arc<ViewGeometry>>(self.views.len())
+            + heap::btree::<Handle, Option<Handle>>(self.held.len())
             + self.views.keys().map(|id| id.as_str().len()).sum::<usize>()
             + 2 * ids
             + heap::ARC_HEADER
@@ -283,35 +288,31 @@ impl LayoutState {
             std::iter::once(view.handle).chain(view.solids.iter().map(|solid| solid.handle))
         })
     }
-    /// Moves each link to an anchor that `before` held and this state dropped onto that anchor's
-    /// own link, so the dependants take the dropped anchor's place.
-    pub(super) fn hand_on_links(&mut self, before: &Self) {
-        let dropped = |handle: &Handle| {
-            before
-                .handles
-                .get(handle)
-                .filter(|_| !self.handles.contains_key(handle))
-                .and_then(|id| before.objects.get(id))
-        };
-        let moved: Vec<(WireId, Handle)> = self
-            .objects
-            .iter()
-            .filter_map(|(id, object)| {
-                let mut at = object.behind?;
-                for _ in 0..before.objects.len() {
-                    let Some(next) = dropped(&at).and_then(|anchor| anchor.behind) else {
-                        break;
-                    };
-                    at = next;
-                }
-                (Some(at) != object.behind).then(|| (id.clone(), at))
-            })
-            .collect();
-        for (id, at) in moved {
-            if let Some(object) = self.objects.get_mut(&id) {
-                object.behind = Some(at);
+    /// Rebuilds `held` from the live links: every dropped anchor they reach keeps its own last
+    /// link from `before`, and one nothing reaches any more is let go.
+    pub(super) fn hold_dropped_anchors(&mut self, before: &Self) {
+        let mut held = BTreeMap::new();
+        for object in self.objects.values() {
+            let mut next = object.behind;
+            while let Some(at) =
+                next.filter(|at| !self.handles.contains_key(at) && !held.contains_key(at))
+            {
+                next = before
+                    .handles
+                    .get(&at)
+                    .and_then(|id| before.objects.get(id))
+                    .map_or_else(
+                        || before.held.get(&at).copied().flatten(),
+                        |anchor| anchor.behind,
+                    );
+                held.insert(at, next);
             }
         }
+        self.held = held;
+    }
+    /// Removed or cut anchors still in the paint walk, with their own last links.
+    pub(crate) fn held(&self) -> &BTreeMap<Handle, Option<Handle>> {
+        &self.held
     }
     /// Resolves a prepared model id without consulting future scene commits.
     pub fn handle(&self, id: &WireId) -> Option<Handle> {
@@ -434,9 +435,10 @@ impl LayoutState {
             content: None,
             presentation_scale: self.presentation_scale,
             presentation_limit: self.presentation_limit,
+            held: BTreeMap::new(),
         });
         after.prune_extras();
-        after.hand_on_links(self);
+        after.hold_dropped_anchors(self);
         for object in after.objects.values() {
             after.world_bounds(object)?;
         }

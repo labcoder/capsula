@@ -314,7 +314,6 @@ pub fn prepare(
         after.handles.insert(*handle, id.clone());
         after.objects.insert(id, object);
     }
-    after.hand_on_links(&before);
     for change in ticket.run.set.iter() {
         if let Some(anchor) = &change.behind {
             let anchor = after.objects.get(anchor).ok_or_else(invariant)?.item.handle;
@@ -325,6 +324,7 @@ pub fn prepare(
                 .behind = Some(anchor);
         }
     }
+    after.hold_dropped_anchors(&before);
     edges::route(&mut after, &build)?;
     update_group_bounds(&mut after);
     edge_labels::separate(&mut after, &build)?;

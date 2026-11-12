@@ -242,6 +242,48 @@ fn a_removed_anchor_hands_its_own_link_to_its_dependants() {
 }
 
 #[test]
+fn removing_an_anchor_keeps_its_dependants_where_they_were() {
+    let tree = json!({"id":"sun","put":[circle("sun")],"set":[
+        {"target":"sun","behind":"c2"},{"target":"c1","behind":"c2"},{"target":"sky","behind":"sun"}]});
+    let (scene, _, view) = drawn(vec![
+        cloud(),
+        tree.clone(),
+        json!({"id":"drop","remove":["sun"]}),
+    ]);
+    assert_eq!(
+        painted(&view, ALL),
+        ["c1", "sky", "c2"],
+        "sky stays above c1"
+    );
+    assert_eq!(painted(&recovered(&scene), ALL), ["c1", "sky", "c2"]);
+    let (scene, _, view) = drawn(vec![
+        cloud(),
+        tree,
+        json!({"id":"root","remove":["c2"]}),
+        json!({"id":"drop","remove":["sun"]}),
+    ]);
+    assert_eq!(painted(&view, ALL), ["c1", "sky"], "at the root too");
+    assert_eq!(painted(&recovered(&scene), ALL), ["c1", "sky"]);
+}
+
+#[test]
+fn nested_removed_anchors_keep_the_order_of_what_survives() {
+    let names = ["a1", "a2", "b", "z"];
+    let put = json!({"id":"put","put":[circle("a1"),circle("a2"),circle("b"),circle("z")],"set":[
+        {"target":"a1","behind":"b"},{"target":"a2","behind":"b"},{"target":"z","behind":"a1"}]});
+    let (scene, _, view) = drawn(vec![put.clone(), json!({"id":"one","remove":["a1"]})]);
+    assert_eq!(painted(&view, &names), ["z", "a2", "b"]);
+    assert_eq!(painted(&recovered(&scene), &names), ["z", "a2", "b"]);
+    let (scene, _, view) = drawn(vec![
+        put,
+        json!({"id":"one","remove":["a1"]}),
+        json!({"id":"two","remove":["b"]}),
+    ]);
+    assert_eq!(painted(&view, &names), ["z", "a2"]);
+    assert_eq!(painted(&recovered(&scene), &names), ["z", "a2"]);
+}
+
+#[test]
 fn two_cuts_hand_on_links_and_drop_unshown_links_alike_live_and_recovered() {
     let (mut scene, mut budget, view) = drawn(vec![
         cloud(),
