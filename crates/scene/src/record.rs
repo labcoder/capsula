@@ -97,11 +97,20 @@ impl Begin {
     #[must_use]
     pub fn continues(&self, stored: &Self) -> bool {
         // shortcut: the stored title and alt keep their first text and can go stale after an edit; store the latest once a stale description shows.
-        self.v == stored.v
-            && self.scene == stored.scene
-            && self.surface == stored.surface
-            && self.size == stored.size
-            && self.others == stored.others
+        let Self {
+            v,
+            scene,
+            surface,
+            size,
+            title: _,
+            alt: _,
+            others,
+        } = self;
+        *v == stored.v
+            && *scene == stored.scene
+            && *surface == stored.surface
+            && *size == stored.size
+            && *others == stored.others
     }
 }
 /// A strict empty call terminator.

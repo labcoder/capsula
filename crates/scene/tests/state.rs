@@ -499,6 +499,26 @@ fn call_guards_allow_typed_equal_continuations_but_not_records_after_end() {
             .code,
         ErrorCode::HeaderMismatch
     );
+    for (other, reason) in [
+        (
+            r#"{"begin":{"v":1,"scene":"scene","surface":"inline","alt":""}}"#,
+            "same scene needs the same surface",
+        ),
+        (
+            r#"{"begin":{"v":1,"scene":"scene","surface":"overlay","alt":"","others":"keep"}}"#,
+            "same scene needs the same others",
+        ),
+        (
+            r#"{"begin":{"v":1,"scene":"other","surface":"overlay","alt":""}}"#,
+            "a continuation names its own scene",
+        ),
+    ] {
+        assert_eq!(
+            call.accept(&record(other), &header).expect_err(reason).code,
+            ErrorCode::HeaderMismatch,
+            "{reason}"
+        );
+    }
     call.accept(&Record::Begin(header.clone()), &header)
         .expect("begin");
     assert_eq!(
