@@ -384,7 +384,13 @@ impl Brain {
                 if matches!(message, ControlToBrain::VoiceHoldStopped { .. }) {
                     let accepted = self.holds.stopped(key);
                     link.control(&ControlToShell::VoiceHoldStopAccepted { gesture: *gesture })?;
-                    if !accepted {
+                    if !accepted
+                        && self
+                            .holds
+                            .pending
+                            .as_ref()
+                            .is_none_or(|hold| hold.key != key || hold.ask.is_some())
+                    {
                         return Ok(true);
                     }
                 }

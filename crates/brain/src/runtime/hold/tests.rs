@@ -391,6 +391,57 @@ async fn prepared_hold_across_loading_is_admitted_before_first_serve_iteration()
 }
 
 #[tokio::test]
+async fn stop_before_admission_cancels_the_pending_hold_and_owes_no_debt() {
+    use crate::runtime::{Recovery, voice};
+    use kumochi_protocol::message::PartState;
+    let scratch = Scratch::new("hold-stop-before-admission");
+    let (mut brain, release, _decoded, _fetch) =
+        crate::runtime::tests::holds::loading_input(&scratch, Vec::new(), "unused");
+    let resume = crate::voice::stt::hold_before_serving(brain.hold_voice().1.unwrap());
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    link.recovery = Some(Recovery::new(&[], 1024));
+    recording(&mut brain);
+    let hold = brain.holds.pending.as_mut().unwrap();
+    hold.ask = None;
+    hold.audio = None;
+    brain.holds.debt = None;
+    brain.holds.gate.active.store(0, Ordering::SeqCst);
+    brain.hold_voice_changed(&mut link).unwrap();
+    assert!(
+        brain
+            .hold_control(
+                &ControlToBrain::VoiceHoldStopped {
+                    gesture: KEY.gesture
+                },
+                &mut link
+            )
+            .unwrap()
+    );
+    accepted(&mut output, KEY.gesture);
+    assert_eq!(status(&mut output), HoldStatus::Cancelled);
+    assert!(brain.holds.pending.is_none());
+    release.send(()).unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(5), voice::next(&mut brain.voice))
+        .await
+        .unwrap();
+    brain.voice_event(event, Some(&mut link)).unwrap();
+    let bytes = output.try_recv().unwrap();
+    let view = kumochi_protocol::frame::decode::<ControlToShell>(
+        &bytes[kumochi_protocol::frame::HEADER_LEN..],
+    )
+    .unwrap();
+    assert!(matches!(view, ControlToShell::Voice(view) if view.speech_input == PartState::Ready));
+    assert_eq!(output.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    assert_eq!(brain.holds.debt, None);
+    resume();
+    brain.close().await;
+}
+
+#[tokio::test]
 async fn admission_ties_device_debt_to_the_admitting_shell_process() {
     use crate::runtime::{Recovery, voice};
     use std::sync::atomic::AtomicU8;
