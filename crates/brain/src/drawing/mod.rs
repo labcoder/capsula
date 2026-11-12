@@ -33,7 +33,7 @@ pub use snapshot::Snapshot;
 use call::{Call, RunLedger};
 
 /// The layout algorithm a new scene is begun with, persisted in its header.
-pub const LAYOUT_VERSION: u32 = 1;
+pub const LAYOUT_VERSION: u32 = 2;
 
 /// Jobs waiting behind the pending write: every record a run's calls may make, each call's
 /// refusal and finish, and room for the shell's shown steps, cuts and stops (guess).

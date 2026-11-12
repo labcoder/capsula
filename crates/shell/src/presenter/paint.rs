@@ -72,8 +72,8 @@ pub(crate) struct Painted {
 pub(crate) struct Frames {
     slots: [Option<(SceneId, Slot)>; MAX_VISIBLE_SCENES],
     epoch: u64,
-    /// A slot left since the last sample.
-    removed: bool,
+    /// A slot left or changed placement since the last sample.
+    invalidated: bool,
     /// Whether the overlay is shown, so only a paint that can reach the screen counts.
     pub(crate) shown: bool,
 }
@@ -188,6 +188,21 @@ impl Frames {
         Some(slot)
     }
 
+    /// Re-places the last sampled pose without beginning or dropping a pending entrance.
+    pub(super) fn reposition(&mut self, scene: SceneId, view: &SceneView) {
+        let (_, slot) = self
+            .slots
+            .iter_mut()
+            .flatten()
+            .find(|(id, _)| *id == scene)
+            .expect("each adopted scene has a frame slot");
+        if let Some(at) = slot.sampled_ms {
+            view.frame(at, &mut slot.frame)
+                .expect("placement preserves the view generation");
+        }
+        self.invalidated = true;
+    }
+
     pub(super) fn take(&mut self, scene: SceneId) -> Option<Slot> {
         let slot = self
             .slots
@@ -195,12 +210,12 @@ impl Frames {
             .find(|slot| slot.as_ref().is_some_and(|(id, _)| *id == scene))
             .and_then(Option::take)
             .map(|(_, slot)| slot);
-        self.removed |= slot.is_some();
+        self.invalidated |= slot.is_some();
         slot
     }
 
     pub(super) fn take_all(&mut self) -> [Option<(SceneId, Slot)>; MAX_VISIBLE_SCENES] {
-        self.removed |= self.slots.iter().any(Option::is_some);
+        self.invalidated |= self.slots.iter().any(Option::is_some);
         std::mem::take(&mut self.slots)
     }
 
@@ -218,7 +233,7 @@ impl Frames {
     ) -> Result<Sample, SceneId> {
         let mut sample = Sample {
             visible: false,
-            changed: std::mem::take(&mut self.removed),
+            changed: std::mem::take(&mut self.invalidated),
         };
         for (scene, view, now_ms) in views {
             let (_, slot) = self

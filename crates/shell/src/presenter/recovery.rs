@@ -9,8 +9,8 @@ use std::{
 
 use kumochi_protocol::message::SceneId;
 use kumochi_scene::{
-    Frame, GlobalBudget, SceneBinding, SceneEvent, SceneView, deferred::Deferred,
-    display::PaintWork, layout::SceneRecovery, limits::MAX_RESIDENT_BYTES,
+    Frame, GlobalBudget, SceneBinding, SceneEvent, deferred::Deferred, display::PaintWork,
+    layout::SceneRecovery, limits::MAX_RESIDENT_BYTES,
 };
 
 use super::{
@@ -172,7 +172,7 @@ impl Presenter {
         drop(rejected);
         for (scene, state, rest, retained) in adopted {
             let activation = super::Activation::new(&state, now);
-            let view = SceneView::new(&rest, state.activated());
+            let view = super::placement::resting_view(&rest, state.activated(), self.drawing_stage);
             let frame = Frame::new();
             let cache = self.stage.stage(&view);
             let bytes = state.attributed_bytes();

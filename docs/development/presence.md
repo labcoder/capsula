@@ -30,6 +30,23 @@ and the keyboard is armed before the brain link starts connecting; [input.md](in
 the shortcut, the typing panel and Esc. A link failure shows in the status panel; Retry never sends
 the previous input again.
 
+`presence::stage` unions the accepted dock layout, the status peek's minimum reservation
+and the accepted bounds of the visible typing, Threads or Settings panel. It chooses the
+largest-area usable band below, above, left or right, in that tie order, with a
+32-logical-pixel inset and at least 240×160 logical pixels left after the inset. If no band
+is usable, it retries with only the dock and peek reserved, then uses the inset work area
+as a last resort. On a display too small for both, an open panel can cover a drawing and
+its entrance can play unseen. Opening or closing a panel updates placement before the next paint;
+when the dock lands, panels re-anchor before the stage is recomputed. The typing panel
+retains its accepted size when re-anchored, like Threads and Settings.
+A retained GPUI display observer refreshes the dock's scale and anchor,
+the drawing stage and a shown overlay's bounds after display changes. Existing views snap
+to the new stage; their scene clocks and prepared geometry stay intact. See
+[scene.md](scene.md#canvas-and-overlay-placement) for the canvas and scale-envelope rules.
+The work area is read fresh at placement transitions, not polled while sampling frames.
+Work-area-only changes wait for the next placement; add a work-area notification through
+the presence adapter.
+
 Before the link starts, the shell starts the scene dropper or fails startup. Typed scene frames
 are protected at the pipe reader, including stale frames and queued or undelivered event batches.
 Preparation and recovery inputs and answers keep that protection through cancellation, rejected

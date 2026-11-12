@@ -348,6 +348,9 @@ impl Presence {
     }
 
     pub(super) fn draw_changed_at(&mut self, now: Instant, cx: &mut Context<'_, Self>) -> bool {
+        if self.presenter.placement_due(now) {
+            self.place_drawings(cx.weak_entity(), cx);
+        }
         if let Some(session) = &self.session {
             let effects = self.presenter.advance(session.generation(), now);
             match effects {

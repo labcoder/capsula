@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 pub(super) fn validate(
     step: &Step,
     objects: &mut BTreeMap<WireId, Object>,
+    surface: crate::record::Surface,
     error_slot: impl Fn(crate::Handle) -> Option<usize>,
 ) -> Result<(), StepError> {
     let fail = |code| StepError::in_step(&step.id, FieldPath::default().field("put"), code);
@@ -66,8 +67,10 @@ pub(super) fn validate(
                 .get(&object.handle)
                 .expect("every object has graph metrics")
                 .scale;
-            object.work.usage.segments = path.segments(scale).map_err(&fail)?;
-            path.composed_scale = scale;
+            let prepared_scale =
+                (scale * crate::limits::presentation_scale(surface)).min(MAX_COMPOSED_SCALE);
+            object.work.usage.segments = path.segments(prepared_scale).map_err(&fail)?;
+            path.composed_scale = prepared_scale;
         }
         if let Some(length) = object.work.dash {
             // Two pieces per edge, and one more for f32 rounding once there is an edge to paint.
@@ -117,8 +120,15 @@ fn graph_metrics(
     }
     Ok(memo)
 }
-pub(crate) fn validate_transforms(objects: &BTreeMap<WireId, Object>) -> Result<(), ErrorCode> {
-    graph_metrics(objects).map(|_| ()).map_err(|(_, code)| code)
+pub(crate) fn validate_transforms(
+    objects: &BTreeMap<WireId, Object>,
+) -> Result<impl Iterator<Item = (crate::Handle, f32)>, ErrorCode> {
+    graph_metrics(objects)
+        .map(|memo| {
+            memo.into_iter()
+                .map(|(handle, graph)| (handle, graph.scale))
+        })
+        .map_err(|(_, code)| code)
 }
 fn graph(
     id: &WireId,

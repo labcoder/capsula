@@ -440,6 +440,7 @@ impl Presence {
                 if let Err(error) = self.reanchor_panels(cx) {
                     tracing::warn!(%error, "can't re-anchor open panels after the dock moved");
                 }
+                self.place_drawings(owner.clone(), cx);
                 let origin = [placement.layout.overlay[0], placement.layout.overlay[1]];
                 self.dock.update(cx, |dock, cx| {
                     dock.paint = Some(placement.frame.paint);

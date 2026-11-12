@@ -63,6 +63,7 @@ pub(super) struct TextPanel {
     pub(super) window: AnyWindowHandle,
     pub(super) view: Entity<TextView>,
     pub(super) typing: Typing,
+    pub(super) bounds: [i32; 4],
     pub(super) input: Entity<InputState>,
     /// The window in front before the panel took focus, given back when it closes.
     previous: Option<Foreground>,
@@ -94,6 +95,7 @@ impl TextPanel {
             window,
             view,
             typing: Typing::default(),
+            bounds: [0; 4],
             input,
             previous: None,
             draft: None,
@@ -135,6 +137,7 @@ impl Presence {
             })
             .map_err(|error| OpenError::Gpui(error.into()))??;
         let opening = !text.typing.visible;
+        text.bounds = bounds;
         text.typing.open();
         if opening {
             self.chat.update(cx, |state, cx| {
@@ -174,6 +177,7 @@ impl Presence {
                 format_args!("input draft nonempty={nonempty} preserved={preserved}"),
             );
         }
+        self.place_drawings(cx.weak_entity(), cx);
         self.runs_changed(cx)
     }
 
@@ -255,6 +259,7 @@ impl Presence {
         Ok(TextPanel {
             window,
             typing: Typing::default(),
+            bounds: [0; 4],
             input,
             view,
             previous: None,
@@ -298,6 +303,7 @@ impl Presence {
             })
             .map_err(|error| OpenError::Gpui(error.into()))??;
         diagnostics::record(cx, format_args!("input dismissed"));
+        self.place_drawings(cx.weak_entity(), cx);
         // The typing panel was covering the status panel's Stop.
         if self.escape_hold.shows_stop() {
             self.pointer_changed(cx)?;

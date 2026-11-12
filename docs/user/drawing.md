@@ -14,8 +14,17 @@ diagrams have the same 48-node and 96-arrow limits as explicitly grouped diagram
 
 Drawings appear on the main display, over your other windows. They never take focus or catch
 clicks, so the app underneath keeps working. While one is on screen, Esc clears it
-(see [Esc](escape.md)). Any part of a drawing past the edges of the main display is cut off;
-Kumochi doesn't move or shrink it to fit.
+(see [Esc](escape.md)). Kumochi centers each drawing in the free area beside its panel,
+shrinks it to fit, or enlarges it up to twice its canvas size when there is room. A drawing
+uses its declared canvas, or its content bounds when no canvas size was given. Moving the
+dock, opening or closing a typing, Threads or Settings panel, or changing the display
+re-places the drawing immediately, without redrawing its steps. When there is room, the free
+area stays clear of the open panel and reserves room for the smaller status peek even when
+it is hidden. On a display too small for both, an open panel can cover a drawing and its
+entrance can play unseen.
+
+This update changes how drawing coordinates are laid out. Drawings left on screen by an
+older version are cleared on reconnect; conversation history is kept.
 
 A shape whose outline crosses itself, like a star, is filled everywhere inside it, its middle
 included. Labels stay upright even when the shape around them is turned. Where translucent

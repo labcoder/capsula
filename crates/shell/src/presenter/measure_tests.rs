@@ -337,7 +337,7 @@ fn measure_native_maximal_content_residency() {
                             committed.preparation,
                             before.clone(),
                             SurfaceGeometry::Overlay {
-                                logical_size: [1920.0, 1080.0],
+                                default_canvas: [1920.0, 1080.0],
                             },
                             Arc::clone(&theme),
                         )

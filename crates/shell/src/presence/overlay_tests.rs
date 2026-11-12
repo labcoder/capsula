@@ -399,7 +399,7 @@ fn a_rotated_label_stays_upright_at_its_turned_anchor_and_scales_uniformly() {
 fn a_shown_overlay_holds_esc_and_a_hidden_one_does_not() {
     kumochi_scene::deferred::start().expect("the dropper starts");
     let surface = SurfaceGeometry::Overlay {
-        logical_size: [1920.0, 1080.0],
+        default_canvas: [1920.0, 1080.0],
     };
     let presenter = Presenter::new(
         surface,
@@ -686,7 +686,7 @@ fn begun(stage: Box<dyn Stage>) -> Presenter {
 fn begun_at(stage: Box<dyn Stage>, now: Instant) -> Presenter {
     kumochi_scene::deferred::start().expect("the dropper starts");
     let surface = SurfaceGeometry::Overlay {
-        logical_size: [1920.0, 1080.0],
+        default_canvas: [1920.0, 1080.0],
     };
     let mut presenter = Presenter::new(surface, Arc::new(Theme::default()), stage);
     presenter.connected(1);
@@ -700,7 +700,7 @@ fn begun_at(stage: Box<dyn Stage>, now: Instant) -> Presenter {
     };
     let header = SceneHeader {
         begin,
-        layout_version: 1,
+        layout_version: 2,
     };
     let frame = DataToShell::SceneBegin {
         scene: TWINNED,

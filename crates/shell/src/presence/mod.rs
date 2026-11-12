@@ -44,6 +44,7 @@ mod pull_dock;
 mod pull_picture;
 mod pulling;
 mod settings;
+mod stage;
 #[cfg(test)]
 mod test_fixture;
 #[cfg(test)]
@@ -105,6 +106,7 @@ struct PresenceApp {
 impl Global for PresenceApp {}
 
 struct Presence {
+    _display_watch: Option<gpui_kit::Subscription>,
     exclusion: exclusion::Exclusion<exclusion::Receipt>,
     exclusion_timer: Option<Task<()>>,
     #[cfg(test)]
@@ -891,16 +893,12 @@ pub(crate) fn open(
     let kumo = cx.new(|_| KumoView::new());
     let (panel_window, panel) = status_window(&events, kumo.clone(), &mut input_windows, cx)?;
     let gesture = Rc::new(Cell::new(Gesture::default()));
-    // shortcut: B5 owns per-display geometry and refresh; preparation uses a default if none is primary.
-    let logical_size = cx.primary_display().map_or([1920.0, 1080.0], |display| {
-        let display_size = display.bounds().size;
-        [display_size.width.into(), display_size.height.into()]
-    });
+    let default_canvas = kumochi_scene::layout::DEFAULT_CANVAS;
     kumochi_scene::deferred::start().map_err(OpenError::Dropper)?;
     let paint_scratch = Rc::new(std::cell::RefCell::new(paint_stroke::Scratch::new()));
     let stage = paint_cache::Stager::new(&paint_scratch);
     let mut presenter = crate::presenter::Presenter::new(
-        kumochi_scene::layout::SurfaceGeometry::Overlay { logical_size },
+        kumochi_scene::layout::SurfaceGeometry::Overlay { default_canvas },
         std::sync::Arc::new(kumochi_scene::theme::Theme::default()),
         Box::new(paint_cache::Stager(
             stage.0 + size_of::<overlay::PaintNotice>() + 2 * size_of::<usize>(),
@@ -911,6 +909,7 @@ pub(crate) fn open(
     let owner = cx.new(|cx| {
         listen(states, event_changes.clone(), cx);
         Presence {
+            _display_watch: Some(stage::watch_displays(cx.weak_entity(), cx)),
             exclusion: exclusion::Exclusion::default(),
             exclusion_timer: None,
             #[cfg(test)]

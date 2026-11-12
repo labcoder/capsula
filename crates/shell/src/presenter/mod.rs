@@ -32,6 +32,7 @@ mod admit;
 mod measure;
 pub(crate) mod overlay_input;
 mod paint;
+mod placement;
 mod prepare;
 mod recovery;
 mod scene;
@@ -54,8 +55,8 @@ use kumochi_protocol::message::{
     SceneDescriptorV1, SceneFailure, SceneId,
 };
 use kumochi_scene::{
-    DetachedCandidate, Frame, GlobalBudget, SceneBinding, SceneRead, SceneState, SceneView,
-    StepError, StopCut, StopOutcome,
+    DetachedCandidate, Frame, GlobalBudget, SceneBinding, SceneRead, SceneState, StepError,
+    StopCut, StopOutcome,
     deferred::{self, Deferred},
     display::PaintWork,
     layout::{LayoutState, PrepareError, PrepareInput, PreparedStep, SurfaceGeometry},
@@ -74,7 +75,7 @@ use scene::{Cut, Out, Ready, Running, Scene, Ticket};
 use snapshot::Assembler;
 
 /// The layout algorithm this shell prepares with; the brain stores it with each scene.
-const LAYOUT_VERSION: u32 = 1;
+const LAYOUT_VERSION: u32 = 2;
 /// A step's preparation should take no longer; missing it is only logged.
 const TARGET: Duration = Duration::from_millis(50);
 /// An admission fails this long after it reached the lane, and a step's preparation this long
@@ -133,6 +134,7 @@ pub(crate) enum Effect {
 pub(crate) struct Presenter {
     pub(crate) input: overlay_input::OverlayOwner,
     surface: SurfaceGeometry,
+    drawing_stage: Option<kumochi_scene::geom::Rect>,
     theme: Arc<Theme>,
     generation: Option<u64>,
     phase: Phase,
@@ -175,6 +177,7 @@ impl Presenter {
         Self {
             input: overlay_input::OverlayOwner::default(),
             surface,
+            drawing_stage: None,
             theme,
             generation: None,
             phase: Phase::Offline,
@@ -652,7 +655,7 @@ impl Presenter {
                 let state = SceneState::begin(header.begin.clone()).map_err(|_| Broken::Header)?;
                 let rest = LayoutState::new(&state);
                 let retained = rest.resident_bytes();
-                let view = SceneView::new(&rest, state.activated());
+                let view = placement::resting_view(&rest, state.activated(), self.drawing_stage);
                 let activation = Activation::new(&state, now);
                 let frame = Frame::new();
                 let cache = self.stage.stage(&view);
@@ -804,7 +807,8 @@ impl Presenter {
             StopOutcome::Cleared => None,
         };
         if let Some(rest) = rest {
-            let mut view = SceneView::new(&rest, scene.state.view().activated());
+            let mut view =
+                placement::resting_view(&rest, scene.state.view().activated(), self.drawing_stage);
             if let Some(at) = stopped {
                 view.carry_spin(&scene.view, at);
             }
@@ -1022,37 +1026,6 @@ impl Presenter {
             let frame = self.frames.borrow_mut().take(id);
             drop(Deferred::new((rest, view, frame, activation), bytes));
         }
-    }
-
-    /// Adopts a bound scene and reserves its frame, with the cache staged from its view.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "adoption moves every owner of the new scene into place at once"
-    )]
-    fn install(
-        &mut self,
-        id: SceneId,
-        state: SceneBinding,
-        rest: LayoutState,
-        retained: usize,
-        view: SceneView,
-        frame: Frame,
-        cache: Box<dyn SceneCache>,
-        activation: Activation,
-    ) {
-        let cache_bytes = cache.bytes();
-        let frame = self.frames.borrow_mut().adopt(id, frame, cache);
-        let mut scene = Scene::new(state, rest, retained, view, frame, cache_bytes, activation);
-        if let Some(pending) = self
-            .stopped_begins
-            .iter_mut()
-            .find(|slot| **slot == Some(id))
-        {
-            *pending = None;
-            scene.cut = Cut::Outstanding;
-            scene.skipping = true;
-        }
-        self.scenes.insert(id, scene);
     }
 
     /// A scene the shell clears: the brain is told unless it is already known as gone.

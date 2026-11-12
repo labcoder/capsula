@@ -54,6 +54,7 @@ impl Presence {
                 } else if let Some(run) = self.presenter.stoppable_run()
                     && self.presenter.live_work(std::time::Instant::now())
                 {
+                    self.place_drawings(cx.weak_entity(), cx);
                     let effects = self.presenter.stop(run, std::time::Instant::now());
                     self.scene_effects(effects, cx);
                 }

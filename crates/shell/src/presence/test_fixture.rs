@@ -53,6 +53,7 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
         });
         let (threads, chat) = Threads::pair();
         let presence = cx.new(|cx| Presence {
+            _display_watch: None,
             exclusion: super::exclusion::Exclusion::default(),
             exclusion_timer: None,
             exclusion_fixture: None,
@@ -82,7 +83,7 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             paint_notice: Rc::default(),
             presenter: Presenter::new(
                 SurfaceGeometry::Overlay {
-                    logical_size: [1920.0, 1080.0],
+                    default_canvas: [1920.0, 1080.0],
                 },
                 Arc::new(Theme::default()),
                 Box::new(super::paint_cache::Stager(

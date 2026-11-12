@@ -24,7 +24,7 @@ fn drawn(scratch: &Scratch) -> (Coordinator, SceneId) {
     store.recover().expect("recover");
     store.main_thread().expect("main");
     store.begin_turn(T, Some("test"), R, "turn").expect("run");
-    let header = serde_json::from_value(serde_json::json!({"begin":{"v":1,"scene":"car","surface":"overlay","alt":"a car"},"layout_version":1})).expect("header");
+    let header = serde_json::from_value(serde_json::json!({"begin":{"v":1,"scene":"car","surface":"overlay","alt":"a car"},"layout_version":2})).expect("header");
     let step = serde_json::from_value(serde_json::json!({"id":"s1","put":[{"view3d":{"id":"v"}},
         {"solid":{"in":"v","id":"a","shape":"box","size":[2,2,2],"label":"Wheel","info":"Front left"}},
         {"solid":{"in":"v","id":"b","shape":"box","size":[1,1,1]}}]}))
@@ -35,7 +35,7 @@ fn drawn(scratch: &Scratch) -> (Coordinator, SceneId) {
             run: R,
             target: Target::New(header),
             revision: 1,
-            layout_version: 1,
+            layout_version: 2,
             step: Arc::new(step),
         })
         .expect("first step")
