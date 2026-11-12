@@ -424,7 +424,8 @@ pub struct Change {
     /// Descriptive text of a solid.
     #[schemars(skip)]
     pub info: Option<Text>,
-    /// Paint the target just below this object.
+    /// Paint the target (not a diagram, table or chart) just below this object, which has the same
+    /// parent. Never brings it forward or reverses an earlier link.
     pub behind: Option<WireId>,
 }
 /// Line record fields.
