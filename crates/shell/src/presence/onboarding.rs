@@ -124,7 +124,12 @@ impl OnboardingView {
             let baked_us = started.elapsed().as_micros();
             let kept = view.update(cx, |view, cx| {
                 view.kumo = image.map(Arc::new);
-                super::diagnostics::record(cx, format_args!("onboarding kumo baked us={baked_us}"));
+                if view.kumo.is_some() {
+                    super::diagnostics::record(
+                        cx,
+                        format_args!("onboarding kumo baked us={baked_us}"),
+                    );
+                }
                 cx.notify();
             });
             if kept.is_err() {
