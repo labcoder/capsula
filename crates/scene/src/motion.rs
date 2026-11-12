@@ -539,7 +539,7 @@ impl Frame {
             generation: None,
         }
     }
-    /// Objects in handle order. Use [`Self::paint_items`] for layered painting.
+    /// Objects in paint order. Use [`Self::paint_items`] for layered painting.
     pub fn items(&self) -> &[FrameItem] {
         &self.items
     }
@@ -650,7 +650,7 @@ impl SceneView {
     pub fn new(at_rest: &LayoutState, activated: u32) -> Self {
         let nodes = build_nodes(at_rest, |_| DONE);
         Self {
-            paint: paint_order(&nodes),
+            paint: paint_order(&nodes, at_rest),
             nodes,
             layout: at_rest.clone(),
             layout_bytes: at_rest.resident_bytes(),
@@ -809,7 +809,7 @@ impl SceneView {
             .map(|geometry| ViewMotion::new(geometry, self.view.as_ref(), Some(now)));
         let (tracks, superseded) = own(&mut nodes, view.as_mut(), candidates);
         let view = Self {
-            paint: paint_order(&nodes),
+            paint: paint_order(&nodes, &step.after),
             nodes,
             layout: step.after.clone(),
             layout_bytes: step.retained_bytes(),
@@ -1060,12 +1060,16 @@ fn retired_bytes(superseded: &Vec<Option<Live>>) -> usize {
             .sum::<usize>()
 }
 
-/// Indices of drawable nodes in handle order, the paint order of prepared display lists.
-fn paint_order(nodes: &[Node]) -> Vec<usize> {
+/// Indices of drawable nodes in paint order: handle order, except where a `set` put an object
+/// behind another. Computed once per activation or rest view, never per frame.
+fn paint_order(nodes: &[Node], layout: &LayoutState) -> Vec<usize> {
     let mut paint: Vec<usize> = (0..nodes.len())
         .filter(|index| !nodes[*index].primitives.is_empty())
         .collect();
-    paint.sort_unstable_by_key(|index| nodes[*index].handle);
+    paint.sort_by_cached_key(|index| {
+        let handle = nodes[*index].handle;
+        (layout.paint_at(handle), handle)
+    });
     paint
 }
 

@@ -64,6 +64,31 @@ impl Rest {
     }
 }
 
+/// Where an object paints: by anchor, then deeper behind-chains first, then by handle. An object
+/// paints at its own handle until a `set` puts it behind another; it keeps that anchor after the
+/// anchor is removed or cut, so replay and recovery recompute the same order.
+// shortcut: nothing moves an object in front of a newer one; add "in front" when someone asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct PaintKey {
+    anchor: Handle,
+    depth: std::cmp::Reverse<u32>,
+}
+impl PaintKey {
+    pub(crate) fn own(handle: Handle) -> Self {
+        Self {
+            anchor: handle,
+            depth: std::cmp::Reverse(0),
+        }
+    }
+    /// Just below `self`, and above anything already behind the same anchor at that depth.
+    pub(super) fn under(self) -> Self {
+        Self {
+            anchor: self.anchor,
+            depth: std::cmp::Reverse(self.depth.0.saturating_add(1)),
+        }
+    }
+}
+
 /// Explicit motion envelopes by property, shared between prefixes until one changes them.
 pub(super) type Motions = BTreeMap<&'static str, crate::state::work::Motion>;
 
@@ -85,6 +110,8 @@ pub(super) struct Placed {
     pub work: PaintWork,
     /// Composed scale `work` charged the rect fallbacks at; the painter refuses a pose past it.
     pub paint_scale: f32,
+    /// Paint position, set once per step that changes it, never per frame.
+    pub paint_at: PaintKey,
 }
 
 impl Placed {
@@ -92,7 +119,9 @@ impl Placed {
         if let Some(old) = cached {
             item.transform = old.item.transform;
         }
+        let paint_at = cached.map_or(PaintKey::own(item.handle), |old| old.paint_at);
         Self {
+            paint_at,
             item,
             source,
             anchors: cached.map_or([Vec2::default(); 2], |old| old.anchors),
@@ -273,6 +302,13 @@ impl LayoutState {
         self.views.values().flat_map(|view| {
             std::iter::once(view.handle).chain(view.solids.iter().map(|solid| solid.handle))
         })
+    }
+    /// Where a placed handle paints; an unknown handle paints at itself.
+    pub(crate) fn paint_at(&self, handle: Handle) -> PaintKey {
+        self.handles
+            .get(&handle)
+            .and_then(|id| self.objects.get(id))
+            .map_or(PaintKey::own(handle), |object| object.paint_at)
     }
     /// Resolves a prepared model id without consulting future scene commits.
     pub fn handle(&self, id: &WireId) -> Option<Handle> {

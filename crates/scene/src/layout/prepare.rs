@@ -314,6 +314,21 @@ pub fn prepare(
         after.handles.insert(*handle, id.clone());
         after.objects.insert(id, object);
     }
+    for change in ticket.run.set.iter() {
+        if let Some(anchor) = &change.behind {
+            let paint_at = after
+                .objects
+                .get(anchor)
+                .ok_or_else(invariant)?
+                .paint_at
+                .under();
+            after
+                .objects
+                .get_mut(&change.target)
+                .ok_or_else(invariant)?
+                .paint_at = paint_at;
+        }
+    }
     edges::route(&mut after, &build)?;
     update_group_bounds(&mut after);
     edge_labels::separate(&mut after, &build)?;

@@ -329,6 +329,7 @@ fn known_field(key: &str) -> bool {
             | "at"
             | "scale"
             | "fill"
+            | "behind"
             | "kind"
             | "box"
             | "r"

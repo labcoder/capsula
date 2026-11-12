@@ -424,6 +424,8 @@ pub struct Change {
     /// Descriptive text of a solid.
     #[schemars(skip)]
     pub info: Option<Text>,
+    /// Paint the target just below this object.
+    pub behind: Option<WireId>,
 }
 /// Line record fields.
 #[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]

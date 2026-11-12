@@ -383,28 +383,48 @@ fn validate_dimensions(op: &Op, prefix: &FieldPath, step: &Step) -> Result<(), S
     Ok(())
 }
 
-pub(super) fn validate_changes(
-    step: &Step,
+/// `behind` holds each target's latest anchor from kept earlier steps; this step's links join it
+/// in set order, so a link that would close a cycle is refused where it appears.
+pub(super) fn validate_changes<'a>(
+    step: &'a Step,
     objects: &BTreeMap<WireId, Object>,
     removed: &HashSet<&WireId>,
+    mut behind: BTreeMap<&'a WireId, &'a WireId>,
 ) -> Result<(), StepError> {
     for (index, change) in step.set.iter().enumerate() {
         let prefix = FieldPath::default().field("set").index(index);
+        let fail = |field, code| StepError::in_step(&step.id, prefix.clone().field(field), code);
         let Some(target) = objects.get(&change.target) else {
-            return Err(StepError::in_step(
-                &step.id,
-                prefix.field("target"),
-                ErrorCode::UnknownRef,
-            ));
+            return Err(fail("target", ErrorCode::UnknownRef));
         };
         validate_change(change, target.kind, &prefix, step)?;
         if removed.contains(&change.target) {
-            return Err(StepError::in_step(
-                &step.id,
-                prefix.field("target"),
-                ErrorCode::RemovedInStep,
-            ));
+            return Err(fail("target", ErrorCode::RemovedInStep));
         }
+        let Some(anchor) = &change.behind else {
+            continue;
+        };
+        let Some(below) = objects.get(anchor) else {
+            return Err(fail("behind", ErrorCode::UnknownRef));
+        };
+        if removed.contains(anchor) {
+            return Err(fail("behind", ErrorCode::RemovedInStep));
+        }
+        if below.kind.three_dimensional() {
+            return Err(fail("behind", ErrorCode::Unsupported));
+        }
+        // Live links are acyclic, so the walk visits each live object at most once.
+        let mut at = anchor;
+        for _ in 0..=objects.len() {
+            if at == &change.target {
+                return Err(fail("behind", ErrorCode::ReferenceCycle));
+            }
+            match behind.get(at) {
+                Some(&next) if objects.contains_key(next) => at = next,
+                _ => break,
+            }
+        }
+        behind.insert(&change.target, anchor);
     }
     Ok(())
 }
@@ -430,6 +450,11 @@ fn validate_change(
         (change.emphasis.is_some(), kind == Kind::Row, "emphasis"),
         (change.info.is_some(), kind == Kind::Solid, "info"),
         (change.color.is_some(), kind != Kind::View3d, "color"),
+        (
+            change.behind.is_some(),
+            !kind.container() && !kind.three_dimensional(),
+            "behind",
+        ),
     ] {
         if present && !owned {
             return Err(StepError::in_step(
