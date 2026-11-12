@@ -245,7 +245,7 @@ impl Coordinator {
         }) {
             return Err(Stale);
         }
-        let first = current.snapshot.is_none();
+        let first = current.snapshot.is_none() || (current.hold.is_some() && key.round == 1);
         if let Some(snapshot) = snapshot {
             current.snapshot.get_or_insert(snapshot);
         }

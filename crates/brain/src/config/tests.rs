@@ -260,6 +260,42 @@ fn github_default_staging_honors_an_unavailable_or_unreadable_config() {
 }
 
 #[test]
+fn hold_to_talk_toggle_has_its_own_wire_operation_and_persists() {
+    let scratch = Scratch::new("config-hold-to-talk");
+    let dir = dir(&scratch);
+    let mut config = Config::load(Some(dir.clone()), ThreadId(1));
+    assert!(config.view().hold_to_talk);
+    for on in [false, true] {
+        let op: SettingsOp = kumochi_protocol::frame::decode(&[12, u8::from(on)]).unwrap();
+        apply(&mut config, op);
+        assert_eq!(
+            saved(&dir.join(CONFIG_FILE))["voice"]["hold_to_talk"].as_bool(),
+            Some(on)
+        );
+        apply(&mut config, SettingsOp::SetSttUnload(SttUnload::After15Min));
+        assert_eq!(
+            Config::load(Some(dir.clone()), ThreadId(1))
+                .view()
+                .hold_to_talk,
+            on
+        );
+    }
+    for value in ["\"false\"", "1", "[]"] {
+        let seeded = format!("[voice]\nhold_to_talk = {value}\nfuture = 7\n");
+        std::fs::write(dir.join(CONFIG_FILE), &seeded).unwrap();
+        assert!(
+            !Config::load(Some(dir.clone()), ThreadId(1))
+                .view()
+                .hold_to_talk
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join(CONFIG_FILE)).unwrap(),
+            seeded
+        );
+    }
+}
+
+#[test]
 fn talk_back_and_the_unload_policy_default_off_and_kept_and_are_saved_in_the_voice_table() {
     let scratch = Scratch::new("config-voice");
     let dir = dir(&scratch);

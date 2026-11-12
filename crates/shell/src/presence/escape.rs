@@ -3,8 +3,25 @@
 use super::drag::Event;
 use super::{Activity, Context, Escape, EscapePanel, OpenError, Presence, diagnostics};
 use crate::escape;
+use kumochi_protocol::message::GestureId;
 
 impl Presence {
+    pub(super) fn native_escape(
+        &mut self,
+        gesture: Option<GestureId>,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
+        if let Some(gesture) = gesture
+            && self.cancel_voice_gesture(gesture, cx)
+        {
+            return Ok(());
+        }
+        if self.voice_working() {
+            return Ok(());
+        }
+        self.escape(cx)
+    }
+
     /// One Esc press, from the hotkey, the typing panel or Stop. The local effect happens here,
     /// and only then is `Stop` or `ClearDrawing` queued for the brain, which nothing waits on.
     #[expect(
@@ -12,6 +29,10 @@ impl Presence {
         reason = "one Esc press keeps its local decision and every effect of it in order"
     )]
     pub(super) fn escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        if self.voice_working() {
+            self.cancel_voice(cx);
+            return Ok(());
+        }
         if self.presenter.input.selection().is_some() {
             self.end_selection(crate::presenter::overlay_input::ExitCause::Escape, cx);
             return Ok(());

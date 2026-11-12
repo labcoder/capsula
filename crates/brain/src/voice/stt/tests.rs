@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::{broadcast, oneshot};
@@ -18,9 +18,90 @@ const WAIT: Duration = Duration::from_secs(5);
 
 mod concurrent;
 
+pub(crate) fn hold_before_serving(handle: &SttHandle) -> impl FnOnce() + use<> {
+    let control = Arc::clone(&handle.control);
+    control.update(|state| state.decode_cut = Some(super::DecodeCut::Delivery));
+    move || control.update(|state| state.decode_cut = None)
+}
+
+#[test]
+fn admitted_use_is_current_ready_not_busy_and_refreshes_the_existing_idle_clock() {
+    use kumochi_protocol::message::{
+        HOLD_DRAIN_TIMEOUT_MS, HOLD_START_TIMEOUT_MS, HoldFailure, MAX_HOLD_CHUNKS,
+    };
+    let harness = Harness::loaded();
+    harness.handle.control.update(|state| {
+        state.idle_since = Instant::now()
+            .checked_sub(Duration::from_secs(899))
+            .unwrap();
+    });
+    let admitted_at = Instant::now();
+    assert_eq!(harness.handle.admit_use(), Ok(1));
+    assert!(harness.handle.control.lock().idle_since >= admitted_at);
+    assert!(harness.handle.current_use(1));
+    assert!(!harness.handle.current_use(2));
+    let (reply, _receive) = oneshot::channel();
+    harness.handle.control.update(|state| {
+        state.decode_cut = Some(super::DecodeCut::Delivery);
+        state.waiting = Some(Decode {
+            rate: 16_000,
+            samples: vec![1],
+            reply,
+        });
+    });
+    assert_eq!(harness.handle.admit_use(), Err(HoldFailure::Busy));
+    let (reply, _receive) = oneshot::channel();
+    assert_eq!(
+        harness.handle.decode_for(
+            1,
+            Decode {
+                rate: 16_000,
+                samples: vec![2],
+                reply
+            }
+        ),
+        Err(HoldFailure::Busy)
+    );
+    harness.handle.unload(1);
+    assert!(!harness.handle.current_use(1));
+    assert_eq!(harness.handle.admit_use(), Err(HoldFailure::NotLoaded));
+    let (reply, _receive) = oneshot::channel();
+    assert_eq!(
+        harness.handle.decode_for(
+            1,
+            Decode {
+                rate: 16_000,
+                samples: vec![2],
+                reply
+            }
+        ),
+        Err(HoldFailure::NotLoaded)
+    );
+    harness
+        .handle
+        .control
+        .update(|state| state.decode_cut = None);
+    let audio = Duration::from_millis(u64::from(MAX_HOLD_CHUNKS) * 20);
+    let entire_hold = audio
+        + Duration::from_millis(u64::from(HOLD_START_TIMEOUT_MS + HOLD_DRAIN_TIMEOUT_MS))
+        + crate::speech::DEADLINES.decode
+        + audio * crate::speech::DEADLINES.decode_per_mille / 1000;
+    assert!(entire_hold < Duration::from_mins(15));
+}
+
 pub(crate) fn held_for_runtime(
     reports: Reports,
     load: mpsc::Receiver<()>,
+) -> (SttHandle, impl Fn() -> Option<Duration>) {
+    held_for_runtime_checked(reports, load, |rate, samples| {
+        format!("{rate}:{}", samples.len())
+    })
+}
+
+pub(crate) fn held_for_runtime_checked(
+    reports: Reports,
+    load: mpsc::Receiver<()>,
+    check: impl Fn(u32, &[i16]) -> String + Send + Sync + 'static,
 ) -> (SttHandle, impl Fn() -> Option<Duration>) {
     let release = Arc::new(Mutex::new(load));
     let (_losses, losses) = broadcast::channel(4);
@@ -30,15 +111,11 @@ pub(crate) fn held_for_runtime(
             .expect("one engine")
             .recv_timeout(WAIT)
             .expect("release load");
-        let (events, _observed) = mpsc::channel();
         let served = serve(
             Generation(0),
-            &FakeDecoder {
-                events,
+            &RuntimeDecoder {
                 release: Arc::clone(&release),
-                lose: Arc::new(AtomicBool::new(false)),
-                gates: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
-                panic_at: Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX)),
+                check: &check,
             },
         );
         assert_eq!(served, Served::Released);
@@ -47,6 +124,23 @@ pub(crate) fn held_for_runtime(
     .expect("owner starts");
     let control = Arc::clone(&handle.control);
     (handle, move || control.lock().unload_after)
+}
+
+struct RuntimeDecoder<'a> {
+    release: Arc<Mutex<mpsc::Receiver<()>>>,
+    check: &'a (dyn Fn(u32, &[i16]) -> String + Sync),
+}
+
+impl Decoder for RuntimeDecoder<'_> {
+    fn decode(&self, rate: u32, samples: &[i16]) -> Result<String, SpeechError> {
+        let text = (self.check)(rate, samples);
+        self.release
+            .lock()
+            .expect("one decoder")
+            .recv_timeout(WAIT)
+            .expect("release decode");
+        Ok(text)
+    }
 }
 
 #[test]

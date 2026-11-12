@@ -27,7 +27,7 @@ impl Presence {
             Owner::Settings
         } else if self.text_open() || self.threads_open() {
             Owner::Typing
-        } else if self.escape_hold.shows_stop() {
+        } else if self.escape_hold.shows_stop() || self.voice_working() {
             Owner::Stop
         } else {
             Owner::Pointer

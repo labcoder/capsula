@@ -37,6 +37,8 @@ mod deletes;
 mod drawings;
 #[path = "github_tests.rs"]
 mod github;
+#[path = "hold_tests.rs"]
+pub(super) mod holds;
 #[path = "job_tests.rs"]
 mod jobs;
 #[path = "lease_tests.rs"]

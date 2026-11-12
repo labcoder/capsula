@@ -230,6 +230,7 @@ pub(super) fn spawn_reader(
                 };
                 let control = match &op {
                     StoreOp::ReadCall(call) => &call.control,
+                    StoreOp::ReadHold(read) => &read.control,
                     StoreOp::BuildContext(read) => &read.control,
                     StoreOp::CompactContext(read) => &read.control,
                     StoreOp::ReadJob(read) => &read.control,
@@ -240,6 +241,15 @@ pub(super) fn spawn_reader(
                 let admitted = barrier.wait_until(stamp, control);
                 let open = admitted.is_ok();
                 let reply = match op {
+                    StoreOp::ReadHold(read) => Input::HoldPrepared {
+                        key: read.snapshot.key,
+                        result: context::read_hold(
+                            open.then_some(&*side),
+                            read,
+                            #[cfg(test)]
+                            || wait_at(gate, hooks.observed.as_ref()),
+                        ),
+                    },
                     StoreOp::ReadCall(call) => Input::ReadFinished(context::read_call(
                         admitted.map(|()| &*side),
                         call,

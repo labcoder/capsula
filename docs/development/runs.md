@@ -1,6 +1,6 @@
 # Runs and the coordinator
 
-A **run** is one user turn: in slice 2 a typed message, later a voice hold or an ask-about. The
+A **run** is one user turn: a typed message, a voice hold or an ask-about. The
 brain's **coordinator** (`crates/brain/src/coordinator/`) is its core loop, written sans I/O: it
 takes inputs and returns effects, and the systems around it (the store, the engine, the pipes,
 timers) do the work and report back. So the order of Esc, late completions and interruption is
@@ -88,8 +88,11 @@ deleted submissions retain their own metadata until their response; a cancelled 
 first state owes exactly one Stop for its own run. A delayed state after an explicit switch
 still answers its own turn but doesn't move input. Esc cancels work, not the target or
 revision. Settings updates replace names and the main id without changing the input draft,
-keyboard focus, viewed history, target or revision. This correlation does not admit voice
-holds, capture audio or promote transcripts into turns.
+keyboard focus, viewed history, target or revision. Voice uses a separate metadata-only
+pending hold keyed by gesture, captured target/revision and current session, not the typed
+queue or its watermark. Only its matching visible Hold-origin first state can bind New;
+Thinking stays cancellable and Answering returns to ordinary Runs. Source admission and
+transcription remain in the [voice owner](voice.md#voice-only-held-turns).
 
 ## Typed drawing admission
 
@@ -524,3 +527,37 @@ A run's steps draw in one scene:
 its first step's write begins the scene and returns its id, and the steps after it wait in the
 run until that ack. A Stop, a replacement, a failed first write or a lost shell drops the waiting
 steps, and the run still settles.
+
+### Voice hold admission
+
+The runtime owns one pending hold, keyed by shell epoch and gesture with its captured
+selection revision and a shared cancellation flag. Recognition queues `ReadHold` on the
+existing stamped page reader: after prior accepted writes, one bounded, cancellable read
+transaction captures the live target's deletion generation and effective model/effort.
+New captures defaults without creating a thread or inventing a run identity.
+
+Only `submit_hold` assigns real thread/run ids and emits a Hold-origin run. Recognized words
+become ordinary deletable user history, written once through the existing ordered turn,
+context and send gates; they do not advance typed/Ask deletion watermarks. The run retains
+the pinned choice and connection before its first build, which skips the thread-choice
+reread but still checks the catalog. No separate transcript or audio record is stored.
+
+Deletion generation safety follows acceptance ordering: the runtime invalidates the shared
+flag before accepting any later target deletion or model write, including changes away and
+back. It also invalidates on selection/settings/connection/session changes, newer explicit
+input and cancel. This applies while a snapshot read is pending and after it completes, so
+an answered deletion cannot revive an old admission. Once submitted, the coordinator also
+fences target deletion/model inputs before routing them. SendReady requires the live flag,
+exact pinned snapshot, ready connection and model; cancellation never grants another send.
+
+The Shell retains one gesture/selection/target handoff without words or a typed
+turn count. Only its first matching Hold-origin state can bind New to a real
+thread. Thinking remains cancellable; Answering transfers to ordinary run
+handling. Selection changes, confirmed deletion and newer typed/Ask input
+invalidate it. Callers revoke collection and drain `take_hold_cancel` before
+queueing replacement input; typed submission refuses while cancellation is
+undelivered. Refused/offline gestures are consumed too. Once this Shell has
+attempted a voice hold, unrequested or cancelled first Hold states are stopped,
+never displayed or allowed to retarget. Before that, the existing unowned-run
+display behavior is unchanged. Disconnect
+clears connection-local cancellation but retains the lifetime gesture high-water.

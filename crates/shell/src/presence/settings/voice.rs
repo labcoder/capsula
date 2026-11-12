@@ -3,6 +3,7 @@ use gpui_kit::InteractiveElement as _;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::Button;
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::radio::{Radio, RadioGroup};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{Context, IntoElement, ParentElement as _, Styled as _, div};
@@ -33,6 +34,7 @@ impl SettingsView {
             .flex()
             .flex_col()
             .gap_3()
+            .child(self.hold_to_talk(cx))
             .child(div().text_sm().child(strings.get(Text::SpeechInput)))
             .child(
                 div()
@@ -113,6 +115,57 @@ impl SettingsView {
                     .text_color(cx.theme().muted_foreground)
                     .child(strings.get(Text::VoiceIdleHelp)),
             )
+    }
+
+    fn hold_to_talk(&self, cx: &Context<'_, Self>) -> impl IntoElement {
+        let state = self.model.read(cx);
+        let strings = cx.global::<Strings>();
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                Checkbox::new("hold-to-talk")
+                    .label(strings.get(Text::HoldToTalk))
+                    .checked(state.hold_to_talk_choice() == Some(true))
+                    .disabled(state.view().is_none() || state.hold_to_talk_pending())
+                    .on_change(cx.listener(|view, on, _, cx| {
+                        let sent = view
+                            .owner
+                            .update(cx, |owner, cx| owner.save_hold_to_talk(*on, cx))
+                            .unwrap_or(false);
+                        view.hold_notice = (!sent).then_some(Text::SettingsUnavailable);
+                        cx.notify();
+                    }))
+                    .map(|checkbox| {
+                        #[cfg(test)]
+                        let checkbox = checkbox.debug_selector(|| "hold-to-talk".into());
+                        checkbox
+                    }),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(strings.get(Text::HoldToTalkHelp)),
+            )
+            .children(
+                state
+                    .hold_to_talk_pending()
+                    .then(|| div().text_xs().child(strings.get(Text::SettingsSaving))),
+            )
+            .children(state.hold_to_talk_error().map(|error| {
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().danger)
+                    .child(strings.error(error))
+            }))
+            .children(self.hold_notice.map(|notice| {
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().danger)
+                    .child(strings.get(notice))
+            }))
     }
 
     fn speech_input_model(&self, cx: &Context<'_, Self>) -> impl IntoElement {

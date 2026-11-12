@@ -84,6 +84,8 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
         })),
         // shortcut: B2a admits holds and consumes focus hints and exclusion lease changes.
         message @ (ControlToBrain::HoldRecognized { .. }
+        | ControlToBrain::VoiceHoldRecognized { .. }
+        | ControlToBrain::VoiceHoldStopped { .. }
         | ControlToBrain::KeyDown { .. }
         | ControlToBrain::KeyUp { .. }
         | ControlToBrain::GestureCancel { .. }
@@ -137,6 +139,13 @@ impl Brain {
     /// Applies a control frame with no shell to tell, as `serve` does once the core has gone.
     pub(super) fn control_offline(&mut self, message: ControlToBrain, len: usize, tap: &mut Tap) {
         tap.record(Pipe::Control, Direction::ToBrain, &message, len);
+        if let ControlToBrain::VoiceHoldStopped { gesture } = &message {
+            self.holds.stopped(crate::coordinator::HoldKey {
+                epoch: self.epoch,
+                gesture: *gesture,
+            });
+            return;
+        }
         if let ControlToBrain::AccountOp(op) = message {
             let applied = self.account_input(AccountInput::Op(op), None);
             debug_assert!(applied.is_ok(), "applying without a shell can't fail");
@@ -173,6 +182,12 @@ impl Brain {
     ) -> Result<Option<Input>, Ended> {
         link.tap
             .record(Pipe::Control, Direction::ToBrain, &message, len);
+        if self
+            .hold_control(&message, link)
+            .map_err(|Full| Ended::Lost)?
+        {
+            return Ok(None);
+        }
         if message == ControlToBrain::Pong {
             *ping_sent = None;
         }
@@ -199,8 +214,10 @@ impl Brain {
             return Ok(None);
         }
         if let ControlToBrain::KeyDown { .. } = message {
-            self.voice_op(Installer::reload_input, Some(link))
-                .map_err(|Full| Ended::Lost)?;
+            if self.hold_to_talk_enabled() {
+                self.voice_op(Installer::reload_input, Some(link))
+                    .map_err(|Full| Ended::Lost)?;
+            }
             return Ok(None);
         }
         control_input(message)

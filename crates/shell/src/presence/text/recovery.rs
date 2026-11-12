@@ -45,6 +45,7 @@ impl Presence {
         };
         match route {
             Route::RunRetry(run) => {
+                self.cancel_voice(cx);
                 self.dismiss_recovery_notice(cx);
                 let Some(input) = self.text.as_ref().map(|text| text.input.clone()) else {
                     self.runs.dismiss_retry();

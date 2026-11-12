@@ -19,6 +19,7 @@ fn view(assistant: &str, user: Option<&str>) -> SettingsView {
         show_in_taskbar: false,
         talk_back: false,
         stt_unload: kumochi_protocol::message::SttUnload::Kept,
+        hold_to_talk: kumochi_protocol::message::DEFAULT_HOLD_TO_TALK,
     }
 }
 
