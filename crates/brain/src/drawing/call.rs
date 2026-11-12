@@ -624,7 +624,7 @@ impl Drawing {
             let Bound::New(state) = &self.calls[at].scene else {
                 continue;
             };
-            if *state.header() == header {
+            if state.header().continues(&header) {
                 self.calls[at].scene = Bound::Held(scene);
             } else {
                 let error = StepError::new(ErrorCode::HeaderMismatch);

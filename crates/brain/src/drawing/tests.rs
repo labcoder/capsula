@@ -252,6 +252,12 @@ fn begin(scene: &str, alt: &str) -> String {
     )
 }
 
+fn sized(scene: &str) -> String {
+    format!(
+        r#"{{"begin":{{"v":1,"scene":"{scene}","surface":"overlay","alt":"","size":[600,400],"others":"keep"}}}}"#
+    )
+}
+
 fn envelope(begin: &str, steps: &[String]) -> Vec<u8> {
     let mut records = vec![begin.to_owned()];
     records.extend(steps.iter().map(|step| format!(r#"{{"step":{step}}}"#)));
@@ -1375,12 +1381,30 @@ fn a_continuing_call_repeats_the_whole_header() {
     let mut drawing = Drawing::default();
     let mut store = Store::default();
     store.run(&mut drawing, call(1, "c1", args("s", &[text("a", "x")])));
-    let other = envelope(&begin("s", "a different alt"), &[text("b", "y")]);
+    let other = envelope(&sized("s"), &[text("b", "y")]);
     let out = store.run(&mut drawing, call(1, "c2", other));
     assert!(trace(&out).is_empty(), "nothing is written");
     assert_eq!(error(&out.calls[0]), ErrorCode::HeaderMismatch);
     let out = store.run(&mut drawing, call(2, "c3", args("s", &[text("b", "y")])));
     assert_eq!(trace(&out), ["write step 2", "step 1#1", "end 1 true"]);
+}
+
+#[test]
+fn a_continuing_call_may_restate_the_title_and_alt() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    store.run(&mut drawing, call(1, "c1", args("s", &[text("a", "x")])));
+    let restated = r#"{"begin":{"v":1,"scene":"s","surface":"overlay","title":"Rain","alt":"now with rain","others":"keep"}}"#;
+    let out = store.run(
+        &mut drawing,
+        call(2, "c2", envelope(restated, &[text("b", "y")])),
+    );
+    assert_eq!(trace(&out), ["write step 2", "step 1#1", "end 1 true"]);
+    assert_eq!(
+        drawing.scenes[0].state.header().alt.as_str(),
+        "",
+        "the stored header keeps its first text"
+    );
 }
 
 #[test]
@@ -1868,7 +1892,7 @@ fn a_streamed_call_beginning_a_new_name_with_another_header_is_refused_once_it_e
     let mut drawing = Drawing::default();
     let mut store = Store::default();
     store.run(&mut drawing, streamed("c1", 0, &begin("s", "")));
-    store.run(&mut drawing, streamed("c2", 0, &begin("s", "other")));
+    store.run(&mut drawing, streamed("c2", 0, &sized("s")));
     let out = store.run(&mut drawing, streamed("c1", 1, &step(&text("a", "x"))));
     assert_eq!(out.calls.len(), 1);
     assert_eq!(
