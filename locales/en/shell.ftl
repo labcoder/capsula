@@ -269,6 +269,10 @@ onboarding-welcome = Hi, I'm { $name }
 onboarding-welcome-help = Call me something else if you like. You can change it later in Settings.
 onboarding-user = What should { $assistant } call you?
 onboarding-user-help = Optional. It's sent to the model you chat with, so { $assistant } can use it.
+onboarding-accounts = Connect an account for { $assistant }
+onboarding-accounts-help = Connect any you have, or skip this. You can connect them later in Settings → Accounts.
+onboarding-not-now = Not now
+onboarding-plan = You're using your ChatGPT plan
 
 # ChatGPT accounts
 

@@ -1,25 +1,30 @@
 //! First-run onboarding's plain state: which step shows and what it waits for. No GPUI, no
 //! transport and no text: the names stay in [`Settings`], so nothing here can log one.
 
-use kumochi_protocol::message::{OnboardingStep, SettingsView};
+use kumochi_protocol::message::{
+    AccountRecovery, AccountView, OnboardingStep, PlanState, SettingsView,
+};
 
 use crate::settings::{Error, Field, Settings};
 
-/// The step on screen. Sign-in and the shortcut come in later steps.
+/// The step on screen. The shortcut comes in a later step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Step {
     /// "Hi, I'm ⟨name⟩", with the assistant's name in an input.
     Welcome,
     /// What the assistant should call the user; optional.
     YourName,
+    /// Connect any account, or skip it.
+    Accounts,
 }
 
 impl Step {
-    /// The name the step edits.
-    pub(crate) fn field(self) -> Field {
+    /// The name the step edits, if it has one.
+    pub(crate) fn field(self) -> Option<Field> {
         match self {
-            Self::Welcome => Field::Assistant,
-            Self::YourName => Field::User,
+            Self::Welcome => Some(Field::Assistant),
+            Self::YourName => Some(Field::User),
+            Self::Accounts => None,
         }
     }
 
@@ -28,6 +33,7 @@ impl Step {
         match self {
             Self::Welcome => OnboardingStep::Welcome,
             Self::YourName => OnboardingStep::YourName,
+            Self::Accounts => OnboardingStep::Accounts,
         }
     }
 
@@ -36,11 +42,22 @@ impl Step {
     fn resume(from: OnboardingStep) -> Self {
         match from {
             OnboardingStep::Welcome => Self::Welcome,
-            OnboardingStep::YourName | OnboardingStep::Accounts | OnboardingStep::Shortcut => {
-                Self::YourName
-            }
+            OnboardingStep::YourName => Self::YourName,
+            OnboardingStep::Accounts | OnboardingStep::Shortcut => Self::Accounts,
         }
     }
+}
+
+/// A usable `ChatGPT` account: signed in, with the plan enabled and no sign-in again owed.
+pub(crate) fn account_complete(view: Option<&AccountView>) -> bool {
+    matches!(
+        view,
+        Some(AccountView::SignedIn {
+            plan: PlanState::Enabled,
+            recovery,
+            ..
+        }) if *recovery != Some(AccountRecovery::SignInAgain)
+    )
 }
 
 /// What closing lands on once the brain says onboarding is finished.
@@ -102,16 +119,18 @@ impl Onboarding {
         self.finishing.is_some()
     }
 
-    /// Continue or Enter, after `Settings::save` ran for the step's field. What `save` returned
-    /// isn't read: false means unchanged, already saving or not sent. The field decides: saving
-    /// waits for the answer, a validation or offline error stays, and anything else goes on,
-    /// including the brain's error left from a refusal once the draft is back at the saved name.
-    /// With no settings view, nothing happens.
+    /// Continue, Not now or Enter, after `Settings::save` ran for the step's field. What `save`
+    /// returned isn't read: false means unchanged, already saving or not sent. The field decides:
+    /// saving waits for the answer, a validation or offline error stays, and anything else goes
+    /// on, including the brain's error left from a refusal once the draft is back at the saved
+    /// name. A step with no field goes on. With no settings view, nothing happens.
     pub(crate) fn submit(&mut self, settings: &Settings) -> Next {
         if settings.view().is_none() || self.finishing.is_some() {
             return Next::Stay;
         }
-        let field = self.step.field();
+        let Some(field) = self.step.field() else {
+            return self.go_on();
+        };
         let state = settings.field(field);
         if state.saving {
             self.awaiting = Some(field);
@@ -169,7 +188,11 @@ impl Onboarding {
                 self.step = Step::YourName;
                 Next::Moved
             }
-            Step::YourName => Next::Finish,
+            Step::YourName => {
+                self.step = Step::Accounts;
+                Next::Moved
+            }
+            Step::Accounts => Next::Finish,
         }
     }
 }

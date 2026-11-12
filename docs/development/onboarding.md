@@ -1,10 +1,10 @@
 # Onboarding
 
 On a launch where the brain's first `SettingsView` says `onboarded: false`, the shell opens one
-window under the dock: the welcome, where the assistant's name can change, then the user's own
-name. Sign-in and the shortcut steps come later. The brain decides whether onboarding is owed
-and remembers which steps were completed (see [settings](settings.md)); the shell keeps nothing
-durable.
+window under the dock: the welcome, where the assistant's name can change, the user's own name,
+then the account step, which offers every model connection. The shortcut step comes later. The
+brain decides whether onboarding is owed and remembers which steps were completed (see
+[settings](settings.md)); the shell keeps nothing durable.
 
 ## Who owns what
 
@@ -15,8 +15,15 @@ durable.
   (`Slot::Onboarding`), so the brain's one answer completes it and no other change. A completed
   step is recorded with `CompleteOnboardingStep` in its own slot (`Slot::OnboardingStep`), which
   never counts as the finish, so a record queued just before it can't refuse it.
-- `shell/onboarding.rs` is the plain state: the step, the field whose save it waits for, and
-  whether a finish is queued. It holds no text, so it has nothing to log.
+- `shell/onboarding.rs` is the plain state: the step, the field whose save it waits for (the
+  account step has none), and whether a finish is queued. It holds no text, so it has nothing to
+  log.
+- `shell/sign_in_mark.rs` is a sign-in one surface asked for, until it ends: `Settled`,
+  `Open { generation, shown }` or `CancelOwed`. `Presence` keeps one per connection for the
+  window (`onboarding_chatgpt`, `onboarding_claude`).
+- `presence/onboarding/accounts.rs` draws the account step from Settings' own sections
+  (`account_section`, `claude_section`) without Sign out or Disconnect, routes their buttons
+  through the marks, and sends the cancels.
 - `presence/onboarding.rs` owns the window (`Presence.onboarding`), the launch decision, and
   whether it may still open this run (`Presence.onboarding_run`, put off by Finish later).
 
@@ -27,14 +34,16 @@ flowchart TD
     S{"First SettingsView"} -- "onboarded is true" --> D["Dock only, as on any day"]
     S -- "onboarded is false" --> R{"onboarding_from, clamped to this build's steps"}
     R -- "welcome" --> W["1 Welcome: Hi, I'm (name input)"]
-    R -- "your_name or later" --> U["2 Your name (optional)"]
+    R -- "your_name" --> U["2 Your name (optional)"]
+    R -- "accounts or later" --> A["3 Accounts: ChatGPT and Claude Code sections"]
     W -- "Enter or Continue: unchanged, or saved; records Welcome" --> U
     W -- "invalid, or refused (Continue again goes on)" --> W
-    U -- "Enter or Continue: blank, unchanged, or saved; records Your name" --> F["FinishOnboarding queued"]
+    U -- "Enter or Continue: blank, unchanged, or saved; records Your name" --> A
     U -- "invalid, or refused (Continue again goes on)" --> U
-    F -- "refused or not sent" --> U
+    A -- "Not now or Continue; records Accounts" --> F["FinishOnboarding queued"]
+    F -- "refused or not sent" --> A
     F -- "answered: onboarded is true" --> P["Window closes, the peek opens"]
-    W & U -- "Finish later, Esc or window close" --> X["Hidden for this run, no finish sent"]
+    W & U & A -- "Finish later, Esc or window close" --> X["Hidden for this run, no finish sent; this window's sign-ins cancelled"]
 ```
 
 ## Rules
@@ -60,6 +69,29 @@ flowchart TD
 - **Nothing shows over it.** While the window shows, the peek stays closed (`panels::Owner::Onboarding`),
   a double-tap opens nothing, and the taskbar button and a dock press bring the window to the front.
   It joins capture exclusion (`exclusion::Slot::Onboarding`), since it shows names.
+- **The account step** shows until Not now or Continue completes it; connecting alone doesn't, so
+  a window closed after connecting resumes there unless the profile is now in use. Its one button
+  reads Not now (ghost) until a model connection is usable (a complete `ChatGPT` account, or
+  Claude Code `Ready`), then Continue. Focus goes to the window's root, so Enter starts nothing.
+  Once a `ChatGPT` sign-in this window asked for completes, the plan line shows beside the button.
+- **A dismissal cancels this window's sign-ins.** A mark opens only on an op the window actually
+  queued (Sign in or Enable for `ChatGPT`, Connect Claude Code), and settles only at a terminal
+  event. For `ChatGPT` that's a view that leaves the wait it showed, a complete account, a
+  sign-in error that offers a new one, or a new connection's first view that isn't waiting. For
+  Claude Code it's any view that isn't waiting, refused or not. Finish later, Esc and the native
+  close take each open mark once and send its cancel through `cancel_sign_in`, past `allows`,
+  because the brain may start the sign-in late and ignores a cancel when nothing is signing in.
+  A cancel that can't be sent stays owed across a link drop: it goes at the next waiting view.
+  It's dropped by a first view with no wait, by a `ChatGPT` sign-in error, or by any op the user
+  sends that connection from Settings or chat. Continue, Not now and the finish hand a waiting
+  sign-in over to the rest of the app instead. After a shell restart, the window adopts a
+  sign-in it finds waiting, at open or on a connection's first view. That is wrong in one
+  accepted case: after Finish later, a sign-in started from Settings or chat that is still
+  waiting when the shell crashes is adopted by the relaunched window, and dismissing it cancels
+  it.
+- **Focus comes back after a section button goes.** The sections replace their buttons when the
+  view changes, so a focused one takes the window's key context, and Esc, with it. The window
+  restores focus the way Settings does (`settings::restore_lost_focus`).
 - **Esc** is bound in the window's own key context and goes through `Presence::escape` as
   `Panel::OnboardingEdit` (restore the saved name) or `Panel::Onboarding` (Finish later); see
   [input](input.md#esc).
