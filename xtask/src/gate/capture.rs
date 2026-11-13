@@ -48,9 +48,12 @@ impl Capture {
         guard()?;
         let mut main = Self::start(Some(Process::open(pid)?), output, duration, &guard)?;
         main.dock_swapchain = dock_swapchain;
+        // A new trace records nothing for its first ~200 ms, so one early seed can be lost.
         let seeded = (|| -> Result<()> {
-            guarded_wait(Duration::from_millis(100), &guard)?;
-            repaint()?;
+            for _ in 0..3 {
+                guarded_wait(Duration::from_millis(100), &guard)?;
+                repaint()?;
+            }
             guarded_wait(Duration::from_millis(100), &guard)
         })();
         if let Err(error) = seeded {

@@ -504,6 +504,13 @@ pub(super) fn summarize(
         "attempted={attempted} unmeasured={unmeasured} native_measured={native_measured:?} display_measured={display_measured:?} displayed_body={displayed_body_counts:?} failures={failures:?}"
     )?;
     ensure!(attempted > 0, "no receipt attempts");
+    ensure!(
+        presents
+            .rows()
+            .iter()
+            .any(|row| row.swapchain == dock_chain),
+        "main trace missed the dock seed: no present on the dock swapchain"
+    );
     for category in mode.categories() {
         ensure!(
             native_measured.get(*category).copied().unwrap_or(0) > 0

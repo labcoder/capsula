@@ -35,8 +35,9 @@ fn usage() -> String {
     format!(
         "usage: cargo xtask <task>
 
-The gate tasks (cold-start, gate-session, hover-gate, bench, slice2-gate) run only as the gate
-identity, never as Kumochi or Kumochi Dev, and build the images they launch themselves:
+The gate tasks (cold-start, gate-session, hover-gate, measure-gate, bench, slice2-gate) run only
+as the gate identity, never as Kumochi or Kumochi Dev, and build the images they launch
+themselves:
   cargo run --release --package xtask --features kumochi-protocol/gate-identity -- <task>
 See docs/development/gate-identity.md.
 
@@ -51,6 +52,9 @@ tasks:
   hover-gate <path-session.txt>
                     the hover phase alone, same redirect rule; injection opens only
                     after ten minutes with no input on Rez, then the quiet second
+  measure-gate <path-session.txt>
+                    gate-session's measured phases with hover-gate's opener;
+                    no Ready and no feel verdicts
   input-fixture     internal bounded separate-process EDIT/Ready fixture
   input-quiet <seconds>
                     observe raw input on a hidden window for 1..120 seconds;
@@ -114,6 +118,8 @@ fn main() -> Result<()> {
         Some("gate-session") => gate::run(args),
         #[cfg(windows)]
         Some("hover-gate") => gate::hover(args),
+        #[cfg(windows)]
+        Some("measure-gate") => gate::measure(args),
         #[cfg(windows)]
         Some("live") => live::run(args),
         #[cfg(windows)]

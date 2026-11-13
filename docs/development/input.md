@@ -443,7 +443,10 @@ the session and is never repaired.
 
 For instrumented phases, a PID-filtered warm trace has an 8-second fixed backstop. Three
 input-free repaints and a guarded wait produce a completed CSV that must have zero loss and one
-eligible dock swapchain before the main trace starts.
+eligible dock swapchain before the main trace starts. The main trace is seeded the same way, with
+three repaints 100 ms apart, because a new trace records nothing for roughly its first 200 ms. A
+resting dock doesn't paint again, so a main trace with no present on the dock swapchain fails as
+a missed dock seed.
 
 Every main-trace swapchain has the same first-present seed rule, including the status panel.
 The v1 CSV parser accepts a finite negative `msUntilRenderStart`: GPU work can start before
@@ -480,7 +483,14 @@ released and the EDIT is uncovered before any potentially slow trace-finish wait
 success and failure.
 
 After injection has opened, any physical input, lock/desktop change, foreign foreground/capture/menu/move loop,
-or phase error stops the whole session. Cleanup releases only acknowledged injected downs,
+or phase error stops the whole session. A foreign foreground stop names only its process id
+(`foreground_pid=<n> owned=false`); the run's before and after process lists resolve the image.
+An empty foreground (pid 0) is allowed for at most 100 ms from its first sample, because
+activation handed to another process's window completes asynchronously. Only an owned window
+in front ends that grace; a foreign pid still stops at once, and a longer NULL stops with
+`foreground_pid=0` and its duration. Nothing is sent while the front is empty, and each phase
+records the graces it used and the longest in `null-foreground.txt`.
+Cleanup releases only acknowledged injected downs,
 closes only owned windows/processes gracefully, and retains
 all errors. It never force-kills another process or repairs language settings. Cursor restoration
 is skipped after any abort, and otherwise remains guarded and confined to owned destinations.
@@ -531,6 +541,14 @@ desktop is `Default`. Unavailable queries are reported as absent values, not tre
 No window title, full executable path or desktop name is logged. A physical Ready press during
 this task is refused. `gate-session` keeps its existing physical Ready path and feel verdicts;
 this separate admission never opens its keyboard gate early.
+
+### The unattended measured session
+
+`measure-gate <path-session.txt>` runs every measured phase of `gate-session`, with the same
+transcript, evidence directory, fixture, guards and PresentMon bounds, behind `hover-gate`'s
+idle opener. It has no Ready and no feel verdicts: it prints that, and its `owner-feel.txt`
+says `not_part_of_this_run`. The physical Ready in `gate-session` stays the only handoff for
+the owner's feel verdicts; the measured phases may also run unattended after ten idle minutes.
 
 ## Voice hold authority
 
