@@ -33,10 +33,12 @@ pub(crate) enum SignInMark {
 }
 
 impl SignInMark {
-    /// This surface's sign-in was queued on connection `generation`; `shown` when its wait
-    /// already shows there, because Open again replaces a waiting attempt without a new view.
-    pub(crate) fn sent(&mut self, generation: u64, shown: bool) {
-        *self = Self::Open { generation, shown };
+    /// This surface's sign-in was queued on connection `generation`.
+    pub(crate) fn sent(&mut self, generation: u64) {
+        *self = Self::Open {
+            generation,
+            shown: false,
+        };
     }
 
     /// A waiting sign-in this process didn't ask for, after a shell restart, becomes this

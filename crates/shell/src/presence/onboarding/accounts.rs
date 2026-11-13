@@ -16,6 +16,7 @@ use crate::presence::Presence;
 use crate::presence::settings::accounts::account_section;
 use crate::presence::settings::claude::claude_section;
 use crate::settings::{Field, Settings};
+use crate::sign_in_mark::Shows;
 use crate::strings::Strings;
 
 /// A model connection is usable: the step's button reads Continue instead of Not now.
@@ -79,7 +80,8 @@ impl OnboardingView {
 }
 
 impl Presence {
-    /// A `ChatGPT` button in the account step. A sign-in it queued is this window's.
+    /// A `ChatGPT` button in the account step. A sign-in it queued is this window's, shown when
+    /// Open again replaced a wait already showing.
     pub(super) fn onboarding_account_op(&mut self, op: AccountOp, cx: &mut Context<'_, Self>) {
         let generation = self.session.as_ref().map(crate::link::Session::generation);
         let shown = matches!(
@@ -90,7 +92,10 @@ impl Presence {
             && matches!(op, AccountOp::SignIn | AccountOp::EnablePlan)
             && let Some(generation) = generation
         {
-            self.onboarding_chatgpt.sent(generation, shown);
+            self.onboarding_chatgpt.sent(generation);
+            if shown {
+                self.onboarding_chatgpt.view(generation, Shows::Waiting);
+            }
         }
     }
 
@@ -101,7 +106,7 @@ impl Presence {
             && op == ConnectionOp::ConnectClaudeCode
             && let Some(generation) = generation
         {
-            self.onboarding_claude.sent(generation, false);
+            self.onboarding_claude.sent(generation);
         }
     }
 
