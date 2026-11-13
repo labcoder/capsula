@@ -578,17 +578,18 @@ impl Presence {
         self.pointer_settle = None;
         self.set_panel(PanelVisibility::Hidden, cx)?;
         tracing::info!("onboarding opened");
-        self.adopt_onboarding_sign_ins(cx);
         self.show_onboarding(Select::All, cx)
     }
 
-    /// Holds the window and pauses holds while it shows. A hold already recognised ends through
-    /// `cancel_voice` with input cleared, so Esc and the next hold work after it: cancelled at
-    /// once if not yet recording, stopping until its microphone joins if it is.
+    /// Holds the window, pauses holds while it shows and adopts a sign-in already waiting. A hold
+    /// already recognised ends through `cancel_voice` with input cleared, so Esc and the next hold
+    /// work after it: cancelled at once if not yet recording, stopping until its microphone joins
+    /// if it is.
     fn set_onboarding(&mut self, panel: OnboardingPanel, cx: &mut Context<'_, Self>) {
         self.onboarding = Some(panel);
         self.voice.paused.set(true);
         self.cancel_voice(cx);
+        self.adopt_onboarding_sign_ins(cx);
     }
 
     /// Places the window under the dock and brings it to the front with focus in its input. If

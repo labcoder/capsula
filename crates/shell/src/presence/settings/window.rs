@@ -120,21 +120,15 @@ impl Presence {
         Ok(())
     }
 
-    /// A Claude Code op from Settings: the attempt is the user's to steer there now.
+    /// A Claude Code op from any surface: the attempt is the user's to steer there now, so an
+    /// owed cancel is dropped.
     pub(in crate::presence) fn claude_op(
         &mut self,
         op: kumochi_protocol::message::ConnectionOp,
         cx: &mut Context<'_, Self>,
-    ) {
-        self.onboarding_claude.superseded();
-        self.queue_claude_op(op, cx);
-    }
-
-    pub(in crate::presence) fn queue_claude_op(
-        &mut self,
-        op: kumochi_protocol::message::ConnectionOp,
-        cx: &mut Context<'_, Self>,
     ) -> bool {
+        self.onboarding_claude.superseded();
+        self.settings_claude.superseded();
         self.cancel_voice(cx);
         let (link, session) = (&self.link, &self.session);
         self.settings.update(cx, |state, cx| {
@@ -205,21 +199,15 @@ impl Presence {
                 .unwrap_or(false)
         })
     }
-    /// An account op from Settings or chat: the attempt is the user's to steer there now.
+    /// An account op from any surface: the attempt is the user's to steer there now, so an owed
+    /// cancel is dropped.
     pub(in crate::presence) fn account_op(
         &mut self,
         op: AccountOp,
         cx: &mut Context<'_, Self>,
     ) -> bool {
         self.onboarding_chatgpt.superseded();
-        self.queue_account_op(op, cx)
-    }
-
-    pub(in crate::presence) fn queue_account_op(
-        &mut self,
-        op: AccountOp,
-        cx: &mut Context<'_, Self>,
-    ) -> bool {
+        self.settings_chatgpt.superseded();
         self.cancel_voice(cx);
         let (link, session) = (&self.link, &self.session);
         self.settings.update(cx, |state, cx| {
@@ -371,6 +359,7 @@ impl Presence {
             return Ok(());
         }
         self.dismiss_github_settings(cx);
+        self.cancel_settings_sign_ins(cx);
         if let Some(field) = self
             .settings_panel
             .as_ref()

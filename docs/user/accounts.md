@@ -3,9 +3,15 @@
 Open the dock's **Settings…**, then **Accounts**. Choose **Continue with ChatGPT** to sign
 in using your browser. Finish there, then return to the app. **Cancel** stops waiting for the
 browser; once you've finished there, the sign-in completes even if you press Cancel.
-**Open again** replaces the waiting sign-in attempt. Closing Settings doesn't cancel it.
-Onboarding's account step offers the same sign-in buttons; closing that window cancels a
-sign-in it started that hasn't finished.
+**Open again** replaces the waiting sign-in attempt.
+
+Closing Settings cancels a ChatGPT or Claude Code sign-in you started there that hasn't
+finished, however Settings closes: for example the close button, Esc, closing its window with
+Alt+F4, a double-tap of the shortcut, opening Tasks, moving the dock, starting to hold the
+shortcut to talk, pressing **Settings…** again, or onboarding opening.
+Switching to your browser or to Claude Code's window doesn't close Settings. A sign-in you
+started from chat isn't cancelled. Onboarding's account step offers the same sign-in buttons, and
+closing that window cancels a sign-in it started the same way.
 
 The connected account shows its email, when provided, and **Using ChatGPT plan** when plan
 use is enabled. If plan use is off, **Enable** asks for permission in your browser. If the

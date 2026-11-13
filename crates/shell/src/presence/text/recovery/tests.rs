@@ -1938,3 +1938,32 @@ fn renewal_uses_one_run_owned_surface_and_a_delayed_frame_cannot_restore_the_ban
         assert!(control.is_empty());
     }
 }
+
+/// Chat's Sign in isn't Settings' own, so Settings closing doesn't cancel it.
+#[gpui::test]
+fn a_sign_in_from_chat_is_not_one_settings_cancels(cx: &mut TestAppContext) {
+    let (owner, _data, control) = ready(cx);
+    receive(
+        &owner,
+        vec![
+            LinkEvent::Account {
+                generation: 1,
+                view: AccountView::SignedOut {
+                    revocation_unconfirmed: false,
+                },
+            },
+            renewal_general(),
+        ],
+        cx,
+    );
+    owner.update(cx, |owner, cx| {
+        owner
+            .recover(Source::Account, Action::SignIn, cx)
+            .expect("sign-in intent");
+        owner.cancel_settings_sign_ins(cx);
+    });
+    assert_eq!(
+        std::iter::from_fn(|| control.try_recv().ok()).collect::<Vec<_>>(),
+        [ControlToBrain::AccountOp(AccountOp::SignIn)]
+    );
+}

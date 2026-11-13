@@ -61,7 +61,7 @@ impl SettingsView {
         claude_section(
             &self.model,
             move |op, cx| {
-                let _gone = owner.update(cx, |owner, cx| owner.claude_op(op, cx));
+                let _gone = owner.update(cx, |owner, cx| owner.settings_claude_op(op, cx));
             },
             Some(disconnect),
             cx,
@@ -82,6 +82,7 @@ pub(in crate::presence) fn claude_section(
     let button = |id: &'static str, text: Text, op: ConnectionOp| {
         let route = route.clone();
         Button::new(id)
+            .debug_selector(move || id.into())
             .label(strings.get(text))
             .disabled(!state.allows(op))
             .on_click(move |_, _, cx| route(op, cx))
@@ -91,6 +92,7 @@ pub(in crate::presence) fn claude_section(
         let model = model.clone();
         actions = actions.child(
             Button::new("claude-review")
+                .debug_selector(|| "claude-review".into())
                 .label(strings.get(Text::ClaudeReview))
                 .disabled(!state.allows(ConnectionOp::FindClaudeCode))
                 .on_click(move |_, _, cx| {
