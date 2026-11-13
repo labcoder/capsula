@@ -206,14 +206,30 @@ pub(in crate::presence) fn bridge(kumo: &Entity<KumoView>, event: PresenceEvent,
 pub(super) fn listen(bounds: Bounds<Pixels>, view: WeakEntity<KumoView>, window: &mut Window) {
     let pressed = view.clone();
     window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-        if phase == DispatchPhase::Bubble
-            && event.button == MouseButton::Left
-            && bounds.contains(&event.position)
-        {
+        if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
+            return;
+        }
+        if bounds.contains(&event.position) {
             update(&pressed, cx, |view, cx| {
                 view.press(event, bounds.center(), window, cx);
             });
         }
+        // Numbers only, for the gate: where the press landed against Kumo's square.
+        let grabbed = pressed
+            .upgrade()
+            .is_some_and(|view| view.read(cx).pull_live());
+        crate::presence::diagnostics::record(
+            cx,
+            format_args!(
+                "kumo press at={},{} bounds={},{},{},{} grabbed={grabbed}",
+                f32::from(event.position.x),
+                f32::from(event.position.y),
+                f32::from(bounds.origin.x),
+                f32::from(bounds.origin.y),
+                f32::from(bounds.size.width),
+                f32::from(bounds.size.height),
+            ),
+        );
     });
     let moved = view.clone();
     window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {

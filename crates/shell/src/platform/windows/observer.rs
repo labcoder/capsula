@@ -109,6 +109,10 @@ pub(crate) fn performance_frequency() -> i64 {
 /// # Errors
 /// Fails when the window has no Win32 handle or Windows can't map the point.
 pub(crate) fn client_origin(window: &Window) -> Result<[i32; 2], PresenceError> {
+    #[cfg(test)]
+    if raw_window_handle::HasWindowHandle::window_handle(window).is_err() {
+        return Ok([0, 0]);
+    }
     let mut point = POINT::default();
     // SAFETY: the handle is the window's live HWND and `point` is writable.
     unsafe { ClientToScreen(hwnd_of(window)?, &raw mut point) }.ok()?;

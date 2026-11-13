@@ -265,26 +265,25 @@ impl KumoView {
 impl Render for KumoView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let view = cx.weak_entity();
-        div()
-            .relative()
-            .size(px(SIZE))
-            .flex_none()
-            .children(
-                self.image
-                    .clone()
-                    .filter(|_| self.pulled == Pulled::Peek)
-                    .map(|image| img(image).size_full()),
+        let body = div().relative().size(px(SIZE)).flex_none();
+        #[cfg(test)]
+        let body = gpui_kit::InteractiveElement::debug_selector(body, || "presence-kumo".into());
+        body.children(
+            self.image
+                .clone()
+                .filter(|_| self.pulled == Pulled::Peek)
+                .map(|image| img(image).size_full()),
+        )
+        .child(
+            canvas(
+                |_, _, _| {},
+                move |bounds, (), window, _| {
+                    pull::listen(bounds, view, window);
+                },
             )
-            .child(
-                canvas(
-                    |_, _, _| {},
-                    move |bounds, (), window, _| {
-                        pull::listen(bounds, view, window);
-                    },
-                )
-                .absolute()
-                .size_full(),
-            )
+            .absolute()
+            .size_full(),
+        )
     }
 }
 

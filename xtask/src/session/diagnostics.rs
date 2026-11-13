@@ -23,7 +23,7 @@ pub(crate) enum Mark {
 }
 
 /// Every non-input line the shell records; any other unknown event still fails.
-const STATUS: [&str; 9] = [
+const STATUS: [&str; 10] = [
     "link state=",
     "carry drop perch=",
     "run phase=",
@@ -33,6 +33,7 @@ const STATUS: [&str; 9] = [
     "kumo baked ",
     "kumo frame shade_us=",
     "kumo reshades=",
+    "kumo press at=",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
