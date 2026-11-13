@@ -40,25 +40,26 @@ fn grabs(seen: &RefCell<Vec<PullChanged>>) -> usize {
 fn a_press_on_stop_never_grabs_kumo_but_a_press_on_kumo_does_while_its_picture_shows(
     cx: &mut TestAppContext,
 ) {
-    press_under_kumo(cx, true, "presence-stop");
+    press_under_kumo(cx, "presence-stop");
 }
 
 #[gpui::test]
 fn a_press_on_chat_never_grabs_kumo_but_a_press_on_kumo_does_while_its_picture_shows(
     cx: &mut TestAppContext,
 ) {
-    press_under_kumo(cx, false, "presence-chat");
+    press_under_kumo(cx, "presence-chat");
 }
 
-/// Presses the button `selector` names, then Kumo's upper part, with Stop shown or not.
-fn press_under_kumo(cx: &mut TestAppContext, stop: bool, selector: &'static str) {
+/// Presses the button `selector` names, then Kumo's upper part. Stop shows only when it's the
+/// button pressed, so otherwise Chat leads the row under Kumo.
+fn press_under_kumo(cx: &mut TestAppContext, selector: &'static str) {
     let _area = work_area_fixture::set([0, 0, 2560, 1392]);
     let presence = test_fixture::presence(cx);
     let (panel, kumo) = presence.update(cx, |this, cx| {
         this.follow_kumo(cx);
         (this.panel.clone(), this.kumo.clone())
     });
-    panel.update(cx, |panel, _| panel.stop = stop);
+    panel.update(cx, |panel, _| panel.stop = selector == "presence-stop");
     kumo.update(cx, |kumo, _| {
         kumo.set_site(Some(PullSite {
             line: [1252, 1, 56, 19],
