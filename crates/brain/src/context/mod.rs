@@ -177,6 +177,8 @@ pub(crate) struct Item {
 pub(crate) struct Supplied {
     pub(crate) summary: Option<Summary>,
     pub(crate) items: Vec<Item>,
+    /// The thread's drawings on screen, taken by the drawing system when the build began.
+    pub(crate) drawings: crate::drawing::Digest,
 }
 
 /// The input item a summary becomes.

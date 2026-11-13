@@ -9,6 +9,7 @@
 //! later frames are never sent.
 
 mod call;
+mod digest;
 pub mod io;
 mod scenes;
 mod snapshot;
@@ -26,6 +27,7 @@ use crate::coordinator::{Effect, Stale, StoreOp};
 use crate::engines::CallId;
 
 pub use call::{CallEnd, CallError, Remaining};
+pub(crate) use digest::Digest;
 pub use io::{Reply, StoredScene, Target, Write};
 pub(crate) use snapshot::CHUNK_TARGET;
 pub use snapshot::Snapshot;

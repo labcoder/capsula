@@ -112,6 +112,7 @@ fn kumo_build(attempt: u64, snapshot: Option<RunSnapshot>) -> Effect {
         origin: Origin::Kumo,
         first: snapshot.is_none(),
         snapshot,
+        drawings: crate::drawing::Digest::default(),
     }))
 }
 
