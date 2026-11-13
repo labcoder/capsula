@@ -88,8 +88,11 @@ fn the_body_is_the_request_as_data() {
 }
 
 /// A text-only body is pinned byte for byte, so image input can't change what text turns send.
+/// The workspace build turns on `serde_json`'s `preserve_order` (keys as written) and a lone brain
+/// build doesn't (keys sorted), so each key order has its own exact bytes.
 #[test]
 fn a_text_only_body_keeps_its_exact_bytes() {
+    let written = json!({ "b": 0, "a": 0 }).to_string() == r#"{"b":0,"a":0}"#;
     let input = vec![
         InputItem::Message {
             role: Role::User,
@@ -102,8 +105,15 @@ fn a_text_only_body_keeps_its_exact_bytes() {
     ];
     let mut request = request("Be brief.", input);
     request.tools.clear();
-    assert_eq!(
-        body(&request).expect("small").to_string(),
+    let expected = if written {
+        concat!(
+            r#"{"model":"gpt-fixture","instructions":"Be brief.","#,
+            r#""input":[{"type":"message","role":"user","content":"Hi \"you\""},"#,
+            r#"{"type":"message","role":"assistant","content":"Hello."}],"#,
+            r#""tools":[],"reasoning":{"effort":"xhigh"},"#,
+            r#""include":["reasoning.encrypted_content"],"store":false,"stream":true}"#,
+        )
+    } else {
         concat!(
             r#"{"include":["reasoning.encrypted_content"],"#,
             r#""input":[{"content":"Hi \"you\"","role":"user","type":"message"},"#,
@@ -111,7 +121,8 @@ fn a_text_only_body_keeps_its_exact_bytes() {
             r#""instructions":"Be brief.","model":"gpt-fixture","reasoning":{"effort":"xhigh"},"#,
             r#""store":false,"stream":true,"tools":[]}"#,
         )
-    );
+    };
+    assert_eq!(body(&request).expect("small").to_string(), expected);
 }
 
 #[test]
