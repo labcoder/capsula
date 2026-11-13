@@ -69,6 +69,26 @@ fn voice_stop_acceptance_appends_a_redacted_control_tag() {
     redacted(&message, Direction::ToShell, "VoiceHoldStopAccepted", 6);
 }
 
+#[test]
+fn screen_hold_states_append_a_redacted_control_tag() {
+    let model =
+        super::ModelName::new(&"\u{1F600}".repeat(super::MAX_MODEL_NAME_CHARS)).expect("valid");
+    for (state, size) in [
+        (
+            super::ScreenHolds::On { model },
+            1 + 1 + 2 + 4 * super::MAX_MODEL_NAME_CHARS,
+        ),
+        (super::ScreenHolds::Off(super::ScreenOff::ModelCantSee), 3),
+        (super::ScreenHolds::Off(super::ScreenOff::NotReady), 3),
+        (super::ScreenHolds::Off(super::ScreenOff::Unsupported), 3),
+    ] {
+        let message = ControlToShell::ScreenHolds(state);
+        assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], 31);
+        round_trip(&message, Pipe::Control, size);
+        redacted(&message, Direction::ToShell, "ScreenHolds", size);
+    }
+}
+
 fn round_trip<M: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(
     message: &M,
     pipe: Pipe,

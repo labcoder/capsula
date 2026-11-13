@@ -56,13 +56,6 @@ fn a_context_keeps_the_wire_bytes_of_a_list_of_bytes() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    expect(
-        clippy::used_underscore_binding,
-        reason = "reads the registration the field holds"
-    )
-)]
 fn a_received_jpeg_is_one_allocation_of_its_exact_length() {
     let len = 2 * 1024 * 1024 - 3;
     let sent = postcard::to_allocvec(&context(vec![0x42; len])).expect("encoded");
@@ -71,5 +64,5 @@ fn a_received_jpeg_is_one_allocation_of_its_exact_length() {
     assert_eq!(received.jpeg.capacity(), len);
     assert_eq!((received.size, received.transform), ([4, 3], TRANSFORM));
     #[cfg(windows)]
-    assert!(received._dump.is_some(), "registered for dump exclusion");
+    assert!(received.dump.is_some(), "registered for dump exclusion");
 }

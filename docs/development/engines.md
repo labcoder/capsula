@@ -311,6 +311,24 @@ marker, zeroes them when its last copy drops, and shows only its length in `Debu
 URL is built in one zeroing string of exactly its length. Whether a model takes images is the catalog's own fact (accounts.md, "Model
 catalog").
 
+**A held run's screen.** A hold's transcript hands its run what the screen part ended with: a
+sealed image, whose buffer and dump registration move into the run's `Jpeg` with no copy, or the
+class saying why there's none. Every build of that run adds it through `ModelRequest::add_screen`,
+after the newest user message: the image followed by the fixed developer line "The image is a
+snapshot from when the user spoke.", or one fixed line naming the class ("The screen was not
+included: it wasn't ready in time."). The lines live in `locales/en/brain.ftl` and carry no window
+details. If the image can't go (another route, or no user message left), the run fails with
+`ScreenUnavailable` rather than sending without it. Known limits:
+- **Every round resends the image.** Each tool round is a new stateless request, so the image's
+  input tokens are charged again every round against the plan's usage, bounded by the round cap,
+  and the body is uploaded again. At the 2 MiB image cap that's about 2.8 MB a round under the
+  10 s send deadline [arithmetic, not measured].
+- **The developer line isn't counted in the 512 KiB bound.** A request built within about 60 bytes
+  of it is refused at send, which fails the run rather than sending more.
+- **A retry goes without the screen.** The shell retries a failed run by resending its text as a
+  new typed turn, so the brain can't tell it from a fresh one. This is closed before screen holds
+  turn on.
+
 ## What builds nothing
 
 | Error | When |

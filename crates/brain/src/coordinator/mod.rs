@@ -550,6 +550,8 @@ struct Run {
     /// What the run read when its first build began, reused by every later build.
     snapshot: Option<crate::context::RunSnapshot>,
     hold: Option<HoldSnapshot>,
+    /// The hold's screen, which every request of the run carries.
+    screen: Option<crate::context::Screen>,
     /// The round's current build; the engine starts once it's admitted.
     build: Option<admission::Build>,
     /// The connection that was ready when the run's turn arrived; none means the run failed
@@ -1136,6 +1138,7 @@ impl Coordinator {
             held: VecDeque::new(),
             snapshot: hold.as_ref().map(|hold| hold.defaults.clone()),
             hold,
+            screen: None,
             build: None,
             connection: self.connection(),
             compacted: None,

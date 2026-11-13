@@ -145,6 +145,7 @@ impl Tapped for ControlToShell {
             Self::DrawingNotReturned { .. } => "DrawingNotReturned",
             Self::VoiceHoldStatus { .. } => "VoiceHoldStatus",
             Self::VoiceHoldStopAccepted { .. } => "VoiceHoldStopAccepted",
+            Self::ScreenHolds(_) => "ScreenHolds",
         }
     }
 

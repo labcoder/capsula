@@ -277,10 +277,21 @@ impl Coordinator {
             made.request.tools.iter().any(|tool| tool.name == DRAW) || self.trusted_draw();
         let current = self.current(key.run)?;
         let thread = current.thread;
+        let mut request = made.request;
+        // shortcut: the screen's developer line isn't counted in BOUND, so a request built within
+        // about 60 bytes of it is refused at send (failing safe); count it if that's ever hit.
+        if current
+            .screen
+            .as_ref()
+            .is_some_and(|screen| request.add_screen(screen).is_err())
+        {
+            let reason = kumochi_protocol::message::ErrorKey::ScreenUnavailable.into();
+            return self.fail_with(key.run, Failure::Engine, reason, effects);
+        }
+        let current = self.current(key.run)?;
         let build = current.build.as_mut().expect("the build was just matched");
         build.offers_draw = offers_draw;
-        build.offered = made
-            .request
+        build.offered = request
             .tools
             .iter()
             .filter_map(|tool| crate::dispatch::named(tool.name))
@@ -298,7 +309,7 @@ impl Coordinator {
                 run: key.run,
                 thread,
                 origin: origin(thread, main),
-                request: made.request,
+                request,
             },
         });
         Ok(())

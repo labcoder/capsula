@@ -74,7 +74,7 @@ fn new_hold_stores_exact_words_once_only_after_submit() {
         0
     );
     let effects = core
-        .submit_hold(snapshot, "recognized-history-sentinel".into())
+        .submit_hold(snapshot, "recognized-history-sentinel".into(), None)
         .unwrap();
     let writes = effects
         .into_iter()
@@ -150,7 +150,7 @@ fn recognition_reads_choice_and_live_generation_after_the_prior_write_barrier() 
     assert_eq!(snapshot.defaults.origin, Origin::Task(TASK));
     assert_eq!(snapshot.defaults.choice, Some(captured.clone()));
     assert_eq!(snapshot.defaults.connection, ConnectionTag(0));
-    for effect in core.submit_hold(snapshot, "next".into()).unwrap() {
+    for effect in core.submit_hold(snapshot, "next".into(), None).unwrap() {
         if let Effect::Store(op) = effect {
             assert!(running.thread.send(op));
         }
@@ -306,7 +306,10 @@ fn deletion_accepted_after_recognition_fences_snapshot_even_after_its_reply() {
     }
     core.handle(running.ack()).unwrap();
     assert!(!core.deletes_pending());
-    assert_eq!(core.submit_hold(snapshot, "late words".into()), Err(()));
+    assert_eq!(
+        core.submit_hold(snapshot, "late words".into(), None),
+        Err(())
+    );
     assert_eq!(core.current_run(), None);
     running.thread.close().blocking_recv().unwrap();
 }

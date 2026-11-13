@@ -457,15 +457,20 @@ it (a panic, an aborted task, a dropped `context`) leaves its frame to the ticke
 wasn't shown, and callers never treat it as fatal.
 
 **The hold's screen part** (`runtime/hold/screen.rs`) is `None` for a voice hold. A screen hold
-starts at `Waiting` and ends at `Closed`. Nothing starts one yet, and the brain has no client until
-the entry-point switch. Every way a hold ends reaches the part through one of two places:
+starts at `Waiting`. Nothing starts one yet, and the brain has no client until the entry-point
+switch. Every way a hold ends reaches the part through one of two places:
 - the hold's invalidation, which covers cancel and Esc, a turn, an Ask, `ShellLost`, a model or
-  default change, a delete, hold-to-talk off, a timeout and session loss;
-- taking the hold, which also covers handing its transcript to the run.
+  default change, a delete, a connection change, hold-to-talk off, a timeout and session loss;
+- taking the hold.
 
-A `Waiting` part may still hold a frame in the worker, so closing it spawns `retire` with the
-worker that captured, if one answered. Closing a `Ready` part drops its context, which zeroes it.
-Closing is idempotent, so a hold that's invalidated and then taken sends one `Retire`.
+A `Waiting` part may still hold a frame in the worker, so closing it leaves `Closed(NotReady)` and
+spawns `retire` with the worker that captured, if one answered. A `Ready` part closed this way
+becomes `Discarded`: its context drops, which zeroes it. Closing is idempotent, so a hold that's
+invalidated and then taken sends one `Retire`. When the transcript is ready, the part is handed to
+the run before the hold is taken: a waiting part closes first, a ready context moves into the run's
+image with its dump registration and no copy, and a closed part's class goes with the run (engines.md,
+"A held run's screen"). A `debug_assert` in the hold's `Drop` fails tests when a hold ends with its
+part still `Waiting` or `Ready`.
 
 ## Portable element data and walk
 

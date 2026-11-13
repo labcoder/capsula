@@ -955,6 +955,61 @@ async fn only_a_listed_image_model_on_the_accounts_connection_takes_images() {
     accounts.close(Instant::now(), Instant::now()).await;
 }
 
+/// The image gate's four states, each from its own condition, and closed again after sign-out.
+#[tokio::test]
+async fn the_image_gate_opens_only_for_a_listed_image_model_where_windows_can_be_captured() {
+    use kumochi_protocol::message::{ModelName, ScreenHolds, ScreenOff};
+    let scratch = Scratch::new("account-image-gate");
+    let store = FakeStore::default();
+    let body = json!({ "models": [
+        { "slug": "gpt-6-sol", "display_name": "GPT-6 Sol", "visibility": "list",
+          "input_modalities": ["text", "image"] },
+        { "slug": "gpt-6-luna", "display_name": "GPT-6 Luna", "visibility": "list",
+          "input_modalities": ["text"] },
+    ] });
+    let http = Catalog::answering([(200, body.to_string())]);
+    let mut accounts = seeded(&scratch, &store, http, LATER);
+    let choice = |slug: &str, connection| ModelChoice {
+        model: ModelSlug::new(slug).expect("slug"),
+        effort: Effort::Low,
+        connection,
+    };
+    let sol = choice("gpt-6-sol", ConnectionKind::ChatGpt);
+    let off = ScreenHolds::Off;
+    assert_eq!(
+        accounts.screen_holds(Some(&sol), true),
+        off(ScreenOff::NotReady)
+    );
+    assert_eq!(read_ended(&mut accounts).await, []);
+    assert_eq!(
+        accounts.screen_holds(Some(&sol), true),
+        ScreenHolds::On {
+            model: ModelName::new("GPT-6 Sol").expect("name"),
+        }
+    );
+    assert_eq!(
+        accounts.screen_holds(Some(&sol), false),
+        off(ScreenOff::Unsupported)
+    );
+    assert_eq!(accounts.screen_holds(None, true), off(ScreenOff::NotReady));
+    for other in [
+        choice("gpt-6-luna", ConnectionKind::ChatGpt),
+        choice("gpt-6-sol", ConnectionKind::AnthropicKey),
+        choice("gpt-6-nova", ConnectionKind::ChatGpt),
+    ] {
+        assert_eq!(
+            accounts.screen_holds(Some(&other), true),
+            off(ScreenOff::ModelCantSee)
+        );
+    }
+    accounts.handle(Input::Op(AccountOp::SignOut));
+    assert_eq!(
+        accounts.screen_holds(Some(&sol), true),
+        off(ScreenOff::NotReady)
+    );
+    accounts.close(Instant::now(), Instant::now()).await;
+}
+
 /// D13-H1: a usable account is ready on its saved set's connection with its catalog, and an
 /// accepted sign-out is unavailable at once, before the sign-out finishes.
 #[tokio::test]

@@ -21,7 +21,7 @@ pub(crate) struct ScreenContext {
     /// before they're freed.
     #[cfg(windows)]
     #[serde(skip)]
-    _dump: Option<crate::platform::DumpExclusion>,
+    dump: Option<crate::platform::DumpExclusion>,
     #[serde(serialize_with = "jpeg_bytes")]
     jpeg: Zeroizing<Vec<u8>>,
     size: [u32; 2],
@@ -82,6 +82,15 @@ impl ScreenContext {
         Self::sealed(jpeg, size, transform)
     }
 
+    /// The image for the run that takes it: its buffer and dump registration move, with no copy.
+    pub(crate) fn into_jpeg(mut self) -> crate::context::Jpeg {
+        crate::context::Jpeg::sealed(
+            std::mem::take(&mut self.jpeg),
+            #[cfg(windows)]
+            self.dump.take(),
+        )
+    }
+
     /// A sealed 4x3 context around `jpeg`, for tests outside the screen module.
     #[cfg(test)]
     pub(crate) fn fixture(jpeg: &[u8]) -> Self {
@@ -101,7 +110,7 @@ impl ScreenContext {
     fn sealed(jpeg: Zeroizing<Vec<u8>>, size: [u32; 2], transform: CaptureTransform) -> Self {
         Self {
             #[cfg(windows)]
-            _dump: crate::platform::DumpExclusion::new(jpeg.as_ptr(), jpeg.capacity()),
+            dump: crate::platform::DumpExclusion::new(jpeg.as_ptr(), jpeg.capacity()),
             jpeg,
             size,
             transform,

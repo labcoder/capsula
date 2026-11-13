@@ -3,10 +3,7 @@
 mod audio;
 #[cfg(test)]
 mod reconnect_tests;
-#[expect(
-    dead_code,
-    reason = "2c4 starts screen parts; a run takes a Ready context from 2c3b"
-)]
+#[cfg_attr(not(test), expect(dead_code, reason = "2c4 starts screen parts"))]
 mod screen;
 #[cfg(test)]
 mod tests;
@@ -120,6 +117,18 @@ impl std::fmt::Debug for Holds {
             .field("pending", &self.pending)
             .field("debt", &self.debt)
             .finish_non_exhaustive()
+    }
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        debug_assert!(
+            !matches!(
+                self.screen,
+                ScreenPart::Waiting { .. } | ScreenPart::Ready(_)
+            ),
+            "a hold ended past both of its screen part's closers"
+        );
     }
 }
 
@@ -664,11 +673,12 @@ impl Brain {
                 if !self.admits_turn(link) {
                     return self.hold_end(HoldStatus::Failed(HoldFailure::Busy), link);
                 }
-                let Some(hold) = self.holds.take() else {
+                let screen = self.holds.submit_screen();
+                let Some(mut hold) = self.holds.take() else {
                     return Ok(());
                 };
-                let snapshot = hold.snapshot.expect("decode has a pinned snapshot");
-                match self.coordinator.submit_hold(snapshot, text.into()) {
+                let snapshot = hold.snapshot.take().expect("decode has a pinned snapshot");
+                match self.coordinator.submit_hold(snapshot, text.into(), screen) {
                     Ok(effects) => self.apply(effects, Some(link)).map_err(|_| Full),
                     Err(()) => Self::hold_status(
                         hold.key,

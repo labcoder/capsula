@@ -675,6 +675,32 @@ pub enum ControlToShell {
         /// The completed source generation, including a replay from an earlier connection.
         gesture: GestureId,
     },
+    /// Whether a hold also shows the model the window under the pointer. Sent when the shell
+    /// connects and whenever it changes.
+    ScreenHolds(ScreenHolds),
+}
+
+/// The image gate's state, for the standing notice and for which hold message the shell sends.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScreenHolds {
+    /// A hold shows `model` the window under the pointer.
+    On {
+        /// The chosen model's display name.
+        model: ModelName,
+    },
+    /// Holds are voice only.
+    Off(ScreenOff),
+}
+
+/// Why holds are voice only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScreenOff {
+    /// The chosen model doesn't take images on this route.
+    ModelCantSee,
+    /// The catalog hasn't been read yet, so whether the model can see isn't known.
+    NotReady,
+    /// This platform has no window capture yet.
+    Unsupported,
 }
 
 /// Shell to brain, on the data pipe.

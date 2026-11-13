@@ -16,6 +16,14 @@ old-process exit can release it, not a timeout or connection replacement.
 The provisional 10-second startup and 2-second final-PCM drain bounds are unmeasured;
 expiry is terminal but never releases an unconfirmed device owner.
 
+## Screen holds
+
+The appended `ScreenHolds` tells the shell whether a hold also shows the model the window under
+the pointer: `On { model }` with the model's display name, or `Off` with `ModelCantSee`,
+`NotReady` (the catalog isn't read, or no model is chosen) or `Unsupported` (no window capture on
+this platform). It's for the standing notice and for which hold message the shell sends. Nothing
+sends it yet, and the shell ignores it. It's payload-redacted in the pipe tap.
+
 ## Anthropic paste metadata
 
 The build-id handshake rejects mixed binaries before decoding connection work.

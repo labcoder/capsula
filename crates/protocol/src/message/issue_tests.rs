@@ -155,8 +155,12 @@ fn tagged_github_refusal_appends_wire_tags_and_keeps_error_validation() {
         postcard::to_allocvec(&ErrorKey::DrawingNotReturned).unwrap(),
         [45]
     );
+    assert_eq!(
+        postcard::to_allocvec(&ErrorKey::ScreenUnavailable).unwrap(),
+        [46]
+    );
     let mut unknown = wire;
-    unknown[5] = 46;
+    unknown[5] = 47;
     assert!(matches!(
         read::<ControlToShell>(&mut unknown.as_slice(), Pipe::Control),
         Err(FrameError::Malformed(_))
