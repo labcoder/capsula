@@ -16,8 +16,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowExW, GA_ROOT, GW_HWNDNEXT, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW,
     GetLayeredWindowAttributes, GetTopWindow, GetWindow, GetWindowDisplayAffinity,
     GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
-    LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA, WDA_NONE, WINDOW_LONG_PTR_INDEX, WS_DISABLED,
-    WS_EX_LAYERED, WS_EX_TRANSPARENT, WindowFromPoint,
+    LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA, LWA_COLORKEY, WDA_NONE, WINDOW_LONG_PTR_INDEX,
+    WS_DISABLED, WS_EX_LAYERED, WS_EX_TRANSPARENT, WindowFromPoint,
 };
 use windows::core::{PCWSTR, w};
 use windows_sys::Win32::Security::{
@@ -47,10 +47,10 @@ struct Facts {
     kumochi: bool,
     visible: bool,
     cloaked: bool,
-    /// `WS_EX_TRANSPARENT`, layered at zero alpha, or drawn by `UpdateLayeredWindow` with a
-    /// click at the point landing elsewhere: clicks fall through it.
+    /// Layered with `WS_EX_TRANSPARENT` or zero constant alpha, or drawn with the hit test
+    /// landing below it: clicks fall through it.
     transparent: bool,
-    /// Drawn by `UpdateLayeredWindow`, and where a click lands can't be told.
+    /// Drawn, and where a click lands can't be told.
     unclear: bool,
     /// Inside its rectangle and its window region.
     contains: bool,
@@ -121,7 +121,7 @@ fn facts(window: HWND, point: PhysicalPoint, shell: u32) -> Facts {
         Layer::Opaque => Hit::Here,
         Layer::ClickThrough => Hit::Through,
         Layer::Drawn if found.kumochi || found.cloaked => Hit::Through,
-        Layer::Drawn => drawn_hit(window, point, shell),
+        Layer::Drawn => drawn_hit(styles(window, GWL_STYLE), || hit_test(window, point)),
     };
     Facts {
         transparent: hit == Hit::Through,
@@ -236,10 +236,20 @@ fn frame(window: HWND) -> Option<PhysicalRect> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Layer {
     Opaque,
-    /// `WS_EX_TRANSPARENT`, or layered with zero constant alpha.
+    /// Layered with `WS_EX_TRANSPARENT`, or with zero constant alpha.
     ClickThrough,
-    /// Drawn by `UpdateLayeredWindow`: per-pixel alpha that this process can't read.
+    /// Layered with transparency this process can't read per pixel: drawn by
+    /// `UpdateLayeredWindow`, or colour-keyed.
     Drawn,
+}
+
+/// Where the hit test landed, relative to the drawn window the walk is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Found {
+    Itself,
+    Below,
+    /// Above it, nowhere, or not found within the walk's bound.
+    Elsewhere,
 }
 
 /// Where a click at the point goes, for the window the walk is on.
@@ -258,46 +268,72 @@ fn styles(window: HWND, which: WINDOW_LONG_PTR_INDEX) -> u32 {
 
 fn layer(window: HWND) -> Layer {
     let styles = styles(window, GWL_EXSTYLE);
-    if styles & WS_EX_TRANSPARENT.0 != 0 {
-        return Layer::ClickThrough;
-    }
+    let attributes = (styles & WS_EX_LAYERED.0 != 0)
+        .then(|| {
+            let (mut alpha, mut flags) = (0_u8, LAYERED_WINDOW_ATTRIBUTES_FLAGS::default());
+            // SAFETY: both outputs are writable; a window drawn by UpdateLayeredWindow fails here.
+            let read = unsafe {
+                GetLayeredWindowAttributes(window, None, Some(&raw mut alpha), Some(&raw mut flags))
+            };
+            read.ok().map(|()| (alpha, flags))
+        })
+        .flatten();
+    layer_of(styles, attributes)
+}
+
+/// Clicks pass through a layered window only: `WS_EX_TRANSPARENT` alone doesn't let them through,
+/// so such a window is taken like any other.
+fn layer_of(styles: u32, attributes: Option<(u8, LAYERED_WINDOW_ATTRIBUTES_FLAGS)>) -> Layer {
     if styles & WS_EX_LAYERED.0 == 0 {
         return Layer::Opaque;
     }
-    let (mut alpha, mut flags) = (0_u8, LAYERED_WINDOW_ATTRIBUTES_FLAGS::default());
-    // SAFETY: both outputs are writable; a window drawn by UpdateLayeredWindow fails here.
-    let read = unsafe {
-        GetLayeredWindowAttributes(window, None, Some(&raw mut alpha), Some(&raw mut flags))
-    };
-    match read {
-        Err(_) => Layer::Drawn,
-        Ok(()) if flags.contains(LWA_ALPHA) && alpha == 0 => Layer::ClickThrough,
-        Ok(()) => Layer::Opaque,
+    if styles & WS_EX_TRANSPARENT.0 != 0 {
+        return Layer::ClickThrough;
+    }
+    match attributes {
+        Some((0, flags)) if flags.contains(LWA_ALPHA) => Layer::ClickThrough,
+        Some((_, flags)) if !flags.contains(LWA_COLORKEY) => Layer::Opaque,
+        _ => Layer::Drawn,
     }
 }
 
-/// A drawn layered window lets clicks through its zero-alpha pixels, and only the window manager's
-/// hit test knows which those are. `WindowFromPoint` gives its answer but skips disabled windows
-/// and doesn't skip Kumochi's, so either of those makes the answer unclear.
-fn drawn_hit(window: HWND, point: PhysicalPoint, shell: u32) -> Hit {
-    if styles(window, GWL_STYLE) & WS_DISABLED.0 != 0 {
+/// A drawn window lets a click through only where the window manager's hit test lands below it.
+/// A hit above it (a window the walk skipped, or Kumochi's) says nothing about the drawn window,
+/// and the hit test skips disabled windows, so either is unclear.
+fn drawn_hit(styles: u32, found: impl FnOnce() -> Found) -> Hit {
+    if styles & WS_DISABLED.0 != 0 {
         return Hit::Unclear;
     }
+    match found() {
+        Found::Itself => Hit::Here,
+        Found::Below => Hit::Through,
+        Found::Elsewhere => Hit::Unclear,
+    }
+}
+
+fn hit_test(window: HWND, point: PhysicalPoint) -> Found {
     let [x, y] = point.0;
     // SAFETY: a hit test at a physical point; it returns an opaque handle.
     let hit = unsafe { WindowFromPoint(POINT { x, y }) };
     if hit.is_invalid() {
-        return Hit::Unclear;
+        return Found::Elsewhere;
     }
     // SAFETY: this only queries the opaque handle.
     let root = unsafe { GetAncestor(hit, GA_ROOT) };
     if root == window {
-        Hit::Here
-    } else if super::elements::excluded(owner(root).0, shell).unwrap_or(false) {
-        Hit::Unclear
-    } else {
-        Hit::Through
+        return Found::Itself;
     }
+    // SAFETY: Windows validates the opaque handle and returns the next one down.
+    let mut next = unsafe { GetWindow(window, GW_HWNDNEXT) }.ok();
+    for _ in 0..MAX_WALK {
+        let Some(below) = next else { break };
+        if below == root {
+            return Found::Below;
+        }
+        // SAFETY: Windows validates the opaque handle and returns the next one down.
+        next = unsafe { GetWindow(below, GW_HWNDNEXT) }.ok();
+    }
+    Found::Elsewhere
 }
 
 fn contains(window: HWND, point: PhysicalPoint) -> bool {

@@ -310,17 +310,20 @@ production calls either yet.
 On Windows the walk reads the top-level z-order from the point. It skips windows whose
 rectangle or window region leaves out the point, before it opens any process, then Kumochi's own
 windows (the worker, the connected shell and Kumochi images: the same rule the element walk
-uses), hidden, cloaked and click-through windows (`WS_EX_TRANSPARENT`, or layered at zero
-constant alpha). A disabled window is still the target, which `WindowFromPoint` wouldn't give.
-Reaching the desktop (`Progman`, `WorkerW`) means `NoWindow`. The target is that window's
-`GA_ROOT`.
+uses), hidden and cloaked windows, and click-through windows: layered ones with
+`WS_EX_TRANSPARENT` or zero constant alpha. `WS_EX_TRANSPARENT` alone doesn't let clicks
+through, so such a window is taken like any other. A disabled window is still the target, which
+`WindowFromPoint` wouldn't give. Reaching the desktop (`Progman`, `WorkerW`) means `NoWindow`.
+The target is that window's `GA_ROOT`.
 
-A layered window drawn by `UpdateLayeredWindow` has no alpha another process can read, and clicks
-fall through its zero-alpha pixels. For one at the point, the walk asks `WindowFromPoint`: if the
-hit is that window, it's the target; if the hit is another window, the walk skips it. When the
-drawn window is disabled, or the hit is Kumochi's own window, `WindowFromPoint`'s answer can't
-say where a click lands, so the walk refuses with `Ambiguous` rather than capture a blank
-overlay or the window under it.
+A layered window drawn by `UpdateLayeredWindow`, or colour-keyed, lets clicks through its
+transparent pixels, and no other process can read which those are. For one at the point, the
+walk asks `WindowFromPoint`. If the hit is that window, it's the target; if the hit is a window
+below it in the z-order, the walk skips it. A hit anywhere else (a window above it that the walk
+skipped, such as Kumochi's, or none) says nothing about the drawn window, and `WindowFromPoint`
+skips disabled windows, so in those cases the walk refuses with `Ambiguous` rather than capture
+a blank overlay or the window under it. The probe saw no message sent to the drawn window's
+process, and no wait while that process was hung.
 
 Before any pixels, the target is refused when it's minimised, cloaked, Kumochi's, elevated (a
 process the worker can't open counts as elevated; for a UWP frame the hosted core window's

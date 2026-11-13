@@ -18,17 +18,18 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, ES_PASSWORD, FindWindowW,
-    GetMessageW, GetWindowRect, HMENU, LWA_ALPHA, MSG, PostMessageW, PostThreadMessageW,
-    RegisterClassW, SMTO_ABORTIFHUNG, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SendMessageTimeoutW,
+    GA_ROOT, GetAncestor, GetMessageW, GetWindowRect, HMENU, LAYERED_WINDOW_ATTRIBUTES_FLAGS,
+    LWA_ALPHA, LWA_COLORKEY, MSG, PostMessageW, PostThreadMessageW, RegisterClassW,
+    SMTO_ABORTIFHUNG, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SendMessageTimeoutW,
     SetLayeredWindowAttributes, SetWindowDisplayAffinity, ShowWindow, ULW_ALPHA,
     UpdateLayeredWindow, WDA_EXCLUDEFROMCAPTURE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP,
     WM_NCHITTEST, WM_QUIT, WNDCLASSW, WS_CHILD, WS_DISABLED, WS_EX_LAYERED, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
+    WS_EX_TRANSPARENT, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE, WindowFromPoint,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, w};
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 
-use super::{Facts, Step, facts, preflight, step};
+use super::{Facts, Found, Hit, Layer, Step, drawn_hit, facts, layer_of, preflight, step};
 use crate::platform::windows::capture::screen_capturer;
 use crate::screen::{CaptureId, Capturer, Failure, FrameMeta, RawFrame, Refusal, Target};
 
@@ -109,6 +110,73 @@ fn the_walk_takes_the_first_window_a_click_would_land_on() {
 }
 
 #[test]
+fn only_a_layered_window_can_be_click_through_and_unreadable_layers_are_drawn() {
+    let layered = WS_EX_LAYERED.0;
+    let transparent = WS_EX_TRANSPARENT.0;
+    let alpha = |value, flags| Some((value, flags));
+    for (why, styles, attributes, expected) in [
+        ("transparent bit alone", transparent, None, Layer::Opaque),
+        ("plain window", 0, None, Layer::Opaque),
+        (
+            "layered and transparent",
+            layered | transparent,
+            None,
+            Layer::ClickThrough,
+        ),
+        (
+            "zero constant alpha",
+            layered,
+            alpha(0, LWA_ALPHA),
+            Layer::ClickThrough,
+        ),
+        (
+            "full constant alpha",
+            layered,
+            alpha(255, LWA_ALPHA),
+            Layer::Opaque,
+        ),
+        (
+            "zero alpha not in use",
+            layered,
+            alpha(0, LAYERED_WINDOW_ATTRIBUTES_FLAGS(0)),
+            Layer::Opaque,
+        ),
+        (
+            "colour key",
+            layered,
+            alpha(255, LWA_COLORKEY),
+            Layer::Drawn,
+        ),
+        (
+            "colour key at zero alpha",
+            layered,
+            alpha(0, LWA_ALPHA | LWA_COLORKEY),
+            Layer::ClickThrough,
+        ),
+        ("drawn by UpdateLayeredWindow", layered, None, Layer::Drawn),
+    ] {
+        assert_eq!(layer_of(styles, attributes), expected, "{why}");
+    }
+}
+
+#[test]
+fn a_drawn_window_is_skipped_only_when_the_hit_test_lands_below_it() {
+    for (styles, found, expected) in [
+        (0, Found::Itself, Hit::Here),
+        (0, Found::Below, Hit::Through),
+        (0, Found::Elsewhere, Hit::Unclear),
+        (WS_DISABLED.0, Found::Itself, Hit::Unclear),
+        (WS_DISABLED.0, Found::Below, Hit::Unclear),
+    ] {
+        assert_eq!(
+            drawn_hit(styles, || found),
+            expected,
+            "{styles:#x} {found:?}"
+        );
+    }
+}
+
+#[test]
 fn a_drawn_window_whose_hit_cant_be_told_ends_the_walk_unclear() {
     assert_eq!(
         step(Facts {
@@ -135,18 +203,30 @@ const HOST_ENV: &str = "KUMOCHI_WINDOW_PROBE_HOST";
 const HOST_TEST: &str = "platform::windows::window::tests::native_probe_host";
 const PATIENCE: Duration = Duration::from_secs(10);
 
-/// One host window: colour (0x00BBGGRR), physical rectangle, owner index, styles, a constant
-/// alpha and a window region relative to its corner. A layered window with no constant alpha is
-/// drawn by `UpdateLayeredWindow` with every pixel at zero alpha, so clicks pass through it
-/// though its styles don't say so.
+/// One host window: colour (0x00BBGGRR), physical rectangle, owner index, styles, how a layered
+/// one is drawn, and a window region relative to its corner.
 struct Plan {
     color: u32,
     rect: [i32; 4],
     owner: Option<usize>,
     style: WINDOW_STYLE,
     ex: WINDOW_EX_STYLE,
-    alpha: Option<u8>,
+    layer: Layering,
     region: Option<[i32; 4]>,
+}
+
+/// How a layered host window gets its pixels; `ex` must include `WS_EX_LAYERED` for all but
+/// `Plain`.
+#[derive(Clone, Copy)]
+enum Layering {
+    Plain,
+    /// One alpha for the whole window.
+    Constant(u8),
+    /// `UpdateLayeredWindow` with every pixel this premultiplied ARGB value: zero is see-through
+    /// and lets clicks pass, though the window's styles don't say so.
+    Drawn(u32),
+    /// Its own colour is the colour key, so every pixel is see-through.
+    Keyed,
 }
 
 const RED: u32 = 0x0000_00FF;
@@ -166,15 +246,28 @@ const P: usize = 9;
 const K: usize = 10;
 const DISABLED: usize = 11;
 const REGION: usize = 12;
+/// `WS_EX_TRANSPARENT` without `WS_EX_LAYERED`, alone over the target.
+const BIT_ONLY: usize = 14;
+/// An opaque drawn window, under a `WS_EX_TRANSPARENT`-only window (16).
+const DRAWN_UNDER_BIT: usize = 15;
+const BIT_OVER_DRAWN: usize = 16;
+/// An opaque drawn window, under a window that the probe cloaks (18).
+const DRAWN_UNDER_CLOAK: usize = 17;
+const CLOAK_OVER_DRAWN: usize = 18;
+const KEYED: usize = 19;
+const DRAWN_OPAQUE: usize = 20;
+const DRAWN_DISABLED: usize = 21;
+/// Premultiplied opaque green.
+const OPAQUE: u32 = 0xFF00_8000;
 
-fn plan() -> [Plan; 14] {
+fn plan() -> [Plan; 22] {
     let popup = |color, rect, owner, ex| Plan {
         color,
         rect,
         owner,
         style: WS_POPUP | WS_VISIBLE,
         ex: WS_EX_TOPMOST | ex,
-        alpha: None,
+        layer: Layering::Plain,
         region: None,
     };
     [
@@ -184,7 +277,7 @@ fn plan() -> [Plan; 14] {
             owner: None,
             style: WS_OVERLAPPEDWINDOW | WS_VISIBLE,
             ex: WS_EX_TOPMOST,
-            alpha: None,
+            layer: Layering::Plain,
             region: None,
         },
         popup(GREEN, [300, 150, 200, 100], Some(T), WINDOW_EX_STYLE(0)),
@@ -194,7 +287,7 @@ fn plan() -> [Plan; 14] {
         popup(0x0080_8080, [900, 100, 150, 100], None, WINDOW_EX_STYLE(0)),
         popup(0x0040_4040, [900, 300, 150, 100], None, WINDOW_EX_STYLE(0)),
         Plan {
-            alpha: Some(255),
+            layer: Layering::Constant(255),
             ..popup(
                 PURPLE,
                 [150, 250, 80, 40],
@@ -202,7 +295,10 @@ fn plan() -> [Plan; 14] {
                 WS_EX_LAYERED | WS_EX_TRANSPARENT,
             )
         },
-        popup(PURPLE, [250, 330, 60, 40], None, WS_EX_LAYERED),
+        Plan {
+            layer: Layering::Drawn(0),
+            ..popup(PURPLE, [250, 330, 60, 40], None, WS_EX_LAYERED)
+        },
         popup(0x0000_8000, [1100, 100, 120, 80], None, WINDOW_EX_STYLE(0)),
         popup(0x0000_0080, [1100, 300, 120, 80], None, WINDOW_EX_STYLE(0)),
         Plan {
@@ -214,8 +310,32 @@ fn plan() -> [Plan; 14] {
             ..popup(0x0000_8080, [320, 110, 60, 30], None, WINDOW_EX_STYLE(0))
         },
         Plan {
-            alpha: Some(0),
+            layer: Layering::Constant(0),
             ..popup(PURPLE, [240, 150, 50, 40], None, WS_EX_LAYERED)
+        },
+        popup(GREEN, [330, 365, 30, 25], None, WS_EX_TRANSPARENT),
+        Plan {
+            layer: Layering::Drawn(OPAQUE),
+            ..popup(GREEN, [370, 365, 30, 25], None, WS_EX_LAYERED)
+        },
+        popup(GREEN, [370, 365, 30, 25], None, WS_EX_TRANSPARENT),
+        Plan {
+            layer: Layering::Drawn(OPAQUE),
+            ..popup(GREEN, [410, 365, 30, 25], None, WS_EX_LAYERED)
+        },
+        popup(YELLOW, [410, 365, 30, 25], None, WINDOW_EX_STYLE(0)),
+        Plan {
+            layer: Layering::Keyed,
+            ..popup(MAGENTA, [450, 365, 30, 25], None, WS_EX_LAYERED)
+        },
+        Plan {
+            layer: Layering::Drawn(OPAQUE),
+            ..popup(GREEN, [235, 205, 30, 20], None, WS_EX_LAYERED)
+        },
+        Plan {
+            layer: Layering::Drawn(OPAQUE),
+            style: WS_POPUP | WS_VISIBLE | WS_DISABLED,
+            ..popup(GREEN, [270, 205, 25, 20], None, WS_EX_LAYERED)
         },
     ]
 }
@@ -305,15 +425,22 @@ fn create(plan: &Plan, index: usize, owner: Option<HWND>) -> HWND {
         )
     }
     .expect("probe window");
-    match (plan.ex.contains(WS_EX_LAYERED), plan.alpha) {
-        (true, Some(alpha)) => {
+    match plan.layer {
+        Layering::Plain => {}
+        Layering::Constant(alpha) => {
             // SAFETY: a layered window this process owns, at one constant alpha.
             let layered =
                 unsafe { SetLayeredWindowAttributes(window, COLORREF(0), alpha, LWA_ALPHA) };
             layered.expect("constant layer");
         }
-        (true, None) => draw_clear(window, [width, height]),
-        (false, _) => {}
+        Layering::Drawn(pixel) => draw(window, [width, height], pixel),
+        Layering::Keyed => {
+            // SAFETY: a layered window this process owns, keyed on its own colour.
+            let keyed = unsafe {
+                SetLayeredWindowAttributes(window, COLORREF(plan.color), 0, LWA_COLORKEY)
+            };
+            keyed.expect("colour key");
+        }
     }
     if let Some([left, top, right, bottom]) = plan.region {
         // SAFETY: a new region whose ownership passes to the window on success.
@@ -325,9 +452,8 @@ fn create(plan: &Plan, index: usize, owner: Option<HWND>) -> HWND {
     window
 }
 
-/// Draws `window` with `UpdateLayeredWindow` from a 32-bit bitmap whose pixels are all zero,
-/// alpha included.
-fn draw_clear(window: HWND, [width, height]: [i32; 2]) {
+/// Draws `window` with `UpdateLayeredWindow` from a 32-bit bitmap whose every pixel is `pixel`.
+fn draw(window: HWND, [width, height]: [i32; 2], pixel: u32) {
     // SAFETY: a memory DC this function deletes.
     let dc = unsafe { CreateCompatibleDC(None) };
     let info = BITMAPINFO {
@@ -355,6 +481,9 @@ fn draw_clear(window: HWND, [width, height]: [i32; 2]) {
         )
     }
     .expect("bitmap");
+    let pixels = usize::try_from(width * height).expect("a small bitmap");
+    // SAFETY: the new section holds `width * height` 32-bit pixels that nothing else uses yet.
+    unsafe { std::slice::from_raw_parts_mut(bits.cast::<u32>(), pixels) }.fill(pixel);
     // SAFETY: selects this function's bitmap into its own DC.
     let previous = unsafe { SelectObject(dc, bitmap.into()) };
     let size = SIZE {
@@ -682,7 +811,7 @@ fn native_window_probe() {
             owner: None,
             style: WS_POPUP | WS_VISIBLE,
             ex: WS_EX_TOPMOST,
-            alpha: None,
+            layer: Layering::Plain,
             region: None,
         },
         100,
@@ -777,7 +906,7 @@ fn native_window_probe() {
             owner: None,
             style: WS_POPUP | WS_VISIBLE,
             ex: WS_EX_TOPMOST,
-            alpha: None,
+            layer: Layering::Plain,
             region: None,
         },
         101,
@@ -792,6 +921,75 @@ fn native_window_probe() {
     );
     // SAFETY: destroys this thread's own window.
     unsafe { DestroyWindow(above) }.expect("own window");
+
+    // F2: `WS_EX_TRANSPARENT` without `WS_EX_LAYERED` isn't click-through, so the walk takes
+    // it; the hit test's own answer is recorded.
+    let taken = at(&mut capturer, point(340, 375))
+        .0
+        .map(|target| target.top.window);
+    // SAFETY: a hit test at a physical point; it returns an opaque handle.
+    let hit = unsafe { WindowFromPoint(POINT { x: 340, y: 375 }) };
+    // SAFETY: this only queries the opaque handle.
+    let hit = unsafe { GetAncestor(hit, GA_ROOT) };
+    println!(
+        "F2 bit_only_taken={} hit_test_bit_only={} hit_test_target={}",
+        taken == Ok(WindowRef(value(host.windows[BIT_ONLY]))),
+        hit == host.windows[BIT_ONLY],
+        hit == host.windows[T]
+    );
+    assert_eq!(
+        taken,
+        Ok(WindowRef(value(host.windows[BIT_ONLY]))),
+        "F2 bit only"
+    );
+
+    // F1: an opaque drawn window under a window the walk takes, or under a cloaked one the walk
+    // skips, never passes for the target beneath it.
+    host.command("cloak", CLOAK_OVER_DRAWN);
+    for (name, p, drawn) in [
+        ("under_bit", point(380, 375), DRAWN_UNDER_BIT),
+        ("under_cloak", point(420, 375), DRAWN_UNDER_CLOAK),
+    ] {
+        let found = at(&mut capturer, p).0.map(|target| target.top.window);
+        println!(
+            "F1 {name} target_taken={} drawn_taken={} bit_taken={} ambiguous={}",
+            found == Ok(WindowRef(value(host.windows[T]))),
+            found == Ok(WindowRef(value(host.windows[drawn]))),
+            found == Ok(WindowRef(value(host.windows[BIT_OVER_DRAWN]))),
+            found == Err(Refusal::Ambiguous)
+        );
+        assert_ne!(found, Ok(WindowRef(value(host.windows[T]))), "F1 {name}");
+    }
+
+    // F3: a window whose every pixel is its colour key lets the click reach the target.
+    let keyed = at(&mut capturer, point(460, 375))
+        .0
+        .map(|target| target.top.window);
+    println!(
+        "F3 keyed_target_taken={} keyed_taken={}",
+        keyed == Ok(WindowRef(value(host.windows[T]))),
+        keyed == Ok(WindowRef(value(host.windows[KEYED])))
+    );
+    assert_eq!(keyed, Ok(WindowRef(value(host.windows[T]))), "F3 keyed");
+
+    // F4: an opaque drawn window is taken; a disabled one can't be told and refuses.
+    let opaque = at(&mut capturer, point(250, 215))
+        .0
+        .map(|target| target.top.window);
+    let corner = rect(host.windows[DRAWN_DISABLED]);
+    let disabled = at(&mut capturer, point(corner.left + 10, corner.top + 10))
+        .0
+        .map(|_| ());
+    println!(
+        "F4 opaque_drawn_taken={} disabled_drawn={disabled:?}",
+        opaque == Ok(WindowRef(value(host.windows[DRAWN_OPAQUE])))
+    );
+    assert_eq!(
+        opaque,
+        Ok(WindowRef(value(host.windows[DRAWN_OPAQUE]))),
+        "F4 opaque drawn"
+    );
+    assert_eq!(disabled, Err(Refusal::Ambiguous), "F4 disabled drawn");
 
     // M3: the password edit maps to the frame by the extended frame bounds' origin, to ±0 px.
     for state in ["normal", "maximized"] {
@@ -856,6 +1054,7 @@ fn native_window_probe() {
         stale.is_err(),
         "M4a: a window minimised after the walk gives no frame"
     );
+    assert!(frame.image().is_none(), "M4a: no image left");
 
     // N2: a target cloaked or capture-protected after the walk gives no frame.
     for (name, index, verb) in [("protected", P, "protect"), ("cloaked", K, "cloak")] {
@@ -872,6 +1071,7 @@ fn native_window_probe() {
             Err(Failure::Refused(Refusal::WindowChanged)),
             "N2 {name}"
         );
+        assert!(frame.image().is_none(), "N2 {name}: no image left");
     }
 
     // M7: a target destroyed after the walk gives no frame.
@@ -887,6 +1087,7 @@ fn native_window_probe() {
         Err(Failure::Refused(Refusal::WindowChanged)),
         "M7: no frame from a destroyed window"
     );
+    assert!(frame.image().is_none(), "M7: no image left");
     // SAFETY: destroys this thread's own window.
     unsafe { DestroyWindow(own) }.expect("own window");
 }
