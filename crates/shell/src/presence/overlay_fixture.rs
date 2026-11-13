@@ -42,6 +42,8 @@ pub(super) enum Mode {
     Hide,
     /// Four copies of the animated picture, each item with its own paint cache, capped at 144.
     FullRate,
+    /// The at-caps picture, capped at 144.
+    CappedFullRate,
 }
 
 /// A rounded bordered card with a label, a rounded rect the fixture turns, a translucent
@@ -67,7 +69,9 @@ pub(super) fn resting(
         panic!("a begin record");
     };
     let step = match mode {
-        Mode::Capped => crate::presenter::tests::cap_measurements::drawing(0, 40),
+        Mode::Capped | Mode::CappedFullRate => {
+            crate::presenter::tests::cap_measurements::drawing(0, 40)
+        }
         Mode::Dry | Mode::Rest | Mode::Animated | Mode::Hide | Mode::FullRate => {
             let Ok(Record::Step(step)) = parse_record(STEP.as_bytes()) else {
                 panic!("a step record");
@@ -102,7 +106,7 @@ pub(super) fn resting(
                 .position(|each| std::ptr::eq(each, item))
                 .expect("a paint unit of a frame item");
             let mut item = item.clone();
-            if !matches!(mode, Mode::Capped)
+            if !matches!(mode, Mode::Capped | Mode::CappedFullRate)
                 && let Some((_, pivot)) = TURNED.iter().find(|(turned, _)| *turned == index)
             {
                 item.transform = Affine::pose(1.0, 0.4, *pivot)
@@ -221,13 +225,18 @@ impl Render for Probe {
     reason = "one bounded native probe and its content-free samples"
 )]
 fn run(mode: Mode) {
-    let animated = matches!(mode, Mode::Animated | Mode::Capped | Mode::FullRate);
+    let animated = matches!(
+        mode,
+        Mode::Animated | Mode::Capped | Mode::FullRate | Mode::CappedFullRate
+    );
     let lifetime = match mode {
         Mode::Dry => Duration::from_secs(5),
         Mode::Hide => Duration::from_secs(7),
-        Mode::Rest | Mode::Animated | Mode::Capped | Mode::FullRate => LIFETIME,
+        Mode::Rest | Mode::Animated | Mode::Capped | Mode::FullRate | Mode::CappedFullRate => {
+            LIFETIME
+        }
     };
-    let rate = if matches!(mode, Mode::FullRate) {
+    let rate = if matches!(mode, Mode::FullRate | Mode::CappedFullRate) {
         MaxFrameRate::cap(144).expect("144 is a frame rate cap")
     } else {
         MaxFrameRate::AUTOMATIC
@@ -509,4 +518,10 @@ fn measure_primary_overlay_animated() {
 #[ignore = "manual quiet-Rez fixed 60 s animated painter fixture, four copies at a 144 cap, no input"]
 fn measure_primary_overlay_animated_four_at_full_rate() {
     run(Mode::FullRate);
+}
+
+#[test]
+#[ignore = "manual quiet-Rez fixed 60 s production item painter at all paint caps, capped at 144, no input"]
+fn measure_primary_overlay_at_paint_caps_at_full_rate() {
+    run(Mode::CappedFullRate);
 }
