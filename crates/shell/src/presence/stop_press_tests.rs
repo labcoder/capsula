@@ -21,7 +21,7 @@ fn click(frame: &mut VisualTestContext, at: Point<Pixels>) {
     input(|input| input.press(|| frame.simulate_mouse_down(at, LEFT, Modifiers::default())));
     input(|input| {
         input.release(LEFT, || {
-            frame.simulate_mouse_up(at, LEFT, Modifiers::default())
+            frame.simulate_mouse_up(at, LEFT, Modifiers::default());
         })
     });
     frame.run_until_parked();
@@ -69,7 +69,7 @@ fn a_press_on_stop_never_grabs_kumo_but_a_press_on_kumo_does(cx: &mut TestAppCon
         .update(|cx| gpui_kit::open_window(options, cx, move |_, _| shown))
         .expect("a GPUI test window opens")
         .0;
-    let mut frame = VisualTestContext::from_window(window.into(), cx);
+    let mut frame = VisualTestContext::from_window(window, cx);
     frame.update(|window, cx| window.draw(cx).clear(cx));
     let stop = frame.debug_bounds("presence-stop").expect("Stop shows");
     let body = frame.debug_bounds("presence-kumo").expect("Kumo shows");
