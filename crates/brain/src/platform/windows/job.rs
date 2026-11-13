@@ -85,7 +85,7 @@ impl Job {
     /// Refuses a start into `jobs` once any of them was shut down. The caller holds
     /// [`crate::platform::spawn_lock`] until its process exists.
     pub(super) fn admit(jobs: &[&Self]) -> io::Result<()> {
-        if jobs.iter().any(|job| job.shut.load(Ordering::Relaxed)) {
+        if jobs.iter().any(|job| job.is_shut_down()) {
             return Err(io::Error::other("the job was shut down"));
         }
         Ok(())
@@ -127,6 +127,11 @@ impl Job {
         Ok(inside != FALSE)
     }
 
+    /// Whether [`Job::shut_down`] has begun.
+    pub(crate) fn is_shut_down(&self) -> bool {
+        self.shut.load(Ordering::Relaxed)
+    }
+
     /// Refuses new processes from now on, then [`Job::terminate`]s. A start either created its
     /// process before the refusal, under [`crate::platform::spawn_lock`], and so is ended, or
     /// sees the refusal.
@@ -163,17 +168,6 @@ impl Job {
             std::thread::sleep(Duration::from_millis(1));
         }
         Ok(())
-    }
-
-    /// Starts `exe arg` inside `jobs`, from its first instruction, with no window and no
-    /// inherited handles. Later jobs nest inside earlier ones: `[brain, run]` puts the process
-    /// in a run job nested in the brain job.
-    ///
-    /// # Errors
-    /// Fails when the process can't be created.
-    pub fn spawn(exe: &Path, arg: &str, jobs: &[&Self]) -> io::Result<Helper> {
-        let _spawning = crate::platform::spawn_lock();
-        Self::spawn_inner(exe, arg, jobs, None)
     }
 
     /// Starts a helper with piped stdin and stdout; stderr is disconnected.

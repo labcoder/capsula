@@ -444,6 +444,7 @@ pub(crate) fn start<K: Kind>(exe: PathBuf, jobs: Arc<Job>) -> io::Result<Handle<
     let worker = Worker::<K>::spawn(&exe, &jobs).map_err(|failure| match failure {
         SpawnFailure::Failed(error) => error,
         SpawnFailure::ExitUnconfirmed => io::Error::other("worker exit unconfirmed"),
+        SpawnFailure::ShutDown => io::Error::other("the job was shut down"),
     })?;
     let (commands, receive) = mpsc::channel(QUEUE);
     let (handle, intents) = Handle::new(commands);
@@ -515,12 +516,19 @@ enum SpawnFailure {
     Failed(io::Error),
     /// Its process started and wasn't seen to exit after termination.
     ExitUnconfirmed,
+    /// Its job was shut down, so nothing started.
+    ShutDown,
 }
 
 impl<K: Kind> Worker<K> {
     fn spawn(exe: &Path, job: &Job) -> Result<Self, SpawnFailure> {
-        let (process, mut pipes) =
-            Job::spawn_piped(exe, K::ARG, &[job]).map_err(SpawnFailure::Failed)?;
+        let (process, mut pipes) = Job::spawn_piped(exe, K::ARG, &[job]).map_err(|error| {
+            if job.is_shut_down() {
+                SpawnFailure::ShutDown
+            } else {
+                SpawnFailure::Failed(error)
+            }
+        })?;
         let (writes, requests) = blocking::sync_channel::<(u64, K::Request)>(QUEUE);
         let (replies, reads) = mpsc::channel(QUEUE);
         let mut worker = Self {
@@ -860,6 +868,10 @@ async fn run<K: Kind>(
                         kind = K::NAME,
                         "worker exit unconfirmed, so it is not replaced"
                     );
+                    return;
+                }
+                Ok(Err(SpawnFailure::ShutDown)) => {
+                    tracing::debug!(kind = K::NAME, "worker not replaced: its job is shut down");
                     return;
                 }
                 Ok(Err(SpawnFailure::Failed(error))) => {

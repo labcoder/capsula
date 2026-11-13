@@ -45,7 +45,8 @@ flowchart LR
   when the job isn't empty after 5 s. Closing the job ends the worker when the brain exits. Quit
   shuts the job down: it marks the job refusing under `platform::spawn_lock()`, which every start
   into a job holds until its process exists, and only then terminates it. So a respawn that loses
-  the race to quit fails at once instead of landing in the job.
+  the race to quit fails at once instead of landing in the job, and its supervisor stops without
+  an error.
 - Helpers inherit no handles except each worker's two explicit stdin/stdout handles. A worker's
   stderr is disconnected.
   Nothing secret is ever on their command lines.

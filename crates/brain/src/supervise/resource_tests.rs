@@ -453,7 +453,11 @@ async fn a_retained_completion_does_not_keep_commands_alive_or_skip_final_exit_c
     let (asked, asks) = blocking::channel();
     let terminations = Arc::new(AtomicUsize::new(0));
     let (worker, (written, replies)) = staged(Some(Box::new(Counted {
-        held: Held { asked, exited },
+        held: Held {
+            asked,
+            exited,
+            terminations: Arc::default(),
+        },
         terminations: Arc::clone(&terminations),
     })));
     let (handle, commands, intents) = handle();
@@ -525,7 +529,11 @@ async fn dropping_a_successfully_sent_unconsumed_resource_causes_retirement_with
     let (asked, _asks) = blocking::channel();
     let terminations = Arc::new(AtomicUsize::new(0));
     let (worker, (written, replies)) = staged(Some(Box::new(Counted {
-        held: Held { asked, exited },
+        held: Held {
+            asked,
+            exited,
+            terminations: Arc::default(),
+        },
         terminations: Arc::clone(&terminations),
     })));
     let (handle, commands, intents) = handle();
