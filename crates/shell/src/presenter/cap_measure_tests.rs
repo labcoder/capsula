@@ -5,8 +5,8 @@ use std::{
 
 use kumochi_scene::{
     Step,
-    display::{MeasureError, TextMeasure, TextStyle},
-    limits::MAX_COMPOSED_SCALE,
+    display::{MeasureError, PaintWork, TextMeasure, TextStyle},
+    limits::{MAX_COMPOSED_SCALE, MAX_GLOBAL_FILL_VERTICES},
 };
 
 use super::{Charged, LIVE, Shaper, begin, commit, controls, failed, live, only_job, step};
@@ -62,6 +62,28 @@ fn drawing_put(iteration: usize, extra_labels: usize) -> Vec<String> {
     put.push(
         r#"{"line":{"id":"wire","from":{"ref":"box0"},"to":[5200,190],"dash":true}}"#.to_owned(),
     );
+    // The rest of the fill cap: fifteen radius-200 boxes of 97 points each, filled without a
+    // border, then an 81-point convex fill.
+    for index in 0..15 {
+        put.push(format!(
+            r#"{{"shape":{{"id":"round{index}","kind":"rect","box":[{},2000,400,400],"radius":200,"fill":"blue","width":0}}}}"#,
+            40 + index * 450
+        ));
+    }
+    let ring: Vec<String> = (0..81_u32)
+        .map(|index| {
+            let angle = std::f64::consts::TAU * f64::from(index) / 81.0;
+            format!(
+                "[{:.3},{:.3}]",
+                3000.0 + 100.0 * angle.cos(),
+                3000.0 + 100.0 * angle.sin()
+            )
+        })
+        .collect();
+    put.push(format!(
+        r#"{{"shape":{{"id":"ring","kind":"polygon","points":[{}],"fill":"blue"}}}}"#,
+        ring.join(",")
+    ));
     for index in 0..extra_labels {
         put.push(format!(r#"{{"text":{{"id":"text{index}","at":[100,800],"text":"{}","max_width":240,"bold":{}}}}}"#,label(index + 4),index % 2 == 0));
     }
@@ -113,7 +135,11 @@ fn the_native_preparation_fixture_fills_every_paint_cap_and_shapes_every_label()
         let work = presenter.paint_work();
         assert_eq!(
             (work.dash_pieces, work.fill_vertices, work.outline_points),
-            (512, 512, 512)
+            (
+                PaintWork::LIMITS.dash_pieces,
+                PaintWork::LIMITS.fill_vertices,
+                PaintWork::LIMITS.outline_points
+            )
         );
         assert_eq!(measure.calls, 4 + extra);
         assert_eq!(presenter.scenes[&LIVE].ready.len(), 1);
@@ -159,7 +185,11 @@ fn measure_native_full_preparation_at_paint_caps() {
                     let work = presenter.paint_work();
                     assert_eq!(
                         (work.dash_pieces, work.fill_vertices, work.outline_points),
-                        (512, 512, 512)
+                        (
+                            PaintWork::LIMITS.dash_pieces,
+                            PaintWork::LIMITS.fill_vertices,
+                            PaintWork::LIMITS.outline_points
+                        )
                     );
                     assert_eq!(measure.calls, 4 + extra);
                     if iteration >= 8 {
@@ -174,7 +204,10 @@ fn measure_native_full_preparation_at_paint_caps() {
         .recv_timeout(Duration::from_secs(150))
         .expect("bounded worker");
     println!(
-        "cap_prepare method=real_presenter_admission_prepare_install native_font=true font=product_theme unique_text=true warmups=8 samples_per_case=128 dash=512 fill=512 outline=512; no queue delay, window paint or compositor claim"
+        "cap_prepare method=real_presenter_admission_prepare_install native_font=true font=product_theme unique_text=true warmups=8 samples_per_case=128 dash={} fill={} outline={}; no queue delay, window paint or compositor claim",
+        PaintWork::LIMITS.dash_pieces,
+        PaintWork::LIMITS.fill_vertices,
+        PaintWork::LIMITS.outline_points
     );
     for (extra, admission_ns, prepare_ns, shaping_ns, full_ns) in rows {
         println!(
@@ -252,7 +285,11 @@ fn window_residency(measure: &mut dyn TextMeasure) -> usize {
     let work = presenter.paint_work();
     assert_eq!(
         (work.dash_pieces, work.fill_vertices, work.outline_points),
-        (512, 512, 512)
+        (
+            PaintWork::LIMITS.dash_pieces,
+            PaintWork::LIMITS.fill_vertices,
+            PaintWork::LIMITS.outline_points
+        )
     );
     for scene in presenter.scenes.values() {
         assert_eq!((scene.ready.len(), scene.queue.len()), (8, 56));
@@ -339,7 +376,10 @@ fn measure_native_eight_window_residency_at_paint_caps() {
         .recv_timeout(Duration::from_secs(150))
         .expect("native windows");
     println!(
-        "native_paint_cap_windows scenes=4 objects=1500 dash=512 fill=512 outline=512 labels=44 chars_per_label=400 lifetime_prefixes=256 ready_per_scene=8 consumed=256 peak_charge_bytes={peak} allowance_bytes={}; reserved and sampled frames plus one prior returned owner per scene; not maximal cells/marks/source bytes, production activation, RSS or heap peak",
+        "native_paint_cap_windows scenes=4 objects=1500 dash={} fill={} outline={} labels=44 chars_per_label=400 lifetime_prefixes=256 ready_per_scene=8 consumed=256 peak_charge_bytes={peak} allowance_bytes={}; reserved and sampled frames plus one prior returned owner per scene; not maximal cells/marks/source bytes, production activation, RSS or heap peak",
+        PaintWork::LIMITS.dash_pieces,
+        PaintWork::LIMITS.fill_vertices,
+        PaintWork::LIMITS.outline_points,
         kumochi_scene::limits::MAX_RESIDENT_BYTES
     );
 }
@@ -586,7 +626,7 @@ fn convex(id: &str, count: u32) -> String {
         .map(|index| {
             let angle = std::f64::consts::TAU * f64::from(index) / f64::from(count);
             format!(
-                "[{:.3},{:.3}]",
+                "[{:.0},{:.0}]",
                 1_000.0 + 900.0 * angle.cos(),
                 1_000.0 + 900.0 * angle.sin()
             )
@@ -598,17 +638,30 @@ fn convex(id: &str, count: u32) -> String {
     )
 }
 
+/// One step of convex fills, at most 300 points each, one point past the global fill cap.
+fn over_cap_fills() -> Step {
+    let mut left = MAX_GLOBAL_FILL_VERTICES + 1;
+    let mut put = Vec::new();
+    while left > 0 {
+        let count = left.min(300);
+        put.push(convex(
+            &format!("f{}", put.len()),
+            u32::try_from(count).expect("at most 300"),
+        ));
+        left -= count;
+    }
+    let source = format!(r#"{{"step":{{"id":"fills","put":[{}]}}}}"#, put.join(","));
+    assert!(source.len() <= kumochi_scene::limits::MAX_RECORD_BYTES);
+    step(&source)
+}
+
 #[test]
 fn the_worker_prepares_under_the_d1_cap() {
     use kumochi_scene::layout::PrepareError;
 
     let (mut presenter, now) = live();
     begin(&mut presenter, LIVE, now);
-    let source = step(&format!(
-        r#"{{"step":{{"id":"fills","put":[{},{}]}}}}"#,
-        convex("a", 300),
-        convex("b", 213)
-    ));
+    let source = over_cap_fills();
     let job = only_job(commit(&mut presenter, LIVE, 0, source, now).expect("admit"));
     let super::Completion::Prepared { result, .. } = job.run(&mut Shaper) else {
         panic!("a preparation");
@@ -620,11 +673,7 @@ fn the_worker_prepares_under_the_d1_cap() {
 fn the_worker_recovers_under_the_d1_cap() {
     use kumochi_scene::layout::{PrepareError, RecoveryError};
 
-    let source = step(&format!(
-        r#"{{"step":{{"id":"fills","put":[{},{}]}}}}"#,
-        convex("a", 300),
-        convex("b", 213)
-    ));
+    let source = over_cap_fills();
     let (_presenter, _, job) = super::recovering(vec![(LIVE, source)]);
     let super::Completion::Recovered { scenes, .. } = job.run(&mut Shaper) else {
         panic!("a recovery");

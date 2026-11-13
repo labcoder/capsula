@@ -706,7 +706,7 @@ fn a_step_too_large_to_paint_ends_its_call_asking_for_fewer_shapes() {
     );
     assert_eq!(
         failed.calls[0].tool_text(),
-        "drawn: [big]; stopped: drawing.TooMuchToPaint; nothing of this scene was shown, so it was removed; everything on screen can hold about 20 plain boxes, or about 10 when arrows have labels; begin a new scene with a new name and fewer or simpler shapes"
+        "drawn: [big]; stopped: drawing.TooMuchToPaint; nothing of this scene was shown, so it was removed; everything on screen can hold about 40 filled circles or ellipses, or a diagram of about 30 boxes with labelled arrows; begin a new scene with a new name and fewer or simpler shapes"
     );
     assert!(drawing.drew_nothing(RunId(1)));
 }
@@ -747,19 +747,19 @@ fn a_later_step_too_large_to_paint_keeps_the_shown_picture() {
     assert_eq!(failed.calls.len(), 1);
     assert_eq!(
         failed.calls[0].tool_text(),
-        "drawn: [one, two]; stopped: drawing.TooMuchToPaint; the picture stays at its last shown step; everything on screen can hold about 20 plain boxes, or about 10 when arrows have labels; use fewer or simpler shapes and call draw again"
+        "drawn: [one, two]; stopped: drawing.TooMuchToPaint; the picture stays at its last shown step; everything on screen can hold about 40 filled circles or ellipses, or a diagram of about 30 boxes with labelled arrows; use fewer or simpler shapes and call draw again"
     );
     assert!(!drawing.drew_nothing(RunId(1)));
 }
 
 /// The budget the refusal names is the prompt's, and its numbers hold at the paint caps: each
-/// stated diagram fits, and one with a quarter more boxes does not.
+/// stated drawing fits, and one with a quarter more circles or boxes does not.
 #[test]
 fn the_paint_budget_matches_the_prompt_and_the_paint_caps() {
     use serde_json::json;
 
-    const PLAIN: usize = 20;
-    const LABELLED: usize = 10;
+    const CIRCLES: usize = 40;
+    const BOXES: usize = 30;
     let words = |text: &str| {
         text.split_whitespace()
             .collect::<Vec<_>>()
@@ -770,39 +770,36 @@ fn the_paint_budget_matches_the_prompt_and_the_paint_caps() {
         words(include_str!("../../prompts/draw.md")).contains(&words(super::call::PAINT_BUDGET)),
         "the prompt states the refusal's budget"
     );
-    assert!(super::call::PAINT_BUDGET.contains(&format!("about {PLAIN} plain boxes")));
-    assert!(
-        super::call::PAINT_BUDGET.contains(&format!("about {LABELLED} when arrows have labels"))
-    );
-    let diagram = |boxes: usize, labelled: bool| {
+    assert!(super::call::PAINT_BUDGET.contains(&format!("about {CIRCLES} filled circles")));
+    assert!(super::call::PAINT_BUDGET.contains(&format!(
+        "a diagram of about {BOXES} boxes with labelled arrows"
+    )));
+    let circles = |count: usize| -> Vec<serde_json::Value> {
+        (0..count)
+            .map(|index| {
+                json!({"shape":{"id":format!("c{index}"),"kind":"ellipse","box":[index * 30, 100, 24, 24],"fill":"blue"}})
+            })
+            .collect()
+    };
+    let diagram = |boxes: usize| {
         let mut put = vec![json!({"diagram":{"id":"d","dir":"down"}})];
         put.extend(
             (0..boxes)
                 .map(|index| json!({"node":{"id":format!("n{index}"),"in":"d","label":"Step"}})),
         );
         put.extend((1..boxes).map(|index| {
-            let mut edge = json!({"id":format!("e{index}"),"from":format!("n{}", index - 1),"to":format!("n{index}")});
-            if labelled {
-                edge["label"] = json!("then");
-            }
-            json!({ "edge": edge })
+            json!({"edge":{"id":format!("e{index}"),"from":format!("n{}", index - 1),"to":format!("n{index}"),"label":"then"}})
         }));
         put
     };
-    for (boxes, labelled) in [(PLAIN, false), (LABELLED, true)] {
-        assert!(
-            paint_work(&diagram(boxes, labelled)).within_limits(),
-            "{boxes} boxes fit"
-        );
-        assert!(
-            !paint_work(&diagram(boxes + boxes / 4, labelled)).within_limits(),
-            "a quarter more boxes do not fit"
-        );
-    }
+    assert!(paint_work(&circles(CIRCLES)).within_limits());
+    assert!(!paint_work(&circles(CIRCLES + CIRCLES / 4)).within_limits());
+    assert!(paint_work(&diagram(BOXES)).within_limits());
+    assert!(!paint_work(&diagram(BOXES + BOXES / 4)).within_limits());
 }
 
-/// The paint work of one step of `put` on a fresh scene at the default surface, prepared
-/// without a cap.
+/// The paint work of one step of `put` on a fresh overlay scene laid out on the shell's default
+/// canvas, as production prepares it, without a cap.
 fn paint_work(put: &[serde_json::Value]) -> kumochi_scene::display::PaintWork {
     use kumochi_scene::display::{MeasureError, TextMeasure, TextStyle};
     use kumochi_scene::layout::{LayoutState, PrepareInput, SurfaceGeometry, prepare};
@@ -843,7 +840,9 @@ fn paint_work(put: &[serde_json::Value]) -> kumochi_scene::display::PaintWork {
     let input = PrepareInput::new(
         ticket,
         before,
-        SurfaceGeometry::default(),
+        SurfaceGeometry::Overlay {
+            default_canvas: kumochi_scene::layout::DEFAULT_CANVAS,
+        },
         Arc::new(kumochi_scene::theme::Theme::default()),
     )
     .map_err(|(error, _)| error)

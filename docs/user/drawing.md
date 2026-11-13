@@ -28,9 +28,9 @@ screen; they can still overlap until side-by-side arrangement is available.
 Simple node-and-arrow diagrams do not need a separate container: their nodes belong to
 the scene itself, and each arrow follows the diagram shared by its endpoints. These
 diagrams have the same 48-node and 96-arrow limits as explicitly grouped diagrams. In
-practice, what can be painted is smaller: about 20 plain boxes across the drawings on
-screen, or about 10 when arrows have labels. A step past that isn't shown. If Kumochi is still
-drawing when that happens, it's told to use fewer or simpler shapes.
+practice, what can be painted is smaller: about 40 filled circles or ellipses across the
+drawings on screen, or a diagram of about 30 boxes with labelled arrows. A step past that isn't
+shown. If Kumochi is still drawing when that happens, it's told to use fewer or simpler shapes.
 
 For function graphs, Kumochi asks the model for sampled values on a chart, with y growing
 upward, rather than a hand-drawn path. Curves draw in along those samples; functions such
