@@ -455,3 +455,130 @@ fn a_held_runs_screen_goes_with_its_request_or_fails_the_run() {
         }
     }
 }
+
+#[test]
+fn a_held_runs_image_stays_out_of_inline_compaction_and_follows_its_turn_after() {
+    use kumochi_protocol::message::EventId;
+
+    use crate::context::{InputItem, Jpeg, ModelRequest, Role, Screen};
+    use crate::coordinator::{CompactBuilt, ContextBuilt, JobAsk, Unbuilt};
+    let image = Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap();
+    let message = |role, text: &str| InputItem::Message {
+        role,
+        text: text.to_owned(),
+    };
+    let request = |input| ModelRequest {
+        choice: Some(choice("captured", Effort::High)),
+        instructions: String::new(),
+        input,
+        tools: Vec::new(),
+    };
+    let mut core = ready_for("captured");
+    core.submit_hold(
+        prepared(&core, Some(T)),
+        "words".into(),
+        Some(Screen::Image(image.clone())),
+    )
+    .unwrap();
+    core.handle(Input::TurnStored { run: R }).unwrap();
+    let first = engine_key(&core, R);
+    let effects = core
+        .handle(Input::ContextBuilt(ContextBuilt {
+            key: first,
+            snapshot: None,
+            result: Err(Unbuilt::TooLarge { room: Some(500) }),
+        }))
+        .unwrap();
+    assert!(matches!(
+        effects[..],
+        [Effect::Store(StoreOp::CompactContext(_))]
+    ));
+    let compacting = engine_key(&core, R);
+    let summary = vec![message(Role::User, "older runs")];
+    let effects = core
+        .handle(Input::CompactBuilt(CompactBuilt {
+            key: compacting,
+            result: Ok(Some((
+                JobAsk {
+                    generation: Generation(5),
+                    built: Built {
+                        request: request(summary.clone()),
+                        sources: vec![T],
+                    },
+                    covers: Some((EventId(20), EventId(31))),
+                },
+                100,
+            ))),
+        }))
+        .unwrap();
+    assert_eq!(
+        started(&effects),
+        vec![summary],
+        "the summary goes without the image"
+    );
+    core.handle(Input::SendReady {
+        key: SendKey::Build(compacting),
+        hold: None,
+    })
+    .unwrap();
+    core.handle(engine(compacting, TurnEvent::TextDelta("Short".to_owned())))
+        .unwrap();
+    core.handle(engine(compacting, TurnEvent::Finished(Finish::Completed)))
+        .unwrap();
+    core.handle(Input::SummaryStored {
+        owner: SendKey::Build(compacting),
+        applied: true,
+    })
+    .unwrap();
+    let rebuilt = engine_key(&core, R);
+    let note = message(Role::Developer, "summary of older runs");
+    let user = message(Role::User, "words");
+    let effects = core
+        .handle(Input::ContextBuilt(ContextBuilt {
+            key: rebuilt,
+            snapshot: None,
+            result: Ok(Built {
+                request: request(vec![note.clone(), user.clone()]),
+                sources: vec![T],
+            }),
+        }))
+        .unwrap();
+    assert_eq!(
+        started(&effects),
+        vec![vec![
+            note,
+            user,
+            InputItem::Image(image),
+            message(
+                Role::Developer,
+                "The image is a snapshot from when the user spoke."
+            ),
+        ]]
+    );
+}
+
+/// A coordinator whose engines are ready with `model` listed.
+fn ready_for(model: &str) -> Coordinator {
+    let mut core = fresh();
+    core.handle(Input::Engines(Availability::Ready(Ready {
+        connection: ConnectionTag(0),
+        models: vec![ModelInfo {
+            slug: ModelSlug::new(model).unwrap(),
+            display_name: ModelName::new("captured model").unwrap(),
+        }],
+        trusted_draw: false,
+    })))
+    .unwrap();
+    core
+}
+
+/// The inputs of every engine start in `effects`.
+fn started(effects: &[Effect]) -> Vec<Vec<crate::context::InputItem>> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::StartEngine { request } => Some(request.request.input.clone()),
+            _ => None,
+        })
+        .collect()
+}

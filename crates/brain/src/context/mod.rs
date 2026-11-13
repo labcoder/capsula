@@ -377,6 +377,9 @@ pub(crate) enum ImageRefused {
     /// No user message to attach it to.
     #[error("no user message to attach the image to")]
     NoTurn,
+    /// The screen's developer line isn't in the bundled messages.
+    #[error("the screen's line isn't bundled")]
+    Unbundled,
 }
 
 impl ModelRequest {
@@ -399,19 +402,24 @@ impl ModelRequest {
     /// Adds a hold's screen after the newest user message: the image and the line saying it's a
     /// snapshot, or the line saying why it isn't there.
     pub(crate) fn add_screen(&mut self, screen: &Screen) -> Result<(), ImageRefused> {
-        let (line, after) = match screen {
+        let id = match screen {
+            Screen::Image(_) => "screen-snapshot",
+            Screen::NotIncluded(ScreenClass::NotReady) => "screen-not-ready",
+        };
+        let text = screen_line(id).ok_or(ImageRefused::Unbundled)?;
+        let after = match screen {
             Screen::Image(image) => {
                 self.attach(image.clone())?;
-                ("screen-snapshot", 2)
+                2
             }
-            Screen::NotIncluded(ScreenClass::NotReady) => ("screen-not-ready", 1),
+            Screen::NotIncluded(_) => 1,
         };
         let at = self.turn()? + after;
         self.input.insert(
             at,
             InputItem::Message {
                 role: Role::Developer,
-                text: screen_line(line),
+                text,
             },
         );
         Ok(())
@@ -457,25 +465,23 @@ impl fmt::Debug for Screen {
     }
 }
 
-/// A fixed developer line from `locales/en/brain.ftl`.
-fn screen_line(id: &str) -> String {
+/// A fixed developer line from `locales/en/brain.ftl`; `None` only if the bundled messages are
+/// broken.
+fn screen_line(id: &str) -> Option<String> {
     let resource = fluent_bundle::FluentResource::try_new(
         include_str!("../../../../locales/en/brain.ftl").to_owned(),
     )
-    .expect("the bundled messages parse");
-    let mut bundle = fluent_bundle::FluentBundle::<fluent_bundle::FluentResource>::new(vec![
-        "en".parse().expect("a valid language tag"),
-    ]);
-    bundle
-        .add_resource(resource)
-        .expect("the bundled messages are unique");
-    let pattern = bundle
-        .get_message(id)
-        .and_then(|message| message.value())
-        .expect("the screen lines are bundled");
-    bundle
-        .format_pattern(pattern, None, &mut Vec::new())
-        .into_owned()
+    .ok()?;
+    let mut bundle =
+        fluent_bundle::FluentBundle::<fluent_bundle::FluentResource>::new(vec!["en".parse().ok()?]);
+    bundle.set_use_isolating(false);
+    bundle.add_resource(resource).ok()?;
+    let pattern = bundle.get_message(id)?.value()?;
+    let mut errors = Vec::new();
+    let line = bundle
+        .format_pattern(pattern, None, &mut errors)
+        .into_owned();
+    errors.is_empty().then_some(line)
 }
 
 /// A request and every thread whose raw text it carries, for the coordinator's delete check.
