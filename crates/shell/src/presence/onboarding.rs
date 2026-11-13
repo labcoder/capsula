@@ -1,6 +1,8 @@
-//! The first-run window: the welcome and the names, over [`crate::onboarding`]'s plain state.
-//! The names go through the Settings model and its save path; nothing here keeps or logs one.
+//! The first-run window: the welcome, the names and the accounts, over [`crate::onboarding`]'s
+//! plain state. The names go through the Settings model and its save path; nothing here keeps or
+//! logs one.
 
+mod accounts;
 #[cfg(test)]
 mod tests;
 
@@ -8,9 +10,9 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _};
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Context, Div, Entity, FocusHandle, Focusable as _,
-    InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Render, Styled as _,
-    Subscription, WeakEntity, Window, div, rems,
+    AnyElement, AnyWindowHandle, App, AppContext as _, Context, Entity, FocusHandle,
+    Focusable as _, InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Render,
+    Styled as _, Subscription, WeakEntity, Window, div, rems,
 };
 use kumochi_protocol::constants;
 use kumochi_protocol::message::ControlToBrain;
@@ -47,8 +49,11 @@ pub(super) struct OnboardingView {
     focus: FocusHandle,
     /// Kept for the shared name handler; Esc reads the Settings draft instead.
     editing: Option<Field>,
+    /// A `ChatGPT` sign-in this window asked for completed: the plan line shows.
+    plan: bool,
     _events: Vec<Subscription>,
     _watch: Subscription,
+    _focus_lost: Subscription,
 }
 
 impl OnboardingView {
@@ -107,6 +112,10 @@ impl OnboardingView {
             }
             cx.notify();
         });
+        let focus_lost = cx.on_focus_lost(window, |view, window, cx| {
+            super::settings::restore_lost_focus(&view.focus, window, cx);
+            cx.notify();
+        });
         Self {
             state,
             link: LinkState::Connected,
@@ -117,22 +126,31 @@ impl OnboardingView {
             inputs,
             focus: cx.focus_handle(),
             editing: None,
+            plan: false,
             _events: subscriptions,
             _watch: watch,
+            _focus_lost: focus_lost,
         }
     }
 
     /// Whether the step's save or the finish is in flight.
     fn busy(&self, cx: &App) -> bool {
-        self.model.read(cx).field(self.state.step().field()).saving || self.state.finishing()
+        self.state
+            .step()
+            .field()
+            .is_some_and(|field| self.model.read(cx).field(field).saving)
+            || self.state.finishing()
     }
 
-    /// The step's words around its input, then its help line.
-    fn body(&self, cx: &Context<'_, Self>) -> Div {
+    /// The step's words around its input, then its help line; the account step's sections.
+    fn body(&self, cx: &Context<'_, Self>) -> AnyElement {
         let strings = cx.global::<Strings>();
         let state = self.model.read(cx);
-        let input = Input::new(self.input())
-            .aria_label(strings.get(match self.state.step().field() {
+        let (Some(field), Some(input)) = (self.state.step().field(), self.input()) else {
+            return self.accounts(cx).into_any_element();
+        };
+        let input = Input::new(input)
+            .aria_label(strings.get(match field {
                 Field::Assistant => Text::AssistantName,
                 Field::User => Text::UserName,
             }))
@@ -144,8 +162,8 @@ impl OnboardingView {
                 .text_color(cx.theme().muted_foreground)
                 .child(text)
         };
-        match self.state.step() {
-            Step::Welcome => {
+        match field {
+            Field::Assistant => {
                 let (before, after) = strings.onboarding_welcome();
                 div()
                     .flex()
@@ -165,8 +183,9 @@ impl OnboardingView {
                             .children((!after.is_empty()).then_some(after)),
                     )
                     .child(help(strings.get(Text::OnboardingWelcomeHelp)))
+                    .into_any_element()
             }
-            Step::YourName => {
+            Field::User => {
                 let [question, user_help] = strings.onboarding_user(state.value(Field::Assistant));
                 div()
                     .flex()
@@ -175,22 +194,65 @@ impl OnboardingView {
                     .child(div().text_xl().child(question))
                     .child(input)
                     .child(help(user_help))
+                    .into_any_element()
             }
         }
     }
 
-    fn input(&self) -> &Entity<InputState> {
-        &self.inputs[usize::from(self.state.step() == Step::YourName)]
+    /// The plan line, then the one button: Continue, or Not now on the account step until a
+    /// model connection is usable.
+    fn footer(&self, cx: &Context<'_, Self>) -> impl IntoElement {
+        let strings = cx.global::<Strings>();
+        let state = self.model.read(cx);
+        let skip = self.state.step() == Step::Accounts && !accounts::usable(state);
+        let next = self.owner.clone();
+        let button = Button::new("onboarding-continue")
+            .debug_selector(|| "onboarding-continue".into())
+            .tab_index(1)
+            .label(strings.get(if skip {
+                Text::OnboardingNotNow
+            } else {
+                Text::OnboardingContinue
+            }))
+            .loading(self.busy(cx))
+            .disabled(state.view().is_none())
+            .on_click(move |_, _, cx| go_on(&next, cx));
+        div()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap_3()
+            .children(self.plan.then(|| {
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(strings.get(Text::OnboardingPlan))
+            }))
+            .child(if skip {
+                button.ghost()
+            } else {
+                button.primary()
+            })
     }
 
-    /// Focus goes into the step's input; `select` selects its text.
+    fn input(&self) -> Option<&Entity<InputState>> {
+        let field = self.state.step().field()?;
+        Some(&self.inputs[usize::from(field == Field::User)])
+    }
+
+    /// Focus goes into the step's input, `select` selecting its text; a step with none focuses
+    /// the window, so Enter starts nothing there.
     pub(super) fn focus_input(
         &self,
         select: Select,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        self.input().update(cx, |input, cx| {
+        let Some(input) = self.input() else {
+            window.focus(&self.focus, cx);
+            return;
+        };
+        input.update(cx, |input, cx| {
             input.focus(window, cx);
             if select == Select::All {
                 input.select_all(window, cx);
@@ -230,10 +292,10 @@ impl Render for OnboardingView {
         let strings = cx.global::<Strings>();
         let state = self.model.read(cx);
         let step = self.state.step();
-        let field = step.field();
         let online = state.view().is_some();
-        let busy = self.busy(cx);
-        let (saving, error) = field_status(state, field, strings);
+        let (saving, error) = step
+            .field()
+            .map_or((None, None), |field| field_status(state, field, strings));
         let failed = error.is_some() || state.finish_refusal().is_some() || self.unsent;
         let status = saving
             .or(error)
@@ -245,7 +307,7 @@ impl Render for OnboardingView {
             });
         let body = self.body(cx);
         let events = self.events.clone();
-        let (close, next) = (self.owner.clone(), self.owner.clone());
+        let close = self.owner.clone();
         div()
             .size_full()
             .flex()
@@ -285,30 +347,26 @@ impl Render for OnboardingView {
                     ),
             )
             .child(
-                div().flex_1().flex().flex_col().gap_2().child(body).child(
-                    div()
-                        .h(rems(1.25))
-                        .text_sm()
-                        .text_color(if failed {
-                            cx.theme().danger
-                        } else {
-                            cx.theme().muted_foreground
-                        })
-                        .children(status),
-                ),
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(body)
+                    .child(
+                        div()
+                            .h(rems(1.25))
+                            .text_sm()
+                            .text_color(if failed {
+                                cx.theme().danger
+                            } else {
+                                cx.theme().muted_foreground
+                            })
+                            .children(status),
+                    ),
             )
-            .child(
-                div().flex().justify_end().child(
-                    Button::new("onboarding-continue")
-                        .debug_selector(|| "onboarding-continue".into())
-                        .primary()
-                        .tab_index(1)
-                        .label(strings.get(Text::OnboardingContinue))
-                        .loading(busy)
-                        .disabled(!online)
-                        .on_click(move |_, _, cx| go_on(&next, cx)),
-                ),
-            )
+            .child(self.footer(cx))
     }
 }
 
@@ -358,7 +416,9 @@ impl Presence {
             return Ok(());
         }
         let view = panel.view.clone();
-        self.save_setting(view.read(cx).state.step().field(), cx);
+        if let Some(field) = view.read(cx).state.step().field() {
+            self.save_setting(field, cx);
+        }
         let settings = self.settings.clone();
         let (from, next) = view.update(cx, |view, cx| {
             view.unsent = false;
@@ -426,6 +486,8 @@ impl Presence {
             }
             Next::Close(landing) => {
                 self.cancel_onboarding_edit(cx);
+                self.onboarding_chatgpt.hand_over();
+                self.onboarding_claude.hand_over();
                 self.close_onboarding(cx)?;
                 if landing == Landing::Peek {
                     self.set_panel(PanelVisibility::Visible, cx)?;
@@ -477,6 +539,7 @@ impl Presence {
         self.pointer_settle = None;
         self.set_panel(PanelVisibility::Hidden, cx)?;
         tracing::info!("onboarding opened");
+        self.adopt_onboarding_sign_ins(cx);
         self.show_onboarding(Select::All, cx)
     }
 
@@ -532,7 +595,8 @@ impl Presence {
 
     /// Finish later, Esc at the top level or the native close: the window goes for this run and
     /// no finish is sent. A name edit still in the field is saved, as closing Settings saves one;
-    /// one that can't be sent is dropped, so no draft or notice outlives the window.
+    /// one that can't be sent is dropped, so no draft or notice outlives the window. A sign-in
+    /// this window asked for that hasn't ended is cancelled, or the cancel stays owed.
     pub(super) fn dismiss_onboarding(
         &mut self,
         cx: &mut Context<'_, Self>,
@@ -540,11 +604,13 @@ impl Presence {
         let Some(panel) = &self.onboarding else {
             return Ok(());
         };
-        let field = panel.view.read(cx).state.step().field();
-        if self.settings.read(cx).editing(field) {
+        if let Some(field) = panel.view.read(cx).state.step().field()
+            && self.settings.read(cx).editing(field)
+        {
             self.save_setting(field, cx);
             self.cancel_onboarding_edit(cx);
         }
+        self.cancel_onboarding_sign_ins(cx);
         self.onboarding_run = ThisRun::PutOff;
         tracing::info!("onboarding put off for this run");
         self.close_onboarding(cx)
@@ -555,7 +621,9 @@ impl Presence {
         let Some(panel) = &self.onboarding else {
             return;
         };
-        let field = panel.view.read(cx).state.step().field();
+        let Some(field) = panel.view.read(cx).state.step().field() else {
+            return;
+        };
         self.settings.update(cx, |state, cx| {
             state.cancel(field);
             cx.notify();
@@ -565,9 +633,13 @@ impl Presence {
     /// Whether Esc cancels the onboarding step's unsaved name.
     pub(super) fn onboarding_editing(&self, cx: &gpui_kit::App) -> bool {
         self.onboarding.as_ref().is_some_and(|panel| {
-            self.settings
+            panel
+                .view
                 .read(cx)
-                .editing(panel.view.read(cx).state.step().field())
+                .state
+                .step()
+                .field()
+                .is_some_and(|field| self.settings.read(cx).editing(field))
         })
     }
 

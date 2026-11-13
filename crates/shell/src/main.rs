@@ -29,6 +29,7 @@ mod presence;
 mod presenter;
 mod runs;
 mod settings;
+mod sign_in_mark;
 mod strings;
 mod theme;
 mod threads;

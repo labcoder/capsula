@@ -236,9 +236,6 @@ creates no file.
   native callback's entry. Lines carry no keys and no text:
   - Legacy Listening and capture effects are inactive. The adapter retains gesture `Instant`
     and callback QPC for voice controls, but does not log a listening-paint timing join.
-  - `resting`
-  - `hold excluded=true|false` and `hold ended restored=true|false`: whether every surface,
-    the dock's native proxy included, took the capture affinity
   - `input opened focused=true|false` and `input dismissed`
   - `input draft nonempty=true|false preserved=true|false`, after an `input opened` that follows
     a dismiss: whether the draft held at that dismiss was nonempty, and whether the input still
@@ -246,9 +243,10 @@ creates no file.
     hash or length is logged, and an empty draft never counts as preserved. The first open logs
     no draft line.
   - `escape action=Stop|Clear|CancelEdit|Dismiss|Ignore` and `escape wanted=true|false stop=true|false`
-  - status lines that aren't input: `link state=`, `run phase=`, `submit sent=`, `dock settled`,
-    `dock paints settled=`, `kumo baked`, `kumo frame shade_us=` and `kumo reshades=`. The
-    harness reads them as status and still refuses any other unknown event.
+  - status lines that no gate reads: `link state=`, `carry drop perch=`, `resting` (exactly),
+    `run phase=`, `submit sent=`, `dock settled`, `dock paints settled=`, `kumo baked`,
+    `kumo frame shade_us=` and `kumo reshades=`. The harness reads them as status and still
+    refuses any other unknown event.
 - `--esc-fixture` holds global Esc from startup until the first Esc arrives, without inventing
   speech or a drawing. The harness checks the hold, presses Esc once, and sees it released.
   It needs `--quit-after-ms` or `--smoke`, so a run can't keep Esc forever. If another process
@@ -259,8 +257,9 @@ creates no file.
 A paint isn't a present. The gate harness joins its exact Canvas QPC to the separately logged
 posted-completion interval and a unique eligible PresentMon row on the validated dock swapchain.
 Missing, dropped, reused or ambiguous joins remain unmeasured; a Canvas marker alone never
-passes a present or display gate. The keyboard `WM_INPUT` QPC → present gate at p95 ≤7ms is
-unmeasured without a retained callback counter. Hover gates the native pointer-entry QPC →
+passes a present or display gate. Shortcut latency, from left Ctrl + left Alt to the dock's
+first present, and AltGr for hold to talk are unmeasured for now: the session has no keyboard
+or layouts phase. Hover gates the native pointer-entry QPC →
 the peek's first present at p95 ≤8ms. That QPC is read
 when the entering `WM_MOUSEMOVE` is dispatched to the proxy's window procedure. So it excludes
 OS routing and the message's wait in the UI thread's Win32 message queue before dispatch, and
@@ -275,15 +274,11 @@ its queue ever fills rather than blocking. `main` creates the file and the worke
 starts, and Quit drains the worker off the UI thread, so the UI thread never touches the disk.
 
 Unit tests cover the reducer's thresholds and sequences, scan-code naming and Esc ordering.
-Real AltGr layouts, focus, hold feel and Listening on screen need the approved desktop session.
+Focus, hold feel and Listening on screen need the approved desktop session.
 The separate-process fixture owns its window loop in `platform/input_session/fixture.rs`.
-On Windows 8 and later, layout loading must run in the process that owns keyboard focus, so
-the runner sends a bounded numeric request to the foreground fixture and verifies its active
-layout acknowledgement before typing. The fixture tracks newly loaded handles and restores
-its original layout on request and on exit, including after a lost acknowledgement. The
-runner then checks the loaded-layout list. The approved session separately compares the
-owner's persistent language registry settings before and after the layouts phase; a change
-stops the session and is reported, never silently repaired with registry writes.
+The approved session compares the owner's persistent language registry settings before and
+after its automated phases; a change stops the session and is reported, never silently repaired
+with registry writes.
 
 ## One approved final-main gate session
 
@@ -349,14 +344,16 @@ display/background-process metadata identify the measurement environment.
 One owned EDIT/Ready fixture remains alive throughout the session. Injection starts disabled.
 The initial release shell is bounded to 120 seconds while the owner has about 90 seconds to try
 the 300ms hold and double tap by hand and choose independent categorical feel verdicts.
-The dock is a short line at top center by default, and Listening turns it the accent colour,
-not a separate test window.
+The dock is a short line at top center by default, not a separate test window. The gate copy
+has no speech model, so a hold is recognised but the line stays plain and nothing is recorded or
+sent; hovering the line may show Not installed in the status panel. Hold feel can't be judged in
+this copy, so Unrated is the right Hold verdict.
 The test window is only for verdicts and Ready. Ready stays disabled until the owner explicitly
 selects both verdicts, including Unrated if that is the owner's choice.
 The feel product writes `feel/milestones.log`; after its graceful exit, `feel/summary.txt`
-reports recognized holds, exclusion/restoration, double-tap openings and focused/unfocused
-opens, plus apply/Canvas timings. These contain no text or keys, are not present timings,
-and do not replace the owner's verdicts or any automated gate.
+reports double-tap openings and focused/unfocused opens. The shell no longer logs holds, so
+holds aren't counted. These contain no text or keys, are not present timings, and do not
+replace the owner's verdicts or any automated gate.
 Missing or truncated feel diagnostics are reported as `summary=unmeasured`, without blocking
 otherwise authorized automated phases; failure to retain the summary itself still stops safely.
 During feel the owner also presses Alt-Tab once and separately reports whether a product window
@@ -409,40 +406,37 @@ cleanup; a phase cannot begin without its complete budget.
 1. The idle CPU row calibrates three saturated 2-second trials, settles for 30 seconds and
    samples for 60. It sends no motion or input and omits the gate observer. Calibrated cycles
    are the CPU gate, with GetProcessTimes alongside; the limit is 1% of one core. DWM and private
-   bytes are retained too. The stretch CPU rows left with the stretch and return with the pull
-   (C2a).
-2. Keyboard runs 100 short 50ms chords with more than 300ms between releases, then one hold and
-   restoration check. Every applied/Canvas sample is retained, including missing-paint failures.
-3. Hover runs after the resting receipts: 100 pointer entries onto the dock. Before each entry,
-   once the previous cycle has hidden the peek, it waits 1–8ms in a fixed jitter. After the entry
-   it waits a fixed 100ms, checks that the peek is visible, then leaves and waits until it hides.
-4. Resting receipts run for 20 seconds; the motion receipts return with the pull (C2a). The harmless EDIT covers the tested area. Only actual EDIT/proxy recipient counts,
+   bytes are retained too.
+2. Resting receipts run for 20 seconds; the motion receipts return with the pull (C2a). The harmless EDIT covers the tested area. Only actual EDIT/proxy recipient counts,
    screen points and QPCs prove delivery; WindowFromPoint checks alone are not receipts.
    Every required category needs stable native and measured display coverage. Rest additionally
    needs displayed-body receipts at the line's center and edge. Dropped-only or otherwise unavailable display evidence makes the phase
    incomplete even when native routing succeeded.
    Hovering the body opens the peek; candidate points exclude its rectangle so that
    later receipt trials cannot target the panel instead of the proxy or covering EDIT.
-5. Focus requires a visible, foreground typing surface before typing a known draft. It dismisses
+3. Hover runs after the resting receipts: 100 pointer entries onto the dock. Before each entry,
+   once the previous cycle has hidden the peek, it waits 1–8ms in a fixed jitter. After the entry
+   it waits a fixed 100ms, checks that the peek is visible, then leaves and waits until it hides.
+4. Focus requires a visible, foreground typing surface before typing a known draft. It dismisses
    through local Esc, reopens, double-taps again while active, then clicks a second top-level
    fixture window, distinct from the previous foreground. After the Dismissed mark, typing must
    be hidden and that second window must still be foreground 300ms later. A guarded EDIT click
    returns to the original fixture before closing the alternate. Both reopens use the non-content observation
    to check draft preservation. Normal Esc dismissal must return foreground to the fixture;
    there is no SetForegroundWindow workaround. Ordinary Esc must then reach the EDIT.
-6. Layouts temporarily use German `00000407` and Spanish `0000040A` in the foreground fixture.
-   Each checks the expected `@`/`€` pair without printing text, no Listening over the AltGr-only
-   interval, and a positive left-modifier chord. The original HKL and loaded-layout inventory are
-   restored. Recursive read-only registry snapshots include missing-key/read status and are
-   compared even on failure; any difference stops the session and is never repaired.
-7. Free and fixture-contested global Esc use separate products but the same fixture. Contested
+5. Free and fixture-contested global Esc use separate products but the same fixture. Contested
    fallback visibility must exist before pointer movement and persist after leave.
-8. A separate bounded contested-Esc product exercises the rendered Stop button, using its
+6. A separate bounded contested-Esc product exercises the rendered Stop button, using its
    observed rectangle and exact owned panel HWND rather than a guessed coordinate. After the
    guarded click, wanted/Stop visibility must clear. The fixture then releases its own Esc
    reservation so ordinary Escape can reach the EDIT
    with an EscapeIgnore acknowledgement. The idle fixture proves clearing this affordance,
    not cancellation of a nonexistent backend request.
+
+There is no keyboard or layouts phase, so shortcut latency and AltGr for hold to talk are
+unmeasured for now. Recursive read-only registry snapshots of the language settings, with
+missing-key/read status, are compared after the phases even on failure; any difference stops
+the session and is never repaired.
 
 For instrumented phases, a PID-filtered warm trace has an 8-second fixed backstop. Three
 input-free repaints and a guarded wait produce a completed CSV that must have zero loss and one
@@ -469,10 +463,8 @@ Main trace backstops are fixed per phase:
 
 | Phase | Main backstop |
 | --- | ---: |
-| Keyboard | 50s |
 | Hover, resting receipts | 30s |
-| Motion receipts | 40s |
-| Focus, layouts | 20s |
+| Focus | 20s |
 | Free Esc, contested persistence, Stop button | 10s |
 
 CPU rows have no main input trace. Normal completion stops only this harness's uniquely named
@@ -486,7 +478,7 @@ success and failure.
 
 After injection has opened, any physical input, lock/desktop change, foreign foreground/capture/menu/move loop,
 or phase error stops the whole session. Cleanup releases only acknowledged injected downs,
-restores owned fixture layout state, closes only owned windows/processes gracefully, and retains
+closes only owned windows/processes gracefully, and retains
 all errors. It never force-kills another process or repairs language settings. Cursor restoration
 is skipped after any abort, and otherwise remains guarded and confined to owned destinations.
 Actual Alt-Tab into owner applications remains manual or unmeasured.

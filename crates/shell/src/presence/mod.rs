@@ -131,6 +131,10 @@ struct Presence {
     onboarding: Option<onboarding::OnboardingPanel>,
     /// Whether onboarding may still open this run.
     onboarding_run: crate::onboarding::ThisRun,
+    /// The `ChatGPT` and Claude Code sign-ins the onboarding window asked for, until each ends;
+    /// an owed cancel outlives the window.
+    onboarding_chatgpt: crate::sign_in_mark::SignInMark,
+    onboarding_claude: crate::sign_in_mark::SignInMark,
     settings: Entity<Settings>,
     threads: Entity<Threads>,
     chat: Entity<Threads>,
@@ -988,6 +992,8 @@ pub(crate) fn open(
             settings_panel: None,
             onboarding: None,
             onboarding_run: crate::onboarding::ThisRun::Owed,
+            onboarding_chatgpt: crate::sign_in_mark::SignInMark::Settled,
+            onboarding_claude: crate::sign_in_mark::SignInMark::Settled,
             settings: cx.new(|_| Settings::default()),
             threads: cx.new(|_| threads),
             chat: cx.new(|_| chat),
