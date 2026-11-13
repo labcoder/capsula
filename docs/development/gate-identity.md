@@ -1,6 +1,7 @@
 # The gate identity
 
-The gate tools (`cold-start`, `gate-session`, `hover-gate`, `bench idle` and `slice2-gate`) start real
+The gate tools (`cold-start`, `gate-session`, `hover-gate`, `measure-gate`, `bench idle` and
+`slice2-gate`) start real
 Kumochi processes on the developer's machine. A throwaway `%LOCALAPPDATA%` isolates files only:
 anything named by the product identity (the pipes, the instance capability, Credential Manager
 names and the folder the system reports for Local AppData) follows the build, not the environment.

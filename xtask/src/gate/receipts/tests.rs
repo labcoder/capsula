@@ -37,25 +37,34 @@ fn resting_gate_requires_displayed_coverage_after_a_valid_warm_trace() {
     let lines = log.lines().count();
     writeln!(log, "end lines={lines} write_errors=0").unwrap();
     fs::write(&observer, log).unwrap();
-    for (name, dropped, include_edge, expected_error) in [
-        ("displayed", 0, true, None),
+    for (name, chain_address, dropped, include_edge, expected_error) in [
+        ("displayed", "0x1", 0, true, None),
         (
             "dropped",
+            "0x1",
             1,
             true,
             Some("center native/display receipt coverage unmeasured"),
         ),
         (
             "missing-edge",
+            "0x1",
             0,
             false,
             Some("edge native/display receipt coverage unmeasured"),
+        ),
+        (
+            "panel-only",
+            "0x2",
+            0,
+            true,
+            Some("main trace missed the dock seed: no present on the dock swapchain"),
         ),
     ] {
         let output = directory.join(name);
         fs::create_dir(&output).unwrap();
         let csv = output.join("main.csv");
-        fs::write(&csv, format!("{header}fixture.exe,42,0x1,DXGI,1,0,{dropped},0.013,0,0,0,Composed: Flip,0,1,0,0,0,0,13\n")).unwrap();
+        fs::write(&csv, format!("{header}fixture.exe,42,{chain_address},DXGI,1,0,{dropped},0.013,0,0,0,Composed: Flip,0,1,0,0,0,0,13\n")).unwrap();
         let mut trials = format!("{HEADER}\n1,center,1,0,18,19,1,20,21,2,proxy,22,1,1,ok\n");
         if include_edge {
             trials.push_str("2,edge,0,0,28,29,1,30,31,2,proxy,32,1,2,ok\n");

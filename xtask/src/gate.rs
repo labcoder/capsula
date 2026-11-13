@@ -390,6 +390,20 @@ fn feel(session: &mut Session, images: &Images, output: &Path, end: Instant) -> 
     session::combine([body, stopped, summarized])
 }
 
+/// Every measured phase without the feel opener, opened by the owner's away rule.
+pub(crate) fn measure(args: impl Iterator<Item = String>) -> Result<()> {
+    session_run(args, ("idle-open-measure", measure_open), &TRIALS)
+}
+
+// shortcut: the idle opener reserves time for one phase, so an open late in the hour fails later phases on their deadlines; reserve every phase's budget if runs start before the owner is away.
+fn measure_open(session: &mut Session, images: &Images, output: &Path, end: Instant) -> Result<()> {
+    println!(
+        "This run has no Ready and records no feel verdicts: those come only from a gate-session with the owner."
+    );
+    fs::write(output.join("owner-feel.txt"), "not_part_of_this_run\n")?;
+    idle_open(session, images, output, end)
+}
+
 /// Rez must have had no input for this long before the idle opener arms.
 const AWAY: Duration = Duration::from_secs(600);
 
@@ -740,6 +754,11 @@ fn run_trial(
             counts.behavior_fail
         )?;
         fs::write(directory.join("result.txt"), format!("{result:?}\n"))?;
+        let (graces, longest) = session.take_null_graces();
+        fs::write(
+            directory.join("null-foreground.txt"),
+            format!("graces={graces}\nlongest_ms={}\n", longest.as_millis()),
+        )?;
         Ok(())
     })();
     session::combine([result, recorded])

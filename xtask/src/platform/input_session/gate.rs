@@ -219,9 +219,99 @@ impl Lease {
     }
 }
 
+/// How long the foreground may be empty: activation handed to another process's window completes
+/// asynchronously, so the front reads NULL until that window's thread accepts it.
+pub(crate) const NULL_GRACE: Duration = Duration::from_millis(100);
+
+/// The guard's view of an empty foreground, and the graces it has allowed since last taken.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NullForeground {
+    since: Option<Instant>,
+    graces: u32,
+    longest: Duration,
+}
+
+impl NullForeground {
+    /// Allows pid 0 for at most [`NULL_GRACE`] from its first sample. Only an owned pid ends the
+    /// grace; any other pid fails at once, straight after a NULL too.
+    pub(crate) fn observe(&mut self, pid: u32, lease: &Lease, now: Instant) -> Result<()> {
+        if pid == 0 {
+            let seen = now.duration_since(*self.since.get_or_insert(now));
+            if seen > NULL_GRACE {
+                bail!(
+                    "foreground left the owned fixture/product processes (foreground_pid=0 owned=false null_ms={})",
+                    seen.as_millis()
+                );
+            }
+            return Ok(());
+        }
+        if !lease.owns(pid) {
+            bail!(
+                "foreground left the owned fixture/product processes (foreground_pid={pid} owned=false)"
+            );
+        }
+        if let Some(since) = self.since.take() {
+            self.graces += 1;
+            self.longest = self.longest.max(now.duration_since(since));
+        }
+        Ok(())
+    }
+
+    /// The graces ended since the last call and the longest of them, then resets both.
+    pub(crate) fn take_used(&mut self) -> (u32, Duration) {
+        (
+            std::mem::take(&mut self.graces),
+            std::mem::take(&mut self.longest),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_null_foreground_is_allowed_for_exactly_the_grace_and_only_an_owned_pid_ends_it() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let lease = Lease::new(7);
+        let mut null = NullForeground::default();
+        null.observe(7, &lease, at(0)).unwrap();
+        assert_eq!(null.take_used(), (0, Duration::ZERO));
+
+        null.observe(0, &lease, at(10)).unwrap();
+        null.observe(0, &lease, at(110)).unwrap();
+        null.observe(7, &lease, at(110)).unwrap();
+        null.observe(0, &lease, at(200)).unwrap();
+        null.observe(0, &lease, at(290)).unwrap();
+        null.observe(7, &lease, at(290)).unwrap();
+        assert_eq!(null.take_used(), (2, Duration::from_millis(100)));
+        assert_eq!(null.take_used(), (0, Duration::ZERO));
+
+        null.observe(0, &lease, at(400)).unwrap();
+        let past = null.observe(0, &lease, at(501)).unwrap_err().to_string();
+        assert!(
+            past.ends_with("(foreground_pid=0 owned=false null_ms=101)"),
+            "{past}"
+        );
+    }
+
+    #[test]
+    fn a_foreign_pid_fails_at_once_even_straight_after_a_null() {
+        let start = Instant::now();
+        let lease = Lease::new(7);
+        let mut null = NullForeground::default();
+        null.observe(0, &lease, start).unwrap();
+        let foreign = null
+            .observe(42, &lease, start + Duration::from_millis(1))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            foreign.ends_with("(foreground_pid=42 owned=false)"),
+            "{foreign}"
+        );
+        assert_eq!(null.take_used(), (0, Duration::ZERO));
+    }
 
     const CALM: Quiet = Quiet {
         aborted: false,
