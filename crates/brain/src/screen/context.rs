@@ -82,6 +82,22 @@ impl ScreenContext {
         Self::sealed(jpeg, size, transform)
     }
 
+    /// A sealed 4x3 context around `jpeg`, for tests outside the screen module.
+    #[cfg(test)]
+    pub(crate) fn fixture(jpeg: &[u8]) -> Self {
+        let display = kumochi_protocol::geometry::PhysicalRect {
+            origin: [0, 0],
+            size: [4, 3],
+        };
+        let transform = CaptureTransform {
+            display,
+            dpi: 96,
+            overview_size: [4, 3],
+            crop: None,
+        };
+        Self::sealed(Zeroizing::new(jpeg.to_vec()), [4, 3], transform)
+    }
+
     fn sealed(jpeg: Zeroizing<Vec<u8>>, size: [u32; 2], transform: CaptureTransform) -> Self {
         Self {
             #[cfg(windows)]

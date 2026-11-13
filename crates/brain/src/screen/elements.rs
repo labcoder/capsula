@@ -146,6 +146,36 @@ pub(crate) struct NodeProps {
     pub(crate) rect: PhysicalRect,
 }
 
+impl Drop for Element {
+    fn drop(&mut self) {
+        scrub(&mut self.name);
+    }
+}
+
+impl Drop for NodeProps {
+    fn drop(&mut self) {
+        scrub(&mut self.name);
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whether each window name dropped on this thread held only zeros once zeroed, and its length.
+    pub(super) static SCRUBBED: std::cell::RefCell<Vec<(bool, usize)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Zeroes window text before its buffer is freed.
+fn scrub(name: &mut String) {
+    let mut bytes = std::mem::take(name).into_bytes();
+    zeroize::Zeroize::zeroize(bytes.as_mut_slice());
+    #[cfg(test)]
+    SCRUBBED.with_borrow_mut(|scrubbed| {
+        scrubbed.push((bytes.iter().all(|byte| *byte == 0), bytes.len()));
+    });
+    zeroize::Zeroize::zeroize(&mut bytes);
+}
+
 impl std::fmt::Debug for NodeProps {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NodeProps")
@@ -492,8 +522,14 @@ fn walk_tree<S: ElementSource>(
             let element = Element {
                 id: ElementId { capture, index },
                 parent,
+                // One exact copy, so no grown buffer is freed with window text in it.
                 name: if visible {
-                    props.name.chars().take(limits.name_chars).collect()
+                    let end = props
+                        .name
+                        .char_indices()
+                        .nth(limits.name_chars)
+                        .map_or(props.name.len(), |(end, _)| end);
+                    props.name[..end].to_owned()
                 } else {
                     String::new()
                 },

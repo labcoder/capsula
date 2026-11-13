@@ -456,6 +456,17 @@ it (a panic, an aborted task, a dropped `context`) leaves its frame to the ticke
 `context` caps at the screen budget (`MAX_TTL`, 1.5 s). So `Unreleased` means only that the release
 wasn't shown, and callers never treat it as fatal.
 
+**The hold's screen part** (`runtime/hold/screen.rs`) is `None` for a voice hold. A screen hold
+starts at `Waiting` and ends at `Closed`. Nothing starts one yet, and the brain has no client until
+the entry-point switch. Every way a hold ends reaches the part through one of two places:
+- the hold's invalidation, which covers cancel and Esc, a turn, an Ask, `ShellLost`, a model or
+  default change, a delete, hold-to-talk off, a timeout and session loss;
+- taking the hold, which also covers handing its transcript to the run.
+
+A `Waiting` part may still hold a frame in the worker, so closing it spawns `retire` with the
+worker that captured, if one answered. Closing a `Ready` part drops its context, which zeroes it.
+Closing is idempotent, so a hold that's invalidated and then taken sends one `Retire`.
+
 ## Portable element data and walk
 
 The control-view data and walk run under capture authority on a bounded reader thread.
@@ -473,7 +484,9 @@ bytes of element JSON (commas and the reply envelope are additional). The byte c
 first. A cut records Elements, Depth, Bytes,
 Budget or Provider; a hard stop replaces an earlier Depth cut. Capture-scoped ids (`c12.e7`)
 carry physical desktop and window-relative rectangles from the same cached properties. Names
-never appear in Debug or errors. Names outside the captured display are empty. Password names are discarded, their rectangles are published
+never appear in Debug or errors. Each name is copied once at its exact length, and it's zeroed when
+its element, or the walk's node properties, drop, so a worker's tree leaves no window text behind.
+The platform's own strings (UIA's `BSTR` and its conversion) aren't covered. Names outside the captured display are empty. Password names are discarded, their rectangles are published
 immediately, and password subtrees are never descended into.
 
 A source validates the root window and pid and returns its owning pid; the portable layer rejects

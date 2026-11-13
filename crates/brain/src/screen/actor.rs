@@ -31,6 +31,15 @@ pub(crate) struct Owner {
     pub(super) gesture: u64,
 }
 
+impl From<crate::coordinator::HoldKey> for Owner {
+    fn from(key: crate::coordinator::HoldKey) -> Self {
+        Self {
+            epoch: key.epoch,
+            gesture: u64::from(key.gesture.0),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Key {
     pub(super) owner: Owner,

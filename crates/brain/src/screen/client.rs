@@ -243,6 +243,18 @@ impl HoldClient {
     }
 }
 
+/// Answers the worker's next request, which must retire `key`'s hold, as released.
+#[cfg(test)]
+pub(crate) async fn release_next(
+    rig: &mut crate::supervise::fixture::Rig<Holds>,
+    key: crate::coordinator::HoldKey,
+) {
+    let owner = Owner::from(key);
+    let (id, request) = rig.next().await;
+    assert!(matches!(request, Request::Retire(asked) if asked == owner));
+    rig.reply(id, &Reply::Released(owner, None)).await;
+}
+
 /// A terminal answer that isn't the one asked for. The caller drops it, and with it anything it
 /// carries: an image is zeroed on drop.
 fn closed(reply: &Reply) -> Closed {

@@ -3,6 +3,11 @@
 mod audio;
 #[cfg(test)]
 mod reconnect_tests;
+#[expect(
+    dead_code,
+    reason = "2c4 starts screen parts; a run takes a Ready context from 2c3b"
+)]
+mod screen;
 #[cfg(test)]
 mod tests;
 
@@ -21,7 +26,9 @@ use zeroize::Zeroize as _;
 use super::{Brain, Effect, Full, Input, Link, Origin};
 use crate::coordinator::{HoldKey, HoldSnapshot};
 use crate::platform::ShellProcess;
+use crate::screen::HoldClient;
 use crate::voice::stt::{Decode, SttHandle, SttResult};
+use screen::ScreenPart;
 
 #[derive(Debug)]
 enum FailureStage {
@@ -89,6 +96,8 @@ pub(super) struct Holds {
     gate: Arc<Gate>,
     send: mpsc::Sender<Packet>,
     receive: mpsc::Receiver<Packet>,
+    /// The screen worker's client; 2c4 gives the brain one.
+    screen: Option<Arc<HoldClient>>,
 }
 
 struct Hold {
@@ -102,6 +111,7 @@ struct Hold {
     deadline: Instant,
     decode: Option<oneshot::Receiver<SttResult>>,
     terminal: Option<HoldStatus>,
+    screen: ScreenPart,
 }
 
 impl std::fmt::Debug for Holds {
@@ -134,6 +144,7 @@ impl Default for Holds {
             gate: Arc::default(),
             send,
             receive,
+            screen: None,
         }
     }
 }
@@ -167,6 +178,7 @@ impl Holds {
             hold.cancel.store(true, Ordering::SeqCst);
             hold.terminal.get_or_insert(status);
         }
+        self.close_screen();
         self.gate.active.store(0, Ordering::SeqCst);
     }
 
@@ -176,6 +188,7 @@ impl Holds {
     }
 
     fn take(&mut self) -> Option<Hold> {
+        self.close_screen();
         self.gate.active.store(0, Ordering::SeqCst);
         while self.receive.try_recv().is_ok() {}
         self.pending.take()
@@ -358,6 +371,7 @@ impl Brain {
                     deadline: Instant::now() + crate::recall::control::READ_TIME,
                     decode: None,
                     terminal: None,
+                    screen: ScreenPart::None,
                 });
                 if state == PartState::Loading {
                     Self::hold_status(key, HoldStatus::Loading, link)?;

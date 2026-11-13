@@ -266,6 +266,19 @@ fn names_are_cut_at_128_characters_not_bytes() {
 }
 
 #[test]
+fn window_names_are_zeroed_when_the_walk_and_its_tree_drop() {
+    SCRUBBED.take();
+    let mut source = FakeSource::flat(1);
+    source.nodes[0].name = "é".repeat(129);
+    let tree = run(&mut source, &LIMITS);
+    let name = &tree.elements[0].name;
+    assert_eq!((name.len(), name.capacity()), (256, 256));
+    assert_eq!(SCRUBBED.take(), [(true, 258)]);
+    drop(tree);
+    assert_eq!(SCRUBBED.take(), [(true, 256)]);
+}
+
+#[test]
 fn json_at_60000_fits_and_another_element_is_cut() {
     // Root: 170 + 112; indices 1..9: 167; 10..99: 168; 100..354: 169.
     assert_eq!(282 + 9 * 167 + 90 * 168 + 255 * 169, 60_000);
