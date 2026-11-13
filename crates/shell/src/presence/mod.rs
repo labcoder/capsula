@@ -696,11 +696,8 @@ impl Render for Panel {
                 .label(strings.get(Text::Stop))
                 .on_click(move |_, _, _| {
                     send(&events, PresenceEvent::Escape);
-                });
-            #[cfg(test)]
-            let button = div()
-                .debug_selector(|| "presence-stop".into())
-                .child(button);
+                })
+                .debug_selector(|| "presence-stop".into());
             Target(button.into_element())
         });
         let stamped = cx.has_global::<Observer>() || cx.has_global::<Diagnostics>();
@@ -742,18 +739,16 @@ impl Render for Panel {
             .gap_1()
             .children(stop)
             .children(retry)
-            .child({
-                let chat = action(
+            .child(
+                action(
                     "chat",
                     strings.get(Text::Chat),
                     chat_owner,
                     Presence::open_text,
                 )
-                .primary();
-                #[cfg(test)]
-                let chat = div().debug_selector(|| "presence-chat".into()).child(chat);
-                chat
-            })
+                .primary()
+                .debug_selector(|| "presence-chat".into()),
+            )
             .child(
                 action(
                     "threads",

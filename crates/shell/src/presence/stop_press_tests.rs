@@ -98,6 +98,11 @@ fn press_under_kumo(cx: &mut TestAppContext, selector: &'static str) {
     });
     let button = frame.debug_bounds(selector).expect("the button shows");
     let body = frame.debug_bounds("presence-kumo").expect("Kumo shows");
+    assert_eq!(
+        frame.debug_bounds("presence-kumo-picture"),
+        Some(body),
+        "Kumo's picture fills its square in the peek"
+    );
 
     click(&mut frame, button.center());
     let on_button = grabs(&seen);

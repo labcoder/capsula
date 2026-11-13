@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::{
-    App, Context, EventEmitter, IntoElement, ParentElement as _, Render, RenderImage, Styled as _,
-    Task, Window, canvas, div, img, px,
+    App, Context, EventEmitter, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    RenderImage, Styled as _, Task, Window, canvas, div, img, px,
 };
 
 use super::kumo::{Animator, CARRY_WIDTH, Look, Mood, Motion, Renderer, Silhouette};
@@ -270,27 +270,33 @@ impl KumoView {
 impl Render for KumoView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let view = cx.weak_entity();
-        let body = div().relative().size(px(SIZE)).flex_none();
-        #[cfg(test)]
-        let body = gpui_kit::InteractiveElement::debug_selector(body, || "presence-kumo".into());
-        body.children(
-            self.image
-                .clone()
-                .filter(|_| self.pulled == Pulled::Peek)
-                .map(|image| img(image).size_full()),
-        )
-        .child(
-            canvas(
-                |_, _, _| {},
-                move |bounds, (), window, _| {
-                    pull::listen(bounds, view, window);
-                },
+        div()
+            .relative()
+            .size(px(SIZE))
+            .flex_none()
+            .debug_selector(|| "presence-kumo".into())
+            .children(
+                self.image
+                    .clone()
+                    .filter(|_| self.pulled == Pulled::Peek)
+                    .map(|image| {
+                        img(image)
+                            .size_full()
+                            .debug_selector(|| "presence-kumo-picture".into())
+                    }),
             )
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full(),
-        )
+            .child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, (), window, _| {
+                        pull::listen(bounds, view, window);
+                    },
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
     }
 }
 
