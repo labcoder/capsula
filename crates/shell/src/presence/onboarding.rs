@@ -1,6 +1,6 @@
-//! The first-run window: the welcome, the names, the accounts and the shortcut, over [`crate::onboarding`]'s
-//! plain state. The names go through the Settings model and its save path; nothing here keeps or
-//! logs one.
+//! The first-run window: the welcome, the names, the accounts and the shortcut, over
+//! [`crate::onboarding`]'s plain state. The names go through the Settings model and its save path;
+//! nothing here keeps or logs one.
 
 mod accounts;
 #[cfg(test)]

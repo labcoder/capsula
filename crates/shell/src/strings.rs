@@ -996,7 +996,6 @@ impl Strings {
     }
 }
 
-/// Each error's catalog id, grouped by feature.
 /// Stands in for an element placed inside a sentence, so the words around it can be split off.
 const SPOT: &str = "\u{E000}";
 
@@ -1008,6 +1007,7 @@ fn around_spot(text: String) -> (String, String) {
     }
 }
 
+/// Each error's catalog id, grouped by feature.
 const fn error_id(key: ErrorKey) -> &'static str {
     match key {
         // Settings

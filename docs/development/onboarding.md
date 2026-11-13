@@ -49,7 +49,9 @@ flowchart TD
     F & FT -- "refused or not sent" --> K
     F -- "answered: onboarded is true" --> P["Window closes, the peek opens"]
     FT -- "answered: onboarded is true" --> T["Window closes, the typing box opens"]
-    W & U & A & K -- "Finish later, Esc or window close" --> X["Hidden for this run, no finish sent; the account step's sign-ins cancelled"]
+    X["`Hidden for this run, no finish sent; sign-ins started on the account step
+    and not yet handed over are cancelled`"]
+    W & U & A & K -- "Finish later, Esc or window close" --> X
 ```
 
 ## Rules
@@ -107,9 +109,9 @@ flowchart TD
   nothing is cancelled and nothing is adopted, at open or after a link drop
   (`onboarding_owns_sign_ins`). Before that step, after a shell restart, the window adopts a
   sign-in it finds waiting, as it opens (`set_onboarding`) or on a connection's first view. That
-  is wrong in one accepted case: after Finish later, a sign-in started from Settings or chat that is still
-  waiting when the shell crashes is adopted by the relaunched window, and dismissing it cancels
-  it.
+  is wrong in one accepted case: after Finish later, a sign-in started from Settings or chat that
+  is still waiting when the shell crashes is adopted by the relaunched window, and dismissing it
+  cancels it.
 - **Focus comes back after a section button goes.** The sections replace their buttons when the
   view changes, so a focused one takes the window's key context, and Esc, with it. The window
   restores focus the way Settings does (`settings::restore_lost_focus`).
