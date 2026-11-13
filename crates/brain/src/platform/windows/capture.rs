@@ -3,9 +3,12 @@
 //! capture session, so nothing streams between tickets. macOS: `ScreenCaptureKit`'s
 //! `SCScreenshotManager` behind the same `Capturer` seam.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::geometry::DisplayRef;
+use kumochi_protocol::geometry::{DisplayRef, PhysicalPoint};
+use windows::Foundation::TypedEventHandler;
 use windows::Graphics::Capture::{
     Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
@@ -36,7 +39,9 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::core::{Interface, factory};
 
-use crate::screen::{Acquired, Capturer, Exclusion, Failure, RawFrame, Refusal, display_edges};
+use crate::screen::{
+    Acquired, Capturer, Exclusion, Failure, RawFrame, Refusal, Target, display_edges,
+};
 
 const POLL: Duration = Duration::from_millis(1);
 
@@ -109,6 +114,36 @@ impl Wgc {
             context,
             winrt,
         })
+    }
+
+    /// One frame of `item` into `frame`: a session of its own, closed before the pixels are read.
+    fn grab(
+        &self,
+        item: &GraphicsCaptureItem,
+        size: SizeInt32,
+        extent: [u32; 2],
+        until: Instant,
+        frame: &mut RawFrame,
+    ) -> Result<Instant, Failure> {
+        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
+            &self.winrt,
+            DirectXPixelFormat::B8G8R8A8UIntNormalized,
+            1,
+            size,
+        )
+        .map_err(|e| fault(&e))?;
+        let staged = pool
+            .CreateCaptureSession(item)
+            .map_err(|e| fault(&e))
+            .and_then(|session| {
+                let staged = self.acquire(&pool, &session, size, extent, until);
+                session.Close().map_err(|e| Failure::Retire(e.code().0))?;
+                staged
+            });
+        pool.Close().map_err(|e| Failure::Retire(e.code().0))?;
+        let (arrived, staging) = staged?;
+        self.read_out(&staging, extent, until, frame)?;
+        Ok(arrived)
     }
 
     /// Starts the session and stages the first frame that's ready before `until`.
@@ -351,25 +386,54 @@ impl Capturer for Wgc {
         if [size.Width, size.Height] != [right - left, bottom - top] {
             return Err(Refusal::DisplayChanged.into());
         }
-        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
-            &self.winrt,
-            DirectXPixelFormat::B8G8R8A8UIntNormalized,
-            1,
-            size,
-        )
-        .map_err(|e| fault(&e))?;
-        let staged = pool
-            .CreateCaptureSession(&item)
-            .map_err(|e| fault(&e))
-            .and_then(|session| {
-                let staged = self.acquire(&pool, &session, size, display.0.size, until);
-                session.Close().map_err(|e| Failure::Retire(e.code().0))?;
-                staged
-            });
-        pool.Close().map_err(|e| Failure::Retire(e.code().0))?;
-        let (arrived, staging) = staged?;
-        self.read_out(&staging, display.0.size, until, frame)?;
+        let arrived = self.grab(&item, size, display.0.size, until, frame)?;
         Ok(Acquired { arrived, dpi })
+    }
+
+    fn pointer_window(&mut self, point: PhysicalPoint, shell: u32) -> Result<Target, Refusal> {
+        super::window::pointer_window(point, shell)
+    }
+
+    /// B8's order: the walk's Kumochi check, then the item, then the same (pid, tid) again; a
+    /// close or any change before the frame is read refuses.
+    fn capture_window(
+        &mut self,
+        target: &Target,
+        until: Instant,
+        frame: &mut RawFrame,
+    ) -> Result<Acquired, Failure> {
+        let window = super::window::handle(target)?;
+        let interop: IGraphicsCaptureItemInterop =
+            factory::<GraphicsCaptureItem, _>().map_err(|e| fault(&e))?;
+        // SAFETY: Windows validates the handle the walk resolved.
+        let item: GraphicsCaptureItem =
+            unsafe { interop.CreateForWindow(window) }.map_err(|e| fault(&e))?;
+        if !super::window::unchanged(target) {
+            return Err(Refusal::WindowChanged.into());
+        }
+        let size = item.Size().map_err(|e| fault(&e))?;
+        let extent = target.top.rect.size;
+        if [size.Width, size.Height] != extent.map(|side| i32::try_from(side).unwrap_or(-1)) {
+            return Err(Refusal::WindowChanged.into());
+        }
+        let closed = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&closed);
+        let token = item
+            .Closed(&TypedEventHandler::new(move |_, _| {
+                seen.store(true, Ordering::Release);
+                Ok(())
+            }))
+            .map_err(|e| fault(&e))?;
+        let grabbed = self.grab(&item, size, extent, until, frame);
+        item.RemoveClosed(token).map_err(|e| fault(&e))?;
+        let arrived = grabbed?;
+        if closed.load(Ordering::Acquire) || !super::window::unchanged(target) {
+            return Err(Refusal::WindowChanged.into());
+        }
+        Ok(Acquired {
+            arrived,
+            dpi: target.dpi,
+        })
     }
 }
 

@@ -300,6 +300,38 @@ This does not claim the legacy production path implements Drop or expiry disposa
 streams, fences across respawn, full-queue termination and matching-generation release waits
 remain A6b2b, which alone may activate the alternate route. Images, OCR and Supersede remain A6c.
 
+## Window under the pointer (dormant)
+
+A screen hold captures one window, not the display. `Capturer::pointer_window` resolves the
+window a click at the hold's point would land on, and `Capturer::capture_window` takes one frame
+of that window alone, so whatever is stacked above it stays out of the image. Nothing in
+production calls either yet.
+
+On Windows the walk reads the top-level z-order from the point. It skips Kumochi's own windows
+(the worker, the connected shell and Kumochi images: the same rule the element walk uses),
+hidden, cloaked and click-through windows (`WS_EX_TRANSPARENT`, or layered at zero alpha), and
+windows whose rectangle or window region leaves out the point. A disabled window is still the
+target, which `WindowFromPoint` wouldn't give. Reaching the desktop (`Progman`, `WorkerW`)
+means `NoWindow`. The target is that window's `GA_ROOT`.
+
+Before any pixels, the target is refused when it's minimised, cloaked, Kumochi's, elevated (a
+process the worker can't open counts as elevated; for a UWP frame the hosted core window's
+process is checked too) or capture-protected by display affinity. The resolved `Target` keeps the
+window, its pid and tid, its DPI and its extended frame bounds, which are the frame's origin and
+size. Capture creates a `GraphicsCaptureItem` for the window, checks the same pid and tid again,
+and requires the item's size to equal the frame bounds. The window closing, or any change to its
+identity, frame or DPI before the pixels are read, refuses with `WindowChanged`.
+
+`platform::windows::window::tests::native_window_probe` is an ignored native check over sentinel
+windows owned by a second test process (the worker's own windows count as Kumochi's). It covers
+the occluder and click-through cases, the frame origin against a password edit, and the
+refusals. It opens topmost windows on the main display for a few seconds, so it runs only when
+the desk is idle, under the measuring lock:
+
+```
+cargo test -p kumochi-brain --lib native_window_probe -- --ignored --exact --nocapture
+```
+
 ## Portable element data and walk
 
 The control-view data and walk run under capture authority on a bounded reader thread.

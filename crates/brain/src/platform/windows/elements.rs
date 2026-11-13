@@ -53,19 +53,25 @@ impl ElementPlatform for Native {
         self.0.store(pid, Ordering::Relaxed);
     }
     fn excluded(&mut self, pid: u32) -> Result<bool, SourceError> {
-        if own_pid(pid, std::process::id(), self.0.load(Ordering::Relaxed)) {
-            return Ok(true);
-        }
-        // SAFETY: only query access is requested; Windows validates this process id.
-        let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-        if raw.is_null() {
-            return Err(io_error(std::io::Error::last_os_error()));
-        }
-        // SAFETY: this successful OpenProcess result is owned and closed exactly once.
-        let process = unsafe { OwnedHandle::from_raw_handle(raw) };
-        let path = super::pipe::process_image(process.as_handle()).map_err(io_error)?;
-        image_excluded(path.file_name().and_then(|name| name.to_str()))
+        excluded(pid, self.0.load(Ordering::Relaxed))
     }
+}
+
+/// Whether `pid` is Kumochi's: this worker, the connected `shell`, or a Kumochi image. The one
+/// rule for both the element walk and the window under the pointer.
+pub(super) fn excluded(pid: u32, shell: u32) -> Result<bool, SourceError> {
+    if own_pid(pid, std::process::id(), shell) {
+        return Ok(true);
+    }
+    // SAFETY: only query access is requested; Windows validates this process id.
+    let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if raw.is_null() {
+        return Err(io_error(std::io::Error::last_os_error()));
+    }
+    // SAFETY: this successful OpenProcess result is owned and closed exactly once.
+    let process = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let path = super::pipe::process_image(process.as_handle()).map_err(io_error)?;
+    image_excluded(path.file_name().and_then(|name| name.to_str()))
 }
 
 fn own_pid(pid: u32, worker: u32, shell: u32) -> bool {
@@ -106,7 +112,7 @@ fn io_error(error: std::io::Error) -> SourceError {
     })
 }
 
-fn rectangle(rect: RECT) -> PhysicalRect {
+pub(super) fn rectangle(rect: RECT) -> PhysicalRect {
     PhysicalRect {
         origin: [rect.left, rect.top],
         size: [

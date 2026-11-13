@@ -32,7 +32,7 @@ mod wire;
 mod worker;
 
 pub use crate::supervise::{Generation, WorkerLost};
-pub(crate) use capture::{Acquired, Capturer, Failure};
+pub(crate) use capture::{Acquired, Capturer, Failure, Target};
 #[cfg(all(windows, any(test, feature = "test-support")))]
 pub(crate) use elements::WalkJob;
 pub use elements::{Availability, Cut, Element, ElementId, ElementTarget, ElementTree};
