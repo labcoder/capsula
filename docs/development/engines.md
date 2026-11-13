@@ -300,6 +300,16 @@ help, the run ends as `failed(budget)` rather than send (shortcut: the shell sho
 failure until runs carry an actionable error). The same oversized body is never retried. The catalog doesn't report a model's
 context size yet, so the byte bound is the only one.
 
+**Images** (dormant until the screen hold activates). `ModelRequest::attach` adds one `Jpeg` right
+after the newest user message, only when the request's model is on the `ChatGPT` connection;
+any other route refuses with `ImageRefused::Route`, so no adapter ever has an image to drop, and
+a request with no user message refuses with `NoTurn`. An image's bytes aren't charged against
+the 512 KiB bound: they're charged at their base64 size against the whole body's 4 MiB ceiling
+[guess], so a turn with an image keeps exactly the text room it had. A `Jpeg` holds only bytes
+that start with a JPEG's SOI marker, zeroes them when its last copy drops, and shows only its
+length in `Debug`. Whether a model takes images is the catalog's own fact (accounts.md, "Model
+catalog").
+
 ## What builds nothing
 
 | Error | When |
@@ -322,9 +332,11 @@ round on the account.
 `function`), `reasoning.effort`, `include: ["reasoning.encrypted_content"]`, `store: false` and
 `stream: true`. It never sends `context_management`, `max_output_tokens` or
 `prompt_cache_retention`. Input items are messages with their role, `function_call`,
-`function_call_output`, and stored native items sent back as the same JSON value (its strings exact, its spacing and escapes not). The serialised
-body is checked against the 512 KiB bound again, and a stored native item that isn't JSON
-builds nothing.
+`function_call_output`, and stored native items sent back as the same JSON value (its strings exact, its spacing and escapes not). An image is a user
+message of its own whose content is one `input_image` with a `data:image/jpeg;base64,` URL and
+`detail: "high"`. The serialised body less its images' URLs is checked against the 512 KiB bound
+again, and the whole body against the 4 MiB ceiling; a stored native item that isn't JSON builds
+nothing. A text-only body is pinned byte for byte by a test.
 
 **One round's stream** maps to `TurnEvent`s in arrival order:
 

@@ -13,14 +13,24 @@ pub(crate) mod compact;
 mod tests;
 
 use std::fmt;
+use std::sync::Arc;
 
-use kumochi_protocol::message::{AssistantName, EventId, ModelChoice, RunId, ThreadId, UserName};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+use kumochi_protocol::message::{
+    AssistantName, ConnectionKind, EventId, ModelChoice, RunId, ThreadId, UserName,
+};
+use zeroize::Zeroizing;
 
 use crate::engines::{CallId, Opaque};
 use crate::store::StoreError;
 
-/// The request's hard size bound [guess].
+/// The request's hard size bound [guess]. With images, it bounds everything but their bytes.
 pub(crate) const BOUND: usize = 512 * 1024;
+/// The whole body's ceiling, images included [guess] (plans/slice-6.md C1, Captain call 4).
+pub(crate) const BODY_CEILING: usize = 4 * 1024 * 1024;
+/// How an image's bytes start in the body, before their base64.
+const JPEG_DATA_URL: &str = "data:image/jpeg;base64,";
 /// The newest runs kept raw, the current one included, when they fit [guess].
 pub(crate) const RAW_RUNS: usize = 8;
 /// The most one reference re-reads [guess].
@@ -191,6 +201,41 @@ pub(crate) enum Role {
     Assistant,
 }
 
+/// A sealed JPEG for the model. Its bytes are user content: Debug shows only their length, and
+/// they're zeroed when the last copy drops.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct Jpeg(Arc<Zeroizing<Vec<u8>>>);
+
+impl Jpeg {
+    /// `bytes` when they start with a JPEG's SOI marker, else nothing; refused bytes are zeroed.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "2c builds it from a hold's sealed screen image")
+    )]
+    pub(crate) fn new(bytes: Vec<u8>) -> Option<Self> {
+        let bytes = Zeroizing::new(bytes);
+        bytes
+            .starts_with(&[0xFF, 0xD8, 0xFF])
+            .then(|| Self(Arc::new(bytes)))
+    }
+
+    /// The image as the data URL the body carries.
+    pub(crate) fn data_url(&self) -> String {
+        format!("{JPEG_DATA_URL}{}", STANDARD.encode(self.0.as_slice()))
+    }
+
+    /// [`Self::data_url`]'s length, without building it.
+    pub(crate) fn data_url_len(&self) -> usize {
+        JPEG_DATA_URL.len() + self.0.len().div_ceil(3) * 4
+    }
+}
+
+impl fmt::Debug for Jpeg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Jpeg").field(&self.0.len()).finish()
+    }
+}
+
 /// One input item of the request.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum InputItem {
@@ -210,6 +255,8 @@ pub(crate) enum InputItem {
     },
     /// A provider's own output item, sent back as the same JSON value.
     Native(Opaque),
+    /// An image from the user, right after the message it belongs to.
+    Image(Jpeg),
 }
 
 impl fmt::Debug for InputItem {
@@ -229,6 +276,7 @@ impl fmt::Debug for InputItem {
                 .field("output_bytes", &output.len())
                 .finish(),
             Self::Native(item) => f.debug_tuple("Native").field(item).finish(),
+            Self::Image(image) => f.debug_tuple("Image").field(image).finish(),
         }
     }
 }
@@ -263,6 +311,51 @@ impl fmt::Debug for ModelRequest {
             .field("input", &self.input)
             .field("tools", &self.tools.len())
             .finish()
+    }
+}
+
+/// Why an image wasn't attached; either way the request is sent without it, never silently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ImageRefused {
+    /// The route can't carry images: no model, or a connection other than `ChatGPT`'s.
+    #[error("this route can't carry images")]
+    Route,
+    /// No user message to attach it to.
+    #[error("no user message to attach the image to")]
+    NoTurn,
+}
+
+impl ModelRequest {
+    /// Adds `image` right after the newest user message. Only the Responses route carries images,
+    /// so any other refuses here and no adapter ever has one to drop. The body's ceiling is
+    /// checked when it's serialised.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "2c attaches a hold's sealed screen image")
+    )]
+    pub(crate) fn attach(&mut self, image: Jpeg) -> Result<(), ImageRefused> {
+        if self
+            .choice
+            .as_ref()
+            .is_none_or(|choice| choice.connection != ConnectionKind::ChatGpt)
+        {
+            return Err(ImageRefused::Route);
+        }
+        let at = self
+            .input
+            .iter()
+            .rposition(|item| {
+                matches!(
+                    item,
+                    InputItem::Message {
+                        role: Role::User,
+                        ..
+                    }
+                )
+            })
+            .ok_or(ImageRefused::NoTurn)?;
+        self.input.insert(at + 1, InputItem::Image(image));
+        Ok(())
     }
 }
 
