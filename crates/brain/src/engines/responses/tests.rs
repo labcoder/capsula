@@ -92,7 +92,7 @@ fn the_body_is_the_request_as_data() {
 /// build doesn't (keys sorted), so each key order has its own exact bytes.
 #[test]
 fn a_text_only_body_keeps_its_exact_bytes() {
-    let written = json!({ "b": 0, "a": 0 }).to_string() == r#"{"b":0,"a":0}"#;
+    let written = json!({ "b": 0, "a": 0 }).to_string().starts_with(r#"{"b""#);
     let input = vec![
         InputItem::Message {
             role: Role::User,
