@@ -123,6 +123,8 @@ It refuses an existing product process, launches the release shell at normal pri
 bounded graceful-quit deadline, settles for thirty seconds, and samples user plus kernel time
 over sixty seconds. CPU is percent of one core; memory is endpoint private bytes, not working
 set or peak memory. `--duration 1..60` shortens a harness smoke check, not an acceptance run.
+`--onboarding` leaves onboarding owed, so the sample covers the shell with the onboarding window
+open; a gate launch is otherwise onboarded.
 The task checks that the same shell, brain and both workers survive the sample and waits for all
 four to exit. Run only in an agreed quiet window; the benchmark sends no input.
 `--baseline <release-directory>` samples older binaries with the same counters. After the sample,

@@ -106,13 +106,17 @@ fn guarded_wait(duration: Duration, guard: &impl Fn() -> Result<()>) -> Result<(
 enum Workload {
     Idle,
     Panel,
+    /// Idle with onboarding owed, so the onboarding window is open.
+    Onboarding,
 }
 
 fn options(mut args: impl Iterator<Item = String>) -> Result<(u64, Option<PathBuf>, Workload)> {
     let mut workload = match args.next().as_deref() {
         Some("idle") => Workload::Idle,
         Some("stretch") => bail!("motion trials return with the pull (C2a)"),
-        _ => bail!("use bench idle [--duration 1..60] [--baseline <checkout> | --panel]"),
+        _ => bail!(
+            "use bench idle [--duration 1..60] [--baseline <checkout> | --panel] [--onboarding]"
+        ),
     };
     let mut duration = None;
     let mut baseline = None;
@@ -135,6 +139,7 @@ fn options(mut args: impl Iterator<Item = String>) -> Result<(u64, Option<PathBu
                 ));
             }
             "--panel" if workload == Workload::Idle => workload = Workload::Panel,
+            "--onboarding" if workload == Workload::Idle => workload = Workload::Onboarding,
             _ => bail!("unknown or duplicate benchmark option"),
         }
     }
@@ -163,9 +168,13 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
             baseline.as_deref(),
         )?;
         println!("build_seconds={:.1}", build.as_secs_f64());
+        let folders = run.folders("app")?;
+        if workload == Workload::Onboarding {
+            folders.owe_onboarding()?;
+        }
         idle(
             &release.join(SHELL_EXE),
-            &run.folders("app")?,
+            &folders,
             seconds,
             baseline.as_deref(),
             workload,
@@ -551,6 +560,24 @@ mod tests {
         assert_eq!(
             options(["idle", "--panel"].into_iter().map(str::to_owned)).unwrap(),
             (60, None, Workload::Panel)
+        );
+        assert_eq!(
+            options(
+                ["idle", "--onboarding", "--baseline", "a"]
+                    .into_iter()
+                    .map(str::to_owned)
+            )
+            .unwrap(),
+            (60, Some(PathBuf::from("a")), Workload::Onboarding)
+        );
+        assert!(
+            options(
+                ["idle", "--panel", "--onboarding"]
+                    .into_iter()
+                    .map(str::to_owned)
+            )
+            .is_err(),
+            "one workload at a time"
         );
     }
 
