@@ -453,14 +453,18 @@ async fn a_retained_completion_does_not_keep_commands_alive_or_skip_final_exit_c
     let (asked, asks) = blocking::channel();
     let terminations = Arc::new(AtomicUsize::new(0));
     let (worker, (written, replies)) = staged(Some(Box::new(Counted {
-        held: Held { asked, exited },
+        held: Held {
+            asked,
+            exited,
+            terminations: Arc::default(),
+        },
         terminations: Arc::clone(&terminations),
     })));
     let (handle, commands, intents) = handle();
     let notices = handle.notices.clone();
     let mut exits = handle.exits();
     let mut actor = Box::pin(run(
-        || Err(io::Error::other("no replacement")),
+        || Err(SpawnFailure::Failed(io::Error::other("no replacement"))),
         worker,
         commands,
         notices,
@@ -525,14 +529,22 @@ async fn dropping_a_successfully_sent_unconsumed_resource_causes_retirement_with
     let (asked, _asks) = blocking::channel();
     let terminations = Arc::new(AtomicUsize::new(0));
     let (worker, (written, replies)) = staged(Some(Box::new(Counted {
-        held: Held { asked, exited },
+        held: Held {
+            asked,
+            exited,
+            terminations: Arc::default(),
+        },
         terminations: Arc::clone(&terminations),
     })));
     let (handle, commands, intents) = handle();
     let notices = handle.notices.clone();
     let mut exits = handle.exits();
     let mut actor = Box::pin(run(
-        || Err(io::Error::other("no replacement in this fixture")),
+        || {
+            Err(SpawnFailure::Failed(io::Error::other(
+                "no replacement in this fixture",
+            )))
+        },
         worker,
         commands,
         notices.clone(),

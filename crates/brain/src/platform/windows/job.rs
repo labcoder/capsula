@@ -8,6 +8,7 @@ use std::io;
 use std::os::windows::ffi::OsStrExt as _;
 use std::os::windows::io::{AsRawHandle as _, BorrowedHandle, FromRawHandle as _, OwnedHandle};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
@@ -37,7 +38,11 @@ const EMPTY_TIMEOUT: Duration = Duration::from_secs(5);
 /// A Job Object that ends its processes when its last handle closes. Only the brain holds the
 /// handle, and it's never inherited, so the brain's death ends everything in it.
 #[derive(Debug)]
-pub struct Job(OwnedHandle);
+pub struct Job {
+    handle: OwnedHandle,
+    /// Set by [`Job::shut_down`]; from then on the job refuses new processes.
+    shut: AtomicBool,
+}
 
 impl Job {
     /// Creates an empty job with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.
@@ -51,7 +56,11 @@ impl Job {
             return Err(io::Error::last_os_error());
         }
         // SAFETY: `raw` is a fresh job handle owned only here.
-        let job = Self(unsafe { OwnedHandle::from_raw_handle(raw) });
+        let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+        let job = Self {
+            handle,
+            shut: AtomicBool::new(false),
+        };
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         // SAFETY: `limits` is the struct this information class expects, with its true size.
@@ -70,7 +79,16 @@ impl Job {
     }
 
     pub(super) fn raw(&self) -> HANDLE {
-        self.0.as_raw_handle()
+        self.handle.as_raw_handle()
+    }
+
+    /// Refuses a start into `jobs` once any of them was shut down. The caller holds
+    /// [`crate::platform::spawn_lock`] until its process exists.
+    pub(super) fn admit(jobs: &[&Self]) -> io::Result<()> {
+        if jobs.iter().any(|job| job.is_shut_down()) {
+            return Err(io::Error::other("the job was shut down"));
+        }
+        Ok(())
     }
 
     /// Processes still running in this job and the jobs nested in it.
@@ -109,6 +127,25 @@ impl Job {
         Ok(inside != FALSE)
     }
 
+    /// Whether [`Job::shut_down`] has begun.
+    pub(crate) fn is_shut_down(&self) -> bool {
+        self.shut.load(Ordering::Relaxed)
+    }
+
+    /// Refuses new processes from now on, then [`Job::terminate`]s. A start either created its
+    /// process before the refusal, under [`crate::platform::spawn_lock`], and so is ended, or
+    /// sees the refusal.
+    ///
+    /// # Errors
+    /// As [`Job::terminate`].
+    pub(crate) fn shut_down(&self) -> io::Result<()> {
+        {
+            let _spawning = crate::platform::spawn_lock();
+            self.shut.store(true, Ordering::Relaxed);
+        }
+        self.terminate()
+    }
+
     /// Ends every process in this job and the jobs nested in it, then waits until none is left.
     ///
     /// # Errors
@@ -133,22 +170,12 @@ impl Job {
         Ok(())
     }
 
-    /// Starts `exe arg` inside `jobs`, from its first instruction, with no window and no
-    /// inherited handles. Later jobs nest inside earlier ones: `[brain, run]` puts the process
-    /// in a run job nested in the brain job.
-    ///
-    /// # Errors
-    /// Fails when the process can't be created.
-    pub fn spawn(exe: &Path, arg: &str, jobs: &[&Self]) -> io::Result<Helper> {
-        Self::spawn_inner(exe, arg, jobs, None)
-    }
-
     /// Starts a helper with piped stdin and stdout; stderr is disconnected.
     /// Only the two child pipe ends are inherited, and their parent copies close before return.
     /// [`crate::platform::spawn_lock`] is held from marking them inheritable until they close.
     ///
     /// # Errors
-    /// Fails when pipes or the process can't be created or configured.
+    /// Fails when pipes or the process can't be created or configured, or a job was shut down.
     pub fn spawn_piped(exe: &Path, arg: &str, jobs: &[&Self]) -> io::Result<(Helper, ChildPipes)> {
         // Taken first so it drops last, after the child ends, on every error path too.
         let spawning = crate::platform::spawn_lock();
@@ -175,6 +202,7 @@ impl Job {
         jobs: &[&Self],
         stdio: Option<[HANDLE; 2]>,
     ) -> io::Result<Helper> {
+        Self::admit(jobs)?;
         let mut application: Vec<u16> = exe.as_os_str().encode_wide().chain(Some(0)).collect();
         let mut command_line: Vec<u16> = format!("\"{}\" {arg}", exe.display())
             .encode_utf16()

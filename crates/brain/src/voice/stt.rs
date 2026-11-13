@@ -533,7 +533,7 @@ fn run(
         };
         let result = engine(&models, &mut serve);
         if result == Err(SpeechError::ExitUnconfirmed) {
-            tracing::error!("speech input ownership remains unconfirmed");
+            tracing::error!("speech worker exit unconfirmed, so speech input stays unavailable");
             let waiting = control.update(|state| {
                 state.ready = false;
                 state.shutdown = true;

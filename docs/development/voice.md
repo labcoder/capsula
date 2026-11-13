@@ -534,7 +534,8 @@ flowchart LR
   until completion and join; its text is dropped, not logged. With one live call and a nonclosed
   waiter, the existing Condvar uses10ms receiver-closure checks; no polling is needed
   otherwise. Slots are reaped by completion, so a held stale first call cannot block reuse of the
-  other slot. This owner API is not yet connected to a production hold/microphone caller.
+  other slot. Its production caller is hold-to-talk chat in `runtime::hold`; the shell owns the
+  microphone.
 - **Load:** the worker's `Load`. A failed load leaves speech input unloaded until the next
   `load`. A newer ask reloads after both running decodes, and a decode left waiting is served by
   the new model.
