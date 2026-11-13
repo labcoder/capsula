@@ -1,0 +1,348 @@
+{
+  "models": [
+    {
+      "slug": "m-0",
+      "display_name": "Model 0",
+      "visibility": "list",
+      "default_reasoning_level": "low",
+      "supported_reasoning_levels": [
+        {
+          "<key-0>": "<string:37>",
+          "effort": "low"
+        },
+        {
+          "<key-0>": "<string:53>",
+          "effort": "medium"
+        },
+        {
+          "<key-0>": "<string:44>",
+          "effort": "high"
+        },
+        {
+          "<key-0>": "<string:47>",
+          "effort": "xhigh"
+        },
+        {
+          "<key-0>": "<string:48>",
+          "effort": "max"
+        },
+        {
+          "<key-0>": "<string:48>",
+          "effort": "<string:5>"
+        }
+      ],
+      "input_modalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "slug": "m-1",
+      "display_name": "Model 1",
+      "visibility": "list",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        {
+          "<key-0>": "<string:37>",
+          "effort": "low"
+        },
+        {
+          "<key-0>": "<string:53>",
+          "effort": "medium"
+        },
+        {
+          "<key-0>": "<string:44>",
+          "effort": "high"
+        },
+        {
+          "<key-0>": "<string:47>",
+          "effort": "xhigh"
+        },
+        {
+          "<key-0>": "<string:48>",
+          "effort": "max"
+        },
+        {
+          "<key-0>": "<string:48>",
+          "effort": "<string:5>"
+        }
+      ],
+      "input_modalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "slug": "m-2",
+      "display_name": "Model 2",
+      "visibility": "list",
+      "default_reasoning_level": "low",
+      "supported_reasoning_levels": [
+        {
+          "<key-0>": "<string:37>",
+          "effort": "low"
+        },
+        {
+          "<key-0>": "<string:53>",
+          "effort": "medium"
+        },
+        {
+          "<key-0>": "<string:44>",
+          "effort": "high"
+        },
+        {
+          "<key-0>": "<string:47>",
+          "effort": "xhigh"
+        },
+        {
+          "<key-0>": "<string:48>",
+          "effort": "max"
+        },
+        {
+          "<key-0>": "<string:48>",
+          "effort": "<string:5>"
+        }
+      ],
+      "input_modalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "slug": "m-3",
+      "display_name": "Model 3",
+      "visibility": "list",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        {
+          "<key-0>": "<string:37>",
+          "effort": "low"
+        },
+        {
+          "<key-0>": "<string:53>",
+          "effort": "medium"
+        },
+        {
+          "<key-0>": "<string:44>",
+          "effort": "high"
+        },
+        {
+          "<key-0>": "<string:47>",
+          "effort": "xhigh"
+        },
+        {
+          "<key-0>": "<string:48>",
+          "effort": "max"
+        },
+        {
+          "<key-0>": "<string:48>",
+          "effort": "<string:5>"
+        }
+      ],
+      "input_modalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "slug": "m-4",
+      "display_name": "Model 4",
+      "visibility": "<string:4>",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        {
+          "<key-0>": "<string:37>",
+          "effort": "low"
+        },
+        {
+          "<key-0>": "<string:53>",
+          "effort": "medium"
+        },
+        {
+          "<key-0>": "<string:44>",
+          "effort": "high"
+        },
+        {
+          "<key-0>": "<string:47>",
+          "effort": "xhigh"
+        },
+        {
+          "<key-0>": "<string:48>",
+          "effort": "max"
+        }
+      ],
+      "input_modalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "slug": "m-5",
+      "display_name": "Model 5",
+      "visibility": "list",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        {
+          "<key-0>": "<string:37>",
+          "effort": "low"
+        },
+        {
+          "<key-0>": "<string:53>",
+          "effort": "medium"
+        },
+        {
+          "<key-0>": "<string:44>",
+          "effort": "high"
+        },
+        {
+          "<key-0>": "<string:47>",
+          "effort": "xhigh"
+        },
+        {
+          "<key-0>": "<string:48>",
+          "effort": "max"
+        }
+      ],
+      "input_modalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "slug": "m-6",
+      "display_name": "Model 6",
+      "visibility": "list",
+      "default_reasoning_level": "low",
+      "supported_reasoning_levels": [
+        {
+          "<key-0>": "<string:37>",
+          "effort": "low"
+        },
+        {
+          "<key-0>": "<string:53>",
+          "effort": "medium"
+        },
+        {
+          "<key-0>": "<string:44>",
+          "effort": "high"
+        },
+        {
+          "<key-0>": "<string:47>",
+          "effort": "xhigh"
+        },
+        {
+          "<key-0>": "<string:48>",
+          "effort": "max"
+        },
+        {
+          "<key-0>": "<string:48>",
+          "effort": "<string:5>"
+        }
+      ],
+      "input_modalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "slug": "m-7",
+      "display_name": "Model 7",
+      "visibility": "list",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        {
+          "<key-0>": "<string:37>",
+          "effort": "low"
+        },
+        {
+          "<key-0>": "<string:53>",
+          "effort": "medium"
+        },
+        {
+          "<key-0>": "<string:44>",
+          "effort": "high"
+        },
+        {
+          "<key-0>": "<string:47>",
+          "effort": "xhigh"
+        },
+        {
+          "<key-0>": "<string:48>",
+          "effort": "max"
+        },
+        {
+          "<key-0>": "<string:48>",
+          "effort": "<string:5>"
+        }
+      ],
+      "input_modalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "slug": "m-8",
+      "display_name": "Model 8",
+      "visibility": "list",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        {
+          "<key-0>": "<string:37>",
+          "effort": "low"
+        },
+        {
+          "<key-0>": "<string:53>",
+          "effort": "medium"
+        },
+        {
+          "<key-0>": "<string:44>",
+          "effort": "high"
+        },
+        {
+          "<key-0>": "<string:47>",
+          "effort": "xhigh"
+        },
+        {
+          "<key-0>": "<string:48>",
+          "effort": "max"
+        }
+      ],
+      "input_modalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "slug": "m-9",
+      "display_name": "Model 9",
+      "visibility": "<string:4>",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        {
+          "<key-0>": "<string:37>",
+          "effort": "low"
+        },
+        {
+          "<key-0>": "<string:53>",
+          "effort": "medium"
+        },
+        {
+          "<key-0>": "<string:44>",
+          "effort": "high"
+        },
+        {
+          "<key-0>": "<string:47>",
+          "effort": "xhigh"
+        },
+        {
+          "<key-0>": "<string:48>",
+          "effort": "max"
+        }
+      ],
+      "input_modalities": [
+        "text",
+        "image"
+      ]
+    }
+  ]
+}

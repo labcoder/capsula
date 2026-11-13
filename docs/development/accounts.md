@@ -626,8 +626,9 @@ input only when its own entry's `input_modalities` array names `"image"`; absent
 anything else means no, and the field never changes which models are shown. The account keeps
 those slugs beside the list and clears them with it; `Accounts::takes_images` is true only for
 such a model on the `ChatGPT` connection, so the screen hold can skip capture before it starts.
-[The field is in the public Codex client's model schema; not yet seen in a capture of this
-account's list.]
+A catalog-provenance capture of this account's list on 2026-11-13 found the field on every entry,
+as an array of lowercase strings, each `["text", "image"]`; a test reads that capture, trimmed to
+the keys it keeps (`connections/catalog/captured_models.json`). Absent still means no.
 
 `runtime::Accounts` owns the catalog, in memory only. It reads when the account becomes usable
 (`SignedIn`, plan `Enabled`, no recovery but Retry), and again on `Retry` or a new connection
