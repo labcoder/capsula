@@ -468,11 +468,7 @@ impl Session {
         // SAFETY: only the PID is inspected, never another application's window content.
         let foreground = pid(unsafe { GetForegroundWindow() });
         let mut null = self.null_foreground.get();
-        let seen = null.observe(
-            foreground,
-            self.lease.get().owns(foreground),
-            Instant::now(),
-        );
+        let seen = null.observe(foreground, &self.lease.get(), Instant::now());
         self.null_foreground.set(null);
         seen?;
         input_desktop_available()?;

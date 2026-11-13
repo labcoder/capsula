@@ -234,7 +234,7 @@ pub(crate) struct NullForeground {
 impl NullForeground {
     /// Allows pid 0 for at most [`NULL_GRACE`] from its first sample. Only an owned pid ends the
     /// grace; any other pid fails at once, straight after a NULL too.
-    pub(crate) fn observe(&mut self, pid: u32, owned: bool, now: Instant) -> Result<()> {
+    pub(crate) fn observe(&mut self, pid: u32, lease: &Lease, now: Instant) -> Result<()> {
         if pid == 0 {
             let seen = now.duration_since(*self.since.get_or_insert(now));
             if seen > NULL_GRACE {
@@ -245,7 +245,7 @@ impl NullForeground {
             }
             return Ok(());
         }
-        if !owned {
+        if !lease.owns(pid) {
             bail!(
                 "foreground left the owned fixture/product processes (foreground_pid={pid} owned=false)"
             );
@@ -274,21 +274,22 @@ mod tests {
     fn a_null_foreground_is_allowed_for_exactly_the_grace_and_only_an_owned_pid_ends_it() {
         let start = Instant::now();
         let at = |ms| start + Duration::from_millis(ms);
+        let lease = Lease::new(7);
         let mut null = NullForeground::default();
-        null.observe(7, true, at(0)).unwrap();
+        null.observe(7, &lease, at(0)).unwrap();
         assert_eq!(null.take_used(), (0, Duration::ZERO));
 
-        null.observe(0, false, at(10)).unwrap();
-        null.observe(0, false, at(110)).unwrap();
-        null.observe(7, true, at(110)).unwrap();
-        null.observe(0, false, at(200)).unwrap();
-        null.observe(0, false, at(290)).unwrap();
-        null.observe(7, true, at(290)).unwrap();
+        null.observe(0, &lease, at(10)).unwrap();
+        null.observe(0, &lease, at(110)).unwrap();
+        null.observe(7, &lease, at(110)).unwrap();
+        null.observe(0, &lease, at(200)).unwrap();
+        null.observe(0, &lease, at(290)).unwrap();
+        null.observe(7, &lease, at(290)).unwrap();
         assert_eq!(null.take_used(), (2, Duration::from_millis(100)));
         assert_eq!(null.take_used(), (0, Duration::ZERO));
 
-        null.observe(0, false, at(400)).unwrap();
-        let past = null.observe(0, false, at(501)).unwrap_err().to_string();
+        null.observe(0, &lease, at(400)).unwrap();
+        let past = null.observe(0, &lease, at(501)).unwrap_err().to_string();
         assert!(
             past.ends_with("(foreground_pid=0 owned=false null_ms=101)"),
             "{past}"
@@ -298,10 +299,11 @@ mod tests {
     #[test]
     fn a_foreign_pid_fails_at_once_even_straight_after_a_null() {
         let start = Instant::now();
+        let lease = Lease::new(7);
         let mut null = NullForeground::default();
-        null.observe(0, false, start).unwrap();
+        null.observe(0, &lease, start).unwrap();
         let foreign = null
-            .observe(42, false, start + Duration::from_millis(1))
+            .observe(42, &lease, start + Duration::from_millis(1))
             .unwrap_err()
             .to_string();
         assert!(
