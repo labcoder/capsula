@@ -124,6 +124,8 @@ has no production acquisition caller and never announces a lease.
 ## The typing panel
 
 A double tap opens a small panel where the status panel would be, with one gpui-kit `Input`.
+While the onboarding window shows, a double tap opens nothing, except at its shortcut step, where
+it finishes onboarding and then opens this panel ([onboarding](onboarding.md)).
 Like the [tasks panel](panels.md), it activates only on a user command, as described in
 [Taking the front](#taking-the-front). The
 panel remembers the window that was in front. Esc hides it and gives the
