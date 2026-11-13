@@ -6,8 +6,9 @@ browser; once you've finished there, the sign-in completes even if you press Can
 **Open again** replaces the waiting sign-in attempt.
 
 Closing Settings cancels a ChatGPT or Claude Code sign-in you started there that hasn't
-finished, however Settings closes: the close button, Esc, a double-tap of the shortcut, opening
-Tasks, moving the dock, starting to hold the shortcut to talk, or pressing **Settings…** again.
+finished, however Settings closes: for example the close button, Esc, closing its window with
+Alt+F4, a double-tap of the shortcut, opening Tasks, moving the dock, starting to hold the
+shortcut to talk, pressing **Settings…** again, or onboarding opening.
 Switching to your browser or to Claude Code's window doesn't close Settings. A sign-in you
 started from chat isn't cancelled. Onboarding's account step offers the same sign-in buttons, and
 closing that window cancels a sign-in it started the same way.

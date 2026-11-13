@@ -14,14 +14,22 @@ use crate::onboarding::account_complete;
 use crate::sign_in_mark::{Seen, Shows};
 
 impl Presence {
-    /// A `ChatGPT` button in Settings. A sign-in it queued is Settings' own.
+    /// A `ChatGPT` button in Settings. A sign-in it queued is Settings' own; Open again replaces a
+    /// waiting attempt without a new view, so a wait already showing counts as shown.
     pub(super) fn settings_account_op(&mut self, op: AccountOp, cx: &mut Context<'_, Self>) {
         let generation = self.session.as_ref().map(crate::link::Session::generation);
+        let shown = matches!(
+            self.settings.read(cx).accounts.view,
+            Some(AccountView::SigningIn)
+        );
         if self.account_op(op, cx)
             && matches!(op, AccountOp::SignIn | AccountOp::EnablePlan)
             && let Some(generation) = generation
         {
             self.settings_chatgpt.sent(generation);
+            if shown {
+                self.settings_chatgpt.view(generation, Shows::Waiting);
+            }
         }
     }
 
