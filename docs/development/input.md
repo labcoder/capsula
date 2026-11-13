@@ -276,7 +276,8 @@ its queue ever fills rather than blocking. `main` creates the file and the worke
 starts, and Quit drains the worker off the UI thread, so the UI thread never touches the disk.
 
 Unit tests cover the reducer's thresholds and sequences, scan-code naming and Esc ordering.
-Focus, hold feel and Listening on screen need the approved desktop session.
+Focus and double-tap feel need the approved desktop session. Its gate copy has no speech model,
+so it can't show Listening or judge hold feel.
 The separate-process fixture owns its window loop in `platform/input_session/fixture.rs`.
 The approved session compares the owner's persistent language registry settings before and
 after its automated phases; a change stops the session and is reported, never silently repaired

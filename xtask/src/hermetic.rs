@@ -30,6 +30,8 @@ const LOCK_LINE: &str = "kumochi-gate-run ";
 /// Onboarding finished, so no shell opens the onboarding window and takes the foreground; and
 /// Claude Code off, so the brain starts no `claude.exe` and reads no policy for it.
 const SETTINGS: &str = "onboarded = true\n\n[claude_code]\nenabled = false\n";
+/// The same settings with onboarding still owed, for a run that measures the onboarding window.
+const OWING_ONBOARDING: &str = "[claude_code]\nenabled = false\n";
 /// How long building the images may take [guess: a cold release shell build on Rez].
 const BUILD_LIMIT: Duration = Duration::from_mins(40);
 
@@ -117,6 +119,15 @@ impl Folders {
         }
         fs::write(settings.join(CONFIG_FILE), SETTINGS).context("writing the gate settings")?;
         Ok(Self { local, roaming })
+    }
+
+    /// Leaves onboarding owed, so the shell opens the onboarding window at start.
+    pub(crate) fn owe_onboarding(&self) -> Result<()> {
+        fs::write(
+            self.roaming.join(GATE.data_dir).join(CONFIG_FILE),
+            OWING_ONBOARDING,
+        )
+        .context("writing the gate settings")
     }
 
     /// Points `command`'s data and settings folders here.
@@ -452,6 +463,11 @@ mod tests {
                 ("APPDATA".as_ref(), Some(roaming.as_os_str())),
                 ("LOCALAPPDATA".as_ref(), Some(local.as_os_str())),
             ]
+        );
+        folders.owe_onboarding().expect("owing onboarding");
+        assert_eq!(
+            fs::read_to_string(dir.join("roaming/Kumochi Gate/config.toml")).expect("settings"),
+            "[claude_code]\nenabled = false\n"
         );
     }
 
