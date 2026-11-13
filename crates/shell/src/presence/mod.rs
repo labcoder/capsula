@@ -742,15 +742,18 @@ impl Render for Panel {
             .gap_1()
             .children(stop)
             .children(retry)
-            .child(
-                action(
+            .child({
+                let chat = action(
                     "chat",
                     strings.get(Text::Chat),
                     chat_owner,
                     Presence::open_text,
                 )
-                .primary(),
-            )
+                .primary();
+                #[cfg(test)]
+                let chat = div().debug_selector(|| "presence-chat".into()).child(chat);
+                chat
+            })
             .child(
                 action(
                     "threads",

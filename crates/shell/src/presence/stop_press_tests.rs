@@ -1,5 +1,6 @@
-//! A press on the peek's Stop button is a press on Stop: it never grabs Kumo, while a press on
-//! Kumo in the same peek does, with Kumo's picture showing.
+//! A press on the peek's button under Kumo (Stop when it shows, else Chat) is a press on that
+//! button: it never grabs Kumo, while a press on Kumo in the same peek does, with Kumo's picture
+//! showing.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -39,13 +40,25 @@ fn grabs(seen: &RefCell<Vec<PullChanged>>) -> usize {
 fn a_press_on_stop_never_grabs_kumo_but_a_press_on_kumo_does_while_its_picture_shows(
     cx: &mut TestAppContext,
 ) {
+    press_under_kumo(cx, true, "presence-stop");
+}
+
+#[gpui::test]
+fn a_press_on_chat_never_grabs_kumo_but_a_press_on_kumo_does_while_its_picture_shows(
+    cx: &mut TestAppContext,
+) {
+    press_under_kumo(cx, false, "presence-chat");
+}
+
+/// Presses the button `selector` names, then Kumo's upper part, with Stop shown or not.
+fn press_under_kumo(cx: &mut TestAppContext, stop: bool, selector: &'static str) {
     let _area = work_area_fixture::set([0, 0, 2560, 1392]);
     let presence = test_fixture::presence(cx);
     let (panel, kumo) = presence.update(cx, |this, cx| {
         this.follow_kumo(cx);
         (this.panel.clone(), this.kumo.clone())
     });
-    panel.update(cx, |panel, _| panel.stop = true);
+    panel.update(cx, |panel, _| panel.stop = stop);
     kumo.update(cx, |kumo, _| {
         kumo.set_site(Some(PullSite {
             line: [1252, 1, 56, 19],
@@ -82,19 +95,19 @@ fn a_press_on_stop_never_grabs_kumo_but_a_press_on_kumo_does_while_its_picture_s
         kumo.update(cx, |kumo, cx| kumo.step(0.0, window, cx));
         window.draw(cx).clear(cx);
     });
-    let stop = frame.debug_bounds("presence-stop").expect("Stop shows");
+    let button = frame.debug_bounds(selector).expect("the button shows");
     let body = frame.debug_bounds("presence-kumo").expect("Kumo shows");
 
-    click(&mut frame, stop.center());
-    let on_stop = grabs(&seen);
+    click(&mut frame, button.center());
+    let on_button = grabs(&seen);
     let upper = point(body.center().x, body.origin.y + px(8.0));
     click(&mut frame, upper);
     let square = kumo.read_with(&frame, |kumo, _| kumo.pressed_square);
     assert_eq!(
-        (on_stop, grabs(&seen) - on_stop, square),
+        (on_button, grabs(&seen) - on_button, square),
         (0, 1, Some(body)),
-        "(grabs from Stop at {:?}, grabs from Kumo's upper part at {upper:?}, the square presses \
-         were tested against) with Kumo drawn at {body:?}",
-        stop.center()
+        "(grabs from {selector} at {:?}, grabs from Kumo's upper part at {upper:?}, the square \
+         presses were tested against) with Kumo drawn at {body:?}",
+        button.center()
     );
 }
