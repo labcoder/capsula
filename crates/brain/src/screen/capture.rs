@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::geometry::DisplayRef;
+use kumochi_protocol::geometry::{DisplayRef, PhysicalPoint};
 
 use super::elements::{
     ElementReader, ElementTree, MaskSink, OpenElements, TopWindow, WalkJob, Walked, intersects,
@@ -38,11 +38,67 @@ pub(crate) struct Acquired {
     pub(crate) dpi: u32,
 }
 
-/// One display capture. Windows: Windows Graphics Capture. macOS: `ScreenCaptureKit`'s
-/// `SCScreenshotManager` with Kumochi excluded from the content filter.
+/// The window a hold points at, as the walk resolved it. Its capture and its element walk use
+/// this same window.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the hold's capture resolves the pointer's window")
+)]
+pub(crate) struct Target {
+    /// The root window, its process and its frame: the captured surface's physical bounds.
+    pub(crate) top: TopWindow,
+    /// The thread that made it, so a reused handle reads as another window.
+    pub(crate) tid: u32,
+    /// Its DPI when resolved.
+    pub(crate) dpi: u32,
+}
+
+impl std::fmt::Debug for Target {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Target")
+            .field("dpi", &self.dpi)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One display or window capture. Windows: Windows Graphics Capture. macOS: `ScreenCaptureKit`'s
+/// `SCScreenshotManager`, with Kumochi excluded from a display's content filter and
+/// `desktopIndependentWindow` for a window.
 pub(crate) trait Capturer {
     fn foreground(&mut self) -> Option<TopWindow> {
         None
+    }
+
+    /// The window a click at `point` would land on, Kumochi's own aside, after the checks that
+    /// refuse it before any pixels. `shell` is the connected shell's process.
+    ///
+    /// # Errors
+    /// `NoWindow` when only Kumochi or the desktop is there, or a preflight refusal.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the hold's capture resolves the pointer's window")
+    )]
+    fn pointer_window(&mut self, _point: PhysicalPoint, _shell: u32) -> Result<Target, Refusal> {
+        Err(Refusal::NoWindow)
+    }
+
+    /// Fills `frame` through [`RawFrame::begin`] with one frame of `target` alone, which
+    /// leaves out whatever is stacked above it. It starts nothing at or after `until`.
+    ///
+    /// # Errors
+    /// `WindowChanged` when the window's identity, frame or DPI moved or it closed, another
+    /// refusal, a numeric fault, or `Retire` when it can't show its capture stopped.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the hold's capture resolves the pointer's window")
+    )]
+    fn capture_window(
+        &mut self,
+        _target: &Target,
+        _until: Instant,
+        _frame: &mut RawFrame,
+    ) -> Result<Acquired, Failure> {
+        Err(Failure::Fault(NO_WINDOW_CAPTURE))
     }
     /// Fills `frame` through [`RawFrame::begin`] with one frame of `display`. It starts nothing
     /// at or after `until`, and stops waiting there.
@@ -84,6 +140,12 @@ impl TicketBook {
 /// The interval in which screen text still describes a newly arrived frame (guess).
 const WALK_WINDOW: Duration = Duration::from_millis(250);
 
+/// `E_NOTIMPL`, for a platform with no window capture yet.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by the dormant window seam")
+)]
+const NO_WINDOW_CAPTURE: i32 = 0x8000_4001_u32.cast_signed();
 const MISSING_ELEMENT_READER: i32 = -1;
 const MISSING_FRAME_META: i32 = -2;
 

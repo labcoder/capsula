@@ -289,7 +289,9 @@ is scrubbed/freed rather than published, and a late element tree is taken and di
 acknowledgement waits for both native jobs to finish; stuck or retiring native work cannot
 acknowledge. At most 16 controls may wait for disposal, matching the inbox cap; the seventeenth
 gets a fixed Busy refusal. Repeated release is idempotent and retains no release history.
-Per-thread retirement fences reject older deletion generations in this worker.
+Each request is owned by a hold: its shell connection's epoch, then its gesture, ordered in that
+order. The worker keeps one high-water retirement fence and refuses any request at or below it, so
+a hold with no thread yet still has an identity, and one Retire covers every earlier hold.
 
 The current allocation is zeroized before growing, releasing or dropping a RawFrame. The tests
 observe synthetic bytes immediately after scrubbing and before freeing; a plain-fill replacement
@@ -297,6 +299,38 @@ remains observationally equivalent in that seam, so optimizer resistance relies 
 This does not claim the legacy production path implements Drop or expiry disposal. Brain-side
 streams, fences across respawn, full-queue termination and matching-generation release waits
 remain A6b2b, which alone may activate the alternate route. Images, OCR and Supersede remain A6c.
+
+## Window under the pointer (dormant)
+
+A screen hold captures one window, not the display. `Capturer::pointer_window` resolves the
+window a click at the hold's point would land on, and `Capturer::capture_window` takes one frame
+of that window alone, so whatever is stacked above it stays out of the image. Nothing in
+production calls either yet.
+
+On Windows the walk reads the top-level z-order from the point. It skips Kumochi's own windows
+(the worker, the connected shell and Kumochi images: the same rule the element walk uses),
+hidden, cloaked and click-through windows (`WS_EX_TRANSPARENT`, or layered at zero alpha), and
+windows whose rectangle or window region leaves out the point. A disabled window is still the
+target, which `WindowFromPoint` wouldn't give. Reaching the desktop (`Progman`, `WorkerW`)
+means `NoWindow`. The target is that window's `GA_ROOT`.
+
+Before any pixels, the target is refused when it's minimised, cloaked, Kumochi's, elevated (a
+process the worker can't open counts as elevated; for a UWP frame the hosted core window's
+process is checked too) or capture-protected by display affinity. The resolved `Target` keeps the
+window, its pid and tid, its DPI and its extended frame bounds, which are the frame's origin and
+size. Capture creates a `GraphicsCaptureItem` for the window, checks the same pid and tid again,
+and requires the item's size to equal the frame bounds. The window closing, or any change to its
+identity, frame or DPI before the pixels are read, refuses with `WindowChanged`.
+
+`platform::windows::window::tests::native_window_probe` is an ignored native check over sentinel
+windows owned by a second test process (the worker's own windows count as Kumochi's). It covers
+the occluder and click-through cases, the frame origin against a password edit, and the
+refusals. It opens topmost windows on the main display for a few seconds, so run it on an idle Windows
+desktop:
+
+```
+cargo test -p kumochi-brain --lib native_window_probe -- --ignored --exact --nocapture
+```
 
 ## Portable element data and walk
 

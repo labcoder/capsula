@@ -20,6 +20,11 @@ mod process;
 mod protected;
 mod root_store;
 mod spawn;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the hold's capture resolves the pointer's window")
+)]
+mod window;
 
 pub(crate) use capture::screen_capturer;
 pub(crate) use credential::WindowsCredentialStore;

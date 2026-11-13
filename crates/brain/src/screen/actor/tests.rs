@@ -26,16 +26,23 @@ const RECT: PhysicalRect = PhysicalRect {
 fn key(id: u64) -> Key {
     Key {
         owner: Owner {
-            thread: ThreadId(7),
-            deletion_generation: 1,
+            epoch: 1,
+            gesture: 7,
         },
         capture: CaptureId(id),
     }
 }
 
 fn context(id: u64) -> Request {
+    context_for(id, key(id).owner)
+}
+
+fn context_for(id: u64, owner: Owner) -> Request {
     Request::Context {
-        key: key(id),
+        key: Key {
+            owner,
+            capture: CaptureId(id),
+        },
         ticket: TicketWire::new(RunId(3), CaptureId(id), id, [91; 16], 30_000),
         display: DisplayRef(RECT),
         exclude: Exclusion::KumochiWindows,
@@ -437,7 +444,7 @@ fn wrong_owner_and_capture_cannot_release_the_live_frame() {
     rig.send(1, &context(1));
     rig.acquired(1);
     let mut foreign = key(1);
-    foreign.owner.thread = ThreadId(8);
+    foreign.owner.gesture = 8;
     for (id, wrong) in [(2, foreign), (3, key(2))] {
         rig.send(id, &Request::Drop(wrong));
         assert_eq!(rig.reply(), (id, Reply::Refused(Refusal::Stale)));
@@ -535,36 +542,59 @@ fn retirement_without_a_capture_fences_old_owners_and_a_failed_attempt_stays_spe
     assert_eq!(rig.reply(), (1, Reply::Released(key(1).owner, None)));
     rig.send(2, &context(2));
     assert_eq!(rig.reply(), (2, Reply::Refused(Refusal::Stale)));
-    let mut newer = context(2);
-    if let Request::Context { key, .. } = &mut newer {
-        key.owner.deletion_generation = 2;
-    }
-    rig.send(3, &newer);
+    let newer = Owner {
+        gesture: 8,
+        ..key(1).owner
+    };
+    rig.send(3, &context_for(2, newer));
     assert_eq!(
         rig.reply(),
         (3, Reply::Refused(Refusal::Reused)),
         "the refused ticket is spent"
     );
-    let mut fresh = context(4);
-    if let Request::Context { key, .. } = &mut fresh {
-        key.owner.deletion_generation = 2;
-    }
-    rig.send(4, &fresh);
+    rig.send(4, &context_for(4, newer));
+    let fresh = Key {
+        owner: newer,
+        capture: CaptureId(4),
+    };
     let (_, reply) = rig.reply();
-    assert!(matches!(reply, Reply::Acquired(actual, _) if actual.owner.deletion_generation == 2));
-    assert_eq!(
-        rig.reply(),
-        (
-            4,
-            Reply::Complete(Key {
-                owner: Owner {
-                    deletion_generation: 2,
-                    ..key(4).owner
-                },
-                ..key(4)
-            })
-        )
-    );
+    assert!(matches!(reply, Reply::Acquired(actual, _) if actual == fresh));
+    assert_eq!(rig.reply(), (4, Reply::Complete(fresh)));
+    rig.finish();
+}
+
+#[test]
+fn the_fence_orders_holds_by_epoch_before_gesture() {
+    let rig = Rig::start(None, None, None);
+    let fence = Owner {
+        epoch: 2,
+        gesture: 1,
+    };
+    rig.send(1, &Request::Retire(fence));
+    assert_eq!(rig.reply(), (1, Reply::Released(fence, None)));
+    let earlier_epoch = Owner {
+        epoch: 1,
+        gesture: 9,
+    };
+    for (id, owner) in [(2, earlier_epoch), (3, fence)] {
+        rig.send(id, &context_for(id, owner));
+        assert_eq!(
+            rig.reply(),
+            (id, Reply::Refused(Refusal::Stale)),
+            "{owner:?}"
+        );
+    }
+    let next = Key {
+        owner: Owner {
+            epoch: 2,
+            gesture: 2,
+        },
+        capture: CaptureId(4),
+    };
+    rig.send(4, &context_for(4, next.owner));
+    let (_, reply) = rig.reply();
+    assert!(matches!(reply, Reply::Acquired(actual, _) if actual == next));
+    assert_eq!(rig.reply(), (4, Reply::Complete(next)));
     rig.finish();
 }
 

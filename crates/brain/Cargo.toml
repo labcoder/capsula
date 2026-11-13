@@ -49,6 +49,7 @@ xn = { version = "=0.2.13", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
+    "Foundation",
     "Media_Ocr",
     "Graphics_Imaging",
     "Storage_Streams",
@@ -59,6 +60,7 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_System_WinRT_Direct3D11",
     "Win32_System_WinRT_Graphics_Capture",

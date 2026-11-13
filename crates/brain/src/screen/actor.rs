@@ -1,12 +1,10 @@
 //! Dormant worker-local ownership loop; A6b2b alone may route production requests here.
 
-use std::collections::BTreeMap;
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::frame;
 use kumochi_protocol::geometry::DisplayRef;
-use kumochi_protocol::message::ThreadId;
 use serde::{Deserialize, Serialize};
 
 use super::capture::{Capturer, Failure, Screen};
@@ -18,10 +16,12 @@ use crate::supervise::{Kind as _, read_request, write_message};
 
 const QUEUE: usize = 16;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A hold: its shell connection's epoch, then the gesture within it. The order is the brain's
+/// own, so one high-water fence retires every earlier hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(super) struct Owner {
-    pub(super) thread: ThreadId,
-    pub(super) deletion_generation: u64,
+    pub(super) epoch: u64,
+    pub(super) gesture: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,7 +136,7 @@ fn run(
     mut screen: Screen,
     now: &dyn Fn() -> Instant,
 ) -> Result<(), frame::FrameError> {
-    let mut fences = BTreeMap::<u64, u64>::new();
+    let mut fence: Option<Owner> = None;
     let mut current = None;
     let mut live = false;
     let mut expires = None;
@@ -176,9 +176,7 @@ fn run(
                     expires = None;
                     let admitted = screen.admit(&ticket, &display, received, now);
                     current = Some(key);
-                    let retired = fences
-                        .get(&key.owner.thread.0)
-                        .is_some_and(|f| key.owner.deletion_generation <= *f);
+                    let retired = fence.is_some_and(|fence| key.owner <= fence);
                     let result =
                         if retired || key.capture != ticket.capture() || capturing.is_some() {
                             Err(Failure::Refused(Refusal::Stale))
@@ -261,20 +259,14 @@ fn run(
                     let (owner, capture) = match control {
                         Request::Drop(key) => (key.owner, Some(key.capture)),
                         Request::Retire(owner) => {
-                            fences
-                                .entry(owner.thread.0)
-                                .and_modify(|f| *f = (*f).max(owner.deletion_generation))
-                                .or_insert(owner.deletion_generation);
+                            fence = fence.max(Some(owner));
                             (owner, None)
                         }
                         _ => unreachable!(),
                     };
                     let matches = current.is_some_and(|held: Key| match capture {
                         Some(capture) => held.owner == owner && held.capture == capture,
-                        None => {
-                            held.owner.thread == owner.thread
-                                && held.owner.deletion_generation <= owner.deletion_generation
-                        }
+                        None => held.owner <= owner,
                     });
                     if capture.is_some() && !matches {
                         send(id, Reply::Refused(Refusal::Stale))?;

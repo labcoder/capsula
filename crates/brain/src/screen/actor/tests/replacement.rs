@@ -269,9 +269,9 @@ fn expired_same_owner_replacement_disposes_before_second_capture() {
 }
 
 #[test]
-fn replacement_by_another_thread_disposes_before_handoff_and_old_release() {
+fn replacement_by_a_later_gesture_disposes_before_handoff_and_old_release() {
     let owner = Owner {
-        thread: ThreadId(8),
+        gesture: 8,
         ..key(2).owner
     };
     let rig = Replacement::held(owner, Duration::ZERO);
@@ -280,10 +280,10 @@ fn replacement_by_another_thread_disposes_before_handoff_and_old_release() {
 }
 
 #[test]
-fn replacement_by_higher_deletion_generation_disposes_before_handoff_and_old_release() {
+fn replacement_by_a_later_epoch_disposes_before_handoff_and_old_release() {
     let owner = Owner {
-        deletion_generation: 2,
-        ..key(2).owner
+        epoch: 2,
+        gesture: 1,
     };
     let rig = Replacement::held(owner, Duration::ZERO);
     rig.disposed_before_handoff();

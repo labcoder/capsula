@@ -164,6 +164,20 @@ pub enum Refusal {
     DisplayChanged,
     /// The requested bounds are empty, overflow or exceed the size cap.
     Invalid,
+    /// Only Kumochi or the desktop is under the pointer, so there's no window to capture.
+    NoWindow,
+    /// The window is minimised.
+    Minimized,
+    /// The window is cloaked, such as on another virtual desktop.
+    Cloaked,
+    /// The window's process is elevated, or can't be opened to tell.
+    Elevated,
+    /// The window asks not to be captured (display affinity).
+    Protected,
+    /// The window is Kumochi's own.
+    Excluded,
+    /// The window's identity, frame or DPI changed, or it closed, before its frame was taken.
+    WindowChanged,
 }
 
 /// A complete, valid frame's description; the pixels stay in the worker.
@@ -171,7 +185,7 @@ pub enum Refusal {
 pub struct FrameMeta {
     /// The ticket's capture.
     pub capture: CaptureId,
-    /// The display's physical bounds, as captured.
+    /// The captured surface's physical bounds: the display, or a window's frame.
     pub display: PhysicalRect,
     /// The display's effective DPI.
     pub dpi: u32,
