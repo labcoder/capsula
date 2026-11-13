@@ -49,6 +49,8 @@ mod settings;
 mod sign_ins;
 mod stage;
 #[cfg(test)]
+mod stop_press_tests;
+#[cfg(test)]
 mod test_fixture;
 #[cfg(test)]
 mod tests;
@@ -689,15 +691,14 @@ impl Render for Panel {
         });
         let stop = self.stop.then(|| {
             let events = self.events.clone();
-            Target(
-                Button::new("stop")
-                    .small()
-                    .label(strings.get(Text::Stop))
-                    .on_click(move |_, _, _| {
-                        send(&events, PresenceEvent::Escape);
-                    })
-                    .into_element(),
-            )
+            let button = Button::new("stop")
+                .small()
+                .label(strings.get(Text::Stop))
+                .on_click(move |_, _, _| {
+                    send(&events, PresenceEvent::Escape);
+                })
+                .debug_selector(|| "presence-stop".into());
+            Target(button.into_element())
         });
         let stamped = cx.has_global::<Observer>() || cx.has_global::<Diagnostics>();
         // Kumo, the name and the status read as one identity; size and weight carry the
@@ -745,7 +746,8 @@ impl Render for Panel {
                     chat_owner,
                     Presence::open_text,
                 )
-                .primary(),
+                .primary()
+                .debug_selector(|| "presence-chat".into()),
             )
             .child(
                 action(

@@ -249,6 +249,9 @@ creates no file.
     `run phase=`, `submit sent=`, `dock settled`, `dock paints settled=`, `kumo baked`,
     `kumo frame shade_us=` and `kumo reshades=`. The harness reads them as status and still
     refuses any other unknown event.
+  - `kumo press at=<x>,<y> bounds=<x>,<y>,<w>,<h> grabbed=true|false`: every left press the
+    peek's window sees, in window pixels against Kumo's square, and whether a pull is live after
+    it. Numbers only; the harness reads it as status.
 - `--esc-fixture` holds global Esc from startup until the first Esc arrives, without inventing
   speech or a drawing. The harness checks the hold, presses Esc once, and sees it released.
   It needs `--quit-after-ms` or `--smoke`, so a run can't keep Esc forever. If another process

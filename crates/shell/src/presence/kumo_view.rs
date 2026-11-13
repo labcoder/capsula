@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::{
-    App, Context, EventEmitter, IntoElement, ParentElement as _, Render, RenderImage, Styled as _,
-    Task, Window, canvas, div, img, px,
+    App, Context, EventEmitter, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    RenderImage, Styled as _, Task, Window, canvas, div, img, px,
 };
 
 use super::kumo::{Animator, CARRY_WIDTH, Look, Mood, Motion, Renderer, Silhouette};
@@ -64,6 +64,9 @@ pub(super) struct KumoView {
     /// The released body is home and still: the dock's next accepted mask is the line alone,
     /// and the pull wants no frame until then. Whichever window showed the body still does.
     resting: bool,
+    /// The square the last press was tested against.
+    #[cfg(test)]
+    pub(in crate::presence) pressed_square: Option<gpui_kit::Bounds<gpui_kit::Pixels>>,
 }
 
 /// Which window shows the body: the peek until the dock has drawn a pulled picture.
@@ -101,6 +104,8 @@ impl KumoView {
             next_rows: Rows::default(),
             pulled: Pulled::Peek,
             resting: false,
+            #[cfg(test)]
+            pressed_square: None,
         }
     }
 
@@ -269,11 +274,16 @@ impl Render for KumoView {
             .relative()
             .size(px(SIZE))
             .flex_none()
+            .debug_selector(|| "presence-kumo".into())
             .children(
                 self.image
                     .clone()
                     .filter(|_| self.pulled == Pulled::Peek)
-                    .map(|image| img(image).size_full()),
+                    .map(|image| {
+                        img(image)
+                            .size_full()
+                            .debug_selector(|| "presence-kumo-picture".into())
+                    }),
             )
             .child(
                 canvas(
@@ -283,6 +293,8 @@ impl Render for KumoView {
                     },
                 )
                 .absolute()
+                .top_0()
+                .left_0()
                 .size_full(),
             )
     }
