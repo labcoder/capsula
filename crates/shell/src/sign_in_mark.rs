@@ -6,10 +6,7 @@
 pub(crate) enum Shows {
     /// It's waiting for the browser or the provider's own window.
     Waiting,
-    /// It ended without the brain having shown it waiting: a complete account, or a refused
-    /// start.
-    Ended,
-    /// Anything else, which ends only a sign-in the brain has shown.
+    /// Anything else, which ends a sign-in the brain has shown, or one on a newer connection.
     Other,
 }
 
@@ -55,10 +52,11 @@ impl SignInMark {
         }
     }
 
-    /// An accepted view on connection `generation`. An open mark ends only at a terminal event:
-    /// a view leaving the wait it showed, one that `Shows::Ended`, or a new connection's first
-    /// view that isn't waiting. An owed cancel goes at the next waiting view, and is dropped by a
-    /// new connection that shows none.
+    /// An accepted view on connection `generation`. An open mark ends at a view leaving the wait
+    /// it showed, or at a newer connection's view that isn't waiting. Until the wait shows, no
+    /// view on the asking connection ends it: that view may predate the brain reading the op. An
+    /// owed cancel goes at the next waiting view, and is dropped by a new connection that shows
+    /// none.
     pub(crate) fn view(&mut self, generation: u64, shows: Shows) -> Seen {
         match *self {
             Self::Settled => Seen::Nothing,
@@ -72,7 +70,7 @@ impl SignInMark {
                         shown: true,
                     };
                     Seen::Nothing
-                } else if asked == generation && !shown && shows == Shows::Other {
+                } else if asked == generation && !shown {
                     Seen::Nothing
                 } else {
                     *self = Self::Settled;

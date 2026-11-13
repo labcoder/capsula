@@ -14,7 +14,7 @@ use kumochi_protocol::message::{
 
 use super::{OnboardingPanel, OnboardingView, Select};
 use crate::input::{Edge, Effect, Event, Gesture, Key};
-use crate::link::{Batch, LinkEvent, Session};
+use crate::link::{Batch, LinkEvent, LinkState, Session};
 use crate::onboarding::{Onboarding, Step, ThisRun};
 use crate::platform::{Deliver, EventTime, PresenceEvent};
 use crate::presence::settings::field_status;
@@ -54,6 +54,16 @@ fn showing(
     AnyWindowHandle,
     async_channel::Receiver<ControlToBrain>,
 ) {
+    let (owner, controls) = connected(cx);
+    let window = open_over(&owner, cx);
+    focus_input(&owner, window, cx);
+    (owner, window, controls)
+}
+
+/// Presence on connection 7 with a settings view that owes onboarding, before the window opens.
+fn connected(
+    cx: &mut TestAppContext,
+) -> (Entity<Presence>, async_channel::Receiver<ControlToBrain>) {
     let owner = test_fixture::presence(cx);
     let controls = owner.update(cx, |owner, cx| {
         owner.session = Some(Session::detached(7, Incarnation(1)));
@@ -66,9 +76,7 @@ fn showing(
         });
         controls
     });
-    let window = open_over(&owner, cx);
-    focus_input(&owner, window, cx);
-    (owner, window, controls)
+    (owner, controls)
 }
 
 /// Shows the onboarding window over `owner` through the setter `open_onboarding` uses.
@@ -854,6 +862,67 @@ fn chatgpt_mark(owner: &Entity<Presence>, cx: &mut TestAppContext) -> SignInMark
     owner.read_with(cx, |owner, _| owner.onboarding_chatgpt)
 }
 
+/// Connect… with Claude Code from the step, as its button does.
+fn connect(owner: &Entity<Presence>, cx: &mut TestAppContext) {
+    owner.update(cx, |owner, cx| {
+        owner
+            .settings
+            .update(cx, |state, _| state.claude.open_connect());
+        owner.onboarding_claude_op(ConnectionOp::ConnectClaudeCode, cx);
+    });
+}
+
+fn marks(owner: &Entity<Presence>, cx: &mut TestAppContext) -> [SignInMark; 2] {
+    owner.read_with(cx, |owner, _| {
+        [owner.onboarding_chatgpt, owner.onboarding_claude]
+    })
+}
+
+fn link(owner: &Entity<Presence>, event: LinkEvent, cx: &mut TestAppContext) {
+    owner.update(cx, |owner, cx| {
+        owner
+            .link_events(Batch::Plain(vec![event]), cx)
+            .expect("a link event");
+    });
+    cx.run_until_parked();
+}
+
+fn error(owner: &Entity<Presence>, key: ErrorKey, action: Action, cx: &mut TestAppContext) {
+    let error = UserError::new(key, Vec::new(), vec![action]).expect("one action");
+    link(
+        owner,
+        LinkEvent::Error {
+            generation: 7,
+            error,
+        },
+        cx,
+    );
+}
+
+/// The sign-in ops sent, without what a new connection requests.
+fn sign_in_ops(controls: &async_channel::Receiver<ControlToBrain>) -> Vec<ControlToBrain> {
+    drain(controls)
+        .into_iter()
+        .filter(|control| {
+            matches!(
+                control,
+                ControlToBrain::AccountOp(_) | ControlToBrain::Connection(_)
+            )
+        })
+        .collect()
+}
+
+const CANCELS: [ControlToBrain; 2] = [
+    ControlToBrain::AccountOp(AccountOp::CancelSignIn),
+    ControlToBrain::Connection(ConnectionOp::CancelClaudeSignIn),
+];
+
+const COMPLETE: AccountView = AccountView::SignedIn {
+    email: None,
+    plan: PlanState::Enabled,
+    recovery: None,
+};
+
 #[gpui::test]
 fn enter_on_the_account_step_starts_nothing(cx: &mut TestAppContext) {
     let (owner, window, controls) = on_accounts(cx);
@@ -963,46 +1032,40 @@ fn continue_hands_a_waiting_sign_in_over(cx: &mut TestAppContext) {
     assert_eq!(drain(&controls), []);
 }
 
-/// A cancel that can't be sent stays owed across a link drop: sent at the next connection's wait,
+/// Cancels that can't be sent stay owed across a link drop: sent at the next connection's wait,
 /// dropped when that connection shows none.
 #[gpui::test]
-fn an_owed_cancel_survives_a_link_drop(cx: &mut TestAppContext) {
+fn owed_cancels_survive_a_link_drop(cx: &mut TestAppContext) {
     for waiting in [true, false] {
         let (owner, window, controls) = on_accounts(cx);
         sign_in(&owner, cx);
-        drain(&controls);
-        owner.update(cx, |owner, cx| {
-            owner.session = None;
-            owner
-                .settings
-                .update(cx, |state, _| state.accounts.disconnected());
-        });
+        connect(&owner, cx);
+        assert_eq!(drain(&controls).len(), 2, "both sign-ins");
+        link(&owner, LinkEvent::State(LinkState::Reconnecting), cx);
         escape(&owner, window, cx);
         assert_eq!(drain(&controls), []);
         assert_eq!(
-            chatgpt_mark(&owner, cx),
-            SignInMark::CancelOwed { generation: 7 }
+            marks(&owner, cx),
+            [SignInMark::CancelOwed { generation: 7 }; 2]
         );
-        owner.update(cx, |owner, _| {
-            owner.session = Some(Session::detached(8, Incarnation(2)));
-        });
-        account(
+        link(
             &owner,
-            8,
-            if waiting {
-                AccountView::SigningIn
-            } else {
-                SIGNED_OUT
-            },
+            LinkEvent::Connected(Session::detached(8, Incarnation(2))),
             cx,
         );
-        let cancel = [ControlToBrain::AccountOp(AccountOp::CancelSignIn)];
+        if waiting {
+            account(&owner, 8, AccountView::SigningIn, cx);
+            claude(&owner, 8, ClaudeCodeView::SigningIn, cx);
+        } else {
+            account(&owner, 8, SIGNED_OUT, cx);
+            claude(&owner, 8, CLAUDE_OUT, cx);
+        }
         assert_eq!(
-            drain(&controls),
-            &cancel[..usize::from(waiting)],
+            sign_in_ops(&controls),
+            &CANCELS[..if waiting { 2 } else { 0 }],
             "{waiting}"
         );
-        assert_eq!(chatgpt_mark(&owner, cx), SignInMark::Settled);
+        assert_eq!(marks(&owner, cx), [SignInMark::Settled; 2]);
     }
 }
 
@@ -1010,7 +1073,7 @@ fn an_owed_cancel_survives_a_link_drop(cx: &mut TestAppContext) {
 fn a_sign_in_from_elsewhere_drops_an_owed_cancel(cx: &mut TestAppContext) {
     let (owner, window, controls) = on_accounts(cx);
     sign_in(&owner, cx);
-    owner.update(cx, |owner, _| owner.session = None);
+    link(&owner, LinkEvent::State(LinkState::Reconnecting), cx);
     escape(&owner, window, cx);
     drain(&controls);
     owner.update(cx, |owner, cx| {
@@ -1019,56 +1082,165 @@ fn a_sign_in_from_elsewhere_drops_an_owed_cancel(cx: &mut TestAppContext) {
     assert_eq!(chatgpt_mark(&owner, cx), SignInMark::Settled);
 }
 
+/// A frame before the wait shows may predate Connect (it can carry only the Anthropic half), so
+/// it ends nothing and the dismissal still cancels; the brain ignores a cancel after a refused
+/// Connect.
 #[gpui::test]
 fn claude_codes_sign_in_from_the_step_is_cancelled_on_dismissal(cx: &mut TestAppContext) {
-    for refused in [false, true] {
+    for answered in [false, true] {
         let (owner, window, controls) = on_accounts(cx);
-        owner.update(cx, |owner, cx| {
-            owner
-                .settings
-                .update(cx, |state, _| state.claude.open_connect());
-            owner.onboarding_claude_op(ConnectionOp::ConnectClaudeCode, cx);
-        });
+        connect(&owner, cx);
         assert_eq!(
             drain(&controls),
             [ControlToBrain::Connection(ConnectionOp::ConnectClaudeCode)]
         );
-        if refused {
+        if answered {
             claude(&owner, 7, CLAUDE_OUT, cx);
         }
         escape(&owner, window, cx);
-        let cancel = [ControlToBrain::Connection(ConnectionOp::CancelClaudeSignIn)];
         assert_eq!(
             drain(&controls),
-            &cancel[..usize::from(!refused)],
-            "{refused}"
+            [ControlToBrain::Connection(ConnectionOp::CancelClaudeSignIn)],
+            "{answered}"
         );
     }
 }
 
-/// After a shell restart the window owns a waiting sign-in it finds, at open or on a connection's
-/// first view.
+/// Sign in again answered by the account still complete (the brain deferred the start) hasn't
+/// ended: the plan line stays hidden, and the dismissal cancels it.
 #[gpui::test]
-fn the_window_adopts_a_waiting_sign_in_after_a_restart(cx: &mut TestAppContext) {
+fn a_sign_in_answered_by_the_same_complete_account_is_still_the_windows(cx: &mut TestAppContext) {
+    let (owner, window, controls) = on_accounts(cx);
+    account(&owner, 7, COMPLETE, cx);
+    error(&owner, ErrorKey::SessionEnded, Action::SignIn, cx);
+    sign_in(&owner, cx);
+    assert_eq!(
+        drain(&controls),
+        [ControlToBrain::AccountOp(AccountOp::SignIn)]
+    );
+    account(&owner, 7, COMPLETE, cx);
+    assert!(!owner.read_with(cx, |owner, cx| {
+        owner
+            .onboarding
+            .as_ref()
+            .expect("showing")
+            .view
+            .read(cx)
+            .plan
+    }));
+    escape(&owner, window, cx);
+    assert_eq!(
+        drain(&controls),
+        [ControlToBrain::AccountOp(AccountOp::CancelSignIn)]
+    );
+}
+
+/// An error offering only Retry comes from a renewal or a refused start, so it ends no sign-in.
+#[gpui::test]
+fn an_error_offering_only_retry_ends_no_sign_in(cx: &mut TestAppContext) {
+    let (owner, window, controls) = on_accounts(cx);
+    sign_in(&owner, cx);
+    account(&owner, 7, AccountView::SigningIn, cx);
+    error(&owner, ErrorKey::SignInFailed, Action::Retry, cx);
+    drain(&controls);
+    escape(&owner, window, cx);
+    assert_eq!(
+        drain(&controls),
+        [ControlToBrain::AccountOp(AccountOp::CancelSignIn)]
+    );
+}
+
+/// Turning the plan on starts a sign-in, so it's the window's like Sign in.
+#[gpui::test]
+fn a_plan_turned_on_from_the_step_is_cancelled_on_dismissal(cx: &mut TestAppContext) {
+    let (owner, window, controls) = on_accounts(cx);
+    account(
+        &owner,
+        7,
+        AccountView::SignedIn {
+            email: None,
+            plan: PlanState::Declined,
+            recovery: None,
+        },
+        cx,
+    );
+    owner.update(cx, |owner, cx| {
+        owner.onboarding_account_op(AccountOp::EnablePlan, cx);
+    });
+    assert_eq!(
+        drain(&controls),
+        [ControlToBrain::AccountOp(AccountOp::EnablePlan)]
+    );
+    escape(&owner, window, cx);
+    assert_eq!(
+        drain(&controls),
+        [ControlToBrain::AccountOp(AccountOp::CancelSignIn)]
+    );
+}
+
+#[gpui::test]
+fn a_ready_claude_code_turns_not_now_into_continue(cx: &mut TestAppContext) {
+    let (owner, _, _controls) = on_accounts(cx);
+    let usable = |owner: &Entity<Presence>, cx: &mut TestAppContext| {
+        owner.read_with(cx, |owner, cx| {
+            super::accounts::usable(owner.settings.read(cx))
+        })
+    };
+    assert!(!usable(&owner, cx));
+    claude(
+        &owner,
+        7,
+        ClaudeCodeView::Ready {
+            version: ClaudeVersion {
+                major: 2,
+                minor: 1,
+                patch: 306,
+            },
+            analytics_on: false,
+        },
+        cx,
+    );
+    assert!(usable(&owner, cx));
+}
+
+/// After a shell restart the window owns each waiting sign-in it finds, as it opens or on a
+/// connection's first view, and one dismissal cancels both.
+#[gpui::test]
+fn the_window_adopts_waiting_sign_ins_after_a_restart(cx: &mut TestAppContext) {
     for at_open in [true, false] {
-        let (owner, window, controls) = showing(cx);
+        let (owner, controls) = connected(cx);
+        let waiting = |owner: &Entity<Presence>, cx: &mut TestAppContext| {
+            account(owner, 7, AccountView::SigningIn, cx);
+            claude(owner, 7, ClaudeCodeView::SigningIn, cx);
+        };
         if at_open {
-            owner.update(cx, |owner, cx| {
-                owner.settings.update(cx, |state, _| {
-                    assert!(state.accounts.receive(Some(7), 7, AccountView::SigningIn));
-                });
-                owner.adopt_onboarding_sign_ins(cx);
-            });
-        } else {
-            account(&owner, 7, AccountView::SigningIn, cx);
+            waiting(&owner, cx);
+        }
+        let window = open_over(&owner, cx);
+        focus_input(&owner, window, cx);
+        if !at_open {
+            waiting(&owner, cx);
         }
         escape(&owner, window, cx);
-        assert_eq!(
-            drain(&controls),
-            [ControlToBrain::AccountOp(AccountOp::CancelSignIn)],
-            "{at_open}"
-        );
+        assert_eq!(drain(&controls), CANCELS, "{at_open}");
     }
+}
+
+/// Without the window nothing is adopted, and a wait shown later on a connection isn't the
+/// window's: after its first view, something else started it.
+#[gpui::test]
+fn the_window_adopts_nothing_while_closed_or_after_a_connections_first_view(
+    cx: &mut TestAppContext,
+) {
+    let (closed, _controls) = connected(cx);
+    account(&closed, 7, AccountView::SigningIn, cx);
+    claude(&closed, 7, ClaudeCodeView::SigningIn, cx);
+    assert_eq!(marks(&closed, cx), [SignInMark::Settled; 2]);
+    let (owner, window, controls) = on_accounts(cx);
+    account(&owner, 7, AccountView::SigningIn, cx);
+    claude(&owner, 7, ClaudeCodeView::SigningIn, cx);
+    escape(&owner, window, cx);
+    assert_eq!(drain(&controls), []);
 }
 
 #[gpui::test]
@@ -1083,16 +1255,7 @@ fn the_plan_line_shows_once_this_windows_sign_in_completes(cx: &mut TestAppConte
     assert_eq!(shows(&owner, cx), (false, false));
     sign_in(&owner, cx);
     account(&owner, 7, AccountView::SigningIn, cx);
-    account(
-        &owner,
-        7,
-        AccountView::SignedIn {
-            email: None,
-            plan: PlanState::Enabled,
-            recovery: None,
-        },
-        cx,
-    );
+    account(&owner, 7, COMPLETE, cx);
     assert_eq!(shows(&owner, cx), (true, true));
 }
 

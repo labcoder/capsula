@@ -60,8 +60,6 @@ impl Presence {
         let complete = account_complete(view);
         let shows = if matches!(view, Some(AccountView::SigningIn)) {
             Shows::Waiting
-        } else if complete {
-            Shows::Ended
         } else {
             Shows::Other
         };
@@ -88,8 +86,8 @@ impl Presence {
         }
     }
 
-    /// An accepted Claude Code view on connection `generation`, as for `ChatGPT`. The brain
-    /// starts the login inside Connect and answers `SigningIn`, so any other answer ends it.
+    /// An accepted Claude Code view on connection `generation`, as for `ChatGPT`. A frame that
+    /// isn't `SigningIn` may only carry the Anthropic half, sent before the brain read Connect.
     pub(super) fn claude_seen(
         &mut self,
         generation: u64,
@@ -99,7 +97,7 @@ impl Presence {
         let shows = if self.settings.read(cx).claude.view == Some(ClaudeCodeView::SigningIn) {
             Shows::Waiting
         } else {
-            Shows::Ended
+            Shows::Other
         };
         if shows == Shows::Waiting && previous != Some(generation) && self.onboarding.is_some() {
             self.onboarding_claude.adopt(generation);

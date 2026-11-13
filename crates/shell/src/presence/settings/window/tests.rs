@@ -698,26 +698,37 @@ const CANCELS: [ControlToBrain; 2] = [
     ControlToBrain::Connection(ConnectionOp::CancelClaudeSignIn),
 ];
 
-/// Before the brain answers or while it waits, closing Settings cancels each sign-in it started,
-/// once.
+/// Before the brain answers, after an answer that isn't the wait (it may predate the op), or while
+/// it waits, closing Settings cancels each sign-in it started, once.
 #[gpui::test]
 fn closing_settings_cancels_its_own_sign_ins_once(cx: &mut TestAppContext) {
-    for shown in [false, true] {
+    for answer in [None, Some(false), Some(true)] {
         let (window, owner, controls) = accounts_panel(cx);
         start_both(window, &controls, cx);
-        if shown {
-            account_views(
+        match answer {
+            Some(true) => account_views(
                 &owner,
                 vec![
                     chatgpt(AccountView::SigningIn),
                     claude_code(ClaudeCodeView::SigningIn),
                 ],
                 cx,
-            );
+            ),
+            Some(false) => account_views(
+                &owner,
+                vec![
+                    chatgpt(AccountView::SignedOut {
+                        revocation_unconfirmed: false,
+                    }),
+                    claude_code(CLAUDE_OUT),
+                ],
+                cx,
+            ),
+            None => {}
         }
         click_github(window, "close-settings", cx);
         assert!(!owner.read_with(cx, |owner, _| owner.settings_open()));
-        assert_eq!(drain(&controls), CANCELS, "shown: {shown}");
+        assert_eq!(drain(&controls), CANCELS, "waiting: {answer:?}");
         account_views(
             &owner,
             vec![

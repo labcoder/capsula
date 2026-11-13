@@ -22,8 +22,9 @@ fn only_a_queued_op_opens_the_mark() {
     );
 }
 
-/// Before the brain shows the wait, only a terminal event ends the mark: an answer that isn't
-/// the wait (the brain may start the sign-in late) keeps it, so a dismissal still cancels it.
+/// Before the brain shows the wait, no answer on the asking connection ends the mark, complete or
+/// refused (it may predate the op, or the brain may start the sign-in late), so a dismissal still
+/// cancels it.
 #[test]
 fn a_dismissal_before_the_wait_shows_owes_the_cancel_once() {
     let mut mark = open(1);
@@ -54,8 +55,6 @@ fn each_terminal_event_ends_the_mark() {
     let mut left = open(1);
     left.view(1, Shows::Waiting);
     assert_eq!(left.view(1, Shows::Other), Seen::Ended, "the wait was left");
-    let mut complete = open(1);
-    assert_eq!(complete.view(1, Shows::Ended), Seen::Ended, "ended unshown");
     let mut failed = open(1);
     failed.view(1, Shows::Waiting);
     failed.failed();
@@ -65,7 +64,7 @@ fn each_terminal_event_ends_the_mark() {
         Seen::Ended,
         "a new connection shows none"
     );
-    for mark in [left, complete, failed, gone] {
+    for mark in [left, failed, gone] {
         assert_eq!(mark, SignInMark::Settled);
     }
 }

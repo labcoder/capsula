@@ -76,17 +76,21 @@ flowchart TD
   Claude Code `Ready`), then Continue. Focus goes to the window's root, so Enter starts nothing.
   Once a `ChatGPT` sign-in this window asked for completes, the plan line shows beside the button.
 - **A dismissal cancels this window's sign-ins.** A mark opens only on an op the window actually
-  queued (Sign in or Enable for `ChatGPT`, Connect Claude Code), and settles only at a terminal
-  event. For `ChatGPT` that's a view that leaves the wait it showed, a complete account, a
-  sign-in error that offers a new one, or a new connection's first view that isn't waiting. For
-  Claude Code it's any view that isn't waiting, refused or not. Finish later, Esc and the native
+  queued (Sign in or Enable for `ChatGPT`, Connect Claude Code). Until the brain shows the wait,
+  no view on the asking connection settles it, refused or complete: a Claude Code frame may carry
+  only the Anthropic half, sent before the brain read Connect, and a deferred Sign in again is
+  answered by the unchanged complete account. It settles once the wait it showed ends, on a newer
+  connection's view that isn't waiting, on a `ChatGPT` sign-in error that offers a new one, or at
+  the hand-over; the cost is one cancel the brain ignores after a refused attempt. While the
+  window shows, Settings and chat can't start a sign-in (see above), so an open mark meets no
+  other surface's sign-in except through adoption. Finish later, Esc and the native
   close take each open mark once and send its cancel through `cancel_sign_in`, past `allows`,
   because the brain may start the sign-in late and ignores a cancel when nothing is signing in.
   A cancel that can't be sent stays owed across a link drop: it goes at the next waiting view.
   It's dropped by a first view with no wait, by a `ChatGPT` sign-in error, or by any op the user
   sends that connection from Settings or chat. Continue, Not now and the finish hand a waiting
   sign-in over to the rest of the app instead. After a shell restart, the window adopts a
-  sign-in it finds waiting, at open or on a connection's first view. That is wrong in one
+  sign-in it finds waiting, as it opens (`set_onboarding`) or on a connection's first view. That is wrong in one
   accepted case: after Finish later, a sign-in started from Settings or chat that is still
   waiting when the shell crashes is adopted by the relaunched window, and dismissing it cancels
   it.
