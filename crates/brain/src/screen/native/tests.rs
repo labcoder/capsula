@@ -6,7 +6,6 @@ use super::*;
 use crate::screen::actor::{Key, Owner};
 use crate::screen::wire::CaptureId;
 use kumochi_protocol::geometry::PhysicalRect;
-use kumochi_protocol::message::ThreadId;
 
 const PATIENCE: Duration = Duration::from_secs(5);
 
@@ -47,8 +46,8 @@ fn job() -> Job {
     Job {
         key: Key {
             owner: Owner {
-                thread: ThreadId(4),
-                deletion_generation: 2,
+                epoch: 4,
+                gesture: 2,
             },
             capture: CaptureId(7),
         },

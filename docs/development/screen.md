@@ -289,7 +289,9 @@ is scrubbed/freed rather than published, and a late element tree is taken and di
 acknowledgement waits for both native jobs to finish; stuck or retiring native work cannot
 acknowledge. At most 16 controls may wait for disposal, matching the inbox cap; the seventeenth
 gets a fixed Busy refusal. Repeated release is idempotent and retains no release history.
-Per-thread retirement fences reject older deletion generations in this worker.
+Each request is owned by a hold: its shell connection's epoch, then its gesture, ordered in that
+order. The worker keeps one high-water retirement fence and refuses any request at or below it, so
+a hold with no thread yet still has an identity, and one Retire covers every earlier hold.
 
 The current allocation is zeroized before growing, releasing or dropping a RawFrame. The tests
 observe synthetic bytes immediately after scrubbing and before freeing; a plain-fill replacement
