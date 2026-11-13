@@ -7,7 +7,7 @@ use kumochi_protocol::message::{
 
 use crate::settings::{Error, Field, Settings};
 
-/// The step on screen. The shortcut comes in a later step.
+/// The step on screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Step {
     /// "Hi, I'm ⟨name⟩", with the assistant's name in an input.
@@ -16,6 +16,8 @@ pub(crate) enum Step {
     YourName,
     /// Connect any account, or skip it.
     Accounts,
+    /// Double-tap the shortcut to finish into typing, or Finish into the peek.
+    Shortcut,
 }
 
 impl Step {
@@ -24,7 +26,7 @@ impl Step {
         match self {
             Self::Welcome => Some(Field::Assistant),
             Self::YourName => Some(Field::User),
-            Self::Accounts => None,
+            Self::Accounts | Self::Shortcut => None,
         }
     }
 
@@ -34,16 +36,17 @@ impl Step {
             Self::Welcome => OnboardingStep::Welcome,
             Self::YourName => OnboardingStep::YourName,
             Self::Accounts => OnboardingStep::Accounts,
+            Self::Shortcut => OnboardingStep::Shortcut,
         }
     }
 
-    /// Where a launch resumes: the first step not yet completed, or the last step this build
-    /// has when the brain remembers one beyond it.
+    /// Where a launch resumes: the first step not yet completed.
     fn resume(from: OnboardingStep) -> Self {
         match from {
             OnboardingStep::Welcome => Self::Welcome,
             OnboardingStep::YourName => Self::YourName,
-            OnboardingStep::Accounts | OnboardingStep::Shortcut => Self::Accounts,
+            OnboardingStep::Accounts => Self::Accounts,
+            OnboardingStep::Shortcut => Self::Shortcut,
         }
     }
 }
@@ -63,8 +66,10 @@ pub(crate) fn account_complete(view: Option<&AccountView>) -> bool {
 /// What closing lands on once the brain says onboarding is finished.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Landing {
-    /// The finish this window asked for: the peek opens.
+    /// The finish this window's Finish asked for: the peek opens.
     Peek,
+    /// The finish a double-tap asked for: the typing box opens.
+    Typing,
     /// Onboarding finished without this window asking: nothing opens.
     Quiet,
 }
@@ -85,8 +90,8 @@ pub(crate) enum Next {
     Stay,
     /// The next step shows; its input takes focus.
     Moved,
-    /// The last step went on: send `FinishOnboarding`.
-    Finish,
+    /// The last step went on: send `FinishOnboarding`, landing here once it's answered.
+    Finish(Landing),
     /// The brain says onboarding is finished: close, landing here.
     Close(Landing),
 }
@@ -171,6 +176,16 @@ impl Onboarding {
         }
     }
 
+    /// A double-tap while the window shows is used up; at the shortcut it asks for the finish that
+    /// opens typing. With no settings view, or a finish already queued, nothing happens.
+    pub(crate) fn double_tap(&self, settings: &Settings) -> Next {
+        if self.step == Step::Shortcut && settings.view().is_some() && self.finishing.is_none() {
+            Next::Finish(Landing::Typing)
+        } else {
+            Next::Stay
+        }
+    }
+
     /// `FinishOnboarding` was queued; the window closes only when the brain says so.
     pub(crate) fn finish_queued(&mut self, landing: Landing) {
         self.finishing = Some(landing);
@@ -192,7 +207,11 @@ impl Onboarding {
                 self.step = Step::Accounts;
                 Next::Moved
             }
-            Step::Accounts => Next::Finish,
+            Step::Accounts => {
+                self.step = Step::Shortcut;
+                Next::Moved
+            }
+            Step::Shortcut => Next::Finish(Landing::Peek),
         }
     }
 }

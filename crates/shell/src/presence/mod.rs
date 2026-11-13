@@ -351,9 +351,11 @@ impl Presence {
                 }
                 Effect::Listening | Effect::HoldStarted | Effect::HoldEnded => continue,
                 Effect::OpenInput => {
-                    if self.onboarding.is_none()
-                        && let Err(error) = self.focus_text(cx)
-                    {
+                    if self.onboarding.is_some() {
+                        if let Err(error) = self.onboarding_double_tap(cx) {
+                            tracing::error!(%error, "can't finish onboarding");
+                        }
+                    } else if let Err(error) = self.focus_text(cx) {
                         tracing::error!(%error, "can't open the typing panel");
                     }
                 }

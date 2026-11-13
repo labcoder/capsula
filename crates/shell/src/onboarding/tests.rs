@@ -66,13 +66,20 @@ fn on_accounts() -> (Settings, Onboarding) {
     (settings, onboarding)
 }
 
+fn on_shortcut() -> (Settings, Onboarding) {
+    let (mut settings, mut onboarding) = on_accounts();
+    assert_eq!(press(&mut settings, &mut onboarding), (vec![], Next::Moved));
+    assert_eq!(onboarding.step(), Step::Shortcut);
+    (settings, onboarding)
+}
+
 #[test]
-fn begin_resumes_at_the_first_step_not_completed_and_never_past_the_last_it_has() {
+fn begin_resumes_at_the_first_step_not_completed() {
     for (from, step) in [
         (OnboardingStep::Welcome, Step::Welcome),
         (OnboardingStep::YourName, Step::YourName),
         (OnboardingStep::Accounts, Step::Accounts),
-        (OnboardingStep::Shortcut, Step::Accounts),
+        (OnboardingStep::Shortcut, Step::Shortcut),
     ] {
         let view = SettingsView {
             onboarding_from: from,
@@ -208,18 +215,41 @@ fn a_blank_name_with_nothing_saved_goes_on_without_sending() {
     assert_eq!(onboarding.step(), Step::Accounts);
 }
 
-/// The account step has no field: Continue or Not now goes on with nothing saved, and it's the
-/// last step this build has.
+/// The account and shortcut steps have no field: Continue or Not now goes on to the shortcut, and
+/// Finish there asks for the finish into the peek, with nothing saved.
 #[test]
-fn the_account_step_finishes_with_nothing_saved() {
-    let (mut settings, mut onboarding) = on_accounts();
+fn the_steps_without_a_name_go_on_and_finish_with_nothing_saved() {
+    let (mut settings, mut onboarding) = on_shortcut();
     assert_eq!(
         press(&mut settings, &mut onboarding),
-        (vec![], Next::Finish)
+        (vec![], Next::Finish(Landing::Peek))
     );
-    assert_eq!(onboarding.step(), Step::Accounts);
+    assert_eq!(onboarding.step(), Step::Shortcut);
     settings.disconnected();
     assert_eq!(press(&mut settings, &mut onboarding), (vec![], Next::Stay));
+}
+
+/// A double-tap is used up at every step; at the shortcut it asks for the finish into typing,
+/// once, and only with a settings view.
+#[test]
+fn only_a_double_tap_at_the_shortcut_asks_for_the_finish_into_typing() {
+    let (settings, onboarding) = on_accounts();
+    assert_eq!(onboarding.double_tap(&settings), Next::Stay);
+    let (mut settings, mut onboarding) = on_shortcut();
+    assert_eq!(
+        onboarding.double_tap(&settings),
+        Next::Finish(Landing::Typing)
+    );
+    assert!(settings.finish_onboarding(|_| true));
+    onboarding.finish_queued(Landing::Typing);
+    assert_eq!(onboarding.double_tap(&settings), Next::Stay, "finishing");
+    assert_eq!(
+        answer(&mut settings, &mut onboarding, view("Kumo", None, true)),
+        Next::Close(Landing::Typing)
+    );
+    let (mut settings, onboarding) = on_shortcut();
+    settings.disconnected();
+    assert_eq!(onboarding.double_tap(&settings), Next::Stay, "no view");
 }
 
 #[test]
@@ -333,8 +363,11 @@ fn a_disconnect_forgets_the_wait_and_the_step_stays_after_reconnect() {
 
 #[test]
 fn an_asked_finish_lands_on_the_peek_and_a_refused_one_can_be_asked_again() {
-    let (mut settings, mut onboarding) = on_accounts();
-    assert_eq!(press(&mut settings, &mut onboarding).1, Next::Finish);
+    let (mut settings, mut onboarding) = on_shortcut();
+    assert_eq!(
+        press(&mut settings, &mut onboarding).1,
+        Next::Finish(Landing::Peek)
+    );
     assert!(settings.finish_onboarding(|op| op == SettingsOp::FinishOnboarding));
     onboarding.finish_queued(Landing::Peek);
     assert!(onboarding.finishing());
@@ -349,7 +382,10 @@ fn an_asked_finish_lands_on_the_peek_and_a_refused_one_can_be_asked_again() {
         Next::Stay
     );
     assert!(!onboarding.finishing());
-    assert_eq!(press(&mut settings, &mut onboarding).1, Next::Finish);
+    assert_eq!(
+        press(&mut settings, &mut onboarding).1,
+        Next::Finish(Landing::Peek)
+    );
     assert!(settings.finish_onboarding(|_| true));
     onboarding.finish_queued(Landing::Peek);
     assert_eq!(
@@ -360,12 +396,15 @@ fn an_asked_finish_lands_on_the_peek_and_a_refused_one_can_be_asked_again() {
 
 #[test]
 fn a_disconnect_forgets_a_queued_finish() {
-    let (mut settings, mut onboarding) = on_accounts();
+    let (mut settings, mut onboarding) = on_shortcut();
     assert!(settings.finish_onboarding(|_| true));
     onboarding.finish_queued(Landing::Peek);
     settings.disconnected();
     assert_eq!(onboarding.settings_changed(&settings), Next::Stay);
     assert!(!onboarding.finishing());
     settings.set_view(view("Kumo", None, false), Update::Unsolicited);
-    assert_eq!(press(&mut settings, &mut onboarding).1, Next::Finish);
+    assert_eq!(
+        press(&mut settings, &mut onboarding).1,
+        Next::Finish(Landing::Peek)
+    );
 }

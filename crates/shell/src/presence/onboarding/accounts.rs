@@ -6,12 +6,12 @@
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
-    Context, InteractiveElement as _, IntoElement, ParentElement as _, Styled as _, div,
+    App, Context, InteractiveElement as _, IntoElement, ParentElement as _, Styled as _, div,
 };
 use kumochi_protocol::message::{AccountOp, AccountView, ClaudeCodeView, ConnectionOp};
 
 use super::OnboardingView;
-use crate::onboarding::account_complete;
+use crate::onboarding::{Step, account_complete};
 use crate::presence::Presence;
 use crate::presence::settings::accounts::account_section;
 use crate::presence::settings::claude::claude_section;
@@ -123,8 +123,19 @@ impl Presence {
         }
     }
 
+    /// Whether the window owns sign-ins: only until it leaves the account step, which hands its
+    /// own over, so after that it adopts nothing for the rest of its life.
+    pub(in crate::presence) fn onboarding_owns_sign_ins(&self, cx: &App) -> bool {
+        self.onboarding
+            .as_ref()
+            .is_some_and(|panel| panel.view.read(cx).state.step() != Step::Shortcut)
+    }
+
     /// The window opened over a waiting sign-in: after a shell restart, it's this window's.
     pub(super) fn adopt_onboarding_sign_ins(&mut self, cx: &Context<'_, Self>) {
+        if !self.onboarding_owns_sign_ins(cx) {
+            return;
+        }
         let state = self.settings.read(cx);
         if let (Some(AccountView::SigningIn), Some(generation)) =
             (&state.accounts.view, state.accounts.generation)

@@ -1,7 +1,7 @@
 //! The sign-ins a surface asked for, until each ends: one [`SignInMark`] per surface and
 //! connection, for the onboarding window and for Settings. A surface's dismissal cancels its own
 //! sign-in that hasn't ended. A sign-in started from chat belongs to neither, and only onboarding
-//! adopts a waiting one after a shell restart.
+//! adopts a waiting one after a shell restart, before it leaves its account step.
 
 use gpui_kit::Context;
 use kumochi_protocol::message::{
@@ -63,7 +63,10 @@ impl Presence {
         } else {
             Shows::Other
         };
-        if shows == Shows::Waiting && previous != Some(generation) && self.onboarding.is_some() {
+        if shows == Shows::Waiting
+            && previous != Some(generation)
+            && self.onboarding_owns_sign_ins(cx)
+        {
             self.onboarding_chatgpt.adopt(generation);
         }
         match self.onboarding_chatgpt.view(generation, shows) {
@@ -99,7 +102,10 @@ impl Presence {
         } else {
             Shows::Other
         };
-        if shows == Shows::Waiting && previous != Some(generation) && self.onboarding.is_some() {
+        if shows == Shows::Waiting
+            && previous != Some(generation)
+            && self.onboarding_owns_sign_ins(cx)
+        {
             self.onboarding_claude.adopt(generation);
         }
         if self.onboarding_claude.view(generation, shows) == Seen::SendCancel

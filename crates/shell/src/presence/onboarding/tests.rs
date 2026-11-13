@@ -81,9 +81,21 @@ fn connected(
 
 /// Shows the onboarding window over `owner` through the setter `open_onboarding` uses.
 fn open_over(owner: &Entity<Presence>, cx: &mut TestAppContext) -> AnyWindowHandle {
+    open_at(owner, OnboardingStep::Welcome, cx)
+}
+
+/// As [`open_over`], resuming at `from` as a launch does.
+fn open_at(
+    owner: &Entity<Presence>,
+    from: OnboardingStep,
+    cx: &mut TestAppContext,
+) -> AnyWindowHandle {
     owner.update(cx, |owner, cx| {
-        let state =
-            Onboarding::begin(&view("Kumo", false), ThisRun::Owed).expect("onboarding is owed");
+        let resumed = SettingsView {
+            onboarding_from: from,
+            ..view("Kumo", false)
+        };
+        let state = Onboarding::begin(&resumed, ThisRun::Owed).expect("onboarding is owed");
         let (model, events, weak) = (
             owner.settings.clone(),
             owner.events.clone(),
@@ -302,6 +314,14 @@ fn an_unsent_finish_says_so_and_can_be_pressed_again(cx: &mut TestAppContext) {
         ))
     );
     assert_eq!(step(&owner, cx), Step::Accounts);
+    press_continue(&owner, cx);
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::Settings(
+            SettingsOp::CompleteOnboardingStep(OnboardingStep::Accounts)
+        ))
+    );
+    assert_eq!(step(&owner, cx), Step::Shortcut);
     let session = owner.update(cx, |owner, _| owner.session.take());
     press_continue(&owner, cx);
     let unsent = |owner: &Entity<Presence>, cx: &mut TestAppContext| {
@@ -320,12 +340,6 @@ fn an_unsent_finish_says_so_and_can_be_pressed_again(cx: &mut TestAppContext) {
     owner.update(cx, |owner, _| owner.session = session);
     press_continue(&owner, cx);
     assert!(!unsent(&owner, cx));
-    assert_eq!(
-        controls.try_recv(),
-        Ok(ControlToBrain::Settings(
-            SettingsOp::CompleteOnboardingStep(OnboardingStep::Accounts)
-        ))
-    );
     assert_eq!(
         controls.try_recv(),
         Ok(ControlToBrain::Settings(SettingsOp::FinishOnboarding))
@@ -483,6 +497,7 @@ fn the_finish_lands_on_the_peek_only_when_the_brain_says_so(cx: &mut TestAppCont
     cx.run_until_parked();
     VisualTestContext::from_window(window, cx).simulate_keystrokes("enter");
     cx.run_until_parked();
+    press_continue(&owner, cx);
     press_continue(&owner, cx);
     let sent = std::iter::from_fn(|| controls.try_recv().ok()).collect::<Vec<_>>();
     assert_eq!(
@@ -998,37 +1013,128 @@ fn a_sign_in_that_ended_is_not_cancelled(cx: &mut TestAppContext) {
     }
 }
 
-/// Continue and Not now leave a waiting sign-in alone; the finish hands it over.
+/// Continue and Not now hand waiting sign-ins over for the rest of the window's life: the
+/// shortcut step neither cancels them nor adopts them again after a link drop.
 #[gpui::test]
-fn continue_hands_a_waiting_sign_in_over(cx: &mut TestAppContext) {
-    let (owner, _, controls) = on_accounts(cx);
-    sign_in(&owner, cx);
-    account(&owner, 7, AccountView::SigningIn, cx);
-    drain(&controls);
-    press_continue(&owner, cx);
+fn continue_hands_waiting_sign_ins_over_for_good(cx: &mut TestAppContext) {
+    for dropped in [false, true] {
+        let (owner, window, controls) = on_accounts(cx);
+        sign_in(&owner, cx);
+        connect(&owner, cx);
+        account(&owner, 7, AccountView::SigningIn, cx);
+        claude(&owner, 7, ClaudeCodeView::SigningIn, cx);
+        drain(&controls);
+        press_continue(&owner, cx);
+        assert_eq!(
+            drain(&controls),
+            [ControlToBrain::Settings(
+                SettingsOp::CompleteOnboardingStep(OnboardingStep::Accounts)
+            )]
+        );
+        assert_eq!(step(&owner, cx), Step::Shortcut);
+        assert_eq!(marks(&owner, cx), [SignInMark::Settled; 2]);
+        if dropped {
+            link(&owner, LinkEvent::State(LinkState::Reconnecting), cx);
+            link(
+                &owner,
+                LinkEvent::Connected(Session::detached(8, Incarnation(2))),
+                cx,
+            );
+            account(&owner, 8, AccountView::SigningIn, cx);
+            claude(&owner, 8, ClaudeCodeView::SigningIn, cx);
+            assert_eq!(marks(&owner, cx), [SignInMark::Settled; 2]);
+        }
+        escape(&owner, window, cx);
+        assert_eq!(sign_in_ops(&controls), [], "dropped: {dropped}");
+    }
+}
+
+/// The window at the shortcut on connection 7, opened there as a launch resumes it.
+fn at_shortcut(
+    cx: &mut TestAppContext,
+) -> (
+    Entity<Presence>,
+    AnyWindowHandle,
+    async_channel::Receiver<ControlToBrain>,
+) {
+    let (owner, controls) = connected(cx);
+    let window = open_at(&owner, OnboardingStep::Shortcut, cx);
+    focus_input(&owner, window, cx);
+    (owner, window, controls)
+}
+
+/// The recogniser's double-tap, applied as the dock's input applies it.
+fn tap(owner: &Entity<Presence>, cx: &mut TestAppContext) {
+    let dock = owner.read_with(cx, |owner, _| owner.dock_window);
+    cx.update(|cx| {
+        dock.update(cx, |_, window, cx| {
+            owner.update(cx, |owner, cx| {
+                owner.apply_effects(
+                    double_tap(),
+                    EventTime {
+                        instant: Instant::now(),
+                    },
+                    window,
+                    cx,
+                );
+            });
+        })
+        .expect("the dock window");
+    });
+    cx.run_until_parked();
+}
+
+/// At the shortcut a double-tap asks for the finish once; when the brain says onboarded, the
+/// window closes and the typing box opens instead of the peek.
+#[gpui::test]
+fn a_double_tap_at_the_shortcut_finishes_into_typing(cx: &mut TestAppContext) {
+    let (owner, _, controls) = at_shortcut(cx);
+    tap(&owner, cx);
+    tap(&owner, cx);
     assert_eq!(
         drain(&controls),
-        [
-            ControlToBrain::Settings(SettingsOp::CompleteOnboardingStep(OnboardingStep::Accounts)),
-            ControlToBrain::Settings(SettingsOp::FinishOnboarding)
-        ]
+        [ControlToBrain::Settings(SettingsOp::FinishOnboarding)]
     );
     owner.update(cx, |owner, cx| {
-        for onboarded in [false, true] {
-            owner
-                .link_events(
-                    Batch::Plain(vec![LinkEvent::Settings {
-                        generation: 7,
-                        view: view("Kumo", onboarded),
-                        answer: true,
-                    }]),
-                    cx,
-                )
-                .expect("an answer");
-        }
+        assert!(
+            owner.onboarding.is_some(),
+            "only the brain's answer closes it"
+        );
+        owner
+            .link_events(
+                Batch::Plain(vec![LinkEvent::Settings {
+                    generation: 7,
+                    view: view("Kumo", true),
+                    answer: true,
+                }]),
+                cx,
+            )
+            .expect("the finish's answer");
         assert!(owner.onboarding.is_none());
+        assert!(owner.text_open());
+        assert_ne!(owner.panel_visibility, PanelVisibility::Visible);
     });
-    assert_eq!(chatgpt_mark(&owner, cx), SignInMark::Settled);
+}
+
+#[gpui::test]
+fn enter_at_the_shortcut_finishes_nothing(cx: &mut TestAppContext) {
+    let (owner, window, controls) = at_shortcut(cx);
+    VisualTestContext::from_window(window, cx).simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(drain(&controls), []);
+    assert_eq!(step(&owner, cx), Step::Shortcut);
+}
+
+/// A window that opens at the shortcut owns no sign-in, so it adopts none it finds waiting.
+#[gpui::test]
+fn a_window_at_the_shortcut_adopts_nothing(cx: &mut TestAppContext) {
+    let (owner, controls) = connected(cx);
+    account(&owner, 7, AccountView::SigningIn, cx);
+    claude(&owner, 7, ClaudeCodeView::SigningIn, cx);
+    let window = open_at(&owner, OnboardingStep::Shortcut, cx);
+    focus_input(&owner, window, cx);
+    assert_eq!(marks(&owner, cx), [SignInMark::Settled; 2]);
+    escape(&owner, window, cx);
     assert_eq!(drain(&controls), []);
 }
 
