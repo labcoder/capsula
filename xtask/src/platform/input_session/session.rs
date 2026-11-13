@@ -459,7 +459,7 @@ impl Session {
         let foreground = pid(unsafe { GetForegroundWindow() });
         ensure!(
             self.lease.get().owns(foreground),
-            "foreground left the owned fixture/product processes"
+            "foreground left the owned fixture/product processes (foreground_pid={foreground} owned=false)"
         );
         input_desktop_available()?;
         let mut info = GUITHREADINFO {

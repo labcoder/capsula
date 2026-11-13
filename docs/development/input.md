@@ -481,7 +481,9 @@ released and the EDIT is uncovered before any potentially slow trace-finish wait
 success and failure.
 
 After injection has opened, any physical input, lock/desktop change, foreign foreground/capture/menu/move loop,
-or phase error stops the whole session. Cleanup releases only acknowledged injected downs,
+or phase error stops the whole session. A foreign foreground stop names only its process id
+(`foreground_pid=<n> owned=false`); the run's before and after process lists resolve the image.
+Cleanup releases only acknowledged injected downs,
 closes only owned windows/processes gracefully, and retains
 all errors. It never force-kills another process or repairs language settings. Cursor restoration
 is skipped after any abort, and otherwise remains guarded and confined to owned destinations.
