@@ -10,6 +10,7 @@ fn built(world: &World, current: RunId) -> Built {
             Supplied {
                 summary: None,
                 items: vec![],
+                ..Supplied::default()
             },
             BOUND,
         )
@@ -138,6 +139,7 @@ fn metadata_only_native_replay_is_source_fenced_and_other_connections_do_not_rep
             Supplied {
                 summary: None,
                 items: vec![],
+                ..Supplied::default()
             },
             BOUND,
         )
@@ -162,6 +164,7 @@ fn metadata_only_native_replay_is_source_fenced_and_other_connections_do_not_rep
             Supplied {
                 summary: None,
                 items: vec![],
+                ..Supplied::default()
             },
             BOUND,
         )
@@ -185,6 +188,7 @@ fn metadata_only_native_replay_is_source_fenced_and_other_connections_do_not_rep
             Supplied {
                 summary: None,
                 items: vec![],
+                ..Supplied::default()
             },
             BOUND,
         )

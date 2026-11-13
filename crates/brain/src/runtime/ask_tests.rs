@@ -125,7 +125,7 @@ fn assert_turn_context(context: &str, alt: &str) {
     assert_minute(stamp);
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(drawings).expect("drawing headers"),
-        serde_json::json!([{"begin":{"v":1,"scene":"car","surface":"overlay","size":null,"title":null,"alt":alt,"others":"clear"}}])
+        serde_json::json!([{"begin":{"v":1,"scene":"car","surface":"overlay","size":null,"title":null,"alt":alt,"others":"clear"},"objects":[["v","view3d"],["a","solid"]]}])
     );
 }
 

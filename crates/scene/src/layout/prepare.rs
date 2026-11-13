@@ -333,7 +333,7 @@ pub fn prepare(
         Arc::make_mut(object.motion.get_or_insert_with(Arc::default)).insert(property, motion);
     }
     after.prune_extras();
-    let (presentation_scale, envelopes) = validate_bounds(&after)?;
+    let (presentation_scale, mut envelopes) = validate_bounds(&after)?;
     after.presentation_scale = presentation_scale;
     after.grow_content()?;
     for primitive in after
@@ -345,6 +345,15 @@ pub fn prepare(
             && points.len() > crate::limits::MAX_GLOBAL_FILL_VERTICES
         {
             return Err(PrepareError::OverPaintWork);
+        }
+    }
+    // A diagram's fit follows measured text, so its contents are charged unshrunk.
+    for object in after.objects.values() {
+        let fit = diagram_fit(&after, object);
+        if fit < 1.0
+            && let Some(envelope) = envelopes.get_mut(&object.item.handle)
+        {
+            *envelope /= fit;
         }
     }
     // A capped scene whose own work passes its cap can never be admitted: stop counting there.
@@ -795,6 +804,24 @@ fn update_group_bounds(state: &mut LayoutState) {
             break;
         }
     }
+}
+
+/// The product of the shrink-to-fit scales of `object` and its ancestors that are diagrams.
+fn diagram_fit(state: &LayoutState, object: &Placed) -> f32 {
+    let mut fit = 1.0_f32;
+    let mut next = Some(object);
+    while let Some(object) = next {
+        if matches!(&*object.source, Op::Diagram(_)) {
+            let matrix = object.item.transform.0;
+            fit *= matrix[0].hypot(matrix[1]).clamp(f32::MIN_POSITIVE, 1.0);
+        }
+        next = object
+            .item
+            .parent
+            .and_then(|handle| state.handles.get(&handle))
+            .and_then(|id| state.objects.get(id));
+    }
+    fit
 }
 
 /// The presentation scale's cap, and each placed object's composed-scale envelope.

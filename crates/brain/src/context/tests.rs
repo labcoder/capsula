@@ -319,79 +319,47 @@ fn drawing_line(built: &Built) -> &str {
 }
 
 #[test]
-fn drawing_context_uses_global_membership_and_the_same_request_snapshot() {
+fn the_drawing_line_is_the_supplied_digest_never_the_store_s_drawings() {
     let mut world = world("ctx-visible-drawings");
     let main = world.main;
-    world.draw(main, "displaced", "old", None);
-    let (task, _) = world.run(None, "task", None);
-    for n in 0..4 {
-        world.draw(task, &format!("foreign{n}"), "foreign", None);
-    }
+    world.draw(main, "stored", "stored_header_marker", None);
     let (_, current) = world.run(Some(main), "ask", None);
     let run = snapshot(Origin::Kumo, None);
     let built = world
         .build(&run, (main, current), Supplied::default(), BOUND)
         .expect("request");
-    assert_eq!(
-        drawing_line(&built),
-        "[]",
-        "select globally before filtering this thread"
-    );
-    let visible = world.draw(main, "visible", "private_header_marker", None);
-    let (_, current) = world.run(Some(main), "now add", None);
-    let reader = Connection::open(world.scratch.db()).expect("reader");
-    let frozen = Snapshot::begin(&reader).expect("snapshot");
-    world
-        .store
-        .clear_scenes(&[visible])
-        .expect("clear after snapshot");
-    let built = build(
-        frozen,
-        &run,
-        Turn {
-            thread: main,
-            run: current,
-            local_time: TIME,
-        },
-        Supplied::default(),
-        BOUND,
-    )
-    .expect("snapshot request");
-    assert_eq!(
-        serde_json::from_str::<Value>(drawing_line(&built)).expect("JSON"),
-        json!([{"begin":{"v":1,"scene":"visible","surface":"overlay","size":null,"title":null,"alt":"private_header_marker","others":"clear"}}])
-    );
-    assert!(!drawing_line(&built).contains("PRIVATE_STEP_CONTENT"));
-    let after = world
-        .build(&run, (main, current), Supplied::default(), BOUND)
-        .expect("fresh request");
-    assert_eq!(drawing_line(&after), "[]");
+    assert_eq!(drawing_line(&built), "[]");
+    let line = r#"[{"begin":{"v":1,"scene":"visible","surface":"overlay","size":null,"title":null,"alt":"private_header_marker","others":"clear"},"objects":[["a","text"]]}]"#;
+    let supplied = Supplied {
+        drawings: crate::drawing::Digest::of(line),
+        ..Supplied::default()
+    };
+    let built = world
+        .build(&run, (main, current), supplied, BOUND)
+        .expect("request");
+    assert_eq!(drawing_line(&built), line);
     let diagnostic = format!("{built:?} {:?}", built.request);
     assert!(!diagnostic.contains("private_header_marker"));
     assert!(!diagnostic.contains(&format!("{:?}", b"private_header_marker")));
 }
 
 #[test]
-fn complete_drawing_headers_count_outer_escaping_before_the_request_bound() {
+fn the_drawing_line_counts_outer_escaping_before_the_request_bound() {
     let mut world = world("ctx-drawing-bound");
     let main = world.main;
     let marker = "PRIVATE_HEADER_\"\\\n".repeat(20);
-    for n in 0..4 {
-        world.draw(main, &format!("scene{n}"), &marker, Some(&marker));
-    }
+    let line = json!([{"begin":{"alt":marker},"objects":[["a","text"]]}]).to_string();
+    let drawings = || Supplied {
+        drawings: crate::drawing::Digest::of(&line),
+        ..Supplied::default()
+    };
+    world.run(Some(main), "earlier", None);
     let (_, current) = world.run(Some(main), "ask", None);
     let run = snapshot(Origin::Kumo, None);
     let built = world
-        .build(&run, (main, current), Supplied::default(), BOUND)
+        .build(&run, (main, current), drawings(), BOUND)
         .expect("request");
-    let headers: Value = serde_json::from_str(drawing_line(&built)).expect("JSON");
-    assert_eq!(headers.as_array().expect("headers").len(), 4);
-    for (index, header) in headers.as_array().expect("headers").iter().enumerate() {
-        assert_eq!(header["begin"]["scene"], format!("scene{index}"));
-        assert_eq!(header["begin"]["alt"], marker);
-        assert_eq!(header["begin"]["title"], marker);
-        assert_eq!(header["begin"]["others"], "clear");
-    }
+    assert_eq!(drawing_line(&built), line);
     let current_item = built
         .request
         .input
@@ -418,13 +386,26 @@ fn complete_drawing_headers_count_outer_escaping_before_the_request_bound() {
     let minimum =
         super::bound::fixed_bytes(&built.request.instructions, &built.request.tools) + 64 + escaped;
     let exact = world
-        .build(&run, (main, current), Supplied::default(), minimum)
+        .build(&run, (main, current), drawings(), minimum)
         .expect("exact current-item bound");
-    assert_eq!(drawing_line(&exact), drawing_line(&built));
+    assert_eq!(drawing_line(&exact), line);
     assert!(matches!(
-        world.build(&run, (main, current), Supplied::default(), minimum - 1),
-        Err(BuildError::TooLarge { .. })
+        world.build(&run, (main, current), drawings(), minimum - 1),
+        Err(BuildError::TooLarge { room: None })
     ));
+    let summarised = Supplied {
+        summary: Some(Summary {
+            first: EventId(1),
+            last: *world.events(main).first().expect("an event"),
+            text: "s".repeat(64),
+        }),
+        ..drawings()
+    };
+    let room = world.build(&run, (main, current), summarised, minimum + 10);
+    assert!(
+        matches!(room, Err(BuildError::TooLarge { room: Some(10) })),
+        "{room:?}"
+    );
     let diagnostic = format!("{built:?} {:?}", built.request);
     assert!(!diagnostic.contains("PRIVATE_HEADER_"));
     assert!(!diagnostic.contains(&format!("{:?}", marker.as_bytes())));
@@ -577,6 +558,7 @@ fn kumo_re_reads_each_reference_and_reports_exactly_the_sources_it_rendered() {
     let supplied = Supplied {
         summary: None,
         items: history(current, last, refs),
+        ..Supplied::default()
     };
     let built = world
         .build(
@@ -614,6 +596,7 @@ fn a_task_never_dereferences_another_tasks_reference_and_kumo_never_its_own() {
     let supplied = Supplied {
         summary: None,
         items: history(current, last, vec![whole(&b_ids, b)]),
+        ..Supplied::default()
     };
     let built = world
         .build(
@@ -653,6 +636,7 @@ fn a_task_never_dereferences_another_tasks_reference_and_kumo_never_its_own() {
     let supplied = Supplied {
         summary: None,
         items: history(kumo_run, last, vec![main_ref]),
+        ..Supplied::default()
     };
     let built = world
         .build(
@@ -762,6 +746,7 @@ fn a_split_or_repeated_tool_group_is_a_typed_error() {
             Supplied {
                 summary: None,
                 items,
+                ..Supplied::default()
             },
             BOUND,
         );
@@ -786,6 +771,7 @@ fn reasoning_is_replayed_only_on_the_connection_that_made_it() {
     let supplied = Supplied {
         summary: None,
         items: vec![item(1, 7, 1), item(2, 8, 2)],
+        ..Supplied::default()
     };
     let built = world
         .build(
@@ -815,6 +801,7 @@ fn a_summary_states_its_range_and_replaces_the_events_it_covers() {
             text: "They talked about clouds.".to_owned(),
         }),
         items: Vec::new(),
+        ..Supplied::default()
     };
     let built = world
         .build(
@@ -912,6 +899,7 @@ fn an_oversized_summary_or_turn_ends_with_too_large() {
             text: huge,
         }),
         items: Vec::new(),
+        ..Supplied::default()
     };
     let summarised = world.build(&run, (main, small), summary, BOUND);
     assert!(
@@ -938,6 +926,7 @@ fn at_most_the_newest_eight_runs_stay_raw_and_a_dropped_runs_sources_dont_count(
     let supplied = Supplied {
         summary: None,
         items: history(first, first_event, vec![whole(&b_ids, b)]),
+        ..Supplied::default()
     };
     let built = world
         .build(
@@ -987,6 +976,7 @@ fn a_title_shown_from_an_empty_range_still_counts_its_task_as_a_source() {
     let supplied = Supplied {
         summary: None,
         items: history(current, last, vec![empty]),
+        ..Supplied::default()
     };
     let built = world
         .build(
@@ -1020,6 +1010,7 @@ fn a_kept_older_runs_history_counts_its_sources() {
     let supplied = Supplied {
         summary: None,
         items: history(older, older_event, vec![whole(&b_ids, b)]),
+        ..Supplied::default()
     };
     let built = world
         .build(
@@ -1069,6 +1060,7 @@ fn a_bound_one_byte_short_drops_an_older_tool_pair_whole() {
     let supplied = || Supplied {
         summary: None,
         items: history(older, older_event, vec![whole(&b_ids[..1], b)]),
+        ..Supplied::default()
     };
     let run = snapshot(Origin::Kumo, None);
     let output = json!({ "quoted_history": [{ "task": b.0, "title": "b",
@@ -1270,6 +1262,7 @@ fn a_summary_is_carried_forward_replaces_its_events_and_never_hides_them() {
             Supplied {
                 summary,
                 items: Vec::new(),
+                ..Supplied::default()
             },
             BOUND,
         )
@@ -1419,6 +1412,7 @@ fn an_escaped_inline_rewrite_is_stored_and_the_next_build_fits() {
         Supplied {
             summary: read.summary(task).expect("read"),
             items: Vec::new(),
+            ..Supplied::default()
         }
     };
     let full = world
@@ -2014,6 +2008,7 @@ fn a_summary_covers_the_notes_through_its_cutoff_and_a_later_note_still_renders(
             text: "earlier".to_owned(),
         }),
         items: Vec::new(),
+        ..Supplied::default()
     };
     let summarized = |last: EventId| {
         message(

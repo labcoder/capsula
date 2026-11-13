@@ -561,9 +561,9 @@ fn ordinary_illustrations_fit_the_paint_caps() {
         let x = f32::from(index) * 30.0;
         round(format!("part{index}"), [x, 200.0, 24.0, 18.0])
     }));
-    // A 30-step flowchart with labelled arrows, shrunk to fit the default canvas: 17 points per
-    // node, and per arrow 3 for its head and 17 for its label's chip: 30 · 17 + 29 · 20 = 1,090
-    // fill and 30 · 17 = 510 outline.
+    // A 30-step flowchart with labelled arrows, shrunk to fit the default canvas but charged
+    // unshrunk: 21 points per node, and per arrow 3 for its head and 21 for its label's chip:
+    // 30 · 21 + 29 · 24 = 1,326 fill and 30 · 21 = 630 outline.
     let mut flow = vec![json!({"diagram":{"id":"d","dir":"down"}})];
     flow.extend(
         (0..30).map(|index| json!({"node":{"id":format!("n{index}"),"in":"d","label":"Step"}})),
@@ -571,9 +571,31 @@ fn ordinary_illustrations_fit_the_paint_caps() {
     flow.extend((1..30).map(|index| {
         json!({"edge":{"id":format!("e{index}"),"from":format!("n{}", index - 1),"to":format!("n{index}"),"label":"then"}})
     }));
-    for (put, fill, outline) in [(sky, 773, 0), (mouse, 1_037, 29), (flow, 1_090, 510)] {
+    for (put, fill, outline) in [(sky, 773, 0), (mouse, 1_037, 29), (flow, 1_326, 630)] {
         let work = picture(header(None), &serde_json::Value::Array(put)).paint_work();
         assert_eq!((work.fill_vertices, work.outline_points), (fill, outline));
         assert!(work.within_limits());
+    }
+}
+
+/// A diagram's fit follows its measured text, so its paint work is charged unshrunk: the same
+/// 30-box chain costs the same shrunk to fit the default canvas as unshrunk on a tall one.
+#[test]
+fn a_diagram_is_charged_unshrunk_whatever_its_fit() {
+    let mut flow = vec![json!({"diagram":{"id":"d","dir":"down"}})];
+    flow.extend(
+        (0..30).map(|index| json!({"node":{"id":format!("n{index}"),"in":"d","label":"Step"}})),
+    );
+    flow.extend((1..30).map(|index| {
+        json!({"edge":{"id":format!("e{index}"),"from":format!("n{}", index - 1),"to":format!("n{index}"),"label":"then"}})
+    }));
+    let flow = serde_json::Value::Array(flow);
+    for size in [None, Some([960.0, 4000.0])] {
+        let work = picture(header(size), &flow).paint_work();
+        assert_eq!(
+            (work.fill_vertices, work.outline_points),
+            (1_326, 630),
+            "{size:?}"
+        );
     }
 }

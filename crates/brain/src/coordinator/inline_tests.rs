@@ -147,6 +147,7 @@ fn rebuilt(attempt: u64) -> Effect {
         origin: Origin::Task(T),
         snapshot: None,
         first: true,
+        drawings: crate::drawing::Digest::default(),
     }))
 }
 

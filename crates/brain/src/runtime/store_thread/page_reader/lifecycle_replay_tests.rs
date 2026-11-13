@@ -63,6 +63,7 @@ fn build(control: Control) -> BuildContext {
         origin: Origin::Kumo,
         snapshot: Some(snapshot()),
         first: false,
+        drawings: crate::drawing::Digest::default(),
     }
 }
 

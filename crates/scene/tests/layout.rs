@@ -3239,7 +3239,7 @@ fn a_later_ancestor_track_recharges_shared_rects_and_refuses_growth_past_the_cap
     // The envelope's 4 at the inline limit of 1, with the 2⁻¹⁶ allowance.
     assert_eq!(charges, vec![(4.0_f32 + 1.0 / 16_384.0).to_bits(); 8]);
     // Radius 8 needs 4 pieces per corner at 1 and 7 at 4: 4 · 5 + 1 and 4 · 8 + 1 points, filled
-    // and bordered. At 32 it needs 18, so eight rects of 77 points pass the cap.
+    // and bordered. At 64 it needs 26, so eight rects of 109 points pass the outline cap.
     let work = |points: usize| PaintWork {
         dash_pieces: 0,
         fill_vertices: 8 * points,
@@ -3249,7 +3249,7 @@ fn a_later_ancestor_track_recharges_shared_rects_and_refuses_growth_past_the_cap
     };
     assert_eq!(first.after.paint_work(), work(21));
     assert_eq!(next.after.paint_work(), work(33));
-    let over = committed(&mut scene, &mut budget, scaled(32));
+    let over = committed(&mut scene, &mut budget, scaled(64));
     assert!(matches!(
         capped(over, &next.after, &mut measure),
         Err(PrepareError::OverPaintWork)

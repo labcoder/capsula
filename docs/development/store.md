@@ -72,16 +72,19 @@ scene's first step waits for every earlier typed clear to commit, including a fa
 clear. Replacement/cap eviction itself is atomic with the first step, so recovery never has
 to hide an uncleared visible scene to fit the cap.
 
-Turn context reads the same globally eligible newest-four typed set in its existing snapshot,
-then filters by thread. It includes complete begin headers only, never drawing steps, in
-`Drawings on screen: [...]` after Local time in the current user item. The empty `[]` line
-overrides stale references after Esc. The complete rendered item, including outer JSON
-escaping, counts against the ordinary request bound; headers are never truncated or logged.
-Discovery and the bounded header reads use the existing cancellation/deadline scope, with
-the context reader's absolute two-second deadline. Four returned headers do not bound SQL
-work: discovery can scan all retained events and, for each begin, its later same-thread
-history looking for a clear or zero cut. Worst-case row work is quadratic in retained history;
-the scoped SQLite progress handler interrupts cancellation or expiry without adding a cache.
+Turn context doesn't read drawings from the store. When a build starts, the coordinator asks
+the drawing reducer for the thread's `Drawings on screen` line and passes it with the build,
+so headers and objects come from one place at one moment: a step still in the store isn't
+listed, and a cleared scene leaves the line at once. A committed step the shell then can't
+prepare stays listed until its failure cut arrives. Each visible scene of the thread, oldest
+first, gives its complete begin header and its surviving objects as `[id, kind]` in put
+order, never step content, positions or labels. The pairs of every scene share one 8 KiB cap,
+a comma each. Scenes take room newest first, each from its newest object back to the first
+pair that doesn't fit, so an older scene may still list small pairs after a newer one ran out.
+A scene that lists fewer than it holds adds `"more"`, the count left out. The line goes after Local time in the
+current user item, and the empty `[]` line overrides stale references after Esc. The complete
+rendered item, including outer JSON escaping, counts against the ordinary request bound;
+the line's `Debug` shows only its length, and it is never logged.
 
 Recovery reads the newest four uncleared scenes of live threads and their full ordered logs,
 then replays the survivors together against one global budget. A corrupt, oversized,

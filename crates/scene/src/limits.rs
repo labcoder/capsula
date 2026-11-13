@@ -62,10 +62,10 @@ pub const MAX_GLOBAL_PATH_SEGMENTS: usize = 20_000;
 /// Maximum dash pieces across visible scenes.
 pub const MAX_GLOBAL_DASH_PIECES: usize = 512;
 /// Maximum fill tessellation vertices across visible scenes. Fills are the cheapest budget to
-/// paint, so it is four times the others (docs/development/scene.md, Paint work).
+/// paint, so it is four times the dash budget (docs/development/scene.md, Paint work).
 pub const MAX_GLOBAL_FILL_VERTICES: usize = 2_048;
-/// Maximum rect fallback outline points across visible scenes.
-pub const MAX_GLOBAL_OUTLINE_POINTS: usize = 512;
+/// Maximum rect fallback outline points across visible scenes: 36 unshrunk diagram boxes.
+pub const MAX_GLOBAL_OUTLINE_POINTS: usize = 768;
 /// Maximum tracks per scene.
 pub const MAX_TRACKS: usize = 256;
 /// Maximum put operations in one step: objects plus tracks.
