@@ -48,9 +48,10 @@ impl Capture {
         guard()?;
         let mut main = Self::start(Some(Process::open(pid)?), output, duration, &guard)?;
         main.dock_swapchain = dock_swapchain;
-        // A new trace records nothing for its first ~200 ms, so one early seed can be lost.
+        // A new trace records nothing for its first ~200 ms, and sometimes longer, so six repaints
+        // over 600 ms keep a seed landing after a slow start; a resting dock repaints for free.
         let seeded = (|| -> Result<()> {
-            for _ in 0..3 {
+            for _ in 0..6 {
                 guarded_wait(Duration::from_millis(100), &guard)?;
                 repaint()?;
             }

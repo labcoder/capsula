@@ -84,6 +84,8 @@ pub(crate) struct Session {
     covered: Option<RECT>,
     original_cursor: Option<POINT>,
     pointer_moved: bool,
+    /// How long the idle activation's confirm waited for the fixture's root to come to the front.
+    pub(crate) root_wait: Duration,
     pub(crate) batches: u32,
     pub(crate) first_qpc: Option<i64>,
     /// QPC just before the last batch's `SendInput`; `None` if that batch never reached it.
@@ -122,6 +124,7 @@ impl Session {
             covered: None,
             original_cursor: None,
             pointer_moved: false,
+            root_wait: Duration::ZERO,
             batches: 0,
             first_qpc: None,
             last_qpc: None,
@@ -134,7 +137,7 @@ impl Session {
     /// The NULL-foreground graces used since the last call, and the longest of them.
     pub(crate) fn take_null_graces(&self) -> (u32, Duration) {
         let mut null = self.null_foreground.get();
-        let used = null.take_used();
+        let used = null.take_used(Instant::now());
         self.null_foreground.set(null);
         used
     }

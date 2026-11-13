@@ -189,6 +189,70 @@ fn accepts_current_main_band_geometry_only_when_it_owns_exactly_the_proxy() {
 }
 
 #[test]
+fn a_pull_is_an_empty_mask_over_an_area_grown_from_the_dock_and_counts_once_per_run() {
+    let line = |id: u32| {
+        format!(
+            "geometry id={id} origin_y=0 rows=2 trimmed=true spans=-,-,0:4,-,-,-;-,-,0:4,-,-,-\n"
+        )
+    };
+    let empty = |id: u32| format!("geometry id={id} origin_y=0 rows=0 trimmed=true spans=\n");
+    let commit = |seq: u32, geometry: u32, proxy: &str| {
+        let qpc = 10 * seq;
+        format!(
+            "commit seq={seq} begin_qpc={qpc} qpc={qpc} result=shape proposal={geometry} epoch={geometry} geometry={geometry} proxy={proxy}\n"
+        )
+    };
+    let stream = |body: String, commits: usize| {
+        finish(format!("{STARTUP}{body}"), 0, 0)
+            .replace("close commits=1", &format!("close commits={commits}"))
+    };
+    let pulls = [
+        line(1),
+        commit(1, 1, "0,0,4,2"),
+        empty(2),
+        commit(2, 2, "-2,0,8,6"),
+        commit(3, 2, "-2,0,8,6"),
+        line(3),
+        commit(4, 3, "0,0,4,2"),
+        empty(4),
+        commit(5, 4, "-2,0,8,6"),
+    ]
+    .concat();
+    let observation = parsed(&stream(pulls.clone(), 5)).unwrap();
+    assert_eq!(observation.pulls, 2, "each run of pull commits is one pull");
+    assert_eq!(observation.commits.len(), 5);
+    let path = directory().join("observer.log");
+    fs::write(&path, stream(pulls, 5)).unwrap();
+    let (loaded, complete) = load(&path, 42);
+    assert!(complete.is_ok(), "{complete:?}");
+    assert_eq!(loaded.pulls, 2, "the count survives for pulls.txt");
+    assert_eq!(
+        read(&path, 42).unwrap_err().to_string(),
+        "Kumo pull seen by the observer (pulls=2)",
+        "every reader, cold start included, refuses a pull"
+    );
+
+    let rows = [line(1), commit(1, 1, "-2,0,8,6")].concat();
+    assert!(
+        parsed(&stream(rows, 1)).is_err(),
+        "a mask with rows over the pull area still has to own it exactly"
+    );
+    for proxy in ["0,0,4,2", "1,0,2,2", "1,0,8,6", "-2,0,8,1"] {
+        let text = [
+            line(1),
+            commit(1, 1, "0,0,4,2"),
+            empty(2),
+            commit(2, 2, proxy),
+        ]
+        .concat();
+        assert!(
+            parsed(&stream(text, 2)).is_err(),
+            "an empty mask over {proxy} isn't a pull and owns nothing"
+        );
+    }
+}
+
+#[test]
 fn geometry_rows_carry_two_drawn_and_four_owned_spans() {
     let mut observation = parsed(&finish(format!("{GEOMETRY}{COMMIT}{STARTUP}"), 0, 0)).unwrap();
     observation.closed = false;

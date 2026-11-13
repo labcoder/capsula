@@ -5,7 +5,7 @@ use std::io::{Write as _, stdout};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 use windows::Win32::Foundation::{LPARAM, POINT, WPARAM};
 use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -148,13 +148,25 @@ impl Session {
         self.settle(end, point, |look, receipt| {
             receipt.count != 0 && !look.foreign && look.capture.is_none()
         })?;
-        let snapshot = Instant::now();
-        let mut look = self.look(end, point)?;
-        let receipt = self.fixture.receipt()?;
-        // SAFETY: reads the foreground HWND only.
-        let foreground = owner(unsafe { GetForegroundWindow() });
-        look.age = snapshot.elapsed();
-        self.activation.confirm(look, receipt, foreground)
+        // Activation hands the front over asynchronously, so the root may arrive a little later.
+        let waited = Instant::now();
+        let until = (waited + SETTLE).min(end);
+        let (look, receipt, foreground) = loop {
+            let snapshot = Instant::now();
+            let mut look = self.look(end, point)?;
+            let receipt = self.fixture.receipt()?;
+            // SAFETY: reads the foreground HWND only.
+            let foreground = owner(unsafe { GetForegroundWindow() });
+            look.age = snapshot.elapsed();
+            if Instant::now() >= until || !self.activation.awaits_root(look, foreground) {
+                break (look, receipt, foreground);
+            }
+            sleep(Duration::from_millis(1));
+        };
+        self.root_wait = waited.elapsed();
+        self.activation
+            .confirm(look, receipt, foreground)
+            .with_context(|| format!("root_wait_ms={}", self.root_wait.as_millis()))
     }
 
     /// Who owns `point`, where the pointer is, and whether anything foreign is active.

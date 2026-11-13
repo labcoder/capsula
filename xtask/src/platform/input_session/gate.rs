@@ -227,6 +227,8 @@ pub(crate) const NULL_GRACE: Duration = Duration::from_millis(100);
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct NullForeground {
     since: Option<Instant>,
+    /// The open grace was already counted when the phase it began in was taken.
+    counted: bool,
     graces: u32,
     longest: Duration,
 }
@@ -250,15 +252,25 @@ impl NullForeground {
                 "foreground left the owned fixture/product processes (foreground_pid={pid} owned=false)"
             );
         }
-        if let Some(since) = self.since.take() {
+        if let Some(since) = self.since.take()
+            && !std::mem::take(&mut self.counted)
+        {
             self.graces += 1;
             self.longest = self.longest.max(now.duration_since(since));
         }
         Ok(())
     }
 
-    /// The graces ended since the last call and the longest of them, then resets both.
-    pub(crate) fn take_used(&mut self) -> (u32, Duration) {
+    /// The graces begun since the last call and the longest of them, then resets both. A grace
+    /// still open at `now` counts here, up to `now`, and not again when it ends.
+    pub(crate) fn take_used(&mut self, now: Instant) -> (u32, Duration) {
+        if let Some(since) = self.since
+            && !self.counted
+        {
+            self.counted = true;
+            self.graces += 1;
+            self.longest = self.longest.max(now.duration_since(since));
+        }
         (
             std::mem::take(&mut self.graces),
             std::mem::take(&mut self.longest),
@@ -277,7 +289,7 @@ mod tests {
         let lease = Lease::new(7);
         let mut null = NullForeground::default();
         null.observe(7, &lease, at(0)).unwrap();
-        assert_eq!(null.take_used(), (0, Duration::ZERO));
+        assert_eq!(null.take_used(at(0)), (0, Duration::ZERO));
 
         null.observe(0, &lease, at(10)).unwrap();
         null.observe(0, &lease, at(110)).unwrap();
@@ -285,8 +297,8 @@ mod tests {
         null.observe(0, &lease, at(200)).unwrap();
         null.observe(0, &lease, at(290)).unwrap();
         null.observe(7, &lease, at(290)).unwrap();
-        assert_eq!(null.take_used(), (2, Duration::from_millis(100)));
-        assert_eq!(null.take_used(), (0, Duration::ZERO));
+        assert_eq!(null.take_used(at(290)), (2, Duration::from_millis(100)));
+        assert_eq!(null.take_used(at(290)), (0, Duration::ZERO));
 
         null.observe(0, &lease, at(400)).unwrap();
         let past = null.observe(0, &lease, at(501)).unwrap_err().to_string();
@@ -310,7 +322,35 @@ mod tests {
             foreign.ends_with("(foreground_pid=42 owned=false)"),
             "{foreign}"
         );
-        assert_eq!(null.take_used(), (0, Duration::ZERO));
+        assert_eq!(
+            null.take_used(start + Duration::from_millis(1)),
+            (1, Duration::from_millis(1)),
+            "the foreign pid ended nothing; the open grace counts at the take"
+        );
+    }
+
+    #[test]
+    fn a_grace_open_at_a_take_counts_there_once_and_still_ends_at_its_limit() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let lease = Lease::new(7);
+        let mut null = NullForeground::default();
+        null.observe(0, &lease, at(0)).unwrap();
+        assert_eq!(null.take_used(at(40)), (1, Duration::from_millis(40)));
+        null.observe(7, &lease, at(60)).unwrap();
+        assert_eq!(
+            null.take_used(at(60)),
+            (0, Duration::ZERO),
+            "the grace isn't counted again when it ends"
+        );
+
+        null.observe(0, &lease, at(100)).unwrap();
+        assert_eq!(null.take_used(at(150)), (1, Duration::from_millis(50)));
+        let past = null.observe(0, &lease, at(201)).unwrap_err().to_string();
+        assert!(
+            past.ends_with("(foreground_pid=0 owned=false null_ms=101)"),
+            "{past}"
+        );
     }
 
     const CALM: Quiet = Quiet {

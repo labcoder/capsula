@@ -439,6 +439,12 @@ cleanup; a phase cannot begin without its complete budget.
    with an EscapeIgnore acknowledgement. The idle fixture proves clearing this affordance,
    not cancellation of a nonexistent backend request.
 
+Every instrumented phase also checks the observer's mask commits: each must own exactly its hit
+proxy, except a Kumo pull's, which the shell records as an empty mask over an area grown from the
+dock. No phase or cold start is meant to pull, so every reader of the observer refuses one, and
+a phase fails with `Kumo pull during <phase>`. Each phase's `pulls.txt` holds its count and
+whether the observer read completely.
+
 There is no keyboard or layouts phase, so shortcut latency and AltGr for hold to talk are
 unmeasured for now. Recursive read-only registry snapshots of the language settings, with
 missing-key/read status, are compared after the phases even on failure; any difference stops
@@ -446,10 +452,10 @@ the session and is never repaired.
 
 For instrumented phases, a PID-filtered warm trace has an 8-second fixed backstop. Three
 input-free repaints and a guarded wait produce a completed CSV that must have zero loss and one
-eligible dock swapchain before the main trace starts. The main trace is seeded the same way, with
-three repaints 100 ms apart, because a new trace records nothing for roughly its first 200 ms. A
-resting dock doesn't paint again, so a main trace with no present on the dock swapchain fails as
-a missed dock seed.
+eligible dock swapchain before the main trace starts. The main trace is seeded with six repaints
+100 ms apart, because a new trace records nothing for roughly its first 200 ms, sometimes longer.
+A resting dock doesn't paint again, so the resting-receipts phase fails a main trace with no
+present on the dock swapchain as a missed dock seed; the other phases don't check it.
 
 Every main-trace swapchain has the same first-present seed rule, including the status panel.
 The v1 CSV parser accepts a finite negative `msUntilRenderStart`: GPU work can start before
@@ -491,8 +497,9 @@ or phase error stops the whole session. A foreign foreground stop names only its
 An empty foreground (pid 0) is allowed for at most 100 ms from its first sample, because
 activation handed to another process's window completes asynchronously. Only an owned window
 in front ends that grace; a foreign pid still stops at once, and a longer NULL stops with
-`foreground_pid=0` and its duration. Nothing is sent while the front is empty, and each phase
-records the graces it used and the longest in `null-foreground.txt`.
+`foreground_pid=0` and its duration. Nothing is sent while the front is empty, except cleanup's
+releases of acknowledged downs. Each phase records the graces it used and the longest in
+`null-foreground.txt`, counting a grace still open at its end as its own.
 Cleanup releases only acknowledged injected downs,
 closes only owned windows/processes gracefully, and retains
 all errors. It never force-kills another process or repairs language settings. Cursor restoration
@@ -521,6 +528,11 @@ A stale snapshot, wrong point, foreign capture/menu or interrupted admission sto
 Only tagged mouse input is allowed at this stage: no Alt-key trick, `AttachThreadInput`, or
 message/input to another app is used. Finalization restores the fixture's prior topmost state.
 If that request fails or cannot arrive, the run refuses and closes its owned fixture instead.
+
+After the click's receipt, the runner waits up to 250 ms for the fixture's root to come to the
+front, because activation completes asynchronously. An empty front or another window of the
+fixture's own process keeps it waiting; a foreign foreground, any input or a moved pointer ends
+the wait at once and refuses. `opener.txt` records the wait as `root_wait_ms`.
 
 The native fixture must acknowledge the tagged click and be the exact foreground window with
 its EDIT focused before publishing Ready. The click changes the last-input tick, so only its

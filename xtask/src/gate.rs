@@ -429,8 +429,9 @@ fn idle_open(session: &mut Session, _: &Images, output: &Path, end: Instant) -> 
     fs::write(
         output.join("opener.txt"),
         format!(
-            "opener=idle\naway_s={}\nattempts={attempts}\n",
-            AWAY.as_secs()
+            "opener=idle\naway_s={}\nattempts={attempts}\nroot_wait_ms={}\n",
+            AWAY.as_secs(),
+            session.root_wait.as_millis()
         ),
     )?;
     Ok(())
@@ -776,7 +777,16 @@ fn summarize(
     if trial.cpu_limit().is_some() {
         return Ok(());
     }
-    let read = observation::read(observer, pid).map(|_| ());
+    let (seen, loaded) = observation::load(observer, pid);
+    let counted = fs::write(
+        output.join("pulls.txt"),
+        format!("pulls={}\ncomplete={}\n", seen.pulls, loaded.is_ok()),
+    )
+    .map_err(anyhow::Error::from);
+    let read = loaded.and_then(|()| {
+        ensure!(seen.pulls == 0, "Kumo pull during {}", trial.name());
+        Ok(())
+    });
     let joined = (|| {
         let mut rows = rows.context("no main trace completed")??;
         match trial {
@@ -794,7 +804,7 @@ fn summarize(
             _ => Ok(()),
         }
     })();
-    session::combine([read, joined])
+    session::combine([read, counted, joined])
 }
 
 #[cfg(test)]
