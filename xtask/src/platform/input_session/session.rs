@@ -26,7 +26,7 @@ use super::fixture::{
     ABORT, ARMED_INPUT, COVER, ESC_HELD, ESCAPE_LEASE, FEEL, INTERRUPTED, OPEN, OPEN_GATE, READY,
     REARM, UNCOVER,
 };
-use super::gate::{Feel, Gate, Lease, Quiet};
+use super::gate::{Feel, Gate, Lease, NullForeground, Quiet};
 use super::guard::{self, StopMetadata};
 use super::{
     FixtureEscMode, InputEdge, MARKER, MAX_COVER, Receipt, Window, class_name, desktop_rect,
@@ -76,6 +76,7 @@ pub(crate) struct Session {
     edit: HWND,
     activation: Activation,
     lease: Cell<Lease>,
+    null_foreground: Cell<NullForeground>,
     first_stop: Cell<Option<StopMetadata>>,
     end: Instant,
     held: [bool; 512],
@@ -113,6 +114,7 @@ impl Session {
             edit,
             activation: Activation::new(owner(fixture.hwnd), owner(edit)),
             lease: Cell::new(Lease::new(fixture.pid)),
+            null_foreground: Cell::new(NullForeground::default()),
             first_stop: Cell::new(None),
             end,
             held: [false; 512],
@@ -127,6 +129,14 @@ impl Session {
             last_accepted: 0,
             qpc_frequency,
         })
+    }
+
+    /// The NULL-foreground graces used since the last call, and the longest of them.
+    pub(crate) fn take_null_graces(&self) -> (u32, Duration) {
+        let mut null = self.null_foreground.get();
+        let used = null.take_used();
+        self.null_foreground.set(null);
+        used
     }
 
     /// Whether the fixture's own window, not merely an owned process, is foreground.
@@ -457,10 +467,14 @@ impl Session {
         );
         // SAFETY: only the PID is inspected, never another application's window content.
         let foreground = pid(unsafe { GetForegroundWindow() });
-        ensure!(
+        let mut null = self.null_foreground.get();
+        let seen = null.observe(
+            foreground,
             self.lease.get().owns(foreground),
-            "foreground left the owned fixture/product processes (foreground_pid={foreground} owned=false)"
+            Instant::now(),
         );
+        self.null_foreground.set(null);
+        seen?;
         input_desktop_available()?;
         let mut info = GUITHREADINFO {
             cbSize: size::<GUITHREADINFO>(),
@@ -556,6 +570,17 @@ impl Session {
             fresh
                 .then_some(())
                 .context("destination snapshot went stale before sending"),
+        )?;
+        // SAFETY: only the PID is inspected; the NULL grace never covers sending.
+        let foreground = pid(unsafe { GetForegroundWindow() });
+        self.or_abort(
+            self.lease
+                .get()
+                .owns(foreground)
+                .then_some(())
+                .with_context(|| {
+                    format!("no owned window in front to send to (foreground_pid={foreground})")
+                }),
         )?;
         self.first_qpc.get_or_insert(qpc);
         self.last_qpc = Some(qpc);

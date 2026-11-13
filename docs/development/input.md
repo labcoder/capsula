@@ -483,6 +483,11 @@ success and failure.
 After injection has opened, any physical input, lock/desktop change, foreign foreground/capture/menu/move loop,
 or phase error stops the whole session. A foreign foreground stop names only its process id
 (`foreground_pid=<n> owned=false`); the run's before and after process lists resolve the image.
+An empty foreground (pid 0) is allowed for at most 100 ms from its first sample, because
+activation handed to another process's window completes asynchronously. Only an owned window
+in front ends that grace; a foreign pid still stops at once, and a longer NULL stops with
+`foreground_pid=0` and its duration. Nothing is sent while the front is empty, and each phase
+records the graces it used and the longest in `null-foreground.txt`.
 Cleanup releases only acknowledged injected downs,
 closes only owned windows/processes gracefully, and retains
 all errors. It never force-kills another process or repairs language settings. Cursor restoration

@@ -754,6 +754,11 @@ fn run_trial(
             counts.behavior_fail
         )?;
         fs::write(directory.join("result.txt"), format!("{result:?}\n"))?;
+        let (graces, longest) = session.take_null_graces();
+        fs::write(
+            directory.join("null-foreground.txt"),
+            format!("graces={graces}\nlongest_ms={}\n", longest.as_millis()),
+        )?;
         Ok(())
     })();
     session::combine([result, recorded])
