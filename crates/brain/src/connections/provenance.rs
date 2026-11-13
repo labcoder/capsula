@@ -181,14 +181,14 @@ pub fn run() -> Outcome {
 
 /// Whether the build resolved the dev credential service and data folder, so the capture can
 /// never touch an installed Kumochi's account.
-fn dev_names(service: &str, data_dir: &str) -> bool {
+pub(super) fn dev_names(service: &str, data_dir: &str) -> bool {
     let dev = ProductIdentity::DEV;
     service == dev.credential_service && data_dir == dev.data_dir
 }
 
 /// `<run>\catalog-provenance.json` for an executable at `<run>\bin\kumochid.exe`, where `<run>`
 /// is `...\live\<digits>`.
-fn output_path(exe: &Path) -> Option<PathBuf> {
+pub(super) fn output_path(exe: &Path) -> Option<PathBuf> {
     let parts: Vec<Component<'_>> = exe.components().collect();
     let [
         ..,
@@ -209,7 +209,7 @@ fn output_path(exe: &Path) -> Option<PathBuf> {
 
 /// The bearer, only for a settled set that outlives the request; anything else stops before a
 /// request, since this mode never renews a session.
-fn usable(
+pub(super) fn usable(
     account: Option<&Account>,
     now: Option<u64>,
 ) -> Result<Secret<Zeroizing<String>>, Outcome> {

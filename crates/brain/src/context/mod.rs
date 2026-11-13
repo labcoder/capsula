@@ -209,7 +209,7 @@ pub(crate) struct Jpeg(Arc<Zeroizing<Vec<u8>>>);
 impl Jpeg {
     /// `bytes` when they start with a JPEG's SOI marker, else nothing; refused bytes are zeroed.
     #[cfg_attr(
-        not(test),
+        not(any(test, debug_assertions)),
         expect(dead_code, reason = "2c builds it from a hold's sealed screen image")
     )]
     pub(crate) fn new(bytes: Vec<u8>) -> Option<Self> {
@@ -330,7 +330,7 @@ impl ModelRequest {
     /// so any other refuses here and no adapter ever has one to drop. The body's ceiling is
     /// checked when it's serialised.
     #[cfg_attr(
-        not(test),
+        not(any(test, debug_assertions)),
         expect(dead_code, reason = "2c attaches a hold's sealed screen image")
     )]
     pub(crate) fn attach(&mut self, image: Jpeg) -> Result<(), ImageRefused> {

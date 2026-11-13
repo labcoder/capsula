@@ -42,6 +42,8 @@ pub(crate) use elements::{
     ElementPlatform, ElementReader, ElementSource, LIMITS, NodeProps, SourceError, TopWindow, Wake,
     excluded_image,
 };
+#[cfg(debug_assertions)]
+pub(crate) use encode::JPEG_CAP;
 pub(crate) use frame::{RawFrame, display_edges};
 #[cfg(all(windows, any(test, feature = "test-support")))]
 pub(crate) use mask::MaskSet;

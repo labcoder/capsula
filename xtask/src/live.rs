@@ -1,7 +1,7 @@
 //! `cargo xtask live <check>`: the real dev brain, on the developer's own dev account, driven over
 //! its real pipes by slice 2's gate client. `account` only reads the non-secret account view;
 //! `signin` and `claude-signin` perform their respective sign-in flows, and
-//! `catalog-provenance` runs only the copied brain, in its capture mode.
+//! `catalog-provenance` and `image` run only the copied brain, each in its own mode.
 //!
 //! The brain serves only the `kumochi.exe` beside it, so, as in the slice 2 gate, an outer xtask
 //! builds the brain, copies it and itself (as `kumochi.exe`) into `target/live/<time>/bin`, and
@@ -13,6 +13,7 @@
 
 mod catalog;
 mod claude_signin;
+mod image;
 mod signin;
 
 use std::fs;
@@ -47,7 +48,9 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         Entry::Inner(Check::Account) => signin::harness(signin::inspect),
         Entry::Inner(Check::SignIn) => signin::inner(),
         Entry::Inner(Check::Claude(ask)) => claude_signin::inner(ask),
-        Entry::Inner(Check::Catalog) => unreachable!("entry refuses --inner for the capture"),
+        Entry::Inner(Check::Catalog | Check::Image) => {
+            unreachable!("entry refuses --inner for the brain-only checks")
+        }
     }
 }
 
@@ -64,15 +67,17 @@ enum Check {
     SignIn,
     Claude(Ask),
     Catalog,
+    Image,
 }
 
 impl Check {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Account,
         Self::SignIn,
         Self::Claude(Ask::SignIn),
         Self::Claude(Ask::Disconnect),
         Self::Catalog,
+        Self::Image,
     ];
 
     /// The arguments after `live` that name it.
@@ -83,6 +88,7 @@ impl Check {
             Self::Claude(Ask::SignIn) => &["claude-signin"],
             Self::Claude(Ask::Disconnect) => &["claude-signin", "--disconnect"],
             Self::Catalog => &["catalog-provenance"],
+            Self::Image => &["image"],
         }
     }
 }
@@ -107,9 +113,9 @@ fn entry(identity: ProductIdentity, args: &[String]) -> Result<Entry> {
                 .map(String::as_str)
                 .eq(check.args().iter().copied())
         })
-        .filter(|check| !(inner && *check == Check::Catalog))
+        .filter(|check| !(inner && matches!(check, Check::Catalog | Check::Image)))
         .context(
-            "usage: cargo xtask live account | signin | claude-signin [--disconnect] | catalog-provenance",
+            "usage: cargo xtask live account | signin | claude-signin [--disconnect] | catalog-provenance | image",
         )?;
     Ok(if inner {
         Entry::Inner(check)
@@ -154,6 +160,9 @@ fn prepare(check: Check) -> Result<()> {
     println!("live {name}: running in {}", folder.display());
     if check == Check::Catalog {
         return catalog::run(&folder);
+    }
+    if check == Check::Image {
+        return image::run(&folder);
     }
     fs::copy(&me, bin.join(SHELL_EXE)).context("copying the client")?;
     let mut inner = Command::new(bin.join(SHELL_EXE));
@@ -528,6 +537,7 @@ mod tests {
                 Entry::Inner(claude(Ask::Disconnect)),
             ),
             (&["catalog-provenance"], Entry::Prepare(Check::Catalog)),
+            (&["image"], Entry::Prepare(Check::Image)),
         ] {
             assert_eq!(
                 entry(ProductIdentity::DEV, &args(list)).expect("debug"),
@@ -546,11 +556,13 @@ mod tests {
             &["first-text"],
             &["catalog-provenance", "--inner"],
             &["catalog-provenance", "C:/elsewhere"],
+            &["image", "--inner"],
+            &["image", "C:/elsewhere"],
         ] {
             let error = entry(ProductIdentity::DEV, &args(list)).expect_err("refused");
             assert_eq!(
                 format!("{error:#}"),
-                "usage: cargo xtask live account | signin | claude-signin [--disconnect] | catalog-provenance"
+                "usage: cargo xtask live account | signin | claude-signin [--disconnect] | catalog-provenance | image"
             );
         }
     }

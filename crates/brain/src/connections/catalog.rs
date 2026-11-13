@@ -18,7 +18,7 @@ use super::http_client::{Endpoint, Http, HttpError, Request};
 use super::oauth::exchange::OAuthCode;
 
 /// The default model's slug when the catalog lists it (owner, plan §9.1).
-const DEFAULT_SLUG: &str = "gpt-6-luna";
+pub(crate) const DEFAULT_SLUG: &str = "gpt-6-luna";
 
 /// The default model `models` calls for when `current` is unset or no longer listed:
 /// [`DEFAULT_SLUG`] at `Low` if listed, else the first model at `Low`. `None` keeps `current`;
