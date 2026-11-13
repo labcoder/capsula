@@ -3,9 +3,15 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::geometry::{PhysicalPoint, WindowRef};
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAK, DwmSetWindowAttribute};
-use windows::Win32::Graphics::Gdi::CreateSolidBrush;
+use windows::Win32::Graphics::Gdi::{
+    AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
+    CreateCompatibleDC, CreateDIBSection, CreateSolidBrush, DIB_RGB_COLORS, DeleteDC, DeleteObject,
+    SelectObject,
+};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
@@ -13,9 +19,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, ES_PASSWORD, GetMessageW,
     GetWindowRect, HMENU, LWA_ALPHA, MSG, PostMessageW, PostThreadMessageW, RegisterClassW,
     SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SetLayeredWindowAttributes, SetWindowDisplayAffinity,
-    ShowWindow, WDA_EXCLUDEFROMCAPTURE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_QUIT, WNDCLASSW,
-    WS_CHILD, WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPEDWINDOW, WS_POPUP,
-    WS_VISIBLE,
+    ShowWindow, ULW_ALPHA, UpdateLayeredWindow, WDA_EXCLUDEFROMCAPTURE, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_APP, WM_QUIT, WNDCLASSW, WS_CHILD, WS_EX_LAYERED, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, w};
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
@@ -100,7 +106,9 @@ const HOST_ENV: &str = "KUMOCHI_WINDOW_PROBE_HOST";
 const HOST_TEST: &str = "platform::windows::window::tests::native_probe_host";
 const PATIENCE: Duration = Duration::from_secs(10);
 
-/// One host window: colour (0x00BBGGRR), physical rectangle, owner index, styles.
+/// One host window: colour (0x00BBGGRR), physical rectangle, owner index, styles. A layered
+/// window with `WS_EX_TRANSPARENT` is opaque; one without it is drawn by `UpdateLayeredWindow`
+/// with every pixel at zero alpha, so clicks pass through it though its styles don't say so.
 struct Plan {
     color: u32,
     rect: [i32; 4],
@@ -121,8 +129,9 @@ const C: usize = 3;
 const X: usize = 4;
 const M: usize = 5;
 const D: usize = 6;
+const U: usize = 8;
 
-fn plan() -> [Plan; 8] {
+fn plan() -> [Plan; 9] {
     let popup = |color, rect, owner, ex| Plan {
         color,
         rect,
@@ -139,7 +148,7 @@ fn plan() -> [Plan; 8] {
             ex: WS_EX_TOPMOST,
         },
         popup(GREEN, [300, 150, 200, 100], Some(T), WINDOW_EX_STYLE(0)),
-        popup(MAGENTA, [600, 100, 100, 100], Some(T), WINDOW_EX_STYLE(0)),
+        popup(MAGENTA, [380, 290, 80, 60], Some(T), WINDOW_EX_STYLE(0)),
         popup(YELLOW, [120, 320, 100, 60], None, WINDOW_EX_STYLE(0)),
         popup(0x00FF_FF00, [700, 300, 150, 100], None, WINDOW_EX_STYLE(0)),
         popup(0x0080_8080, [900, 100, 150, 100], None, WINDOW_EX_STYLE(0)),
@@ -150,6 +159,7 @@ fn plan() -> [Plan; 8] {
             None,
             WS_EX_LAYERED | WS_EX_TRANSPARENT,
         ),
+        popup(PURPLE, [250, 330, 60, 40], None, WS_EX_LAYERED),
     ]
 }
 
@@ -221,12 +231,90 @@ fn create(plan: &Plan, index: usize, owner: Option<HWND>) -> HWND {
         )
     }
     .expect("probe window");
-    if plan.ex.contains(WS_EX_LAYERED) {
+    if plan.ex.contains(WS_EX_LAYERED | WS_EX_TRANSPARENT) {
         // SAFETY: a fully opaque layered window this process owns.
         unsafe { SetLayeredWindowAttributes(window, COLORREF(0), 255, LWA_ALPHA) }
             .expect("opaque layer");
+    } else if plan.ex.contains(WS_EX_LAYERED) {
+        draw_clear(window, [width, height]);
     }
     window
+}
+
+/// Draws `window` with `UpdateLayeredWindow` from a 32-bit bitmap whose pixels are all zero,
+/// alpha included.
+fn draw_clear(window: HWND, [width, height]: [i32; 2]) {
+    // SAFETY: a memory DC this function deletes.
+    let dc = unsafe { CreateCompatibleDC(None) };
+    let info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: u32::try_from(size_of::<BITMAPINFOHEADER>()).expect("small header"),
+            biWidth: width,
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..BITMAPINFOHEADER::default()
+        },
+        ..BITMAPINFO::default()
+    };
+    let mut bits = std::ptr::null_mut();
+    // SAFETY: the header is readable and `bits` writable; a new section's memory starts zeroed.
+    let bitmap = unsafe {
+        CreateDIBSection(
+            Some(dc),
+            &raw const info,
+            DIB_RGB_COLORS,
+            &raw mut bits,
+            None,
+            0,
+        )
+    }
+    .expect("bitmap");
+    // SAFETY: selects this function's bitmap into its own DC.
+    let previous = unsafe { SelectObject(dc, bitmap.into()) };
+    let size = SIZE {
+        cx: width,
+        cy: height,
+    };
+    let origin = POINT::default();
+    let blend = BLENDFUNCTION {
+        BlendOp: u8::try_from(AC_SRC_OVER).expect("a byte flag"),
+        BlendFlags: 0,
+        SourceConstantAlpha: 255,
+        AlphaFormat: u8::try_from(AC_SRC_ALPHA).expect("a byte flag"),
+    };
+    // SAFETY: every pointer is to a local that outlives the call; the window is this process's.
+    unsafe {
+        UpdateLayeredWindow(
+            window,
+            None,
+            None,
+            Some(&raw const size),
+            Some(dc),
+            Some(&raw const origin),
+            COLORREF(0),
+            Some(&raw const blend),
+            ULW_ALPHA,
+        )
+    }
+    .expect("drawn layer");
+    // SAFETY: puts back the DC's first bitmap.
+    let _ours = unsafe { SelectObject(dc, previous) };
+    // SAFETY: the bitmap is no longer selected and is deleted once.
+    let _deleted = unsafe { DeleteObject(bitmap.into()) };
+    // SAFETY: the DC came from CreateCompatibleDC and is deleted once.
+    let _gone = unsafe { DeleteDC(dc) };
+}
+
+/// Checks before any grab that the resolved target is the host's window `index`, so a
+/// resolution mistake can't capture another app's window, even into memory.
+fn ours(target: &Target, host: &Host, index: usize) {
+    assert_eq!(
+        target.top.window,
+        WindowRef(value(host.windows[index])),
+        "the probe's window {index}"
+    );
 }
 
 fn value(window: HWND) -> u64 {
@@ -241,7 +329,7 @@ fn hwnd(value: u64) -> HWND {
 
 /// The host side: makes the plan's windows, then serves one command per stdin line until EOF.
 #[test]
-#[ignore = "Rez only: the window probe's host, started by native_window_probe"]
+#[ignore = "the window probe's host, started by native_window_probe"]
 fn native_probe_host() {
     if std::env::var_os(HOST_ENV).is_none() {
         return;
@@ -305,7 +393,7 @@ fn native_probe_host() {
         unsafe { PostThreadMessageW(main, WM_QUIT, WPARAM(0), LPARAM(0)) }.expect("quit");
     }));
     let mut message = MSG::default();
-    // SAFETY: \`message\` is writable; this thread owns the windows it pumps.
+    // SAFETY: `message` is writable; this thread owns the windows it pumps.
     while unsafe { GetMessageW(&raw mut message, None, 0, 0) }.0 > 0 {
         // SAFETY: dispatches the message this loop just read.
         unsafe { DispatchMessageW(&raw const message) };
@@ -399,12 +487,12 @@ impl Drop for Host {
 
 fn rect(window: HWND) -> RECT {
     let mut rect = RECT::default();
-    // SAFETY: \`rect\` is writable; Windows validates the handle.
+    // SAFETY: `rect` is writable; Windows validates the handle.
     unsafe { GetWindowRect(window, &raw mut rect) }.expect("window rect");
     rect
 }
 
-/// Pixels of \`frame\` within 40 of \`color\` (0x00BBGGRR) on every channel.
+/// Pixels of `frame` within 40 of `color` (0x00BBGGRR) on every channel.
 fn count(frame: &RawFrame, color: u32) -> usize {
     let (_, bgra) = frame.image().expect("committed frame");
     let [r, g, b, _] = color.to_le_bytes();
@@ -446,10 +534,10 @@ fn grab(
 }
 
 /// M1–M4 and M7's forced-handle and destroyed-target parts, over windows a second process owns.
-/// Away-time only, under the measuring lock: \`--ignored --exact --nocapture\`. Pixels stay in
+/// Run it on an idle Windows desktop: `--ignored --exact --nocapture`. Pixels stay in
 /// memory; it prints booleans, counts and milliseconds only.
 #[test]
-#[ignore = "Rez only: opens sentinel windows and captures them, in memory"]
+#[ignore = "opens sentinel windows on an idle Windows desktop and captures them, in memory"]
 #[expect(
     clippy::too_many_lines,
     reason = "one probe run, in the plan's order from M1 to M7"
@@ -464,11 +552,7 @@ fn native_window_probe() {
     // overlay above or beside it left out.
     let (target, resolve_ms) = at(&mut capturer, point(200, 200));
     let target = target.expect("the target under the pointer");
-    assert_eq!(
-        target.top.window,
-        WindowRef(value(host.windows[T])),
-        "M1 target"
-    );
+    ours(&target, &host, T);
     let (m1_capture, capture_ms) = grab(&mut capturer, &target, &mut frame);
     assert_eq!(m1_capture, Ok(()), "M1 capture");
     let meta = FrameMeta {
@@ -514,12 +598,23 @@ fn native_window_probe() {
         assert_eq!(window, Ok(WindowRef(value(expected))), "{name}");
     }
 
+    // N4, recorded and not asserted: a layered window drawn at zero alpha by UpdateLayeredWindow
+    // lets clicks through, but nothing in its styles says so.
+    let (found, _) = at(&mut capturer, point(270, 350));
+    let window = found.map(|target| target.top.window);
+    println!(
+        "N4 drawn_overlay_taken={} target_taken={}",
+        window == Ok(WindowRef(value(host.windows[U]))),
+        window == Ok(WindowRef(value(host.windows[T])))
+    );
+
     // M3: the password edit maps to the frame by the extended frame bounds' origin, to ±0 px.
     for state in ["normal", "maximized"] {
         if state == "maximized" {
             host.command("maximize", T);
         }
         let target = at(&mut capturer, point(200, 200)).0.expect("target");
+        ours(&target, &host, T);
         assert_eq!(
             grab(&mut capturer, &target, &mut frame).0,
             Ok(()),
@@ -561,6 +656,7 @@ fn native_window_probe() {
     let minimised = at(&mut capturer, point(950, 150))
         .0
         .expect("before minimising");
+    ours(&minimised, &host, M);
     host.command("minimize", M);
     let stale = grab(&mut capturer, &minimised, &mut frame).0;
     let refused = preflight(host.windows[M], 0).map(|_| ());
@@ -580,6 +676,7 @@ fn native_window_probe() {
     let doomed = at(&mut capturer, point(950, 350))
         .0
         .expect("before destroying");
+    ours(&doomed, &host, D);
     host.command("destroy", D);
     let destroyed = grab(&mut capturer, &doomed, &mut frame).0;
     println!("M7 destroyed={destroyed:?}");
