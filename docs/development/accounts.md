@@ -621,7 +621,13 @@ whole sign-out makes, for Keep and Erase.
 whose `visibility` is `"list"`, in the server's order. Each must have a `ModelSlug` and a
 one-line `ModelName` (1–80 characters); a mistyped, invalid or duplicate entry, or one past
 `MAX_MODELS` (200), is skipped and counted, and only the count is logged. Every listed model is
-treated as tool-capable (`LISTED_MODELS_CALL_TOOLS`, a local policy).
+treated as tool-capable (`LISTED_MODELS_CALL_TOOLS`, a local policy). A listed model takes image
+input only when its own entry's `input_modalities` array names `"image"`; absent, mistyped or
+anything else means no, and the field never changes which models are shown. The account keeps
+those slugs beside the list and clears them with it; `Accounts::takes_images` is true only for
+such a model on the `ChatGPT` connection, so the screen hold can skip capture before it starts.
+[The field is in the public Codex client's model schema; not yet seen in a capture of this
+account's list.]
 
 `runtime::Accounts` owns the catalog, in memory only. It reads when the account becomes usable
 (`SignedIn`, plan `Enabled`, no recovery but Retry), and again on `Retry` or a new connection

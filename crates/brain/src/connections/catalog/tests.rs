@@ -68,6 +68,7 @@ async fn kept(models: Vec<Value>) -> Result<Vec<(String, String)>, CatalogError>
     let http = answering(200, &json!({ "models": models }).to_string());
     let catalog = read(&http, Secret::new(Zeroizing::new("bearer".to_owned()))).await?;
     Ok(catalog
+        .models
         .into_iter()
         .map(|model| {
             (
@@ -99,8 +100,13 @@ async fn the_listed_models_come_in_the_servers_order_with_the_bearer_sent_only_t
     )
     .await
     .expect("read");
-    let slugs: Vec<_> = catalog.iter().map(|model| model.slug.as_str()).collect();
+    let slugs: Vec<_> = catalog
+        .models
+        .iter()
+        .map(|model| model.slug.as_str())
+        .collect();
     assert_eq!(slugs, ["gpt-6.1-sol", "gpt-6-luna"]);
+    assert_eq!(catalog.images, []);
     assert_eq!(
         *http.sent.lock().expect("log"),
         [(
@@ -108,6 +114,57 @@ async fn the_listed_models_come_in_the_servers_order_with_the_bearer_sent_only_t
             Some("bearer-token".to_owned()),
             0
         )]
+    );
+}
+
+/// Image input comes only from an entry's own `input_modalities` naming `"image"`, and whatever
+/// that field holds, the shown list is the same.
+#[tokio::test]
+async fn image_input_is_read_from_input_modalities_without_changing_the_list() {
+    let with = |slug: &str, modalities: Value| {
+        let mut entry = model(slug, "Model");
+        entry["input_modalities"] = modalities;
+        entry
+    };
+    let http = answering(
+        200,
+        &json!({ "models": [
+            with("m-text-image", json!(["text", "image"])),
+            with("m-text", json!(["text"])),
+            model("m-absent", "Model"),
+            with("m-string", json!("image")),
+            with("m-number", json!(7)),
+            with("m-upper", json!(["IMAGE"])),
+            with("m-nested", json!([["image"]])),
+            with("m-text-image", json!(["image"])),
+            { "slug": "m-hidden", "display_name": "Hidden", "visibility": "hide",
+              "input_modalities": ["image"] },
+        ]})
+        .to_string(),
+    );
+    let listing = read(&http, Secret::new(Zeroizing::new("bearer".to_owned())))
+        .await
+        .expect("read");
+    let slugs: Vec<_> = listing
+        .models
+        .iter()
+        .map(|model| model.slug.as_str())
+        .collect();
+    assert_eq!(
+        slugs,
+        [
+            "m-text-image",
+            "m-text",
+            "m-absent",
+            "m-string",
+            "m-number",
+            "m-upper",
+            "m-nested"
+        ]
+    );
+    assert_eq!(
+        listing.images,
+        [ModelSlug::new("m-text-image").expect("slug")]
     );
 }
 

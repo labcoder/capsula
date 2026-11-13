@@ -418,8 +418,9 @@ async fn each_bound_holds_at_its_limit_and_refuses_one_over() {
 /// Where `catalog::read` found each admitted model, from its numbered name.
 async fn admitted(body: &Value, prefix: &str) -> Vec<usize> {
     let http = Script::new([Ok(answer(200, body.to_string().as_bytes()))]);
-    let models = catalog::read(&http, bearer()).await.expect("a model list");
-    models
+    let listing = catalog::read(&http, bearer()).await.expect("a model list");
+    listing
+        .models
         .iter()
         .map(|model| {
             let index = model.display_name.as_str().strip_prefix(prefix);

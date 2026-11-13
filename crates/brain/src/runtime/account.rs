@@ -10,8 +10,8 @@ use std::thread;
 
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::{
-    AccountOp, AccountRecovery, AccountView, Action, ControlToShell, DataToShell, ErrorKey,
-    ModelInfo, PlanState, SettingsOp, UserError,
+    AccountOp, AccountRecovery, AccountView, Action, ConnectionKind, ControlToShell, DataToShell,
+    ErrorKey, ModelChoice, ModelInfo, ModelSlug, PlanState, SettingsOp, UserError,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{AbortHandle, JoinHandle};
@@ -21,7 +21,7 @@ use zeroize::Zeroizing;
 use crate::connections::account::{
     AccountState, Denied, Effect, Input, Job, Listened, Received, Worker,
 };
-use crate::connections::catalog::{CatalogError, default_model, read};
+use crate::connections::catalog::{CatalogError, Listing, default_model, read};
 use crate::connections::clock::Clock;
 use crate::connections::http_client::{HttpError, SharedHttp};
 use crate::connections::oauth::exchange::{ExchangeError, exchange};
@@ -91,7 +91,7 @@ pub(crate) enum Event {
     /// The read started under `epoch` ended: the models, or what to tell the user, if anything.
     Read {
         epoch: u64,
-        result: Result<Vec<ModelInfo>, Option<UserError>>,
+        result: Result<Listing, Option<UserError>>,
     },
 }
 
@@ -112,6 +112,8 @@ struct Catalog {
     read: Option<AbortHandle>,
     /// The last read's models; `None` until one succeeds in this epoch.
     models: Option<Vec<ModelInfo>>,
+    /// Which of those models take image input, cleared with them.
+    images: Vec<ModelSlug>,
     /// The shell hasn't heard the current list.
     unsent: bool,
 }
@@ -130,6 +132,7 @@ impl Catalog {
             self.epoch += 1;
             self.cancel();
             self.unsent |= self.models.take().is_some();
+            self.images.clear();
         }
         self.usable = usable;
     }
@@ -329,15 +332,16 @@ impl Accounts {
     fn read_ended(
         &mut self,
         epoch: u64,
-        result: Result<Vec<ModelInfo>, Option<UserError>>,
+        result: Result<Listing, Option<UserError>>,
     ) -> Vec<ControlToShell> {
         if epoch != self.catalog.epoch {
             return Vec::new();
         }
         self.catalog.read = None;
         match result {
-            Ok(models) => {
-                self.catalog.models = Some(models);
+            Ok(listing) => {
+                self.catalog.models = Some(listing.models);
+                self.catalog.images = listing.images;
                 self.catalog.unsent = true;
                 Vec::new()
             }
@@ -411,6 +415,18 @@ impl Accounts {
     /// The last catalog read in this epoch, if one succeeded.
     pub(super) fn models(&self) -> Option<&[ModelInfo]> {
         self.catalog.models.as_deref()
+    }
+
+    /// Whether `choice` can be sent an image: the catalog's own model on the account's connection,
+    /// listed as taking image input. Nothing else does, so the screen is skipped before capture.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "2c's hold admission asks before any capture")
+    )]
+    pub(super) fn takes_images(&self, choice: &ModelChoice) -> bool {
+        choice.connection == ConnectionKind::ChatGpt
+            && self.catalog.models.is_some()
+            && self.catalog.images.contains(&choice.model)
     }
 
     /// The catalog for the shell, once each time it changes or a shell connects.
@@ -762,7 +778,7 @@ async fn read_catalog(
     wait: oneshot::Receiver<Access>,
     http: HttpFactory,
     reads: mpsc::UnboundedSender<Event>,
-) -> Result<Vec<ModelInfo>, Option<UserError>> {
+) -> Result<Listing, Option<UserError>> {
     let bearer = match wait.await {
         Ok(Ok(bearer)) => bearer,
         Ok(Err(Denied::Failed(error))) => return Err(Some(error)),
@@ -786,7 +802,7 @@ async fn read_catalog(
 /// one reports nothing.
 async fn catalog_task(
     epoch: u64,
-    task: JoinHandle<Result<Vec<ModelInfo>, Option<UserError>>>,
+    task: JoinHandle<Result<Listing, Option<UserError>>>,
     reads: mpsc::UnboundedSender<Event>,
 ) {
     let result = match task.await {
