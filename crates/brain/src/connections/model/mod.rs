@@ -69,7 +69,7 @@ impl ResponsesBody {
 
 /// `value`'s length as JSON, counted without building it; `usize::MAX` if it can't be
 /// serialized.
-pub(crate) fn serialized_len(value: &Value) -> usize {
+pub(crate) fn serialized_len(value: &impl serde::Serialize) -> usize {
     struct Counted(usize);
 
     impl std::io::Write for Counted {

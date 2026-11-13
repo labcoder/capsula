@@ -545,9 +545,11 @@ fn walk_tree<S: ElementSource>(
                     size: props.rect.size,
                 },
             };
-            let len = serde_json::to_vec(&element)
-                .map_err(|_| Failure::Fault(0))?
-                .len();
+            // Counted, not built: a built copy would hold the name in a buffer freed unzeroed.
+            let len = match crate::connections::model::serialized_len(&element) {
+                usize::MAX => return Err(Failure::Fault(0)),
+                len => len,
+            };
             if bytes + len > limits.bytes {
                 tree.cut = Some(Cut::Bytes);
                 mask_only = true;

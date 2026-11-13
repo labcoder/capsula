@@ -484,9 +484,11 @@ bytes of element JSON (commas and the reply envelope are additional). The byte c
 first. A cut records Elements, Depth, Bytes,
 Budget or Provider; a hard stop replaces an earlier Depth cut. Capture-scoped ids (`c12.e7`)
 carry physical desktop and window-relative rectangles from the same cached properties. Names
-never appear in Debug or errors. Each name is copied once at its exact length, and it's zeroed when
-its element, or the walk's node properties, drop, so a worker's tree leaves no window text behind.
-The platform's own strings (UIA's `BSTR` and its conversion) aren't covered. Names outside the captured display are empty. Password names are discarded, their rectangles are published
+never appear in Debug or errors. Each name is copied once at its exact length, its JSON size is
+counted against the byte cut without building the JSON, and it's zeroed when its element, or the
+walk's node properties, drop. So the tree's own strings leave no window text behind. The platform's
+strings aren't covered: UIA's `BSTR`, and `name()`'s conversion on Windows, which collects
+`decode_utf16` into a `String` that grows. Names outside the captured display are empty. Password names are discarded, their rectangles are published
 immediately, and password subtrees are never descended into.
 
 A source validates the root window and pid and returns its owning pid; the portable layer rejects
