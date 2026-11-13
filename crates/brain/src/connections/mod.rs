@@ -8,6 +8,8 @@ pub mod clock;
 pub mod error;
 pub mod github;
 pub mod http_client;
+#[cfg(debug_assertions)]
+pub mod image_check;
 pub mod marker;
 pub mod model;
 pub mod oauth;

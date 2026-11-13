@@ -302,6 +302,10 @@ pub const CLAUDE_QUESTIONS_ENV: &str = "KUMOCHI_CLAUDE_QUESTIONS";
 /// `cargo xtask live catalog-provenance` runs. A brain built without it exits 10.
 pub const CATALOG_PROVENANCE_ARG: &str = "--catalog-provenance";
 
+/// Dev builds only: the bounded image check, which `cargo xtask live image` runs. A brain built
+/// without it exits 10.
+pub const IMAGE_CHECK_ARG: &str = "--image-check";
+
 /// The capture's one output file, in its `target\live\<time>` run folder.
 pub const CATALOG_PROVENANCE_FILE: &str = "catalog-provenance.json";
 

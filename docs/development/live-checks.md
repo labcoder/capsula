@@ -3,8 +3,8 @@
 `cargo xtask live <check>` runs the real dev brain on the developer's own dev account and drives it
 over its real pipes with the slice 2 gate's client (see [the slice 2 gate](slice2-gate.md)). Live
 checks run on Rez, never in CI, and only with the owner present or in a session the Captain
-approved. The checks are `account`, `signin`, `claude-signin` and `catalog-provenance`, which runs
-the brain alone, with no client (see its section).
+approved. The checks are `account`, `signin`, `claude-signin`, `catalog-provenance` and `image`.
+The last two run the brain alone, with no client (see their sections).
 
 ## How it runs
 
@@ -237,6 +237,54 @@ is partial and must be deleted, never adopted. On exit 0, read the whole file be
 beside it names the command, this check's PR and the exact head it ran at (a squash merge leaves
 that commit off main), the date and the counters. The fixture's walk test carries its own literal
 lists of the approved keys, words and placeholder forms rather than importing this module's.
+
+## `image`
+
+`cargo xtask live image` checks that the account's model accepts an image the way the product sends
+it, and reads it. Run it only in a live turn the Captain assigned, from the reviewed head.
+
+- xtask copies only `kumochid.exe` into `target\live\<time>\bin` and runs
+  `kumochid.exe --image-check` itself, in its kill-on-close job, with stdin and stderr null and
+  stdout piped, for at most 6 minutes. No log, store, pipe, tap or scene thread starts.
+- The mode is built into debug brains only. A brain without it still recognizes the flag and exits
+  10 before logging. Its preflight is the catalog capture's: the dev names, the
+  `...\live\<digits>\bin` folder, one vault open, and a settled session that outlives the request.
+  It never renews the session, and it checks that again before each request.
+- Before anything is sent, it builds three requests through the product's own path
+  (`ModelRequest::attach`, then the Responses body), on the default model at low effort. Each
+  user message asks for the colours of the image's left and right halves, and the image follows it
+  as `input_image` with a `data:image/jpeg;base64` URL and `detail: "high"`. The images are
+  built in memory: a 256×256 JPEG, red on the left and blue on the right; the same halves with
+  noise at the screen worker's 2 MiB JPEG cap; and the same at the largest size whose body stays
+  under the 4 MiB body ceiling. The two noisy images are 2048 wide, with their height searched up
+  to 4096, so they stay between square and 3:2 rather than becoming strips. If either comes out
+  more than 2% under its target, the brain exits 18 before the vault opens. No screen, file or
+  other app is read.
+- The requests go out in that order. The first one that doesn't complete, or a session that's no
+  longer fresh, stops the run with the rest unspent.
+
+**Requests.** The mode's `Budget` is fixed at five, so within one run a sixth send can't happen,
+retries and renewals included; it never retries or renews, so a run sends at most three. Nothing
+counts across runs: a run happens only in a live turn the Captain assigned, and that assignment
+states how many image requests earlier runs have sent. The brain prints one line per request,
+from counts and fixed words only: the image's kind, width and height, JPEG and body bytes, the
+status (`2xx` on success), the provider's error code and the request part it names when it gave
+known ones, the result, the milliseconds and `content_match`, which is true when the answer's words are exactly `red` then
+`blue`. The answer itself is kept only in memory for that match and zeroed. xtask prints only the
+brain's lines that start with `request=`, then one line from the exit code:
+
+```
+request=1 image=small size=256x256 jpeg_bytes=<n> body_bytes=<n> status=2xx code=- param=- result=completed ms=<n> content_match=true
+image check: done (requests: 3)
+image check: nothing sent, exit 16 (requests: 0)
+image check: stopped, exit 20 (requests: at most 3)
+image check: no exit code (requests: at most 3)
+```
+
+Exits 10–17 mean the same as the catalog capture's and send nothing; 18 means an image or body
+couldn't be built, so nothing was sent; 20 means a request didn't complete or the session went
+stale. A run that stopped or has no exit code may have sent one more request than it printed,
+for example when printing a line failed, so its count is an upper bound.
 
 ## Bounds
 
