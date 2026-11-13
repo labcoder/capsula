@@ -891,6 +891,8 @@ shell's guard. None of the counts depends on display, pose or reveal, and sums s
   vertex-count assumptions; any build error fails loudly rather than dropping a primitive.
 - Every `Prim::Rect` is charged as the painter's path fallback, which rotation and partial
   reveals trigger: `corner_segments(radius · c)` pieces per corner and 4(n + 1) + 1 points.
+  The radius is the declared one, not the half-side clamp the painter draws with, so a rect
+  that wider text squeezes never costs less; the painter's own count can only be lower.
   c is its object's charged scale: the composed-scale envelope of the object and its
   ancestors, with a diagram's shrink-to-fit taken as 1, times the surface limit (2 on an overlay, 1 inline), times 1 + 2⁻¹⁶, then capped
   at 64. The 2⁻¹⁶ is a conservative allowance for f32 drift between that envelope and a
@@ -933,8 +935,12 @@ across all visible scenes and reserved ready/rest states. Fills get four times t
 because they are the cheapest to paint: on Rez at 144 Hz, about 2,000 fill vertices cost a
 paint p99 of 0.21 ms against 1.07 ms for as many outline points. A filled circle or ellipse
 costs 48 fill vertices at any size or canvas, so 42 fit. A diagram is shrunk to fit its canvas
-by a factor between 0.8 and 1, which follows its measured text, so preparation charges a
-diagram's contents as if unshrunk: the charge is then the same whatever the fonts. On an
+by a factor between 0.8 and 1, which follows its measured text, so preparation divides each
+fit out and charges a diagram's contents as if unshrunk. A node a cut takes out of its diagram
+keeps that fit in its own transform, and `LayoutState` keeps the fit beside it, so the node
+stays charged unshrunk in every later step and after recovery. The fit then no longer changes
+the charge, but pill and circle radii, label chip sizes and dash lengths still follow measured
+text; the brain's count below bounds the first two. On an
 overlay a plain box costs 21 fill vertices and 21 outline points, and a labelled arrow adds 24
 fill vertices for its head and label chip. So the outline budget bounds diagrams: 36 boxes fit
 at 756 outline points and 37 are refused at 777. The draw prompt and the refusal say about 40
@@ -953,6 +959,58 @@ so the bound is about 14 ms by extrapolation, not measured. It runs on a prepara
 under the 250 ms step deadline, never on the UI thread, and an ordinary call doesn't reach it:
 explicit polygons stop at 512 points, so 2,048 needs a long generated path whose edges nearly
 all overlap without crossing. Without a cap the charge stays exact.
+
+#### The brain's count
+
+The brain lays out a step itself before writing it, with `display::WideMeasure` in place of
+the shell's fonts, and counts its paint work at admission; the shell's guard stays. The wide
+measure is never smaller than a shell text layout that keeps three promises:
+
+- No character is wider than the measure allows. Each printable ASCII character is charged the
+  wider of its regular and bold Segoe UI advance plus a tenth, rounded up to a hundredth of an
+  em, and at most 1 em unless the font's own advance is wider (bold `W` is 1.005 em, charged
+  1.01). To regenerate that table, read the advances of U+0020 to U+007E from the `hmtx`
+  tables of `segoeui.ttf` and `segoeuib.ttf`, divide by the units per em and apply the rule.
+  CJK ideographs, kana, hangul and full-width forms are charged 1 em; private use, everything
+  past the Basic Multilingual Plane and nine measured wider characters 2 em; the rest 1.5 em.
+  Measured on Windows 11 in Segoe UI and its bold and the fallback fonts Rez carries, where
+  emoji are 1.37 em and the widest BMP glyph 1.99 em.
+- Lines are no taller than 1.5 em. Segoe UI's ascent and descent come to 1.33 em.
+- Lines break wherever this rule may, and only once a line is full: a line may break before a
+  word character that follows a space, or before any other character but a space, once it holds
+  something besides spaces; a line that passes the width breaks at its last such place since the
+  previous break, or else before the character that passed it; `\n` always breaks. Word
+  characters are the letters and digits of Latin, Cyrillic, Vietnamese and Bengali text and the
+  punctuation that joins or closes a word. This is the pinned GPUI's `compute_wrap_boundaries`,
+  which shapes labels; its `LineWrapper::wrap_line` breaks differently and would not keep the
+  bound. A shell has to break exactly where this rule may: one that breaks in fewer places, or in
+  a few more (after a hyphen, say), or before a line is full, can show more lines.
+
+Under those promises, greedy breaking ends each of the brain's lines no later than the shell's,
+so every label's lines, width (the narrower of the widest line and the max width, as GPUI
+reports it) and height are at least the shell's, and so is every node, chip and callout. Fill and
+outline are then at least what the shell charges. The scene crate's `wide_measure` tests check
+that against seeded shell measures on generated labels and scenes, and the shell's
+`the_brain_measure_bounds_the_shipped_font` checks it against the real font on a corpus of
+Latin, Cyrillic, Arabic, CJK and emoji labels and on a run of each printable ASCII character.
+
+The bound stops where the promises do. The width table comes from one machine's fonts. Latin
+is Segoe UI's plus a tenth, so a UI font up to a tenth wider still fits, but a platform whose UI
+font is wider must add its advances to the table, and the shell's conformance test fails there
+first. A font outside the measured set (macOS's are unmeasured), cuneiform, which Segoe UI
+Historic draws at up to 4.6 em, a break that one glyph hides (a ligature or an emoji sequence)
+and a character the font draws as several glyphs (the split vowels of Tamil, Malayalam or
+Bengali), which gives the shell a break inside it, can exceed it, and so can a theme font with
+lines taller than 1.5 em. Dashes sit outside the bound too, because a
+dashed edge's length follows the layout instead of growing with it: a long edge label that
+widens a rightward flow's rank gap, a link that skips ranks, and a fan-out to wide nodes all
+change it. The wide measure is the side that under-counts least on the measured fixtures, and
+the fan-out one still comes out at 110 pieces against a shell's 112. In each case a scene near
+a limit can pass the brain's count and still be refused by the shell after the call ended, the
+picture staying at its last shown step. Only paint work refuses at admission: a step whose
+brain-side preparation fails for any other reason, such as the wider layout leaving the
+canvas range, is not refused, carries no charge and isn't counted against the other scenes,
+so the shell's guard is the only check for that scene.
 
 D1's Rez admission target at the cap is p95 ≤1 ms and p99 ≤1.1 ms, with the sampled maximum
 reported separately; clear, cut and eviction retain their ≤2 ms target, global clear included.

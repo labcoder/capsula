@@ -3,7 +3,9 @@
 mod allocation;
 use kumochi_scene::{
     Admission, Begin, Frame, GlobalBudget, Record, SceneState, SceneView, StopCut,
-    display::{MeasureError, PaintWork, TextMeasure, TextStyle, fallback_corner_segments},
+    display::{
+        MeasureError, PaintWork, TextMeasure, TextStyle, WideMeasure, fallback_corner_segments,
+    },
     geom::{Affine, Rect, Vec2},
     layout::{LayoutState, PrepareInput, PreparedStep, SurfaceGeometry, place, prepare, recover},
     parse_record,
@@ -46,6 +48,10 @@ fn header(size: Option<[f32; 2]>) -> Begin {
 }
 
 fn picture(header: Begin, put: &serde_json::Value) -> LayoutState {
+    measured(header, put, &mut Measure)
+}
+
+fn measured(header: Begin, put: &serde_json::Value, measure: &mut dyn TextMeasure) -> LayoutState {
     let mut scene = SceneState::begin(header).expect("scene");
     let before = LayoutState::new(&scene);
     let mut budget = GlobalBudget::default();
@@ -55,7 +61,7 @@ fn picture(header: Begin, put: &serde_json::Value) -> LayoutState {
     else {
         panic!("step")
     };
-    prepared(&mut scene, &mut budget, before, &step).after
+    prepared(&mut scene, &mut budget, before, &step, measure).after
 }
 
 /// Commits and prepares `step` under the paint cap the shell passes.
@@ -64,6 +70,7 @@ fn prepared(
     budget: &mut GlobalBudget,
     before: LayoutState,
     step: &kumochi_scene::Step,
+    measure: &mut dyn TextMeasure,
 ) -> PreparedStep {
     let Admission::New(candidate) = scene.admit(step, budget).expect("admit") else {
         panic!("new")
@@ -79,7 +86,7 @@ fn prepared(
     )
     .expect("input")
     .with_paint_cap(Some(PaintWork::LIMITS));
-    prepare(input, &mut Measure, &AtomicBool::new(false)).expect("prepare")
+    prepare(input, measure, &AtomicBool::new(false)).expect("prepare")
 }
 
 fn assert_graph_placement(frame: &Frame, expected: Affine) {
@@ -116,7 +123,7 @@ fn recorded_graph_stays_centered_through_activation_stop_recovery_and_stage_chan
     else {
         panic!("step")
     };
-    let step = prepared(&mut scene, &mut budget, before, &step);
+    let step = prepared(&mut scene, &mut budget, before, &step, &mut Measure);
     assert_eq!(step.after.fit_extent(), rect(16.0, -14.0, 473.0, 448.0));
     let mut frame = Frame::new();
     view.activate(step, 0, 800, &mut frame).expect("activate");
@@ -493,13 +500,9 @@ fn a_rotated_chain_at_the_depth_limit_stays_within_its_charge() {
     let posed = (a * d - b * c).abs().sqrt();
     assert!((posed - 32.0).abs() < 1e-3, "posed at {posed}");
     assert!(b.abs() > 1.0, "turned, so the painter takes the fallback");
-    let bounds = rect(0.0, 0.0, 8.0, 8.0);
-    assert_eq!(fallback_corner_segments(bounds, radius, 32.0), 10);
-    assert_eq!(
-        fallback_corner_segments(bounds, radius, item.paint_scale),
-        11
-    );
-    assert!(fallback_corner_segments(bounds, radius, posed) <= 11);
+    assert_eq!(fallback_corner_segments(radius, 32.0), 10);
+    assert_eq!(fallback_corner_segments(radius, item.paint_scale), 11);
+    assert!(fallback_corner_segments(radius, posed) <= 11);
 }
 
 #[test]
@@ -530,7 +533,7 @@ fn a_growing_step_replaces_the_fit_once_and_removal_does_not_shrink_it() {
         let Record::Step(step) = parse_record(source.as_bytes()).expect("step") else {
             panic!("step")
         };
-        let step = prepared(&mut scene, &mut budget, layout, &step);
+        let step = prepared(&mut scene, &mut budget, layout, &step, &mut Measure);
         assert_eq!(step.after.fit_extent(), extent);
         layout = step.after.clone();
         view.activate(step, 0, 800, &mut frame).expect("activate");
@@ -572,10 +575,79 @@ fn ordinary_illustrations_fit_the_paint_caps() {
         json!({"edge":{"id":format!("e{index}"),"from":format!("n{}", index - 1),"to":format!("n{index}"),"label":"then"}})
     }));
     for (put, fill, outline) in [(sky, 773, 0), (mouse, 1_037, 29), (flow, 1_326, 630)] {
-        let work = picture(header(None), &serde_json::Value::Array(put)).paint_work();
+        let put = serde_json::Value::Array(put);
+        let work = picture(header(None), &put).paint_work();
         assert_eq!((work.fill_vertices, work.outline_points), (fill, outline));
+        let wide = measured(header(None), &put, &mut WideMeasure).paint_work();
+        assert_eq!(wide, work, "the brain's wide measure charges them the same");
         assert!(work.within_limits());
     }
+}
+
+/// A node a Stop keeps without its shrunk diagram takes the diagram's fit into its own transform,
+/// and stays charged unshrunk in every later step and after recovery: 21 fill and 21 outline
+/// points, where charging it at the 0.8 fit would give 17.
+#[test]
+fn a_node_cut_out_of_its_shrunk_diagram_stays_charged_unshrunk() {
+    let mut put = vec![json!({"diagram":{"id":"d","dir":"down"}})];
+    put.extend(
+        (0..30).map(|index| json!({"node":{"id":format!("n{index}"),"in":"d","label":"Step"}})),
+    );
+    let step = |value: serde_json::Value| {
+        let Record::Step(step) =
+            parse_record(&serde_json::to_vec(&json!({ "step": value })).expect("json"))
+                .expect("step")
+        else {
+            panic!("step")
+        };
+        step
+    };
+    let mut scene = SceneState::begin(header(None)).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = prepared(
+        &mut scene,
+        &mut budget,
+        before,
+        &step(json!({"id":"one","put":put})),
+        &mut Measure,
+    );
+    let node = scene
+        .handle(&"n0".to_owned().try_into().expect("id"))
+        .expect("node");
+    scene
+        .stop(
+            &StopCut {
+                activated: 1,
+                revealed: Bounded::new(vec![node]).expect("cut"),
+            },
+            &mut budget,
+        )
+        .expect("stop");
+    let cut = first.after.cut(&scene).expect("a re-rooted node");
+    let charge = |work: PaintWork| (work.fill_vertices, work.outline_points);
+    assert_eq!(charge(cut.paint_work()), (21, 21));
+    let next = prepared(
+        &mut scene,
+        &mut budget,
+        cut,
+        &step(json!({"id":"two","set":[{"target":"n0","color":"#abcdef"}]})),
+        &mut Measure,
+    );
+    assert_eq!(charge(next.after.paint_work()), (21, 21));
+    let (_, recovered) = recover(
+        scene.header().clone(),
+        scene.recovery_log(),
+        SurfaceGeometry::Overlay {
+            default_canvas: [960.0, 600.0],
+        },
+        &Arc::new(Theme::default()),
+        &mut Measure,
+        &AtomicBool::new(false),
+        Some(PaintWork::LIMITS),
+    )
+    .expect("recovered");
+    assert_eq!(charge(recovered.paint_work()), (21, 21));
 }
 
 /// A diagram's fit follows its measured text, so its paint work is charged unshrunk: the same

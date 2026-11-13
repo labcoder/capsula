@@ -86,7 +86,8 @@ pub(super) struct Placed {
     pub title: Option<Vec2>,
     /// Paint work of `item.primitives`, recounted when they or `paint_scale` change.
     pub work: PaintWork,
-    /// Composed scale `work` charged the rect fallbacks at; the painter refuses a pose past it.
+    /// Composed scale `work` charged the rect fallbacks at; the painter refuses a pose whose pieces
+    /// pass that charge.
     pub paint_scale: f32,
     /// The latest `set.behind` anchor. Once it is removed or cut, `LayoutState::held` keeps its
     /// place.
@@ -137,6 +138,9 @@ pub struct LayoutState {
     /// Removed or cut `set.behind` anchors that live links still reach, directly or through
     /// each other, with each one's own last link: unpainted places in the paint walk.
     pub(super) held: BTreeMap<Handle, Option<Handle>>,
+    /// Shrink-to-fit scales inside placed transforms: each fitted diagram's own, and the product
+    /// a cut composed into an object it re-rooted. Paint work divides them out.
+    pub(super) fits: BTreeMap<Handle, f32>,
 }
 impl fmt::Debug for LayoutState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -159,6 +163,7 @@ impl LayoutState {
             extras: BTreeMap::new(),
             views: BTreeMap::new(),
             held: BTreeMap::new(),
+            fits: BTreeMap::new(),
             canvas: Rect {
                 origin: Vec2::default(),
                 size: scene.header().size.map_or(
@@ -261,6 +266,7 @@ impl LayoutState {
             + heap::btree::<u32, Arc<BTreeMap<usize, Extra>>>(self.extras.len())
             + heap::btree::<WireId, Arc<ViewGeometry>>(self.views.len())
             + heap::btree::<Handle, Option<Handle>>(self.held.len())
+            + heap::btree::<Handle, f32>(self.fits.len())
             + self.views.keys().map(|id| id.as_str().len()).sum::<usize>()
             + 2 * ids
             + heap::ARC_HEADER
@@ -383,6 +389,7 @@ impl LayoutState {
         }
         // The kept prefix is a subset of this one, so this index bounds the partial map's charge.
         let mut retained = Deferred::new(BTreeMap::new(), self.index_bytes());
+        let mut fits = BTreeMap::new();
         for (id, handle, parent) in scene.preparation_objects() {
             let mut object = self
                 .objects
@@ -390,6 +397,7 @@ impl LayoutState {
                 .filter(|object| object.item.handle == handle)
                 .cloned()
                 .ok_or(PrepareError::Stale)?;
+            let mut fit = self.fits.get(&handle).copied().unwrap_or(1.0);
             if parent.is_none()
                 && let Some(old_parent) = object.item.parent
             {
@@ -405,8 +413,12 @@ impl LayoutState {
                         .ok_or_else(primitives::invariant)?;
                     object.inherited_opacity *= ancestor.inherited_opacity
                         * ancestor.rest.opacity.unwrap_or(ancestor.item.opacity);
+                    fit *= self.fits.get(&handle).copied().unwrap_or(1.0);
                     next = ancestor.item.parent;
                 }
+            }
+            if fit < 1.0 {
+                fits.insert(object.item.handle, fit);
             }
             object.item.parent = parent;
             retained.insert(id.clone(), object);
@@ -436,6 +448,7 @@ impl LayoutState {
             presentation_scale: self.presentation_scale,
             presentation_limit: self.presentation_limit,
             held: BTreeMap::new(),
+            fits,
         });
         after.prune_extras();
         after.hold_dropped_anchors(self);

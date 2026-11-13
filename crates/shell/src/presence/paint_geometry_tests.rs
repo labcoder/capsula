@@ -228,7 +228,7 @@ fn exact_edge_and_chord_reveal_boundaries_match_on_both_sides() {
             rect,
             radius,
             1.0,
-            kumochi_scene::display::fallback_corner_segments(rect, radius, MAX_COMPOSED_SCALE),
+            kumochi_scene::display::fallback_corner_segments(radius, MAX_COMPOSED_SCALE),
         )
         .expect("charged corners");
         let outline = paint_paths::rounded(rect, radius, segments);

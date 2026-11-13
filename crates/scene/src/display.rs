@@ -7,6 +7,9 @@ use crate::{
 };
 use std::{fmt, sync::Arc};
 
+mod wide;
+pub use wide::WideMeasure;
+
 /// Text shaping parameters shared with painting.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TextStyle {
@@ -188,12 +191,12 @@ impl PaintWork {
                     Self::fills(points.len().saturating_add(crossings(points, cap)))
                 }
                 Prim::Rect {
-                    rect,
                     radius,
                     fill,
                     border,
+                    ..
                 } => {
-                    let points = fallback_corner_segments(*rect, *radius, scale)
+                    let points = fallback_corner_segments(*radius, scale)
                         .saturating_add(1)
                         .saturating_mul(4)
                         .saturating_add(1);
@@ -364,10 +367,11 @@ pub fn corner_segments(world_radius: f64) -> usize {
             .asin();
     whole((std::f64::consts::FRAC_PI_4 / half_angle).ceil()).map_or(usize::MAX, |n| n.max(1))
 }
-/// Corner pieces a `Prim::Rect` fallback is charged: its radius clamped as painted, at the
-/// composed scale its object was charged at, so no admitted pose needs more.
-pub fn fallback_corner_segments(rect: Rect, radius: f32, scale: f32) -> usize {
-    let radius = radius.clamp(0.0, (rect.size.x.min(rect.size.y) * 0.5).max(0.0));
+/// Corner pieces a `Prim::Rect` fallback is charged: its declared radius at the composed scale
+/// its object was charged at, so no admitted pose needs more. The painter clamps the radius to
+/// half the shorter side, which only lowers the count; charging before the clamp keeps a rect
+/// squeezed by wider text from costing less.
+pub fn fallback_corner_segments(radius: f32, scale: f32) -> usize {
     corner_segments(f64::from(radius) * f64::from(scale))
 }
 
@@ -748,13 +752,13 @@ mod tests {
         // Radius 8 at scale 64 needs 26 pieces per corner: 4 · 27 + 1 points.
         let node = at_64(&[rect(100.0, 8.0, None, Some((paint(), 2.0)))]);
         assert_eq!((node.outline_points, node.fill_vertices), (109, 0));
-        // Clamped to half of a 10-unit side: radius 5 at scale 64 needs 20 pieces.
+        // Charged at its declared radius 8, not the 5 the painter clamps a 10-unit side to.
         assert_eq!(
             at_64(&[rect(10.0, 8.0, Some(paint()), None)]).fill_vertices,
-            85
+            109
         );
         assert_eq!(
-            fallback_corner_segments(Rect::default(), f32::NAN, MAX_COMPOSED_SCALE),
+            fallback_corner_segments(f32::NAN, MAX_COMPOSED_SCALE),
             usize::MAX
         );
         let largest = Prim::Rect {
