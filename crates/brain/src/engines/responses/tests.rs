@@ -87,6 +87,33 @@ fn the_body_is_the_request_as_data() {
     assert_eq!(body(&request("Be brief.", input)), Ok(expected));
 }
 
+/// A text-only body is pinned byte for byte, so image input can't change what text turns send.
+#[test]
+fn a_text_only_body_keeps_its_exact_bytes() {
+    let input = vec![
+        InputItem::Message {
+            role: Role::User,
+            text: "Hi \"you\"".to_owned(),
+        },
+        InputItem::Message {
+            role: Role::Assistant,
+            text: "Hello.".to_owned(),
+        },
+    ];
+    let mut request = request("Be brief.", input);
+    request.tools.clear();
+    assert_eq!(
+        body(&request).expect("small").to_string(),
+        concat!(
+            r#"{"include":["reasoning.encrypted_content"],"#,
+            r#""input":[{"content":"Hi \"you\"","role":"user","type":"message"},"#,
+            r#"{"content":"Hello.","role":"assistant","type":"message"}],"#,
+            r#""instructions":"Be brief.","model":"gpt-fixture","reasoning":{"effort":"xhigh"},"#,
+            r#""store":false,"stream":true,"tools":[]}"#,
+        )
+    );
+}
+
 #[test]
 fn the_offered_draw_schema_is_serialized_non_strict_without_changing_other_tools() {
     let mut request = request("", Vec::new());
