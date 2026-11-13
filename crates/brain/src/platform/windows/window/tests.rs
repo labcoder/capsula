@@ -433,12 +433,13 @@ impl Host {
         let stdin = child.stdin.take();
         let mut lines = BufReader::new(child.stdout.take().expect("host stdout")).lines();
         let (mut windows, mut edit) = (Vec::new(), HWND::default());
+        // libtest prints `test <name> ... ` without a newline, so the first line has a prefix.
         for line in lines.by_ref().map_while(Result::ok) {
             let words: Vec<&str> = line.split(' ').collect();
             match words.as_slice() {
-                ["hwnd", _, handle] => windows.push(hwnd(handle.parse().expect("handle"))),
-                ["edit", handle] => edit = hwnd(handle.parse().expect("handle")),
-                ["ready"] => break,
+                [.., "hwnd", _, handle] => windows.push(hwnd(handle.parse().expect("handle"))),
+                [.., "edit", handle] => edit = hwnd(handle.parse().expect("handle")),
+                [.., "ready"] => break,
                 _ => {}
             }
         }
