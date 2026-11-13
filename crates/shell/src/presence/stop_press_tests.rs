@@ -36,7 +36,9 @@ fn grabs(seen: &RefCell<Vec<PullChanged>>) -> usize {
 }
 
 #[gpui::test]
-fn a_press_on_stop_never_grabs_kumo_but_a_press_on_kumo_does_while_its_picture_shows(cx: &mut TestAppContext) {
+fn a_press_on_stop_never_grabs_kumo_but_a_press_on_kumo_does_while_its_picture_shows(
+    cx: &mut TestAppContext,
+) {
     let _area = work_area_fixture::set([0, 0, 2560, 1392]);
     let presence = test_fixture::presence(cx);
     let (panel, kumo) = presence.update(cx, |this, cx| {
