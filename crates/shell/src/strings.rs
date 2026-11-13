@@ -207,9 +207,11 @@ pub(crate) enum Text {
     // Onboarding
     OnboardingClose,
     OnboardingContinue,
+    OnboardingFinish,
     OnboardingNotNow,
     OnboardingPlan,
     OnboardingWelcomeHelp,
+    ShortcutKeys,
 
     // ChatGPT accounts
     AccountProvider,
@@ -484,9 +486,11 @@ impl Text {
         // Onboarding
         OnboardingClose,
         OnboardingContinue,
+        OnboardingFinish,
         OnboardingNotNow,
         OnboardingPlan,
         OnboardingWelcomeHelp,
+        ShortcutKeys,
 
         // ChatGPT accounts
         AccountProvider,
@@ -763,9 +767,11 @@ impl Text {
             // Onboarding
             Self::OnboardingClose => "onboarding-close",
             Self::OnboardingContinue => "onboarding-continue",
+            Self::OnboardingFinish => "onboarding-finish",
             Self::OnboardingNotNow => "onboarding-not-now",
             Self::OnboardingPlan => "onboarding-plan",
             Self::OnboardingWelcomeHelp => "onboarding-welcome-help",
+            Self::ShortcutKeys => "shortcut-keys",
 
             // ChatGPT accounts
             Self::AccountProvider => "accounts-provider",
@@ -886,14 +892,23 @@ impl Strings {
     /// The welcome's words before and after the name input, which may sit anywhere in it. Both
     /// are trimmed, since the row spaces the input itself.
     pub(crate) fn onboarding_welcome(&self) -> (String, String) {
-        const SPOT: &str = "\u{E000}";
         let mut args = FluentArgs::new();
         args.set("name", SPOT);
-        let text = self.format("onboarding-welcome", Some(&args));
-        match text.split_once(SPOT) {
-            Some((before, after)) => (before.trim().to_owned(), after.trim().to_owned()),
-            None => (text, String::new()),
-        }
+        around_spot(self.format("onboarding-welcome", Some(&args)))
+    }
+
+    /// The shortcut step's words before and after the keys, which may sit anywhere in it, then
+    /// its help line, with the assistant's name.
+    pub(crate) fn onboarding_shortcut(&self, assistant: &str) -> [String; 3] {
+        let mut args = FluentArgs::new();
+        args.set("assistant", assistant);
+        args.set("keys", SPOT);
+        let (before, after) = around_spot(self.format("onboarding-shortcut", Some(&args)));
+        [
+            before,
+            after,
+            self.format("onboarding-shortcut-help", Some(&args)),
+        ]
     }
 
     /// The question for the user's name and its help line, with the assistant's name.
@@ -981,6 +996,17 @@ impl Strings {
     }
 }
 
+/// Stands in for an element placed inside a sentence, so the words around it can be split off.
+const SPOT: &str = "\u{E000}";
+
+/// The words before and after [`SPOT`], trimmed, since the row spaces the element itself.
+fn around_spot(text: String) -> (String, String) {
+    match text.split_once(SPOT) {
+        Some((before, after)) => (before.trim().to_owned(), after.trim().to_owned()),
+        None => (text, String::new()),
+    }
+}
+
 /// Each error's catalog id, grouped by feature.
 const fn error_id(key: ErrorKey) -> &'static str {
     match key {
@@ -1065,6 +1091,19 @@ mod tests {
                 "Also show {} in the taskbar",
                 kumochi_protocol::constants::DISPLAY_NAME
             )
+        );
+    }
+
+    #[test]
+    fn onboarding_splits_the_shortcut_at_its_keys() {
+        assert_eq!(
+            Strings::english().onboarding_shortcut("Kumo"),
+            [
+                "Double-tap".to_owned(),
+                "to chat with Kumo".to_owned(),
+                "Try it now: two quick presses of both keys open a typing box under the dock."
+                    .to_owned()
+            ]
         );
     }
 

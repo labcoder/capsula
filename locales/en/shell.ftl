@@ -273,6 +273,11 @@ onboarding-accounts = Connect an account for { $assistant }
 onboarding-accounts-help = Connect any you have, or skip this. You can connect them later in Settings → Accounts.
 onboarding-not-now = Not now
 onboarding-plan = You're using your ChatGPT plan
+# { $keys } marks where the shortcut's keys sit; text may come before or after them.
+onboarding-shortcut = Double-tap { $keys } to chat with { $assistant }
+onboarding-shortcut-help = Try it now: two quick presses of both keys open a typing box under the dock.
+onboarding-finish = Finish
+shortcut-keys = left Ctrl + left Alt
 
 # ChatGPT accounts
 

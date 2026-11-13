@@ -1,6 +1,6 @@
-//! The first-run window: the welcome, the names and the accounts, over [`crate::onboarding`]'s
-//! plain state. The names go through the Settings model and its save path; nothing here keeps or
-//! logs one.
+//! The first-run window: the welcome, the names, the accounts and the shortcut, over
+//! [`crate::onboarding`]'s plain state. The names go through the Settings model and its save path;
+//! nothing here keeps or logs one.
 
 mod accounts;
 #[cfg(test)]
@@ -173,12 +173,17 @@ impl OnboardingView {
             || self.state.finishing()
     }
 
-    /// The step's words around its input, then its help line; the account step's sections.
+    /// The step's words around its input, then its help line; the account step's sections; the
+    /// shortcut.
     fn body(&self, cx: &Context<'_, Self>) -> AnyElement {
         let strings = cx.global::<Strings>();
         let state = self.model.read(cx);
         let (Some(field), Some(input)) = (self.state.step().field(), self.input()) else {
-            return self.accounts(cx).into_any_element();
+            return if self.state.step() == Step::Shortcut {
+                self.shortcut(cx).into_any_element()
+            } else {
+                self.accounts(cx).into_any_element()
+            };
         };
         let input = Input::new(input)
             .aria_label(strings.get(match field {
@@ -238,17 +243,56 @@ impl OnboardingView {
         }
     }
 
-    /// The plan line, then the one button: Continue, or Not now on the account step until a
-    /// model connection is usable.
+    /// The shortcut's sentence with its keys as a keycap, then its help line.
+    fn shortcut(&self, cx: &Context<'_, Self>) -> impl IntoElement {
+        let strings = cx.global::<Strings>();
+        let [before, after, help] =
+            strings.onboarding_shortcut(self.model.read(cx).value(Field::Assistant));
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_x_2()
+                    .text_xl()
+                    .child(before)
+                    .child(
+                        div()
+                            .px_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .child(strings.get(Text::ShortcutKeys)),
+                    )
+                    .children((!after.is_empty()).then_some(after)),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(help),
+            )
+    }
+
+    /// The plan line, then the one button: Continue; Not now on the account step until a model
+    /// connection is usable; Finish, not primary, at the shortcut, whose real action is the
+    /// double-tap.
     fn footer(&self, cx: &Context<'_, Self>) -> impl IntoElement {
         let strings = cx.global::<Strings>();
         let state = self.model.read(cx);
-        let skip = self.state.step() == Step::Accounts && !accounts::usable(state);
+        let step = self.state.step();
+        let skip = step == Step::Accounts && !accounts::usable(state);
         let next = self.owner.clone();
         let button = Button::new("onboarding-continue")
             .debug_selector(|| "onboarding-continue".into())
             .tab_index(1)
-            .label(strings.get(if skip {
+            .label(strings.get(if step == Step::Shortcut {
+                Text::OnboardingFinish
+            } else if skip {
                 Text::OnboardingNotNow
             } else {
                 Text::OnboardingContinue
@@ -269,6 +313,8 @@ impl OnboardingView {
             }))
             .child(if skip {
                 button.ghost()
+            } else if step == Step::Shortcut {
+                button
             } else {
                 button.primary()
             })
@@ -467,6 +513,20 @@ impl Presence {
         self.onboarding_next(from, next, cx)
     }
 
+    /// A double-tap while the window shows: used up, and at the shortcut it asks for the finish
+    /// that opens typing.
+    pub(super) fn onboarding_double_tap(
+        &mut self,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
+        let Some(panel) = &self.onboarding else {
+            return Ok(());
+        };
+        let state = &panel.view.read(cx).state;
+        let (from, next) = (state.step(), state.double_tap(self.settings.read(cx)));
+        self.onboarding_next(from, next, cx)
+    }
+
     /// What the plain state decided, `from` being the step that was showing when it decided.
     fn onboarding_next(
         &mut self,
@@ -477,7 +537,7 @@ impl Presence {
         let Some(panel) = &self.onboarding else {
             return Ok(());
         };
-        if matches!(next, Next::Moved | Next::Finish) {
+        if next == Next::Moved {
             let (link, session) = (&self.link, &self.session);
             let recorded = self.settings.update(cx, |state, _| {
                 state.complete_onboarding_step(from.recorded(), |op| {
@@ -493,6 +553,11 @@ impl Presence {
         match next {
             Next::Stay => Ok(()),
             Next::Moved => {
+                // Leaving the account step hands its sign-ins over for the window's whole life.
+                if from == Step::Accounts {
+                    self.onboarding_chatgpt.hand_over();
+                    self.onboarding_claude.hand_over();
+                }
                 tracing::info!(step = ?panel.view.read(cx).state.step(), "onboarding moved on");
                 panel
                     .window
@@ -503,7 +568,7 @@ impl Presence {
                     })
                     .map_err(|error| OpenError::Gpui(error.into()))
             }
-            Next::Finish => {
+            Next::Finish(landing) => {
                 let view = panel.view.clone();
                 let (link, session) = (&self.link, &self.session);
                 let queued = self.settings.update(cx, |state, cx| {
@@ -516,7 +581,7 @@ impl Presence {
                 });
                 view.update(cx, |view, cx| {
                     if queued {
-                        view.state.finish_queued(Landing::Peek);
+                        view.state.finish_queued(landing);
                     }
                     view.unsent = !queued;
                     cx.notify();
@@ -528,10 +593,11 @@ impl Presence {
                 self.onboarding_chatgpt.hand_over();
                 self.onboarding_claude.hand_over();
                 self.close_onboarding(cx)?;
-                if landing == Landing::Peek {
-                    self.set_panel(PanelVisibility::Visible, cx)?;
+                match landing {
+                    Landing::Peek => self.set_panel(PanelVisibility::Visible, cx),
+                    Landing::Typing => self.focus_text(cx),
+                    Landing::Quiet => Ok(()),
                 }
-                Ok(())
             }
         }
     }
