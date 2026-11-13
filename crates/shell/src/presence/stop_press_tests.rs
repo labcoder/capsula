@@ -1,5 +1,5 @@
 //! A press on the peek's Stop button is a press on Stop: it never grabs Kumo, while a press on
-//! Kumo in the same peek does.
+//! Kumo in the same peek does, with Kumo's picture showing.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -9,6 +9,7 @@ use gpui_kit::{
     WindowOptions, point, px, size,
 };
 
+use super::kumo::Motion;
 use super::kumo_view::{PullChanged, PullSite};
 use super::test_fixture;
 use crate::platform::input::input;
@@ -35,7 +36,7 @@ fn grabs(seen: &RefCell<Vec<PullChanged>>) -> usize {
 }
 
 #[gpui::test]
-fn a_press_on_stop_never_grabs_kumo_but_a_press_on_kumo_does(cx: &mut TestAppContext) {
+fn a_press_on_stop_never_grabs_kumo_but_a_press_on_kumo_does_while_its_picture_shows(cx: &mut TestAppContext) {
     let _area = work_area_fixture::set([0, 0, 2560, 1392]);
     let presence = test_fixture::presence(cx);
     let (panel, kumo) = presence.update(cx, |this, cx| {
@@ -70,18 +71,28 @@ fn a_press_on_stop_never_grabs_kumo_but_a_press_on_kumo_does(cx: &mut TestAppCon
         .expect("a GPUI test window opens")
         .0;
     let mut frame = VisualTestContext::from_window(window, cx);
-    frame.update(|window, cx| window.draw(cx).clear(cx));
+    kumo.update(&mut frame, |kumo, cx| {
+        kumo.rebake(1.0, cx);
+        kumo.show(Motion::Reduced, cx);
+    });
+    frame.run_until_parked();
+    frame.update(|window, cx| {
+        kumo.update(cx, |kumo, cx| kumo.step(0.0, window, cx));
+        window.draw(cx).clear(cx);
+    });
     let stop = frame.debug_bounds("presence-stop").expect("Stop shows");
     let body = frame.debug_bounds("presence-kumo").expect("Kumo shows");
 
     click(&mut frame, stop.center());
+    let on_stop = grabs(&seen);
+    let upper = point(body.center().x, body.origin.y + px(8.0));
+    click(&mut frame, upper);
+    let square = kumo.read_with(&frame, |kumo, _| kumo.pressed_square);
     assert_eq!(
-        grabs(&seen),
-        0,
-        "a press on Stop at {:?} grabbed Kumo at {body:?}",
+        (on_stop, grabs(&seen) - on_stop, square),
+        (0, 1, Some(body)),
+        "(grabs from Stop at {:?}, grabs from Kumo's upper part at {upper:?}, the square presses \
+         were tested against) with Kumo drawn at {body:?}",
         stop.center()
     );
-
-    click(&mut frame, body.center());
-    assert_eq!(grabs(&seen), 1, "a press on Kumo at {body:?} grabs it");
 }
