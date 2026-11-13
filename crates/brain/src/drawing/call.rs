@@ -30,10 +30,11 @@ const RETRY_HINT: &str = "; drawn lists what this call added, and earlier steps 
 /// Follows a model error once the run drew its whole step budget but still takes calls.
 const FULL_HINT: &str = "; no further step can be drawn in this turn";
 /// What everything on screen together can paint, in shapes a model can plan with. The draw
-/// prompt says the same, and a test ties both numbers to the paint caps.
+/// prompt says the same, and `the_paint_budget_matches_the_prompt_and_the_paint_caps` ties both
+/// numbers to the paint caps.
 macro_rules! paint_budget {
     () => {
-        "everything on screen can hold about 20 plain boxes, or about 10 when arrows have labels"
+        "everything on screen can hold about 40 filled circles or ellipses, or a diagram of about 20 boxes with labelled arrows"
     };
 }
 #[cfg(test)]

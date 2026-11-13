@@ -538,3 +538,42 @@ fn a_growing_step_replaces_the_fit_once_and_removal_does_not_shrink_it() {
         assert_eq!(frame.items()[0].transform.0[0].to_bits(), scale.to_bits());
     }
 }
+
+/// Ordinary illustrations of the kind the 512-point caps refused (OSC-688) fit the paint caps.
+#[test]
+fn ordinary_illustrations_fit_the_paint_caps() {
+    let round = |id: String, at: [f32; 4]| json!({"shape":{"id":id,"kind":"ellipse","box":at,"fill":"#d5dde9","width":0}});
+    // A night sky: its background, a two-circle moon and six stars, then a cloud of eight
+    // ellipses. Every filled ellipse is a 48-gon whatever its size: 5 + 16 · 48 = 773.
+    let mut sky = vec![
+        json!({"shape":{"id":"sky","kind":"rect","box":[0,0,960,600],"fill":"#0b1a3a","width":0}}),
+    ];
+    sky.extend((0..16_u16).map(|index| {
+        let x = f32::from(index) * 55.0;
+        round(format!("round{index}"), [x, 100.0, 40.0 + x / 4.0, 30.0])
+    }));
+    // A detailed cartoon mouse: 21 filled round parts and a radius-12 shirt, filled and bordered,
+    // whose fallback costs 29 points: 21 · 48 + 29 = 1,037.
+    let mut mouse = vec![
+        json!({"shape":{"id":"shirt","kind":"rect","box":[225,455,200,145],"radius":12,"fill":"red","color":"fg","width":2}}),
+    ];
+    mouse.extend((0..21_u16).map(|index| {
+        let x = f32::from(index) * 30.0;
+        round(format!("part{index}"), [x, 200.0, 24.0, 18.0])
+    }));
+    // A 30-step flowchart with labelled arrows, shrunk to fit the default canvas: 17 points per
+    // node, and per arrow 3 for its head and 17 for its label's chip: 30 · 17 + 29 · 20 = 1,090
+    // fill and 30 · 17 = 510 outline.
+    let mut flow = vec![json!({"diagram":{"id":"d","dir":"down"}})];
+    flow.extend(
+        (0..30).map(|index| json!({"node":{"id":format!("n{index}"),"in":"d","label":"Step"}})),
+    );
+    flow.extend((1..30).map(|index| {
+        json!({"edge":{"id":format!("e{index}"),"from":format!("n{}", index - 1),"to":format!("n{index}"),"label":"then"}})
+    }));
+    for (put, fill, outline) in [(sky, 773, 0), (mouse, 1_037, 29), (flow, 1_090, 510)] {
+        let work = picture(header(None), &serde_json::Value::Array(put)).paint_work();
+        assert_eq!((work.fill_vertices, work.outline_points), (fill, outline));
+        assert!(work.within_limits());
+    }
+}
