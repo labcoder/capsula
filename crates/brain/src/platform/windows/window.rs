@@ -4,7 +4,7 @@
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 
 use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect, WindowRef};
-use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWINDOWATTRIBUTE, DwmGetWindowAttribute,
 };
@@ -13,10 +13,11 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowExW, GA_ROOT, GW_HWNDNEXT, GWL_EXSTYLE, GetAncestor, GetClassNameW,
+    FindWindowExW, GA_ROOT, GW_HWNDNEXT, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW,
     GetLayeredWindowAttributes, GetTopWindow, GetWindow, GetWindowDisplayAffinity,
     GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
-    LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA, WDA_NONE, WS_EX_LAYERED, WS_EX_TRANSPARENT,
+    LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA, WDA_NONE, WINDOW_LONG_PTR_INDEX, WS_DISABLED,
+    WS_EX_LAYERED, WS_EX_TRANSPARENT, WindowFromPoint,
 };
 use windows::core::{PCWSTR, w};
 use windows_sys::Win32::Security::{
@@ -46,8 +47,11 @@ struct Facts {
     kumochi: bool,
     visible: bool,
     cloaked: bool,
-    /// `WS_EX_TRANSPARENT`, or layered at zero alpha: clicks fall through it.
+    /// `WS_EX_TRANSPARENT`, layered at zero alpha, or drawn by `UpdateLayeredWindow` with a
+    /// click at the point landing elsewhere: clicks fall through it.
     transparent: bool,
+    /// Drawn by `UpdateLayeredWindow`, and where a click lands can't be told.
+    unclear: bool,
     /// Inside its rectangle and its window region.
     contains: bool,
     desktop: bool,
@@ -58,6 +62,7 @@ enum Step {
     Skip,
     Stop,
     Take,
+    Unclear,
 }
 
 /// One window of the walk: a click passes through what's skipped, and the desktop ends it.
@@ -67,6 +72,8 @@ fn step(facts: Facts) -> Step {
         Step::Skip
     } else if facts.desktop {
         Step::Stop
+    } else if facts.unclear {
+        Step::Unclear
     } else {
         Step::Take
     }
@@ -80,6 +87,7 @@ pub(super) fn pointer_window(point: PhysicalPoint, shell: u32) -> Result<Target,
         let Some(window) = next else { break };
         match step(facts(window, point, shell)) {
             Step::Take => return preflight(window, shell),
+            Step::Unclear => return Err(Refusal::Ambiguous),
             Step::Stop => break,
             Step::Skip => {}
         }
@@ -89,18 +97,36 @@ pub(super) fn pointer_window(point: PhysicalPoint, shell: u32) -> Result<Target,
     Err(Refusal::NoWindow)
 }
 
+/// Reads only what's needed: no process is opened for a window that leaves out the point.
 fn facts(window: HWND, point: PhysicalPoint, shell: u32) -> Facts {
     // SAFETY: Windows validates the opaque handle and returns its visibility.
     if !unsafe { IsWindowVisible(window) }.as_bool() {
         return Facts::default();
     }
-    Facts {
+    if !contains(window, point) {
+        return Facts {
+            visible: true,
+            ..Facts::default()
+        };
+    }
+    let found = Facts {
         kumochi: super::elements::excluded(owner(window).0, shell).unwrap_or(false),
         visible: true,
         cloaked: cloaked(window),
-        transparent: transparent(window),
-        contains: contains(window, point),
+        contains: true,
         desktop: DESKTOP.contains(&class(window).as_str()),
+        ..Facts::default()
+    };
+    let hit = match layer(window) {
+        Layer::Opaque => Hit::Here,
+        Layer::ClickThrough => Hit::Through,
+        Layer::Drawn if found.kumochi || found.cloaked => Hit::Through,
+        Layer::Drawn => drawn_hit(window, point, shell),
+    };
+    Facts {
+        transparent: hit == Hit::Through,
+        unclear: hit == Hit::Unclear,
+        ..found
     }
 }
 
@@ -130,10 +156,7 @@ fn preflight(window: HWND, shell: u32) -> Result<Target, Refusal> {
             return Err(Refusal::Elevated);
         }
     }
-    let mut affinity = 0;
-    // SAFETY: `affinity` is writable; Windows validates the handle.
-    let read = unsafe { GetWindowDisplayAffinity(root, &raw mut affinity) };
-    if read.is_err() || affinity != WDA_NONE.0 {
+    if protected(root) {
         return Err(Refusal::Protected);
     }
     let frame = frame(root).ok_or(Refusal::WindowChanged)?;
@@ -148,7 +171,7 @@ fn preflight(window: HWND, shell: u32) -> Result<Target, Refusal> {
             pid,
             rect: frame,
         },
-        tid,
+        instance: tid,
         dpi,
     })
 }
@@ -161,7 +184,7 @@ pub(super) fn handle(target: &Target) -> Result<HWND, Refusal> {
 }
 
 /// Whether the window is still the one the walk resolved: same process and thread, frame and
-/// DPI, and not minimised.
+/// DPI, and not minimised, cloaked or capture-protected.
 pub(super) fn unchanged(target: &Target) -> bool {
     let Ok(window) = handle(target) else {
         return false;
@@ -171,9 +194,19 @@ pub(super) fn unchanged(target: &Target) -> bool {
     // SAFETY: Windows validates the opaque handle.
     let dpi = unsafe { GetDpiForWindow(window) };
     !iconic
-        && owner(window) == (target.top.pid, target.tid)
+        && owner(window) == (target.top.pid, target.instance)
         && frame(window) == Some(target.top.rect)
         && dpi == target.dpi
+        && !cloaked(window)
+        && !protected(window)
+}
+
+/// Capture-protected by display affinity; an unreadable affinity counts as protected.
+fn protected(window: HWND) -> bool {
+    let mut affinity = 0;
+    // SAFETY: `affinity` is writable; Windows validates the handle.
+    let read = unsafe { GetWindowDisplayAffinity(window, &raw mut affinity) };
+    read.is_err() || affinity != WDA_NONE.0
 }
 
 fn owner(window: HWND) -> (u32, u32) {
@@ -200,22 +233,71 @@ fn frame(window: HWND) -> Option<PhysicalRect> {
     attribute::<RECT>(window, DWMWA_EXTENDED_FRAME_BOUNDS).map(super::elements::rectangle)
 }
 
-fn transparent(window: HWND) -> bool {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Layer {
+    Opaque,
+    /// `WS_EX_TRANSPARENT`, or layered with zero constant alpha.
+    ClickThrough,
+    /// Drawn by `UpdateLayeredWindow`: per-pixel alpha that this process can't read.
+    Drawn,
+}
+
+/// Where a click at the point goes, for the window the walk is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Hit {
+    Here,
+    Through,
+    Unclear,
+}
+
+fn styles(window: HWND, which: WINDOW_LONG_PTR_INDEX) -> u32 {
     // SAFETY: reads one style word of a validated handle.
-    let styles = unsafe { GetWindowLongPtrW(window, GWL_EXSTYLE) }.cast_unsigned() & 0xFFFF_FFFF;
-    let styles = u32::try_from(styles).unwrap_or_default();
+    let styles = unsafe { GetWindowLongPtrW(window, which) }.cast_unsigned() & 0xFFFF_FFFF;
+    u32::try_from(styles).unwrap_or_default()
+}
+
+fn layer(window: HWND) -> Layer {
+    let styles = styles(window, GWL_EXSTYLE);
     if styles & WS_EX_TRANSPARENT.0 != 0 {
-        return true;
+        return Layer::ClickThrough;
     }
     if styles & WS_EX_LAYERED.0 == 0 {
-        return false;
+        return Layer::Opaque;
     }
     let (mut alpha, mut flags) = (0_u8, LAYERED_WINDOW_ATTRIBUTES_FLAGS::default());
     // SAFETY: both outputs are writable; a window drawn by UpdateLayeredWindow fails here.
     let read = unsafe {
         GetLayeredWindowAttributes(window, None, Some(&raw mut alpha), Some(&raw mut flags))
     };
-    read.is_ok() && flags.contains(LWA_ALPHA) && alpha == 0
+    match read {
+        Err(_) => Layer::Drawn,
+        Ok(()) if flags.contains(LWA_ALPHA) && alpha == 0 => Layer::ClickThrough,
+        Ok(()) => Layer::Opaque,
+    }
+}
+
+/// A drawn layered window lets clicks through its zero-alpha pixels, and only the window manager's
+/// hit test knows which those are. `WindowFromPoint` gives its answer but skips disabled windows
+/// and doesn't skip Kumochi's, so either of those makes the answer unclear.
+fn drawn_hit(window: HWND, point: PhysicalPoint, shell: u32) -> Hit {
+    if styles(window, GWL_STYLE) & WS_DISABLED.0 != 0 {
+        return Hit::Unclear;
+    }
+    let [x, y] = point.0;
+    // SAFETY: a hit test at a physical point; it returns an opaque handle.
+    let hit = unsafe { WindowFromPoint(POINT { x, y }) };
+    if hit.is_invalid() {
+        return Hit::Unclear;
+    }
+    // SAFETY: this only queries the opaque handle.
+    let root = unsafe { GetAncestor(hit, GA_ROOT) };
+    if root == window {
+        Hit::Here
+    } else if super::elements::excluded(owner(root).0, shell).unwrap_or(false) {
+        Hit::Unclear
+    } else {
+        Hit::Through
+    }
 }
 
 fn contains(window: HWND, point: PhysicalPoint) -> bool {
@@ -291,7 +373,9 @@ fn elevated(pid: u32) -> bool {
     // SAFETY: this successful OpenProcessToken result is owned and closed exactly once.
     let token = unsafe { OwnedHandle::from_raw_handle(token) };
     let mut elevation = TOKEN_ELEVATION::default();
-    let size = u32::try_from(size_of::<TOKEN_ELEVATION>()).expect("a four-byte struct");
+    let Ok(size) = u32::try_from(size_of::<TOKEN_ELEVATION>()) else {
+        return true;
+    };
     let mut written = 0;
     // SAFETY: the token is live and `elevation` is writable for `size` bytes.
     let read = unsafe {

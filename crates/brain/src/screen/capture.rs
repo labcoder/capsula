@@ -47,8 +47,9 @@ pub(crate) struct Acquired {
 pub(crate) struct Target {
     /// The root window, its process and its frame: the captured surface's physical bounds.
     pub(crate) top: TopWindow,
-    /// The thread that made it, so a reused handle reads as another window.
-    pub(crate) tid: u32,
+    /// The platform's second identity word, so a reused handle reads as another window: the
+    /// creating thread on Windows.
+    pub(crate) instance: u32,
     /// Its DPI when resolved.
     pub(crate) dpi: u32,
 }
@@ -73,7 +74,8 @@ pub(crate) trait Capturer {
     /// refuse it before any pixels. `shell` is the connected shell's process.
     ///
     /// # Errors
-    /// `NoWindow` when only Kumochi or the desktop is there, or a preflight refusal.
+    /// `NoWindow` when only Kumochi or the desktop is there, `Ambiguous` when a drawn layered
+    /// window is there and where a click lands can't be told, or a preflight refusal.
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "the hold's capture resolves the pointer's window")

@@ -307,25 +307,37 @@ window a click at the hold's point would land on, and `Capturer::capture_window`
 of that window alone, so whatever is stacked above it stays out of the image. Nothing in
 production calls either yet.
 
-On Windows the walk reads the top-level z-order from the point. It skips Kumochi's own windows
-(the worker, the connected shell and Kumochi images: the same rule the element walk uses),
-hidden, cloaked and click-through windows (`WS_EX_TRANSPARENT`, or layered at zero alpha), and
-windows whose rectangle or window region leaves out the point. A disabled window is still the
-target, which `WindowFromPoint` wouldn't give. Reaching the desktop (`Progman`, `WorkerW`)
-means `NoWindow`. The target is that window's `GA_ROOT`.
+On Windows the walk reads the top-level z-order from the point. It skips windows whose
+rectangle or window region leaves out the point, before it opens any process, then Kumochi's own
+windows (the worker, the connected shell and Kumochi images: the same rule the element walk
+uses), hidden, cloaked and click-through windows (`WS_EX_TRANSPARENT`, or layered at zero
+constant alpha). A disabled window is still the target, which `WindowFromPoint` wouldn't give.
+Reaching the desktop (`Progman`, `WorkerW`) means `NoWindow`. The target is that window's
+`GA_ROOT`.
+
+A layered window drawn by `UpdateLayeredWindow` has no alpha another process can read, and clicks
+fall through its zero-alpha pixels. For one at the point, the walk asks `WindowFromPoint`: if the
+hit is that window, it's the target; if the hit is another window, the walk skips it. When the
+drawn window is disabled, or the hit is Kumochi's own window, `WindowFromPoint`'s answer can't
+say where a click lands, so the walk refuses with `Ambiguous` rather than capture a blank
+overlay or the window under it.
 
 Before any pixels, the target is refused when it's minimised, cloaked, Kumochi's, elevated (a
 process the worker can't open counts as elevated; for a UWP frame the hosted core window's
 process is checked too) or capture-protected by display affinity. The resolved `Target` keeps the
-window, its pid and tid, its DPI and its extended frame bounds, which are the frame's origin and
-size. Capture creates a `GraphicsCaptureItem` for the window, checks the same pid and tid again,
-and requires the item's size to equal the frame bounds. The window closing, or any change to its
-identity, frame or DPI before the pixels are read, refuses with `WindowChanged`.
+window, its pid, a second identity word (the creating thread on Windows), its DPI and its extended
+frame bounds, which are the frame's origin and size. Capture creates a `GraphicsCaptureItem` for
+the window, checks the same identity again, and requires the item's size to equal the frame
+bounds. The window closing, being minimised, cloaked or capture-protected, or any change to its
+identity, frame or DPI before the pixels are read, refuses with `WindowChanged`; so does an item
+that can't be created for a window that has since changed. Every failed capture zeroes and frees
+the frame before it returns (`RawFrame::fill`).
 
 `platform::windows::window::tests::native_window_probe` is an ignored native check over sentinel
 windows owned by a second test process (the worker's own windows count as Kumochi's). It covers
-the occluder and click-through cases, the frame origin against a password edit, and the
-refusals. It opens topmost windows on the main display for a few seconds, so run it on an idle Windows
+the occluder, click-through, disabled, region and drawn-overlay cases, the desktop stop, the
+frame origin against a password edit, and the refusals, including a window that changes after
+the walk. It opens topmost windows on the main display for a few seconds, so run it on an idle Windows
 desktop:
 
 ```

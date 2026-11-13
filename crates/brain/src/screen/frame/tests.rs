@@ -35,6 +35,41 @@ fn scrubbing_zeroes_the_whole_allocation_spare_capacity_included() {
 }
 
 #[test]
+fn a_failed_fill_scrubs_and_frees_what_it_wrote_and_a_good_one_keeps_it() {
+    let mut frame = RawFrame::default();
+    let (audit, scrubbed) = std::sync::mpsc::channel();
+    frame.audit(audit);
+    let refused: Result<(), Refusal> = frame.fill(|frame| {
+        frame.begin(4, 3).expect("in bounds").fill(0xEF);
+        Err(Refusal::WindowChanged)
+    });
+    assert_eq!(refused, Err(Refusal::WindowChanged));
+    let old = scrubbed
+        .try_iter()
+        .last()
+        .expect("scrubbed before returning");
+    assert_eq!(old.len(), 48);
+    assert_eq!(old.iter().filter(|&&byte| byte != 0).count(), 0);
+    assert_eq!(frame.allocation().1, 0);
+    let kept: Result<(), Refusal> = frame.fill(|frame| {
+        frame.begin(4, 3).expect("in bounds").fill(0xEF);
+        Ok(())
+    });
+    assert_eq!(kept, Ok(()));
+    let meta = FrameMeta {
+        capture: CaptureId(6),
+        display: PhysicalRect {
+            origin: [0, 0],
+            size: [4, 3],
+        },
+        dpi: 96,
+        acquired_after_ms: 0,
+    };
+    assert_eq!(frame.commit(meta), Ok(()));
+    assert_eq!(frame.image(), Some((meta, &[0xEF; 48][..])));
+}
+
+#[test]
 fn release_frees_a_committed_image_and_a_later_capture_starts_fresh() {
     let size = [4, 3];
     let mut frame = RawFrame::default();

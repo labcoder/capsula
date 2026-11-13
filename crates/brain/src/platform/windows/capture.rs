@@ -394,10 +394,21 @@ impl Capturer for Wgc {
         super::window::pointer_window(point, shell)
     }
 
-    /// B8's order: the walk's Kumochi check, then the item, then the same (pid, tid) again; a
-    /// close or any change before the frame is read refuses.
+    /// B8's order: the walk's Kumochi check, then the item, then the same identity again; a
+    /// close or any change before the frame is read refuses. Every failure leaves `frame` empty.
     fn capture_window(
         &mut self,
+        target: &Target,
+        until: Instant,
+        frame: &mut RawFrame,
+    ) -> Result<Acquired, Failure> {
+        frame.fill(|frame| self.window_frame(target, until, frame))
+    }
+}
+
+impl Wgc {
+    fn window_frame(
+        &self,
         target: &Target,
         until: Instant,
         frame: &mut RawFrame,
@@ -407,7 +418,13 @@ impl Capturer for Wgc {
             factory::<GraphicsCaptureItem, _>().map_err(|e| fault(&e))?;
         // SAFETY: Windows validates the handle the walk resolved.
         let item: GraphicsCaptureItem =
-            unsafe { interop.CreateForWindow(window) }.map_err(|e| fault(&e))?;
+            unsafe { interop.CreateForWindow(window) }.map_err(|e| {
+                if super::window::unchanged(target) {
+                    fault(&e)
+                } else {
+                    Refusal::WindowChanged.into()
+                }
+            })?;
         if !super::window::unchanged(target) {
             return Err(Refusal::WindowChanged.into());
         }

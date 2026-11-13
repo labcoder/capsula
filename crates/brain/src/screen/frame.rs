@@ -45,6 +45,19 @@ impl RawFrame {
         Ok(&mut self.bgra)
     }
 
+    /// Runs one capture into this frame, then zeroes and frees it if the capture failed, so a
+    /// refused or partial copy never stays in the buffer. Windows and macOS share it.
+    pub(crate) fn fill<T, E>(
+        &mut self,
+        capture: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let result = capture(self);
+        if result.is_err() {
+            self.release();
+        }
+        result
+    }
+
     pub(super) fn invalidate(&mut self) {
         self.valid = None;
     }

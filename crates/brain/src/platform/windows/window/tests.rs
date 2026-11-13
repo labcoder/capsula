@@ -1,5 +1,6 @@
 use std::io::{BufRead as _, BufReader, Lines, Write as _};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::geometry::{PhysicalPoint, WindowRef};
@@ -9,24 +10,25 @@ use windows::Win32::Foundation::{
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAK, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
-    CreateCompatibleDC, CreateDIBSection, CreateSolidBrush, DIB_RGB_COLORS, DeleteDC, DeleteObject,
-    SelectObject,
+    CreateCompatibleDC, CreateDIBSection, CreateRectRgn, CreateSolidBrush, DIB_RGB_COLORS,
+    DeleteDC, DeleteObject, SelectObject, SetWindowRgn,
 };
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, ES_PASSWORD, GetMessageW,
-    GetWindowRect, HMENU, LWA_ALPHA, MSG, PostMessageW, PostThreadMessageW, RegisterClassW,
-    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SetLayeredWindowAttributes, SetWindowDisplayAffinity,
-    ShowWindow, ULW_ALPHA, UpdateLayeredWindow, WDA_EXCLUDEFROMCAPTURE, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_APP, WM_QUIT, WNDCLASSW, WS_CHILD, WS_EX_LAYERED, WS_EX_TOPMOST,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, ES_PASSWORD, FindWindowW,
+    GetMessageW, GetWindowRect, HMENU, LWA_ALPHA, MSG, PostMessageW, PostThreadMessageW,
+    RegisterClassW, SMTO_ABORTIFHUNG, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SendMessageTimeoutW,
+    SetLayeredWindowAttributes, SetWindowDisplayAffinity, ShowWindow, ULW_ALPHA,
+    UpdateLayeredWindow, WDA_EXCLUDEFROMCAPTURE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP,
+    WM_NCHITTEST, WM_QUIT, WNDCLASSW, WS_CHILD, WS_DISABLED, WS_EX_LAYERED, WS_EX_TOPMOST,
     WS_EX_TRANSPARENT, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, w};
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 
-use super::{Facts, Step, preflight, step};
+use super::{Facts, Step, facts, preflight, step};
 use crate::platform::windows::capture::screen_capturer;
 use crate::screen::{CaptureId, Capturer, Failure, FrameMeta, RawFrame, Refusal, Target};
 
@@ -85,9 +87,36 @@ fn the_walk_takes_the_first_window_a_click_would_land_on() {
                 ..eligible()
             },
         ),
+        (
+            "unclear but elsewhere",
+            Facts {
+                unclear: true,
+                contains: false,
+                ..eligible()
+            },
+        ),
+        (
+            "unclear but kumochi",
+            Facts {
+                unclear: true,
+                kumochi: true,
+                ..eligible()
+            },
+        ),
     ] {
         assert_eq!(step(skipped), Step::Skip, "{why}");
     }
+}
+
+#[test]
+fn a_drawn_window_whose_hit_cant_be_told_ends_the_walk_unclear() {
+    assert_eq!(
+        step(Facts {
+            unclear: true,
+            ..eligible()
+        }),
+        Step::Unclear
+    );
 }
 
 #[test]
@@ -106,15 +135,18 @@ const HOST_ENV: &str = "KUMOCHI_WINDOW_PROBE_HOST";
 const HOST_TEST: &str = "platform::windows::window::tests::native_probe_host";
 const PATIENCE: Duration = Duration::from_secs(10);
 
-/// One host window: colour (0x00BBGGRR), physical rectangle, owner index, styles. A layered
-/// window with `WS_EX_TRANSPARENT` is opaque; one without it is drawn by `UpdateLayeredWindow`
-/// with every pixel at zero alpha, so clicks pass through it though its styles don't say so.
+/// One host window: colour (0x00BBGGRR), physical rectangle, owner index, styles, a constant
+/// alpha and a window region relative to its corner. A layered window with no constant alpha is
+/// drawn by `UpdateLayeredWindow` with every pixel at zero alpha, so clicks pass through it
+/// though its styles don't say so.
 struct Plan {
     color: u32,
     rect: [i32; 4],
     owner: Option<usize>,
     style: WINDOW_STYLE,
     ex: WINDOW_EX_STYLE,
+    alpha: Option<u8>,
+    region: Option<[i32; 4]>,
 }
 
 const RED: u32 = 0x0000_00FF;
@@ -130,14 +162,20 @@ const X: usize = 4;
 const M: usize = 5;
 const D: usize = 6;
 const U: usize = 8;
+const P: usize = 9;
+const K: usize = 10;
+const DISABLED: usize = 11;
+const REGION: usize = 12;
 
-fn plan() -> [Plan; 9] {
+fn plan() -> [Plan; 14] {
     let popup = |color, rect, owner, ex| Plan {
         color,
         rect,
         owner,
         style: WS_POPUP | WS_VISIBLE,
         ex: WS_EX_TOPMOST | ex,
+        alpha: None,
+        region: None,
     };
     [
         Plan {
@@ -146,6 +184,8 @@ fn plan() -> [Plan; 9] {
             owner: None,
             style: WS_OVERLAPPEDWINDOW | WS_VISIBLE,
             ex: WS_EX_TOPMOST,
+            alpha: None,
+            region: None,
         },
         popup(GREEN, [300, 150, 200, 100], Some(T), WINDOW_EX_STYLE(0)),
         popup(MAGENTA, [380, 290, 80, 60], Some(T), WINDOW_EX_STYLE(0)),
@@ -153,15 +193,36 @@ fn plan() -> [Plan; 9] {
         popup(0x00FF_FF00, [700, 300, 150, 100], None, WINDOW_EX_STYLE(0)),
         popup(0x0080_8080, [900, 100, 150, 100], None, WINDOW_EX_STYLE(0)),
         popup(0x0040_4040, [900, 300, 150, 100], None, WINDOW_EX_STYLE(0)),
-        popup(
-            PURPLE,
-            [150, 250, 80, 40],
-            None,
-            WS_EX_LAYERED | WS_EX_TRANSPARENT,
-        ),
+        Plan {
+            alpha: Some(255),
+            ..popup(
+                PURPLE,
+                [150, 250, 80, 40],
+                None,
+                WS_EX_LAYERED | WS_EX_TRANSPARENT,
+            )
+        },
         popup(PURPLE, [250, 330, 60, 40], None, WS_EX_LAYERED),
+        popup(0x0000_8000, [1100, 100, 120, 80], None, WINDOW_EX_STYLE(0)),
+        popup(0x0000_0080, [1100, 300, 120, 80], None, WINDOW_EX_STYLE(0)),
+        Plan {
+            style: WS_POPUP | WS_VISIBLE | WS_DISABLED,
+            ..popup(0x0080_8000, [400, 110, 60, 30], None, WINDOW_EX_STYLE(0))
+        },
+        Plan {
+            region: Some([30, 0, 60, 30]),
+            ..popup(0x0000_8080, [320, 110, 60, 30], None, WINDOW_EX_STYLE(0))
+        },
+        Plan {
+            alpha: Some(0),
+            ..popup(PURPLE, [240, 150, 50, 40], None, WS_EX_LAYERED)
+        },
     ]
 }
+
+/// `WM_NCHITTEST` messages the host's windows received, so the probe can tell whether its hit
+/// test sent any to another process.
+static HITS: AtomicU64 = AtomicU64::new(0);
 
 const CLOAK: u32 = WM_APP + 1;
 const PROTECT: u32 = WM_APP + 2;
@@ -169,6 +230,9 @@ const MINIMIZE: u32 = WM_APP + 3;
 const MAXIMIZE: u32 = WM_APP + 4;
 const RESTORE: u32 = WM_APP + 5;
 const DESTROY: u32 = WM_APP + 6;
+const HANG: u32 = WM_APP + 7;
+/// How long `hang` keeps the host's window thread from reading messages.
+const HUNG: Duration = Duration::from_secs(3);
 
 extern "system" fn host_proc(window: HWND, message: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     let done = match message {
@@ -193,8 +257,18 @@ extern "system" fn host_proc(window: HWND, message: u32, w: WPARAM, l: LPARAM) -
         }
         // SAFETY: destroys this thread's own window.
         DESTROY => unsafe { DestroyWindow(window) }.is_ok(),
-        // SAFETY: the default handling of a message for this thread's own window.
-        _ => return unsafe { DefWindowProcW(window, message, w, l) },
+        HANG => {
+            println!("done true");
+            std::thread::sleep(HUNG);
+            return LRESULT(0);
+        }
+        _ => {
+            if message == WM_NCHITTEST {
+                HITS.fetch_add(1, Ordering::Relaxed);
+            }
+            // SAFETY: the default handling of a message for this thread's own window.
+            return unsafe { DefWindowProcW(window, message, w, l) };
+        }
     };
     println!("done {done}");
     LRESULT(0)
@@ -231,12 +305,22 @@ fn create(plan: &Plan, index: usize, owner: Option<HWND>) -> HWND {
         )
     }
     .expect("probe window");
-    if plan.ex.contains(WS_EX_LAYERED | WS_EX_TRANSPARENT) {
-        // SAFETY: a fully opaque layered window this process owns.
-        unsafe { SetLayeredWindowAttributes(window, COLORREF(0), 255, LWA_ALPHA) }
-            .expect("opaque layer");
-    } else if plan.ex.contains(WS_EX_LAYERED) {
-        draw_clear(window, [width, height]);
+    match (plan.ex.contains(WS_EX_LAYERED), plan.alpha) {
+        (true, Some(alpha)) => {
+            // SAFETY: a layered window this process owns, at one constant alpha.
+            let layered =
+                unsafe { SetLayeredWindowAttributes(window, COLORREF(0), alpha, LWA_ALPHA) };
+            layered.expect("constant layer");
+        }
+        (true, None) => draw_clear(window, [width, height]),
+        (false, _) => {}
+    }
+    if let Some([left, top, right, bottom]) = plan.region {
+        // SAFETY: a new region whose ownership passes to the window on success.
+        let region = unsafe { CreateRectRgn(left, top, right, bottom) };
+        // SAFETY: this process's own window takes the region and frees it later.
+        let taken = unsafe { SetWindowRgn(window, Some(region), true) };
+        assert_ne!(taken, 0, "region");
     }
     window
 }
@@ -375,6 +459,10 @@ fn native_probe_host() {
             let (Some(verb), Some(index)) = (words.next(), words.next()) else {
                 continue;
             };
+            if verb == "hits" {
+                println!("hits {}", HITS.load(Ordering::Relaxed));
+                continue;
+            }
             let message = match verb {
                 "cloak" => CLOAK,
                 "protect" => PROTECT,
@@ -382,6 +470,7 @@ fn native_probe_host() {
                 "maximize" => MAXIMIZE,
                 "restore" => RESTORE,
                 "destroy" => DESTROY,
+                "hang" => HANG,
                 _ => continue,
             };
             let index: usize = index.parse().expect("window index");
@@ -468,6 +557,19 @@ impl Host {
             .find(|line| line.starts_with("done"));
         assert_eq!(reply.as_deref(), Some("done true"), "{verb} {index}");
         std::thread::sleep(Duration::from_millis(400));
+    }
+
+    /// `WM_NCHITTEST` messages the host's windows have received so far.
+    fn hits(&mut self) -> u64 {
+        let stdin = self.stdin.as_mut().expect("host stdin");
+        writeln!(stdin, "hits 0").expect("command");
+        stdin.flush().expect("command");
+        self.lines
+            .by_ref()
+            .map_while(Result::ok)
+            .find_map(|line| line.strip_prefix("hits ").map(str::to_owned))
+            .and_then(|count| count.parse().ok())
+            .expect("hit count")
     }
 }
 
@@ -580,6 +682,8 @@ fn native_window_probe() {
             owner: None,
             style: WS_POPUP | WS_VISIBLE,
             ex: WS_EX_TOPMOST,
+            alpha: None,
+            region: None,
         },
         100,
         None,
@@ -589,6 +693,10 @@ fn native_window_probe() {
         ("overlay", point(180, 270), host.windows[T]),
         ("cloaked-above", point(150, 350), host.windows[T]),
         ("own-above", point(130, 130), host.windows[T]),
+        ("disabled", point(430, 125), host.windows[DISABLED]),
+        ("region-excluded", point(330, 125), host.windows[T]),
+        ("region-included", point(365, 125), host.windows[REGION]),
+        ("alpha-0", point(265, 170), host.windows[T]),
     ] {
         let (found, _) = at(&mut capturer, p);
         let window = found.map(|target| target.top.window);
@@ -599,15 +707,91 @@ fn native_window_probe() {
         assert_eq!(window, Ok(WindowRef(value(expected))), "{name}");
     }
 
-    // N4, recorded and not asserted: a layered window drawn at zero alpha by UpdateLayeredWindow
-    // lets clicks through, but nothing in its styles says so.
-    let (found, _) = at(&mut capturer, point(270, 350));
+    // R1: the shell's desktop window ends the walk.
+    // SAFETY: finds the shell's desktop window by class; nothing is read.
+    let desktop = unsafe { FindWindowW(w!("Progman"), PCWSTR::null()) }.expect("desktop window");
+    let whole = rect(desktop);
+    let middle = point(
+        whole.left + (whole.right - whole.left) / 2,
+        whole.top + (whole.bottom - whole.top) / 2,
+    );
+    let stop = step(facts(desktop, middle, 0));
+    println!("R1 desktop_stop={}", stop == Step::Stop);
+    assert_eq!(stop, Step::Stop, "R1 desktop");
+
+    // N4: a layered window drawn at zero alpha by UpdateLayeredWindow lets clicks through, though
+    // nothing in its styles says so; the walk asks the window manager's hit test.
+    let before = host.hits();
+    let (found, drawn_ms) = at(&mut capturer, point(270, 350));
+    let sent = host.hits() - before;
     let window = found.map(|target| target.top.window);
     println!(
-        "N4 drawn_overlay_taken={} target_taken={}",
+        "N4 drawn_overlay_taken={} target_taken={} resolve_ms={drawn_ms} nchittest_to_host={sent}",
         window == Ok(WindowRef(value(host.windows[U]))),
         window == Ok(WindowRef(value(host.windows[T])))
     );
+    assert_eq!(
+        window,
+        Ok(WindowRef(value(host.windows[T]))),
+        "N4 drawn overlay"
+    );
+    // N4 with every host window hung: a hit test that waited on another process would block here.
+    host.command("hang", U);
+    let before = host.hits();
+    let (found, hung_ms) = at(&mut capturer, point(270, 350));
+    let sent = host.hits() - before;
+    let window = found.map(|target| target.top.window);
+    println!(
+        "N4 hung_host target_taken={} resolve_ms={hung_ms} nchittest_to_host={sent}",
+        window == Ok(WindowRef(value(host.windows[T])))
+    );
+    assert_eq!(
+        window,
+        Ok(WindowRef(value(host.windows[T]))),
+        "N4 hung host"
+    );
+    assert!(hung_ms < 1_000, "N4: the hit test waited on the hung host");
+    std::thread::sleep(HUNG);
+    // The counter's own check: one hit test this probe sends the host on purpose.
+    let before = host.hits();
+    let mut answer = 0;
+    // SAFETY: asks the host's own window for one hit test at (200, 200), for at most a second.
+    let asked = unsafe {
+        SendMessageTimeoutW(
+            host.windows[T],
+            WM_NCHITTEST,
+            WPARAM(0),
+            LPARAM(0x00C8_00C8),
+            SMTO_ABORTIFHUNG,
+            1_000,
+            Some(&raw mut answer),
+        )
+    };
+    let counted = host.hits() - before;
+    println!("N4 counter_check sent={} counted={counted}", asked.0 != 0);
+    assert_eq!(counted, 1, "N4: the host counts a hit test sent to it");
+    let above = create(
+        &Plan {
+            color: GREEN,
+            rect: [260, 340, 20, 20],
+            owner: None,
+            style: WS_POPUP | WS_VISIBLE,
+            ex: WS_EX_TOPMOST,
+            alpha: None,
+            region: None,
+        },
+        101,
+        None,
+    );
+    let covered = at(&mut capturer, point(270, 350)).0.map(|_| ());
+    println!("N4 own_window_above_drawn={covered:?}");
+    assert_eq!(
+        covered,
+        Err(Refusal::Ambiguous),
+        "N4 under Kumochi's window"
+    );
+    // SAFETY: destroys this thread's own window.
+    unsafe { DestroyWindow(above) }.expect("own window");
 
     // M3: the password edit maps to the frame by the extended frame bounds' origin, to ±0 px.
     for state in ["normal", "maximized"] {
@@ -673,6 +857,23 @@ fn native_window_probe() {
         "M4a: a window minimised after the walk gives no frame"
     );
 
+    // N2: a target cloaked or capture-protected after the walk gives no frame.
+    for (name, index, verb) in [("protected", P, "protect"), ("cloaked", K, "cloak")] {
+        let corner = rect(host.windows[index]);
+        let walked = at(&mut capturer, point(corner.left + 10, corner.top + 10))
+            .0
+            .expect("before the change");
+        ours(&walked, &host, index);
+        host.command(verb, index);
+        let changed = grab(&mut capturer, &walked, &mut frame).0;
+        println!("N2 {name}_after_walk={changed:?}");
+        assert_eq!(
+            changed,
+            Err(Failure::Refused(Refusal::WindowChanged)),
+            "N2 {name}"
+        );
+    }
+
     // M7: a target destroyed after the walk gives no frame.
     let doomed = at(&mut capturer, point(950, 350))
         .0
@@ -681,7 +882,11 @@ fn native_window_probe() {
     host.command("destroy", D);
     let destroyed = grab(&mut capturer, &doomed, &mut frame).0;
     println!("M7 destroyed={destroyed:?}");
-    assert!(destroyed.is_err(), "M7: no frame from a destroyed window");
+    assert_eq!(
+        destroyed,
+        Err(Failure::Refused(Refusal::WindowChanged)),
+        "M7: no frame from a destroyed window"
+    );
     // SAFETY: destroys this thread's own window.
     unsafe { DestroyWindow(own) }.expect("own window");
 }
