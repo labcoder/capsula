@@ -47,8 +47,16 @@ fn the_data_url_is_the_prefix_and_padded_base64() {
         let image = jpeg(&bytes);
         assert_eq!(image.data_url_len(), expected, "{len}");
         assert_eq!(image.data_url().len(), expected, "{len}");
+        assert_eq!(
+            image.data_url().capacity(),
+            expected,
+            "built without growing: {len}"
+        );
     }
-    assert_eq!(jpeg(&SOI).data_url(), "data:image/jpeg;base64,/9j/");
+    assert_eq!(
+        jpeg(&SOI).data_url().as_str(),
+        "data:image/jpeg;base64,/9j/"
+    );
 }
 
 #[test]

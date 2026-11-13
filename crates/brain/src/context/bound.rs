@@ -24,7 +24,7 @@ pub(super) fn item_bytes(item: &InputItem) -> usize {
             } => escaped(call.as_str()) + escaped(name) + escaped(arguments),
             InputItem::FunctionOutput { call, output } => escaped(call.as_str()) + escaped(output),
             InputItem::Native(item) => item.size(),
-            InputItem::Image(image) => image.data_url_len(),
+            InputItem::Image(image) => image.item_len(),
         }
 }
 

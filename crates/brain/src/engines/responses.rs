@@ -14,10 +14,12 @@ pub(crate) use engine::{Access, AccessAsk, AccessHandle, Bearer, Responses};
 use std::fmt;
 
 use kumochi_protocol::message::Effort;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
+use zeroize::Zeroize as _;
 
 use super::{CallId, EngineFailure, Finish, Opaque, ToolName, TurnEvent};
 use crate::connections::model::error::Failure;
+use crate::connections::model::serialized_len;
 use crate::connections::model::sse::{Progress, SseEvent};
 use crate::context::{BODY_CEILING, BOUND, InputItem, ModelRequest, Role};
 
@@ -45,11 +47,16 @@ pub(crate) enum BodyError {
 /// streams, and reasoning comes back encrypted so it can be replayed.
 pub(crate) fn body(request: &ModelRequest) -> Result<Value, BodyError> {
     let choice = request.choice.as_ref().ok_or(BodyError::NoModel)?;
-    let input = request
-        .input
-        .iter()
-        .map(input_item)
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut input = Vec::with_capacity(request.input.len());
+    for item in &request.input {
+        match input_item(item) {
+            Ok(item) => input.push(item),
+            Err(error) => {
+                wipe_items(&mut input);
+                return Err(error);
+            }
+        }
+    }
     let tools: Vec<Value> = request
         .tools
         .iter()
@@ -66,29 +73,48 @@ pub(crate) fn body(request: &ModelRequest) -> Result<Value, BodyError> {
             value
         })
         .collect();
-    let body = json!({
+    // The input is moved in, not copied, since it can carry images.
+    let mut body = json!({
         "model": choice.model.as_str(),
         "instructions": request.instructions,
-        "input": input,
+        "input": null,
         "tools": tools,
         "reasoning": { "effort": effort(choice.effort) },
         "include": ["reasoning.encrypted_content"],
         "store": false,
         "stream": true,
     });
+    body["input"] = Value::Array(input);
+    // Each image is charged with its whole item and the comma before it.
     let images: usize = request
         .input
         .iter()
         .map(|item| match item {
-            InputItem::Image(image) => image.data_url_len(),
+            InputItem::Image(image) => image.item_len() + 1,
             _ => 0,
         })
         .sum();
-    let size = body.to_string().len();
+    let size = serialized_len(&body);
     if size - images > BOUND || size > BODY_CEILING {
+        wipe_images(&mut body);
         return Err(BodyError::TooLarge);
     }
     Ok(body)
+}
+
+/// Zeroes the data URL of each image in a built body, once it has been serialized.
+pub(crate) fn wipe_images(body: &mut Value) {
+    if let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) {
+        wipe_items(input);
+    }
+}
+
+fn wipe_items(items: &mut [Value]) {
+    for item in items {
+        if let Some(Value::String(url)) = item.pointer_mut("/content/0/image_url") {
+            url.zeroize();
+        }
+    }
 }
 
 fn input_item(item: &InputItem) -> Result<Value, BodyError> {
@@ -120,15 +146,24 @@ fn input_item(item: &InputItem) -> Result<Value, BodyError> {
         InputItem::Native(item) => {
             serde_json::from_slice(item.bytes()).map_err(|_| BodyError::Native)?
         }
-        InputItem::Image(image) => json!({
-            "type": "message",
-            "role": "user",
-            "content": [{
-                "type": "input_image",
-                "image_url": image.data_url(),
-                "detail": "high",
-            }],
-        }),
+        // Built by hand so the URL is moved in, never copied.
+        InputItem::Image(image) => {
+            let mut part = Map::new();
+            part.insert("type".to_owned(), "input_image".into());
+            part.insert(
+                "image_url".to_owned(),
+                Value::String(std::mem::take(&mut *image.data_url())),
+            );
+            part.insert("detail".to_owned(), "high".into());
+            let mut item = Map::new();
+            item.insert("type".to_owned(), "message".into());
+            item.insert("role".to_owned(), "user".into());
+            item.insert(
+                "content".to_owned(),
+                Value::Array(vec![Value::Object(part)]),
+            );
+            Value::Object(item)
+        }
     })
 }
 

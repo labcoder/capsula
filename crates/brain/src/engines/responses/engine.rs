@@ -11,7 +11,7 @@ use kumochi_protocol::message::ErrorKey;
 use tokio::sync::{mpsc, oneshot};
 use zeroize::Zeroizing;
 
-use super::{Round, body};
+use super::{Round, body, wipe_images};
 use crate::connections::account::Denied;
 use crate::connections::model::budget::Budget;
 use crate::connections::model::conn::{Connect, ModelClient};
@@ -136,10 +136,13 @@ impl<C: Connect> Shared<C> {
         gate: SendGate,
     ) -> Option<Finish> {
         let failed = |failure| Some(Finish::Failed(EngineFailure::Stream(failure)));
-        let Ok(value) = body(&request.request) else {
+        let Ok(mut value) = body(&request.request) else {
             return failed(Failure::Request);
         };
-        let body = match ResponsesBody::new(&value) {
+        let body = ResponsesBody::new(&value);
+        wipe_images(&mut value);
+        drop(value);
+        let body = match body {
             Ok(body) => body,
             Err(failure) => return failed(failure),
         };

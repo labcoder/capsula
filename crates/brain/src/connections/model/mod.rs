@@ -56,12 +56,35 @@ impl ResponsesBody {
         if request["store"] != false || request["stream"] != true {
             return Err(Failure::Request);
         }
-        let bytes = Zeroizing::new(serde_json::to_vec(request).map_err(|_| Failure::Request)?);
-        if bytes.len() > MAX_REQUEST_BYTES {
+        let len = serialized_len(request);
+        if len > MAX_REQUEST_BYTES {
             return Err(Failure::Request);
         }
+        // Sized first, so the buffer never grows and leaves a copy behind.
+        let mut bytes = Zeroizing::new(Vec::with_capacity(len));
+        serde_json::to_writer(&mut *bytes, request).map_err(|_| Failure::Request)?;
         Ok(Self(Secret::new(bytes)))
     }
+}
+
+/// `value`'s length as JSON, counted without building it; `usize::MAX` if it can't be
+/// serialized.
+pub(crate) fn serialized_len(value: &Value) -> usize {
+    struct Counted(usize);
+
+    impl std::io::Write for Counted {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut counted = Counted(0);
+    serde_json::to_writer(&mut counted, value).map_or(usize::MAX, |()| counted.0)
 }
 
 impl fmt::Debug for ResponsesBody {
