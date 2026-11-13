@@ -278,7 +278,8 @@ record Rez's scale with that result.
 `screen/actor.rs` is an alternate worker-local protocol and loop, not selected by the
 production brain or worker entry point. Those still use the original synchronous request path.
 The alternate loop creates a dedicated capture producer; that thread constructs, uses and drops
-its non-Send capturer, sampling foreground immediately before capture. Only the sole-owned
+its non-Send capturer, resolving the window under the hold's point and capturing that window
+alone. Only the sole-owned
 `RawFrame` and content-free result identity move back to the actor. Capture and UIA each reserve
 one completion slot until taken; their nonblocking wakes may coalesce in the bounded inbox.
 The actor checks the slots after every event and nearest-expiry/deadline wake.
@@ -346,6 +347,39 @@ desktop:
 ```
 cargo test -p kumochi-brain --lib native_window_probe -- --ignored --exact --nocapture
 ```
+
+## Sealing a hold's image (dormant)
+
+In the alternate loop, a hold's `Context` carries the hold's point instead of a display. The
+capture thread resolves the window under it and captures that window alone. A refusal or a fault
+answers that hold only: there is no screen for it, and the same capturer serves the next hold.
+Only `Retire` ends the worker.
+
+After the element walk, `Seal` hands out the hold's one image as a `ScreenContext`: the frame
+masked and encoded as an overview JPEG, with its `CaptureTransform`. It seals only when the walk
+found every password mask, and refuses with `Unmasked` otherwise. The frame is scrubbed and
+freed whatever the answer, so a second `Seal` is `Stale`.
+
+The JPEG is capped at 2 MiB (`JPEG_CAP`), a guess until real windows are measured. The encoder
+writes into one buffer allocated at the cap, so growth never copies it, and an image over the cap
+refuses with `TooLarge`; it is never downscaled further. `TooLarge`, `Unmasked` and
+`Ambiguous` are ordinary refusals.
+
+The JPEG's bytes are user content. `ScreenContext` zeroes them on drop and its Debug prints only
+the byte count and size. The encoder's buffers are zeroed on every error, and the worker zeroes
+its serialized copies of a message once written. Nothing writes the bytes to a log, a file or a
+store.
+
+On Windows, a frame's pixel buffer and the sealed JPEG are each registered as excluded from crash
+dumps (`WerRegisterExcludedMemoryBlock`) while they hold content, and unregistered after they're
+zeroed and before they're freed or grown. The registration is in-process only. When Windows
+refuses it, capture carries on, and that buffer's contents can appear in a crash dump written
+while it holds them.
+
+Chromium's control view can miss a rendered page's fields. When the walk passes through a
+`Chrome_RenderWidgetHostHWND` element and finds fewer than 20 named elements in that page, the
+masks are `Partial`, so the hold doesn't seal. The threshold is a guess until a real page is
+measured.
 
 ## Portable element data and walk
 

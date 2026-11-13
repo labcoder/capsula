@@ -5,7 +5,6 @@ use std::thread;
 
 use super::*;
 use crate::screen::capture::{Acquired, Target};
-use crate::screen::wire::Exclusion;
 use crate::screen::elements::{
     ElementPlatform, ElementReader, ElementSource, NodeProps, SourceError, TopWindow,
 };
@@ -13,6 +12,7 @@ use crate::screen::elements::{WalkJob, Walked};
 use crate::screen::frame::RawFrame;
 use crate::screen::mask::MaskSink;
 use crate::screen::reader::ThreadedReader;
+use crate::screen::wire::Exclusion;
 use kumochi_protocol::geometry::{DisplayRef, PhysicalPoint, PhysicalRect, WindowRef};
 use kumochi_protocol::message::RunId;
 
@@ -961,4 +961,28 @@ fn sealing_before_the_walk_refuses_releases_the_frame_and_stays_refused() {
     rig.send(4, &Request::Seal(key(1)));
     assert_eq!(rig.reply(), (4, Reply::Refused(Refusal::Stale)));
     rig.finish();
+}
+#[test]
+fn a_sealed_context_never_prints_its_jpeg() {
+    let marker = b"KUMOCHI-SEALED-MARKER".to_vec();
+    let encoded = crate::screen::encode::Encoded {
+        jpeg: zeroize::Zeroizing::new(marker.clone()),
+        size: [4, 3],
+        capture: CaptureId(1),
+        generation: 1,
+        completeness: crate::screen::mask::Completeness::Complete,
+        transform: crate::screen::encode::CaptureTransform {
+            display: RECT,
+            dpi: 96,
+            overview_size: [4, 3],
+            crop: None,
+        },
+    };
+    let context = crate::screen::context::ScreenContext::new(encoded);
+    let printed = format!("{context:?}");
+    let reply = format!("{:?}", Reply::Sealed(key(1), context));
+    for text in [printed, reply] {
+        assert!(!text.contains("KUMOCHI-SEALED-MARKER"), "{text}");
+        assert!(!text.contains(&format!("{marker:?}")[1..20]), "{text}");
+    }
 }

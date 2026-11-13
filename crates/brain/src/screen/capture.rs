@@ -69,10 +69,6 @@ impl std::fmt::Debug for Target {
 /// `SCScreenshotManager`, with Kumochi excluded from a display's content filter and
 /// `desktopIndependentWindow` for a window.
 pub(crate) trait Capturer {
-    fn foreground(&mut self) -> Option<TopWindow> {
-        None
-    }
-
     /// The window a click at `point` would land on, Kumochi's own aside, after the checks that
     /// refuse it before any pixels. `shell` is the connected shell's process.
     ///
@@ -254,14 +250,22 @@ impl Screen {
     /// Hands out the held frame's one image, masked and encoded under `cap` JPEG bytes, and
     /// releases the frame whatever the outcome. Only a walk that found every password mask
     /// seals.
-    pub(super) fn seal(&mut self, capture: CaptureId, cap: usize) -> Result<ScreenContext, Failure> {
+    pub(super) fn seal(
+        &mut self,
+        capture: CaptureId,
+        cap: usize,
+    ) -> Result<ScreenContext, Failure> {
         let sealed = self.sealed(capture, cap);
         self.clear();
         sealed
     }
 
     fn sealed(&mut self, capture: CaptureId, cap: usize) -> Result<ScreenContext, Failure> {
-        if self.held.as_ref().is_none_or(|held| held.capture != capture) {
+        if self
+            .held
+            .as_ref()
+            .is_none_or(|held| held.capture != capture)
+        {
             return Err(Refusal::Stale.into());
         }
         let sink = Arc::clone(&self.masks);

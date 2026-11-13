@@ -570,7 +570,9 @@ fn root_owner_exclusion_applies_to_foreground_and_window_targets() {
 fn page_tree(inside: usize, named: usize) -> FakeSource {
     let outside = 30;
     let mut source = FakeSource::flat(2 + inside + outside);
-    source.nodes[0].children = std::iter::once(1).chain(2 + inside..2 + inside + outside).collect();
+    source.nodes[0].children = std::iter::once(1)
+        .chain(2 + inside..2 + inside + outside)
+        .collect();
     source.nodes[1].children = (2..2 + inside).collect();
     for node in (2..2 + named).chain(2 + inside..2 + inside + outside) {
         source.nodes[node].name = "named".into();

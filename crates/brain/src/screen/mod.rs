@@ -43,11 +43,11 @@ pub(crate) use elements::{
     excluded_image,
 };
 pub(crate) use frame::{RawFrame, display_edges};
-#[cfg(windows)]
-pub(crate) use ocr::PAGE_CLASS;
 #[cfg(all(windows, any(test, feature = "test-support")))]
 pub(crate) use mask::MaskSet;
 pub use mask::Unavailable;
+#[cfg(windows)]
+pub(crate) use ocr::PAGE_CLASS;
 #[cfg(windows)]
 pub(crate) use reader::{CONNECTION_TIMEOUT, TRANSACTION_TIMEOUT, ThreadedReader};
 pub use supervisor::{CaptureError, REQUEST_DEADLINE, ScreenHandle, ScreenSupervisor};

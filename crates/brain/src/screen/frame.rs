@@ -12,7 +12,7 @@ pub(crate) const MAX_SIDE: u32 = 8192;
 /// only a complete, checked copy becomes valid again. Windows and macOS share it.
 #[derive(Default)]
 pub(crate) struct RawFrame {
-    /// Dropped before the buffer is scrubbed, grown or freed.
+    /// Dropped once the buffer is scrubbed, and before it's grown or freed.
     #[cfg(windows)]
     dump: Option<crate::platform::DumpExclusion>,
     bgra: Vec<u8>,
@@ -80,13 +80,13 @@ impl RawFrame {
     /// Takes the whole allocation out, every byte of its capacity zeroed with volatile writes the
     /// optimizer keeps.
     fn scrubbed(&mut self) -> Vec<u8> {
-        #[cfg(windows)]
-        drop(self.dump.take());
         self.valid = None;
         self.filled = [0; 2];
         let capacity = self.bgra.capacity();
         self.bgra.resize(capacity, 0);
         self.bgra.as_mut_slice().zeroize();
+        #[cfg(windows)]
+        drop(self.dump.take());
         #[cfg(test)]
         if let Some(audit) = &self.audit {
             let _sent = audit.send(self.bgra.clone());
