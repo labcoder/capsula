@@ -706,7 +706,7 @@ fn a_step_too_large_to_paint_ends_its_call_asking_for_fewer_shapes() {
     );
     assert_eq!(
         failed.calls[0].tool_text(),
-        "drawn: [big]; stopped: drawing.TooMuchToPaint; nothing of this scene was shown, so it was removed; begin a new scene with a new name and fewer or simpler shapes"
+        "drawn: [big]; stopped: drawing.TooMuchToPaint; nothing of this scene was shown, so it was removed; everything on screen can hold about 20 plain boxes, or about 10 when arrows have labels; begin a new scene with a new name and fewer or simpler shapes"
     );
     assert!(drawing.drew_nothing(RunId(1)));
 }
@@ -747,9 +747,115 @@ fn a_later_step_too_large_to_paint_keeps_the_shown_picture() {
     assert_eq!(failed.calls.len(), 1);
     assert_eq!(
         failed.calls[0].tool_text(),
-        "drawn: [one, two]; stopped: drawing.TooMuchToPaint; the picture stays at its last shown step; use fewer or simpler shapes and call draw again"
+        "drawn: [one, two]; stopped: drawing.TooMuchToPaint; the picture stays at its last shown step; everything on screen can hold about 20 plain boxes, or about 10 when arrows have labels; use fewer or simpler shapes and call draw again"
     );
     assert!(!drawing.drew_nothing(RunId(1)));
+}
+
+/// The budget the refusal names is the prompt's, and its numbers hold at the paint caps: each
+/// stated diagram fits, and one with a quarter more boxes does not.
+#[test]
+fn the_paint_budget_matches_the_prompt_and_the_paint_caps() {
+    use serde_json::json;
+
+    const PLAIN: usize = 20;
+    const LABELLED: usize = 10;
+    let words = |text: &str| {
+        text.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    };
+    assert!(
+        words(include_str!("../../prompts/draw.md")).contains(&words(super::call::PAINT_BUDGET)),
+        "the prompt states the refusal's budget"
+    );
+    assert!(super::call::PAINT_BUDGET.contains(&format!("about {PLAIN} plain boxes")));
+    assert!(
+        super::call::PAINT_BUDGET.contains(&format!("about {LABELLED} when arrows have labels"))
+    );
+    let diagram = |boxes: usize, labelled: bool| {
+        let mut put = vec![json!({"diagram":{"id":"d","dir":"down"}})];
+        put.extend(
+            (0..boxes)
+                .map(|index| json!({"node":{"id":format!("n{index}"),"in":"d","label":"Step"}})),
+        );
+        put.extend((1..boxes).map(|index| {
+            let mut edge = json!({"id":format!("e{index}"),"from":format!("n{}", index - 1),"to":format!("n{index}")});
+            if labelled {
+                edge["label"] = json!("then");
+            }
+            json!({ "edge": edge })
+        }));
+        put
+    };
+    for (boxes, labelled) in [(PLAIN, false), (LABELLED, true)] {
+        assert!(
+            paint_work(&diagram(boxes, labelled)).within_limits(),
+            "{boxes} boxes fit"
+        );
+        assert!(
+            !paint_work(&diagram(boxes + boxes / 4, labelled)).within_limits(),
+            "a quarter more boxes do not fit"
+        );
+    }
+}
+
+/// The paint work of one step of `put` on a fresh scene at the default surface, prepared
+/// without a cap.
+fn paint_work(put: &[serde_json::Value]) -> kumochi_scene::display::PaintWork {
+    use kumochi_scene::display::{MeasureError, TextMeasure, TextStyle};
+    use kumochi_scene::layout::{LayoutState, PrepareInput, SurfaceGeometry, prepare};
+
+    struct Measure;
+    impl TextMeasure for Measure {
+        fn measure(
+            &mut self,
+            _: &str,
+            _: TextStyle,
+            _: Option<f32>,
+        ) -> Result<[f32; 2], MeasureError> {
+            Ok([40.0, 20.0])
+        }
+    }
+    let record = |value: serde_json::Value| {
+        parse_record(&serde_json::to_vec(&value).expect("JSON")).expect("a record")
+    };
+    let Record::Begin(begin) =
+        record(serde_json::json!({"begin":{"v":1,"scene":"budget","surface":"overlay","alt":""}}))
+    else {
+        panic!("a begin record");
+    };
+    let Record::Step(step) = record(serde_json::json!({"step":{"id":"one","put":put}})) else {
+        panic!("a step record");
+    };
+    let mut scene = SceneState::begin(begin).expect("scene");
+    let mut budget = kumochi_scene::GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let kumochi_scene::Admission::New(admitted) = scene.admit(&step, &budget).expect("admitted")
+    else {
+        panic!("a new step");
+    };
+    let ticket = scene
+        .commit(admitted, &mut budget)
+        .expect("committed")
+        .preparation;
+    let input = PrepareInput::new(
+        ticket,
+        before,
+        SurfaceGeometry::default(),
+        Arc::new(kumochi_scene::theme::Theme::default()),
+    )
+    .map_err(|(error, _)| error)
+    .expect("the first step follows the empty layout");
+    prepare(
+        input,
+        &mut Measure,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .expect("prepared")
+    .after
+    .paint_work()
 }
 
 /// One record of run `run`'s streamed call `call`.

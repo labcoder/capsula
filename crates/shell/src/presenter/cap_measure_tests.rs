@@ -568,7 +568,7 @@ fn measure_worst_case_fill_crossings() {
             let effects = presenter.completed(done, now).expect("a refused answer");
             assert_eq!(
                 controls(&effects),
-                [&failed(LIVE, 0, SceneFailure::Residency)]
+                [&failed(LIVE, 0, SceneFailure::PaintWork)]
             );
         }
     }

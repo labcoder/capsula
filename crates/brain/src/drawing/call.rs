@@ -29,11 +29,27 @@ pub(super) const MAX_CALL_RECORDS: usize = MAX_DRAW_STEPS_PER_RUN + 2;
 const RETRY_HINT: &str = "; drawn lists what this call added, and earlier steps stay as they were; correct this and call draw again";
 /// Follows a model error once the run drew its whole step budget but still takes calls.
 const FULL_HINT: &str = "; no further step can be drawn in this turn";
+/// What everything on screen together can paint, in shapes a model can plan with. The draw
+/// prompt says the same, and a test ties both numbers to the paint caps.
+macro_rules! paint_budget {
+    () => {
+        "everything on screen can hold about 20 plain boxes, or about 10 when arrows have labels"
+    };
+}
+#[cfg(test)]
+pub(super) const PAINT_BUDGET: &str = paint_budget!();
 /// Follows a step too large to paint while the run can still draw and earlier steps stay shown.
-const PAINT_HINT: &str =
-    "; the picture stays at its last shown step; use fewer or simpler shapes and call draw again";
+const PAINT_HINT: &str = concat!(
+    "; the picture stays at its last shown step; ",
+    paint_budget!(),
+    "; use fewer or simpler shapes and call draw again"
+);
 /// Follows a step too large to paint that left its scene with nothing shown, so it was removed.
-const CLEARED_HINT: &str = "; nothing of this scene was shown, so it was removed; begin a new scene with a new name and fewer or simpler shapes";
+const CLEARED_HINT: &str = concat!(
+    "; nothing of this scene was shown, so it was removed; ",
+    paint_budget!(),
+    "; begin a new scene with a new name and fewer or simpler shapes"
+);
 /// Follows any early stop once the run accepts no further draw call.
 const SPENT_HINT: &str = "; no further draw call will be accepted in this turn";
 

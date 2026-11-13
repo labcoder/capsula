@@ -616,6 +616,15 @@ fn measure_primary_paint_work_candidates() {
             mixed.work = mixed.work + other.work;
             mixed.primitives.extend(other.primitives);
         }
+        let sources: Vec<_> = mixed
+            .primitives
+            .iter()
+            .map(|(prim, _)| prim.clone())
+            .collect();
+        mixed.cache = PaintScene::of(
+            kumochi_scene::Handle::new(1, 0).expect("a diagnostic handle"),
+            &sources,
+        );
         cases.push(mixed);
     }
     measure_preparation_work();
