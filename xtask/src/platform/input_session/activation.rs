@@ -119,6 +119,15 @@ impl Activation {
         self.advance(Stage::Clicked, confirmed.then_some(Stage::Confirmed))
     }
 
+    /// Whether to keep waiting for the fixture's root to come to the front: all else is calm, the
+    /// pointer is on its point, and the front is empty or another window of the fixture's process.
+    pub(crate) fn awaits_root(&self, look: Look, foreground: Owner) -> bool {
+        self.calm(look)
+            && look.cursor == self.point
+            && foreground != self.root
+            && (foreground.pid == 0 || foreground.pid == self.root.pid)
+    }
+
     /// Whether a half-acknowledged down may be released: only on this desktop, from a fresh look,
     /// toward the still-owned EDIT, with the pointer on its point and no capture but the EDIT's.
     /// Foreign activity and the deadline don't block this cleanup.
@@ -298,6 +307,48 @@ mod tests {
             confirmed.confirm(CALM, RECEIVED, ROOT).is_err(),
             "confirmed once"
         );
+    }
+
+    #[test]
+    fn the_confirm_waits_for_the_root_only_over_an_empty_or_own_front_while_calm() {
+        let activation = upto(3);
+        let null = Owner { window: 0, pid: 0 };
+        assert!(activation.awaits_root(CALM, null), "an empty front");
+        assert!(activation.awaits_root(CALM, EDIT), "the fixture's own EDIT");
+        assert!(!activation.awaits_root(CALM, ROOT), "the root is in front");
+        assert!(!activation.awaits_root(CALM, FOREIGN), "a foreign front");
+        for (case, look) in [
+            (
+                "input",
+                Look {
+                    foreign: true,
+                    ..CALM
+                },
+            ),
+            (
+                "a moved pointer",
+                Look {
+                    cursor: POINT { x: 301, y: 260 },
+                    ..CALM
+                },
+            ),
+            (
+                "a changed desktop",
+                Look {
+                    desktop: false,
+                    ..CALM
+                },
+            ),
+            (
+                "the deadline",
+                Look {
+                    in_time: false,
+                    ..CALM
+                },
+            ),
+        ] {
+            assert!(!activation.awaits_root(look, null), "{case}");
+        }
     }
 
     #[test]

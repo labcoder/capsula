@@ -122,6 +122,10 @@ pub(super) struct Observation {
     pub(super) clicks: Vec<Click>,
     pub(super) hovers: Vec<Hover>,
     pub(super) stop_target: Option<StopTarget>,
+    /// Kumo pulls seen: runs of commits of an empty mask over an area grown from the dock.
+    pub(super) pulls: u32,
+    /// The last commit was a pull's.
+    pulling: bool,
     pending_targets: Vec<StopTarget>,
     pid: u32,
     lines: u64,
@@ -483,8 +487,13 @@ impl Observation {
         let proxy = rect(proxy)?;
         let [left, top, width, height] = proxy;
         let band = &self.geometries[&geometry];
+        // The shell records a pull's masks without their rows, over the pull area around the dock.
+        let pull = band.rows.is_empty()
+            && self
+                .startup
+                .is_some_and(|startup| grown_from(proxy, startup.dock));
         ensure!(
-            band.origin_y == top
+            pull || band.origin_y == top
                 && band.rows.len() == usize::try_from(height)?
                 && band.rows.iter().all(|row| {
                     row.owned[0] == Some([left, left + width])
@@ -492,6 +501,8 @@ impl Observation {
                 }),
             "committed geometry does not own exactly the hit proxy"
         );
+        self.pulls += u32::from(pull && !self.pulling);
+        self.pulling = pull;
         let qpc = ordered(counter, previous.map_or(0, |value| value.qpc))?;
         let begin_qpc = positive(begin)?;
         ensure!(
@@ -804,6 +815,13 @@ fn span(text: &str) -> Result<Option<[i32; 2]>> {
     let (left, right) = (number(left)?, number(right)?);
     ensure!(left < right, "empty or reversed geometry span");
     Ok(Some([left, right]))
+}
+
+/// Whether `outer` holds `inner` and is larger than it.
+fn grown_from(outer: [i32; 4], inner: [i32; 4]) -> bool {
+    let [left, top, width, height] = outer.map(i64::from);
+    let [x, y, w, h] = inner.map(i64::from);
+    outer != inner && left <= x && top <= y && x + w <= left + width && y + h <= top + height
 }
 
 fn inside_panel([left, top, width, height]: [i32; 4], [x, y, w, h]: [i32; 4]) -> bool {
