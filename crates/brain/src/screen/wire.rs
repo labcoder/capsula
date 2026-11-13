@@ -178,6 +178,8 @@ pub enum Refusal {
     Excluded,
     /// The window's identity, frame or DPI changed, or it closed, before its frame was taken.
     WindowChanged,
+    /// A drawn layered window is under the pointer and where a click lands can't be told.
+    Ambiguous,
 }
 
 /// A complete, valid frame's description; the pixels stay in the worker.
