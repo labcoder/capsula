@@ -59,6 +59,8 @@ pub(crate) struct Claude {
     again: bool,
     /// A Disconnect is still to finish.
     cleaning: bool,
+    /// The generation a Cancel started: its Status decides whether Kumochi's folder goes.
+    cancelled: Option<u64>,
     /// The launches admitted, until each one's teardown is over and its report, if one is due,
     /// was heard.
     launches: Vec<Held>,
@@ -125,6 +127,7 @@ impl Claude {
             out: None,
             again: false,
             cleaning: false,
+            cancelled: None,
             launches: Vec::new(),
             quarantine: None,
             warm: None,
@@ -255,7 +258,9 @@ impl Claude {
                     && self.view == ClaudeCodeView::SigningIn
                     && self.out == Some(Work::Login) =>
             {
-                self.begin(Work::Version);
+                if self.begin(Work::Version) {
+                    self.cancelled = Some(self.generation);
+                }
             }
             // A Disconnect the lane can't take leaves nothing marked, so it may be asked again.
             ConnectionOp::DisconnectClaudeCode if signs_in && self.finds && !self.cleaning => {
@@ -294,6 +299,18 @@ impl Claude {
         {
             self.quarantine = None;
         }
+        // The Version and Status after a Cancel: unless the Status is signed in, or the lane
+        // couldn't run the call (Busy, Refused), the sign-in may have left Claude Code's file in
+        // Kumochi's folder, and only a Disconnect removes it.
+        let leftover = self.cancelled == Some(generation)
+            && matches!(self.out, Some(Work::Version | Work::Status))
+            && !matches!(
+                result,
+                Ok(Outcome::Status {
+                    signed_in: true,
+                    ..
+                }) | Err(Failure::Busy | Failure::Refused)
+            );
         match result {
             Ok(Outcome::Version(_) | Outcome::LoginEnded) => {
                 if self.submit(Work::Status) {
@@ -339,6 +356,12 @@ impl Claude {
             }
         }
         self.out = None;
+        if leftover {
+            self.cleaning = self.begin(Work::Disconnect { logout: false });
+            if self.cleaning {
+                self.view = ClaudeCodeView::CleanupPending;
+            }
+        }
         if std::mem::take(&mut self.again) {
             self.find();
         }
