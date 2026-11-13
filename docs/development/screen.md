@@ -325,8 +325,8 @@ identity, frame or DPI before the pixels are read, refuses with `WindowChanged`.
 `platform::windows::window::tests::native_window_probe` is an ignored native check over sentinel
 windows owned by a second test process (the worker's own windows count as Kumochi's). It covers
 the occluder and click-through cases, the frame origin against a password edit, and the
-refusals. It opens topmost windows on the main display for a few seconds, so it runs only when
-the desk is idle, under the measuring lock:
+refusals. It opens topmost windows on the main display for a few seconds, so run it on an idle Windows
+desktop:
 
 ```
 cargo test -p kumochi-brain --lib native_window_probe -- --ignored --exact --nocapture
