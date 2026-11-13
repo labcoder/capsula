@@ -44,10 +44,13 @@ const PROMPT: &str = "Name the colour of the image's left half, then of its righ
 /// The most answer text kept for the match.
 const ANSWER_BYTES: usize = 256;
 const QUALITY: u8 = 85;
-/// Noise in each channel, out of 256, so the large images don't compress away.
+/// Noise in each channel, out of 256, so the large images don't compress away while each half
+/// stays plainly red or blue.
 const NOISE: u32 = 64;
-/// The noisy images' width; their height is searched.
-const WIDTH: u32 = 1024;
+/// The noisy images' width, and the most their searched height may reach. At this width both
+/// large images come out between square and 3:2, so a refusal can't be about an extreme shape.
+const WIDTH: u32 = 2048;
+const TOP: u32 = 4096;
 /// Room left in the near-ceiling body for everything but the image.
 const SLACK: usize = 16 * 1024;
 
@@ -84,7 +87,7 @@ pub fn run() -> u8 {
     let client = ModelClient::new(tls);
     let budget = Budget::limited(Some(BUDGET));
     let code = runtime.block_on(async {
-        for (number, (kind, jpeg_bytes, body, body_bytes)) in requests.iter().enumerate() {
+        for (number, (kind, size, jpeg_bytes, body, body_bytes)) in requests.iter().enumerate() {
             let bearer = match usable(
                 account.as_ref().map(Secret::expose),
                 SystemClock.unix_seconds(),
@@ -108,6 +111,7 @@ pub fn run() -> u8 {
             let line = report(
                 number + 1,
                 kind,
+                *size,
                 *jpeg_bytes,
                 *body_bytes,
                 start.elapsed().as_millis(),
@@ -123,17 +127,22 @@ pub fn run() -> u8 {
     code
 }
 
-/// The three requests, built before anything is sent: kind, JPEG bytes, body and body bytes.
-fn requests() -> Option<Vec<(&'static str, usize, ResponsesBody, usize)>> {
+/// One request, built before anything is sent: kind, image size, JPEG bytes, body and body bytes.
+type Prepared = (&'static str, [u32; 2], usize, ResponsesBody, usize);
+
+/// The three requests; nothing when an image misses its size or a body is refused.
+fn requests() -> Option<Vec<Prepared>> {
     let model = ModelSlug::new(DEFAULT_SLUG).ok()?;
     let near_ceiling = (BODY_CEILING - SLACK) / 4 * 3;
+    let (cap, cap_height) = sized(WIDTH, TOP, JPEG_CAP)?;
+    let (ceiling, ceiling_height) = sized(WIDTH, TOP, near_ceiling)?;
     [
-        ("small", halves(256, 256, 0)?),
-        ("cap", sized(JPEG_CAP)?),
-        ("ceiling", sized(near_ceiling)?),
+        ("small", [256, 256], halves(256, 256, 0)?),
+        ("cap", [WIDTH, cap_height], cap),
+        ("ceiling", [WIDTH, ceiling_height], ceiling),
     ]
     .into_iter()
-    .map(|(kind, jpeg)| {
+    .map(|(kind, size, jpeg)| {
         let jpeg_bytes = jpeg.len();
         let mut request = ModelRequest {
             choice: Some(ModelChoice {
@@ -153,6 +162,7 @@ fn requests() -> Option<Vec<(&'static str, usize, ResponsesBody, usize)>> {
         let body_bytes = value.to_string().len();
         Some((
             kind,
+            size,
             jpeg_bytes,
             ResponsesBody::new(&value).ok()?,
             body_bytes,
@@ -161,20 +171,22 @@ fn requests() -> Option<Vec<(&'static str, usize, ResponsesBody, usize)>> {
     .collect()
 }
 
-/// The largest noisy two-colour JPEG, `WIDTH` wide, of at most `cap` bytes.
-fn sized(cap: usize) -> Option<Vec<u8>> {
-    let (mut low, mut high, mut best) = (16_u32, 4096_u32, None);
+/// The tallest noisy two-colour JPEG `width` wide and at most `top` high with at most `cap`
+/// bytes, and its height; nothing unless it comes within 2% of `cap`, so a request never goes
+/// out smaller than its line says.
+fn sized(width: u32, top: u32, cap: usize) -> Option<(Vec<u8>, u32)> {
+    let (mut low, mut high, mut best) = (16_u32, top, None);
     while low <= high {
         let height = low + (high - low) / 2;
-        let jpeg = halves(WIDTH, height, NOISE)?;
+        let jpeg = halves(width, height, NOISE)?;
         if jpeg.len() <= cap {
             low = height + 1;
-            best = Some(jpeg);
+            best = Some((jpeg, height));
         } else {
             high = height - 1;
         }
     }
-    best
+    best.filter(|(jpeg, _)| jpeg.len() >= cap - cap / 50)
 }
 
 /// A JPEG whose left half is red and right half blue, each channel moved by up to `noise`.
@@ -235,36 +247,34 @@ fn matches(answer: &str) -> bool {
 fn report(
     number: usize,
     kind: &str,
+    [width, height]: [u32; 2],
     jpeg_bytes: usize,
     body_bytes: usize,
     ms: u128,
     result: Result<bool, Failure>,
 ) -> String {
-    let (status, code, outcome, matched) = match result {
+    let none = || "-".to_owned();
+    let (status, code, param, outcome, matched) = match result {
         Ok(matched) => (
             "2xx".to_owned(),
-            "-".to_owned(),
+            none(),
+            none(),
             "completed",
             matched.to_string(),
         ),
         Err(Failure::Provider(error)) => (
             error.status.to_string(),
-            error
-                .code
-                .map_or_else(|| "-".to_owned(), |code| format!("{code:?}")),
+            error.code.map_or_else(none, |code| format!("{code:?}")),
+            error.param.map_or_else(none, |param| format!("{param:?}")),
             "refused",
-            "-".to_owned(),
+            none(),
         ),
-        Err(failure) => (
-            "-".to_owned(),
-            "-".to_owned(),
-            kind_of(failure),
-            "-".to_owned(),
-        ),
+        Err(failure) => (none(), none(), none(), kind_of(failure), none()),
     };
     format!(
-        "request={number} image={kind} jpeg_bytes={jpeg_bytes} body_bytes={body_bytes} \
-         status={status} code={code} result={outcome} ms={ms} content_match={matched}"
+        "request={number} image={kind} size={width}x{height} jpeg_bytes={jpeg_bytes} \
+         body_bytes={body_bytes} status={status} code={code} param={param} result={outcome} \
+         ms={ms} content_match={matched}"
     )
 }
 

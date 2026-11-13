@@ -53,13 +53,16 @@ fn request_lines(text: &str) -> Vec<&str> {
         .collect()
 }
 
-/// The run's line, from its exit code and the number of request lines. A run that ended without
-/// a code may have had one more request in flight.
+/// The run's line, from its exit code and the number of request lines. A run that stopped or
+/// ended without a code may have sent one request whose line never printed.
 fn summary(code: Option<i32>, lines: usize) -> String {
     match code {
         Some(0) => format!("image check: done (requests: {lines})"),
         Some(code @ 10..=19) => format!("image check: nothing sent, exit {code} (requests: 0)"),
-        Some(code) => format!("image check: stopped, exit {code} (requests: {lines})"),
+        Some(code) => format!(
+            "image check: stopped, exit {code} (requests: at most {})",
+            lines + 1
+        ),
         None => format!(
             "image check: no exit code (requests: at most {})",
             lines + 1
@@ -94,8 +97,21 @@ mod tests {
                 0,
                 "image check: nothing sent, exit 19 (requests: 0)",
             ),
-            (Some(20), 2, "image check: stopped, exit 20 (requests: 2)"),
-            (Some(-1), 1, "image check: stopped, exit -1 (requests: 1)"),
+            (
+                Some(20),
+                2,
+                "image check: stopped, exit 20 (requests: at most 3)",
+            ),
+            (
+                Some(101),
+                0,
+                "image check: stopped, exit 101 (requests: at most 1)",
+            ),
+            (
+                Some(-1),
+                1,
+                "image check: stopped, exit -1 (requests: at most 2)",
+            ),
             (None, 2, "image check: no exit code (requests: at most 3)"),
         ] {
             assert_eq!(summary(code, lines), line);
