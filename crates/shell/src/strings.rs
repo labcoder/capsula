@@ -1065,6 +1065,7 @@ const fn error_id(key: ErrorKey) -> &'static str {
         ErrorKey::GitHubUnavailable => "github-unavailable",
         ErrorKey::DrawingReplacementFailed => "error-drawing-replacement-failed",
         ErrorKey::DrawingNotReturned => "error-drawing-not-returned",
+        ErrorKey::ScreenUnavailable => "error-screen-unavailable",
     }
 }
 

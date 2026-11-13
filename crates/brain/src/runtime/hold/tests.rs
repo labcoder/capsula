@@ -1228,53 +1228,35 @@ fn waiting() -> ScreenPart {
     }
 }
 
+const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xD9];
+
+fn ready() -> ScreenPart {
+    ScreenPart::Ready(crate::screen::ScreenContext::fixture(JPEG))
+}
+
 enum Closer {
     Control(ControlToBrain),
-    ShellLost,
+    Fence(Box<Input>),
     Event(Event),
+    /// The serve loop's queued turn and the settings queue's model change both invalidate.
+    Invalidate(HoldStatus),
     Lost,
 }
 
 #[tokio::test]
 async fn every_closer_of_a_waiting_screen_part_retires_its_frame_once() {
-    use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
     let scratch = Scratch::new("hold-screen-closers");
     let mut brain = test_support::brain(&scratch, "");
     let (out, mut output) = mpsc::channel(16);
     let queue = RefCell::new(DataQueue::new(super::super::window()));
-    let ready = Notify::new();
+    let ready_notify = Notify::new();
     let mut tap = Tap::from_env();
-    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
     link.recovery = Some(crate::runtime::Recovery::new(&[], 1024));
     let mut rig = crate::supervise::fixture::start::<crate::screen::Holds>();
     brain.holds.screen = Some(Arc::new(HoldClient::new(rig.handle.clone())));
-    let choice = ModelChoice {
-        model: ModelSlug::new("fixture-model").unwrap(),
-        effort: Effort::High,
-        connection: ConnectionKind::ChatGpt,
-    };
-    let thread = brain.config.view().main_thread;
-    let closers = [
-        Closer::Control(ControlToBrain::GestureCancel {
-            gesture: KEY.gesture,
-        }),
-        Closer::Control(ControlToBrain::Settings(SettingsOp::SetDefaultModel(
-            choice.clone(),
-        ))),
-        Closer::Control(ControlToBrain::Settings(SettingsOp::SetHoldToTalk(false))),
-        Closer::Control(ControlToBrain::Settings(SettingsOp::RemoveVoice(
-            kumochi_protocol::voice::VoicePart::SpeechInput,
-        ))),
-        Closer::Control(ControlToBrain::ThreadOp(ThreadOp::SetModel {
-            thread,
-            choice,
-        })),
-        Closer::ShellLost,
-        Closer::Event(Event::Deadline),
-        Closer::Event(Event::Decoded(KEY, SttResult::Text("words".into()))),
-        Closer::Lost,
-    ];
-    for closer in closers {
+    let closers = closers(brain.config.view().main_thread);
+    for (index, closer) in closers.into_iter().enumerate() {
         screen_hold(&mut brain, KEY, waiting());
         let submits = matches!(closer, Closer::Event(Event::Decoded(..)));
         match closer {
@@ -1284,15 +1266,17 @@ async fn every_closer_of_a_waiting_screen_part_retires_its_frame_once() {
                     brain.hold_fence(&input);
                 }
             }
-            Closer::ShellLost => brain.hold_fence(&Input::ShellLost),
+            Closer::Fence(input) => brain.hold_fence(&input),
             Closer::Event(event) => brain.hold_event(event, &mut link).unwrap(),
+            Closer::Invalidate(status) => brain.holds.invalidate(status),
             Closer::Lost => brain.holds.lost(),
         }
         assert!(
             brain.holds.pending.as_ref().is_none_or(|hold| matches!(
                 hold.screen,
-                ScreenPart::Closed(screen::Class::NotReady)
-            ))
+                ScreenPart::Closed(crate::context::ScreenClass::NotReady)
+            )),
+            "closer {index}"
         );
         crate::screen::release_next(&mut rig, KEY).await;
         brain.holds.lost();
@@ -1316,11 +1300,7 @@ async fn every_closer_of_a_waiting_screen_part_retires_its_frame_once() {
     };
     screen_hold(&mut brain, voice, ScreenPart::None);
     brain.holds.lost();
-    screen_hold(
-        &mut brain,
-        voice,
-        ScreenPart::Ready(crate::screen::ScreenContext::fixture(b"jpeg")),
-    );
+    screen_hold(&mut brain, voice, ready());
     brain.holds.lost();
     let last = HoldKey {
         epoch: 0,
@@ -1332,21 +1312,161 @@ async fn every_closer_of_a_waiting_screen_part_retires_its_frame_once() {
     brain.close().await;
 }
 
+#[tokio::test]
+async fn a_ready_image_goes_to_its_run_and_a_waiting_part_closes_before_its_run_takes_it() {
+    use crate::context::{Jpeg, Screen, ScreenClass};
+    let scratch = Scratch::new("hold-screen-submit");
+    let mut brain = test_support::brain(&scratch, "");
+    let mut rig = crate::supervise::fixture::start::<crate::screen::Holds>();
+    brain.holds.screen = Some(Arc::new(HoldClient::new(rig.handle.clone())));
+    screen_hold(&mut brain, KEY, ready());
+    let image = Jpeg::new(JPEG.to_vec()).unwrap();
+    assert!(matches!(brain.holds.submit_screen(), Some(Screen::Image(sent)) if sent == image));
+    assert!(matches!(
+        brain.holds.pending.as_ref().unwrap().screen,
+        ScreenPart::None
+    ));
+    brain.holds.lost();
+    screen_hold(&mut brain, KEY, waiting());
+    assert!(matches!(
+        brain.holds.submit_screen(),
+        Some(Screen::NotIncluded(ScreenClass::NotReady))
+    ));
+    crate::screen::release_next(&mut rig, KEY).await;
+    brain.holds.lost();
+    for part in [ScreenPart::None, ScreenPart::Discarded] {
+        screen_hold(&mut brain, KEY, part);
+        assert!(brain.holds.submit_screen().is_none());
+        brain.holds.lost();
+    }
+    screen_hold(&mut brain, KEY, ready());
+    brain.holds.invalidate(HoldStatus::Cancelled);
+    assert!(matches!(
+        brain.holds.pending.as_ref().unwrap().screen,
+        ScreenPart::Discarded
+    ));
+    assert!(brain.holds.submit_screen().is_none());
+    brain.holds.lost();
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn the_transcript_hands_a_ready_image_to_its_run() {
+    let scratch = Scratch::new("hold-screen-run");
+    let mut brain = test_support::brain(&scratch, "");
+    let (out, _output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    link.recovery = Some(crate::runtime::Recovery::new(&[], 1024));
+    screen_hold(&mut brain, KEY, ready());
+    brain
+        .hold_event(
+            Event::Decoded(KEY, SttResult::Text("words".into())),
+            &mut link,
+        )
+        .unwrap();
+    assert!(brain.holds.pending.is_none());
+    assert!(matches!(
+        brain.coordinator.current_screen(),
+        Some(crate::context::Screen::Image(image))
+            if *image == crate::context::Jpeg::new(JPEG.to_vec()).unwrap()
+    ));
+    brain.close().await;
+}
+
+#[test]
+#[should_panic(expected = "a hold ended past both of its screen part's closers")]
+fn a_hold_dropped_with_a_live_screen_part_fails_in_tests() {
+    drop(Hold {
+        key: KEY,
+        thread: None,
+        cancel: Arc::default(),
+        snapshot: None,
+        audio: None,
+        ask: None,
+        released: false,
+        deadline: Instant::now(),
+        decode: None,
+        terminal: None,
+        screen: waiting(),
+    });
+}
+
 #[test]
 fn a_screen_hold_prints_no_image_bytes() {
     let scratch = Scratch::new("hold-screen-debug");
     let mut brain = test_support::brain(&scratch, "");
     let marker = b"KUMOCHI-HOLD-SCREEN-MARKER";
-    let ready = || ScreenPart::Ready(crate::screen::ScreenContext::fixture(marker));
-    screen_hold(&mut brain, KEY, ready());
+    let part = || ScreenPart::Ready(crate::screen::ScreenContext::fixture(marker));
+    screen_hold(&mut brain, KEY, part());
+    let screen = crate::context::Screen::Image(
+        crate::context::Jpeg::new([&[0xFF, 0xD8, 0xFF][..], marker].concat()).unwrap(),
+    );
     let texts = [
         format!("{:?}", brain.holds),
         format!("{:?}", brain.holds.pending),
-        format!("{:?}", ready()),
+        format!("{:?}", part()),
+        format!("{screen:?}"),
     ];
     for text in texts {
         assert!(!text.contains("KUMOCHI-HOLD-SCREEN-MARKER"), "{text}");
         assert!(!text.contains(&format!("{marker:?}")[1..20]), "{text}");
     }
-    brain.holds.pending = None;
+    brain.holds.lost();
+}
+
+/// Every way a hold ends, through the entry point production uses for it.
+fn closers(thread: ThreadId) -> Vec<Closer> {
+    use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
+    let choice = ModelChoice {
+        model: ModelSlug::new("fixture-model").unwrap(),
+        effort: Effort::High,
+        connection: ConnectionKind::ChatGpt,
+    };
+    let fence = |input| Closer::Fence(Box::new(input));
+    vec![
+        Closer::Control(ControlToBrain::GestureCancel {
+            gesture: KEY.gesture,
+        }),
+        Closer::Control(ControlToBrain::Settings(SettingsOp::SetDefaultModel(
+            choice.clone(),
+        ))),
+        Closer::Control(ControlToBrain::Settings(SettingsOp::SetHoldToTalk(false))),
+        Closer::Control(ControlToBrain::Settings(SettingsOp::RemoveVoice(
+            kumochi_protocol::voice::VoicePart::SpeechInput,
+        ))),
+        Closer::Control(ControlToBrain::ThreadOp(ThreadOp::SetModel {
+            thread,
+            choice,
+        })),
+        fence(Input::ShellLost),
+        fence(Input::Turn {
+            turn: 1,
+            thread: None,
+            text: "typed".into(),
+        }),
+        fence(Input::Ask {
+            turn: 1,
+            scene: kumochi_protocol::message::SceneId(1),
+            element: kumochi_scene::Handle::new(1, 0).unwrap(),
+        }),
+        fence(Input::Delete {
+            thread,
+            after_turns: 0,
+            resend: false,
+        }),
+        fence(Input::Engines(crate::coordinator::Availability::Ready(
+            crate::coordinator::Ready {
+                connection: crate::context::ConnectionTag(77),
+                ..crate::coordinator::Ready::fixture()
+            },
+        ))),
+        Closer::Event(Event::Deadline),
+        Closer::Event(Event::Decoded(KEY, SttResult::Text("words".into()))),
+        Closer::Invalidate(HoldStatus::Cancelled),
+        Closer::Invalidate(HoldStatus::Failed(HoldFailure::ChoiceChanged)),
+        Closer::Lost,
+    ]
 }

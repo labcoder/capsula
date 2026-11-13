@@ -107,6 +107,7 @@ impl Coordinator {
         &mut self,
         snapshot: HoldSnapshot,
         text: Content,
+        screen: Option<crate::context::Screen>,
     ) -> Result<Vec<Effect>, ()> {
         if text.trim().is_empty() || !self.admits_hold(&snapshot) {
             snapshot.cancel.store(true, Ordering::SeqCst);
@@ -122,10 +123,22 @@ impl Coordinator {
             Some(snapshot),
             &mut effects,
         );
+        // shortcut: the shell retries a failed run by sending its text as a new typed turn, so a
+        // held run's retry goes without its screen and nothing says so; record that a run carried
+        // a screen and fail its retry with ScreenUnavailable before 2c4 turns screen holds on.
+        if let Some(run) = &mut self.current {
+            run.screen = screen;
+        }
         self.drawing_settle(&mut effects);
         self.retry_with(&mut effects);
         self.arm_retry(&mut effects);
         Ok(effects)
+    }
+
+    /// The current run's screen, for tests outside the coordinator.
+    #[cfg(test)]
+    pub(crate) fn current_screen(&self) -> Option<&crate::context::Screen> {
+        self.current.as_ref().and_then(|run| run.screen.as_ref())
     }
 
     pub(crate) fn admits_hold(&self, snapshot: &HoldSnapshot) -> bool {

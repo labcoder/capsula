@@ -205,10 +205,46 @@ pub(crate) enum Role {
 
 /// A sealed JPEG for the model. Its bytes are user content: Debug shows only their length, and
 /// they're zeroed when the last copy drops.
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) struct Jpeg(Arc<Zeroizing<Vec<u8>>>);
+#[derive(Clone)]
+pub(crate) struct Jpeg(Arc<Image>);
+
+/// The one buffer behind every copy of a [`Jpeg`].
+struct Image {
+    /// Declared first so it drops first: the registration ends after `Drop` zeroes the bytes and
+    /// before they're freed.
+    #[cfg(windows)]
+    _dump: Option<crate::platform::DumpExclusion>,
+    bytes: Zeroizing<Vec<u8>>,
+}
+
+impl Drop for Image {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut *self.bytes);
+    }
+}
+
+impl PartialEq for Jpeg {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.bytes == other.0.bytes
+    }
+}
+
+impl Eq for Jpeg {}
 
 impl Jpeg {
+    /// A sealed image's own buffer, moved in without a copy, with the dump registration that
+    /// already covers it.
+    pub(crate) fn sealed(
+        bytes: Zeroizing<Vec<u8>>,
+        #[cfg(windows)] dump: Option<crate::platform::DumpExclusion>,
+    ) -> Self {
+        Self(Arc::new(Image {
+            #[cfg(windows)]
+            _dump: dump,
+            bytes,
+        }))
+    }
+
     /// `bytes` when they start with a JPEG's SOI marker, else nothing; refused bytes are zeroed.
     #[cfg_attr(
         not(any(test, debug_assertions)),
@@ -216,9 +252,13 @@ impl Jpeg {
     )]
     pub(crate) fn new(bytes: Vec<u8>) -> Option<Self> {
         let bytes = Zeroizing::new(bytes);
-        bytes
-            .starts_with(&[0xFF, 0xD8, 0xFF])
-            .then(|| Self(Arc::new(bytes)))
+        bytes.starts_with(&[0xFF, 0xD8, 0xFF]).then(|| {
+            Self(Arc::new(Image {
+                #[cfg(windows)]
+                _dump: None,
+                bytes,
+            }))
+        })
     }
 
     /// The image as the data URL the body carries, built in one zeroing buffer of exactly its
@@ -226,13 +266,13 @@ impl Jpeg {
     pub(crate) fn data_url(&self) -> Zeroizing<String> {
         let mut url = Zeroizing::new(String::with_capacity(self.data_url_len()));
         url.push_str(JPEG_DATA_URL);
-        STANDARD.encode_string(self.0.as_slice(), &mut url);
+        STANDARD.encode_string(self.0.bytes.as_slice(), &mut url);
         url
     }
 
     /// [`Self::data_url`]'s length, without building it.
     pub(crate) fn data_url_len(&self) -> usize {
-        JPEG_DATA_URL.len() + self.0.len().div_ceil(3) * 4
+        JPEG_DATA_URL.len() + self.0.bytes.len().div_ceil(3) * 4
     }
 
     /// The image's whole input item serialized, wrapper included, without building it. Exact,
@@ -244,7 +284,7 @@ impl Jpeg {
 
 impl fmt::Debug for Jpeg {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("Jpeg").field(&self.0.len()).finish()
+        f.debug_tuple("Jpeg").field(&self.0.bytes.len()).finish()
     }
 }
 
@@ -341,10 +381,6 @@ impl ModelRequest {
     /// Adds `image` right after the newest user message. Only the Responses route carries images,
     /// so any other refuses here and no adapter ever has one to drop. The body's ceiling is
     /// checked when it's serialised.
-    #[cfg_attr(
-        not(any(test, debug_assertions)),
-        expect(dead_code, reason = "2c attaches a hold's sealed screen image")
-    )]
     pub(crate) fn attach(&mut self, image: Jpeg) -> Result<(), ImageRefused> {
         if self
             .choice
@@ -353,8 +389,35 @@ impl ModelRequest {
         {
             return Err(ImageRefused::Route);
         }
-        let at = self
-            .input
+        let at = self.turn()?;
+        self.input.insert(at + 1, InputItem::Image(image));
+        Ok(())
+    }
+
+    /// Adds a hold's screen after the newest user message: the image and the line saying it's a
+    /// snapshot, or the line saying why it isn't there.
+    pub(crate) fn add_screen(&mut self, screen: &Screen) -> Result<(), ImageRefused> {
+        let (line, after) = match screen {
+            Screen::Image(image) => {
+                self.attach(image.clone())?;
+                ("screen-snapshot", 2)
+            }
+            Screen::NotIncluded(ScreenClass::NotReady) => ("screen-not-ready", 1),
+        };
+        let at = self.turn()? + after;
+        self.input.insert(
+            at,
+            InputItem::Message {
+                role: Role::Developer,
+                text: screen_line(line),
+            },
+        );
+        Ok(())
+    }
+
+    /// The newest user message's position.
+    fn turn(&self) -> Result<usize, ImageRefused> {
+        self.input
             .iter()
             .rposition(|item| {
                 matches!(
@@ -365,10 +428,52 @@ impl ModelRequest {
                     }
                 )
             })
-            .ok_or(ImageRefused::NoTurn)?;
-        self.input.insert(at + 1, InputItem::Image(image));
-        Ok(())
+            .ok_or(ImageRefused::NoTurn)
     }
+}
+
+/// Why a hold's screen part closed without an image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScreenClass {
+    /// The part was still waiting when the hold's transcript was ready.
+    NotReady,
+}
+
+/// What a hold's screen part hands its run, which every request of the run carries.
+#[derive(Clone)]
+pub(crate) enum Screen {
+    Image(Jpeg),
+    NotIncluded(ScreenClass),
+}
+
+impl fmt::Debug for Screen {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Image(image) => f.debug_tuple("Image").field(image).finish(),
+            Self::NotIncluded(class) => f.debug_tuple("NotIncluded").field(class).finish(),
+        }
+    }
+}
+
+/// A fixed developer line from `locales/en/brain.ftl`.
+fn screen_line(id: &str) -> String {
+    let resource = fluent_bundle::FluentResource::try_new(
+        include_str!("../../../../locales/en/brain.ftl").to_owned(),
+    )
+    .expect("the bundled messages parse");
+    let mut bundle = fluent_bundle::FluentBundle::<fluent_bundle::FluentResource>::new(vec![
+        "en".parse().expect("a valid language tag"),
+    ]);
+    bundle
+        .add_resource(resource)
+        .expect("the bundled messages are unique");
+    let pattern = bundle
+        .get_message(id)
+        .and_then(|message| message.value())
+        .expect("the screen lines are bundled");
+    bundle
+        .format_pattern(pattern, None, &mut Vec::new())
+        .into_owned()
 }
 
 /// A request and every thread whose raw text it carries, for the coordinator's delete check.

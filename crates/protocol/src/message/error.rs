@@ -104,6 +104,8 @@ pub enum ErrorKey {
     DrawingReplacementFailed,
     /// A run that called `draw` finished with no committed step.
     DrawingNotReturned,
+    /// A held turn's screen couldn't go with its request, so the turn wasn't sent without it.
+    ScreenUnavailable,
 }
 
 macro_rules! catalog {
@@ -171,6 +173,7 @@ impl ErrorKey {
         GitHubUnavailable,
         DrawingReplacementFailed,
         DrawingNotReturned,
+        ScreenUnavailable,
     }
 }
 

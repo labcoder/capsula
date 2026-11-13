@@ -80,7 +80,7 @@ fn new_hold_allocates_only_at_submit_with_real_origin_and_no_typed_watermark() {
     assert_eq!(read.snapshot.thread, None);
     assert_eq!(read.snapshot.defaults.connection, ConnectionTag(0));
     let effects = core
-        .submit_hold(read.snapshot, "exact recognized words".into())
+        .submit_hold(read.snapshot, "exact recognized words".into(), None)
         .unwrap();
     assert_eq!(
         effects[0],
@@ -187,9 +187,12 @@ fn stale_cancel_connection_pending_delete_and_unread_target_create_no_turn() {
             _ => unreachable!(),
         }
         let retry = snapshot.clone();
-        assert_eq!(core.submit_hold(snapshot, "words".into()), Err(()));
+        assert_eq!(core.submit_hold(snapshot, "words".into(), None), Err(()));
         core.availability = Availability::Ready(Ready::fixture());
-        assert_eq!(core.submit_hold(retry, "later valid words".into()), Err(()));
+        assert_eq!(
+            core.submit_hold(retry, "later valid words".into(), None),
+            Err(())
+        );
         assert_eq!(
             (
                 core.last_run,
@@ -206,7 +209,7 @@ fn stale_cancel_connection_pending_delete_and_unread_target_create_no_turn() {
 fn pinned_choice_survives_delayed_build_but_still_gets_the_first_catalog_check() {
     for listed in [false, true] {
         let mut core = fresh();
-        core.submit_hold(prepared(&core, Some(T)), "words".into())
+        core.submit_hold(prepared(&core, Some(T)), "words".into(), None)
             .unwrap();
         let effects = core.handle(Input::TurnStored { run: R }).unwrap();
         let [Effect::Store(StoreOp::BuildContext(build))] = effects.as_slice() else {
@@ -274,7 +277,7 @@ fn cancellation_after_begin_turn_and_model_away_back_never_grant() {
         let mut core = fresh();
         let snapshot = prepared(&core, Some(T));
         let cancel = Arc::clone(&snapshot.cancel);
-        core.submit_hold(snapshot, "words".into()).unwrap();
+        core.submit_hold(snapshot, "words".into(), None).unwrap();
         core.handle(Input::TurnStored { run: R }).unwrap();
         core.handle(built(R, 1, &[T])).unwrap();
         let key = engine_key(&core, R);
@@ -327,7 +330,7 @@ fn cancellation_after_begin_turn_and_model_away_back_never_grant() {
 #[test]
 fn explicit_cancel_matches_epoch_and_preserves_the_typed_counter() {
     let mut core = fresh();
-    core.submit_hold(prepared(&core, None), "words".into())
+    core.submit_hold(prepared(&core, None), "words".into(), None)
         .unwrap();
     assert_eq!(core.cancel_hold(HoldKey { epoch: 8, ..KEY }), Vec::new());
     assert_eq!(core.current_run(), Some(R));
@@ -358,7 +361,7 @@ fn hold_carriers_redact_content_and_ignore_execution_capabilities_in_equality() 
         })
     );
     let effects = core
-        .submit_hold(read.snapshot.clone(), "transcript-sentinel".into())
+        .submit_hold(read.snapshot.clone(), "transcript-sentinel".into(), None)
         .unwrap();
     for debug in [
         format!("{:?}", StoreOp::ReadHold(read)),
@@ -368,6 +371,87 @@ fn hold_carriers_redact_content_and_ignore_execution_capabilities_in_equality() 
         for marker in ["transcript-sentinel", "private-name-sentinel"] {
             assert!(!debug.contains(marker));
             assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
+        }
+    }
+}
+
+#[test]
+fn a_held_runs_screen_goes_with_its_request_or_fails_the_run() {
+    use crate::context::{InputItem, Jpeg, ModelRequest, Role, Screen, ScreenClass};
+    let image = Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap();
+    let user = InputItem::Message {
+        role: Role::User,
+        text: "words".to_owned(),
+    };
+    let line = |text: &str| InputItem::Message {
+        role: Role::Developer,
+        text: text.to_owned(),
+    };
+    let snapshot = "The image is a snapshot from when the user spoke.";
+    let not_ready = "The screen was not included: it wasn't ready in time.";
+    let cases = [
+        (
+            Some(Screen::Image(image.clone())),
+            ConnectionKind::ChatGpt,
+            Some(vec![
+                user.clone(),
+                InputItem::Image(image.clone()),
+                line(snapshot),
+            ]),
+        ),
+        (
+            Some(Screen::NotIncluded(ScreenClass::NotReady)),
+            ConnectionKind::ChatGpt,
+            Some(vec![user.clone(), line(not_ready)]),
+        ),
+        (None, ConnectionKind::ChatGpt, Some(vec![user.clone()])),
+        (
+            Some(Screen::Image(image)),
+            ConnectionKind::AnthropicKey,
+            None,
+        ),
+    ];
+    for (screen, connection, sent) in cases {
+        let mut core = fresh();
+        core.handle(Input::Engines(Availability::Ready(Ready {
+            connection: ConnectionTag(0),
+            models: vec![ModelInfo {
+                slug: ModelSlug::new("captured").unwrap(),
+                display_name: ModelName::new("captured model").unwrap(),
+            }],
+            trusted_draw: false,
+        })))
+        .unwrap();
+        core.submit_hold(prepared(&core, Some(T)), "words".into(), screen)
+            .unwrap();
+        core.handle(Input::TurnStored { run: R }).unwrap();
+        let Input::ContextBuilt(mut done) = built(R, 1, &[T]) else {
+            unreachable!()
+        };
+        done.result = Ok(Built {
+            request: ModelRequest {
+                choice: Some(ModelChoice {
+                    connection,
+                    ..choice("captured", Effort::High)
+                }),
+                instructions: String::new(),
+                input: vec![user.clone()],
+                tools: Vec::new(),
+            },
+            sources: vec![T],
+        });
+        let effects = core.handle(Input::ContextBuilt(done)).unwrap();
+        let started = effects.iter().find_map(|effect| match effect {
+            Effect::StartEngine { request } => Some(request.request.input.clone()),
+            _ => None,
+        });
+        assert_eq!(started, sent);
+        if sent.is_none() {
+            assert!(effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Control(ControlToShell::RunState { error: Some(error), .. })
+                    if error.key() == kumochi_protocol::message::ErrorKey::ScreenUnavailable
+            )));
         }
     }
 }

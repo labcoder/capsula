@@ -11,7 +11,8 @@ use std::thread;
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::{
     AccountOp, AccountRecovery, AccountView, Action, ConnectionKind, ControlToShell, DataToShell,
-    ErrorKey, ModelChoice, ModelInfo, ModelSlug, PlanState, SettingsOp, UserError,
+    ErrorKey, ModelChoice, ModelInfo, ModelSlug, PlanState, ScreenHolds, ScreenOff, SettingsOp,
+    UserError,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{AbortHandle, JoinHandle};
@@ -427,6 +428,32 @@ impl Accounts {
         choice.connection == ConnectionKind::ChatGpt
             && self.catalog.models.is_some()
             && self.catalog.images.contains(&choice.model)
+    }
+
+    /// The image gate: whether a hold on `choice` also shows the model the window under the
+    /// pointer, given whether this platform has window capture. With no catalog read, or no
+    /// model chosen, it isn't known yet, so it's `NotReady` rather than `ModelCantSee`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "2c4 sends ScreenHolds"))]
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the caller supplies the platform's capture, so tests can take it away"
+    )]
+    pub(super) fn screen_holds(&self, choice: Option<&ModelChoice>, capture: bool) -> ScreenHolds {
+        if !capture {
+            return ScreenHolds::Off(ScreenOff::Unsupported);
+        }
+        let (Some(models), Some(choice)) = (self.models(), choice) else {
+            return ScreenHolds::Off(ScreenOff::NotReady);
+        };
+        models
+            .iter()
+            .find(|info| info.slug == choice.model)
+            .filter(|_| self.takes_images(choice))
+            .map_or(ScreenHolds::Off(ScreenOff::ModelCantSee), |info| {
+                ScreenHolds::On {
+                    model: info.display_name.clone(),
+                }
+            })
     }
 
     /// The catalog for the shell, once each time it changes or a shell connects.
