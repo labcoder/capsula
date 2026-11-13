@@ -842,7 +842,7 @@ Prepared residency remains the preparation layer's separate limit.
 | Chart | 8 series × 500 points, 40 categories | 20,000 marks |
 | Path | 512 points, 4,096 flattened segments | 20,000 segments |
 | Dash pieces | Explicit geometry preflighted; generated geometry counted at preparation | 512 |
-| Fill vertices | Points plus crossing pairs, at most 21,845 per build | 512 |
+| Fill vertices | Points plus crossing pairs, at most 21,845 per build | 2,048 |
 | Bordered-rect outline points | Rounded fallback at the object's charged scale | 512 |
 | Motion | 256 tracks, 32 keys/track, 60 s/track and after last activation | — |
 | Object graph | Depth 16 | — |
@@ -928,18 +928,31 @@ every other line at most 513 points including a closed outline's repeated first 
 the longest run, closed, costs 4 × 4,098 + 4 = 16,396 of a build's 21,845 vertices.
 The painter still refuses a longer run loudly.
 
-The global limits are 512 dash pieces, 512 fill vertices and 512 outline points, shared
-across all visible scenes and reserved ready/rest states. On an overlay, four radius-8 filled
-and bordered boxes cost 100 fill and outline points, leaving room for labels and dashed connectors;
-labels remain subject to the existing text and object limits. A drawing beyond the limits
-fails explicitly through the scene's `PaintWork` failure or recovery clear, without simplifying
-its geometry. Before counting crossings, preparation refuses any one generated fill with
-more than 512 points, which cannot fit even without a crossing. Given a paint cap
+The global limits are 512 dash pieces, 2,048 fill vertices and 512 outline points, shared
+across all visible scenes and reserved ready/rest states. Fills get four times the others
+because they are the cheapest to paint: on Rez at 144 Hz, about 2,000 fill vertices cost a
+paint p99 of 0.21 ms against 1.07 ms for as many outline points. A filled circle or ellipse
+costs 48 fill vertices at any size or canvas, so 42 fit. A diagram is shrunk to fit its canvas
+by a factor between 0.8 and 1. On an overlay, a plain box costs 21 fill vertices and 21 outline
+points unshrunk and 17 of each once shrunk to 0.917 or below, and a labelled arrow adds 24 fill
+vertices unshrunk for its head and label chip. So the outline budget bounds diagrams: 24
+unshrunk boxes fit at 504 outline points and 25 are refused at 525, while on the default
+canvas a 30-box chain shrinks to 0.8 and fits at 510. The draw prompt and the refusal say
+about 40 circles or about 20 boxes, leaving room for the rest of the screen. Labels remain
+subject to the existing text and object limits. A
+drawing beyond the limits fails explicitly through the scene's `PaintWork` failure or recovery
+clear, without simplifying its geometry. Before counting crossings, preparation refuses any one
+generated fill with more than 2,048 points, which cannot fit even without a crossing. Given a paint cap
 (`PrepareInput::with_paint_cap`, and the `paint_cap` of `recover` and `recover_all`; the
 shell's worker and recovery pass `PaintWork::LIMITS`), it also keeps a running total of the
 scene's own paint work and refuses with `OverPaintWork` once that passes the cap, which no
 admission could accept. Each fill then counts crossings only up to the fill budget left, so a
-refused scene costs at most about 512²/2 crossing tests. Without a cap the charge stays exact.
+refused scene costs at most about 2,048²/2 crossing tests, about 2.1 million against 131
+thousand at 512. One all-overlapping 512-point comb measured 0.88 ms on Rez, about 6.7 ns a pair,
+so the bound is about 14 ms by extrapolation, not measured. It runs on a preparation worker
+under the 250 ms step deadline, never on the UI thread, and an ordinary call doesn't reach it:
+explicit polygons stop at 512 points, so 2,048 needs a long generated path whose edges nearly
+all overlap without crossing. Without a cap the charge stays exact.
 
 D1's Rez admission target at the cap is p95 ≤1 ms and p99 ≤1.1 ms, with the sampled maximum
 reported separately; clear, cut and eviction retain their ≤2 ms target, global clear included.

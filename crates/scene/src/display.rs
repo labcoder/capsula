@@ -519,6 +519,15 @@ mod tests {
     use super::*;
     use crate::limits::MAX_COMPOSED_SCALE;
 
+    /// A cap of 512 in each budget, so the boundary fixtures below stay hand-countable whatever
+    /// the global limits are.
+    const CAP_512: PaintWork = PaintWork {
+        dash_pieces: 512,
+        fill_vertices: 512,
+        outline_points: 512,
+        ..PaintWork::LIMITS
+    };
+
     /// Charges `primitives` at the largest admitted composed scale.
     fn at_64(primitives: &[Prim]) -> PaintWork {
         PaintWork::of(primitives, MAX_COMPOSED_SCALE)
@@ -885,12 +894,7 @@ mod tests {
         let square = fill(&[[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]);
         let bowtie = fill(&[[0.0, 0.0], [10.0, 10.0], [10.0, 0.0], [0.0, 10.0]]);
         let within = |prims: &[Prim], fill_vertices| {
-            PaintWork::within(
-                prims,
-                spent(fill_vertices),
-                PaintWork::LIMITS,
-                MAX_COMPOSED_SCALE,
-            )
+            PaintWork::within(prims, spent(fill_vertices), CAP_512, MAX_COMPOSED_SCALE)
         };
         assert_eq!(
             within(std::slice::from_ref(&bowtie), 507),
@@ -947,7 +951,7 @@ mod tests {
                 (dashes, outlines)
             );
             assert_eq!(
-                PaintWork::within(&next, spent, PaintWork::LIMITS, MAX_COMPOSED_SCALE),
+                PaintWork::within(&next, spent, CAP_512, MAX_COMPOSED_SCALE),
                 accepted.then_some(PaintWork {
                     dash_pieces: 212,
                     outline_points: new_outline,

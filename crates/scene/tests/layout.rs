@@ -8,6 +8,7 @@ use kumochi_scene::{
         Glide, LayoutState, PrepareError, PrepareInput, PreparedStep, SurfaceGeometry, prepare,
         recover, recover_all,
     },
+    limits::MAX_GLOBAL_FILL_VERTICES,
     parse_record,
     text::Bounded,
     theme::Theme,
@@ -3128,7 +3129,7 @@ fn preparation_counts_paint_work_once_and_refuses_an_unbuildable_fill() {
 
 #[test]
 fn generated_fill_points_refuse_before_crossing_count_above_the_global_cap() {
-    for curves in [63, 64] {
+    for curves in [255, 256] {
         let mut scene = SceneState::begin(header()).expect("scene");
         let mut budget = GlobalBudget::default();
         let before = LayoutState::new(&scene);
@@ -3139,12 +3140,12 @@ fn generated_fill_points_refuse_before_crossing_count_above_the_global_cap() {
             json!({"id":"curves","put":[{"path":{"id":"fill","d":d,"fill":"blue"}}]}),
         );
         let prepared = picture(&scene, commit, &before, &mut Measure::default());
-        if curves == 63 {
-            let prepared = prepared.expect("505 generated points fit the counting bound");
+        if curves == 255 {
+            let prepared = prepared.expect("2,041 generated points fit the counting bound");
             let Prim::Fill { points, .. } = &prepared.display.items[0].primitives[0] else {
                 panic!("prepared fill");
             };
-            assert_eq!(points.len(), 505);
+            assert_eq!(points.len(), 2_041);
         } else {
             assert!(matches!(prepared, Err(PrepareError::OverPaintWork)));
         }
@@ -3261,15 +3262,37 @@ fn a_later_ancestor_track_recharges_shared_rects_and_refuses_growth_past_the_cap
     assert_eq!(next.after.paint_work(), work(33));
 }
 
-/// A convex polygon of `count` points on a circle: no crossings, so it charges its points.
+/// A convex polygon of `count` points on a circle: no crossings, so it charges its points. Whole
+/// coordinates keep a scene of fills at the global cap within one record.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "rounded coordinates within 100 to 1,900"
+)]
 fn convex(id: &str, count: u32) -> Value {
-    let points: Vec<[f64; 2]> = (0..count)
+    let points: Vec<[i32; 2]> = (0..count)
         .map(|index| {
             let angle = std::f64::consts::TAU * f64::from(index) / f64::from(count);
-            [1_000.0 + 900.0 * angle.cos(), 1_000.0 + 900.0 * angle.sin()]
+            [angle.cos(), angle.sin()].map(|axis| (1_000.0 + 900.0 * axis).round() as i32)
         })
         .collect();
     json!({"shape":{"id":id,"kind":"polygon","points":points,"fill":"blue"}})
+}
+
+/// Convex polygons with `base` points in all, at most 512 each (one shape's limit), then one more
+/// polygon of `last` points.
+fn fills(base: usize, last: u32) -> Vec<Value> {
+    let mut put: Vec<Value> = (0..base.div_ceil(512))
+        .map(|index| {
+            let count = (base - index * 512).min(512);
+            convex(
+                &format!("f{index}"),
+                u32::try_from(count).expect("at most 512"),
+            )
+        })
+        .collect();
+    put.push(convex("last", last));
+    put
 }
 
 fn fill_scene(put: &[Value]) -> (SceneState, kumochi_scene::Committed) {
@@ -3283,9 +3306,15 @@ fn fill_scene(put: &[Value]) -> (SceneState, kumochi_scene::Committed) {
 fn bounded_preparation_refuses_once_the_scene_s_own_work_passes_the_cap() {
     let cap = Some(kumochi_scene::display::PaintWork::LIMITS);
     for (put, bounded) in [
-        (vec![convex("a", 512)], Some(512)),
-        (vec![convex("a", 300), convex("b", 212)], Some(512)),
-        (vec![convex("a", 300), convex("b", 213)], None),
+        (
+            fills(MAX_GLOBAL_FILL_VERTICES - 512, 512),
+            Some(MAX_GLOBAL_FILL_VERTICES),
+        ),
+        (
+            fills(MAX_GLOBAL_FILL_VERTICES - 212, 212),
+            Some(MAX_GLOBAL_FILL_VERTICES),
+        ),
+        (fills(MAX_GLOBAL_FILL_VERTICES - 212, 213), None),
     ] {
         let (scene, commit) = fill_scene(&put);
         let before = LayoutState::new(&scene);
@@ -3311,7 +3340,7 @@ fn bounded_preparation_refuses_once_the_scene_s_own_work_passes_the_cap() {
             None => assert!(matches!(prepared, Err(PrepareError::OverPaintWork))),
         }
     }
-    let (scene, commit) = fill_scene(&[convex("a", 300), convex("b", 213)]);
+    let (scene, commit) = fill_scene(&fills(MAX_GLOBAL_FILL_VERTICES - 212, 213));
     let exact = picture(
         &scene,
         commit,
@@ -3319,12 +3348,15 @@ fn bounded_preparation_refuses_once_the_scene_s_own_work_passes_the_cap() {
         &mut Measure::default(),
     )
     .expect("unbounded preparation stays exact");
-    assert_eq!(exact.after.paint_work().fill_vertices, 513);
+    assert_eq!(
+        exact.after.paint_work().fill_vertices,
+        MAX_GLOBAL_FILL_VERTICES + 1
+    );
 }
 
 #[test]
 fn bounded_recovery_refuses_a_scene_over_the_cap() {
-    let (scene, _) = fill_scene(&[convex("a", 300), convex("b", 213)]);
+    let (scene, _) = fill_scene(&fills(MAX_GLOBAL_FILL_VERTICES - 212, 213));
     let log = scene.recovery_log();
     for (cap, refused) in [
         (Some(kumochi_scene::display::PaintWork::LIMITS), true),
@@ -3351,7 +3383,10 @@ fn bounded_recovery_refuses_a_scene_over_the_cap() {
             ));
         } else {
             let (_, layout) = result.as_ref().expect("unbounded recovery stays exact");
-            assert_eq!(layout.paint_work().fill_vertices, 513);
+            assert_eq!(
+                layout.paint_work().fill_vertices,
+                MAX_GLOBAL_FILL_VERTICES + 1
+            );
         }
     }
 }
@@ -3366,10 +3401,13 @@ fn bounded_second_step_counts_reused_fill_work_before_new_objects() {
         let first = committed(
             &mut scene,
             &mut budget,
-            json!({"id":"first","put":[convex("a", 300)]}),
+            json!({"id":"first","put":fills(MAX_GLOBAL_FILL_VERTICES - 512, 300)}),
         );
-        let first = picture(&scene, first, &before, &mut measure).expect("first fill");
-        assert_eq!(first.after.paint_work().fill_vertices, 300);
+        let first = picture(&scene, first, &before, &mut measure).expect("first fills");
+        assert_eq!(
+            first.after.paint_work().fill_vertices,
+            MAX_GLOBAL_FILL_VERTICES - 212
+        );
         let next = committed(
             &mut scene,
             &mut budget,
@@ -3385,10 +3423,13 @@ fn bounded_second_step_counts_reused_fill_work_before_new_objects() {
         .with_paint_cap(Some(kumochi_scene::display::PaintWork::LIMITS));
         let result = prepare(input, &mut measure, &AtomicBool::new(false));
         if accepted {
-            let next = result.expect("300 reused points plus 212 new points fit");
+            let next = result.expect("the reused points plus 212 new points fit");
             next.validate(&scene, &first.after)
                 .expect("current picture");
-            assert_eq!(next.after.paint_work().fill_vertices, 512);
+            assert_eq!(
+                next.after.paint_work().fill_vertices,
+                MAX_GLOBAL_FILL_VERTICES
+            );
             let Prim::Fill { points: old, .. } = &first.after.items()[0].primitives[0] else {
                 panic!("original fill");
             };
@@ -3399,6 +3440,9 @@ fn bounded_second_step_counts_reused_fill_work_before_new_objects() {
         } else {
             assert!(matches!(result, Err(PrepareError::OverPaintWork)));
         }
-        assert_eq!(first.after.paint_work().fill_vertices, 300);
+        assert_eq!(
+            first.after.paint_work().fill_vertices,
+            MAX_GLOBAL_FILL_VERTICES - 212
+        );
     }
 }
