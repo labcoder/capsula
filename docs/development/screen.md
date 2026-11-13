@@ -378,10 +378,13 @@ and the brain keep no copy of one they don't zero:
   one zeroing buffer that fits the largest, so nothing grows. It writes to an unbuffered stdout
   (`platform::raw_stdout`, a duplicate of the handle), not the standard library's line buffer.
 - The brain reads the screen kind's replies with `Zeroed`: each frame into a zeroing buffer of
-  its own length, each chunk's body zeroed once copied. A reply of several chunks is put together
-  in one zeroing buffer allocated at the 4 MiB reply cap when its first chunk arrives, so it
-  never grows; each such reply pays a 4 MiB clear when it's dropped. A reply of one chunk is
-  decoded from that chunk. Frames left queued when a worker is lost are zeroed too.
+  its own length, and each chunk's body, read as one byte string into a buffer of exactly its
+  length, into a `ZeroedBody`, which zeroes itself when dropped. So a chunk is zeroed wherever
+  it ends: once copied, refused for no pending request or over budget, unsent by the reader
+  thread, or still queued when a worker is lost. A frame that fails to decode partway leaves no
+  partly filled copy. A reply of several chunks is put together in one zeroing buffer allocated
+  at the 4 MiB reply cap when its first chunk arrives, so it never grows; each such reply pays a
+  4 MiB clear when it's dropped. A reply of one chunk is decoded from that chunk.
 - `ScreenContext`'s JPEG is sent as one byte string, the same bytes as before, and received
   with one exact allocation. A received context is registered for dump exclusion like the
   worker's.
@@ -398,6 +401,8 @@ Error Reporting's reports only: not out of dumps a debugger or another tool take
 system memory dump, and a process can register only a limited number of blocks. A frame's buffer
 stays registered while it's reused and is unregistered once zeroed, before it's freed. The JPEG is
 registered once encoding finishes, and the resampled RGB never is; both live only for the encode.
+In the brain only the decoded `ScreenContext` is registered: a reply's frame buffer, chunk body
+and 4 MiB assembly buffer aren't excluded while they hold it, which lasts until it's decoded.
 The registration is in-process only. When Windows refuses it, capture carries on, and that
 buffer's contents can appear in an error report written while it holds them.
 

@@ -512,8 +512,11 @@ struct Worker<K: Kind> {
     /// Taken for exit confirmation once the worker is lost.
     process: Option<Box<dyn Process>>,
     writes: blocking::SyncSender<(u64, K::Request)>,
-    reads: mpsc::Receiver<Option<Frame>>,
+    reads: mpsc::Receiver<Option<Chunk<K>>>,
 }
+
+/// A reply frame as a kind's reassembly holds it.
+type Chunk<K> = Frame<<<K as Kind>::Assembly as Reassembly>::Body>;
 
 /// Why a worker didn't start.
 enum SpawnFailure {
@@ -549,13 +552,7 @@ impl<K: Kind> Worker<K> {
                     loop {
                         let reply = K::Assembly::read(&mut pipes.stdout).ok().flatten();
                         let ended = reply.is_none();
-                        if let Err(unsent) = replies.blocking_send(reply) {
-                            if let Some(reply) = unsent.0 {
-                                K::Assembly::discard(reply);
-                            }
-                            break;
-                        }
-                        if ended {
+                        if replies.blocking_send(reply).is_err() || ended {
                             break;
                         }
                     }
@@ -714,19 +711,15 @@ fn complete<K: Kind>(answer: Answer<K>, reply: Result<(K::Reply, Generation), Wo
 /// or one past the request's message or byte budget is a protocol break.
 fn accept<K: Kind>(
     pending: &mut BTreeMap<u64, Pending<K>>,
-    reply: Frame,
+    reply: Chunk<K>,
     generation: Generation,
 ) -> Result<(), WorkerLost> {
     let id = reply.id;
-    let Some(item) = pending.get_mut(&id) else {
-        K::Assembly::discard(reply);
-        return Err(WorkerLost::Lost);
-    };
-    let Some(bytes) = item.bytes.checked_sub(reply.body.len()) else {
-        K::Assembly::discard(reply);
-        return Err(WorkerLost::Lost);
-    };
-    item.bytes = bytes;
+    let item = pending.get_mut(&id).ok_or(WorkerLost::Lost)?;
+    item.bytes = item
+        .bytes
+        .checked_sub(reply.body.as_ref().len())
+        .ok_or(WorkerLost::Lost)?;
     let Some(body) = item.assembly.push(reply, frame::decode::<K::Reply>)? else {
         return Ok(());
     };
@@ -757,7 +750,7 @@ fn backoff(losses: &mut VecDeque<Instant>, now: Instant) -> Duration {
 /// Serves one worker until it's lost, then fails everything it held. `None` once every handle is
 /// gone or the request ids run out.
 async fn serve<K: Kind>(
-    reads: &mut mpsc::Receiver<Option<Frame>>,
+    reads: &mut mpsc::Receiver<Option<Chunk<K>>>,
     writes: &blocking::SyncSender<(u64, K::Request)>,
     commands: &mut mpsc::Receiver<Command<K>>,
     id: &mut u64,
@@ -836,12 +829,6 @@ async fn run<K: Kind>(
             tracing::debug!(kind = K::NAME, "worker stopped");
         }
         let process = worker.process.take();
-        worker.reads.close();
-        while let Ok(reply) = worker.reads.try_recv() {
-            if let Some(reply) = reply {
-                K::Assembly::discard(reply);
-            }
-        }
         drop(worker);
         terminate::<K>(process.as_deref());
         while let Ok(command) = commands.try_recv() {

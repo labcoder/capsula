@@ -2,12 +2,13 @@
 //! throughout, chunks numbered from zero, the last one marked. A message is postcard-serialized
 //! once, capped by its kind, and split into frames under the pipe's cap.
 
+use std::fmt;
 use std::io::{self, Read, Write};
 
 use kumochi_protocol::frame::{self, FrameError, HEADER_LEN, Pipe};
 use postcard::ser_flavors::Size;
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::de::{self, DeserializeOwned, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use zeroize::{Zeroize as _, Zeroizing};
 
 use super::WorkerLost;
@@ -21,11 +22,59 @@ const FIELDS: usize = 64;
 pub(super) const CHUNK: usize = Pipe::Data.max_payload() - FIELDS;
 
 #[derive(Serialize, Deserialize)]
-pub(crate) struct Frame {
+pub(crate) struct Frame<B = Vec<u8>> {
     pub id: u64,
     pub chunk: u32,
     pub last: bool,
-    pub body: Vec<u8>,
+    pub body: B,
+}
+
+/// A [`Zeroed`] frame's body: user content, zeroed when it's dropped, wherever that happens.
+/// It's read as one byte string into a buffer of exactly its length, so a frame that fails to
+/// decode leaves no partly filled copy.
+pub(crate) struct ZeroedBody(Vec<u8>);
+
+#[cfg(test)]
+thread_local! {
+    /// The length and capacity each [`ZeroedBody`] dropped on this thread had once zeroed.
+    pub(super) static SCRUBBED: std::cell::RefCell<Vec<(usize, usize)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+impl Drop for ZeroedBody {
+    fn drop(&mut self) {
+        self.0.zeroize();
+        #[cfg(test)]
+        SCRUBBED.with_borrow_mut(|scrubbed| scrubbed.push((self.0.len(), self.0.capacity())));
+    }
+}
+
+impl AsRef<[u8]> for ZeroedBody {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ZeroedBody {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Exact;
+
+        impl Visitor<'_> for Exact {
+            type Value = ZeroedBody;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a frame's body")
+            }
+
+            fn visit_bytes<E: de::Error>(self, bytes: &[u8]) -> Result<Self::Value, E> {
+                let mut body = Vec::with_capacity(bytes.len());
+                body.extend_from_slice(bytes);
+                Ok(ZeroedBody(body))
+            }
+        }
+
+        deserializer.deserialize_bytes(Exact)
+    }
 }
 
 /// A [`Frame`] whose body is borrowed; it serializes to the same bytes.
@@ -40,13 +89,16 @@ struct FrameRef<'a> {
 /// How a kind's replies are read and put back together. [`Assembly`] is the plain way;
 /// [`Zeroed`] is for replies that can carry the user's content.
 pub(crate) trait Reassembly: Send + 'static {
+    /// What a frame's body is held in until it's pushed or dropped.
+    type Body: AsRef<[u8]> + DeserializeOwned + Send + 'static;
+
     fn new(max: usize) -> Self;
 
     /// The next frame, `None` when the worker closed its pipe between frames.
     ///
     /// # Errors
     /// Fails as [`frame::read`] does.
-    fn read(reader: &mut impl Read) -> Result<Option<Frame>, FrameError>;
+    fn read(reader: &mut impl Read) -> Result<Option<Frame<Self::Body>>, FrameError>;
 
     /// Adds the next chunk; once the last arrives, `decode` reads the whole message.
     ///
@@ -54,14 +106,9 @@ pub(crate) trait Reassembly: Send + 'static {
     /// A gap, a repeat, an empty chunk or going over the cap is a protocol break.
     fn push<R>(
         &mut self,
-        chunk: Frame,
+        chunk: Frame<Self::Body>,
         decode: impl FnOnce(&[u8]) -> R,
     ) -> Result<Option<R>, WorkerLost>;
-
-    /// Lets go of a frame that won't be pushed.
-    fn discard(chunk: Frame) {
-        drop(chunk);
-    }
 }
 
 /// Each message's chunks, in order, up to a cap per message.
@@ -100,6 +147,8 @@ impl Assembly {
 }
 
 impl Reassembly for Assembly {
+    type Body = Vec<u8>;
+
     fn new(max: usize) -> Self {
         Self::new(max)
     }
@@ -118,7 +167,7 @@ impl Reassembly for Assembly {
 }
 
 /// Reassembly that leaves no copy of a reply behind: each frame is read into a zeroing buffer of
-/// its own length, each chunk's body is zeroed once copied, and a message of several chunks is
+/// its own length, each chunk's body is a [`ZeroedBody`], and a message of several chunks is
 /// put together in one zeroing buffer allocated at the cap, so it never grows. A message of one
 /// chunk is decoded from that chunk.
 pub(crate) struct Zeroed {
@@ -128,6 +177,8 @@ pub(crate) struct Zeroed {
 }
 
 impl Reassembly for Zeroed {
+    type Body = ZeroedBody;
+
     fn new(max: usize) -> Self {
         Self {
             max,
@@ -136,7 +187,7 @@ impl Reassembly for Zeroed {
         }
     }
 
-    fn read(reader: &mut impl Read) -> Result<Option<Frame>, FrameError> {
+    fn read(reader: &mut impl Read) -> Result<Option<Frame<ZeroedBody>>, FrameError> {
         let mut header = [0; HEADER_LEN];
         let mut filled = 0;
         while filled < HEADER_LEN {
@@ -160,10 +211,10 @@ impl Reassembly for Zeroed {
 
     fn push<R>(
         &mut self,
-        mut chunk: Frame,
+        chunk: Frame<ZeroedBody>,
         decode: impl FnOnce(&[u8]) -> R,
     ) -> Result<Option<R>, WorkerLost> {
-        let body = Zeroizing::new(std::mem::take(&mut chunk.body));
+        let body = chunk.body.as_ref();
         let held = self.bytes.as_ref().map_or(0, |bytes| bytes.len());
         if chunk.chunk != self.next || body.is_empty() || body.len() > self.max - held {
             return Err(WorkerLost::Lost);
@@ -171,13 +222,13 @@ impl Reassembly for Zeroed {
         self.next = self.next.checked_add(1).ok_or(WorkerLost::Lost)?;
         if chunk.last && self.bytes.is_none() {
             self.next = 0;
-            return Ok(Some(decode(&body)));
+            return Ok(Some(decode(body)));
         }
         let max = self.max;
         let bytes = self
             .bytes
             .get_or_insert_with(|| Zeroizing::new(Vec::with_capacity(max)));
-        bytes.extend_from_slice(&body);
+        bytes.extend_from_slice(body);
         if !chunk.last {
             return Ok(None);
         }
@@ -185,10 +236,6 @@ impl Reassembly for Zeroed {
         let decoded = decode(bytes);
         self.bytes = None;
         Ok(Some(decoded))
-    }
-
-    fn discard(mut chunk: Frame) {
-        chunk.body.zeroize();
     }
 }
 

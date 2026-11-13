@@ -6,7 +6,9 @@ use serde::Serialize;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
-use super::{CHUNK, Frame, Reassembly as _, Zeroed, write_message, write_sized};
+use super::{
+    CHUNK, Frame, Reassembly as _, SCRUBBED, Zeroed, ZeroedBody, write_message, write_sized,
+};
 use crate::supervise::{Destination, Generation, Kind, Pending, WorkerLost, accept};
 
 /// A kind whose replies can carry content, never started.
@@ -34,7 +36,7 @@ fn plain(id: u64, message: &impl Serialize) -> Vec<u8> {
     bytes
 }
 
-fn read_all(bytes: &[u8]) -> Vec<Frame> {
+fn read_all(bytes: &[u8]) -> Vec<Frame<ZeroedBody>> {
     let mut reader = bytes;
     let mut frames = Vec::new();
     while let Some(next) = Zeroed::read(&mut reader).expect("a frame") {
@@ -43,16 +45,16 @@ fn read_all(bytes: &[u8]) -> Vec<Frame> {
     frames
 }
 
-fn chunk(number: u32, body: Vec<u8>) -> Frame {
+fn chunk(number: u32, body: Vec<u8>) -> Frame<ZeroedBody> {
     Frame {
         id: 1,
         chunk: number,
         last: false,
-        body,
+        body: ZeroedBody(body),
     }
 }
 
-fn last(number: u32, body: Vec<u8>) -> Frame {
+fn last(number: u32, body: Vec<u8>) -> Frame<ZeroedBody> {
     Frame {
         last: true,
         ..chunk(number, body)
@@ -113,9 +115,10 @@ fn zeroed_reading_gives_the_plain_reads_frames() {
             .expect("read")
             .expect("a frame");
         assert_eq!(
-            (read.id, read.chunk, read.last, read.body),
-            (plain.id, plain.chunk, plain.last, plain.body)
+            (read.id, read.chunk, read.last, read.body.as_ref()),
+            (plain.id, plain.chunk, plain.last, plain.body.as_slice())
         );
+        assert_eq!(read.body.0.capacity(), plain.body.len(), "read exactly");
     }
 }
 
@@ -192,6 +195,30 @@ fn zeroed_reassembly_refuses_a_gap_a_repeat_and_an_empty_chunk() {
         zeroed.push(last(1, vec![2]), <[u8]>::to_vec),
         Ok(Some(vec![1, 2]))
     );
+}
+
+#[test]
+fn every_zeroed_frame_is_zeroed_when_dropped_pushed_or_not() {
+    SCRUBBED.take();
+    let mut zeroed = Zeroed::new(8);
+    assert_eq!(
+        zeroed.push(last(0, vec![7; 3]), <[u8]>::to_vec),
+        Ok(Some(vec![7; 3]))
+    );
+    let (mut requests, _replies) = pending([1, 2]);
+    let stray = Frame {
+        id: 3,
+        ..last(0, vec![7; 5])
+    };
+    assert_eq!(
+        accept(&mut requests, stray, Generation(0)),
+        Err(WorkerLost::Lost),
+        "for no request"
+    );
+    let (frames, reads) = tokio::sync::mpsc::channel(1);
+    frames.try_send(Some(last(0, vec![7; 6]))).expect("room");
+    drop((frames, reads));
+    assert_eq!(SCRUBBED.take(), [(0, 3), (0, 5), (0, 6)]);
 }
 
 #[test]
