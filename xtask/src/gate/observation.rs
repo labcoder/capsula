@@ -220,13 +220,20 @@ impl Reader {
     }
 }
 
+/// A complete observation with no Kumo pull: no gate phase or cold start is meant to pull.
 pub(super) fn read(path: &Path, pid: u32) -> Result<Observation> {
     let (observation, validation) = load(path, pid);
     validation?;
+    ensure!(
+        observation.pulls == 0,
+        "Kumo pull seen by the observer (pulls={})",
+        observation.pulls
+    );
     Ok(observation)
 }
 
-fn load(path: &Path, pid: u32) -> (Observation, Result<()>) {
+/// What the observer recorded, as far as it reads, and whether it read completely.
+pub(super) fn load(path: &Path, pid: u32) -> (Observation, Result<()>) {
     let mut reader = match Reader::open(path, pid) {
         Ok(reader) => reader,
         Err(error) => return (Observation::default(), Err(error)),

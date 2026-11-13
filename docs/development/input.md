@@ -438,8 +438,9 @@ cleanup; a phase cannot begin without its complete budget.
 
 Every instrumented phase also checks the observer's mask commits: each must own exactly its hit
 proxy, except a Kumo pull's, which the shell records as an empty mask over an area grown from the
-dock. No phase is meant to pull, so a pull fails its phase with `Kumo pull during <phase>`, and
-each phase's `pulls.txt` holds its count.
+dock. No phase or cold start is meant to pull, so every reader of the observer refuses one, and
+a phase fails with `Kumo pull during <phase>`. Each phase's `pulls.txt` holds its count and
+whether the observer read completely.
 
 There is no keyboard or layouts phase, so shortcut latency and AltGr for hold to talk are
 unmeasured for now. Recursive read-only registry snapshots of the language settings, with

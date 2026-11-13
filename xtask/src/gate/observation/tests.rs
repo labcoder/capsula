@@ -218,9 +218,19 @@ fn a_pull_is_an_empty_mask_over_an_area_grown_from_the_dock_and_counts_once_per_
         commit(5, 4, "-2,0,8,6"),
     ]
     .concat();
-    let observation = parsed(&stream(pulls, 5)).unwrap();
+    let observation = parsed(&stream(pulls.clone(), 5)).unwrap();
     assert_eq!(observation.pulls, 2, "each run of pull commits is one pull");
     assert_eq!(observation.commits.len(), 5);
+    let path = directory().join("observer.log");
+    fs::write(&path, stream(pulls, 5)).unwrap();
+    let (loaded, complete) = load(&path, 42);
+    assert!(complete.is_ok(), "{complete:?}");
+    assert_eq!(loaded.pulls, 2, "the count survives for pulls.txt");
+    assert_eq!(
+        read(&path, 42).unwrap_err().to_string(),
+        "Kumo pull seen by the observer (pulls=2)",
+        "every reader, cold start included, refuses a pull"
+    );
 
     let rows = [line(1), commit(1, 1, "-2,0,8,6")].concat();
     assert!(

@@ -777,12 +777,14 @@ fn summarize(
     if trial.cpu_limit().is_some() {
         return Ok(());
     }
-    let read = observation::read(observer, pid).and_then(|observed| {
-        fs::write(
-            output.join("pulls.txt"),
-            format!("pulls={}\n", observed.pulls),
-        )?;
-        ensure!(observed.pulls == 0, "Kumo pull during {}", trial.name());
+    let (seen, loaded) = observation::load(observer, pid);
+    let counted = fs::write(
+        output.join("pulls.txt"),
+        format!("pulls={}\ncomplete={}\n", seen.pulls, loaded.is_ok()),
+    )
+    .map_err(anyhow::Error::from);
+    let read = loaded.and_then(|()| {
+        ensure!(seen.pulls == 0, "Kumo pull during {}", trial.name());
         Ok(())
     });
     let joined = (|| {
@@ -802,7 +804,7 @@ fn summarize(
             _ => Ok(()),
         }
     })();
-    session::combine([read, joined])
+    session::combine([read, counted, joined])
 }
 
 #[cfg(test)]
