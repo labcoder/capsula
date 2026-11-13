@@ -77,15 +77,22 @@ flowchart TD
   Once a `ChatGPT` sign-in this window asked for completes, the plan line shows beside the button.
 - **A dismissal cancels this window's sign-ins.** A mark opens only on an op the window actually
   queued (Sign in or Enable for `ChatGPT`, Connect Claude Code), and settles only at a terminal
-  event: a view that leaves the wait it showed, a complete account, a refused Connect, a sign-in
-  error that offers a new one, or a new connection's first view that isn't waiting. Finish later,
-  Esc and the native close take each open mark once and send its cancel through
-  `cancel_sign_in`, past `allows`, because the brain may start the sign-in late and ignores a
-  cancel when nothing is signing in. A cancel that can't be sent stays owed across a link drop:
-  it goes at the next waiting view and is dropped by a first view with no wait, or by the user
-  sending that connection an op from Settings. Continue, Not now and the finish hand a waiting
+  event. For `ChatGPT` that's a view that leaves the wait it showed, a complete account, a
+  sign-in error that offers a new one, or a new connection's first view that isn't waiting. For
+  Claude Code it's any view that isn't waiting, refused or not. Finish later, Esc and the native
+  close take each open mark once and send its cancel through `cancel_sign_in`, past `allows`,
+  because the brain may start the sign-in late and ignores a cancel when nothing is signing in.
+  A cancel that can't be sent stays owed across a link drop: it goes at the next waiting view.
+  It's dropped by a first view with no wait, by a `ChatGPT` sign-in error, or by any op the user
+  sends that connection from Settings or chat. Continue, Not now and the finish hand a waiting
   sign-in over to the rest of the app instead. After a shell restart, the window adopts a
-  sign-in it finds waiting, at open or on a connection's first view.
+  sign-in it finds waiting, at open or on a connection's first view. That is wrong in one
+  accepted case: after Finish later, a sign-in started from Settings or chat that is still
+  waiting when the shell crashes is adopted by the relaunched window, and dismissing it cancels
+  it.
+- **Focus comes back after a section button goes.** The sections replace their buttons when the
+  view changes, so a focused one takes the window's key context, and Esc, with it. The window
+  restores focus the way Settings does (`settings::restore_lost_focus`).
 - **Esc** is bound in the window's own key context and goes through `Presence::escape` as
   `Panel::OnboardingEdit` (restore the saved name) or `Panel::Onboarding` (Finish later); see
   [input](input.md#esc).

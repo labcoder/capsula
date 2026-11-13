@@ -123,10 +123,7 @@ impl SettingsView {
         let view = cx.entity_id();
         let display = window.observe_window_display(move |_, cx| cx.notify(view));
         let focus_lost = cx.on_focus_lost(window, |view, window, cx| {
-            window
-                .focus_lost_restore_target(cx)
-                .unwrap_or_else(|| view.focus.clone())
-                .focus(window, cx);
+            restore_lost_focus(&view.focus, window, cx);
             cx.notify();
         });
         let mut view = Self {
@@ -397,4 +394,17 @@ impl Render for SettingsView {
                 )
             }))
     }
+}
+
+/// A view that shows the account sections: a focused button its view replaced took the view's
+/// key context, and Esc, with it. Focus goes where GPUI would restore it, or else to the view.
+pub(in crate::presence) fn restore_lost_focus(
+    focus: &FocusHandle,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    window
+        .focus_lost_restore_target(cx)
+        .unwrap_or_else(|| focus.clone())
+        .focus(window, cx);
 }

@@ -9,7 +9,7 @@ Closing Settings cancels a ChatGPT or Claude Code sign-in you started there that
 finished, however Settings closes: the close button, Esc, a double-tap of the shortcut, opening
 Tasks, moving the dock, starting to hold the shortcut to talk, or pressing **Settings…** again.
 Switching to your browser or to Claude Code's window doesn't close Settings. A sign-in you
-started from chat isn't cancelled. Onboarding's account step offers the same buttons, and
+started from chat isn't cancelled. Onboarding's account step offers the same sign-in buttons, and
 closing that window cancels a sign-in it started the same way.
 
 The connected account shows its email, when provided, and **Using ChatGPT plan** when plan
