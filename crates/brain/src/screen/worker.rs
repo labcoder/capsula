@@ -7,9 +7,10 @@ use super::capture::{Capturer, Failure, Open, Screen};
 use super::elements::OpenElements;
 use super::supervisor::Screen as ScreenKind;
 use super::wire::{ReplyBody, RequestBody};
-use crate::supervise::{Kind as _, read_request, write_message};
+use crate::supervise::{Kind as _, read_request, write_sized};
 
-/// Serves stdin/stdout after the caller initializes content-free logging.
+/// Serves stdin/stdout after the caller initializes content-free logging. Replies go to an
+/// unbuffered stdout, since they can carry window text and images.
 ///
 /// # Errors
 /// Returns a framing or transport failure, never request contents.
@@ -19,7 +20,7 @@ use crate::supervise::{Kind as _, read_request, write_message};
 pub fn serve() -> Result<(), frame::FrameError> {
     serve_on(
         &mut io::stdin().lock(),
-        &mut io::stdout().lock(),
+        &mut crate::platform::raw_stdout()?,
         open,
         open_elements,
         &Instant::now,
@@ -112,7 +113,7 @@ fn serve_on(
                 (ReplyBody::Fault(code), true)
             }
         };
-        write_message(output, id, &reply, ScreenKind::MAX_REPLY)?;
+        write_sized(output, id, &reply, ScreenKind::MAX_REPLY)?;
         if retire {
             return Ok(());
         }

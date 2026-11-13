@@ -20,6 +20,7 @@ getrandom.workspace = true
 httparse = "1.10"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 keyring.workspace = true
+postcard = { version = "1", default-features = false, features = ["use-std"] }
 # Spoken replies. Pinned exactly: the voice owner relies on xn 0.2.13's own pool API.
 ptts = { version = "=0.6.0", default-features = false, features = ["hf"] }
 ring = "0.17"

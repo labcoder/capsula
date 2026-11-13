@@ -14,6 +14,7 @@ impl Kind for Test {
     const MAX_REPLY: usize = 1024;
     type Request = Vec<u8>;
     type Reply = String;
+    type Assembly = crate::supervise::Assembly;
 }
 
 #[tokio::test]

@@ -36,6 +36,22 @@ pub(crate) use windows::shell_connection;
 )]
 mod windows;
 
+/// Standard output as an unbuffered file: a duplicate of its handle, so what's written there
+/// passes through no buffer the standard library keeps and never zeroes.
+#[cfg(windows)]
+pub(crate) fn raw_stdout() -> std::io::Result<std::fs::File> {
+    use std::os::windows::io::AsHandle as _;
+    Ok(std::io::stdout().as_handle().try_clone_to_owned()?.into())
+}
+
+/// Standard output as an unbuffered file: a duplicate of its descriptor, so what's written there
+/// passes through no buffer the standard library keeps and never zeroes.
+#[cfg(unix)]
+pub(crate) fn raw_stdout() -> std::io::Result<std::fs::File> {
+    use std::os::fd::AsFd as _;
+    Ok(std::io::stdout().as_fd().try_clone_to_owned()?.into())
+}
+
 /// Serializes every process start that can inherit handles. A handle made inheritable for one
 /// child leaks into any other child created while it is, so std `Command` and dependencies that
 /// spawn (the browser launch) take this guard too.

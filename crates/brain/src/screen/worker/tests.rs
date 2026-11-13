@@ -6,6 +6,7 @@ use kumochi_protocol::message::RunId;
 use super::*;
 use crate::screen::wire::{CaptureId, Exclusion, TicketWire};
 use crate::screen::{Acquired, RawFrame};
+use crate::supervise::write_message;
 
 /// A platform whose every capture fails with `FAILURE`.
 struct Failing<const RETIRE: bool>;

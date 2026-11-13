@@ -13,6 +13,7 @@ use crate::screen::frame::RawFrame;
 use crate::screen::mask::MaskSink;
 use crate::screen::reader::ThreadedReader;
 use crate::screen::wire::Exclusion;
+use crate::supervise::write_message;
 use kumochi_protocol::geometry::{DisplayRef, PhysicalPoint, PhysicalRect, WindowRef};
 use kumochi_protocol::message::RunId;
 

@@ -4,6 +4,7 @@ use std::time::Duration;
 use super::super::*;
 use crate::screen::elements::tests::{RECT, open_reader};
 use crate::screen::{CaptureId, ElementTarget, Exclusion, FrameMeta, Refusal, TicketWire};
+use crate::supervise::write_message;
 use kumochi_protocol::geometry::DisplayRef;
 use kumochi_protocol::message::RunId;
 

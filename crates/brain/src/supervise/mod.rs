@@ -31,14 +31,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc as blocking};
 use std::time::Duration;
 
-use kumochi_protocol::frame::{self, Pipe};
+use kumochi_protocol::frame;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::time::Instant;
 
-use self::wire::{Assembly, Frame};
-pub(crate) use self::wire::{read_request, write_message};
+use self::wire::Frame;
+pub(crate) use self::wire::{
+    Assembly, Reassembly, Zeroed, read_request, write_message, write_sized,
+};
 use crate::platform::{Helper, Job};
 
 /// Losses are counted over this window for backoff.
@@ -67,6 +69,9 @@ pub(crate) trait Kind: 'static {
     const MAX_REPLY: usize;
     type Request: Serialize + Send + 'static;
     type Reply: DeserializeOwned + Send + 'static;
+    /// How its replies are read and put back together: [`Zeroed`] when they can carry the
+    /// user's content.
+    type Assembly: Reassembly;
 
     /// Whether `reply` ends its request. Every reply of a kind without streams does.
     fn is_terminal(_reply: &Self::Reply) -> bool {
@@ -542,9 +547,15 @@ impl<K: Kind> Worker<K> {
                 .name(format!("{}-reader", K::NAME))
                 .spawn(move || {
                     loop {
-                        let reply = frame::read(&mut pipes.stdout, Pipe::Data).ok().flatten();
+                        let reply = K::Assembly::read(&mut pipes.stdout).ok().flatten();
                         let ended = reply.is_none();
-                        if replies.blocking_send(reply).is_err() || ended {
+                        if let Err(unsent) = replies.blocking_send(reply) {
+                            if let Some(reply) = unsent.0 {
+                                K::Assembly::discard(reply);
+                            }
+                            break;
+                        }
+                        if ended {
                             break;
                         }
                     }
@@ -670,7 +681,7 @@ enum LossReason {
 struct Pending<K: Kind> {
     until: Instant,
     answer: Destination<K>,
-    assembly: Assembly,
+    assembly: K::Assembly,
     /// What the request may still receive: whole messages, and serialized bytes across them.
     messages: usize,
     bytes: usize,
@@ -685,7 +696,7 @@ impl<K: Kind> Pending<K> {
         Self {
             until,
             answer,
-            assembly: Assembly::new(K::MAX_REPLY),
+            assembly: K::Assembly::new(K::MAX_REPLY),
             messages: MAX_MESSAGES,
             bytes,
         }
@@ -707,16 +718,20 @@ fn accept<K: Kind>(
     generation: Generation,
 ) -> Result<(), WorkerLost> {
     let id = reply.id;
-    let item = pending.get_mut(&id).ok_or(WorkerLost::Lost)?;
-    item.bytes = item
-        .bytes
-        .checked_sub(reply.body.len())
-        .ok_or(WorkerLost::Lost)?;
-    let Some(bytes) = item.assembly.push(reply)? else {
+    let Some(item) = pending.get_mut(&id) else {
+        K::Assembly::discard(reply);
+        return Err(WorkerLost::Lost);
+    };
+    let Some(bytes) = item.bytes.checked_sub(reply.body.len()) else {
+        K::Assembly::discard(reply);
+        return Err(WorkerLost::Lost);
+    };
+    item.bytes = bytes;
+    let Some(body) = item.assembly.push(reply, frame::decode::<K::Reply>)? else {
         return Ok(());
     };
     item.messages = item.messages.checked_sub(1).ok_or(WorkerLost::Lost)?;
-    let body = frame::decode::<K::Reply>(&bytes).map_err(|_| WorkerLost::Lost)?;
+    let body = body.map_err(|_| WorkerLost::Lost)?;
     if item.answer.deliver(body, generation)? {
         pending.remove(&id);
     }
@@ -821,6 +836,12 @@ async fn run<K: Kind>(
             tracing::debug!(kind = K::NAME, "worker stopped");
         }
         let process = worker.process.take();
+        worker.reads.close();
+        while let Ok(reply) = worker.reads.try_recv() {
+            if let Some(reply) = reply {
+                K::Assembly::discard(reply);
+            }
+        }
         drop(worker);
         terminate::<K>(process.as_deref());
         while let Ok(command) = commands.try_recv() {

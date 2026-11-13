@@ -1,5 +1,7 @@
 use std::sync::atomic::AtomicUsize;
 
+use kumochi_protocol::frame::Pipe;
+
 use super::*;
 
 pub(crate) fn retirement() -> (Retirement, resource::Intents) {
