@@ -22,7 +22,7 @@ pub enum Unavailable {
 }
 
 /// How far the masks are known to cover the walked window.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Completeness {
     /// No walk has finished for this capture.
     Pending,

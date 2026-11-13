@@ -6,8 +6,8 @@ use std::time::Instant;
 use kumochi_protocol::geometry::PhysicalPoint;
 
 use super::actor::Key;
-use super::capture::{Acquired, Capturer, Failure};
-use super::elements::{TopWindow, Wake};
+use super::capture::{Acquired, Capturer, Failure, Target};
+use super::elements::Wake;
 use super::frame::RawFrame;
 
 /// One hold's capture: the window under `point`, then one frame of it alone.
@@ -21,7 +21,7 @@ pub(super) struct Job {
 }
 
 /// The frame comes back on every outcome; a success names the window it shows.
-pub(super) type Completion = (Key, RawFrame, Result<(Acquired, TopWindow), Failure>);
+pub(super) type Completion = (Key, RawFrame, Result<(Acquired, Target), Failure>);
 
 pub(super) struct CaptureThread {
     jobs: SyncSender<Job>,
@@ -50,7 +50,7 @@ impl CaptureThread {
                             let target = capturer.pointer_window(job.point, job.shell)?;
                             capturer
                                 .capture_window(&target, job.until, &mut job.frame)
-                                .map(|acquired| (acquired, target.top))
+                                .map(|acquired| (acquired, target))
                         })();
                         if answers.try_send((job.key, job.frame, result)).is_err() || !wake() {
                             drop(requests);

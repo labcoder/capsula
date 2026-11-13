@@ -43,10 +43,6 @@ pub(crate) struct Acquired {
 
 /// The window a hold points at, as the walk resolved it. Its capture and its element walk use
 /// this same window.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the hold's capture resolves the pointer's window")
-)]
 pub(crate) struct Target {
     /// The root window, its process and its frame: the captured surface's physical bounds.
     pub(crate) top: TopWindow,
@@ -158,6 +154,8 @@ struct Held {
     spent: bool,
     /// The window its one walk read, which a seal requires to be the captured one.
     walked: Option<(WindowRef, u32)>,
+    /// The captured window as its capture resolved it, which a seal checks again.
+    target: Option<Target>,
 }
 
 /// The capture state one worker owns on its serve thread.
@@ -168,6 +166,9 @@ pub(super) struct Screen {
     held: Option<Held>,
     masks: MaskSink,
     pub(super) reader: Option<Result<Box<dyn ElementReader>, i32>>,
+    /// Whether a window is still the one its capture resolved: the platform's check, a fake in
+    /// tests.
+    pub(super) unchanged: fn(&Target) -> bool,
 }
 
 impl Default for Screen {
@@ -179,6 +180,7 @@ impl Default for Screen {
             held: None,
             masks: Arc::new(Mutex::new(MaskSet::new(CaptureId(0)))),
             reader: None,
+            unchanged: crate::platform::window_unchanged,
         }
     }
 }
@@ -236,8 +238,32 @@ impl Screen {
             foreground,
             spent: false,
             walked: None,
+            target: None,
         });
         Ok(meta)
+    }
+
+    /// Keeps the captured window's identity for the seal's check.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the dormant alternate loop captures windows")
+    )]
+    pub(super) fn pin(&mut self, target: Target) {
+        if let Some(held) = &mut self.held {
+            held.target = Some(target);
+        }
+    }
+
+    /// How far the held capture's masks are known to cover its window.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the dormant alternate loop reports walks")
+    )]
+    pub(super) fn completeness(&self) -> Completeness {
+        self.masks.lock().map_or(
+            Completeness::Unknown(super::mask::Unavailable::Busy),
+            |masks| masks.completeness(),
+        )
     }
 
     #[cfg_attr(
@@ -252,7 +278,7 @@ impl Screen {
 
     /// Hands out the held frame's one image, masked and encoded under `cap` JPEG bytes, and
     /// releases the frame whatever the outcome. Only a walk of the captured window that found
-    /// every password mask seals.
+    /// every password mask seals, and only while that window is still the one captured.
     pub(super) fn seal(
         &mut self,
         capture: CaptureId,
@@ -277,6 +303,9 @@ impl Screen {
         let masks = sink.lock().map_err(|_| Refusal::Unmasked)?;
         if masks.completeness() != Completeness::Complete {
             return Err(Refusal::Unmasked.into());
+        }
+        if !held.target.as_ref().is_some_and(self.unchanged) {
+            return Err(Refusal::WindowChanged.into());
         }
         let clean = sanitize(&mut self.frame, &masks)?;
         overview_within(&clean, cap).map(ScreenContext::new)

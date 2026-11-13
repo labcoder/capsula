@@ -6,7 +6,6 @@ use crate::screen::elements::tests::{RECT, open_reader};
 use crate::screen::{CaptureId, ElementTarget, Exclusion, FrameMeta, Refusal, TicketWire};
 use crate::supervise::write_message;
 use kumochi_protocol::geometry::DisplayRef;
-use kumochi_protocol::message::RunId;
 
 struct Good;
 impl Capturer for Good {
@@ -27,7 +26,7 @@ impl Capturer for Good {
 
 fn capture(id: u64, generation: u64) -> RequestBody {
     RequestBody::Capture {
-        ticket: TicketWire::new(RunId(1), CaptureId(id), generation, [0; 16], 2_000),
+        ticket: TicketWire::new(CaptureId(id), generation, [0; 16], 2_000),
         display: DisplayRef(RECT),
         exclude: Exclusion::KumochiWindows,
     }

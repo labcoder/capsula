@@ -7,10 +7,11 @@ use kumochi_protocol::frame;
 use kumochi_protocol::geometry::PhysicalPoint;
 use serde::{Deserialize, Serialize};
 
-use super::capture::{Capturer, Failure, Screen};
+use super::capture::{Capturer, Failure, Screen, Target};
 use super::context::ScreenContext;
 use super::elements::{ElementTree, OpenElements, Wake};
 use super::encode::JPEG_CAP;
+use super::mask::Completeness;
 use super::native::{CaptureThread, Job};
 use super::supervisor::Screen as Kind;
 use super::wire::{CaptureId, ElementTarget, FrameMeta, Refusal, TicketWire};
@@ -25,19 +26,19 @@ const _: () = assert!(
 /// A hold: its shell connection's epoch, then the gesture within it. The order is the brain's
 /// own, so one high-water fence retires every earlier hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub(super) struct Owner {
+pub(crate) struct Owner {
     pub(super) epoch: u64,
     pub(super) gesture: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct Key {
+pub(crate) struct Key {
     pub(super) owner: Owner,
     pub(super) capture: CaptureId,
 }
 
 #[derive(Serialize, Deserialize)]
-enum Request {
+pub(crate) enum Request {
     Ping,
     /// One frame of the window under `point`, the hold's pointer when it was recognized.
     Context {
@@ -49,6 +50,11 @@ enum Request {
         key: Key,
         target: ElementTarget,
     },
+    /// The hold's one walk of the captured window, kept in the worker for the seal's masks; only
+    /// how complete they are comes back.
+    Walk {
+        key: Key,
+    },
     /// The held frame's one image, after its walk; the frame is released whatever the answer.
     Seal(Key),
     Drop(Key),
@@ -56,11 +62,12 @@ enum Request {
 }
 
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
-enum Reply {
+pub(crate) enum Reply {
     Pong,
     Acquired(Key, FrameMeta),
     Complete(Key),
     Elements(Key, ElementTree),
+    Walked(Key, Completeness),
     Sealed(Key, ScreenContext),
     Released(Owner, Option<CaptureId>),
     Refused(Refusal),
@@ -109,11 +116,13 @@ pub(super) fn serve_on(
     open: impl FnMut() -> Result<Box<dyn Capturer>, i32> + Send + 'static,
     elements: OpenElements,
     now: impl Fn() -> Instant + Send + Sync + 'static,
+    unchanged: fn(&Target) -> bool,
 ) -> Result<(), frame::FrameError> {
     let (inbox, events) = mpsc::sync_channel(QUEUE);
     let capture = CaptureThread::open(open, wake(inbox.clone()))
         .map_err(|_| std::io::Error::other("capture thread"))?;
     let mut screen = Screen::default();
+    screen.unchanged = unchanged;
     screen.reader = Some(elements(wake(inbox.clone())));
     let now = std::sync::Arc::new(now);
     let clock = std::sync::Arc::clone(&now);
@@ -149,12 +158,12 @@ fn run(
     let mut live = false;
     let mut expires = None;
     let mut capturing: Option<Capture> = None;
-    let mut walking: Option<(u64, Key, Instant)> = None;
+    let mut walking: Option<(u64, Key, Instant, Answer)> = None;
     let mut releasing = Vec::new();
     loop {
         let deadline = expires
             .into_iter()
-            .chain(walking.map(|(_, _, until)| until))
+            .chain(walking.map(|(_, _, until, _)| until))
             .min();
         let event = match deadline {
             Some(until) => events
@@ -222,7 +231,12 @@ fn run(
                         }
                     }
                 }
-                Request::Elements { key, target } => {
+                walk @ (Request::Elements { .. } | Request::Walk { .. }) => {
+                    let (key, target, summary) = match walk {
+                        Request::Elements { key, target } => (key, target, Answer::Tree),
+                        Request::Walk { key } => (key, ElementTarget::Foreground, Answer::Masks),
+                        _ => unreachable!(),
+                    };
                     if !live || current != Some(key) || capturing.is_some() || walking.is_some() {
                         send(id, Reply::Refused(Refusal::Stale))?;
                     } else {
@@ -237,9 +251,9 @@ fn run(
                                     .expect("validated reader")
                                     .begin(job)
                                 {
-                                    Ok(()) => walking = Some((id, key, until)),
+                                    Ok(()) => walking = Some((id, key, until, summary)),
                                     Err(walked) => {
-                                        send(id, Reply::Elements(key, walked.tree))?;
+                                        send(id, answer(summary, key, walked.tree, &screen))?;
                                         if walked.retire {
                                             return Ok(());
                                         }
@@ -247,7 +261,7 @@ fn run(
                                 }
                             }
                             Ok(Err(walked)) => {
-                                send(id, Reply::Elements(key, walked.tree))?;
+                                send(id, answer(summary, key, walked.tree, &screen))?;
                                 if walked.retire {
                                     return Ok(());
                                 }
@@ -320,15 +334,17 @@ fn run(
                     screen.clear();
                     send(pending.id, Reply::Refused(Refusal::Stale))?;
                 } else {
-                    let result = result.and_then(|(acquired, window)| {
-                        screen.acquired(
+                    let result = result.and_then(|(acquired, target)| {
+                        let meta = screen.acquired(
                             &pending.ticket,
-                            window.rect,
+                            target.top.rect,
                             pending.received,
                             pending.expires,
                             now(),
-                            (acquired, Some(window)),
-                        )
+                            (acquired, Some(target.top.clone())),
+                        )?;
+                        screen.pin(target);
+                        Ok(meta)
                     });
                     match result {
                         Ok(meta) => {
@@ -346,7 +362,7 @@ fn run(
             Err(()) => return Ok(()),
             Ok(None) => {}
         }
-        if let Some((id, key, _)) = walking {
+        if let Some((id, key, _, summary)) = walking {
             if let Some(result) = screen
                 .reader
                 .as_mut()
@@ -358,11 +374,11 @@ fn run(
                     Err(Failure::Retire(_)) => return Ok(()),
                     Ok(walked) if walked.retire => return Ok(()),
                     Ok(walked) if live && current == Some(key) => {
-                        send(id, Reply::Elements(key, walked.tree))?;
+                        send(id, answer(summary, key, walked.tree, &screen))?;
                     }
                     _ => send(id, Reply::Refused(Refusal::Stale))?,
                 }
-            } else if walking.is_some_and(|(_, _, until)| now() >= until) {
+            } else if walking.is_some_and(|(_, _, until, _)| now() >= until) {
                 return Ok(());
             }
         }
@@ -371,6 +387,21 @@ fn run(
                 send(id, Reply::Released(owner, capture))?;
             }
         }
+    }
+}
+
+/// What a walk answers: its tree for `Elements`; for `Walk`, only how complete its masks are, so
+/// no window text leaves the worker.
+#[derive(Clone, Copy)]
+enum Answer {
+    Tree,
+    Masks,
+}
+
+fn answer(summary: Answer, key: Key, tree: ElementTree, screen: &Screen) -> Reply {
+    match summary {
+        Answer::Masks => Reply::Walked(key, screen.completeness()),
+        Answer::Tree => Reply::Elements(key, tree),
     }
 }
 

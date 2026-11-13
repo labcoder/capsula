@@ -1,5 +1,4 @@
 use kumochi_protocol::geometry::PhysicalRect;
-use kumochi_protocol::message::RunId;
 
 use super::super::wire::CaptureId;
 use super::*;
@@ -60,7 +59,7 @@ async fn capture_accepts_only_its_own_frame_and_passes_refusals_through() {
             Err(CaptureError::Screen(ScreenError::ExitUnconfirmed)),
         ),
     ] {
-        let ticket = TicketWire::new(RunId(1), CaptureId(7), 1, [0; 16], 2_000);
+        let ticket = TicketWire::new(CaptureId(7), 1, [0; 16], 2_000);
         let capture = handle.capture(ticket, display, Exclusion::KumochiWindows);
         let answer = async {
             let (body, answer) = receive.recv().await.expect("queued capture");
