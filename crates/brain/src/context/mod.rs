@@ -381,10 +381,6 @@ impl ModelRequest {
     /// Adds `image` right after the newest user message. Only the Responses route carries images,
     /// so any other refuses here and no adapter ever has one to drop. The body's ceiling is
     /// checked when it's serialised.
-    #[cfg_attr(
-        not(any(test, debug_assertions)),
-        expect(dead_code, reason = "2c attaches a hold's sealed screen image")
-    )]
     pub(crate) fn attach(&mut self, image: Jpeg) -> Result<(), ImageRefused> {
         if self
             .choice
