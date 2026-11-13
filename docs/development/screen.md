@@ -366,9 +366,10 @@ refuses with `TooLarge`; it is never downscaled further. `TooLarge`, `Unmasked` 
 `Ambiguous` are ordinary refusals.
 
 The JPEG's bytes are user content. `ScreenContext` zeroes them on drop and its Debug prints only
-the byte count and size. The encoder's buffers are zeroed on every error, and the worker zeroes
-its serialized copies of a message once written. Nothing writes the bytes to a log, a file or a
-store.
+the byte count and size. The encoder's buffers are zeroed on every error. The worker zeroes its
+final serialized buffers once a message is written, but not the copies a growing buffer leaves
+behind when it reallocates, and the brain doesn't zero the message it reassembles yet; the change
+that connects the brain's stream owns both. Nothing writes the bytes to a log, a file or a store.
 
 On Windows, a frame's pixel buffer and the sealed JPEG are each registered as excluded from crash
 dumps (`WerRegisterExcludedMemoryBlock`) while they hold content, and unregistered after they're
