@@ -6,17 +6,21 @@ mod accounts;
 #[cfg(test)]
 mod tests;
 
+use std::sync::Arc;
+use std::time::Instant;
+
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _};
 use gpui_kit::{
     AnyElement, AnyWindowHandle, App, AppContext as _, Context, Entity, FocusHandle,
     Focusable as _, InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Render,
-    Styled as _, Subscription, WeakEntity, Window, div, rems,
+    RenderImage, Styled as _, Subscription, Task, WeakEntity, Window, div, img, px, rems,
 };
 use kumochi_protocol::constants;
 use kumochi_protocol::message::ControlToBrain;
 
+use super::kumo_view::{SIZE, still};
 use super::settings::{field_status, name_input_event};
 use super::{
     Foreground, LinkState, OpenError, PanelVisibility, Presence, PresenceEvent, PresenceSurface,
@@ -49,6 +53,9 @@ pub(super) struct OnboardingView {
     focus: FocusHandle,
     /// Kept for the shared name handler; Esc reads the Settings draft instead.
     editing: Option<Field>,
+    /// Kumo's still pose under the welcome, once its bake lands.
+    kumo: Option<Arc<RenderImage>>,
+    _kumo_bake: Task<()>,
     /// A `ChatGPT` sign-in this window asked for completed: the plan line shows.
     plan: bool,
     _events: Vec<Subscription>,
@@ -112,6 +119,28 @@ impl OnboardingView {
             }
             cx.notify();
         });
+        let scale = window.scale_factor();
+        let kumo_bake = cx.spawn(async move |view, cx| {
+            let started = Instant::now();
+            let image = cx
+                .background_executor()
+                .spawn(async move { still(scale) })
+                .await;
+            let baked_us = started.elapsed().as_micros();
+            let kept = view.update(cx, |view, cx| {
+                view.kumo = image.map(Arc::new);
+                if view.kumo.is_some() {
+                    super::diagnostics::record(
+                        cx,
+                        format_args!("onboarding kumo baked us={baked_us}"),
+                    );
+                }
+                cx.notify();
+            });
+            if kept.is_err() {
+                tracing::debug!("onboarding closed before Kumo's bake landed");
+            }
+        });
         let focus_lost = cx.on_focus_lost(window, |view, window, cx| {
             super::settings::restore_lost_focus(&view.focus, window, cx);
             cx.notify();
@@ -126,6 +155,8 @@ impl OnboardingView {
             inputs,
             focus: cx.focus_handle(),
             editing: None,
+            kumo: None,
+            _kumo_bake: kumo_bake,
             plan: false,
             _events: subscriptions,
             _watch: watch,
@@ -181,6 +212,14 @@ impl OnboardingView {
                             .child(before)
                             .child(div().flex_1().min_w(rems(12.0)).child(input.large()))
                             .children((!after.is_empty()).then_some(after)),
+                    )
+                    .child(
+                        // Reserved before the bake lands, so the welcome doesn't move.
+                        div()
+                            .size(px(SIZE))
+                            .flex_none()
+                            .self_center()
+                            .children(self.kumo.clone().map(|image| img(image).size_full())),
                     )
                     .child(help(strings.get(Text::OnboardingWelcomeHelp)))
                     .into_any_element()

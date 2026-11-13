@@ -2,8 +2,8 @@
 
 The first time you start Kumochi, a window opens under the dock.
 
-1. **Hi, I'm Kumo.** The assistant's name is in a box you can edit. Change it if you like, then
-   press Enter or **Continue**.
+1. **Hi, I'm Kumo.** The assistant's name is in a box you can edit, with Kumo under it. Change it
+   if you like, then press Enter or **Continue**.
 2. **What should Kumo call you?** This is optional. Leave it blank to skip it. Your name is sent to
    the model you chat with, so the assistant can use it.
 3. **Connect an account for Kumo.** ChatGPT and Claude Code, each as Settings → Accounts shows

@@ -24,7 +24,8 @@ each) and keeps, per pixel, the antialiased coverage, the surface normal, the de
 thickness, and ambient occlusion. A `Framing` places the cloud in the square; `CARD` leaves
 room for the shadow and gives the edge a soft vapour band about a pixel wide. The bake's cost
 grows with the size squared, so it runs when the size or display scale changes, never per frame
-and never inside GPUI's paint.
+and never inside GPUI's paint. `kumo_view::still` bakes once and shades the still pose for a window
+that shows Kumo without animating it, such as onboarding's welcome.
 
 Tests cover the field's sign inside and outside, the framing's centre and corner, the bake's
 empty corners and covered middle, the soft band against a crisp one, determinism, and the empty

@@ -355,6 +355,20 @@ fn device(logical: f32, scale: f32) -> u16 {
     (logical * scale).round().clamp(1.0, f32::from(u16::MAX)) as u16
 }
 
+/// Kumo's still pose at rest, `SIZE` at `scale`, for a window that shows Kumo without
+/// animating it. This bakes the body, so it runs off the UI thread.
+pub(super) fn still(scale: f32) -> Option<RenderImage> {
+    let size = device(SIZE, scale);
+    let renderer = Renderer::new(&Silhouette::emoji(), size, Look::default());
+    let mut pixels = vec![0; renderer.image_len()];
+    if let Err(error) = renderer.render(&super::kumo::FrameState::IDLE, &mut pixels) {
+        tracing::error!(%error, "can't shade the still Kumo");
+        return None;
+    }
+    image::RgbaImage::from_raw(u32::from(size), u32::from(size), pixels)
+        .map(|buffer| RenderImage::new([image::Frame::new(buffer)]))
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -366,6 +380,25 @@ mod tests {
     };
 
     use super::{KumoView, Mood, Motion};
+
+    /// The still pose is `SIZE` at the scale it's baked for, clear at the corner and solid at
+    /// the centre.
+    #[test]
+    fn a_still_kumo_is_the_peeks_size_at_its_scale() {
+        for (scale, side) in [(1.0, 64), (1.5, 96)] {
+            let image = super::still(scale).expect("a still Kumo");
+            let pixels = gpui::DevicePixels(side);
+            assert_eq!(image.size(0), gpui::size(pixels, pixels), "scale {scale}");
+            let bytes = image.as_bytes(0).expect("one frame");
+            let side = usize::try_from(side).expect("a small side");
+            let alpha = |x: usize, y: usize| bytes[(y * side + x) * 4 + 3];
+            assert_eq!(
+                (alpha(0, 0), alpha(side / 2, side / 2)),
+                (0, 255),
+                "scale {scale}"
+            );
+        }
+    }
 
     struct Blank;
 
