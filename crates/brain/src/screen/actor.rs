@@ -17,6 +17,10 @@ use super::wire::{CaptureId, ElementTarget, FrameMeta, Refusal, TicketWire};
 use crate::supervise::{Kind as _, read_request, write_message};
 
 const QUEUE: usize = 16;
+const _: () = assert!(
+    JPEG_CAP + 4096 <= super::wire::MAX_REPLY_BYTES,
+    "a sealed reply, the JPEG plus well under 4 KiB, must fit the reply cap"
+);
 
 /// A hold: its shell connection's epoch, then the gesture within it. The order is the brain's
 /// own, so one high-water fence retires every earlier hold.

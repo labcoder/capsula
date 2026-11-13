@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::geometry::{DisplayRef, PhysicalPoint, PhysicalRect};
+use kumochi_protocol::geometry::{DisplayRef, PhysicalPoint, PhysicalRect, WindowRef};
 
 use super::context::ScreenContext;
 use super::elements::{
@@ -156,6 +156,8 @@ struct Held {
     walk_by: Instant,
     foreground: Option<TopWindow>,
     spent: bool,
+    /// The window its one walk read, which a seal requires to be the captured one.
+    walked: Option<(WindowRef, u32)>,
 }
 
 /// The capture state one worker owns on its serve thread.
@@ -233,6 +235,7 @@ impl Screen {
             walk_by: acquired.arrived + WALK_WINDOW,
             foreground,
             spent: false,
+            walked: None,
         });
         Ok(meta)
     }
@@ -248,8 +251,8 @@ impl Screen {
     }
 
     /// Hands out the held frame's one image, masked and encoded under `cap` JPEG bytes, and
-    /// releases the frame whatever the outcome. Only a walk that found every password mask
-    /// seals.
+    /// releases the frame whatever the outcome. Only a walk of the captured window that found
+    /// every password mask seals.
     pub(super) fn seal(
         &mut self,
         capture: CaptureId,
@@ -261,12 +264,14 @@ impl Screen {
     }
 
     fn sealed(&mut self, capture: CaptureId, cap: usize) -> Result<ScreenContext, Failure> {
-        if self
+        let held = self
             .held
             .as_ref()
-            .is_none_or(|held| held.capture != capture)
-        {
-            return Err(Refusal::Stale.into());
+            .filter(|held| held.capture == capture)
+            .ok_or(Refusal::Stale)?;
+        let captured = held.foreground.as_ref().map(|top| (top.window, top.pid));
+        if captured.is_none() || held.walked != captured {
+            return Err(Refusal::Unmasked.into());
         }
         let sink = Arc::clone(&self.masks);
         let masks = sink.lock().map_err(|_| Refusal::Unmasked)?;
@@ -375,6 +380,9 @@ impl Screen {
                 }),
             window @ ElementTarget::Window { .. } => Some(window),
         };
+        if let Some(ElementTarget::Window { window, pid }) = target {
+            held.walked = Some((window, pid));
+        }
         let Some(target) = target else {
             let mut tree =
                 ElementTree::unavailable(capture, super::elements::Unavailable::NoWindow);

@@ -943,6 +943,46 @@ fn a_walked_hold_seals_one_masked_jpeg_and_releases_its_frame() {
 }
 
 #[test]
+fn a_complete_walk_of_another_window_never_seals_the_captured_one() {
+    let rig = Rig::start(None, None, None);
+    rig.send(1, &context(1));
+    rig.acquired(1);
+    let other = ElementTarget::Window {
+        window: WindowRef(9),
+        pid: 8,
+    };
+    rig.send(
+        2,
+        &Request::Elements {
+            key: key(1),
+            target: other,
+        },
+    );
+    let (id, reply) = rig.reply();
+    assert!(
+        id == 2 && matches!(reply, Reply::Elements(walked, _) if walked == key(1)),
+        "{reply:?}"
+    );
+    rig.send(3, &Request::Seal(key(1)));
+    assert_eq!(rig.reply(), (3, Reply::Refused(Refusal::Unmasked)));
+    rig.scrubbed();
+    rig.send(
+        4,
+        &Request::Elements {
+            key: key(1),
+            target: ElementTarget::Window {
+                window: WindowRef(7),
+                pid: 8,
+            },
+        },
+    );
+    assert_eq!(rig.reply(), (4, Reply::Refused(Refusal::Stale)));
+    rig.send(5, &Request::Seal(key(1)));
+    assert_eq!(rig.reply(), (5, Reply::Refused(Refusal::Stale)));
+    rig.finish();
+}
+
+#[test]
 fn sealing_before_the_walk_refuses_releases_the_frame_and_stays_refused() {
     let rig = Rig::start(None, None, None);
     rig.send(1, &context(1));

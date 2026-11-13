@@ -12,7 +12,7 @@ pub(crate) const MAX_SIDE: u32 = 8192;
 /// only a complete, checked copy becomes valid again. Windows and macOS share it.
 #[derive(Default)]
 pub(crate) struct RawFrame {
-    /// Dropped once the buffer is scrubbed, and before it's grown or freed.
+    /// Registered while the allocation holds pixels; dropped once it's scrubbed, before it's freed.
     #[cfg(windows)]
     dump: Option<crate::platform::DumpExclusion>,
     bgra: Vec<u8>,
@@ -43,11 +43,9 @@ impl RawFrame {
         if len > self.bgra.capacity() {
             self.release();
         }
-        #[cfg(windows)]
-        drop(self.dump.take());
         self.bgra.resize(len, 0);
         #[cfg(windows)]
-        {
+        if self.dump.is_none() {
             self.dump =
                 crate::platform::DumpExclusion::new(self.bgra.as_ptr(), self.bgra.capacity());
         }
