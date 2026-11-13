@@ -2,7 +2,7 @@ use super::{Seen, Shows, SignInMark};
 
 fn open(generation: u64) -> SignInMark {
     let mut mark = SignInMark::default();
-    mark.sent(generation);
+    mark.sent(generation, false);
     mark
 }
 
@@ -12,7 +12,7 @@ fn only_a_queued_op_opens_the_mark() {
     assert_eq!(mark.view(1, Shows::Waiting), Seen::Nothing);
     assert_eq!(mark, SignInMark::Settled);
     assert!(!mark.take(), "nothing was asked for here");
-    mark.sent(1);
+    mark.sent(1, false);
     assert_eq!(
         mark,
         SignInMark::Open {

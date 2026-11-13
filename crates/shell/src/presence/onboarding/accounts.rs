@@ -82,11 +82,15 @@ impl Presence {
     /// A `ChatGPT` button in the account step. A sign-in it queued is this window's.
     pub(super) fn onboarding_account_op(&mut self, op: AccountOp, cx: &mut Context<'_, Self>) {
         let generation = self.session.as_ref().map(crate::link::Session::generation);
+        let shown = matches!(
+            self.settings.read(cx).accounts.view,
+            Some(AccountView::SigningIn)
+        );
         if self.account_op(op, cx)
             && matches!(op, AccountOp::SignIn | AccountOp::EnablePlan)
             && let Some(generation) = generation
         {
-            self.onboarding_chatgpt.sent(generation);
+            self.onboarding_chatgpt.sent(generation, shown);
         }
     }
 
@@ -97,7 +101,7 @@ impl Presence {
             && op == ConnectionOp::ConnectClaudeCode
             && let Some(generation) = generation
         {
-            self.onboarding_claude.sent(generation);
+            self.onboarding_claude.sent(generation, false);
         }
     }
 

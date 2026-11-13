@@ -88,7 +88,8 @@ flowchart TD
   because the brain may start the sign-in late and ignores a cancel when nothing is signing in.
   A cancel that can't be sent stays owed across a link drop: it goes at the next waiting view.
   It's dropped by a first view with no wait, by a `ChatGPT` sign-in error, or by any op the user
-  sends that connection from Settings or chat. Continue, Not now and the finish hand a waiting
+  sends that connection from any surface: Settings, chat or onboarding. Open again keeps a shown
+  wait shown, since the brain replaces the attempt without a new view. Continue, Not now and the finish hand a waiting
   sign-in over to the rest of the app instead. After a shell restart, the window adopts a
   sign-in it finds waiting, as it opens (`set_onboarding`) or on a connection's first view. That is wrong in one
   accepted case: after Finish later, a sign-in started from Settings or chat that is still

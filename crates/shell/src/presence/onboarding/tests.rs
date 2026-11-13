@@ -1135,6 +1135,35 @@ fn a_sign_in_answered_by_the_same_complete_account_is_still_the_windows(cx: &mut
     );
 }
 
+/// Open again replaces the waiting attempt without a new view, so the wait still counts as shown:
+/// the completed sign-in shows the plan line and leaves nothing to cancel.
+#[gpui::test]
+fn open_again_keeps_the_wait_it_replaced(cx: &mut TestAppContext) {
+    let (owner, window, controls) = on_accounts(cx);
+    sign_in(&owner, cx);
+    account(&owner, 7, AccountView::SigningIn, cx);
+    sign_in(&owner, cx);
+    assert_eq!(
+        drain(&controls),
+        [
+            ControlToBrain::AccountOp(AccountOp::SignIn),
+            ControlToBrain::AccountOp(AccountOp::SignIn)
+        ]
+    );
+    account(&owner, 7, COMPLETE, cx);
+    assert!(owner.read_with(cx, |owner, cx| {
+        owner
+            .onboarding
+            .as_ref()
+            .expect("showing")
+            .view
+            .read(cx)
+            .plan
+    }));
+    escape(&owner, window, cx);
+    assert_eq!(drain(&controls), []);
+}
+
 /// An error offering only Retry comes from a renewal or a refused start, so it ends no sign-in.
 #[gpui::test]
 fn an_error_offering_only_retry_ends_no_sign_in(cx: &mut TestAppContext) {

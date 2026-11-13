@@ -3,8 +3,9 @@ use gpui_kit::{AppContext as _, TestAppContext, WindowOptions};
 use super::{SettingsPanel, SettingsView};
 use crate::presence::test_fixture;
 
-use crate::link::{Batch, LinkEvent, Session};
+use crate::link::{Batch, LinkEvent, LinkState, Session};
 use crate::presence::Presence;
+use crate::sign_in_mark::SignInMark;
 use gpui_kit::{AnyWindowHandle, Entity, VisualTestContext, px, size};
 use kumochi_protocol::message::{
     AccountOp, AccountView, ClaudeCodeView, ClaudeVersion, ConnectionOp, ConnectionsView,
@@ -739,6 +740,78 @@ fn closing_settings_cancels_its_own_sign_ins_once(cx: &mut TestAppContext) {
         );
         assert_eq!(drain(&controls), [], "a sent cancel isn't owed again");
     }
+}
+
+/// Open again replaces the waiting attempt without a new view, so once it completes, closing
+/// Settings sends nothing.
+#[gpui::test]
+fn closing_settings_after_open_again_completes_sends_nothing(cx: &mut TestAppContext) {
+    let (window, owner, controls) = accounts_panel(cx);
+    owner.update(cx, |owner, cx| {
+        owner.settings_account_op(AccountOp::SignIn, cx);
+    });
+    account_views(&owner, vec![chatgpt(AccountView::SigningIn)], cx);
+    owner.update(cx, |owner, cx| {
+        owner.settings_account_op(AccountOp::SignIn, cx);
+    });
+    account_views(
+        &owner,
+        vec![chatgpt(AccountView::SignedIn {
+            email: None,
+            plan: PlanState::Enabled,
+            recovery: None,
+        })],
+        cx,
+    );
+    assert_eq!(drain(&controls).len(), 2, "two sign-ins");
+    click_github(window, "close-settings", cx);
+    assert_eq!(drain(&controls), []);
+}
+
+/// An op the user sends a connection from elsewhere, chat's Sign in included, drops Settings'
+/// owed cancel for it, so the wait the next connection shows isn't cancelled.
+#[gpui::test]
+fn a_sign_in_from_chat_drops_settings_owed_cancels(cx: &mut TestAppContext) {
+    let (window, owner, controls) = accounts_panel(cx);
+    start_both(window, &controls, cx);
+    account_views(&owner, vec![LinkEvent::State(LinkState::Reconnecting)], cx);
+    click_github(window, "close-settings", cx);
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(
+            [owner.settings_chatgpt, owner.settings_claude],
+            [SignInMark::CancelOwed { generation: 7 }; 2]
+        );
+    });
+    owner.update(cx, |owner, cx| {
+        assert!(
+            !owner.account_op(AccountOp::SignIn, cx),
+            "no link to send on"
+        );
+        assert!(!owner.claude_op(ConnectionOp::ConnectClaudeCode, cx));
+    });
+    account_views(
+        &owner,
+        vec![
+            LinkEvent::Connected(Session::detached(8, Incarnation(2))),
+            LinkEvent::Account {
+                generation: 8,
+                view: AccountView::SigningIn,
+            },
+            LinkEvent::Connections {
+                generation: 8,
+                view: ConnectionsView {
+                    anthropic: KeyView::Missing,
+                    claude_code: ClaudeCodeView::SigningIn,
+                },
+            },
+        ],
+        cx,
+    );
+    let cancels: Vec<_> = drain(&controls)
+        .into_iter()
+        .filter(|control| CANCELS.contains(control))
+        .collect();
+    assert_eq!(cancels, []);
 }
 
 #[gpui::test]
