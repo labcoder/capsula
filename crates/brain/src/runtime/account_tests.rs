@@ -9,8 +9,9 @@ use std::sync::{Arc, Mutex};
 use kumochi_protocol::Secret;
 use kumochi_protocol::constants::SESSION_LOCK;
 use kumochi_protocol::message::{
-    AccountOp, AccountRecovery, AccountView, Action, ControlToBrain, ControlToShell, DataToShell,
-    Effort, ErrorKey, ModelChoice, ModelInfo, ModelSlug, Phase, PlanState, UserError,
+    AccountOp, AccountRecovery, AccountView, Action, ConnectionKind, ControlToBrain,
+    ControlToShell, DataToShell, Effort, ErrorKey, ModelChoice, ModelInfo, ModelSlug, Phase,
+    PlanState, UserError,
 };
 use serde_json::json;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -20,6 +21,7 @@ use zeroize::Zeroizing;
 
 use super::{Ended, PATIENCE, Shell, duplex};
 use crate::connections::account::{Denied, Input, Listened, Worker};
+use crate::connections::catalog::Listing;
 use crate::connections::clock::{Clock, FixedClock};
 use crate::connections::http_client::{Endpoint, Http, HttpError, Request, Response, SharedHttp};
 use crate::connections::model::budget::Budget;
@@ -909,13 +911,47 @@ async fn the_catalog_is_read_retried_and_cleared_when_the_account_stops_being_us
     );
     accounts.handle(Event::Read {
         epoch: 0,
-        result: Ok(models),
+        result: Ok(Listing {
+            models,
+            images: Vec::new(),
+        }),
     });
     assert_eq!(
         accounts.models(),
         None,
         "a read from before the sign-out is dropped"
     );
+    accounts.close(Instant::now(), Instant::now()).await;
+}
+
+/// Image input is the catalog's own fact about its own connection: a listed image model on
+/// `ChatGPT` takes images; a text-only model, another connection, or a signed-out account doesn't.
+#[tokio::test]
+async fn only_a_listed_image_model_on_the_accounts_connection_takes_images() {
+    let scratch = Scratch::new("account-images");
+    let store = FakeStore::default();
+    let body = json!({ "models": [
+        { "slug": "gpt-6-sol", "display_name": "GPT-6 Sol", "visibility": "list",
+          "input_modalities": ["text", "image"] },
+        { "slug": "gpt-6-luna", "display_name": "GPT-6 Luna", "visibility": "list",
+          "input_modalities": ["text"] },
+    ] });
+    let http = Catalog::answering([(200, body.to_string())]);
+    let mut accounts = seeded(&scratch, &store, http, LATER);
+    let choice = |slug: &str, connection| ModelChoice {
+        model: ModelSlug::new(slug).expect("slug"),
+        effort: Effort::Low,
+        connection,
+    };
+    let sol = choice("gpt-6-sol", ConnectionKind::ChatGpt);
+    assert!(!accounts.takes_images(&sol), "nothing read yet");
+    assert_eq!(read_ended(&mut accounts).await, []);
+    assert!(accounts.takes_images(&sol));
+    assert!(!accounts.takes_images(&choice("gpt-6-luna", ConnectionKind::ChatGpt)));
+    assert!(!accounts.takes_images(&choice("gpt-6-sol", ConnectionKind::AnthropicKey)));
+    assert!(!accounts.takes_images(&choice("gpt-6-sol", ConnectionKind::ClaudeCode)));
+    accounts.handle(Input::Op(AccountOp::SignOut));
+    assert!(!accounts.takes_images(&sol), "cleared with the list");
     accounts.close(Instant::now(), Instant::now()).await;
 }
 

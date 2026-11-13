@@ -29,7 +29,7 @@ use crate::platform::credential::NativeCredentialStore;
 
 /// The approved observation keys, matched exactly; any other key becomes `<key-n>`, its index
 /// in its own object.
-const KEYS: [&str; 14] = [
+const KEYS: [&str; 15] = [
     "models",
     "slug",
     "display_name",
@@ -44,10 +44,11 @@ const KEYS: [&str; 14] = [
     "default_effort",
     "reasoning_effort",
     "effort",
+    "input_modalities",
 ];
 /// The strings written as they are, compared without ASCII case; any other becomes
 /// `<string:N>`, N its byte length.
-const WORDS: [&str; 13] = [
+const WORDS: [&str; 15] = [
     "list",
     "none",
     "minimal",
@@ -61,6 +62,8 @@ const WORDS: [&str; 13] = [
     "extra_high",
     "max",
     "maximum",
+    "text",
+    "image",
 ];
 /// The renewal's 60 s early margin plus the client's 120 s total limit, so the bearer outlives the
 /// request.

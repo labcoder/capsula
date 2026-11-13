@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use super::{CallId, EngineFailure, Finish, Opaque, ToolName, TurnEvent};
 use crate::connections::model::error::Failure;
 use crate::connections::model::sse::{Progress, SseEvent};
-use crate::context::{BOUND, InputItem, ModelRequest, Role};
+use crate::context::{BODY_CEILING, BOUND, InputItem, ModelRequest, Role};
 
 /// What one round keeps while it streams: its calls' ids and arguments and the native items it
 /// passes on [guess].
@@ -36,7 +36,7 @@ pub(crate) enum BodyError {
     /// A stored native item isn't JSON.
     #[error("a stored native item isn't JSON")]
     Native,
-    /// The serialised body is over the request's bound.
+    /// The serialised body is over the request's bound, or with its images over the ceiling.
     #[error("the request body is over its size bound")]
     TooLarge,
 }
@@ -76,7 +76,16 @@ pub(crate) fn body(request: &ModelRequest) -> Result<Value, BodyError> {
         "store": false,
         "stream": true,
     });
-    if body.to_string().len() > BOUND {
+    let images: usize = request
+        .input
+        .iter()
+        .map(|item| match item {
+            InputItem::Image(image) => image.data_url_len(),
+            _ => 0,
+        })
+        .sum();
+    let size = body.to_string().len();
+    if size - images > BOUND || size > BODY_CEILING {
         return Err(BodyError::TooLarge);
     }
     Ok(body)
@@ -111,6 +120,15 @@ fn input_item(item: &InputItem) -> Result<Value, BodyError> {
         InputItem::Native(item) => {
             serde_json::from_slice(item.bytes()).map_err(|_| BodyError::Native)?
         }
+        InputItem::Image(image) => json!({
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_image",
+                "image_url": image.data_url(),
+                "detail": "high",
+            }],
+        }),
     })
 }
 

@@ -68,6 +68,7 @@ async fn kept(models: Vec<Value>) -> Result<Vec<(String, String)>, CatalogError>
     let http = answering(200, &json!({ "models": models }).to_string());
     let catalog = read(&http, Secret::new(Zeroizing::new("bearer".to_owned()))).await?;
     Ok(catalog
+        .models
         .into_iter()
         .map(|model| {
             (
@@ -99,8 +100,13 @@ async fn the_listed_models_come_in_the_servers_order_with_the_bearer_sent_only_t
     )
     .await
     .expect("read");
-    let slugs: Vec<_> = catalog.iter().map(|model| model.slug.as_str()).collect();
+    let slugs: Vec<_> = catalog
+        .models
+        .iter()
+        .map(|model| model.slug.as_str())
+        .collect();
     assert_eq!(slugs, ["gpt-6.1-sol", "gpt-6-luna"]);
+    assert_eq!(catalog.images, []);
     assert_eq!(
         *http.sent.lock().expect("log"),
         [(
@@ -108,6 +114,91 @@ async fn the_listed_models_come_in_the_servers_order_with_the_bearer_sent_only_t
             Some("bearer-token".to_owned()),
             0
         )]
+    );
+}
+
+/// A real list: the catalog-provenance live check's capture of this account's models on
+/// 2026-11-13, trimmed to the six keys that capture keeps, with its scrubbed slugs, names and
+/// strings as it wrote them. Two entries aren't listed.
+#[tokio::test]
+async fn a_captured_list_gives_its_listed_models_and_their_image_input() {
+    let http = answering(200, include_str!("captured_models.json"));
+    let catalog = read(&http, Secret::new(Zeroizing::new("bearer".to_owned())))
+        .await
+        .expect("the captured list reads");
+    let models: Vec<_> = catalog
+        .models
+        .iter()
+        .map(|model| pair(model.slug.as_str(), model.display_name.as_str()))
+        .collect();
+    assert_eq!(
+        models,
+        [
+            pair("m-0", "Model 0"),
+            pair("m-1", "Model 1"),
+            pair("m-2", "Model 2"),
+            pair("m-3", "Model 3"),
+            pair("m-5", "Model 5"),
+            pair("m-6", "Model 6"),
+            pair("m-7", "Model 7"),
+            pair("m-8", "Model 8"),
+        ]
+    );
+    let images: Vec<_> = catalog.images.iter().map(ModelSlug::as_str).collect();
+    assert_eq!(
+        images,
+        ["m-0", "m-1", "m-2", "m-3", "m-5", "m-6", "m-7", "m-8"]
+    );
+}
+
+/// Image input comes only from an entry's own `input_modalities` naming `"image"`, and whatever
+/// that field holds, the shown list is the same.
+#[tokio::test]
+async fn image_input_is_read_from_input_modalities_without_changing_the_list() {
+    let with = |slug: &str, modalities: Value| {
+        let mut entry = model(slug, "Model");
+        entry["input_modalities"] = modalities;
+        entry
+    };
+    let http = answering(
+        200,
+        &json!({ "models": [
+            with("m-text-image", json!(["text", "image"])),
+            with("m-text", json!(["text"])),
+            model("m-absent", "Model"),
+            with("m-string", json!("image")),
+            with("m-number", json!(7)),
+            with("m-upper", json!(["IMAGE"])),
+            with("m-nested", json!([["image"]])),
+            with("m-text-image", json!(["image"])),
+            { "slug": "m-hidden", "display_name": "Hidden", "visibility": "hide",
+              "input_modalities": ["image"] },
+        ]})
+        .to_string(),
+    );
+    let listing = read(&http, Secret::new(Zeroizing::new("bearer".to_owned())))
+        .await
+        .expect("read");
+    let slugs: Vec<_> = listing
+        .models
+        .iter()
+        .map(|model| model.slug.as_str())
+        .collect();
+    assert_eq!(
+        slugs,
+        [
+            "m-text-image",
+            "m-text",
+            "m-absent",
+            "m-string",
+            "m-number",
+            "m-upper",
+            "m-nested"
+        ]
+    );
+    assert_eq!(
+        listing.images,
+        [ModelSlug::new("m-text-image").expect("slug")]
     );
 }
 

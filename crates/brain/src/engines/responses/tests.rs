@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use super::{BodyError, ROUND_BYTES, ROUND_ITEMS, Round, body};
 use crate::connections::model::error::{Code, Failure, ProviderError};
 use crate::connections::model::sse::Reader;
-use crate::context::{BOUND, InputItem, ModelRequest, Role, ToolSchema};
+use crate::context::{BODY_CEILING, BOUND, InputItem, Jpeg, ModelRequest, Role, ToolSchema};
 use crate::engines::{CallId, EngineFailure, Finish, Opaque, ToolName, TurnEvent};
 
 const TOOL_ROUND: &[u8] = include_bytes!("../../../fixtures/responses/tool_round.sse");
@@ -87,6 +87,44 @@ fn the_body_is_the_request_as_data() {
     assert_eq!(body(&request("Be brief.", input)), Ok(expected));
 }
 
+/// A text-only body is pinned byte for byte, so image input can't change what text turns send.
+/// The workspace build turns on `serde_json`'s `preserve_order` (keys as written) and a lone brain
+/// build doesn't (keys sorted), so each key order has its own exact bytes.
+#[test]
+fn a_text_only_body_keeps_its_exact_bytes() {
+    let written = json!({ "b": 0, "a": 0 }).to_string().starts_with(r#"{"b""#);
+    let input = vec![
+        InputItem::Message {
+            role: Role::User,
+            text: "Hi \"you\"".to_owned(),
+        },
+        InputItem::Message {
+            role: Role::Assistant,
+            text: "Hello.".to_owned(),
+        },
+    ];
+    let mut request = request("Be brief.", input);
+    request.tools.clear();
+    let expected = if written {
+        concat!(
+            r#"{"model":"gpt-fixture","instructions":"Be brief.","#,
+            r#""input":[{"type":"message","role":"user","content":"Hi \"you\""},"#,
+            r#"{"type":"message","role":"assistant","content":"Hello."}],"#,
+            r#""tools":[],"reasoning":{"effort":"xhigh"},"#,
+            r#""include":["reasoning.encrypted_content"],"store":false,"stream":true}"#,
+        )
+    } else {
+        concat!(
+            r#"{"include":["reasoning.encrypted_content"],"#,
+            r#""input":[{"content":"Hi \"you\"","role":"user","type":"message"},"#,
+            r#"{"content":"Hello.","role":"assistant","type":"message"}],"#,
+            r#""instructions":"Be brief.","model":"gpt-fixture","reasoning":{"effort":"xhigh"},"#,
+            r#""store":false,"stream":true,"tools":[]}"#,
+        )
+    };
+    assert_eq!(body(&request).expect("small").to_string(), expected);
+}
+
 #[test]
 fn the_offered_draw_schema_is_serialized_non_strict_without_changing_other_tools() {
     let mut request = request("", Vec::new());
@@ -139,6 +177,80 @@ fn a_body_at_the_bound_is_sent_and_one_byte_over_is_refused() {
     );
     let over = "a".repeat(BOUND - empty + 1);
     assert_eq!(body(&request(&over, Vec::new())), Err(BodyError::TooLarge));
+}
+
+/// A JPEG of `len` bytes.
+fn jpeg(len: usize) -> Jpeg {
+    let mut bytes = vec![0xFF, 0xD8, 0xFF];
+    bytes.resize(len, 0x42);
+    Jpeg::new(bytes).expect("a JPEG's start")
+}
+
+fn asked_with(image: Jpeg) -> Vec<InputItem> {
+    vec![
+        InputItem::Message {
+            role: Role::User,
+            text: "What's this?".to_owned(),
+        },
+        InputItem::Image(image),
+    ]
+}
+
+#[test]
+fn an_image_is_a_high_detail_data_url_in_a_user_message_of_its_own() {
+    let sent = body(&request("", asked_with(jpeg(6)))).expect("small");
+    assert_eq!(
+        sent["input"],
+        json!([
+            { "type": "message", "role": "user", "content": "What's this?" },
+            { "type": "message", "role": "user", "content": [{
+                "type": "input_image",
+                "image_url": "data:image/jpeg;base64,/9j/QkJC",
+                "detail": "high",
+            }]},
+        ])
+    );
+}
+
+/// An image's bytes are charged against the 4 MiB ceiling, not the 512 KiB bound, which still
+/// holds everything else exactly.
+#[test]
+fn with_an_image_the_rest_still_fits_the_bound_exactly() {
+    let image = jpeg(6);
+    let url = image.data_url_len();
+    let empty = body(&request("", asked_with(image.clone())))
+        .expect("small")
+        .to_string()
+        .len();
+    let fits = "a".repeat(BOUND - (empty - url));
+    assert_eq!(
+        body(&request(&fits, asked_with(image.clone()))).map(|sent| sent.to_string().len()),
+        Ok(BOUND + url)
+    );
+    let over = "a".repeat(BOUND - (empty - url) + 1);
+    assert_eq!(
+        body(&request(&over, asked_with(image))),
+        Err(BodyError::TooLarge)
+    );
+}
+
+#[test]
+fn a_body_with_images_at_the_ceiling_is_sent_and_one_byte_over_is_refused() {
+    let image = jpeg((BODY_CEILING - 4096) / 4 * 3);
+    let empty = body(&request("", asked_with(image.clone())))
+        .expect("under the ceiling")
+        .to_string()
+        .len();
+    let fits = "a".repeat(BODY_CEILING - empty);
+    assert_eq!(
+        body(&request(&fits, asked_with(image.clone()))).map(|sent| sent.to_string().len()),
+        Ok(BODY_CEILING)
+    );
+    let over = "a".repeat(BODY_CEILING - empty + 1);
+    assert_eq!(
+        body(&request(&over, asked_with(image))),
+        Err(BodyError::TooLarge)
+    );
 }
 
 #[test]

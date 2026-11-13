@@ -117,6 +117,16 @@ struct ErrorObject {
     code: Option<String>,
 }
 
+/// A read catalog: the models shown, and which of them take image input.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Listing {
+    /// The listed models, in the server's order.
+    pub models: Vec<ModelInfo>,
+    /// The listed models whose entry's `input_modalities` names `"image"`. It changes nothing
+    /// shown; absent or malformed means no.
+    pub images: Vec<ModelSlug>,
+}
+
 /// Reads the catalog with `bearer`: the listed models, at most [`MAX_MODELS`], in the server's
 /// order.
 ///
@@ -125,7 +135,7 @@ struct ErrorObject {
 pub async fn read(
     http: &impl Http,
     bearer: Secret<Zeroizing<String>>,
-) -> Result<Vec<ModelInfo>, CatalogError> {
+) -> Result<Listing, CatalogError> {
     let response = http
         .execute(Request {
             endpoint: Endpoint::Models(bearer),
@@ -144,10 +154,14 @@ pub async fn read(
         });
     }
     let body: Body = serde_json::from_slice(bytes).map_err(|_| CatalogError::Response)?;
-    let mut models: Vec<ModelInfo> = Vec::new();
+    let mut listing = Listing::default();
     let mut skipped = 0_usize;
-    for entry in body.models {
-        let Ok(entry) = serde_json::from_value::<Entry>(entry) else {
+    for value in body.models {
+        let images = value
+            .get("input_modalities")
+            .and_then(Value::as_array)
+            .is_some_and(|modalities| modalities.iter().any(|modality| modality == "image"));
+        let Ok(entry) = serde_json::from_value::<Entry>(value) else {
             skipped += 1;
             continue;
         };
@@ -159,9 +173,13 @@ pub async fn read(
             ModelName::new(&entry.display_name),
         ) {
             (Ok(slug), Ok(display_name))
-                if models.len() < MAX_MODELS && models.iter().all(|model| model.slug != slug) =>
+                if listing.models.len() < MAX_MODELS
+                    && listing.models.iter().all(|model| model.slug != slug) =>
             {
-                models.push(ModelInfo { slug, display_name });
+                if images {
+                    listing.images.push(slug.clone());
+                }
+                listing.models.push(ModelInfo { slug, display_name });
             }
             _ => skipped += 1,
         }
@@ -169,5 +187,5 @@ pub async fn read(
     if skipped > 0 {
         tracing::warn!(skipped, "model list entries were skipped");
     }
-    Ok(models)
+    Ok(listing)
 }
