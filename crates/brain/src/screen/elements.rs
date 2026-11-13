@@ -191,6 +191,11 @@ pub(crate) trait ElementSource {
     fn mask(&mut self, node: &Self::Node) -> Result<(bool, PhysicalRect), SourceError> {
         self.read(node).map(|props| (props.password, props.rect))
     }
+    /// Whether `node` hosts a browser's rendered page (`Chrome_RenderWidgetHostHWND`), whose
+    /// fields the control view can miss.
+    fn web_content(&mut self, _node: &Self::Node) -> bool {
+        false
+    }
     fn first_child(&mut self, node: &Self::Node) -> Result<Option<Self::Node>, SourceError>;
     fn next_sibling(&mut self, node: &Self::Node) -> Result<Option<Self::Node>, SourceError>;
 }
@@ -425,6 +430,9 @@ fn walk_tree<S: ElementSource>(
     let mut mask_only = false;
     let mut mask_reads = 0;
     let mut complete = true;
+    // B6: per stored element, whether it sits in a rendered page; and that page's named nodes.
+    let mut in_page: Vec<bool> = Vec::new();
+    let mut page_named = None;
     while let Some((node, parent, depth)) = stack.pop() {
         let stop = if !mask_only && tree.elements.len() >= limits.elements {
             Some(Cut::Elements)
@@ -505,6 +513,13 @@ fn walk_tree<S: ElementSource>(
                 tree.cut = Some(Cut::Bytes);
                 mask_only = true;
             } else {
+                let page = source.web_content(&node)
+                    || parent.is_some_and(|parent| in_page[usize::from(parent)]);
+                if page {
+                    let named = page_named.get_or_insert(0_usize);
+                    *named += usize::from(!element.name.is_empty());
+                }
+                in_page.push(page);
                 bytes += len;
                 tree.elements.push(element);
             }
@@ -537,6 +552,8 @@ fn walk_tree<S: ElementSource>(
             break;
         }
     }
+    // Until M6 measures a real page, a page this sparse may hide fields the walk can't see.
+    complete &= page_named.is_none_or(|named| named >= super::ocr::NAMED_MIN);
     Ok((
         tree,
         if complete {

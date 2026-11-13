@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use super::*;
 use crate::screen::actor::{Key, Owner};
-use crate::screen::wire::CaptureId;
-use kumochi_protocol::geometry::PhysicalRect;
+use crate::screen::capture::Target;
+use crate::screen::wire::{CaptureId, Exclusion, Refusal};
+use kumochi_protocol::geometry::{DisplayRef, PhysicalPoint, PhysicalRect};
 
 const PATIENCE: Duration = Duration::from_secs(5);
 
@@ -16,6 +17,29 @@ struct Local {
 }
 
 impl Capturer for Local {
+    fn pointer_window(&mut self, _: PhysicalPoint, _: u32) -> Result<Target, Refusal> {
+        Ok(Target {
+            top: TopWindow {
+                window: kumochi_protocol::geometry::WindowRef(7),
+                pid: 8,
+                rect: PhysicalRect {
+                    origin: [0, 0],
+                    size: [2, 2],
+                },
+            },
+            instance: 9,
+            dpi: 96,
+        })
+    }
+    fn capture_window(
+        &mut self,
+        target: &Target,
+        until: Instant,
+        frame: &mut RawFrame,
+    ) -> Result<Acquired, Failure> {
+        let display = DisplayRef(target.top.rect);
+        self.capture_into(&display, Exclusion::KumochiWindows, until, frame)
+    }
     fn capture_into(
         &mut self,
         display: &DisplayRef,
@@ -52,11 +76,8 @@ fn job() -> Job {
             capture: CaptureId(7),
         },
         frame: RawFrame::default(),
-        display: DisplayRef(PhysicalRect {
-            origin: [0, 0],
-            size: [2, 2],
-        }),
-        exclude: Exclusion::KumochiWindows,
+        point: PhysicalPoint([1, 1]),
+        shell: 0,
         until: Instant::now() + PATIENCE,
     }
 }

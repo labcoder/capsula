@@ -7,6 +7,7 @@ use std::io::{Read, Write};
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize as _, Zeroizing};
 
 use super::WorkerLost;
 
@@ -56,14 +57,16 @@ impl Assembly {
     }
 }
 
-/// Writes `message`, a request or a reply, as one or more frames under `id`.
+/// Writes `message`, a request or a reply, as one or more frames under `id`. A message can carry
+/// an image, so its serialized copies are zeroed once written.
 pub(crate) fn write_message<T: Serialize>(
     output: &mut impl Write,
     id: u64,
     message: &T,
     max: usize,
 ) -> Result<(), FrameError> {
-    let bytes = frame::encode_payload(message)?;
+    let bytes = Zeroizing::new(frame::encode_payload(message)?);
+    let mut framed = Zeroizing::new(Vec::new());
     if bytes.len() > max {
         return Err(FrameError::TooLarge {
             len: bytes.len(),
@@ -72,7 +75,7 @@ pub(crate) fn write_message<T: Serialize>(
     }
     let count = bytes.len().div_ceil(CHUNK).max(1);
     for (number, body) in bytes.chunks(CHUNK).enumerate() {
-        let chunk = Frame {
+        let mut chunk = Frame {
             id,
             chunk: u32::try_from(number).map_err(|_| FrameError::TooLarge {
                 len: bytes.len(),
@@ -81,7 +84,10 @@ pub(crate) fn write_message<T: Serialize>(
             last: number + 1 == count,
             body: body.to_vec(),
         };
-        frame::write(output, &chunk, Pipe::Data)?;
+        let encoded = frame::encode_into(&chunk, Pipe::Data, &mut framed);
+        chunk.body.zeroize();
+        encoded?;
+        output.write_all(&framed)?;
     }
     output.flush()?;
     Ok(())

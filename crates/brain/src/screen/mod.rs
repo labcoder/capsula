@@ -6,6 +6,7 @@
 )]
 mod actor;
 mod capture;
+mod context;
 #[cfg_attr(
     not(any(test, windows)),
     expect(dead_code, reason = "macOS adapter follows Windows")
@@ -42,6 +43,8 @@ pub(crate) use elements::{
     excluded_image,
 };
 pub(crate) use frame::{RawFrame, display_edges};
+#[cfg(windows)]
+pub(crate) use ocr::PAGE_CLASS;
 #[cfg(all(windows, any(test, feature = "test-support")))]
 pub(crate) use mask::MaskSet;
 pub use mask::Unavailable;

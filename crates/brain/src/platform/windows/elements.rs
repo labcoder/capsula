@@ -16,8 +16,8 @@ use windows::Win32::System::Com::{
 use windows::Win32::UI::Accessibility::{
     CUIAutomation8, IUIAutomation, IUIAutomation2, IUIAutomationCacheRequest, IUIAutomationElement,
     IUIAutomationTreeWalker, TreeScope_Element, UIA_BoundingRectanglePropertyId,
-    UIA_ControlTypePropertyId, UIA_E_ELEMENTNOTAVAILABLE, UIA_IsOffscreenPropertyId,
-    UIA_IsPasswordPropertyId, UIA_NamePropertyId,
+    UIA_ClassNamePropertyId, UIA_ControlTypePropertyId, UIA_E_ELEMENTNOTAVAILABLE,
+    UIA_IsOffscreenPropertyId, UIA_IsPasswordPropertyId, UIA_NamePropertyId,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GA_ROOT, GetAncestor, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId,
@@ -223,6 +223,7 @@ impl Automation {
             UIA_BoundingRectanglePropertyId,
             UIA_IsPasswordPropertyId,
             UIA_IsOffscreenPropertyId,
+            UIA_ClassNamePropertyId,
         ] {
             // SAFETY: cache is live and each property id is a documented UIA property.
             unsafe { cache.AddProperty(property) }?;
@@ -334,6 +335,10 @@ impl ElementSource for Automation {
         // SAFETY: BoundingRectangle was requested in this element's cache.
         let rect = unsafe { node.CachedBoundingRectangle() }.map_err(error)?;
         Ok((password, rectangle(rect)))
+    }
+    fn web_content(&mut self, node: &Self::Node) -> bool {
+        // SAFETY: ClassName was requested in this element's cache.
+        unsafe { node.CachedClassName() }.is_ok_and(|class| class == crate::screen::PAGE_CLASS)
     }
     fn first_child(&mut self, node: &Self::Node) -> Result<Option<Self::Node>, SourceError> {
         // SAFETY: node, cache and walker are live on this initialized thread.

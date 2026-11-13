@@ -2,6 +2,7 @@
 
 mod capture;
 mod credential;
+mod dump;
 mod elements;
 #[cfg(feature = "test-support")]
 pub use elements::measurement::{WindowProbe, WindowSample, WindowSession};
@@ -28,6 +29,7 @@ mod window;
 
 pub(crate) use capture::screen_capturer;
 pub(crate) use credential::WindowsCredentialStore;
+pub(crate) use dump::DumpExclusion;
 pub(crate) use elements::screen_elements;
 #[cfg(debug_assertions)]
 pub(crate) use fault::call_throwing_export;

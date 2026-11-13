@@ -33,6 +33,8 @@ pub(crate) struct FakeSource {
     pub(crate) sibling_fail_at: Option<usize>,
     pub(crate) reads: Cell<usize>,
     pub(crate) mask_reads: Cell<usize>,
+    /// The node that hosts a rendered page, if any.
+    pub(crate) page: Option<usize>,
 }
 
 impl FakeSource {
@@ -55,6 +57,7 @@ impl FakeSource {
             sibling_fail_at: None,
             reads: Cell::new(0),
             mask_reads: Cell::new(0),
+            page: None,
         }
     }
 }
@@ -86,6 +89,9 @@ impl ElementSource for FakeSource {
             return Err(SourceError::Fault(-7));
         }
         Ok((self.nodes[*node].password, self.nodes[*node].rect))
+    }
+    fn web_content(&mut self, node: &usize) -> bool {
+        self.page == Some(*node)
     }
     fn first_child(&mut self, node: &usize) -> Result<Option<usize>, SourceError> {
         if self.navigation_at == Some(*node) {
@@ -556,6 +562,50 @@ fn root_owner_exclusion_applies_to_foreground_and_window_targets() {
             job.masks.lock().unwrap().completeness(),
             Completeness::Unknown(why)
         );
+    }
+}
+
+/// A root with a page host (node 1) holding `inside` nodes, `named` of them named, and 30
+/// named nodes outside the page.
+fn page_tree(inside: usize, named: usize) -> FakeSource {
+    let outside = 30;
+    let mut source = FakeSource::flat(2 + inside + outside);
+    source.nodes[0].children = std::iter::once(1).chain(2 + inside..2 + inside + outside).collect();
+    source.nodes[1].children = (2..2 + inside).collect();
+    for node in (2..2 + named).chain(2 + inside..2 + inside + outside) {
+        source.nodes[node].name = "named".into();
+    }
+    source.page = Some(1);
+    source
+}
+
+#[test]
+fn a_rendered_page_with_too_few_named_elements_leaves_masks_partial() {
+    use crate::screen::ocr::NAMED_MIN;
+    for (mut source, expected) in [
+        (page_tree(25, NAMED_MIN - 1), Completeness::Partial),
+        (page_tree(25, NAMED_MIN), Completeness::Complete),
+        (
+            FakeSource {
+                page: None,
+                ..page_tree(25, 0)
+            },
+            Completeness::Complete,
+        ),
+    ] {
+        let now = Instant::now();
+        let job = job(1, now + Duration::from_secs(1));
+        let tree = walk(
+            &mut source,
+            &job,
+            &LIMITS,
+            &|| now,
+            &mut FakePlatform(false),
+        )
+        .unwrap();
+        assert_eq!(tree.cut, None);
+        assert_eq!(tree.elements.len(), 57);
+        assert_eq!(job.masks.lock().unwrap().completeness(), expected);
     }
 }
 
