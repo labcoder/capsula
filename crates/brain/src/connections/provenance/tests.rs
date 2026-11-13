@@ -333,6 +333,30 @@ fn only_approved_keys_closed_words_and_small_integers_stay() {
     assert_eq!(scrub(&body), Ok((want, counts)));
 }
 
+/// The list's image-input field keeps its name and its text and image words; other words don't.
+#[test]
+fn input_modalities_stay_with_their_text_and_image_words() {
+    let body = json!({ "models": [{
+        "display_name": "GPT X",
+        "input_modalities": ["text", "IMAGE", "audio", MARKER],
+        "slug": "gpt-x",
+        "visibility": "list",
+    }]});
+    let want = json!({ "models": [{
+        "display_name": "Model 0",
+        "input_modalities": ["text", "IMAGE", "<string:5>", "<string:16>"],
+        "slug": "m-0",
+        "visibility": "list",
+    }]});
+    let counts = Counts {
+        entries: 1,
+        keys: 0,
+        strings: 2,
+        numbers: 0,
+    };
+    assert_eq!(scrub(&body), Ok((want, counts)));
+}
+
 #[tokio::test]
 async fn no_planted_marker_reaches_the_written_bytes() {
     let wide: Vec<String> = (0..65).map(|i| format!("\"{MARKER}{i:02}\":1")).collect();

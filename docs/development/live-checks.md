@@ -199,14 +199,14 @@ counters), `body_bytes` (the raw body's length), `scrubbed` (how many `models` e
 renamed, and how many keys, strings and numbers were replaced) and `body`. No request id, header,
 account fact or product name is written. In `body`:
 
-- A key stays only on an exact, case-sensitive match with one of 14 approved observation keys:
+- A key stays only on an exact, case-sensitive match with one of 15 approved observation keys:
   `models`, `slug`, `display_name`, `visibility`, `supported_reasoning_levels`,
   `supported_reasoning_efforts`, `supported_efforts`, `reasoning_levels`, `reasoning_efforts`,
-  `default_reasoning_level`, `default_reasoning_effort`, `default_effort`, `reasoning_effort` and
-  `effort`. Any other becomes `<key-n>`, its index within its own object in serde_json's map
+  `default_reasoning_level`, `default_reasoning_effort`, `default_effort`, `reasoning_effort`,
+  `effort` and `input_modalities`. Any other becomes `<key-n>`, its index within its own object in serde_json's map
   order, so `<key-2>` in two entries needn't be the same key. Its value is still scrubbed and kept.
 - A string stays, in its own case, only if it equals `list`, `none`, `minimal`, `low`, `medium`,
-  `high`, `xhigh`, `x-high`, `x_high`, `extra-high`, `extra_high`, `max` or `maximum` without
+  `high`, `xhigh`, `x-high`, `x_high`, `extra-high`, `extra_high`, `max`, `maximum`, `text` or `image` without
   ASCII case. Any other becomes `<string:N>`, N its byte length.
 - Integers 0–16, booleans and null stay; any other number becomes `-1`.
 - In each object of the top-level `models` array, a string `slug` becomes `m-<k>` when it's a valid
