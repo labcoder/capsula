@@ -36,16 +36,19 @@ pub(crate) struct ZeroedBody(Vec<u8>);
 
 #[cfg(test)]
 thread_local! {
-    /// The length and capacity each [`ZeroedBody`] dropped on this thread had once zeroed.
-    pub(super) static SCRUBBED: std::cell::RefCell<Vec<(usize, usize)>> =
+    /// Whether each [`ZeroedBody`] dropped on this thread held only zeros once zeroed, and its
+    /// length.
+    pub(super) static SCRUBBED: std::cell::RefCell<Vec<(bool, usize)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
 impl Drop for ZeroedBody {
     fn drop(&mut self) {
-        self.0.zeroize();
+        self.0.as_mut_slice().zeroize();
         #[cfg(test)]
-        SCRUBBED.with_borrow_mut(|scrubbed| scrubbed.push((self.0.len(), self.0.capacity())));
+        SCRUBBED.with_borrow_mut(|scrubbed| {
+            scrubbed.push((self.0.iter().all(|byte| *byte == 0), self.0.len()));
+        });
     }
 }
 

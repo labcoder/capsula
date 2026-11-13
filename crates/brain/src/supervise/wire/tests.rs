@@ -218,7 +218,7 @@ fn every_zeroed_frame_is_zeroed_when_dropped_pushed_or_not() {
     let (frames, reads) = tokio::sync::mpsc::channel(1);
     frames.try_send(Some(last(0, vec![7; 6]))).expect("room");
     drop((frames, reads));
-    assert_eq!(SCRUBBED.take(), [(0, 3), (0, 5), (0, 6)]);
+    assert_eq!(SCRUBBED.take(), [(true, 3), (true, 5), (true, 6)]);
 }
 
 #[test]
