@@ -43,14 +43,11 @@ enum Trial {
     StopButton,
 }
 
-// shortcut: the motion trials (three stretch CPU rows and the motion receipts) left with the stretch; C2a brings them back with the pull.
-const TRIALS: [Trial; 9] = [
+const TRIALS: [Trial; 7] = [
     Trial::Idle,
-    Trial::Input(Phase::Keyboard, FixtureEscMode::Free),
     Trial::ReceiptRest,
     Trial::Input(Phase::Hover, FixtureEscMode::Free),
     Trial::Input(Phase::Focus, FixtureEscMode::Free),
-    Trial::Input(Phase::Layouts, FixtureEscMode::Free),
     Trial::Input(Phase::Esc, FixtureEscMode::Free),
     Trial::Input(Phase::Esc, FixtureEscMode::Reserved),
     Trial::StopButton,
@@ -59,9 +56,8 @@ const TRIALS: [Trial; 9] = [
 impl Trial {
     fn trace_bound(self) -> Option<Duration> {
         let seconds = match self {
-            Self::Input(Phase::Keyboard, _) => 50,
             Self::Input(Phase::Hover, _) | Self::ReceiptRest => 30,
-            Self::Input(Phase::Focus | Phase::Layouts, _) => 20,
+            Self::Input(Phase::Focus, _) => 20,
             Self::Input(Phase::Esc, _) | Self::StopButton => 10,
             Self::Idle => return None,
         };
@@ -79,10 +75,8 @@ impl Trial {
     fn name(self) -> &'static str {
         match self {
             Self::Idle => "cpu-idle",
-            Self::Input(Phase::Keyboard, _) => "keyboard",
             Self::Input(Phase::Hover, _) => "hover",
             Self::Input(Phase::Focus, _) => "focus-draft-escape",
-            Self::Input(Phase::Layouts, _) => "layouts",
             Self::Input(Phase::Esc, FixtureEscMode::Free) => "escape-free",
             Self::Input(Phase::Esc, FixtureEscMode::Reserved) => "escape-contested",
             Self::ReceiptRest => "receipt-rest",
@@ -343,7 +337,7 @@ fn run_session(
 
 fn feel(session: &mut Session, images: &Images, output: &Path, end: Instant) -> Result<()> {
     println!(
-        "Injection is disabled. The dock is a short line at the top center by default; Listening turns it the accent colour. Try hold and double tap. This test window is only for the two verdicts and Ready; explicitly choose each verdict (Unrated is valid). Press Alt-Tab once and separately report whether any {DISPLAY_NAME} window appears. Then physically click Ready and do not touch the mouse or keyboard until this window closes (about 10 minutes, at most one hour). The first quiet second only opens injection. Input before injection opens returns to Ready without extending the feel deadline. Every feel verdict, including Off, is independent of owner approval."
+        "Injection is disabled. The dock is a short line at the top center by default. Try the shortcut, left Ctrl and left Alt. Press and hold both keys: after about 300 ms the hold is recognised, but this test copy has no speech model, so the line stays plain and nothing is recorded or sent; hovering the line may show Not installed, or Speech input status unavailable, in the status panel. The hold can't be judged in this copy, so choose Unrated for the Hold verdict. Double tap both keys, two short presses released less than 300 ms apart, to open the typing box under the dock; Esc hides it. AltGr and the right Ctrl and Alt keys never trigger the shortcut. This test window is only for the two verdicts and Ready; explicitly choose each verdict (Unrated is valid). Press Alt-Tab once and separately report whether any {DISPLAY_NAME} window appears. Then physically click Ready and do not touch the mouse or keyboard until this window closes (about 10 minutes, at most one hour). The first quiet second only opens injection. Input before injection opens returns to Ready without extending the feel deadline. Every feel verdict, including Off, is independent of owner approval."
     );
     let feel_directory = output.join("feel");
     fs::create_dir(&feel_directory)?;
@@ -718,7 +712,7 @@ fn run_trial(
         Ok(())
     };
     let flushed = if let Trial::Input(phase, mode) = trial {
-        session::check_flushed(phase, mode, &diagnostics, &mut counts)
+        session::check_flushed(phase, mode, &diagnostics)
     } else {
         Ok(())
     };
@@ -767,14 +761,6 @@ fn summarize(
     let joined = (|| {
         let mut rows = rows.context("no main trace completed")??;
         match trial {
-            Trial::Input(Phase::Keyboard, _) => observation::summarize_keyboard(
-                &diagnostics.canvas_pairs()?,
-                observer,
-                pid,
-                &mut rows,
-                dock,
-                output,
-            ),
             Trial::Input(Phase::Hover, _) => observation::summarize_hover(
                 observer,
                 pid,
@@ -898,15 +884,11 @@ mod tests {
     }
 
     #[test]
-    fn receipts_follow_keyboard_and_esc_conflict_is_last() {
+    fn receipts_follow_idle_and_esc_conflict_is_last() {
         assert!(TRIALS.contains(&Trial::Input(Phase::Hover, FixtureEscMode::Free)));
-        let keyboard = TRIALS
-            .iter()
-            .position(|trial| *trial == Trial::Input(Phase::Keyboard, FixtureEscMode::Free))
-            .unwrap();
-        assert_eq!(TRIALS[keyboard + 1], Trial::ReceiptRest);
+        assert_eq!(&TRIALS[..2], &[Trial::Idle, Trial::ReceiptRest]);
         assert_eq!(
-            &TRIALS[7..],
+            &TRIALS[5..],
             &[
                 Trial::Input(Phase::Esc, FixtureEscMode::Reserved),
                 Trial::StopButton

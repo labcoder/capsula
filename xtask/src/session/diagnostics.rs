@@ -1,17 +1,9 @@
-//! Validated non-content input milestones and callback-to-Canvas pairing.
+//! Validated non-content input milestones.
 
 use anyhow::{Context as _, Result, bail, ensure};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mark {
-    Applied {
-        us: u64,
-        start_qpc: i64,
-    },
-    Painted(u64),
-    Resting,
-    Hold(bool),
-    HoldEnded(bool),
     Opened(bool),
     Draft {
         nonempty: bool,
@@ -31,8 +23,9 @@ pub(crate) enum Mark {
 }
 
 /// Every non-input line the shell records; any other unknown event still fails.
-const STATUS: [&str; 8] = [
+const STATUS: [&str; 9] = [
     "link state=",
+    "carry drop perch=",
     "run phase=",
     "submit sent=",
     "dock settled",
@@ -56,26 +49,7 @@ impl Record {
             .context("invalid input diagnostic envelope")?;
         let qpc = counter.parse()?;
         ensure!(qpc > 0, "invalid diagnostic QPC counter");
-        let mark = if let Some(value) = event.strip_prefix("listening applied_us=") {
-            let (us, start) = value
-                .split_once(" start_qpc=")
-                .context("input diagnostic start QPC missing")?;
-            let start_qpc = start.parse()?;
-            ensure!(
-                start_qpc > 0 && start_qpc <= qpc,
-                "invalid input diagnostic start QPC"
-            );
-            Mark::Applied {
-                us: us.parse()?,
-                start_qpc,
-            }
-        } else if let Some(value) = event.strip_prefix("listening painted_us=") {
-            Mark::Painted(value.parse()?)
-        } else if let Some(value) = event.strip_prefix("hold excluded=") {
-            Mark::Hold(value.parse()?)
-        } else if let Some(value) = event.strip_prefix("hold ended restored=") {
-            Mark::HoldEnded(value.parse()?)
-        } else if let Some(value) = event.strip_prefix("input opened focused=") {
+        let mark = if let Some(value) = event.strip_prefix("input opened focused=") {
             Mark::Opened(value.parse()?)
         } else if let Some(value) = event.strip_prefix("input draft nonempty=") {
             let (nonempty, preserved) = value
@@ -97,7 +71,7 @@ impl Record {
             Mark::Status
         } else {
             match event {
-                "resting" => Mark::Resting,
+                "resting" => Mark::Status,
                 "input dismissed" => Mark::Dismissed,
                 "escape action=Stop" => Mark::EscapeStop,
                 "escape action=Clear" => Mark::EscapeClear,
@@ -110,106 +84,42 @@ impl Record {
     }
 }
 
-type CanvasSample = (i64, i64, u64);
-
 pub(super) fn summarize_feel(records: &[Record]) -> String {
-    let mut holds = 0;
-    let mut excluded = 0;
-    let mut restored = 0;
     let mut opened = [0; 2];
-    let mut applied = Vec::new();
-    let mut painted = Vec::new();
     for record in records {
-        match record.mark {
-            Mark::Hold(ok) => {
-                holds += 1;
-                excluded += usize::from(ok);
-            }
-            Mark::HoldEnded(ok) => restored += usize::from(ok),
-            Mark::Opened(focused) => opened[usize::from(focused)] += 1,
-            Mark::Applied { us, .. } => applied.push(us),
-            Mark::Painted(us) => painted.push(us),
-            _ => {}
+        if let Mark::Opened(focused) = record.mark {
+            opened[usize::from(focused)] += 1;
         }
     }
     format!(
-        "recognized_holds={holds} excluded_ok={excluded} restored_ok={restored}\nrecognized_double_taps={} focused_opens={} unfocused_opens={}\napplied_us={applied:?}\ncanvas_painted_us={painted:?}\nsource=owner feel milestones only; Canvas is not present/display latency; not a human verdict or automated gate\n",
+        "recognized_double_taps={} focused_opens={} unfocused_opens={}\nsource=owner feel milestones only; not a human verdict or automated gate\n",
         opened.iter().sum::<usize>(),
         opened[1],
         opened[0]
     )
 }
 
-pub(super) fn pair_paints(records: &[Record]) -> Result<(Vec<CanvasSample>, usize)> {
-    let mut latest = None;
-    let mut applied = 0usize;
-    let mut pairs = Vec::new();
-    for record in records {
-        match record.mark {
-            Mark::Applied { start_qpc, .. } => {
-                latest = Some(start_qpc);
-                applied += 1;
-            }
-            Mark::Painted(us) => pairs.push((
-                latest
-                    .take()
-                    .context("Canvas paint has no unmatched preceding applied milestone")?,
-                record.qpc,
-                us,
-            )),
-            _ => {}
-        }
-    }
-    let missing = applied
-        .checked_sub(pairs.len())
-        .context("more Canvas paints than applied milestones")?;
-    Ok((pairs, missing))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Mark, Record, pair_paints, summarize_feel};
+    use super::{Mark, Record, summarize_feel};
 
     #[test]
     fn feel_summary_reports_recognition_and_focus_without_treating_it_as_a_gate() {
         let records = [
-            "qpc=10 listening applied_us=8 start_qpc=9",
-            "qpc=20 listening painted_us=1200",
-            "qpc=30 hold excluded=true",
-            "qpc=40 hold ended restored=true",
-            "qpc=50 hold excluded=false",
-            "qpc=60 hold ended restored=false",
+            "qpc=20 carry drop perch=true",
+            "qpc=30 resting",
             "qpc=70 input opened focused=false",
             "qpc=80 input opened focused=true",
         ]
         .map(|line| Record::parse(line).unwrap());
         assert_eq!(
             summarize_feel(&records),
-            "recognized_holds=2 excluded_ok=1 restored_ok=1\nrecognized_double_taps=2 focused_opens=1 unfocused_opens=1\napplied_us=[8]\ncanvas_painted_us=[1200]\nsource=owner feel milestones only; Canvas is not present/display latency; not a human verdict or automated gate\n"
+            "recognized_double_taps=2 focused_opens=1 unfocused_opens=1\nsource=owner feel milestones only; not a human verdict or automated gate\n"
         );
     }
 
     #[test]
     fn diagnostics_accept_only_documented_transcript_free_milestones() {
-        assert_eq!(
-            Record::parse("qpc=123 listening applied_us=42 start_qpc=100").unwrap(),
-            Record {
-                qpc: 123,
-                mark: Mark::Applied {
-                    us: 42,
-                    start_qpc: 100
-                }
-            },
-            "native callback QPC is retained with the applied duration"
-        );
-        assert_eq!(
-            Record::parse("qpc=123 listening painted_us=42").unwrap(),
-            Record {
-                qpc: 123,
-                mark: Mark::Painted(42)
-            },
-            "paint duration remains a Canvas callback marker"
-        );
         assert_eq!(
             Record::parse("qpc=124 escape wanted=true stop=false")
                 .unwrap()
@@ -228,9 +138,9 @@ mod tests {
             "qpc=2 kumo",
             "qpc=2 kumo bakedsize=64",
             "qpc=2 link",
-            "qpc=3 listening applied_us=-1 start_qpc=1",
-            "qpc=3 listening applied_us=1 start_qpc=4",
-            "qpc=3 listening applied_us=1 start_qpc=0",
+            "qpc=3 listening applied_us=1 start_qpc=1",
+            "qpc=3 listening painted_us=42",
+            "qpc=3 restingX",
         ] {
             assert!(
                 Record::parse(line).is_err(),
@@ -256,6 +166,8 @@ mod tests {
             ("qpc=9 submit sent=true", 9),
             ("qpc=10 dock settled", 10),
             ("qpc=11 dock paints settled=3", 11),
+            ("qpc=12 carry drop perch=false", 12),
+            ("qpc=13 resting", 13),
         ] {
             assert_eq!(
                 Record::parse(line).unwrap(),
@@ -310,46 +222,5 @@ mod tests {
                 "malformed draft checkpoint: {line}"
             );
         }
-    }
-
-    #[test]
-    fn paint_pairs_with_latest_applied_without_hiding_a_missing_sample() {
-        let records = [
-            Record {
-                qpc: 11,
-                mark: Mark::Applied {
-                    us: 1,
-                    start_qpc: 10,
-                },
-            },
-            Record {
-                qpc: 12,
-                mark: Mark::Resting,
-            },
-            Record {
-                qpc: 21,
-                mark: Mark::Applied {
-                    us: 1,
-                    start_qpc: 20,
-                },
-            },
-            Record {
-                qpc: 22,
-                mark: Mark::Painted(2),
-            },
-        ];
-        assert_eq!(
-            pair_paints(&records).unwrap(),
-            (vec![(20, 22, 2)], 1),
-            "the latest callback is paired and the earlier missing paint remains counted"
-        );
-        assert!(
-            pair_paints(&[Record {
-                qpc: 1,
-                mark: Mark::Painted(2)
-            }])
-            .is_err(),
-            "orphan paints cannot become successful samples"
-        );
     }
 }

@@ -1,7 +1,7 @@
 //! Separate-process EDIT fixture: the owner's feel verdicts and physical Ready, then the
 //! physical-input/session guards, click receipts, Esc lease and cover placement.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, ensure};
@@ -15,9 +15,7 @@ use windows::Win32::System::RemoteDesktop::{
 };
 use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ACTIVATE_KEYBOARD_LAYOUT_FLAGS, ActivateKeyboardLayout, EnableWindow, GetCapture, GetFocus,
-    GetKeyState, GetKeyboardLayout, GetKeyboardLayoutList, GetKeyboardLayoutNameW, HKL,
-    LoadKeyboardLayoutW, MOD_NOREPEAT, RegisterHotKey, SetFocus, UnloadKeyboardLayout,
+    EnableWindow, GetCapture, GetFocus, GetKeyState, MOD_NOREPEAT, RegisterHotKey, SetFocus,
     UnregisterHotKey, VK_LBUTTON,
 };
 use windows::Win32::UI::Input::{
@@ -66,8 +64,6 @@ pub(super) const CLICK_POINT: PCWSTR = w!("InputSessionClickPoint");
 /// The idle activation: 0 unused, 1 pending, 2 used, whatever its outcome.
 const ACTIVATION: PCWSTR = w!("InputSessionActivation");
 
-pub(super) const LOAD_LAYOUT: u32 = WM_APP + 17;
-pub(super) const RESTORE_LAYOUTS: u32 = WM_APP + 18;
 pub(super) const ESCAPE_LEASE: u32 = WM_APP + 19;
 pub(super) const COVER: u32 = WM_APP + 20;
 pub(super) const UNCOVER: u32 = WM_APP + 21;
@@ -489,12 +485,6 @@ unsafe extern "system" fn fixture_proc(
         guard::SET_PHASE => {
             return answer(u8::try_from(wp.0).map(guard::set_phase).map_err(Into::into));
         }
-        LOAD_LAYOUT => {
-            return load_layout(window, wp.0).map_or(LRESULT(0), |layout| {
-                LRESULT(layout.0.expose_provenance().cast_signed())
-            });
-        }
-        RESTORE_LAYOUTS => return answer(restore_layouts()),
         ESCAPE_LEASE => {
             let mode = if wp.0 == 0 {
                 FixtureEscMode::Free
@@ -715,19 +705,12 @@ pub(crate) fn fixture() -> Result<()> {
             Err(error.context(format!("alternate cleanup also failed: {cleanup}")))
         }
     };
-    let restored = restore_layouts();
     // SAFETY: querying a potentially destroyed fixture handle is supported by IsWindow.
     if unsafe { IsWindow(Some(root)) }.as_bool() {
         // SAFETY: the fixture window was created on this thread and has not been destroyed.
         unsafe { DestroyWindow(root) }?;
     }
-    match (result, restored) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-        (Err(error), Err(cleanup)) => {
-            Err(error.context(format!("fixture layout cleanup also failed: {cleanup}")))
-        }
-    }
+    result
 }
 
 fn child(
@@ -879,97 +862,6 @@ fn focus_edit() -> Result<()> {
     Ok(())
 }
 
-thread_local! {
-    static LAYOUTS: RefCell<Option<FixtureLayouts>> = const { RefCell::new(None) };
-}
-
-struct FixtureLayouts {
-    original: HKL,
-    added: Vec<HKL>,
-}
-
-fn loaded_layouts() -> Result<Vec<HKL>> {
-    // SAFETY: querying the list size changes no layouts.
-    let count = unsafe { GetKeyboardLayoutList(None) };
-    ensure!(count > 0, "cannot snapshot fixture keyboard layouts");
-    let mut layouts = vec![HKL::default(); usize::try_from(count)?];
-    // SAFETY: layouts has capacity for the advertised number of handles.
-    let read = unsafe { GetKeyboardLayoutList(Some(&mut layouts)) };
-    ensure!(read == count, "layout list changed during fixture snapshot");
-    Ok(layouts)
-}
-
-fn layout_id(selection: usize) -> Result<PCWSTR> {
-    match selection {
-        0 => Ok(w!("00000407")),
-        1 => Ok(w!("0000040A")),
-        _ => anyhow::bail!("unsupported fixture layout request"),
-    }
-}
-
-fn load_layout(root: HWND, selection: usize) -> Result<HKL> {
-    let klid = layout_id(selection)?;
-    // SAFETY: reading the foreground does not change it.
-    let foreground = unsafe { GetForegroundWindow() };
-    // SAFETY: reading this fixture thread's focus does not change it.
-    let focused = foreground == root && !unsafe { GetFocus() }.is_invalid();
-    ensure!(
-        focused && property(root, ABORT) == 0,
-        "fixture does not own keyboard focus"
-    );
-    super::input_desktop_available()?;
-    LAYOUTS.with(|slot| {
-        let mut slot = slot.try_borrow_mut()?;
-        let state = slot.get_or_insert_with(|| FixtureLayouts {
-            // SAFETY: zero reads the calling fixture thread's active layout.
-            original: unsafe { GetKeyboardLayout(0) },
-            added: Vec::new(),
-        });
-        let before = loaded_layouts()?;
-        // SAFETY: the fixture owns keyboard focus; no ACTIVATE/REORDER or preference flags are supplied.
-        let layout =
-            unsafe { LoadKeyboardLayoutW(klid, ACTIVATE_KEYBOARD_LAYOUT_FLAGS::default()) }?;
-        if !before.contains(&layout) && !state.added.contains(&layout) {
-            state.added.push(layout);
-        }
-        // SAFETY: this activates the returned loaded handle on the owned fixture thread.
-        unsafe { ActivateKeyboardLayout(layout, ACTIVATE_KEYBOARD_LAYOUT_FLAGS::default()) }?;
-        let mut name = [0u16; 9];
-        // SAFETY: name has the documented nine-code-unit size.
-        unsafe { GetKeyboardLayoutNameW(&mut name) }?;
-        // SAFETY: klid points to one of the two static NUL-terminated layout identifiers above.
-        let expected = unsafe { klid.as_wide() };
-        ensure!(
-            name[..8] == *expected,
-            "fixture activated a different layout"
-        );
-        Ok(layout)
-    })
-}
-
-pub(super) fn restore_layouts() -> Result<()> {
-    LAYOUTS.with(|slot| {
-        let mut slot = slot.try_borrow_mut()?;
-        let Some(state) = slot.as_mut() else {
-            return Ok(());
-        };
-        // SAFETY: restore only this fixture thread's original loaded layout.
-        unsafe {
-            ActivateKeyboardLayout(state.original, ACTIVATE_KEYBOARD_LAYOUT_FLAGS::default())
-        }?;
-        let mut failed = false;
-        state.added.retain(|layout| {
-            // SAFETY: only handles newly loaded by this fixture are unloaded.
-            let error = unsafe { UnloadKeyboardLayout(*layout) }.is_err();
-            failed |= error;
-            error
-        });
-        ensure!(!failed, "fixture layout cleanup was incomplete");
-        *slot = None;
-        Ok(())
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use windows::Win32::UI::Input::{
@@ -978,7 +870,6 @@ mod tests {
     };
 
     use super::super::guard::{InputClass, PhysicalInput, physical_event};
-    use super::layout_id;
     use kumochi_protocol::constants::FOCUS_INPUT_MARKER;
 
     fn mouse_event(mouse: RAWMOUSE) -> RAWINPUT {
@@ -1109,17 +1000,5 @@ mod tests {
                 marker: None,
             })
         );
-    }
-
-    #[test]
-    fn fixture_accepts_only_the_two_approved_layout_identifiers() {
-        for (request, expected) in [(0, "00000407"), (1, "0000040A")] {
-            let layout = layout_id(request).unwrap();
-            // SAFETY: the accepted request returns a static NUL-terminated identifier.
-            let units = unsafe { layout.as_wide() };
-            assert!(units.iter().copied().eq(expected.encode_utf16()));
-        }
-        assert!(layout_id(2).is_err());
-        assert!(layout_id(usize::MAX).is_err());
     }
 }
