@@ -59,6 +59,13 @@ fn drawing_put(iteration: usize, extra_labels: usize) -> Vec<String> {
             r#"{{"shape":{{"id":"outline{index}","kind":"rect","box":[0,0,8,8]{radius}}}}}"#
         ));
     }
+    // The outline cap's last 256 points: seven radius-8 outlines of 25 and nine of 9.
+    for index in 0..16 {
+        let radius = if index < 7 { 8.0 } else { 0.001 };
+        put.push(format!(
+            r#"{{"shape":{{"id":"more{index}","kind":"rect","box":[0,0,16,16],"radius":{radius}}}}}"#
+        ));
+    }
     put.push(
         r#"{"line":{"id":"wire","from":{"ref":"box0"},"to":[5200,190],"dash":true}}"#.to_owned(),
     );

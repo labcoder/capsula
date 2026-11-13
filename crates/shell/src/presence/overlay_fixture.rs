@@ -469,7 +469,7 @@ fn the_capped_painter_fixture_reuses_the_full_native_preparation_workload() {
     let mut measure =
         crate::presenter::Measure::new(Arc::new(text), gpui_kit::Font::default().family);
     let (items, work) = resting(&mut measure, [2560.0, 1440.0], Mode::Capped);
-    assert_eq!(items.len(), 114);
+    assert_eq!(items.len(), 130);
     assert_eq!(
         (work.dash_pieces, work.fill_vertices, work.outline_points),
         (

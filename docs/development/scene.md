@@ -843,7 +843,7 @@ Prepared residency remains the preparation layer's separate limit.
 | Path | 512 points, 4,096 flattened segments | 20,000 segments |
 | Dash pieces | Explicit geometry preflighted; generated geometry counted at preparation | 512 |
 | Fill vertices | Points plus crossing pairs, at most 21,845 per build | 2,048 |
-| Bordered-rect outline points | Rounded fallback at the object's charged scale | 512 |
+| Bordered-rect outline points | Rounded fallback at the object's charged scale | 768 |
 | Motion | 256 tracks, 32 keys/track, 60 s/track and after last activation | — |
 | Object graph | Depth 16 | — |
 | Coordinates | Finite, absolute value ≤20,000 after composition | — |
@@ -892,7 +892,7 @@ shell's guard. None of the counts depends on display, pose or reveal, and sums s
 - Every `Prim::Rect` is charged as the painter's path fallback, which rotation and partial
   reveals trigger: `corner_segments(radius · c)` pieces per corner and 4(n + 1) + 1 points.
   c is its object's charged scale: the composed-scale envelope of the object and its
-  ancestors, times the surface limit (2 on an overlay, 1 inline), times 1 + 2⁻¹⁶, then capped
+  ancestors, with a diagram's shrink-to-fit taken as 1, times the surface limit (2 on an overlay, 1 inline), times 1 + 2⁻¹⁶, then capped
   at 64. The 2⁻¹⁶ is a conservative allowance for f32 drift between that envelope and a
   frame's composed matrix along an admitted chain, not a proof. Preparation recomputes c for
   every retained object after the step's motion updates and keeps a count only when both its
@@ -928,18 +928,18 @@ every other line at most 513 points including a closed outline's repeated first 
 the longest run, closed, costs 4 × 4,098 + 4 = 16,396 of a build's 21,845 vertices.
 The painter still refuses a longer run loudly.
 
-The global limits are 512 dash pieces, 2,048 fill vertices and 512 outline points, shared
-across all visible scenes and reserved ready/rest states. Fills get four times the others
+The global limits are 512 dash pieces, 2,048 fill vertices and 768 outline points, shared
+across all visible scenes and reserved ready/rest states. Fills get four times the dash budget
 because they are the cheapest to paint: on Rez at 144 Hz, about 2,000 fill vertices cost a
 paint p99 of 0.21 ms against 1.07 ms for as many outline points. A filled circle or ellipse
 costs 48 fill vertices at any size or canvas, so 42 fit. A diagram is shrunk to fit its canvas
-by a factor between 0.8 and 1. On an overlay, a plain box costs 21 fill vertices and 21 outline
-points unshrunk and 17 of each once shrunk to 0.917 or below, and a labelled arrow adds 24 fill
-vertices unshrunk for its head and label chip. So the outline budget bounds diagrams: 24
-unshrunk boxes fit at 504 outline points and 25 are refused at 525, while on the default
-canvas a 30-box chain shrinks to 0.8 and fits at 510. The draw prompt and the refusal say
-about 40 circles or about 20 boxes, leaving room for the rest of the screen. Labels remain
-subject to the existing text and object limits. A
+by a factor between 0.8 and 1, which follows its measured text, so preparation charges a
+diagram's contents as if unshrunk: the charge is then the same whatever the fonts. On an
+overlay a plain box costs 21 fill vertices and 21 outline points, and a labelled arrow adds 24
+fill vertices for its head and label chip. So the outline budget bounds diagrams: 36 boxes fit
+at 756 outline points and 37 are refused at 777. The draw prompt and the refusal say about 40
+circles or about 30 boxes, leaving room for the rest of the screen. Labels remain subject to
+the existing text and object limits. A
 drawing beyond the limits fails explicitly through the scene's `PaintWork` failure or recovery
 clear, without simplifying its geometry. Before counting crossings, preparation refuses any one
 generated fill with more than 2,048 points, which cannot fit even without a crossing. Given a paint cap
