@@ -178,65 +178,111 @@ fn run(
         }
         let mut send = |id, reply| write_sized(output, id, &reply, Kind::MAX_REPLY);
         match event {
-            Some(Event::Request(id, body, received)) => match body {
-                Request::Ping => send(id, Reply::Pong)?,
-                Request::Context { key, ticket, point } => {
-                    if current.is_some_and(|held: Key| held.owner != key.owner) {
-                        screen.clear();
+            Some(Event::Request(id, body, received)) => {
+                let walk = match body {
+                    Request::Ping => {
+                        send(id, Reply::Pong)?;
+                        None
                     }
-                    live = false;
-                    expires = None;
-                    let admitted = screen.admit(&ticket, received, now);
-                    current = Some(key);
-                    let retired = fence.is_some_and(|fence| key.owner <= fence);
-                    let result =
-                        if retired || key.capture != ticket.capture() || capturing.is_some() {
-                            Err(Failure::Refused(Refusal::Stale))
-                        } else {
-                            admitted
-                        };
-                    match result {
-                        Ok(until) => {
-                            if let Some(Ok(reader)) = &mut screen.reader {
-                                reader.set_shell_pid(ticket.shell_pid());
-                            }
-                            let job = Job {
-                                key,
-                                frame: std::mem::take(&mut screen.frame),
-                                point,
-                                shell: ticket.shell_pid(),
-                                until,
-                            };
-                            match native.begin(job) {
-                                None => {
-                                    live = true;
-                                    expires = Some(until);
-                                    capturing = Some(Capture {
-                                        id,
-                                        key,
-                                        ticket,
-                                        received,
-                                        expires: until,
-                                    });
-                                }
-                                Some(mut job) => {
-                                    job.frame.release();
-                                    send(id, Reply::Busy)?;
-                                }
-                            }
-                        }
-                        Err(error) => {
+                    Request::Context { key, ticket, point } => {
+                        if current.is_some_and(|held: Key| held.owner != key.owner) {
                             screen.clear();
-                            send(id, failed(error))?;
                         }
+                        live = false;
+                        expires = None;
+                        let admitted = screen.admit(&ticket, received, now);
+                        current = Some(key);
+                        let retired = fence.is_some_and(|fence| key.owner <= fence);
+                        let result =
+                            if retired || key.capture != ticket.capture() || capturing.is_some() {
+                                Err(Failure::Refused(Refusal::Stale))
+                            } else {
+                                admitted
+                            };
+                        match result {
+                            Ok(until) => {
+                                if let Some(Ok(reader)) = &mut screen.reader {
+                                    reader.set_shell_pid(ticket.shell_pid());
+                                }
+                                let job = Job {
+                                    key,
+                                    frame: std::mem::take(&mut screen.frame),
+                                    point,
+                                    shell: ticket.shell_pid(),
+                                    until,
+                                };
+                                match native.begin(job) {
+                                    None => {
+                                        live = true;
+                                        expires = Some(until);
+                                        capturing = Some(Capture {
+                                            id,
+                                            key,
+                                            ticket,
+                                            received,
+                                            expires: until,
+                                        });
+                                    }
+                                    Some(mut job) => {
+                                        job.frame.release();
+                                        send(id, Reply::Busy)?;
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                screen.clear();
+                                send(id, failed(error))?;
+                            }
+                        }
+                        None
                     }
-                }
-                walk @ (Request::Elements { .. } | Request::Walk { .. }) => {
-                    let (key, target, summary) = match walk {
-                        Request::Elements { key, target } => (key, target, Answer::Tree),
-                        Request::Walk { key } => (key, ElementTarget::Foreground, Answer::Masks),
-                        _ => unreachable!(),
-                    };
+                    Request::Elements { key, target } => Some((key, target, Answer::Tree)),
+                    Request::Walk { key } => Some((key, ElementTarget::Foreground, Answer::Masks)),
+                    Request::Seal(key) => {
+                        if !live || current != Some(key) || capturing.is_some() || walking.is_some()
+                        {
+                            send(id, Reply::Refused(Refusal::Stale))?;
+                        } else {
+                            live = false;
+                            expires = None;
+                            match screen.seal(key.capture, JPEG_CAP) {
+                                Ok(context) => send(id, Reply::Sealed(key, context))?,
+                                Err(error) => send(id, failed(error))?,
+                            }
+                        }
+                        None
+                    }
+                    control @ (Request::Drop(_) | Request::Retire(_)) => {
+                        let (owner, capture) = match control {
+                            Request::Drop(key) => (key.owner, Some(key.capture)),
+                            Request::Retire(owner) => {
+                                fence = fence.max(Some(owner));
+                                (owner, None)
+                            }
+                            _ => unreachable!(),
+                        };
+                        let matches = current.is_some_and(|held: Key| match capture {
+                            Some(capture) => held.owner == owner && held.capture == capture,
+                            None => held.owner <= owner,
+                        });
+                        if capture.is_some() && !matches {
+                            send(id, Reply::Refused(Refusal::Stale))?;
+                        } else {
+                            if matches {
+                                live = false;
+                                expires = None;
+                                screen.clear();
+                            }
+                            if releasing.len() == QUEUE {
+                                send(id, Reply::Busy)?;
+                            } else {
+                                releasing.push((id, owner, capture));
+                            }
+                        }
+                        None
+                    }
+                };
+                if let Some((key, target, summary)) = walk {
                     if !live || current != Some(key) || capturing.is_some() || walking.is_some() {
                         send(id, Reply::Refused(Refusal::Stale))?;
                     } else {
@@ -271,47 +317,7 @@ fn run(
                         }
                     }
                 }
-                Request::Seal(key) => {
-                    if !live || current != Some(key) || capturing.is_some() || walking.is_some() {
-                        send(id, Reply::Refused(Refusal::Stale))?;
-                    } else {
-                        live = false;
-                        expires = None;
-                        match screen.seal(key.capture, JPEG_CAP) {
-                            Ok(context) => send(id, Reply::Sealed(key, context))?,
-                            Err(error) => send(id, failed(error))?,
-                        }
-                    }
-                }
-                control @ (Request::Drop(_) | Request::Retire(_)) => {
-                    let (owner, capture) = match control {
-                        Request::Drop(key) => (key.owner, Some(key.capture)),
-                        Request::Retire(owner) => {
-                            fence = fence.max(Some(owner));
-                            (owner, None)
-                        }
-                        _ => unreachable!(),
-                    };
-                    let matches = current.is_some_and(|held: Key| match capture {
-                        Some(capture) => held.owner == owner && held.capture == capture,
-                        None => held.owner <= owner,
-                    });
-                    if capture.is_some() && !matches {
-                        send(id, Reply::Refused(Refusal::Stale))?;
-                    } else {
-                        if matches {
-                            live = false;
-                            expires = None;
-                            screen.clear();
-                        }
-                        if releasing.len() == QUEUE {
-                            send(id, Reply::Busy)?;
-                        } else {
-                            releasing.push((id, owner, capture));
-                        }
-                    }
-                }
-            },
+            }
             Some(Event::End(result)) => {
                 result?;
                 return Ok(());

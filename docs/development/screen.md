@@ -433,8 +433,9 @@ speaks to the worker through the shared supervisor as its own kind, `Holds`, wit
 worker's argument and caps, the actor's messages and the zeroing reply reader.
 
 - **`context(owner, point, until)`** mints a fresh capture id and a ticket whose number is above
-  every earlier one (a worker refuses a number it has already spent), with `ttl_ms` set to the
-  time left until `until`, a random nonce and the connected shell's pid. It streams
+  every earlier one (a worker refuses a number it has already spent), minted under the fence's
+  lock so tickets reach the worker in order, with `ttl_ms` set to the time left until `until`
+  but never over `MAX_TTL`, a random nonce and the connected shell's pid. It streams
   `Acquired`, then `Complete`, and returns the `Held` frame with the worker generation that
   holds it.
 - **`walk(held)`** and **`seal(held)`** answer only when that same generation replies, for that
@@ -444,13 +445,16 @@ worker's argument and caps, the actor's messages and the zeroing reply reader.
   keeps its own: `retire(owner)` raises it first, and a `context` for a hold at or below it is
   refused `Stale` without being sent.
 - **Release waits and termination.** `retire(owner, holder, until)` returns once the worker answers
-  `Released` for that owner, from the holder or a later generation, since a later worker means
-  the holder's exit was seen. A worker that answers anything else may still hold a frame, and so
+  `Released` for that owner, from the holder or a later generation, or any answer from a later
+  generation, since a later worker means the holder's exit was seen. A worker that answers anything else may still hold a frame, and so
   may the holder when the supervisor can't take the retire (a full queue, a loss), so that worker
   is ended and its confirmed exit is the release. An unconfirmed exit, or neither by `until`, is `Unreleased`;
   the worker's own ticket expiry still clears the frame.
 
-There's no brain-side `Drop`: `Retire` covers every way a hold closes.
+There's no brain-side `Drop`. A hold that closes normally sends `Retire`. One that closes without
+it (a panic, an aborted task, a dropped `context`) leaves its frame to the ticket's expiry, which
+`context` caps at the screen budget (`MAX_TTL`, 1.5 s). So `Unreleased` means only that the release
+wasn't shown, and callers never treat it as fatal.
 
 ## Portable element data and walk
 
