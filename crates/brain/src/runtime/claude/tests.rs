@@ -303,7 +303,16 @@ async fn cancel_ends_the_sign_in_and_shows_it_signed_out() {
     assert_eq!(claude.view(), ClaudeCodeView::SignedOut { version: V });
     assert_eq!(
         base.calls(),
-        [FOUND[0], FOUND[1], "auth login", FOUND[0], FOUND[1]]
+        [
+            FOUND[0],
+            FOUND[1],
+            "auth login",
+            FOUND[0],
+            FOUND[1],
+            FOUND[0],
+            FOUND[1]
+        ],
+        "the Status, then the find after the folder's removal"
     );
 }
 
@@ -743,4 +752,140 @@ mod launches {
         assert_eq!(end(launch).await, Teardown::Done);
         assert!(claude.close(soon()).await);
     }
+}
+
+/// A file Claude Code may leave in its config folder when it's ended part way through a save.
+fn partial(base: &Base) -> std::path::PathBuf {
+    base.owned().join("config").join("partial")
+}
+
+/// A cancel that doesn't end signed in removes Kumochi's Claude Code folder, without a logout,
+/// so no sign-in file outlives a view that says signed out.
+#[tokio::test]
+async fn a_cancel_that_ends_signed_out_removes_claude_codes_folder() {
+    let base = Base::new("cancel-removes");
+    let mut claude = signed_out(&base, "loginhang").await;
+    claude.op(ConnectionOp::ConnectClaudeCode);
+    started(&base, "auth login").await;
+    std::fs::write(partial(&base), b"").expect("a partial save");
+    claude.op(ConnectionOp::CancelClaudeSignIn);
+    settle(&mut claude).await;
+    assert!(claude.close(soon()).await);
+    assert_eq!(claude.view(), ClaudeCodeView::SignedOut { version: V });
+    assert!(!partial(&base).exists());
+    assert!(!base.marker().exists());
+    assert_eq!(
+        base.calls(),
+        [
+            FOUND[0],
+            FOUND[1],
+            "auth login",
+            FOUND[0],
+            FOUND[1],
+            FOUND[0],
+            FOUND[1]
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_cancel_whose_status_fails_removes_claude_codes_folder() {
+    let base = Base::new("cancel-status-fails");
+    let mut claude = signed_out(&base, "loginhang").await;
+    claude.op(ConnectionOp::ConnectClaudeCode);
+    started(&base, "auth login").await;
+    std::fs::write(partial(&base), b"").expect("a partial save");
+    claude.op(ConnectionOp::CancelClaudeSignIn);
+    timeout(Duration::from_secs(30), async {
+        loop {
+            let wake = claude.next().await;
+            if let Wake::Lane(Done {
+                generation,
+                result: Ok(Outcome::Status { .. }),
+            }) = wake
+            {
+                claude.wake(Wake::Lane(Done {
+                    generation,
+                    result: Err(Failure::Deadline),
+                }));
+                return;
+            }
+            claude.wake(wake);
+        }
+    })
+    .await
+    .expect("the cancel's Status");
+    assert_eq!(claude.view(), ClaudeCodeView::CleanupPending);
+    settle(&mut claude).await;
+    assert!(claude.close(soon()).await);
+    assert_eq!(claude.view(), ClaudeCodeView::SignedOut { version: V });
+    assert!(!partial(&base).exists());
+}
+
+/// Claude Code finished saving before the cancel landed: the sign-in stands, as Cancel says.
+#[tokio::test]
+async fn a_cancel_that_ends_signed_in_keeps_the_sign_in() {
+    let base = Base::new("cancel-keeps");
+    let mut claude = signed_out(&base, "loginhang").await;
+    claude.op(ConnectionOp::ConnectClaudeCode);
+    started(&base, "auth login").await;
+    let token = base.owned().join("config").join("signed-in");
+    std::fs::write(&token, b"").expect("a finished save");
+    claude.op(ConnectionOp::CancelClaudeSignIn);
+    settle(&mut claude).await;
+    assert!(claude.close(soon()).await);
+    assert_eq!(claude.view(), READY);
+    assert!(token.exists());
+    assert_eq!(
+        base.calls(),
+        [FOUND[0], FOUND[1], "auth login", FOUND[0], FOUND[1]]
+    );
+}
+
+/// The cleanup belongs to the cancel's own Status: a later job starts clear of it.
+#[tokio::test]
+async fn a_job_after_a_cancel_starts_without_its_cleanup() {
+    let base = Base::new("cancel-then-find");
+    let mut claude = signed_out(&base, "out").await;
+    claude.cancelled = Some(claude.generation);
+    claude.op(ConnectionOp::FindClaudeCode);
+    settle(&mut claude).await;
+    assert!(claude.close(soon()).await);
+    assert_eq!(claude.view(), ClaudeCodeView::SignedOut { version: V });
+    assert_eq!(base.calls(), [FOUND[0], FOUND[1], FOUND[0], FOUND[1]]);
+}
+
+#[tokio::test]
+async fn a_cancel_whose_version_fails_removes_claude_codes_folder() {
+    let base = Base::new("cancel-version-fails");
+    let mut claude = signed_out(&base, "loginhang").await;
+    claude.op(ConnectionOp::ConnectClaudeCode);
+    started(&base, "auth login").await;
+    std::fs::write(partial(&base), b"").expect("a partial save");
+    claude.op(ConnectionOp::CancelClaudeSignIn);
+    timeout(Duration::from_secs(30), async {
+        loop {
+            let wake = claude.next().await;
+            if let Wake::Lane(Done {
+                generation,
+                result: Ok(Outcome::Version(_)),
+            }) = wake
+                && generation == claude.generation
+            {
+                claude.wake(Wake::Lane(Done {
+                    generation,
+                    result: Err(Failure::Deadline),
+                }));
+                return;
+            }
+            claude.wake(wake);
+        }
+    })
+    .await
+    .expect("the cancel's Version");
+    assert_eq!(claude.view(), ClaudeCodeView::CleanupPending);
+    settle(&mut claude).await;
+    assert!(claude.close(soon()).await);
+    assert_eq!(claude.view(), ClaudeCodeView::SignedOut { version: V });
+    assert!(!partial(&base).exists());
 }
