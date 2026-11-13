@@ -812,7 +812,7 @@ fn run_fixture(root: HWND, instance: HINSTANCE, lifetime_ms: u32) -> Result<()> 
     child(
         w!("STATIC"),
         &HSTRING::from(
-            "The dock line starts top center; Listening turns it the accent colour.\r\nSelect both verdicts (Unrated is valid), then click Ready.\r\nDo not touch mouse or keyboard until this window closes.\r\nAllow about 10 minutes (up to 1 hour), not just one second.\r\nBefore injection input re-arms Ready; afterwards it stops.",
+            "The dock line starts top center and stays plain on a hold; choose Unrated for Hold.\r\nSelect both verdicts (Unrated is valid), then click Ready.\r\nDo not touch mouse or keyboard until this window closes.\r\nAllow about 10 minutes (up to 1 hour), not just one second.\r\nBefore injection input re-arms Ready; afterwards it stops.",
         ),
         WINDOW_STYLE::default(),
         [12, 352, 600, 96],
