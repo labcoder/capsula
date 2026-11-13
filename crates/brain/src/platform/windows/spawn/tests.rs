@@ -527,6 +527,25 @@ fn launch_and_spawned_debug_show_counts_not_values() {
 }
 
 #[test]
+fn a_shut_down_job_refuses_new_processes() {
+    let job = Job::new().expect("job");
+    let before = start("park", &[], &base_env(), Stdio::Null, &job).expect("a start before");
+    job.shut_down().expect("job ends");
+    assert!(
+        before
+            .process
+            .exits_within(Duration::from_secs(2))
+            .expect("wait"),
+        "ended by the shutdown"
+    );
+    let after = start("park", &[], &base_env(), Stdio::Null, &job).expect_err("refused");
+    assert_eq!(after.to_string(), "the job was shut down");
+    let piped = Job::spawn_piped(&exe(), MARK, &[&job]).expect_err("refused");
+    assert_eq!(piped.to_string(), "the job was shut down");
+    assert_eq!(job.active_processes().expect("count"), 0);
+}
+
+#[test]
 fn terminating_a_helper_that_is_already_exiting_succeeds() {
     let job = Job::new().expect("job");
     let child = start("park", &[], &base_env(), Stdio::Null, &job).expect("spawn");

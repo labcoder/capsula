@@ -115,7 +115,7 @@ struct ChildEnds {
 /// absolute path, a NUL in the executable, the folder or an argument, a command line over
 /// [`MAX_COMMAND_LINE`], an environment name that's empty, holds `=` or NUL, or repeats another
 /// without regard to case, or a value holding NUL; otherwise the OS's error creating the pipes or
-/// the process.
+/// the process, or a refusal when a job in `jobs` was shut down.
 pub fn spawn(launch: &Launch<'_>) -> io::Result<Spawned> {
     let mut command_line = command_line(launch.exe, launch.args)?;
     let environment = environment_block(launch.env)?;
@@ -152,9 +152,12 @@ pub fn spawn(launch: &Launch<'_>) -> io::Result<Spawned> {
     let mut info = PROCESS_INFORMATION::default();
     let created = {
         let _spawning = crate::platform::spawn_lock();
-        let created = inherited
-            .iter()
-            .try_for_each(|&handle| set_inheritable(handle))
+        let created = Job::admit(launch.jobs)
+            .and_then(|()| {
+                inherited
+                    .iter()
+                    .try_for_each(|&handle| set_inheritable(handle))
+            })
             .and_then(|()| {
                 // SAFETY: the application, command line, environment and folder are
                 // NUL-terminated and the command line is writable, as CreateProcessW requires;

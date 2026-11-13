@@ -388,7 +388,7 @@ async fn confirming() -> Confirming {
         next.lock()
             .expect("unpoisoned")
             .take()
-            .ok_or_else(|| io::Error::other("one replacement"))
+            .ok_or_else(|| SpawnFailure::Failed(io::Error::other("one replacement")))
     };
     let (handle, receive, intents) = handle();
     let running = tokio::spawn(run(
@@ -511,7 +511,9 @@ async fn a_live_worker_that_refuses_termination_is_reported_unconfirmed() {
     let (handle, receive, intents) = handle();
     let mut exits = handle.exits();
     let running = tokio::spawn(run(
-        || -> io::Result<Worker<Test>> { Err(io::Error::other("no replacement")) },
+        || -> Result<Worker<Test>, SpawnFailure> {
+            Err(SpawnFailure::Failed(io::Error::other("no replacement")))
+        },
         worker,
         receive,
         handle.notices.clone(),
@@ -538,6 +540,68 @@ async fn a_live_worker_that_refuses_termination_is_reported_unconfirmed() {
     assert!(child.try_wait().expect("cmd").is_none(), "still running");
     child.kill().expect("cmd ends");
     child.wait().expect("cmd ends");
+}
+
+#[test]
+fn a_worker_whose_threads_fail_is_a_plain_failure_only_once_its_process_exits() {
+    // Abandons a worker whose process exits when asked, or doesn't: the failure and the wait.
+    let abandoned = |exits| {
+        let (asked, asks) = blocking::channel();
+        let (decide, exited) = blocking::channel();
+        decide.send(exits).expect("decided");
+        let (mut worker, _played) = staged(Some(Box::new(Held { asked, exited })));
+        let failure = worker.abandon(io::Error::other("no reader thread"));
+        assert!(
+            worker.process.is_none(),
+            "dropping the worker ends nothing twice"
+        );
+        (failure, asks.try_recv().expect("the exit was waited for"))
+    };
+    let (failure, waited) = abandoned(true);
+    assert!(
+        matches!(failure, SpawnFailure::Failed(ref error) if error.to_string() == "no reader thread")
+    );
+    assert_eq!(waited, EXIT_CONFIRMATION);
+    let (failure, waited) = abandoned(false);
+    assert!(matches!(failure, SpawnFailure::ExitUnconfirmed));
+    assert_eq!(waited, EXIT_CONFIRMATION);
+}
+
+#[tokio::test]
+async fn a_replacement_left_running_by_its_failed_start_refuses_every_handle() {
+    let (asked, _asks) = blocking::channel();
+    let (decide, exited) = blocking::channel();
+    decide.send(true).expect("the first worker exits");
+    let (first, (_written, lose)) = staged(Some(Box::new(Held { asked, exited })));
+    let spawns = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&spawns);
+    let (handle, receive, intents) = handle();
+    let running = tokio::spawn(run(
+        move || {
+            counted.fetch_add(1, Ordering::Relaxed);
+            Err(SpawnFailure::ExitUnconfirmed)
+        },
+        first,
+        receive,
+        handle.notices.clone(),
+        intents,
+        Generation(0),
+    ));
+    lose.send(None).await.expect("the supervisor reads");
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .expect("the supervisor ends")
+        .expect("joined");
+    assert_eq!(
+        spawns.load(Ordering::Relaxed),
+        1,
+        "no second start beside one that may still run"
+    );
+    let until = Instant::now() + Duration::from_secs(60);
+    assert_eq!(
+        handle.request(vec![], until).await,
+        Err(WorkerLost::ExitUnconfirmed)
+    );
 }
 
 /// A waker that records what the exit channel holds at the instant a loss wakes it, which is

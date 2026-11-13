@@ -190,7 +190,7 @@ pub async fn run() -> Result<(), BrainError> {
     }
     drop(screen);
     // Ending the job waits on the processes, so it runs off the async thread.
-    match tokio::task::spawn_blocking(move || jobs.terminate()).await {
+    match tokio::task::spawn_blocking(move || jobs.shut_down()).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
             tracing::warn!(%error, "couldn't end the helpers; closing the job ends them");

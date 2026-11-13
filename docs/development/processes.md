@@ -38,9 +38,14 @@ flowchart LR
   `TerminateProcess` on a process that is already exiting with access denied, so
   `Helper::terminate` counts that refusal as a request already under way. Exit is still proved by
   a wait. The supervisor waits 2 s, and a worker still running then is reported as `worker exit
-  unconfirmed` and never replaced. At quit the brain may exit before that wait ends, so the
+  unconfirmed` and never replaced. So is a replacement whose reader or writer thread didn't start:
+  its process is terminated and waited for the same way before anything respawns. At quit the
+  brain may exit before that wait ends, so the
   report can instead be only the job's: `couldn't end the helpers; closing the job ends them`
-  when the job isn't empty after 5 s. Closing the job ends the worker when the brain exits.
+  when the job isn't empty after 5 s. Closing the job ends the worker when the brain exits. Quit
+  shuts the job down: it marks the job refusing under `platform::spawn_lock()`, which every start
+  into a job holds until its process exists, and only then terminates it. So a respawn that loses
+  the race to quit fails at once instead of landing in the job.
 - Helpers inherit no handles except each worker's two explicit stdin/stdout handles. A worker's
   stderr is disconnected.
   Nothing secret is ever on their command lines.

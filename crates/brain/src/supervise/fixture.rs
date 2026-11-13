@@ -64,7 +64,9 @@ pub(crate) fn start_at<K: Kind>(generation: Generation) -> Rig<K> {
     let actor = tokio::spawn(run(
         move || {
             counted.fetch_add(1, Ordering::Relaxed);
-            Err(io::Error::other("no replacement in this fixture"))
+            Err(SpawnFailure::Failed(io::Error::other(
+                "no replacement in this fixture",
+            )))
         },
         worker,
         receive,

@@ -7,9 +7,9 @@
 //! [`Generation`], and respawns, backing off after the second loss in a minute. The loss is the one
 //! recovery boundary: requests that arrive during the exit wait are held, as during a respawn, and
 //! outside crash backoff they and requests after the loss reach the next worker. An exit that
-//! isn't seen is fatal: nothing respawns and every handle, held requests included, is refused with
-//! [`WorkerLost::ExitUnconfirmed`]. A request gets one reply, or a bounded stream of them ending in
-//! the kind's terminal reply.
+//! isn't seen is fatal, a replacement's whose threads didn't start included: nothing respawns and
+//! every handle, held requests included, is refused with [`WorkerLost::ExitUnconfirmed`]. A
+//! request gets one reply, or a bounded stream of them ending in the kind's terminal reply.
 
 mod resource;
 mod wire;
@@ -438,9 +438,13 @@ impl<K: Kind> std::fmt::Debug for ReplyStream<K> {
 /// Starts a `K` worker directly in `jobs` and its supervisor task.
 ///
 /// # Errors
-/// Returns a process or thread creation failure.
+/// Returns a process or thread creation failure, or that the process left by a thread creation
+/// failure wasn't seen to exit.
 pub(crate) fn start<K: Kind>(exe: PathBuf, jobs: Arc<Job>) -> io::Result<Handle<K>> {
-    let worker = Worker::<K>::spawn(&exe, &jobs)?;
+    let worker = Worker::<K>::spawn(&exe, &jobs).map_err(|failure| match failure {
+        SpawnFailure::Failed(error) => error,
+        SpawnFailure::ExitUnconfirmed => io::Error::other("worker exit unconfirmed"),
+    })?;
     let (commands, receive) = mpsc::channel(QUEUE);
     let (handle, intents) = Handle::new(commands);
     drop(tokio::spawn(run(
@@ -505,12 +509,21 @@ struct Worker<K: Kind> {
     reads: mpsc::Receiver<Option<Frame>>,
 }
 
+/// Why a worker didn't start.
+enum SpawnFailure {
+    /// Nothing it started still runs.
+    Failed(io::Error),
+    /// Its process started and wasn't seen to exit after termination.
+    ExitUnconfirmed,
+}
+
 impl<K: Kind> Worker<K> {
-    fn spawn(exe: &Path, job: &Job) -> io::Result<Self> {
-        let (process, mut pipes) = Job::spawn_piped(exe, K::ARG, &[job])?;
+    fn spawn(exe: &Path, job: &Job) -> Result<Self, SpawnFailure> {
+        let (process, mut pipes) =
+            Job::spawn_piped(exe, K::ARG, &[job]).map_err(SpawnFailure::Failed)?;
         let (writes, requests) = blocking::sync_channel::<(u64, K::Request)>(QUEUE);
         let (replies, reads) = mpsc::channel(QUEUE);
-        let worker = Self {
+        let mut worker = Self {
             process: Some(Box::new(process)),
             writes,
             reads,
@@ -527,7 +540,8 @@ impl<K: Kind> Worker<K> {
                             break;
                         }
                     }
-                })?,
+                })
+                .map_err(|error| worker.abandon(error))?,
         );
         drop(
             std::thread::Builder::new()
@@ -542,9 +556,24 @@ impl<K: Kind> Worker<K> {
                             break;
                         }
                     }
-                })?,
+                })
+                .map_err(|error| worker.abandon(error))?,
         );
         Ok(worker)
+    }
+
+    /// Ends the process of a worker whose threads didn't start and waits for its exit, so a
+    /// respawn never runs beside it.
+    fn abandon(&mut self, error: io::Error) -> SpawnFailure {
+        let process = self.process.take();
+        terminate::<K>(process.as_deref());
+        if process
+            .is_some_and(|process| matches!(process.exits_within(EXIT_CONFIRMATION), Ok(true)))
+        {
+            SpawnFailure::Failed(error)
+        } else {
+            SpawnFailure::ExitUnconfirmed
+        }
     }
 }
 
@@ -759,7 +788,7 @@ async fn serve<K: Kind>(
 }
 
 async fn run<K: Kind>(
-    spawn: impl Fn() -> io::Result<Worker<K>> + Clone + Send + 'static,
+    spawn: impl Fn() -> Result<Worker<K>, SpawnFailure> + Clone + Send + 'static,
     mut worker: Worker<K>,
     mut commands: mpsc::Receiver<Command<K>>,
     notices: Notices,
@@ -825,7 +854,15 @@ async fn run<K: Kind>(
                     generation = next_generation;
                     break;
                 }
-                Ok(Err(error)) => {
+                Ok(Err(SpawnFailure::ExitUnconfirmed)) => {
+                    notices.fatal.store(true, Ordering::Release);
+                    tracing::error!(
+                        kind = K::NAME,
+                        "worker exit unconfirmed, so it is not replaced"
+                    );
+                    return;
+                }
+                Ok(Err(SpawnFailure::Failed(error))) => {
                     tracing::error!(
                         kind = K::NAME,
                         code = error.raw_os_error(),
