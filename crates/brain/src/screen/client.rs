@@ -12,12 +12,16 @@ use tokio::time::Instant;
 use super::actor::{Key, Owner, Reply, Request};
 use super::context::ScreenContext;
 use super::mask::Completeness;
-use super::supervisor::Screen;
+use super::supervisor::{REQUEST_DEADLINE, Screen};
 use super::wire::{CaptureId, FrameMeta, Refusal, TicketWire};
 use crate::supervise::{Generation, Handle, Kind, WorkerLost, Zeroed};
 
 #[cfg(test)]
 mod tests;
+
+/// The longest a ticket lets the worker hold a frame: the screen budget. With no `Retire` (a
+/// panic, an aborted task, a dropped `context`), the worker's own expiry clears the frame by then.
+pub(crate) const MAX_TTL: std::time::Duration = REQUEST_DEADLINE;
 
 /// The hold protocol: the screen worker's argument and caps, the actor's messages.
 pub(crate) struct Holds;
@@ -61,7 +65,8 @@ pub(crate) enum Closed {
 }
 
 /// A retired hold's release wasn't shown: neither the worker's answer nor its process's exit
-/// came in time. The worker's own ticket expiry still clears the frame.
+/// came in time, which includes a holder that had already exited before `retire` began. It's
+/// never fatal: the worker's own ticket expiry clears the frame within [`MAX_TTL`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Unreleased;
 
@@ -87,7 +92,8 @@ impl HoldClient {
         }
     }
 
-    /// Captures the window under `point` for `owner`, under a ticket that runs out at `until`.
+    /// Captures the window under `point` for `owner`, under a ticket that runs out at `until`
+    /// or after [`MAX_TTL`], whichever is sooner.
     ///
     /// # Errors
     /// `Refused(Stale)` for a retired hold, without asking the worker; otherwise the worker's
@@ -105,15 +111,8 @@ impl HoldClient {
         let mut nonce = [0; 16];
         getrandom::fill(&mut nonce)
             .map_err(|error| Closed::Fault(error.raw_os_error().unwrap_or(-1)))?;
-        let ttl_ms = u32::try_from(until.saturating_duration_since(Instant::now()).as_millis())
-            .unwrap_or(u32::MAX);
-        let ticket = TicketWire::new(
-            key.capture,
-            self.tickets.fetch_add(1, Ordering::Relaxed),
-            nonce,
-            ttl_ms,
-        )
-        .for_shell(crate::platform::connected_shell_pid());
+        let ttl = until.saturating_duration_since(Instant::now()).min(MAX_TTL);
+        let ttl_ms = u32::try_from(ttl.as_millis()).unwrap_or(u32::MAX);
         let mut stream = {
             let fence = self
                 .fence
@@ -122,6 +121,14 @@ impl HoldClient {
             if fence.is_some_and(|fence| owner <= fence) {
                 return Err(Closed::Refused(Refusal::Stale));
             }
+            // Minted under the lock, so tickets reach the worker in the order of their numbers.
+            let ticket = TicketWire::new(
+                key.capture,
+                self.tickets.fetch_add(1, Ordering::Relaxed),
+                nonce,
+                ttl_ms,
+            )
+            .for_shell(crate::platform::connected_shell_pid());
             self.inner
                 .request_stream(Request::Context { key, ticket, point }, until)
                 .map_err(Closed::Lost)?
@@ -202,6 +209,8 @@ impl HoldClient {
             {
                 return Ok(());
             }
+            // A later worker's answer means the holder's exit was seen, so nothing is held.
+            Ok((_, from)) if holder.is_some_and(|holder| from > holder) => return Ok(()),
             Ok((_, from)) => from,
             Err(_) => holder.ok_or(Unreleased)?,
         };
@@ -232,6 +241,18 @@ impl HoldClient {
             Err(lost) => Err(Closed::Lost(lost)),
         }
     }
+}
+
+/// Answers the worker's next request, which must retire `key`'s hold, as released.
+#[cfg(test)]
+pub(crate) async fn release_next(
+    rig: &mut crate::supervise::fixture::Rig<Holds>,
+    key: crate::coordinator::HoldKey,
+) {
+    let owner = Owner::from(key);
+    let (id, request) = rig.next().await;
+    assert!(matches!(request, Request::Retire(asked) if asked == owner));
+    rig.reply(id, &Reply::Released(owner, None)).await;
 }
 
 /// A terminal answer that isn't the one asked for. The caller drops it, and with it anything it

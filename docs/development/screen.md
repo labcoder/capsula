@@ -433,8 +433,9 @@ speaks to the worker through the shared supervisor as its own kind, `Holds`, wit
 worker's argument and caps, the actor's messages and the zeroing reply reader.
 
 - **`context(owner, point, until)`** mints a fresh capture id and a ticket whose number is above
-  every earlier one (a worker refuses a number it has already spent), with `ttl_ms` set to the
-  time left until `until`, a random nonce and the connected shell's pid. It streams
+  every earlier one (a worker refuses a number it has already spent), minted under the fence's
+  lock so tickets reach the worker in order, with `ttl_ms` set to the time left until `until`
+  but never over `MAX_TTL`, a random nonce and the connected shell's pid. It streams
   `Acquired`, then `Complete`, and returns the `Held` frame with the worker generation that
   holds it.
 - **`walk(held)`** and **`seal(held)`** answer only when that same generation replies, for that
@@ -444,13 +445,27 @@ worker's argument and caps, the actor's messages and the zeroing reply reader.
   keeps its own: `retire(owner)` raises it first, and a `context` for a hold at or below it is
   refused `Stale` without being sent.
 - **Release waits and termination.** `retire(owner, holder, until)` returns once the worker answers
-  `Released` for that owner, from the holder or a later generation, since a later worker means
-  the holder's exit was seen. A worker that answers anything else may still hold a frame, and so
+  `Released` for that owner, from the holder or a later generation, or any answer from a later
+  generation, since a later worker means the holder's exit was seen. A worker that answers anything else may still hold a frame, and so
   may the holder when the supervisor can't take the retire (a full queue, a loss), so that worker
   is ended and its confirmed exit is the release. An unconfirmed exit, or neither by `until`, is `Unreleased`;
   the worker's own ticket expiry still clears the frame.
 
-There's no brain-side `Drop`: `Retire` covers every way a hold closes.
+There's no brain-side `Drop`. A hold that closes normally sends `Retire`. One that closes without
+it (a panic, an aborted task, a dropped `context`) leaves its frame to the ticket's expiry, which
+`context` caps at the screen budget (`MAX_TTL`, 1.5 s). So `Unreleased` means only that the release
+wasn't shown, and callers never treat it as fatal.
+
+**The hold's screen part** (`runtime/hold/screen.rs`) is `None` for a voice hold. A screen hold
+starts at `Waiting` and ends at `Closed`. Nothing starts one yet, and the brain has no client until
+the entry-point switch. Every way a hold ends reaches the part through one of two places:
+- the hold's invalidation, which covers cancel and Esc, a turn, an Ask, `ShellLost`, a model or
+  default change, a delete, hold-to-talk off, a timeout and session loss;
+- taking the hold, which also covers handing its transcript to the run.
+
+A `Waiting` part may still hold a frame in the worker, so closing it spawns `retire` with the
+worker that captured, if one answered. Closing a `Ready` part drops its context, which zeroes it.
+Closing is idempotent, so a hold that's invalidated and then taken sends one `Retire`.
 
 ## Portable element data and walk
 
@@ -469,7 +484,11 @@ bytes of element JSON (commas and the reply envelope are additional). The byte c
 first. A cut records Elements, Depth, Bytes,
 Budget or Provider; a hard stop replaces an earlier Depth cut. Capture-scoped ids (`c12.e7`)
 carry physical desktop and window-relative rectangles from the same cached properties. Names
-never appear in Debug or errors. Names outside the captured display are empty. Password names are discarded, their rectangles are published
+never appear in Debug or errors. Each name is copied once at its exact length, its JSON size is
+counted against the byte cut without building the JSON, and it's zeroed when its element, or the
+walk's node properties, drop. So the tree's own strings leave no window text behind. The platform's
+strings aren't covered: UIA's `BSTR`, and `name()`'s conversion on Windows, which collects
+`decode_utf16` into a `String` that grows. Names outside the captured display are empty. Password names are discarded, their rectangles are published
 immediately, and password subtrees are never descended into.
 
 A source validates the root window and pid and returns its owning pid; the portable layer rejects

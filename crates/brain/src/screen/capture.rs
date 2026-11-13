@@ -114,8 +114,8 @@ pub(crate) trait Capturer {
 /// Opens the platform capturer on the first capture.
 pub(crate) type Open = fn() -> Result<Box<dyn Capturer>, i32>;
 
-/// Generations spent by this worker. A respawn starts empty: the brain's single-use tickets
-/// (B2a) guard across workers.
+/// Generations spent by this worker. A respawn starts empty: the hold client's rising ticket
+/// numbers guard across workers.
 #[derive(Debug, Default)]
 struct TicketBook {
     high_water: Option<u64>,

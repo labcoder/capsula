@@ -613,6 +613,7 @@ fn recording(brain: &mut Brain) {
         deadline: Instant::now() + Duration::from_secs(70),
         decode: None,
         terminal: None,
+        screen: ScreenPart::None,
     });
     brain.holds.debt = Some(KEY);
     brain
@@ -1209,4 +1210,143 @@ async fn cancel_model_default_and_unload_changes_are_terminal_before_their_handl
         assert_eq!(brain.coordinator.current_run(), None);
     }
     brain.close().await;
+}
+
+/// Leaves a recording hold on `thread` whose screen part is `screen`.
+fn screen_hold(brain: &mut Brain, key: HoldKey, screen: ScreenPart) {
+    recording(brain);
+    let thread = brain.config.view().main_thread;
+    let hold = brain.holds.pending.as_mut().unwrap();
+    hold.key = key;
+    hold.thread = Some(thread);
+    hold.screen = screen;
+}
+
+fn waiting() -> ScreenPart {
+    ScreenPart::Waiting {
+        generation: Some(crate::screen::Generation(0)),
+    }
+}
+
+enum Closer {
+    Control(ControlToBrain),
+    ShellLost,
+    Event(Event),
+    Lost,
+}
+
+#[tokio::test]
+async fn every_closer_of_a_waiting_screen_part_retires_its_frame_once() {
+    use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
+    let scratch = Scratch::new("hold-screen-closers");
+    let mut brain = test_support::brain(&scratch, "");
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    link.recovery = Some(crate::runtime::Recovery::new(&[], 1024));
+    let mut rig = crate::supervise::fixture::start::<crate::screen::Holds>();
+    brain.holds.screen = Some(Arc::new(HoldClient::new(rig.handle.clone())));
+    let choice = ModelChoice {
+        model: ModelSlug::new("fixture-model").unwrap(),
+        effort: Effort::High,
+        connection: ConnectionKind::ChatGpt,
+    };
+    let thread = brain.config.view().main_thread;
+    let closers = [
+        Closer::Control(ControlToBrain::GestureCancel {
+            gesture: KEY.gesture,
+        }),
+        Closer::Control(ControlToBrain::Settings(SettingsOp::SetDefaultModel(
+            choice.clone(),
+        ))),
+        Closer::Control(ControlToBrain::Settings(SettingsOp::SetHoldToTalk(false))),
+        Closer::Control(ControlToBrain::Settings(SettingsOp::RemoveVoice(
+            kumochi_protocol::voice::VoicePart::SpeechInput,
+        ))),
+        Closer::Control(ControlToBrain::ThreadOp(ThreadOp::SetModel {
+            thread,
+            choice,
+        })),
+        Closer::ShellLost,
+        Closer::Event(Event::Deadline),
+        Closer::Event(Event::Decoded(KEY, SttResult::Text("words".into()))),
+        Closer::Lost,
+    ];
+    for closer in closers {
+        screen_hold(&mut brain, KEY, waiting());
+        let submits = matches!(closer, Closer::Event(Event::Decoded(..)));
+        match closer {
+            Closer::Control(message) => {
+                brain.hold_control(&message, &mut link).unwrap();
+                if let Some(input) = super::super::controls::control_input(message).unwrap() {
+                    brain.hold_fence(&input);
+                }
+            }
+            Closer::ShellLost => brain.hold_fence(&Input::ShellLost),
+            Closer::Event(event) => brain.hold_event(event, &mut link).unwrap(),
+            Closer::Lost => brain.holds.lost(),
+        }
+        assert!(
+            brain.holds.pending.as_ref().is_none_or(|hold| matches!(
+                hold.screen,
+                ScreenPart::Closed(screen::Class::NotReady)
+            ))
+        );
+        crate::screen::release_next(&mut rig, KEY).await;
+        brain.holds.lost();
+        while let Ok(bytes) = output.try_recv() {
+            let busy = ControlToShell::VoiceHoldStatus {
+                gesture: KEY.gesture,
+                status: HoldStatus::Failed(HoldFailure::Busy),
+            };
+            let frame = kumochi_protocol::frame::decode::<ControlToShell>(
+                &bytes[kumochi_protocol::frame::HEADER_LEN..],
+            );
+            assert!(
+                !submits || frame.ok() != Some(busy),
+                "the transcript reached submit"
+            );
+        }
+    }
+    let voice = HoldKey {
+        epoch: 0,
+        gesture: GestureId(1),
+    };
+    screen_hold(&mut brain, voice, ScreenPart::None);
+    brain.holds.lost();
+    screen_hold(
+        &mut brain,
+        voice,
+        ScreenPart::Ready(crate::screen::ScreenContext::fixture(b"jpeg")),
+    );
+    brain.holds.lost();
+    let last = HoldKey {
+        epoch: 0,
+        gesture: GestureId(2),
+    };
+    screen_hold(&mut brain, last, waiting());
+    brain.holds.lost();
+    crate::screen::release_next(&mut rig, last).await;
+    brain.close().await;
+}
+
+#[test]
+fn a_screen_hold_prints_no_image_bytes() {
+    let scratch = Scratch::new("hold-screen-debug");
+    let mut brain = test_support::brain(&scratch, "");
+    let marker = b"KUMOCHI-HOLD-SCREEN-MARKER";
+    let ready = || ScreenPart::Ready(crate::screen::ScreenContext::fixture(marker));
+    screen_hold(&mut brain, KEY, ready());
+    let texts = [
+        format!("{:?}", brain.holds),
+        format!("{:?}", brain.holds.pending),
+        format!("{:?}", ready()),
+    ];
+    for text in texts {
+        assert!(!text.contains("KUMOCHI-HOLD-SCREEN-MARKER"), "{text}");
+        assert!(!text.contains(&format!("{marker:?}")[1..20]), "{text}");
+    }
+    brain.holds.pending = None;
 }

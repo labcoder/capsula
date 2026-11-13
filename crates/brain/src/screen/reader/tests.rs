@@ -397,10 +397,9 @@ fn masks_poisoned_during_a_successful_read_still_retire() {
             .join()
             .is_err()
         );
-        NodeProps {
-            password: true,
-            ..props("must not publish")
-        }
+        let mut props = props("must not publish");
+        props.password = true;
+        props
     });
     assert_busy(
         &reader

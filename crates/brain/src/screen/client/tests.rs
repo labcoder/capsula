@@ -83,10 +83,10 @@ async fn each_capture_gets_a_fresh_key_and_a_higher_ticket_and_names_its_worker(
             (key.owner, ticket.capture(), point),
             (owner(gesture), key.capture, PhysicalPoint([5, 6]))
         );
-        assert!(
-            (4_000..=5_000).contains(&ticket.ttl_ms()),
-            "{}",
-            ticket.ttl_ms()
+        assert_eq!(
+            ticket.ttl_ms(),
+            1_500,
+            "the screen budget, not the 5 s deadline"
         );
         tickets.push((key.capture, ticket.generation()));
         rig.reply(id, &Reply::Acquired(key, meta(key.capture)))
@@ -218,4 +218,48 @@ async fn a_retire_the_full_queue_refuses_ends_the_holder_and_its_exit_releases_t
             Err(Closed::Lost(WorkerLost::Lost))
         );
     }
+}
+
+#[tokio::test]
+async fn a_ticket_runs_out_at_a_sooner_deadline() {
+    let mut rig = fixture::start::<Holds>();
+    let client = client(&rig);
+    let _asking = tokio::spawn({
+        let client = Arc::clone(&client);
+        async move {
+            client
+                .context(
+                    owner(7),
+                    PhysicalPoint([1, 1]),
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .await
+        }
+    });
+    let (_, request) = rig.next().await;
+    let Request::Context { ticket, .. } = request else {
+        panic!("not a capture: {request:?}")
+    };
+    assert!(
+        (900..=1_000).contains(&ticket.ttl_ms()),
+        "{}",
+        ticket.ttl_ms()
+    );
+}
+
+#[tokio::test]
+async fn a_replacement_that_answers_anything_but_the_release_is_left_running() {
+    let mut rig = fixture::start_at::<Holds>(Generation(1));
+    let client = client(&rig);
+    let retiring = tokio::spawn({
+        let client = Arc::clone(&client);
+        async move { client.retire(owner(7), Some(Generation(0)), until()).await }
+    });
+    let (id, _) = rig.next().await;
+    rig.reply(id, &Reply::Busy).await;
+    assert_eq!(retiring.await.expect("joins"), Ok(()));
+    assert_eq!(
+        rig.terminations.load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
 }
