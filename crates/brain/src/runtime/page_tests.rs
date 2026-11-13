@@ -412,6 +412,7 @@ fn page_forwarding_leaves_the_current_run_and_its_pending_writes_alone() {
             origin: Origin::Task(ThreadId(2)),
             snapshot: None,
             first: true,
+            drawings: crate::drawing::Digest::default(),
         }))])
     );
 }

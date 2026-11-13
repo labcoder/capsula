@@ -3013,3 +3013,198 @@ fn a_repeated_step_in_a_continuing_call_draws_nothing() {
     );
     assert!(out.calls[0].complete(), "a retransmission isn't an error");
 }
+
+/// The digest line of `thread`, parsed.
+fn digest(drawing: &Drawing, thread: ThreadId) -> serde_json::Value {
+    serde_json::from_str(drawing.digest(thread).as_str()).expect("a JSON line")
+}
+
+/// `count` texts `{prefix}000` onwards, one step each 256.
+fn texts(prefix: &str, from: usize, count: usize) -> Vec<String> {
+    let ids: Vec<_> = (from..from + count)
+        .map(|n| format!("{prefix}{n:03}"))
+        .collect();
+    ids.chunks(256)
+        .map(|chunk| {
+            let put: Vec<_> = chunk
+                .iter()
+                .map(|id| format!(r#"{{"text":{{"id":"{id}","text":"","at":[1,1]}}}}"#))
+                .collect();
+            format!(r#"{{"id":"{}","put":[{}]}}"#, chunk[0], put.join(","))
+        })
+        .collect()
+}
+
+#[test]
+fn the_digest_lists_a_thread_s_scenes_with_their_objects_in_put_order() {
+    let mut drawing = Drawing::default();
+    assert_eq!(drawing.digest(THREAD).as_str(), "[]");
+    let mut store = Store::default();
+    store.run(
+        &mut drawing,
+        call(1, "c1", args("one", &[text("a", "z"), text("b", "m")])),
+    );
+    store.run(
+        &mut drawing,
+        Input::Call {
+            thread: ThreadId(8),
+            run: RunId(1),
+            call: CallId::new("c2").expect("id"),
+            args: args("theirs", &[text("a", "q")]),
+        },
+    );
+    store.run(&mut drawing, call(1, "c3", args("two", &[text("a", "k")])));
+    let begin = |scene: &str| serde_json::json!({"v":1,"scene":scene,"surface":"overlay","size":null,"title":null,"alt":"","others":"keep"});
+    assert_eq!(
+        digest(&drawing, THREAD),
+        serde_json::json!([
+            {"begin":begin("one"),"objects":[["z","text"],["m","text"]]},
+            {"begin":begin("two"),"objects":[["k","text"]]},
+        ])
+    );
+    assert_eq!(
+        digest(&drawing, ThreadId(8)),
+        serde_json::json!([{"begin":begin("theirs"),"objects":[["q","text"]]}])
+    );
+    assert_eq!(drawing.digest(ThreadId(9)).as_str(), "[]");
+}
+
+#[test]
+fn the_digest_cap_lists_the_newest_objects_and_counts_the_rest() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    // Each pair is `["o000","text"]`, 15 bytes and a comma: 512 fill the cap exactly.
+    store.run(
+        &mut drawing,
+        call(1, "c1", args("big", &texts("o", 0, 512))),
+    );
+    let line = digest(&drawing, THREAD);
+    assert_eq!(line[0]["objects"].as_array().expect("pairs").len(), 512);
+    assert_eq!(line[0]["objects"][0], serde_json::json!(["o000", "text"]));
+    assert_eq!(line[0].get("more"), None);
+    store.run(
+        &mut drawing,
+        call(1, "c2", args("big", &texts("o", 512, 1))),
+    );
+    let line = digest(&drawing, THREAD);
+    assert_eq!(line[0]["objects"].as_array().expect("pairs").len(), 512);
+    assert_eq!(line[0]["objects"][0], serde_json::json!(["o001", "text"]));
+    assert_eq!(line[0]["objects"][511], serde_json::json!(["o512", "text"]));
+    assert_eq!(line[0]["more"], 1);
+    store.run(
+        &mut drawing,
+        call(1, "c3", args("small", &[text("a", "s")])),
+    );
+    let line = digest(&drawing, THREAD);
+    assert_eq!(line[1]["objects"], serde_json::json!([["s", "text"]]));
+    assert_eq!(line[1].get("more"), None);
+    assert_eq!(line[0]["objects"].as_array().expect("pairs").len(), 511);
+    assert_eq!(line[0]["objects"][0], serde_json::json!(["o002", "text"]));
+    assert_eq!(line[0]["more"], 2);
+}
+
+#[test]
+fn the_digest_takes_a_step_once_it_is_written_and_drops_a_cleared_scene_at_once() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    store.run(&mut drawing, call(1, "c1", args("one", &[text("a", "x")])));
+    let before = drawing.digest(THREAD);
+    let pending = drawing
+        .handle(call(1, "c2", args("one", &[text("b", "y")])))
+        .expect("a continuing call");
+    let write = sent(&pending).expect("step write").1;
+    assert_eq!(
+        drawing.digest(THREAD),
+        before,
+        "a step in the store isn't listed"
+    );
+    let written = store.answer(&write);
+    let out = reply(&mut drawing, &pending, Ok(written));
+    store.settle(&mut drawing, out);
+    assert_eq!(
+        digest(&drawing, THREAD)[0]["objects"],
+        serde_json::json!([["x", "text"], ["y", "text"]])
+    );
+    let pending = drawing
+        .handle(call(1, "c3", args("one", &[text("c", "w")])))
+        .expect("a continuing call");
+    let write = sent(&pending).expect("step write").1;
+    drawing
+        .handle(Input::Clear {
+            scenes: vec![SceneId(1)],
+        })
+        .expect("clear");
+    assert_eq!(drawing.digest(THREAD).as_str(), "[]");
+    let written = store.answer(&write);
+    let out = reply(&mut drawing, &pending, Ok(written));
+    store.settle(&mut drawing, out);
+    assert_eq!(drawing.digest(THREAD).as_str(), "[]");
+}
+
+#[test]
+fn the_digest_debug_shows_no_header_text() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    let input = call(
+        1,
+        "c1",
+        envelope(&begin("one", "PRIVATE_ALT_MARKER"), &[text("a", "x")]),
+    );
+    store.run(&mut drawing, input);
+    let digest = drawing.digest(THREAD);
+    assert!(digest.as_str().contains("PRIVATE_ALT_MARKER"));
+    let debug = format!("{digest:?}");
+    assert_eq!(
+        debug,
+        format!("Digest {{ bytes: {} }}", digest.as_str().len())
+    );
+    assert!(!debug.contains(&format!("{:?}", b"PRIVATE_ALT_MARKER")));
+}
+
+#[test]
+fn the_digest_follows_a_remove_a_stop_cut_and_a_deleted_thread() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    let removal = r#"{"id":"c","remove":["x"]}"#.to_owned();
+    store.run(
+        &mut drawing,
+        call(
+            1,
+            "c1",
+            args("one", &[text("a", "x"), text("b", "y"), removal]),
+        ),
+    );
+    store.run(
+        &mut drawing,
+        call(1, "c2", args("two", &[text("a", "p"), text("b", "q")])),
+    );
+    // Scene one is cut too, or the Stop would clear it as never shown.
+    let cuts = vec![
+        SceneCut {
+            scene: SceneId(1),
+            cut: cut(3, vec![handle(&drawing, 1, "y")]),
+        },
+        SceneCut {
+            scene: SceneId(2),
+            cut: cut(1, vec![handle(&drawing, 2, "p")]),
+        },
+    ];
+    let cuts = SceneCuts::new(cuts).expect("two scenes");
+    store.run(
+        &mut drawing,
+        Input::StopScenes {
+            run: RunId(1),
+            cuts,
+        },
+    );
+    let begin = |scene: &str| serde_json::json!({"v":1,"scene":scene,"surface":"overlay","size":null,"title":null,"alt":"","others":"keep"});
+    assert_eq!(
+        digest(&drawing, THREAD),
+        serde_json::json!([
+            {"begin":begin("one"),"objects":[["y","text"]]},
+            {"begin":begin("two"),"objects":[["p","text"]]},
+        ])
+    );
+    store.run(&mut drawing, Input::ThreadDeleted { thread: THREAD });
+    assert_eq!(drawing.digest(THREAD).as_str(), "[]");
+}

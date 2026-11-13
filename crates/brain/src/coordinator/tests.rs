@@ -141,6 +141,7 @@ fn build_context(run: RunId, thread: ThreadId, attempt: u64) -> Effect {
         origin: Origin::Task(thread),
         snapshot: None,
         first: true,
+        drawings: crate::drawing::Digest::default(),
     }))
 }
 

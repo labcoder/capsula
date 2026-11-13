@@ -129,6 +129,7 @@ fn rebuilt(attempt: u64) -> Effect {
         origin: Origin::Kumo,
         snapshot: None,
         first: true,
+        drawings: crate::drawing::Digest::default(),
     }))
 }
 

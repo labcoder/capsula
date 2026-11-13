@@ -16,7 +16,9 @@ order; leave enter out unless you want a particular effect. Everything on screen
 hold about 40 filled circles or ellipses, or a diagram of about 30 boxes with labelled
 arrows; more is refused.
 
-The current turn lists Drawings on screen with their complete begin headers.
+The current turn lists Drawings on screen: each one's complete begin header and its objects
+as [id, kind] in the order they were put (an arrow is a line; ids starting -- are a
+mermaid's parts); "more" counts older objects left out.
 For the same subject, continue a listed scene: copy its header's scene, size and
 others exactly (title and alt may change), and use new step ids with set/remove for
 changes. remove lists ids; it is never a put item. Set color also recolours a fill.
@@ -26,7 +28,8 @@ one entry per part. behind can't bring X forward or reverse an earlier behind: r
 put a new one.
 Omit start unless waiting on an earlier step in this call.
 Object ids are never reused in a scene, even after remove: to resize or reshape an object,
-remove it and put a replacement with a new id, since set never changes geometry.
+remove it and put a replacement with a new id, since set never changes geometry. An id
+that isn't listed, or was removed, may still be taken, so never reuse one.
 For a new subject, use a new scene name; others defaults to clear, replacing this
 conversation's earlier drawings after the first step is saved. Use others: keep
 only for a separate comparison/accompanying drawing; kept drawings may overlap.

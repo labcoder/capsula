@@ -40,6 +40,8 @@ pub struct BuildContext {
     pub(crate) snapshot: Option<RunSnapshot>,
     /// The run's first build.
     pub(crate) first: bool,
+    /// The thread's drawings on screen when the build began, headers and objects together.
+    pub(crate) drawings: crate::drawing::Digest,
 }
 
 impl PartialEq for BuildContext {
@@ -49,6 +51,7 @@ impl PartialEq for BuildContext {
             && self.origin == other.origin
             && self.snapshot == other.snapshot
             && self.first == other.first
+            && self.drawings == other.drawings
     }
 }
 impl Eq for BuildContext {}
@@ -189,13 +192,15 @@ impl Coordinator {
         };
         let control = current.control.0.child();
         current.build = Some(Build::new(key, exposed, None, control.clone()));
+        let (thread, snapshot) = (current.thread, current.snapshot.clone());
         effects.push(Effect::Store(StoreOp::BuildContext(BuildContext {
             control,
             key,
-            thread: current.thread,
-            origin: origin(current.thread, main),
-            snapshot: current.snapshot.clone(),
-            first: current.snapshot.is_none(),
+            thread,
+            origin: origin(thread, main),
+            first: snapshot.is_none(),
+            snapshot,
+            drawings: self.drawing.digest(thread),
         })));
     }
 

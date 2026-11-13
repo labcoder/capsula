@@ -24,6 +24,26 @@ pub(crate) enum Kind {
     Solid,
 }
 impl Kind {
+    /// The name a `put` gives this kind; an arrow is a line.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Line => "line",
+            Self::Path => "path",
+            Self::Shape => "shape",
+            Self::Text => "text",
+            Self::Callout => "callout",
+            Self::Highlight => "highlight",
+            Self::Diagram => "diagram",
+            Self::Node => "node",
+            Self::Edge => "edge",
+            Self::Table => "table",
+            Self::Row => "row",
+            Self::Chart => "chart",
+            Self::Series => "series",
+            Self::View3d => "view3d",
+            Self::Solid => "solid",
+        }
+    }
     fn container(self) -> bool {
         matches!(self, Self::Diagram | Self::Table | Self::Chart)
     }

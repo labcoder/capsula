@@ -99,6 +99,7 @@ pub(super) fn read(
         thread,
         snapshot,
         first,
+        drawings,
         ..
     } = job;
     let Some(mut snapshot) = snapshot else {
@@ -129,6 +130,7 @@ pub(super) fn read(
                     let supplied = Supplied {
                         summary: read.summary(thread)?,
                         items: Vec::new(),
+                        drawings,
                     };
                     Ok(build(read, &snapshot, turn, supplied, BOUND))
                 })

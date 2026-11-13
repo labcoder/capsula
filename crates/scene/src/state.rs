@@ -355,6 +355,13 @@ impl SceneState {
     pub fn object_count(&self) -> usize {
         self.objects.len()
     }
+    /// Returns every surviving object's id, handle and kind as a `put` names it; an arrow is a
+    /// line.
+    pub fn objects(&self) -> impl Iterator<Item = (&WireId, Handle, &'static str)> {
+        self.objects
+            .iter()
+            .map(|(id, object)| (id, object.handle, object.kind.name()))
+    }
 
     /// Returns logical work still charged, including pending removals.
     pub fn usage(&self) -> Usage {

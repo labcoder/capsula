@@ -150,41 +150,6 @@ impl Store {
     }
 }
 
-impl super::context::Snapshot<'_> {
-    pub(crate) fn drawing_headers(&self, thread: ThreadId) -> Result<Vec<Begin>, StoreError> {
-        let cap = body_cap()?;
-        let limit = i64::try_from(MAX_VISIBLE_SCENES).map_err(|_| StoreError::Drawing)?;
-        let thread = sql_id(thread.0, StoreError::NoThread)?;
-        let read = || {
-            let mut begins: Vec<(i64, i64)> = self
-                .0
-                .prepare(CANDIDATES)
-                .and_then(|mut query| {
-                    query
-                        .query_map(params![cap, limit], |row| Ok((row.get(0)?, row.get(1)?)))?
-                        .collect()
-                })
-                .map_err(|_| StoreError::Drawing)?;
-            begins.reverse();
-            let mut headers = Vec::new();
-            for (id, owner) in begins {
-                if owner == thread
-                    && let Some(reading) = header(&self.0, id, cap).map_err(redact)?
-                {
-                    headers.push(reading.header.begin);
-                }
-            }
-            Ok(headers)
-        };
-        match &self.1 {
-            Some(control) => control
-                .query(&self.0, || read().map_err(crate::recall::Error::from))
-                .map_err(StoreError::from),
-            None => read(),
-        }
-    }
-}
-
 fn write_step(
     conn: &Connection,
     (thread, run): (ThreadId, RunId),
