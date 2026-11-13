@@ -180,6 +180,10 @@ pub enum Refusal {
     WindowChanged,
     /// A drawn layered window is under the pointer and where a click lands can't be told.
     Ambiguous,
+    /// The window's password masks aren't known to be complete, so its image isn't exported.
+    Unmasked,
+    /// The sealed image is over the JPEG cap, so it isn't exported.
+    TooLarge,
 }
 
 /// A complete, valid frame's description; the pixels stay in the worker.

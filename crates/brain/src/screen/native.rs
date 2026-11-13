@@ -3,27 +3,25 @@
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::time::Instant;
 
-use kumochi_protocol::geometry::DisplayRef;
+use kumochi_protocol::geometry::PhysicalPoint;
 
 use super::actor::Key;
 use super::capture::{Acquired, Capturer, Failure};
 use super::elements::{TopWindow, Wake};
 use super::frame::RawFrame;
-use super::wire::Exclusion;
 
+/// One hold's capture: the window under `point`, then one frame of it alone.
 pub(super) struct Job {
     pub(super) key: Key,
     pub(super) frame: RawFrame,
-    pub(super) display: DisplayRef,
-    pub(super) exclude: Exclusion,
+    pub(super) point: PhysicalPoint,
+    /// The connected shell's process, which the walk counts as Kumochi's.
+    pub(super) shell: u32,
     pub(super) until: Instant,
 }
 
-pub(super) type Completion = (
-    Key,
-    RawFrame,
-    Result<(Acquired, Option<TopWindow>), Failure>,
-);
+/// The frame comes back on every outcome; a success names the window it shows.
+pub(super) type Completion = (Key, RawFrame, Result<(Acquired, TopWindow), Failure>);
 
 pub(super) struct CaptureThread {
     jobs: SyncSender<Job>,
@@ -49,10 +47,10 @@ impl CaptureThread {
                                 Some(capturer) => capturer,
                                 None => capturer.insert(open().map_err(Failure::Fault)?),
                             };
-                            let foreground = capturer.foreground();
+                            let target = capturer.pointer_window(job.point, job.shell)?;
                             capturer
-                                .capture_into(&job.display, job.exclude, job.until, &mut job.frame)
-                                .map(|acquired| (acquired, foreground))
+                                .capture_window(&target, job.until, &mut job.frame)
+                                .map(|acquired| (acquired, target.top))
                         })();
                         if answers.try_send((job.key, job.frame, result)).is_err() || !wake() {
                             drop(requests);

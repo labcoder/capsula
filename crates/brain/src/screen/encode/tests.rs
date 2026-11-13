@@ -488,3 +488,22 @@ fn image_debug_never_contains_content_as_text_or_byte_lists() {
         )
     );
 }
+
+#[test]
+fn the_jpeg_cap_admits_its_exact_size_and_refuses_one_byte_less() {
+    let mut raw = frame(rect([0, 0], [64, 48]), |x, y| {
+        [
+            u8::try_from(x * 4).unwrap(),
+            u8::try_from(y * 5).unwrap(),
+            u8::try_from((x + y) % 256).unwrap(),
+            255,
+        ]
+    });
+    let clean = sanitize(&mut raw, &MaskSet::new(CaptureId(1))).unwrap();
+    let len = overview_within(&clean, JPEG_CAP).unwrap().jpeg.len();
+    assert_eq!(overview_within(&clean, len).unwrap().jpeg.len(), len);
+    assert!(matches!(
+        overview_within(&clean, len - 1),
+        Err(Failure::Refused(Refusal::TooLarge))
+    ));
+}

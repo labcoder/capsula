@@ -28,6 +28,31 @@ impl Drop for Captures {
 }
 
 impl Capturer for Captures {
+    /// The point names the window's size, so each hold can ask for its own.
+    fn pointer_window(&mut self, point: PhysicalPoint, _: u32) -> Result<Target, Refusal> {
+        let [width, height] = point.0.map(|side| u32::try_from(side).unwrap());
+        Ok(Target {
+            top: TopWindow {
+                window: WindowRef(7),
+                pid: 8,
+                rect: PhysicalRect {
+                    origin: [0, 0],
+                    size: [width, height],
+                },
+            },
+            instance: 9,
+            dpi: 96,
+        })
+    }
+    fn capture_window(
+        &mut self,
+        target: &Target,
+        until: Instant,
+        frame: &mut RawFrame,
+    ) -> Result<Acquired, Failure> {
+        let display = DisplayRef(target.top.rect);
+        self.capture_into(&display, Exclusion::KumochiWindows, until, frame)
+    }
     fn capture_into(
         &mut self,
         display: &DisplayRef,
@@ -181,8 +206,7 @@ impl Replacement {
             Request::Context {
                 key,
                 ticket: TicketWire::new(RunId(3), key.capture, key.capture.0, [91; 16], 30_000),
-                display: DisplayRef(display),
-                exclude: Exclusion::KumochiWindows,
+                point: PhysicalPoint(display.size.map(|side| i32::try_from(side).unwrap())),
             },
         );
     }

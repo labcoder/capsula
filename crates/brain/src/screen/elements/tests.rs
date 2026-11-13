@@ -33,6 +33,8 @@ pub(crate) struct FakeSource {
     pub(crate) sibling_fail_at: Option<usize>,
     pub(crate) reads: Cell<usize>,
     pub(crate) mask_reads: Cell<usize>,
+    /// The nodes that host a rendered page.
+    pub(crate) pages: Vec<usize>,
 }
 
 impl FakeSource {
@@ -55,6 +57,7 @@ impl FakeSource {
             sibling_fail_at: None,
             reads: Cell::new(0),
             mask_reads: Cell::new(0),
+            pages: Vec::new(),
         }
     }
 }
@@ -86,6 +89,9 @@ impl ElementSource for FakeSource {
             return Err(SourceError::Fault(-7));
         }
         Ok((self.nodes[*node].password, self.nodes[*node].rect))
+    }
+    fn web_content(&mut self, node: &usize) -> bool {
+        self.pages.contains(node)
     }
     fn first_child(&mut self, node: &usize) -> Result<Option<usize>, SourceError> {
         if self.navigation_at == Some(*node) {
@@ -557,6 +563,104 @@ fn root_owner_exclusion_applies_to_foreground_and_window_targets() {
             Completeness::Unknown(why)
         );
     }
+}
+
+/// A root with one page host per `(inside, named)`, each holding `inside` nodes with `named`
+/// of them named, then 30 named nodes outside every page, which the walk reaches last.
+fn page_tree(pages: &[(usize, usize)]) -> FakeSource {
+    let outside = 30;
+    let total = 1 + pages.iter().map(|(inside, _)| 1 + inside).sum::<usize>() + outside;
+    let mut source = FakeSource::flat(total);
+    let mut next = 1;
+    let mut roots = Vec::new();
+    for &(inside, named) in pages {
+        let host = next;
+        source.nodes[host].children = (host + 1..host + 1 + inside).collect();
+        for node in host + 1..host + 1 + named {
+            source.nodes[node].name = "named".into();
+        }
+        source.pages.push(host);
+        roots.push(host);
+        next = host + 1 + inside;
+    }
+    for node in next..total {
+        source.nodes[node].name = "named".into();
+    }
+    source.nodes[0].children = roots.into_iter().chain(next..total).collect();
+    source
+}
+
+fn walked(source: &mut FakeSource, limits: &ElementLimits) -> (ElementTree, Completeness) {
+    let now = Instant::now();
+    let job = job(1, now + Duration::from_secs(1));
+    let tree = walk(source, &job, limits, &|| now, &mut FakePlatform(false)).unwrap();
+    let completeness = job.masks.lock().unwrap().completeness();
+    (tree, completeness)
+}
+
+#[test]
+fn a_rendered_page_with_too_few_named_elements_leaves_masks_partial() {
+    use crate::screen::ocr::NAMED_MIN;
+    for (mut source, expected) in [
+        (page_tree(&[(25, NAMED_MIN - 1)]), Completeness::Partial),
+        (page_tree(&[(25, NAMED_MIN)]), Completeness::Complete),
+        (
+            FakeSource {
+                pages: Vec::new(),
+                ..page_tree(&[(25, 0)])
+            },
+            Completeness::Complete,
+        ),
+    ] {
+        let now = Instant::now();
+        let job = job(1, now + Duration::from_secs(1));
+        let tree = walk(
+            &mut source,
+            &job,
+            &LIMITS,
+            &|| now,
+            &mut FakePlatform(false),
+        )
+        .unwrap();
+        assert_eq!(tree.cut, None);
+        assert_eq!(tree.elements.len(), 57);
+        assert_eq!(job.masks.lock().unwrap().completeness(), expected);
+    }
+}
+
+#[test]
+fn a_sparse_page_beside_a_rich_one_leaves_masks_partial() {
+    use crate::screen::ocr::NAMED_MIN;
+    for (pages, expected) in [
+        ([(25, 25), (25, NAMED_MIN - 1)], Completeness::Partial),
+        ([(25, 25), (25, NAMED_MIN)], Completeness::Complete),
+    ] {
+        let (tree, completeness) = walked(&mut page_tree(&pages), &LIMITS);
+        assert_eq!(tree.cut, None);
+        assert_eq!(tree.elements.len(), 83);
+        assert_eq!(completeness, expected);
+    }
+}
+
+#[test]
+fn a_page_reached_only_after_the_element_cut_leaves_masks_partial() {
+    let limits = ElementLimits {
+        elements: 10,
+        ..LIMITS
+    };
+    let mut source = page_tree(&[]);
+    let (tree, completeness) = walked(&mut source, &limits);
+    assert_eq!(
+        (tree.cut, tree.elements.len(), completeness),
+        (Some(Cut::Elements), 10, Completeness::Complete)
+    );
+    let mut source = page_tree(&[]);
+    source.pages.push(30);
+    let (tree, completeness) = walked(&mut source, &limits);
+    assert_eq!(
+        (tree.cut, tree.elements.len(), completeness),
+        (Some(Cut::Elements), 10, Completeness::Partial)
+    );
 }
 
 #[test]

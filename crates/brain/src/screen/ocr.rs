@@ -16,8 +16,13 @@ const WORDS: usize = 2_000;
 const BYTES: usize = 32_768;
 const POLL: Duration = Duration::from_millis(1);
 
+/// Fewer named elements than this and the control view likely missed the content.
+pub(crate) const NAMED_MIN: usize = 20;
+/// The window class that hosts a Chromium page's rendered content.
+pub(crate) const PAGE_CLASS: &str = "Chrome_RenderWidgetHostHWND";
+
 pub(crate) fn should_recognize(named_count: usize, focused_hwnd_class: &str) -> bool {
-    named_count < 20 || focused_hwnd_class == "Chrome_RenderWidgetHostHWND"
+    named_count < NAMED_MIN || focused_hwnd_class == PAGE_CLASS
 }
 
 #[derive(Clone, Copy, Debug)]

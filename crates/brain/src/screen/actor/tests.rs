@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
 use super::*;
-use crate::screen::capture::Acquired;
+use crate::screen::capture::{Acquired, Target};
 use crate::screen::elements::{
     ElementPlatform, ElementReader, ElementSource, NodeProps, SourceError, TopWindow,
 };
@@ -12,7 +12,8 @@ use crate::screen::elements::{WalkJob, Walked};
 use crate::screen::frame::RawFrame;
 use crate::screen::mask::MaskSink;
 use crate::screen::reader::ThreadedReader;
-use kumochi_protocol::geometry::{PhysicalRect, WindowRef};
+use crate::screen::wire::Exclusion;
+use kumochi_protocol::geometry::{DisplayRef, PhysicalPoint, PhysicalRect, WindowRef};
 use kumochi_protocol::message::RunId;
 
 mod replacement;
@@ -44,8 +45,7 @@ fn context_for(id: u64, owner: Owner) -> Request {
             capture: CaptureId(id),
         },
         ticket: TicketWire::new(RunId(3), CaptureId(id), id, [91; 16], 30_000),
-        display: DisplayRef(RECT),
-        exclude: Exclusion::KumochiWindows,
+        point: PhysicalPoint([1, 1]),
     }
 }
 
@@ -119,23 +119,40 @@ struct Fake {
     foreground: Option<Gate>,
     capture: Option<Gate>,
     audit: mpsc::Sender<Vec<u8>>,
+    /// Taken by the first capture that reaches it.
     completion: Option<Failure>,
     sampled: mpsc::Sender<thread::ThreadId>,
     _local: Rc<()>,
 }
 impl Capturer for Fake {
-    fn foreground(&mut self) -> Option<TopWindow> {
+    /// Resolves the walk's window; a point left of the display has none.
+    fn pointer_window(&mut self, point: PhysicalPoint, _: u32) -> Result<Target, Refusal> {
         if let Some(gate) = self.foreground.take() {
             gate.wait();
         }
         self.sampled
             .send(thread::current().id())
             .expect("test listens");
-        Some(TopWindow {
-            window: WindowRef(7),
-            pid: 8,
-            rect: RECT,
+        if point.0[0] < 0 {
+            return Err(Refusal::NoWindow);
+        }
+        Ok(Target {
+            top: TopWindow {
+                window: WindowRef(7),
+                pid: 8,
+                rect: RECT,
+            },
+            instance: 9,
+            dpi: 96,
         })
+    }
+    fn capture_window(
+        &mut self,
+        _: &Target,
+        until: Instant,
+        frame: &mut RawFrame,
+    ) -> Result<Acquired, Failure> {
+        self.capture_into(&DisplayRef(RECT), Exclusion::KumochiWindows, until, frame)
     }
     fn capture_into(
         &mut self,
@@ -149,7 +166,7 @@ impl Capturer for Fake {
         if let Some(gate) = self.capture.take() {
             gate.wait();
         }
-        if let Some(failure) = self.completion {
+        if let Some(failure) = self.completion.take() {
             return Err(failure);
         }
         Ok(Acquired {
@@ -242,6 +259,8 @@ struct Rig {
     masks: mpsc::Receiver<MaskSink>,
     sampled: mpsc::Receiver<thread::ThreadId>,
     clock: Arc<Mutex<Instant>>,
+    /// Capturers the worker opened.
+    opened: Arc<std::sync::atomic::AtomicUsize>,
     done: thread::JoinHandle<Result<(), frame::FrameError>>,
 }
 
@@ -269,6 +288,8 @@ impl Rig {
         let (sample, sampled) = mpsc::channel();
         let clock = Arc::new(Mutex::new(Instant::now()));
         let time = Arc::clone(&clock);
+        let opened = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let opens = Arc::clone(&opened);
         let done = thread::spawn(move || {
             let now = *time.lock().unwrap();
             SOURCE.with(|source| {
@@ -291,6 +312,7 @@ impl Rig {
                     bytes: Vec::new(),
                 },
                 move || {
+                    opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     Ok(Box::new(Fake {
                         clock: Arc::clone(&captured_at),
                         foreground: foreground.take(),
@@ -318,6 +340,7 @@ impl Rig {
             masks,
             sampled,
             clock,
+            opened,
             done,
         }
     }
@@ -635,12 +658,12 @@ fn a_failed_new_attempt_revokes_the_old_frame_and_invalid_elements_stay_spent() 
         },
     );
     assert_eq!(rig.reply(), (3, Reply::Refused(Refusal::Reused)));
-    let mut invalid = context(4);
-    if let Request::Context { display, .. } = &mut invalid {
-        display.0.size = [0, 3];
+    let mut nowhere = context(4);
+    if let Request::Context { point, .. } = &mut nowhere {
+        *point = PhysicalPoint([-1, 1]);
     }
-    rig.send(4, &invalid);
-    assert_eq!(rig.reply(), (4, Reply::Refused(Refusal::Invalid)));
+    rig.send(4, &nowhere);
+    assert_eq!(rig.reply(), (4, Reply::Refused(Refusal::NoWindow)));
     rig.scrubbed();
     rig.send(
         5,
@@ -872,4 +895,134 @@ fn a_blocked_walk_does_not_queue_the_next_captures_foreground_behind_it() {
         (4, Reply::Released(key(3).owner, Some(CaptureId(3))))
     );
     rig.finish();
+}
+
+#[test]
+fn a_window_fault_answers_its_hold_alone_and_the_same_capturer_serves_the_next() {
+    let rig = Rig::create(None, None, None, Clock::Manual, Some(Failure::Fault(-5)));
+    rig.send(1, &context(1));
+    assert_eq!(rig.reply(), (1, Reply::Fault(-5)));
+    rig.scrubbed();
+    rig.send(2, &context(2));
+    rig.acquired(2);
+    assert_eq!(rig.opened.load(std::sync::atomic::Ordering::SeqCst), 1);
+    rig.finish();
+}
+
+#[test]
+fn a_walked_hold_seals_one_masked_jpeg_and_releases_its_frame() {
+    let rig = Rig::start(None, None, None);
+    rig.send(1, &context(1));
+    rig.acquired(1);
+    rig.send(
+        2,
+        &Request::Elements {
+            key: key(1),
+            target: ElementTarget::Foreground,
+        },
+    );
+    let (id, reply) = rig.reply();
+    assert!(
+        id == 2 && matches!(reply, Reply::Elements(walked, _) if walked == key(1)),
+        "{reply:?}"
+    );
+    rig.send(3, &Request::Seal(key(1)));
+    let (id, reply) = rig.reply();
+    let Reply::Sealed(sealed, context) = reply else {
+        panic!("not sealed: {reply:?}")
+    };
+    assert_eq!((id, sealed), (3, key(1)));
+    let image = image::load_from_memory_with_format(context.jpeg(), image::ImageFormat::Jpeg)
+        .expect("a JPEG");
+    assert_eq!((image.width(), image.height()), (4, 3));
+    assert_eq!(context.transform().display, RECT);
+    rig.scrubbed();
+    rig.send(4, &Request::Seal(key(1)));
+    assert_eq!(rig.reply(), (4, Reply::Refused(Refusal::Stale)));
+    rig.finish();
+}
+
+#[test]
+fn a_complete_walk_of_another_window_never_seals_the_captured_one() {
+    let rig = Rig::start(None, None, None);
+    rig.send(1, &context(1));
+    rig.acquired(1);
+    let other = ElementTarget::Window {
+        window: WindowRef(9),
+        pid: 8,
+    };
+    rig.send(
+        2,
+        &Request::Elements {
+            key: key(1),
+            target: other,
+        },
+    );
+    let (id, reply) = rig.reply();
+    assert!(
+        id == 2 && matches!(reply, Reply::Elements(walked, _) if walked == key(1)),
+        "{reply:?}"
+    );
+    rig.send(3, &Request::Seal(key(1)));
+    assert_eq!(rig.reply(), (3, Reply::Refused(Refusal::Unmasked)));
+    rig.scrubbed();
+    rig.send(
+        4,
+        &Request::Elements {
+            key: key(1),
+            target: ElementTarget::Window {
+                window: WindowRef(7),
+                pid: 8,
+            },
+        },
+    );
+    assert_eq!(rig.reply(), (4, Reply::Refused(Refusal::Stale)));
+    rig.send(5, &Request::Seal(key(1)));
+    assert_eq!(rig.reply(), (5, Reply::Refused(Refusal::Stale)));
+    rig.finish();
+}
+
+#[test]
+fn sealing_before_the_walk_refuses_releases_the_frame_and_stays_refused() {
+    let rig = Rig::start(None, None, None);
+    rig.send(1, &context(1));
+    rig.acquired(1);
+    rig.send(2, &Request::Seal(key(1)));
+    assert_eq!(rig.reply(), (2, Reply::Refused(Refusal::Unmasked)));
+    rig.scrubbed();
+    rig.send(
+        3,
+        &Request::Elements {
+            key: key(1),
+            target: ElementTarget::Foreground,
+        },
+    );
+    assert_eq!(rig.reply(), (3, Reply::Refused(Refusal::Stale)));
+    rig.send(4, &Request::Seal(key(1)));
+    assert_eq!(rig.reply(), (4, Reply::Refused(Refusal::Stale)));
+    rig.finish();
+}
+#[test]
+fn a_sealed_context_never_prints_its_jpeg() {
+    let marker = b"KUMOCHI-SEALED-MARKER".to_vec();
+    let encoded = crate::screen::encode::Encoded {
+        jpeg: zeroize::Zeroizing::new(marker.clone()),
+        size: [4, 3],
+        capture: CaptureId(1),
+        generation: 1,
+        completeness: crate::screen::mask::Completeness::Complete,
+        transform: crate::screen::encode::CaptureTransform {
+            display: RECT,
+            dpi: 96,
+            overview_size: [4, 3],
+            crop: None,
+        },
+    };
+    let context = crate::screen::context::ScreenContext::new(encoded);
+    let printed = format!("{context:?}");
+    let reply = format!("{:?}", Reply::Sealed(key(1), context));
+    for text in [printed, reply] {
+        assert!(!text.contains("KUMOCHI-SEALED-MARKER"), "{text}");
+        assert!(!text.contains(&format!("{marker:?}")[1..20]), "{text}");
+    }
 }

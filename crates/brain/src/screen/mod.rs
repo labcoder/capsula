@@ -6,6 +6,7 @@
 )]
 mod actor;
 mod capture;
+mod context;
 #[cfg_attr(
     not(any(test, windows)),
     expect(dead_code, reason = "macOS adapter follows Windows")
@@ -45,6 +46,8 @@ pub(crate) use frame::{RawFrame, display_edges};
 #[cfg(all(windows, any(test, feature = "test-support")))]
 pub(crate) use mask::MaskSet;
 pub use mask::Unavailable;
+#[cfg(windows)]
+pub(crate) use ocr::PAGE_CLASS;
 #[cfg(windows)]
 pub(crate) use reader::{CONNECTION_TIMEOUT, TRANSACTION_TIMEOUT, ThreadedReader};
 pub use supervisor::{CaptureError, REQUEST_DEADLINE, ScreenHandle, ScreenSupervisor};

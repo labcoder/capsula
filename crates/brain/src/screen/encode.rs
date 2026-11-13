@@ -1,8 +1,12 @@
 //! Portable overview resampling and native focus crops, exclusively from sanitized pixels.
 
+use std::io::Write;
+
 use image::ExtendedColorType;
 use image::codecs::jpeg::JpegEncoder;
 use kumochi_protocol::geometry::{LogicalPoint, OverviewPoint, PhysicalPoint, PhysicalRect};
+use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use super::capture::Failure;
 use super::mask::Completeness;
@@ -13,9 +17,12 @@ const OVERVIEW_LIMIT: [u32; 2] = [1280, 720];
 const CROP_LIMIT: [u32; 2] = [1024, 576];
 const JPEG_QUALITY: u8 = 85;
 const ENCODE_FAULT: i32 = -2_147_467_259;
+/// The largest JPEG the worker hands out; one over refuses, with no further downscale.
+// shortcut: 2 MiB is a guess, not a measurement; set it from M10's JPEG sizes of real windows.
+pub(crate) const JPEG_CAP: usize = 2 * 1024 * 1024;
 
 /// Coordinate spaces belonging to one image, all relative to its captured display.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CaptureTransform {
     pub(crate) display: PhysicalRect,
     pub(crate) dpi: u32,
@@ -82,7 +89,7 @@ impl CaptureTransform {
 
 /// One JPEG. Its bytes are user content and never appear in diagnostics.
 pub(crate) struct Encoded {
-    pub(crate) jpeg: Vec<u8>,
+    pub(crate) jpeg: Zeroizing<Vec<u8>>,
     pub(crate) size: [u32; 2],
     #[cfg_attr(not(test), expect(dead_code, reason = "A6 checks image capture ids"))]
     pub(crate) capture: CaptureId,
@@ -106,12 +113,17 @@ impl std::fmt::Debug for Encoded {
 /// Area-averages to fit 1280×720 without enlarging, then encodes RGB at quality 85.
 ///
 /// # Errors
-/// A content-free numeric fault if JPEG encoding fails.
+/// `TooLarge` over [`JPEG_CAP`]; a content-free numeric fault if JPEG encoding fails.
 #[cfg_attr(not(test), expect(dead_code, reason = "A6 stages the overview"))]
 pub(crate) fn overview(frame: &SanitizedFrame<'_>) -> Result<Encoded, Failure> {
+    overview_within(frame, JPEG_CAP)
+}
+
+/// [`overview`] under a cap of `cap` JPEG bytes.
+pub(crate) fn overview_within(frame: &SanitizedFrame<'_>, cap: usize) -> Result<Encoded, Failure> {
     let (meta, _) = frame.image();
     let size = overview_size(meta.display.size);
-    encode(frame, meta.display, size, None)
+    encode(frame, meta.display, size, None, cap)
 }
 
 /// Clips and centres a native-pixel window no larger than 1024×576, without scaling.
@@ -122,7 +134,7 @@ pub(crate) fn overview(frame: &SanitizedFrame<'_>) -> Result<Encoded, Failure> {
 pub(crate) fn crop(frame: &SanitizedFrame<'_>, region: PhysicalRect) -> Result<Encoded, Failure> {
     let (meta, _) = frame.image();
     let region = crop_rect(region, meta.display).ok_or(Refusal::Invalid)?;
-    encode(frame, region, region.size, Some(region))
+    encode(frame, region, region.size, Some(region), JPEG_CAP)
 }
 
 fn overview_size(size: [u32; 2]) -> [u32; 2] {
@@ -150,17 +162,53 @@ fn crop_rect(region: PhysicalRect, display: PhysicalRect) -> Option<PhysicalRect
     Some(rect)
 }
 
+/// Writes into a buffer made with its whole capacity, so the JPEG is never copied by a
+/// reallocation, and remembers whether the encoder wanted more than the cap.
+struct Capped<'a> {
+    bytes: &'a mut Vec<u8>,
+    cap: usize,
+    over: bool,
+}
+
+impl Write for Capped<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.len() > self.cap - self.bytes.len() {
+            self.over = true;
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn encode(
     frame: &SanitizedFrame<'_>,
     region: PhysicalRect,
     size: [u32; 2],
     crop: Option<PhysicalRect>,
+    cap: usize,
 ) -> Result<Encoded, Failure> {
-    let rgb = resample(frame, region, size);
-    let mut jpeg = Vec::new();
-    JpegEncoder::new_with_quality(&mut jpeg, JPEG_QUALITY)
-        .encode(&rgb, size[0], size[1], ExtendedColorType::Rgb8)
-        .map_err(|_| Failure::Fault(ENCODE_FAULT))?;
+    let rgb = Zeroizing::new(resample(frame, region, size));
+    let mut jpeg = Zeroizing::new(Vec::with_capacity(cap));
+    let mut out = Capped {
+        bytes: &mut jpeg,
+        cap,
+        over: false,
+    };
+    let encoded = JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY).encode(
+        &rgb,
+        size[0],
+        size[1],
+        ExtendedColorType::Rgb8,
+    );
+    if out.over {
+        return Err(Refusal::TooLarge.into());
+    }
+    encoded.map_err(|_| Failure::Fault(ENCODE_FAULT))?;
     let (meta, _) = frame.image();
     Ok(Encoded {
         jpeg,

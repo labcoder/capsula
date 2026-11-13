@@ -4,17 +4,23 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::frame;
-use kumochi_protocol::geometry::DisplayRef;
+use kumochi_protocol::geometry::PhysicalPoint;
 use serde::{Deserialize, Serialize};
 
 use super::capture::{Capturer, Failure, Screen};
+use super::context::ScreenContext;
 use super::elements::{ElementTree, OpenElements, Wake};
+use super::encode::JPEG_CAP;
 use super::native::{CaptureThread, Job};
 use super::supervisor::Screen as Kind;
-use super::wire::{CaptureId, ElementTarget, Exclusion, FrameMeta, Refusal, TicketWire};
+use super::wire::{CaptureId, ElementTarget, FrameMeta, Refusal, TicketWire};
 use crate::supervise::{Kind as _, read_request, write_message};
 
 const QUEUE: usize = 16;
+const _: () = assert!(
+    JPEG_CAP + 4096 <= super::wire::MAX_REPLY_BYTES,
+    "a sealed reply, the JPEG plus well under 4 KiB, must fit the reply cap"
+);
 
 /// A hold: its shell connection's epoch, then the gesture within it. The order is the brain's
 /// own, so one high-water fence retires every earlier hold.
@@ -33,16 +39,18 @@ pub(super) struct Key {
 #[derive(Serialize, Deserialize)]
 enum Request {
     Ping,
+    /// One frame of the window under `point`, the hold's pointer when it was recognized.
     Context {
         key: Key,
         ticket: TicketWire,
-        display: DisplayRef,
-        exclude: Exclusion,
+        point: PhysicalPoint,
     },
     Elements {
         key: Key,
         target: ElementTarget,
     },
+    /// The held frame's one image, after its walk; the frame is released whatever the answer.
+    Seal(Key),
     Drop(Key),
     Retire(Owner),
 }
@@ -53,6 +61,7 @@ enum Reply {
     Acquired(Key, FrameMeta),
     Complete(Key),
     Elements(Key, ElementTree),
+    Sealed(Key, ScreenContext),
     Released(Owner, Option<CaptureId>),
     Refused(Refusal),
     Busy,
@@ -90,7 +99,6 @@ struct Capture {
     id: u64,
     key: Key,
     ticket: TicketWire,
-    display: DisplayRef,
     received: Instant,
     expires: Instant,
 }
@@ -163,18 +171,13 @@ fn run(
         match event {
             Some(Event::Request(id, body, received)) => match body {
                 Request::Ping => send(id, Reply::Pong)?,
-                Request::Context {
-                    key,
-                    ticket,
-                    display,
-                    exclude,
-                } => {
+                Request::Context { key, ticket, point } => {
                     if current.is_some_and(|held: Key| held.owner != key.owner) {
                         screen.clear();
                     }
                     live = false;
                     expires = None;
-                    let admitted = screen.admit(&ticket, &display, received, now);
+                    let admitted = screen.admit(&ticket, received, now);
                     current = Some(key);
                     let retired = fence.is_some_and(|fence| key.owner <= fence);
                     let result =
@@ -191,8 +194,8 @@ fn run(
                             let job = Job {
                                 key,
                                 frame: std::mem::take(&mut screen.frame),
-                                display,
-                                exclude,
+                                point,
+                                shell: ticket.shell_pid(),
                                 until,
                             };
                             match native.begin(job) {
@@ -203,7 +206,6 @@ fn run(
                                         id,
                                         key,
                                         ticket,
-                                        display,
                                         received,
                                         expires: until,
                                     });
@@ -251,6 +253,18 @@ fn run(
                                 }
                             }
                             Err(Failure::Retire(_)) => return Ok(()),
+                            Err(error) => send(id, failed(error))?,
+                        }
+                    }
+                }
+                Request::Seal(key) => {
+                    if !live || current != Some(key) || capturing.is_some() || walking.is_some() {
+                        send(id, Reply::Refused(Refusal::Stale))?;
+                    } else {
+                        live = false;
+                        expires = None;
+                        match screen.seal(key.capture, JPEG_CAP) {
+                            Ok(context) => send(id, Reply::Sealed(key, context))?,
                             Err(error) => send(id, failed(error))?,
                         }
                     }
@@ -306,14 +320,14 @@ fn run(
                     screen.clear();
                     send(pending.id, Reply::Refused(Refusal::Stale))?;
                 } else {
-                    let result = result.and_then(|(acquired, foreground)| {
+                    let result = result.and_then(|(acquired, window)| {
                         screen.acquired(
                             &pending.ticket,
-                            &pending.display,
+                            window.rect,
                             pending.received,
                             pending.expires,
                             now(),
-                            (acquired, foreground),
+                            (acquired, Some(window)),
                         )
                     });
                     match result {
@@ -360,6 +374,8 @@ fn run(
     }
 }
 
+/// Only `Retire` ends the worker. A refusal or a fault, a window capture's included, answers
+/// this request alone: no screen for that hold, and the same capturer serves the next one.
 fn failed(error: Failure) -> Reply {
     match error {
         Failure::Refused(why) => Reply::Refused(why),

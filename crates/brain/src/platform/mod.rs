@@ -25,6 +25,8 @@ pub(super) use connected_shell::register_shell;
 pub use session_lock::{SessionLock, SessionLockError};
 pub use trust_roots::{TrustRoots, TrustRootsError};
 #[cfg(windows)]
+pub(crate) use windows::DumpExclusion;
+#[cfg(windows)]
 pub(crate) use windows::shell_connection;
 
 #[cfg(windows)]

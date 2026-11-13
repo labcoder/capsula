@@ -278,7 +278,8 @@ record Rez's scale with that result.
 `screen/actor.rs` is an alternate worker-local protocol and loop, not selected by the
 production brain or worker entry point. Those still use the original synchronous request path.
 The alternate loop creates a dedicated capture producer; that thread constructs, uses and drops
-its non-Send capturer, sampling foreground immediately before capture. Only the sole-owned
+its non-Send capturer, resolving the window under the hold's point and capturing that window
+alone. Only the sole-owned
 `RawFrame` and content-free result identity move back to the actor. Capture and UIA each reserve
 one completion slot until taken; their nonblocking wakes may coalesce in the bounded inbox.
 The actor checks the slots after every event and nearest-expiry/deadline wake.
@@ -346,6 +347,54 @@ desktop:
 ```
 cargo test -p kumochi-brain --lib native_window_probe -- --ignored --exact --nocapture
 ```
+
+## Sealing a hold's image (dormant)
+
+In the alternate loop, a hold's `Context` carries the hold's point instead of a display. The
+capture thread resolves the window under it and captures that window alone. A refusal or a fault
+answers that hold only: there is no screen for it, and the same capturer serves the next hold.
+Only `Retire` ends the worker.
+
+After the element walk, `Seal` hands out the hold's one image as a `ScreenContext`: the frame
+masked and encoded as an overview JPEG, with its `CaptureTransform`. It seals only when the
+hold's one walk read the captured window itself (its window and process) and found every
+password mask, and refuses with `Unmasked` otherwise. The frame is scrubbed and
+freed whatever the answer, so a second `Seal` is `Stale`.
+
+The JPEG is capped at 2 MiB (`JPEG_CAP`), a guess until real windows are measured. The encoder
+writes into one buffer allocated at the cap, so growth never copies it, and an image over the cap
+refuses with `TooLarge`; it is never downscaled further. `TooLarge`, `Unmasked` and
+`Ambiguous` are ordinary refusals.
+
+The JPEG's bytes are user content. `ScreenContext` zeroes them on drop and its Debug prints only
+the byte count and size. The encoder's buffers (the resampled RGB and the JPEG) are zeroed on
+drop, errors included. The worker zeroes its final serialized buffers once a message is written,
+but not the copies a growing buffer leaves behind when it reallocates. Nothing writes the bytes
+to a log, a file or a store.
+
+The change that first sends `Seal` has three preconditions, because the image only becomes
+reachable then:
+
+1. The worker serializes the reply without growth copies: sized first, written into one buffer.
+2. The brain zeroes the message it reassembles from the reply's chunks.
+3. The brain holds its `ScreenContext` under the same rules as the worker: zeroed on drop and
+   excluded from error reports.
+
+On Windows, a frame's pixel buffer and the sealed JPEG are each registered with
+`WerRegisterExcludedMemoryBlock` while they hold content. That keeps the block out of Windows
+Error Reporting's reports only: not out of dumps a debugger or another tool takes, nor out of a
+system memory dump, and a process can register only a limited number of blocks. A frame's buffer
+stays registered while it's reused and is unregistered once zeroed, before it's freed. The JPEG is
+registered once encoding finishes, and the resampled RGB never is; both live only for the encode.
+The registration is in-process only. When Windows refuses it, capture carries on, and that
+buffer's contents can appear in an error report written while it holds them.
+
+Chromium's control view can miss a rendered page's fields. Every `Chrome_RenderWidgetHostHWND`
+element the walk passes through starts a page, and each page needs 20 named elements of its own
+among those the walk stored; otherwise the masks are `Partial` and the hold doesn't seal. A page
+first reached after the walk's element or byte cut has none stored, so it's `Partial` too, and a
+large page the walk cuts short refuses for now. The threshold is a guess until a real page is
+measured.
 
 ## Portable element data and walk
 

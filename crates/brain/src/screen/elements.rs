@@ -191,6 +191,11 @@ pub(crate) trait ElementSource {
     fn mask(&mut self, node: &Self::Node) -> Result<(bool, PhysicalRect), SourceError> {
         self.read(node).map(|props| (props.password, props.rect))
     }
+    /// Whether `node` hosts a browser's rendered page (`Chrome_RenderWidgetHostHWND`), whose
+    /// fields the control view can miss.
+    fn web_content(&mut self, _node: &Self::Node) -> bool {
+        false
+    }
     fn first_child(&mut self, node: &Self::Node) -> Result<Option<Self::Node>, SourceError>;
     fn next_sibling(&mut self, node: &Self::Node) -> Result<Option<Self::Node>, SourceError>;
 }
@@ -425,6 +430,9 @@ fn walk_tree<S: ElementSource>(
     let mut mask_only = false;
     let mut mask_reads = 0;
     let mut complete = true;
+    // B6: for each stored element, the rendered page it sits in; for each page, its named elements.
+    let mut page_of: Vec<Option<usize>> = Vec::new();
+    let mut named: Vec<usize> = Vec::new();
     while let Some((node, parent, depth)) = stack.pop() {
         let stop = if !mask_only && tree.elements.len() >= limits.elements {
             Some(Cut::Elements)
@@ -475,7 +483,9 @@ fn walk_tree<S: ElementSource>(
             complete &= !props.rect.size.contains(&0);
         }
         let index = u16::try_from(tree.elements.len()).map_err(|_| Failure::Fault(0))?;
-        if !mask_only {
+        if mask_only {
+            complete &= !source.web_content(&node);
+        } else {
             let visible = !props.password && intersects(props.rect, *display);
             let name_cut = visible && props.name.chars().count() > limits.name_chars;
             let element = Element {
@@ -504,7 +514,18 @@ fn walk_tree<S: ElementSource>(
             if bytes + len > limits.bytes {
                 tree.cut = Some(Cut::Bytes);
                 mask_only = true;
+                complete &= !source.web_content(&node);
             } else {
+                let page = if source.web_content(&node) {
+                    named.push(0);
+                    Some(named.len() - 1)
+                } else {
+                    parent.and_then(|parent| page_of[usize::from(parent)])
+                };
+                if let Some(page) = page {
+                    named[page] += usize::from(!element.name.is_empty());
+                }
+                page_of.push(page);
                 bytes += len;
                 tree.elements.push(element);
             }
@@ -537,6 +558,9 @@ fn walk_tree<S: ElementSource>(
             break;
         }
     }
+    // A sparse page may hide fields the walk can't see, so every page needs NAMED_MIN names.
+    // shortcut: a large page the walk cuts short refuses too; set the rule from M6's real pages.
+    complete &= named.iter().all(|&count| count >= super::ocr::NAMED_MIN);
     Ok((
         tree,
         if complete {

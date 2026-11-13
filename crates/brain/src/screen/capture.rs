@@ -3,13 +3,16 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::geometry::{DisplayRef, PhysicalPoint};
+use kumochi_protocol::geometry::{DisplayRef, PhysicalPoint, PhysicalRect, WindowRef};
 
+use super::context::ScreenContext;
 use super::elements::{
     ElementReader, ElementTree, MaskSink, OpenElements, TopWindow, WalkJob, Walked, intersects,
 };
+use super::encode::overview_within;
 use super::frame::{RawFrame, display_edges};
-use super::mask::MaskSet;
+use super::mask::{Completeness, MaskSet};
+use super::sanitize::sanitize;
 use super::wire::{CaptureId, ElementTarget, Exclusion, FrameMeta, Refusal, TicketWire};
 
 /// Why a screen operation failed or requires worker retirement.
@@ -66,10 +69,6 @@ impl std::fmt::Debug for Target {
 /// `SCScreenshotManager`, with Kumochi excluded from a display's content filter and
 /// `desktopIndependentWindow` for a window.
 pub(crate) trait Capturer {
-    fn foreground(&mut self) -> Option<TopWindow> {
-        None
-    }
-
     /// The window a click at `point` would land on, Kumochi's own aside, after the checks that
     /// refuse it before any pixels. `shell` is the connected shell's process.
     ///
@@ -157,6 +156,8 @@ struct Held {
     walk_by: Instant,
     foreground: Option<TopWindow>,
     spent: bool,
+    /// The window its one walk read, which a seal requires to be the captured one.
+    walked: Option<(WindowRef, u32)>,
 }
 
 /// The capture state one worker owns on its serve thread.
@@ -186,7 +187,6 @@ impl Screen {
     pub(super) fn admit(
         &mut self,
         ticket: &TicketWire,
-        display: &DisplayRef,
         received: Instant,
         now: &dyn Fn() -> Instant,
     ) -> Result<Instant, Failure> {
@@ -195,17 +195,17 @@ impl Screen {
         self.masks = Arc::new(Mutex::new(MaskSet::new(ticket.capture())));
         self.book.spend(ticket.generation())?;
         let expires = received + Duration::from_millis(ticket.ttl_ms().into());
-        display_edges(display)?;
         if now() >= expires {
             return Err(Refusal::Expired.into());
         }
         Ok(expires)
     }
 
+    /// Commits the frame of `surface`: a display, or the window the walk resolved.
     pub(super) fn acquired(
         &mut self,
         ticket: &TicketWire,
-        display: &DisplayRef,
+        surface: PhysicalRect,
         received: Instant,
         expires: Instant,
         now: Instant,
@@ -218,7 +218,7 @@ impl Screen {
         }
         let meta = FrameMeta {
             capture: ticket.capture(),
-            display: display.0,
+            display: surface,
             dpi: acquired.dpi,
             acquired_after_ms: u32::try_from(
                 acquired
@@ -235,6 +235,7 @@ impl Screen {
             walk_by: acquired.arrived + WALK_WINDOW,
             foreground,
             spent: false,
+            walked: None,
         });
         Ok(meta)
     }
@@ -249,6 +250,38 @@ impl Screen {
         self.masks = Arc::new(Mutex::new(MaskSet::new(CaptureId(0))));
     }
 
+    /// Hands out the held frame's one image, masked and encoded under `cap` JPEG bytes, and
+    /// releases the frame whatever the outcome. Only a walk of the captured window that found
+    /// every password mask seals.
+    pub(super) fn seal(
+        &mut self,
+        capture: CaptureId,
+        cap: usize,
+    ) -> Result<ScreenContext, Failure> {
+        let sealed = self.sealed(capture, cap);
+        self.clear();
+        sealed
+    }
+
+    fn sealed(&mut self, capture: CaptureId, cap: usize) -> Result<ScreenContext, Failure> {
+        let held = self
+            .held
+            .as_ref()
+            .filter(|held| held.capture == capture)
+            .ok_or(Refusal::Stale)?;
+        let captured = held.foreground.as_ref().map(|top| (top.window, top.pid));
+        if captured.is_none() || held.walked != captured {
+            return Err(Refusal::Unmasked.into());
+        }
+        let sink = Arc::clone(&self.masks);
+        let masks = sink.lock().map_err(|_| Refusal::Unmasked)?;
+        if masks.completeness() != Completeness::Complete {
+            return Err(Refusal::Unmasked.into());
+        }
+        let clean = sanitize(&mut self.frame, &masks)?;
+        overview_within(&clean, cap).map(ScreenContext::new)
+    }
+
     /// Takes one frame under `ticket`, received at `received`. Its validity is local: it runs
     /// from receipt, so the brain still checks its own deadline on the reply.
     pub(super) fn capture(
@@ -260,7 +293,8 @@ impl Screen {
         now: &dyn Fn() -> Instant,
         open: (Open, OpenElements),
     ) -> Result<FrameMeta, Failure> {
-        let expires = self.admit(ticket, display, received, now)?;
+        let expires = self.admit(ticket, received, now)?;
+        display_edges(display)?;
         let capturer = match &mut self.capturer {
             Some(capturer) => capturer,
             None => self.capturer.insert(open.0().map_err(Failure::Fault)?),
@@ -281,7 +315,7 @@ impl Screen {
         let acquired = capturer.capture_into(display, exclude, expires, &mut self.frame)?;
         self.acquired(
             ticket,
-            display,
+            display.0,
             received,
             expires,
             now(),
@@ -346,6 +380,9 @@ impl Screen {
                 }),
             window @ ElementTarget::Window { .. } => Some(window),
         };
+        if let Some(ElementTarget::Window { window, pid }) = target {
+            held.walked = Some((window, pid));
+        }
         let Some(target) = target else {
             let mut tree =
                 ElementTree::unavailable(capture, super::elements::Unavailable::NoWindow);
