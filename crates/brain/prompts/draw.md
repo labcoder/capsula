@@ -13,7 +13,7 @@ it up to 2 times when there is room. Do not guess the display size or position.
 Build a larger drawing in 3 to 6 steps, in the order you would draw it by hand, each
 with a short say. Without a delay, a step's objects come in one after another in put
 order; leave enter out unless you want a particular effect. Everything on screen can
-hold about 40 filled circles or ellipses, or a diagram of about 20 boxes with labelled
+hold about 40 filled circles or ellipses, or a diagram of about 30 boxes with labelled
 arrows; more is refused.
 
 The current turn lists Drawings on screen with their complete begin headers.
