@@ -40,6 +40,7 @@ impl Kind for Screen {
     const MAX_REPLY: usize = MAX_REPLY_BYTES;
     type Request = RequestBody;
     type Reply = ReplyBody;
+    type Assembly = crate::supervise::Zeroed;
 }
 
 /// The isolated worker's lifecycle owner.

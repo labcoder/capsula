@@ -31,14 +31,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc as blocking};
 use std::time::Duration;
 
-use kumochi_protocol::frame::{self, Pipe};
+use kumochi_protocol::frame;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::time::Instant;
 
-use self::wire::{Assembly, Frame};
-pub(crate) use self::wire::{read_request, write_message};
+use self::wire::Frame;
+pub(crate) use self::wire::{
+    Assembly, Reassembly, Zeroed, read_request, write_message, write_sized,
+};
 use crate::platform::{Helper, Job};
 
 /// Losses are counted over this window for backoff.
@@ -67,6 +69,9 @@ pub(crate) trait Kind: 'static {
     const MAX_REPLY: usize;
     type Request: Serialize + Send + 'static;
     type Reply: DeserializeOwned + Send + 'static;
+    /// How its replies are read and put back together: [`Zeroed`] when they can carry the
+    /// user's content.
+    type Assembly: Reassembly;
 
     /// Whether `reply` ends its request. Every reply of a kind without streams does.
     fn is_terminal(_reply: &Self::Reply) -> bool {
@@ -507,8 +512,11 @@ struct Worker<K: Kind> {
     /// Taken for exit confirmation once the worker is lost.
     process: Option<Box<dyn Process>>,
     writes: blocking::SyncSender<(u64, K::Request)>,
-    reads: mpsc::Receiver<Option<Frame>>,
+    reads: mpsc::Receiver<Option<Chunk<K>>>,
 }
+
+/// A reply frame as a kind's reassembly holds it.
+type Chunk<K> = Frame<<<K as Kind>::Assembly as Reassembly>::Body>;
 
 /// Why a worker didn't start.
 enum SpawnFailure {
@@ -542,7 +550,7 @@ impl<K: Kind> Worker<K> {
                 .name(format!("{}-reader", K::NAME))
                 .spawn(move || {
                     loop {
-                        let reply = frame::read(&mut pipes.stdout, Pipe::Data).ok().flatten();
+                        let reply = K::Assembly::read(&mut pipes.stdout).ok().flatten();
                         let ended = reply.is_none();
                         if replies.blocking_send(reply).is_err() || ended {
                             break;
@@ -670,7 +678,7 @@ enum LossReason {
 struct Pending<K: Kind> {
     until: Instant,
     answer: Destination<K>,
-    assembly: Assembly,
+    assembly: K::Assembly,
     /// What the request may still receive: whole messages, and serialized bytes across them.
     messages: usize,
     bytes: usize,
@@ -685,7 +693,7 @@ impl<K: Kind> Pending<K> {
         Self {
             until,
             answer,
-            assembly: Assembly::new(K::MAX_REPLY),
+            assembly: K::Assembly::new(K::MAX_REPLY),
             messages: MAX_MESSAGES,
             bytes,
         }
@@ -703,20 +711,20 @@ fn complete<K: Kind>(answer: Answer<K>, reply: Result<(K::Reply, Generation), Wo
 /// or one past the request's message or byte budget is a protocol break.
 fn accept<K: Kind>(
     pending: &mut BTreeMap<u64, Pending<K>>,
-    reply: Frame,
+    reply: Chunk<K>,
     generation: Generation,
 ) -> Result<(), WorkerLost> {
     let id = reply.id;
     let item = pending.get_mut(&id).ok_or(WorkerLost::Lost)?;
     item.bytes = item
         .bytes
-        .checked_sub(reply.body.len())
+        .checked_sub(reply.body.as_ref().len())
         .ok_or(WorkerLost::Lost)?;
-    let Some(bytes) = item.assembly.push(reply)? else {
+    let Some(body) = item.assembly.push(reply, frame::decode::<K::Reply>)? else {
         return Ok(());
     };
     item.messages = item.messages.checked_sub(1).ok_or(WorkerLost::Lost)?;
-    let body = frame::decode::<K::Reply>(&bytes).map_err(|_| WorkerLost::Lost)?;
+    let body = body.map_err(|_| WorkerLost::Lost)?;
     if item.answer.deliver(body, generation)? {
         pending.remove(&id);
     }
@@ -742,7 +750,7 @@ fn backoff(losses: &mut VecDeque<Instant>, now: Instant) -> Duration {
 /// Serves one worker until it's lost, then fails everything it held. `None` once every handle is
 /// gone or the request ids run out.
 async fn serve<K: Kind>(
-    reads: &mut mpsc::Receiver<Option<Frame>>,
+    reads: &mut mpsc::Receiver<Option<Chunk<K>>>,
     writes: &blocking::SyncSender<(u64, K::Request)>,
     commands: &mut mpsc::Receiver<Command<K>>,
     id: &mut u64,

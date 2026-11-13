@@ -3,7 +3,7 @@
 use kumochi_protocol::message::{Effort, ModelChoice, ModelSlug};
 use serde_json::{Value, json};
 
-use super::{BodyError, ROUND_BYTES, ROUND_ITEMS, Round, body};
+use super::{BodyError, ROUND_BYTES, ROUND_ITEMS, Round, body, wipe_images};
 use crate::connections::model::error::{Code, Failure, ProviderError};
 use crate::connections::model::sse::Reader;
 use crate::context::{BODY_CEILING, BOUND, InputItem, Jpeg, ModelRequest, Role, ToolSchema};
@@ -212,22 +212,22 @@ fn an_image_is_a_high_detail_data_url_in_a_user_message_of_its_own() {
     );
 }
 
-/// An image's bytes are charged against the 4 MiB ceiling, not the 512 KiB bound, which still
-/// holds everything else exactly.
+/// An image's whole item and its comma are charged against the 4 MiB ceiling, not the 512 KiB
+/// bound, which still holds everything else exactly.
 #[test]
 fn with_an_image_the_rest_still_fits_the_bound_exactly() {
     let image = jpeg(6);
-    let url = image.data_url_len();
+    let charged = image.item_len() + 1;
     let empty = body(&request("", asked_with(image.clone())))
         .expect("small")
         .to_string()
         .len();
-    let fits = "a".repeat(BOUND - (empty - url));
+    let fits = "a".repeat(BOUND - (empty - charged));
     assert_eq!(
         body(&request(&fits, asked_with(image.clone()))).map(|sent| sent.to_string().len()),
-        Ok(BOUND + url)
+        Ok(BOUND + charged)
     );
-    let over = "a".repeat(BOUND - (empty - url) + 1);
+    let over = "a".repeat(BOUND - (empty - charged) + 1);
     assert_eq!(
         body(&request(&over, asked_with(image))),
         Err(BodyError::TooLarge)
@@ -251,6 +251,25 @@ fn a_body_with_images_at_the_ceiling_is_sent_and_one_byte_over_is_refused() {
         body(&request(&over, asked_with(image))),
         Err(BodyError::TooLarge)
     );
+}
+
+#[test]
+fn an_images_item_length_is_exact() {
+    for len in [3, 4, 5, 6, 1000] {
+        let image = jpeg(len);
+        let sent = body(&request("", asked_with(image.clone()))).expect("small");
+        let item = serde_json::to_vec(&sent["input"][1]).expect("serialised");
+        assert_eq!(item.len(), image.item_len(), "{len}");
+    }
+}
+
+#[test]
+fn wiping_a_body_zeroes_its_image_urls_and_nothing_else() {
+    let mut sent = body(&request("", asked_with(jpeg(6)))).expect("small");
+    wipe_images(&mut sent);
+    assert_eq!(sent["input"][1]["content"][0]["image_url"], "");
+    assert_eq!(sent["input"][0]["content"], "What's this?");
+    assert_eq!(sent["input"][1]["content"][0]["detail"], "high");
 }
 
 #[test]

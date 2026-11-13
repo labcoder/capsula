@@ -116,3 +116,14 @@ fn the_tools_go_in_block_one_by_name() {
         )
     );
 }
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "an image reached the Claude Code seed")]
+fn an_image_reaching_the_seed_stops_a_debug_build() {
+    let image = crate::context::Jpeg::new(vec![0xFF, 0xD8, 0xFF]).expect("a JPEG's start");
+    encode(
+        &request(vec![said(Role::User, "now"), InputItem::Image(image)]),
+        &[],
+    );
+}

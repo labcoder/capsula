@@ -3,6 +3,8 @@ use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::task::{Context, Poll, Waker};
 
+use kumochi_protocol::frame::Pipe;
+
 use super::wire::CHUNK;
 use super::*;
 
@@ -22,6 +24,7 @@ impl Kind for Test {
     const MAX_REPLY: usize = 4 * 1024 * 1024;
     type Request = Vec<u8>;
     type Reply = String;
+    type Assembly = crate::supervise::Assembly;
 }
 
 /// `message` as the frames a worker writes for it.

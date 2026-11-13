@@ -1,5 +1,7 @@
 use std::sync::atomic::AtomicUsize;
 
+use kumochi_protocol::frame::Pipe;
+
 use super::*;
 
 pub(crate) fn retirement() -> (Retirement, resource::Intents) {
@@ -31,7 +33,7 @@ pub(crate) struct Rig<K: Kind> {
     pub(crate) handle: Handle<K>,
     pub(crate) actor: tokio::task::JoinHandle<()>,
     requests: Option<blocking::Receiver<(u64, K::Request)>>,
-    replies: mpsc::Sender<Option<Frame>>,
+    replies: mpsc::Sender<Option<Chunk<K>>>,
     waiting: Option<blocking::Receiver<Duration>>,
     pub(crate) confirm: blocking::Sender<bool>,
     pub(crate) terminations: Arc<AtomicUsize>,

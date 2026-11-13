@@ -368,17 +368,32 @@ refuses with `TooLarge`; it is never downscaled further. `TooLarge`, `Unmasked` 
 
 The JPEG's bytes are user content. `ScreenContext` zeroes them on drop and its Debug prints only
 the byte count and size. The encoder's buffers (the resampled RGB and the JPEG) are zeroed on
-drop, errors included. The worker zeroes its final serialized buffers once a message is written,
-but not the copies a growing buffer leaves behind when it reallocates. Nothing writes the bytes
-to a log, a file or a store.
+drop, errors included. Nothing writes the bytes to a log, a file or a store.
 
-The change that first sends `Seal` has three preconditions, because the image only becomes
-reachable then:
+**Copies of a reply.** A screen reply can carry window text or the image, so the screen worker
+and the brain keep no copy of one they don't zero:
 
-1. The worker serializes the reply without growth copies: sized first, written into one buffer.
-2. The brain zeroes the message it reassembles from the reply's chunks.
-3. The brain holds its `ScreenContext` under the same rules as the worker: zeroed on drop and
-   excluded from error reports.
+- The worker writes with `write_sized`: the message is sized first and serialized into one
+  zeroing buffer of that size, and its frames, each up to 262,080 body bytes, are encoded into
+  one zeroing buffer that fits the largest, so nothing grows. It writes to an unbuffered stdout
+  (`platform::raw_stdout`, a duplicate of the handle), not the standard library's line buffer.
+- The brain reads the screen kind's replies with `Zeroed`: each frame into a zeroing buffer of
+  its own length, and each chunk's body, read as one byte string into a buffer of exactly its
+  length, into a `ZeroedBody`, which zeroes itself when dropped. So a chunk is zeroed wherever
+  it ends: once copied, refused for no pending request or over budget, unsent by the reader
+  thread, or still queued when a worker is lost. A frame that fails to decode partway leaves no
+  partly filled copy. A reply of several chunks is put together in one zeroing buffer allocated
+  at the 4 MiB reply cap when its first chunk arrives, so it never grows; each such reply pays a
+  4 MiB clear when it's dropped. A reply of one chunk is decoded from that chunk.
+- `ScreenContext`'s JPEG is sent as one byte string, the same bytes as before, and received
+  with one exact allocation. A received context is registered for dump exclusion like the
+  worker's.
+
+Speech replies and the shell pipe keep their plain framing (`Assembly`, `write_message`).
+
+What's beyond reach: the kernel's pipe buffers between the worker and the brain, the TLS
+library's buffers of plaintext not yet sent, the socket's buffers (ciphertext), and paging,
+since no buffer is page-locked.
 
 On Windows, a frame's pixel buffer and the sealed JPEG are each registered with
 `WerRegisterExcludedMemoryBlock` while they hold content. That keeps the block out of Windows
@@ -386,6 +401,8 @@ Error Reporting's reports only: not out of dumps a debugger or another tool take
 system memory dump, and a process can register only a limited number of blocks. A frame's buffer
 stays registered while it's reused and is unregistered once zeroed, before it's freed. The JPEG is
 registered once encoding finishes, and the resampled RGB never is; both live only for the encode.
+In the brain only the decoded `ScreenContext` is registered: a reply's frame buffer, chunk body
+and 4 MiB assembly buffer aren't excluded while they hold it, which lasts until it's decoded.
 The registration is in-process only. When Windows refuses it, capture carries on, and that
 buffer's contents can appear in an error report written while it holds them.
 

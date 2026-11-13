@@ -31,6 +31,8 @@ pub(crate) const BOUND: usize = 512 * 1024;
 pub(crate) const BODY_CEILING: usize = 4 * 1024 * 1024;
 /// How an image's bytes start in the body, before their base64.
 const JPEG_DATA_URL: &str = "data:image/jpeg;base64,";
+/// An image's Responses input item with an empty URL. The keys' order doesn't change its length.
+const EMPTY_IMAGE_ITEM: &str = r#"{"type":"message","role":"user","content":[{"type":"input_image","image_url":"","detail":"high"}]}"#;
 /// The newest runs kept raw, the current one included, when they fit [guess].
 pub(crate) const RAW_RUNS: usize = 8;
 /// The most one reference re-reads [guess].
@@ -219,14 +221,24 @@ impl Jpeg {
             .then(|| Self(Arc::new(bytes)))
     }
 
-    /// The image as the data URL the body carries.
-    pub(crate) fn data_url(&self) -> String {
-        format!("{JPEG_DATA_URL}{}", STANDARD.encode(self.0.as_slice()))
+    /// The image as the data URL the body carries, built in one zeroing buffer of exactly its
+    /// length, so no copy is left behind.
+    pub(crate) fn data_url(&self) -> Zeroizing<String> {
+        let mut url = Zeroizing::new(String::with_capacity(self.data_url_len()));
+        url.push_str(JPEG_DATA_URL);
+        STANDARD.encode_string(self.0.as_slice(), &mut url);
+        url
     }
 
     /// [`Self::data_url`]'s length, without building it.
     pub(crate) fn data_url_len(&self) -> usize {
         JPEG_DATA_URL.len() + self.0.len().div_ceil(3) * 4
+    }
+
+    /// The image's whole input item serialized, wrapper included, without building it. Exact,
+    /// since neither the prefix nor base64 needs escaping.
+    pub(crate) fn item_len(&self) -> usize {
+        EMPTY_IMAGE_ITEM.len() + self.data_url_len()
     }
 }
 

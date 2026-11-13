@@ -14,7 +14,7 @@ use super::encode::JPEG_CAP;
 use super::native::{CaptureThread, Job};
 use super::supervisor::Screen as Kind;
 use super::wire::{CaptureId, ElementTarget, FrameMeta, Refusal, TicketWire};
-use crate::supervise::{Kind as _, read_request, write_message};
+use crate::supervise::{Kind as _, read_request, write_sized};
 
 const QUEUE: usize = 16;
 const _: () = assert!(
@@ -167,7 +167,7 @@ fn run(
             expires = None;
             screen.clear();
         }
-        let mut send = |id, reply| write_message(output, id, &reply, Kind::MAX_REPLY);
+        let mut send = |id, reply| write_sized(output, id, &reply, Kind::MAX_REPLY);
         match event {
             Some(Event::Request(id, body, received)) => match body {
                 Request::Ping => send(id, Reply::Pong)?,

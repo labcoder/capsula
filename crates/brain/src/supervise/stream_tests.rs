@@ -11,6 +11,7 @@ impl Kind for Staged {
     const MAX_REPLY: usize = 4 * 1024 * 1024;
     type Request = Vec<u8>;
     type Reply = String;
+    type Assembly = crate::supervise::Assembly;
 
     fn is_terminal(reply: &String) -> bool {
         !reply.starts_with("stage")
@@ -27,6 +28,7 @@ impl Kind for Large {
     const MAX_REPLY: usize = MAX_STREAM_BYTES + 1;
     type Request = Vec<u8>;
     type Reply = Vec<u8>;
+    type Assembly = crate::supervise::Assembly;
 }
 
 const SERVED: Generation = Generation(3);

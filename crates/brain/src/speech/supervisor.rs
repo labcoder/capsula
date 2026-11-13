@@ -23,6 +23,7 @@ impl Kind for Speech {
     const MAX_REPLY: usize = MAX_TRANSCRIPT_BYTES + 1024;
     type Request = SpeechRequest;
     type Reply = SpeechReply;
+    type Assembly = crate::supervise::Assembly;
 }
 
 /// Each request's absolute budget, from the call through queueing, a respawn, chunking and the
