@@ -205,7 +205,7 @@ impl Replacement {
             key.capture.0,
             Request::Context {
                 key,
-                ticket: TicketWire::new(RunId(3), key.capture, key.capture.0, [91; 16], 30_000),
+                ticket: TicketWire::new(key.capture, key.capture.0, [91; 16], 30_000),
                 point: PhysicalPoint(display.size.map(|side| i32::try_from(side).unwrap())),
             },
         );

@@ -1,5 +1,4 @@
 use kumochi_protocol::geometry::{DisplayRef, PhysicalRect};
-use kumochi_protocol::message::RunId;
 use serde::{Deserialize, Serialize};
 
 use crate::supervise::WorkerLost;
@@ -79,11 +78,10 @@ pub enum WorkerFault {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaptureId(pub u64);
 
-/// One capture's authority. Only B2a's ticket book mints it, from a recognized hold or an
-/// Include send under a live exclusion lease; this module only carries and checks it.
+/// One capture's authority. Only the brain's hold client mints it, for a recognized hold; this
+/// module only carries and checks it.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TicketWire {
-    run: RunId,
     capture: CaptureId,
     generation: u64,
     nonce: [u8; 16],
@@ -92,17 +90,12 @@ pub struct TicketWire {
 }
 
 impl TicketWire {
-    // shortcut: B2a's `Tickets::mint` is the production caller; until then only tests mint.
-    #[cfg_attr(not(test), expect(dead_code, reason = "B2a mints tickets"))]
-    pub(crate) fn new(
-        run: RunId,
-        capture: CaptureId,
-        generation: u64,
-        nonce: [u8; 16],
-        ttl_ms: u32,
-    ) -> Self {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the hold client mints tickets once holds use it")
+    )]
+    pub(crate) fn new(capture: CaptureId, generation: u64, nonce: [u8; 16], ttl_ms: u32) -> Self {
         Self {
-            run,
             capture,
             generation,
             nonce,
@@ -135,7 +128,6 @@ impl TicketWire {
 impl std::fmt::Debug for TicketWire {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TicketWire")
-            .field("run", &self.run)
             .field("capture", &self.capture)
             .field("generation", &self.generation)
             .finish_non_exhaustive()

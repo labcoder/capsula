@@ -2,7 +2,6 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use kumochi_protocol::geometry::PhysicalRect;
-use kumochi_protocol::message::RunId;
 
 use super::*;
 use crate::screen::frame::MAX_SIDE;
@@ -92,13 +91,7 @@ impl Rig {
 }
 
 fn ticket(generation: u64) -> TicketWire {
-    TicketWire::new(
-        RunId(3),
-        CaptureId(generation * 10),
-        generation,
-        [0xAB; 16],
-        TTL,
-    )
+    TicketWire::new(CaptureId(generation * 10), generation, [0xAB; 16], TTL)
 }
 
 fn rect(size: [u32; 2]) -> DisplayRef {
@@ -268,7 +261,7 @@ fn no_carrier_prints_the_nonce_or_the_pixels() {
     }
     assert_eq!(
         format!("{ticket:?}"),
-        "TicketWire { run: RunId(3), capture: CaptureId(10), generation: 1, .. }"
+        "TicketWire { capture: CaptureId(10), generation: 1, .. }"
     );
     assert_eq!(
         format!("{frame:?}"),
@@ -278,3 +271,21 @@ fn no_carrier_prints_the_nonce_or_the_pixels() {
 
 #[path = "capture_elements_tests.rs"]
 mod elements;
+
+#[test]
+fn a_window_that_no_longer_exists_is_never_unchanged() {
+    let gone = Target {
+        top: TopWindow {
+            window: WindowRef(0),
+            pid: u32::MAX,
+            rect: PhysicalRect {
+                origin: [0, 0],
+                size: [4, 3],
+            },
+        },
+        instance: u32::MAX,
+        dpi: 96,
+    };
+    assert!(!crate::platform::window_unchanged(&gone));
+    assert!(!(Screen::default().unchanged)(&gone));
+}

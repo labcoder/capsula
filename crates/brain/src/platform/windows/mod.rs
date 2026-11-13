@@ -65,3 +65,4 @@ pub(crate) use protected::{
 };
 pub use root_store::trust_roots;
 pub use spawn::{Launch, Spawned, Stdio, spawn};
+pub(crate) use window::unchanged as window_unchanged;

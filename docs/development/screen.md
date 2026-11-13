@@ -123,7 +123,8 @@ by this dormant transaction. Source regressions do not establish compositor timi
 The worker can sanitize and encode them locally, but no operation exports them.
 
 - **Authority.** `TicketWire` can only be built inside the brain. Nothing in production sends
-  `Capture` yet; ticket minting and the capture flow are not connected.
+  `Capture` yet; ticket minting and the capture flow are not connected. The hold client below
+  mints the alternate loop's tickets.
   `Exclusion::KumochiWindows` is the caller's declaration of a live shell exclusion lease,
   not proof of one.
 - **Local validity.** The worker starts the ticket's `ttl_ms` at receipt on its own monotonic
@@ -297,9 +298,9 @@ a hold with no thread yet still has an identity, and one Retire covers every ear
 The current allocation is zeroized before growing, releasing or dropping a RawFrame. The tests
 observe synthetic bytes immediately after scrubbing and before freeing; a plain-fill replacement
 remains observationally equivalent in that seam, so optimizer resistance relies on `zeroize`.
-This does not claim the legacy production path implements Drop or expiry disposal. Brain-side
-streams, fences across respawn, full-queue termination and matching-generation release waits
-remain A6b2b, which alone may activate the alternate route. Images, OCR and Supersede remain A6c.
+This does not claim the legacy production path implements Drop or expiry disposal. The brain's
+side is the hold client below; activating the alternate route is a later change. Images, OCR and
+Supersede remain A6c.
 
 ## Window under the pointer (dormant)
 
@@ -355,11 +356,22 @@ capture thread resolves the window under it and captures that window alone. A re
 answers that hold only: there is no screen for it, and the same capturer serves the next hold.
 Only `Retire` ends the worker.
 
+A hold walks with `Walk { key }`: the same walk as `Elements` on the captured window, but the
+tree stays in the worker for the seal's masks, and only `Walked(key, Completeness)` comes back,
+so no window text reaches the brain.
+
 After the element walk, `Seal` hands out the hold's one image as a `ScreenContext`: the frame
 masked and encoded as an overview JPEG, with its `CaptureTransform`. It seals only when the
 hold's one walk read the captured window itself (its window and process) and found every
-password mask, and refuses with `Unmasked` otherwise. The frame is scrubbed and
-freed whatever the answer, so a second `Seal` is `Stale`.
+password mask, and refuses with `Unmasked` otherwise. Then, before masking, it checks on the
+serve thread that the window is still the one captured: the same process and creating thread,
+frame and DPI, and not minimised, cloaked or capture-protected. Anything else refuses with
+`WindowChanged`. A closed window fails that check at once. The frame is scrubbed and freed
+whatever the answer, so a second `Seal` is `Stale`.
+
+The check's limit: a window destroyed and replaced between the capture and `Seal` by another
+with the same handle value, process, creating thread, frame and DPI would pass. Handle values are
+said to carry a reuse counter, which isn't documented. Off Windows, no window is ever unchanged.
 
 The JPEG is capped at 2 MiB (`JPEG_CAP`), a guess until real windows are measured. The encoder
 writes into one buffer allocated at the cap, so growth never copies it, and an image over the cap
@@ -412,6 +424,33 @@ among those the walk stored; otherwise the masks are `Partial` and the hold does
 first reached after the walk's element or byte cut has none stored, so it's `Partial` too, and a
 large page the walk cuts short refuses for now. The threshold is a guess until a real page is
 measured.
+
+## The brain's hold client (dormant)
+
+`screen/client.rs` is the brain's side of the alternate loop, for one hold's frame. Nothing calls
+it yet: no hold has a screen part, and the worker's entry point still runs the legacy loop. It
+speaks to the worker through the shared supervisor as its own kind, `Holds`, with the screen
+worker's argument and caps, the actor's messages and the zeroing reply reader.
+
+- **`context(owner, point, until)`** mints a fresh capture id and a ticket whose number is above
+  every earlier one (a worker refuses a number it has already spent), with `ttl_ms` set to the
+  time left until `until`, a random nonce and the connected shell's pid. It streams
+  `Acquired`, then `Complete`, and returns the `Held` frame with the worker generation that
+  holds it.
+- **`walk(held)`** and **`seal(held)`** answer only when that same generation replies, for that
+  same key. Anything else is `Lost`: a replacement holds nothing. A `Sealed` for another key is
+  dropped, which zeroes it.
+- **Fences across respawn.** The worker's retirement fence ends with its process, so the client
+  keeps its own: `retire(owner)` raises it first, and a `context` for a hold at or below it is
+  refused `Stale` without being sent.
+- **Release waits and termination.** `retire(owner, holder, until)` returns once the worker answers
+  `Released` for that owner, from the holder or a later generation, since a later worker means
+  the holder's exit was seen. A worker that answers anything else may still hold a frame, and so
+  may the holder when the supervisor can't take the retire (a full queue, a loss), so that worker
+  is ended and its confirmed exit is the release. An unconfirmed exit, or neither by `until`, is `Unreleased`;
+  the worker's own ticket expiry still clears the frame.
+
+There's no brain-side `Drop`: `Retire` covers every way a hold closes.
 
 ## Portable element data and walk
 

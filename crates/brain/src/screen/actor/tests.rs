@@ -15,7 +15,6 @@ use crate::screen::reader::ThreadedReader;
 use crate::screen::wire::Exclusion;
 use crate::supervise::write_message;
 use kumochi_protocol::geometry::{DisplayRef, PhysicalPoint, PhysicalRect, WindowRef};
-use kumochi_protocol::message::RunId;
 
 mod replacement;
 
@@ -45,9 +44,16 @@ fn context_for(id: u64, owner: Owner) -> Request {
             owner,
             capture: CaptureId(id),
         },
-        ticket: TicketWire::new(RunId(3), CaptureId(id), id, [91; 16], 30_000),
+        ticket: TicketWire::new(CaptureId(id), id, [91; 16], 30_000),
         point: PhysicalPoint([1, 1]),
     }
+}
+
+/// The fake's window under `point` reads as changed by the time it's sealed.
+const CHANGES: PhysicalPoint = PhysicalPoint([1, 2]);
+
+fn unchanged(target: &Target) -> bool {
+    target.instance == 9
 }
 
 struct Input {
@@ -143,7 +149,7 @@ impl Capturer for Fake {
                 pid: 8,
                 rect: RECT,
             },
-            instance: 9,
+            instance: if point == CHANGES { 10 } else { 9 },
             dpi: 96,
         })
     }
@@ -332,6 +338,7 @@ impl Rig {
                         *time.lock().unwrap()
                     }
                 },
+                unchanged,
             )
         });
         Self {
@@ -711,7 +718,7 @@ fn expiry_disposes_an_acquired_frame_without_any_followup_request() {
     let rig = Rig::create(None, None, None, Clock::Realtime, None);
     let mut request = context(1);
     if let Request::Context { ticket, .. } = &mut request {
-        *ticket = TicketWire::new(RunId(3), CaptureId(1), 1, [91; 16], 2_000);
+        *ticket = TicketWire::new(CaptureId(1), 1, [91; 16], 2_000);
     }
     rig.send(1, &request);
     rig.acquired(1);
@@ -1003,6 +1010,51 @@ fn sealing_before_the_walk_refuses_releases_the_frame_and_stays_refused() {
     assert_eq!(rig.reply(), (4, Reply::Refused(Refusal::Stale)));
     rig.finish();
 }
+#[test]
+fn a_walk_answers_only_how_complete_its_masks_are_and_the_hold_seals() {
+    let rig = Rig::start(None, None, None);
+    rig.send(1, &context(1));
+    rig.acquired(1);
+    rig.send(2, &Request::Walk { key: key(1) });
+    assert_eq!(
+        rig.reply(),
+        (2, Reply::Walked(key(1), Completeness::Complete))
+    );
+    rig.send(3, &Request::Seal(key(1)));
+    let (id, reply) = rig.reply();
+    assert!(
+        id == 3 && matches!(reply, Reply::Sealed(sealed, _) if sealed == key(1)),
+        "{reply:?}"
+    );
+    rig.scrubbed();
+    rig.finish();
+}
+
+#[test]
+fn a_window_changed_since_its_capture_refuses_the_seal_and_releases_the_frame() {
+    let rig = Rig::start(None, None, None);
+    let Request::Context { key, ticket, .. } = context(1) else {
+        unreachable!()
+    };
+    rig.send(
+        1,
+        &Request::Context {
+            key,
+            ticket,
+            point: CHANGES,
+        },
+    );
+    rig.acquired(1);
+    rig.send(2, &Request::Walk { key });
+    assert_eq!(rig.reply(), (2, Reply::Walked(key, Completeness::Complete)));
+    rig.send(3, &Request::Seal(key));
+    assert_eq!(rig.reply(), (3, Reply::Refused(Refusal::WindowChanged)));
+    rig.scrubbed();
+    rig.send(4, &Request::Seal(key));
+    assert_eq!(rig.reply(), (4, Reply::Refused(Refusal::Stale)));
+    rig.finish();
+}
+
 #[test]
 fn a_sealed_context_never_prints_its_jpeg() {
     let marker = b"KUMOCHI-SEALED-MARKER".to_vec();

@@ -235,6 +235,7 @@ pub(crate) const LIMITS: ElementLimits = ElementLimits {
 
 const MASK_READ_LIMIT: usize = 2_048;
 
+#[derive(Clone)]
 pub(crate) struct TopWindow {
     pub(crate) window: WindowRef,
     pub(crate) pid: u32,

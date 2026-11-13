@@ -6,6 +6,8 @@
 )]
 mod actor;
 mod capture;
+#[cfg_attr(not(test), expect(dead_code, reason = "holds use the client from 2c4"))]
+mod client;
 mod context;
 #[cfg_attr(
     not(any(test, windows)),

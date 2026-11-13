@@ -97,7 +97,15 @@ pub(crate) use windows::{
 #[cfg(windows)]
 pub use windows::{managed_presence, system_env};
 #[cfg(windows)]
-pub(crate) use windows::{screen_capturer, screen_elements};
+pub(crate) use windows::{screen_capturer, screen_elements, window_unchanged};
+
+/// Whether a captured window is still the one its capture resolved. No platform but Windows
+/// captures windows yet, so none is ever unchanged.
+// shortcut: macOS will check the window here.
+#[cfg(not(windows))]
+pub(crate) fn window_unchanged(_target: &crate::screen::Target) -> bool {
+    false
+}
 
 /// Whether one managed-policy source exists, by existence only. Only a proven-missing source is
 /// `Absent`; access denied and every other unresolved result are `Indeterminate`.

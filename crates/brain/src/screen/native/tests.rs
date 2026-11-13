@@ -5,6 +5,7 @@ use std::time::Duration;
 use super::*;
 use crate::screen::actor::{Key, Owner};
 use crate::screen::capture::Target;
+use crate::screen::elements::TopWindow;
 use crate::screen::wire::{CaptureId, Exclusion, Refusal};
 use kumochi_protocol::geometry::{DisplayRef, PhysicalPoint, PhysicalRect};
 

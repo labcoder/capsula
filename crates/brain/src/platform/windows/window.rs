@@ -185,7 +185,7 @@ pub(super) fn handle(target: &Target) -> Result<HWND, Refusal> {
 
 /// Whether the window is still the one the walk resolved: same process and thread, frame and
 /// DPI, and not minimised, cloaked or capture-protected.
-pub(super) fn unchanged(target: &Target) -> bool {
+pub(crate) fn unchanged(target: &Target) -> bool {
     let Ok(window) = handle(target) else {
         return false;
     };

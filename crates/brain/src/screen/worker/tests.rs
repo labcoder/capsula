@@ -1,7 +1,6 @@
 use std::time::Instant;
 
 use kumochi_protocol::geometry::{DisplayRef, PhysicalRect};
-use kumochi_protocol::message::RunId;
 
 use super::*;
 use crate::screen::wire::{CaptureId, Exclusion, TicketWire};
@@ -30,7 +29,7 @@ impl<const RETIRE: bool> Capturer for Failing<RETIRE> {
 #[test]
 fn a_capture_that_must_retire_answers_fault_and_serves_nothing_more() {
     let capture = RequestBody::Capture {
-        ticket: TicketWire::new(RunId(1), CaptureId(1), 1, [0; 16], 2_000),
+        ticket: TicketWire::new(CaptureId(1), 1, [0; 16], 2_000),
         display: DisplayRef(PhysicalRect {
             origin: [0, 0],
             size: [4, 3],
