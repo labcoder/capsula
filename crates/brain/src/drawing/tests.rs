@@ -752,14 +752,17 @@ fn a_later_step_too_large_to_paint_keeps_the_shown_picture() {
     assert!(!drawing.drew_nothing(RunId(1)));
 }
 
-/// The budget the refusal names is the prompt's, and its numbers hold at the paint caps: each
-/// stated drawing fits, and one with a quarter more circles or boxes does not.
+/// The budget the refusal names is the prompt's, and its numbers hold at the paint caps on a
+/// canvas that holds the diagram unshrunk, where a box costs the most: each stated drawing fits,
+/// one with a quarter more circles or boxes does not, and the true edges are 42 circles and 24
+/// boxes.
 #[test]
 fn the_paint_budget_matches_the_prompt_and_the_paint_caps() {
+    use kumochi_scene::display::PaintWork;
     use serde_json::json;
 
     const CIRCLES: usize = 40;
-    const BOXES: usize = 30;
+    const BOXES: usize = 20;
     let words = |text: &str| {
         text.split_whitespace()
             .collect::<Vec<_>>()
@@ -792,14 +795,39 @@ fn the_paint_budget_matches_the_prompt_and_the_paint_caps() {
         }));
         put
     };
-    assert!(paint_work(&circles(CIRCLES)).within_limits());
-    assert!(!paint_work(&circles(CIRCLES + CIRCLES / 4)).within_limits());
-    assert!(paint_work(&diagram(BOXES)).within_limits());
-    assert!(!paint_work(&diagram(BOXES + BOXES / 4)).within_limits());
+    let circle_work = |count: usize| PaintWork {
+        fill_vertices: 48 * count,
+        largest_fill: 48,
+        ..PaintWork::default()
+    };
+    // Unshrunk, a box costs 21 fill and 21 outline points, and a labelled arrow 24 fill.
+    let diagram_work = |boxes: usize| PaintWork {
+        fill_vertices: 21 * boxes + 24 * (boxes - 1),
+        largest_fill: 21,
+        outline_points: 21 * boxes,
+        largest_outline: 21,
+        ..PaintWork::default()
+    };
+    for (count, fits) in [
+        (CIRCLES, true),
+        (42, true),
+        (43, false),
+        (CIRCLES + CIRCLES / 4, false),
+    ] {
+        let work = paint_work(&circles(count));
+        assert_eq!(work, circle_work(count), "{count} circles");
+        assert_eq!(work.within_limits(), fits, "{count} circles");
+    }
+    for (boxes, fits) in [(BOXES, true), (24, true), (BOXES + BOXES / 4, false)] {
+        let work = paint_work(&diagram(boxes));
+        assert_eq!(work, diagram_work(boxes), "{boxes} boxes");
+        assert_eq!(work.within_limits(), fits, "{boxes} boxes");
+    }
+    assert_eq!(diagram_work(BOXES + BOXES / 4).outline_points, 525);
 }
 
-/// The paint work of one step of `put` on a fresh overlay scene laid out on the shell's default
-/// canvas, as production prepares it, without a cap.
+/// The paint work of one step of `put` on a fresh overlay scene that declares a 960 × 4000
+/// canvas, tall enough to hold a 25-box chain unshrunk, prepared as the shell does without a cap.
 fn paint_work(put: &[serde_json::Value]) -> kumochi_scene::display::PaintWork {
     use kumochi_scene::display::{MeasureError, TextMeasure, TextStyle};
     use kumochi_scene::layout::{LayoutState, PrepareInput, SurfaceGeometry, prepare};
@@ -819,7 +847,7 @@ fn paint_work(put: &[serde_json::Value]) -> kumochi_scene::display::PaintWork {
         parse_record(&serde_json::to_vec(&value).expect("JSON")).expect("a record")
     };
     let Record::Begin(begin) =
-        record(serde_json::json!({"begin":{"v":1,"scene":"budget","surface":"overlay","alt":""}}))
+        record(serde_json::json!({"begin":{"v":1,"scene":"budget","surface":"overlay","size":[960,4000],"alt":""}}))
     else {
         panic!("a begin record");
     };

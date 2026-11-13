@@ -410,11 +410,11 @@ fn measure_native_maximal_content_residency() {
 
 /// Maximal content passes admission but not the paint cap: step 21 adds a scene's first
 /// 500-point scatter series, past `PaintWork::LIMITS`, so the shell refuses it with `PaintWork`
-/// and halts the scene. Step 21 is prepared when step 13 is consumed, so 14 steps activate.
-/// No maximal scene reaches its full
-/// drawing, so a residency peak here would measure a truncated run. This test checks the
-/// refusal instead, and `measure_native_eight_window_residency_at_paint_caps` measures the
-/// eight-window allowance with content the paint cap admits.
+/// and halts the scene. Step 21 is prepared when step 13 is consumed, so 14 steps activate. No
+/// maximal scene reaches its full drawing, so a residency peak here would measure a truncated
+/// run. This test checks the refusal instead, and
+/// `measure_native_eight_window_residency_at_paint_caps` measures the eight-window allowance
+/// with content the paint cap admits.
 #[test]
 #[ignore = "native font shaping; run with --exact --ignored; no window or input"]
 fn native_maximal_content_is_refused_as_paint_work() {

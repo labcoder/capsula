@@ -34,7 +34,7 @@ const FULL_HINT: &str = "; no further step can be drawn in this turn";
 /// numbers to the paint caps.
 macro_rules! paint_budget {
     () => {
-        "everything on screen can hold about 40 filled circles or ellipses, or a diagram of about 30 boxes with labelled arrows"
+        "everything on screen can hold about 40 filled circles or ellipses, or a diagram of about 20 boxes with labelled arrows"
     };
 }
 #[cfg(test)]

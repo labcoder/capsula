@@ -931,12 +931,15 @@ The painter still refuses a longer run loudly.
 The global limits are 512 dash pieces, 2,048 fill vertices and 512 outline points, shared
 across all visible scenes and reserved ready/rest states. Fills get four times the others
 because they are the cheapest to paint: on Rez at 144 Hz, about 2,000 fill vertices cost a
-paint p99 of 0.21 ms against 1.07 ms for as many outline points. On an overlay laid out on
-the default canvas, a filled circle or ellipse costs 48 fill vertices at any size, a diagram box
-17 fill vertices and 17 outline points, and a labelled arrow 20 fill vertices for its head and
-label chip, so about 40 filled circles fit, or a diagram of about 30 boxes with labelled arrows,
-which the outline budget bounds. A diagram of a few boxes lays them out larger, at up to 21
-points each. Labels remain subject to the existing text and object limits. A
+paint p99 of 0.21 ms against 1.07 ms for as many outline points. A filled circle or ellipse
+costs 48 fill vertices at any size or canvas, so 42 fit. A diagram is shrunk to fit its canvas
+by a factor between 0.8 and 1. On an overlay, a plain box costs 21 fill vertices and 21 outline
+points unshrunk and 17 of each once shrunk to 0.917 or below, and a labelled arrow adds 24 fill
+vertices unshrunk for its head and label chip. So the outline budget bounds diagrams: 24
+unshrunk boxes fit at 504 outline points and 25 are refused at 525, while on the default
+canvas a 30-box chain shrinks to 0.8 and fits at 510. The draw prompt and the refusal say
+about 40 circles or about 20 boxes, leaving room for the rest of the screen. Labels remain
+subject to the existing text and object limits. A
 drawing beyond the limits fails explicitly through the scene's `PaintWork` failure or recovery
 clear, without simplifying its geometry. Before counting crossings, preparation refuses any one
 generated fill with more than 2,048 points, which cannot fit even without a crossing. Given a paint cap
@@ -944,7 +947,12 @@ generated fill with more than 2,048 points, which cannot fit even without a cros
 shell's worker and recovery pass `PaintWork::LIMITS`), it also keeps a running total of the
 scene's own paint work and refuses with `OverPaintWork` once that passes the cap, which no
 admission could accept. Each fill then counts crossings only up to the fill budget left, so a
-refused scene costs at most about 2,048²/2 crossing tests. Without a cap the charge stays exact.
+refused scene costs at most about 2,048²/2 crossing tests, about 2.1 million against 131
+thousand at 512. One all-overlapping 512-point comb measured 0.88 ms on Rez, about 6.7 ns a pair,
+so the bound is about 14 ms by extrapolation, not measured. It runs on a preparation worker
+under the 250 ms step deadline, never on the UI thread, and an ordinary call doesn't reach it:
+explicit polygons stop at 512 points, so 2,048 needs a long generated path whose edges nearly
+all overlap without crossing. Without a cap the charge stays exact.
 
 D1's Rez admission target at the cap is p95 ≤1 ms and p99 ≤1.1 ms, with the sampled maximum
 reported separately; clear, cut and eviction retain their ≤2 ms target, global clear included.

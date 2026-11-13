@@ -561,8 +561,9 @@ fn ordinary_illustrations_fit_the_paint_caps() {
         let x = f32::from(index) * 30.0;
         round(format!("part{index}"), [x, 200.0, 24.0, 18.0])
     }));
-    // A 30-step flowchart with labelled arrows: 17 points per node, and per arrow 3 for its head
-    // and 17 for its label's chip: 30 · 17 + 29 · 20 = 1,090 fill and 30 · 17 = 510 outline.
+    // A 30-step flowchart with labelled arrows, shrunk to fit the default canvas: 17 points per
+    // node, and per arrow 3 for its head and 17 for its label's chip: 30 · 17 + 29 · 20 = 1,090
+    // fill and 30 · 17 = 510 outline.
     let mut flow = vec![json!({"diagram":{"id":"d","dir":"down"}})];
     flow.extend(
         (0..30).map(|index| json!({"node":{"id":format!("n{index}"),"in":"d","label":"Step"}})),
