@@ -47,9 +47,13 @@ pub fn drag(n: u64) -> Generation {
     Generation::new(n)
 }
 
-/// A placement with these parts, as the perch rules would publish one.
-pub const fn placement(body: PhysicalRect, card: PhysicalRect, above: bool) -> Placement {
-    Placement { body, card, above }
+/// A placement above the title bar, as the perch rules would publish one.
+pub const fn placement_above(body: PhysicalRect, card: PhysicalRect) -> Placement {
+    Placement {
+        body,
+        card,
+        above: true,
+    }
 }
 
 /// The watch generation numbered `n`. A fresh `Targeting` mints 1 first.

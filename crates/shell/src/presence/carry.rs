@@ -324,13 +324,15 @@ mod tests {
     use super::{Candidates, EXTENTS, READ_INTERVAL, Sample, decide, deliver, label};
     use crate::platform::PresenceEvent;
     use crate::platform::host::{HostChange, Label, PhysicalRect, WatchGen};
-    use crate::presence::perch::target_fixtures::{HOST, OTHER, drag, host, placement, watch};
+    use crate::presence::perch::target_fixtures::{
+        HOST, OTHER, drag, host, placement_above, watch,
+    };
     use crate::presence::perch::{Placement, Targeting, WindowTarget};
     use crate::strings::Strings;
 
     /// The perch on `host(HOST, 0)` at `EXTENTS`: centred above the caption, with the card on
     /// the left, since on the right it would cover the caption buttons.
-    const PERCH: Placement = placement(
+    const PERCH: Placement = placement_above(
         PhysicalRect {
             left: 418,
             top: 144,
@@ -343,7 +345,6 @@ mod tests {
             right: 414,
             bottom: 268,
         },
-        true,
     );
 
     struct Owner {
