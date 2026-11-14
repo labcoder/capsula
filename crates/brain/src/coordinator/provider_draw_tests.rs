@@ -312,20 +312,20 @@ fn semantic_failure_identity_is_independent_of_ready_timing_and_early_ack_keeps_
 fn text_after_the_records_array_completes_the_call_and_draws_nothing_more() {
     let second = r#",{"end":{}}],"records":[{"step":{"id":"s2","put":[{"shape":{"id":"b","kind":"rect","box":[20,0,10,10]}}]}},{"end":{}}]}"#;
     for tail in [r#"] , "end":{}}"#, second, "] not json"] {
-        let args = format!("{PREFIX}{tail}");
+        let bytes = format!("{PREFIX}{tail}");
         for streamed in [true, false] {
             let scratch = Scratch::new("draw-after-records");
             let mut store = store(&scratch);
             let mut core = offered(vec![T]);
             let effects = if streamed {
                 start(&mut core, "after");
-                let mut effects = delta(&mut core, "after", &args);
-                effects.extend(ready(&mut core, "after", &args));
+                let mut effects = delta(&mut core, "after", &bytes);
+                effects.extend(ready(&mut core, "after", &bytes));
                 let mut effects = drain(&mut core, &mut store, effects);
                 effects.extend(send(&mut core, TurnEvent::Finished(Finish::Completed)));
                 effects
             } else {
-                let (dispatch, effects) = call(&mut core, "after", args.as_bytes());
+                let (dispatch, effects) = call(&mut core, "after", bytes.as_bytes());
                 assert_eq!(dispatch, Dispatch::Committing);
                 drain(&mut core, &mut store, effects)
             };
@@ -335,6 +335,14 @@ fn text_after_the_records_array_completes_the_call_and_draws_nothing_more() {
             );
             assert_eq!(ends(&effects), [true]);
             assert_prefix(&store, &["s1"]);
+            assert_eq!(
+                call(&mut core, "after", &args(None)),
+                (
+                    Dispatch::Answered(ToolOutput::Error(ToolError::Reused)),
+                    Vec::new()
+                ),
+                "the call keeps its canonical identity, so changed arguments are refused"
+            );
         }
     }
 }
