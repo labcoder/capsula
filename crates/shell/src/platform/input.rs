@@ -5,7 +5,15 @@
 
 use std::cell::Cell;
 
-use gpui_kit::MouseButton;
+/// A mouse button, as the native bridge reads it and the drag owner compares it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Button {
+    Left,
+    Right,
+    Middle,
+    Back,
+    Forward,
+}
 
 /// One per UI thread. Every value it stamps is new, so two stamps never tie.
 #[derive(Debug, Default)]
@@ -14,7 +22,7 @@ pub(crate) struct Input {
     /// The stamp of the press being forwarded, if any.
     press: Cell<Option<u64>>,
     /// The button whose release is being forwarded, if any.
-    released: Cell<Option<MouseButton>>,
+    released: Cell<Option<Button>>,
     /// How many release forwards are still running.
     releasing: Cell<u32>,
     /// A drained capture loss waits for the outermost release forward to return.
@@ -54,7 +62,7 @@ impl Input {
     /// Forwards `button`'s release inside `forward`. Returns its result, and whether a capture
     /// loss drained meanwhile is now due its reconcile: only the outermost release returns
     /// `true`, once.
-    pub(crate) fn release<R>(&self, button: MouseButton, forward: impl FnOnce() -> R) -> (R, bool) {
+    pub(crate) fn release<R>(&self, button: Button, forward: impl FnOnce() -> R) -> (R, bool) {
         let outer = self.released.replace(Some(button));
         let depth = self.releasing.get();
         self.releasing.set(depth + 1);
@@ -65,7 +73,7 @@ impl Input {
     }
 
     /// Capture changed now: its stamp, and the button whose forwarded release caused it.
-    pub(crate) fn capture_changed(&self) -> (u64, Option<MouseButton>) {
+    pub(crate) fn capture_changed(&self) -> (u64, Option<Button>) {
         (self.next(), self.released.get())
     }
 
@@ -87,11 +95,9 @@ impl Input {
 
 #[cfg(test)]
 mod tests {
-    use gpui_kit::MouseButton;
+    use super::{Button, Input};
 
-    use super::Input;
-
-    const LEFT: MouseButton = MouseButton::Left;
+    const LEFT: Button = Button::Left;
 
     #[test]
     fn stamps_never_repeat_across_presses_and_losses() {
@@ -148,8 +154,8 @@ mod tests {
                 "not before the release returns"
             );
             input
-                .release(MouseButton::Right, || {
-                    assert_eq!(input.capture_changed().1, Some(MouseButton::Right));
+                .release(Button::Right, || {
+                    assert_eq!(input.capture_changed().1, Some(Button::Right));
                 })
                 .1
         });

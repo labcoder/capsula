@@ -13,7 +13,7 @@ use gpui_kit::{
 use super::kumo::Motion;
 use super::kumo_view::{PullChanged, PullSite};
 use super::test_fixture;
-use crate::platform::input::input;
+use crate::platform::input::{Button, input};
 use crate::platform::work_area_fixture;
 
 const LEFT: MouseButton = MouseButton::Left;
@@ -22,7 +22,7 @@ const LEFT: MouseButton = MouseButton::Left;
 fn click(frame: &mut VisualTestContext, at: Point<Pixels>) {
     input(|input| input.press(|| frame.simulate_mouse_down(at, LEFT, Modifiers::default())));
     input(|input| {
-        input.release(LEFT, || {
+        input.release(Button::Left, || {
             frame.simulate_mouse_up(at, LEFT, Modifiers::default());
         })
     });

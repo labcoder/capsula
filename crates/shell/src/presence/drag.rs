@@ -3,7 +3,7 @@
 //! moves and the ending go out. Nothing here has effects: only a `Released` ending may, and
 //! the caller validates it first. How it fits: docs/development/kumo.md, "The pull".
 
-use gpui_kit::{MouseButton, Pixels, Point};
+use crate::platform::input::Button;
 
 /// Which drag an outcome belongs to. Each press that starts a drag gets the next one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,7 +20,7 @@ impl Generation {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum End {
     /// The initiating button came up here. The only ending that may have effects.
-    Released(Point<Pixels>),
+    Released([f32; 2]),
     /// Esc.
     Cancelled,
     /// Another pointer mode took over; this ending has no user effects.
@@ -33,16 +33,13 @@ pub(crate) enum End {
 /// What reaches the owner while a drag may be live.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Event {
-    /// GPUI's `MouseMoveEvent`, with the button it reports held.
+    /// GPUI's `MouseMoveEvent` in logical pixels, with the button it reports held.
     Move {
-        at: Point<Pixels>,
-        pressed: Option<MouseButton>,
+        at: [f32; 2],
+        pressed: Option<Button>,
     },
-    /// GPUI's `MouseUpEvent`. GPUI has released capture for any button by then.
-    Up {
-        button: MouseButton,
-        at: Point<Pixels>,
-    },
+    /// GPUI's `MouseUpEvent` in logical pixels. GPUI has released capture for any button by then.
+    Up { button: Button, at: [f32; 2] },
     /// `Escape::CancelPull`.
     Escape,
     /// The overlay input authority takes the pointer for selection.
@@ -53,10 +50,7 @@ pub(crate) enum Event {
     Preempt,
     /// The native bridge's `CaptureLost`: stamped `seq` in the UI thread's input sequence when
     /// it was emitted, with the button whose release caused it, or `None` for a loss from outside.
-    CaptureLost {
-        seq: u64,
-        released: Option<MouseButton>,
-    },
+    CaptureLost { seq: u64, released: Option<Button> },
     /// The window holding capture closed or deactivated.
     SourceClosed,
 }
@@ -66,14 +60,14 @@ pub(crate) enum Event {
 pub(crate) enum Outcome {
     /// It belongs to no live drag, or to an ended one.
     Ignored,
-    Moved(Generation, Point<Pixels>),
+    Moved(Generation, [f32; 2]),
     Ended(Generation, End),
 }
 
 #[derive(Clone, Copy, Debug)]
 struct Live {
     generation: Generation,
-    button: MouseButton,
+    button: Button,
     /// The press's stamp in the UI thread's input sequence, which never repeats a value.
     start: u64,
     /// The initiating button's own release took capture, so its `Up` should follow in the same
@@ -90,7 +84,7 @@ pub(crate) struct DragOwner {
 impl DragOwner {
     /// Starts a drag on `button`'s press, stamped `start`. While one is live, a press starts
     /// nothing: its button's release ends the live drag as lost.
-    pub(crate) fn press(&mut self, button: MouseButton, start: u64) -> Option<Generation> {
+    pub(crate) fn press(&mut self, button: Button, start: u64) -> Option<Generation> {
         if self.live.is_some() {
             return None;
         }
@@ -155,25 +149,24 @@ impl DragOwner {
 
 #[cfg(test)]
 mod tests {
-    use gpui_kit::{MouseButton, Pixels, Point, point, px};
-
     use super::{DragOwner, End, Event, Generation, Outcome};
+    use crate::platform::input::Button;
 
-    const LEFT: MouseButton = MouseButton::Left;
-    const RIGHT: MouseButton = MouseButton::Right;
+    const LEFT: Button = Button::Left;
+    const RIGHT: Button = Button::Right;
 
-    fn at(x: f32, y: f32) -> Point<Pixels> {
-        point(px(x), px(y))
+    fn at(x: f32, y: f32) -> [f32; 2] {
+        [x, y]
     }
 
-    fn up(button: MouseButton, x: f32) -> Event {
+    fn up(button: Button, x: f32) -> Event {
         Event::Up {
             button,
             at: at(x, 0.0),
         }
     }
 
-    fn lost(seq: u64, released: Option<MouseButton>) -> Event {
+    fn lost(seq: u64, released: Option<Button>) -> Event {
         Event::CaptureLost { seq, released }
     }
 

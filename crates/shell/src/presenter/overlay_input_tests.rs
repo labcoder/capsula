@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 
-use gpui_kit::{MouseButton, point, px};
 use kumochi_protocol::message::GestureId;
 
 use super::{
     Effect, ExitCause, InputPlatform, Layer, OverlayInput, OverlayOwner, RegionId, Regions,
     SelectionEnd,
 };
+use crate::platform::input::Button;
 use crate::presence::drag::{DragOwner, End, Event, Outcome};
 
 const A: RegionId = RegionId(1);
@@ -49,7 +49,7 @@ struct Platform {
     selection_above: bool,
     captured: bool,
     input: crate::platform::input::Input,
-    last_loss: Option<(u64, Option<MouseButton>)>,
+    last_loss: Option<(u64, Option<Button>)>,
 }
 
 impl InputPlatform for Platform {
@@ -131,7 +131,7 @@ impl Platform {
             .input
             .press(|| self.input.pressed())
             .expect("selection press is forwarded");
-        let effects = owner.selected(gesture, MouseButton::Left, seq, ready);
+        let effects = owner.selected(gesture, Button::Left, seq, ready);
         assert_eq!(self.apply(owner, effects), Ok(()));
     }
 }
@@ -196,8 +196,8 @@ fn all_exit_causes_restore_both_modes_once() {
             platform.enter(&mut owner, HOLD);
             let effects = match cause {
                 ExitCause::Release => owner.selection_event(Event::Up {
-                    button: MouseButton::Left,
-                    at: point(px(8.0), px(9.0)),
+                    button: Button::Left,
+                    at: [8.0, 9.0],
                 }),
                 ExitCause::Escape => owner.selection_event(Event::Escape),
                 ExitCause::CaptureLost => owner.selection_event(Event::CaptureLost {
@@ -300,7 +300,7 @@ fn entering_mid_orbit_cancels_it_before_selection_and_disables_regions() {
     assert!(!owner.begin_orbit(A));
     assert_eq!(owner.lease_drag(), None);
     assert_eq!(owner.select(GestureId(2)), vec![]);
-    assert_eq!(owner.selected(HOLD, MouseButton::Left, 25, Ok(())), vec![]);
+    assert_eq!(owner.selected(HOLD, Button::Left, 25, Ok(())), vec![]);
 }
 
 #[test]
@@ -314,7 +314,7 @@ fn preempted_drag_ends_without_user_effects_before_selection_capture_is_stamped(
         .expect("Kumo press is forwarded");
     platform
         .drag
-        .press(MouseButton::Left, press)
+        .press(Button::Left, press)
         .expect("no existing drag");
     assert!(!owner.begin_orbit(A));
     platform.enter(&mut owner, HOLD);
@@ -350,14 +350,14 @@ fn voluntary_capture_loss_waits_for_release_or_reconciliation() {
         assert_eq!(
             owner.selection_event(Event::CaptureLost {
                 seq: 21,
-                released: Some(MouseButton::Left)
+                released: Some(Button::Left)
             }),
             vec![]
         );
         let effects = if release {
             owner.selection_event(Event::Up {
-                button: MouseButton::Left,
-                at: point(px(1.0), px(2.0)),
+                button: Button::Left,
+                at: [1.0, 2.0],
             })
         } else {
             owner.reconcile()
@@ -399,7 +399,7 @@ fn a_failed_entry_restores_live_regions_without_starting_selection() {
             platform.endings,
             vec![(HOLD, ExitCause::Failed, SelectionEnd::Cancelled)]
         );
-        assert_eq!(owner.selected(HOLD, MouseButton::Left, 30, Ok(())), vec![]);
+        assert_eq!(owner.selected(HOLD, Button::Left, 30, Ok(())), vec![]);
         assert_eq!(owner.end_selection(HOLD, ExitCause::BrainLost), vec![]);
     }
 }
@@ -450,8 +450,8 @@ fn release_escape_shrinking_and_stale_rectangles_keep_the_current_gesture_author
         (
             None,
             Event::Up {
-                button: MouseButton::Left,
-                at: point(px(1.0), px(2.0)),
+                button: Button::Left,
+                at: [1.0, 2.0],
             },
             ExitCause::Release,
             SelectionEnd::Region([1, 2, 4, 4]),
@@ -459,8 +459,8 @@ fn release_escape_shrinking_and_stale_rectangles_keep_the_current_gesture_author
         (
             Some((HOLD, [1, 2, 5, 4])),
             Event::Up {
-                button: MouseButton::Left,
-                at: point(px(1.0), px(2.0)),
+                button: Button::Left,
+                at: [1.0, 2.0],
             },
             ExitCause::Release,
             SelectionEnd::Region([1, 2, 5, 4]),
@@ -474,8 +474,8 @@ fn release_escape_shrinking_and_stale_rectangles_keep_the_current_gesture_author
         (
             Some((HOLD, [1, 2, 3, 4])),
             Event::Up {
-                button: MouseButton::Left,
-                at: point(px(1.0), px(2.0)),
+                button: Button::Left,
+                at: [1.0, 2.0],
             },
             ExitCause::Release,
             SelectionEnd::Released,
@@ -483,8 +483,8 @@ fn release_escape_shrinking_and_stale_rectangles_keep_the_current_gesture_author
         (
             Some((GestureId(2), [8, 9, 20, 30])),
             Event::Up {
-                button: MouseButton::Left,
-                at: point(px(1.0), px(2.0)),
+                button: Button::Left,
+                at: [1.0, 2.0],
             },
             ExitCause::Release,
             SelectionEnd::Region([1, 2, 4, 4]),
