@@ -145,8 +145,10 @@ fn drawing_order_survives_panels_dock_moves_replacement_and_reconnection() {
         windows.bind_hwnd(Layer::Dock, dock.0).unwrap();
         windows.proxy(super::super::observer::ProxyHandle(proxy.0));
         windows.bind_hwnd(Layer::Selection, selection.0).unwrap();
-        windows.regions.insert(RegionId(1), region.0);
-        let regions = Regions::from([(RegionId(1), [0, 0, 16, 16])]);
+        windows
+            .regions
+            .insert(crate::presenter::tests::region(1), region.0);
+        let regions = Regions::from([(crate::presenter::tests::region(1), [0, 0, 16, 16])]);
         if drawing_first {
             windows.bind_hwnd(Layer::Overlay, drawing.0).unwrap();
             windows.configure(OverlayInput::Regions, &regions).unwrap();

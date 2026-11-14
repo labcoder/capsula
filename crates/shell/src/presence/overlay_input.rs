@@ -117,7 +117,10 @@ mod tests {
         let mut platform = Platform::default();
         let mut emitted = Vec::new();
         let gesture = GestureId(7);
-        assert_eq!(owner.select(gesture), vec![Effect::Configure]);
+        assert_eq!(
+            crate::presenter::tests::select(&mut owner, gesture),
+            vec![Effect::Configure]
+        );
         assert_eq!(owner.configure(&mut platform), Ok(()));
         let effects = owner.end_selection(gesture, ExitCause::CaptureLost);
         assert_eq!(

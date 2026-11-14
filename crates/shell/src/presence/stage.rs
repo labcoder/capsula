@@ -324,19 +324,17 @@ mod tests {
             presence.presenter.frames().borrow_mut().shown = true;
             let open = transforms(presence, 1);
             assert_ne!(open, closed);
-            let observation = presence
-                .presenter
-                .frames()
-                .borrow()
-                .painted(crate::presenter::tests::LIVE)
-                .expect("painted");
+            let observation = crate::presenter::tests::painted(
+                &presence.presenter.frames().borrow(),
+                crate::presenter::tests::LIVE,
+            )
+            .expect("painted");
             presence.dismiss_text(cx).expect("close typing after paint");
             assert_eq!(
-                presence
-                    .presenter
-                    .frames()
-                    .borrow()
-                    .painted(crate::presenter::tests::LIVE),
+                crate::presenter::tests::painted(
+                    &presence.presenter.frames().borrow(),
+                    crate::presenter::tests::LIVE
+                ),
                 Some(observation)
             );
             assert_eq!(transforms(presence, 1), open);
