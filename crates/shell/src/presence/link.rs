@@ -481,6 +481,13 @@ impl Presence {
                     self.request_pages(cx);
                     credit
                 }
+                DataToShell::Models { connection, models } => {
+                    self.settings.update(cx, |state, cx| {
+                        state.set_models(connection, models);
+                        cx.notify();
+                    });
+                    bytes
+                }
                 DataToShell::SceneSnapshot {
                     scene,
                     revision,
