@@ -20,11 +20,14 @@ fn info(slug: &str) -> ModelInfo {
 }
 
 fn ready(connection: u64, models: &[&str]) -> Input {
-    Input::Engines(Availability::Ready(Ready {
-        connection: ConnectionTag(connection),
-        models: models.iter().map(|slug| info(slug)).collect(),
-        trusted_draw: false,
-    }))
+    Input::Engines(
+        kumochi_protocol::message::ConnectionKind::ChatGpt,
+        Availability::Ready(Ready {
+            connection: ConnectionTag(connection),
+            models: models.iter().map(|slug| info(slug)).collect(),
+            trusted_draw: false,
+        }),
+    )
 }
 
 fn reason(key: ErrorKey, action: Action) -> UserError {
@@ -170,9 +173,10 @@ fn a_signed_out_turn_is_kept_and_fails_before_any_build() {
 #[test]
 fn the_accounts_own_reason_reaches_the_shell() {
     let plan = UserError::from(ErrorKey::PlanUnavailable);
-    let (mut core, effects) = typed_with(Some(Input::Engines(Availability::Unavailable(
-        plan.clone(),
-    ))));
+    let (mut core, effects) = typed_with(Some(Input::Engines(
+        kumochi_protocol::message::ConnectionKind::ChatGpt,
+        Availability::Unavailable(plan.clone()),
+    )));
     assert_eq!(effects, told(Some(plan)));
     assert_eq!(core.handle(Input::TurnStored { run: R }), Ok(written()));
 }
@@ -183,7 +187,10 @@ fn the_accounts_own_reason_reaches_the_shell() {
 fn a_sign_out_before_the_turn_is_stored_ends_the_run_and_a_new_account_never_answers_it() {
     let mut core = typed(Some(ready(7, &["m"])));
     assert_eq!(
-        core.handle(Input::Engines(Availability::Unavailable(sign_in()))),
+        core.handle(Input::Engines(
+            kumochi_protocol::message::ConnectionKind::ChatGpt,
+            Availability::Unavailable(sign_in())
+        )),
         Ok(told(Some(sign_in())))
     );
     assert_eq!(core.handle(ready(8, &["m"])), Ok(Vec::new()));
@@ -209,7 +216,10 @@ fn a_sign_out_during_the_first_build_ends_the_run_and_its_late_result_is_stale()
             .any(|effect| matches!(effect, Effect::Store(StoreOp::BuildContext(_))))
     );
     assert_eq!(
-        core.handle(Input::Engines(Availability::Unavailable(sign_in()))),
+        core.handle(Input::Engines(
+            kumochi_protocol::message::ConnectionKind::ChatGpt,
+            Availability::Unavailable(sign_in())
+        )),
         Ok(failed(Some(sign_in())))
     );
     assert_eq!(core.handle(built(Some("m"), Vec::new())), Err(super::Stale));
@@ -279,9 +289,10 @@ fn an_accepted_sign_out_ends_the_run_with_its_reason() {
     core.handle(built(Some("m"), Vec::new())).expect("current");
     let signing_out = reason(ErrorKey::SignInNeeded, Action::SignIn);
     assert_eq!(
-        core.handle(Input::Engines(Availability::Unavailable(
-            signing_out.clone()
-        ))),
+        core.handle(Input::Engines(
+            kumochi_protocol::message::ConnectionKind::ChatGpt,
+            Availability::Unavailable(signing_out.clone())
+        )),
         Ok(failed(Some(signing_out)))
     );
 }
@@ -396,6 +407,8 @@ fn a_send_takes_its_runs_connection_only_while_the_run_is_current() {
         thread: T,
         serial: 2,
     });
+    assert_eq!(core.sending(round), None, "unbound before its first build");
+    core.handle(built(Some("m"), Vec::new())).expect("current");
     assert_eq!(core.sending(round), Some(ConnectionTag(7)));
     assert_eq!(core.handle(ready(8, &["m"])).map(|_| ()), Ok(()));
     assert_eq!(core.sending(job), Some(ConnectionTag(8)));
@@ -415,7 +428,11 @@ fn a_send_takes_its_runs_connection_only_while_the_run_is_current() {
         revealed: Vec::new(),
     })
     .expect("current");
-    assert_eq!(core.bound(R), Some(ConnectionTag(7)), "the run is ending");
+    assert_eq!(
+        core.replay_tag(R),
+        Some(ConnectionTag(7)),
+        "the run is ending"
+    );
     assert_eq!(core.sending(round), None);
 
     let core = typed(None);

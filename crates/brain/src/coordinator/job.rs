@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::time::Duration;
 
-use kumochi_protocol::message::{EventId, RunId, ThreadId, ThreadTitle};
+use kumochi_protocol::message::{ConnectionKind, EventId, RunId, ThreadId, ThreadTitle};
 
 use super::admission::origin;
 use super::{Coordinator, Effect, SendKey, Stale, StoreOp, SummaryText, Unbuilt};
@@ -231,7 +231,14 @@ impl Coordinator {
             self.job_ended(effects);
             return Ok(());
         };
-        if job.voided(&ask.built.sources) {
+        // shortcut: a job answers only on `ChatGPT` until jobs get a route of their own.
+        let elsewhere = ask
+            .built
+            .request
+            .choice
+            .as_ref()
+            .is_some_and(|choice| choice.connection != ConnectionKind::ChatGpt);
+        if elsewhere || job.voided(&ask.built.sources) {
             self.job_ended(effects);
             return Ok(());
         }

@@ -29,10 +29,11 @@ const TEXT_KEPT: usize = 4096;
 /// Room in a data frame for a `TextSubmit`'s other fields [guess].
 const SUBMIT_OVERHEAD: usize = 64;
 /// Sign-in failures that may restore a submission before its run starts answering.
-const RECONNECT: [ErrorKey; 6] = [
+const RECONNECT: [ErrorKey; 7] = [
     ErrorKey::SessionEnded,
     ErrorKey::AccountRefused,
     ErrorKey::SignInNeeded,
+    ErrorKey::ConnectionNeeded,
     ErrorKey::ClaudeCodeSignedOut,
     ErrorKey::AnthropicKeyRejected,
     ErrorKey::RenewalUnconfirmed,

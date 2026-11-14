@@ -788,6 +788,52 @@ fn reasoning_is_replayed_only_on_the_connection_that_made_it() {
 }
 
 #[test]
+fn native_items_replay_only_on_a_chatgpt_route() {
+    use kumochi_protocol::message::ConnectionKind;
+    let mut world = world("ctx-route-replay");
+    let main = world.main;
+    let (_, current) = world.run(Some(main), "ask", None);
+    let last = *world.events(main).last().expect("an event");
+    let item = Item {
+        id: EventId(last.0 + 1),
+        run: current,
+        body: Body::Native {
+            connection: ConnectionTag(7),
+            item: Opaque::new(vec![1]).expect("small"),
+        },
+    };
+    for (connection, replayed) in [
+        (ConnectionKind::ChatGpt, true),
+        (ConnectionKind::ClaudeCode, false),
+        (ConnectionKind::AnthropicKey, false),
+    ] {
+        let mut run = snapshot(Origin::Kumo, None);
+        run.choice.as_mut().expect("a choice").connection = connection;
+        let built = world
+            .build(
+                &run,
+                (main, current),
+                Supplied {
+                    summary: None,
+                    items: vec![item.clone()],
+                    ..Supplied::default()
+                },
+                BOUND,
+            )
+            .expect("built");
+        assert_eq!(
+            built
+                .request
+                .input
+                .iter()
+                .any(|input| matches!(input, InputItem::Native(_))),
+            replayed,
+            "{connection:?}"
+        );
+    }
+}
+
+#[test]
 fn a_summary_states_its_range_and_replaces_the_events_it_covers() {
     let mut world = world("ctx-summary");
     let main = world.main;

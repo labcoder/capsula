@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
-    ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, Deleted,
+    ConnectionKind, ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, Deleted,
     MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, SceneId, SpeechPcm, ThreadId,
     Transcript,
 };
@@ -150,7 +150,8 @@ pub(crate) enum Selected {
 #[derive(Debug)]
 pub(crate) struct Brain {
     pub(crate) crashes: crate::relaunch::Crashes,
-    coordinator: Coordinator,
+    /// Boxed, so a future that owns the brain stays under clippy's `large_futures` limit.
+    coordinator: Box<Coordinator>,
     store: Option<StoreThread>,
     engine: Box<dyn Engine>,
     /// The dev fixture was picked, so runs never wait on the account.
@@ -291,7 +292,7 @@ impl Brain {
         let (engine_tx, engine_events) = mpsc::channel(ENGINE_QUEUE);
         let mut brain = Self {
             crashes: crate::relaunch::Crashes::default(),
-            coordinator,
+            coordinator: Box::new(coordinator),
             store: Some(store),
             engine,
             #[cfg(any(test, debug_assertions))]
@@ -358,7 +359,7 @@ impl Brain {
         };
         #[cfg(not(any(test, debug_assertions)))]
         let now = self.account.availability();
-        let input = Input::Engines(now);
+        let input = Input::Engines(kumochi_protocol::message::ConnectionKind::ChatGpt, now);
         self.hold_fence(&input);
         let effects = self
             .coordinator
@@ -1033,7 +1034,7 @@ impl Brain {
         let (origin, run) = (build.origin, build.key.run);
         build.snapshot.get_or_insert_with(|| RunSnapshot {
             // A build for a run that already ended is stale, so its tag is never read.
-            connection: self.coordinator.bound(run).unwrap_or(ConnectionTag(0)),
+            connection: self.coordinator.replay_tag(run).unwrap_or(ConnectionTag(0)),
             ..self.snapshot(origin)
         });
     }
@@ -1055,13 +1056,29 @@ impl Brain {
     fn start_job(&mut self, job: JobKey, kind: JobKind, request: engines::RunRequest) {
         let gate = SendGate::new(request.key, Arc::clone(&self.asks), self.inputs_tx.clone());
         let cancel = engines::start_job(
-            &*self.engine,
+            self.engine_for(&request),
             request,
             (job, kind),
             self.inputs_tx.clone(),
             gate,
         );
         self.job = Some((job, cancel));
+    }
+
+    /// The engine for `request`'s choice: `ChatGPT`'s for its own and for none, and [`Unserved`]
+    /// for a connection with no engine yet.
+    ///
+    /// [`Unserved`]: engines::Unserved
+    fn engine_for(&self, request: &engines::RunRequest) -> &dyn Engine {
+        match request
+            .request
+            .choice
+            .as_ref()
+            .map(|choice| choice.connection)
+        {
+            None | Some(ConnectionKind::ChatGpt) => &*self.engine,
+            Some(ConnectionKind::AnthropicKey | ConnectionKind::ClaudeCode) => &engines::Unserved,
+        }
     }
 
     /// What a run's first build, or a job's read, takes: the names and default model now.
@@ -1193,8 +1210,12 @@ impl Brain {
                     let run = request.run;
                     let gate =
                         SendGate::new(request.key, Arc::clone(&self.asks), self.inputs_tx.clone());
-                    let cancel =
-                        engines::start(&*self.engine, request, self.engine_tx.clone(), gate);
+                    let cancel = engines::start(
+                        self.engine_for(&request),
+                        request,
+                        self.engine_tx.clone(),
+                        gate,
+                    );
                     self.round = Some((run, cancel));
                 }
                 Effect::StartJob { job, kind, request } => self.start_job(job, kind, request),

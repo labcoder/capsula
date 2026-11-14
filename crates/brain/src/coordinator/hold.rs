@@ -5,10 +5,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use kumochi_protocol::message::{Content, ControlToShell, GestureId, RunOrigin, ThreadId};
+use kumochi_protocol::message::{
+    ConnectionKind, Content, ControlToShell, GestureId, RunOrigin, ThreadId,
+};
 
+use super::availability::Arrived;
 use super::{Coordinator, Effect, Input, StoreOp, admission};
-use crate::context::{Origin, RunSnapshot};
+use crate::context::{ConnectionTag, Origin, RunSnapshot};
 use crate::recall::control::{Control, READ_TIME};
 use crate::store::Generation;
 
@@ -41,7 +44,19 @@ pub struct HoldSnapshot {
     pub(crate) selection: u64,
     pub(crate) generation: Option<Generation>,
     pub(crate) defaults: RunSnapshot,
+    /// The sign-in each kind had ready when the hold began; the hold answers on its choice's.
+    pub(crate) arrived: Arrived,
     pub(crate) cancel: Arc<AtomicBool>,
+}
+
+impl HoldSnapshot {
+    /// The kind the hold answers on: its choice's, else `ChatGPT`'s.
+    fn kind(&self) -> ConnectionKind {
+        self.defaults
+            .choice
+            .as_ref()
+            .map_or(ConnectionKind::ChatGpt, |choice| choice.connection)
+    }
 }
 
 impl fmt::Debug for HoldSnapshot {
@@ -52,6 +67,7 @@ impl fmt::Debug for HoldSnapshot {
             .field("selection", &self.selection)
             .field("generation", &self.generation)
             .field("connection", &self.defaults.connection)
+            .field("arrived", &self.arrived)
             .finish_non_exhaustive()
     }
 }
@@ -63,6 +79,7 @@ impl PartialEq for HoldSnapshot {
             && self.selection == other.selection
             && self.generation == other.generation
             && self.defaults == other.defaults
+            && self.arrived == other.arrived
     }
 }
 impl Eq for HoldSnapshot {}
@@ -104,7 +121,7 @@ impl Coordinator {
         }
     }
 
-    /// Captures the ready connection, without allocating a run or a new thread.
+    /// Captures the sign-in each kind has ready, without allocating a run or a new thread.
     pub(crate) fn prepare_hold(
         &self,
         key: HoldKey,
@@ -113,15 +130,18 @@ impl Coordinator {
         mut defaults: RunSnapshot,
         cancel: Arc<AtomicBool>,
     ) -> Result<StoreOp, ()> {
-        let connection = self.connection();
+        let arrived = self.arrived_now();
         if cancel.load(Ordering::SeqCst)
-            || connection.is_none()
+            || arrived.is_empty()
             || thread.is_some_and(|thread| self.deleting_thread(thread))
         {
             cancel.store(true, Ordering::SeqCst);
             return Err(());
         }
-        defaults.connection = connection.ok_or(())?;
+        // Read only to replay native items, which only a `ChatGPT` route does.
+        defaults.connection = arrived
+            .get(ConnectionKind::ChatGpt)
+            .unwrap_or(ConnectionTag(0));
         defaults.origin = thread.map_or(Origin::Kumo, |thread| {
             admission::origin(thread, self.main_thread)
         });
@@ -133,6 +153,7 @@ impl Coordinator {
                 selection,
                 generation: None,
                 defaults,
+                arrived,
                 cancel,
             },
         }))
@@ -181,8 +202,18 @@ impl Coordinator {
             || snapshot
                 .thread
                 .is_some_and(|thread| self.deleting_thread(thread))
-            || self.connection() != Some(snapshot.defaults.connection)
-            || self.unlisted(snapshot.defaults.choice.as_ref()).is_some())
+            || !self.answers(snapshot))
+    }
+
+    /// Whether `hold` can still answer: its kind's sign-in from when it began is still ready, and
+    /// that kind's catalog lists its choice. A `ChatGPT` hold also replays under that sign-in.
+    fn answers(&self, hold: &HoldSnapshot) -> bool {
+        let choice = hold.defaults.choice.as_ref();
+        self.route_for(hold.arrived, choice).is_ok_and(|route| {
+            (route.kind != ConnectionKind::ChatGpt || route.tag == hold.defaults.connection)
+                && self.refusal(route).is_none()
+                && self.unlisted(route.kind, choice).is_none()
+        })
     }
 
     pub(crate) fn cancel_current_hold(&mut self) -> Vec<Effect> {
@@ -194,8 +225,15 @@ impl Coordinator {
         key.map_or_else(Vec::new, |key| self.cancel_hold(key))
     }
 
-    pub(crate) fn hold_availability_changes(&self, now: &super::Availability) -> bool {
-        now != &self.availability
+    /// Whether `kind` becoming `now` fails a pending hold: a real change to the hold's own kind, or
+    /// to any kind while its read, and so its kind, is still out.
+    pub(crate) fn hold_availability_changes(
+        &self,
+        kind: ConnectionKind,
+        now: &super::Availability,
+        hold: Option<&HoldSnapshot>,
+    ) -> bool {
+        now != self.availability_of(kind) && hold.is_none_or(|hold| hold.kind() == kind)
     }
 
     /// Cancels only the real run transferred from this exact hold.
@@ -224,10 +262,9 @@ impl Coordinator {
         self.current.as_ref().is_none_or(|run| {
             run.hold.as_ref().is_none_or(|hold| {
                 !hold.cancel.load(Ordering::SeqCst)
-                    && self.connection() == Some(hold.defaults.connection)
                     && !self.deleting_thread(run.thread)
                     && run.snapshot.as_ref() == Some(&hold.defaults)
-                    && self.unlisted(hold.defaults.choice.as_ref()).is_none()
+                    && self.answers(hold)
             })
         })
     }
@@ -240,10 +277,11 @@ impl Coordinator {
             | Input::ThreadOp(kumochi_protocol::message::ThreadOp::SetModel { thread, .. }) => {
                 *thread == run.thread
             }
-            Input::Engines(super::Availability::Ready(ready)) => {
-                ready.connection != hold.defaults.connection
+            Input::Engines(kind, super::Availability::Ready(ready)) => {
+                *kind == hold.kind() && hold.arrived.get(*kind) != Some(ready.connection)
             }
-            Input::Engines(super::Availability::Unavailable(_)) | Input::ShellLost => true,
+            Input::Engines(kind, super::Availability::Unavailable(_)) => *kind == hold.kind(),
+            Input::ShellLost => true,
             _ => false,
         };
         if invalid {

@@ -106,6 +106,8 @@ pub enum ErrorKey {
     DrawingNotReturned,
     /// A held turn's screen couldn't go with its request, so the turn wasn't sent without it.
     ScreenUnavailable,
+    /// No connection that can answer is set up, so nothing can answer until one is connected.
+    ConnectionNeeded,
 }
 
 macro_rules! catalog {
@@ -174,6 +176,7 @@ impl ErrorKey {
         DrawingReplacementFailed,
         DrawingNotReturned,
         ScreenUnavailable,
+        ConnectionNeeded,
     }
 }
 

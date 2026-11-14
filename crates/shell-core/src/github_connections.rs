@@ -7,13 +7,13 @@ use crate::strings::Text;
 use kumochi_protocol::message::{Cleanup, GitHubOp, GitHubView, UserCode, UserError};
 
 #[derive(Default)]
-pub(crate) struct GitHubConnections {
-    pub(crate) generation: Option<u64>,
-    pub(crate) view: Option<GitHubView>,
-    pub(crate) error: Option<UserError>,
-    pub(crate) send_failed: bool,
-    pub(crate) origin: Arc<()>,
-    pub(crate) controls_origin: Arc<()>,
+pub struct GitHubConnections {
+    pub generation: Option<u64>,
+    pub view: Option<GitHubView>,
+    pub error: Option<UserError>,
+    pub send_failed: bool,
+    pub origin: Arc<()>,
+    pub controls_origin: Arc<()>,
     waiting: Option<GitHubOp>,
     unexplained: bool,
     challenge: Option<UserCode>,
@@ -21,7 +21,7 @@ pub(crate) struct GitHubConnections {
 }
 
 impl GitHubConnections {
-    pub(crate) fn status(&self) -> Text {
+    pub fn status(&self) -> Text {
         match self.waiting {
             Some(GitHubOp::Connect) => return Text::GitHubRequesting,
             Some(GitHubOp::CancelConnect) => return Text::GitHubCanceling,
@@ -50,7 +50,7 @@ impl GitHubConnections {
         }
     }
 
-    pub(crate) fn commands(&self) -> &'static [(Text, GitHubOp)] {
+    pub fn commands(&self) -> &'static [(Text, GitHubOp)] {
         match &self.view {
             None | Some(GitHubView::SignedOut { cleanup: None }) => {
                 &[(Text::GitHubConnect, GitHubOp::Connect)]
@@ -78,7 +78,7 @@ impl GitHubConnections {
         }
     }
 
-    pub(crate) fn error_text(&self) -> Option<Text> {
+    pub fn error_text(&self) -> Option<Text> {
         use kumochi_protocol::message::ErrorKey;
         self.error.as_ref().map(|error| match error.key() {
             ErrorKey::GitHubUnavailable => Text::GitHubUnavailable,
@@ -94,7 +94,7 @@ impl GitHubConnections {
         })
     }
 
-    pub(crate) fn login(&self) -> Option<&kumochi_protocol::message::GitHubLogin> {
+    pub fn login(&self) -> Option<&kumochi_protocol::message::GitHubLogin> {
         match &self.view {
             Some(
                 GitHubView::Connected { login, .. }
@@ -111,7 +111,7 @@ impl GitHubConnections {
         }
     }
 
-    pub(crate) fn disconnected(&mut self) {
+    pub fn disconnected(&mut self) {
         *self = Self::default();
     }
 
@@ -126,7 +126,7 @@ impl GitHubConnections {
         true
     }
 
-    pub(crate) fn receive(
+    pub fn receive(
         &mut self,
         current: Option<u64>,
         generation: u64,
@@ -222,7 +222,7 @@ impl GitHubConnections {
         true
     }
 
-    pub(crate) fn receive_error(
+    pub fn receive_error(
         &mut self,
         current: Option<u64>,
         generation: u64,
@@ -239,7 +239,7 @@ impl GitHubConnections {
         true
     }
 
-    pub(crate) fn allows(&self, current: Option<u64>, op: &GitHubOp) -> bool {
+    pub fn allows(&self, current: Option<u64>, op: &GitHubOp) -> bool {
         if current.is_none() || current != self.generation {
             return false;
         }
@@ -286,7 +286,7 @@ impl GitHubConnections {
         }
     }
 
-    pub(crate) fn send(
+    pub fn send(
         &mut self,
         current: Option<u64>,
         op: GitHubOp,
@@ -312,7 +312,7 @@ impl GitHubConnections {
         true
     }
 
-    pub(crate) fn code(&self, current: Option<u64>, now: Instant) -> Option<(&UserCode, u64)> {
+    pub fn code(&self, current: Option<u64>, now: Instant) -> Option<(&UserCode, u64)> {
         if current.is_none() || current != self.generation || self.error.is_some() {
             return None;
         }
@@ -328,7 +328,7 @@ impl GitHubConnections {
         ))
     }
 
-    pub(crate) fn is_current(
+    pub fn is_current(
         &self,
         current: Option<u64>,
         generation: Option<u64>,

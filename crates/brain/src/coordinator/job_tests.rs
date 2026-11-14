@@ -794,3 +794,39 @@ fn a_held_job_send_arms_its_hold_capped_at_165_seconds() {
         );
     }
 }
+
+#[test]
+fn a_job_on_another_connections_choice_ends_unsent_and_frees_the_slot() {
+    use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
+    for connection in [ConnectionKind::ClaudeCode, ConnectionKind::AnthropicKey] {
+        let elsewhere = |key| {
+            let Input::JobBuilt(mut built) = job_built(key, &[T]) else {
+                unreachable!("job_built builds a job's read");
+            };
+            if let Ok(Some(ask)) = &mut built.result {
+                ask.built.request.choice = Some(ModelChoice {
+                    connection,
+                    model: ModelSlug::new("m").expect("slug"),
+                    effort: Effort::Low,
+                });
+            }
+            Input::JobBuilt(built)
+        };
+        let mut core = reading();
+        assert_eq!(
+            core.handle(elsewhere(key(2))),
+            Ok(vec![compacts(3)]),
+            "the title job ends unsent, and compaction follows: {connection:?}"
+        );
+        assert_eq!(
+            core.handle(elsewhere(key(3))),
+            Ok(Vec::new()),
+            "compaction ends unsent too: {connection:?}"
+        );
+        assert_eq!(
+            core.handle(ready(key(3))),
+            Ok(rebuild(key(3))),
+            "the slot is empty"
+        );
+    }
+}

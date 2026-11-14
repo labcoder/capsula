@@ -214,6 +214,32 @@ fn idle_release_and_a_fresh_installer_request_reload_without_fetching_or_stale_r
 }
 
 #[test]
+fn an_idle_clock_moved_once_the_model_is_ready_still_counts_when_serving_starts() {
+    use kumochi_protocol::message::SttUnload;
+
+    let harness = Harness::new();
+    harness
+        .handle
+        .control
+        .update(|state| state.hold_after_ready = true);
+    harness.handle.load("models".into(), 1);
+    assert_eq!(harness.event(), Event::Loaded("models".into()));
+    harness.wait_ready();
+    harness.handle.set_unload(SttUnload::After15Min);
+    harness.handle.control.update(|state| {
+        state.idle_since = Instant::now()
+            .checked_sub(Duration::from_mins(15))
+            .expect("fixture clock supports the idle interval");
+        state.hold_after_ready = false;
+    });
+    assert_eq!(harness.event(), Event::TornDown);
+    assert_eq!(
+        harness.reports(2),
+        [report(1, LoadEvent::Loaded), report(1, LoadEvent::Unloaded)]
+    );
+}
+
+#[test]
 fn an_expired_idle_clock_never_interrupts_running_or_queued_decodes() {
     use kumochi_protocol::message::SttUnload;
 

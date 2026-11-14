@@ -4,7 +4,7 @@ use super::{Pending, Settings, SettingsOp, Slot};
 use crate::strings::Text;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SpeechInputAction {
+pub enum SpeechInputAction {
     Install,
     Retry,
     Reload,
@@ -12,7 +12,7 @@ pub(crate) enum SpeechInputAction {
 }
 
 impl SpeechInputAction {
-    pub(crate) fn label(self) -> Text {
+    pub fn label(self) -> Text {
         match self {
             Self::Install => Text::VoiceInstallModel,
             Self::Retry => Text::VoiceRetryModel,
@@ -23,13 +23,13 @@ impl SpeechInputAction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct SpeechInputIntent {
+pub struct SpeechInputIntent {
     generation: u64,
-    pub(crate) action: SpeechInputAction,
+    pub action: SpeechInputAction,
 }
 
 impl Settings {
-    pub(crate) fn hold_to_talk_notice(&self) -> Option<Text> {
+    pub fn hold_to_talk_notice(&self) -> Option<Text> {
         if !self.hold_to_talk_enabled() {
             return Some(if self.view.is_some() {
                 Text::HoldDisabled
@@ -48,7 +48,13 @@ impl Settings {
             && self.hold_to_talk_choice() != Some(false)
     }
 
-    pub(crate) fn hold_to_talk_choice(&self) -> Option<bool> {
+    /// `hold_to_talk_enabled`, for the shell's tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn hold_to_talk_enabled_for_tests(&self) -> bool {
+        self.hold_to_talk_enabled()
+    }
+
+    pub fn hold_to_talk_choice(&self) -> Option<bool> {
         let saved = self.view.as_ref()?.hold_to_talk;
         self.pending
             .iter()
@@ -59,13 +65,13 @@ impl Settings {
             .or(Some(saved))
     }
 
-    pub(crate) fn hold_to_talk_pending(&self) -> bool {
+    pub fn hold_to_talk_pending(&self) -> bool {
         self.pending
             .iter()
             .any(|pending| matches!(pending.slot, Slot::HoldToTalk(_)))
     }
 
-    pub(crate) fn hold_to_talk_error(&self) -> Option<&UserError> {
+    pub fn hold_to_talk_error(&self) -> Option<&UserError> {
         self.notice_slot
             .filter(|slot| matches!(slot, Slot::HoldToTalk(_)))
             .and(self.notice.as_ref())
@@ -75,11 +81,7 @@ impl Settings {
         clippy::fn_params_excessive_bools,
         reason = "the checkbox and wire setter carry this boolean unchanged"
     )]
-    pub(crate) fn send_hold_to_talk(
-        &mut self,
-        on: bool,
-        send: impl FnOnce(SettingsOp) -> bool,
-    ) -> bool {
+    pub fn send_hold_to_talk(&mut self, on: bool, send: impl FnOnce(SettingsOp) -> bool) -> bool {
         if self.hold_to_talk_pending()
             || self.hold_to_talk_choice().is_none_or(|old| old == on)
             || !send(SettingsOp::SetHoldToTalk(on))
@@ -94,7 +96,7 @@ impl Settings {
         true
     }
 
-    pub(crate) fn receive_speech_input(
+    pub fn receive_speech_input(
         &mut self,
         current: Option<u64>,
         generation: u64,
@@ -108,7 +110,7 @@ impl Settings {
         true
     }
 
-    pub(crate) fn speech_input_intent(&self) -> Option<SpeechInputIntent> {
+    pub fn speech_input_intent(&self) -> Option<SpeechInputIntent> {
         self.view.as_ref()?;
         let action = match self.speech_input? {
             PartState::NotInstalled => SpeechInputAction::Install,
@@ -125,28 +127,28 @@ impl Settings {
         })
     }
 
-    pub(crate) fn speech_input_pending(&self) -> bool {
+    pub fn speech_input_pending(&self) -> bool {
         self.pending
             .iter()
             .any(|pending| matches!(pending.slot, Slot::SpeechInput(_)))
     }
 
-    pub(crate) fn speech_input_error(&self) -> Option<&UserError> {
+    pub fn speech_input_error(&self) -> Option<&UserError> {
         self.speech_error.as_ref()
     }
 
-    pub(crate) fn speech_input_send_failed(&self) -> bool {
+    pub fn speech_input_send_failed(&self) -> bool {
         self.speech_send_failed
     }
 
-    pub(crate) fn speech_input_failure(&self) -> Option<UserError> {
+    pub fn speech_input_failure(&self) -> Option<UserError> {
         match self.speech_input? {
             PartState::Failed { key, .. } => Some(key.into()),
             _ => None,
         }
     }
 
-    pub(crate) fn send_speech_input(
+    pub fn send_speech_input(
         &mut self,
         intent: SpeechInputIntent,
         current: Option<u64>,
@@ -178,7 +180,7 @@ impl Settings {
         true
     }
 
-    pub(crate) fn speech_input_status(&self) -> Text {
+    pub fn speech_input_status(&self) -> Text {
         match self.speech_input {
             None => Text::VoiceStatusUnknown,
             Some(PartState::NotInstalled) => Text::VoiceNotInstalled,
@@ -197,7 +199,7 @@ impl Settings {
         }
     }
 
-    pub(crate) fn stt_unload_choice(&self) -> Option<SttUnload> {
+    pub fn stt_unload_choice(&self) -> Option<SttUnload> {
         let saved = self.view.as_ref()?.stt_unload;
         self.pending
             .iter()
@@ -208,21 +210,21 @@ impl Settings {
             .or(Some(saved))
     }
 
-    pub(crate) fn stt_unload_pending(&self) -> bool {
+    pub fn stt_unload_pending(&self) -> bool {
         self.pending
             .iter()
             .any(|pending| matches!(pending.slot, Slot::SttUnload(_)))
     }
 
-    pub(crate) fn stt_unload_error(&self) -> Option<&UserError> {
+    pub fn stt_unload_error(&self) -> Option<&UserError> {
         self.stt_error.as_ref()
     }
 
-    pub(crate) fn stt_unload_send_failed(&self) -> bool {
+    pub fn stt_unload_send_failed(&self) -> bool {
         self.stt_send_failed
     }
 
-    pub(crate) fn send_stt_unload(
+    pub fn send_stt_unload(
         &mut self,
         policy: SttUnload,
         send: impl FnOnce(SettingsOp) -> bool,

@@ -25,7 +25,7 @@ No login URL, code or credential contents reach the shell. See [Claude Code](cla
 
 The status panel's **Settings…** opens a retained window, the tasks panel's size and anchored
 with the same work-area clamping. Kit's tabs expose **General**, **Accounts** and **Voice**.
-`shell/settings.rs` owns the plain drafts, validation, per-field saving and errors;
+`shell-core/settings.rs` owns the plain drafts, validation, per-field saving and errors;
 `presence/settings/window.rs` owns the window and session sends; `presence/settings/mod.rs`
 owns the shared view frame, retained Kit inputs and subscriptions. `general.rs` and `accounts.rs`
 compose their tabs without another settings entity. The shell's UI thread never waits for a save.
@@ -291,7 +291,8 @@ refused with `Error(VoiceUnavailable)` and its one
 `SettingsOp::SetDefaultModel` under epoch 0, which no connection has, so a shell hears only the
 settled `SettingsView` (see [accounts](accounts.md#model-catalog)). Explicit user changes remain
 unconditional; queued epoch-0 repairs recompute against the latest committed choice and catalog
-at the write boundary, so they cannot replace an acknowledged choice on another connection.
+at the write boundary, so they cannot replace an acknowledged choice on another connection. A
+repair with nothing left to write changes nothing, pending holds included.
 The raw table reads as absent, valid or invalid intent. A table missing only `connection` means
 ChatGPT. An unknown effort keeps the connection and model, displays Medium and executes at Low,
 without rewriting the table. A malformed table that names ChatGPT or no connection, or a value

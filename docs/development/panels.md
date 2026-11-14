@@ -23,7 +23,7 @@ hand check; pure Esc and save ordering are unit-tested. A new Settings panel inh
 current capture exclusion, just like Tasks and typing.
 
 `presence/settings.rs` owns this lifetime, `presence/settings_view.rs` composes Kit's TabBar
-and Inputs, and `shell/settings.rs` owns drafts and ordered answers. See
+and Inputs, and `shell-core/settings.rs` owns drafts and ordered answers. See
 [settings](settings.md#shell-editor) for the FIFO and error lifetime, and
 [using Settings](../user/settings.md) for the workflow.
 

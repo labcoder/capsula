@@ -111,6 +111,29 @@ pub trait Engine: Send + Sync + fmt::Debug {
     fn start(&self, request: RunRequest, events: mpsc::Sender<TurnEvent>, gate: SendGate) -> Round;
 }
 
+/// The engine for a connection that has none yet: its round fails at once with
+/// `ModelUnavailable`, so another engine never gets a request for a connection it doesn't serve.
+#[derive(Debug)]
+pub(crate) struct Unserved;
+
+impl Engine for Unserved {
+    fn start(
+        &self,
+        _request: RunRequest,
+        events: mpsc::Sender<TurnEvent>,
+        _gate: SendGate,
+    ) -> Round {
+        Box::pin(async move {
+            let failure = EngineFailure::Access(Some(crate::coordinator::model_unavailable()));
+            // Nobody listens once the round is dropped, so a failed send has nothing left to tell.
+            events
+                .send(TurnEvent::Finished(Finish::Failed(failure)))
+                .await
+                .ok();
+        })
+    }
+}
+
 /// Asks waiting for the coordinator's answer, by build or job.
 pub(crate) type Asks = Arc<Mutex<Vec<(SendKey, oneshot::Sender<Answer>)>>>;
 

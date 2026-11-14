@@ -10,10 +10,11 @@ use super::{Applied, Refused, Runs};
 
 /// The keys a sign-in failure explains a named run's failure with, written out here rather than
 /// read from the code under test. `TurnRefused` has no run, so it isn't one.
-const RECONNECT: [ErrorKey; 6] = [
+const RECONNECT: [ErrorKey; 7] = [
     ErrorKey::SessionEnded,
     ErrorKey::AccountRefused,
     ErrorKey::SignInNeeded,
+    ErrorKey::ConnectionNeeded,
     ErrorKey::ClaudeCodeSignedOut,
     ErrorKey::AnthropicKeyRejected,
     ErrorKey::RenewalUnconfirmed,

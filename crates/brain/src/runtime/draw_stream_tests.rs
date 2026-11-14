@@ -41,14 +41,17 @@ fn brain(scratch: &Scratch) -> Brain {
         .expect("scratch model choice");
     pending.write().expect("scratch settings");
     brain.config.commit(pending);
-    brain.offline(Input::Engines(Availability::Ready(Ready {
-        connection: ConnectionTag(0),
-        models: vec![ModelInfo {
-            slug,
-            display_name: ModelName::new("Offline model").expect("model name"),
-        }],
-        trusted_draw: false,
-    })));
+    brain.offline(Input::Engines(
+        kumochi_protocol::message::ConnectionKind::ChatGpt,
+        Availability::Ready(Ready {
+            connection: ConnectionTag(0),
+            models: vec![ModelInfo {
+                slug,
+                display_name: ModelName::new("Offline model").expect("model name"),
+            }],
+            trusted_draw: false,
+        }),
+    ));
     brain
 }
 

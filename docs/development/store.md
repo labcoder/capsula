@@ -115,9 +115,10 @@ rows read as `thread` and `words` with no model:
 `StoredChoice` separates structural decoding from admission. Page display never contacts a provider.
 An unknown effort is kept as unknown for execution, which uses the selected model's policy instead
 of the page's placeholder. For the currently supported ChatGPT route, the default remains Low;
-catalog membership is checked by the coordinator. Context, background-job and hold reads refuse
-saved or default non-ChatGPT selections until route-aware admission lands, so persistence does not
-activate a route or disclose its content through the ChatGPT engine. A ChatGPT catalog refresh
+catalog membership is checked by the coordinator. Context, background-job and hold reads return the
+saved or default selection on any connection, and admission decides whether that connection can
+answer (runs.md, "Availability"), so nothing on another connection reaches the ChatGPT engine. A
+ChatGPT catalog refresh
 also preserves an explicit default on another connection. Missing/deleted threads are errors,
 not an unset selection. This replaces the old unknown-effort-to-default-model fallback.
 

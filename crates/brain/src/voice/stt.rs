@@ -190,6 +190,9 @@ struct State {
     finished: [Option<SttResult>; 2],
     #[cfg(test)]
     decode_cut: Option<DecodeCut>,
+    /// Holds the worker between the model becoming ready and serving.
+    #[cfg(test)]
+    hold_after_ready: bool,
     unload_after: Option<Duration>,
     idle_since: Instant,
     shutdown: bool,
@@ -375,6 +378,8 @@ impl SttHandle {
                 finished: [None, None],
                 #[cfg(test)]
                 decode_cut: None,
+                #[cfg(test)]
+                hold_after_ready: false,
                 unload_after: None,
                 idle_since: Instant::now(),
                 shutdown: false,
@@ -516,6 +521,8 @@ fn run(
                 let kept = !state.shutdown && state.current == Some(ask) && wants(state, ask);
                 state.ready = kept;
                 if state.ready {
+                    // The idle clock starts with readiness, so a change made once ready stays.
+                    state.idle_since = Instant::now();
                     reports.send(ask, LoadEvent::Loaded);
                 }
                 kept
@@ -523,6 +530,13 @@ fn run(
             if !kept {
                 ended = Some(LoadEvent::Discarded);
                 return Served::Released;
+            }
+            #[cfg(test)]
+            {
+                let mut state = control.lock();
+                while state.hold_after_ready {
+                    state = control.wait(state);
+                }
             }
             let served = serve_decodes(control, ask, generation, decoder, &mut losses);
             ended = Some(match served {
@@ -601,7 +615,6 @@ fn serve_decodes(
         let mut running: [Option<Running<'_>>; 2] = [None, None];
         let mut failed = false;
         let mut state = control.lock();
-        state.idle_since = Instant::now();
         loop {
             #[cfg(test)]
             while state.decode_cut == Some(DecodeCut::Delivery) {
