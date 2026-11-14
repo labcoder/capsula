@@ -1797,16 +1797,21 @@ async fn a_screen_worker_that_cant_start_leaves_screen_holds_unsupported() {
     brain.close().await;
 }
 
+/// Every control message the shell was sent since the last call.
+fn controls(output: &mut mpsc::Receiver<Vec<u8>>) -> Vec<ControlToShell> {
+    use kumochi_protocol::frame;
+    std::iter::from_fn(|| output.try_recv().ok())
+        .map(|bytes| frame::decode(&bytes[frame::HEADER_LEN..]).expect("decodes"))
+        .collect()
+}
+
 /// Every gate message the shell was sent since the last call.
 fn gates(output: &mut mpsc::Receiver<Vec<u8>>) -> Vec<ScreenHolds> {
-    use kumochi_protocol::frame;
-    use kumochi_protocol::message::ControlToShell;
-    std::iter::from_fn(|| output.try_recv().ok())
-        .filter_map(|bytes| {
-            match frame::decode::<ControlToShell>(&bytes[frame::HEADER_LEN..]).expect("decodes") {
-                ControlToShell::ScreenHolds(state) => Some(state),
-                _ => None,
-            }
+    controls(output)
+        .into_iter()
+        .filter_map(|message| match message {
+            ControlToShell::ScreenHolds(state) => Some(state),
+            _ => None,
         })
         .collect()
 }
@@ -1836,22 +1841,28 @@ async fn a_system_that_cant_capture_ends_the_hold_not_ready_and_holds_stay_unsup
     brain.screen_holds_changed(&mut link).unwrap();
     assert!(matches!(gates(&mut output)[..], [ScreenHolds::On { .. }]));
     screen_hold(&mut brain, KEY, unanswered());
-    for _ in 0..2 {
-        let event = ScreenEvent {
-            key: KEY,
-            generation: None,
-            outcome: screen::ending(Closed::Refused(Refusal::Unsupported)),
-        };
-        brain.hold_screen_event(event, &mut link).unwrap();
-    }
+    let unsupported = || ScreenEvent {
+        key: KEY,
+        generation: None,
+        outcome: screen::ending(Closed::Refused(Refusal::Unsupported)),
+    };
+    brain.hold_screen_event(unsupported(), &mut link).unwrap();
     assert!(matches!(
         brain.holds.pending.as_ref().unwrap().screen,
         ScreenPart::Closed(ScreenClass::NotReady)
     ));
     assert_eq!(
-        gates(&mut output),
-        [ScreenHolds::Off(ScreenOff::Unsupported)]
+        controls(&mut output),
+        [
+            ControlToShell::CaptureFailed {
+                capture_for: CaptureFor::Gesture(KEY.gesture),
+                reason: CaptureFailure::Unavailable,
+            },
+            ControlToShell::ScreenHolds(ScreenHolds::Off(ScreenOff::Unsupported)),
+        ]
     );
+    brain.hold_screen_event(unsupported(), &mut link).unwrap();
+    assert_eq!(gates(&mut output), []);
     for on in [false, true] {
         let pending = brain.config.stage(SettingsOp::SetScreenHolds(on)).unwrap();
         pending.write().unwrap();
@@ -1867,6 +1878,28 @@ async fn a_system_that_cant_capture_ends_the_hold_not_ready_and_holds_stay_unsup
         brain.screen_gate(Some(&sol)),
         ScreenHolds::Off(ScreenOff::Unsupported)
     );
+}
+
+#[tokio::test]
+async fn a_capture_the_system_refuses_comes_back_from_the_task_as_unsupported() {
+    use crate::screen::Refusal;
+    type Reply = <crate::screen::Holds as crate::supervise::Kind>::Reply;
+    let scratch = Scratch::new("hold-screen-refused");
+    let mut brain = test_support::brain(&scratch, "");
+    let mut rig = crate::supervise::fixture::start::<crate::screen::Holds>();
+    brain.holds.screen = Some(Arc::new(HoldClient::new(rig.handle.clone())));
+    screen_hold(&mut brain, KEY, ScreenPart::None);
+    let point = kumochi_protocol::geometry::PhysicalPoint([5, 5]);
+    assert!(brain.holds.start_screen(KEY, point, LEASE));
+    let (id, _capture) = rig.next().await;
+    rig.reply(id, &Reply::Refused(Refusal::Unsupported)).await;
+    let Event::Screen(answer) = super::next(&mut brain.holds).await else {
+        panic!("not the task's answer");
+    };
+    assert!(matches!(answer.outcome, Outcome::Unsupported));
+    assert_eq!(answer.generation, None);
+    brain.holds.screen_event(answer);
+    brain.close().await;
 }
 
 #[tokio::test]

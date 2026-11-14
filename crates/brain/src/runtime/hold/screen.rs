@@ -59,7 +59,7 @@ pub(super) enum Outcome {
     Sealed(ScreenContext),
     Closed(ScreenClass),
     /// The worker's system can't capture a window; the part closes `NotReady` and the brain
-    /// remembers it for the session.
+    /// remembers it until it restarts, across shell reconnects.
     Unsupported,
 }
 

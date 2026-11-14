@@ -435,14 +435,15 @@ client starts.
 Whether this system can capture a window is the worker's answer, not the brain's. The worker
 asks when it opens its capturer, on a hold's first capture, and a no comes back as the
 `Unsupported` refusal. That hold ends `NotReady`, with no image and no line beyond what
-`NotReady` gives. The brain then clears its window capture flag for the session and sends the
-gate once as `Off(Unsupported)`; nothing turns the flag back on, so a settings write, a catalog
-change or a worker restart leaves it off. Until that first hold the gate reads `On` on a system
-that can't capture. The brain doesn't ask itself because its start-up runs on the process's main
-thread (a current-thread runtime under `block_on`): a WinRT call there joins that thread to the
-process's implicit MTA, and nothing in the brain process picks a COM apartment today. UI
-Automation and OCR run in the screen worker. A cold ask also costs about 27 ms in a dry run
-(debug build, not under the measuring lock), which only a screen hold pays this way.
+`NotReady` gives. The brain then clears its window capture flag until the brain restarts, across
+shell reconnects, and sends the gate once as `Off(Unsupported)`. Nothing turns the flag back on,
+so a settings write, a catalog change or a worker restart leaves it off. Until that first hold
+the gate reads `On` on a system that can't capture. The brain doesn't ask itself because its
+start-up runs on the process's main thread (a current-thread runtime under `block_on`): a WinRT
+call there joins that thread to the process's implicit MTA, and nothing in the brain process
+picks a COM apartment today. UI Automation and OCR run in the screen worker. A cold ask also
+costs about 27 ms in a dry run (debug build, not under the measuring lock), which only a screen
+hold pays this way.
 
 - **`context(owner, point, until)`** mints a fresh capture id and a ticket whose number is above
   every earlier one (a worker refuses a number it has already spent), minted under the fence's
@@ -499,7 +500,7 @@ windows; after `CaptureDone`, or for any other lease, a lapse is ignored.
 
 | Class | Worker answers |
 |---|---|
-| `NotReady` | `Expired`, `Unsupported` (which also turns screen holds off for the session, below), `Busy`, a fault, a loss or the deadline, a lapsed lease, or still `Waiting` when the words are; `Reused` too, with a `debug_assert`, because only a brain bug sends it |
+| `NotReady` | `Expired`, `Unsupported` (which also turns screen holds off until the brain restarts, below), `Busy`, a fault, a loss or the deadline, a lapsed lease, or still `Waiting` when the words are; `Reused` too, with a `debug_assert`, because only a brain bug sends it |
 | `NothingThere` | `NoWindow` |
 | `CantShare` | `Minimized`, `Cloaked`, `Elevated`, `Protected`, `Excluded` |
 | `Unreadable` | `Unmasked`, `Ambiguous` |
