@@ -6,8 +6,8 @@ use super::*;
 use crate::screen::actor::{Key, Owner};
 use crate::screen::capture::Target;
 use crate::screen::elements::TopWindow;
-use crate::screen::wire::{CaptureId, Exclusion, Refusal};
-use kumochi_protocol::geometry::{DisplayRef, PhysicalPoint, PhysicalRect};
+use crate::screen::wire::{CaptureId, Refusal};
+use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect};
 
 const PATIENCE: Duration = Duration::from_secs(5);
 
@@ -35,23 +35,14 @@ impl Capturer for Local {
     fn capture_window(
         &mut self,
         target: &Target,
-        until: Instant,
-        frame: &mut RawFrame,
-    ) -> Result<Acquired, Failure> {
-        let display = DisplayRef(target.top.rect);
-        self.capture_into(&display, Exclusion::KumochiWindows, until, frame)
-    }
-    fn capture_into(
-        &mut self,
-        display: &DisplayRef,
-        _: Exclusion,
         _: Instant,
         frame: &mut RawFrame,
     ) -> Result<Acquired, Failure> {
         if self.owner != std::thread::current().id() {
             return Err(Failure::Fault(-99));
         }
-        frame.begin(display.0.size[0], display.0.size[1])?.fill(91);
+        let [width, height] = target.top.rect.size;
+        frame.begin(width, height)?.fill(91);
         Ok(Acquired {
             arrived: Instant::now(),
             dpi: 96,

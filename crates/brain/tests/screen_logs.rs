@@ -8,12 +8,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use kumochi_brain::platform::Job;
-use kumochi_brain::screen::{Generation, RequestBody, ScreenError, ScreenSupervisor};
+use kumochi_brain::screen::{Generation, HoldClient, WorkerLost};
 
 const WORKER: &str = env!("CARGO_BIN_EXE_kumochid");
 const PATIENCE: Duration = Duration::from_secs(10);
 /// One fixture process, start to exit [guess: each takes a few seconds].
 const FIXTURE_PATIENCE: Duration = Duration::from_secs(60);
+
+/// A request's deadline under [`PATIENCE`].
+fn until() -> tokio::time::Instant {
+    tokio::time::Instant::now() + PATIENCE
+}
 
 /// Waits for `next` under [`PATIENCE`] of real time, which a paused tokio clock can't measure.
 async fn within_patience<T>(next: impl std::future::Future<Output = T>) -> T {
@@ -90,9 +95,9 @@ fn panic_hook_and_environment_fault_are_exercised_in_child_processes() {
         .expect("logs")
         .map(|entry| std::fs::read_to_string(entry.expect("entry").path()).expect("log"))
         .collect::<String>();
-    assert!(logs.contains("worker.rs:"), "{logs}");
+    assert!(logs.contains("actor.rs:"), "{logs}");
     assert!(!logs.contains("private screen fault payload"), "{logs}");
-    assert!(!logs.contains("RequestBody"), "{logs}");
+    assert!(!logs.contains("ScreenRequest"), "{logs}");
     std::fs::remove_dir_all(dir).expect("remove logs");
 }
 
@@ -100,12 +105,8 @@ fn panic_hook_and_environment_fault_are_exercised_in_child_processes() {
 #[ignore = "subprocess fixture with isolated environment"]
 async fn panic_fixture() {
     let job = Arc::new(Job::new().expect("job"));
-    let screen = ScreenSupervisor::with_deadline(PathBuf::from(WORKER), Arc::clone(&job), PATIENCE)
-        .expect("supervisor");
-    assert_eq!(
-        screen.request(RequestBody::Ping).await,
-        Err(ScreenError::WorkerLost)
-    );
+    let screen = HoldClient::start(PathBuf::from(WORKER), Arc::clone(&job)).expect("worker");
+    assert_eq!(screen.ping(until()).await, Err(WorkerLost::Lost));
     drop(screen);
     tokio::task::yield_now().await;
     job.terminate().expect("end job");
@@ -115,8 +116,7 @@ async fn panic_fixture() {
 #[ignore = "subprocess fixture with isolated environment"]
 async fn environment_crash_fixture() {
     let job = Arc::new(Job::new().expect("job"));
-    let screen = ScreenSupervisor::with_deadline(PathBuf::from(WORKER), Arc::clone(&job), PATIENCE)
-        .expect("supervisor");
+    let screen = HoldClient::start(PathBuf::from(WORKER), Arc::clone(&job)).expect("worker");
     let mut losses = screen.lost();
     tokio::time::pause();
     let keep_clock_manual = tokio::spawn(async {
@@ -125,19 +125,13 @@ async fn environment_crash_fixture() {
         }
     });
     for dead in 0..3 {
-        assert_eq!(
-            screen.request(RequestBody::Ping).await,
-            Err(ScreenError::WorkerLost)
-        );
+        assert_eq!(screen.ping(until()).await, Err(WorkerLost::Lost));
         assert_eq!(
             within_patience(losses.recv()).await.expect("worker loss"),
             Generation(dead)
         );
     }
-    assert_eq!(
-        screen.request(RequestBody::Ping).await,
-        Err(ScreenError::WorkerLost)
-    );
+    assert_eq!(screen.ping(until()).await, Err(WorkerLost::Lost));
     assert_eq!(
         losses.try_recv(),
         Err(tokio::sync::broadcast::error::TryRecvError::Empty)
@@ -158,8 +152,7 @@ async fn environment_crash_fixture() {
 #[ignore = "subprocess fixture with isolated environment"]
 async fn exit_at_launch_fixture() {
     let job = Arc::new(Job::new().expect("job"));
-    let screen = ScreenSupervisor::with_deadline(PathBuf::from(WORKER), Arc::clone(&job), PATIENCE)
-        .expect("supervisor");
+    let screen = HoldClient::start(PathBuf::from(WORKER), Arc::clone(&job)).expect("worker");
     let mut losses = screen.lost();
     let mut at = Vec::new();
     for dead in 0..5 {
@@ -179,10 +172,7 @@ async fn exit_at_launch_fixture() {
         at[4] - at[3] >= Duration::from_secs(1),
         "fourth loss waited"
     );
-    assert_eq!(
-        screen.request(RequestBody::Ping).await,
-        Err(ScreenError::WorkerLost)
-    );
+    assert_eq!(screen.ping(until()).await, Err(WorkerLost::Lost));
     drop(screen);
     tokio::task::yield_now().await;
     job.terminate().expect("end job");

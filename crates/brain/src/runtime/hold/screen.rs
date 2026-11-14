@@ -147,14 +147,14 @@ impl super::Holds {
         }
     }
 
-    /// Closes the pending hold's screen part to `closed`, whatever it reached: a waiting frame is
-    /// retired, and an image dropped and zeroed.
-    pub(super) fn close_screen_as(&mut self, closed: ScreenPart) {
+    /// Closes the pending hold's screen part as `class`, or with no line when there's none,
+    /// whatever it reached: a waiting frame is retired, and an image dropped and zeroed.
+    pub(super) fn close_screen_as(&mut self, class: Option<ScreenClass>) {
         self.retire_waiting();
         if let Some(hold) = &mut self.pending
             && !matches!(hold.screen, ScreenPart::None)
         {
-            hold.screen = closed;
+            hold.screen = class.map_or(ScreenPart::Discarded, ScreenPart::Closed);
         }
     }
 

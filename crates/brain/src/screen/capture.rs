@@ -3,17 +3,17 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::geometry::{DisplayRef, PhysicalPoint, PhysicalRect, WindowRef};
+use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect, WindowRef};
 
 use super::context::ScreenContext;
 use super::elements::{
-    ElementReader, ElementTree, MaskSink, OpenElements, TopWindow, WalkJob, Walked, intersects,
+    ElementReader, ElementTree, MaskSink, TopWindow, WalkJob, Walked, intersects,
 };
 use super::encode::overview_within;
-use super::frame::{RawFrame, display_edges};
+use super::frame::RawFrame;
 use super::mask::{Completeness, MaskSet};
 use super::sanitize::sanitize;
-use super::wire::{CaptureId, ElementTarget, Exclusion, FrameMeta, Refusal, TicketWire};
+use super::wire::{CaptureId, ElementTarget, FrameMeta, Refusal, TicketWire};
 
 /// Why a screen operation failed or requires worker retirement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,10 +71,6 @@ pub(crate) trait Capturer {
     /// # Errors
     /// `NoWindow` when only Kumochi or the desktop is there, `Ambiguous` when a drawn layered
     /// window is there and where a click lands can't be told, or a preflight refusal.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the hold's capture resolves the pointer's window")
-    )]
     fn pointer_window(&mut self, _point: PhysicalPoint, _shell: u32) -> Result<Target, Refusal> {
         Err(Refusal::NoWindow)
     }
@@ -85,10 +81,6 @@ pub(crate) trait Capturer {
     /// # Errors
     /// `WindowChanged` when the window's identity, frame or DPI moved or it closed, another
     /// refusal, a numeric fault, or `Retire` when it can't show its capture stopped.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the hold's capture resolves the pointer's window")
-    )]
     fn capture_window(
         &mut self,
         _target: &Target,
@@ -97,22 +89,7 @@ pub(crate) trait Capturer {
     ) -> Result<Acquired, Failure> {
         Err(Failure::Fault(NO_WINDOW_CAPTURE))
     }
-    /// Fills `frame` through [`RawFrame::begin`] with one frame of `display`. It starts nothing
-    /// at or after `until`, and stops waiting there.
-    ///
-    /// # Errors
-    /// A refusal, a numeric fault, or `Retire` when it can't show its capture stopped.
-    fn capture_into(
-        &mut self,
-        display: &DisplayRef,
-        exclude: Exclusion,
-        until: Instant,
-        frame: &mut RawFrame,
-    ) -> Result<Acquired, Failure>;
 }
-
-/// Opens the platform capturer on the first capture.
-pub(crate) type Open = fn() -> Result<Box<dyn Capturer>, i32>;
 
 /// Generations spent by this worker. A respawn starts empty: the hold client's rising ticket
 /// numbers guard across workers.
@@ -138,10 +115,6 @@ impl TicketBook {
 const WALK_WINDOW: Duration = Duration::from_millis(250);
 
 /// `E_NOTIMPL`, for a platform with no window capture yet.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the dormant window seam")
-)]
 const NO_WINDOW_CAPTURE: i32 = 0x8000_4001_u32.cast_signed();
 const MISSING_ELEMENT_READER: i32 = -1;
 const MISSING_FRAME_META: i32 = -2;
@@ -162,7 +135,6 @@ struct Held {
 pub(super) struct Screen {
     book: TicketBook,
     pub(super) frame: RawFrame,
-    capturer: Option<Box<dyn Capturer>>,
     held: Option<Held>,
     masks: MaskSink,
     pub(super) reader: Option<Result<Box<dyn ElementReader>, i32>>,
@@ -176,7 +148,6 @@ impl Default for Screen {
         Self {
             book: TicketBook::default(),
             frame: RawFrame::default(),
-            capturer: None,
             held: None,
             masks: Arc::new(Mutex::new(MaskSet::new(CaptureId(0)))),
             reader: None,
@@ -244,10 +215,6 @@ impl Screen {
     }
 
     /// Keeps the captured window's identity for the seal's check.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the dormant alternate loop captures windows")
-    )]
     pub(super) fn pin(&mut self, target: Target) {
         if let Some(held) = &mut self.held {
             held.target = Some(target);
@@ -255,10 +222,6 @@ impl Screen {
     }
 
     /// How far the held capture's masks are known to cover its window.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the dormant alternate loop reports walks")
-    )]
     pub(super) fn completeness(&self) -> Completeness {
         self.masks.lock().map_or(
             Completeness::Unknown(super::mask::Unavailable::Busy),
@@ -266,10 +229,6 @@ impl Screen {
         )
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the dormant alternate loop disposes frames")
-    )]
     pub(super) fn clear(&mut self) {
         self.held = None;
         self.frame.release();
@@ -309,47 +268,6 @@ impl Screen {
         }
         let clean = sanitize(&mut self.frame, &masks)?;
         overview_within(&clean, cap).map(ScreenContext::new)
-    }
-
-    /// Takes one frame under `ticket`, received at `received`. Its validity is local: it runs
-    /// from receipt, so the brain still checks its own deadline on the reply.
-    pub(super) fn capture(
-        &mut self,
-        ticket: &TicketWire,
-        display: &DisplayRef,
-        exclude: Exclusion,
-        received: Instant,
-        now: &dyn Fn() -> Instant,
-        open: (Open, OpenElements),
-    ) -> Result<FrameMeta, Failure> {
-        let expires = self.admit(ticket, received, now)?;
-        display_edges(display)?;
-        let capturer = match &mut self.capturer {
-            Some(capturer) => capturer,
-            None => self.capturer.insert(open.0().map_err(Failure::Fault)?),
-        };
-        if self.reader.as_ref().is_some_and(Result::is_err) {
-            self.reader = None;
-        }
-        let foreground = self
-            .reader
-            // shortcut: no listener until A6b2's actor; the legacy walk waits for its own reply.
-            .get_or_insert_with(|| open.1(Box::new(|| true)))
-            .as_mut()
-            .ok()
-            .and_then(|reader| {
-                reader.set_shell_pid(ticket.shell_pid());
-                reader.foreground()
-            });
-        let acquired = capturer.capture_into(display, exclude, expires, &mut self.frame)?;
-        self.acquired(
-            ticket,
-            display.0,
-            received,
-            expires,
-            now(),
-            (acquired, foreground),
-        )
     }
 
     pub(super) fn walk_job(
@@ -432,24 +350,6 @@ impl Screen {
             masks: Arc::clone(&self.masks),
         };
         Ok(Ok(job))
-    }
-
-    pub(super) fn elements(
-        &mut self,
-        capture: CaptureId,
-        target: ElementTarget,
-        now: &dyn Fn() -> Instant,
-    ) -> Result<Walked, Failure> {
-        match self.walk_job(capture, target, now)? {
-            Ok(job) => self
-                .reader
-                .as_mut()
-                .expect("validated")
-                .as_mut()
-                .map_err(|code| Failure::Fault(*code))?
-                .walk(job),
-            Err(walked) => Ok(walked),
-        }
     }
 
     #[cfg(test)]

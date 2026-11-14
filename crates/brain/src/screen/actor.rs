@@ -1,4 +1,5 @@
-//! Dormant worker-local ownership loop; A6b2b alone may route production requests here.
+//! The screen worker's loop: it owns one hold's frame from its capture through its walk to its
+//! image, or its release.
 
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::time::{Duration, Instant};
@@ -8,12 +9,14 @@ use kumochi_protocol::geometry::PhysicalPoint;
 use serde::{Deserialize, Serialize};
 
 use super::capture::{Capturer, Failure, Screen, Target};
+use super::client::Holds as Kind;
 use super::context::ScreenContext;
 use super::elements::{ElementTree, OpenElements, Wake};
 use super::encode::JPEG_CAP;
 use super::mask::Completeness;
 use super::native::{CaptureThread, Job};
-use super::supervisor::Screen as Kind;
+#[cfg(debug_assertions)]
+use super::wire::WorkerFault;
 use super::wire::{CaptureId, ElementTarget, FrameMeta, Refusal, TicketWire};
 use crate::supervise::{Kind as _, read_request, write_sized};
 
@@ -68,6 +71,9 @@ pub(crate) enum Request {
     Seal(Key),
     Drop(Key),
     Retire(Owner),
+    /// Trigger one failure without modifying the parent's environment.
+    #[cfg(debug_assertions)]
+    Fault(WorkerFault),
 }
 
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
@@ -119,6 +125,22 @@ struct Capture {
     expires: Instant,
 }
 
+/// Serves stdin/stdout after the caller initializes content-free logging. Replies go to an
+/// unbuffered stdout, since they can carry window text and images.
+///
+/// # Errors
+/// Returns a framing or transport failure, never request contents.
+pub fn serve() -> Result<(), frame::FrameError> {
+    serve_on(
+        std::io::stdin(),
+        &mut crate::platform::raw_stdout()?,
+        open,
+        open_elements,
+        Instant::now,
+        crate::platform::window_unchanged,
+    )
+}
+
 pub(super) fn serve_on(
     mut input: impl std::io::Read + Send + 'static,
     output: &mut impl std::io::Write,
@@ -127,6 +149,21 @@ pub(super) fn serve_on(
     now: impl Fn() -> Instant + Send + Sync + 'static,
     unchanged: fn(&Target) -> bool,
 ) -> Result<(), frame::FrameError> {
+    #[cfg(debug_assertions)]
+    let mut fault = std::env::var(kumochi_protocol::constants::SCREEN_FAULT_ENV)
+        .ok()
+        .and_then(|value| match value.as_str() {
+            "hang" => Some(WorkerFault::Hang),
+            "crash" => Some(WorkerFault::Crash),
+            "garbage" => Some(WorkerFault::Garbage),
+            "panic" => Some(WorkerFault::Panic),
+            "exit" => Some(WorkerFault::Exit),
+            _ => None,
+        });
+    #[cfg(debug_assertions)]
+    if fault == Some(WorkerFault::Exit) {
+        return Ok(());
+    }
     let (inbox, events) = mpsc::sync_channel(QUEUE);
     let capture = CaptureThread::open(open, wake(inbox.clone()))
         .map_err(|_| std::io::Error::other("capture thread"))?;
@@ -139,6 +176,8 @@ pub(super) fn serve_on(
         let ended = loop {
             match read_request::<Request>(&mut input, Kind::MAX_REQUEST) {
                 Ok(Some((id, body))) => {
+                    #[cfg(debug_assertions)]
+                    let body = fault.take().map_or(body, Request::Fault);
                     if inbox.send(Event::Request(id, body, clock())).is_err() {
                         return;
                     }
@@ -185,6 +224,16 @@ fn run(
             expires = None;
             screen.clear();
         }
+        #[cfg(debug_assertions)]
+        let event = match event {
+            Some(Event::Request(_, Request::Fault(fault), _)) => {
+                if trigger(fault, output)? {
+                    return Ok(());
+                }
+                None
+            }
+            event => event,
+        };
         let mut send = |id, reply| write_sized(output, id, &reply, Kind::MAX_REPLY);
         match event {
             Some(Event::Request(id, body, received)) => {
@@ -247,6 +296,8 @@ fn run(
                     }
                     Request::Elements { key, target } => Some((key, target, Answer::Tree)),
                     Request::Walk { key } => Some((key, ElementTarget::Foreground, Answer::Masks)),
+                    #[cfg(debug_assertions)]
+                    Request::Fault(_) => None,
                     Request::Seal(key) => {
                         if !live || current != Some(key) || capturing.is_some() || walking.is_some()
                         {
@@ -418,6 +469,58 @@ fn answer(summary: Answer, key: Key, tree: ElementTree, screen: &Screen) -> Repl
         Answer::Masks => Reply::Walked(key, screen.completeness()),
         Answer::Tree => Reply::Elements(key, tree),
     }
+}
+
+/// Triggers one dev-only failure; `Ok(true)` ends the worker.
+#[cfg(debug_assertions)]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "explicit dev-only panic-hook fixture"
+)]
+fn trigger(
+    fault: WorkerFault,
+    output: &mut impl std::io::Write,
+) -> Result<bool, frame::FrameError> {
+    match fault {
+        WorkerFault::Hang => loop {
+            std::thread::park();
+        },
+        WorkerFault::Crash => std::process::exit(1),
+        WorkerFault::Garbage => {
+            output.write_all(&[0xff; 4])?;
+            output.flush()?;
+            Ok(false)
+        }
+        WorkerFault::Panic => panic!("private screen fault payload"),
+        WorkerFault::Exit => Ok(true),
+    }
+}
+
+#[cfg(windows)]
+fn open() -> Result<Box<dyn Capturer>, i32> {
+    crate::platform::screen_capturer()
+}
+
+/// No platform but Windows captures yet, so every capture is a numeric fault.
+// shortcut: macOS will open ScreenCaptureKit here.
+#[cfg(not(windows))]
+fn open() -> Result<Box<dyn Capturer>, i32> {
+    Err(NO_CAPTURER)
+}
+
+/// `E_NOTIMPL`, as the Windows adapter reports an unsupported capture.
+#[cfg(not(windows))]
+const NO_CAPTURER: i32 = 0x8000_4001_u32.cast_signed();
+
+#[cfg(windows)]
+fn open_elements(wake: Wake) -> Result<Box<dyn super::elements::ElementReader>, i32> {
+    crate::platform::screen_elements(wake)
+}
+
+// shortcut: macOS will open its accessibility source here.
+#[cfg(not(windows))]
+fn open_elements(_wake: Wake) -> Result<Box<dyn super::elements::ElementReader>, i32> {
+    Err(NO_CAPTURER)
 }
 
 /// Only `Retire` ends the worker. A refusal or a fault, a window capture's included, answers

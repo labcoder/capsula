@@ -3,10 +3,20 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::*;
-use crate::screen::{CaptureError, ScreenError};
 use crate::supervise::{read_request, write_message};
 
 mod continuation;
+
+use crate::screen::actor::{Key, Owner, Reply};
+
+/// The hold a walk's reply answers.
+const KEY: Key = Key {
+    owner: Owner {
+        epoch: 1,
+        gesture: 1,
+    },
+    capture: CaptureId(1),
+};
 
 pub(crate) const RECT: PhysicalRect = PhysicalRect {
     origin: [0, 0],
@@ -116,13 +126,6 @@ impl ElementSource for FakeSource {
 #[derive(Clone)]
 pub(crate) struct FakePlatform(pub(crate) bool);
 impl ElementPlatform for FakePlatform {
-    fn foreground(&mut self) -> Option<TopWindow> {
-        Some(TopWindow {
-            window: WindowRef(7),
-            pid: 8,
-            rect: RECT,
-        })
-    }
     fn excluded(&mut self, pid: u32) -> Result<bool, SourceError> {
         Ok(self.0 && pid == 8)
     }
@@ -151,29 +154,26 @@ fn unavailable(capture: CaptureId, why: Unavailable) -> ElementTree {
     }
 }
 
-pub(crate) struct FakeReader;
+/// Walks at once when begun; `poll` takes the answer.
+#[derive(Default)]
+pub(crate) struct FakeReader(Option<Result<Walked, Failure>>);
 impl ElementReader for FakeReader {
-    fn foreground(&mut self) -> Option<TopWindow> {
-        FakePlatform(false).foreground()
-    }
-    fn begin(&mut self, _job: WalkJob) -> Result<(), Walked> {
-        unreachable!("the serve path walks")
-    }
-    fn poll(&mut self) -> Option<Result<Walked, Failure>> {
-        unreachable!("the serve path walks")
-    }
-    fn walk(&mut self, job: WalkJob) -> Result<Walked, Failure> {
-        walk(
+    fn begin(&mut self, job: WalkJob) -> Result<(), Walked> {
+        let walked = walk(
             &mut FakeSource::flat(1),
             &job,
             &LIMITS,
             &Instant::now,
             &mut FakePlatform(false),
-        )
-        .map(|tree| Walked {
+        );
+        self.0 = Some(walked.map(|tree| Walked {
             tree,
             retire: false,
-        })
+        }));
+        Ok(())
+    }
+    fn poll(&mut self) -> Option<Result<Walked, Failure>> {
+        self.0.take()
     }
 }
 
@@ -182,7 +182,7 @@ impl ElementReader for FakeReader {
     reason = "matches the production opener signature"
 )]
 pub(crate) fn open_reader(_wake: Wake) -> Result<Box<dyn ElementReader>, i32> {
-    Ok(Box::new(FakeReader))
+    Ok(Box::<FakeReader>::default())
 }
 
 fn run(source: &mut FakeSource, limits: &ElementLimits) -> ElementTree {
@@ -501,7 +501,7 @@ fn password_and_descendant_sentinels_never_escape_and_masks_survive_cuts() {
             }
         );
         let text = format!(
-            "{tree:?} {:?} {:?} {:?} {:?}",
+            "{tree:?} {:?} {:?} {:?}",
             tree.elements[0],
             tree.elements[1],
             NodeProps {
@@ -509,8 +509,7 @@ fn password_and_descendant_sentinels_never_escape_and_masks_survive_cuts() {
                 password: false,
                 control_type: 50_000,
                 rect: RECT
-            },
-            CaptureError::Screen(ScreenError::Fault(-7))
+            }
         );
         assert_debug_redacted(&text);
         let walked = Walked {
@@ -523,7 +522,7 @@ fn password_and_descendant_sentinels_never_escape_and_masks_survive_cuts() {
         );
         assert_eq!(format!("{job:?}"), "WalkJob(..)");
         assert_debug_redacted(&outer_debug);
-        let reply = crate::screen::ReplyBody::Elements(walked.tree);
+        let reply = Reply::Elements(KEY, walked.tree);
         let mut framed = Vec::new();
         write_message(&mut framed, 4, &reply, super::super::wire::MAX_REPLY_BYTES).unwrap();
         let debug = format!("{reply:?}");
@@ -539,11 +538,8 @@ fn password_and_descendant_sentinels_never_escape_and_masks_survive_cuts() {
             }
         }
         assert_eq!(
-            read_request::<crate::screen::ReplyBody>(
-                &mut framed.as_slice(),
-                super::super::wire::MAX_REPLY_BYTES
-            )
-            .unwrap(),
+            read_request::<Reply>(&mut framed.as_slice(), super::super::wire::MAX_REPLY_BYTES)
+                .unwrap(),
             Some((4, reply))
         );
     }

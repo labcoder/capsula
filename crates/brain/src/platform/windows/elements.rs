@@ -46,9 +46,6 @@ pub(crate) fn screen_elements(wake: Wake) -> Result<Box<dyn ElementReader>, i32>
 struct Native(Arc<AtomicU32>);
 
 impl ElementPlatform for Native {
-    fn foreground(&mut self) -> Option<TopWindow> {
-        foreground()
-    }
     fn set_shell_pid(&mut self, pid: u32) {
         self.0.store(pid, Ordering::Relaxed);
     }

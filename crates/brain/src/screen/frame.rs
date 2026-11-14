@@ -1,6 +1,5 @@
 //! The worker's one frame: a reused CPU buffer and, separately, whether it holds a valid image.
 
-use kumochi_protocol::geometry::DisplayRef;
 use zeroize::Zeroize as _;
 
 use super::wire::{FrameMeta, Refusal};
@@ -134,24 +133,6 @@ impl std::fmt::Debug for RawFrame {
             .field("valid", &self.valid)
             .finish_non_exhaustive()
     }
-}
-
-/// The display's `[left, top, right, bottom]` in physical pixels, once its size is capturable.
-///
-/// # Errors
-/// `Invalid` when a side is empty or over the cap, or an edge leaves the `i32` range.
-pub(crate) fn display_edges(display: &DisplayRef) -> Result<[i32; 4], Refusal> {
-    let rect = display.0;
-    byte_len(rect.size).ok_or(Refusal::Invalid)?;
-    let edge = |origin: i32, size: u32| {
-        i32::try_from(i64::from(origin) + i64::from(size)).map_err(|_| Refusal::Invalid)
-    };
-    Ok([
-        rect.origin[0],
-        rect.origin[1],
-        edge(rect.origin[0], rect.size[0])?,
-        edge(rect.origin[1], rect.size[1])?,
-    ])
 }
 
 fn byte_len([width, height]: [u32; 2]) -> Option<usize> {

@@ -272,6 +272,11 @@ impl Brain {
         self.holds.connected(peer);
     }
 
+    /// Gives screen holds the client of the brain's one screen worker.
+    pub(crate) fn attach_screen(&mut self, client: Arc<HoldClient>) {
+        self.holds.screen = Some(client);
+    }
+
     fn hold_status(key: HoldKey, status: HoldStatus, link: &mut Link<'_, '_>) -> Result<(), Full> {
         if let HoldStatus::Failed(reason) = status {
             tracing::warn!(stage = ?FailureStage::Status, ?reason, "held speech input failed");
@@ -545,15 +550,13 @@ impl Brain {
             match self.screen_gate(choice.as_ref()) {
                 ScreenHolds::On { .. } => {}
                 // Switched off by the user, so the hold goes on as voice with no line.
-                ScreenHolds::Off(ScreenOff::TurnedOff) => {
-                    self.holds.close_screen_as(ScreenPart::Discarded);
+                ScreenHolds::Off(ScreenOff::TurnedOff) => self.holds.close_screen_as(None),
+                ScreenHolds::Off(ScreenOff::ModelCantSee) => {
+                    self.holds.close_screen_as(Some(ScreenClass::ModelCantSee));
                 }
-                ScreenHolds::Off(ScreenOff::ModelCantSee) => self
-                    .holds
-                    .close_screen_as(ScreenPart::Closed(ScreenClass::ModelCantSee)),
-                ScreenHolds::Off(ScreenOff::NotReady | ScreenOff::Unsupported) => self
-                    .holds
-                    .close_screen_as(ScreenPart::Closed(ScreenClass::NotReady)),
+                ScreenHolds::Off(ScreenOff::NotReady | ScreenOff::Unsupported) => {
+                    self.holds.close_screen_as(Some(ScreenClass::NotReady));
+                }
             }
         }
         self.hold_voice_changed(link)

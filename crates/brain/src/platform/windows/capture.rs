@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::geometry::{DisplayRef, PhysicalPoint};
+use kumochi_protocol::geometry::PhysicalPoint;
 use windows::Foundation::TypedEventHandler;
 use windows::Graphics::Capture::{
     Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
@@ -15,7 +15,7 @@ use windows::Graphics::Capture::{
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Graphics::SizeInt32;
-use windows::Win32::Foundation::{E_NOTIMPL, HMODULE, RECT};
+use windows::Win32::Foundation::{E_NOTIMPL, HMODULE};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_FLAG_DO_NOT_WAIT,
@@ -26,22 +26,16 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_DEVICE_HUNG, DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET,
     DXGI_ERROR_WAS_STILL_DRAWING, IDXGIDevice,
 };
-use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MONITOR_DEFAULTTONULL, MONITORINFO, MonitorFromRect,
-};
 use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
 };
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::Win32::UI::HiDpi::{
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, MDT_EFFECTIVE_DPI,
-    SetProcessDpiAwarenessContext,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::core::{Interface, factory};
 
-use crate::screen::{
-    Acquired, Capturer, Exclusion, Failure, RawFrame, Refusal, Target, display_edges,
-};
+use crate::screen::{Acquired, Capturer, Failure, RawFrame, Refusal, Target};
 
 const POLL: Duration = Duration::from_millis(1);
 
@@ -340,53 +334,6 @@ impl Drop for Mapping<'_> {
 }
 
 impl Capturer for Wgc {
-    fn capture_into(
-        &mut self,
-        display: &DisplayRef,
-        exclude: Exclusion,
-        until: Instant,
-        frame: &mut RawFrame,
-    ) -> Result<Acquired, Failure> {
-        // The shell's exclusion lease keeps Kumochi out of the frame (B3a).
-        let Exclusion::KumochiWindows = exclude;
-        let [left, top, right, bottom] = display_edges(display)?;
-        let rect = RECT {
-            left,
-            top,
-            right,
-            bottom,
-        };
-        // SAFETY: reads which monitor holds a valid rectangle.
-        let monitor = unsafe { MonitorFromRect(&raw const rect, MONITOR_DEFAULTTONULL) };
-        if monitor.is_invalid() {
-            return Err(Refusal::DisplayChanged.into());
-        }
-        let mut info = MONITORINFO {
-            cbSize: u32::try_from(size_of::<MONITORINFO>()).map_err(|_| Failure::Fault(0))?,
-            ..MONITORINFO::default()
-        };
-        // SAFETY: `info` is writable and its size is set.
-        let read = unsafe { GetMonitorInfoW(monitor, &raw mut info) };
-        if !read.as_bool() || info.rcMonitor != rect {
-            return Err(Refusal::DisplayChanged.into());
-        }
-        let (mut dpi, mut unused) = (0, 0);
-        // SAFETY: both outputs are writable.
-        unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &raw mut dpi, &raw mut unused) }
-            .map_err(|e| fault(&e))?;
-        let interop: IGraphicsCaptureItemInterop =
-            factory::<GraphicsCaptureItem, _>().map_err(|e| fault(&e))?;
-        // SAFETY: `monitor` came from MonitorFromRect just now.
-        let item: GraphicsCaptureItem =
-            unsafe { interop.CreateForMonitor(monitor) }.map_err(|e| fault(&e))?;
-        let size = item.Size().map_err(|e| fault(&e))?;
-        if [size.Width, size.Height] != [right - left, bottom - top] {
-            return Err(Refusal::DisplayChanged.into());
-        }
-        let arrived = self.grab(&item, size, display.0.size, until, frame)?;
-        Ok(Acquired { arrived, dpi })
-    }
-
     fn pointer_window(&mut self, point: PhysicalPoint, shell: u32) -> Result<Target, Refusal> {
         super::window::pointer_window(point, shell)
     }
@@ -455,15 +402,11 @@ impl Wgc {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use kumochi_protocol::geometry::{DisplayRef, PhysicalRect};
-    use windows::Win32::Foundation::POINT;
+    use kumochi_protocol::geometry::PhysicalRect;
     use windows::Win32::Graphics::Direct3D11::D3D11_MAPPED_SUBRESOURCE;
-    use windows::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint,
-    };
 
-    use super::{Wgc, copy_rows, fault, poll};
-    use crate::screen::{CaptureId, Capturer, Exclusion, Failure, FrameMeta, RawFrame, Refusal};
+    use super::{copy_rows, fault, poll};
+    use crate::screen::{CaptureId, Failure, FrameMeta, RawFrame, Refusal};
 
     #[test]
     fn a_result_ready_at_the_deadline_is_released_and_refused() {
@@ -558,66 +501,6 @@ mod tests {
             assert_eq!(frame.image(), Some((meta, &packed[..])));
             assert_eq!(copy_rows(&bad, 2, 3, &mut frame), not_implemented);
             assert_eq!(frame.image(), None);
-        }
-    }
-
-    fn primary() -> DisplayRef {
-        // SAFETY: asks which monitor is primary; no pointers.
-        let monitor = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
-        let mut info = MONITORINFO {
-            cbSize: u32::try_from(size_of::<MONITORINFO>()).expect("small struct"),
-            ..MONITORINFO::default()
-        };
-        // SAFETY: `info` is writable and its size is set.
-        let read = unsafe { GetMonitorInfoW(monitor, &raw mut info) };
-        assert!(read.as_bool(), "monitor info");
-        let r = info.rcMonitor;
-        DisplayRef(PhysicalRect {
-            origin: [r.left, r.top],
-            size: [
-                u32::try_from(r.right - r.left).expect("width"),
-                u32::try_from(r.bottom - r.top).expect("height"),
-            ],
-        })
-    }
-
-    fn sample(wgc: &mut Wgc, display: &DisplayRef, frame: &mut RawFrame) -> (Duration, u32) {
-        let start = Instant::now();
-        let until = start + Duration::from_secs(2);
-        let acquired = wgc
-            .capture_into(display, Exclusion::KumochiWindows, until, frame)
-            .expect("capture");
-        (start.elapsed(), acquired.dpi)
-    }
-
-    /// Rez evidence, run by hand on a quiet machine: `--ignored --nocapture`. Pixels stay in memory.
-    #[test]
-    #[ignore = "Rez only: captures the primary display, in memory"]
-    fn primary_display_cold_and_warm_samples() {
-        let display = primary();
-        let mut frame = RawFrame::default();
-        let mut cold = Vec::new();
-        for _ in 0..20 {
-            let start = Instant::now();
-            let mut wgc = Wgc::new().expect("device");
-            let (_, dpi) = sample(&mut wgc, &display, &mut frame);
-            cold.push(start.elapsed());
-            println!("display {:?} dpi {dpi}", display.0);
-        }
-        let mut wgc = Wgc::new().expect("device");
-        sample(&mut wgc, &display, &mut frame);
-        let mut warm: Vec<_> = (0..20)
-            .map(|_| sample(&mut wgc, &display, &mut frame).0)
-            .collect();
-        for (name, times) in [("cold", &mut cold), ("warm", &mut warm)] {
-            times.sort();
-            println!(
-                "{name}: p50 {:?} p95 {:?} max {:?} n {}",
-                times[9],
-                times[18],
-                times[19],
-                times.len()
-            );
         }
     }
 }

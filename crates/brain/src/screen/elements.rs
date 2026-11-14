@@ -232,15 +232,12 @@ pub(crate) trait ElementSource {
 
 pub(crate) trait ElementReader {
     fn set_shell_pid(&mut self, _pid: u32) {}
-    fn foreground(&mut self) -> Option<TopWindow>;
     /// Hands `job` to the walk without waiting. `Err` is the walk's answer when it can't start;
     /// a job still pending, even one whose completion landed untaken, retires the reader.
     fn begin(&mut self, job: WalkJob) -> Result<(), Walked>;
     /// The pending walk's answer once its completion landed, which the opener's [`Wake`]
     /// announces; `None` while it runs or when nothing is pending.
-    #[cfg_attr(not(test), expect(dead_code, reason = "A6b2's actor polls"))]
     fn poll(&mut self) -> Option<Result<Walked, Failure>>;
-    fn walk(&mut self, job: WalkJob) -> Result<Walked, Failure>;
 }
 
 /// Called after each walk completion lands; it never blocks, and `false` means nobody listens.
@@ -280,7 +277,6 @@ impl std::fmt::Debug for TopWindow {
 
 pub(crate) trait ElementPlatform: Clone + Send + 'static {
     fn set_shell_pid(&mut self, _pid: u32) {}
-    fn foreground(&mut self) -> Option<TopWindow>;
     fn excluded(&mut self, pid: u32) -> Result<bool, SourceError>;
 }
 

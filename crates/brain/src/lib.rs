@@ -170,8 +170,9 @@ pub async fn run() -> Result<(), BrainError> {
         None if claude_on => runtime::claude::Claude::default(),
         lane => runtime::claude::Claude::turned_off(lane),
     });
-    let screen = screen::ScreenSupervisor::start(exe.clone(), std::sync::Arc::clone(&jobs))
+    let screen = screen::HoldClient::start(exe.clone(), std::sync::Arc::clone(&jobs))
         .map_err(BrainError::Helpers)?;
+    brain.attach_screen(std::sync::Arc::new(screen));
     let mut bytes = [0; CAPABILITY_LEN];
     getrandom::fill(&mut bytes)?;
     let identity = Identity {
@@ -188,7 +189,6 @@ pub async fn run() -> Result<(), BrainError> {
         }
         Ok(None) | Err(_) => brain.close().await,
     }
-    drop(screen);
     // Ending the job waits on the processes, so it runs off the async thread.
     match tokio::task::spawn_blocking(move || jobs.shut_down()).await {
         Ok(Ok(())) => {}

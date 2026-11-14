@@ -12,9 +12,8 @@ use crate::screen::elements::{WalkJob, Walked};
 use crate::screen::frame::RawFrame;
 use crate::screen::mask::MaskSink;
 use crate::screen::reader::ThreadedReader;
-use crate::screen::wire::Exclusion;
 use crate::supervise::write_message;
-use kumochi_protocol::geometry::{DisplayRef, PhysicalPoint, PhysicalRect, WindowRef};
+use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect, WindowRef};
 
 mod replacement;
 
@@ -156,15 +155,6 @@ impl Capturer for Fake {
     fn capture_window(
         &mut self,
         _: &Target,
-        until: Instant,
-        frame: &mut RawFrame,
-    ) -> Result<Acquired, Failure> {
-        self.capture_into(&DisplayRef(RECT), Exclusion::KumochiWindows, until, frame)
-    }
-    fn capture_into(
-        &mut self,
-        _: &DisplayRef,
-        _: Exclusion,
         _: Instant,
         frame: &mut RawFrame,
     ) -> Result<Acquired, Failure> {
@@ -210,9 +200,6 @@ impl ElementSource for Source {
 #[derive(Clone)]
 struct Platform;
 impl ElementPlatform for Platform {
-    fn foreground(&mut self) -> Option<TopWindow> {
-        None
-    }
     fn excluded(&mut self, _: u32) -> Result<bool, SourceError> {
         Ok(false)
     }
@@ -222,9 +209,6 @@ struct Reader {
     masks: mpsc::Sender<MaskSink>,
 }
 impl ElementReader for Reader {
-    fn foreground(&mut self) -> Option<TopWindow> {
-        self.inner.foreground()
-    }
     fn set_shell_pid(&mut self, pid: u32) {
         self.inner.set_shell_pid(pid);
     }
@@ -236,9 +220,6 @@ impl ElementReader for Reader {
     }
     fn poll(&mut self) -> Option<Result<Walked, Failure>> {
         self.inner.poll()
-    }
-    fn walk(&mut self, job: WalkJob) -> Result<Walked, Failure> {
-        self.inner.walk(job)
     }
 }
 struct Setup {

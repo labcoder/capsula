@@ -5,6 +5,7 @@ use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect};
 
 use super::*;
 use crate::screen::encode::{CaptureTransform, Encoded};
+use crate::screen::wire::FrameMeta;
 use crate::supervise::fixture::{self, Rig};
 
 const RECT: PhysicalRect = PhysicalRect {
@@ -37,7 +38,6 @@ fn held(capture: u64) -> Held {
     Held {
         key,
         generation: Generation(0),
-        meta: meta(key.capture),
     }
 }
 
@@ -93,10 +93,7 @@ async fn each_capture_gets_a_fresh_key_and_a_higher_ticket_and_names_its_worker(
             .await;
         rig.reply(id, &Reply::Complete(key)).await;
         let held = asking.await.expect("joins").expect("held");
-        assert_eq!(
-            (held.key, held.generation, held.meta),
-            (key, Generation(0), meta(key.capture))
-        );
+        assert_eq!((held.key, held.generation), (key, Generation(0)));
     }
     assert_eq!(tickets, [(CaptureId(1), 1), (CaptureId(2), 2)]);
 }
