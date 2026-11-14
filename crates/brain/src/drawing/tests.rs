@@ -2992,7 +2992,38 @@ fn debug_and_display_never_carry_drawing_content() {
         header,
         log: Vec::new(),
     };
+    let mut deferred = Drawing {
+        defer_preparation: true,
+        ..Drawing::default()
+    };
+    let content = format!(
+        r#"{{"id":"{SECRET}","put":[{{"text":{{"id":"{SECRET}","text":"{SECRET}","at":[0,0]}}}}]}}"#
+    );
+    let mut store = Store::default();
+    store.run(&mut deferred, call(1, "b", args(SECRET, &[text("a", "x")])));
+    let admitted = deferred
+        .handle(call(1, "c", args(SECRET, &[content])))
+        .expect("a call");
+    let job = admitted
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::PrepareDrawing(job) => Some(job.clone()),
+            _ => None,
+        })
+        .expect("a step to lay out");
+    let prepared = job.clone().run();
+    assert!(matches!(
+        prepared,
+        Input::Prepared {
+            outcome: crate::drawing::Prepared::Layout { .. },
+            ..
+        }
+    ));
     let printed = [
+        format!("{job:?}"),
+        format!("{prepared:?}"),
+        format!("{:?}", admitted.effects),
         format!("{writes:?}"),
         format!("{end:?}"),
         format!("{stored:?}"),

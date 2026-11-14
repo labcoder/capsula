@@ -195,7 +195,7 @@ pub struct Drawing {
     theme: Arc<Theme>,
     /// Unit tests lay steps out inline, answering at once, unless they defer to an effect.
     #[cfg(test)]
-    defer_preparation: bool,
+    pub(crate) defer_preparation: bool,
 }
 
 /// A visible scene.

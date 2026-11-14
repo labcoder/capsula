@@ -226,9 +226,14 @@ impl Drawing {
             self.end(at, Some(CallError::TooMuchToPaint { cleared: false }), out);
             return Ok(());
         }
+        let victims: &[SceneId] = match &step.scene {
+            Pend::New { victims, .. } => victims,
+            Pend::Held { .. } => &[],
+        };
         let retained: usize = self
             .scenes
             .iter()
+            .filter(|held| !victims.contains(&held.scene))
             .filter_map(|held| held.paint.as_ref())
             .map(Paint::resident_bytes)
             .sum();

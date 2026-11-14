@@ -1009,8 +1009,9 @@ the fan-out one still comes out at 110 pieces against a shell's 112. In each cas
 a limit can pass the brain's count and still be refused by the shell after the call ended, the
 picture staying at its last shown step. Only paint work refuses at admission: a step whose
 brain-side preparation fails for any other reason, such as the wider layout leaving the
-canvas range, is not refused, carries no charge and isn't counted against the other scenes,
-so the shell's guard is the only check for that scene.
+canvas range, is not refused, carries no charge and isn't counted against the other scenes.
+While any scene is uncounted, the shell's guard is the final check for every scene, since the
+brain doesn't know what that scene paints.
 
 The brain charges each scene what the shell may hold for it. It keeps the scene's last shown
 layout and the layout of every committed step not shown yet, and charges their field-by-field
@@ -1031,14 +1032,15 @@ then works like this:
 
 A cut changes the charge only when its `SceneCutApplied` goes out, since the shell keeps its
 stopped picture until then; the cut's own write seals the reducer meanwhile, so no other step
-is charged against the released room early. Recovery lays the kept scenes out with the wide
-measure before intake opens. If any of them doesn't lay out, none is counted until it's
-cleared.
+is charged against the released room early. The cut layout is laid out and its bytes counted
+on the coordinator thread at that moment. Recovery lays the kept scenes out with the wide
+measure on the coordinator before intake opens, and it can't be cancelled. If any of them
+doesn't lay out, none is counted until it's cleared.
 
 The kept layouts are capped at `MAX_RETAINED_BYTES` (16 MiB, a guess) across scenes. A step
-that would pass it is written uncounted: its scene drops its layouts and stays uncounted, so
-the shell's guard alone checks it and may refuse it late. With no shell showing steps, up to
-that cap stays kept until the scene is cut or ends.
+that would pass it is written uncounted: its scene drops its layouts and stays uncounted, and
+the shell's guard is then the final check for every scene and may refuse a step late. With no
+shell showing steps, up to that cap stays kept until the scene is cut or ends.
 
 D1's Rez admission target at the cap is p95 ≤1 ms and p99 ≤1.1 ms, with the sampled maximum
 reported separately; clear, cut and eviction retain their ≤2 ms target, global clear included.

@@ -157,6 +157,12 @@ impl Coordinator {
         self.drawing.available()
     }
 
+    /// Lays drawing steps out through the runtime's preparation thread, as the shipped brain does.
+    #[cfg(test)]
+    pub(crate) fn defer_drawing_preparation(&mut self) {
+        self.drawing.defer_preparation = true;
+    }
+
     /// A frozen, validated v1 snapshot for the next connection's data FIFO.
     /// # Errors
     /// Rejects a visible set whose earlier writes have not settled.
