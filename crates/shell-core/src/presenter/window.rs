@@ -42,7 +42,7 @@ pub(crate) enum ConsumeError {
 
 /// A consumed step, charged against the prepared allowance until its owner drops it.
 #[cfg_attr(
-    not(test),
+    not(any(test, feature = "test-support")),
     expect(
         dead_code,
         reason = "activation drops the consumed step unread; only tests borrow it"
@@ -56,7 +56,7 @@ pub(crate) struct ConsumedStep {
 }
 
 #[cfg_attr(
-    not(test),
+    not(any(test, feature = "test-support")),
     expect(
         dead_code,
         reason = "activation drops the consumed step unread; only tests borrow it"

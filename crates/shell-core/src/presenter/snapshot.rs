@@ -34,7 +34,7 @@ const _: () = assert!(
 );
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum Broken {
+pub enum Broken {
     #[error("invalid snapshot membership")]
     Membership,
     #[error("invalid snapshot counts")]

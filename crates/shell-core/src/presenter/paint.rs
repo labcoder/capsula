@@ -18,14 +18,14 @@ use super::{
 
 /// A scene's retained paint state, staged from the view its frame samples. The presenter only
 /// charges, moves and retires it; the painter that staged it uses it.
-pub(crate) trait SceneCache: Any + Send {
+pub trait SceneCache: Any + Send {
     /// Requested bytes it owns, fixed when it was staged.
     fn bytes(&self) -> usize;
 }
 
 /// Stages a scene's paint cache from the view about to be committed. It never refuses: what it
 /// can't stage fails when it paints.
-pub(crate) trait Stage {
+pub trait Stage {
     fn stage(&self, view: &SceneView) -> Box<dyn SceneCache>;
     fn fixed_bytes(&self) -> usize;
 }
@@ -54,11 +54,11 @@ pub(super) struct Slot {
 
 /// What one sample found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Sample {
+pub struct Sample {
     /// Some frame has an item to paint.
-    pub(crate) visible: bool,
+    pub visible: bool,
     /// A frame was adopted, replaced, resampled at a new bound or removed since the last sample.
-    pub(crate) changed: bool,
+    pub changed: bool,
 }
 
 /// A bound a shown overlay painted, at the epoch of the view it sampled.
@@ -69,18 +69,18 @@ pub(crate) struct Painted {
 }
 
 #[derive(Default)]
-pub(crate) struct Frames {
+pub struct Frames {
     pub(super) slots: [Option<(SceneId, Slot)>; MAX_VISIBLE_SCENES],
     pub(super) retirement: Option<super::swap::Retirement>,
     epoch: u64,
     /// A slot left or changed placement since the last sample.
     pub(super) invalidated: bool,
     /// Whether the overlay is shown, so only a paint that can reach the screen counts.
-    pub(crate) shown: bool,
+    pub shown: bool,
 }
 
 impl Frames {
-    pub(crate) fn hide(&mut self) {
+    pub fn hide(&mut self) {
         self.shown = false;
         let epoch = self.next_epoch();
         for (_, slot) in self.slots.iter_mut().flatten() {
@@ -288,7 +288,7 @@ impl Frames {
     /// Paints every frame in scene order, each with its cache; only the overlay's paint callback
     /// calls it. A shown overlay records each sampled bound it painted. A frame that fails paints
     /// no more and waits for [`Presenter::paint_failed`]. Whether a frame newly failed.
-    pub(crate) fn paint<E>(
+    pub fn paint<E>(
         &self,
         mut paint: impl FnMut(&Frame, &mut dyn SceneCache) -> Result<(), E>,
     ) -> bool {
@@ -410,7 +410,7 @@ impl Frames {
         slot.sampled_ms
     }
 
-    pub(crate) fn observations(&self) -> [Option<(SceneId, u64, u32)>; MAX_VISIBLE_SCENES] {
+    pub fn observations(&self) -> [Option<(SceneId, u64, u32)>; MAX_VISIBLE_SCENES] {
         self.slots.each_ref().map(|slot| {
             let (scene, slot) = slot.as_ref()?;
             let painted = self.painted(*scene)?;
@@ -422,7 +422,7 @@ impl Frames {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn ids(&self) -> [Option<SceneId>; MAX_VISIBLE_SCENES] {
         self.slots
             .each_ref()
@@ -432,23 +432,26 @@ impl Frames {
 
 impl Presenter {
     /// The frames the overlay paints. Borrow them only inside its paint callback.
-    pub(crate) fn frames(&self) -> Rc<RefCell<Frames>> {
+    pub fn frames(&self) -> Rc<RefCell<Frames>> {
         Rc::clone(&self.frames)
     }
 
     /// Whether the overlay is showing the scenes' frames, so Esc is held for them.
-    pub(crate) fn drawn(&self) -> bool {
+    pub fn drawn(&self) -> bool {
         self.frames.borrow().shown
     }
 
     /// Samples every scene's view at `now_ms`. A scene whose frame its view refuses is
     /// cleared, as an over-cap adoption is.
-    #[cfg_attr(not(test), expect(dead_code, reason = "numeric sampler compatibility"))]
+    #[cfg_attr(
+        not(any(test, feature = "test-support")),
+        expect(dead_code, reason = "numeric sampler compatibility")
+    )]
     pub(crate) fn sample(&mut self, now_ms: u64) -> (Sample, Vec<Effect>) {
         self.sample_times(|_| now_ms)
     }
 
-    pub(crate) fn sample_at(&mut self, now: std::time::Instant) -> (Sample, Vec<Effect>) {
+    pub fn sample_at(&mut self, now: std::time::Instant) -> (Sample, Vec<Effect>) {
         self.frames.borrow_mut().expire_retirement(now);
         self.sample_times(|scene| scene.activation.time(now))
     }
@@ -485,7 +488,7 @@ impl Presenter {
     }
 
     /// Clears every scene whose frame failed to paint.
-    pub(crate) fn paint_failed(&mut self) -> Vec<Effect> {
+    pub fn paint_failed(&mut self) -> Vec<Effect> {
         self.frames.borrow_mut().retire_failed_pictures();
         let mut out = Out::default();
         let failed = self.frames.borrow().failed();

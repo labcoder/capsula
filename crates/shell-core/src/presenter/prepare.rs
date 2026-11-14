@@ -25,7 +25,7 @@ use kumochi_scene::{
 use super::snapshot::Source;
 
 /// One committed step's preparation on its scene's current tip.
-pub(crate) struct PrepareJob {
+pub struct PrepareJob {
     id: u64,
     scene: SceneId,
     input: Deferred<PrepareInput>,
@@ -34,7 +34,7 @@ pub(crate) struct PrepareJob {
 }
 
 /// One connection's recovered batch: every scene in one call, under one budget.
-pub(crate) struct RecoveryJob {
+pub struct RecoveryJob {
     id: u64,
     sources: Deferred<Vec<Source>>,
     surface: SurfaceGeometry,
@@ -45,7 +45,7 @@ pub(crate) struct RecoveryJob {
 
 /// One commit's admission against a read-only snapshot of its scene, installed through the
 /// scene's binding when it comes back.
-pub(crate) struct AdmitJob {
+pub struct AdmitJob {
     id: u64,
     read: SceneRead,
     frame: Deferred<DataToShell>,
@@ -59,7 +59,7 @@ pub(crate) struct AdmitJob {
     clippy::large_enum_variant,
     reason = "Prepared is 400 bytes (size_of: a 368-byte deferred PreparedStep result plus four words) and moves once per prepare job, so boxing would only add an allocation"
 )]
-pub(crate) enum Completion {
+pub enum Completion {
     /// A step's preparation.
     Prepared {
         id: u64,
@@ -103,7 +103,7 @@ impl PrepareJob {
     }
 
     /// Prepares on the calling worker thread until done or cancelled.
-    pub(crate) fn run(self, measure: &mut dyn TextMeasure) -> Completion {
+    pub fn run(self, measure: &mut dyn TextMeasure) -> Completion {
         let cancel = self.cancel;
         let mut result = self.input.map(|input| {
             layout::prepare(
@@ -158,7 +158,7 @@ impl AdmitJob {
     }
 
     /// Admits on the calling worker thread, against the snapshot alone.
-    pub(crate) fn run(self) -> Completion {
+    pub fn run(self) -> Completion {
         let result = match &*self.frame {
             DataToShell::SceneStepCommit { step, .. } if !self.cancel.load(Ordering::Relaxed) => {
                 Some(self.read.admit_detached(step))
@@ -199,7 +199,7 @@ impl RecoveryJob {
     }
 
     /// Recovers the whole batch on the calling worker thread until done or cancelled.
-    pub(crate) fn run(self, measure: &mut dyn TextMeasure) -> Completion {
+    pub fn run(self, measure: &mut dyn TextMeasure) -> Completion {
         let mut global = GlobalBudget::default();
         let mut scenes = self.sources.map(|sources| {
             let batch: Vec<_> = sources

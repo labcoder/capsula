@@ -9,7 +9,7 @@ pub mod microphone;
 #[cfg(windows)]
 #[expect(
     unsafe_code,
-    reason = "Win32 calls; the core's only unsafe code lives here"
+    reason = "Win32 calls; the core's only shipped unsafe code lives here"
 )]
 mod windows;
 
