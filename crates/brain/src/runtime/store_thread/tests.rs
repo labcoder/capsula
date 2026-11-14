@@ -1528,3 +1528,36 @@ fn measure_delete_during_a_purge() {
         worst(&behind),
     );
 }
+
+#[test]
+fn a_withdrawn_screen_is_stored_after_its_turn() {
+    use kumochi_protocol::message::HeldScreen;
+    let scratch = Scratch::new("held-withdraw-op");
+    let store = Store::open(&scratch.db()).expect("store");
+    let (thread, run) = (ThreadId(1), RunId(1));
+    let (acks, mut replies) = mpsc::unbounded_channel();
+    let store = StoreThread::spawn(store, acks, Schedule::default()).expect("thread");
+    assert!(store.send(StoreOp::BeginTurn {
+        thread,
+        title: Some("t".into()),
+        run,
+        text: "hi".into(),
+        screen: Some(HeldScreen::Attached),
+    }));
+    assert!(store.send(StoreOp::WithdrawScreen { run }));
+    store.close().blocking_recv().expect("closed");
+    let mut got = Vec::new();
+    while let Ok(reply) = replies.try_recv() {
+        got.push(reply);
+    }
+    assert_eq!(
+        got,
+        [Input::TurnStored { run }],
+        "nothing answers the withdrawal"
+    );
+    let conn = rusqlite::Connection::open(scratch.db()).expect("raw open");
+    let stored: Option<String> = conn
+        .query_row("SELECT screen FROM runs WHERE id = 1", [], |row| row.get(0))
+        .expect("the run's row");
+    assert_eq!(stored.as_deref(), Some("withdrawn"));
+}
