@@ -179,7 +179,7 @@ fn arrived_after(inputs: Vec<Input>) -> Vec<Effect> {
     .split_off(3)
 }
 
-/// The owner's rule for a turn nothing can answer (OSC-742): ConnectionNeeded, with Open
+/// The owner's rule for a turn nothing can answer (OSC-742): `ConnectionNeeded`, with Open
 /// Settings, only when `ChatGPT` needs a sign-in and Claude Code is installed but signed out.
 /// Every other Claude Code state, the one before it reports included, keeps `ChatGPT`'s reason
 /// and its action; any other `ChatGPT` reason is kept whatever Claude Code's is.

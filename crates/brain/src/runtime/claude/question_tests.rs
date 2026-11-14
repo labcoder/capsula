@@ -401,6 +401,9 @@ async fn a_warm_launch_writes_only_its_two_control_lines() {
 
 type Change = fn(&mut LaunchSnapshot);
 
+/// A condition that alone stops admission: its name, how to set it and how to clear it.
+type Condition = (&'static str, fn(&mut Claude), fn(&mut Claude));
+
 /// A launch that offers nothing starts with no allow list, passes an audit that expects no tool
 /// before input and after the seed, and seeds an empty tool list.
 #[tokio::test]
@@ -1243,7 +1246,7 @@ const UNREVIEWED: ClaudeCodeView = ClaudeCodeView::Ready {
     analytics_on: false,
 };
 
-/// Each view's reason, with Open Settings only. None is ConnectionNeeded, which only the
+/// Each view's reason, with Open Settings only. None is `ConnectionNeeded`, which only the
 /// coordinator's rule for a turn nothing can answer sends.
 #[test]
 fn each_view_reports_its_own_reason_with_open_settings() {
@@ -1321,7 +1324,7 @@ async fn availability_and_launch_agree_on_every_condition() {
     assert!(!ready.trusted_draw);
     drop(rig.claude.take(&rig.snapshot()).expect("admitted"));
 
-    let conditions: [(&str, fn(&mut Claude), fn(&mut Claude)); 5] = [
+    let conditions: [Condition; 5] = [
         (
             "a pending Disconnect",
             |c| c.cleaning = true,

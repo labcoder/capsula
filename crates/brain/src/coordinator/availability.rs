@@ -202,7 +202,7 @@ impl Coordinator {
     }
 
     /// Why a turn that arrived with nothing ready can't be answered: `ChatGPT`'s reason, except
-    /// that ConnectionNeeded takes "sign in to ChatGPT"'s place while Claude Code is installed but
+    /// that `ConnectionNeeded` takes the `ChatGPT` sign-in's place while Claude Code is installed but
     /// signed out (owner, OSC-742). A positive match, so a Claude Code that isn't found, isn't
     /// reported yet, is off or is broken leaves `ChatGPT`'s notice and its Sign in.
     pub(super) fn nothing_ready(&self, chatgpt: &UserError) -> UserError {
