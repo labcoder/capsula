@@ -1,5 +1,6 @@
 //! Read-only capture metadata and control of this harness's uniquely named ETW session.
 
+use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io::Read as _;
@@ -160,10 +161,22 @@ pub(crate) fn qpc() -> Result<i64> {
     Ok(counter)
 }
 
-pub(crate) fn presentmon_command() -> Command {
-    let mut command = Command::new("C:/dev/capsula-ws/tools/presentmon/PresentMon-2.6.0-x64.exe");
+fn presentmon_path(path: Option<OsString>) -> Result<PathBuf> {
+    let path = PathBuf::from(path.context("set PRESENTMON_EXE to your PresentMon-2.6.0-x64.exe")?);
+    ensure!(path.is_absolute(), "PRESENTMON_EXE must be an absolute path");
+    ensure!(
+        path.file_name().and_then(|name| name.to_str()) == Some("PresentMon-2.6.0-x64.exe"),
+        "PRESENTMON_EXE must select PresentMon-2.6.0-x64.exe"
+    );
+    Ok(path)
+}
+
+pub(crate) fn presentmon_command() -> Result<Command> {
+    let path = presentmon_path(std::env::var_os("PRESENTMON_EXE"))?;
+    ensure!(path.is_file(), "PRESENTMON_EXE must name an existing file");
+    let mut command = Command::new(path);
     command.creation_flags((CREATE_NO_WINDOW | NORMAL_PRIORITY_CLASS).0);
-    command
+    Ok(command)
 }
 
 pub(crate) fn desktop_metadata() -> Result<String> {
@@ -322,8 +335,30 @@ pub(crate) fn file_sha256(path: &Path) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TraceLoss, file_sha256, final_path, map_creation};
+    use super::{TraceLoss, file_sha256, final_path, map_creation, presentmon_path};
     use std::os::windows::io::AsRawHandle as _;
+
+    #[test]
+    fn presentmon_selection_requires_an_explicit_absolute_pinned_path() {
+        let directory = std::env::temp_dir().join("chosen tools with spaces");
+        let selected = directory.join("PresentMon-2.6.0-x64.exe");
+        assert_eq!(
+            presentmon_path(Some(selected.clone().into_os_string())).unwrap(),
+            selected
+        );
+        assert!(presentmon_path(None).is_err());
+        for path in [
+            std::path::PathBuf::new(),
+            "PresentMon-2.6.0-x64.exe".into(),
+            "tools/PresentMon-2.6.0-x64.exe".into(),
+            directory.join("PresentMon-2.5.0-x64.exe"),
+            directory.join("PresentMon-2.6.0-x86.exe"),
+            directory.join("PresentMon.exe"),
+            directory.join("other.exe"),
+        ] {
+            assert!(presentmon_path(Some(path.into_os_string())).is_err());
+        }
+    }
 
     #[test]
     fn creation_utc_maps_to_a_bounded_qpc_interval() {
