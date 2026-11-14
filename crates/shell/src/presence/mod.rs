@@ -21,7 +21,7 @@ mod issue_review;
 mod kumo;
 mod kumo_view;
 mod launch;
-mod line;
+pub(crate) mod line;
 mod link;
 mod messages;
 pub(crate) mod observer;
