@@ -13,5 +13,9 @@ kumochi-protocol.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
+[features]
+# The fixtures the shell's tests share with the core's.
+test-support = []
+
 [lints]
 workspace = true

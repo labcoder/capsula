@@ -5,11 +5,11 @@ use std::fmt;
 
 /// A rectangle in physical screen pixels, half-open: `[left, right) × [top, bottom)`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct PhysicalRect {
-    pub(crate) left: i32,
-    pub(crate) top: i32,
-    pub(crate) right: i32,
-    pub(crate) bottom: i32,
+pub struct PhysicalRect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
 }
 
 impl PhysicalRect {
@@ -48,19 +48,19 @@ impl PhysicalRect {
 /// Which window a target is: the handle, process and thread. A handle can be reused on the same
 /// thread, so only a watch proves the window is still the same one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct HostId {
-    pub(crate) window: usize,
-    pub(crate) process: u32,
-    pub(crate) thread: u32,
+pub struct HostId {
+    pub window: usize,
+    pub process: u32,
+    pub thread: u32,
 }
 
 /// One watch's generation, minted by Presence and never reused in the process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct WatchGen(pub(crate) u64);
+pub struct WatchGen(pub u64);
 
 /// What a watched host did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum HostChange {
+pub enum HostChange {
     /// It moved or resized.
     Moved,
     /// It was destroyed, hidden, minimized or cloaked.
@@ -70,38 +70,38 @@ pub(crate) enum HostChange {
 /// The raw caption reads for one window, in physical pixels unless noted. The rules that turn
 /// them into a caption are in `presence/perch/caption.rs`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Facts {
+pub struct Facts {
     /// The calling thread really is per-monitor aware v2, so every rectangle is physical.
-    pub(crate) per_monitor_v2: bool,
+    pub per_monitor_v2: bool,
     /// `(style & WS_CAPTION) == WS_CAPTION`.
-    pub(crate) captioned: bool,
+    pub captioned: bool,
     /// The raw window rectangle.
-    pub(crate) bounds: PhysicalRect,
+    pub bounds: PhysicalRect,
     /// The visible frame.
-    pub(crate) frame: PhysicalRect,
+    pub frame: PhysicalRect,
     /// The work area of the frame's monitor.
-    pub(crate) work_area: PhysicalRect,
+    pub work_area: PhysicalRect,
     /// The DPI the host lays itself out at.
-    pub(crate) layout_dpi: u32,
+    pub layout_dpi: u32,
     /// The effective DPI of the frame's monitor.
-    pub(crate) monitor_dpi: u32,
+    pub monitor_dpi: u32,
     /// The visible title bar, as reported, in screen coordinates.
-    pub(crate) title_bar: Option<PhysicalRect>,
+    pub title_bar: Option<PhysicalRect>,
     /// The caption buttons as reported, relative to `bounds`' top-left, in unpinned units.
-    pub(crate) buttons: Option<PhysicalRect>,
+    pub buttons: Option<PhysicalRect>,
     /// The standard top inset for the host's style, in host units; a resizable window's when
     /// it has no caption.
-    pub(crate) top_inset: i32,
+    pub top_inset: i32,
     /// One standard caption button's width, in host units.
-    pub(crate) button_width: i32,
+    pub button_width: i32,
 }
 
 /// The window under the pointer, as read. Its `Debug` never prints the title.
 #[derive(Clone, Copy)]
-pub(crate) struct HostFacts {
-    pub(crate) id: HostId,
-    pub(crate) caption: Facts,
-    pub(crate) label: Label,
+pub struct HostFacts {
+    pub id: HostId,
+    pub caption: Facts,
+    pub label: Label,
 }
 
 impl fmt::Debug for HostFacts {
@@ -115,19 +115,19 @@ impl fmt::Debug for HostFacts {
 }
 
 /// UTF-16 units a label keeps.
-pub(crate) const LABEL_UNITS: usize = 64;
+pub const LABEL_UNITS: usize = 64;
 
 /// Another app's window title, screen text. It's kept inline, so reading one allocates
 /// nothing, and its `Debug` prints only its length. It goes to the drop label and nowhere else.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Label {
+pub struct Label {
     units: [u16; LABEL_UNITS],
     len: u8,
 }
 
 impl Label {
     /// The first [`LABEL_UNITS`] units of `title`, without a trailing half of a surrogate pair.
-    pub(crate) fn new(title: &[u16]) -> Self {
+    pub fn new(title: &[u16]) -> Self {
         let mut len = title.len().min(LABEL_UNITS);
         if len > 0 && (0xD800..0xDC00).contains(&title[len - 1]) {
             len -= 1;
@@ -140,7 +140,7 @@ impl Label {
         }
     }
 
-    pub(crate) fn units(&self) -> &[u16] {
+    pub fn units(&self) -> &[u16] {
         &self.units[..usize::from(self.len)]
     }
 }
@@ -151,8 +151,8 @@ impl fmt::Debug for Label {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod fixture;
+#[cfg(any(test, feature = "test-support"))]
+pub mod fixture;
 
 #[cfg(test)]
 mod tests {

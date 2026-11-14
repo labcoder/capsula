@@ -6,7 +6,7 @@ mod accounts_fixture;
 mod carry;
 mod deletes;
 pub(crate) mod diagnostics;
-pub(crate) mod drag;
+pub(crate) use kumochi_shell_core::presence::drag;
 mod drawings;
 mod escape;
 #[expect(
@@ -40,7 +40,6 @@ mod paint_stroke;
 #[cfg(test)]
 mod paint_work_fixture;
 mod panels;
-mod perch;
 mod position;
 mod pull_dock;
 mod pull_picture;
@@ -79,6 +78,7 @@ use gpui_kit::{
     WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point, px, size,
 };
 use kumochi_protocol::constants;
+use kumochi_shell_core::presence::perch;
 
 use crate::escape::{Activity, Escape, EscapeHold, Panel as EscapePanel};
 use crate::input::{Effect, Gesture};

@@ -1,8 +1,7 @@
 //! The operating system behind small, safe functions. Windows only for now.
 
 pub(crate) mod credential;
-pub(crate) mod host;
-pub(crate) mod input;
+pub(crate) use kumochi_shell_core::platform::{host, input};
 pub(crate) mod microphone;
 
 #[cfg(test)]

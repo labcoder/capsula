@@ -12,4 +12,6 @@ pub mod claude_accounts;
 pub mod credential;
 pub mod escape;
 pub mod instance;
+pub mod platform;
+pub mod presence;
 pub mod sign_in_mark;

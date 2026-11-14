@@ -10,20 +10,20 @@ const CLEARANCE: i32 = 4;
 
 /// What placement fits, in logical pixels: the input bounds, which hold the painted ones.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Extents {
+pub struct Extents {
     /// The body's side.
-    pub(crate) body: i32,
+    pub body: i32,
     /// The task card's width and height.
-    pub(crate) card: [i32; 2],
+    pub card: [i32; 2],
 }
 
 /// Where the body and the card end up, in physical pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Placement {
-    pub(crate) body: PhysicalRect,
-    pub(crate) card: PhysicalRect,
+pub struct Placement {
+    pub body: PhysicalRect,
+    pub card: PhysicalRect,
     /// Above the title bar, rather than just below the caption.
-    pub(crate) above: bool,
+    pub above: bool,
 }
 
 /// Centred above the title bar if there's room, else just below the caption inside the frame,

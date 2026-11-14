@@ -13,7 +13,7 @@ pub(crate) enum Source {
 
 /// Where a drop counts: the title bar, without the caption buttons.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Caption {
+pub struct Caption {
     pub(crate) rect: PhysicalRect,
     pub(crate) source: Source,
 }
@@ -21,7 +21,7 @@ pub(crate) struct Caption {
 /// At most three button rectangles: the report as read, the same report scaled from host
 /// units while their units are unpinned, and the inferred strip.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Exclusions {
+pub struct Exclusions {
     pub(crate) rects: [Option<(PhysicalRect, Source)>; 3],
 }
 
@@ -46,14 +46,14 @@ pub(crate) struct Geometry {
 
 /// A window Kumo can perch on, in physical screen pixels. Its `label` prints only its length.
 #[derive(Clone, Copy)]
-pub(crate) struct WindowTarget {
-    pub(crate) id: HostId,
-    pub(crate) frame: PhysicalRect,
-    pub(crate) work_area: PhysicalRect,
-    pub(crate) monitor_dpi: u32,
-    pub(crate) caption: Caption,
-    pub(crate) exclusions: Exclusions,
-    pub(crate) label: Label,
+pub struct WindowTarget {
+    pub id: HostId,
+    pub frame: PhysicalRect,
+    pub work_area: PhysicalRect,
+    pub monitor_dpi: u32,
+    pub caption: Caption,
+    pub exclusions: Exclusions,
+    pub label: Label,
 }
 
 impl std::fmt::Debug for WindowTarget {
@@ -90,7 +90,7 @@ pub(crate) fn target_of(facts: &HostFacts) -> Option<WindowTarget> {
 /// The perch target `facts` describe when `point` is a drop on it: inside its half-open
 /// caption, which already ends left of every caption-button exclusion. A frame hit alone
 /// isn't a drop.
-pub(crate) fn drop_target(facts: &HostFacts, [x, y]: [i32; 2]) -> Option<WindowTarget> {
+pub fn drop_target(facts: &HostFacts, [x, y]: [i32; 2]) -> Option<WindowTarget> {
     target_of(facts).filter(|target| {
         let caption = target.caption.rect;
         (caption.left..caption.right).contains(&x) && (caption.top..caption.bottom).contains(&y)
