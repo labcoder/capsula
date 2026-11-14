@@ -8,7 +8,7 @@ use crate::platform::input::Button;
 use crate::presence::drag::{DragOwner, End, Event, Outcome};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum OverlayInput {
+pub enum OverlayInput {
     #[default]
     PassThrough,
     Regions,
@@ -16,20 +16,16 @@ pub(crate) enum OverlayInput {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct RegionId(pub(crate) u64);
+pub struct RegionId(pub(crate) u64);
 
 /// Physical screen [x, y, width, height], maintained by the region's owner.
-pub(crate) type Regions = BTreeMap<RegionId, [i32; 4]>;
+pub type Regions = BTreeMap<RegionId, [i32; 4]>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct DragLease(u64);
+pub struct DragLease(u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "B3a/B3b supply selection exits")
-)]
-pub(crate) enum ExitCause {
+pub enum ExitCause {
     Release,
     Escape,
     GestureCancel,
@@ -42,14 +38,14 @@ pub(crate) enum ExitCause {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SelectionEnd {
+pub enum SelectionEnd {
     Released,
     Region([i32; 4]),
     Cancelled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum Layer {
+pub enum Layer {
     Panels,
     Dock,
     Regions,
@@ -59,7 +55,7 @@ pub(crate) enum Layer {
 
 impl OverlayInput {
     /// Top first; a dormant selection surface remains below the visual overlay.
-    pub(crate) fn order(self) -> [Layer; 5] {
+    pub fn order(self) -> [Layer; 5] {
         use Layer::{Dock, Overlay, Panels, Regions, Selection};
         match self {
             Self::PassThrough | Self::Regions => [Panels, Dock, Regions, Overlay, Selection],
@@ -69,13 +65,13 @@ impl OverlayInput {
 }
 
 /// No activation operation: macOS uses nonactivating `NSPanel`, `ignoresMouseEvents` and levels.
-pub(crate) trait InputPlatform {
+pub trait InputPlatform {
     type Error;
     fn configure(&mut self, mode: OverlayInput, regions: &Regions) -> Result<(), Self::Error>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Effect {
+pub enum Effect {
     InputCancelled(RegionId),
     CancelDrag(DragLease),
     Configure,
@@ -85,7 +81,7 @@ pub(crate) enum Effect {
 
 /// The presenter retains this state across brain connections; no platform or orbit state lives here.
 #[derive(Debug, Default)]
-pub(crate) struct OverlayOwner {
+pub struct OverlayOwner {
     mode: OverlayInput,
     regions: Regions,
     orbit: Option<RegionId>,
@@ -106,7 +102,7 @@ impl OverlayOwner {
         self.mode
     }
 
-    pub(crate) fn configure<P: InputPlatform>(&self, platform: &mut P) -> Result<(), P::Error> {
+    pub fn configure<P: InputPlatform>(&self, platform: &mut P) -> Result<(), P::Error> {
         platform.configure(self.mode, &self.regions)
     }
 
@@ -158,7 +154,7 @@ impl OverlayOwner {
         }
     }
 
-    pub(crate) fn lease_drag(&mut self) -> Option<DragLease> {
+    pub fn lease_drag(&mut self) -> Option<DragLease> {
         if self.mode == OverlayInput::Selecting || self.orbit.is_some() || self.drag.is_some() {
             return None;
         }
@@ -168,7 +164,7 @@ impl OverlayOwner {
         Some(lease)
     }
 
-    pub(crate) fn return_drag(&mut self, lease: DragLease) {
+    pub fn return_drag(&mut self, lease: DragLease) {
         if self.drag == Some(lease) {
             self.drag = None;
         }
@@ -209,7 +205,7 @@ impl OverlayOwner {
         vec![Effect::SelectionStarted(gesture)]
     }
 
-    pub(crate) fn selection(&self) -> Option<GestureId> {
+    pub fn selection(&self) -> Option<GestureId> {
         self.gesture
     }
 
@@ -219,17 +215,17 @@ impl OverlayOwner {
         }
     }
 
-    pub(crate) fn selection_event(&mut self, event: Event) -> Vec<Effect> {
+    pub fn selection_event(&mut self, event: Event) -> Vec<Effect> {
         let outcome = self.selection.handle(event);
         self.ending(outcome)
     }
 
-    pub(crate) fn reconcile(&mut self) -> Vec<Effect> {
+    pub fn reconcile(&mut self) -> Vec<Effect> {
         let outcome = self.selection.reconcile();
         self.ending(outcome)
     }
 
-    pub(crate) fn end_selection(&mut self, gesture: GestureId, cause: ExitCause) -> Vec<Effect> {
+    pub fn end_selection(&mut self, gesture: GestureId, cause: ExitCause) -> Vec<Effect> {
         if self.gesture != Some(gesture) {
             return Vec::new();
         }

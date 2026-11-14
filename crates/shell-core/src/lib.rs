@@ -7,6 +7,14 @@
               when the controller's public surface is designed"
 )]
 
+#[cfg(test)]
+#[path = "../../scene/tests/support/allocation.rs"]
+#[expect(
+    dead_code,
+    reason = "shared allocator helpers serve several test binaries"
+)]
+mod allocation;
+
 pub mod accounts;
 pub mod claude_accounts;
 pub mod credential;
@@ -14,4 +22,5 @@ pub mod escape;
 pub mod instance;
 pub mod platform;
 pub mod presence;
+pub mod presenter;
 pub mod sign_in_mark;
