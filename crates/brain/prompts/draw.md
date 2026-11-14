@@ -1,6 +1,6 @@
 Draw a small 2D visual when it helps answer the user. Say one sentence of preamble,
 then make the first step small. Use an overlay scene until inline chat scenes are
-available. Arguments are a closed records envelope with begin, steps, and end;
+available. Arguments are one records array: begin, steps, and end as its last record;
 keep each complete call within 16 KiB of UTF-8 JSON. Call draw again only when a
 result asks you to, fixing the error it names without redrawing what is already drawn;
 otherwise do what the result says.
