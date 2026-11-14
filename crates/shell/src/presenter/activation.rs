@@ -147,6 +147,15 @@ impl Presenter {
             .is_some_and(|scene| scene.pending_consumption == Some(index))
         {
             self.activate_ready(generation, id, index, now, &mut out)?;
+            let busy = self.lane.as_ref().is_some_and(|lane| lane.scene == id);
+            if !busy
+                && self.generation == Some(generation)
+                && let Some(scene) = self.scenes.get_mut(&id)
+                && scene.pending_consumption == Some(index)
+            {
+                scene.pending_consumption = None;
+                self.drain(now, &mut out)?;
+            }
         }
         Ok(out.finish())
     }
@@ -180,10 +189,7 @@ impl Presenter {
         match scene.activation.due(scene.state.view(), index) {
             Ok(due) if due > time => return Ok(()),
             Ok(_) => {}
-            Err(reason) => {
-                self.fail(id, run, index, reason, out);
-                return Ok(());
-            }
+            Err(reason) => return self.fail(id, run, index, reason, now, out),
         }
         let segment =
             synthetic_duration_ms(scene.state.view().step(index).and_then(|s| s.say.as_ref()));
@@ -223,8 +229,10 @@ impl Presenter {
                 out.effects.extend(effects);
             }
             Err(ConsumeError::Busy) => {}
-            Err(ConsumeError::Residency) => self.fail(id, run, index, SceneFailure::Residency, out),
-            Err(_) => self.fail(id, run, index, SceneFailure::Validation, out),
+            Err(ConsumeError::Residency) => {
+                self.fail(id, run, index, SceneFailure::Residency, now, out)?;
+            }
+            Err(_) => self.fail(id, run, index, SceneFailure::Validation, now, out)?,
         }
         Ok(())
     }
