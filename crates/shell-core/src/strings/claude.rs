@@ -6,7 +6,7 @@ use kumochi_protocol::message::{AuditFailed, ClaudeCodeView, PolicyFailed, Unsup
 use super::Strings;
 
 impl Strings {
-    pub(crate) fn claude_status(&self, view: Option<ClaudeCodeView>) -> String {
+    pub fn claude_status(&self, view: Option<ClaudeCodeView>) -> String {
         let mut args = FluentArgs::new();
         let id = match view {
             None => "claude-status-waiting",

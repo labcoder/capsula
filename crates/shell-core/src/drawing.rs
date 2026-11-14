@@ -20,7 +20,7 @@ const CLEARED_KEPT: usize = 64;
 /// What the brain sent breaks the drawing's protocol, so the connection ends. It names sizes and
 /// counts, never labels.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum Broken {
+pub enum Broken {
     #[error("{0} scenes, more than the cap or one named twice")]
     Scenes(usize),
     #[error("a scene's step counts are out of range")]
@@ -33,19 +33,19 @@ pub(crate) enum Broken {
 
 /// What a change asks of the caller: a `ClearDrawing` to send, and credit to grant.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct Effect {
-    pub(crate) clear: Option<ControlToBrain>,
-    pub(crate) credit: u32,
+pub struct Effect {
+    pub clear: Option<ControlToBrain>,
+    pub credit: u32,
 }
 
 /// A `SceneSnapshot` frame, with its size on the pipe.
 #[derive(Debug)]
-pub(crate) struct Chunk {
-    pub(crate) scene: SceneId,
-    pub(crate) revision: u32,
-    pub(crate) steps: Vec<Step>,
-    pub(crate) last: bool,
-    pub(crate) bytes: u32,
+pub struct Chunk {
+    pub scene: SceneId,
+    pub revision: u32,
+    pub steps: Vec<Step>,
+    pub last: bool,
+    pub bytes: u32,
 }
 
 /// A scene on screen.
@@ -152,7 +152,7 @@ impl Drawing {
     }
 
     /// The shown scenes, oldest first.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn shown(&self) -> impl Iterator<Item = (&SceneId, &Scene)> {
         self.shown.iter()
     }

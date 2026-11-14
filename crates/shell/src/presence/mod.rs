@@ -15,7 +15,6 @@ mod escape;
 )]
 mod exclusion;
 mod frame_rate;
-mod geometry;
 mod gesture;
 mod issue_review;
 mod kumo;
@@ -54,7 +53,6 @@ mod test_fixture;
 #[cfg(test)]
 mod tests;
 mod text;
-mod thread_selection;
 mod thread_view;
 mod threads;
 mod voice;
@@ -78,7 +76,7 @@ use gpui_kit::{
     WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point, px, size,
 };
 use kumochi_protocol::constants;
-use kumochi_shell_core::presence::perch;
+use kumochi_shell_core::presence::{geometry, perch, thread_selection};
 
 use crate::escape::{Activity, Escape, EscapeHold, Panel as EscapePanel};
 use crate::input::{Effect, Gesture};

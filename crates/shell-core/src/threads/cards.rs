@@ -15,7 +15,7 @@ pub(super) struct Watermark {
     pub(super) approval: Option<ApprovalRev>,
 }
 
-pub(crate) struct Entry {
+pub struct Entry {
     thread: ThreadId,
     views: [bool; 2],
     pub(super) mark: Option<Watermark>,
@@ -23,7 +23,7 @@ pub(crate) struct Entry {
     needed: bool,
     flight: Option<u32>,
     attempt: Option<Attempt>,
-    pub(crate) feedback: Option<Feedback>,
+    pub feedback: Option<Feedback>,
 }
 
 struct Attempt {
@@ -33,52 +33,52 @@ struct Attempt {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Feedback {
+pub enum Feedback {
     QueueFailed,
     Unavailable(IssueUnavailableKind),
     Refused(IssueRefused),
 }
 
 impl Entry {
-    pub(crate) fn review_blocked(&self) -> bool {
+    pub fn review_blocked(&self) -> bool {
         matches!(
             self.feedback,
             Some(Feedback::Unavailable(IssueUnavailableKind::AttemptNotSaved))
         )
     }
 
-    pub(crate) fn pending(&self) -> bool {
+    pub fn pending(&self) -> bool {
         self.attempt.as_ref().is_some_and(|attempt| attempt.pending)
     }
 
-    pub(crate) fn pending_action(&self) -> bool {
+    pub fn pending_action(&self) -> bool {
         self.attempt
             .as_ref()
             .is_some_and(|attempt| attempt.pending && !attempt.review)
     }
 
-    pub(crate) fn pending_review(&self) -> bool {
+    pub fn pending_review(&self) -> bool {
         self.attempt
             .as_ref()
             .is_some_and(|attempt| attempt.pending && attempt.review)
     }
 
-    pub(crate) fn pending_review_request(&self) -> Option<u64> {
+    pub fn pending_review_request(&self) -> Option<u64> {
         self.attempt
             .as_ref()
             .filter(|attempt| attempt.pending && attempt.review)
             .map(|attempt| attempt.request)
     }
 
-    pub(crate) fn state(&self) -> Option<&ActionState> {
+    pub fn state(&self) -> Option<&ActionState> {
         self.mark.as_ref().map(|mark| &mark.state)
     }
 
-    pub(crate) fn card(&self) -> Option<&IssueCard> {
+    pub fn card(&self) -> Option<&IssueCard> {
         self.full.as_ref()
     }
 
-    pub(crate) fn loading(&self) -> bool {
+    pub fn loading(&self) -> bool {
         self.needed || self.flight.is_some()
     }
 }

@@ -331,10 +331,10 @@ display timing and click receipt need an approved session.
 
 ## The drawing
 
-`crates/shell/src/drawing.rs` holds what's drawn: at most four scenes by `SceneId`, each a list of
-steps, and the recovery that restores them on each connection. It's plain state, no GPUI, so its
-rules are unit-tested. `runs.rs` keeps the runs, turns, the fence and the answer text, and hands
-it the steps it lets through.
+`crates/shell-core/src/drawing.rs` holds what's drawn: at most four scenes by `SceneId`, each a
+list of steps, and the recovery that restores them on each connection. It's plain state, no
+GPUI, so its rules are unit-tested. `runs.rs`, beside it, keeps the runs, turns, the fence and
+the answer text, and hands it the steps it lets through.
 
 - A live step for a new scene admits it the way the brain does: the newest four, evicting the
   oldest, so a `ClearDrawing` never names more than four.

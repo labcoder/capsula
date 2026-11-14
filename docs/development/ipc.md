@@ -183,9 +183,10 @@ flowchart LR
   in the typing panel in preference to the retained brain error. Reconnecting or accepting a
   `SettingsView` clears the local refusal; a successful submit clears both. A new key goes at
   the end of `ErrorKey`, and also in its feature's group in the catalog list,
-  `strings.rs`'s `error_id` (or `Text::id` for shell-only text), and `locales/en/shell.ftl`.
+  `error_id` in `shell-core`'s `strings.rs` (or `Text::id` for shell-only text), and
+  `locales/en/shell.ftl`.
   Non-wire text entries go in their feature's section, never at the file's tail:
-  keep `Text`, its catalog list and ID mapping in `crates/shell/src/strings.rs`,
+  keep `Text`, its catalog list and ID mapping in `crates/shell-core/src/strings.rs`,
   `ErrorKey`'s catalog list and mapping, and `locales/en/shell.ftl` grouped together.
   Catalog array lengths are derived from their lists. Wire enums, including `ErrorKey`,
   remain append-only because postcard tags are positional; concurrent error-key additions

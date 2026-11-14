@@ -11,12 +11,15 @@ use anyhow::{Context as _, Result, ensure};
 
 /// The crates the core may depend on directly, dev-dependencies included. A change that gives
 /// the core a dependency adds it here, so the new line is reviewed.
-const DEPENDENCIES: [&str; 5] = [
+const DEPENDENCIES: [&str; 8] = [
+    "fluent-bundle",
     "keyring",
+    "kumochi-brain",
     "kumochi-protocol",
     "kumochi-scene",
     "thiserror",
     "tracing",
+    "unic-langid",
 ];
 
 /// Crate-name prefixes of the UI frameworks a front end may sit on. The whole tree is searched

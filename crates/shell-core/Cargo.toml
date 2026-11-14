@@ -8,11 +8,16 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+fluent-bundle.workspace = true
 keyring.workspace = true
 kumochi-protocol.workspace = true
 kumochi-scene.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+unic-langid.workspace = true
+
+[dev-dependencies]
+kumochi-brain = { path = "../brain", features = ["test-support"] }
 
 [features]
 # The fixtures the shell's tests share with the core's.
