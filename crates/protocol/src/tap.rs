@@ -146,6 +146,7 @@ impl Tapped for ControlToShell {
             Self::VoiceHoldStatus { .. } => "VoiceHoldStatus",
             Self::VoiceHoldStopAccepted { .. } => "VoiceHoldStopAccepted",
             Self::ScreenHolds(_) => "ScreenHolds",
+            Self::HoldScreen { .. } => "HoldScreen",
         }
     }
 

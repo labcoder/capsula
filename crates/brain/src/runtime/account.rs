@@ -431,16 +431,25 @@ impl Accounts {
     }
 
     /// The image gate: whether a hold on `choice` also shows the model the window under the
-    /// pointer, given whether this platform has window capture. With no catalog read, or no
-    /// model chosen, it isn't known yet, so it's `NotReady` rather than `ModelCantSee`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "2c4 sends ScreenHolds"))]
+    /// pointer, given whether this platform has window capture and whether the user allows it.
+    /// With no catalog read, or no model chosen, it isn't known yet, so it's `NotReady` rather
+    /// than `ModelCantSee`; the switch comes first, so turning it off always reads as off.
+    #[cfg_attr(not(test), expect(dead_code, reason = "2c4b sends ScreenHolds"))]
     #[expect(
         clippy::fn_params_excessive_bools,
-        reason = "the caller supplies the platform's capture, so tests can take it away"
+        reason = "the caller supplies the platform's capture and the user's switch"
     )]
-    pub(super) fn screen_holds(&self, choice: Option<&ModelChoice>, capture: bool) -> ScreenHolds {
+    pub(super) fn screen_holds(
+        &self,
+        choice: Option<&ModelChoice>,
+        capture: bool,
+        enabled: bool,
+    ) -> ScreenHolds {
         if !capture {
             return ScreenHolds::Off(ScreenOff::Unsupported);
+        }
+        if !enabled {
+            return ScreenHolds::Off(ScreenOff::TurnedOff);
         }
         let (Some(models), Some(choice)) = (self.models(), choice) else {
             return ScreenHolds::Off(ScreenOff::NotReady);

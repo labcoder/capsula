@@ -1144,6 +1144,7 @@ fn welcome(control: &PipeClient) -> Result<IssueSession, LinkError> {
             | ControlToShell::VoiceHoldStatus { .. }
             | ControlToShell::VoiceHoldStopAccepted { .. }
             | ControlToShell::ScreenHolds(_)
+            | ControlToShell::HoldScreen { .. }
             | ControlToShell::Voice(_),
         ) => Err(LinkError::Rejected),
         Some(ControlToShell::BuildMismatch { brain_build }) => {
@@ -1498,12 +1499,13 @@ fn watch(
                 }
             }
             // Slice 7's PR 6 stops playback on SpeechRevoked; nothing plays yet. The screen notice
-            // arrives with the switch that sends ScreenHolds.
+            // and the per-hold line arrive with the switch that sends HoldRecognized.
             Ok(Some(
                 ControlToShell::SpeechRevoked { .. }
                 | ControlToShell::ThreadModelSet { .. }
                 | ControlToShell::NoVisual { .. }
-                | ControlToShell::ScreenHolds(_),
+                | ControlToShell::ScreenHolds(_)
+                | ControlToShell::HoldScreen { .. },
             )) => {}
             Ok(Some(ControlToShell::Welcome { .. } | ControlToShell::BuildMismatch { .. })) => {
                 tracing::warn!("the brain repeated its handshake; ending the connection");
