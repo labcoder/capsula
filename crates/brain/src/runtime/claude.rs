@@ -82,8 +82,8 @@ pub(crate) struct Claude {
     epochs: u64,
     /// The models runs may name now: the reviewed row's while a launch would be admitted.
     models: Vec<ModelInfo>,
-    /// A shell hasn't heard `models` yet.
-    unsent: bool,
+    /// The list a shell hasn't heard yet.
+    owed: Option<Vec<ModelInfo>>,
 }
 
 /// Runs bound under one epoch go on through a Find; a sign-out, a Disconnect, an audit failure,
@@ -155,7 +155,7 @@ impl Claude {
             epoch: None,
             epochs: 0,
             models: Vec::new(),
-            unsent: false,
+            owed: None,
         }
     }
 
@@ -484,19 +484,23 @@ impl Claude {
 
     /// Records the models runs may name now; a change is owed to the shell.
     fn offer(&mut self, models: Vec<ModelInfo>) {
-        self.unsent |= self.models != models;
+        if self.models != models {
+            self.owed = Some(models.clone());
+        }
         self.models = models;
     }
 
     /// A shell connected: it hears the models on offer, if there are any.
     pub(super) fn connected(&mut self) {
-        self.unsent |= !self.models.is_empty();
+        if !self.models.is_empty() {
+            self.owed = Some(self.models.clone());
+        }
     }
 
     fn models_unsent(&mut self) -> Option<DataToShell> {
-        std::mem::take(&mut self.unsent).then(|| DataToShell::Models {
+        self.owed.take().map(|models| DataToShell::Models {
             connection: ConnectionKind::ClaudeCode,
-            models: self.models.clone(),
+            models,
         })
     }
 
