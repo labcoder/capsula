@@ -562,10 +562,11 @@ fn deliver(runs: &mut Runs, mut store: Option<&mut Store>, effects: Vec<BrainEff
                 title,
                 run,
                 text,
+                screen,
             }) => {
                 if let Some(store) = store.as_deref_mut() {
                     store
-                        .begin_turn(thread, title.as_deref(), run, &text)
+                        .begin_held_turn(thread, title.as_deref(), run, &text, screen)
                         .expect("the turn is stored");
                 }
             }

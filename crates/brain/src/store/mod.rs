@@ -22,6 +22,9 @@ mod duplicate_tests;
 mod heard;
 #[cfg(test)]
 mod heard_tests;
+mod held;
+#[cfg(test)]
+mod held_tests;
 #[cfg(test)]
 mod issue_scope_tests;
 mod pages;
@@ -46,7 +49,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use kumochi_protocol::constants;
-use kumochi_protocol::message::{Deleted, RunId, ThreadId};
+use kumochi_protocol::message::{Deleted, HeldScreen, RunId, ThreadId};
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
 
 pub use drawing::DrawingRecovery;
@@ -457,6 +460,22 @@ impl Store {
         run: RunId,
         text: &str,
     ) -> Result<(), StoreError> {
+        self.begin_held_turn(thread, title, run, text, None)
+    }
+
+    /// [`Store::begin_turn`] for a hold's turn: `screen`, what the hold carried into it, goes in
+    /// the run's row in the same transaction, so it's committed before any request exists.
+    ///
+    /// # Errors
+    /// As [`Store::begin_turn`].
+    pub fn begin_held_turn(
+        &mut self,
+        thread: ThreadId,
+        title: Option<&str>,
+        run: RunId,
+        text: &str,
+        screen: Option<HeldScreen>,
+    ) -> Result<(), StoreError> {
         let (thread, run) = (
             sql_id(thread.0, StoreError::NoThread)?,
             sql_id(run.0, StoreError::NoRun)?,
@@ -478,10 +497,10 @@ impl Store {
             return Err(StoreError::NoThread);
         }
         let inserted = tx.execute(
-            "INSERT INTO runs (id, thread, state, started_ms)
-             SELECT ?1, ?2, 'active', ?3
+            "INSERT INTO runs (id, thread, state, started_ms, screen)
+             SELECT ?1, ?2, 'active', ?3, ?4
              WHERE ?1 > coalesce((SELECT seq FROM sqlite_sequence WHERE name = 'runs'), 0)",
-            params![run, thread, now],
+            params![run, thread, now, screen.map(held::column)],
         )?;
         if inserted == 0 {
             return Err(StoreError::StaleId);

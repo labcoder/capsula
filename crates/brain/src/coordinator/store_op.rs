@@ -1,8 +1,8 @@
 //! What the core loop asks of the store thread, and the answer a failed write gets.
 
 use kumochi_protocol::message::{
-    Content, DataToShell, Deleted, EventId, ModelChoice, PageOf, RunId, SceneId, Step, ThreadId,
-    ThreadTitle,
+    Content, DataToShell, Deleted, EventId, HeldScreen, ModelChoice, PageOf, RunId, SceneId, Step,
+    ThreadId, ThreadTitle,
 };
 
 use std::fmt;
@@ -61,6 +61,8 @@ pub enum StoreOp {
         run: RunId,
         /// The user's text.
         text: Content,
+        /// What a screen hold carried into the turn; `None` for every other turn.
+        screen: Option<HeldScreen>,
     },
     /// The text streamed since the last write, then one step.
     CommitStep {

@@ -694,9 +694,10 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
             title,
             run,
             text,
+            screen,
         } => write(store, purger, acks, run, "turn", |store| {
             store
-                .begin_turn(thread, title.as_deref(), run, &text)
+                .begin_held_turn(thread, title.as_deref(), run, &text, screen)
                 .map(|()| Input::TurnStored { run })
         }),
         StoreOp::CommitStep {

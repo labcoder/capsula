@@ -459,6 +459,16 @@ pub(crate) enum Screen {
     NotIncluded(ScreenClass),
 }
 
+impl Screen {
+    /// What the run's turn carries, for its stored row and the shell.
+    pub(crate) fn held(&self) -> kumochi_protocol::message::HeldScreen {
+        match self {
+            Self::Image(_) => kumochi_protocol::message::HeldScreen::Attached,
+            Self::NotIncluded(class) => kumochi_protocol::message::HeldScreen::NotIncluded(*class),
+        }
+    }
+}
+
 impl fmt::Debug for Screen {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

@@ -318,7 +318,14 @@ after the newest user message: the image followed by the fixed developer line "T
 snapshot from when the user spoke.", or one fixed line naming the class ("The screen was not
 included: it wasn't ready in time."). The lines live in `locales/en/brain.ftl` and carry no window
 details. If the image can't go (another route, or no user message left), the run fails with
-`ScreenUnavailable` rather than sending without it. Known limits:
+`ScreenUnavailable` rather than sending without it. What the hold carried goes in the run's row
+with its turn (store.md, `runs.screen`), and the shell hears it once as `HoldScreen` when the
+run's first request starts. The row is written first on purpose: the first build starts only
+after `TurnStored`, so history can over-report a screen but never miss one that left the
+machine, and a failed turn write fails the run before anything is built. Known limits:
+- **History can show a window that never left.** A held run that fails, is stopped or is
+  replaced before its first request still records its screen, so its history shows a window
+  for a turn whose image was never sent.
 - **Every round resends the image.** Each tool round is a new stateless request, so the image's
   input tokens are charged again every round against the plan's usage, bounded by the round cap,
   and the body is uploaded again. At the 2 MiB image cap that's about 2.8 MB a round under the

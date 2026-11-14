@@ -552,6 +552,9 @@ struct Run {
     hold: Option<HoldSnapshot>,
     /// The hold's screen, which every request of the run carries.
     screen: Option<crate::context::Screen>,
+    /// The hold's gesture while its screen is still to be told to the shell, which happens once,
+    /// at the run's first request.
+    untold: Option<kumochi_protocol::message::GestureId>,
     /// The round's current build; the engine starts once it's admitted.
     build: Option<admission::Build>,
     /// The connection that was ready when the run's turn arrived; none means the run failed
@@ -1114,6 +1117,7 @@ impl Coordinator {
             title,
             run,
             text,
+            screen: screen.as_ref().map(crate::context::Screen::held),
         };
         if let Some(hold) = &mut hold {
             hold.defaults.origin = admission::origin(thread, self.main_thread);
@@ -1123,6 +1127,10 @@ impl Coordinator {
         if let Some(hold) = &hold {
             control = control.observe(std::sync::Arc::clone(&hold.cancel));
         }
+        let untold = screen
+            .as_ref()
+            .and(hold.as_ref())
+            .map(|hold| hold.key.gesture);
         self.current = Some(Run {
             control: crate::recall::control::CancelOnDrop(control),
             id: run,
@@ -1139,6 +1147,7 @@ impl Coordinator {
             waiting: VecDeque::new(),
             held: VecDeque::new(),
             snapshot: hold.as_ref().map(|hold| hold.defaults.clone()),
+            untold,
             hold,
             screen,
             build: None,

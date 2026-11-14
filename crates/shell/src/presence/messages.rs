@@ -493,7 +493,7 @@ fn row(
         };
     }
     let label = match kind {
-        PageEventKind::User => Some(strings.get(Text::ThreadUser)),
+        PageEventKind::User | PageEventKind::HeldTurn { .. } => Some(strings.get(Text::ThreadUser)),
         PageEventKind::AssistantText => Some(strings.assistant(state.settings.as_ref().map_or(
             kumochi_protocol::constants::DEFAULT_ASSISTANT_NAME,
             |settings| settings.assistant_name.as_str(),
@@ -701,6 +701,32 @@ mod tests {
                 [6, 5, 4, 3, 2, 1]
             );
             assert_eq!(state.before, Some(EventId(1)));
+        });
+    }
+
+    #[gpui::test]
+    fn a_held_turn_renders_exactly_as_a_plain_user_turn(cx: &mut TestAppContext) {
+        use kumochi_protocol::message::{HeldScreen, ScreenClass};
+        cx.update(|cx| {
+            cx.set_global(Strings::english());
+            let mut user = event(1);
+            user.kind = PageEventKind::User;
+            let mut state = Threads::chat();
+            state.events = vec![user.clone()];
+            let plain = stored_rows(&state, cx);
+            assert_eq!(plain.len(), 1);
+            assert_eq!(
+                plain[0].label.as_deref(),
+                Some(cx.global::<Strings>().get(Text::ThreadUser).as_str())
+            );
+            for screen in [
+                HeldScreen::Attached,
+                HeldScreen::NotIncluded(ScreenClass::Changed),
+            ] {
+                user.kind = PageEventKind::HeldTurn { screen };
+                state.events = vec![user.clone()];
+                assert!(stored_rows(&state, cx) == plain, "{screen:?}");
+            }
         });
     }
 

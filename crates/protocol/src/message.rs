@@ -687,17 +687,18 @@ pub enum ControlToShell {
     HoldScreen {
         /// The hold's gesture.
         gesture: GestureId,
-        /// Sent, or why not.
+        /// The image, or why not.
         outcome: HeldScreen,
     },
 }
 
-/// What a screen hold's window did.
+/// What a screen hold carried into its turn. It never says the window was sent: a run can end
+/// before its first request leaves the machine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HeldScreen {
-    /// The model was sent the window.
-    Sent,
-    /// The model was told the window wasn't included, and why.
+    /// The window's image was attached to the turn.
+    Attached,
+    /// The line telling the model the window wasn't included, and why, was attached instead.
     NotIncluded(ScreenClass),
 }
 

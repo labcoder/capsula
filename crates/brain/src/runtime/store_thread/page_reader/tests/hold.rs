@@ -90,6 +90,7 @@ fn new_hold_stores_exact_words_once_only_after_submit() {
             title: Some("recognized-history-sentinel".into()),
             run: RunId(10),
             text: "recognized-history-sentinel".into(),
+            screen: None,
         }]
     );
     assert!(running.thread.send(writes.into_iter().next().unwrap()));
