@@ -12,22 +12,22 @@ use crate::strings::Text;
 
 mod dock;
 mod voice;
-pub(crate) use voice::{SpeechInputAction, SpeechInputIntent};
+pub use voice::{SpeechInputAction, SpeechInputIntent};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Field {
+pub enum Field {
     Assistant,
     User,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Update {
+pub enum Update {
     Answer,
     Unsolicited,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TaskbarChoice {
+pub enum TaskbarChoice {
     Hidden,
     Shown,
 }
@@ -39,7 +39,7 @@ enum Draft {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum Error {
+pub enum Error {
     #[error("{0}")]
     Validation(NameError),
     #[error("the brain refused the settings change")]
@@ -49,9 +49,9 @@ pub(crate) enum Error {
 }
 
 #[derive(Default)]
-pub(crate) struct FieldState {
-    pub(crate) saving: bool,
-    pub(crate) error: Option<Error>,
+pub struct FieldState {
+    pub saving: bool,
+    pub error: Option<Error>,
     value: String,
     authoritative: String,
 }
@@ -66,9 +66,17 @@ impl fmt::Debug for FieldState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Completion {
+pub struct Completion {
     pub(crate) failed: bool,
     pub(crate) field: Field,
+}
+
+impl Completion {
+    /// A completion as `Settings::set_view` returns it, for the shell's tests to compare with.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_tests(failed: bool, field: Field) -> Self {
+        Self { failed, field }
+    }
 }
 
 /// What a queued settings operation changes.
@@ -141,11 +149,11 @@ impl DockIntent {
 }
 
 #[derive(Default)]
-pub(crate) struct Settings {
-    pub(crate) accounts: crate::accounts::Accounts,
-    pub(crate) claude: crate::claude_accounts::ClaudeAccounts,
-    pub(crate) github: crate::github_connections::GitHubConnections,
-    pub(crate) native_taskbar_notice: Option<Text>,
+pub struct Settings {
+    pub accounts: crate::accounts::Accounts,
+    pub claude: crate::claude_accounts::ClaudeAccounts,
+    pub github: crate::github_connections::GitHubConnections,
+    pub native_taskbar_notice: Option<Text>,
     view: Option<SettingsView>,
     notice: Option<UserError>,
     notice_slot: Option<Slot>,
@@ -173,7 +181,7 @@ impl fmt::Debug for Settings {
 }
 
 impl Settings {
-    pub(crate) fn receive(
+    pub fn receive(
         &mut self,
         current: Option<u64>,
         generation: u64,
@@ -193,7 +201,7 @@ impl Settings {
         true
     }
 
-    pub(crate) fn set_view(&mut self, view: SettingsView, update: Update) -> Option<Completion> {
+    pub fn set_view(&mut self, view: SettingsView, update: Update) -> Option<Completion> {
         let sync_assistant = !self.assistant.saving && !self.editing(Field::Assistant);
         let sync_user = !self.user.saving && !self.editing(Field::User);
         view.assistant_name
@@ -245,15 +253,15 @@ impl Settings {
         })
     }
 
-    pub(crate) fn view(&self) -> Option<&SettingsView> {
+    pub fn view(&self) -> Option<&SettingsView> {
         self.view.as_ref()
     }
 
-    pub(crate) fn notice(&self) -> Option<&UserError> {
+    pub fn notice(&self) -> Option<&UserError> {
         self.notice.as_ref()
     }
 
-    pub(crate) fn dock_notice(&self) -> Option<Text> {
+    pub fn dock_notice(&self) -> Option<Text> {
         if [&self.assistant, &self.user]
             .iter()
             .any(|state| matches!(state.error, Some(Error::Validation(_) | Error::Offline)))
@@ -269,12 +277,12 @@ impl Settings {
         })
     }
 
-    pub(crate) fn clear_notice(&mut self) {
+    pub fn clear_notice(&mut self) {
         self.notice = None;
         self.notice_slot = None;
     }
 
-    pub(crate) fn field(&self, field: Field) -> &FieldState {
+    pub fn field(&self, field: Field) -> &FieldState {
         match field {
             Field::Assistant => &self.assistant,
             Field::User => &self.user,
@@ -288,16 +296,16 @@ impl Settings {
         }
     }
 
-    pub(crate) fn value(&self, field: Field) -> &str {
+    pub fn value(&self, field: Field) -> &str {
         &self.field(field).value
     }
 
-    pub(crate) fn editing(&self, field: Field) -> bool {
+    pub fn editing(&self, field: Field) -> bool {
         let state = self.field(field);
         state.value != state.authoritative
     }
 
-    pub(crate) fn change(&mut self, field: Field, value: &str) {
+    pub fn change(&mut self, field: Field, value: &str) {
         let state = self.field_mut(field);
         if state.value == value {
             return;
@@ -311,7 +319,7 @@ impl Settings {
         }
     }
 
-    pub(crate) fn cancel(&mut self, field: Field) {
+    pub fn cancel(&mut self, field: Field) {
         if self.field(field).saving {
             return;
         }
@@ -319,7 +327,7 @@ impl Settings {
         self.change(field, &value);
     }
 
-    pub(crate) fn save(&mut self, field: Field, send: impl FnOnce(SettingsOp) -> bool) -> bool {
+    pub fn save(&mut self, field: Field, send: impl FnOnce(SettingsOp) -> bool) -> bool {
         if self.field(field).saving {
             return false;
         }
@@ -350,7 +358,7 @@ impl Settings {
     }
 
     /// Inline Kumo renames share the settings FIFO without replacing an unrelated draft.
-    pub(crate) fn send_assistant(
+    pub fn send_assistant(
         &mut self,
         name: AssistantName,
         send: impl FnOnce(SettingsOp) -> bool,
@@ -371,7 +379,7 @@ impl Settings {
     }
 
     /// The newest frame rate cap the user chose: the last one queued, else the saved one.
-    pub(crate) fn max_frame_rate_choice(&self) -> Option<MaxFrameRate> {
+    pub fn max_frame_rate_choice(&self) -> Option<MaxFrameRate> {
         let queued = self
             .pending
             .iter()
@@ -392,7 +400,7 @@ impl Settings {
 
     /// Sends a new frame rate cap unless it's the newest one, queued or saved. It shows once the
     /// brain answers.
-    pub(crate) fn send_max_frame_rate(
+    pub fn send_max_frame_rate(
         &mut self,
         rate: MaxFrameRate,
         send: impl FnOnce(SettingsOp) -> bool,
@@ -412,7 +420,7 @@ impl Settings {
         true
     }
 
-    pub(crate) fn taskbar_choice(&self) -> Option<TaskbarChoice> {
+    pub fn taskbar_choice(&self) -> Option<TaskbarChoice> {
         let view = self.view.as_ref()?;
         self.pending
             .iter()
@@ -428,13 +436,13 @@ impl Settings {
             }))
     }
 
-    pub(crate) fn apply_taskbar(&mut self, apply: impl FnOnce(TaskbarChoice) -> Option<Text>) {
+    pub fn apply_taskbar(&mut self, apply: impl FnOnce(TaskbarChoice) -> Option<Text>) {
         if let Some(choice) = self.taskbar_choice() {
             self.native_taskbar_notice = apply(choice);
         }
     }
 
-    pub(crate) fn send_taskbar(
+    pub fn send_taskbar(
         &mut self,
         choice: TaskbarChoice,
         send: impl FnOnce(SettingsOp) -> bool,
@@ -455,7 +463,7 @@ impl Settings {
     /// Queues `FinishOnboarding` in the ordered answer queue, so the brain's one answer to it
     /// completes it and no other change. False when offline, when one is already queued, or when
     /// the send fails.
-    pub(crate) fn finish_onboarding(&mut self, send: impl FnOnce(SettingsOp) -> bool) -> bool {
+    pub fn finish_onboarding(&mut self, send: impl FnOnce(SettingsOp) -> bool) -> bool {
         if self.view.is_none() || self.finishing() || !send(SettingsOp::FinishOnboarding) {
             return false;
         }
@@ -469,7 +477,7 @@ impl Settings {
 
     /// Queues `CompleteOnboardingStep` in the ordered answer queue, apart from the finish. False
     /// when offline or the send fails.
-    pub(crate) fn complete_onboarding_step(
+    pub fn complete_onboarding_step(
         &mut self,
         step: OnboardingStep,
         send: impl FnOnce(SettingsOp) -> bool,
@@ -492,14 +500,20 @@ impl Settings {
             .any(|pending| pending.slot == Slot::Onboarding)
     }
 
+    /// `finishing`, for the shell's tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn finishing_for_tests(&self) -> bool {
+        self.finishing()
+    }
+
     /// The brain's refusal of the last `FinishOnboarding`, until another change clears it.
-    pub(crate) fn finish_refusal(&self) -> Option<&UserError> {
+    pub fn finish_refusal(&self) -> Option<&UserError> {
         self.notice
             .as_ref()
             .filter(|_| self.notice_slot == Some(Slot::Onboarding))
     }
 
-    pub(crate) fn rename_refusal(&self) -> Text {
+    pub fn rename_refusal(&self) -> Text {
         if self.assistant.saving {
             Text::RenameBusy
         } else if self.view.is_none() {
@@ -531,7 +545,7 @@ impl Settings {
         true
     }
 
-    pub(crate) fn error(&mut self, error: UserError) -> Option<Field> {
+    pub fn error(&mut self, error: UserError) -> Option<Field> {
         // A step that isn't remembered only shows again next launch, so it raises no notice.
         if settings_error(error.key())
             && let Some(pending) = self
@@ -562,7 +576,7 @@ impl Settings {
         Some(field)
     }
 
-    pub(crate) fn disconnected(&mut self) {
+    pub fn disconnected(&mut self) {
         if self.offline_position.is_none() {
             self.offline_position = self.pending.iter().rev().find_map(|pending| {
                 match (pending.slot, pending.failed) {

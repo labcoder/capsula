@@ -846,7 +846,7 @@ fn renewal_general() -> LinkEvent {
 fn settings_retry_rechecks_its_captured_field_and_waits_for_the_matching_answer(
     cx: &mut TestAppContext,
 ) {
-    use crate::settings::{Field, Update};
+    use crate::settings::{Completion, Field, Update};
     use kumochi_protocol::message::{
         AssistantName, DockPosition, MaxFrameRate, SettingsOp, SettingsView,
     };
@@ -913,8 +913,7 @@ fn settings_retry_rechecks_its_captured_field_and_waits_for_the_matching_answer(
             let completion = state
                 .set_view(saved, Update::Answer)
                 .expect("matching answer");
-            assert!(completion.failed);
-            assert_eq!(completion.field, Field::Assistant);
+            assert_eq!(completion, Completion::for_tests(true, Field::Assistant));
             state.change(Field::Assistant, "Cirrus");
             state.change(Field::User, "keep this settings draft");
             cx.notify();

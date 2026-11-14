@@ -57,7 +57,12 @@ fn hold_to_talk_is_keyboard_operable_and_waits_for_the_saved_answer(cx: &mut Tes
     let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
     frame.update(|window, cx| {
         view.update(cx, |view, cx| view.focus(window, cx));
-        assert!(view.read(cx).model.read(cx).hold_to_talk_enabled());
+        assert!(
+            view.read(cx)
+                .model
+                .read(cx)
+                .hold_to_talk_enabled_for_tests()
+        );
         window.draw(cx).clear(cx);
     });
     assert!(frame.debug_bounds("hold-to-talk").is_some());
@@ -69,7 +74,7 @@ fn hold_to_talk_is_keyboard_operable_and_waits_for_the_saved_answer(cx: &mut Tes
     frame.update(|_, cx| {
         let state = view.read(cx).model.read(cx);
         assert!(state.hold_to_talk_pending());
-        assert!(!state.hold_to_talk_enabled());
+        assert!(!state.hold_to_talk_enabled_for_tests());
         assert!(state.view().unwrap().hold_to_talk);
     });
     frame.update(|_, cx| {
@@ -88,7 +93,13 @@ fn hold_to_talk_is_keyboard_operable_and_waits_for_the_saved_answer(cx: &mut Tes
                 .unwrap();
         });
         assert!(!view.read(cx).model.read(cx).hold_to_talk_pending());
-        assert!(!view.read(cx).model.read(cx).hold_to_talk_enabled());
+        assert!(
+            !view
+                .read(cx)
+                .model
+                .read(cx)
+                .hold_to_talk_enabled_for_tests()
+        );
     });
     assert!(controls.is_empty());
 }
