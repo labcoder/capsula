@@ -27,7 +27,10 @@ pub(crate) fn default_model(
     current: Option<&ModelChoice>,
     models: &[ModelInfo],
 ) -> Option<ModelChoice> {
-    if current.is_some_and(|choice| models.iter().any(|model| model.slug == choice.model)) {
+    if current.is_some_and(|choice| {
+        choice.connection != kumochi_protocol::message::ConnectionKind::ChatGpt
+            || models.iter().any(|model| model.slug == choice.model)
+    }) {
         return None;
     }
     let model = models

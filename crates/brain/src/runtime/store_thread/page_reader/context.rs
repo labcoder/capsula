@@ -9,6 +9,7 @@ use crate::coordinator::{
     Unbuilt,
 };
 use crate::recall::control::READ_TIME;
+use crate::store::choice::StoredChoice;
 use crate::store::context::Snapshot;
 use crate::store::{Side, StoreError};
 use std::time::Instant;
@@ -39,12 +40,16 @@ pub(super) fn read_hold(
                             let read = Snapshot::begin(conn)?;
                             #[cfg(test)]
                             hold();
-                            if let Some(thread) = snapshot.thread {
-                                snapshot.generation =
-                                    Some(read.generation(thread)?.ok_or(StoreError::NoThread)?);
-                                snapshot.defaults.choice =
-                                    read.choice(thread)?.or(snapshot.defaults.choice.take());
-                            }
+                            let stored = match snapshot.thread {
+                                Some(thread) => {
+                                    snapshot.generation =
+                                        Some(read.generation(thread)?.ok_or(StoreError::NoThread)?);
+                                    read.stored_choice(thread)?
+                                }
+                                None => StoredChoice::Absent,
+                            };
+                            // A hold's run takes this snapshot whole, so its first build reads no choice.
+                            choose(stored, &mut snapshot.defaults)?;
                             read.end()?;
                             Ok(())
                         })
@@ -86,6 +91,18 @@ pub(super) fn read_call(
     }
 }
 
+fn choose(
+    stored: StoredChoice,
+    snapshot: &mut crate::context::RunSnapshot,
+) -> Result<(), StoreError> {
+    if stored == StoredChoice::Absent && snapshot.invalid_default {
+        return Err(StoreError::Read);
+    }
+    snapshot.choice = stored.execution(snapshot.choice.take())?;
+    snapshot.invalid_default = false;
+    Ok(())
+}
+
 /// Builds `job` on `side`, or fails it when the store closed before its turn (`None`). A run's
 /// first build reads its model choice into its snapshot. Failures are logged by kind only.
 pub(super) fn read(
@@ -119,7 +136,7 @@ pub(super) fn read(
                     #[cfg(test)]
                     hold();
                     if first {
-                        snapshot.choice = read.choice(thread)?.or(snapshot.choice.take());
+                        choose(read.stored_choice(thread)?, &mut snapshot)?;
                     }
                     let local_time = read.local_time()?;
                     let turn = Turn {
@@ -256,7 +273,7 @@ pub(super) fn read_job(
                     let read = Snapshot::begin(conn)?.controlled(scope.clone());
                     #[cfg(test)]
                     hold();
-                    snapshot.choice = read.choice(key.thread)?.or(snapshot.choice.take());
+                    choose(read.stored_choice(key.thread)?, &mut snapshot)?;
                     let ask = match kind {
                         JobKind::Title => Ok(read.first_ask(key.thread)?.map(|ask| JobAsk {
                             generation: ask.generation,

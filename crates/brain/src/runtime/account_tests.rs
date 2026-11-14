@@ -863,6 +863,249 @@ fn listing() -> (u16, String) {
     (200, models.to_string())
 }
 
+#[tokio::test]
+async fn route_default_a_queued_repair_cannot_overwrite_an_acknowledged_user_choice() {
+    use crate::runtime::settings::{self, Change, Gate, Queued};
+    use kumochi_protocol::message::{ConnectionKind, SettingsOp};
+
+    for connection in [ConnectionKind::ClaudeCode, ConnectionKind::AnthropicKey] {
+        let scratch = Scratch::new(&format!("queued-repair-{connection:?}"));
+        let store = FakeStore::default();
+        let accounts = seeded(&scratch, &store, Catalog::answering([listing()]), LATER);
+        let mut brain = test_support::brain_with(&scratch, "", accounts);
+        let picked = ModelChoice {
+            connection,
+            model: ModelSlug::new("same-slug").expect("slug"),
+            effort: Effort::High,
+        };
+        let release = brain.hold_config_write();
+        brain.settings_ops.push_back(Queued {
+            change: Change::User(SettingsOp::SetDefaultModel(picked.clone())),
+            epoch: brain.epoch + 1,
+        });
+        brain.pump_settings(None).expect("start held user write");
+        timeout(PATIENCE, async {
+            loop {
+                let event = brain.account.next().await;
+                let read = matches!(event, Event::Read { .. });
+                brain.account_input(event, None).expect("catalog event");
+                if read {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("catalog queued repair");
+        assert!(
+            brain
+                .settings_ops
+                .iter()
+                .any(|op| op.epoch == settings::BRAIN),
+            "repair queued behind user write"
+        );
+        let ((control, data), mut shell) = duplex();
+        let mut tap = Tap::from_env();
+        let client = async {
+            loop {
+                if matches!(shell.frame().await, ControlToShell::Settings { .. }) {
+                    break;
+                }
+            }
+            release.send(Gate::Write).expect("release user write");
+            loop {
+                if let ControlToShell::Settings { view, answer: true } = shell.frame().await {
+                    assert_eq!(
+                        view.default_model,
+                        Some(picked.clone()),
+                        "user acknowledgement"
+                    );
+                    break;
+                }
+            }
+            shell
+                .send(&ControlToBrain::Settings(SettingsOp::FinishOnboarding))
+                .await;
+            loop {
+                if let ControlToShell::Settings { view, answer: true } = shell.frame().await {
+                    assert!(view.onboarded);
+                    assert_eq!(
+                        view.default_model,
+                        Some(picked.clone()),
+                        "queue drained past repair"
+                    );
+                    break;
+                }
+            }
+            drop(shell);
+        };
+        let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+        assert_eq!(ended, Ended::Lost);
+        brain.close().await;
+        assert_eq!(
+            scratch.config().view().default_model,
+            Some(picked),
+            "reload"
+        );
+    }
+}
+
+#[tokio::test]
+async fn route_default_restart_and_catalog_preserve_explicit_intent() {
+    use kumochi_protocol::message::ConnectionKind;
+    let cases = [
+        (
+            "{ connection = 'ClaudeCode', model = 'same-slug', effort = 'High' }",
+            Some(ConnectionKind::ClaudeCode),
+        ),
+        (
+            "{ connection = 'AnthropicKey', model = 'same-slug', effort = 'High' }",
+            Some(ConnectionKind::AnthropicKey),
+        ),
+        (
+            "{ connection = 'ClaudeCode', model = 'same-slug', effort = 'Ultra' }",
+            Some(ConnectionKind::ClaudeCode),
+        ),
+        (
+            "{ connection = 'AnthropicKey', model = 'same-slug', effort = 'Ultra' }",
+            Some(ConnectionKind::AnthropicKey),
+        ),
+        (
+            "{ connection = 'Unknown', model = 'same-slug', effort = 'High' }",
+            None,
+        ),
+        ("{ connection = 'ClaudeCode', model = 'same-slug' }", None),
+        ("{ connection = 'AnthropicKey', effort = 'High' }", None),
+        (
+            "{ connection = 42, model = 'same-slug', effort = 'High' }",
+            None,
+        ),
+        (
+            "{ connection = 'ClaudeCode', model = 42, effort = 'High' }",
+            None,
+        ),
+        (
+            "{ connection = 'AnthropicKey', model = 'same-slug', effort = 42 }",
+            None,
+        ),
+        ("'not a selection table'", None),
+        ("{}", None),
+    ];
+    for (n, (value, expected_kind)) in cases.into_iter().enumerate() {
+        Box::pin(preserved_default_after_restart(n, value, expected_kind)).await;
+    }
+}
+
+#[derive(Debug)]
+struct CountStarts(Arc<AtomicU64>);
+impl crate::engines::Engine for CountStarts {
+    fn start(
+        &self,
+        _: crate::engines::RunRequest,
+        events: mpsc::Sender<crate::engines::TurnEvent>,
+        _: crate::engines::SendGate,
+    ) -> crate::engines::Round {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        Box::pin(async move {
+            events
+                .send(crate::engines::TurnEvent::Finished(
+                    crate::engines::Finish::Failed(crate::engines::EngineFailure::Provider),
+                ))
+                .await
+                .expect("events");
+        })
+    }
+}
+
+async fn preserved_default_after_restart(
+    n: usize,
+    value: &str,
+    expected_kind: Option<kumochi_protocol::message::ConnectionKind>,
+) {
+    use kumochi_protocol::constants::CONFIG_FILE;
+    use kumochi_protocol::message::SettingsOp;
+    let scratch = Scratch::new(&format!("restart-default-{n}"));
+    std::fs::create_dir_all(scratch.dir()).expect("folder");
+    let path = scratch.dir().join(CONFIG_FILE);
+    std::fs::write(&path, format!("default_model = {value}")).expect("config");
+    let before: toml::Table = std::fs::read_to_string(&path)
+        .expect("file")
+        .parse()
+        .expect("TOML");
+    let mut config = scratch.config();
+    if let Some(kind) = expected_kind {
+        let shown = config
+            .view()
+            .default_model
+            .as_ref()
+            .expect("retained identity");
+        assert_eq!(shown.connection, kind);
+        assert_eq!(shown.model.as_str(), "same-slug");
+    }
+    let pending = config
+        .stage(SettingsOp::FinishOnboarding)
+        .expect("unrelated write");
+    pending.write().expect("written");
+    config.commit(pending);
+    drop(config);
+    let store = FakeStore::default();
+    let accounts = seeded(&scratch, &store, Catalog::answering([listing()]), LATER);
+    let starts = Arc::new(AtomicU64::new(0));
+    let selected = crate::runtime::Selected::Account {
+        engine: Box::new(CountStarts(Arc::clone(&starts))),
+        asks: mpsc::unbounded_channel().1,
+    };
+    let mut brain = test_support::brain_on(&scratch, selected, accounts);
+    timeout(PATIENCE, async {
+        loop {
+            let event = brain.account.next().await;
+            let read = matches!(event, Event::Read { .. });
+            brain.account_input(event, None).expect("catalog event");
+            if read {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("catalog read");
+    brain.drain_settings().await;
+    let snapshot = brain.snapshot(crate::context::Origin::Task(
+        kumochi_protocol::message::ThreadId(2),
+    ));
+    assert_eq!(
+        snapshot.invalid_default,
+        expected_kind.is_none(),
+        "execution retains invalid intent"
+    );
+    assert_eq!(
+        snapshot.choice.as_ref().map(|choice| choice.connection),
+        expected_kind
+    );
+    let after: toml::Table = std::fs::read_to_string(&path)
+        .expect("file")
+        .parse()
+        .expect("TOML");
+    assert_eq!(
+        after["default_model"], before["default_model"],
+        "retained across write/restart/catalog: {n}"
+    );
+    assert_eq!(after["onboarded"].as_bool(), Some(true));
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        shell.submit("never send this through another route").await;
+        assert_eq!(failed_with(&mut shell).await, None);
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    assert_eq!(
+        starts.load(Ordering::Relaxed),
+        0,
+        "no engine, bearer or Grant path entered"
+    );
+    brain.close().await;
+}
+
 fn slugs(models: &[ModelInfo]) -> Vec<&str> {
     models.iter().map(|model| model.slug.as_str()).collect()
 }

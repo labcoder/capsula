@@ -145,7 +145,7 @@ impl Pages<'_> {
         let mut query = self
             .0
             .prepare(
-                "SELECT id, title, updated_ms, kind, model, effort FROM threads
+                "SELECT id, title, updated_ms, kind, model, effort, connection FROM threads
              WHERE state = 'live' AND CASE WHEN ?1 IS NULL THEN 1
                  ELSE kind = 'thread' AND (updated_ms, id) < (?1, ?2) END
              ORDER BY kind = 'main' DESC, updated_ms DESC, id DESC LIMIT ?3",
@@ -243,7 +243,7 @@ impl Pages<'_> {
             .0
             .prepare(
                 "WITH matches AS MATERIALIZED (
-                 SELECT t.id, t.title, t.updated_ms, t.kind, t.model, t.effort,
+                 SELECT t.id, t.title, t.updated_ms, t.kind, t.model, t.effort, t.connection,
                  t.state = 'live' AS live, min(f.rank) AS score
                  FROM events_fts f JOIN events e ON e.id = f.rowid
                  JOIN threads t ON t.id = e.thread
@@ -252,7 +252,7 @@ impl Pages<'_> {
              anchor AS (
                  SELECT coalesce((SELECT score FROM matches WHERE id = ?2), ?3) AS score
              )
-             SELECT m.id, m.title, m.updated_ms, m.kind, m.model, m.effort, m.score
+             SELECT m.id, m.title, m.updated_ms, m.kind, m.model, m.effort, m.connection, m.score
              FROM matches m, anchor a
              WHERE m.live AND (?2 IS NULL OR m.score > a.score OR (m.score = a.score AND m.id < ?2))
              ORDER BY m.score, m.id DESC LIMIT ?4",
@@ -268,7 +268,7 @@ impl Pages<'_> {
                 ],
                 |row| {
                     let thread = thread_row(row)?;
-                    let rank: f64 = row.get(6)?;
+                    let rank: f64 = row.get(7)?;
                     if !rank.is_finite() {
                         return Err(rusqlite::Error::InvalidQuery);
                     }
@@ -403,6 +403,7 @@ fn thread_row(row: &Row<'_>) -> rusqlite::Result<ThreadRow> {
         choice: choice_of(
             row.get_ref(4)?.as_str_or_null()?,
             row.get_ref(5)?.as_str_or_null()?,
+            row.get_ref(6)?.as_str_or_null()?,
         )?,
     })
 }

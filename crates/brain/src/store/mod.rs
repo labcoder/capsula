@@ -15,6 +15,7 @@ mod calls;
 #[cfg(test)]
 mod calls_tests;
 mod cards;
+pub(crate) mod choice;
 pub(crate) mod context;
 mod drawing;
 #[cfg(test)]

@@ -69,6 +69,8 @@ pub(crate) struct RunSnapshot {
     /// The thread's model, else the default; `None` until a catalog has been read. The fixture
     /// engine needs none, and a real engine (PR 13a) refuses a request without one.
     pub(crate) choice: Option<ModelChoice>,
+    /// A malformed global selection cannot be mistaken for an absent default on the store read.
+    pub(crate) invalid_default: bool,
     pub(crate) connection: ConnectionTag,
 }
 

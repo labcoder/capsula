@@ -64,6 +64,151 @@ fn rename(store: &mut Store, thread: ThreadId, text: &str, source: TitleSource) 
     store.set_title(thread, &text, source).expect("set");
 }
 
+#[test]
+fn route_choice_keeps_the_same_slug_on_each_connection_after_reopen() {
+    use kumochi_protocol::message::ConnectionKind;
+
+    let scratch = Scratch::new("route-choice-reopen");
+    let mut store = opened(&scratch);
+    let mut expected = Vec::new();
+    for connection in [
+        ConnectionKind::ChatGpt,
+        ConnectionKind::ClaudeCode,
+        ConnectionKind::AnthropicKey,
+    ] {
+        let thread = task(&mut store, "route");
+        let picked = ModelChoice {
+            connection,
+            ..choice("same-slug", Effort::High)
+        };
+        assert!(store.set_model(thread, &picked).expect("save"));
+        expected.push((thread, picked));
+    }
+    drop(store);
+    let store = opened(&scratch);
+    let (rows, _) = list(&store, None);
+    for (thread, picked) in expected {
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.id == thread)
+                .expect("listed")
+                .choice,
+            Some(picked.clone())
+        );
+        let read = Snapshot::begin(&store.conn).expect("snapshot");
+        assert_eq!(read.choice(thread).expect("context choice"), Some(picked));
+    }
+}
+
+#[test]
+fn route_choice_migration_backfills_selected_rows_only() {
+    let scratch = Scratch::new("route-choice-migration");
+    std::fs::create_dir_all(scratch.db().parent().expect("folder")).expect("folder");
+    let mut conn = Connection::open(scratch.db()).expect("file");
+    schema::migrate_to(&mut conn, 8).expect("before route migration");
+    conn.execute(
+        "INSERT INTO threads (id, title, created_ms, updated_ms, model, effort)
+        VALUES (2, 'selected', 1, 1, 'same-slug', 'high'), (3, 'unset', 1, 1, NULL, NULL)",
+        [],
+    )
+    .expect("old rows");
+    drop(conn);
+    let store = opened(&scratch);
+    let read = Snapshot::begin(&store.conn).expect("snapshot");
+    assert_eq!(
+        read.choice(ThreadId(2)).expect("migrated"),
+        Some(choice("same-slug", Effort::High))
+    );
+    assert_eq!(read.choice(ThreadId(3)).expect("absent"), None);
+    let saved: Option<String> = store
+        .conn
+        .query_row("SELECT connection FROM threads WHERE id = 3", [], |row| {
+            row.get(0)
+        })
+        .expect("row");
+    assert_eq!(saved, None);
+}
+
+#[test]
+fn route_choice_unknown_or_missing_kind_never_becomes_absent() {
+    use super::choice::StoredChoice;
+    let scratch = Scratch::new("route-choice-invalid-kind");
+    let mut store = opened(&scratch);
+    let thread = task(&mut store, "invalid");
+    let picked = choice("same-slug", Effort::High);
+    store.set_model(thread, &picked).expect("save");
+    for connection in [Some("unknown"), None] {
+        store
+            .conn
+            .execute(
+                "UPDATE threads SET connection = ?2 WHERE id = ?1",
+                rusqlite::params![sql(thread), connection],
+            )
+            .expect("plant");
+        let read = Snapshot::begin(&store.conn).expect("snapshot");
+        assert_eq!(
+            read.stored_choice(thread).expect("decoded"),
+            StoredChoice::Invalid
+        );
+        assert!(matches!(
+            read.stored_choice(thread)
+                .expect("decoded")
+                .execution(Some(picked.clone())),
+            Err(StoreError::Read)
+        ));
+        assert!(
+            store
+                .pages()
+                .read_page(
+                    1,
+                    PageOf::Threads {
+                        search: None,
+                        after: None
+                    }
+                )
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn route_choice_pages_keep_unknown_models_and_routes_without_a_catalog() {
+    use kumochi_protocol::message::ConnectionKind;
+    let scratch = Scratch::new("route-choice-cold-page");
+    let mut store = opened(&scratch);
+    let thread = task(&mut store, "removed model");
+    let picked = ModelChoice {
+        connection: ConnectionKind::ClaudeCode,
+        ..choice("removed-model", Effort::High)
+    };
+    store.set_model(thread, &picked).expect("save");
+    drop(store);
+    let store = opened(&scratch);
+    for search in [None, Some("needle".to_owned())] {
+        let page = store
+            .pages()
+            .read_page(
+                1,
+                PageOf::Threads {
+                    search,
+                    after: None,
+                },
+            )
+            .expect("cold page");
+        let DataToShell::ThreadList { threads, .. } = page else {
+            panic!("list")
+        };
+        assert_eq!(
+            threads
+                .iter()
+                .find(|row| row.id == thread)
+                .expect("visible")
+                .choice,
+            Some(picked.clone())
+        );
+    }
+}
+
 fn choice(model: &str, effort: Effort) -> ModelChoice {
     ModelChoice {
         model: ModelSlug::new(model).expect("valid"),
@@ -446,10 +591,9 @@ fn a_model_choice_round_trips_through_a_page_and_a_restart() {
     assert_eq!(choices, [(ThreadId(1), None), (thread, Some(picked))]);
 }
 
-/// CAPS-90 M1: an effort this build doesn't know, an older build's `minimal` or a newer build's,
-/// reads as no choice instead of failing the page, and the other rows are unchanged.
+/// Unknown effort no longer erases a saved model: pages keep its identity with an inert effort.
 #[test]
-fn an_unknown_stored_effort_reads_as_no_choice() {
+fn an_unknown_stored_effort_keeps_the_saved_model_on_pages() {
     let scratch = Scratch::new("choice-unknown-effort");
     let mut store = opened(&scratch);
     let newer = task(&mut store, "newer");
@@ -461,7 +605,7 @@ fn an_unknown_stored_effort_reads_as_no_choice() {
         store
             .conn
             .execute(
-                "UPDATE threads SET model = 'gpt-6.1-sol', effort = ?2 WHERE id = ?1",
+                "UPDATE threads SET model = 'gpt-6.1-sol', effort = ?2, connection = 'chatgpt' WHERE id = ?1",
                 rusqlite::params![sql(thread), effort],
             )
             .expect("planted");
@@ -476,8 +620,8 @@ fn an_unknown_stored_effort_reads_as_no_choice() {
         [
             (ThreadId(1), None),
             (kept, Some(picked)),
-            (older, None),
-            (newer, None)
+            (older, Some(choice("gpt-6.1-sol", Effort::Medium))),
+            (newer, Some(choice("gpt-6.1-sol", Effort::Medium)))
         ]
     );
 }

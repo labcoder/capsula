@@ -78,7 +78,7 @@ fn a_v7_store_reopens_at_v8_with_its_runs_screen_unknown() {
         .conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("version");
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     assert_eq!(screen(&store, RunId(7)), None);
     assert_eq!(kinds(&store, ThreadId(5)), [PageEventKind::User]);
 }

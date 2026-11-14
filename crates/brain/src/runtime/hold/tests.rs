@@ -322,7 +322,7 @@ async fn admission_boundaries(stage: AdmissionStage) {
                 Seen::StoreOpQueued(StoreOp::BeginTurn { .. })
             ));
         }
-        brain.coordinator =
+        *brain.coordinator =
             Coordinator::ready_for_tests(ThreadId(1), ThreadId(1), RunId(0), Vec::new());
         brain.close().await;
         let store = crate::store::Store::open(&scratch.db()).unwrap();

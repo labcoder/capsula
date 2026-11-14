@@ -1010,7 +1010,7 @@ fn choice(slug: &str, effort: Effort) -> ModelChoice {
 }
 
 #[test]
-fn the_default_model_persists_and_a_bad_one_reads_as_unset() {
+fn the_default_model_preserves_identity_when_only_effort_is_unknown() {
     let scratch = Scratch::new("config-default-model");
     let dir = dir(&scratch);
     let path = dir.join(CONFIG_FILE);
@@ -1050,7 +1050,7 @@ fn the_default_model_persists_and_a_bad_one_reads_as_unset() {
         ),
         (
             "default_model = { model = \"gpt-6-luna\", effort = \"ultra\" }".to_owned(),
-            None,
+            Some(choice("gpt-6-luna", Effort::Medium)),
         ),
         (
             "default_model = { model = \"gpt-6-luna\" }".to_owned(),

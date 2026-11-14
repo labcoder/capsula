@@ -3,10 +3,13 @@
 
 use std::fmt;
 
-use kumochi_protocol::message::{EventId, ModelChoice, RunId, ThreadId, ThreadKind};
+#[cfg(test)]
+use kumochi_protocol::message::ModelChoice;
+use kumochi_protocol::message::{EventId, RunId, ThreadId, ThreadKind};
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 
-use super::threads::{choice_of, kind_of};
+use super::choice::StoredChoice;
+use super::threads::kind_of;
 use super::{Generation, StoreError, rounds, row_id, sql_id};
 use crate::context::{Body, Item, Summary};
 
@@ -453,24 +456,30 @@ impl Snapshot<'_> {
     ///
     /// # Errors
     /// Fails when SQLite fails or the stored model isn't a slug.
+    #[cfg(test)]
     pub(crate) fn choice(&self, thread: ThreadId) -> Result<Option<ModelChoice>, StoreError> {
+        self.stored_choice(thread)?.display().map_err(Into::into)
+    }
+
+    pub(crate) fn stored_choice(&self, thread: ThreadId) -> Result<StoredChoice, StoreError> {
         let Ok(id) = sql_id(thread.0, StoreError::NoThread) else {
-            return Ok(None);
+            return Err(StoreError::NoThread);
         };
         let choice = self
             .0
             .query_row(
-                "SELECT model, effort FROM threads WHERE id = ?1 AND state = 'live'",
+                "SELECT model, effort, connection FROM threads WHERE id = ?1 AND state = 'live'",
                 params![id],
                 |row| {
-                    choice_of(
+                    Ok(StoredChoice::decode(
                         row.get_ref(0)?.as_str_or_null()?,
                         row.get_ref(1)?.as_str_or_null()?,
-                    )
+                        row.get_ref(2)?.as_str_or_null()?,
+                    ))
                 },
             )
             .optional()?;
-        Ok(choice.flatten())
+        choice.ok_or(StoreError::NoThread)
     }
 
     /// The local date and time to the minute, from the system's time zone.

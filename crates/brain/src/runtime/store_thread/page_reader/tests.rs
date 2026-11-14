@@ -440,6 +440,7 @@ fn build(thread: u64, attempt: u64, choice: Option<ModelChoice>) -> StoreOp {
             user: None,
             choice,
             connection: ConnectionTag(0),
+            invalid_default: false,
         }),
         first: true,
         drawings: crate::drawing::Digest::default(),
@@ -455,6 +456,102 @@ fn choice(slug: &str) -> ModelChoice {
 }
 
 /// A built request and the model its run read.
+#[test]
+fn route_choice_non_chatgpt_context_and_jobs_never_build_on_chatgpt() {
+    use crate::coordinator::{JobBuilt, JobKey, JobKind, ReadJob};
+    use kumochi_protocol::message::ConnectionKind;
+
+    for connection in [ConnectionKind::ClaudeCode, ConnectionKind::AnthropicKey] {
+        let scratch = Scratch::new(&format!("route-read-{connection:?}"));
+        let mut store = Store::open(&scratch.db()).expect("store");
+        store.recover().expect("recover");
+        with_thread(&mut store, 2);
+        let picked = ModelChoice {
+            connection,
+            ..choice("same-slug")
+        };
+        store.set_model(ThreadId(2), &picked).expect("save");
+        let running = run(store, None);
+        let request = build(2, 1, Some(choice("chatgpt-default")));
+        let StoreOp::BuildContext(context) = &request else {
+            panic!("build")
+        };
+        let snapshot = context.snapshot.clone();
+        assert!(running.thread.send(request));
+        assert!(matches!(
+            running.ack(),
+            Input::ContextBuilt(ContextBuilt {
+                result: Err(Unbuilt::Failed),
+                ..
+            })
+        ));
+        for kind in [JobKind::Title, JobKind::Compact] {
+            assert!(running.thread.send(StoreOp::ReadJob(ReadJob {
+                control: crate::recall::control::Control::new(
+                    std::time::Instant::now() + crate::coordinator::WALL_CLOCK,
+                ),
+                key: JobKey {
+                    thread: ThreadId(2),
+                    serial: 1
+                },
+                kind,
+                origin: Origin::Task(ThreadId(2)),
+                snapshot: snapshot.clone(),
+                compact_at: 1,
+            })));
+            assert!(matches!(
+                running.ack(),
+                Input::JobBuilt(JobBuilt {
+                    result: Err(Unbuilt::Failed),
+                    ..
+                })
+            ));
+        }
+        running.thread.close().blocking_recv().expect("closed");
+    }
+}
+
+#[test]
+fn route_default_invalid_intent_refuses_a_build_but_not_a_valid_thread_override() {
+    let scratch = Scratch::new("invalid-default-build");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    store.recover().expect("recover");
+    with_thread(&mut store, 2);
+    let running = run(store, None);
+    let invalid_default = |attempt| {
+        let mut op = build(2, attempt, None);
+        let StoreOp::BuildContext(build) = &mut op else {
+            panic!("build")
+        };
+        build.snapshot.as_mut().expect("snapshot").invalid_default = true;
+        op
+    };
+    assert!(running.thread.send(invalid_default(1)));
+    assert!(matches!(
+        running.ack(),
+        Input::ContextBuilt(ContextBuilt {
+            result: Err(Unbuilt::Failed),
+            ..
+        })
+    ));
+    let picked = choice("thread-model");
+    assert!(running.thread.send(StoreOp::SetModel {
+        thread: ThreadId(2),
+        choice: picked.clone()
+    }));
+    assert_eq!(
+        running.ack(),
+        Input::ModelSet {
+            thread: ThreadId(2),
+            choice: picked.clone(),
+            applied: true
+        }
+    );
+    assert!(running.thread.send(invalid_default(2)));
+    assert_eq!(made(running.ack()).1, Some(picked));
+    running.thread.close().blocking_recv().expect("closed");
+}
+
 fn made(reply: Input) -> (Built, Option<ModelChoice>) {
     match reply {
         Input::ContextBuilt(ContextBuilt {

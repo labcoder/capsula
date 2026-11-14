@@ -124,6 +124,7 @@ mod tests {
                 connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
             }),
             connection: ConnectionTag(0),
+            invalid_default: false,
         };
         let ask = "a".repeat(ASK_CHARS + 1);
         let request = title_request(&snapshot, &ask);

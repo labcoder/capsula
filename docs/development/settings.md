@@ -241,7 +241,7 @@ than growing the window with the text. The existing Settings content region owns
 | `onboarded` | boolean | absent: `true` for a profile in use at start, else `false` |
 | `onboarding_from` | `welcome`, `your_name`, `accounts` or `shortcut` | absent or invalid: `welcome` |
 | `max_frame_rate` | 30, 60, 72, 120 or 144, or absent | absent (Automatic) |
-| `default_model` | a table: `model` (a model slug) and `effort` (`Low` to `Max`), or absent | absent until a catalog is read |
+| `default_model` | a table: `connection`, `model` (a model slug) and `effort` (`Low` to `Max`), or absent; legacy tables omit `connection` | absent until a catalog is read |
 | `dock_position` | `top_left`, `top_center`, `top_right`, `middle_left`, `center`, `middle_right`, `bottom_left`, `bottom_center` or `bottom_right` | `top_center` |
 | `show_in_taskbar` | boolean | `false` |
 | `[voice] talk_back` | boolean | `false` |
@@ -289,7 +289,14 @@ refused with `Error(VoiceUnavailable)` and its one
 
 `default_model` is the model a thread with no choice runs on. Only the brain sets it today, with
 `SettingsOp::SetDefaultModel` under epoch 0, which no connection has, so a shell hears only the
-settled `SettingsView` (see [accounts](accounts.md#model-catalog)). A bad value reads as unset.
+settled `SettingsView` (see [accounts](accounts.md#model-catalog)). Explicit user changes remain
+unconditional; queued epoch-0 repairs recompute against the latest committed choice and catalog
+at the write boundary, so they cannot replace an acknowledged choice on another connection.
+The raw table distinguishes absent, structurally valid and invalid intent. A legacy table missing
+only `connection` means ChatGPT. Unknown effort preserves the connection/model identity and
+displays Medium without rewriting the table. Invalid intent has no display choice but is not
+absent: catalog repair leaves it untouched, unrelated settings writes preserve it, and execution
+refuses it unless the thread has its own valid saved choice.
 
 **Names** follow one rule, checked by `AssistantName` and `UserName` in `crates/protocol` on
 both sides: trimmed, 1–24 Unicode scalar values, one line, with no control characters and no

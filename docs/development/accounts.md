@@ -652,7 +652,10 @@ registration. A 401 offers Retry and marks the bearer's set as due, so the Retry
 
 A read that leaves `default_model` unset or no longer listed sets it, as the brain's own settings
 change: `gpt-6-luna` at `Low` when listed, otherwise the first model at `Low`. A listed choice is
-never overwritten, and an empty list changes nothing (see [settings](settings.md#config-keys)).
+never overwritten, and an empty list changes nothing. Explicit non-ChatGPT or invalid saved
+intent is never repaired from this catalog. Repairs recompute at the serialized settings write
+boundary rather than applying the choice captured when the catalog arrived
+(see [settings](settings.md#config-keys)).
 
 ## Credential storage
 
