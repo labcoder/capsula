@@ -1860,7 +1860,7 @@ async fn a_system_that_cant_capture_ends_the_hold_not_ready_and_holds_stay_unsup
             .unwrap();
         brain.screen_holds_changed(&mut link).unwrap();
     }
-    brain.attach_screen(Arc::new(HoldClient::new(rig.handle.clone())));
+    brain.attach_screen(Arc::new(HoldClient::new(rig.handle)));
     brain.screen_holds_changed(&mut link).unwrap();
     assert_eq!(gates(&mut output), []);
     assert_eq!(
