@@ -521,6 +521,8 @@ fn run(
                 let kept = !state.shutdown && state.current == Some(ask) && wants(state, ask);
                 state.ready = kept;
                 if state.ready {
+                    // The idle clock starts with readiness, so a change made once ready stays.
+                    state.idle_since = Instant::now();
                     reports.send(ask, LoadEvent::Loaded);
                 }
                 kept
@@ -613,7 +615,6 @@ fn serve_decodes(
         let mut running: [Option<Running<'_>>; 2] = [None, None];
         let mut failed = false;
         let mut state = control.lock();
-        state.idle_since = Instant::now();
         loop {
             #[cfg(test)]
             while state.decode_cut == Some(DecodeCut::Delivery) {
