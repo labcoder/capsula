@@ -468,7 +468,7 @@ fn hide_and_selection_loss_return_cannot_borrow_the_peers_retained_full_card(
                         _ => None,
                     })
                     .unwrap();
-                model.apply(page(request));
+                model.apply_for_tests(page(request));
                 assert_eq!(
                     model.issue(DraftId(9)).unwrap().card().unwrap().version,
                     StateVersion(2)
@@ -879,14 +879,14 @@ fn loading_missing_broken_session_and_wrong_login_fail_closed(cx: &mut TestAppCo
                     );
                 }
                 assert_eq!(
-                    model.card_request(Bounded::new(vec![DraftId(9)]).unwrap()),
+                    model.card_request_for_tests(Bounded::new(vec![DraftId(9)]).unwrap()),
                     Some(DataToBrain::IssueCardsRequest {
                         request: 6,
                         drafts: Bounded::new(vec![DraftId(9)]).unwrap()
                     })
                 );
                 if failure == "unavailable" {
-                    model.apply(DataToShell::IssueCardsDone {
+                    model.apply_for_tests(DataToShell::IssueCardsDone {
                         request: 6,
                         status: IssueCardsStatus::Failed,
                     });
@@ -897,9 +897,9 @@ fn loading_missing_broken_session_and_wrong_login_fail_closed(cx: &mut TestAppCo
                     };
                     card.state = ActionState::Sending;
                     card.approval = None;
-                    model.apply(conflict);
+                    model.apply_for_tests(conflict);
                     assert!(model.cards_broken());
-                    model.apply(DataToShell::IssueCardsDone {
+                    model.apply_for_tests(DataToShell::IssueCardsDone {
                         request: 6,
                         status: IssueCardsStatus::Complete,
                     });
@@ -1031,7 +1031,7 @@ fn a_coalesced_peer_hydration_cannot_revive_an_old_confirmation(cx: &mut TestApp
     cx.update(|cx| {
         f.models[1].update(cx, |model, _| {
             assert_eq!(
-                model.card_request(Bounded::new(vec![DraftId(9)]).unwrap()),
+                model.card_request_for_tests(Bounded::new(vec![DraftId(9)]).unwrap()),
                 Some(DataToBrain::IssueCardsRequest {
                     request: 6,
                     drafts: Bounded::new(vec![DraftId(9)]).unwrap()

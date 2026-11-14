@@ -630,7 +630,7 @@ mod tests {
             gpui_kit::init(cx);
             cx.set_global(Strings::english());
             let model = cx.new(|_| {
-                let mut state = Threads::chat();
+                let mut state = Threads::chat_for_tests();
                 state.open = Some(ThreadId(1));
                 state.events = events;
                 state
@@ -711,7 +711,7 @@ mod tests {
             cx.set_global(Strings::english());
             let mut user = event(1);
             user.kind = PageEventKind::User;
-            let mut state = Threads::chat();
+            let mut state = Threads::chat_for_tests();
             state.events = vec![user.clone()];
             let plain = stored_rows(&state, cx);
             assert_eq!(plain.len(), 1);
@@ -751,7 +751,7 @@ mod tests {
             let mut user = event(21);
             user.kind = PageEventKind::User;
             user.text = sentinel.into();
-            let mut state = Threads::chat();
+            let mut state = Threads::chat_for_tests();
             state.events = vec![
                 marker(1, run, 1),
                 marker(2, run, 1),
@@ -1275,12 +1275,12 @@ mod tests {
                 state.connected();
                 state.show();
                 assert_eq!(state.requests().len(), 2);
-                state.apply(DataToShell::ThreadList {
+                state.apply_for_tests(DataToShell::ThreadList {
                     request: 1,
                     threads: Vec::new(),
                     next: None,
                 });
-                state.apply(DataToShell::Page {
+                state.apply_for_tests(DataToShell::Page {
                     request: 2,
                     thread: ThreadId(1),
                     events: (11..=30).rev().map(event).collect(),
@@ -1304,7 +1304,7 @@ mod tests {
                         state.disconnected();
                         state.connected();
                         assert_eq!(state.requests().len(), 2);
-                        state.apply(DataToShell::Page {
+                        state.apply_for_tests(DataToShell::Page {
                             request: 5,
                             thread: ThreadId(1),
                             events: (31..=50).rev().map(event).collect(),
@@ -1312,10 +1312,10 @@ mod tests {
                         });
                     }
                     "selection" => state.select(Some(ThreadId(2))),
-                    "failure" => state.apply(DataToShell::PageFailed { request: 3 }),
+                    "failure" => state.apply_for_tests(DataToShell::PageFailed { request: 3 }),
                     _ => unreachable!("three terminal changes"),
                 }
-                state.apply(DataToShell::Page {
+                state.apply_for_tests(DataToShell::Page {
                     request: 3,
                     thread: ThreadId(1),
                     events: vec![event(1)],
