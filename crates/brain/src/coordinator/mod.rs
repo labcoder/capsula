@@ -334,6 +334,8 @@ pub enum Input {
         /// They're loaded.
         loaded: bool,
     },
+    /// The user turned screen holds off: every run's image is withdrawn.
+    ScreenHoldsOff,
     /// The pump forwarded what TTS made of `run`'s segment.
     Tts {
         /// The run.
@@ -964,6 +966,7 @@ impl Coordinator {
                 }
                 crate::dispatch::Committed::Failed => self.call_failed(&key, &mut effects)?,
             },
+            Input::ScreenHoldsOff => self.screen_holds_off(&mut effects),
             input @ (Input::AudioOutput { .. }
             | Input::SpokenReplies { .. }
             | Input::Tts { .. }
