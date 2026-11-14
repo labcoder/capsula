@@ -1856,12 +1856,15 @@ fn a_delete_counts_the_turns_queued_before_it_and_runs_settle_the_brain_s_answer
         frame::write(&mut &link.control, &answer, Pipe::Control).expect("written");
         credit.push(apply(&mut runs, handle, next(&events)));
         if matches!(answer, ControlToShell::ThreadDeleted { .. }) {
-            assert!(runs.holds(t), "T waits on the turn sent before its delete");
+            assert!(
+                runs.holds_for_tests(t),
+                "T waits on the turn sent before its delete"
+            );
             assert!(!runs.select_thread(Some(t)));
         }
     }
     assert_eq!(credit, [bytes, 0, 0, 0], "the held text's credit, once");
-    assert!(!runs.holds(t));
+    assert!(!runs.holds_for_tests(t));
     assert!(runs.working(), "U's data hasn't ended");
     assert_eq!(
         runs.shown(),
@@ -1957,7 +1960,7 @@ fn a_delete_answered_before_a_new_brain_never_fences_the_new_brain_s_runs() {
     drop(a_control);
     // Applying B's Connected here would panic: A's answer comes first.
     assert_eq!(apply(&mut runs, &handle, next(&events)), 0);
-    assert!(!runs.holds(t));
+    assert!(!runs.holds_for_tests(t));
     let b = connected(next(&events));
     assert_eq!(b.incarnation(), Incarnation(2));
     runs.disconnected();

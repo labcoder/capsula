@@ -808,7 +808,7 @@ mod tests {
             cx.set_global(Strings::english());
             let (events, _) = async_channel::unbounded();
             gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
-                let model = cx.new(|_| crate::threads::Threads::chat());
+                let model = cx.new(|_| crate::threads::Threads::chat_for_tests());
                 let settings = cx.new(|_| crate::settings::Settings::default());
                 cx.new(|cx| {
                     let mut view = TextView::new(
@@ -848,7 +848,7 @@ mod tests {
                         let DataToBrain::PageRequest { request, page } = request else {
                             panic!("page request");
                         };
-                        state.apply(match page {
+                        state.apply_for_tests(match page {
                             PageOf::Threads { .. } => DataToShell::ThreadList {
                                 request,
                                 threads: Vec::new(),

@@ -153,7 +153,7 @@ fn old_connection_keys_cannot_touch_reused_turns_after_either_reconnect(cx: &mut
         owner.read_with(cx, |owner, cx| {
             assert_eq!(owner.runs.kept(), [16]);
             assert_eq!(owner.runs.target(), Target::New);
-            assert!(owner.runs.holds(ThreadId(9)));
+            assert!(owner.runs.holds_for_tests(ThreadId(9)));
             assert_eq!(owner.chat_notice.shown(), None);
             assert_eq!(owner.session.as_ref().map(Session::granted), Some(0));
             assert!(owner.text_open());
@@ -211,7 +211,7 @@ fn old_connection_keys_cannot_touch_reused_turns_after_either_reconnect(cx: &mut
         owner.read_with(cx, |owner, cx| {
             assert_eq!(owner.runs.kept(), [16]);
             assert_eq!(owner.runs.target(), Target::New);
-            assert!(owner.runs.holds(ThreadId(9)));
+            assert!(owner.runs.holds_for_tests(ThreadId(9)));
             assert_eq!(owner.session.as_ref().map(Session::granted), Some(0));
             assert_eq!(
                 owner.activity,
@@ -244,7 +244,7 @@ fn old_connection_keys_cannot_touch_reused_turns_after_either_reconnect(cx: &mut
         owner.read_with(cx, |owner, cx| {
             assert_eq!(owner.runs.kept(), Vec::<usize>::new());
             assert_eq!(owner.runs.target(), Target::Task(ThreadId(7)));
-            assert!(!owner.runs.holds(ThreadId(9)));
+            assert!(!owner.runs.holds_for_tests(ThreadId(9)));
             assert!(
                 !owner.runs.working(),
                 "both state and held RunEnd have completed"

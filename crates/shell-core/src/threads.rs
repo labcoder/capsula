@@ -151,7 +151,7 @@ impl Threads {
         }
     }
 
-    pub fn card_request(
+    pub(crate) fn card_request(
         &mut self,
         drafts: Bounded<DraftId, MAX_ISSUE_CARDS>,
     ) -> Option<DataToBrain> {
@@ -170,7 +170,7 @@ impl Threads {
         }
         Some(DataToBrain::IssueCardsRequest { request, drafts })
     }
-    pub fn chat() -> Self {
+    pub(crate) fn chat() -> Self {
         Self {
             view: View::Chat,
             ..Self::default()
@@ -284,9 +284,30 @@ impl Threads {
         self.reads.borrow_mut().cards.shown(self.view, thread, ids);
     }
 
-    #[cfg(test)]
-    pub(crate) fn exhaust_for_tests(&mut self) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn exhaust_for_tests(&mut self) {
         self.reads.borrow_mut().counter = u32::MAX;
+    }
+
+    /// `chat`, for the shell's tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn chat_for_tests() -> Self {
+        Self::chat()
+    }
+
+    /// `apply`, for the shell's tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn apply_for_tests(&mut self, message: DataToShell) {
+        self.apply(message);
+    }
+
+    /// `card_request`, for the shell's tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn card_request_for_tests(
+        &mut self,
+        drafts: Bounded<DraftId, MAX_ISSUE_CARDS>,
+    ) -> Option<DataToBrain> {
+        self.card_request(drafts)
     }
 
     pub fn owns_request(&self, request: u32) -> bool {
@@ -655,7 +676,7 @@ impl Threads {
     }
 
     #[expect(clippy::too_many_lines, reason = "one wire-frame dispatcher")]
-    pub fn apply(&mut self, message: DataToShell) {
+    pub(crate) fn apply(&mut self, message: DataToShell) {
         if let DataToShell::IssueCardRead { request, card } = message {
             self.reads.borrow_mut().cards.full(request, card);
             return;

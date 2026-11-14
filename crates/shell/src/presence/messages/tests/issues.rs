@@ -61,7 +61,7 @@ fn a_batched_prepend_and_card_shrink_clamp_the_retained_event_anchor(cx: &mut Te
             text: "title".into(),
             cut: false,
         });
-        state.apply(DataToShell::Page {
+        state.apply_for_tests(DataToShell::Page {
             request: 2,
             thread: ThreadId(1),
             events,
@@ -74,7 +74,7 @@ fn a_batched_prepend_and_card_shrink_clamp_the_retained_event_anchor(cx: &mut Te
                 drafts: Bounded::new(vec![DraftId(9)]).unwrap()
             }]
         );
-        state.apply(issue_frame(
+        state.apply_for_tests(issue_frame(
             3,
             1,
             &"A long saved issue body that wraps. ".repeat(500),
@@ -126,7 +126,7 @@ fn a_batched_prepend_and_card_shrink_clamp_the_retained_event_anchor(cx: &mut Te
         anchor
     });
     model.update(cx, |state, cx| {
-        state.apply(DataToShell::Page {
+        state.apply_for_tests(DataToShell::Page {
             request: 4,
             thread: ThreadId(1),
             events: vec![event(6)],
@@ -276,9 +276,8 @@ fn actual_card_batches_notify_both_histories_and_grant_credit_once(cx: &mut Test
     }
     owner.update(cx, |owner, cx| {
         assert_eq!(
-            owner
-                .chat
-                .update(cx, |state, _| state.card_request(Bounded::default())),
+            owner.chat.update(cx, |state, _| state
+                .card_request_for_tests(Bounded::default())),
             Some(DataToBrain::IssueCardsRequest {
                 request: 6,
                 drafts: Bounded::default()
@@ -296,9 +295,8 @@ fn actual_card_batches_notify_both_histories_and_grant_credit_once(cx: &mut Test
             .unwrap();
         assert!(owner.threads.read(cx).owns_request(5));
         assert_eq!(
-            owner
-                .chat
-                .update(cx, |state, _| state.card_request(Bounded::default())),
+            owner.chat.update(cx, |state, _| state
+                .card_request_for_tests(Bounded::default())),
             None
         );
         assert_eq!(owner.session.as_ref().unwrap().granted(), 41);
@@ -398,9 +396,8 @@ fn actual_card_batches_notify_both_histories_and_grant_credit_once(cx: &mut Test
         assert!(!owner.threads.read(cx).owns_request(7));
         assert_eq!(owner.session.as_ref().unwrap().granted(), 61);
         assert_eq!(
-            owner
-                .chat
-                .update(cx, |state, _| state.card_request(Bounded::default())),
+            owner.chat.update(cx, |state, _| state
+                .card_request_for_tests(Bounded::default())),
             Some(DataToBrain::IssueCardsRequest {
                 request: 8,
                 drafts: Bounded::default()
@@ -449,7 +446,7 @@ fn saved_issue_rows_hydrate_remeasure_and_keep_unknown_or_unavailable_truthful(
                 },
             ]
         );
-        state.apply(DataToShell::Page {
+        state.apply_for_tests(DataToShell::Page {
             request: 2,
             thread: ThreadId(1),
             before: None,
@@ -499,7 +496,7 @@ fn saved_issue_rows_hydrate_remeasure_and_keep_unknown_or_unavailable_truthful(
     let body = "private-issue-body-marker with wrapping text. ".repeat(25);
     let url = IssueUrl::new("https://github.com/o/r/issues/7").unwrap();
     model.update(cx, |state, cx| {
-        state.apply(DataToShell::IssueCardRead {
+        state.apply_for_tests(DataToShell::IssueCardRead {
             request: 3,
             card: IssueCard {
                 draft: DraftId(9),
@@ -562,7 +559,7 @@ fn saved_issue_rows_hydrate_remeasure_and_keep_unknown_or_unavailable_truthful(
             None,
             None,
         );
-        state.apply(DataToShell::IssueCardsDone {
+        state.apply_for_tests(DataToShell::IssueCardsDone {
             request: 3,
             status: IssueCardsStatus::Complete,
         });
@@ -573,7 +570,7 @@ fn saved_issue_rows_hydrate_remeasure_and_keep_unknown_or_unavailable_truthful(
                 drafts: kumochi_scene::text::Bounded::new(vec![DraftId(9)]).unwrap(),
             }]
         );
-        state.apply(DataToShell::IssueCardsDone {
+        state.apply_for_tests(DataToShell::IssueCardsDone {
             request: 4,
             status: IssueCardsStatus::Failed,
         });

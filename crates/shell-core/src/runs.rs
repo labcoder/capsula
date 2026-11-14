@@ -20,7 +20,7 @@ use kumochi_protocol::message::{
     SceneId, ThreadId, ThreadKind, ThreadRow, UserError,
 };
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use crate::drawing::Scene;
 use crate::drawing::{Broken, Chunk, Drawing, Effect};
 
@@ -249,8 +249,8 @@ impl Runs {
     }
 
     /// The lengths of the typed texts still held: pending turns oldest first, then the named run's.
-    #[cfg(test)]
-    pub(crate) fn kept(&self) -> Vec<usize> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn kept(&self) -> Vec<usize> {
         self.submitted
             .iter()
             .chain(self.named.as_ref().map(|(_, submitted)| submitted))
@@ -339,8 +339,8 @@ impl Runs {
     }
 
     /// The scenes on screen, oldest first.
-    #[cfg(test)]
-    pub(crate) fn scenes(&self) -> impl Iterator<Item = &Scene> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn scenes(&self) -> impl Iterator<Item = &Scene> {
         self.drawing.shown().map(|(_, scene)| scene)
     }
 
@@ -511,8 +511,14 @@ impl Runs {
     }
 
     /// `thread` holds a delete slot: its delete is unanswered, or turns sent before it are.
-    pub fn holds(&self, thread: ThreadId) -> bool {
+    pub(crate) fn holds(&self, thread: ThreadId) -> bool {
         self.deleting.contains(&thread) || self.gone.iter().any(|(gone, _)| *gone == thread)
+    }
+
+    /// `holds`, for the shell's tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn holds_for_tests(&self, thread: ThreadId) -> bool {
+        self.holds(thread)
     }
 
     /// The threads whose delete is unanswered.
@@ -662,8 +668,8 @@ impl Runs {
         (applied, notice)
     }
 
-    #[cfg(test)]
-    pub(crate) fn apply_state(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn apply_state(
         &mut self,
         run: RunId,
         thread: ThreadId,
