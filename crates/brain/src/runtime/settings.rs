@@ -330,8 +330,12 @@ impl Brain {
     ) -> Result<(), Full> {
         let outcome = match written {
             Ok((pending, Ok(()))) => {
+                let screen_holds = self.config.view().screen_holds;
                 self.config.commit(pending);
                 self.voice_policy();
+                if screen_holds && !self.config.view().screen_holds {
+                    self.screen_holds_off();
+                }
                 #[cfg(test)]
                 self.observer.send(super::Seen::SettingsCommitted).ok();
                 Outcome::Applied

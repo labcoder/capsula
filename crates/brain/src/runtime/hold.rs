@@ -783,6 +783,13 @@ impl Brain {
         )
     }
 
+    /// The user turned screen holds off: a pending hold goes on as voice with no line, and every
+    /// run's image is withdrawn.
+    pub(super) fn screen_holds_off(&mut self) {
+        self.holds.close_screen_as(None);
+        self.offline(Input::ScreenHoldsOff);
+    }
+
     /// Sends the gate's state for the default model once per connection, then whenever it changes.
     pub(super) fn screen_holds_changed(&mut self, link: &mut Link<'_, '_>) -> Result<(), Full> {
         let choice = self.config.view().default_model.clone();

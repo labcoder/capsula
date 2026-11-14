@@ -322,7 +322,10 @@ details. If the image can't go (another route, or no user message left), the run
 with its turn (store.md, `runs.screen`), and the shell hears it once as `HoldScreen` when the
 run's first request starts. The row is written first on purpose: the first build starts only
 after `TurnStored`, so history can over-report a screen but never miss one that left the
-machine, and a failed turn write fails the run before anything is built. Known limits:
+machine, and a failed turn write fails the run before anything is built. Turning screen holds off
+withdraws every run's image at once: it drops and zeroes, and the run's next build fails with
+`ScreenUnavailable`. If no request has carried it yet, the turn's `screen` becomes `withdrawn`;
+once one has, it stays `attached`. Known limits:
 - **History can show a window that never left.** A held run that fails, is stopped or is
   replaced before its first request still records its screen, so its history shows a window
   for a turn whose image was never sent.

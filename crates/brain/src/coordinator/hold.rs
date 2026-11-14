@@ -81,6 +81,27 @@ impl super::Run {
 }
 
 impl Coordinator {
+    /// Withdraws every run's image, which drops and zeroes it, so the run's next build fails.
+    /// A turn whose image no request has carried yet is recorded as withdrawn; once a request
+    /// has started with it, the turn keeps `attached`.
+    pub(super) fn screen_holds_off(&mut self, effects: &mut Vec<Effect>) {
+        for run in self.ending.iter_mut().chain(self.current.as_mut()) {
+            if !matches!(run.screen, Some(crate::context::Screen::Image(_))) {
+                continue;
+            }
+            run.screen = Some(crate::context::Screen::Withdrawn);
+            if run.untold.take().is_none() {
+                continue;
+            }
+            match &mut run.begin {
+                Some(StoreOp::BeginTurn { screen, .. }) => {
+                    *screen = Some(kumochi_protocol::message::HeldScreen::Withdrawn);
+                }
+                _ => effects.push(Effect::Store(StoreOp::WithdrawScreen { run: run.id })),
+            }
+        }
+    }
+
     /// Captures the ready connection, without allocating a run or a new thread.
     pub(crate) fn prepare_hold(
         &self,

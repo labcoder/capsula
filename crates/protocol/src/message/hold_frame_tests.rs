@@ -117,6 +117,14 @@ fn a_held_screens_outcome_appends_a_redacted_control_tag() {
         );
         outcomes.push((HeldScreen::NotIncluded(class), 8));
     }
+    for (outcome, tag) in [
+        (HeldScreen::Attached, 0),
+        (HeldScreen::NotIncluded(ScreenClass::NotReady), 1),
+        (HeldScreen::Withdrawn, 2),
+    ] {
+        assert_eq!(postcard::to_allocvec(&outcome).expect("encodes")[0], tag);
+    }
+    outcomes.push((HeldScreen::Withdrawn, 7));
     for (outcome, size) in outcomes {
         let message = ControlToShell::HoldScreen {
             gesture: GESTURE,

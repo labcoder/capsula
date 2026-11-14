@@ -380,6 +380,9 @@ pub(crate) enum ImageRefused {
     /// The screen's developer line isn't in the bundled messages.
     #[error("the screen's line isn't bundled")]
     Unbundled,
+    /// The user turned screen holds off while the run held its image.
+    #[error("the screen was withdrawn")]
+    Withdrawn,
 }
 
 impl ModelRequest {
@@ -411,14 +414,14 @@ impl ModelRequest {
             Screen::NotIncluded(ScreenClass::TooLarge) => "screen-too-large",
             Screen::NotIncluded(ScreenClass::Changed) => "screen-changed",
             Screen::NotIncluded(ScreenClass::ModelCantSee) => "screen-model-cant-see",
+            Screen::Withdrawn => return Err(ImageRefused::Withdrawn),
         };
         let text = screen_line(id).ok_or(ImageRefused::Unbundled)?;
-        let after = match screen {
-            Screen::Image(image) => {
-                self.attach(image.clone())?;
-                2
-            }
-            Screen::NotIncluded(_) => 1,
+        let after = if let Screen::Image(image) = screen {
+            self.attach(image.clone())?;
+            2
+        } else {
+            1
         };
         let at = self.turn()? + after;
         self.input.insert(
@@ -457,6 +460,8 @@ pub(crate) use kumochi_protocol::message::ScreenClass;
 pub(crate) enum Screen {
     Image(Jpeg),
     NotIncluded(ScreenClass),
+    /// The image the user withdrew by turning screen holds off; no request may carry the run on.
+    Withdrawn,
 }
 
 impl Screen {
@@ -465,6 +470,7 @@ impl Screen {
         match self {
             Self::Image(_) => kumochi_protocol::message::HeldScreen::Attached,
             Self::NotIncluded(class) => kumochi_protocol::message::HeldScreen::NotIncluded(*class),
+            Self::Withdrawn => kumochi_protocol::message::HeldScreen::Withdrawn,
         }
     }
 }
@@ -474,6 +480,7 @@ impl fmt::Debug for Screen {
         match self {
             Self::Image(image) => f.debug_tuple("Image").field(image).finish(),
             Self::NotIncluded(class) => f.debug_tuple("NotIncluded").field(class).finish(),
+            Self::Withdrawn => f.write_str("Withdrawn"),
         }
     }
 }

@@ -689,6 +689,17 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
             }
             purger.op_arrived(store);
         }
+        StoreOp::WithdrawScreen { run } => {
+            purger.op_arriving();
+            if store
+                .reconnect()
+                .and_then(|()| store.withdraw_screen(run))
+                .is_err()
+            {
+                tracing::warn!("a withdrawn screen wasn't stored");
+            }
+            purger.op_arrived(store);
+        }
         StoreOp::BeginTurn {
             thread,
             title,
