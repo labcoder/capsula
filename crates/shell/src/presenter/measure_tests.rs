@@ -37,7 +37,8 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
                 let shapes = |range: std::ops::Range<usize>| {
                     range.map(|i| {
                         if counts.len() == 1 {
-                            format!(r#"{{"shape":{{"id":"s{i}","kind":"rect","box":[0,0,1,1]}}}}"#)
+                            // Borderless: this times the reducer, and bordered rects would spend the shared outline budget.
+                            format!(r#"{{"shape":{{"id":"s{i}","kind":"rect","box":[0,0,1,1],"width":0}}}}"#)
                         } else {
                             format!(r#"{{"shape":{{"id":"s{i}","kind":"polygon","points":[[0,0],[1,0],[1,1],[0,1]]}}}}"#)
                         }
