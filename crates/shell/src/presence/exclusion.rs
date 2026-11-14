@@ -2,19 +2,12 @@
 
 mod machine;
 
-#[cfg(test)]
-use std::time::{Duration, Instant};
-
 use gpui_kit::AnyWindowHandle;
 use kumochi_protocol::message::CaptureFor;
-#[cfg(test)]
-use kumochi_protocol::message::LeaseGeneration;
 
 use super::{Context, Presence, platform};
 use machine::Surfaces;
 pub(super) use machine::{Error, Exclusion, Slot};
-#[cfg(test)]
-use machine::{Key, LIFETIME};
 
 pub(super) enum Receipt {
     Windows {

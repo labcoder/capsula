@@ -19,8 +19,8 @@ use super::observer::{self, Drawn, Surface};
 use super::paint::Stamp;
 use super::pull_picture::PullPicture;
 use super::{OpenError, Presence, platform};
-use crate::platform::{PresenceError, PresenceNative, ROW_SPANS};
-use machine::{Attempt, Surfaces};
+use crate::platform::{PresenceError, PresenceNative};
+use machine::{Attempt, ROW_SPANS, Surfaces};
 pub(super) use machine::{Line, LineFrame, Placement, slot};
 
 /// The widest the drop label gets, in logical pixels; a longer title is cut short.
