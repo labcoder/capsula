@@ -111,10 +111,19 @@ pub trait Engine: Send + Sync + fmt::Debug {
     fn start(&self, request: RunRequest, events: mpsc::Sender<TurnEvent>, gate: SendGate) -> Round;
 }
 
-/// The engine for a connection that has none yet: its round fails at once with
-/// `ModelUnavailable`, so another engine never gets a request for a connection it doesn't serve.
+/// The engine for a run its connection can't answer: its round fails at once with what it
+/// carries, so another engine never gets a request for a connection it doesn't serve.
 #[derive(Debug)]
-pub(crate) struct Unserved;
+pub(crate) struct Unserved(pub(crate) EngineFailure);
+
+impl Unserved {
+    /// For a connection that has no engine yet: `ModelUnavailable`.
+    pub(crate) fn model_unavailable() -> Self {
+        Self(EngineFailure::Access(Some(
+            crate::coordinator::model_unavailable(),
+        )))
+    }
+}
 
 impl Engine for Unserved {
     fn start(
@@ -123,8 +132,8 @@ impl Engine for Unserved {
         events: mpsc::Sender<TurnEvent>,
         _gate: SendGate,
     ) -> Round {
+        let failure = self.0.clone();
         Box::pin(async move {
-            let failure = EngineFailure::Access(Some(crate::coordinator::model_unavailable()));
             // Nobody listens once the round is dropped, so a failed send has nothing left to tell.
             events
                 .send(TurnEvent::Finished(Finish::Failed(failure)))

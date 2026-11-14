@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::constants::{CLAUDE_CODE_QUARANTINE, MCP_SERVER_NAME};
-use kumochi_protocol::message::{PolicyFailed, RunId};
+use kumochi_protocol::constants::{CLAUDE_CODE_QUARANTINE, ENGINE_DIR, MCP_SERVER_NAME};
+use kumochi_protocol::message::{ModelChoice, PolicyFailed, RunId};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -27,6 +27,7 @@ use crate::engines::{
     self, Answer, Asks, Engine, EngineFailure, Finish, RunRequest, SendGate, SendLease, TurnEvent,
 };
 use crate::platform::Job;
+use crate::test_support::{Captured, SENTINEL};
 
 const FACTS: &str = include_str!("../../../fixtures/claude-code/facts.jsonl");
 const TEXT: &str = include_str!("../../../fixtures/claude-code/text.jsonl");
@@ -295,7 +296,13 @@ struct Played {
 }
 
 fn play(question: &ClaudeQuestion) -> Played {
-    let request = RunRequest::for_tests(RunId(1), ThreadId(1), "Be brief.");
+    play_with(
+        question,
+        RunRequest::for_tests(RunId(1), ThreadId(1), "Be brief."),
+    )
+}
+
+fn play_with(question: &ClaudeQuestion, request: RunRequest) -> Played {
     let key = request.key;
     let asks = Asks::default();
     let (inputs_tx, inputs) = mpsc::unbounded_channel();
@@ -401,6 +408,196 @@ async fn a_warm_launch_writes_only_its_two_control_lines() {
 
 type Change = fn(&mut LaunchSnapshot);
 
+/// [`synthetic_signed_in`] with no tool on the server or in init.
+fn offering_nothing() -> Script {
+    let mut script = synthetic_signed_in().init(|init| init["tools"] = json!([]));
+    let mut mcp: Value = serde_json::from_str(&script.mcp_status[0]).expect("json");
+    mcp["response"]["response"]["mcpServers"][0]["tools"] = json!([]);
+    script.mcp_status[0] = mcp.to_string();
+    script
+}
+
+/// A run's request whose choice is `model` at `effort` on `connection`.
+fn choosing(model: &str, effort: Effort, connection: ConnectionKind) -> RunRequest {
+    let mut request = RunRequest::for_tests(RunId(1), ThreadId(1), "Be brief.");
+    request.request.choice = Some(ModelChoice {
+        model: ModelSlug::new(model).expect("valid"),
+        effort,
+        connection,
+    });
+    request
+}
+
+/// Plays `request`'s question to its end: the round's events, and the launch's reports.
+async fn answer(rig: &mut Rig, request: RunRequest) -> (Vec<TurnEvent>, Vec<launch::Outcome>) {
+    let question = rig.claude.question(&request).expect("admitted");
+    let (id, _) = rig.last();
+    let mut played = play_with(&question, request);
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    let events = rig.drive(played.events()).await;
+    (events, rig.reported(id).await)
+}
+
+/// Tests 5 and 6, and L1: a Claude Code choice is answered on the row's own alias with its
+/// effort's CLI word and no tool, and the whole command line is exactly that. A model the row
+/// doesn't list, another connection's choice or none starts nothing.
+#[tokio::test]
+async fn a_question_takes_only_a_listed_alias_its_effort_word_and_no_tool() {
+    let mut rig = Rig::new("question-choice", &offering_nothing()).await;
+    let words = [
+        (Effort::Low, "low"),
+        (Effort::Medium, "medium"),
+        (Effort::High, "high"),
+        (Effort::XHigh, "xhigh"),
+        (Effort::Max, "max"),
+    ];
+    for (n, (effort, word)) in words.into_iter().enumerate() {
+        let (events, reports) = answer(
+            &mut rig,
+            choosing("haiku", effort, ConnectionKind::ClaudeCode),
+        )
+        .await;
+        answered(&events);
+        assert_eq!(reports, [launch::Outcome::Clean]);
+        let argv = rig.argv(n + 1);
+        let (head, rest) = argv.split_once(" --mcp-config ").expect("an MCP config");
+        let (path, tail) = rest.split_once(' ').expect("more after it");
+        let launches = rig.base.owned().join(ENGINE_DIR);
+        assert!(
+            path.starts_with(launches.to_str().expect("utf-8"))
+                && path.ends_with(r"\work\mcp.json"),
+            "{path}"
+        );
+        assert_eq!(
+            format!("{head} {tail}"),
+            format!(
+                "-p --restricted --strict-mcp-config --disable-slash-commands --tools  \
+                 --no-session-persistence --input-format stream-json --output-format stream-json \
+                 --verbose --include-partial-messages --max-turns 8 \
+                 --exclude-dynamic-system-prompt-sections --model haiku --effort {word}"
+            ),
+            "{effort:?}"
+        );
+        assert!(
+            rig.seed(n + 1).ends_with("Tools:\n[]"),
+            "{}",
+            rig.seed(n + 1)
+        );
+    }
+    let launches = rig.claude.launches.len();
+    for request in [
+        choosing("claude-test", Effort::Low, ConnectionKind::ClaudeCode),
+        choosing("haiku", Effort::Low, ConnectionKind::ChatGpt),
+        RunRequest::for_tests(RunId(1), ThreadId(1), "Be brief."),
+    ] {
+        assert!(
+            matches!(rig.claude.question(&request), Err(LaunchRefused::NotReady)),
+            "{request:?}"
+        );
+    }
+    assert_eq!(rig.claude.launches.len(), launches, "nothing started");
+    rig.close().await;
+}
+
+/// Test 9: a refused question fails with Claude Code's own reason while no launch would be
+/// admitted, and with none otherwise; never with `Access(None)`, which reads as a `ChatGPT`
+/// sign-in.
+#[tokio::test]
+async fn a_refused_question_fails_with_claude_codes_reason_or_with_none() {
+    let mut rig = Rig::new("question-refused", &synthetic_signed_in()).await;
+    for refused in [
+        LaunchRefused::NotReady,
+        LaunchRefused::Busy,
+        LaunchRefused::Identity,
+        LaunchRefused::Lifetime,
+    ] {
+        assert_eq!(
+            rig.claude.refused(refused),
+            EngineFailure::Provider,
+            "{refused:?}"
+        );
+    }
+    rig.claude.view = ClaudeCodeView::NotFound;
+    assert_eq!(
+        rig.claude.refused(LaunchRefused::NotReady),
+        EngineFailure::Claude(
+            UserError::new(
+                ErrorKey::ClaudeCodeNotFound,
+                Vec::new(),
+                vec![Action::OpenSettings]
+            )
+            .expect("one action")
+        )
+    );
+    rig.claude.view = READY;
+    rig.close().await;
+}
+
+/// Test 8: Stop mid-answer drops the round, and the launch's teardown confirms its job empty
+/// and deletes its folder.
+#[tokio::test]
+async fn a_question_stopped_mid_answer_leaves_no_process_and_no_folder() {
+    let mut rig = Rig::new("question-stopped", &offering_nothing().held_at_user("go")).await;
+    let request = choosing("haiku", Effort::Low, ConnectionKind::ClaudeCode);
+    let question = rig.claude.question(&request).expect("admitted");
+    let (id, control) = rig.last();
+    let mut played = play_with(&question, request);
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    until("seeded", || rig.stdin().len() == 3).await;
+    played.round.abort();
+    drop(played);
+    drop(question);
+    assert_eq!(rig.reported(id).await, [launch::Outcome::Clean]);
+    until("the teardown confirmed", || control.is_ended()).await;
+    let launches = rig.base.owned().join(ENGINE_DIR);
+    until("the launch folder deleted", || {
+        fs::read_dir(&launches).expect("the engine folder").count() == 0
+    })
+    .await;
+    rig.close().await;
+}
+
+/// A marker in the prompt and in the answer reaches no log line on the round's thread and no
+/// Debug of the question, its request or its reports, as text or as bytes.
+#[tokio::test]
+async fn a_question_logs_and_debugs_no_prompt_or_answer_text() {
+    let captured = Captured::default();
+    let _capturing = captured.install();
+    let mut script = offering_nothing();
+    for line in &mut script.user {
+        if let Some(text) = line["event"]["delta"]["text"].as_str() {
+            let marked = format!("{text}{SENTINEL}");
+            line["event"]["delta"]["text"] = json!(marked);
+        }
+    }
+    let mut rig = Rig::new("question-sentinel", &script).await;
+    let mut request = choosing("haiku", Effort::Low, ConnectionKind::ClaudeCode);
+    request.request.instructions = format!("Be brief. {SENTINEL}");
+    let question = rig.claude.question(&request).expect("admitted");
+    let (id, _) = rig.last();
+    let debugs = [format!("{question:?}"), format!("{request:?}")];
+    let mut played = play_with(&question, request);
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    let events = rig.drive(played.events()).await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, TurnEvent::TextDelta(text) if text.contains(SENTINEL))),
+        "the marked answer came through"
+    );
+    let reports = format!("{:?}", rig.reported(id).await);
+    let bytes = format!("{:?}", SENTINEL.as_bytes());
+    let bytes = bytes.trim_start_matches('[').trim_end_matches(']');
+    for text in debugs.iter().chain([&reports, &captured.text()]) {
+        assert!(!text.contains(SENTINEL), "{text}");
+        assert!(!text.contains(bytes), "{text}");
+    }
+    rig.close().await;
+}
+
 /// A condition that alone stops admission: its name, how to set it and how to clear it.
 type Condition = (&'static str, fn(&mut Claude), fn(&mut Claude));
 
@@ -408,11 +605,7 @@ type Condition = (&'static str, fn(&mut Claude), fn(&mut Claude));
 /// before input and after the seed, and seeds an empty tool list.
 #[tokio::test]
 async fn a_launch_that_offers_nothing_has_no_tool_anywhere() {
-    let mut script = synthetic_signed_in().init(|init| init["tools"] = json!([]));
-    let mut mcp: Value = serde_json::from_str(&script.mcp_status[0]).expect("json");
-    mcp["response"]["response"]["mcpServers"][0]["tools"] = json!([]);
-    script.mcp_status[0] = mcp.to_string();
-    let mut rig = Rig::new("question-offers-nothing", &script).await;
+    let mut rig = Rig::new("question-offers-nothing", &offering_nothing()).await;
     let snapshot = rig
         .claude
         .snapshot(ThreadId(1), "claude-test".to_owned(), None, Offer::Nothing)

@@ -9,7 +9,7 @@ use kumochi_protocol::message::{
 use super::{BuildKey, ContextBuilt, Coordinator, Effect, Input, R, StoreOp, T, delta, draw_call};
 use crate::context::{Built, ConnectionTag, ModelRequest, Origin, RunSnapshot, ToolSchema};
 use crate::coordinator::availability::{connection_needed, model_unavailable};
-use crate::coordinator::{Availability, JobKey, Ready, RoundItems, SendKey};
+use crate::coordinator::{Availability, JobKey, Ready, RoundItems, SendKey, Unbuilt};
 use crate::engines::{EngineFailure, Finish, TurnEvent};
 use crate::store::{Failure, RunEnd};
 
@@ -266,6 +266,48 @@ fn connection_needed_offers_only_open_settings_and_the_claude_kinds_start_unavai
             "{kind:?}"
         );
     }
+}
+
+/// Test 10: a build too large on a Claude Code route fails on its budget, with no compaction
+/// read and no engine start, since only `ChatGPT` compacts.
+#[test]
+fn a_build_too_large_on_claude_code_fails_on_its_budget_without_compacting() {
+    let claude_code = kumochi_protocol::message::ConnectionKind::ClaudeCode;
+    let mut core = typed(Some(Input::Engines(
+        claude_code,
+        Availability::Ready(Ready {
+            connection: ConnectionTag(3),
+            models: vec![info("haiku")],
+            trusted_draw: false,
+        }),
+    )));
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    let too_large = Input::ContextBuilt(ContextBuilt {
+        key: key(1),
+        snapshot: Some(RunSnapshot {
+            origin: Origin::Task(T),
+            assistant: AssistantName::new("Kumo").expect("name"),
+            user: None,
+            choice: Some(ModelChoice {
+                model: ModelSlug::new("haiku").expect("valid"),
+                effort: Effort::Low,
+                connection: claude_code,
+            }),
+            connection: ConnectionTag(7),
+        }),
+        result: Err(Unbuilt::TooLarge { room: Some(500) }),
+    });
+    let mut expected = vec![Effect::CancelEngine { run: R }];
+    expected.extend(told(None));
+    expected.push(Effect::Store(StoreOp::EndRun {
+        thread: T,
+        run: R,
+        text: None,
+        revealed: None,
+        clear: None,
+        end: RunEnd::Failed(Failure::Budget),
+    }));
+    assert_eq!(core.handle(too_large), Ok(expected));
 }
 
 #[test]

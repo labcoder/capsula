@@ -8,7 +8,7 @@ use std::time::Instant;
 use kumochi_protocol::constants::CLAUDE_QUESTIONS_ENV;
 use kumochi_protocol::message::{
     Action, AuditFailed, ClaudeCodeView, ClaudeVersion, ConnectionKind, ConnectionOp,
-    ConnectionsView, ControlToShell, ErrorKey, ModelInfo, ModelName, ModelSlug, ThreadId,
+    ConnectionsView, ControlToShell, Effort, ErrorKey, ModelInfo, ModelName, ModelSlug, ThreadId,
     Unsupported, UserError,
 };
 use tokio::sync::mpsc;
@@ -27,6 +27,7 @@ use crate::engines::claude_code::policy::{self, Reviewed};
 use crate::engines::claude_code::supervisor::{
     self, Control, Launch, LaunchRefused, MAX_LAUNCH, Question,
 };
+use crate::engines::{EngineFailure, RunRequest};
 
 /// Where Claude Code's sign-in may be kept, which owner call 1 decided.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -493,14 +494,65 @@ impl Claude {
             .expect("one action is within the limit")
     }
 
+    /// The engine for one question on `request`'s Claude Code choice, offering no tools. The
+    /// model is the reviewed row's own alias, so only a listed one reaches the command line
+    /// whatever the request names, and the effort goes by a table to the CLI's word.
+    ///
+    /// # Errors
+    /// [`LaunchRefused::NotReady`] unless a launch would be admitted and the choice is a Claude
+    /// Code one whose model the row lists; otherwise as [`take`](Self::take).
+    pub(crate) fn question(
+        &mut self,
+        request: &RunRequest,
+    ) -> Result<ClaudeQuestion, LaunchRefused> {
+        let (_, row) = self.admitted().ok_or(LaunchRefused::NotReady)?;
+        let choice = request
+            .request
+            .choice
+            .as_ref()
+            .filter(|choice| choice.connection == ConnectionKind::ClaudeCode)
+            .ok_or(LaunchRefused::NotReady)?;
+        let model = row
+            .models
+            .iter()
+            .map(|&(slug, _)| slug)
+            .find(|&slug| slug == choice.model.as_str())
+            .ok_or(LaunchRefused::NotReady)?;
+        let effort = match choice.effort {
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+            Effort::XHigh => "xhigh",
+            Effort::Max => "max",
+        };
+        let snapshot = self.snapshot(
+            request.thread,
+            model.to_owned(),
+            Some(effort.to_owned()),
+            Offer::Nothing,
+        )?;
+        self.take(&snapshot)
+    }
+
+    /// What a run's round fails with when its question was refused: Claude Code's own reason
+    /// while no launch would be admitted, else none. Never `Access(None)`, which reads as a
+    /// `ChatGPT` sign-in.
+    pub(crate) fn refused(&self, refused: LaunchRefused) -> EngineFailure {
+        match refused {
+            LaunchRefused::NotReady if self.admitted().is_none() => {
+                EngineFailure::Claude(self.reason())
+            }
+            LaunchRefused::NotReady
+            | LaunchRefused::Busy
+            | LaunchRefused::Identity
+            | LaunchRefused::Lifetime => EngineFailure::Provider,
+        }
+    }
+
     /// What a launch for `thread` would be fixed to now.
     ///
     /// # Errors
     /// [`LaunchRefused::NotReady`] unless Claude Code is Ready.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "C5b-2's engine selection is the first caller")
-    )]
     pub(crate) fn snapshot(
         &self,
         thread: ThreadId,
@@ -552,10 +604,6 @@ impl Claude {
     ///
     /// # Errors
     /// As [`warm`](Self::warm).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "C5b-2's engine selection is the first caller")
-    )]
     pub(crate) fn take(
         &mut self,
         snapshot: &LaunchSnapshot,

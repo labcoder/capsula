@@ -64,10 +64,6 @@ impl fmt::Debug for Clock {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Offer {
     /// No tools: a text answer.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the text question is the first caller")
-    )]
     Nothing,
     /// The MCP subset of the origin's model offers.
     Mcp(Origin),
