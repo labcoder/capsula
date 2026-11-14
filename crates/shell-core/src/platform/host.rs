@@ -152,6 +152,11 @@ impl fmt::Debug for Label {
 }
 
 #[cfg(any(test, feature = "test-support"))]
+#[expect(
+    clippy::missing_assert_message,
+    clippy::missing_panics_doc,
+    reason = "the fixture's asserts are test assertions, built outside cfg(test) for the shell's tests"
+)]
 pub mod fixture;
 
 #[cfg(test)]

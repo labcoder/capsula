@@ -13,12 +13,9 @@ pub fn assert_no_sentinel(text: &str) {
     assert!(!text.contains(SENTINEL), "{text}");
     let units: Vec<u16> = SENTINEL.encode_utf16().collect();
     let bytes: Vec<u8> = units.iter().flat_map(|unit| unit.to_le_bytes()).collect();
-    assert!(
-        !text.as_bytes().windows(bytes.len()).any(|w| w == bytes),
-        "{text}"
-    );
+    assert!(!text.as_bytes().windows(bytes.len()).any(|w| w == bytes));
     let written: Vec<u16> = text.encode_utf16().collect();
-    assert!(!written.windows(units.len()).any(|w| w == units), "{text}");
+    assert!(!written.windows(units.len()).any(|w| w == units));
     let list = |values: Vec<String>| values.join(", ");
     assert!(
         !text.contains(&list(units.iter().map(u16::to_string).collect())),
