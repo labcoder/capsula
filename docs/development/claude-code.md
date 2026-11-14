@@ -269,8 +269,8 @@ stateDiagram-v2
   deletion alone. With the off switch, only that deletion runs.
 - **The deletion** holds the chain from the volume root, then opens each entry in Kumochi's folder
   without following it, checks it through that handle like a held folder or file, and deletes it
-  through that handle. Each folder stays open while its entries are listed through its handle, so its name can't be rebound
-  mid-walk. A reparse point, or a folder someone else could change, stops the deletion, leaving its
+  through that handle. Each folder stays open while its entries are listed through a second handle
+  shown to be the same folder, so its name can't be rebound mid-walk. A reparse point, or a folder someone else could change, stops the deletion, leaving its
   target alone and the marker down.
 - **What each open asks for.** Both walks (the check before a start and the deletion) open every
   entry, file or folder, for read-control and read-attributes only: enough for the reparse, final
