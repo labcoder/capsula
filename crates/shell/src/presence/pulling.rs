@@ -164,8 +164,8 @@ impl Pulling {
         Some(generation)
     }
 
-    /// One event for the drag, with its points in logical pixels in the peek whose client area starts at
-    /// `window`.
+    /// One event for the drag, with its points in logical pixels in the peek whose client area
+    /// starts at `window`.
     pub(crate) fn handle(&mut self, event: Event, window: [i32; 2]) -> Outcome {
         let outcome = self.owner.handle(event);
         self.apply(outcome, window);
