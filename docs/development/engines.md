@@ -323,9 +323,13 @@ with its turn (store.md, `runs.screen`), and the shell hears it once as `HoldScr
 run's first request starts. The row is written first on purpose: the first build starts only
 after `TurnStored`, so history can over-report a screen but never miss one that left the
 machine, and a failed turn write fails the run before anything is built. Turning screen holds off
-withdraws every run's image at once: it drops and zeroes, and the run's next build fails with
-`ScreenUnavailable`. If no request has carried it yet, the turn's `screen` becomes `withdrawn`;
-once one has, it stays `attached`. Known limits:
+withdraws every run's image: the run's own copy drops at once, and the bytes are zeroed when the
+last copy drops. The run's next build fails with `ScreenUnavailable`, and a request that has
+started keeps its copy until its round ends but is refused at the send, failing the run the same
+way. If no request has carried the image yet, the turn's `screen` becomes `withdrawn`; once one
+has, it stays `attached`. Known limits:
+- **A granted send can't be recalled.** Turning screen holds off refuses a request's send that
+  hasn't been granted yet, but a body already granted goes out with its image.
 - **History can show a window that never left.** A held run that fails, is stopped or is
   replaced before its first request still records its screen, so its history shows a window
   for a turn whose image was never sent.

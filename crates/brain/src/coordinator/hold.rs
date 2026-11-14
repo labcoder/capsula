@@ -81,9 +81,11 @@ impl super::Run {
 }
 
 impl Coordinator {
-    /// Withdraws every run's image, which drops and zeroes it, so the run's next build fails.
-    /// A turn whose image no request has carried yet is recorded as withdrawn; once a request
-    /// has started with it, the turn keeps `attached`.
+    /// Withdraws every run's image: the run's own copy drops at once, and the bytes are zeroed
+    /// when the last copy drops. The run's next build fails, and a request that has started
+    /// keeps its copy until its round ends but is refused at the send. A turn whose image no
+    /// request has carried yet is recorded as withdrawn; once a request has started with it, the
+    /// turn keeps `attached`.
     pub(super) fn screen_holds_off(&mut self, effects: &mut Vec<Effect>) {
         for run in self.ending.iter_mut().chain(self.current.as_mut()) {
             if !matches!(run.screen, Some(crate::context::Screen::Image(_))) {

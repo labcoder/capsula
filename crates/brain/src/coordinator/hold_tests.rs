@@ -898,6 +898,56 @@ fn turning_screen_holds_off_after_the_first_request_keeps_the_turn_attached() {
 }
 
 #[test]
+fn a_started_requests_send_is_refused_once_screen_holds_are_off() {
+    let mut core = ready_for("captured");
+    core.submit_hold(prepared(&core, Some(T)), "words".into(), Some(image()))
+        .unwrap();
+    core.handle(Input::TurnStored { run: R }).unwrap();
+    let first = engine_key(&core, R);
+    assert_eq!(starts(&core.handle(screened(first, &[T])).unwrap()), 1);
+    let mut effects = core.handle(Input::ScreenHoldsOff).unwrap();
+    effects.extend(
+        core.handle(Input::SendReady {
+            key: SendKey::Build(first),
+            hold: None,
+        })
+        .unwrap(),
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Grant(_))),
+        "{effects:?}"
+    );
+    assert!(effects.contains(&Effect::Rebuild(SendKey::Build(first))));
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Control(ControlToShell::RunState { run: R, error: Some(error), .. })
+            if error.key() == kumochi_protocol::message::ErrorKey::ScreenUnavailable
+    )));
+    assert_eq!(
+        withdrawals(&effects),
+        [],
+        "the stored screen stays attached"
+    );
+    assert_eq!(core.current_run(), None);
+}
+
+#[test]
+fn a_run_still_ending_has_its_image_withdrawn_too() {
+    let mut core = ready_for("captured");
+    core.submit_hold(prepared(&core, Some(T)), "words".into(), Some(image()))
+        .unwrap();
+    core.handle(Input::TurnStored { run: R }).unwrap();
+    core.cancel_hold(KEY);
+    assert_eq!(core.current_run(), None);
+    assert_eq!(
+        withdrawals(&core.handle(Input::ScreenHoldsOff).unwrap()),
+        [R]
+    );
+}
+
+#[test]
 fn a_withdrawn_run_fails_with_screen_unavailable_before_any_request() {
     let mut core = ready_for("captured");
     core.submit_hold(prepared(&core, Some(T)), "words".into(), Some(image()))
