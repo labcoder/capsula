@@ -340,7 +340,11 @@ impl Runs {
 
     /// The scenes on screen, oldest first.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn scenes(&self) -> impl Iterator<Item = &Scene> {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only this crate's tests read it")
+    )]
+    pub(crate) fn scenes(&self) -> impl Iterator<Item = &Scene> {
         self.drawing.shown().map(|(_, scene)| scene)
     }
 
