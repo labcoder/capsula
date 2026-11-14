@@ -370,12 +370,24 @@ impl Generation {
     pub(crate) fn running(&self) -> Result<(), MicError> {
         self.advance(OPENING, RUNNING)
     }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn running_for_tests(&self) -> Result<(), MicError> {
+        self.running()
+    }
 }
 /// Running is preparation evidence, never permission to copy samples.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Running {
     pub(crate) gesture: GestureId,
     pub(crate) rate: u32,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Running {
+    pub fn for_tests(gesture: GestureId, rate: u32) -> Self {
+        Self { gesture, rate }
+    }
 }
 
 /// Finalization is reported only after the worker's native teardown and join.
@@ -445,6 +457,22 @@ impl MicOwner {
             });
         }
         Self::start_with(generation, session, super::windows::microphone::capture)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn start_with_for_tests(
+        generation: Generation,
+        session: Arc<AtomicBool>,
+        capture: impl FnOnce(
+            &Generation,
+            &AtomicBool,
+            &async_channel::Sender<Running>,
+            &async_channel::Sender<MicPcm>,
+        ) -> Result<Finalization, MicError>
+        + Send
+        + 'static,
+    ) -> Result<Self, MicError> {
+        Self::start_with(generation, session, capture)
     }
 
     pub(crate) fn start_with(
@@ -550,6 +578,10 @@ impl MicOwner {
 
     /// Nonblocking polling; an error leaves the generation unavailable, not retired.
     #[cfg(any(test, feature = "test-support"))]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only this crate's tests poll for the receipt")
+    )]
     pub(crate) fn try_receipt(&mut self) -> Option<Result<StopReceipt, MicError>> {
         if self.reported {
             return None;
