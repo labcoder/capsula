@@ -1,0 +1,194 @@
+//! The capture exclusion's lease, apart from the windows it covers: one lease at a time, a
+//! receipt for each surface, and a cleanup that restores every surface or keeps the debt.
+
+use std::time::{Duration, Instant};
+
+use kumochi_protocol::message::{CaptureFor, LeaseGeneration};
+
+pub(super) const LIFETIME: Duration = Duration::from_secs(3);
+const SLOTS: [Slot; 8] = [
+    Slot::Dock,
+    Slot::Proxy,
+    Slot::Status,
+    Slot::Text,
+    Slot::Threads,
+    Slot::Settings,
+    Slot::Drawing,
+    Slot::Onboarding,
+];
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Slot {
+    Dock,
+    Proxy,
+    Status,
+    Text,
+    Threads,
+    Settings,
+    Drawing,
+    Onboarding,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Key {
+    pub(super) session: u64,
+    pub(super) input: CaptureFor,
+    pub(super) generation: LeaseGeneration,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub(crate) enum Error {
+    #[error("exclusion is busy or has restoration debt")]
+    Busy,
+    #[error("exclusion generation or deadline exhausted")]
+    Exhausted,
+    #[error("a presence surface could not preserve its affinity")]
+    Surface,
+}
+
+pub(super) trait Surfaces {
+    type Receipt;
+    fn snapshot(&mut self, slot: Slot) -> Result<Option<Self::Receipt>, Error>;
+    fn exclude(&mut self, slot: Slot, receipt: &Self::Receipt) -> Result<(), Error>;
+    fn restore(&mut self, slot: Slot, receipt: &Self::Receipt) -> Result<(), Error>;
+    fn gone(receipt: &Self::Receipt) -> bool;
+    fn same(&self, slot: Slot, receipt: &Self::Receipt) -> bool;
+}
+
+pub(super) struct ExclusionLease<R> {
+    pub(super) key: Key,
+    pub(super) deadline: Instant,
+    pub(super) revoked: bool,
+    pub(super) receipts: [Option<R>; 8],
+}
+
+pub(crate) struct Exclusion<R> {
+    pub(super) generation: u32,
+    pub(super) lease: Option<ExclusionLease<R>>,
+}
+
+impl<R> Default for Exclusion<R> {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            lease: None,
+        }
+    }
+}
+
+impl<R> Exclusion<R> {
+    pub(super) fn acquire(
+        &mut self,
+        session: u64,
+        input: CaptureFor,
+        now: Instant,
+        surfaces: &mut impl Surfaces<Receipt = R>,
+    ) -> Result<Key, Error> {
+        if self.lease.is_some() {
+            return Err(Error::Busy);
+        }
+        self.generation = self.generation.checked_add(1).ok_or(Error::Exhausted)?;
+        let deadline = now.checked_add(LIFETIME).ok_or(Error::Exhausted)?;
+        let key = Key {
+            session,
+            input,
+            generation: LeaseGeneration(self.generation),
+        };
+        let mut receipts = std::array::from_fn(|_| None);
+        for slot in SLOTS {
+            receipts[slot as usize] = surfaces.snapshot(slot)?;
+        }
+        self.lease = Some(ExclusionLease {
+            key,
+            deadline,
+            revoked: false,
+            receipts,
+        });
+        for slot in SLOTS {
+            let receipt = &self.lease.as_ref().expect("installed above").receipts[slot as usize];
+            if let Some(receipt) = receipt
+                && surfaces.exclude(slot, receipt).is_err()
+            {
+                self.cleanup(surfaces)?;
+                return Err(Error::Surface);
+            }
+        }
+        Ok(key)
+    }
+
+    pub(super) fn attach<S: Surfaces<Receipt = R>>(
+        &mut self,
+        slot: Slot,
+        surfaces: &mut S,
+    ) -> Result<(), Error> {
+        let Some(lease) = &mut self.lease else {
+            return Ok(());
+        };
+        if lease.revoked {
+            return Err(Error::Busy);
+        }
+        let receipt = &mut lease.receipts[slot as usize];
+        if let Some(prior) = receipt.as_ref().filter(|prior| !S::gone(prior)) {
+            if surfaces.same(slot, prior) {
+                return Ok(());
+            }
+            self.cleanup(surfaces)?;
+            return Err(Error::Surface);
+        }
+        let result = surfaces.snapshot(slot).and_then(|prior| {
+            *receipt = prior;
+            let prior = receipt.as_ref().ok_or(Error::Surface)?;
+            surfaces.exclude(slot, prior)
+        });
+        if result.is_err() {
+            self.cleanup(surfaces)?;
+        }
+        result
+    }
+
+    pub(super) fn cleanup(
+        &mut self,
+        surfaces: &mut impl Surfaces<Receipt = R>,
+    ) -> Result<(), Error> {
+        let Some(lease) = &mut self.lease else {
+            return Ok(());
+        };
+        lease.revoked = true;
+        for slot in SLOTS {
+            let receipt = &mut lease.receipts[slot as usize];
+            if let Some(prior) = receipt
+                && surfaces.restore(slot, prior).is_ok()
+            {
+                *receipt = None;
+            }
+        }
+        if lease.receipts.iter().any(Option::is_some) {
+            return Err(Error::Surface);
+        }
+        self.lease = None;
+        Ok(())
+    }
+
+    pub(super) fn expire(
+        &mut self,
+        key: Key,
+        now: Instant,
+        surfaces: &mut impl Surfaces<Receipt = R>,
+    ) -> Result<(), Error> {
+        if self
+            .lease
+            .as_ref()
+            .is_some_and(|lease| lease.key == key && now >= lease.deadline)
+        {
+            self.cleanup(surfaces)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(super) fn matches(&self, session: u64, input: CaptureFor) -> bool {
+        self.lease
+            .as_ref()
+            .is_some_and(|lease| lease.key.session == session && lease.key.input == input)
+    }
+}

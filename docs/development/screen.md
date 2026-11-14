@@ -78,7 +78,8 @@ it remains unimplemented and unverified.
 
 ## Local shell exclusion
 
-Presence owns a never-published local transaction in `presence/exclusion.rs`. No production
+Presence owns a never-published local transaction in `presence/exclusion.rs`; the lease and
+its cleanup rules are in `presence/exclusion/machine.rs`, with no GPUI. No production
 caller acquires it, and it cannot send HoldRecognized, Include, a ticket or a capture request.
 The one private acquisition path snapshots exact native affinity before changing the dock,
 hit proxy, status panel, typing panel, threads panel, settings panel and drawing overlay.

@@ -82,8 +82,4 @@ pub(crate) use windows::{
     restore_window_affinity, session_id, watch_host, window_affinity, window_handle, work_area,
 };
 
-/// The most owned `[left, right)` column spans one hit-mask row holds: two shapes, each with
-/// its current and previous snapshot.
-pub(crate) const ROW_SPANS: usize = 4;
-/// One screen row's owned columns.
-pub(crate) type RowSpans = [Option<[i32; 2]>; ROW_SPANS];
+pub(crate) use crate::presence::line::machine::{ROW_SPANS, RowSpans};
