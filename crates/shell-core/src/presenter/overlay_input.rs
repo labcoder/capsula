@@ -24,6 +24,7 @@ pub type Regions = BTreeMap<RegionId, [i32; 4]>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DragLease(u64);
 
+// shortcut: GestureCancel and HoldEnded have no producer in shipped code; B3a/B3b supply them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExitCause {
     Release,
