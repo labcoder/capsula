@@ -3,17 +3,19 @@
 
 use std::time::Duration;
 
-use kumochi_protocol::message::{ControlToShell, EventId, Phase, RunId, ThreadId, ThreadTitle};
+use kumochi_protocol::message::{
+    ControlToShell, Deleted, EventId, Phase, RunId, ThreadId, ThreadTitle,
+};
 
-use super::{R, T, admit, engine, fresh, request, run_end, state};
+use super::{R, T, admit, built, ends_failed, engine, fresh, request, run_end, state};
 use crate::context::compact::COMPACT_AT;
 use crate::context::{Built, Origin};
 use crate::coordinator::{
-    Coordinator, Effect, Input, JobAsk, JobBuilt, JobKey, JobKind, JobOutput, LeaseId, ReadJob,
-    SEND_DEADLINE, SendKey, Stale, StoreOp, SummaryText, Unbuilt,
+    BuildKey, Coordinator, Effect, Input, JobAsk, JobBuilt, JobKey, JobKind, JobOutput, LeaseId,
+    ReadJob, SEND_DEADLINE, SendKey, Stale, StoreOp, SummaryText, Unbuilt,
 };
 use crate::engines::{Finish, RunRequest, TurnEvent};
-use crate::store::{Generation, TitleSource};
+use crate::store::{Failure, Generation, TitleSource};
 
 /// The deletion generation every test read finds.
 const G: Generation = Generation(5);
@@ -527,6 +529,107 @@ fn a_job_lease_past_its_deadline_cancels_the_job_and_fails_closed() {
         run_done(&mut core, Some(T), R2),
         vec![state(R2, T, Phase::Done), run_end(R2)],
         "no job starts once sends failed closed"
+    );
+}
+
+/// A held send is a Claude Code process on its own pipes: past its hold it fails its run and
+/// fences its sources, but a later run and its title job are still granted.
+#[test]
+fn a_held_send_past_its_hold_fences_its_sources_and_leaves_other_sends_granted() {
+    const B: ThreadId = ThreadId(2);
+    let refused = Effect::Control(ControlToShell::ThreadDeleted {
+        thread: B,
+        outcome: Deleted::NotHidden,
+        last_run: None,
+    });
+    let build = |run, attempt| {
+        SendKey::Build(BuildKey {
+            run,
+            round: 1,
+            attempt,
+        })
+    };
+    let mut core = signed_in();
+    core.handle(Input::Turn {
+        turn: 1,
+        thread: None,
+        text: "hi".into(),
+    })
+    .expect("a turn is never stale");
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    core.handle(built(R, 1, &[T, B])).expect("current");
+    let held = LeaseId {
+        key: build(R, 1),
+        send: 1,
+    };
+    core.handle(Input::SendReady {
+        key: held.key,
+        hold: Some(Duration::from_secs(40)),
+    })
+    .expect("asked");
+    assert_eq!(
+        core.handle(delete(B, 1)),
+        Ok(Vec::new()),
+        "the lease holds it"
+    );
+    let mut expected = ends_failed(Failure::Engine);
+    expected.push(refused.clone());
+    assert_eq!(
+        core.handle(Input::SendDeadline { lease: held }),
+        Ok(expected)
+    );
+    assert_eq!(
+        core.handle(delete(B, 1)),
+        Ok(vec![refused]),
+        "B stays fenced"
+    );
+    core.handle(Input::RunStored { run: R }).expect("ending");
+
+    core.handle(Input::Turn {
+        turn: 1,
+        thread: Some(T),
+        text: "again".into(),
+    })
+    .expect("a turn is never stale");
+    core.handle(Input::TurnStored { run: R2 }).expect("current");
+    core.handle(built(R2, 2, &[T])).expect("current");
+    let next = LeaseId {
+        key: build(R2, 2),
+        send: 2,
+    };
+    assert_eq!(
+        core.handle(Input::SendReady {
+            key: next.key,
+            hold: None,
+        }),
+        Ok(vec![
+            Effect::Grant(next),
+            Effect::ArmSendDeadline {
+                lease: next,
+                after: SEND_DEADLINE,
+            },
+        ]),
+        "a later run is granted"
+    );
+    core.handle(Input::SendSettled { lease: next })
+        .expect("granted");
+    core.handle(engine(
+        super::engine_key(&core, R2),
+        TurnEvent::Finished(Finish::Completed),
+    ))
+    .expect("current");
+    assert_eq!(
+        core.handle(Input::RunStored { run: R2 }),
+        Ok(done_starting(R2, 3))
+    );
+    assert_eq!(
+        core.handle(job_built(key(3), &[T])),
+        Ok(vec![start_job(key(3), R2)])
+    );
+    assert_eq!(
+        core.handle(ready(key(3))),
+        Ok(granted(lease(key(3), 3))),
+        "its title job is granted"
     );
 }
 

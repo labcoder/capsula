@@ -173,7 +173,12 @@ sequenceDiagram
 - **Held sends.** A sender whose body can go out again until a process tree is confirmed ended
   (a Claude Code question, see [claude-code.md](claude-code.md#launches)) asks with
   `SendGate::ask_held(hold)`. Its lease's deadline is `hold`, capped at `MAX_HOLD` (165 s), in
-  place of the 15 s, for builds and jobs alike, and fails closed the same way.
+  place of the 15 s, for builds and jobs alike. Past it, the lease fails closed the same way: its
+  run fails, its held deletes are refused, and its sources stay fenced until the brain restarts.
+  It doesn't stop other grants, though. A held sender is a separate process on its own pipes, not
+  the shared transport, so a teardown that never confirmed is that lane's fault alone, and the
+  lane already refuses every later launch (see [claude-code.md](claude-code.md#launches)). ChatGPT
+  runs and their title and summary jobs keep being granted.
 - **Restart.** A held delete never reached the store, so after a restart its thread is still
   there and no success was ever reported, as with any delete a quit didn't finish.
 
