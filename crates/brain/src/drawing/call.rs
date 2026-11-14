@@ -651,6 +651,7 @@ impl Drawing {
             step,
             fenced: false,
             clear_requested: false,
+            loss_dropped: false,
             interrupted: None,
             laid: None,
         };
@@ -897,8 +898,19 @@ impl Drawing {
         if loss == super::Loss::Drop && !ended.contains(&run) {
             ended.push(run);
         }
+        // shortcut: older runs' losses settle with the closing run's flag, which holds while runs
+        // are sequential; give each run its own once OSC-56 lets runs overlap.
         for owner in ended {
             self.end_loss(owner, loss, out);
+        }
+        if loss == super::Loss::Drop
+            && let Some(super::Pending {
+                wait: Wait::Step(write) | Wait::Prepare { step: write, .. },
+                ..
+            }) = &mut self.pending
+            && write.run <= closed
+        {
+            write.loss_dropped = true;
         }
         let calls: Vec<_> = self
             .calls

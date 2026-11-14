@@ -1301,16 +1301,15 @@ impl Coordinator {
             speech::revoke(&mut run, crate::voice::reply::Revoker::Brain, effects);
         }
         let drew_nothing = outcome == RunEnd::Done && self.drawing.drew_nothing(run.id);
-        let by_user = matches!(
-            outcome,
+        let loss = match outcome {
             RunEnd::Interrupted(
-                Interruption::Stop | Interruption::Replaced | Interruption::Deleted
-            )
-        );
-        let loss = if by_user {
-            crate::drawing::Loss::Drop
-        } else {
-            crate::drawing::Loss::Tell
+                Interruption::Stop | Interruption::Replaced | Interruption::Deleted,
+            ) => crate::drawing::Loss::Drop,
+            RunEnd::Done
+            | RunEnd::Interrupted(Interruption::ShellLost | Interruption::ViewStalled)
+            | RunEnd::Failed(Failure::Budget | Failure::Engine | Failure::Store) => {
+                crate::drawing::Loss::Tell
+            }
         };
         self.drawing_closed(run.id, loss, effects);
         run.tools.drop_round();
@@ -1320,7 +1319,7 @@ impl Coordinator {
         // Steps waiting for the scene's id were never sent, so no ack is owed for them.
         run.steps = run.sent();
         run.waiting.clear();
-        if by_user {
+        if loss == crate::drawing::Loss::Drop {
             effects.push(Effect::Revoke { run: run.id });
         }
         run.held.clear();

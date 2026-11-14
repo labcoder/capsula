@@ -27,6 +27,13 @@ impl Drawing {
             held.committers[0].expect("replacement's first step was committed live"),
             held.thread,
         );
+        if run <= self.closed {
+            out.effects.push(Effect::Control(
+                kumochi_protocol::message::ControlToShell::DrawingReplacementFailed { thread, run },
+            ));
+            self.end_loss(run, super::Loss::Drop, out);
+            return;
+        }
         self.ledger(run).loss = Some(thread);
         self.settle_loss(run, out);
     }
@@ -102,6 +109,7 @@ impl Drawing {
             step,
             fenced,
             clear_requested,
+            loss_dropped,
             interrupted,
             laid,
             ..
@@ -133,7 +141,7 @@ impl Drawing {
                 (scene, committed.index)
             }
             Pend::New { admission, victims } => {
-                let replaced = !victims.is_empty();
+                let replaced = !victims.is_empty() && !loss_dropped;
                 let mut states: Vec<_> = self
                     .scenes
                     .iter_mut()

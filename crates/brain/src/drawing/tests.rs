@@ -962,6 +962,48 @@ fn a_call_that_spends_the_run_s_last_step_tells_the_loss() {
 }
 
 #[test]
+fn a_replacement_saved_after_the_user_ended_its_run_reports_no_loss() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    store.run(
+        &mut drawing,
+        call(1, "old", args("old", &[text("old", "old")])),
+    );
+    let mut held = drawing
+        .handle(call(1, "new", replacement_args("new", &numbered("n", 1))))
+        .expect("a fresh call");
+    while let Some((serial, write)) =
+        sent(&held).filter(|(_, write)| !matches!(write, Write::Step { .. }))
+    {
+        let reply = Ok(store.answer(&write));
+        held = drawing
+            .handle(Input::Written { serial, reply })
+            .expect("the pending lookup");
+    }
+    let first = sent(&held)
+        .expect("the first step's write is in the store")
+        .1;
+    let mut out = drawing
+        .handle(Input::RunClosed {
+            run: RunId(1),
+            loss: Loss::Drop,
+        })
+        .expect("the user ended the run");
+    let answer = store.answer(&first);
+    merge(&mut out, reply(&mut drawing, &held, Ok(answer)));
+    let out = store.settle(&mut drawing, out);
+    assert_eq!(
+        drawing.scenes.len(),
+        1,
+        "the replacement's scene was installed"
+    );
+    let failed = store.run(&mut drawing, first_step_failed());
+    assert_eq!(notices_in(&out), []);
+    assert_eq!(notices_in(&failed), []);
+    assert!(no_loss(&drawing));
+}
+
+#[test]
 fn deleting_the_thread_drops_its_loss_silently() {
     let mut drawing = Drawing::default();
     let mut store = Store::default();

@@ -134,7 +134,9 @@ deferred until the run can no longer draw a step: at once when its step budget i
 end of a call that spends it, or at `RunClosed`. `RunClosed` carries a `Loss` the coordinator
 takes from the run's outcome: `Drop` for `Interrupted(Stop | Replaced | Deleted)`, which the user
 caused, and `Tell` for every other end, including `Done` and `Failed`. Either way the ledger
-leaves with the run, and the run's scenes report no loss after it. A thread deletion drops its
+leaves with the run. After `Drop`, none of the run's scenes reports a loss, including a
+replacement whose first step was still being saved. After `Tell`, a scene of the run that still
+shows nothing and fails later is told at once, at most once per run. A thread deletion drops its
 runs' losses silently. A run that loses a replacement and then paints a different drawing gives
 no notice.
 Whole-scene `SceneFailed` refusals derive their original
