@@ -360,6 +360,15 @@ the account lock first on every call, then pins the chain to `engine\` with `hol
 deletes each leftover with `remove_tree`, so a second lane or brain never sweeps a live launch,
 and a reparse point anywhere on the way is refused rather than followed. A leftover that won't
 delete doesn't fail the call.
+
+The same sweep empties two folders Claude Code fills on each launch inside Kumochi's folder:
+`config\sessions\`, where it writes a `<pid>.json` record that only a clean exit removes, so a
+Stop or a deadline leaves one behind; and `local\claude-cli-nodejs\Cache\`, where its MCP logs
+record each session's id, its working folder, the tools it called and their timings. Only those
+two folders' children go, through the same `hold_chain` and `remove_tree`: nothing at the root of
+`config\` (the sign-in file is there), nothing else under `local\`, and not `config\backups\`.
+Nothing is opened for reading, and no name, size or content is logged. A failed delete is left for
+the next sweep, as `engine\` leftovers are.
 - shortcut: a locked leftover is retried only before each lane call and at brain start, not on a
   timer, so it can stay for an idle session; add a timer if that turns out to matter.
 

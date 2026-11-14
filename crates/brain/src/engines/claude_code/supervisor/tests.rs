@@ -21,6 +21,7 @@ use crate::coordinator::Input as CoordinatorInput;
 use crate::engines::claude_code::lane::tests::{Base, host, locked, soon};
 use crate::engines::claude_code::lane::{Failure, LANE_QUEUE, Lane, Outcome, PIPE_GRACE, Work};
 use crate::engines::{self, Asks, Engine, Finish, Round, RunRequest, SendGate, TurnEvent};
+use crate::platform::sherpa::tests::set_junction;
 use crate::platform::{self, FAKE_CLAUDE, Job, Stdio};
 
 /// What a test sets on a launch before it's queued.
@@ -998,6 +999,77 @@ async fn a_restarted_lane_sweeps_leftover_launches() {
     assert!(matches!(version(&mut lane).await, Ok(Outcome::Version(_))));
     assert!(launch_dirs(&base).is_empty());
     assert!(!file.exists());
+}
+
+/// Claude Code's session record and MCP log go at the next sweep, and nothing beside them: not
+/// the sign-in file at the root of either swept folder's parent, nor its backups.
+#[tokio::test]
+async fn a_sweep_takes_claude_codes_session_records_and_mcp_logs_and_nothing_beside_them() {
+    let base = Base::new("launch-sweep-files");
+    let config = base.owned().join("config");
+    let cli = base.owned().join("local").join("claude-cli-nodejs");
+    let sessions = config.join("sessions");
+    let cache = cli.join("Cache");
+    let swept = [
+        sessions.join("4242.json"),
+        cache
+            .join("C--work")
+            .join("mcp-logs-kumochi")
+            .join("1.jsonl"),
+    ];
+    let kept = [
+        config.join(".credentials.json"),
+        cli.join(".credentials.json"),
+        config.join("backups").join("1.json"),
+    ];
+    for file in swept.iter().chain(&kept) {
+        owned_dirs(&base, file.parent().expect("a folder"));
+        fs::write(file, b"left").expect("a file");
+    }
+    let stamps = |file: &Path| {
+        let meta = fs::metadata(file).expect("still there");
+        let bytes = fs::read(file).expect("the test's own bytes");
+        (
+            bytes,
+            meta.modified().expect("written"),
+            meta.created().expect("made"),
+        )
+    };
+    let before: Vec<_> = kept.iter().map(|file| stamps(file)).collect();
+    let _lane = found(&base, "out").await;
+    for folder in [&sessions, &cache] {
+        assert_eq!(fs::read_dir(folder).expect("kept").count(), 0, "{folder:?}");
+    }
+    assert_eq!(
+        kept.iter().map(|file| stamps(file)).collect::<Vec<_>>(),
+        before
+    );
+}
+
+/// A swept folder that is a junction is refused, so nothing behind it is deleted.
+#[tokio::test]
+async fn a_swept_folder_that_is_a_junction_is_never_followed() {
+    for (name, folder) in [
+        ("sessions", ["config", "sessions"].as_slice()),
+        ("cache", ["local", "claude-cli-nodejs", "Cache"].as_slice()),
+    ] {
+        let base = Base::new(&format!("launch-sweep-junction-{name}"));
+        let outside = base.0.join("outside");
+        // Trusted like Kumochi's own folders, so only the refused junction keeps it.
+        owned_dirs(&base, &outside);
+        let behind = outside.join("4242.json");
+        fs::write(&behind, b"kept").expect("a file outside");
+        let link = folder
+            .iter()
+            .fold(base.owned(), |path, part| path.join(part));
+        owned_dirs(&base, &link);
+        set_junction(&link, &outside).expect("a junction out of the folder");
+        let (host, _switches) = host(&base, "out");
+        let mut lane = Lane::start(host).expect("lane");
+        assert_eq!(version(&mut lane).await, Err(Failure::Folders), "{name}");
+        assert!(lane.close(soon()).await);
+        assert_eq!(fs::read(&behind).expect("still there"), b"kept", "{name}");
+    }
 }
 
 /// S8.
