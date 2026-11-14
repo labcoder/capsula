@@ -53,7 +53,8 @@ pub(crate) fn run() -> Result<()> {
         .collect();
     ensure!(
         unlisted.is_empty(),
-        "kumochi-shell-core depends on crates that are not on the list in xtask/src/core.rs: {}",
+        "kumochi-shell-core depends on crates that are not on the list in \
+         xtask/src/check_core.rs: {}",
         unlisted.join(", ")
     );
     let whole = tree(root, &["--package", "kumochi-shell-core"])?;

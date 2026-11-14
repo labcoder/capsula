@@ -13,7 +13,7 @@ use kumochi_protocol::tap;
 
 #[cfg(windows)]
 mod bench;
-mod core;
+mod check_core;
 #[cfg(windows)]
 mod gate;
 #[cfg(windows)]
@@ -110,7 +110,7 @@ fn main() -> Result<()> {
             println!("{}", usage());
             Ok(())
         }
-        Some("check-core") => core::run(),
+        Some("check-core") => check_core::run(),
         Some("check-vendor") => vendor::run(),
         Some("pipe-dump") => pipe_dump(
             &args
