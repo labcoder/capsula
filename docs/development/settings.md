@@ -32,6 +32,12 @@ compose their tabs without another settings entity. The shell's UI thread never 
 The plain model also retains the brain notice across reconnects and fences incoming settings
 by connection generation before changing any draft, save slot or saved view.
 
+**Model** (`shell-core/settings/model.rs`): Presence hands each `DataToShell::Models` catalog to
+the settings model, which keeps one per connection that has an engine (ChatGPT, and Claude Code
+once it lists models) and drops them on disconnect. General draws one radio per model and sends
+`SetDefaultModel` with the newest choice's effort on the same connection, else `Low`. The
+brain checks the model per run, so the shell doesn't validate it.
+
 Enter or blur validates with the protocol's name types and queues the change. An unchanged
 normalized name sends no operation, including inline renames. While saving, that field is readonly and says Saving…;
 the other field remains usable. A refused save restores its authoritative value and keeps its

@@ -448,6 +448,25 @@ impl Presence {
         });
     }
 
+    pub(in crate::presence) fn save_default_model(
+        &mut self,
+        connection: kumochi_protocol::message::ConnectionKind,
+        model: kumochi_protocol::message::ModelSlug,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let (link, session) = (&self.link, &self.session);
+        self.settings.update(cx, |state, cx| {
+            let sent = state.send_default_model(connection, model, |op| {
+                session
+                    .as_ref()
+                    .is_some_and(|session| link.send_control(session, ControlToBrain::Settings(op)))
+            });
+            if sent {
+                cx.notify();
+            }
+        });
+    }
+
     pub(in crate::presence) fn save_setting(
         &mut self,
         field: Field,
