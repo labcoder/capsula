@@ -163,7 +163,10 @@ pub(crate) fn qpc() -> Result<i64> {
 
 fn presentmon_path(path: Option<OsString>) -> Result<PathBuf> {
     let path = PathBuf::from(path.context("set PRESENTMON_EXE to your PresentMon-2.6.0-x64.exe")?);
-    ensure!(path.is_absolute(), "PRESENTMON_EXE must be an absolute path");
+    ensure!(
+        path.is_absolute(),
+        "PRESENTMON_EXE must be an absolute path"
+    );
     ensure!(
         path.file_name().and_then(|name| name.to_str()) == Some("PresentMon-2.6.0-x64.exe"),
         "PRESENTMON_EXE must select PresentMon-2.6.0-x64.exe"
