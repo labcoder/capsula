@@ -341,7 +341,7 @@ fn gated<'a>(rest: &[&'a str]) -> Option<&'a str> {
 
 /// The keyword of the item a line declares, if it declares one.
 fn item(line: &str) -> Option<&str> {
-    const ITEMS: [&str; 12] = [
+    const ITEMS: [&str; 11] = [
         "mod",
         "fn",
         "impl",
@@ -353,7 +353,6 @@ fn item(line: &str) -> Option<&str> {
         "trait",
         "union",
         "macro_rules",
-        "crate",
     ];
     let line = match line.strip_prefix("pub(") {
         Some(scope) => scope.split_once(") ")?.1,
@@ -363,6 +362,7 @@ fn item(line: &str) -> Option<&str> {
     let first = words.next()?;
     match first {
         "const" => Some(words.next().filter(|word| *word == "fn").unwrap_or(first)),
+        "extern" if line.starts_with("extern crate ") => Some("crate"),
         "async" | "unsafe" | "extern" => words.take(3).find(|word| ITEMS.contains(word)),
         _ => ITEMS.contains(&first).then_some(first),
     }
@@ -473,6 +473,8 @@ pub(in crate::presenter) use fixture::step;
 #[cfg(test)]
 unsafe extern "system" fn callback() {}
 #[cfg(test)]
+extern crate alloc;
+#[cfg(test)]
 mod tests;
 "#;
         assert_eq!(gate_faults(items), []);
@@ -509,8 +511,10 @@ mod tests;
         for (gate, under) in [
             ("#[cfg(test)]", "return Self::stub();"),
             ("#[cfg(test)]", "record(&frame);"),
+            ("#[cfg(test)]", "crate::record(&frame);"),
             ("#[cfg(test)]", "{"),
             ("#[cfg(test)]", "unsafe { record(&frame) }"),
+            ("#[cfg(test)]", "unsafe { crate::record(&frame) }"),
             ("#[cfg(test)]", "let recorded = Vec::new();"),
             ("#[cfg(test)]", "recorded: Vec<Frame>,"),
             ("#[cfg(test)]", "StopReason::Release => {}"),
