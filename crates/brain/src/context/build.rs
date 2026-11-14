@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use kumochi_protocol::constants::DISPLAY_NAME;
-use kumochi_protocol::message::{EventId, RunId, ThreadId, ThreadKind};
+use kumochi_protocol::message::{ConnectionKind, EventId, RunId, ThreadId, ThreadKind};
 use serde_json::{Value, json};
 
 use super::bound::{fixed_bytes, item_bytes};
@@ -216,9 +216,14 @@ pub(super) fn render(
     local_time: Option<&str>,
     sources: &mut BTreeSet<ThreadId>,
 ) -> Result<Vec<InputItem>, StoreError> {
-    let native = items.iter().any(
-        |item| matches!(&item.body, Body::Native { connection, .. } if *connection == run.connection),
-    );
+    // Native items replay only on `ChatGPT`; any other route gets each run as its text.
+    let native = run
+        .choice
+        .as_ref()
+        .is_none_or(|choice| choice.connection == ConnectionKind::ChatGpt)
+        && items.iter().any(
+            |item| matches!(&item.body, Body::Native { connection, .. } if *connection == run.connection),
+        );
     let after_rounds = items
         .iter()
         .rposition(|item| {

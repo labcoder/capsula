@@ -99,11 +99,8 @@ impl Coordinator {
         let refused = self
             .current
             .as_ref()
-            .and_then(|run| run.connection)
-            .map_or_else(
-                || Some(sign_in_needed()),
-                |connection| self.refusal(connection),
-            )
+            .and_then(|run| run.route)
+            .map_or_else(|| Some(sign_in_needed()), |route| self.refusal(route))
             .or_else(|| {
                 // A request that started before the switch went off still holds its own copy.
                 self.current

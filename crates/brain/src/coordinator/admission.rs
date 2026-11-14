@@ -7,7 +7,6 @@ use std::collections::BTreeSet;
 
 use kumochi_protocol::message::{RunId, ThreadId};
 
-use super::availability::sign_in_needed;
 use super::inline::Inline;
 use super::{Coordinator, Effect, SendKey, Stale, StoreOp};
 use crate::context::{Built, Origin, RunSnapshot};
@@ -266,14 +265,20 @@ impl Coordinator {
             .snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.choice.clone());
-        let refused = match current.connection {
-            Some(connection) => self.refusal(connection),
-            None => Some(sign_in_needed()),
-        }
-        .or_else(|| first.then(|| self.unlisted(choice.as_ref())).flatten());
+        let (route, arrived) = (current.route, current.arrived);
+        let route = match route.map_or_else(|| self.route_for(arrived, choice.as_ref()), Ok) {
+            Ok(route) => route,
+            Err(reason) => return self.fail_with(key.run, Failure::Engine, reason, effects),
+        };
+        let refused = self.refusal(route).or_else(|| {
+            first
+                .then(|| self.unlisted(route.kind, choice.as_ref()))
+                .flatten()
+        });
         if let Some(reason) = refused {
             return self.fail_with(key.run, Failure::Engine, reason, effects);
         }
+        self.current(key.run)?.route = Some(route);
         let made = match made {
             Ok(made) => made,
             Err(room) => return self.compact_inline(key, room, effects),

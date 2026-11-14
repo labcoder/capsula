@@ -37,6 +37,8 @@ mod inline;
 mod jobs;
 #[path = "lease_tests.rs"]
 mod leases;
+#[path = "route_tests.rs"]
+mod routes;
 #[path = "scene_tests.rs"]
 mod scenes;
 #[path = "speech_tests.rs"]

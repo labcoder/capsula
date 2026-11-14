@@ -407,6 +407,8 @@ fn a_send_takes_its_runs_connection_only_while_the_run_is_current() {
         thread: T,
         serial: 2,
     });
+    assert_eq!(core.sending(round), None, "unbound before its first build");
+    core.handle(built(Some("m"), Vec::new())).expect("current");
     assert_eq!(core.sending(round), Some(ConnectionTag(7)));
     assert_eq!(core.handle(ready(8, &["m"])).map(|_| ()), Ok(()));
     assert_eq!(core.sending(job), Some(ConnectionTag(8)));
@@ -426,7 +428,11 @@ fn a_send_takes_its_runs_connection_only_while_the_run_is_current() {
         revealed: Vec::new(),
     })
     .expect("current");
-    assert_eq!(core.bound(R), Some(ConnectionTag(7)), "the run is ending");
+    assert_eq!(
+        core.replay_tag(R),
+        Some(ConnectionTag(7)),
+        "the run is ending"
+    );
     assert_eq!(core.sending(round), None);
 
     let core = typed(None);

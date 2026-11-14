@@ -182,7 +182,12 @@ impl Coordinator {
                 .thread
                 .is_some_and(|thread| self.deleting_thread(thread))
             || self.connection() != Some(snapshot.defaults.connection)
-            || self.unlisted(snapshot.defaults.choice.as_ref()).is_some())
+            || self
+                .unlisted(
+                    kumochi_protocol::message::ConnectionKind::ChatGpt,
+                    snapshot.defaults.choice.as_ref(),
+                )
+                .is_some())
     }
 
     pub(crate) fn cancel_current_hold(&mut self) -> Vec<Effect> {
@@ -231,7 +236,12 @@ impl Coordinator {
                     && self.connection() == Some(hold.defaults.connection)
                     && !self.deleting_thread(run.thread)
                     && run.snapshot.as_ref() == Some(&hold.defaults)
-                    && self.unlisted(hold.defaults.choice.as_ref()).is_none()
+                    && self
+                        .unlisted(
+                            kumochi_protocol::message::ConnectionKind::ChatGpt,
+                            hold.defaults.choice.as_ref(),
+                        )
+                        .is_none()
             })
         })
     }

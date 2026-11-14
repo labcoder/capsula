@@ -59,6 +59,13 @@ pub(crate) enum Origin {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ConnectionTag(pub(crate) u64);
 
+/// What a run answers on: a connection kind and the sign-in it was bound to at its first build.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Route {
+    pub(crate) kind: ConnectionKind,
+    pub(crate) tag: ConnectionTag,
+}
+
 /// What a run reads once when it starts and reuses for every round, so a rename applies from the
 /// next run.
 #[derive(Clone, Debug, PartialEq, Eq)]

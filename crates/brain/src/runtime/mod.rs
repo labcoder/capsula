@@ -1034,7 +1034,7 @@ impl Brain {
         let (origin, run) = (build.origin, build.key.run);
         build.snapshot.get_or_insert_with(|| RunSnapshot {
             // A build for a run that already ended is stale, so its tag is never read.
-            connection: self.coordinator.bound(run).unwrap_or(ConnectionTag(0)),
+            connection: self.coordinator.replay_tag(run).unwrap_or(ConnectionTag(0)),
             ..self.snapshot(origin)
         });
     }

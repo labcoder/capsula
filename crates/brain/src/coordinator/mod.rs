@@ -561,9 +561,11 @@ struct Run {
     untold: Option<kumochi_protocol::message::GestureId>,
     /// The round's current build; the engine starts once it's admitted.
     build: Option<admission::Build>,
-    /// The connection that was ready when the run's turn arrived; none means the run failed
-    /// then.
-    connection: Option<crate::context::ConnectionTag>,
+    /// The sign-in each kind had ready when the run's turn arrived; a kind's entry goes when that
+    /// kind changes before the first build.
+    arrived: availability::Arrived,
+    /// What the run answers on, from its first admitted build on.
+    route: Option<crate::context::Route>,
     /// The round that compacted inline since the run's last admitted build.
     compacted: Option<u32>,
     /// The draw call the engine's steps stream in, once it starts.
@@ -1161,7 +1163,8 @@ impl Coordinator {
             hold,
             screen,
             build: None,
-            connection: self.connection(),
+            arrived: self.arrived_now(),
+            route: None,
             compacted: None,
             draw: None,
             draw_calls: Vec::new(),
@@ -1195,7 +1198,9 @@ impl Coordinator {
 
     /// Fails the run `turn` just started while nothing can answer it; the turn is kept.
     fn unanswered(&mut self, run: RunId, effects: &mut Vec<Effect>) {
-        if let Availability::Unavailable(reason) = &self.availability {
+        if let Availability::Unavailable(reason) = &self.availability
+            && self.arrived_now() == availability::Arrived::default()
+        {
             let reason = reason.clone();
             self.fail_with(run, Failure::Engine, reason, effects)
                 .expect("the run is current");
