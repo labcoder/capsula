@@ -12,9 +12,6 @@ use kumochi_protocol::message::{
 use kumochi_scene::text::Bounded;
 
 mod cards;
-#[cfg(not(any(test, feature = "test-support")))]
-pub(crate) use cards::Feedback as IssueFeedback;
-#[cfg(any(test, feature = "test-support"))]
 pub use cards::Feedback as IssueFeedback;
 #[cfg(test)]
 mod tests;
