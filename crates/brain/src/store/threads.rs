@@ -1,11 +1,10 @@
 //! The main thread, and what the shell may change about a thread: a task's title and a thread's
 //! model choice. Neither change moves a thread in the list.
 
-use kumochi_protocol::message::{
-    Effort, ModelChoice, ModelSlug, ThreadId, ThreadKind, ThreadTitle,
-};
+use kumochi_protocol::message::{ModelChoice, ThreadId, ThreadKind, ThreadTitle};
 use rusqlite::{OptionalExtension as _, params};
 
+use super::choice::{StoredChoice, connection_text, effort_text};
 use super::{Generation, Store, StoreError, now_ms, row_id, sql_id};
 
 /// Who set a task's title. A first-words title is `BeginTurn`'s, and only it can be replaced by
@@ -88,20 +87,16 @@ impl Store {
             return Ok(false);
         };
         let changed = self.conn.execute(
-            "UPDATE threads SET model = ?2, effort = ?3 WHERE id = ?1 AND state = 'live'",
-            params![thread, choice.model.as_str(), effort_text(choice.effort)],
+            "UPDATE threads SET model = ?2, effort = ?3, connection = ?4
+             WHERE id = ?1 AND state = 'live'",
+            params![
+                thread,
+                choice.model.as_str(),
+                effort_text(choice.effort),
+                connection_text(choice.connection)
+            ],
         )?;
         Ok(changed > 0)
-    }
-}
-
-fn effort_text(effort: Effort) -> &'static str {
-    match effort {
-        Effort::Low => "low",
-        Effort::Medium => "medium",
-        Effort::High => "high",
-        Effort::XHigh => "xhigh",
-        Effort::Max => "max",
     }
 }
 
@@ -114,29 +109,11 @@ pub(super) fn kind_of(text: &str) -> rusqlite::Result<ThreadKind> {
     }
 }
 
-/// A stored `model` and `effort`, which are both set or both null. A slug no build wrote fails the
-/// read. An effort this build doesn't know, an older or a newer build's, reads as no choice, so the
-/// thread falls back to the default model and the page still reads (CAPS-90 M1).
+/// Displays a structurally valid saved selection without requiring a live catalog.
 pub(super) fn choice_of(
     model: Option<&str>,
     effort: Option<&str>,
+    connection: Option<&str>,
 ) -> rusqlite::Result<Option<ModelChoice>> {
-    let (Some(model), Some(effort)) = (model, effort) else {
-        return Ok(None);
-    };
-    let model = ModelSlug::new(model).map_err(|_| rusqlite::Error::InvalidQuery)?;
-    let Some(effort) = Effort::ALL
-        .into_iter()
-        .find(|known| effort_text(*known) == effort)
-    else {
-        tracing::warn!("a stored effort this build doesn't know reads as no choice");
-        return Ok(None);
-    };
-    // shortcut: the store keeps no connection until A3's migration, so every saved choice reads
-    // as ChatGPT's.
-    Ok(Some(ModelChoice {
-        model,
-        effort,
-        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
-    }))
+    StoredChoice::decode(model, effort, connection).display()
 }

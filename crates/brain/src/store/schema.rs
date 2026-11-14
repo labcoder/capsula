@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use super::StoreError;
 
 /// Each entry moves the schema up one version; append, never edit.
-pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8];
+pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9];
 
 /// Threads, their append-only events with full-text search, and runs. Foreign keys have no
 /// cascade, so deletion names every table and fails loudly if one is missed.
@@ -175,6 +175,12 @@ INSERT INTO approval_mark (id, last) VALUES (1, 0);
 /// build doesn't know reads as none.
 const V8: &str = "
 ALTER TABLE runs ADD COLUMN screen TEXT;
+";
+
+/// A thread's saved model choice names its connection. Older choices were all `ChatGPT`'s.
+const V9: &str = "
+ALTER TABLE threads ADD COLUMN connection TEXT;
+UPDATE threads SET connection = 'chatgpt' WHERE model IS NOT NULL;
 ";
 
 /// Applies every migration past the file's version, each in its own transaction.

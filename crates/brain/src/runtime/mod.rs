@@ -1067,11 +1067,25 @@ impl Brain {
     /// What a run's first build, or a job's read, takes: the names and default model now.
     fn snapshot(&self, origin: Origin) -> RunSnapshot {
         let view = self.config.view();
+        // An invalid default runs nothing: with no choice, a run's model check refuses it.
+        let choice = match self.config.default_choice() {
+            crate::store::choice::StoredChoice::Absent
+            | crate::store::choice::StoredChoice::Invalid => None,
+            crate::store::choice::StoredChoice::Valid {
+                connection,
+                model,
+                effort,
+            } => Some(kumochi_protocol::message::ModelChoice {
+                connection,
+                model,
+                effort: effort.unwrap_or(kumochi_protocol::message::Effort::Low),
+            }),
+        };
         RunSnapshot {
             origin,
             assistant: view.assistant_name.clone(),
             user: view.user_name.clone(),
-            choice: view.default_model.clone(),
+            choice,
             // shortcut: a job records no connection yet; 13b tags it with the one it used.
             connection: ConnectionTag(0),
         }

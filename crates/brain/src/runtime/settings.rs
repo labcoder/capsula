@@ -275,6 +275,17 @@ impl Brain {
                     answered?;
                     continue;
                 }
+                // A queued repair is recomputed here, so it never replaces a choice written since.
+                Change::User(SettingsOp::SetDefaultModel(_)) if epoch == BRAIN => {
+                    let Some(choice) = self.repaired_default() else {
+                        continue;
+                    };
+                    (
+                        self.config.stage(SettingsOp::SetDefaultModel(choice)),
+                        None,
+                        None,
+                    )
+                }
                 Change::User(op) => (self.config.stage(op), None, None),
                 // A removal committed since the load: writing it would put the part back.
                 Change::Voice(VoiceWrite::Activate { part, token })

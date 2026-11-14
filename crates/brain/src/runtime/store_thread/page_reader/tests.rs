@@ -455,6 +455,61 @@ fn choice(slug: &str) -> ModelChoice {
 }
 
 /// A built request and the model its run read.
+#[test]
+fn route_choice_non_chatgpt_context_and_jobs_never_build_on_chatgpt() {
+    use crate::coordinator::{JobBuilt, JobKey, JobKind, ReadJob};
+    use kumochi_protocol::message::ConnectionKind;
+
+    for connection in [ConnectionKind::ClaudeCode, ConnectionKind::AnthropicKey] {
+        let scratch = Scratch::new(&format!("route-read-{connection:?}"));
+        let mut store = Store::open(&scratch.db()).expect("store");
+        store.recover().expect("recover");
+        with_thread(&mut store, 2);
+        let picked = ModelChoice {
+            connection,
+            ..choice("same-slug")
+        };
+        store.set_model(ThreadId(2), &picked).expect("save");
+        let running = run(store, None);
+        let request = build(2, 1, Some(choice("chatgpt-default")));
+        let StoreOp::BuildContext(context) = &request else {
+            panic!("build")
+        };
+        let snapshot = context.snapshot.clone();
+        assert!(running.thread.send(request));
+        assert!(matches!(
+            running.ack(),
+            Input::ContextBuilt(ContextBuilt {
+                result: Err(Unbuilt::Failed),
+                ..
+            })
+        ));
+        for kind in [JobKind::Title, JobKind::Compact] {
+            assert!(running.thread.send(StoreOp::ReadJob(ReadJob {
+                control: crate::recall::control::Control::new(
+                    std::time::Instant::now() + crate::coordinator::WALL_CLOCK,
+                ),
+                key: JobKey {
+                    thread: ThreadId(2),
+                    serial: 1
+                },
+                kind,
+                origin: Origin::Task(ThreadId(2)),
+                snapshot: snapshot.clone(),
+                compact_at: 1,
+            })));
+            assert!(matches!(
+                running.ack(),
+                Input::JobBuilt(JobBuilt {
+                    result: Err(Unbuilt::Failed),
+                    ..
+                })
+            ));
+        }
+        running.thread.close().blocking_recv().expect("closed");
+    }
+}
+
 fn made(reply: Input) -> (Built, Option<ModelChoice>) {
     match reply {
         Input::ContextBuilt(ContextBuilt {

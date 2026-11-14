@@ -59,6 +59,24 @@ fn answering(status: u16, body: &str) -> Once {
     }
 }
 
+#[test]
+fn route_choice_chatgpt_refresh_keeps_another_connections_default() {
+    use kumochi_protocol::message::ConnectionKind;
+
+    let models = [ModelInfo {
+        slug: ModelSlug::new("gpt-6-luna").expect("slug"),
+        display_name: ModelName::new("Luna").expect("name"),
+    }];
+    for connection in [ConnectionKind::ClaudeCode, ConnectionKind::AnthropicKey] {
+        let current = ModelChoice {
+            model: ModelSlug::new("same-slug").expect("slug"),
+            effort: Effort::High,
+            connection,
+        };
+        assert_eq!(default_model(Some(&current), &models), None);
+    }
+}
+
 fn model(slug: &str, name: &str) -> Value {
     json!({ "slug": slug, "display_name": name, "visibility": "list" })
 }

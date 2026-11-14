@@ -9,6 +9,7 @@ use crate::coordinator::{
     Unbuilt,
 };
 use crate::recall::control::READ_TIME;
+use crate::store::choice::StoredChoice;
 use crate::store::context::Snapshot;
 use crate::store::{Side, StoreError};
 use std::time::Instant;
@@ -39,12 +40,17 @@ pub(super) fn read_hold(
                             let read = Snapshot::begin(conn)?;
                             #[cfg(test)]
                             hold();
-                            if let Some(thread) = snapshot.thread {
-                                snapshot.generation =
-                                    Some(read.generation(thread)?.ok_or(StoreError::NoThread)?);
-                                snapshot.defaults.choice =
-                                    read.choice(thread)?.or(snapshot.defaults.choice.take());
-                            }
+                            let stored = match snapshot.thread {
+                                Some(thread) => {
+                                    snapshot.generation =
+                                        Some(read.generation(thread)?.ok_or(StoreError::NoThread)?);
+                                    read.stored_choice(thread)?
+                                }
+                                None => StoredChoice::Absent,
+                            };
+                            // A hold's run takes this snapshot whole, so its first build reads no choice.
+                            snapshot.defaults.choice =
+                                stored.execution(snapshot.defaults.choice.take())?;
                             read.end()?;
                             Ok(())
                         })
@@ -119,7 +125,9 @@ pub(super) fn read(
                     #[cfg(test)]
                     hold();
                     if first {
-                        snapshot.choice = read.choice(thread)?.or(snapshot.choice.take());
+                        snapshot.choice = read
+                            .stored_choice(thread)?
+                            .execution(snapshot.choice.take())?;
                     }
                     let local_time = read.local_time()?;
                     let turn = Turn {
@@ -256,7 +264,9 @@ pub(super) fn read_job(
                     let read = Snapshot::begin(conn)?.controlled(scope.clone());
                     #[cfg(test)]
                     hold();
-                    snapshot.choice = read.choice(key.thread)?.or(snapshot.choice.take());
+                    snapshot.choice = read
+                        .stored_choice(key.thread)?
+                        .execution(snapshot.choice.take())?;
                     let ask = match kind {
                         JobKind::Title => Ok(read.first_ask(key.thread)?.map(|ask| JobAsk {
                             generation: ask.generation,
