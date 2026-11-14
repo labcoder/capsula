@@ -18,6 +18,7 @@ A local-first desktop AI presence: a GPUI shell (`kumochi.exe`) and a headless b
 crates/protocol/   shared data: Secret, and constants.rs (every product name)
 crates/scene/      the drawing format, validator and layout
 crates/brain/      bin kumochid: the headless process
+crates/shell-core/ what the shell knows and decides; no UI framework in its tree
 crates/shell/      bin kumochi: the GPUI app
 xtask/             dev tasks in Rust; no scripts in other languages
 docs/development/  how Kumochi works inside

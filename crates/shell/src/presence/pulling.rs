@@ -3,10 +3,9 @@
 //! boundary, so growing or moving the overlay never shifts the grip. How it fits:
 //! docs/development/kumo.md, "The pull".
 
-use gpui_kit::{MouseButton, Pixels, Point};
-
 use super::drag::{DragOwner, Event, Generation, Outcome};
 use super::kumo::{CARRY_WIDTH, Motion, Pull, Rect, SNAP_LEN, Vec2, v2};
+use crate::platform::input::Button;
 
 /// Logical pixels from the work area's origin, at the work area and scale fixed at the grab.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -19,13 +18,11 @@ pub(crate) struct PullSpace {
 }
 
 impl PullSpace {
-    /// `at`, a GPUI point in a window whose client area starts at `window` in physical screen
+    /// `at`, logical pixels in a window whose client area starts at `window` in physical screen
     /// pixels.
-    pub(crate) fn point(self, window: [i32; 2], at: Point<Pixels>) -> Vec2 {
-        let x = f64::from(window[0] - self.area[0])
-            + f64::from(f32::from(at.x)) * f64::from(self.scale);
-        let y = f64::from(window[1] - self.area[1])
-            + f64::from(f32::from(at.y)) * f64::from(self.scale);
+    pub(crate) fn point(self, window: [i32; 2], at: [f32; 2]) -> Vec2 {
+        let x = f64::from(window[0] - self.area[0]) + f64::from(at[0]) * f64::from(self.scale);
+        let y = f64::from(window[1] - self.area[1]) + f64::from(at[1]) * f64::from(self.scale);
         self.physical([x, y])
     }
 
@@ -144,10 +141,10 @@ impl Pulling {
     /// area starts at `window`. A press while a pull exists starts nothing.
     pub(crate) fn press(
         &mut self,
-        button: MouseButton,
+        button: Button,
         seq: u64,
         window: [i32; 2],
-        at: Point<Pixels>,
+        at: [f32; 2],
         grab: Grab,
     ) -> Option<Generation> {
         if self.pull.is_some() {
@@ -167,8 +164,8 @@ impl Pulling {
         Some(generation)
     }
 
-    /// One event for the drag, with GPUI's points in the peek whose client area starts at
-    /// `window`.
+    /// One event for the drag, with its points in logical pixels in the peek whose client area
+    /// starts at `window`.
     pub(crate) fn handle(&mut self, event: Event, window: [i32; 2]) -> Outcome {
         let outcome = self.owner.handle(event);
         self.apply(outcome, window);
@@ -229,13 +226,12 @@ impl Pulling {
 
 #[cfg(test)]
 mod tests {
-    use gpui_kit::{MouseButton, Pixels, Point, point, px};
-
     use super::{Grab, Phase, PullSpace, Pulling};
+    use crate::platform::input::Button;
     use crate::presence::drag::{End, Event, Generation, Outcome};
     use crate::presence::kumo::{Motion, Rect, Vec2, v2};
 
-    const LEFT: MouseButton = MouseButton::Left;
+    const LEFT: Button = Button::Left;
     const FRAME: f32 = 1.0 / 72.0;
     /// A work area left of the primary monitor, at 125%.
     const SPACE: PullSpace = PullSpace {
@@ -245,8 +241,8 @@ mod tests {
     /// The peek's client origin, physical screen pixels.
     const PEEK: [i32; 2] = [-1000, 600];
 
-    fn at(x: f32, y: f32) -> Point<Pixels> {
-        point(px(x), px(y))
+    fn at(x: f32, y: f32) -> [f32; 2] {
+        [x, y]
     }
 
     fn grab(home: Vec2) -> Grab {
@@ -479,7 +475,7 @@ mod tests {
         let layout = Position::default().layout(space.area, line::slot(1.0), [380, 124], 0);
         let paint = line::LineFrame::in_slot(layout.dock, 1.0).paint;
         let pad = 12.0 + SIZE * 0.5;
-        let home = space.point([layout.panel[0], layout.panel[1]], point(px(pad), px(pad)));
+        let home = space.point([layout.panel[0], layout.panel[1]], [pad, pad]);
         let grab = Grab::new(space, paint, layout.dock, home, Motion::Full);
         assert!(
             (home - grab.dock).len() > SNAP_LEN,
@@ -491,7 +487,7 @@ mod tests {
                 LEFT,
                 1,
                 [layout.panel[0], layout.panel[1]],
-                point(px(pad), px(pad)),
+                [pad, pad],
                 grab,
             )
             .expect("nothing pulled yet");

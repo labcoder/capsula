@@ -4,11 +4,11 @@
 
 use gpui_kit::{
     App, Bounds, Context, DispatchPhase, Entity, EventEmitter, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, WeakEntity, Window,
+    MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels, Point, WeakEntity, Window,
 };
 
 use super::{KumoView, motion};
-use crate::platform::input::{Input, input};
+use crate::platform::input::{Button, Input, input};
 use crate::platform::{self, PresenceError, PresenceEvent};
 use crate::presence::drag::{End, Event, Generation, Outcome};
 use crate::presence::pulling::{Grab, Phase, PullSpace};
@@ -65,10 +65,13 @@ impl KumoView {
         clippy::cast_possible_truncation,
         reason = "a rounded screen offset fits an i32"
     )]
-    pub(in crate::presence) fn screen_point(&self, at: Point<Pixels>) -> Option<[i32; 2]> {
+    pub(in crate::presence) fn screen_point(&self, at: [f32; 2]) -> Option<[i32; 2]> {
         let (_, space) = self.pulling.pull()?;
-        let offset = |value: Pixels| (f32::from(value) * space.scale).round() as i32;
-        Some([self.origin[0] + offset(at.x), self.origin[1] + offset(at.y)])
+        let offset = |value: f32| (value * space.scale).round() as i32;
+        Some([
+            self.origin[0] + offset(at[0]),
+            self.origin[1] + offset(at[1]),
+        ])
     }
 
     /// A press on Kumo, read while the native bridge forwards it, so its stamp orders it
@@ -96,7 +99,7 @@ impl KumoView {
             area,
             scale: window.scale_factor(),
         };
-        let home = space.point(origin, centre);
+        let home = space.point(origin, point(centre));
         let grab = Grab::new(space, site.line, site.slot, home, motion(cx));
         let Some(owner) = &self.owner else { return };
         let Ok(Some(lease)) = owner.update(cx, |owner, _| owner.presenter.input.lease_drag())
@@ -104,7 +107,14 @@ impl KumoView {
             return;
         };
         self.lease = Some(lease);
-        self.grab(event.button, seq, origin, event.position, grab, cx);
+        self.grab(
+            button(event.button),
+            seq,
+            origin,
+            point(event.position),
+            grab,
+            cx,
+        );
         if !self.pull_live()
             && let Some(lease) = self.lease.take()
         {
@@ -115,10 +125,10 @@ impl KumoView {
     /// Starts a pull at `at` in the peek whose client area starts at `origin`, unless one exists.
     pub(super) fn grab(
         &mut self,
-        button: MouseButton,
+        button: Button,
         seq: u64,
         origin: [i32; 2],
-        at: Point<Pixels>,
+        at: [f32; 2],
         grab: Grab,
         cx: &mut Context<'_, Self>,
     ) {
@@ -162,12 +172,7 @@ impl KumoView {
 
     /// A presence window lost capture. The drag decides whether the loss ends it; one its own
     /// button's release caused is reconciled only after that release's forward has returned.
-    fn capture_lost(
-        &mut self,
-        seq: u64,
-        released: Option<MouseButton>,
-        cx: &mut Context<'_, Self>,
-    ) {
+    fn capture_lost(&mut self, seq: u64, released: Option<Button>, cx: &mut Context<'_, Self>) {
         self.pull_event(Event::CaptureLost { seq, released }, cx);
         if input(Input::reconcile_after_release) {
             let view = cx.weak_entity();
@@ -237,8 +242,8 @@ pub(super) fn listen(bounds: Bounds<Pixels>, view: WeakEntity<KumoView>, window:
     window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
         if phase == DispatchPhase::Capture {
             let event = Event::Move {
-                at: event.position,
-                pressed: event.pressed_button,
+                at: point(event.position),
+                pressed: event.pressed_button.map(button),
             };
             update(&moved, cx, |view, cx| {
                 view.pointer(event, || space(window), cx);
@@ -248,12 +253,28 @@ pub(super) fn listen(bounds: Bounds<Pixels>, view: WeakEntity<KumoView>, window:
     window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
         if phase == DispatchPhase::Capture {
             let up = Event::Up {
-                button: event.button,
-                at: event.position,
+                button: button(event.button),
+                at: point(event.position),
             };
             update(&view, cx, |view, cx| view.pointer(up, || space(window), cx));
         }
     });
+}
+
+/// GPUI's button, as the drag owner names it.
+fn button(button: MouseButton) -> Button {
+    match button {
+        MouseButton::Left => Button::Left,
+        MouseButton::Right => Button::Right,
+        MouseButton::Middle => Button::Middle,
+        MouseButton::Navigate(NavigationDirection::Back) => Button::Back,
+        MouseButton::Navigate(NavigationDirection::Forward) => Button::Forward,
+    }
+}
+
+/// GPUI's point, as the drag owner takes it: logical pixels, x then y.
+fn point(at: Point<Pixels>) -> [f32; 2] {
+    [f32::from(at.x), f32::from(at.y)]
 }
 
 /// The work area and scale now.
@@ -281,16 +302,16 @@ mod tests {
 
     use async_channel::Sender;
     use gpui::TestAppContext;
-    use gpui_kit::{AppContext as _, Entity, MouseButton, point, px};
+    use gpui_kit::{AppContext as _, Entity};
 
     use super::{KumoView, PullChanged};
-    use crate::platform::input::input;
+    use crate::platform::input::{Button, input};
     use crate::platform::{PresenceError, PresenceEvent};
     use crate::presence::drag::{End, Event};
     use crate::presence::kumo::{Motion, v2};
     use crate::presence::pulling::{Grab, Phase, PullSpace};
 
-    const LEFT: MouseButton = MouseButton::Left;
+    const LEFT: Button = Button::Left;
 
     fn grab(view: &Entity<KumoView>, cx: &mut TestAppContext) {
         let grab = Grab::new(
@@ -302,7 +323,7 @@ mod tests {
         );
         let seq = input(|input| input.press(|| input.pressed())).expect("a forwarded press");
         view.update(cx, |view, cx| {
-            view.grab(LEFT, seq, [560, 860], point(px(80.0), px(60.0)), grab, cx);
+            view.grab(LEFT, seq, [560, 860], [80.0, 60.0], grab, cx);
         });
     }
 
@@ -357,7 +378,7 @@ mod tests {
                 events
                     .try_send(PresenceEvent::CaptureLost { seq, released })
                     .expect("the channel is open");
-                let ((), inner_due) = input.release(MouseButton::Middle, || cx.run_until_parked());
+                let ((), inner_due) = input.release(Button::Middle, || cx.run_until_parked());
                 assert!(!inner_due, "an inner forward doesn't reconcile");
                 assert_eq!(
                     input.capture_changed().1,
@@ -376,7 +397,7 @@ mod tests {
     #[gpui::test]
     fn a_release_drained_inside_a_nested_forward_ends_once_as_released(cx: &mut TestAppContext) {
         let (view, seen, events) = grabbed(cx);
-        let at = point(px(300.0), px(-40.0));
+        let at = [300.0, -40.0];
         let up = Event::Up { button: LEFT, at };
         assert!(release(cx, &view, &seen, &events, Some(up)));
         events
@@ -429,7 +450,7 @@ mod tests {
     /// with no move before it.
     fn release_reading(cx: &mut TestAppContext, now: Result<PullSpace, PresenceError>) -> End {
         let (view, seen, _) = grabbed(cx);
-        let at = point(px(300.0), px(-40.0));
+        let at = [300.0, -40.0];
         view.update(cx, |view, cx| {
             view.pointer(Event::Up { button: LEFT, at }, || now, cx);
         });
@@ -449,7 +470,7 @@ mod tests {
     fn an_up_in_the_grabs_space_is_released(cx: &mut TestAppContext) {
         assert_eq!(
             release_reading(cx, Ok(SPACE)),
-            End::Released(point(px(300.0), px(-40.0)))
+            End::Released([300.0, -40.0])
         );
     }
 
