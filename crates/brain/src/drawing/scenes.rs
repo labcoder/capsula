@@ -15,19 +15,52 @@ use super::{
 use crate::coordinator::{Effect, StoreOp};
 
 impl Drawing {
+    /// A replacement that showed nothing failed. Its run owns the loss, so a corrected call that
+    /// paints can still drop it.
     pub(super) fn replacement_failed(&mut self, scene: SceneId, out: &mut Output) {
-        if let Some(at) = self.live(scene)
-            && self.scenes[at].replacement == Some(super::ReplacementLoss::Pending)
+        let Some(at) = self.live(scene).filter(|&at| self.scenes[at].replaced) else {
+            return;
+        };
+        let held = &mut self.scenes[at];
+        held.replaced = false;
+        let (run, thread) = (
+            held.committers[0].expect("replacement's first step was committed live"),
+            held.thread,
+        );
+        self.ledger(run).loss = Some(thread);
+        self.settle_loss(run, out);
+    }
+
+    /// Tells the shell of `run`'s loss once the run can no longer draw a step.
+    pub(super) fn settle_loss(&mut self, run: RunId, out: &mut Output) {
+        if self
+            .runs
+            .iter()
+            .any(|ledger| ledger.run == run && ledger.loss.is_some())
+            && self.remaining(run) != super::Remaining::Steps
         {
-            let held = &mut self.scenes[at];
-            held.replacement = Some(super::ReplacementLoss::Failed);
-            let run = held.committers[0].expect("replacement's first step was committed live");
+            self.end_loss(run, super::Loss::Tell, out);
+        }
+    }
+
+    /// Ends `run`'s loss, telling the shell unless it's dropped; none of its scenes reports one
+    /// again.
+    pub(super) fn end_loss(&mut self, run: RunId, loss: super::Loss, out: &mut Output) {
+        if let Some(thread) = self
+            .runs
+            .iter_mut()
+            .find(|ledger| ledger.run == run)
+            .and_then(|ledger| ledger.loss.take())
+            && loss == super::Loss::Tell
+        {
             out.effects.push(Effect::Control(
-                kumochi_protocol::message::ControlToShell::DrawingReplacementFailed {
-                    thread: held.thread,
-                    run,
-                },
+                kumochi_protocol::message::ControlToShell::DrawingReplacementFailed { thread, run },
             ));
+        }
+        for held in &mut self.scenes {
+            if held.committers.first() == Some(&Some(run)) {
+                held.replaced = false;
+            }
         }
     }
 
@@ -100,7 +133,7 @@ impl Drawing {
                 (scene, committed.index)
             }
             Pend::New { admission, victims } => {
-                let replacement = (!victims.is_empty()).then_some(super::ReplacementLoss::Pending);
+                let replaced = !victims.is_empty();
                 let mut states: Vec<_> = self
                     .scenes
                     .iter_mut()
@@ -159,7 +192,7 @@ impl Drawing {
                     committers: vec![Some(run)],
                     refused_through: 0,
                     gone: false,
-                    replacement,
+                    replaced,
                     paint,
                 });
                 (id, committed.index)
@@ -384,6 +417,11 @@ impl Drawing {
     /// The thread's rows are gone: its scenes leave without a clear, and a step of it still in
     /// the store suppresses its newcomer but still settles committed replacement victims.
     pub(super) fn deleted(&mut self, thread: ThreadId, out: &mut Output) {
+        for ledger in &mut self.runs {
+            if ledger.loss == Some(thread) {
+                ledger.loss = None;
+            }
+        }
         self.cancel_preparation(|step| step.thread == thread);
         if let Some(Pending {
             wait: Wait::Step(write) | Wait::Prepare { step: write, .. },

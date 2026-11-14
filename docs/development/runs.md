@@ -126,10 +126,17 @@ A terminal brain validation/store error or shell refusal before that paint emits
 tool results keep their specific cause; a store failure instead ends the run as `failed(store)`.
 Both keep the single separate loss notice, and neither result duplicates it. User cancellation
 reports no drawing failure, and already-ended results are not rewritten.
-The notice is immediate, not deferred until the run can no longer draw. When a committed first
-step is empty or still unpainted and a later record of that successor fails, the notice says the
-earlier drawings are gone even though a corrected call in the same run may still draw. A silent
-loss would be worse; run-owned loss accounting is a separate follow-up.
+The run owns the loss, not the scene: the failure moves it to the run's ledger
+(`RunLedger.loss`, at most one per run), so a whole-scene refusal that removes the successor
+keeps it. A `StepShown` for any step that run committed drops it silently, because the shell
+sends one only for a painted frame with items; a commit never shown does not. The notice is
+deferred until the run can no longer draw a step: at once when its step budget is spent, at the
+end of a call that spends it, or at `RunClosed`. `RunClosed` carries a `Loss` the coordinator
+takes from the run's outcome: `Drop` for `Interrupted(Stop | Replaced | Deleted)`, which the user
+caused, and `Tell` for every other end, including `Done` and `Failed`. Either way the ledger
+leaves with the run, and the run's scenes report no loss after it. A thread deletion drops its
+runs' losses silently. A run that loses a replacement and then paints a different drawing gives
+no notice.
 Whole-scene `SceneFailed` refusals derive their original
 identity here even when the shell had no run at header refusal; they are distinct from explicit
 `ClearDrawing` requests. The shell retains only its existing single notice, filters it by

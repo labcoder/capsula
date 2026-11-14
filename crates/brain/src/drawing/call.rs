@@ -183,6 +183,9 @@ pub(super) struct RunLedger {
     /// A call failed, so the next calls are the repair round.
     failed: bool,
     exhausted: bool,
+    /// A replacement it drew failed before anything of it was shown, so this thread's earlier
+    /// drawings are gone; told once the run can't repair it, and dropped when the user ended it.
+    pub(super) loss: Option<ThreadId>,
 }
 
 impl RunLedger {
@@ -753,6 +756,7 @@ impl Drawing {
                 complete: error.is_none(),
             }));
         }
+        self.settle_loss(self.calls[at].run, out);
         let remaining = self.remaining(self.calls[at].run);
         let call = &mut self.calls[at];
         call.done = true;
@@ -844,9 +848,21 @@ impl Drawing {
         }
     }
 
-    pub(super) fn close(&mut self, run: RunId, out: &mut Output) {
+    pub(super) fn close(&mut self, run: RunId, loss: super::Loss, out: &mut Output) {
         self.closed = self.closed.max(run);
         let closed = self.closed;
+        let mut ended: Vec<RunId> = self
+            .runs
+            .iter()
+            .filter(|ledger| ledger.run <= closed && ledger.loss.is_some())
+            .map(|ledger| ledger.run)
+            .collect();
+        if loss == super::Loss::Drop && !ended.contains(&run) {
+            ended.push(run);
+        }
+        for owner in ended {
+            self.end_loss(owner, loss, out);
+        }
         let calls: Vec<_> = self
             .calls
             .iter()
@@ -887,7 +903,7 @@ impl Drawing {
     /// What the run still accepts from its own budgets and whether it closed.
     // shortcut: the coordinator's round and tool-call budgets aren't seen here, so a refusal in a
     // run's last allowed round still invites a retry; pass them in if that shows up.
-    fn remaining(&self, run: RunId) -> Remaining {
+    pub(super) fn remaining(&self, run: RunId) -> Remaining {
         let ledger = self.runs.iter().find(|ledger| ledger.run == run);
         if run <= self.closed
             || ledger.is_some_and(|ledger| ledger.exhausted || ledger.calls >= MAX_CALLS_PER_RUN)
@@ -906,7 +922,7 @@ impl Drawing {
             .position(|call| call.run == run && call.id == *id && !call.done)
     }
 
-    fn ledger(&mut self, run: RunId) -> &mut RunLedger {
+    pub(super) fn ledger(&mut self, run: RunId) -> &mut RunLedger {
         let at = self
             .runs
             .iter()
@@ -920,6 +936,7 @@ impl Drawing {
                     rejected: 0,
                     failed: false,
                     exhausted: false,
+                    loss: None,
                 });
                 self.runs.len() - 1
             });

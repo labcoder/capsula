@@ -279,9 +279,7 @@ fn a_step_being_laid_out_seals_the_reducer_and_a_closed_run_cancels_it() {
     };
     let out = drawing.handle(shown).expect("a shown step");
     assert!(out.effects.is_empty(), "it waits behind the layout");
-    let closed = drawing
-        .handle(Input::RunClosed { run: RunId(1) })
-        .expect("the run closed");
+    let closed = drawing.handle(closed(1)).expect("the run closed");
     assert!(job.cancel.load(Ordering::Relaxed));
     assert!(
         closed.calls.is_empty(),
@@ -720,9 +718,7 @@ fn measure_preparation_and_its_cancellation() {
         }
         let unfinished = matches!(answer.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
         let start = Instant::now();
-        drawing
-            .handle(Input::RunClosed { run: RunId(1) })
-            .expect("the run closed");
+        drawing.handle(closed(1)).expect("the run closed");
         if !unfinished {
             invalid += 1;
             thread.join().expect("the preparation thread ends");
