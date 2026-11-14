@@ -25,16 +25,20 @@ pub(crate) fn pair(label: &str) -> (PipeClient, PipeClient) {
 }
 
 /// A connection the link attends on its own thread, and the brain's ends of its pipes.
-pub(crate) struct Attended {
-    pub(crate) handle: LinkHandle,
-    pub(crate) events: Receiver<LinkEvent>,
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "only this crate's tests read the brain's ends")
+)]
+pub struct Attended {
+    pub handle: LinkHandle,
+    pub events: Receiver<LinkEvent>,
     pub(crate) control: PipeClient,
     pub(crate) data: Arc<PipeClient>,
     /// Returns whether the UI was still there when the connection ended.
-    pub(crate) link: JoinHandle<bool>,
+    pub link: JoinHandle<bool>,
 }
 
-pub(crate) fn attended(label: &str) -> Attended {
+pub fn attended(label: &str) -> Attended {
     attended_from(label, 0)
 }
 
@@ -84,7 +88,7 @@ pub(super) fn attended_shared(
 }
 
 /// The link's events with a timeout on each.
-pub(crate) fn patient(events: Receiver<LinkEvent>) -> mpsc::Receiver<LinkEvent> {
+pub fn patient(events: Receiver<LinkEvent>) -> mpsc::Receiver<LinkEvent> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         while let Ok(event) = events.recv_blocking() {
@@ -96,11 +100,11 @@ pub(crate) fn patient(events: Receiver<LinkEvent>) -> mpsc::Receiver<LinkEvent> 
     receiver
 }
 
-pub(crate) fn next(events: &mpsc::Receiver<LinkEvent>) -> LinkEvent {
+pub fn next(events: &mpsc::Receiver<LinkEvent>) -> LinkEvent {
     events.recv_timeout(PATIENCE).expect("an event in time")
 }
 
-pub(crate) fn connected(event: LinkEvent) -> Session {
+pub fn connected(event: LinkEvent) -> Session {
     let LinkEvent::Connected(session) = event else {
         panic!("Connected first, got {event:?}");
     };
