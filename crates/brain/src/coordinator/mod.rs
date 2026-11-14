@@ -1066,7 +1066,7 @@ impl Coordinator {
             ..
         }) = done.ending
         {
-            self.after_run(done.thread, done.id, effects);
+            self.after_run(done.thread, done.id, done.route, effects);
         }
         if let Some(Ending {
             outcome: RunEnd::Done,

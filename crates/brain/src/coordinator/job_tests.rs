@@ -4,15 +4,18 @@
 use std::time::Duration;
 
 use kumochi_protocol::message::{
-    ControlToShell, Deleted, EventId, Phase, RunId, ThreadId, ThreadTitle,
+    AssistantName, ConnectionKind, ControlToShell, Deleted, Effort, EventId, ModelChoice,
+    ModelInfo, ModelName, ModelSlug, Phase, RunId, ThreadId, ThreadTitle,
 };
 
 use super::{R, T, admit, built, ends_failed, engine, fresh, request, run_end, state};
 use crate::context::compact::COMPACT_AT;
-use crate::context::{Built, Origin};
+use crate::context::{Built, ConnectionTag, Origin, RunSnapshot};
+use crate::coordinator::availability::model_unavailable;
 use crate::coordinator::{
-    BuildKey, Coordinator, Effect, Input, JobAsk, JobBuilt, JobKey, JobKind, JobOutput, LeaseId,
-    ReadJob, SEND_DEADLINE, SendKey, Stale, StoreOp, SummaryText, Unbuilt,
+    Availability, BuildKey, ContextBuilt, Coordinator, Effect, Input, JobAsk, JobBuilt, JobKey,
+    JobKind, JobOutput, LeaseId, ReadJob, Ready, SEND_DEADLINE, SendKey, Stale, StoreOp,
+    SummaryText, Unbuilt,
 };
 use crate::engines::{Finish, RunRequest, TurnEvent};
 use crate::store::{Failure, Generation, TitleSource};
@@ -932,4 +935,261 @@ fn a_job_on_another_connections_choice_ends_unsent_and_frees_the_slot() {
             "the slot is empty"
         );
     }
+}
+
+const CLAUDE: ConnectionKind = ConnectionKind::ClaudeCode;
+
+fn haiku() -> ModelChoice {
+    ModelChoice {
+        connection: CLAUDE,
+        model: ModelSlug::new("haiku").expect("slug"),
+        effort: Effort::Low,
+    }
+}
+
+fn ready_on(kind: ConnectionKind, tag: u64) -> Input {
+    Input::Engines(
+        kind,
+        Availability::Ready(Ready {
+            connection: ConnectionTag(tag),
+            models: vec![ModelInfo {
+                slug: ModelSlug::new("haiku").expect("slug"),
+                display_name: ModelName::new("Haiku").expect("name"),
+            }],
+            trusted_draw: false,
+        }),
+    )
+}
+
+/// Takes a turn in `thread` (a new task when `None`) on haiku over Claude Code and runs it to a
+/// stored `Done`; what that stored outcome did.
+fn claude_run_done(core: &mut Coordinator, thread: Option<ThreadId>, run: RunId) -> Vec<Effect> {
+    core.handle(Input::Turn {
+        turn: 1,
+        thread,
+        text: "Plan a trip".into(),
+    })
+    .expect("a turn is never stale");
+    let effects = core.handle(Input::TurnStored { run }).expect("current");
+    let attempt = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Store(StoreOp::BuildContext(build)) => Some(build.key.attempt),
+            _ => None,
+        })
+        .expect("a build starts");
+    core.handle(Input::ContextBuilt(ContextBuilt {
+        key: BuildKey {
+            run,
+            round: 1,
+            attempt,
+        },
+        snapshot: Some(RunSnapshot {
+            origin: Origin::Task(T),
+            assistant: AssistantName::new("Kumo").expect("name"),
+            user: None,
+            choice: Some(haiku()),
+            connection: ConnectionTag(7),
+        }),
+        result: Ok(Built {
+            request: request(),
+            sources: vec![T],
+        }),
+    }))
+    .expect("admitted");
+    core.handle(engine(
+        super::engine_key(core, run),
+        TurnEvent::Finished(Finish::Completed),
+    ))
+    .expect("current");
+    core.handle(Input::RunStored { run }).expect("ending")
+}
+
+/// Only Claude Code is ready, as sign-in 7, and `ChatGPT` never signed in: run 10 in new task 4
+/// ended `Done` on haiku, and job 2's read is out.
+fn claude_reading() -> Coordinator {
+    let mut core = Coordinator::new(MAIN, ThreadId(3), RunId(9), Vec::new());
+    core.handle(ready_on(CLAUDE, 7)).expect("never stale");
+    assert_eq!(claude_run_done(&mut core, None, R), done_starting(R, 2));
+    core
+}
+
+/// Job `key`'s read, finished, on a request naming `choice`.
+fn job_built_on(key: JobKey, choice: Option<ModelChoice>) -> Input {
+    let Input::JobBuilt(mut built) = job_built(key, &[T]) else {
+        unreachable!("job_built builds a job's read");
+    };
+    if let Ok(Some(ask)) = &mut built.result {
+        ask.built.request.choice = choice;
+    }
+    Input::JobBuilt(built)
+}
+
+/// Job `key`'s title request of `run`, naming `choice`.
+fn start_job_on(key: JobKey, run: RunId, choice: Option<ModelChoice>) -> Effect {
+    let Effect::StartJob {
+        job,
+        kind,
+        mut request,
+    } = start_job(key, run)
+    else {
+        unreachable!("start_job starts a job");
+    };
+    request.request.choice = choice;
+    Effect::StartJob { job, kind, request }
+}
+
+/// Test 1: a Claude Code run's `Done` starts its title job with no `ChatGPT` account, and the
+/// job's request goes out on the run's own Claude Code choice and is granted.
+#[test]
+fn a_claude_code_runs_done_titles_it_on_claude_code_with_no_chatgpt_account() {
+    let mut core = claude_reading();
+    assert_eq!(
+        core.handle(job_built_on(key(2), Some(haiku()))),
+        Ok(vec![start_job_on(key(2), R, Some(haiku()))])
+    );
+    assert_eq!(core.handle(ready(key(2))), Ok(granted(lease(key(2), 1))));
+}
+
+/// Test 2: a `ChatGPT` run's `Done` starts no job while `ChatGPT` is signed out, though
+/// `ChatGPT` reads ready and Claude Code is ready too.
+#[test]
+fn a_chatgpt_runs_done_starts_no_job_signed_out_while_claude_code_is_ready() {
+    let mut core = fresh();
+    core.handle(ready_on(CLAUDE, 7)).expect("never stale");
+    assert_eq!(
+        run_done(&mut core, None, R),
+        vec![state(R, T, Phase::Done), run_end(R)]
+    );
+}
+
+/// Test 3: a Claude Code job whose read names another connection, because the thread's choice
+/// changed since its run, ends unsent and frees the slot.
+#[test]
+fn a_claude_code_job_whose_read_names_another_connection_ends_unsent() {
+    let luna = ModelChoice {
+        connection: ConnectionKind::ChatGpt,
+        model: ModelSlug::new("gpt-6-luna").expect("slug"),
+        effort: Effort::Low,
+    };
+    for choice in [None, Some(luna)] {
+        let mut core = claude_reading();
+        assert_eq!(
+            core.handle(job_built_on(key(2), choice.clone())),
+            Ok(vec![compacts(3)]),
+            "the title job ends unsent, and compaction follows: {choice:?}"
+        );
+        assert_eq!(
+            core.handle(job_built_on(key(3), choice.clone())),
+            Ok(Vec::new()),
+            "compaction ends unsent too: {choice:?}"
+        );
+        assert_eq!(
+            core.handle(ready(key(3))),
+            Ok(rebuild(key(3))),
+            "the slot is empty"
+        );
+    }
+}
+
+/// Test 4: a Claude Code job ends when Claude Code becomes unavailable or draws another sign-in,
+/// never on `ChatGPT`'s sign-in or sign-out, and it takes no `ChatGPT` bearer.
+#[test]
+fn a_claude_code_job_follows_claude_codes_fences_and_not_chatgpts() {
+    let mut core = claude_reading();
+    assert_eq!(
+        core.handle(Input::SignedIn { generation: 1 }),
+        Ok(Vec::new()),
+        "ChatGPT's sign-in leaves it"
+    );
+    core.handle(ready_on(ConnectionKind::ChatGpt, 8))
+        .expect("never stale");
+    assert_eq!(
+        core.sending(SendKey::Job(key(2))),
+        None,
+        "no ChatGPT bearer"
+    );
+    assert_eq!(
+        core.sending(SendKey::Job(key(9))),
+        Some(ConnectionTag(8)),
+        "ChatGPT's is ready for a ChatGPT job"
+    );
+    assert_eq!(
+        core.handle(Input::SignedOut { generation: 1 }),
+        Ok(Vec::new()),
+        "ChatGPT's sign-out leaves it"
+    );
+    assert_eq!(
+        core.handle(job_built_on(key(2), Some(haiku()))),
+        Ok(vec![start_job_on(key(2), R, Some(haiku()))]),
+        "it's still in the slot"
+    );
+    assert_eq!(
+        core.handle(Input::Engines(
+            CLAUDE,
+            Availability::Unavailable(model_unavailable())
+        )),
+        Ok(vec![Effect::CancelJob(key(2))])
+    );
+
+    let mut core = claude_reading();
+    assert_eq!(
+        core.handle(ready_on(CLAUDE, 7)),
+        Ok(Vec::new()),
+        "the same sign-in keeps it"
+    );
+    assert_eq!(
+        core.handle(ready_on(CLAUDE, 8)),
+        Ok(vec![Effect::CancelJob(key(2))]),
+        "another sign-in ends it"
+    );
+}
+
+/// Test 8: a Claude Code job's held send past its hold ends only that job; sends didn't fail
+/// closed, so the next run's title job still starts.
+#[test]
+fn a_claude_code_jobs_held_send_past_its_hold_ends_only_the_job() {
+    let mut core = claude_reading();
+    core.handle(job_built_on(key(2), Some(haiku())))
+        .expect("current");
+    assert_eq!(
+        core.handle(Input::SendReady {
+            key: SendKey::Job(key(2)),
+            hold: Some(Duration::from_secs(60)),
+        }),
+        Ok(vec![
+            Effect::Grant(lease(key(2), 1)),
+            Effect::ArmSendDeadline {
+                lease: lease(key(2), 1),
+                after: Duration::from_secs(60),
+            },
+        ])
+    );
+    assert_eq!(
+        core.handle(Input::SendDeadline {
+            lease: lease(key(2), 1)
+        }),
+        Ok(vec![Effect::CancelJob(key(2))])
+    );
+    assert_eq!(
+        claude_run_done(&mut core, Some(T), R2),
+        done_starting(R2, 4),
+        "the next run's job starts"
+    );
+}
+
+/// The job's grant checks its route as a run's send does: a `ChatGPT` job whose sign-in changed
+/// since its run is dropped unsent.
+#[test]
+fn a_job_whose_sign_in_changed_is_dropped_at_its_grant() {
+    let mut core = reading();
+    assert_eq!(
+        core.handle(job_built(key(2), &[T])),
+        Ok(vec![start_job(key(2), R)])
+    );
+    core.handle(ready_on(ConnectionKind::ChatGpt, 8))
+        .expect("never stale");
+    let mut dropped = rebuild(key(2));
+    dropped.push(Effect::CancelJob(key(2)));
+    assert_eq!(core.handle(ready(key(2))), Ok(dropped));
 }

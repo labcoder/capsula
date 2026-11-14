@@ -1682,3 +1682,175 @@ async fn a_stuck_lane_fails_the_next_question_with_a_reason_and_stops_reading_re
         "a stuck lane keeps its lock"
     );
 }
+
+/// What woke a test brain's core: one of its inputs, or Claude Code's.
+enum Next {
+    Input(Input),
+    Wake(Wake),
+}
+
+/// Runs `brain`'s Claude Code core and grants every ask, until an input `done` picks.
+async fn run_brain<T>(brain: &mut Brain, mut done: impl FnMut(Input) -> Option<T>) -> T {
+    timeout(Duration::from_secs(30), async {
+        loop {
+            let next = tokio::select! {
+                input = brain.inputs.recv() => Next::Input(input.expect("the brain holds its sender")),
+                input = brain.engine_events.recv() => Next::Input(input.expect("the brain holds its sender")),
+                wake = brain.claude.next() => Next::Wake(wake),
+            };
+            match next {
+                Next::Wake(wake) => brain.claude_done(wake, None).expect("no link"),
+                Next::Input(Input::SendReady { key, .. }) => {
+                    let lease = SendLease::new(LeaseId { key, send: 1 }, brain.inputs_tx.clone());
+                    engines::answer(&brain.asks, key, Answer::Grant(lease));
+                }
+                Next::Input(input) => {
+                    if let Some(found) = done(input) {
+                        return found;
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect("in time")
+}
+
+/// Runs `brain`'s Claude Code core and grants every ask until `done` holds.
+async fn drive_until(brain: &mut Brain, done: impl Fn() -> bool) {
+    timeout(Duration::from_secs(30), async {
+        while !done() {
+            let next = tokio::select! {
+                input = brain.inputs.recv() => Next::Input(input.expect("the brain holds its sender")),
+                wake = brain.claude.next() => Next::Wake(wake),
+                () = tokio::time::sleep(Duration::from_millis(20)) => continue,
+            };
+            match next {
+                Next::Wake(wake) => brain.claude_done(wake, None).expect("no link"),
+                Next::Input(Input::SendReady { key, .. }) => {
+                    let lease = SendLease::new(LeaseId { key, send: 1 }, brain.inputs_tx.clone());
+                    engines::answer(&brain.asks, key, Answer::Grant(lease));
+                }
+                Next::Input(_) => {}
+            }
+        }
+    })
+    .await
+    .expect("in time");
+}
+
+/// A brain whose Claude Code is `rig`'s Ready connection; the rig keeps the fake's base.
+fn brain_on(rig: &mut Rig, name: &str) -> Brain {
+    let mut brain = crate::test_support::brain(&crate::test_support::Scratch::new(name), "");
+    std::mem::swap(&mut brain.claude, &mut rig.claude);
+    brain
+}
+
+/// A title job's request on haiku at Low over Claude Code.
+fn title_job(job: crate::coordinator::JobKey) -> RunRequest {
+    let mut request = choosing("haiku", Effort::Low, ConnectionKind::ClaudeCode);
+    request.key = SendKey::Job(job);
+    request
+}
+
+/// Test 7: a title job on a Claude Code choice asks Claude Code on the row's own alias, its
+/// effort's word and no tool, the same command line a typed turn takes, and reports the title.
+#[tokio::test]
+async fn a_title_job_on_claude_code_asks_like_a_turn_and_reports_its_title() {
+    use crate::coordinator::{JobKey, JobKind, JobOutput};
+    let mut rig = Rig::new("job-title", &offering_nothing()).await;
+    let mut brain = brain_on(&mut rig, "job-title");
+    let job = JobKey {
+        thread: ThreadId(1),
+        serial: 2,
+    };
+    brain.start_job(job, JobKind::Title, title_job(job));
+    let output = run_brain(&mut brain, |input| match input {
+        Input::JobDone { key, output } if key == job => Some(output),
+        _ => None,
+    })
+    .await;
+    assert_eq!(
+        output,
+        Some(JobOutput::Title(
+            kumochi_protocol::message::ThreadTitle::new("Hello from the fake. Café ✓")
+                .expect("valid")
+        ))
+    );
+    let argv = rig.argv(1);
+    let (head, rest) = argv.split_once(" --mcp-config ").expect("an MCP config");
+    let (_, tail) = rest.split_once(' ').expect("more after it");
+    assert_eq!(
+        format!("{head} {tail}"),
+        "-p --restricted --strict-mcp-config --disable-slash-commands --tools  \
+         --no-session-persistence --input-format stream-json --output-format stream-json \
+         --verbose --include-partial-messages --max-turns 8 \
+         --exclude-dynamic-system-prompt-sections --model haiku --effort low"
+    );
+    assert!(rig.seed(1).ends_with("Tools:\n[]"), "{}", rig.seed(1));
+    assert!(brain.claude.close(soon()).await);
+}
+
+/// Test 9: a typed turn arrives while a Claude Code title job is mid-answer. The runtime gets the
+/// job's cancel and then the turn's round, in the order a new turn sends them: the job's launch
+/// is torn down and its folder deleted, and the turn's question launches behind it and answers.
+#[tokio::test]
+async fn a_turn_during_a_claude_code_title_job_tears_the_job_down_and_is_answered() {
+    use crate::coordinator::{Effect, JobKey, JobKind};
+    let mut rig = Rig::new("job-then-turn", &offering_nothing().held_at_user("go")).await;
+    offering_nothing().write(&rig.base, Some(2));
+    let mut brain = brain_on(&mut rig, "job-then-turn");
+    let job = JobKey {
+        thread: ThreadId(1),
+        serial: 2,
+    };
+    brain.start_job(job, JobKind::Title, title_job(job));
+    let control = Arc::clone(
+        &brain
+            .claude
+            .launches
+            .last()
+            .expect("the job's launch")
+            .control,
+    );
+    drive_until(&mut brain, || rig.stdin().len() == 3).await;
+    let turn = choosing("haiku", Effort::Low, ConnectionKind::ClaudeCode);
+    let SendKey::Build(round) = turn.key else {
+        unreachable!("a turn's request is a build's");
+    };
+    brain
+        .apply(
+            vec![
+                Effect::CancelJob(job),
+                Effect::StartEngine { request: turn },
+            ],
+            None,
+        )
+        .expect("no link");
+    let mut events = Vec::new();
+    run_brain(&mut brain, |input| match input {
+        Input::Engine { key, event } if key == round => {
+            let finished = matches!(event, TurnEvent::Finished(_));
+            events.push(event);
+            finished.then_some(())
+        }
+        _ => None,
+    })
+    .await;
+    answered(&events);
+    assert_eq!(
+        fs::read_to_string(rig.base.0.join("starts.log"))
+            .expect("starts")
+            .lines()
+            .filter(|start| start.starts_with("-p "))
+            .count(),
+        2,
+        "the job's question, then the turn's"
+    );
+    let launches = rig.base.owned().join(ENGINE_DIR);
+    drive_until(&mut brain, || {
+        control.is_ended() && fs::read_dir(&launches).expect("the engine folder").count() == 0
+    })
+    .await;
+    assert!(brain.claude.close(soon()).await);
+}
