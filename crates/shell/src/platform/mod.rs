@@ -1,8 +1,6 @@
 //! The operating system behind small, safe functions. Windows only for now.
 
-pub(crate) mod credential;
-pub(crate) use kumochi_shell_core::platform::{host, input};
-pub(crate) mod microphone;
+pub(crate) use kumochi_shell_core::platform::{host, input, microphone};
 
 #[cfg(test)]
 pub(crate) mod work_area_fixture {
@@ -70,6 +68,8 @@ pub(crate) mod work_area_fixture {
 )]
 mod windows;
 
+#[cfg(windows)]
+pub(crate) use kumochi_shell_core::platform::data_dir;
 #[cfg(all(windows, test))]
 pub(crate) use windows::test_pair;
 #[cfg(windows)]
@@ -77,7 +77,7 @@ pub(crate) use windows::{
     Affinity, Deliver, EscapeHotkey, EventTime, Foreground, HostWatch, MaskUpdate, OverlayWindows,
     PipeClient, PresenceError, PresenceEvent, PresenceLabels, PresenceNative, PresenceSurface,
     ProxyHandle, ProxyNote, activate_presence_window, client_origin, configure_presence_window,
-    cursor_position, data_dir, exclude_window, hide_presence_window, host_at, launch_detached,
+    cursor_position, exclude_window, hide_presence_window, host_at, launch_detached,
     performance_counter, performance_frequency, place_presence_window, restore_foreground,
     restore_window_affinity, session_id, watch_host, window_affinity, window_handle, work_area,
 };

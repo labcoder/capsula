@@ -63,7 +63,7 @@ fn hold_failures_log_closed_stages_and_reasons_without_user_content(cx: &mut Tes
         owner.update(cx, |owner, _| {
             owner.voice.start = Some(Box::new(move |token, session| {
                 if worker {
-                    MicOwner::start_with(token, session, move |_, _, _, _| {
+                    MicOwner::start_with_for_tests(token, session, move |_, _, _, _| {
                         if error == MicError::Unconfirmed {
                             Err(error)
                         } else {
@@ -529,7 +529,7 @@ fn microphone_start_without_running_reports_unavailable_not_cancellation(cx: &mu
         owner.update(cx, |owner, _| {
             owner.voice.start = Some(Box::new(move |token, session| {
                 if worker {
-                    MicOwner::start_with(token, session, move |_, _, _, _| {
+                    MicOwner::start_with_for_tests(token, session, move |_, _, _, _| {
                         Ok(Finalization::Discarded(error))
                     })
                 } else {
@@ -999,46 +999,47 @@ fn source(
     let (copied, samples) = mpsc::channel();
     owner.update(cx, |owner, _| {
         owner.voice.start = Some(Box::new(move |generation, session| {
-            MicOwner::start_with(generation, session, move |token, session, running, pcm| {
-                entered.send(()).unwrap();
-                opening.recv_timeout(Duration::from_secs(3)).unwrap();
-                let prepared = token.running();
-                let mut collected = false;
-                if prepared.is_ok() {
-                    running
-                        .try_send(Running {
-                            gesture: token.gesture(),
-                            rate: 8_000,
-                        })
-                        .unwrap();
-                    while token.mode(session, Instant::now()) == Ok(Mode::Preparing) {
-                        thread::park_timeout(Duration::from_millis(1));
+            MicOwner::start_with_for_tests(
+                generation,
+                session,
+                move |token, session, running, pcm| {
+                    entered.send(()).unwrap();
+                    opening.recv_timeout(Duration::from_secs(3)).unwrap();
+                    let prepared = token.running_for_tests();
+                    let mut collected = false;
+                    if prepared.is_ok() {
+                        running
+                            .try_send(Running::for_tests(token.gesture(), 8_000))
+                            .unwrap();
+                        while token.mode(session, Instant::now()) == Ok(Mode::Preparing) {
+                            thread::park_timeout(Duration::from_millis(1));
+                        }
+                        if token.mode(session, Instant::now()) == Ok(Mode::Collecting) {
+                            collected = true;
+                            copied.send(()).unwrap();
+                        }
                     }
-                    if token.mode(session, Instant::now()) == Ok(Mode::Collecting) {
-                        collected = true;
-                        copied.send(()).unwrap();
+                    finishing.recv_timeout(Duration::from_secs(3)).unwrap();
+                    if let Some(error) = failure {
+                        return Err(error);
                     }
-                }
-                finishing.recv_timeout(Duration::from_secs(3)).unwrap();
-                if let Some(error) = failure {
-                    return Err(error);
-                }
-                match token.mode(session, Instant::now()) {
-                    Ok(Mode::Release) if collected => {
-                        pcm.try_send(MicPcm {
-                            gesture: token.gesture(),
-                            seq: 0,
-                            rate: 8_000,
-                            last: true,
-                            samples: vec![17, -93, 405],
-                        })
-                        .unwrap();
-                        Ok(Finalization::Released { packets: 1 })
+                    match token.mode(session, Instant::now()) {
+                        Ok(Mode::Release) if collected => {
+                            pcm.try_send(MicPcm {
+                                gesture: token.gesture(),
+                                seq: 0,
+                                rate: 8_000,
+                                last: true,
+                                samples: vec![17, -93, 405],
+                            })
+                            .unwrap();
+                            Ok(Finalization::Released { packets: 1 })
+                        }
+                        Err(error) => Ok(Finalization::Discarded(error)),
+                        _ => panic!("fake source must be stopped before finalization"),
                     }
-                    Err(error) => Ok(Finalization::Discarded(error)),
-                    _ => panic!("fake source must be stopped before finalization"),
-                }
-            })
+                },
+            )
         }));
     });
     (open, finish, started, samples)

@@ -585,4 +585,4 @@ shows, the fence drops a hold before it warms or arms anything, on every recogni
 The microphone generation remains occupied until its matching stop/join receipt or
 proof it was never started. Cancellation and startup/hold deadlines are not release
 receipts. The shared gate, source lifecycle and fixed failures are in
-`platform/microphone.rs`; device APIs stay behind its native adapter.
+`shell-core`'s `platform/microphone.rs`; device APIs stay behind its native adapter.

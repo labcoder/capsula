@@ -16,7 +16,6 @@ mod github_connections;
 mod github_link_tests;
 mod input;
 mod link;
-mod logging;
 mod onboarding;
 mod platform;
 mod presence;
@@ -29,7 +28,8 @@ use std::process::ExitCode;
 
 use kumochi_protocol::constants;
 use kumochi_shell_core::{
-    accounts, claude_accounts, credential, drawing, escape, instance, runs, sign_in_mark, threads,
+    accounts, claude_accounts, credential, drawing, escape, instance, logging, runs, sign_in_mark,
+    threads,
 };
 use strings::Strings;
 

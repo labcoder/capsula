@@ -3928,6 +3928,7 @@ dependencies = [
 name = "kumochi-shell-core"
 version = "0.1.2"
 dependencies = [
+ "async-channel",
  "fluent-bundle",
  "keyring",
  "kumochi-brain",
@@ -3935,7 +3936,11 @@ dependencies = [
  "kumochi-scene",
  "thiserror 2.0.21",
  "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
  "unic-langid",
+ "windows 0.62.2",
+ "zeroize",
 ]
 
 [[package]]
