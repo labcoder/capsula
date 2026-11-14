@@ -38,6 +38,8 @@ pub(super) struct ProviderDraw {
     owner: Option<usize>,
     ready: bool,
     pub(super) registered: bool,
+    /// Text followed the closed records array; it is never read.
+    after_records: bool,
 }
 
 impl fmt::Debug for DrawCall {
@@ -165,6 +167,7 @@ impl Coordinator {
             owner,
             ready: false,
             registered,
+            after_records: false,
         });
         if let Dispatch::Answered(output) = dispatch {
             run.tools.answer(call, output);
@@ -214,6 +217,10 @@ impl Coordinator {
             let (index, bytes) = match next {
                 Ok(Some(record)) => record,
                 Ok(None) => break,
+                Err(TokenError::AfterRecords) => {
+                    self.current(run)?.provider_draw(call)?.after_records = true;
+                    break;
+                }
                 Err(error) => {
                     self.provider_invalid(run, call, CallError::Token(error), effects)?;
                     return Ok(());
@@ -283,12 +290,13 @@ impl Coordinator {
             }
             p.ready = true;
             let validation = if p.raw == args.as_bytes() {
-                p.tokenizer
-                    .finish()
-                    .map_err(CallError::Token)
-                    .and_then(|()| {
-                        crate::dispatch::validate_draw(args.as_bytes()).map(|draw| draw.hash)
-                    })
+                match p.tokenizer.finish() {
+                    Ok(()) | Err(TokenError::AfterRecords) => Ok(()),
+                    Err(error) => Err(CallError::Token(error)),
+                }
+                .and_then(|()| {
+                    crate::dispatch::validate_draw(args.as_bytes()).map(|draw| draw.hash)
+                })
             } else {
                 Err(CallError::Token(TokenError::Malformed { at: p.raw.len() }))
             };
@@ -450,10 +458,10 @@ impl Coordinator {
             .filter_map(|open| {
                 let p = open.provider.as_ref()?;
                 let at = p.owner?;
-                Some((open.call.clone(), at))
+                Some((open.call.clone(), at, p.after_records))
             })
             .collect();
-        for (call, at) in calls {
+        for (call, at, after_records) in calls {
             let association = self.current(run)?.draw_calls[at]
                 .provider
                 .as_mut()
@@ -468,7 +476,9 @@ impl Coordinator {
                     call: call.clone(),
                 },
                 ToolName::Draw,
-                CallInput::Draw(DrawAction::Finish(None)),
+                CallInput::Draw(DrawAction::Finish(
+                    after_records.then_some(CallError::Token(TokenError::AfterRecords)),
+                )),
                 effects,
             ) {
                 return self.fail(run, crate::store::Failure::Engine, effects);

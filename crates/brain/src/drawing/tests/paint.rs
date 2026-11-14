@@ -320,105 +320,115 @@ fn recovered_scenes_are_charged_what_their_layouts_paint() {
 /// after it, and the step is still never written.
 #[test]
 fn a_layout_finished_before_its_cancel_is_never_written() {
-    for source in ["refused", "deleted", "cleared", "newcomers"] {
-        let mut drawing = Drawing {
-            defer_preparation: true,
-            ..Drawing::default()
-        };
-        let mut store = Store::default();
-        store.run(
-            &mut drawing,
-            call(1, "c1", args("s1", &[circles("one", 0, 2)])),
-        );
-        let scene = if source == "newcomers" { "s2" } else { "s1" };
-        let out = drawing
-            .handle(call(1, "c2", args(scene, &[circles("two", 2, 2)])))
-            .expect("a fresh call");
-        // A new scene's name is looked up before its step is laid out.
-        let out = match sent(&out) {
-            Some((serial, write @ Write::Lookup { .. })) => drawing
-                .handle(Input::Written {
-                    serial,
-                    reply: Ok(store.answer(&write)),
-                })
-                .expect("the lookup"),
-            _ => out,
-        };
-        let finished = job(&out).run();
-        assert!(
-            matches!(
-                finished,
-                Input::Prepared {
-                    outcome: Prepared::Layout { .. },
-                    ..
-                }
-            ),
-            "{source}: the layout finished"
-        );
-        let cancel = match source {
-            "refused" => Input::CallFinished {
-                thread: THREAD,
-                run: RunId(1),
-                call: CallId::new("c2").expect("a short ASCII id"),
-                error: Some(CallError::Interrupted),
-            },
-            "deleted" => Input::ThreadDeleted { thread: THREAD },
-            _ => Input::Clear {
-                scenes: vec![SceneId(1)],
-            },
-        };
-        let mut out = drawing.handle(cancel).expect("a cancel");
-        merge(&mut out, drawing.handle(finished).expect("the held layout"));
-        let out = store.settle(&mut drawing, out);
-        assert!(
-            !trace(&out)
-                .iter()
-                .any(|line| line.starts_with("write step")),
-            "{source}: {:?}",
-            trace(&out)
-        );
-        match source {
-            "deleted" => {
-                let mut inline = Drawing::default();
-                let mut reference = Store::default();
-                reference.run(
-                    &mut inline,
-                    call(1, "c1", args("s1", &[circles("one", 0, 2)])),
-                );
-                let mut pending = inline
-                    .handle(call(1, "c2", args("s1", &[circles("two", 2, 2)])))
-                    .expect("a fresh call");
-                merge(
-                    &mut pending,
-                    inline
-                        .handle(Input::ThreadDeleted { thread: THREAD })
-                        .expect("a deletion"),
-                );
-                let written = reference.settle(&mut inline, pending);
-                let errors =
-                    |ends: &[CallEnd]| ends.iter().map(|end| end.error.clone()).collect::<Vec<_>>();
-                assert_eq!(
-                    errors(&out.calls),
-                    errors(&written.calls),
-                    "as a fenced Wait::Step ends"
-                );
-                assert!(out.calls[0].drawn.is_empty(), "nothing was written");
+    let failing: Vec<_> = ["refused", "deleted", "cleared", "newcomers"]
+        .into_iter()
+        .filter(|source| std::panic::catch_unwind(|| cancel_race(source)).is_err())
+        .collect();
+    assert_eq!(
+        failing,
+        Vec::<&str>::new(),
+        "every source runs before the test fails"
+    );
+}
+
+fn cancel_race(source: &str) {
+    let mut drawing = Drawing {
+        defer_preparation: true,
+        ..Drawing::default()
+    };
+    let mut store = Store::default();
+    store.run(
+        &mut drawing,
+        call(1, "c1", args("s1", &[circles("one", 0, 2)])),
+    );
+    let scene = if source == "newcomers" { "s2" } else { "s1" };
+    let out = drawing
+        .handle(call(1, "c2", args(scene, &[circles("two", 2, 2)])))
+        .expect("a fresh call");
+    // A new scene's name is looked up before its step is laid out.
+    let out = match sent(&out) {
+        Some((serial, write @ Write::Lookup { .. })) => drawing
+            .handle(Input::Written {
+                serial,
+                reply: Ok(store.answer(&write)),
+            })
+            .expect("the lookup"),
+        _ => out,
+    };
+    let finished = job(&out).run();
+    assert!(
+        matches!(
+            finished,
+            Input::Prepared {
+                outcome: Prepared::Layout { .. },
+                ..
             }
-            "cleared" => {
-                assert_eq!(out.calls.len(), 1);
-                assert_eq!(error(&out.calls[0]), ErrorCode::SceneCleared);
-            }
-            _ => assert_eq!(
-                out.calls
-                    .iter()
-                    .map(|end| end.error.clone())
-                    .collect::<Vec<_>>(),
-                [Some(CallError::Interrupted)],
-                "{source}"
-            ),
+        ),
+        "{source}: the layout finished"
+    );
+    let cancel = match source {
+        "refused" => Input::CallFinished {
+            thread: THREAD,
+            run: RunId(1),
+            call: CallId::new("c2").expect("a short ASCII id"),
+            error: Some(CallError::Interrupted),
+        },
+        "deleted" => Input::ThreadDeleted { thread: THREAD },
+        _ => Input::Clear {
+            scenes: vec![SceneId(1)],
+        },
+    };
+    let mut out = drawing.handle(cancel).expect("a cancel");
+    merge(&mut out, drawing.handle(finished).expect("the held layout"));
+    let out = store.settle(&mut drawing, out);
+    assert!(
+        !trace(&out)
+            .iter()
+            .any(|line| line.starts_with("write step")),
+        "{source}: {:?}",
+        trace(&out)
+    );
+    match source {
+        "deleted" => {
+            let mut inline = Drawing::default();
+            let mut reference = Store::default();
+            reference.run(
+                &mut inline,
+                call(1, "c1", args("s1", &[circles("one", 0, 2)])),
+            );
+            let mut pending = inline
+                .handle(call(1, "c2", args("s1", &[circles("two", 2, 2)])))
+                .expect("a fresh call");
+            merge(
+                &mut pending,
+                inline
+                    .handle(Input::ThreadDeleted { thread: THREAD })
+                    .expect("a deletion"),
+            );
+            let written = reference.settle(&mut inline, pending);
+            let errors =
+                |ends: &[CallEnd]| ends.iter().map(|end| end.error.clone()).collect::<Vec<_>>();
+            assert_eq!(
+                errors(&out.calls),
+                errors(&written.calls),
+                "as a fenced Wait::Step ends"
+            );
+            assert!(out.calls[0].drawn.is_empty(), "nothing was written");
         }
-        assert!(drawing.settled(), "{source}");
+        "cleared" => {
+            assert_eq!(out.calls.len(), 1);
+            assert_eq!(error(&out.calls[0]), ErrorCode::SceneCleared);
+        }
+        _ => assert_eq!(
+            out.calls
+                .iter()
+                .map(|end| end.error.clone())
+                .collect::<Vec<_>>(),
+            [Some(CallError::Interrupted)],
+            "{source}"
+        ),
     }
+    assert!(drawing.settled(), "{source}");
 }
 
 /// What every counted scene's layouts retain.
