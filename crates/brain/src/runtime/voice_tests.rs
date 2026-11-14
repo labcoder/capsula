@@ -1125,7 +1125,7 @@ async fn quit_stops_the_running_fetch() {
         .expect("the fetch starts");
     tokio::time::timeout(
         super::PATIENCE,
-        brain.quit(tokio::time::Instant::now() + super::PATIENCE),
+        Box::pin(brain.quit(tokio::time::Instant::now() + super::PATIENCE)),
     )
     .await
     .expect("quit ends");
@@ -1155,7 +1155,7 @@ async fn quit_cancels_the_fetch_and_keeps_the_held_write() {
         .expect("the write waits on the gate");
     tokio::time::timeout(
         super::PATIENCE,
-        brain.quit(tokio::time::Instant::now() + super::PATIENCE),
+        Box::pin(brain.quit(tokio::time::Instant::now() + super::PATIENCE)),
     )
     .await
     .expect("quit ends");
@@ -1185,7 +1185,7 @@ async fn an_install_queued_behind_a_write_never_fetches_after_quit() {
         .expect("the write waits on the gate");
     tokio::time::timeout(
         super::PATIENCE,
-        brain.quit(tokio::time::Instant::now() + super::PATIENCE),
+        Box::pin(brain.quit(tokio::time::Instant::now() + super::PATIENCE)),
     )
     .await
     .expect("quit ends");
@@ -1355,7 +1355,7 @@ async fn quit_lands_a_held_intent_and_leaves_the_delete_to_start_up() {
     gate.send(Gate::Write).expect("the write waits on the gate");
     tokio::time::timeout(
         super::PATIENCE,
-        brain.quit(tokio::time::Instant::now() + super::PATIENCE),
+        Box::pin(brain.quit(tokio::time::Instant::now() + super::PATIENCE)),
     )
     .await
     .expect("quit ends");
@@ -1383,7 +1383,7 @@ async fn an_intent_held_past_quit_still_lands_on_disk() {
     brain.pump_settings_offline();
     tokio::time::timeout(
         super::PATIENCE,
-        brain.quit(tokio::time::Instant::now() + std::time::Duration::from_millis(50)),
+        Box::pin(brain.quit(tokio::time::Instant::now() + std::time::Duration::from_millis(50))),
     )
     .await
     .expect("quit ends at its deadline");
