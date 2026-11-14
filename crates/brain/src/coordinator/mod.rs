@@ -1205,7 +1205,7 @@ impl Coordinator {
         if let Availability::Unavailable(reason) = &self.availability
             && self.arrived_now() == availability::Arrived::default()
         {
-            let reason = reason.clone();
+            let reason = self.nothing_ready(reason);
             self.fail_with(run, Failure::Engine, reason, effects)
                 .expect("the run is current");
         }

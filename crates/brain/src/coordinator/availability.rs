@@ -88,6 +88,17 @@ pub(crate) fn sign_in_needed() -> UserError {
         .expect("one action is within the limit")
 }
 
+/// The reason a turn gets when nothing is connected that could answer it: Open Settings only, since
+/// a notice's Sign in starts `ChatGPT`'s sign-in for this key.
+pub(crate) fn connection_needed() -> UserError {
+    UserError::new(
+        ErrorKey::ConnectionNeeded,
+        Vec::new(),
+        vec![Action::OpenSettings],
+    )
+    .expect("one action is within the limit")
+}
+
 pub(crate) fn model_unavailable() -> UserError {
     UserError::new(
         ErrorKey::ModelUnavailable,
@@ -187,6 +198,22 @@ impl Coordinator {
                 .filter(|route| route.kind == ConnectionKind::ChatGpt)
                 .map(|route| route.tag),
             SendKey::Job(_) => self.connection(),
+        }
+    }
+
+    /// Why a turn that arrived with nothing ready can't be answered: `ChatGPT`'s reason, except
+    /// that ConnectionNeeded takes "sign in to ChatGPT"'s place while Claude Code is installed but
+    /// signed out (owner, OSC-742). A positive match, so a Claude Code that isn't found, isn't
+    /// reported yet, is off or is broken leaves `ChatGPT`'s notice and its Sign in.
+    pub(super) fn nothing_ready(&self, chatgpt: &UserError) -> UserError {
+        let signed_out = matches!(
+            &self.claude_code,
+            Availability::Unavailable(reason) if reason.key() == ErrorKey::ClaudeCodeSignedOut
+        );
+        if chatgpt.key() == ErrorKey::SignInNeeded && signed_out {
+            connection_needed()
+        } else {
+            chatgpt.clone()
         }
     }
 

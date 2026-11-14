@@ -471,6 +471,21 @@ fn disconnect_removes_identity_errors_and_delivery_state_without_replaying_opera
     }
 }
 
+/// ConnectionNeeded names no one account's state, so it never sets the Accounts row's error, nor
+/// replaces one.
+#[test]
+fn connection_needed_leaves_the_accounts_row_alone() {
+    let mut accounts = Accounts::default();
+    receive(&mut accounts, signed_out());
+    let needed = error(ErrorKey::ConnectionNeeded, vec![Action::OpenSettings]);
+    accounts.error(&needed);
+    assert_eq!(accounts.error, None);
+    let failure = UserError::from(ErrorKey::SignInFailed);
+    accounts.error(&failure);
+    accounts.error(&needed);
+    assert_eq!(accounts.error, Some(failure));
+}
+
 #[test]
 fn settings_and_request_errors_do_not_replace_or_extend_an_account_error() {
     let mut accounts = Accounts::default();

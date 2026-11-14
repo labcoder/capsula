@@ -6,6 +6,7 @@ use kumochi_protocol::message::{
     ModelSlug, Phase, RunId, ThreadId, UserError,
 };
 
+use crate::coordinator::availability::{connection_needed, model_unavailable};
 use super::{BuildKey, ContextBuilt, Coordinator, Effect, Input, R, StoreOp, T, delta, draw_call};
 use crate::context::{Built, ConnectionTag, ModelRequest, Origin, RunSnapshot, ToolSchema};
 use crate::coordinator::{Availability, JobKey, Ready, RoundItems, SendKey};
@@ -161,6 +162,108 @@ fn started(effects: &[Effect]) -> bool {
     effects
         .iter()
         .any(|effect| matches!(effect, Effect::StartEngine { .. }))
+}
+
+/// What a turn typed after `inputs` does once it's written and announced, with nothing ready.
+fn arrived_after(inputs: Vec<Input>) -> Vec<Effect> {
+    let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), Vec::new());
+    for input in inputs {
+        assert_eq!(core.handle(input), Ok(Vec::new()));
+    }
+    core.handle(Input::Turn {
+        turn: 1,
+        thread: None,
+        text: "hi".into(),
+    })
+    .expect("a turn is never stale")
+    .split_off(3)
+}
+
+/// The owner's rule for a turn nothing can answer (OSC-742): ConnectionNeeded, with Open
+/// Settings, only when `ChatGPT` needs a sign-in and Claude Code is installed but signed out.
+/// Every other Claude Code state, the one before it reports included, keeps `ChatGPT`'s reason
+/// and its action; any other `ChatGPT` reason is kept whatever Claude Code's is.
+#[test]
+fn connection_needed_goes_out_only_when_claude_code_is_installed_but_signed_out() {
+    let open = |key| reason(key, Action::OpenSettings);
+    let declined = reason(ErrorKey::PlanNotEnabled, Action::Enable);
+    // Claude Code's state (None: not reported yet), and what a turn gets with ChatGPT signed out
+    // and with ChatGPT's plan declined.
+    let rows: Vec<(Option<UserError>, UserError, UserError)> = vec![
+        (None, sign_in(), declined.clone()),
+        (
+            Some(open(ErrorKey::ClaudeCodeSignedOut)),
+            connection_needed(),
+            declined.clone(),
+        ),
+        (
+            Some(open(ErrorKey::ClaudeCodeNotFound)),
+            sign_in(),
+            declined.clone(),
+        ),
+        (Some(model_unavailable()), sign_in(), declined.clone()),
+        (
+            Some(open(ErrorKey::ClaudeCodeUnsupported)),
+            sign_in(),
+            declined.clone(),
+        ),
+        (
+            Some(open(ErrorKey::ClaudeCodePolicy)),
+            sign_in(),
+            declined.clone(),
+        ),
+        (
+            Some(open(ErrorKey::ClaudeCodeAuditFailed)),
+            sign_in(),
+            declined.clone(),
+        ),
+        (
+            Some(open(ErrorKey::ClaudeCodeCleanupPending)),
+            sign_in(),
+            declined.clone(),
+        ),
+    ];
+    for (claude, when_signed_out, when_declined) in rows {
+        for (chatgpt, expected) in [(sign_in(), when_signed_out), (declined.clone(), when_declined)]
+        {
+            let mut inputs = vec![Input::Engines(
+                kumochi_protocol::message::ConnectionKind::ChatGpt,
+                Availability::Unavailable(chatgpt.clone()),
+            )];
+            inputs.extend(claude.clone().map(|why| {
+                Input::Engines(
+                    kumochi_protocol::message::ConnectionKind::ClaudeCode,
+                    Availability::Unavailable(why),
+                )
+            }));
+            assert_eq!(
+                arrived_after(inputs),
+                told(Some(expected)),
+                "{:?} with {:?}",
+                chatgpt.key(),
+                claude.as_ref().map(UserError::key)
+            );
+        }
+    }
+}
+
+/// L1: the key goes out with Open Settings only, since a notice's Sign in would start
+/// `ChatGPT`'s sign-in for it. Both Claude kinds start as `ModelUnavailable` until reported.
+#[test]
+fn connection_needed_offers_only_open_settings_and_the_claude_kinds_start_unavailable() {
+    assert_eq!(connection_needed().key(), ErrorKey::ConnectionNeeded);
+    assert_eq!(connection_needed().actions(), [Action::OpenSettings]);
+    let core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), Vec::new());
+    for kind in [
+        kumochi_protocol::message::ConnectionKind::ClaudeCode,
+        kumochi_protocol::message::ConnectionKind::AnthropicKey,
+    ] {
+        assert_eq!(
+            core.availability_of(kind),
+            &Availability::Unavailable(model_unavailable()),
+            "{kind:?}"
+        );
+    }
 }
 
 #[test]
