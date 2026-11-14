@@ -22,11 +22,11 @@ use crate::context::Origin;
 use crate::coordinator::{Input, LeaseId, SendKey};
 use crate::engines::claude_code::lane::Host;
 use crate::engines::claude_code::lane::tests::{Base, V, host, soon};
-use crate::platform::Job;
 use crate::engines::claude_code::supervisor::tests::{WAIT, until};
 use crate::engines::{
     self, Answer, Asks, Engine, EngineFailure, Finish, RunRequest, SendGate, SendLease, TurnEvent,
 };
+use crate::platform::Job;
 
 const FACTS: &str = include_str!("../../../fixtures/claude-code/facts.jsonl");
 const TEXT: &str = include_str!("../../../fixtures/claude-code/text.jsonl");
@@ -1312,13 +1312,21 @@ async fn availability_and_launch_agree_on_every_condition() {
         panic!("ready");
     };
     assert_eq!(ready.connection, ConnectionTag(1));
-    let slugs: Vec<&str> = ready.models.iter().map(|model| model.slug.as_str()).collect();
+    let slugs: Vec<&str> = ready
+        .models
+        .iter()
+        .map(|model| model.slug.as_str())
+        .collect();
     assert_eq!(slugs, ["sonnet", "opus", "haiku", "fable"]);
     assert!(!ready.trusted_draw);
     drop(rig.claude.take(&rig.snapshot()).expect("admitted"));
 
     let conditions: [(&str, fn(&mut Claude), fn(&mut Claude)); 5] = [
-        ("a pending Disconnect", |c| c.cleaning = true, |c| c.cleaning = false),
+        (
+            "a pending Disconnect",
+            |c| c.cleaning = true,
+            |c| c.cleaning = false,
+        ),
         (
             "a quarantine",
             |c| {
@@ -1364,7 +1372,11 @@ async fn the_tag_survives_a_find_and_never_outlives_a_sign_out() {
     let mut rig = Rig::new("question-epoch", &synthetic_signed_in()).await;
     let first = tag(&rig.claude.availability());
     rig.claude.op(ConnectionOp::FindClaudeCode);
-    assert_eq!(tag(&rig.claude.availability()), first, "while the Find runs");
+    assert_eq!(
+        tag(&rig.claude.availability()),
+        first,
+        "while the Find runs"
+    );
     rig.settle().await;
     assert_eq!(rig.claude.view(), READY);
     assert_eq!(tag(&rig.claude.availability()), first, "after it");
@@ -1376,7 +1388,10 @@ async fn the_tag_survives_a_find_and_never_outlives_a_sign_out() {
     );
     rig.claude.view = READY;
     let second = tag(&rig.claude.availability());
-    assert_ne!(second, first, "a later sign-in never answers a run bound before");
+    assert_ne!(
+        second, first,
+        "a later sign-in never answers a run bound before"
+    );
 
     rig.claude.view = UNREVIEWED;
     assert_eq!(
@@ -1384,7 +1399,11 @@ async fn the_tag_survives_a_find_and_never_outlives_a_sign_out() {
         unavailable(ErrorKey::ClaudeCodeUnsupported)
     );
     rig.claude.view = READY;
-    assert_ne!(tag(&rig.claude.availability()), second, "nor across a version");
+    assert_ne!(
+        tag(&rig.claude.availability()),
+        second,
+        "nor across a version"
+    );
     rig.close().await;
 }
 
@@ -1434,5 +1453,8 @@ async fn a_stuck_lane_fails_the_next_question_with_a_reason_and_stops_reading_re
         unavailable(ErrorKey::ClaudeCodeUnsupported)
     );
     // shortcut: the kept lock lives until the test process ends, leaving this scratch folder.
-    assert!(!rig.claude.close(soon()).await, "a stuck lane keeps its lock");
+    assert!(
+        !rig.claude.close(soon()).await,
+        "a stuck lane keeps its lock"
+    );
 }

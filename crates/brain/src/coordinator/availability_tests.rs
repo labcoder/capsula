@@ -6,9 +6,9 @@ use kumochi_protocol::message::{
     ModelSlug, Phase, RunId, ThreadId, UserError,
 };
 
-use crate::coordinator::availability::{connection_needed, model_unavailable};
 use super::{BuildKey, ContextBuilt, Coordinator, Effect, Input, R, StoreOp, T, delta, draw_call};
 use crate::context::{Built, ConnectionTag, ModelRequest, Origin, RunSnapshot, ToolSchema};
+use crate::coordinator::availability::{connection_needed, model_unavailable};
 use crate::coordinator::{Availability, JobKey, Ready, RoundItems, SendKey};
 use crate::engines::{EngineFailure, Finish, TurnEvent};
 use crate::store::{Failure, RunEnd};
@@ -224,8 +224,10 @@ fn connection_needed_goes_out_only_when_claude_code_is_installed_but_signed_out(
         ),
     ];
     for (claude, when_signed_out, when_declined) in rows {
-        for (chatgpt, expected) in [(sign_in(), when_signed_out), (declined.clone(), when_declined)]
-        {
+        for (chatgpt, expected) in [
+            (sign_in(), when_signed_out),
+            (declined.clone(), when_declined),
+        ] {
             let mut inputs = vec![Input::Engines(
                 kumochi_protocol::message::ConnectionKind::ChatGpt,
                 Availability::Unavailable(chatgpt.clone()),
