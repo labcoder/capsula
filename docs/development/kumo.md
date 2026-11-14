@@ -151,7 +151,7 @@ The cost per pixel is about 110 to 160 ns, highest in the smallest regions, like
 
 ## The pull
 
-`pull.rs`'s `Pull` is what a drag does to Kumo, frame by frame. `presence/drag.rs`'s `DragOwner` decides when the drag ends. Both are pure, and C2a wires them to the peek and the dock overlay.
+`pull.rs`'s `Pull` is what a drag does to Kumo, frame by frame. `DragOwner`, in `crates/shell-core/src/presence/drag.rs`, decides when the drag ends. Both are pure, and C2a wires them to the peek and the dock overlay.
 
 - **The body.** It follows the pointer on a critically damped spring (28 per second, 24 substeps an update), keeping the offset at which it was pressed, so it doesn't jump to the pointer. It's integrated relative to home, so near home its small steps aren't rounded away against screen coordinates. A negative or non-finite step counts as none, and one longer than 0.1 s as 0.1 s, as the neck's does.
 - **Its width** goes from the peek's 64 px at home to the 84 px carry width at `SNAP_LEN` away, smoothly with distance, so it shrinks back the same way.
@@ -222,7 +222,7 @@ Tests drive `decide` with a host gone in the first drain and in the final one, a
 
 ## The native bridge
 
-A pull needs to tell its own button's release from capture being taken away, and GPUI reports only the release. So the presence windows' subclass (`platform/windows/presence.rs`) adds what Windows knows, through `platform/input.rs`'s `Input`, which is plain state with no operating-system calls, so macOS's event handling can make the same calls later.
+A pull needs to tell its own button's release from capture being taken away, and GPUI reports only the release. So the presence windows' subclass (`platform/windows/presence.rs`) adds what Windows knows, through `Input` in `crates/shell-core/src/platform/input.rs`, which is plain state with no operating-system calls, so macOS's event handling can make the same calls later.
 
 - **One sequence.** Each forwarded button press is stamped with the next value of one UI-thread sequence, and so is each capture loss, where it's produced and never when it's drained. The press handler reads the press's stamp with `pressed` while the press is being forwarded. A press forwarded inside another gets its own stamp and gives the outer one back when it returns.
 - **Releases have a scope.** Each `WM_*BUTTONUP` is forwarded inside `release`, which names its button for that forward only, as a depth so nesting is safe. A `WM_CAPTURECHANGED` during it is `CaptureLost { released: Some(button) }`; at any other time it's `None`. `WM_CANCELMODE` is always `None`, so always involuntary, and it's still forwarded to the default handling.

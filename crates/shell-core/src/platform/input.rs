@@ -7,7 +7,7 @@ use std::cell::Cell;
 
 /// A mouse button, as the native bridge reads it and the drag owner compares it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Button {
+pub enum Button {
     Left,
     Right,
     Middle,
@@ -17,7 +17,7 @@ pub(crate) enum Button {
 
 /// One per UI thread. Every value it stamps is new, so two stamps never tie.
 #[derive(Debug, Default)]
-pub(crate) struct Input {
+pub struct Input {
     last: Cell<u64>,
     /// The stamp of the press being forwarded, if any.
     press: Cell<Option<u64>>,
@@ -34,7 +34,7 @@ thread_local! {
 }
 
 /// This thread's [`Input`].
-pub(crate) fn input<R>(f: impl FnOnce(&Input) -> R) -> R {
+pub fn input<R>(f: impl FnOnce(&Input) -> R) -> R {
     INPUT.with(f)
 }
 
@@ -47,7 +47,7 @@ impl Input {
 
     /// Forwards a button press inside `forward`, with a new stamp that [`Input::pressed`] reads
     /// meanwhile. A press forwarded inside it gets its own stamp and gives this one back.
-    pub(crate) fn press<R>(&self, forward: impl FnOnce() -> R) -> R {
+    pub fn press<R>(&self, forward: impl FnOnce() -> R) -> R {
         let outer = self.press.replace(Some(self.next()));
         let result = forward();
         self.press.set(outer);
@@ -55,14 +55,14 @@ impl Input {
     }
 
     /// The stamp of the press being forwarded.
-    pub(crate) fn pressed(&self) -> Option<u64> {
+    pub fn pressed(&self) -> Option<u64> {
         self.press.get()
     }
 
     /// Forwards `button`'s release inside `forward`. Returns its result, and whether a capture
     /// loss drained meanwhile is now due its reconcile: only the outermost release returns
     /// `true`, once.
-    pub(crate) fn release<R>(&self, button: Button, forward: impl FnOnce() -> R) -> (R, bool) {
+    pub fn release<R>(&self, button: Button, forward: impl FnOnce() -> R) -> (R, bool) {
         let outer = self.released.replace(Some(button));
         let depth = self.releasing.get();
         self.releasing.set(depth + 1);
@@ -73,18 +73,18 @@ impl Input {
     }
 
     /// Capture changed now: its stamp, and the button whose forwarded release caused it.
-    pub(crate) fn capture_changed(&self) -> (u64, Option<Button>) {
+    pub fn capture_changed(&self) -> (u64, Option<Button>) {
         (self.next(), self.released.get())
     }
 
     /// A cancel mode now: its stamp. Never a release's, whatever is being forwarded.
-    pub(crate) fn cancelled(&self) -> u64 {
+    pub fn cancelled(&self) -> u64 {
         self.next()
     }
 
     /// A capture loss was drained. Returns whether its reconcile may be scheduled now; otherwise
     /// a release is still being forwarded, and the outermost one reports it due as it returns.
-    pub(crate) fn reconcile_after_release(&self) -> bool {
+    pub fn reconcile_after_release(&self) -> bool {
         if self.releasing.get() == 0 {
             return true;
         }

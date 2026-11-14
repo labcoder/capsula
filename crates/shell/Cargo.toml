@@ -60,6 +60,7 @@ windows = { version = "0.62", features = [
 [dev-dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.10", features = ["test-support"] }
 kumochi-brain = { path = "../brain", features = ["test-support"] }
+kumochi-shell-core = { path = "../shell-core", features = ["test-support"] }
 
 [lints]
 workspace = true
