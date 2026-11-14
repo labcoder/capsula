@@ -2,9 +2,9 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use kumochi_protocol::geometry::PhysicalRect;
+use kumochi_protocol::geometry::WindowRef;
 
 use super::*;
-use crate::screen::frame::MAX_SIDE;
 use crate::screen::wire::CaptureId;
 
 const TTL: u32 = 2_000;
@@ -17,15 +17,16 @@ struct Knobs {
     fill: Cell<u8>,
     takes: Cell<Duration>,
     fail: Cell<Option<Failure>>,
+    /// The window the next capture resolves.
+    window: Cell<u64>,
 }
 
 struct Fake(Rc<Knobs>);
 
 impl Capturer for Fake {
-    fn capture_into(
+    fn capture_window(
         &mut self,
-        _: &DisplayRef,
-        _: Exclusion,
+        _: &Target,
         until: Instant,
         frame: &mut RawFrame,
     ) -> Result<Acquired, Failure> {
@@ -49,6 +50,7 @@ impl Capturer for Fake {
 
 struct Rig {
     screen: Screen,
+    fake: Fake,
     knobs: Rc<Knobs>,
     start: Instant,
 }
@@ -63,30 +65,85 @@ impl Rig {
             fill: Cell::new(fill),
             takes: Cell::new(Duration::ZERO),
             fail: Cell::new(None),
+            window: Cell::new(7),
         });
         let screen = Screen {
-            capturer: Some(Box::new(Fake(Rc::clone(&knobs)))),
+            reader: Some(crate::screen::elements::tests::open_reader(Box::new(
+                || true,
+            ))),
             ..Screen::default()
         };
         Self {
             screen,
+            fake: Fake(Rc::clone(&knobs)),
             knobs,
             start,
         }
     }
 
-    /// Captures `display` under `generation`, received at `start` and asked at `start + at`.
-    fn take(&mut self, generation: u64, display: [u32; 2], at: u64) -> Result<FrameMeta, Failure> {
+    /// Captures a window of `size` under `generation`, received at `start` and asked at
+    /// `start + at`, through the steps the actor takes.
+    fn take(&mut self, generation: u64, size: [u32; 2], at: u64) -> Result<FrameMeta, Failure> {
         self.knobs.clock.set(self.start + Duration::from_millis(at));
         let knobs = Rc::clone(&self.knobs);
-        self.screen.capture(
-            &ticket(generation),
-            &rect(display),
-            Exclusion::KumochiWindows,
+        let now = move || knobs.clock.get();
+        let ticket = ticket(generation);
+        let expires = self.screen.admit(&ticket, self.start, &now)?;
+        let target = Target {
+            top: TopWindow {
+                window: WindowRef(self.knobs.window.get()),
+                pid: 8,
+                rect: rect(size),
+            },
+            instance: 9,
+            dpi: 144,
+        };
+        let acquired = self
+            .fake
+            .capture_window(&target, expires, &mut self.screen.frame)?;
+        let surface = target.top.rect;
+        self.screen.acquired(
+            &ticket,
+            surface,
             self.start,
-            &move || knobs.clock.get(),
-            (|| Err(9), crate::screen::elements::tests::open_reader),
+            expires,
+            now(),
+            (acquired, Some(target.top)),
         )
+    }
+}
+
+/// The held capture's walk, begun and answered as the actor's loop does.
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "a walk that never answers fails the test"
+)]
+fn elements(
+    screen: &mut Screen,
+    capture: CaptureId,
+    target: ElementTarget,
+    now: &dyn Fn() -> Instant,
+) -> Result<Walked, Failure> {
+    let job = match screen.walk_job(capture, target, now)? {
+        Ok(job) => job,
+        Err(walked) => return Ok(walked),
+    };
+    let reader = screen
+        .reader
+        .as_mut()
+        .expect("validated")
+        .as_mut()
+        .map_err(|code| Failure::Fault(*code))?;
+    if let Err(walked) = reader.begin(job) {
+        return Ok(walked);
+    }
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(answer) = reader.poll() {
+            return answer;
+        }
+        assert!(Instant::now() < until, "the walk never answered");
+        std::thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -94,17 +151,17 @@ fn ticket(generation: u64) -> TicketWire {
     TicketWire::new(CaptureId(generation * 10), generation, [0xAB; 16], TTL)
 }
 
-fn rect(size: [u32; 2]) -> DisplayRef {
-    DisplayRef(PhysicalRect {
+fn rect(size: [u32; 2]) -> PhysicalRect {
+    PhysicalRect {
         origin: [-2560, 0],
         size,
-    })
+    }
 }
 
 fn meta(generation: u64, size: [u32; 2], after: u32) -> FrameMeta {
     FrameMeta {
         capture: CaptureId(generation * 10),
-        display: rect(size).0,
+        display: rect(size),
         dpi: 144,
         acquired_after_ms: after,
     }
@@ -195,65 +252,13 @@ fn a_frame_of_another_size_is_refused_as_a_changed_display() {
 }
 
 #[test]
-fn bounds_are_checked_before_the_platform_is_asked() {
-    let mut rig = Rig::new([4, 3], 7);
-    for (generation, size) in [
-        (1, [0, 3]),
-        (2, [4, 0]),
-        (3, [MAX_SIDE + 1, 1]),
-        (4, [1, MAX_SIDE + 1]),
-    ] {
-        assert_eq!(rig.take(generation, size, 0), Err(Refusal::Invalid.into()));
-    }
-    let overflow = DisplayRef(PhysicalRect {
-        origin: [i32::MAX, 0],
-        size: [1, 1],
-    });
-    assert_eq!(display_edges(&overflow), Err(Refusal::Invalid));
-    let largest = DisplayRef(PhysicalRect {
-        origin: [i32::MAX - 8192, -8192],
-        size: [MAX_SIDE, MAX_SIDE],
-    });
-    assert_eq!(
-        display_edges(&largest),
-        Ok([i32::MAX - 8192, -8192, i32::MAX, 0])
-    );
-    assert_eq!(rig.knobs.calls.get(), 0);
-}
-
-#[test]
-fn a_failed_open_is_a_fault_and_is_retried_on_the_next_ticket() {
-    let mut screen = Screen::default();
-    let start = Instant::now();
-    let now = move || start;
-    let take = |screen: &mut Screen, generation| {
-        screen.capture(
-            &ticket(generation),
-            &rect([4, 3]),
-            Exclusion::KumochiWindows,
-            start,
-            &now,
-            (|| Err(-3), crate::screen::elements::tests::open_reader),
-        )
-    };
-    assert_eq!(take(&mut screen, 1), Err(Failure::Fault(-3)));
-    assert_eq!(take(&mut screen, 2), Err(Failure::Fault(-3)));
-}
-
-#[test]
 fn no_carrier_prints_the_nonce_or_the_pixels() {
     let ticket = ticket(1);
     let mut frame = RawFrame::default();
     frame.begin(4, 3).expect("small frame").fill(0xAB);
-    let body = crate::screen::wire::RequestBody::Capture {
-        ticket: ticket.clone(),
-        display: rect([4, 3]),
-        exclude: Exclusion::KumochiWindows,
-    };
     for text in [
         format!("{ticket:?}"),
         format!("{frame:?}"),
-        format!("{body:?}"),
         format!("{:?}", Failure::Refused(Refusal::Expired)),
     ] {
         assert!(!text.contains("171"), "{text}");

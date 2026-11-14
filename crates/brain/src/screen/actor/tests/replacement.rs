@@ -47,19 +47,10 @@ impl Capturer for Captures {
     fn capture_window(
         &mut self,
         target: &Target,
-        until: Instant,
-        frame: &mut RawFrame,
-    ) -> Result<Acquired, Failure> {
-        let display = DisplayRef(target.top.rect);
-        self.capture_into(&display, Exclusion::KumochiWindows, until, frame)
-    }
-    fn capture_into(
-        &mut self,
-        display: &DisplayRef,
-        _: Exclusion,
         _: Instant,
         frame: &mut RawFrame,
     ) -> Result<Acquired, Failure> {
+        let display = target.top.rect;
         self.calls += 1;
         if self.calls == 2 {
             let (pointer, capacity) = frame.allocation();
@@ -67,7 +58,7 @@ impl Capturer for Captures {
             self.second.take().unwrap().wait();
         }
         frame.audit(self.audit.clone());
-        frame.begin(display.0.size[0], display.0.size[1])?.fill(91);
+        frame.begin(display.size[0], display.size[1])?.fill(91);
         let (pointer, capacity) = frame.allocation();
         self.allocations.send((pointer.addr(), capacity)).unwrap();
         Ok(Acquired {

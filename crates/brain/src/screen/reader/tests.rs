@@ -2,7 +2,7 @@ use super::*;
 use crate::screen::ElementTarget;
 use crate::screen::elements::{Availability, NodeProps, SourceError};
 use crate::screen::mask::{Completeness, MaskSet};
-use kumochi_protocol::geometry::{PhysicalRect, WindowRef};
+use kumochi_protocol::geometry::PhysicalRect;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
@@ -46,13 +46,6 @@ fn the_instrumented_clock_observes_the_walks_deadline_check() {
 #[derive(Clone)]
 struct Platform;
 impl ElementPlatform for Platform {
-    fn foreground(&mut self) -> Option<TopWindow> {
-        Some(TopWindow {
-            window: WindowRef(17),
-            pid: 23,
-            rect: RECT,
-        })
-    }
     fn excluded(&mut self, _pid: u32) -> Result<bool, SourceError> {
         Ok(false)
     }
@@ -193,137 +186,6 @@ fn failed_source_initialization_is_a_fault_and_the_next_capture_retries() {
         next_masks.lock().unwrap().completeness(),
         Completeness::Complete
     );
-}
-
-#[test]
-fn timeout_then_still_busy_retires_and_drop_does_not_join() {
-    let old_masks = masks(1);
-    let source_masks = Arc::clone(&old_masks);
-    let (release, released) = mpsc::channel();
-    let (finished, finish) = mpsc::channel();
-    let mut reader = reader(move |_| {
-        source_masks.lock().unwrap().push(RECT);
-        let result = released.recv_timeout(Duration::from_secs(3));
-        finished.send(result).unwrap();
-        props("late")
-    });
-    let start = Instant::now();
-    let first = reader.walk(job(
-        1,
-        start + Duration::from_millis(50),
-        Arc::clone(&old_masks),
-    ));
-    let first_elapsed = start.elapsed();
-    let new_masks = masks(2);
-    let second = reader.walk(job(
-        2,
-        Instant::now() + Duration::from_secs(1),
-        Arc::clone(&new_masks),
-    ));
-    let dropping = Instant::now();
-    drop(reader);
-    let drop_elapsed = dropping.elapsed();
-    release.send(()).unwrap();
-    assert_eq!(finish.recv_timeout(Duration::from_secs(1)).unwrap(), Ok(()));
-    assert_busy(&first.unwrap(), 1, false);
-    assert_busy(&second.unwrap(), 2, true);
-    assert_eq!(old_masks.lock().unwrap().rects(), &[RECT]);
-    assert_eq!(new_masks.lock().unwrap().rects(), &[]);
-    assert_eq!(
-        new_masks.lock().unwrap().completeness(),
-        Completeness::Unknown(Unavailable::Busy)
-    );
-    assert!(first_elapsed >= Duration::from_millis(200));
-    assert!(first_elapsed < Duration::from_secs(1));
-    assert!(drop_elapsed < Duration::from_millis(50));
-}
-
-#[test]
-fn late_reply_is_drained_and_next_capture_gets_its_own_tree() {
-    let until = Instant::now() + Duration::from_millis(100);
-    let (release, released) = mpsc::channel();
-    let mut reader = reader(move |count| {
-        if count == 1 {
-            released.recv_timeout(Duration::from_secs(3)).unwrap();
-        }
-        props(if count == 1 { "obsolete" } else { "fresh" })
-    });
-    let (forward, forwarded) = mpsc::sync_channel(1);
-    let original = std::mem::replace(&mut reader.replies, forwarded);
-    let (queued, notification) = mpsc::channel();
-    let relay = std::thread::spawn(move || {
-        while let Ok(reply) = original.recv() {
-            let capture = reply.0;
-            if forward.send(reply).is_err() {
-                break;
-            }
-            if queued.send(capture).is_err() {
-                break;
-            }
-        }
-    });
-    let old_masks = masks(1);
-    let first = reader.walk(job(1, until, Arc::clone(&old_masks)));
-    release.send(()).unwrap();
-    assert_eq!(
-        notification.recv_timeout(Duration::from_secs(1)).unwrap(),
-        CaptureId(1)
-    );
-    assert_eq!(
-        old_masks.lock().unwrap().completeness(),
-        Completeness::Unknown(Unavailable::Busy)
-    );
-    let fresh_masks = masks(2);
-    let second = reader.walk(job(
-        2,
-        Instant::now() + Duration::from_secs(1),
-        Arc::clone(&fresh_masks),
-    ));
-    drop(reader);
-    relay.join().unwrap();
-    assert_busy(&first.unwrap(), 1, false);
-    let second = second.unwrap();
-    assert!(!second.retire);
-    assert_eq!(second.tree.capture, CaptureId(2));
-    assert_eq!(second.tree.availability, Availability::Read);
-    assert_eq!(second.tree.cut, None);
-    assert_eq!(second.tree.elements.len(), 1);
-    assert_eq!(second.tree.elements[0].name, "fresh");
-    assert_eq!(second.tree.elements[0].id.capture, CaptureId(2));
-    assert_eq!(
-        fresh_masks.lock().unwrap().completeness(),
-        Completeness::Complete
-    );
-}
-
-#[test]
-fn cached_read_finishing_100ms_after_budget_is_accepted_within_slack() {
-    let until = Instant::now() + Duration::from_millis(500);
-    let (entered, entering) = mpsc::channel();
-    let (release, released) = mpsc::channel();
-    let mut reader = reader(move |_| {
-        entered.send(()).unwrap();
-        released.recv_timeout(Duration::from_secs(3)).unwrap();
-        props("complete")
-    });
-    let trigger = std::thread::spawn(move || {
-        entering.recv_timeout(Duration::from_secs(1)).unwrap();
-        std::thread::sleep(
-            (until + Duration::from_millis(100)).saturating_duration_since(Instant::now()),
-        );
-        release.send(()).unwrap();
-    });
-    let sink = masks(3);
-    let result = reader.walk(job(3, until, Arc::clone(&sink)));
-    trigger.join().unwrap();
-    let walked = result.unwrap();
-    assert!(!walked.retire);
-    assert_eq!(walked.tree.capture, CaptureId(3));
-    assert_eq!(walked.tree.availability, Availability::Read);
-    assert_eq!(walked.tree.cut, None);
-    assert_eq!(walked.tree.elements.len(), 1);
-    assert_eq!(walked.tree.elements[0].name, "complete");
-    assert_eq!(sink.lock().unwrap().completeness(), Completeness::Complete);
 }
 
 #[test]
@@ -478,35 +340,6 @@ fn full_job_queue_never_blocks_and_a_second_attempt_retires() {
     assert!(elapsed < Duration::from_millis(500));
 }
 
-#[test]
-fn a_wrong_capture_tag_in_the_drain_retires_without_starting_work() {
-    let (jobs, requests) = mpsc::sync_channel(1);
-    let (answers, replies) = mpsc::sync_channel(1);
-    answers
-        .try_send((
-            CaptureId(99),
-            Ok(ElementTree::unavailable(
-                CaptureId(99),
-                Unavailable::NoWindow,
-            )),
-        ))
-        .ok()
-        .unwrap();
-    let mut reader = ThreadedReader {
-        platform: Platform,
-        jobs,
-        replies,
-        pending: Some((CaptureId(10), masks(10))),
-        retired: false,
-    };
-    assert_busy(
-        &reader.walk(job(11, Instant::now(), masks(11))).unwrap(),
-        11,
-        true,
-    );
-    assert!(matches!(requests.try_recv(), Err(TryRecvError::Empty)));
-}
-
 /// A read that reports entering, then waits for its release.
 fn gate() -> (
     impl FnMut(u32) -> NodeProps + Send + 'static,
@@ -644,20 +477,4 @@ fn begin_after_an_untaken_completion_retires_and_keeps_that_completion() {
         kept.retire,
         "taking a completion cannot revive a retired reader"
     );
-}
-
-#[test]
-fn a_blocked_walk_does_not_delay_the_next_captures_foreground() {
-    let (read, entering, release) = gate();
-    let (wake, landed) = told();
-    let mut reader = waking(read, wake);
-    assert!(matches!(reader.begin(job(46, later(), masks(46))), Ok(())));
-    entering.recv_timeout(Duration::from_secs(1)).unwrap();
-    let top = reader.foreground().expect("the platform's foreground");
-    assert_eq!((top.window, top.pid, top.rect), (WindowRef(17), 23, RECT));
-    assert!(reader.poll().is_none(), "the walk is still blocked");
-    release.send(()).unwrap();
-    landed.recv_timeout(Duration::from_secs(1)).unwrap();
-    let walked = reader.poll().expect("landed before its wake").unwrap();
-    assert_eq!(walked.tree.capture, CaptureId(46));
 }

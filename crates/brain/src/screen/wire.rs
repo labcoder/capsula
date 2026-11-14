@@ -1,62 +1,10 @@
-use kumochi_protocol::geometry::{DisplayRef, PhysicalRect};
+use kumochi_protocol::geometry::PhysicalRect;
 use serde::{Deserialize, Serialize};
 
-use crate::supervise::WorkerLost;
-
 pub(super) use super::elements::ElementTarget;
-use super::elements::ElementTree;
 
 /// The largest reply, serialized.
 pub(super) const MAX_REPLY_BYTES: usize = 4 * 1024 * 1024;
-
-/// Why screen work did not finish. No foreign error text crosses this boundary.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum ScreenError {
-    /// The worker died, broke its protocol or missed a deadline.
-    #[error("screen worker lost")]
-    WorkerLost,
-    /// A lost worker wasn't seen to exit, so nothing replaces it and screen work stays refused.
-    #[error("screen worker exit unconfirmed")]
-    ExitUnconfirmed,
-    /// The worker refused an operation with a numeric platform code.
-    #[error("screen operation failed ({0})")]
-    Fault(i32),
-}
-
-impl From<WorkerLost> for ScreenError {
-    fn from(lost: WorkerLost) -> Self {
-        match lost {
-            WorkerLost::Lost => Self::WorkerLost,
-            WorkerLost::ExitUnconfirmed => Self::ExitUnconfirmed,
-        }
-    }
-}
-
-/// A request to the isolated worker.
-#[derive(Serialize, Deserialize)]
-pub enum RequestBody {
-    /// Check that the worker can serve work.
-    Ping,
-    /// Take one frame of `display` into the worker's buffer; only metadata comes back.
-    Capture {
-        /// The authority for this one capture.
-        ticket: TicketWire,
-        /// The physical display the hold was recognized on.
-        display: DisplayRef,
-        /// What must not appear in the frame.
-        exclude: Exclusion,
-    },
-    /// Read control-view elements under the held capture.
-    Elements {
-        /// The committed frame whose authority is spent.
-        capture: CaptureId,
-        /// The top-level window to read.
-        target: ElementTarget,
-    },
-    /// Trigger one failure without modifying the parent's environment.
-    #[cfg(debug_assertions)]
-    Fault(WorkerFault),
-}
 
 /// A dev-only, one-request failure fixture.
 #[cfg(debug_assertions)]
@@ -81,7 +29,7 @@ pub struct CaptureId(pub u64);
 /// One capture's authority. Only the brain's hold client mints it, for a recognized hold; this
 /// module only carries and checks it.
 #[derive(Clone, Serialize, Deserialize)]
-pub struct TicketWire {
+pub(crate) struct TicketWire {
     capture: CaptureId,
     generation: u64,
     nonce: [u8; 16],
@@ -130,18 +78,9 @@ impl std::fmt::Debug for TicketWire {
     }
 }
 
-/// What the frame must leave out. Windows: the shell's lease (B3a) hides Kumochi's windows, so
-/// this is a declaration, not proof of a live lease. macOS: the worker excludes Kumochi in the
-/// `SCContentFilter`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Exclusion {
-    /// Every Kumochi window.
-    KumochiWindows,
-}
-
 /// Why the worker refused a capture or element walk without a platform fault.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Refusal {
+pub(crate) enum Refusal {
     /// The ticket's local validity ran out before a complete frame.
     Expired,
     /// This ticket's generation was already spent in this worker.
@@ -176,48 +115,15 @@ pub enum Refusal {
 
 /// A complete, valid frame's description; the pixels stay in the worker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FrameMeta {
+pub(crate) struct FrameMeta {
     /// The ticket's capture.
-    pub capture: CaptureId,
+    pub(crate) capture: CaptureId,
     /// The captured surface's physical bounds: the display, or a window's frame.
-    pub display: PhysicalRect,
+    pub(crate) display: PhysicalRect,
     /// The display's effective DPI.
-    pub dpi: u32,
+    pub(crate) dpi: u32,
     /// From the request's receipt to the frame's arrival, in milliseconds.
-    pub acquired_after_ms: u32,
-}
-
-impl std::fmt::Debug for RequestBody {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("RequestBody(***)")
-    }
-}
-
-/// The result of one complete worker reply.
-#[derive(PartialEq, Eq, Serialize, Deserialize)]
-pub enum ReplyBody {
-    /// The worker is responsive.
-    Pong,
-    /// A content-free failure code.
-    Fault(i32),
-    /// A complete frame is held in the worker.
-    Captured(FrameMeta),
-    /// A bounded, capture-scoped control-view tree.
-    Elements(ElementTree),
-    /// The requested operation was refused.
-    Refused(Refusal),
-}
-
-impl std::fmt::Debug for ReplyBody {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Pong => f.write_str("Pong"),
-            Self::Fault(code) => write!(f, "Fault({code})"),
-            Self::Captured(meta) => write!(f, "Captured({meta:?})"),
-            Self::Elements(tree) => write!(f, "Elements({tree:?})"),
-            Self::Refused(refusal) => write!(f, "Refused({refusal:?})"),
-        }
-    }
+    pub(crate) acquired_after_ms: u32,
 }
 
 #[cfg(test)]

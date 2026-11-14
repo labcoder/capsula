@@ -96,6 +96,8 @@ pub(super) struct Holds {
     receive: mpsc::Receiver<Packet>,
     /// The screen worker's client; 2c4 gives the brain one.
     screen: Option<Arc<HoldClient>>,
+    /// Whether this platform captures one window; a client alone doesn't say so.
+    window_capture: bool,
     /// Where each hold's screen task sends its answers.
     screen_events: mpsc::Sender<ScreenEvent>,
     screen_answers: mpsc::Receiver<ScreenEvent>,
@@ -160,6 +162,7 @@ impl Default for Holds {
             send,
             receive,
             screen: None,
+            window_capture: crate::platform::WINDOW_CAPTURE,
             screen_events,
             screen_answers,
         }
@@ -270,6 +273,11 @@ pub(super) async fn next(holds: &mut Holds) -> Event {
 impl Brain {
     pub(crate) fn connected_shell(&mut self, peer: ShellProcess) {
         self.holds.connected(peer);
+    }
+
+    /// Gives screen holds the client of the brain's one screen worker.
+    pub(crate) fn attach_screen(&mut self, client: Arc<HoldClient>) {
+        self.holds.screen = Some(client);
     }
 
     fn hold_status(key: HoldKey, status: HoldStatus, link: &mut Link<'_, '_>) -> Result<(), Full> {
@@ -545,15 +553,13 @@ impl Brain {
             match self.screen_gate(choice.as_ref()) {
                 ScreenHolds::On { .. } => {}
                 // Switched off by the user, so the hold goes on as voice with no line.
-                ScreenHolds::Off(ScreenOff::TurnedOff) => {
-                    self.holds.close_screen_as(ScreenPart::Discarded);
+                ScreenHolds::Off(ScreenOff::TurnedOff) => self.holds.close_screen_as(None),
+                ScreenHolds::Off(ScreenOff::ModelCantSee) => {
+                    self.holds.close_screen_as(Some(ScreenClass::ModelCantSee));
                 }
-                ScreenHolds::Off(ScreenOff::ModelCantSee) => self
-                    .holds
-                    .close_screen_as(ScreenPart::Closed(ScreenClass::ModelCantSee)),
-                ScreenHolds::Off(ScreenOff::NotReady | ScreenOff::Unsupported) => self
-                    .holds
-                    .close_screen_as(ScreenPart::Closed(ScreenClass::NotReady)),
+                ScreenHolds::Off(ScreenOff::NotReady | ScreenOff::Unsupported) => {
+                    self.holds.close_screen_as(Some(ScreenClass::NotReady));
+                }
             }
         }
         self.hold_voice_changed(link)
@@ -768,7 +774,7 @@ impl Brain {
     fn screen_gate(&self, choice: Option<&ModelChoice>) -> ScreenHolds {
         self.account.screen_holds(
             choice,
-            self.holds.screen.is_some(),
+            self.holds.window_capture && self.holds.screen.is_some(),
             self.config.view().screen_holds,
         )
     }

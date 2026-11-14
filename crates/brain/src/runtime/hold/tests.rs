@@ -1774,6 +1774,26 @@ async fn the_threads_choice_rechecks_the_gate_and_a_closed_gate_closes_the_part_
 }
 
 #[tokio::test]
+async fn without_window_capture_the_gate_reads_unsupported_whatever_the_client() {
+    use kumochi_protocol::message::{ScreenHolds, ScreenOff};
+    let scratch = Scratch::new("hold-screen-unsupported");
+    let (mut brain, _release, _decoded, _fetch) =
+        crate::runtime::tests::holds::input(&scratch, Vec::new(), "not submitted").await;
+    let (_rig, sol, _luna) = sees_on_sol(&mut brain);
+    brain.holds.window_capture = true;
+    assert!(matches!(
+        brain.screen_gate(Some(&sol)),
+        ScreenHolds::On { .. }
+    ));
+    brain.holds.window_capture = false;
+    assert!(matches!(
+        brain.screen_gate(Some(&sol)),
+        ScreenHolds::Off(ScreenOff::Unsupported)
+    ));
+    brain.close().await;
+}
+
+#[tokio::test]
 async fn a_screen_hold_repeating_a_voice_holds_gesture_adds_no_part_to_it() {
     let scratch = Scratch::new("hold-screen-repeat");
     let (mut brain, _release, _decoded, _fetch) =

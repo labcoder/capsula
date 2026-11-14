@@ -124,7 +124,7 @@ fn off_display_names_are_absent_from_every_outer_carrier() {
         format!("{walked:?} {tagged:?} {job:?}").as_bytes(),
         "off_display_sentinel",
     );
-    let reply = crate::screen::wire::ReplyBody::Elements(walked.tree);
+    let reply = Reply::Elements(KEY, walked.tree);
     assert_absent(format!("{reply:?}").as_bytes(), "off_display_sentinel");
     assert_absent(&serde_json::to_vec(&reply).unwrap(), "off_display_sentinel");
 }

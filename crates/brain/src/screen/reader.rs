@@ -1,18 +1,17 @@
 //! A bounded serve-side wait around a source owned by one disposable worker thread.
 
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use super::elements::{
-    self, ElementPlatform, ElementReader, ElementSource, ElementTree, MaskSink, TopWindow,
-    Unavailable, WalkJob, Walked,
+    self, ElementPlatform, ElementReader, ElementSource, ElementTree, MaskSink, Unavailable,
+    WalkJob, Walked,
 };
 use super::{CaptureId, Failure};
 
 pub(crate) const CONNECTION_TIMEOUT: Duration = Duration::from_millis(100);
 pub(crate) const TRANSACTION_TIMEOUT: Duration = Duration::from_millis(100);
-const SLACK: Duration = CONNECTION_TIMEOUT.saturating_add(TRANSACTION_TIMEOUT);
 
 /// The walk thread's one completion: it finishes at most one job at a time, and `begin` refuses a
 /// job while the last one's completion hasn't been taken, so this one-slot channel never fills.
@@ -141,10 +140,6 @@ impl<P: ElementPlatform> ElementReader for ThreadedReader<P> {
     fn set_shell_pid(&mut self, pid: u32) {
         self.platform.set_shell_pid(pid);
     }
-    fn foreground(&mut self) -> Option<TopWindow> {
-        self.platform.foreground()
-    }
-
     fn begin(&mut self, job: WalkJob) -> Result<(), Walked> {
         let (capture, masks) = (job.capture, Arc::clone(&job.masks));
         if self.retired || masks.is_poisoned() || self.pending.is_some() {
@@ -165,31 +160,31 @@ impl<P: ElementPlatform> ElementReader for ThreadedReader<P> {
             reply => Some(self.settle(capture, &masks, reply.ok())),
         }
     }
+}
 
-    /// Discards a timed-out walk's late completion, then begins `job` and waits for its completion
-    /// until its deadline plus the UIA slack; a timeout answers Busy and leaves the job pending, so
-    /// the next walk retires the reader if it's still running.
-    // shortcut: a bounded blocking wait on the serve thread; A6b2's actor uses begin and poll.
+/// A walk begun and waited out between polls, as the actor's loop does between wakes. Fixtures only.
+#[cfg(test)]
+pub(crate) trait Walk {
+    fn walk(&mut self, job: WalkJob) -> Result<Walked, Failure>;
+}
+
+#[cfg(test)]
+impl<P: ElementPlatform> Walk for ThreadedReader<P> {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "a walk that never answers fails the test"
+    )]
     fn walk(&mut self, job: WalkJob) -> Result<Walked, Failure> {
-        let (capture, until, masks) = (job.capture, job.until, Arc::clone(&job.masks));
-        loop {
-            match self.replies.try_recv() {
-                Ok((old, _)) if self.pending.as_ref().is_some_and(|(p, _)| *p == old) => {
-                    self.pending = None;
-                }
-                Err(TryRecvError::Empty) => break,
-                _ => return Ok(self.retire(capture, &masks)),
-            }
-        }
         if let Err(walked) = self.begin(job) {
             return Ok(walked);
         }
-        let timeout = (until + SLACK).saturating_duration_since(Instant::now());
-        match self.replies.recv_timeout(timeout) {
-            Err(RecvTimeoutError::Timeout) if !masks.is_poisoned() => {
-                Ok(self.busy(capture, &masks))
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(answer) = self.poll() {
+                return answer;
             }
-            reply => self.settle(capture, &masks, reply.ok()),
+            assert!(Instant::now() < until, "the walk never answered");
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 }
