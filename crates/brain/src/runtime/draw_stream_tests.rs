@@ -424,3 +424,68 @@ async fn a_mapper_changed_final_item_keeps_the_prefix_without_a_new_tool_result(
         [scene]
     );
 }
+
+#[tokio::test]
+async fn a_provider_step_is_laid_out_on_the_preparation_thread_before_its_write() {
+    let scratch = Scratch::new("provider-prepare");
+    let mut brain = brain(&scratch);
+    brain.coordinator.defer_drawing_preparation();
+    let (out, _controls) = mpsc::channel(64);
+    let queue = RefCell::new(DataQueue::new(window()));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    link.recovery = brain.describe(&mut link).expect("initial membership");
+    let key = start(&mut brain, &mut link).await;
+    apply(
+        &mut brain,
+        &mut link,
+        Input::Engine {
+            key,
+            event: TurnEvent::ToolCallStarted {
+                call: CallId::new("provider-draw").expect("call id"),
+                name: ToolName::Draw,
+            },
+        },
+    );
+    apply(
+        &mut brain,
+        &mut link,
+        Input::Engine {
+            key,
+            event: delta(FIRST),
+        },
+    );
+    let mut laid_out = false;
+    let scene = loop {
+        let input = reply(&mut brain).await;
+        laid_out |= matches!(
+            input,
+            Input::Drawing(crate::drawing::Input::Prepared {
+                outcome: crate::drawing::Prepared::Layout { .. },
+                ..
+            })
+        );
+        let landed = match &input {
+            Input::DrawingWritten {
+                reply: Ok(Reply::Step(scene)),
+                ..
+            } => Some(*scene),
+            _ => None,
+        };
+        apply(&mut brain, &mut link, input);
+        if let Some(scene) = landed {
+            break scene;
+        }
+    };
+    assert!(
+        laid_out,
+        "the layout came back from its thread before the write"
+    );
+    assert!(matches!(
+        frames(&queue).as_slice(),
+        [DataToShell::SceneBegin { scene: began, .. },
+         DataToShell::SceneStepCommit { scene: committed, index: 0, .. }]
+            if *began == scene && *committed == scene
+    ));
+}

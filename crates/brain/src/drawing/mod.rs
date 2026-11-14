@@ -11,6 +11,7 @@
 mod call;
 mod digest;
 pub mod io;
+mod prepare;
 mod scenes;
 mod snapshot;
 #[cfg(test)]
@@ -19,8 +20,12 @@ mod tests;
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use kumochi_protocol::message::{RunId, SceneCuts, SceneFailure, SceneId, ThreadId};
+use kumochi_scene::display::{PaintWork, WideMeasure};
+use kumochi_scene::layout::LayoutState;
+use kumochi_scene::theme::Theme;
 use kumochi_scene::{Admitted, Begin, GlobalBudget, Record, SceneState, Step, StopCut};
 
 use crate::coordinator::{Effect, Stale, StoreOp};
@@ -29,10 +34,12 @@ use crate::engines::CallId;
 pub use call::{CallEnd, CallError, Remaining};
 pub(crate) use digest::Digest;
 pub use io::{Reply, StoredScene, Target, Write};
+pub use prepare::{PrepareJob, Prepared, Shared};
 pub(crate) use snapshot::CHUNK_TARGET;
 pub use snapshot::Snapshot;
 
 use call::{Call, RunLedger};
+use prepare::Paint;
 
 /// The layout algorithm a new scene is begun with, persisted in its header.
 pub const LAYOUT_VERSION: u32 = 2;
@@ -149,6 +156,13 @@ pub enum Input {
         /// Its answer, or `Err` when nothing of it was stored.
         reply: Result<Reply, ()>,
     },
+    /// The step `serial` was laid out with the wide measure.
+    Prepared {
+        /// The preparation.
+        serial: u64,
+        /// How it ended.
+        outcome: Prepared,
+    },
 }
 
 /// What one input produced.
@@ -178,6 +192,10 @@ pub struct Drawing {
     /// A v1 clear isn't acknowledged yet, so no new scene's first step is written: the store then
     /// never holds more than four uncleared scenes.
     clearing: bool,
+    theme: Arc<Theme>,
+    /// Unit tests lay steps out inline, answering at once, unless they defer to an effect.
+    #[cfg(test)]
+    pub(crate) defer_preparation: bool,
 }
 
 /// A visible scene.
@@ -193,6 +211,9 @@ struct Held {
     /// Cleared or deleted: no frame of it goes out, and it leaves once no write is pending.
     gone: bool,
     replacement: Option<ReplacementLoss>,
+    /// Its wide layout and charge; `None` once a preparation failed for any reason but paint
+    /// work, leaving the shell's guard as the scene's only check.
+    paint: Option<Paint>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -264,6 +285,12 @@ enum Wait {
         revision: u32,
         cut: StopCut,
     },
+    /// An admitted step being laid out before its write.
+    Prepare {
+        step: Box<StepWait>,
+        write: Write,
+        cancel: Arc<AtomicBool>,
+    },
 }
 
 /// An admitted step in the store.
@@ -277,6 +304,9 @@ struct StepWait {
     fenced: bool,
     clear_requested: bool,
     interrupted: Option<CallError>,
+    /// The step's wide layout and its resident bytes, which the scene keeps once the write
+    /// commits; `None` writes it uncounted.
+    laid: Option<(LayoutState, usize)>,
 }
 
 /// The scene a pending step goes into.
@@ -337,12 +367,20 @@ impl Drawing {
                 .unwrap_or(0);
             skipped.push(stored.remove(bad).scene);
         };
+        let (stored, states): (Vec<_>, Vec<_>) = stored
+            .into_iter()
+            .zip(states)
+            .filter(|(stored, state)| {
+                if state.is_cleared() {
+                    skipped.push(stored.scene);
+                }
+                !state.is_cleared()
+            })
+            .unzip();
+        let theme = Arc::<Theme>::default();
+        let (states, global, layouts) = Self::lay_out(&stored, states, global, &theme);
         let mut scenes = Vec::new();
-        for (stored, state) in stored.into_iter().zip(states) {
-            if state.is_cleared() {
-                skipped.push(stored.scene);
-                continue;
-            }
+        for ((stored, state), layout) in stored.into_iter().zip(states).zip(layouts) {
             scenes.push(Held {
                 scene: stored.scene,
                 thread: stored.thread,
@@ -352,15 +390,51 @@ impl Drawing {
                 state,
                 gone: false,
                 replacement: None,
+                paint: layout.map(Paint::at_rest),
             });
         }
         skipped.sort_unstable();
         let drawing = Self {
             global,
             scenes,
+            theme,
             ..Self::default()
         };
         (drawing, skipped)
+    }
+
+    /// Lays the kept scenes out with the wide measure. Only a batch that lays out whole replaces
+    /// the replayed states, since a layout belongs to the state it was prepared with.
+    // shortcut: one scene that fails to lay out leaves every recovered scene uncounted until it's
+    // cleared; recover the rest alone if a recovery failure shows up in use.
+    fn lay_out(
+        stored: &[StoredScene],
+        states: Vec<SceneState>,
+        global: GlobalBudget,
+        theme: &Arc<Theme>,
+    ) -> (Vec<SceneState>, GlobalBudget, Vec<Option<LayoutState>>) {
+        let sources: Vec<_> = stored
+            .iter()
+            .map(|scene| (&scene.header.begin, scene.log.as_slice()))
+            .collect();
+        let (laid, laid_global) = kumochi_scene::layout::recover_all(
+            &sources,
+            prepare::SURFACE,
+            theme,
+            &mut WideMeasure,
+            &AtomicBool::new(false),
+            Some(PaintWork::LIMITS),
+        );
+        if let Ok(laid) = laid.into_iter().collect::<Result<Vec<_>, _>>() {
+            let (states, layouts) = laid
+                .into_iter()
+                .map(|(state, layout)| (state, Some(layout)))
+                .unzip();
+            (states, laid_global, layouts)
+        } else {
+            let layouts = states.iter().map(|_| None).collect();
+            (states, global, layouts)
+        }
     }
 
     /// Acts on one input.
@@ -449,6 +523,7 @@ impl Drawing {
             Input::RunClosed { run } => self.close(run, &mut out),
             Input::ThreadDeleted { thread } => self.deleted(thread, &mut out),
             Input::Written { serial, reply } => self.written(serial, reply, &mut out)?,
+            Input::Prepared { serial, outcome } => self.prepared(serial, outcome, &mut out)?,
         }
         self.pump(&mut out);
         Ok(out)
@@ -502,7 +577,7 @@ impl Drawing {
             .as_ref()
             .is_some_and(|pending| match &pending.wait {
                 Wait::Lookup { run: owner, .. } => *owner == run,
-                Wait::Step(write) => write.run == run,
+                Wait::Step(write) | Wait::Prepare { step: write, .. } => write.run == run,
                 Wait::Cut { .. } => false,
             });
         writing
@@ -632,7 +707,11 @@ impl Drawing {
     ) -> Result<(), Stale> {
         let pending = self
             .pending
-            .take_if(|pending| pending.in_flight && pending.serial == serial)
+            .take_if(|pending| {
+                pending.in_flight
+                    && pending.serial == serial
+                    && !matches!(pending.wait, Wait::Prepare { .. })
+            })
             .ok_or(Stale)?;
         match (pending.wait, reply) {
             (Wait::Lookup { run, call, begin }, Ok(Reply::Lookup(found))) => {
@@ -660,6 +739,7 @@ impl Drawing {
             }
             (Wait::Lookup { run, call, .. }, _) => self.store_failed(run, &call, out),
             (Wait::Step(write), _) => self.store_failed(write.run, &write.call, out),
+            (Wait::Prepare { .. }, _) => unreachable!("a preparation is never a write"),
         }
         let closed = self.closed;
         self.calls.retain(|call| call.run > closed || !call.done);
@@ -690,6 +770,7 @@ impl fmt::Debug for Input {
             Self::RunClosed { .. } => "RunClosed",
             Self::ThreadDeleted { .. } => "ThreadDeleted",
             Self::Written { .. } => "Written",
+            Self::Prepared { .. } => "Prepared",
         })
     }
 }
