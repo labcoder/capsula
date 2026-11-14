@@ -148,7 +148,9 @@ errors add `; no further step can be drawn in this turn`. Once the run accepts n
 because it closed or spent its repair round, rejected records or calls, any early stop adds
 `; no further draw call will be accepted in this turn`. Until then, other stops, such as the
 per-call record cap or a store, preparation or interruption failure, carry no phrase. A refused
-new scene saved nothing, so the repair call may reuse its name and header. The coordinator's
+new scene saved nothing, so the repair call may reuse its name and header. That includes a
+step the brain refuses as `drawing.TooMuchToPaint` at admission, before anything is written
+(scene.md, "The brain's count"). The coordinator's
 round and tool-call budgets are not reflected.
 
 An offered provider `draw` instead admits closed records while arguments stream. The same

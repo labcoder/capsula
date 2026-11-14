@@ -17,8 +17,8 @@ hold about 40 filled circles or ellipses, or a diagram of about 30 boxes with la
 arrows; more is refused.
 
 The current turn lists Drawings on screen: each one's complete begin header and its objects
-as [id, kind] in the order they were put (an arrow is a line; ids starting -- are a
-mermaid's parts); "more" counts older objects left out.
+as [id, kind] in the order they were put (an arrow is a line; ids like --3.0 are a
+mermaid's generated parts); "more" counts older objects left out.
 For the same subject, continue a listed scene: copy its header's scene, size and
 others exactly (title and alt may change), and use new step ids with set/remove for
 changes. remove lists ids; it is never a put item. Set color also recolours a fill.

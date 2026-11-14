@@ -823,13 +823,17 @@ impl Brain {
                     continue;
                 }
                 written = settings::written(&mut self.config_write) => {
-                    if self.settings_done(written, Some(&mut link)).is_err() {
+                    if self.settings_done(written, Some(&mut link)).is_err()
+                        || self.screen_holds_changed(&mut link).is_err()
+                    {
                         return Ended::Lost;
                     }
                     continue;
                 }
                 input = self.account.next() => {
-                    if self.account_input(input, Some(&mut link)).is_err() {
+                    if self.account_input(input, Some(&mut link)).is_err()
+                        || self.screen_holds_changed(&mut link).is_err()
+                    {
                         return Ended::Lost;
                     }
                     continue;
@@ -953,6 +957,8 @@ impl Brain {
         link.control(&self.composed(&connected))
             .map_err(|Full| Ended::Lost)?;
         self.voice_opened(link).map_err(|Full| Ended::Lost)?;
+        self.screen_holds_changed(link)
+            .map_err(|Full| Ended::Lost)?;
         if let Some(models) = self.account.connections.models_unsent() {
             link.data(&models).map_err(|Full| Ended::Lost)?;
         }
@@ -1190,6 +1196,18 @@ impl Brain {
                 Effect::Revoke { run } => {
                     if let Some(link) = link.as_deref_mut() {
                         link.queue.borrow_mut().revoke(run);
+                    }
+                }
+                Effect::PrepareDrawing(job) => {
+                    let unprepared = Input::Drawing(job.unprepared());
+                    let inputs = self.inputs_tx.clone();
+                    let spawned = std::thread::Builder::new()
+                        .name("drawing-prepare".to_owned())
+                        .spawn(move || inputs.send(Input::Drawing(job.run())).unwrap_or_default());
+                    if spawned.is_err() {
+                        tracing::warn!("the drawing preparation thread didn't start");
+                        let sent = self.inputs_tx.send(unprepared).is_ok();
+                        debug_assert!(sent, "the brain holds its own receiver");
                     }
                 }
                 Effect::RevokeScenes { scenes } => {

@@ -4,11 +4,14 @@
 use kumochi_protocol::message::{
     DataToShell, MAX_VISIBLE_SCENES, RunId, SceneFailure, SceneHeader, SceneId, ThreadId,
 };
+use kumochi_scene::layout::LayoutState;
 use kumochi_scene::text::Bounded;
 use kumochi_scene::{ReplacementDisposition, Step, StopCut};
 
 use super::io::Write;
-use super::{CutKind, Drawing, Held, Job, LAYOUT_VERSION, Output, Pend, Pending, StepWait, Wait};
+use super::{
+    CutKind, Drawing, Held, Job, LAYOUT_VERSION, Output, Paint, Pend, Pending, StepWait, Wait,
+};
 use crate::coordinator::{Effect, StoreOp};
 
 impl Drawing {
@@ -67,6 +70,7 @@ impl Drawing {
             fenced,
             clear_requested,
             interrupted,
+            laid,
             ..
         } = write;
         let begun = matches!(scene, Pend::New { .. });
@@ -89,6 +93,10 @@ impl Drawing {
                     .commit(admitted, &mut self.global)
                     .expect("the pending write sealed its scene and the global budget");
                 held.committers.push(Some(run));
+                held.paint = held.paint.take().zip(laid).map(|(mut paint, laid)| {
+                    paint.committed(committed.index, laid);
+                    paint
+                });
                 (scene, committed.index)
             }
             Pend::New { admission, victims } => {
@@ -141,6 +149,8 @@ impl Drawing {
                 };
                 out.effects
                     .push(Effect::Data(DataToShell::SceneBegin { scene: id, header }));
+                let paint =
+                    laid.map(|laid| Paint::begun(LayoutState::new(&state), committed.index, laid));
                 self.scenes.push(Held {
                     scene: id,
                     thread,
@@ -150,6 +160,7 @@ impl Drawing {
                     refused_through: 0,
                     gone: false,
                     replacement,
+                    paint,
                 });
                 (id, committed.index)
             }
@@ -205,6 +216,7 @@ impl Drawing {
         }
         let revision = held.state.revision();
         if held.state.recovery_log().len() == logged {
+            self.cut_applied(at);
             out.effects.push(Effect::Data(DataToShell::SceneCutApplied {
                 scene,
                 revision,
@@ -267,6 +279,7 @@ impl Drawing {
         let Some(at) = self.live(scene) else {
             return;
         };
+        self.cut_applied(at);
         out.effects.push(Effect::Data(DataToShell::SceneCutApplied {
             scene,
             revision,
@@ -278,11 +291,21 @@ impl Drawing {
         }
     }
 
+    /// The shell hears the cut as its `SceneCutApplied` goes out and keeps only the cut layout
+    /// from then on, so the scene's charge stays the pre-cut one until that moment.
+    fn cut_applied(&mut self, at: usize) {
+        let held = &mut self.scenes[at];
+        held.paint = held.paint.take().and_then(|paint| paint.cut(&held.state));
+    }
+
     /// A step was first painted: its removals stop being charged.
     pub(super) fn shown(&mut self, scene: SceneId, index: u32, out: &mut Output) {
         let Some(at) = self.live(scene) else {
             return;
         };
+        if let Some(paint) = &mut self.scenes[at].paint {
+            paint.shown(index);
+        }
         if self.scenes[at]
             .state
             .retire(index, &mut self.global)
@@ -361,8 +384,9 @@ impl Drawing {
     /// The thread's rows are gone: its scenes leave without a clear, and a step of it still in
     /// the store suppresses its newcomer but still settles committed replacement victims.
     pub(super) fn deleted(&mut self, thread: ThreadId, out: &mut Output) {
+        self.cancel_preparation(|step| step.thread == thread);
         if let Some(Pending {
-            wait: Wait::Step(write),
+            wait: Wait::Step(write) | Wait::Prepare { step: write, .. },
             ..
         }) = &mut self.pending
             && write.thread == thread
@@ -390,6 +414,9 @@ impl Drawing {
                 left.push(held.scene);
             }
         }
+        self.cancel_preparation(
+            |step| matches!(step.scene, Pend::Held { scene, .. } if left.contains(&scene)),
+        );
         if let Some(Pending {
             in_flight: false,
             wait: Wait::Cut { scene, .. },

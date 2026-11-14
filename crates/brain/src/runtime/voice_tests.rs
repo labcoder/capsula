@@ -638,7 +638,7 @@ fn seeded_at(scratch: &Scratch, models: PathBuf, voice: &str, short: u64) -> Pat
 }
 
 /// The connection's opening frames up to `Scenes`: the voice view, after checking it comes once,
-/// after `Account` and before `Scenes`.
+/// after `Account` and before `Scenes`, and that the screen gate's state comes once, after it.
 async fn opening<S: AsyncRead + AsyncWrite>(shell: &mut Shell<S>) -> VoiceView {
     let mut kinds = Vec::new();
     let mut voice = None;
@@ -651,12 +651,16 @@ async fn opening<S: AsyncRead + AsyncWrite>(shell: &mut Shell<S>) -> VoiceView {
                 kinds.push("Voice");
                 voice = Some(view);
             }
+            ControlToShell::ScreenHolds(_) => kinds.push("ScreenHolds"),
             ControlToShell::Scenes { .. } => break,
             other => panic!("unexpected {other:?}"),
         }
     }
     kinds.push("Scenes");
-    assert_eq!(kinds, ["Settings", "Account", "Voice", "Scenes"]);
+    assert_eq!(
+        kinds,
+        ["Settings", "Account", "Voice", "ScreenHolds", "Scenes"]
+    );
     voice.expect("a voice view")
 }
 

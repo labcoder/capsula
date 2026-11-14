@@ -53,7 +53,10 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
                 .expect("in time")
                 .expect("readable")
                 .expect("open");
-            if !matches!(frame, ControlToShell::Connections(_)) {
+            if !matches!(
+                frame,
+                ControlToShell::Connections(_) | ControlToShell::ScreenHolds(_)
+            ) {
                 return frame;
             }
         }
@@ -1332,10 +1335,15 @@ async fn a_plan_the_catalog_refuses_shows_the_account_unavailable() {
 /// default model the read set, which is saved.
 #[tokio::test]
 async fn a_connection_hears_the_catalog_and_the_default_model_it_set() {
+    use kumochi_protocol::message::{ScreenHolds, ScreenOff};
     let scratch = Scratch::new("account-catalog-brain");
     let store = FakeStore::default();
     let accounts = seeded(&scratch, &store, Catalog::answering([listing()]), LATER);
     let mut brain = test_support::brain_with(&scratch, "", accounts);
+    let rig = crate::supervise::fixture::start::<crate::screen::Holds>();
+    brain.attach_screen(std::sync::Arc::new(crate::screen::HoldClient::new(
+        rig.handle.clone(),
+    )));
     let luna = ModelChoice {
         model: ModelSlug::new("gpt-6-luna").expect("valid"),
         effort: Effort::Low,
@@ -1365,12 +1373,172 @@ async fn a_connection_hears_the_catalog_and_the_default_model_it_set() {
                 break;
             }
         }
+        loop {
+            let next = timeout(PATIENCE, shell.next_control())
+                .await
+                .expect("in time");
+            if let Some(ControlToShell::ScreenHolds(state)) = next.expect("readable") {
+                assert_eq!(
+                    state,
+                    ScreenHolds::Off(ScreenOff::ModelCantSee),
+                    "luna can't see"
+                );
+                break;
+            }
+        }
         drop(shell);
     };
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
     assert_eq!(ended, Ended::Lost);
     brain.close().await;
     assert_eq!(scratch.config().view().default_model, Some(luna));
+}
+
+/// [`Catalog`]'s answers, each held until its release fires.
+struct HeldCatalog(Catalog, Mutex<Option<oneshot::Receiver<()>>>);
+
+impl Http for HeldCatalog {
+    fn execute(
+        &self,
+        request: Request,
+    ) -> impl std::future::Future<Output = Result<Response, HttpError>> + Send {
+        let release = self.1.lock().expect("gate").take();
+        let answer = self.0.execute(request);
+        async move {
+            if let Some(release) = release {
+                release.await.ok();
+            }
+            answer.await
+        }
+    }
+}
+
+/// A signed-in brain on `http` with a fixture screen worker and Luna, which can't see, already
+/// saved as the default model.
+fn luna_with_a_screen(
+    scratch: &Scratch,
+    store: &FakeStore,
+    http: SharedHttp,
+) -> (
+    crate::runtime::Brain,
+    crate::supervise::fixture::Rig<crate::screen::Holds>,
+) {
+    let accounts = seeded(scratch, store, http, LATER);
+    let mut brain = test_support::brain_with(scratch, "", accounts);
+    let rig = crate::supervise::fixture::start::<crate::screen::Holds>();
+    brain.attach_screen(Arc::new(crate::screen::HoldClient::new(rig.handle.clone())));
+    let pending = brain
+        .config
+        .stage(kumochi_protocol::message::SettingsOp::SetDefaultModel(
+            ModelChoice {
+                model: ModelSlug::new("gpt-6-luna").expect("valid"),
+                effort: Effort::Low,
+                connection: ConnectionKind::ChatGpt,
+            },
+        ))
+        .expect("staged");
+    pending.write().expect("written");
+    brain.config.commit(pending);
+    (brain, rig)
+}
+
+/// With the default model already saved, a catalog read that lands while a shell is connected
+/// moves the screen gate, and the shell hears the new state.
+#[tokio::test]
+async fn a_catalog_read_while_connected_sends_the_screen_gate_it_moved() {
+    use kumochi_protocol::message::{ScreenHolds, ScreenOff};
+    let scratch = Scratch::new("account-catalog-screen-gate");
+    let store = FakeStore::default();
+    let (release, released) = oneshot::channel();
+    let http = SharedHttp::new(HeldCatalog(
+        Catalog(Mutex::new(VecDeque::from([listing()]))),
+        Mutex::new(Some(released)),
+    ));
+    let (mut brain, rig) = luna_with_a_screen(&scratch, &store, http);
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        let mut gates = Vec::new();
+        loop {
+            let next = timeout(PATIENCE, shell.next_control())
+                .await
+                .expect("in time");
+            match next.expect("readable").expect("open") {
+                ControlToShell::ScreenHolds(state) => gates.push(state),
+                ControlToShell::Scenes { .. } => break,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            gates,
+            [ScreenHolds::Off(ScreenOff::NotReady)],
+            "the read is held"
+        );
+        release.send(()).expect("the read waits");
+        loop {
+            let next = timeout(PATIENCE, shell.next_control())
+                .await
+                .expect("in time");
+            if let Some(ControlToShell::ScreenHolds(state)) = next.expect("readable") {
+                assert_eq!(state, ScreenHolds::Off(ScreenOff::ModelCantSee));
+                break;
+            }
+        }
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
+    drop(rig);
+}
+
+/// A sign-out the shell sends clears the catalog at once, so its own control frame sends the
+/// gate it moved, before the credential thread or the revocation answers anything.
+#[tokio::test]
+async fn a_sign_out_from_the_shell_sends_the_gate_it_moved_at_once() {
+    use kumochi_protocol::message::{ScreenHolds, ScreenOff};
+    let scratch = Scratch::new("account-sign-out-screen-gate");
+    let store = FakeStore::default();
+    let (mut brain, rig) = luna_with_a_screen(&scratch, &store, Catalog::answering([listing()]));
+    let (out, mut output) = mpsc::channel(64);
+    let queue = std::cell::RefCell::new(crate::runtime::data::DataQueue::new(
+        crate::runtime::window(),
+    ));
+    let ready = tokio::sync::Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = crate::runtime::Link::new(&out, &queue, &ready, &mut tap);
+    while brain.account.models().is_none() {
+        let input = timeout(PATIENCE, brain.account.next())
+            .await
+            .expect("in time");
+        brain.account_input(input, Some(&mut link)).expect("room");
+    }
+    brain.screen_holds_changed(&mut link).expect("room");
+    let gates = |output: &mut mpsc::Receiver<Vec<u8>>| {
+        std::iter::from_fn(|| output.try_recv().ok())
+            .filter_map(|bytes| {
+                match kumochi_protocol::frame::decode(&bytes[kumochi_protocol::frame::HEADER_LEN..])
+                    .expect("a control frame")
+                {
+                    ControlToShell::ScreenHolds(state) => Some(state),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        gates(&mut output),
+        [ScreenHolds::Off(ScreenOff::ModelCantSee)]
+    );
+    let sign_out = ControlToBrain::AccountOp(AccountOp::SignOut);
+    assert!(matches!(
+        brain.control_frame(sign_out, 0, &mut link, &mut None),
+        Ok(None)
+    ));
+    assert_eq!(gates(&mut output), [ScreenHolds::Off(ScreenOff::NotReady)]);
+    drop(link);
+    brain.close().await;
+    drop(rig);
 }
 
 impl<S: AsyncRead + AsyncWrite> Shell<S> {

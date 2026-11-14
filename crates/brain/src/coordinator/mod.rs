@@ -442,6 +442,8 @@ pub enum Effect {
         /// The run.
         run: RunId,
     },
+    /// Lay a drawing step out off this thread; the job's answer is a drawing input.
+    PrepareDrawing(crate::drawing::PrepareJob),
     /// Drop the snapshots of `scenes` not yet sent to the shell, which cleared them.
     RevokeScenes {
         /// The scenes.

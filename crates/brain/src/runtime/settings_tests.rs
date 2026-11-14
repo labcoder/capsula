@@ -77,6 +77,60 @@ impl<S: AsyncRead + tokio::io::AsyncWrite> Shell<S> {
     }
 }
 
+/// The next settings, screen gate or scenes frame, as a label.
+async fn gate_or_settings<S: AsyncRead + tokio::io::AsyncWrite>(shell: &mut Shell<S>) -> String {
+    loop {
+        let next = tokio::time::timeout(super::PATIENCE, shell.next_control());
+        match next
+            .await
+            .expect("in time")
+            .expect("readable")
+            .expect("open")
+        {
+            ControlToShell::Settings { answer, .. } => return format!("Settings answer={answer}"),
+            ControlToShell::ScreenHolds(state) => return format!("{state:?}"),
+            ControlToShell::Scenes { .. } => return "Scenes".to_owned(),
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_screen_gate_is_sent_at_connect_and_after_a_change_that_moves_it() {
+    let scratch = Scratch::new("settings-screen-gate");
+    let mut brain = test_support::brain(&scratch, "");
+    let rig = crate::supervise::fixture::start::<crate::screen::Holds>();
+    brain.attach_screen(std::sync::Arc::new(crate::screen::HoldClient::new(
+        rig.handle.clone(),
+    )));
+    let mut tap = Tap::from_env();
+    let ((control, data), mut shell) = duplex();
+    let client = async {
+        let mut labels = Vec::new();
+        for _ in 0..3 {
+            labels.push(gate_or_settings(&mut shell).await);
+        }
+        assert_eq!(labels, ["Settings answer=false", "Off(NotReady)", "Scenes"]);
+        shell.send(&op(SettingsOp::SetScreenHolds(false))).await;
+        assert_eq!(gate_or_settings(&mut shell).await, "Settings answer=true");
+        assert_eq!(gate_or_settings(&mut shell).await, "Off(TurnedOff)");
+        shell.send(&rename("Nimbus")).await;
+        assert_eq!(gate_or_settings(&mut shell).await, "Settings answer=true");
+        shell.send(&op(SettingsOp::SetScreenHolds(true))).await;
+        assert_eq!(
+            gate_or_settings(&mut shell).await,
+            "Settings answer=true",
+            "an unrelated change didn't resend the gate"
+        );
+        assert_eq!(gate_or_settings(&mut shell).await, "Off(NotReady)");
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
+    drop(rig);
+}
+
 #[tokio::test]
 async fn the_view_comes_before_scenes_and_each_change_is_answered_in_order() {
     let scratch = Scratch::new("settings-order");
@@ -280,10 +334,14 @@ async fn names_never_reach_the_tap_in_either_direction() {
     assert!(lines[0].contains("brain -> shell  Settings ("), "{dumped}");
     assert!(lines[1].contains("brain -> shell  Account ("), "{dumped}");
     assert!(lines[2].contains("brain -> shell  Connections(ConnectionsView { anthropic: Missing, claude_code: NotFound })"), "{dumped}");
-    assert!(lines[3].contains("brain -> shell  Scenes {"), "{dumped}");
-    assert!(lines[4].contains("shell -> brain  Settings ("), "{dumped}");
-    assert!(lines[5].contains("brain -> shell  Settings ("), "{dumped}");
-    assert!(lines[6].contains("shell -> brain  Pong"), "{dumped}");
+    assert!(
+        lines[3].contains("brain -> shell  ScreenHolds ("),
+        "{dumped}"
+    );
+    assert!(lines[4].contains("brain -> shell  Scenes {"), "{dumped}");
+    assert!(lines[5].contains("shell -> brain  Settings ("), "{dumped}");
+    assert!(lines[6].contains("brain -> shell  Settings ("), "{dumped}");
+    assert!(lines[7].contains("shell -> brain  Pong"), "{dumped}");
 }
 
 fn saved_name(scratch: &Scratch) -> String {

@@ -98,6 +98,8 @@ pub(super) struct Holds {
     screen: Option<Arc<HoldClient>>,
     /// Whether this platform captures one window; a client alone doesn't say so.
     window_capture: bool,
+    /// The gate's state last sent on this connection.
+    screen_sent: Option<ScreenHolds>,
     /// Where each hold's screen task sends its answers.
     screen_events: mpsc::Sender<ScreenEvent>,
     screen_answers: mpsc::Receiver<ScreenEvent>,
@@ -163,6 +165,7 @@ impl Default for Holds {
             receive,
             screen: None,
             window_capture: crate::platform::WINDOW_CAPTURE,
+            screen_sent: None,
             screen_events,
             screen_answers,
         }
@@ -216,6 +219,7 @@ impl Holds {
 
     pub(super) fn opened(&mut self) {
         self.high = 0;
+        self.screen_sent = None;
     }
 
     /// None when the shell process could not be checked, so the receipt stays unacknowledged.
@@ -777,6 +781,18 @@ impl Brain {
             self.holds.window_capture && self.holds.screen.is_some(),
             self.config.view().screen_holds,
         )
+    }
+
+    /// Sends the gate's state for the default model once per connection, then whenever it changes.
+    pub(super) fn screen_holds_changed(&mut self, link: &mut Link<'_, '_>) -> Result<(), Full> {
+        let choice = self.config.view().default_model.clone();
+        let state = self.screen_gate(choice.as_ref());
+        if self.holds.screen_sent.as_ref() == Some(&state) {
+            return Ok(());
+        }
+        link.control(&ControlToShell::ScreenHolds(state.clone()))?;
+        self.holds.screen_sent = Some(state);
+        Ok(())
     }
 
     /// Starts the pending hold `key`'s screen part when the gate is open for the default model

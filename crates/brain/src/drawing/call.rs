@@ -383,7 +383,8 @@ impl Drawing {
     /// The call's arguments already ended and wait in the queue, so nothing more of it counts.
     fn finishing(&self, run: RunId, id: &CallId) -> bool {
         self.pending.as_ref().is_some_and(|pending| matches!(&pending.wait,
-            Wait::Step(write) if write.run == run && write.call == *id && write.interrupted.is_some()
+            Wait::Step(write) | Wait::Prepare { step: write, .. }
+                if write.run == run && write.call == *id && write.interrupted.is_some()
         )) || self.queue.iter().any(|job| {
             matches!(job, Job::Finish { run: owner, call, .. } if *owner == run && call == id)
         })
@@ -631,8 +632,9 @@ impl Drawing {
             fenced: false,
             clear_requested: false,
             interrupted: None,
+            laid: None,
         };
-        self.write(Wait::Step(Box::new(wait)), write, out);
+        self.prepare_step(wait, write, out);
         Ok(())
     }
 
@@ -806,8 +808,9 @@ impl Drawing {
             return;
         };
         self.calls[at].refused = true;
+        self.cancel_preparation(|step| step.run == run && step.call == *id);
         if let Some(super::Pending {
-            wait: Wait::Step(write),
+            wait: Wait::Step(write) | Wait::Prepare { step: write, .. },
             ..
         }) = &mut self.pending
             && write.run == run
