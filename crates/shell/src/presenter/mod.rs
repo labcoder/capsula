@@ -1200,4 +1200,6 @@ fn failure(error: &PrepareError) -> SceneFailure {
 }
 
 #[cfg(test)]
+pub(crate) mod fixture;
+#[cfg(test)]
 pub(crate) mod tests;

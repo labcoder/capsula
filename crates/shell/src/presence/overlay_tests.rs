@@ -559,7 +559,7 @@ fn the_deepest_turned_chain_builds_its_fallback_within_its_charge() {
     }));
     prepare_canvas_step_at(&mut presenter, 0, record.as_bytes(), now);
     assert!(presenter.advance(1, now).expect("activate").is_empty());
-    let (sample, _) = presenter.sample(60_000);
+    let (sample, _) = crate::presenter::tests::sample(&mut presenter, 60_000);
     assert!(sample.visible);
     let failed = presenter.frames().borrow().paint(|frame, _| {
         let (item, _, prims) = frame
@@ -772,7 +772,7 @@ fn begun_at(stage: Box<dyn Stage>, now: Instant) -> Presenter {
     presenter
         .data(1, Deferred::new(frame, 0), 0, now)
         .expect("a new scene");
-    let (sample, effects) = presenter.sample(0);
+    let (sample, effects) = crate::presenter::tests::sample(&mut presenter, 0);
     assert!(effects.is_empty());
     assert!(
         !sample.visible,
@@ -849,7 +849,7 @@ fn the_real_canvas_paints_a_cache_staged_from_its_frame_s_view(cx: &mut TestAppC
     let frames = presenter.frames();
     draw_once(&frames, WeakEntity::new_invalid(), cx);
     assert_eq!(
-        frames.borrow().painted(scene).map(|painted| painted.bound),
+        crate::presenter::tests::painted(&frames.borrow(), scene).map(|(_, bound)| bound),
         Some(1),
         "the canvas painted the sampled bound"
     );
@@ -871,7 +871,11 @@ fn the_real_canvas_fails_a_cache_staged_from_another_view_for_good(cx: &mut Test
     let frames = presenter.frames();
     for draw in 0..2 {
         draw_once(&frames, WeakEntity::new_invalid(), cx);
-        assert_eq!(frames.borrow().painted(TWINNED), None, "draw {draw}");
+        assert_eq!(
+            crate::presenter::tests::painted(&frames.borrow(), TWINNED),
+            None,
+            "draw {draw}"
+        );
         assert!(presenter.holds_scenes(), "only the owner releases it");
     }
     assert_eq!(cleared(&mut presenter), [vec![TWINNED]]);
@@ -933,7 +937,7 @@ fn a_real_geometry_bearing_canvas_observes_its_prepared_bound(cx: &mut TestAppCo
     );
     draw_once(&frames, WeakEntity::new_invalid(), cx);
     assert_eq!(
-        frames.borrow().painted(scene).map(|painted| painted.bound),
+        crate::presenter::tests::painted(&frames.borrow(), scene).map(|(_, bound)| bound),
         Some(1)
     );
 }
@@ -976,7 +980,7 @@ fn a_warm_geometry_bearing_element_allocates_only_its_three_handoffs(cx: &mut Te
         "the fill, its outline and the dashed line"
     );
     assert_eq!(
-        frames.borrow().painted(scene).map(|painted| painted.bound),
+        crate::presenter::tests::painted(&frames.borrow(), scene).map(|(_, bound)| bound),
         Some(1)
     );
     visual.update(|window, _| window.remove_window());
