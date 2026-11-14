@@ -42,7 +42,7 @@ before checking its captured revision, thread and the current draft, or attempti
 Refusal consumes it too. New's named run establishes the stored thread before capture can
 be retried; Retry never submits another unbound New turn. Dismissal also drops the slot.
 
-`chat_notice.rs` retains the typed error and its run, account or settings-field owner.
+`shell-core/chat_notice.rs` retains the typed error and its run, account or settings-field owner.
 Presence pushes that notice into the composer. Its render reads Settings, so GPUI tracks
 that dependency and invalidates the window on settings-only enabled-state changes without
 an explicit Settings observer. Input observation notifies the composer only when draft

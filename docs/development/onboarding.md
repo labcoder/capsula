@@ -11,12 +11,12 @@ brain decides whether onboarding is owed and remembers which steps were complete
 
 - The brain owns the `onboarded` flag, `onboarding_from` (the first step not yet completed) and
   both names in `config.toml`.
-- `shell/settings.rs` owns the name drafts, their validation and saves, as for Settings, and
+- `shell-core/settings.rs` owns the name drafts, their validation and saves, as for Settings, and
   `Settings::finish_onboarding`, which puts `FinishOnboarding` in the same ordered answer queue
   (`Slot::Onboarding`), so the brain's one answer completes it and no other change. A completed
   step is recorded with `CompleteOnboardingStep` in its own slot (`Slot::OnboardingStep`), which
   never counts as the finish, so a record queued just before it can't refuse it.
-- `shell/onboarding.rs` is the plain state: the step, the field whose save it waits for (the
+- `shell-core/onboarding.rs` is the plain state: the step, the field whose save it waits for (the
   account step has none), and whether a finish is queued. It holds no text, so it has nothing to
   log.
 - `shell/sign_in_mark.rs` is a sign-in one surface asked for, until it ends: `Settled`,
