@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use super::StoreError;
 
 /// Each entry moves the schema up one version; append, never edit.
-pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7];
+pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8];
 
 /// Threads, their append-only events with full-text search, and runs. Foreign keys have no
 /// cascade, so deletion names every table and fails loudly if one is missed.
@@ -166,6 +166,15 @@ CREATE TABLE approval_mark (
     last INTEGER NOT NULL CHECK (last >= 0)
 ) STRICT;
 INSERT INTO approval_mark (id, last) VALUES (1, 0);
+";
+
+/// What a screen hold carried into its run's turn (docs/development/store.md): `attached` for the
+/// window's image, or the class saying why it wasn't included. Written with the turn, before any
+/// request exists, so it never says the image left the machine. NULL for every other run and every
+/// older one. Never image bytes. No `CHECK`, so a later class needs no table rebuild; a value a
+/// build doesn't know reads as none.
+const V8: &str = "
+ALTER TABLE runs ADD COLUMN screen TEXT;
 ";
 
 /// Applies every migration past the file's version, each in its own transaction.

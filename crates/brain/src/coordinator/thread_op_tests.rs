@@ -122,6 +122,7 @@ fn deleting_the_main_thread_answers_not_hidden_before_anything_else() {
                 title: None,
                 run: RunId(11),
                 text: "again".into(),
+                screen: None,
             }),
             state(RunId(11), MAIN, Phase::Thinking),
             Effect::ArmDeadline {

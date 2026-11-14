@@ -89,6 +89,7 @@ fn new_hold_allocates_only_at_submit_with_real_origin_and_no_typed_watermark() {
             title: Some("exact recognized words".into()),
             run: R,
             text: "exact recognized words".into(),
+            screen: None,
         })
     );
     assert_eq!(
@@ -555,6 +556,219 @@ fn a_held_runs_image_stays_out_of_inline_compaction_and_follows_its_turn_after()
             ),
         ]]
     );
+}
+
+/// `key`'s build of `sources`: the user's words, on a model that can take an image.
+fn screened(key: BuildKey, sources: &[ThreadId]) -> Input {
+    use crate::context::{InputItem, ModelRequest, Role};
+    Input::ContextBuilt(ContextBuilt {
+        key,
+        snapshot: None,
+        result: Ok(Built {
+            request: ModelRequest {
+                choice: Some(choice("captured", Effort::High)),
+                instructions: String::new(),
+                input: vec![InputItem::Message {
+                    role: Role::User,
+                    text: "words".to_owned(),
+                }],
+                tools: Vec::new(),
+            },
+            sources: sources.to_vec(),
+        }),
+    })
+}
+
+fn told(effects: &[Effect]) -> Vec<&Effect> {
+    effects
+        .iter()
+        .filter(|effect| matches!(effect, Effect::Control(ControlToShell::HoldScreen { .. })))
+        .collect()
+}
+
+fn starts(effects: &[Effect]) -> usize {
+    effects
+        .iter()
+        .filter(|effect| {
+            matches!(
+                effect,
+                Effect::Store(StoreOp::BuildContext(_)) | Effect::StartEngine { .. }
+            )
+        })
+        .count()
+}
+
+#[test]
+fn a_held_turn_stores_its_screen_before_any_build_can_start() {
+    use kumochi_protocol::message::HeldScreen;
+
+    use crate::context::{Jpeg, Screen, ScreenClass};
+    let image = Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap();
+    let changed = HeldScreen::NotIncluded(ScreenClass::Changed);
+    for (screen, held) in [
+        (Some(Screen::Image(image)), Some(HeldScreen::Attached)),
+        (
+            Some(Screen::NotIncluded(ScreenClass::Changed)),
+            Some(changed),
+        ),
+        (None, None),
+    ] {
+        let mut core = ready_for("captured");
+        let effects = core
+            .submit_hold(prepared(&core, Some(T)), "words".into(), screen)
+            .unwrap();
+        assert_eq!(
+            effects[0],
+            Effect::Store(StoreOp::BeginTurn {
+                thread: T,
+                title: None,
+                run: R,
+                text: "words".into(),
+                screen: held,
+            })
+        );
+        assert_eq!(
+            starts(&effects),
+            0,
+            "nothing builds before the turn commits"
+        );
+        let effects = core.handle(Input::TurnStored { run: R }).unwrap();
+        assert!(matches!(
+            effects[..],
+            [Effect::Store(StoreOp::BuildContext(_))]
+        ));
+    }
+}
+
+#[test]
+fn a_held_turn_whose_write_fails_sends_nothing_and_fails_the_run() {
+    use crate::context::{Jpeg, Screen};
+    let mut core = ready_for("captured");
+    let image = Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap();
+    core.submit_hold(
+        prepared(&core, Some(T)),
+        "words".into(),
+        Some(Screen::Image(image)),
+    )
+    .unwrap();
+    let effects = core.handle(Input::StoreFailed { run: R }).unwrap();
+    assert_eq!(starts(&effects), 0, "{effects:?}");
+    assert_eq!(told(&effects), Vec::<&Effect>::new());
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Control(ControlToShell::RunState {
+            run: R,
+            phase: Phase::Failed,
+            ..
+        })
+    )));
+    assert_eq!(core.current_run(), None);
+    assert_eq!(core.handle(Input::TurnStored { run: R }), Err(Stale));
+}
+
+#[test]
+fn a_held_runs_screen_is_told_once_at_its_first_request() {
+    use kumochi_protocol::message::{Deleted, HeldScreen};
+
+    use crate::context::{Jpeg, Screen, ScreenClass};
+    const B: ThreadId = ThreadId(2);
+    let image = Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap();
+    let changed = HeldScreen::NotIncluded(ScreenClass::Changed);
+    for (screen, held) in [
+        (Some(Screen::Image(image)), Some(HeldScreen::Attached)),
+        (
+            Some(Screen::NotIncluded(ScreenClass::Changed)),
+            Some(changed),
+        ),
+        (None, None),
+    ] {
+        let mut core = ready_for("captured");
+        core.submit_hold(prepared(&core, Some(T)), "words".into(), screen)
+            .unwrap();
+        core.handle(Input::TurnStored { run: R }).unwrap();
+        let first = engine_key(&core, R);
+        let effects = core.handle(screened(first, &[T, B])).unwrap();
+        let expected = held.map_or_else(Vec::new, |outcome| {
+            vec![Effect::Control(ControlToShell::HoldScreen {
+                gesture: KEY.gesture,
+                outcome,
+            })]
+        });
+        assert_eq!(effects.len(), expected.len() + 1, "{effects:?}");
+        assert_eq!(effects[..expected.len()], expected[..]);
+        assert!(matches!(effects.last(), Some(Effect::StartEngine { .. })));
+        core.handle(Input::Delete {
+            thread: B,
+            after_turns: 0,
+            resend: false,
+        })
+        .unwrap();
+        let mut later = core
+            .handle(Input::SendReady {
+                key: SendKey::Build(first),
+                hold: None,
+            })
+            .unwrap();
+        assert!(later.contains(&Effect::Rebuild(SendKey::Build(first))));
+        later.extend(
+            core.handle(Input::Deleted {
+                thread: B,
+                outcome: Deleted::Hidden,
+                last_run: None,
+            })
+            .unwrap(),
+        );
+        let again = engine_key(&core, R);
+        assert_ne!(again, first, "a new attempt");
+        later.extend(core.handle(screened(again, &[T])).unwrap());
+        assert_eq!(
+            later
+                .iter()
+                .filter(|effect| matches!(effect, Effect::StartEngine { .. }))
+                .count(),
+            1,
+            "the rebuilt request starts"
+        );
+        assert_eq!(told(&later), Vec::<&Effect>::new(), "told once");
+    }
+}
+
+#[test]
+fn a_held_run_that_never_starts_a_request_tells_nothing() {
+    use crate::context::{Jpeg, Screen};
+    for ending in ["cancelled before its build", "image refused by the route"] {
+        let mut core = ready_for("captured");
+        let image = Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap();
+        let mut effects = core
+            .submit_hold(
+                prepared(&core, Some(T)),
+                "words".into(),
+                Some(Screen::Image(image)),
+            )
+            .unwrap();
+        effects.extend(core.handle(Input::TurnStored { run: R }).unwrap());
+        let key = engine_key(&core, R);
+        if ending == "cancelled before its build" {
+            effects.extend(core.cancel_hold(KEY));
+            assert_eq!(core.current_run(), None);
+            assert_eq!(core.handle(screened(key, &[T])), Err(Stale));
+        } else {
+            let Input::ContextBuilt(mut done) = screened(key, &[T]) else {
+                unreachable!()
+            };
+            done.result.as_mut().unwrap().request.choice = Some(ModelChoice {
+                connection: ConnectionKind::AnthropicKey,
+                ..choice("captured", Effort::High)
+            });
+            effects.extend(core.handle(Input::ContextBuilt(done)).unwrap());
+            assert!(effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Control(ControlToShell::RunState { error: Some(error), .. })
+                    if error.key() == kumochi_protocol::message::ErrorKey::ScreenUnavailable
+            )));
+        }
+        assert_eq!(told(&effects), Vec::<&Effect>::new(), "{ending}");
+    }
 }
 
 /// A coordinator whose engines are ready with `model` listed.

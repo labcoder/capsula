@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use kumochi_protocol::message::{Content, GestureId, RunOrigin, ThreadId};
+use kumochi_protocol::message::{Content, ControlToShell, GestureId, RunOrigin, ThreadId};
 
 use super::{Coordinator, Effect, Input, StoreOp, admission};
 use crate::context::{Origin, RunSnapshot};
@@ -66,6 +66,19 @@ impl PartialEq for HoldSnapshot {
     }
 }
 impl Eq for HoldSnapshot {}
+
+impl super::Run {
+    /// At the run's first request: tells the shell what its hold's screen carried, once.
+    pub(super) fn tell_screen(&mut self, effects: &mut Vec<Effect>) {
+        let (Some(gesture), Some(screen)) = (self.untold.take(), &self.screen) else {
+            return;
+        };
+        effects.push(Effect::Control(ControlToShell::HoldScreen {
+            gesture,
+            outcome: screen.held(),
+        }));
+    }
+}
 
 impl Coordinator {
     /// Captures the ready connection, without allocating a run or a new thread.

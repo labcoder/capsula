@@ -539,6 +539,7 @@ async fn an_op_fails_while_the_store_cant_reopen_and_the_next_is_stored_once_it_
         title: Some("new".into()),
         run,
         text: text.into(),
+        screen: None,
     };
     assert!(thread.send(turn(RunId(3), "refused words")));
     assert_eq!(
@@ -675,6 +676,7 @@ fn every_operation_gets_one_reply_in_order() {
             title: Some("t".into()),
             run,
             text: "hi".into(),
+            screen: None,
         },
         StoreOp::CommitStep {
             thread: ThreadId(2),
@@ -768,6 +770,7 @@ fn a_round_the_reader_would_refuse_fails_its_run_and_the_thread_goes_on() {
             title: Some("t".into()),
             run: RunId(1),
             text: "hi".into(),
+            screen: None,
         },
         round(RunId(1), item, over),
         end(RunId(1), RunEnd::Failed(crate::store::Failure::Store)),
@@ -776,6 +779,7 @@ fn a_round_the_reader_would_refuse_fails_its_run_and_the_thread_goes_on() {
             title: None,
             run: RunId(2),
             text: "again".into(),
+            screen: None,
         },
         round(RunId(2), &growing, ok()),
         end(RunId(2), RunEnd::Failed(crate::store::Failure::Store)),
@@ -784,6 +788,7 @@ fn a_round_the_reader_would_refuse_fails_its_run_and_the_thread_goes_on() {
             title: None,
             run: RunId(3),
             text: "once more".into(),
+            screen: None,
         },
         round(RunId(3), item, ok()),
         end(RunId(3), RunEnd::Done),
@@ -854,6 +859,7 @@ fn a_heard_point_is_stored_and_answers_nothing() {
             title: Some("t".into()),
             run,
             text: "hi".into(),
+            screen: None,
         },
         StoreOp::EndRun {
             thread,
@@ -868,6 +874,7 @@ fn a_heard_point_is_stored_and_answers_nothing() {
             title: None,
             run: refused,
             text: "again".into(),
+            screen: None,
         },
         StoreOp::EndRun {
             thread,
@@ -919,6 +926,34 @@ fn a_heard_point_is_stored_and_answers_nothing() {
         ("done".into(), None, None, None),
         "the refused point leaves the run's outcome as it was"
     );
+}
+
+#[test]
+fn a_held_turns_screen_is_stored_with_its_turn() {
+    use kumochi_protocol::message::{HeldScreen, ScreenClass};
+    let scratch = Scratch::new("held-op");
+    let store = Store::open(&scratch.db()).expect("store");
+    let (thread, run) = (ThreadId(1), RunId(1));
+    let (acks, mut replies) = mpsc::unbounded_channel();
+    let store = StoreThread::spawn(store, acks, Schedule::default()).expect("thread");
+    assert!(store.send(StoreOp::BeginTurn {
+        thread,
+        title: Some("t".into()),
+        run,
+        text: "hi".into(),
+        screen: Some(HeldScreen::NotIncluded(ScreenClass::TooLarge)),
+    }));
+    store.close().blocking_recv().expect("closed");
+    let mut got = Vec::new();
+    while let Ok(reply) = replies.try_recv() {
+        got.push(reply);
+    }
+    assert_eq!(got, [Input::TurnStored { run }]);
+    let conn = rusqlite::Connection::open(scratch.db()).expect("raw open");
+    let stored: Option<String> = conn
+        .query_row("SELECT screen FROM runs WHERE id = 1", [], |row| row.get(0))
+        .expect("the run's row");
+    assert_eq!(stored.as_deref(), Some("too_large"));
 }
 
 #[test]
@@ -1027,6 +1062,7 @@ fn measure_page_reads() {
                 title: None,
                 run: RunId(2_000_001 + at),
                 text: "a measured turn".into(),
+                screen: None,
             }));
         };
         let settle = |thread: &StoreThread, replies: &mut mpsc::UnboundedReceiver<Input>, at| {
@@ -1446,6 +1482,7 @@ fn measure_delete_during_a_purge() {
                 title: Some("t".into()),
                 run: turn.1,
                 text: "a measured turn".into(),
+                screen: None,
             }));
             let released = Instant::now();
             releasing.send(()).expect("the copy waits");

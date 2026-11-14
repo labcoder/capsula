@@ -313,7 +313,8 @@ impl Pages<'_> {
                              AND b.kind = 'scene_begin' AND b.body IS NOT NULL)
                      END END END
                  END,
-                 CASE WHEN e.kind IN ('draft', 'action') THEN substr(CAST(e.body AS BLOB), 1, 33) END
+                 CASE WHEN e.kind IN ('draft', 'action') THEN substr(CAST(e.body AS BLOB), 1, 33) END,
+                 CASE WHEN e.kind = 'user' THEN (SELECT r.screen FROM runs r WHERE r.id = e.run) END
                  FROM events e
              JOIN threads t ON t.id = e.thread AND t.state = 'live'
              WHERE e.thread = ?1 AND (?2 IS NULL OR e.id < ?2)
@@ -344,7 +345,13 @@ impl Pages<'_> {
                         text.truncate(error.valid_up_to());
                     }
                     let kind = match kind.as_str() {
-                        "user" => PageEventKind::User,
+                        "user" => row
+                            .get::<_, Option<String>>(6)?
+                            .as_deref()
+                            .and_then(super::held::read)
+                            .map_or(PageEventKind::User, |screen| PageEventKind::HeldTurn {
+                                screen,
+                            }),
                         "assistant_text" => PageEventKind::AssistantText,
                         "scene_step" => row.get::<_, Option<i64>>(4)?.map_or(
                             PageEventKind::SceneStep,

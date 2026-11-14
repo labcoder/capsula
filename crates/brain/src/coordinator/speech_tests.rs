@@ -429,6 +429,7 @@ fn a_new_turn_while_draining_revokes_the_old_speech_and_starts_at_once() {
                 title: None,
                 run: next,
                 text: "next".into(),
+                screen: None,
             }),
             Effect::Control(ControlToShell::RunState {
                 run: next,

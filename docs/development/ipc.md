@@ -29,10 +29,15 @@ fields changed in place, not by appending: `pointer_display`, the display that h
 was replaced by `selection` and a physical `pointer`, and its smallest encoding went from 9 bytes
 to 8. That's safe because nothing sends it yet and the build-id handshake refuses mixed binaries.
 
-The appended `HoldScreen { gesture, outcome }` says what a screen hold's window did, once, when
-its run's first request starts: `Sent`, or `NotIncluded` with one of seven fixed classes, the
-last of them, `ModelCantSee`, appended for a hold whose thread is pinned to a model that can't be
-sent images. Nothing in it names a window.
+The appended `HoldScreen { gesture, outcome }` says what a screen hold carried into its turn,
+once, when its run's first request starts: `Attached` for the window's image, or `NotIncluded`
+with one of seven fixed classes, the last of them, `ModelCantSee`, appended for a hold whose
+thread is pinned to a model that can't be sent images. Nothing in it names a window. A history
+page carries the same value on the turn's user event as the appended
+`PageEventKind::HeldTurn { screen }` (tag 6), read from the run's stored `screen`
+([store](store.md#tables)). It says what the turn carried, not that a request left the machine:
+the value is stored with the turn, before any request exists. The shell shows a `HeldTurn`
+exactly as a plain user turn until the history line arrives.
 
 `SettingsOp::SetScreenHolds` is appended, and `SettingsView` gains `screen_holds` (on when a
 settings file has no key, off when it can't be read). A new struct field isn't append-only in
@@ -42,7 +47,8 @@ mixed binaries.
 The brain sends `ScreenHolds` for the default model once a connection opens, after `Welcome` and
 the voice view, and again only when a saved settings change, a catalog read or an account
 operation the shell sent (a sign-out clears the catalog at once) moves it. Nothing sends
-`HoldScreen` or `HoldRecognized` yet. In the running phase the shell ignores `ScreenHolds` and
+`HoldRecognized` yet, so no run carries a screen, and no `HoldScreen` or `HeldTurn` is ever
+produced. In the running phase the shell ignores `ScreenHolds` and
 `HoldScreen`; before `Welcome` it rejects either one and ends the connection. All three are
 payload-redacted in the pipe tap.
 

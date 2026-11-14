@@ -269,7 +269,7 @@ fn version_six_upgrades_with_its_rows_and_an_unused_mark() {
         .conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("version");
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     let marks: Vec<(i64, i64)> = store
         .conn
         .prepare("SELECT id, last FROM approval_mark")
