@@ -9,7 +9,7 @@ use crate::settings::{Error, Field, Settings};
 
 /// The step on screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Step {
+pub enum Step {
     /// "Hi, I'm ⟨name⟩", with the assistant's name in an input.
     Welcome,
     /// What the assistant should call the user; optional.
@@ -22,7 +22,7 @@ pub(crate) enum Step {
 
 impl Step {
     /// The name the step edits, if it has one.
-    pub(crate) fn field(self) -> Option<Field> {
+    pub fn field(self) -> Option<Field> {
         match self {
             Self::Welcome => Some(Field::Assistant),
             Self::YourName => Some(Field::User),
@@ -31,7 +31,7 @@ impl Step {
     }
 
     /// The step the brain remembers once this one is completed.
-    pub(crate) fn recorded(self) -> OnboardingStep {
+    pub fn recorded(self) -> OnboardingStep {
         match self {
             Self::Welcome => OnboardingStep::Welcome,
             Self::YourName => OnboardingStep::YourName,
@@ -52,7 +52,7 @@ impl Step {
 }
 
 /// A usable `ChatGPT` account: signed in, with the plan enabled and no sign-in again owed.
-pub(crate) fn account_complete(view: Option<&AccountView>) -> bool {
+pub fn account_complete(view: Option<&AccountView>) -> bool {
     matches!(
         view,
         Some(AccountView::SignedIn {
@@ -65,7 +65,7 @@ pub(crate) fn account_complete(view: Option<&AccountView>) -> bool {
 
 /// What closing lands on once the brain says onboarding is finished.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Landing {
+pub enum Landing {
     /// The finish this window's Finish asked for: the peek opens.
     Peek,
     /// The finish a double-tap asked for: the typing box opens.
@@ -76,7 +76,7 @@ pub(crate) enum Landing {
 
 /// Whether onboarding may still open this run.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum ThisRun {
+pub enum ThisRun {
     #[default]
     Owed,
     /// Finish later was chosen, or the window couldn't open: not again until the next launch.
@@ -85,7 +85,7 @@ pub(crate) enum ThisRun {
 
 /// What the window does after a submit or a settings change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Next {
+pub enum Next {
     /// Nothing beyond redrawing.
     Stay,
     /// The next step shows; its input takes focus.
@@ -97,7 +97,7 @@ pub(crate) enum Next {
 }
 
 #[derive(Debug)]
-pub(crate) struct Onboarding {
+pub struct Onboarding {
     step: Step,
     /// Go on once this field's save settles without an error.
     awaiting: Option<Field>,
@@ -108,7 +108,7 @@ pub(crate) struct Onboarding {
 impl Onboarding {
     /// What a settings view opens, at the first step not yet completed: none once the brain says
     /// onboarding isn't owed, or once it was put off this run.
-    pub(crate) fn begin(view: &SettingsView, run: ThisRun) -> Option<Self> {
+    pub fn begin(view: &SettingsView, run: ThisRun) -> Option<Self> {
         (!view.onboarded && run == ThisRun::Owed).then_some(Self {
             step: Step::resume(view.onboarding_from),
             awaiting: None,
@@ -116,11 +116,11 @@ impl Onboarding {
         })
     }
 
-    pub(crate) fn step(&self) -> Step {
+    pub fn step(&self) -> Step {
         self.step
     }
 
-    pub(crate) fn finishing(&self) -> bool {
+    pub fn finishing(&self) -> bool {
         self.finishing.is_some()
     }
 
@@ -129,7 +129,7 @@ impl Onboarding {
     /// saving waits for the answer, a validation or offline error stays, and anything else goes
     /// on, including the brain's error left from a refusal once the draft is back at the saved
     /// name. A step with no field goes on. With no settings view, nothing happens.
-    pub(crate) fn submit(&mut self, settings: &Settings) -> Next {
+    pub fn submit(&mut self, settings: &Settings) -> Next {
         if settings.view().is_none() || self.finishing.is_some() {
             return Next::Stay;
         }
@@ -150,7 +150,7 @@ impl Onboarding {
     /// A settings view or answer was applied, or the link dropped. An awaited save that settled
     /// goes on when its field has no error. A finish that's no longer queued was refused, so it
     /// can be asked for again.
-    pub(crate) fn settings_changed(&mut self, settings: &Settings) -> Next {
+    pub fn settings_changed(&mut self, settings: &Settings) -> Next {
         let Some(view) = settings.view() else {
             self.disconnected();
             return Next::Stay;
@@ -178,7 +178,7 @@ impl Onboarding {
 
     /// A double-tap while the window shows is used up; at the shortcut it asks for the finish that
     /// opens typing. With no settings view, or a finish already queued, nothing happens.
-    pub(crate) fn double_tap(&self, settings: &Settings) -> Next {
+    pub fn double_tap(&self, settings: &Settings) -> Next {
         if self.step == Step::Shortcut && settings.view().is_some() && self.finishing.is_none() {
             Next::Finish(Landing::Typing)
         } else {
@@ -187,7 +187,7 @@ impl Onboarding {
     }
 
     /// `FinishOnboarding` was queued; the window closes only when the brain says so.
-    pub(crate) fn finish_queued(&mut self, landing: Landing) {
+    pub fn finish_queued(&mut self, landing: Landing) {
         self.finishing = Some(landing);
     }
 

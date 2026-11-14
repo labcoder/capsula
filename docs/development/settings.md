@@ -25,7 +25,7 @@ No login URL, code or credential contents reach the shell. See [Claude Code](cla
 
 The status panel's **Settings…** opens a retained window, the tasks panel's size and anchored
 with the same work-area clamping. Kit's tabs expose **General**, **Accounts** and **Voice**.
-`shell/settings.rs` owns the plain drafts, validation, per-field saving and errors;
+`shell-core/settings.rs` owns the plain drafts, validation, per-field saving and errors;
 `presence/settings/window.rs` owns the window and session sends; `presence/settings/mod.rs`
 owns the shared view frame, retained Kit inputs and subscriptions. `general.rs` and `accounts.rs`
 compose their tabs without another settings entity. The shell's UI thread never waits for a save.

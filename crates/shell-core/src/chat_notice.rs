@@ -7,7 +7,7 @@ use kumochi_protocol::message::{AccountOp, Action, ErrorKey, RunId, ThreadId, Us
 use crate::settings::Field;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Source {
+pub enum Source {
     Run(RunId),
     Account,
     Settings(Option<Field>),
@@ -15,9 +15,9 @@ pub(crate) enum Source {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct Notice {
-    pub(crate) error: UserError,
-    pub(crate) source: Source,
+pub struct Notice {
+    pub error: UserError,
+    pub source: Source,
 }
 
 impl fmt::Debug for Notice {
@@ -40,7 +40,7 @@ impl fmt::Debug for Notice {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Route {
+pub enum Route {
     RunRetry(RunId),
     Account(AccountOp),
     SettingsRetry(Field),
@@ -50,7 +50,7 @@ pub(crate) enum Route {
 }
 
 impl Notice {
-    pub(crate) fn route(&self, action: Action) -> Option<Route> {
+    pub fn route(&self, action: Action) -> Option<Route> {
         Some(match action {
             Action::Retry => match self.source {
                 Source::Run(run) => Route::RunRetry(run),
@@ -82,7 +82,7 @@ enum Renewal {
 }
 
 #[derive(Default)]
-pub(crate) struct ChatNotice {
+pub struct ChatNotice {
     shown: Option<Notice>,
     renewal: Renewal,
 }
@@ -97,17 +97,17 @@ impl fmt::Debug for ChatNotice {
 }
 
 impl ChatNotice {
-    pub(crate) fn for_thread(&self, thread: Option<ThreadId>) -> Option<&Notice> {
+    pub fn for_thread(&self, thread: Option<ThreadId>) -> Option<&Notice> {
         self.shown.as_ref().filter(|notice| {
             !matches!(notice.source, Source::Drawing { thread: owner, .. } if Some(owner) != thread)
         })
     }
 
-    pub(crate) fn shown(&self) -> Option<&Notice> {
+    pub fn shown(&self) -> Option<&Notice> {
         self.shown.as_ref()
     }
 
-    pub(crate) fn present(&mut self, error: UserError, source: Source) {
+    pub fn present(&mut self, error: UserError, source: Source) {
         if error.key() == ErrorKey::RenewalUnconfirmed {
             self.renewal = match (&self.renewal, source) {
                 (Renewal::Fresh | Renewal::AccountShown, Source::Run(_)) => Renewal::RunOwnedShown,
@@ -118,7 +118,7 @@ impl ChatNotice {
         self.shown = Some(Notice { error, source });
     }
 
-    pub(crate) fn dismiss(&mut self) {
+    pub fn dismiss(&mut self) {
         if self
             .shown
             .as_ref()
@@ -129,11 +129,11 @@ impl ChatNotice {
         self.shown = None;
     }
 
-    pub(crate) fn clear(&mut self) {
+    pub fn clear(&mut self) {
         *self = Self::default();
     }
 
-    pub(crate) fn recovered(&mut self) {
+    pub fn recovered(&mut self) {
         self.renewal = Renewal::Fresh;
         if self
             .shown

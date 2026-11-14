@@ -1,7 +1,7 @@
 use super::{DockIntent, DockPosition, Pending, Settings, SettingsOp, Slot};
 
 impl Settings {
-    pub(crate) fn dock_position_choice(&self) -> Option<DockPosition> {
+    pub fn dock_position_choice(&self) -> Option<DockPosition> {
         self.offline_position
             .map(DockIntent::position)
             .or_else(|| {
@@ -16,7 +16,7 @@ impl Settings {
             .or(self.view.as_ref().map(|view| view.dock_position))
     }
 
-    pub(crate) fn send_dock_position(
+    pub fn send_dock_position(
         &mut self,
         position: DockPosition,
         send: impl FnOnce(SettingsOp) -> bool,
@@ -25,7 +25,7 @@ impl Settings {
         self.flush_offline_position(send);
     }
 
-    pub(crate) fn flush_offline_position(&mut self, send: impl FnOnce(SettingsOp) -> bool) -> bool {
+    pub fn flush_offline_position(&mut self, send: impl FnOnce(SettingsOp) -> bool) -> bool {
         let (Some(intent), Some(view)) = (self.offline_position, self.view.as_ref()) else {
             return false;
         };

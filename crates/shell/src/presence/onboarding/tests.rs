@@ -527,7 +527,10 @@ fn the_finish_lands_on_the_peek_only_when_the_brain_says_so(cx: &mut TestAppCont
                 .expect("a step's answer");
         }
         assert!(owner.onboarding.is_some());
-        assert!(owner.settings.read(cx).finishing(), "still the finish's");
+        assert!(
+            owner.settings.read(cx).finishing_for_tests(),
+            "still the finish's"
+        );
         owner
             .link_events(
                 Batch::Plain(vec![LinkEvent::Settings {
