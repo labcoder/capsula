@@ -72,10 +72,14 @@ pub struct Completion {
 }
 
 impl Completion {
-    /// A completion as `Settings::set_view` returns it, for the shell's tests to compare with.
+    /// The completion `Settings::set_view` returns for a refused save of `field`, for the
+    /// shell's tests to compare with.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn for_tests(failed: bool, field: Field) -> Self {
-        Self { failed, field }
+    pub fn failed_for_tests(field: Field) -> Self {
+        Self {
+            failed: true,
+            field,
+        }
     }
 }
 

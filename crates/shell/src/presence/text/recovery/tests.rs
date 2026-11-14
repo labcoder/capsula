@@ -839,10 +839,6 @@ fn renewal_general() -> LinkEvent {
 }
 
 #[gpui::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "the saved view spells out every settings field"
-)]
 fn settings_retry_rechecks_its_captured_field_and_waits_for_the_matching_answer(
     cx: &mut TestAppContext,
 ) {
@@ -913,7 +909,7 @@ fn settings_retry_rechecks_its_captured_field_and_waits_for_the_matching_answer(
             let completion = state
                 .set_view(saved, Update::Answer)
                 .expect("matching answer");
-            assert_eq!(completion, Completion::for_tests(true, Field::Assistant));
+            assert_eq!(completion, Completion::failed_for_tests(Field::Assistant));
             state.change(Field::Assistant, "Cirrus");
             state.change(Field::User, "keep this settings draft");
             cx.notify();
