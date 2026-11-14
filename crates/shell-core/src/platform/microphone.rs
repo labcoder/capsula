@@ -30,7 +30,7 @@ pub(super) use pcm::{Format, Packetizer, Sample};
 
 /// The capture pump's sleep while the endpoint is empty, one wire chunk long; the reaper and
 /// the UI's hold watcher reuse it as their check interval.
-pub(crate) const POLL: Duration = Duration::from_millis(20);
+pub const POLL: Duration = Duration::from_millis(20);
 /// One wire chunk, as the packetizer cuts them.
 const CHUNK: Duration = Duration::from_millis(20);
 /// A whole capture buffer drained in one pass, plus three chunks for the forwarder to lag.
@@ -52,7 +52,7 @@ const RETIRED: u64 = 7;
 
 /// Fixed diagnostics only; foreign errors and driver identifiers never escape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum MicError {
+pub enum MicError {
     #[error("microphone generation is stale")]
     Stale,
     #[error("microphone was cancelled")]
@@ -230,15 +230,15 @@ impl PacketBoundary {
 
 /// Native input closes this atomic fence without borrowing GPUI.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct CollectionGate(Arc<AtomicU64>);
+pub struct CollectionGate(Arc<AtomicU64>);
 
 impl CollectionGate {
-    pub(crate) fn latest(&self) -> u64 {
+    pub fn latest(&self) -> u64 {
         self.0.load(Ordering::Acquire) >> 3
     }
 
     /// Arms a strictly newer nonzero gesture only after the prior join receipt.
-    pub(crate) fn arm(&self, gesture: GestureId) -> Result<Generation, MicError> {
+    pub fn arm(&self, gesture: GestureId) -> Result<Generation, MicError> {
         self.arm_at(gesture, Instant::now())
     }
 
@@ -261,17 +261,17 @@ impl CollectionGate {
     }
 
     /// Normal release can never downgrade an earlier cancellation.
-    pub(crate) fn release(&self, gesture: GestureId) {
+    pub fn release(&self, gesture: GestureId) {
         transition(&self.0, gesture, RELEASED);
     }
 
     /// Cancellation upgrades normal release and is terminal for this generation.
-    pub(crate) fn cancel(&self, gesture: GestureId) {
+    pub fn cancel(&self, gesture: GestureId) {
         transition(&self.0, gesture, CANCELLED);
     }
 
     /// Reset/input-session loss needs no deferred gesture identifier lookup.
-    pub(crate) fn cancel_current(&self) {
+    pub fn cancel_current(&self) {
         let current = self.0.load(Ordering::Acquire);
         if let Some(id) = u32::try_from(current >> 3).ok().filter(|id| *id != 0) {
             self.cancel(GestureId(id));
@@ -288,7 +288,7 @@ fn transition(gate: &AtomicU64, gesture: GestureId, target: u64) {
 
 /// A checked, single-start generation; cloning it cannot grant a second open.
 #[derive(Clone, Debug)]
-pub(crate) struct Generation {
+pub struct Generation {
     gate: Arc<AtomicU64>,
     gesture: GestureId,
     at: Instant,
@@ -296,7 +296,7 @@ pub(crate) struct Generation {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Mode {
+pub enum Mode {
     Preparing,
     Collecting,
     Release,
@@ -304,7 +304,7 @@ pub(crate) enum Mode {
 
 impl Generation {
     /// Retires denied admission only if no source start has claimed this generation.
-    pub(crate) fn discard_unstarted(&self) -> Result<(), MicError> {
+    pub fn discard_unstarted(&self) -> Result<(), MicError> {
         self.startup
             .set(Instant::now())
             .map_err(|_| MicError::Stale)?;
@@ -313,11 +313,11 @@ impl Generation {
         Ok(())
     }
 
-    pub(crate) fn gesture(&self) -> GestureId {
+    pub fn gesture(&self) -> GestureId {
         self.gesture
     }
 
-    pub(crate) fn retired(&self) -> bool {
+    pub fn retired(&self) -> bool {
         self.gate.load(Ordering::Acquire) == (u64::from(self.gesture.0) << 3 | RETIRED)
     }
 
@@ -337,7 +337,7 @@ impl Generation {
         self.mode(session, Instant::now()) == Ok(Mode::Collecting)
     }
 
-    pub(crate) fn mode(&self, session: &AtomicBool, now: Instant) -> Result<Mode, MicError> {
+    pub fn mode(&self, session: &AtomicBool, now: Instant) -> Result<Mode, MicError> {
         let state = self.gate.load(Ordering::Acquire);
         if state >> 3 != u64::from(self.gesture.0) {
             return Err(MicError::Stale);
@@ -373,41 +373,41 @@ impl Generation {
 }
 /// Running is preparation evidence, never permission to copy samples.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Running {
+pub struct Running {
     pub(crate) gesture: GestureId,
     pub(crate) rate: u32,
 }
 
 /// Finalization is reported only after the worker's native teardown and join.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Finalization {
+pub enum Finalization {
     Released { packets: u32 },
     Discarded(MicError),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum StopReason {
-    #[cfg(test)]
+pub enum StopReason {
+    #[cfg(any(test, feature = "test-support"))]
     Release,
     Cancel,
 }
 
 /// This receipt, unlike a stop request, releases the device generation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct StopReceipt {
+pub struct StopReceipt {
     pub(crate) gesture: GestureId,
-    pub(crate) finalization: Finalization,
+    pub finalization: Finalization,
 }
 
 /// One source worker. Dropping requests cancellation but is not a join receipt.
-pub(crate) struct MicOwner {
+pub struct MicOwner {
     generation: Generation,
     session: Arc<AtomicBool>,
     wake: Arc<OnceLock<thread::Thread>>,
     completion: Receiver<Result<Finalization, MicError>>,
     reported: bool,
-    pub(crate) running: Receiver<Running>,
-    pub(crate) pcm: Receiver<MicPcm>,
+    pub running: Receiver<Running>,
+    pub pcm: Receiver<MicPcm>,
 }
 
 struct WorkerCleanup {
@@ -438,11 +438,8 @@ impl fmt::Debug for MicOwner {
 impl MicOwner {
     /// Caller must have Brain admission and must forward PCM on a separate worker.
     /// No device is touched on this calling thread.
-    pub(crate) fn start(
-        generation: Generation,
-        session: Arc<AtomicBool>,
-    ) -> Result<Self, MicError> {
-        if cfg!(test) {
+    pub fn start(generation: Generation, session: Arc<AtomicBool>) -> Result<Self, MicError> {
+        if cfg!(any(test, feature = "test-support")) {
             return Self::start_with(generation, session, |_, _, _, _| {
                 Ok(Finalization::Discarded(MicError::Unavailable))
             });
@@ -529,7 +526,7 @@ impl MicOwner {
     }
 
     /// Call only after accepting this running receipt and publishing matching UI state.
-    pub(crate) fn accept_running(&self, running: Running) -> Result<(), MicError> {
+    pub fn accept_running(&self, running: Running) -> Result<(), MicError> {
         if running.gesture != self.generation.gesture {
             return Err(MicError::Stale);
         }
@@ -538,9 +535,9 @@ impl MicOwner {
     }
 
     /// The native edge should already have closed the gate; this is idempotent.
-    pub(crate) fn stop(&self, reason: StopReason) {
+    pub fn stop(&self, reason: StopReason) {
         match reason {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             StopReason::Release => {
                 transition(&self.generation.gate, self.generation.gesture, RELEASED);
             }
@@ -552,7 +549,7 @@ impl MicOwner {
     }
 
     /// Nonblocking polling; an error leaves the generation unavailable, not retired.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn try_receipt(&mut self) -> Option<Result<StopReceipt, MicError>> {
         if self.reported {
             return None;
@@ -571,7 +568,7 @@ impl MicOwner {
         }
     }
 
-    pub(crate) async fn receipt(&mut self) -> Result<StopReceipt, MicError> {
+    pub async fn receipt(&mut self) -> Result<StopReceipt, MicError> {
         if self.reported {
             return Err(MicError::Stale);
         }

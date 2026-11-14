@@ -8,10 +8,24 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+async-channel = "2"
 keyring.workspace = true
 kumochi-protocol.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Security_Credentials",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+] }
 
 [features]
 # The fixtures the shell's tests share with the core's.
