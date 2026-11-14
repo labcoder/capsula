@@ -100,8 +100,7 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
                             assert!(super::jobs(effects).is_empty());
                             let head = super::ready_head(&mirror, id);
                             let start = Instant::now();
-                            let consumed = mirror
-                                .consume_ready(id, head, now, 0, 0)
+                            let consumed = super::consume_ready(&mut mirror, id, head, now, 0, 0)
                                 .expect("the head fits");
                             let job = only_job(consumed.effects.expect("the successor dispatch"));
                             drop(consumed.step);
@@ -192,7 +191,7 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
                 );
                 assert_eq!(super::held(&mirror, scene).0, super::WINDOW);
             }
-            let charged = mirror.residency();
+            let charged = super::residency(&mirror);
             let start = Instant::now();
             let effects = mirror.clear(now).expect("clear full histories");
             drop(effects);
@@ -257,9 +256,7 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
 fn consume_timed(presenter: &mut super::Presenter, scene: SceneId, now: Instant) -> u128 {
     let index = super::ready_head(presenter, scene);
     let start = Instant::now();
-    let consumed = presenter
-        .consume_ready(scene, index, now, 0, 0)
-        .expect("the head fits");
+    let consumed = super::consume_ready(presenter, scene, index, now, 0, 0).expect("the head fits");
     let effects = consumed.effects.expect("a current scene");
     let empty = effects.is_empty();
     drop(effects);
@@ -446,8 +443,7 @@ fn native_maximal_content_is_refused_as_paint_work() {
                     if super::held(&presenter, id).0 == 0 {
                         break;
                     }
-                    let done = presenter
-                        .consume_ready(id, consumed, now, 0, 0)
+                    let done = super::consume_ready(&mut presenter, id, consumed, now, 0, 0)
                         .expect("the ready head");
                     consumed += 1;
                     let effects = done.effects.expect("a current scene");

@@ -1,26 +1,31 @@
 //! The presenter's test fixtures that tests outside its own test files share.
 
 use std::{
-    sync::{Arc, mpsc},
+    any::Any,
+    sync::{Arc, atomic::Ordering, mpsc},
     time::{Duration, Instant},
 };
 
 use kumochi_protocol::message::{
-    ControlToBrain, DataToShell, MAX_VISIBLE_SCENES, RunId, SceneDescriptorV1, SceneFailure,
-    SceneHeader, SceneId, SceneSnapshotChunk,
+    ControlToBrain, DataToShell, GestureId, MAX_VISIBLE_SCENES, RunId, SceneDescriptorV1,
+    SceneFailure, SceneHeader, SceneId, SceneSnapshotChunk,
 };
 use kumochi_scene::{
     Record, SceneEvent, SceneView, Step, StopCut,
     budget::Usage,
     deferred::Deferred,
-    display::{MeasureError, TextMeasure, TextStyle},
+    display::{MeasureError, PaintWork, TextMeasure, TextStyle},
     layout::SurfaceGeometry,
     parse_record,
     text::Bounded,
     theme::Theme,
 };
 
-use super::{AdmitJob, Broken, Effect, PrepareJob, Presenter, RecoveryJob, SceneCache, Stage};
+use super::{
+    AdmitJob, Broken, Effect, Frames, PrepareJob, Presenter, RecoveryJob, Sample, SceneCache,
+    Stage,
+    overlay_input::{self, OverlayOwner, RegionId},
+};
 
 pub(crate) const GENERATION: u64 = 1;
 pub(crate) const RUN: RunId = RunId(5);
@@ -730,4 +735,67 @@ pub(crate) fn show_rest(presenter: &mut Presenter, scene: SceneId) {
     let scene = presenter.scenes.get_mut(&scene).expect("scene");
     scene.view = SceneView::new(&scene.rest, scene.state.view().activated());
     scene.view_bytes = scene.view.resident_bytes();
+}
+
+/// What the presenter charges against the prepared allowance.
+pub(crate) fn residency(presenter: &Presenter) -> usize {
+    presenter.residency()
+}
+
+/// The paint work the presenter's scenes and retired frames hold.
+pub(crate) fn paint_work(presenter: &Presenter) -> PaintWork {
+    presenter.paint_work()
+}
+
+/// The charge consumed steps their owners still hold.
+pub(crate) fn returned(presenter: &Presenter) -> usize {
+    presenter.returned.load(Ordering::Relaxed)
+}
+
+/// Samples every scene's view at `now_ms`.
+pub(crate) fn sample(presenter: &mut Presenter, now_ms: u64) -> (Sample, Vec<Effect>) {
+    presenter.sample(now_ms)
+}
+
+/// The epoch and bound a shown overlay painted for `scene`.
+pub(crate) fn painted(frames: &Frames, scene: SceneId) -> Option<(u64, u32)> {
+    frames
+        .painted(scene)
+        .map(|painted| (painted.epoch, painted.bound))
+}
+
+/// Starts the selection for `gesture`.
+pub(crate) fn select(owner: &mut OverlayOwner, gesture: GestureId) -> Vec<overlay_input::Effect> {
+    owner.select(gesture)
+}
+
+/// The region `id` names.
+pub(crate) fn region(id: u64) -> RegionId {
+    RegionId(id)
+}
+
+/// A step consumed through [`consume_ready`], charged until `step` drops.
+pub(crate) struct Consumption {
+    pub(crate) step: Box<dyn Any>,
+    pub(crate) index: u32,
+    pub(crate) effects: Result<Vec<Effect>, Broken>,
+}
+
+/// Activates `scene`'s oldest prepared step, which must be `index`, as the activation owner will.
+pub(crate) fn consume_ready(
+    presenter: &mut Presenter,
+    scene: SceneId,
+    index: u32,
+    now: Instant,
+    scene_time: u64,
+    segment_ms: u64,
+) -> Result<Consumption, String> {
+    let consumed = presenter
+        .consume_ready(scene, index, now, scene_time, segment_ms)
+        .map_err(|error| format!("{error:?}"))?;
+    Ok(Consumption {
+        index: consumed.step.step().index,
+        step: Box::new(consumed.step),
+        effects: consumed.effects,
+    })
 }

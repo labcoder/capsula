@@ -139,7 +139,7 @@ fn the_native_preparation_fixture_fills_every_paint_cap_and_shapes_every_label()
             .completed(job.run(&mut measure), now)
             .expect("prepared answer");
         assert!(controls(&effects).is_empty());
-        let work = presenter.paint_work();
+        let work = super::paint_work(&presenter);
         assert_eq!(
             (work.dash_pieces, work.fill_vertices, work.outline_points),
             (
@@ -189,7 +189,7 @@ fn measure_native_full_preparation_at_paint_caps() {
                     let effects = presenter.completed(done, now).expect("install");
                     let full = start.elapsed().as_nanos();
                     assert!(controls(&effects).is_empty());
-                    let work = presenter.paint_work();
+                    let work = super::paint_work(&presenter);
                     assert_eq!(
                         (work.dash_pieces, work.fill_vertices, work.outline_points),
                         (
@@ -292,7 +292,7 @@ fn window_residency(measure: &mut dyn TextMeasure) -> usize {
         ),
         (4, 1500)
     );
-    let work = presenter.paint_work();
+    let work = super::paint_work(&presenter);
     assert_eq!(
         (work.dash_pieces, work.fill_vertices, work.outline_points),
         (
@@ -304,20 +304,19 @@ fn window_residency(measure: &mut dyn TextMeasure) -> usize {
     for scene in super::scene_ids(&presenter) {
         assert_eq!(super::held(&presenter, scene), (8, 56));
     }
-    let mut peak = presenter.residency();
+    let mut peak = super::residency(&presenter);
     let mut previous = [None, None, None, None];
     for index in 0..64 {
         for (offset, prior) in previous.iter_mut().enumerate() {
             let id = SceneId(100 + u64::try_from(offset).expect("four scenes"));
-            let consumed = presenter
-                .consume_ready(id, index, now, 0, 0)
-                .expect("ready head");
-            assert_eq!(consumed.step.step().index, index);
+            let consumed =
+                super::consume_ready(&mut presenter, id, index, now, 0, 0).expect("ready head");
+            assert_eq!(consumed.index, index);
             super::show_rest(&mut presenter, id);
-            let (sample, effects) = presenter.sample(0);
+            let (sample, effects) = super::sample(&mut presenter, 0);
             assert!(sample.visible);
             assert!(effects.is_empty());
-            peak = peak.max(presenter.residency());
+            peak = peak.max(super::residency(&presenter));
             drop(prior.replace(consumed.step));
             running.extend(super::jobs(consumed.effects.expect("current scene")));
             while let Some(job) = running.pop() {
@@ -326,9 +325,9 @@ fn window_residency(measure: &mut dyn TextMeasure) -> usize {
                     .expect("successor");
                 assert!(controls(&effects).is_empty());
                 running.extend(super::jobs(effects));
-                peak = peak.max(presenter.residency());
+                peak = peak.max(super::residency(&presenter));
             }
-            assert!(presenter.residency() <= MAX_RESIDENT_BYTES);
+            assert!(super::residency(&presenter) <= MAX_RESIDENT_BYTES);
         }
     }
     for scene in super::scene_ids(&presenter) {
@@ -342,14 +341,9 @@ fn window_residency(measure: &mut dyn TextMeasure) -> usize {
     }));
     assert_eq!(items, 1500);
     drop(previous);
-    assert_eq!(
-        presenter
-            .returned
-            .load(std::sync::atomic::Ordering::Relaxed),
-        0
-    );
+    assert_eq!(super::returned(&presenter), 0);
     drop(presenter.clear(now).expect("clear"));
-    assert_eq!(presenter.residency(), 0);
+    assert_eq!(super::residency(&presenter), 0);
     assert!(peak <= MAX_RESIDENT_BYTES);
     peak
 }
@@ -409,7 +403,7 @@ fn disposal_fixture() -> (super::Presenter, Instant) {
     assert!(controls(&effects).is_empty());
     assert_eq!(super::usage(&presenter).objects, 1500);
     assert_eq!(super::scene_ids(&presenter).len(), 4);
-    let (sample, effects) = presenter.sample(0);
+    let (sample, effects) = super::sample(&mut presenter, 0);
     assert!(sample.visible);
     assert!(effects.is_empty());
     (presenter, now)
@@ -432,7 +426,7 @@ fn the_disposal_fixture_really_retains_1500_objects_across_four_scenes() {
         }]
     );
     assert_eq!(super::usage(&presenter).objects, 0);
-    assert_eq!(presenter.residency(), 0);
+    assert_eq!(super::residency(&presenter), 0);
 }
 
 #[test]
@@ -451,7 +445,7 @@ fn measure_clear_cut_and_eviction_at_the_global_object_cap() {
         let effects = presenter.clear(now).expect("global clear");
         let clear_ns = start.elapsed().as_nanos();
         assert_eq!(super::usage(&presenter).objects, 0);
-        assert_eq!(presenter.residency(), 0);
+        assert_eq!(super::residency(&presenter), 0);
         assert_eq!(controls(&effects).len(), 1);
 
         let (mut presenter, now) = disposal_fixture();
@@ -503,7 +497,7 @@ fn measure_clear_cut_and_eviction_at_the_global_object_cap() {
         let eviction_ns = start.elapsed().as_nanos();
         assert!(controls(&effects).is_empty());
         assert_eq!(super::usage(&presenter).objects, 0);
-        assert_eq!(presenter.residency(), 0);
+        assert_eq!(super::residency(&presenter), 0);
         if iteration >= 8 {
             rows.push((clear_ns, stop_ns, cut_ns, eviction_ns, scenes));
         }
