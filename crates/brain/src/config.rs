@@ -8,10 +8,11 @@
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
+use crate::store::choice::StoredChoice;
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
 use kumochi_protocol::message::{
-    AccountView, AssistantName, DockPosition, ErrorKey, MaxFrameRate, ModelChoice, OnboardingStep,
-    RepoName, RunId, SettingsOp, SettingsView, SttUnload, ThreadId, UserName,
+    AccountView, AssistantName, DockPosition, ErrorKey, MaxFrameRate, OnboardingStep, RepoName,
+    RunId, SettingsOp, SettingsView, SttUnload, ThreadId, UserName,
 };
 use kumochi_protocol::voice::VoicePart;
 use toml::{Table, Value};
@@ -170,6 +171,12 @@ impl Config {
     /// The settings now.
     pub(crate) fn view(&self) -> &SettingsView {
         &self.view
+    }
+
+    pub(crate) fn default_choice(&self) -> StoredChoice {
+        self.table
+            .as_ref()
+            .map_or(StoredChoice::Invalid, default_choice_of)
     }
 
     /// `[claude_code] enabled`: on unless it's `false`. Anything else there, or a file that
@@ -478,9 +485,11 @@ fn view_of(table: &Table, main_thread: ThreadId, in_use: bool) -> SettingsView {
             .unwrap_or_default(),
         Some(_) => invalid(MAX_FRAME_RATE).unwrap_or_default(),
     };
-    let default_model = table.get(DEFAULT_MODEL).and_then(|value| {
-        (value.clone().try_into::<ModelChoice>().ok()).or_else(|| invalid(DEFAULT_MODEL))
-    });
+    let default_model = match default_choice_of(table) {
+        choice @ StoredChoice::Valid { .. } => choice.display().ok().flatten(),
+        _ if table.contains_key(DEFAULT_MODEL) => invalid(DEFAULT_MODEL),
+        _ => None,
+    };
     let dock_position = table
         .get(DOCK_POSITION)
         .and_then(|value| {
@@ -559,6 +568,35 @@ fn onboarding_from(table: &Table) -> OnboardingStep {
             (value.clone().try_into::<OnboardingStep>().ok()).or_else(|| invalid(ONBOARDING_FROM))
         })
         .unwrap_or_default()
+}
+
+fn default_choice_of(table: &Table) -> StoredChoice {
+    let Some(value) = table.get(DEFAULT_MODEL) else {
+        return StoredChoice::Absent;
+    };
+    let connection = match value.get("connection") {
+        None => "chatgpt",
+        Some(Value::String(kind)) => match kind.as_str() {
+            "ChatGpt" => "chatgpt",
+            "ClaudeCode" => "claude_code",
+            "AnthropicKey" => "anthropic_key",
+            _ => return StoredChoice::Invalid,
+        },
+        Some(_) => return StoredChoice::Invalid,
+    };
+    let effort = value
+        .get("effort")
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase);
+    match StoredChoice::decode(
+        value.get("model").and_then(Value::as_str),
+        effort.as_deref(),
+        Some(connection),
+    ) {
+        // ChatGPT's own malformed intent reads as unset, as before, so its catalog repairs it.
+        StoredChoice::Invalid if connection == "chatgpt" => StoredChoice::Absent,
+        choice => choice,
+    }
 }
 
 fn invalid<T>(key: &str) -> Option<T> {

@@ -110,7 +110,16 @@ rows read as `thread` and `words` with no model:
 |---|---|
 | `kind` | `main` for Kumo's thread, `thread` for a task. A unique partial index allows one `main`. It keeps these two values for good: changing a `CHECK` rebuilds the table, so later facts (origin, parent, archive) get their own nullable columns |
 | `title_source` | Who wrote the title: `words` (the first turn's first line, from `BeginTurn`), `model` or `user` |
-| `model`, `effort` | The thread's model slug and effort as free text, both set or both null (a `CHECK`). They're checked against the catalog per run, so a catalog change never needs a migration, and a page carries a stored choice even once the catalog drops it. An effort this build doesn't know (an older build's `minimal`, or a newer build's) reads as no choice, so one row never fails a page; a slug no build wrote still does |
+| `model`, `effort`, `connection` | The saved route, model and effort. Version 9 adds `connection` and backfills selected older rows as ChatGPT. Only three unset fields mean no choice; a partial row, invalid slug or unknown connection fails the read rather than falling back to another model. Pages retain the saved route/model independently of sign-in and catalogs; an unknown effort displays Medium without changing the saved row. An unknown connection fails the whole thread list and search read, so a new connection kind needs a schema version that older builds refuse |
+
+`StoredChoice` separates structural decoding from admission. Page display never contacts a provider.
+An unknown effort is kept as unknown for execution, which uses the selected model's policy instead
+of the page's placeholder. For the currently supported ChatGPT route, the default remains Low;
+catalog membership is checked by the coordinator. Context, background-job and hold reads refuse
+saved or default non-ChatGPT selections until route-aware admission lands, so persistence does not
+activate a route or disclose its content through the ChatGPT engine. A ChatGPT catalog refresh
+also preserves an explicit default on another connection. Missing/deleted threads are errors,
+not an unset selection. This replaces the old unknown-effort-to-default-model fallback.
 
 - **The main thread** is created by the recovery scan when it's missing, after unfinished
   deletions and before `high_water()` is read, as one statement of its own. A start cut short
@@ -125,7 +134,7 @@ rows read as `thread` and `words` with no model:
   title job reads a task's first ask with `Snapshot::first_ask`, which finds nothing once the
   title isn't first words. A later `BeginTurn` on an existing thread never touches its title or
   source. Neither a rename nor a model choice moves the thread in the list.
-- **Model choice.** `SetModel` stores a live thread's `model` and `effort`; a hidden or missing
+- **Model choice.** `SetModel` stores a live thread's `connection`, `model` and `effort`; a hidden or missing
   thread changes nothing. The worker answers `ModelSet` only after the write, echoing the
   thread and exact choice with `applied=true` when a live row matched. Hidden, missing or
   unrepresentable ids, failed writes and operations refused before reaching the store answer

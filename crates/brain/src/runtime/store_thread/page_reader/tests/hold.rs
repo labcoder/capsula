@@ -314,3 +314,69 @@ fn deletion_accepted_after_recognition_fences_snapshot_even_after_its_reply() {
     assert_eq!(core.current_run(), None);
     running.thread.close().blocking_recv().unwrap();
 }
+
+#[test]
+fn a_hold_on_a_non_chatgpt_choice_is_refused_at_its_read() {
+    use kumochi_protocol::message::ConnectionKind;
+    let claude = ModelChoice {
+        connection: ConnectionKind::ClaudeCode,
+        ..choice("sonnet", Effort::Low)
+    };
+    let key = ModelChoice {
+        connection: ConnectionKind::AnthropicKey,
+        ..choice("claude-sonnet-5-5", Effort::Low)
+    };
+    let chatgpt = choice("gpt-6-luna", Effort::Low);
+    let expected = chatgpt.clone();
+    // (the thread's saved choice, the default, prepared)
+    let cases = [
+        (Some(claude.clone()), Some(chatgpt.clone()), false),
+        (Some(key), Some(chatgpt.clone()), false),
+        (None, Some(claude), false),
+        (Some(chatgpt.clone()), None, true),
+        (None, Some(chatgpt), true),
+    ];
+    for (saved, default, prepared) in cases {
+        for target in [None, Some(TASK)] {
+            if saved.is_some() && target.is_none() {
+                continue;
+            }
+            let scratch = Scratch::new("held-route-fence");
+            let mut store = Store::open(&scratch.db()).unwrap();
+            store.recover().unwrap();
+            store
+                .begin_turn(TASK, Some("task"), RunId(1), "prior")
+                .unwrap();
+            store.end_run(TASK, RunId(1), &[], RunEnd::Done).unwrap();
+            if let Some(saved) = &saved {
+                store.set_model(TASK, saved).unwrap();
+            }
+            let running = run(store, None);
+            let core = Coordinator::ready_for_tests(MAIN, TASK, RunId(9), Vec::new());
+            let op = core
+                .prepare_hold(
+                    KEY,
+                    target,
+                    42,
+                    RunSnapshot {
+                        origin: Origin::Kumo,
+                        assistant: AssistantName::new("Kumo").unwrap(),
+                        user: None,
+                        choice: default.clone(),
+                        connection: ConnectionTag(99),
+                    },
+                    Arc::new(AtomicBool::new(false)),
+                )
+                .unwrap();
+            assert!(running.thread.send(op));
+            let Input::HoldPrepared { key: KEY, result } = running.ack() else {
+                panic!("hold reply")
+            };
+            assert_eq!(result.is_ok(), prepared, "{saved:?} {default:?} {target:?}");
+            if let Ok(snapshot) = result {
+                assert_eq!(snapshot.defaults.choice.as_ref(), Some(&expected));
+            }
+            running.thread.close().blocking_recv().unwrap();
+        }
+    }
+}

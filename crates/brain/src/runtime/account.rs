@@ -643,6 +643,18 @@ impl Brain {
         frames.iter().try_for_each(|frame| link.control(frame))
     }
 
+    pub(super) fn repaired_default(&self) -> Option<kumochi_protocol::message::ModelChoice> {
+        if matches!(
+            self.config.default_choice(),
+            crate::store::choice::StoredChoice::Invalid
+        ) {
+            return None;
+        }
+        self.account
+            .models()
+            .and_then(|models| default_model(self.config.view().default_model.as_ref(), models))
+    }
+
     /// Applies an account input and tells the connected shell, if any, what changed. A catalog
     /// read that leaves `default_model` unset or unlisted queues the brain's own change to it.
     pub(super) fn account_input(
@@ -667,12 +679,7 @@ impl Brain {
         }
         self.availability_changed(link.as_deref_mut())
             .map_err(|_| Full)?;
-        if read
-            && let Some(choice) = self
-                .account
-                .models()
-                .and_then(|models| default_model(self.config.view().default_model.as_ref(), models))
-        {
+        if read && let Some(choice) = self.repaired_default() {
             self.settings_ops.push_back(settings::Queued {
                 change: settings::Change::User(SettingsOp::SetDefaultModel(choice)),
                 epoch: settings::BRAIN,
