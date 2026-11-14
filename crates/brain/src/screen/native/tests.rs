@@ -109,6 +109,38 @@ fn the_non_send_capturer_is_constructed_used_and_dropped_on_its_one_thread() {
 }
 
 #[test]
+fn a_failed_open_answers_fault_and_the_next_job_opens_again() {
+    let (dropped, dropping) = mpsc::channel();
+    let (wake, wakes) = mpsc::channel();
+    let mut opens = 0;
+    let mut native = CaptureThread::open(
+        move || {
+            opens += 1;
+            if opens == 1 {
+                return Err(-5);
+            }
+            Ok(Box::new(Local {
+                owner: std::thread::current().id(),
+                dropped: dropped.clone(),
+                _not_send: Rc::new(()),
+            }))
+        },
+        Box::new(move || wake.send(()).is_ok()),
+    )
+    .unwrap();
+    assert!(native.begin(job()).is_none());
+    wakes.recv_timeout(PATIENCE).unwrap();
+    let (_, _, failed) = native.poll().unwrap().unwrap();
+    assert!(matches!(failed, Err(Failure::Fault(-5))), "{failed:?}");
+    assert!(native.begin(job()).is_none());
+    wakes.recv_timeout(PATIENCE).unwrap();
+    let (_, _, acquired) = native.poll().unwrap().unwrap();
+    assert_eq!(acquired.unwrap().0.dpi, 96);
+    drop(native);
+    dropping.recv_timeout(PATIENCE).unwrap();
+}
+
+#[test]
 fn a_full_wake_does_not_block_the_reserved_completion_and_a_gone_listener_ends_the_thread() {
     let (wake, wakes) = mpsc::sync_channel(1);
     wake.try_send(()).unwrap();

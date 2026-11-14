@@ -23,7 +23,7 @@ mod root_store;
 mod spawn;
 mod window;
 
-pub(crate) use capture::screen_capturer;
+pub(crate) use capture::{WINDOW_CAPTURE, screen_capturer};
 pub(crate) use credential::WindowsCredentialStore;
 pub(crate) use dump::DumpExclusion;
 pub(crate) use elements::screen_elements;

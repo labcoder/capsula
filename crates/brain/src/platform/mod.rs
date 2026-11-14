@@ -95,9 +95,14 @@ pub(crate) use windows::{
     unmark, validate_model_path,
 };
 #[cfg(windows)]
-pub use windows::{managed_presence, system_env};
+pub(crate) use windows::{WINDOW_CAPTURE, screen_capturer, screen_elements, window_unchanged};
 #[cfg(windows)]
-pub(crate) use windows::{screen_capturer, screen_elements, window_unchanged};
+pub use windows::{managed_presence, system_env};
+
+/// Whether this platform captures one window alone. No platform but Windows does yet.
+// shortcut: macOS will capture with ScreenCaptureKit; true once that adapter lands.
+#[cfg(not(windows))]
+pub(crate) const WINDOW_CAPTURE: bool = false;
 
 /// Whether a captured window is still the one its capture resolved. No platform but Windows
 /// captures windows yet, so none is ever unchanged.

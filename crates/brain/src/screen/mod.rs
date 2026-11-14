@@ -51,6 +51,8 @@ pub(crate) use ocr::PAGE_CLASS;
 pub(crate) use reader::Walk;
 #[cfg(windows)]
 pub(crate) use reader::{CONNECTION_TIMEOUT, TRANSACTION_TIMEOUT, ThreadedReader};
+#[cfg(test)]
+pub(crate) use wire::FrameMeta;
 #[cfg(debug_assertions)]
 pub use wire::WorkerFault;
-pub use wire::{CaptureId, FrameMeta, Refusal, TicketWire};
+pub(crate) use wire::{CaptureId, Refusal};

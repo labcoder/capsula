@@ -39,6 +39,9 @@ use crate::screen::{Acquired, Capturer, Failure, RawFrame, Refusal, Target};
 
 const POLL: Duration = Duration::from_millis(1);
 
+/// Whether this platform captures one window alone: Windows Graphics Capture does.
+pub(crate) const WINDOW_CAPTURE: bool = true;
+
 /// Opens the worker's capturer on its serve thread.
 ///
 /// # Errors

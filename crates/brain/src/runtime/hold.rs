@@ -96,6 +96,8 @@ pub(super) struct Holds {
     receive: mpsc::Receiver<Packet>,
     /// The screen worker's client; 2c4 gives the brain one.
     screen: Option<Arc<HoldClient>>,
+    /// Whether this platform captures one window; a client alone doesn't say so.
+    window_capture: bool,
     /// Where each hold's screen task sends its answers.
     screen_events: mpsc::Sender<ScreenEvent>,
     screen_answers: mpsc::Receiver<ScreenEvent>,
@@ -160,6 +162,7 @@ impl Default for Holds {
             send,
             receive,
             screen: None,
+            window_capture: crate::platform::WINDOW_CAPTURE,
             screen_events,
             screen_answers,
         }
@@ -771,7 +774,7 @@ impl Brain {
     fn screen_gate(&self, choice: Option<&ModelChoice>) -> ScreenHolds {
         self.account.screen_holds(
             choice,
-            self.holds.screen.is_some(),
+            self.holds.window_capture && self.holds.screen.is_some(),
             self.config.view().screen_holds,
         )
     }

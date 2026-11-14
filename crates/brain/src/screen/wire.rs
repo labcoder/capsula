@@ -29,7 +29,7 @@ pub struct CaptureId(pub u64);
 /// One capture's authority. Only the brain's hold client mints it, for a recognized hold; this
 /// module only carries and checks it.
 #[derive(Clone, Serialize, Deserialize)]
-pub struct TicketWire {
+pub(crate) struct TicketWire {
     capture: CaptureId,
     generation: u64,
     nonce: [u8; 16],
@@ -80,7 +80,7 @@ impl std::fmt::Debug for TicketWire {
 
 /// Why the worker refused a capture or element walk without a platform fault.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Refusal {
+pub(crate) enum Refusal {
     /// The ticket's local validity ran out before a complete frame.
     Expired,
     /// This ticket's generation was already spent in this worker.
@@ -115,15 +115,15 @@ pub enum Refusal {
 
 /// A complete, valid frame's description; the pixels stay in the worker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FrameMeta {
+pub(crate) struct FrameMeta {
     /// The ticket's capture.
-    pub capture: CaptureId,
+    pub(crate) capture: CaptureId,
     /// The captured surface's physical bounds: the display, or a window's frame.
-    pub display: PhysicalRect,
+    pub(crate) display: PhysicalRect,
     /// The display's effective DPI.
-    pub dpi: u32,
+    pub(crate) dpi: u32,
     /// From the request's receipt to the frame's arrival, in milliseconds.
-    pub acquired_after_ms: u32,
+    pub(crate) acquired_after_ms: u32,
 }
 
 #[cfg(test)]

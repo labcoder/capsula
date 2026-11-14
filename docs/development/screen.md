@@ -423,7 +423,9 @@ measured.
 `screen/client.rs` is the brain's side of the worker's loop, for one hold's frame. The brain
 starts its one screen worker with `HoldClient::start` and gives the client to screen holds. Only a
 screen hold's task calls it, and the shell doesn't send screen holds yet. It speaks to the worker through the shared supervisor as its own kind, `Holds`, with the screen
-worker's argument and caps, the actor's messages and the zeroing reply reader.
+worker's argument and caps, the actor's messages and the zeroing reply reader. The image gate
+takes the platform's `WINDOW_CAPTURE` as well as the client, so off Windows it reads `Unsupported`
+even though the client starts.
 
 - **`context(owner, point, until)`** mints a fresh capture id and a ticket whose number is above
   every earlier one (a worker refuses a number it has already spent), minted under the fence's

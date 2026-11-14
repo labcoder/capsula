@@ -2,6 +2,7 @@ use std::io::{self, Cursor, Read, Write};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
+use std::time::Duration;
 
 use super::*;
 use crate::screen::capture::{Acquired, Target};
@@ -840,6 +841,44 @@ fn a_poisoned_walk_cannot_acknowledge_release_while_its_provider_still_runs() {
     );
     sent.expect("provider remained held until this assertion");
     rig.scrubbed();
+    rig.finish();
+}
+
+#[test]
+fn a_walk_that_outlasts_its_deadline_and_the_uia_slack_ends_the_worker() {
+    let (gate, entered, release) = gate();
+    let rig = Rig::start(None, None, Some(gate));
+    rig.send(1, &context(1));
+    rig.acquired(1);
+    rig.send(
+        2,
+        &Request::Elements {
+            key: key(1),
+            target: ElementTarget::Window {
+                window: WindowRef(7),
+                pid: 8,
+            },
+        },
+    );
+    entered.recv_timeout(PATIENCE).unwrap();
+    let start = *rig.clock.lock().unwrap();
+    let bound = start + Duration::from_millis(120) + CONNECTION_TIMEOUT + TRANSACTION_TIMEOUT;
+    *rig.clock.lock().unwrap() = bound.checked_sub(Duration::from_millis(1)).unwrap();
+    rig.send(3, &Request::Ping);
+    assert_eq!(rig.reply(), (3, Reply::Pong));
+    rig.send(4, &Request::Ping);
+    assert_eq!(
+        rig.reply(),
+        (4, Reply::Pong),
+        "inside the slack the walk still runs"
+    );
+    *rig.clock.lock().unwrap() = bound;
+    assert_eq!(
+        rig.replies.recv_timeout(PATIENCE),
+        Err(mpsc::RecvTimeoutError::Disconnected),
+        "a walk past its slack ends the worker without answering"
+    );
+    release.send(()).unwrap();
     rig.finish();
 }
 

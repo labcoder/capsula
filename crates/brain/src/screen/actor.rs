@@ -2,7 +2,7 @@
 //! image, or its release.
 
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use kumochi_protocol::frame;
 use kumochi_protocol::geometry::PhysicalPoint;
@@ -15,6 +15,7 @@ use super::elements::{ElementTree, OpenElements, Wake};
 use super::encode::JPEG_CAP;
 use super::mask::Completeness;
 use super::native::{CaptureThread, Job};
+use super::reader::{CONNECTION_TIMEOUT, TRANSACTION_TIMEOUT};
 #[cfg(debug_assertions)]
 use super::wire::WorkerFault;
 use super::wire::{CaptureId, ElementTarget, FrameMeta, Refusal, TicketWire};
@@ -348,7 +349,7 @@ fn run(
                     } else {
                         match screen.walk_job(key.capture, target, now) {
                             Ok(Ok(job)) => {
-                                let until = job.until + Duration::from_millis(200);
+                                let until = job.until + CONNECTION_TIMEOUT + TRANSACTION_TIMEOUT;
                                 match screen
                                     .reader
                                     .as_mut()
