@@ -5,22 +5,17 @@ use kumochi_protocol::message::{
 };
 
 #[derive(Default)]
-pub(crate) struct Accounts {
-    pub(crate) generation: Option<u64>,
-    pub(crate) view: Option<AccountView>,
-    pub(crate) error: Option<UserError>,
-    pub(crate) send_failed: bool,
-    pub(crate) waiting: Option<AccountOp>,
+pub struct Accounts {
+    pub generation: Option<u64>,
+    pub view: Option<AccountView>,
+    pub error: Option<UserError>,
+    pub send_failed: bool,
+    pub waiting: Option<AccountOp>,
     unexplained: bool,
 }
 
 impl Accounts {
-    pub(crate) fn receive(
-        &mut self,
-        current: Option<u64>,
-        generation: u64,
-        view: AccountView,
-    ) -> bool {
+    pub fn receive(&mut self, current: Option<u64>, generation: u64, view: AccountView) -> bool {
         if current != Some(generation) {
             return false;
         }
@@ -35,11 +30,11 @@ impl Accounts {
         true
     }
 
-    pub(crate) fn disconnected(&mut self) {
+    pub fn disconnected(&mut self) {
         *self = Self::default();
     }
 
-    pub(crate) fn error(&mut self, error: &UserError) {
+    pub fn error(&mut self, error: &UserError) {
         if matches!(
             error.key(),
             ErrorKey::AccountRefused | ErrorKey::SignInNeeded
@@ -107,7 +102,7 @@ impl Accounts {
         }
     }
 
-    pub(crate) fn allows(&self, op: AccountOp) -> bool {
+    pub fn allows(&self, op: AccountOp) -> bool {
         if self.waiting.is_some() {
             return false;
         }
@@ -148,7 +143,7 @@ impl Accounts {
         }
     }
 
-    pub(crate) fn sign_in_again(&self) -> bool {
+    pub fn sign_in_again(&self) -> bool {
         matches!(
             self.view,
             Some(AccountView::SignedIn {
@@ -174,7 +169,7 @@ impl Accounts {
             .is_some_and(|error| error.actions().contains(&action))
     }
 
-    pub(crate) fn send(&mut self, op: AccountOp, send: impl FnOnce(AccountOp) -> bool) -> bool {
+    pub fn send(&mut self, op: AccountOp, send: impl FnOnce(AccountOp) -> bool) -> bool {
         if !self.allows(op) {
             return false;
         }
@@ -191,7 +186,7 @@ impl Accounts {
 
     /// Sends `CancelSignIn` without asking `allows`, for a dismissal that must cancel a sign-in
     /// the brain hasn't answered or shown yet. The brain ignores it when nothing is signing in.
-    pub(crate) fn cancel_sign_in(&mut self, send: impl FnOnce(AccountOp) -> bool) -> bool {
+    pub fn cancel_sign_in(&mut self, send: impl FnOnce(AccountOp) -> bool) -> bool {
         if !send(AccountOp::CancelSignIn) {
             return false;
         }

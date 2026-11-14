@@ -15,6 +15,7 @@ path = "src/main.rs"
 async-channel = "2"
 kumochi-protocol.workspace = true
 kumochi-scene.workspace = true
+kumochi-shell-core.workspace = true
 lyon = "=1.0.19"
 fluent-bundle.workspace = true
 gpui-kit.workspace = true

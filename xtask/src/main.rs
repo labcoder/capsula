@@ -13,6 +13,7 @@ use kumochi_protocol::tap;
 
 #[cfg(windows)]
 mod bench;
+mod check_core;
 #[cfg(windows)]
 mod gate;
 #[cfg(windows)]
@@ -87,6 +88,9 @@ tasks:
   slice2-gate       the slice 2 gate: the real brain with fixture scripts, driven
                     over its real pipes by a scripted client; no input; refuses while
                     any product process runs
+  check-core        fail if kumochi-shell-core has a dependency that is not on its list, a UI
+                    framework in its tree, its test support in a shipped binary, or a test
+                    gate the shell's tests could miss; CI runs it to hold the crate boundary
   check-vendor      fail unless every crate in vendor/ is what Cargo.lock builds;
                     CI runs it so a GPUI bump can't silently drop a vendored patch
   voice-assets link <models-dir> <natives-dir>
@@ -106,6 +110,7 @@ fn main() -> Result<()> {
             println!("{}", usage());
             Ok(())
         }
+        Some("check-core") => check_core::run(),
         Some("check-vendor") => vendor::run(),
         Some("pipe-dump") => pipe_dump(
             &args

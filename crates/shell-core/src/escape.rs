@@ -11,28 +11,28 @@
     clippy::struct_excessive_bools,
     reason = "each is a separate fact Esc's order reads"
 )]
-pub(crate) struct Activity {
+pub struct Activity {
     /// A run streams, speaks or acts.
-    pub(crate) working: bool,
+    pub working: bool,
     /// Audio is playing.
-    pub(crate) speaking: bool,
+    pub speaking: bool,
     /// A drawing is on screen.
-    pub(crate) drawing: bool,
+    pub drawing: bool,
     /// Kumo is being pulled out of the peek.
-    pub(crate) pulling: bool,
+    pub pulling: bool,
 }
 
 impl Activity {
     /// Esc is held system-wide only for speech, a drawing or a pull, never for Listening or
     /// hover.
-    pub(crate) fn holds_global_escape(self) -> bool {
+    pub fn holds_global_escape(self) -> bool {
         self.speaking || self.drawing || self.pulling
     }
 }
 
 /// The one local effect of an Esc press.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Escape {
+pub enum Escape {
     CancelPull,
     Stop,
     Clear,
@@ -43,7 +43,7 @@ pub(crate) enum Escape {
 
 /// Whether a local panel Esc could dismiss is open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Panel {
+pub enum Panel {
     Open,
     Threads,
     Rename,
@@ -57,7 +57,7 @@ pub(crate) enum Panel {
 }
 
 /// Decides one Esc press from what's moving and whether a local panel is open.
-pub(crate) fn decide(activity: Activity, panel: Panel) -> Escape {
+pub fn decide(activity: Activity, panel: Panel) -> Escape {
     if activity.pulling {
         Escape::CancelPull
     } else if activity.working || activity.speaking {
@@ -78,7 +78,7 @@ pub(crate) fn decide(activity: Activity, panel: Panel) -> Escape {
 
 /// Holds global Esc while it's wanted, and shows Stop instead when Windows refuses it.
 #[derive(Debug)]
-pub(crate) struct EscapeHold<H> {
+pub struct EscapeHold<H> {
     hotkey: Option<H>,
     stop: bool,
 }
@@ -95,10 +95,7 @@ impl<H> Default for EscapeHold<H> {
 impl<H> EscapeHold<H> {
     /// Holds Esc, registering it unless it's already held. A refusal is logged without key or
     /// text content and turns on the Stop fallback.
-    pub(crate) fn acquire<E: std::fmt::Display>(
-        &mut self,
-        register: impl FnOnce() -> Result<H, E>,
-    ) {
+    pub fn acquire<E: std::fmt::Display>(&mut self, register: impl FnOnce() -> Result<H, E>) {
         if self.hotkey.is_some() {
             return;
         }
@@ -115,13 +112,13 @@ impl<H> EscapeHold<H> {
     }
 
     /// Gives Esc back and turns the Stop fallback off.
-    pub(crate) fn release(&mut self) {
+    pub fn release(&mut self) {
         self.hotkey = None;
         self.stop = false;
     }
 
     /// Whether the panel shows Stop in place of global Esc.
-    pub(crate) fn shows_stop(&self) -> bool {
+    pub fn shows_stop(&self) -> bool {
         self.stop
     }
 }

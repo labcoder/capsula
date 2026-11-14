@@ -3,7 +3,7 @@
 
 /// What an accepted view shows of the sign-in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Shows {
+pub enum Shows {
     /// It's waiting for the browser or the provider's own window.
     Waiting,
     /// Anything else, which ends a sign-in the brain has shown, or one on a newer connection.
@@ -12,7 +12,7 @@ pub(crate) enum Shows {
 
 /// What the caller does next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Seen {
+pub enum Seen {
     Nothing,
     /// The sign-in this surface asked for ended.
     Ended,
@@ -21,7 +21,7 @@ pub(crate) enum Seen {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum SignInMark {
+pub enum SignInMark {
     /// None asked for, or the last one ended.
     #[default]
     Settled,
@@ -34,7 +34,7 @@ pub(crate) enum SignInMark {
 
 impl SignInMark {
     /// This surface's sign-in was queued on connection `generation`.
-    pub(crate) fn sent(&mut self, generation: u64) {
+    pub fn sent(&mut self, generation: u64) {
         *self = Self::Open {
             generation,
             shown: false,
@@ -43,7 +43,7 @@ impl SignInMark {
 
     /// A waiting sign-in this process didn't ask for, after a shell restart, becomes this
     /// surface's own.
-    pub(crate) fn adopt(&mut self, generation: u64) {
+    pub fn adopt(&mut self, generation: u64) {
         if *self == Self::Settled {
             *self = Self::Open {
                 generation,
@@ -57,7 +57,7 @@ impl SignInMark {
     /// view on the asking connection ends it: that view may predate the brain reading the op. An
     /// owed cancel goes at the next waiting view, and is dropped by a new connection that shows
     /// none.
-    pub(crate) fn view(&mut self, generation: u64, shows: Shows) -> Seen {
+    pub fn view(&mut self, generation: u64, shows: Shows) -> Seen {
         match *self {
             Self::Settled => Seen::Nothing,
             Self::Open {
@@ -90,13 +90,13 @@ impl SignInMark {
     }
 
     /// The brain reported the sign-in failed: it has ended, and nothing is owed for it.
-    pub(crate) fn failed(&mut self) {
+    pub fn failed(&mut self) {
         *self = Self::Settled;
     }
 
     /// The surface was dismissed: true once, while the sign-in it asked for hasn't ended, and the
     /// cancel is owed until [`Self::cancel_sent`] reports it was sent.
-    pub(crate) fn take(&mut self) -> bool {
+    pub fn take(&mut self) -> bool {
         let Self::Open { generation, .. } = *self else {
             return false;
         };
@@ -104,14 +104,14 @@ impl SignInMark {
         true
     }
 
-    pub(crate) fn cancel_sent(&mut self) {
+    pub fn cancel_sent(&mut self) {
         if matches!(self, Self::CancelOwed { .. }) {
             *self = Self::Settled;
         }
     }
 
     /// Onboarding finished: a sign-in still waiting is the rest of the app's, not cancelled.
-    pub(crate) fn hand_over(&mut self) {
+    pub fn hand_over(&mut self) {
         if matches!(self, Self::Open { .. }) {
             *self = Self::Settled;
         }
@@ -119,7 +119,7 @@ impl SignInMark {
 
     /// The user sent this connection an op from elsewhere, so the attempt is theirs to steer
     /// there: an owed cancel is dropped.
-    pub(crate) fn superseded(&mut self) {
+    pub fn superseded(&mut self) {
         if matches!(self, Self::CancelOwed { .. }) {
             *self = Self::Settled;
         }

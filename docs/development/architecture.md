@@ -60,18 +60,36 @@ flowchart TD
   protocol["protocol<br/>messages, ids, constants"]
   scene["scene<br/>drawing format, validator,<br/>layout, 3D geometry"]
   brain["brain<br/>bin kumochid"]
+  core["shell-core<br/>what the shell knows<br/>and decides"]
   shell["shell<br/>bin kumochi"]
   xtask["xtask<br/>bench, eval, fixtures"]
   brain --> protocol
   brain --> scene
   shell --> protocol
   shell --> scene
+  shell --> core
+  core --> protocol
   xtask --> protocol
   xtask --> scene
   protocol --> scene
 ```
 
 `scene` has no GPUI and no tokio. The shell gives it text measurement through a small trait.
+
+`shell-core` holds what the shell knows and decides, apart from how it is drawn. No UI
+framework is in its dependency tree, dev-dependencies included, so nothing in it can name
+GPUI; the shell is the crate that does. `cargo xtask check-core` holds that in CI: the core's
+direct dependencies are a list in `xtask/src/check_core.rs`, so a new one is a reviewed line,
+and the whole tree is searched for a framework's name.
+
+The shell's tests build the core as a dependency, without `cfg(test)`. So a test double in
+the core is gated on `any(test, feature = "test-support")`, and only a dev-dependency may
+turn that feature on. `check-core` fails on any other spelling of a test gate that could
+switch behaviour, and when the feature reaches a normal dependency anywhere in the
+workspace. One build is outside its reach: `cargo build --all-targets` resolves features
+once for the whole command, so the `kumochi.exe` it writes carries the core's test support.
+That has to fail safe, so test support only ever takes something away: a device becomes a
+stub that reports itself unavailable, never the other way round.
 
 ## The brain is a game loop
 
