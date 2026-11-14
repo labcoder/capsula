@@ -10,8 +10,12 @@
 pub mod accounts;
 pub mod claude_accounts;
 pub mod credential;
+pub mod drawing;
 pub mod escape;
 pub mod instance;
 pub mod platform;
 pub mod presence;
+pub mod runs;
 pub mod sign_in_mark;
+pub mod strings;
+pub mod threads;

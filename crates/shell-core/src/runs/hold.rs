@@ -11,7 +11,7 @@ pub(super) struct Hold {
 }
 
 impl Runs {
-    pub(crate) fn begin_hold(&mut self, gesture: GestureId) -> Result<ControlToBrain, Refused> {
+    pub fn begin_hold(&mut self, gesture: GestureId) -> Result<ControlToBrain, Refused> {
         if gesture.0 <= self.hold_high {
             return Err(Refused::Busy);
         }
@@ -40,14 +40,14 @@ impl Runs {
         })
     }
 
-    pub(crate) fn cancel_hold(&mut self) {
+    pub fn cancel_hold(&mut self) {
         if let Some(hold) = self.hold.take() {
             self.hold_cancel = Some(hold.gesture);
             self.fence = self.fence.max(hold.run.unwrap_or_default());
         }
     }
 
-    pub(crate) fn take_hold_cancel(&mut self) -> Option<ControlToBrain> {
+    pub fn take_hold_cancel(&mut self) -> Option<ControlToBrain> {
         self.hold_cancel
             .take()
             .map(|gesture| ControlToBrain::GestureCancel { gesture })

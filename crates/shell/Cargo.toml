@@ -17,7 +17,6 @@ kumochi-protocol.workspace = true
 kumochi-scene.workspace = true
 kumochi-shell-core.workspace = true
 lyon = "=1.0.19"
-fluent-bundle.workspace = true
 gpui-kit.workspace = true
 # GPUI's own image type, for Kumo's frames; the same version GPUI already builds.
 image = { version = "0.25.10", default-features = false }
@@ -28,7 +27,6 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
-unic-langid.workspace = true
 zeroize.workspace = true
 
 [target.'cfg(windows)'.dependencies]

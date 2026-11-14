@@ -12,7 +12,7 @@ use kumochi_protocol::message::{
 use kumochi_scene::text::Bounded;
 
 mod cards;
-pub(crate) use cards::Feedback as IssueFeedback;
+pub use cards::Feedback as IssueFeedback;
 #[cfg(test)]
 mod tests;
 
@@ -67,7 +67,7 @@ struct Pending {
 }
 
 #[derive(Clone, Copy, Debug, thiserror::Error)]
-pub(crate) enum SearchError {
+pub enum SearchError {
     #[error("the search is too long for a data frame")]
     TooLong,
 }
@@ -77,27 +77,27 @@ pub(crate) enum SearchError {
     clippy::struct_excessive_bools,
     reason = "independent facts about the panel and its reads, not a state machine"
 )]
-pub(crate) struct Threads {
-    pub(crate) settings: Option<SettingsView>,
-    pub(crate) rows: Vec<ThreadRow>,
-    pub(crate) next: Option<ThreadCursor>,
-    pub(crate) open: Option<ThreadId>,
+pub struct Threads {
+    pub settings: Option<SettingsView>,
+    pub rows: Vec<ThreadRow>,
+    pub next: Option<ThreadCursor>,
+    pub open: Option<ThreadId>,
     /// Newest first; stored event ids remain distinct, even within one run.
-    pub(crate) events: Vec<PageEvent>,
-    pub(crate) before: Option<EventId>,
-    pub(crate) listed: bool,
-    pub(crate) loaded: bool,
-    pub(crate) proven: Option<RunId>,
+    pub events: Vec<PageEvent>,
+    pub before: Option<EventId>,
+    pub listed: bool,
+    pub loaded: bool,
+    pub proven: Option<RunId>,
     settled: Option<RunId>,
-    pub(crate) search_error: Option<SearchError>,
+    pub search_error: Option<SearchError>,
     /// The last read failed; cleared by the next page that lands.
-    pub(crate) failed: bool,
+    pub failed: bool,
     /// Threads whose delete is unanswered; they show as deleting and can't be chosen.
-    pub(crate) deleting: Vec<ThreadId>,
+    pub deleting: Vec<ThreadId>,
     /// Every delete slot is held, so no other thread can be deleted yet.
-    pub(crate) deletes_full: bool,
+    pub deletes_full: bool,
     /// The last delete answered that nothing changed; cleared by the next confirm.
-    pub(crate) delete_failed: bool,
+    pub delete_failed: bool,
     connected: bool,
     /// Pages are read only while the panel is shown.
     shown: bool,
@@ -131,11 +131,7 @@ impl std::fmt::Debug for Threads {
 }
 
 impl Threads {
-    pub(crate) fn begin_issue_confirmation(
-        &mut self,
-        draft: DraftId,
-        live: &Rc<std::cell::Cell<bool>>,
-    ) {
+    pub fn begin_issue_confirmation(&mut self, draft: DraftId, live: &Rc<std::cell::Cell<bool>>) {
         self.retire_issue_confirmation();
         self.reads.borrow_mut().issue_confirmations[match self.view {
             View::Browse => 0,
@@ -143,7 +139,7 @@ impl Threads {
         }] = Some((draft, Rc::downgrade(live)));
     }
 
-    pub(crate) fn retire_issue_confirmation(&mut self) {
+    pub fn retire_issue_confirmation(&mut self) {
         if let Some((_, live)) = self.reads.borrow_mut().issue_confirmations[match self.view {
             View::Browse => 0,
             View::Chat => 1,
@@ -155,7 +151,7 @@ impl Threads {
         }
     }
 
-    pub(crate) fn card_request(
+    pub fn card_request(
         &mut self,
         drafts: Bounded<DraftId, MAX_ISSUE_CARDS>,
     ) -> Option<DataToBrain> {
@@ -174,14 +170,14 @@ impl Threads {
         }
         Some(DataToBrain::IssueCardsRequest { request, drafts })
     }
-    pub(crate) fn chat() -> Self {
+    pub fn chat() -> Self {
         Self {
             view: View::Chat,
             ..Self::default()
         }
     }
 
-    pub(crate) fn pair() -> (Self, Self) {
+    pub fn pair() -> (Self, Self) {
         let browse = Self::default();
         let chat = Self {
             reads: Rc::clone(&browse.reads),
@@ -190,15 +186,15 @@ impl Threads {
         (browse, chat)
     }
 
-    pub(crate) fn exhausted(&self) -> bool {
+    pub fn exhausted(&self) -> bool {
         self.reads.borrow().exhausted
     }
 
-    pub(crate) fn cards_broken(&self) -> bool {
+    pub fn cards_broken(&self) -> bool {
         self.reads.borrow().cards.broken
     }
 
-    pub(crate) fn issue(&self, draft: DraftId) -> Option<std::cell::Ref<'_, cards::Entry>> {
+    pub fn issue(&self, draft: DraftId) -> Option<std::cell::Ref<'_, cards::Entry>> {
         if !self.connected || !self.shown || self.cards_broken() {
             return None;
         }
@@ -208,7 +204,7 @@ impl Threads {
         .ok()
     }
 
-    pub(crate) fn action_state(
+    pub fn action_state(
         &mut self,
         draft: DraftId,
         version: kumochi_protocol::message::StateVersion,
@@ -222,19 +218,19 @@ impl Threads {
             .state(draft, version, state, approval, request);
     }
 
-    pub(crate) fn issue_submitted(&mut self, draft: DraftId, request: Option<u64>) {
+    pub fn issue_submitted(&mut self, draft: DraftId, request: Option<u64>) {
         self.reads.borrow_mut().cards.submitted(draft, request);
     }
 
-    pub(crate) fn issue_scope(&self) -> u64 {
+    pub fn issue_scope(&self) -> u64 {
         self.event_revision
     }
 
-    pub(crate) fn issue_review_started(&mut self, draft: DraftId, request: u64) {
+    pub fn issue_review_started(&mut self, draft: DraftId, request: u64) {
         self.reads.borrow_mut().cards.review_started(draft, request);
     }
 
-    pub(crate) fn issue_review(
+    pub fn issue_review(
         &mut self,
         request: u64,
         card: kumochi_protocol::message::IssueCard,
@@ -242,11 +238,11 @@ impl Threads {
         self.reads.borrow_mut().cards.review(request, card)
     }
 
-    pub(crate) fn cancel_issue_review(&mut self, request: u64, draft: DraftId) {
+    pub fn cancel_issue_review(&mut self, request: u64, draft: DraftId) {
         self.reads.borrow_mut().cards.cancel_review(request, draft);
     }
 
-    pub(crate) fn issue_unavailable(
+    pub fn issue_unavailable(
         &mut self,
         request: u64,
         draft: DraftId,
@@ -258,7 +254,7 @@ impl Threads {
             .unavailable(request, draft, kind);
     }
 
-    pub(crate) fn issue_refused(
+    pub fn issue_refused(
         &mut self,
         request: u64,
         draft: DraftId,
@@ -293,7 +289,7 @@ impl Threads {
         self.reads.borrow_mut().counter = u32::MAX;
     }
 
-    pub(crate) fn owns_request(&self, request: u32) -> bool {
+    pub fn owns_request(&self, request: u32) -> bool {
         self.reads.borrow().pending.contains(&(request, self.view))
     }
 
@@ -302,15 +298,15 @@ impl Threads {
             .and_then(|thread| self.rows.iter().position(|row| row.id == thread))
     }
 
-    pub(crate) fn can_rename(&self, thread: ThreadId) -> bool {
+    pub fn can_rename(&self, thread: ThreadId) -> bool {
         self.connected && !self.deleting.contains(&thread)
     }
 
-    pub(crate) fn set_settings(&mut self, settings: SettingsView) {
+    pub fn set_settings(&mut self, settings: SettingsView) {
         self.settings = Some(settings);
     }
 
-    pub(crate) fn row(&self, thread: ThreadId) -> Option<&ThreadRow> {
+    pub fn row(&self, thread: ThreadId) -> Option<&ThreadRow> {
         self.cached
             .get(&thread)
             .or_else(|| self.rows.iter().find(|row| row.id == thread))
@@ -318,7 +314,7 @@ impl Threads {
 
     /// A rename of `thread` to `title` was sent: its page is read again now, and again after each
     /// committed-title notification until a page shows the new title.
-    pub(crate) fn renamed(&mut self, thread: ThreadId, title: &str) {
+    pub fn renamed(&mut self, thread: ThreadId, title: &str) {
         let after = self.pages.get(&thread).copied().flatten();
         self.unconfirmed.insert(thread, (after, title.to_owned()));
         if !self.reread.contains(&after) {
@@ -326,27 +322,27 @@ impl Threads {
         }
     }
 
-    pub(crate) fn online(&self) -> bool {
+    pub fn online(&self) -> bool {
         self.connected
     }
 
-    pub(crate) fn searching(&self) -> bool {
+    pub fn searching(&self) -> bool {
         self.search.is_some()
     }
 
-    pub(crate) fn listing(&self) -> bool {
+    pub fn listing(&self) -> bool {
         self.list_pending.is_some() || self.list_needed.is_some() || !self.reread.is_empty()
     }
 
-    pub(crate) fn reading(&self) -> bool {
+    pub fn reading(&self) -> bool {
         self.event_pending.is_some() || self.event_needed.is_some()
     }
 
-    pub(crate) fn history_revision(&self) -> u64 {
+    pub fn history_revision(&self) -> u64 {
         self.event_revision
     }
 
-    pub(crate) fn connected(&mut self) {
+    pub fn connected(&mut self) {
         self.retire_issue_confirmation();
         self.connected = true;
         self.proven = None;
@@ -359,18 +355,18 @@ impl Threads {
     }
 
     /// The panel opened: reads start again, from a fresh first page.
-    pub(crate) fn show(&mut self) {
+    pub fn show(&mut self) {
         self.shown = true;
         self.refresh();
         self.sync_cards();
     }
 
-    pub(crate) fn show_for(&mut self, thread: Option<ThreadId>) {
+    pub fn show_for(&mut self, thread: Option<ThreadId>) {
         self.select(thread);
         self.show();
     }
 
-    pub(crate) fn follow(&mut self, thread: Option<ThreadId>) -> bool {
+    pub fn follow(&mut self, thread: Option<ThreadId>) -> bool {
         if self.open == thread {
             return false;
         }
@@ -379,14 +375,14 @@ impl Threads {
     }
 
     /// The panel closed: nothing more is read until it opens.
-    pub(crate) fn hide(&mut self) {
+    pub fn hide(&mut self) {
         self.shown = false;
         self.reread.clear();
         self.unconfirmed.clear();
         self.select(None);
     }
 
-    pub(crate) fn disconnected(&mut self) {
+    pub fn disconnected(&mut self) {
         self.retire_issue_confirmation();
         let mut reads = self.reads.borrow_mut();
         reads.pending.clear();
@@ -413,7 +409,7 @@ impl Threads {
         self.unconfirmed.clear();
     }
 
-    pub(crate) fn refresh(&mut self) {
+    pub fn refresh(&mut self) {
         self.reread.clear();
         self.deferred_search = None;
         self.list_revision = self.list_revision.wrapping_add(1);
@@ -448,19 +444,19 @@ impl Threads {
         self.refresh();
     }
 
-    pub(crate) fn defer_search(&mut self, words: &str) -> u64 {
+    pub fn defer_search(&mut self, words: &str) -> u64 {
         self.search(words);
         self.deferred_search = Some(self.list_revision);
         self.list_revision
     }
 
-    pub(crate) fn finish_search(&mut self, revision: u64) {
+    pub fn finish_search(&mut self, revision: u64) {
         if self.deferred_search == Some(revision) {
             self.deferred_search = None;
         }
     }
 
-    pub(crate) fn select(&mut self, thread: Option<ThreadId>) {
+    pub fn select(&mut self, thread: Option<ThreadId>) {
         self.retire_issue_confirmation();
         self.open = thread;
         self.proven = None;
@@ -475,7 +471,7 @@ impl Threads {
 
     /// `thread` was hidden or removed: its row, its open messages and every read in flight
     /// about it go, so no reply sent before the brain hid it lands.
-    pub(crate) fn deleted(&mut self, thread: ThreadId) {
+    pub fn deleted(&mut self, thread: ThreadId) {
         self.cached.remove(&thread);
         self.pages.remove(&thread);
         self.unconfirmed.remove(&thread);
@@ -500,25 +496,25 @@ impl Threads {
         }
     }
 
-    pub(crate) fn more_threads(&mut self) {
+    pub fn more_threads(&mut self) {
         if self.next.is_some() && !self.listing() {
             self.list_needed = Some(Read::More);
         }
     }
 
-    pub(crate) fn older_events(&mut self) {
+    pub fn older_events(&mut self) {
         if self.before.is_some() && !self.reading() {
             self.event_needed = Some(Read::More);
         }
     }
 
-    pub(crate) fn settled(&mut self, thread: ThreadId, run: RunId) {
+    pub fn settled(&mut self, thread: ThreadId, run: RunId) {
         if self.open == Some(thread) {
             self.settled = Some(run);
         }
     }
 
-    pub(crate) fn run_state(&mut self, thread: ThreadId) {
+    pub fn run_state(&mut self, thread: ThreadId) {
         // shortcut: Stop and failure are told before their outcome is written, so this read can
         // miss it until the next RunState; refresh on the store's ack if that shows.
         if self.open == Some(thread) && self.event_needed != Some(Read::First) {
@@ -540,7 +536,7 @@ impl Threads {
     /// The brain committed a thread's title: the list is read again, or the read in flight earns
     /// one more, and so is the page of every rename no page has confirmed, since its earlier
     /// reread may have beaten the commit.
-    pub(crate) fn changed(&mut self) {
+    pub fn changed(&mut self) {
         if self.searching() {
             return;
         }
@@ -560,7 +556,7 @@ impl Threads {
 
     /// Marks requests in flight before handing them to the nonblocking sender. A failed send
     /// disconnects this state; changing a query or selection never frees an unanswered slot.
-    pub(crate) fn requests(&mut self) -> Vec<DataToBrain> {
+    pub fn requests(&mut self) -> Vec<DataToBrain> {
         if !self.connected || !self.shown || self.cards_broken() {
             return Vec::new();
         }
@@ -653,13 +649,13 @@ impl Threads {
 
     /// Applies a page frame and returns its credit: the whole frame, used or dropped, since the
     /// brain counted all of it against the window.
-    pub(crate) fn receive(&mut self, message: DataToShell, bytes: u32) -> u32 {
+    pub fn receive(&mut self, message: DataToShell, bytes: u32) -> u32 {
         self.apply(message);
         bytes
     }
 
     #[expect(clippy::too_many_lines, reason = "one wire-frame dispatcher")]
-    pub(crate) fn apply(&mut self, message: DataToShell) {
+    pub fn apply(&mut self, message: DataToShell) {
         if let DataToShell::IssueCardRead { request, card } = message {
             self.reads.borrow_mut().cards.full(request, card);
             return;
@@ -865,7 +861,7 @@ impl Threads {
     }
 }
 
-pub(crate) fn row_label(row: &ThreadRow, settings: Option<&SettingsView>) -> String {
+pub fn row_label(row: &ThreadRow, settings: Option<&SettingsView>) -> String {
     if row.kind == ThreadKind::Main {
         settings
             .map_or(constants::DEFAULT_ASSISTANT_NAME, |settings| {

@@ -11,7 +11,6 @@ mod allocation;
 
 mod chat_notice;
 mod confirmation;
-mod drawing;
 mod github_connections;
 #[cfg(test)]
 mod github_link_tests;
@@ -22,16 +21,16 @@ mod onboarding;
 mod platform;
 mod presence;
 mod presenter;
-mod runs;
 mod settings;
 mod strings;
 mod theme;
-mod threads;
 
 use std::process::ExitCode;
 
 use kumochi_protocol::constants;
-use kumochi_shell_core::{accounts, claude_accounts, credential, escape, instance, sign_in_mark};
+use kumochi_shell_core::{
+    accounts, claude_accounts, credential, drawing, escape, instance, runs, sign_in_mark, threads,
+};
 use strings::Strings;
 
 fn main() -> ExitCode {
