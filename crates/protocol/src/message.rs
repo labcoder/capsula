@@ -683,7 +683,7 @@ pub enum ControlToShell {
     /// Whether a hold also shows the model the window under the pointer. Sent when the shell
     /// connects and whenever it changes.
     ScreenHolds(ScreenHolds),
-    /// What a screen hold's window did, sent once, when its run's first request starts.
+    /// What a screen hold carried into its turn, sent once, when its run's first request starts.
     HoldScreen {
         /// The hold's gesture.
         gesture: GestureId,

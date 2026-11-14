@@ -15,6 +15,33 @@ fn screen(store: &Store, run: RunId) -> Option<String> {
         .expect("the run's row")
 }
 
+/// The value after `screen`, through every value. The match is exhaustive, so a new class or
+/// value breaks the build here until it's chained in, and then fails the test until `ALL` has it.
+fn after(screen: HeldScreen) -> Option<HeldScreen> {
+    Some(HeldScreen::NotIncluded(match screen {
+        HeldScreen::Attached => ScreenClass::NotReady,
+        HeldScreen::NotIncluded(ScreenClass::NotReady) => ScreenClass::NothingThere,
+        HeldScreen::NotIncluded(ScreenClass::NothingThere) => ScreenClass::CantShare,
+        HeldScreen::NotIncluded(ScreenClass::CantShare) => ScreenClass::Unreadable,
+        HeldScreen::NotIncluded(ScreenClass::Unreadable) => ScreenClass::TooLarge,
+        HeldScreen::NotIncluded(ScreenClass::TooLarge) => ScreenClass::Changed,
+        HeldScreen::NotIncluded(ScreenClass::Changed) => ScreenClass::ModelCantSee,
+        HeldScreen::NotIncluded(ScreenClass::ModelCantSee) => return None,
+    }))
+}
+
+#[test]
+fn every_value_reads_back_as_itself() {
+    let mut next = Some(HeldScreen::Attached);
+    let mut values = 0;
+    while let Some(screen) = next {
+        assert_eq!(super::held::read(super::held::column(screen)), Some(screen));
+        values += 1;
+        next = after(screen);
+    }
+    assert_eq!(values, 8);
+}
+
 /// A new thread whose one run's turn carried `held`.
 fn held_run(store: &mut Store, held: Option<HeldScreen>) -> (ThreadId, RunId) {
     let (high_thread, high_run) = store.high_water().expect("high water");
