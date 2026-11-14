@@ -93,10 +93,10 @@ impl KumoView {
 #[cfg(test)]
 mod tests {
     use gpui::TestAppContext;
-    use gpui_kit::{AppContext as _, Entity, MouseButton, point, px};
+    use gpui_kit::{AppContext as _, Entity};
 
     use super::{KumoView, Pulled};
-    use crate::platform::input::input;
+    use crate::platform::input::{Button, input};
     use crate::presence::drag::Event;
     use crate::presence::kumo::{Motion, v2};
     use crate::presence::kumo_view::pull_rows;
@@ -123,22 +123,15 @@ mod tests {
         let seq = input(|input| input.press(|| input.pressed())).expect("a forwarded press");
         view.update(cx, |view, cx| {
             assert!(view.art.is_some(), "the pulled art baked");
-            view.grab(
-                MouseButton::Left,
-                seq,
-                [560, 860],
-                point(px(80.0), px(60.0)),
-                grab,
-                cx,
-            );
+            view.grab(Button::Left, seq, [560, 860], [80.0, 60.0], grab, cx);
         });
         view
     }
 
     fn release(view: &mut KumoView, cx: &mut gpui_kit::Context<'_, KumoView>) {
         let up = Event::Up {
-            button: MouseButton::Left,
-            at: point(px(80.0), px(60.0)),
+            button: Button::Left,
+            at: [80.0, 60.0],
         };
         view.pull_event(up, cx);
     }
@@ -191,11 +184,11 @@ mod tests {
         let view = grabbed(cx, Motion::Full);
         view.update(cx, |view, cx| {
             let scratch = view.art.as_ref().expect("baked").scratch_capacity();
-            let at = point(px(140.0), px(-20.0));
+            let at = [140.0, -20.0];
             view.pull_event(
                 Event::Move {
                     at,
-                    pressed: Some(MouseButton::Left),
+                    pressed: Some(Button::Left),
                 },
                 cx,
             );
@@ -288,8 +281,8 @@ mod tests {
         view.update(cx, |view, cx| {
             view.pull_event(
                 Event::Move {
-                    at: point(px(80.0), px(-200.0)),
-                    pressed: Some(MouseButton::Left),
+                    at: [80.0, -200.0],
+                    pressed: Some(Button::Left),
                 },
                 cx,
             );

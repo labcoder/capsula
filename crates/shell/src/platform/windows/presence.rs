@@ -7,7 +7,7 @@ use std::ffi::c_void;
 use std::rc::Rc;
 
 use async_channel::Sender;
-use gpui_kit::{MouseButton, NavigationDirection, Window};
+use gpui_kit::Window;
 use kumochi_protocol::constants::{FOCUS_INPUT_MARKER, OBJECT_PREFIX};
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -57,7 +57,7 @@ use super::hit_mask::{HitMask, MaskUpdate};
 use super::keyboard::{self, Deliver, EscapeHotkey, Keys};
 use super::observer::{self, Observe, ProxyHandle};
 use crate::platform::host::{HostChange, WatchGen};
-use crate::platform::input;
+use crate::platform::input::{self, Button};
 
 /// The tray's callback message to the proxy window.
 const TRAY_MESSAGE: u32 = WM_APP + 1;
@@ -99,7 +99,7 @@ pub(crate) enum PresenceEvent {
     /// capture taken from outside.
     CaptureLost {
         seq: u64,
-        released: Option<MouseButton>,
+        released: Option<Button>,
     },
     /// The outermost button release returned while a drained capture loss waited for it.
     Reconcile,
@@ -1114,15 +1114,15 @@ unsafe extern "system" fn proxy_proc(
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
-/// The button a press or release message is for, as GPUI names it.
-fn button(message: u32, wparam: WPARAM) -> Option<MouseButton> {
+/// The button a press or release message is for.
+fn button(message: u32, wparam: WPARAM) -> Option<Button> {
     match message {
-        WM_LBUTTONDOWN | WM_LBUTTONUP => Some(MouseButton::Left),
-        WM_RBUTTONDOWN | WM_RBUTTONUP => Some(MouseButton::Right),
-        WM_MBUTTONDOWN | WM_MBUTTONUP => Some(MouseButton::Middle),
+        WM_LBUTTONDOWN | WM_LBUTTONUP => Some(Button::Left),
+        WM_RBUTTONDOWN | WM_RBUTTONUP => Some(Button::Right),
+        WM_MBUTTONDOWN | WM_MBUTTONUP => Some(Button::Middle),
         WM_XBUTTONDOWN | WM_XBUTTONUP => match u16::try_from((wparam.0 >> 16) & 0xFFFF) {
-            Ok(XBUTTON1) => Some(MouseButton::Navigate(NavigationDirection::Back)),
-            Ok(XBUTTON2) => Some(MouseButton::Navigate(NavigationDirection::Forward)),
+            Ok(XBUTTON1) => Some(Button::Back),
+            Ok(XBUTTON2) => Some(Button::Forward),
             _ => None,
         },
         _ => None,
@@ -1133,7 +1133,7 @@ fn button(message: u32, wparam: WPARAM) -> Option<MouseButton> {
 /// forward, and nothing here can reach the subclass's `Hover`: the forward may destroy the
 /// window, which frees it.
 fn release(
-    released: MouseButton,
+    released: Button,
     events: Option<Sender<PresenceEvent>>,
     forward: impl FnOnce() -> LRESULT,
 ) -> LRESULT {
@@ -1220,14 +1220,13 @@ unsafe extern "system" fn hover_subclass(
 #[cfg(test)]
 mod tests {
     use async_channel::Receiver;
-    use gpui_kit::MouseButton;
     use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
     use windows::Win32::UI::WindowsAndMessaging::{
         IsWindow, SendMessageW, WM_CANCELMODE, WM_CAPTURECHANGED, WM_LBUTTONUP, WM_RBUTTONUP,
     };
 
     use super::{
-        PresenceEvent, PresenceSurface, focus_input, hide, input, proxy_proc, signed_words,
+        Button, PresenceEvent, PresenceSurface, focus_input, hide, input, proxy_proc, signed_words,
         subclass_hover,
     };
     use kumochi_protocol::constants::FOCUS_INPUT_MARKER;
@@ -1310,11 +1309,11 @@ mod tests {
     const LOSSES_THEN_ONE_RECONCILE: [PresenceEvent; 3] = [
         PresenceEvent::CaptureLost {
             seq: 1,
-            released: Some(MouseButton::Right),
+            released: Some(Button::Right),
         },
         PresenceEvent::CaptureLost {
             seq: 2,
-            released: Some(MouseButton::Left),
+            released: Some(Button::Left),
         },
         PresenceEvent::Reconcile,
     ];
@@ -1356,7 +1355,7 @@ mod tests {
             }]
         );
         let ((), _) = input::input(|input| {
-            input.release(MouseButton::Left, || {
+            input.release(Button::Left, || {
                 // SAFETY: as above.
                 unsafe { SendMessageW(window.0, WM_CANCELMODE, None, None) };
             })

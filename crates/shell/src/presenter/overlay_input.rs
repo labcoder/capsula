@@ -2,9 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use gpui_kit::MouseButton;
 use kumochi_protocol::message::GestureId;
 
+use crate::platform::input::Button;
 use crate::presence::drag::{DragOwner, End, Event, Outcome};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -196,7 +196,7 @@ impl OverlayOwner {
     pub(crate) fn selected(
         &mut self,
         gesture: GestureId,
-        button: MouseButton,
+        button: Button,
         seq: u64,
         ready: Result<(), ()>,
     ) -> Vec<Effect> {
