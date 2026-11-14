@@ -1774,6 +1774,29 @@ async fn the_threads_choice_rechecks_the_gate_and_a_closed_gate_closes_the_part_
 }
 
 #[tokio::test]
+async fn a_screen_worker_that_cant_start_leaves_screen_holds_unsupported() {
+    use kumochi_protocol::frame;
+    use kumochi_protocol::message::{ControlToShell, ScreenHolds, ScreenOff};
+    let scratch = Scratch::new("screen-worker-missing");
+    let mut brain = test_support::brain(&scratch, "");
+    brain.holds.window_capture = true;
+    let jobs = Arc::new(crate::platform::Job::new().expect("job"));
+    crate::start_screen(&mut brain, scratch.dir().join("missing.exe"), &jobs);
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(crate::runtime::window()));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    brain.screen_holds_changed(&mut link).expect("room");
+    let bytes = output.try_recv().expect("the gate");
+    assert_eq!(
+        frame::decode::<ControlToShell>(&bytes[frame::HEADER_LEN..]).expect("decodes"),
+        ControlToShell::ScreenHolds(ScreenHolds::Off(ScreenOff::Unsupported))
+    );
+    brain.close().await;
+}
+
+#[tokio::test]
 async fn without_window_capture_the_gate_reads_unsupported_whatever_the_client() {
     use kumochi_protocol::message::{ScreenHolds, ScreenOff};
     let scratch = Scratch::new("hold-screen-unsupported");
