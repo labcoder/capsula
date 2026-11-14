@@ -1000,14 +1000,28 @@ async fn route_default_restart_and_catalog_preserve_explicit_intent() {
         ),
     ];
     for (n, (value, expected)) in cases.into_iter().enumerate() {
-        Box::pin(preserved_default_after_restart(n, value, expected)).await;
+        Box::pin(preserved_default_after_restart(n, value, expected, None)).await;
     }
+}
+
+/// Claude Code ready and listing the saved default still never starts the `ChatGPT` engine: no
+/// engine serves Claude Code yet, so the run fails with `ModelUnavailable`.
+#[tokio::test]
+async fn a_ready_connection_without_an_engine_never_starts_chatgpts() {
+    use kumochi_protocol::message::ConnectionKind;
+    Box::pin(preserved_default_after_restart(
+        99,
+        "{ connection = 'ClaudeCode', model = 'same-slug', effort = 'High' }",
+        AfterRestart::Kept(ConnectionKind::ClaudeCode),
+        Some(ConnectionKind::ClaudeCode),
+    ))
+    .await;
 }
 
 /// What a hand-written `default_model` becomes once the brain restarts and reads the catalog.
 #[derive(Clone, Copy, Debug)]
 enum AfterRestart {
-    /// Another connection's intent: kept on disk, shown, and fenced at the store.
+    /// Another connection's intent: kept on disk, shown, and refused at the run's first build.
     Kept(kumochi_protocol::message::ConnectionKind),
     /// Another connection's malformed intent: kept on disk, and a run has no model to use.
     Refused,
@@ -1092,7 +1106,28 @@ impl crate::engines::Engine for CountStarts {
     }
 }
 
-async fn preserved_default_after_restart(n: usize, value: &str, expected: AfterRestart) {
+/// `kind` ready, listing `same-slug`.
+fn lists_same_slug(kind: kumochi_protocol::message::ConnectionKind) -> crate::coordinator::Input {
+    crate::coordinator::Input::Engines(
+        kind,
+        crate::coordinator::Availability::Ready(crate::coordinator::Ready {
+            connection: crate::context::ConnectionTag(1),
+            models: vec![ModelInfo {
+                slug: kumochi_protocol::message::ModelSlug::new("same-slug").expect("slug"),
+                display_name: kumochi_protocol::message::ModelName::new("Same").expect("name"),
+            }],
+            trusted_draw: false,
+        }),
+    )
+}
+
+/// `ready`: a connection made ready, listing `same-slug`, before the turn.
+async fn preserved_default_after_restart(
+    n: usize,
+    value: &str,
+    expected: AfterRestart,
+    ready: Option<kumochi_protocol::message::ConnectionKind>,
+) {
     use kumochi_protocol::constants::CONFIG_FILE;
     use kumochi_protocol::message::{ConnectionKind, Effort, SettingsOp};
     let scratch = Scratch::new(&format!("restart-default-{n}"));
@@ -1140,6 +1175,9 @@ async fn preserved_default_after_restart(n: usize, value: &str, expected: AfterR
     .await
     .expect("catalog read");
     brain.drain_settings().await;
+    if let Some(kind) = ready {
+        brain.offline(lists_same_slug(kind));
+    }
     let snapshot = brain.snapshot(crate::context::Origin::Task(
         kumochi_protocol::message::ThreadId(2),
     ));
@@ -1174,11 +1212,8 @@ async fn preserved_default_after_restart(n: usize, value: &str, expected: AfterR
     let mut tap = Tap::from_env();
     let client = async {
         shell.submit("never send this through another route").await;
-        // A saved route is fenced at the store; an invalid default leaves no model to check.
-        assert_eq!(
-            failed_with(&mut shell).await,
-            matches!(expected, AfterRestart::Refused).then(model_unavailable)
-        );
+        // A saved route has no engine to answer it; an invalid default leaves no model to check.
+        assert_eq!(failed_with(&mut shell).await, Some(model_unavailable()));
         drop(shell);
     };
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);

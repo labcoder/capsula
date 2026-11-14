@@ -86,7 +86,7 @@ pub(crate) fn sign_in_needed() -> UserError {
         .expect("one action is within the limit")
 }
 
-pub(super) fn model_unavailable() -> UserError {
+pub(crate) fn model_unavailable() -> UserError {
     UserError::new(
         ErrorKey::ModelUnavailable,
         Vec::new(),

@@ -42,6 +42,7 @@ use crate::engines::{RunRequest, TurnEvent};
 use crate::store::{Failure, Interruption, RunEnd, SceneState};
 
 pub use admission::{BuildContext, BuildKey, ContextBuilt, Unbuilt};
+pub(crate) use availability::model_unavailable;
 pub use availability::{Availability, Ready};
 pub use cards::{CardRead, Cards};
 pub use hold::{HoldKey, HoldRead, HoldSnapshot};

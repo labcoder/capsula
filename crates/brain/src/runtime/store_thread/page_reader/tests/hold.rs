@@ -316,7 +316,7 @@ fn deletion_accepted_after_recognition_fences_snapshot_even_after_its_reply() {
 }
 
 #[test]
-fn a_hold_on_a_non_chatgpt_choice_is_refused_at_its_read() {
+fn a_hold_reads_the_exact_saved_choice_on_any_connection() {
     use kumochi_protocol::message::ConnectionKind;
     let claude = ModelChoice {
         connection: ConnectionKind::ClaudeCode,
@@ -327,16 +327,15 @@ fn a_hold_on_a_non_chatgpt_choice_is_refused_at_its_read() {
         ..choice("claude-sonnet-5-5", Effort::Low)
     };
     let chatgpt = choice("gpt-6-luna", Effort::Low);
-    let expected = chatgpt.clone();
-    // (the thread's saved choice, the default, prepared)
+    // (the thread's saved choice, the default, what the hold reads)
     let cases = [
-        (Some(claude.clone()), Some(chatgpt.clone()), false),
-        (Some(key), Some(chatgpt.clone()), false),
-        (None, Some(claude), false),
-        (Some(chatgpt.clone()), None, true),
-        (None, Some(chatgpt), true),
+        (Some(claude.clone()), Some(chatgpt.clone()), claude.clone()),
+        (Some(key.clone()), Some(chatgpt.clone()), key),
+        (None, Some(claude.clone()), claude),
+        (Some(chatgpt.clone()), None, chatgpt.clone()),
+        (None, Some(chatgpt.clone()), chatgpt),
     ];
-    for (saved, default, prepared) in cases {
+    for (saved, default, expected) in cases {
         for target in [None, Some(TASK)] {
             if saved.is_some() && target.is_none() {
                 continue;
@@ -372,10 +371,8 @@ fn a_hold_on_a_non_chatgpt_choice_is_refused_at_its_read() {
             let Input::HoldPrepared { key: KEY, result } = running.ack() else {
                 panic!("hold reply")
             };
-            assert_eq!(result.is_ok(), prepared, "{saved:?} {default:?} {target:?}");
-            if let Ok(snapshot) = result {
-                assert_eq!(snapshot.defaults.choice.as_ref(), Some(&expected));
-            }
+            let snapshot = result.unwrap_or_else(|()| panic!("{saved:?} {default:?} {target:?}"));
+            assert_eq!(snapshot.defaults.choice.as_ref(), Some(&expected));
             running.thread.close().blocking_recv().unwrap();
         }
     }

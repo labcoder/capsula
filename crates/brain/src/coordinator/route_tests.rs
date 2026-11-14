@@ -409,3 +409,20 @@ fn a_hold_on_another_kind_lives_through_chatgpts_changes_and_ends_on_its_own() {
         assert_eq!(core.current_run(), None, "{at_the_send}");
     }
 }
+
+#[test]
+fn another_connections_choice_fails_while_chatgpt_lists_its_slug() {
+    for kind in [CLAUDE, KEY] {
+        let mut core = typed(vec![ready(CHATGPT, 7, &["m"])]);
+        let effects = core
+            .handle(built(Some(choice(kind, "m"))))
+            .expect("current");
+        assert_eq!(
+            failure(&effects),
+            Some(reason(ErrorKey::ModelUnavailable, Action::OpenSettings)),
+            "{kind:?}"
+        );
+        assert!(!started(&effects));
+        assert_eq!(core.sending(SendKey::Build(key())), None);
+    }
+}
