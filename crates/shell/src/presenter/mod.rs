@@ -361,7 +361,7 @@ impl Presenter {
                     .get_mut(&scene)
                     .and_then(|state| state.running.take_if(|running| running.id == id));
                 if let Some(running) = running {
-                    self.prepared(scene, &running, result, full_after, now, &mut out);
+                    self.prepared(scene, &running, result, full_after, now, &mut out)?;
                 }
             }
             Completion::Admitted {
@@ -420,7 +420,7 @@ impl Presenter {
             })
             .collect();
         for (scene, run, index) in late {
-            self.fail(scene, run, index, SceneFailure::Timeout, &mut out);
+            self.fail(scene, run, index, SceneFailure::Timeout, now, &mut out)?;
         }
         if matches!(&self.phase, Phase::Recovering(recovery) if now >= recovery.started + RECOVERY_DEADLINE)
         {
@@ -946,8 +946,7 @@ impl Presenter {
             .expect("the front ticket was just read");
         let (run, index) = (ticket.run, ticket.index);
         if now >= eligible_at + DEADLINE {
-            self.fail(id, run, index, SceneFailure::Timeout, out);
-            return Ok(());
+            return self.fail(id, run, index, SceneFailure::Timeout, now, out);
         }
         let bytes = ticket.preparation.attribution()
             + scene
@@ -984,10 +983,7 @@ impl Presenter {
                 Ok(())
             }
             Err(error) if matches!(error.0, PrepareError::Stale) => Err(Broken::Order),
-            Err(error) => {
-                self.fail(id, run, index, failure(&error.0), out);
-                Ok(())
-            }
+            Err(error) => self.fail(id, run, index, failure(&error.0), now, out),
         }
     }
 
@@ -1000,7 +996,7 @@ impl Presenter {
         full_after: usize,
         now: Instant,
         out: &mut Out,
-    ) {
+    ) -> Result<(), Broken> {
         let elapsed = now.saturating_duration_since(running.eligible_at);
         if let Ok(prepared) = &*result
             && let Some(scene) = self.scenes.get(&id)
@@ -1026,7 +1022,7 @@ impl Presenter {
                 sum + scene.paint
             });
         let Some(scene) = self.scenes.get_mut(&id) else {
-            return;
+            return Ok(());
         };
         let accepted = if elapsed >= DEADLINE {
             Err(SceneFailure::Timeout)
@@ -1060,34 +1056,49 @@ impl Presenter {
                     full_after,
                 });
             }
-            Err(reason) => self.fail(id, running.run, running.index, reason, out),
+            Err(reason) => self.fail(id, running.run, running.index, reason, now, out)?,
         }
+        Ok(())
     }
 
     /// A step failed: its scene drops its work and, unless already cut since its last commit,
-    /// sends the cut at its activated bound and waits for the brain to acknowledge it.
-    fn fail(&mut self, id: SceneId, run: RunId, index: u32, reason: SceneFailure, out: &mut Out) {
+    /// sends the cut at its activated bound and waits for the brain to acknowledge it. A
+    /// consumption the scene was waiting for goes with its work, so the frames held behind it
+    /// resume.
+    fn fail(
+        &mut self,
+        id: SceneId,
+        run: RunId,
+        index: u32,
+        reason: SceneFailure,
+        now: Instant,
+        out: &mut Out,
+    ) -> Result<(), Broken> {
         if self.frames.borrow().successor() == Some(id) {
             self.discard_replacement();
         }
         let Some(scene) = self.scenes.get_mut(&id) else {
-            return;
+            return Ok(());
         };
+        let waited = scene.pending_consumption.is_some();
         scene.halt();
         scene.skipping = true;
-        if scene.cut != Cut::Open {
-            return;
+        if scene.cut == Cut::Open {
+            scene.cut = Cut::Outstanding;
+            scene.stopped_ms = scene.sampled_ms;
+            out.effects
+                .push(Effect::Control(ControlToBrain::StepFailed {
+                    run,
+                    scene: id,
+                    index,
+                    reason,
+                    cut: scene.cut_now(),
+                }));
         }
-        scene.cut = Cut::Outstanding;
-        scene.stopped_ms = scene.sampled_ms;
-        out.effects
-            .push(Effect::Control(ControlToBrain::StepFailed {
-                run,
-                scene: id,
-                index,
-                reason,
-                cut: scene.cut_now(),
-            }));
+        if waited {
+            self.drain(now, out)?;
+        }
+        Ok(())
     }
 
     /// Drops a scene and releases its budget, residency and work.
