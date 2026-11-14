@@ -3913,6 +3913,7 @@ dependencies = [
  "kumochi-brain",
  "kumochi-protocol",
  "kumochi-scene",
+ "kumochi-shell-core",
  "lyon",
  "raw-window-handle",
  "smallvec",
@@ -3923,6 +3924,16 @@ dependencies = [
  "unic-langid",
  "windows 0.62.2",
  "zeroize",
+]
+
+[[package]]
+name = "kumochi-shell-core"
+version = "0.1.2"
+dependencies = [
+ "keyring",
+ "kumochi-protocol",
+ "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]

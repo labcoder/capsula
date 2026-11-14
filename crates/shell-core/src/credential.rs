@@ -7,7 +7,7 @@ use kumochi_protocol::message::{CAPABILITY_LEN, Capability};
 
 /// The capability couldn't be read.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum CredentialError {
+pub enum CredentialError {
     /// Credential Manager failed, or holds no capability yet.
     #[error("Credential Manager failed")]
     Store(#[from] keyring::Error),
@@ -20,7 +20,7 @@ pub(crate) enum CredentialError {
 ///
 /// # Errors
 /// Fails when there is none or it's malformed.
-pub(crate) fn read(session: u32) -> Result<Capability, CredentialError> {
+pub fn read(session: u32) -> Result<Capability, CredentialError> {
     let account = instance_entry(session);
     let bytes = Entry::new(INSTANCE_SERVICE, &account)?.get_secret()?;
     let bytes: [u8; CAPABILITY_LEN] = bytes.try_into().map_err(|_| CredentialError::WrongLength)?;

@@ -60,18 +60,27 @@ flowchart TD
   protocol["protocol<br/>messages, ids, constants"]
   scene["scene<br/>drawing format, validator,<br/>layout, 3D geometry"]
   brain["brain<br/>bin kumochid"]
+  core["shell-core<br/>what the shell knows<br/>and decides"]
   shell["shell<br/>bin kumochi"]
   xtask["xtask<br/>bench, eval, fixtures"]
   brain --> protocol
   brain --> scene
   shell --> protocol
   shell --> scene
+  shell --> core
+  core --> protocol
   xtask --> protocol
   xtask --> scene
   protocol --> scene
 ```
 
 `scene` has no GPUI and no tokio. The shell gives it text measurement through a small trait.
+
+`shell-core` holds what the shell knows and decides, apart from how it is drawn. No UI
+framework is in its dependency tree, dev-dependencies included, so nothing in it can name
+GPUI; the shell is the crate that does. `cargo xtask check-core` fails CI when a framework
+enters that tree. It also fails on a test gate in the core that the shell's tests would miss:
+those tests build the core as a dependency, without `cfg(test)`.
 
 ## The brain is a game loop
 
