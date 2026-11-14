@@ -140,8 +140,8 @@ fn base_dir() -> PathBuf {
 }
 
 /// A question: `echo` copies stdin to stdout and logs each read's length to `echo.log`,
-/// `deaf` never reads stdin, `flood` writes stdout until it can't, `replay` answers as
-/// [`replay`] says, and any other mode exits.
+/// `deaf` never reads stdin, `late` exits 100 ms after stdin's end, `flood` writes stdout until
+/// it can't, `replay` answers as [`replay`] says, and any other mode exits.
 fn question(kind: &str) -> i32 {
     match kind {
         "replay" => replay(),
@@ -170,6 +170,10 @@ fn question(kind: &str) -> i32 {
             }
         }
         "deaf" => std::thread::sleep(Duration::from_secs(60)),
+        "late" => {
+            std::io::copy(&mut std::io::stdin(), &mut std::io::sink()).ok();
+            std::thread::sleep(Duration::from_millis(100));
+        }
         "flood" => {
             let chunk = vec![b'x'; 64 * 1024];
             let mut stdout = std::io::stdout();

@@ -597,6 +597,7 @@ pub(super) fn run(
         dir: None,
         listener: None,
         job: None,
+        child: None,
         pumps: Vec::new(),
         #[cfg(test)]
         terminate: hooks.terminate.take(),
@@ -619,14 +620,16 @@ pub(super) fn run(
         Err(failure) => {
             started.send(Err(failure)).ok();
         }
-        Ok((pipes, process)) => {
+        Ok(pipes) => {
             // A round that's gone revoked the launch as it went.
             started.send(Ok(pipes)).ok();
-            while !control.is_revoked()
-                && !closing.load(Ordering::Acquire)
-                && Instant::now() < deadline
-                && matches!(process.exits_within(POLL), Ok(false))
-            {}
+            if let Some(child) = &running.child {
+                while !control.is_revoked()
+                    && !closing.load(Ordering::Acquire)
+                    && Instant::now() < deadline
+                    && matches!(child.exits_within(POLL), Ok(false))
+                {}
+            }
         }
     }
     let teardown = running.stop(host);
@@ -655,7 +658,7 @@ fn begin(
     ready: Ready,
     parts: Parts<'_>,
     host: &Host,
-) -> Result<(Pipes, platform::Helper), LaunchFailed> {
+) -> Result<Pipes, LaunchFailed> {
     let Parts {
         id,
         question,
@@ -718,7 +721,7 @@ fn begin(
         binding,
     };
     running.listener = Some(serve(listener, context, &host.runtime));
-    let mut spawned = platform::spawn(&platform::Launch {
+    let spawned = platform::spawn(&platform::Launch {
         exe: &program.exe,
         args: &args,
         cwd: &work,
@@ -727,9 +730,10 @@ fn begin(
         jobs: &[&host.brain_job, &job],
     })
     .map_err(|_| LaunchFailed::Spawn)?;
+    running.child = Some(spawned.process);
     let stdout = pumps(
         running,
-        &mut spawned,
+        (spawned.stdin, spawned.stdout, spawned.stderr),
         stdin,
         control,
         #[cfg(test)]
@@ -744,30 +748,23 @@ fn begin(
             fails: hooks.spawn_fails,
         },
     )?;
-    Ok((
-        Pipes {
-            stdin: Some(round_stdin),
-            control: Arc::clone(control),
-            stdout,
-        },
-        spawned.process,
-    ))
+    Ok(Pipes {
+        stdin: Some(round_stdin),
+        control: Arc::clone(control),
+        stdout,
+    })
 }
 
 /// Starts the three pumps on the child's pipes, each into `running` as it starts; the round's
 /// stdout.
 fn pumps(
     running: &mut Running,
-    spawned: &mut platform::Spawned,
+    child_pipes: (Option<PipeWriter>, Option<PipeReader>, Option<PipeReader>),
     stdin: mpsc::Receiver<Input>,
     control: &Arc<Control>,
     #[cfg(test)] hooks: tests::Pumps,
 ) -> Result<mpsc::Receiver<Vec<u8>>, LaunchFailed> {
-    let (Some(child_stdin), Some(child_stdout), Some(child_stderr)) = (
-        spawned.stdin.take(),
-        spawned.stdout.take(),
-        spawned.stderr.take(),
-    ) else {
+    let (Some(child_stdin), Some(child_stdout), Some(child_stderr)) = child_pipes else {
         return Err(LaunchFailed::Spawn);
     };
     let (output, stdout) = mpsc::channel(PIPE_QUEUE);
@@ -888,6 +885,8 @@ struct Running {
     dir: Option<PathBuf>,
     listener: Option<(tokio::task::AbortHandle, std_mpsc::Receiver<()>)>,
     job: Option<Arc<Job>>,
+    /// Claude Code's process: it holds its working folder until it has finished exiting.
+    child: Option<platform::Helper>,
     pumps: Vec<std_mpsc::Receiver<()>>,
     #[cfg(test)]
     terminate: Option<tests::Pause>,
@@ -896,7 +895,8 @@ struct Running {
 impl Running {
     /// Fails the gate and closes stdin, seals the held send, aborts the listener and waits up to
     /// [`PIPE_GRACE`] for its task to end, ends the job and confirms it empty, waits for the pumps,
-    /// and only then settles the send and deletes the folder. Anything not confirmed ended never
+    /// and only then settles the send and, once the child has finished exiting or a further
+    /// [`PIPE_GRACE`] has passed, deletes the folder. Anything not confirmed ended never
     /// falls through to either: its send is abandoned unsettled, so its sources stay held until
     /// its deadline fails it closed.
     fn stop(mut self, host: &Host) -> Teardown {
@@ -911,6 +911,10 @@ impl Running {
         // Nothing the launch started can send any more.
         drop(send);
         drop(self.held);
+        // The job reads empty before the child's handles close; a failed wait shows as FolderLeft.
+        if let Some(child) = &self.child {
+            child.exits_within(PIPE_GRACE).ok();
+        }
         match self.dir.as_deref().map(platform::remove_tree) {
             None | Some(Ok(())) => Teardown::Done,
             Some(Err(_)) => Teardown::FolderLeft,
