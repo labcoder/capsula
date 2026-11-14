@@ -152,33 +152,12 @@ impl fmt::Debug for Label {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
-    use super::{Facts, HostChange, HostFacts, HostId, LABEL_UNITS, Label, PhysicalRect, WatchGen};
+pub(crate) mod fixture;
 
-    pub(crate) const SENTINEL: &str = "SENTINEL-TITLE-7f3a";
-
-    pub(crate) fn sentinel() -> Label {
-        Label::new(&SENTINEL.encode_utf16().collect::<Vec<_>>())
-    }
-
-    /// Fails when `text` holds the sentinel as text, as UTF-8 bytes or as UTF-16 units.
-    pub(crate) fn assert_no_sentinel(text: &str) {
-        assert!(!text.contains(SENTINEL), "{text}");
-        let units: Vec<u16> = SENTINEL.encode_utf16().collect();
-        let bytes: Vec<u8> = units.iter().flat_map(|unit| unit.to_le_bytes()).collect();
-        assert!(!text.as_bytes().windows(bytes.len()).any(|w| w == bytes));
-        let written: Vec<u16> = text.encode_utf16().collect();
-        assert!(!written.windows(units.len()).any(|w| w == units));
-        let list = |values: Vec<String>| values.join(", ");
-        assert!(
-            !text.contains(&list(units.iter().map(u16::to_string).collect())),
-            "{text}"
-        );
-        assert!(
-            !text.contains(&list(SENTINEL.bytes().map(|b| b.to_string()).collect())),
-            "{text}"
-        );
-    }
+#[cfg(test)]
+mod tests {
+    use super::fixture::{assert_no_sentinel, sentinel};
+    use super::{Facts, HostFacts, HostId, LABEL_UNITS, Label, PhysicalRect};
 
     #[test]
     fn a_label_keeps_at_most_its_units_and_never_half_a_pair() {
@@ -228,15 +207,5 @@ pub(crate) mod tests {
         let text = format!("{facts:?} {:?}", facts.label);
         assert!(text.contains("Label(19 units)"), "{text}");
         assert_no_sentinel(&text);
-        assert_no_sentinel(&format!(
-            "{:?}",
-            crate::platform::PresenceEvent::HostChanged {
-                w: WatchGen(1),
-                change: HostChange::Gone,
-            }
-        ));
-        let error = crate::platform::PresenceError::HostWatch;
-        assert_eq!(error.to_string(), "can't watch the host window");
-        assert_no_sentinel(&format!("{error} {error:?}"));
     }
 }

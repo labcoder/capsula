@@ -478,6 +478,8 @@ mod tests {
     };
 
     use super::{captioned, install, metrics, teardown, unhook_all};
+    use crate::platform::host::fixture::assert_no_sentinel;
+    use crate::platform::host::{HostChange, WatchGen};
 
     #[test]
     fn only_the_whole_caption_style_counts_as_a_caption() {
@@ -600,5 +602,19 @@ mod tests {
         let mut stuck = Some(8);
         teardown(&mut stuck, |_| false);
         assert_eq!(stuck, Some(8), "a failed unhook keeps the slot taken");
+    }
+
+    #[test]
+    fn no_title_reaches_a_host_event_or_error() {
+        assert_no_sentinel(&format!(
+            "{:?}",
+            crate::platform::PresenceEvent::HostChanged {
+                w: WatchGen(1),
+                change: HostChange::Gone,
+            }
+        ));
+        let error = crate::platform::PresenceError::HostWatch;
+        assert_eq!(error.to_string(), "can't watch the host window");
+        assert_no_sentinel(&format!("{error} {error:?}"));
     }
 }

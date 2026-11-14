@@ -185,55 +185,20 @@ impl Targeting {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub(crate) mod fixture;
+
+#[cfg(test)]
+mod tests {
+    use super::fixture::{HOST, OTHER, drag, host, rect};
     use super::{Check, Drop, Targeting};
-    use crate::platform::host::{HostChange, HostId, Label, PhysicalRect, WatchGen};
-    use crate::presence::drag::Generation;
-    use crate::presence::perch::caption::{Caption, Exclusions, Source, WindowTarget};
+    use crate::platform::host::{HostChange, PhysicalRect, WatchGen};
+    use crate::presence::perch::caption::WindowTarget;
     use crate::presence::perch::place::{Extents, Placement};
 
     const KUMO: Extents = Extents {
         body: 56,
         card: [200, 120],
     };
-    pub(crate) const HOST: HostId = HostId {
-        window: 1,
-        process: 2,
-        thread: 3,
-    };
-    pub(crate) const OTHER: HostId = HostId {
-        window: 9,
-        process: 2,
-        thread: 3,
-    };
-
-    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> PhysicalRect {
-        PhysicalRect {
-            left,
-            top,
-            right,
-            bottom,
-        }
-    }
-
-    /// An 800 × 600 host at 100 %, `dx` right of x = 100, on a 1920 × 1040 work area.
-    pub(crate) fn host(id: HostId, dx: i32) -> WindowTarget {
-        let mut exclusions = Exclusions::default();
-        exclusions.rects[0] = Some((rect(792 + dx, 200, 900 + dx, 231), Source::Inferred));
-        WindowTarget {
-            id,
-            frame: rect(100 + dx, 200, 900 + dx, 800),
-            work_area: rect(0, 0, 1920, 1040),
-            monitor_dpi: 96,
-            caption: Caption {
-                rect: rect(100 + dx, 200, 792 + dx, 231),
-                source: Source::Inferred,
-            },
-            exclusions,
-            label: Label::new(&[]),
-        }
-    }
-
     /// The perch on `host(_, 0)`: centred above the caption, the card to its right.
     const PERCH: Placement = Placement {
         body: PhysicalRect {
@@ -266,10 +231,6 @@ pub(crate) mod tests {
         },
         above: true,
     };
-
-    pub(crate) fn drag(n: u64) -> Generation {
-        Generation::new(n)
-    }
 
     /// A carry in drag 1 armed on `HOST`.
     fn armed() -> (Targeting, WatchGen) {
