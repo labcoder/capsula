@@ -713,10 +713,12 @@ pub enum ScreenClass {
     CantShare,
     /// The window's password masks couldn't be completed, or where a click lands couldn't be told.
     Unreadable,
-    /// The image was over the cap.
+    /// The window or its image was over the size cap.
     TooLarge,
     /// The window or display changed while it was being captured.
     Changed,
+    /// The hold's thread is pinned to a model that can't be sent images. Appended.
+    ModelCantSee,
 }
 
 /// The image gate's state, for the standing notice and for which hold message the shell sends.

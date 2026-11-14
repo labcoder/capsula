@@ -2138,6 +2138,10 @@ fn every_screen_class_tells_the_model_its_own_fixed_line() {
             ScreenClass::Changed,
             "The screen was not included: the window changed while it was being captured.",
         ),
+        (
+            ScreenClass::ModelCantSee,
+            "The screen was not included: this model can't be sent images.",
+        ),
     ];
     for (class, line) in cases {
         let mut request = ModelRequest {

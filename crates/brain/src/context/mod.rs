@@ -410,6 +410,7 @@ impl ModelRequest {
             Screen::NotIncluded(ScreenClass::Unreadable) => "screen-unreadable",
             Screen::NotIncluded(ScreenClass::TooLarge) => "screen-too-large",
             Screen::NotIncluded(ScreenClass::Changed) => "screen-changed",
+            Screen::NotIncluded(ScreenClass::ModelCantSee) => "screen-model-cant-see",
         };
         let text = screen_line(id).ok_or(ImageRefused::Unbundled)?;
         let after = match screen {

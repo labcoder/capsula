@@ -16,3 +16,4 @@ screen-cant-share = The screen was not included: the window can't be shared.
 screen-unreadable = The screen was not included: the window couldn't be read safely.
 screen-too-large = The screen was not included: the window image was too large.
 screen-changed = The screen was not included: the window changed while it was being captured.
+screen-model-cant-see = The screen was not included: this model can't be sent images.
