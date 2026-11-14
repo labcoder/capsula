@@ -295,7 +295,10 @@ fn failed_terminate(job: &Job) -> std::io::Result<()> {
 
 /// Reports the job empty while its child may still be exiting, as Windows does for the moment
 /// between a process leaving its job and its handles closing.
-#[expect(clippy::unnecessary_wraps, reason = "it stands in for `Job::terminate`")]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "it stands in for `Job::terminate`"
+)]
 fn confirmed_early(_job: &Job) -> std::io::Result<()> {
     Ok(())
 }

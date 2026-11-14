@@ -349,8 +349,10 @@ each pump. A pump still running after that gets the round's stdout let go and up
 again, so each pump can take up to two graces. A failed termination, a pump that doesn't end or a
 listener task that didn't end is `Stuck`: the job is still terminated, but the lane goes stuck,
 keeps the lock and the folder, and refuses the next call. Only a settled launch drops its
-folder's handles and deletes it. A pump thread that can't start fails the launch as `Spawn`
-through the same stop.
+folder's handles and deletes it, after waiting up to `PIPE_GRACE` more for Claude Code's own
+process to finish exiting: Windows counts a process out of its job before it closes the process's
+handles, its working folder among them, so a deletion in between would fail. A pump thread
+that can't start fails the launch as `Spawn` through the same stop.
 
 **The folder is the crash record.** Every launch process sits in the kill-on-close brain job, so a
 crash leaves only files under `engine\`, which is reserved for launch folders. `settle()` takes
