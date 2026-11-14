@@ -1,7 +1,9 @@
-//! Whether a run may be answered, and on which connection (docs/development/runs.md,
-//! "Availability"). The runtime reports the account's state as [`Availability`]. A run is bound
-//! to the connection that was ready when its turn arrived, and it ends as soon as that
-//! connection stops being the ready one, even while its turn is still being written. The model check (S4) runs once, on the first build.
+//! Whether a run may be answered, and on which route (docs/development/runs.md, "Availability").
+//! The runtime reports each connection kind's state as [`Availability`]. A turn records the
+//! sign-in each kind had ready when it arrived, and its first build binds the route of its
+//! choice's kind under that sign-in. Before then, a change to a kind takes it out of the arrival
+//! and the run ends once none is left; after, only a change to the route's own kind ends it. The
+//! model check (S4) runs once, on the first build, against the route's catalog.
 
 use kumochi_protocol::message::{
     Action, ConnectionKind, ErrorKey, ModelChoice, ModelInfo, RunId, UserError,
