@@ -2187,3 +2187,42 @@ async fn turning_screen_holds_off_closes_the_pending_part_and_withdraws_the_runs
     brain.holds.lost();
     brain.close().await;
 }
+
+#[tokio::test]
+async fn a_pending_hold_on_another_kind_ends_only_on_its_own_kinds_change() {
+    use crate::context::ConnectionTag;
+    use crate::coordinator::Ready;
+    use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
+    let scratch = Scratch::new("hold-route-fence");
+    let mut brain = test_support::brain(&scratch, "");
+    let claude = |input| Input::Engines(ConnectionKind::ClaudeCode, Availability::Ready(input));
+    let away = || Ready {
+        connection: ConnectionTag(21),
+        ..Ready::fixture()
+    };
+    brain.offline(claude(Ready::fixture()));
+    recording(&mut brain);
+    let hold = brain.holds.pending.as_mut().unwrap();
+    hold.snapshot.as_mut().unwrap().defaults.choice = Some(ModelChoice {
+        model: ModelSlug::new("fixture-model").unwrap(),
+        effort: Effort::High,
+        connection: ConnectionKind::ClaudeCode,
+    });
+    let flag = Arc::clone(&hold.cancel);
+    brain.offline(Input::Engines(
+        ConnectionKind::ChatGpt,
+        Availability::Ready(away()),
+    ));
+    brain.offline(claude(Ready::fixture()));
+    assert!(
+        !flag.load(Ordering::SeqCst),
+        "ChatGPT's change and Claude Code's equal state leave it"
+    );
+    brain.offline(claude(away()));
+    assert!(
+        flag.load(Ordering::SeqCst),
+        "its own kind's change fails it"
+    );
+    brain.holds.lost();
+    brain.close().await;
+}

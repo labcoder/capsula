@@ -67,7 +67,7 @@ impl Arrived {
         self.0[slot(kind)]
     }
 
-    fn is_empty(self) -> bool {
+    pub(super) fn is_empty(self) -> bool {
         self.0.iter().all(Option::is_none)
     }
 }

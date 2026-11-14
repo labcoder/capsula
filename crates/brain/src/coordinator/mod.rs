@@ -1143,6 +1143,9 @@ impl Coordinator {
             .as_ref()
             .and(hold.as_ref())
             .map(|hold| hold.key.gesture);
+        let arrived = hold
+            .as_ref()
+            .map_or_else(|| self.arrived_now(), |hold| hold.arrived);
         self.current = Some(Run {
             control: crate::recall::control::CancelOnDrop(control),
             id: run,
@@ -1163,7 +1166,7 @@ impl Coordinator {
             hold,
             screen,
             build: None,
-            arrived: self.arrived_now(),
+            arrived,
             route: None,
             compacted: None,
             draw: None,
