@@ -94,7 +94,7 @@ pub enum BrainError {
     /// The store's thread couldn't be started.
     #[error("can't start the store's thread")]
     StoreThread(#[source] io::Error),
-    /// The helpers' Job Object or a helper couldn't be created.
+    /// The helpers' Job Object couldn't be created.
     #[error("can't start the helpers")]
     Helpers(#[source] io::Error),
     /// The account's credential thread couldn't be started.
@@ -170,9 +170,7 @@ pub async fn run() -> Result<(), BrainError> {
         None if claude_on => runtime::claude::Claude::default(),
         lane => runtime::claude::Claude::turned_off(lane),
     });
-    let screen = screen::HoldClient::start(exe.clone(), std::sync::Arc::clone(&jobs))
-        .map_err(BrainError::Helpers)?;
-    brain.attach_screen(std::sync::Arc::new(screen));
+    start_screen(&mut brain, exe.clone(), &jobs);
     let mut bytes = [0; CAPABILITY_LEN];
     getrandom::fill(&mut bytes)?;
     let identity = Identity {
@@ -232,6 +230,15 @@ fn start_voice(
         .ok();
     let fetcher = std::sync::Arc::new(voice::download::Online(models.clone()));
     brain.attach_voice(models, stuck, (stt, tts), [stt_heard, tts_heard], fetcher);
+}
+
+/// Gives screen holds the brain's one screen worker. One that can't start leaves screen holds
+/// `Unsupported` for the session, the way a voice part that can't start is unavailable.
+fn start_screen(brain: &mut Brain, exe: PathBuf, jobs: &std::sync::Arc<Job>) {
+    match screen::HoldClient::start(exe, std::sync::Arc::clone(jobs)) {
+        Ok(client) => brain.attach_screen(std::sync::Arc::new(client)),
+        Err(error) => tracing::warn!(kind = ?error.kind(), "the screen worker can't start"),
+    }
 }
 
 /// The account system on the real credential store, browser, clock and network, and the fact that

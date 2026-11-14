@@ -20,6 +20,29 @@ use crate::voice::stt::held_for_runtime_checked;
 
 const G: GestureId = GestureId(17);
 
+#[tokio::test]
+async fn a_screen_worker_that_cant_start_leaves_screen_holds_unsupported() {
+    use kumochi_protocol::message::{ScreenHolds, ScreenOff};
+    let scratch = Scratch::new("screen-worker-missing");
+    let mut brain = test_support::brain(&scratch, "");
+    let jobs = Arc::new(crate::platform::Job::new().expect("job"));
+    crate::start_screen(&mut brain, scratch.dir().join("missing.exe"), &jobs);
+    let (out, mut output) = mpsc::channel(16);
+    let queue = std::cell::RefCell::new(crate::runtime::data::DataQueue::new(
+        crate::runtime::window(),
+    ));
+    let ready_notify = tokio::sync::Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = crate::runtime::Link::new(&out, &queue, &ready_notify, &mut tap);
+    brain.screen_holds_changed(&mut link).expect("room");
+    let bytes = output.try_recv().expect("the gate");
+    assert_eq!(
+        frame::decode::<ControlToShell>(&bytes[frame::HEADER_LEN..]).expect("decodes"),
+        ControlToShell::ScreenHolds(ScreenHolds::Off(ScreenOff::Unsupported))
+    );
+    brain.close().await;
+}
+
 struct Requested(mpsc::UnboundedSender<crate::engines::RunRequest>);
 
 impl std::fmt::Debug for Requested {
