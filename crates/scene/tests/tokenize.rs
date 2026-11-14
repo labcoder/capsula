@@ -240,19 +240,20 @@ fn malformed_json_is_terminal_and_never_resynchronizes() {
 
 #[test]
 fn text_after_the_closed_records_array_is_its_own_terminal_error() {
-    let begun: &[u8] = br#"{"records":[{"begin":{}}]"#;
-    let begin: &[&[u8]] = &[br#"{"begin":{}}"#];
+    let opened: &[u8] = br#"{"records":[{"begin":{}}]"#;
+    let record: &[u8] = br#"{"begin":{}}"#;
     let empty: &[u8] = br#"{"records":[]"#;
-    let cases: [(&[u8], &[&[u8]], &[u8]); 7] = [
-        (begun, begin, br#","records":[{"step":{}}]}"#),
-        (begun, begin, br#" , "end":{}}"#),
-        (begun, begin, b"x"),
-        (begun, begin, b"}}"),
-        (begun, begin, b"} \xff"),
-        (empty, &[], b"}x"),
-        (empty, &[], br#","end":{}}"#),
+    let cases: [(&[u8], usize, &[u8]); 7] = [
+        (opened, 1, br#","records":[{"step":{}}]}"#),
+        (opened, 1, br#" , "end":{}}"#),
+        (opened, 1, b"x"),
+        (opened, 1, b"}}"),
+        (opened, 1, b"} \xff"),
+        (empty, 0, b"}x"),
+        (empty, 0, br#","end":{}}"#),
     ];
-    for (records, expected, tail) in cases {
+    for (records, emits, tail) in cases {
+        let expected = &[record][..emits];
         let fixture = [records, tail].concat();
         for delta in [1, fixture.len()] {
             let mut tokenizer = Tokenizer::new();

@@ -553,7 +553,10 @@ fn text_after_the_records_meets_the_spent_budget_an_end_record_would() {
     let mut drawing = Drawing::default();
     let mut store = Store::default();
     let forward = r#"{"id":"a","start":{"after":"later","ms":0}}"#.to_owned();
-    store.run(&mut drawing, call(1, "c1", args("s1", &[forward.clone()])));
+    store.run(
+        &mut drawing,
+        call(1, "c1", args("s1", std::slice::from_ref(&forward))),
+    );
     store.run(&mut drawing, streamed("open", 0, &begin("s2", "")));
     store.run(&mut drawing, streamed("open", 1, &step(&text("a", "x"))));
     let spent = store.run(&mut drawing, call(1, "c3", args("s3", &[forward])));
