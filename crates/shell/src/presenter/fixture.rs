@@ -11,6 +11,7 @@ use kumochi_protocol::message::{
 };
 use kumochi_scene::{
     Record, SceneEvent, SceneView, Step, StopCut,
+    budget::Usage,
     deferred::Deferred,
     display::{MeasureError, TextMeasure, TextStyle},
     layout::SurfaceGeometry,
@@ -654,4 +655,79 @@ pub(crate) fn host_stale_begin(presenter: &mut Presenter, connected: bool) {
     assert!(controls(&effects).is_empty());
     assert!(jobs(effects).is_empty());
     assert!(!presenter.scenes.contains_key(&LIVE));
+}
+
+/// Read-ahead positions per scene: prepared results not yet consumed, plus the running one.
+pub(crate) const WINDOW: usize = super::scene::WINDOW;
+
+/// The scenes the presenter holds.
+pub(crate) fn scene_ids(presenter: &Presenter) -> Vec<SceneId> {
+    presenter.scenes.keys().copied().collect()
+}
+
+/// How many prepared steps `scene` holds, and how many tickets wait behind them.
+pub(crate) fn held(presenter: &Presenter, scene: SceneId) -> (usize, usize) {
+    let scene = &presenter.scenes[&scene];
+    (scene.ready.len(), scene.queue.len())
+}
+
+/// The index of `scene`'s oldest prepared step.
+pub(crate) fn ready_head(presenter: &Presenter, scene: SceneId) -> u32 {
+    presenter.scenes[&scene]
+        .ready
+        .front()
+        .expect("a ready head")
+        .step
+        .index
+}
+
+/// Whether `scene` has nothing running and nothing waiting.
+pub(crate) fn idle(presenter: &Presenter, scene: SceneId) -> bool {
+    let scene = &presenter.scenes[&scene];
+    scene.running.is_none() && scene.queue.is_empty()
+}
+
+/// The revision of the layout `scene`'s next step prepares on.
+pub(crate) fn tip_revision(presenter: &Presenter, scene: SceneId) -> u32 {
+    presenter.scenes[&scene].tip().revision()
+}
+
+/// The objects in `scene`'s committed view.
+pub(crate) fn object_count(presenter: &Presenter, scene: SceneId) -> usize {
+    presenter.scenes[&scene].state.view().object_count()
+}
+
+/// The steps `scene`'s committed view has activated.
+pub(crate) fn activated(presenter: &Presenter, scene: SceneId) -> u32 {
+    presenter.scenes[&scene].state.view().activated()
+}
+
+/// The source of the first step `scene` logged for recovery.
+pub(crate) fn first_logged_step(presenter: &Presenter, scene: SceneId) -> Arc<Step> {
+    let SceneEvent::Step { step, .. } = &presenter.scenes[&scene].state.view().recovery_log()[0]
+    else {
+        panic!("the committed source");
+    };
+    Arc::clone(step)
+}
+
+/// What the scenes use of the one shell budget.
+pub(crate) fn usage(presenter: &Presenter) -> Usage {
+    presenter.global.usage()
+}
+
+/// The worker slots answers still hold.
+pub(crate) fn workers(presenter: &Presenter) -> usize {
+    presenter.workers()
+}
+
+/// Shows `scene` at its rest with a fresh cache, as consumption will once it installs views.
+pub(crate) fn show_rest(presenter: &mut Presenter, scene: SceneId) {
+    presenter
+        .frames
+        .borrow_mut()
+        .replaced(scene, Box::new(Charged(0)));
+    let scene = presenter.scenes.get_mut(&scene).expect("scene");
+    scene.view = SceneView::new(&scene.rest, scene.state.view().activated());
+    scene.view_bytes = scene.view.resident_bytes();
 }

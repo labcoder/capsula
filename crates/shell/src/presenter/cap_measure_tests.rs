@@ -9,7 +9,7 @@ use kumochi_scene::{
     limits::{MAX_COMPOSED_SCALE, MAX_GLOBAL_FILL_VERTICES},
 };
 
-use super::{Charged, LIVE, Shaper, begin, commit, controls, failed, live, only_job, step};
+use super::{LIVE, Shaper, begin, commit, controls, failed, live, only_job, step};
 
 pub(crate) fn drawing(iteration: usize, extra_labels: usize) -> Step {
     let source = format!(
@@ -149,7 +149,7 @@ fn the_native_preparation_fixture_fills_every_paint_cap_and_shapes_every_label()
             )
         );
         assert_eq!(measure.calls, 4 + extra);
-        assert_eq!(presenter.scenes[&LIVE].ready.len(), 1);
+        assert_eq!(super::held(&presenter, LIVE).0, 1);
     }
 }
 
@@ -230,7 +230,7 @@ fn measure_native_full_preparation_at_paint_caps() {
 )]
 fn window_residency(measure: &mut dyn TextMeasure) -> usize {
     use kumochi_protocol::message::SceneId;
-    use kumochi_scene::{SceneView, limits::MAX_RESIDENT_BYTES};
+    use kumochi_scene::limits::MAX_RESIDENT_BYTES;
 
     let (mut presenter, now) = live();
     let mut running = Vec::new();
@@ -286,7 +286,10 @@ fn window_residency(measure: &mut dyn TextMeasure) -> usize {
         running.extend(super::jobs(effects));
     }
     assert_eq!(
-        (presenter.scenes.len(), presenter.global.usage().objects),
+        (
+            super::scene_ids(&presenter).len(),
+            super::usage(&presenter).objects
+        ),
         (4, 1500)
     );
     let work = presenter.paint_work();
@@ -298,8 +301,8 @@ fn window_residency(measure: &mut dyn TextMeasure) -> usize {
             PaintWork::LIMITS.outline_points
         )
     );
-    for scene in presenter.scenes.values() {
-        assert_eq!((scene.ready.len(), scene.queue.len()), (8, 56));
+    for scene in super::scene_ids(&presenter) {
+        assert_eq!(super::held(&presenter, scene), (8, 56));
     }
     let mut peak = presenter.residency();
     let mut previous = [None, None, None, None];
@@ -310,13 +313,7 @@ fn window_residency(measure: &mut dyn TextMeasure) -> usize {
                 .consume_ready(id, index, now, 0, 0)
                 .expect("ready head");
             assert_eq!(consumed.step.step().index, index);
-            presenter
-                .frames
-                .borrow_mut()
-                .replaced(id, Box::new(Charged(0)));
-            let scene = presenter.scenes.get_mut(&id).expect("scene");
-            scene.view = SceneView::new(&scene.rest, scene.state.view().activated());
-            scene.view_bytes = scene.view.resident_bytes();
+            super::show_rest(&mut presenter, id);
             let (sample, effects) = presenter.sample(0);
             assert!(sample.visible);
             assert!(effects.is_empty());
@@ -334,12 +331,12 @@ fn window_residency(measure: &mut dyn TextMeasure) -> usize {
             assert!(presenter.residency() <= MAX_RESIDENT_BYTES);
         }
     }
-    for scene in presenter.scenes.values() {
-        assert_eq!(scene.state.view().activated(), 64);
-        assert_eq!((scene.ready.len(), scene.queue.len()), (0, 0));
+    for scene in super::scene_ids(&presenter) {
+        assert_eq!(super::activated(&presenter, scene), 64);
+        assert_eq!(super::held(&presenter, scene), (0, 0));
     }
     let mut items = 0;
-    assert!(!presenter.frames.borrow().paint(|frame, _| {
+    assert!(!presenter.frames().borrow().paint(|frame, _| {
         items += frame.items().len();
         Ok::<_, std::fmt::Error>(())
     }));
@@ -410,8 +407,8 @@ fn disposal_fixture() -> (super::Presenter, Instant) {
         .completed(job.run(&mut Shaper), now)
         .expect("recovered cap");
     assert!(controls(&effects).is_empty());
-    assert_eq!(presenter.global.usage().objects, 1500);
-    assert_eq!(presenter.scenes.len(), 4);
+    assert_eq!(super::usage(&presenter).objects, 1500);
+    assert_eq!(super::scene_ids(&presenter).len(), 4);
     let (sample, effects) = presenter.sample(0);
     assert!(sample.visible);
     assert!(effects.is_empty());
@@ -422,7 +419,7 @@ fn disposal_fixture() -> (super::Presenter, Instant) {
 fn the_disposal_fixture_really_retains_1500_objects_across_four_scenes() {
     let (mut presenter, now) = disposal_fixture();
     let mut items = 0;
-    assert!(!presenter.frames.borrow().paint(|frame, _| {
+    assert!(!presenter.frames().borrow().paint(|frame, _| {
         items += frame.items().len();
         Ok::<_, std::fmt::Error>(())
     }));
@@ -434,7 +431,7 @@ fn the_disposal_fixture_really_retains_1500_objects_across_four_scenes() {
             scene_ids: (100..104).map(kumochi_protocol::message::SceneId).collect()
         }]
     );
-    assert_eq!(presenter.global.usage().objects, 0);
+    assert_eq!(super::usage(&presenter).objects, 0);
     assert_eq!(presenter.residency(), 0);
 }
 
@@ -453,7 +450,7 @@ fn measure_clear_cut_and_eviction_at_the_global_object_cap() {
         let start = Instant::now();
         let effects = presenter.clear(now).expect("global clear");
         let clear_ns = start.elapsed().as_nanos();
-        assert_eq!(presenter.global.usage().objects, 0);
+        assert_eq!(super::usage(&presenter).objects, 0);
         assert_eq!(presenter.residency(), 0);
         assert_eq!(controls(&effects).len(), 1);
 
@@ -495,7 +492,7 @@ fn measure_clear_cut_and_eviction_at_the_global_object_cap() {
             mark = acked;
         }
         let cut_ns = (mark - start).as_nanos();
-        assert_eq!(presenter.global.usage().objects, 1500);
+        assert_eq!(super::usage(&presenter).objects, 1500);
 
         let (mut presenter, now) = disposal_fixture();
         let frame = DataToShell::ScenesRemoved {
@@ -505,7 +502,7 @@ fn measure_clear_cut_and_eviction_at_the_global_object_cap() {
         let effects = super::data(&mut presenter, frame, now).expect("evicted scenes");
         let eviction_ns = start.elapsed().as_nanos();
         assert!(controls(&effects).is_empty());
-        assert_eq!(presenter.global.usage().objects, 0);
+        assert_eq!(super::usage(&presenter).objects, 0);
         assert_eq!(presenter.residency(), 0);
         if iteration >= 8 {
             rows.push((clear_ns, stop_ns, cut_ns, eviction_ns, scenes));

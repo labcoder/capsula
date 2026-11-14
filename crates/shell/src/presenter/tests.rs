@@ -1216,11 +1216,7 @@ fn a_failed_weak_entity_update_retires_its_captured_completion(cx: &mut gpui_kit
         panic!("a preparation completion");
     };
     assert_eq!(result.as_ref().expect("prepared step").index, 0);
-    let SceneEvent::Step { step, .. } = &presenter.scenes[&LIVE].state.view().recovery_log()[0]
-    else {
-        panic!("the committed source");
-    };
-    let source = Arc::clone(step);
+    let source = first_logged_step(&presenter, LIVE);
     assert!(drained(&source, 4));
     assert_eq!(
         Arc::strong_count(&source),
@@ -1251,7 +1247,7 @@ fn a_failed_weak_entity_update_retires_its_captured_completion(cx: &mut gpui_kit
         "the failed delivery never invokes its closure"
     );
     assert_eq!(
-        presenter.workers(),
+        workers(&presenter),
         0,
         "the discarded answer releases its slot"
     );
