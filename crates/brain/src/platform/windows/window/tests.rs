@@ -20,16 +20,20 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, ES_PASSWORD, FindWindowW,
     GA_ROOT, GetAncestor, GetMessageW, GetWindowRect, HMENU, LAYERED_WINDOW_ATTRIBUTES_FLAGS,
     LWA_ALPHA, LWA_COLORKEY, MSG, PostMessageW, PostThreadMessageW, RegisterClassW,
-    SMTO_ABORTIFHUNG, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SendMessageTimeoutW,
-    SetLayeredWindowAttributes, SetWindowDisplayAffinity, ShowWindow, ULW_ALPHA,
-    UpdateLayeredWindow, WDA_EXCLUDEFROMCAPTURE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP,
-    WM_NCHITTEST, WM_QUIT, WNDCLASSW, WS_CHILD, WS_DISABLED, WS_EX_LAYERED, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE, WindowFromPoint,
+    SMTO_ABORTIFHUNG, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE, SWP_NOSIZE,
+    SWP_NOZORDER, SendMessageTimeoutW, SendMessageW, SetLayeredWindowAttributes,
+    SetWindowDisplayAffinity, SetWindowPos, ShowWindow, ULW_ALPHA, UpdateLayeredWindow,
+    WDA_EXCLUDEFROMCAPTURE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_NCHITTEST, WM_QUIT,
+    WNDCLASSW, WS_CHILD, WS_DISABLED, WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE, WindowFromPoint,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, w};
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 
-use super::{Facts, Found, Hit, Layer, Step, drawn_hit, facts, layer_of, preflight, step};
+use super::{
+    Facts, Found, Hit, Layer, Step, drawn_hit, facts, frame, layer_of, owner, preflight, step,
+    unchanged,
+};
 use crate::platform::windows::capture::screen_capturer;
 use crate::screen::{CaptureId, Capturer, Failure, FrameMeta, RawFrame, Refusal, Target};
 
@@ -351,6 +355,10 @@ const MAXIMIZE: u32 = WM_APP + 4;
 const RESTORE: u32 = WM_APP + 5;
 const DESTROY: u32 = WM_APP + 6;
 const HANG: u32 = WM_APP + 7;
+const NUDGE: u32 = WM_APP + 8;
+/// Sent, not posted: destroys the window and makes the same plan's again on this thread, and
+/// returns the new handle.
+const RECREATE: u32 = WM_APP + 9;
 /// How long `hang` keeps the host's window thread from reading messages.
 const HUNG: Duration = Duration::from_secs(3);
 
@@ -377,6 +385,21 @@ extern "system" fn host_proc(window: HWND, message: u32, w: WPARAM, l: LPARAM) -
         }
         // SAFETY: destroys this thread's own window.
         DESTROY => unsafe { DestroyWindow(window) }.is_ok(),
+        NUDGE => {
+            let was = rect(window);
+            let flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
+            // SAFETY: moves this thread's own window one pixel right, keeping its size.
+            unsafe { SetWindowPos(window, None, was.left + 1, was.top, 0, 0, flags) }.is_ok()
+        }
+        RECREATE => {
+            let index = w.0;
+            // SAFETY: destroys this thread's own window; nothing here touches it afterwards.
+            let gone = unsafe { DestroyWindow(window) }.is_ok();
+            let made = make(&plan()[index], index, None);
+            println!("hwnd {index} {}", value(made));
+            println!("done {gone}");
+            return LRESULT(isize::try_from(made.0.addr()).expect("handles fit isize"));
+        }
         HANG => {
             println!("done true");
             std::thread::sleep(HUNG);
@@ -394,8 +417,12 @@ extern "system" fn host_proc(window: HWND, message: u32, w: WPARAM, l: LPARAM) -
     LRESULT(0)
 }
 
+fn class(index: usize) -> HSTRING {
+    HSTRING::from(format!("kumochi-window-probe-{index}"))
+}
+
 fn create(plan: &Plan, index: usize, owner: Option<HWND>) -> HWND {
-    let class = HSTRING::from(format!("kumochi-window-probe-{index}"));
+    let class = class(index);
     // SAFETY: a solid brush the class keeps for the process's life.
     let brush = unsafe { CreateSolidBrush(COLORREF(plan.color)) };
     let wc = WNDCLASSW {
@@ -406,6 +433,12 @@ fn create(plan: &Plan, index: usize, owner: Option<HWND>) -> HWND {
     };
     // SAFETY: the class structure and its name outlive the call.
     assert_ne!(unsafe { RegisterClassW(&raw const wc) }, 0, "class");
+    make(plan, index, owner)
+}
+
+/// A window of `index`'s registered class, drawn as `plan` says.
+fn make(plan: &Plan, index: usize, owner: Option<HWND>) -> HWND {
+    let class = class(index);
     let [x, y, width, height] = plan.rect;
     // SAFETY: creates this process's own window with a registered class.
     let window = unsafe {
@@ -581,7 +614,7 @@ fn native_probe_host() {
     println!("ready");
     // SAFETY: reads this thread's id.
     let main = unsafe { GetCurrentThreadId() };
-    let posted: Vec<u64> = windows.iter().map(|window| value(*window)).collect();
+    let mut posted: Vec<u64> = windows.iter().map(|window| value(*window)).collect();
     drop(std::thread::spawn(move || {
         for line in std::io::stdin().lines().map_while(Result::ok) {
             let mut words = line.split(' ');
@@ -592,6 +625,15 @@ fn native_probe_host() {
                 println!("hits {}", HITS.load(Ordering::Relaxed));
                 continue;
             }
+            if verb == "recreate" {
+                let index: usize = index.parse().expect("window index");
+                // SAFETY: waits for the host's own window thread to replace its window.
+                let made = unsafe {
+                    SendMessageW(hwnd(posted[index]), RECREATE, Some(WPARAM(index)), None)
+                };
+                posted[index] = u64::try_from(made.0).expect("a window handle");
+                continue;
+            }
             let message = match verb {
                 "cloak" => CLOAK,
                 "protect" => PROTECT,
@@ -600,6 +642,7 @@ fn native_probe_host() {
                 "restore" => RESTORE,
                 "destroy" => DESTROY,
                 "hang" => HANG,
+                "nudge" => NUDGE,
                 _ => continue,
             };
             let index: usize = index.parse().expect("window index");
@@ -686,6 +729,23 @@ impl Host {
             .find(|line| line.starts_with("done"));
         assert_eq!(reply.as_deref(), Some("done true"), "{verb} {index}");
         std::thread::sleep(Duration::from_millis(400));
+    }
+
+    /// Has the host destroy window `index` and make the same plan's again, at the same frame on
+    /// the same thread, and takes the new handle.
+    fn recreate(&mut self, index: usize) {
+        let stdin = self.stdin.as_mut().expect("host stdin");
+        writeln!(stdin, "recreate {index}").expect("command");
+        stdin.flush().expect("command");
+        for line in self.lines.by_ref().map_while(Result::ok) {
+            if let Some(handle) = line.strip_prefix(&format!("hwnd {index} ")) {
+                self.windows[index] = hwnd(handle.parse().expect("handle"));
+            } else if line.starts_with("done") {
+                assert_eq!(line, "done true", "recreate {index}");
+                return;
+            }
+        }
+        panic!("the host ended during recreate {index}");
     }
 
     /// `WM_NCHITTEST` messages the host's windows have received so far.
@@ -1090,4 +1150,108 @@ fn native_window_probe() {
     assert!(frame.image().is_none(), "M7: no image left");
     // SAFETY: destroys this thread's own window.
     unsafe { DestroyWindow(own) }.expect("own window");
+}
+
+/// Walks to the host's window `index` and checks it's the one resolved.
+fn walked(capturer: &mut Box<dyn Capturer>, host: &Host, index: usize) -> Target {
+    let corner = rect(host.windows[index]);
+    let point = PhysicalPoint([corner.left + 10, corner.top + 10]);
+    let target = at(capturer, point).0.expect("the window under the point");
+    ours(&target, host, index);
+    target
+}
+
+/// N5 and U0–U6: the seal-time identity check on real windows a second process owns, including
+/// a window its thread destroys and makes again at the same frame. Run it on an idle Windows
+/// desktop: `--ignored --exact --nocapture`. Pixels stay in memory; it prints booleans, counts,
+/// handle values and nanoseconds only.
+#[test]
+#[ignore = "opens sentinel windows on an idle Windows desktop and captures them, in memory"]
+fn native_unchanged_probe() {
+    let mut capturer = screen_capturer().expect("window capture");
+    let mut host = Host::start();
+    let mut pixels = RawFrame::default();
+
+    // N5: the same plan made again by the same thread differs from the walked window only by its
+    // handle, which is what `unchanged` and the capture must notice.
+    let before = walked(&mut capturer, &host, M);
+    assert!(unchanged(&before), "N5: the walked window, untouched");
+    let old = host.windows[M];
+    host.recreate(M);
+    std::thread::sleep(Duration::from_millis(100));
+    let new = host.windows[M];
+    let only_handle =
+        owner(new) == (before.top.pid, before.instance) && frame(new) == Some(before.top.rect);
+    let kept = unchanged(&before);
+    let taken = grab(&mut capturer, &before, &mut pixels).0;
+    println!(
+        "N5 old={} new={} same_value={} only_handle_differs={only_handle} unchanged={kept} capture={taken:?}",
+        value(old),
+        value(new),
+        old == new
+    );
+    assert!(
+        only_handle,
+        "N5: the recreated window keeps its thread and frame"
+    );
+    assert!(!kept, "N5: a recreated window isn't the walked one");
+    assert_eq!(
+        taken,
+        Err(Failure::Refused(Refusal::WindowChanged)),
+        "N5 capture"
+    );
+    assert!(pixels.image().is_none(), "N5: no image left");
+
+    // N5b: whether the window manager hands the walked handle out again within a few hundred
+    // remakes, and whether such a remake ever passes.
+    let (mut repeats, mut passed) = (0_u32, 0_u32);
+    for _ in 0..256 {
+        host.recreate(M);
+        repeats += u32::from(host.windows[M] == old);
+        passed += u32::from(unchanged(&before));
+    }
+    println!("N5b cycles=256 repeats={repeats} unchanged={passed}");
+    assert_eq!(
+        passed, 0,
+        "N5b: a remade window never passes for the walked one"
+    );
+
+    // U0: an untouched window passes every time, and what one check costs.
+    let target = walked(&mut capturer, &host, M);
+    let mut spent: Vec<u128> = (0..1_000)
+        .map(|_| {
+            let start = Instant::now();
+            assert!(unchanged(&target), "U0: an untouched window");
+            start.elapsed().as_nanos()
+        })
+        .collect();
+    spent.sort_unstable();
+    println!(
+        "U0 calls=1000 median_ns={} max_ns={}",
+        spent[500], spent[999]
+    );
+
+    // U1–U6: each change after the walk fails the check.
+    let mut changed = Vec::new();
+    for (name, verb, index) in [
+        ("U1 nudged", "nudge", M),
+        ("U2 maximized", "maximize", M),
+        ("U3 minimised", "minimize", M),
+        ("U4 cloaked", "cloak", D),
+        ("U5 protected", "protect", P),
+        ("U6 destroyed", "destroy", K),
+    ] {
+        let target = walked(&mut capturer, &host, index);
+        host.command(verb, index);
+        let kept = unchanged(&target);
+        println!("{name}={}", !kept);
+        changed.push((name, kept));
+        if matches!(verb, "maximize" | "minimize") {
+            host.command("restore", index);
+        }
+    }
+    assert!(
+        changed.iter().all(|(_, kept)| !kept),
+        "every change fails the check: {changed:?}"
+    );
 }

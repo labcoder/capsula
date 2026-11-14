@@ -367,6 +367,7 @@ fn settings_frames_keep_their_connection_generation_and_authoritative_view() {
         talk_back: false,
         stt_unload: kumochi_protocol::message::SttUnload::Kept,
         hold_to_talk: kumochi_protocol::message::DEFAULT_HOLD_TO_TALK,
+        screen_holds: kumochi_protocol::message::DEFAULT_SCREEN_HOLDS,
     };
     frame::write(
         &mut &link.control,
@@ -1482,6 +1483,7 @@ fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
         talk_back: false,
         stt_unload: kumochi_protocol::message::SttUnload::Kept,
         hold_to_talk: kumochi_protocol::message::DEFAULT_HOLD_TO_TALK,
+        screen_holds: kumochi_protocol::message::DEFAULT_SCREEN_HOLDS,
     };
     for message in [
         ControlToShell::Welcome {

@@ -121,14 +121,12 @@ impl Coordinator {
             snapshot.thread,
             text,
             Some(snapshot),
+            screen,
             &mut effects,
         );
-        // shortcut: the shell retries a failed run by sending its text as a new typed turn, so a
-        // held run's retry goes without its screen and nothing says so; record that a run carried
-        // a screen and fail its retry with ScreenUnavailable before 2c4 turns screen holds on.
-        if let Some(run) = &mut self.current {
-            run.screen = screen;
-        }
+        // shortcut: resent text can't be told from a fresh turn, so the shell offers no Retry for
+        // a held run; one that does must name its run and fail with ScreenUnavailable when that
+        // run carried a screen.
         self.drawing_settle(&mut effects);
         self.retry_with(&mut effects);
         self.arm_retry(&mut effects);

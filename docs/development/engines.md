@@ -325,9 +325,10 @@ details. If the image can't go (another route, or no user message left), the run
   10 s send deadline [arithmetic, not measured].
 - **The developer line isn't counted in the 512 KiB bound.** A request built within about 60 bytes
   of it is refused at send, which fails the run rather than sending more.
-- **A retry goes without the screen.** The shell retries a failed run by resending its text as a
-  new typed turn, so the brain can't tell it from a fresh one. This is closed before screen holds
-  turn on.
+- **A held run has no Retry.** The shell retries a failed run by resending its text as a new
+  typed turn, which the brain can't tell from a fresh one, so it offers Retry only for typed runs.
+  A Retry for a held run would have to name the run it retries and fail with `ScreenUnavailable`
+  when that run carried a screen.
 
 ## What builds nothing
 

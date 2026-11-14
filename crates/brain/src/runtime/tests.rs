@@ -60,18 +60,16 @@ mod voice;
 
 #[test]
 fn staged_hold_controls_do_not_admit_or_change_a_run() {
-    use kumochi_protocol::geometry::{DisplayRef, PhysicalRect, WindowRef};
+    use kumochi_protocol::geometry::{PhysicalPoint, WindowRef};
     use kumochi_protocol::message::{FocusHint, GestureId, LeaseGeneration};
     let gesture = GestureId(9);
     let lease = LeaseGeneration(4);
     for message in [
         ControlToBrain::HoldRecognized {
             gesture,
-            pointer_display: DisplayRef(PhysicalRect {
-                origin: [-1, 2],
-                size: [3, 4],
-            }),
             thread: Some(ThreadId(1)),
+            selection: 5,
+            pointer: PhysicalPoint([-1, 2]),
             lease,
             t_qpc: u64::MAX,
         },

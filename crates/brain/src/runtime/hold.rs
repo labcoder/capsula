@@ -123,10 +123,11 @@ impl std::fmt::Debug for Holds {
 impl Drop for Hold {
     fn drop(&mut self) {
         debug_assert!(
-            !matches!(
-                self.screen,
-                ScreenPart::Waiting { .. } | ScreenPart::Ready(_)
-            ),
+            std::thread::panicking()
+                || !matches!(
+                    self.screen,
+                    ScreenPart::Waiting { .. } | ScreenPart::Ready(_)
+                ),
             "a hold ended past both of its screen part's closers"
         );
     }

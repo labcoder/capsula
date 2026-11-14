@@ -977,34 +977,58 @@ async fn the_image_gate_opens_only_for_a_listed_image_model_where_windows_can_be
     let sol = choice("gpt-6-sol", ConnectionKind::ChatGpt);
     let off = ScreenHolds::Off;
     assert_eq!(
-        accounts.screen_holds(Some(&sol), true),
+        accounts.screen_holds(Some(&sol), true, true),
         off(ScreenOff::NotReady)
+    );
+    assert_eq!(
+        accounts.screen_holds(Some(&sol), true, false),
+        off(ScreenOff::TurnedOff),
+        "the switch comes before the catalog"
     );
     assert_eq!(read_ended(&mut accounts).await, []);
     assert_eq!(
-        accounts.screen_holds(Some(&sol), true),
+        accounts.screen_holds(Some(&sol), true, true),
         ScreenHolds::On {
             model: ModelName::new("GPT-6 Sol").expect("name"),
         }
     );
     assert_eq!(
-        accounts.screen_holds(Some(&sol), false),
+        accounts.screen_holds(Some(&sol), false, true),
         off(ScreenOff::Unsupported)
     );
-    assert_eq!(accounts.screen_holds(None, true), off(ScreenOff::NotReady));
+    assert_eq!(
+        accounts.screen_holds(None, true, true),
+        off(ScreenOff::NotReady)
+    );
+    assert_eq!(
+        accounts.screen_holds(None, true, false),
+        off(ScreenOff::TurnedOff)
+    );
+    assert_eq!(
+        accounts.screen_holds(Some(&sol), true, false),
+        off(ScreenOff::TurnedOff)
+    );
+    assert_eq!(
+        accounts.screen_holds(Some(&sol), false, false),
+        off(ScreenOff::Unsupported)
+    );
     for other in [
         choice("gpt-6-luna", ConnectionKind::ChatGpt),
         choice("gpt-6-sol", ConnectionKind::AnthropicKey),
         choice("gpt-6-nova", ConnectionKind::ChatGpt),
     ] {
         assert_eq!(
-            accounts.screen_holds(Some(&other), true),
+            accounts.screen_holds(Some(&other), true, true),
             off(ScreenOff::ModelCantSee)
+        );
+        assert_eq!(
+            accounts.screen_holds(Some(&other), true, false),
+            off(ScreenOff::TurnedOff)
         );
     }
     accounts.handle(Input::Op(AccountOp::SignOut));
     assert_eq!(
-        accounts.screen_holds(Some(&sol), true),
+        accounts.screen_holds(Some(&sol), true, true),
         off(ScreenOff::NotReady)
     );
     accounts.close(Instant::now(), Instant::now()).await;

@@ -1084,6 +1084,7 @@ impl Coordinator {
             thread,
             text,
             None,
+            None,
             effects,
         )
     }
@@ -1094,6 +1095,7 @@ impl Coordinator {
         thread: Option<ThreadId>,
         text: Content,
         mut hold: Option<HoldSnapshot>,
+        screen: Option<crate::context::Screen>,
         effects: &mut Vec<Effect>,
     ) -> RunId {
         self.cancel_job(effects);
@@ -1140,7 +1142,7 @@ impl Coordinator {
             held: VecDeque::new(),
             snapshot: hold.as_ref().map(|hold| hold.defaults.clone()),
             hold,
-            screen: None,
+            screen,
             build: None,
             connection: self.connection(),
             compacted: None,
