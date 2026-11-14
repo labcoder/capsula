@@ -132,6 +132,8 @@ impl CallEnd {
             text.push_str(AFTER_RECORDS_NOTE);
         }
         if let Some(error) = &self.error {
+            let cleared =
+                matches!(error, CallError::Step(step) if step.code == ErrorCode::SceneCleared);
             text.push_str("; stopped: ");
             text.push_str(&match error {
                 CallError::Step(error) => error.tool_text(),
@@ -144,7 +146,7 @@ impl CallEnd {
                     CallError::Step(_) | CallError::Token(_) | CallError::TooMuchToPaint { .. },
                 ) => FULL_HINT,
                 (Remaining::Steps, CallError::Step(_) | CallError::Token(_))
-                    if self.drawn.is_empty() =>
+                    if self.drawn.is_empty() || cleared =>
                 {
                     RETRY_HINT
                 }
@@ -710,14 +712,15 @@ impl Drawing {
             return;
         };
         let after_records = error == Some(CallError::Token(TokenError::AfterRecords));
+        if after_records && self.calls[at].guard.finish().is_err() {
+            self.record(run, id, Record::End(End {}), out);
+        }
+        let Some(at) = self.open_call(run, id) else {
+            return;
+        };
         let ended = match error {
-            _ if after_records => self.calls[at]
-                .guard
-                .finish()
-                .or_else(|_| self.guard(at, &Record::End(End {})))
-                .map_err(CallError::Step),
-            Some(error) => Err(error),
-            None => self.calls[at].guard.finish().map_err(CallError::Step),
+            Some(error) if !after_records => Err(error),
+            _ => self.calls[at].guard.finish().map_err(CallError::Step),
         };
         match ended {
             Ok(()) => {
@@ -823,7 +826,12 @@ impl Drawing {
                     run: owner,
                     call,
                     error,
-                } if *owner == run && call == id => Some(error.clone()),
+                } if *owner == run
+                    && call == id
+                    && *error != CallError::Token(TokenError::AfterRecords) =>
+                {
+                    Some(error.clone())
+                }
                 _ => None,
             })
             .unwrap_or(CallError::Interrupted);

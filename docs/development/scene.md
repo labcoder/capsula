@@ -2079,7 +2079,8 @@ Drain each supplied delta until `None`, then provide the next delta. At EOF call
 
 The outer object must contain exactly one `records` key and an array of record
 objects. Escaped spellings of that key work; a repeated or additional key is text
-after the records, below. A leading byte-order mark (BOM) and invalid UTF-8 outside strings are rejected.
+after the records, below. A leading byte-order mark (BOM) is rejected, and so is invalid UTF-8
+outside strings before the records array closes; after it, that is text after the records.
 Whitespace, nested objects/arrays, JSON number/literal syntax, split UTF-8,
 escapes and paired UTF-16 surrogate escapes are handled incrementally. Duplicate
 fields inside a record remain the typed parser's responsibility.

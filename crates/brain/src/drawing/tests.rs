@@ -9,8 +9,8 @@ use kumochi_protocol::message::{
 };
 use kumochi_scene::text::Bounded;
 use kumochi_scene::{
-    Budget, ErrorCode, Handle, Record, SceneEvent, SceneState, Step, StopCut, TokenError, WireId,
-    parse_record,
+    Budget, ErrorCode, Handle, Record, SceneEvent, SceneState, Step, StepError, StopCut,
+    TokenError, WireId, parse_record,
 };
 
 use super::call::MAX_CALL_RECORDS;
@@ -489,6 +489,104 @@ fn a_brain_error_after_a_committed_prefix_reports_loss_once_without_hiding_its_c
             )));
         }
     }
+}
+
+#[test]
+fn an_interrupt_never_takes_text_after_the_records_array_as_the_call_s_ending() {
+    use kumochi_protocol::message::ControlToShell;
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    store.run(
+        &mut drawing,
+        call(1, "old", args("old", &[text("old", "old")])),
+    );
+    let records = format!(
+        r#"{{"records":[{{"begin":{{"v":1,"scene":"new","surface":"overlay","alt":""}}}},{},{}]}} x"#,
+        step(r#"{"id":"s1","start":"now"}"#),
+        step(r#"{"id":"s2","start":"now"}"#)
+    );
+    let mut held = drawing
+        .handle(call(1, "new", records.into_bytes()))
+        .expect("a fresh call");
+    while let Some((serial, write)) =
+        sent(&held).filter(|(_, write)| !matches!(write, Write::Step { .. }))
+    {
+        let reply = Ok(store.answer(&write));
+        held = drawing
+            .handle(Input::Written { serial, reply })
+            .expect("the pending lookup");
+    }
+    let first = sent(&held)
+        .expect("the first step's write is in the store")
+        .1;
+    let mut out = drawing
+        .handle(Input::CallFinished {
+            thread: THREAD,
+            run: RunId(1),
+            call: CallId::new("new").expect("call id"),
+            error: Some(CallError::Interrupted),
+        })
+        .expect("the interrupt");
+    let answer = store.answer(&first);
+    merge(&mut out, reply(&mut drawing, &held, Ok(answer)));
+    let out = store.settle(&mut drawing, out);
+    assert_eq!(out.calls.len(), 1);
+    assert_eq!(out.calls[0].drawn, [wire("s1")]);
+    assert_eq!(out.calls[0].error, Some(CallError::Interrupted));
+    let ends: Vec<bool> = out
+        .effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Data(DataToShell::SceneEnd { complete, .. }) => Some(*complete),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends, [false]);
+    assert!(!out.effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Control(ControlToShell::DrawingReplacementFailed { .. })
+    )));
+}
+
+#[test]
+fn text_after_the_records_meets_the_spent_budget_an_end_record_would() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    let forward = r#"{"id":"a","start":{"after":"later","ms":0}}"#.to_owned();
+    store.run(&mut drawing, call(1, "c1", args("s1", &[forward.clone()])));
+    store.run(&mut drawing, streamed("open", 0, &begin("s2", "")));
+    store.run(&mut drawing, streamed("open", 1, &step(&text("a", "x"))));
+    let spent = store.run(&mut drawing, call(1, "c3", args("s3", &[forward])));
+    assert_eq!(error(&spent.calls[0]), ErrorCode::ForwardRef);
+    let out = store.run(
+        &mut drawing,
+        Input::CallFinished {
+            thread: THREAD,
+            run: RunId(1),
+            call: CallId::new("open").expect("call id"),
+            error: Some(CallError::Token(TokenError::AfterRecords)),
+        },
+    );
+    assert_eq!(out.calls.len(), 1);
+    assert_eq!(out.calls[0].drawn, [wire("a")]);
+    assert_eq!(out.calls[0].error, Some(CallError::Exhausted));
+}
+
+#[test]
+fn a_stop_for_a_cleared_scene_never_says_its_drawn_steps_are_on_screen() {
+    let end = CallEnd {
+        run: RunId(1),
+        call: CallId::new("c").expect("call id"),
+        scene: Some(SceneId(1)),
+        drawn: vec![wire("a")],
+        error: Some(CallError::Step(StepError::new(ErrorCode::SceneCleared))),
+        remaining: Remaining::Steps,
+        after_records: false,
+    };
+    assert_eq!(
+        end.tool_text(),
+        format!("drawn: [a]; stopped: $: scene.SceneCleared{RETRY}")
+    );
 }
 
 #[test]

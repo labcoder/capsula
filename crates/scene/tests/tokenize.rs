@@ -240,15 +240,20 @@ fn malformed_json_is_terminal_and_never_resynchronizes() {
 
 #[test]
 fn text_after_the_closed_records_array_is_its_own_terminal_error() {
-    let records = br#"{"records":[{"begin":{}}]"#;
-    for tail in [
-        br#","records":[{"step":{}}]}"#.as_slice(),
-        br#" , "end":{}}"#,
-        b"x",
-        b"}}",
-        b"} \xff",
-    ] {
-        let fixture = [records.as_slice(), tail].concat();
+    let begun: &[u8] = br#"{"records":[{"begin":{}}]"#;
+    let begin: &[&[u8]] = &[br#"{"begin":{}}"#];
+    let empty: &[u8] = br#"{"records":[]"#;
+    let cases: [(&[u8], &[&[u8]], &[u8]); 7] = [
+        (begun, begin, br#","records":[{"step":{}}]}"#),
+        (begun, begin, br#" , "end":{}}"#),
+        (begun, begin, b"x"),
+        (begun, begin, b"}}"),
+        (begun, begin, b"} \xff"),
+        (empty, &[], b"}x"),
+        (empty, &[], br#","end":{}}"#),
+    ];
+    for (records, expected, tail) in cases {
+        let fixture = [records, tail].concat();
         for delta in [1, fixture.len()] {
             let mut tokenizer = Tokenizer::new();
             let mut emitted = Vec::new();
@@ -256,7 +261,7 @@ fn text_after_the_closed_records_array_is_its_own_terminal_error() {
                 .chunks(delta)
                 .find_map(|chunk| consume(&mut tokenizer, chunk, &mut emitted).err());
             assert_eq!(error, Some(TokenError::AfterRecords));
-            assert_eq!(emitted, [br#"{"begin":{}}"#.to_vec()]);
+            assert_eq!(emitted, expected);
             assert_eq!(tokenizer.finish(), Err(TokenError::AfterRecords));
         }
     }
@@ -269,6 +274,11 @@ fn text_after_the_closed_records_array_is_its_own_terminal_error() {
         scan(br#"{"records":[{"begin":{}}"#, 1).err(),
         Some(TokenError::Truncated),
         "an array that never closes is still truncated"
+    );
+    assert_eq!(
+        scan(empty, 1).err(),
+        Some(TokenError::Truncated),
+        "a closed array without the envelope's brace is still truncated"
     );
 }
 

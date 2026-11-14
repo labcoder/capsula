@@ -161,7 +161,8 @@ streamed path alike, the brain then ends the call as complete once every record 
 was accepted: the text stands in for a missing `end`, is never read, applied or echoed, and the
 result is `drawn: [...]; text after the records array was ignored`, with no stop, phrase or
 repair round. A malformed record inside the array, or an array that never closes, still stops
-the call. An empty array with text after it still fails as `scene.BeforeBegin`.
+the call. An empty array with text after it still fails as `scene.BeforeBegin`. A call
+interrupted before its records ran ends as interrupted, never as complete.
 
 An offered provider `draw` instead admits closed records while arguments stream. The same
 dispatcher checks the caller, offered tool and current admitted build before every handoff;

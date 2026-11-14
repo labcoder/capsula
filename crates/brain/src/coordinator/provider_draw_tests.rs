@@ -348,6 +348,33 @@ fn text_after_the_records_array_completes_the_call_and_draws_nothing_more() {
 }
 
 #[test]
+fn an_empty_records_array_with_text_after_it_draws_nothing() {
+    let bytes = r#"{"records":[]}x"#;
+    for streamed in [true, false] {
+        let scratch = Scratch::new("draw-empty-after-records");
+        let mut store = store(&scratch);
+        let mut core = offered(vec![T]);
+        let effects = if streamed {
+            start(&mut core, "empty");
+            let mut effects = delta(&mut core, "empty", bytes);
+            effects.extend(ready(&mut core, "empty", bytes));
+            let mut effects = drain(&mut core, &mut store, effects);
+            effects.extend(send(&mut core, TurnEvent::Finished(Finish::Completed)));
+            effects
+        } else {
+            let (dispatch, effects) = call(&mut core, "empty", bytes.as_bytes());
+            assert_eq!(dispatch, Dispatch::Committing);
+            drain(&mut core, &mut store, effects)
+        };
+        assert_eq!(
+            result(&effects).output,
+            ToolOutput::Text(format!("drawn: []; stopped: $: scene.BeforeBegin{RETRY}"))
+        );
+        assert_eq!(ends(&effects), Vec::<bool>::new());
+    }
+}
+
+#[test]
 fn terminal_syntax_typed_and_truncated_tails_keep_one_prefix_and_a_fixed_refusal() {
     for (suffix, verify, stopped) in [
         (
