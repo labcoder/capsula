@@ -329,6 +329,25 @@ fn screen_holds_default_on_persist_and_a_bad_value_reads_as_off() {
 }
 
 #[test]
+fn screen_holds_read_as_off_when_the_file_cant_be_read() {
+    let scratch = Scratch::new("config-screen-holds-unread");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    std::fs::write(&path, "[voice]\nscreen_holds = true\nnot toml [").expect("seeded");
+    let unparseable = Config::load(Some(dir.clone()), ThreadId(1));
+    std::fs::remove_file(&path).expect("removed broken fixture");
+    std::fs::create_dir(&path).expect("a folder where the file goes");
+    let unreadable = Config::load(Some(dir), ThreadId(1));
+    for (cause, config) in [
+        ("unparseable", unparseable),
+        ("unreadable", unreadable),
+        ("no home", Config::load(None, ThreadId(1))),
+    ] {
+        assert!(!config.view().screen_holds, "{cause}");
+    }
+}
+
+#[test]
 fn talk_back_and_the_unload_policy_default_off_and_kept_and_are_saved_in_the_voice_table() {
     let scratch = Scratch::new("config-voice");
     let dir = dir(&scratch);

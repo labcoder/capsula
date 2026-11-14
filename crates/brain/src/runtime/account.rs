@@ -434,7 +434,7 @@ impl Accounts {
     /// pointer, given whether this platform has window capture and whether the user allows it.
     /// With no catalog read, or no model chosen, it isn't known yet, so it's `NotReady` rather
     /// than `ModelCantSee`; the switch comes first, so turning it off always reads as off.
-    #[cfg_attr(not(test), expect(dead_code, reason = "2c4 sends ScreenHolds"))]
+    #[cfg_attr(not(test), expect(dead_code, reason = "2c4b sends ScreenHolds"))]
     #[expect(
         clippy::fn_params_excessive_bools,
         reason = "the caller supplies the platform's capture and the user's switch"

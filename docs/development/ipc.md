@@ -24,15 +24,19 @@ the pointer: `On { model }` with the model's display name, or `Off` with `ModelC
 this platform) or the appended `TurnedOff` (the user's switch). It's for the standing notice and
 for which hold message the shell sends: `HoldRecognized` only while it's `On`, otherwise
 `VoiceHoldRecognized`. `HoldRecognized` carries the gesture, the thread, the selection revision,
-the pointer sampled once at recognition, the exclusion lease and the recognition time.
+the pointer sampled once at recognition, the exclusion lease and the recognition time. Its
+fields changed in place, not by appending (the display-relative pointer became `selection` and a
+physical `pointer`, and its smallest encoding went from 9 bytes to 8). That's safe because
+nothing sends it yet, the brain ignores it, and the build-id handshake refuses mixed binaries.
 
 The appended `HoldScreen { gesture, outcome }` says what a screen hold's window did, once, when
 its run's first request starts: `Sent`, or `NotIncluded` with one of six fixed classes. Nothing
 in it names a window.
 
 `SettingsOp::SetScreenHolds` is appended, and `SettingsView` gains `screen_holds` (on when a
-settings file has no key). A new struct field isn't append-only in postcard, whose fields are
-positional; it's safe only because the build-id handshake refuses mixed binaries.
+settings file has no key, off when it can't be read). A new struct field isn't append-only in
+postcard, whose fields are positional; it's safe only because the build-id handshake refuses
+mixed binaries.
 
 Nothing sends `ScreenHolds`, `HoldScreen` or `HoldRecognized` yet, and the shell ignores the
 first two. All three are payload-redacted in the pipe tap.

@@ -145,10 +145,13 @@ impl Config {
     }
 
     fn refusing(path: Option<PathBuf>, refusal: Refusal, main_thread: ThreadId) -> Self {
+        let mut view = view_of(&Table::new(), main_thread, true);
+        // A file that can't be read may have turned screen holds off.
+        view.screen_holds = false;
         Self {
             path,
             table: Err(refusal),
-            view: view_of(&Table::new(), main_thread, true),
+            view,
             in_use: true,
         }
     }
@@ -443,8 +446,8 @@ fn voice_mut(table: &mut Table) -> &mut Table {
     voice.as_table_mut().expect("the voice key holds a table")
 }
 
-/// The settings a table holds. A known key with a bad value reads as its default, and stays in
-/// the table untouched until the user sets that key.
+/// The settings a table holds. A known key with a bad value reads as its default, or as off for
+/// an on/off key, and stays in the table untouched until the user sets that key.
 #[expect(
     clippy::fn_params_excessive_bools,
     reason = "what an absent onboarded key reads as, fixed at start"
