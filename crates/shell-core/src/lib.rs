@@ -3,6 +3,7 @@
 #![expect(
     missing_docs,
     missing_debug_implementations,
+    clippy::missing_errors_doc,
     reason = "these models became public by moving out of the shell; they get docs and Debug \
               when the controller's public surface is designed"
 )]
