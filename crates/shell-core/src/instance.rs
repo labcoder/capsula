@@ -7,7 +7,7 @@ use std::path::Path;
 /// Held for the shell's whole life; closing the file releases the lock.
 #[derive(Debug)]
 #[must_use = "dropping the guard lets another shell start"]
-pub(crate) struct InstanceLock {
+pub struct InstanceLock {
     _file: File,
 }
 
@@ -18,7 +18,7 @@ impl InstanceLock {
     /// # Errors
     /// Fails when the folder or file can't be created, or the lock fails for a reason other than
     /// another holder.
-    pub(crate) fn try_acquire(path: &Path) -> io::Result<Option<Self>> {
+    pub fn try_acquire(path: &Path) -> io::Result<Option<Self>> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }

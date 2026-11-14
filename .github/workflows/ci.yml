@@ -72,6 +72,8 @@ jobs:
       - run: cargo deny --locked check
         if: steps.dependencies.outputs.changed == 'True'
       - run: cargo xtask check-vendor
+      - run: cargo xtask check-core
+      - run: cargo check -p kumochi-shell-core --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: cargo test -p gpui-pre-windows --locked --lib vsync

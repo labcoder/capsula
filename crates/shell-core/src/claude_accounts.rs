@@ -3,21 +3,16 @@
 use kumochi_protocol::message::{ClaudeCodeView, ConnectionOp};
 
 #[derive(Default, Debug)]
-pub(crate) struct ClaudeAccounts {
-    pub(crate) generation: Option<u64>,
-    pub(crate) view: Option<ClaudeCodeView>,
-    pub(crate) send_failed: bool,
-    pub(crate) connect_screen: bool,
+pub struct ClaudeAccounts {
+    pub generation: Option<u64>,
+    pub view: Option<ClaudeCodeView>,
+    pub send_failed: bool,
+    pub connect_screen: bool,
     waiting: Option<ConnectionOp>,
 }
 
 impl ClaudeAccounts {
-    pub(crate) fn receive(
-        &mut self,
-        current: Option<u64>,
-        generation: u64,
-        view: ClaudeCodeView,
-    ) -> bool {
+    pub fn receive(&mut self, current: Option<u64>, generation: u64, view: ClaudeCodeView) -> bool {
         if current != Some(generation) {
             return false;
         }
@@ -33,17 +28,17 @@ impl ClaudeAccounts {
         true
     }
 
-    pub(crate) fn disconnected(&mut self) {
+    pub fn disconnected(&mut self) {
         *self = Self::default();
     }
 
-    pub(crate) fn open_connect(&mut self) {
+    pub fn open_connect(&mut self) {
         if self.waiting.is_none() && matches!(self.view, Some(ClaudeCodeView::SignedOut { .. })) {
             self.connect_screen = true;
         }
     }
 
-    pub(crate) fn allows(&self, op: ConnectionOp) -> bool {
+    pub fn allows(&self, op: ConnectionOp) -> bool {
         if self.generation.is_none() || self.waiting.is_some() {
             return false;
         }
@@ -69,11 +64,7 @@ impl ClaudeAccounts {
         }
     }
 
-    pub(crate) fn send(
-        &mut self,
-        op: ConnectionOp,
-        send: impl FnOnce(ConnectionOp) -> bool,
-    ) -> bool {
+    pub fn send(&mut self, op: ConnectionOp, send: impl FnOnce(ConnectionOp) -> bool) -> bool {
         if !self.allows(op) {
             return false;
         }
@@ -88,7 +79,7 @@ impl ClaudeAccounts {
 
     /// Sends `CancelClaudeSignIn` without asking `allows`, for a dismissal that must cancel a
     /// sign-in the brain hasn't answered yet. The brain ignores it when nothing is signing in.
-    pub(crate) fn cancel_sign_in(&mut self, send: impl FnOnce(ConnectionOp) -> bool) -> bool {
+    pub fn cancel_sign_in(&mut self, send: impl FnOnce(ConnectionOp) -> bool) -> bool {
         if !send(ConnectionOp::CancelClaudeSignIn) {
             return false;
         }
