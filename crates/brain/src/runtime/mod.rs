@@ -150,7 +150,8 @@ pub(crate) enum Selected {
 #[derive(Debug)]
 pub(crate) struct Brain {
     pub(crate) crashes: crate::relaunch::Crashes,
-    coordinator: Coordinator,
+    /// Boxed, so a future that owns the brain stays under clippy's `large_futures` limit.
+    coordinator: Box<Coordinator>,
     store: Option<StoreThread>,
     engine: Box<dyn Engine>,
     /// The dev fixture was picked, so runs never wait on the account.
@@ -291,7 +292,7 @@ impl Brain {
         let (engine_tx, engine_events) = mpsc::channel(ENGINE_QUEUE);
         let mut brain = Self {
             crashes: crate::relaunch::Crashes::default(),
-            coordinator,
+            coordinator: Box::new(coordinator),
             store: Some(store),
             engine,
             #[cfg(any(test, debug_assertions))]
@@ -358,7 +359,7 @@ impl Brain {
         };
         #[cfg(not(any(test, debug_assertions)))]
         let now = self.account.availability();
-        let input = Input::Engines(now);
+        let input = Input::Engines(kumochi_protocol::message::ConnectionKind::ChatGpt, now);
         self.hold_fence(&input);
         let effects = self
             .coordinator

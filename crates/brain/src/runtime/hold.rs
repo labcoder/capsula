@@ -321,7 +321,7 @@ impl Brain {
             {
                 Some(HoldStatus::Failed(HoldFailure::ChoiceChanged))
             }
-            Input::Engines(now) if self.coordinator.hold_availability_changes(now) => {
+            Input::Engines(kind, now) if self.coordinator.hold_availability_changes(*kind, now) => {
                 Some(HoldStatus::Failed(HoldFailure::ChoiceChanged))
             }
             _ => None,

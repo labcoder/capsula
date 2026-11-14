@@ -308,8 +308,8 @@ pub enum Input {
     },
     /// The shell renamed a task or set a thread's model.
     ThreadOp(ThreadOp),
-    /// Whether runs can be answered changed.
-    Engines(Availability),
+    /// Whether runs on a connection kind can be answered changed.
+    Engines(kumochi_protocol::message::ConnectionKind, Availability),
     /// A `CommitCall` finished.
     CallCommitted {
         /// The call.
@@ -678,8 +678,11 @@ pub struct Coordinator {
     sends: u64,
     /// A lease failed closed: nothing is granted again until the brain restarts.
     transport_failed: bool,
-    /// Whether runs can be answered, and on which connection.
+    /// Whether `ChatGPT` runs can be answered, and on which sign-in.
     availability: Availability,
+    /// The other connections, which no engine answers yet, so they stay unavailable.
+    anthropic_key: Availability,
+    claude_code: Availability,
     /// The one background job.
     job: Option<job::Job>,
     /// The signed-in account's generation, while one can send.
@@ -740,6 +743,8 @@ impl Coordinator {
             sends: 0,
             transport_failed: false,
             availability: Availability::Unavailable(availability::sign_in_needed()),
+            anthropic_key: Availability::Unavailable(availability::model_unavailable()),
+            claude_code: Availability::Unavailable(availability::model_unavailable()),
             job: None,
             account: None,
             signed_out: None,
@@ -941,7 +946,7 @@ impl Coordinator {
                 self.provider_sources_changed(&mut effects);
             }
             Input::ThreadOp(op) => self.thread_op(op, &mut effects),
-            Input::Engines(now) => self.available(now, &mut effects),
+            Input::Engines(kind, now) => self.available(kind, now, &mut effects),
             Input::ReadFinished(done) => self.read_finished(done, &mut effects)?,
             Input::CallCommitted { key, outcome, then } => match outcome {
                 crate::dispatch::Committed::Done => {

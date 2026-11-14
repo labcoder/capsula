@@ -322,7 +322,7 @@ async fn admission_boundaries(stage: AdmissionStage) {
                 Seen::StoreOpQueued(StoreOp::BeginTurn { .. })
             ));
         }
-        brain.coordinator =
+        *brain.coordinator =
             Coordinator::ready_for_tests(ThreadId(1), ThreadId(1), RunId(0), Vec::new());
         brain.close().await;
         let store = crate::store::Store::open(&scratch.db()).unwrap();
@@ -1116,8 +1116,14 @@ async fn accepted_connection_change_away_and_back_and_late_result_cannot_revive_
     let flag = Arc::clone(&brain.holds.pending.as_ref().unwrap().cancel);
     let mut away = Ready::fixture();
     away.connection = ConnectionTag(21);
-    brain.offline(Input::Engines(Availability::Ready(away)));
-    brain.offline(Input::Engines(Availability::Ready(Ready::fixture())));
+    brain.offline(Input::Engines(
+        kumochi_protocol::message::ConnectionKind::ChatGpt,
+        Availability::Ready(away),
+    ));
+    brain.offline(Input::Engines(
+        kumochi_protocol::message::ConnectionKind::ChatGpt,
+        Availability::Ready(Ready::fixture()),
+    ));
     assert!(flag.load(Ordering::SeqCst));
     brain
         .hold_event(
@@ -1461,12 +1467,13 @@ fn closers(thread: ThreadId) -> Vec<Closer> {
             after_turns: 0,
             resend: false,
         }),
-        fence(Input::Engines(crate::coordinator::Availability::Ready(
-            crate::coordinator::Ready {
+        fence(Input::Engines(
+            kumochi_protocol::message::ConnectionKind::ChatGpt,
+            crate::coordinator::Availability::Ready(crate::coordinator::Ready {
                 connection: crate::context::ConnectionTag(77),
                 ..crate::coordinator::Ready::fixture()
-            },
-        ))),
+            }),
+        )),
         Closer::Event(Event::Deadline),
         Closer::Event(Event::Decoded(KEY, SttResult::Text("words".into()))),
         Closer::Invalidate(HoldStatus::Cancelled),

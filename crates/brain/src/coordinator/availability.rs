@@ -3,7 +3,9 @@
 //! to the connection that was ready when its turn arrived, and it ends as soon as that
 //! connection stops being the ready one, even while its turn is still being written. The model check (S4) runs once, on the first build.
 
-use kumochi_protocol::message::{Action, ErrorKey, ModelChoice, ModelInfo, RunId, UserError};
+use kumochi_protocol::message::{
+    Action, ConnectionKind, ErrorKey, ModelChoice, ModelInfo, RunId, UserError,
+};
 
 use super::{Coordinator, Effect, SendKey, Stale};
 use crate::connections::model::error::Failure as Stream;
@@ -61,7 +63,7 @@ pub(crate) fn sign_in_needed() -> UserError {
         .expect("one action is within the limit")
 }
 
-fn model_unavailable() -> UserError {
+pub(super) fn model_unavailable() -> UserError {
     UserError::new(
         ErrorKey::ModelUnavailable,
         Vec::new(),
@@ -71,10 +73,32 @@ fn model_unavailable() -> UserError {
 }
 
 impl Coordinator {
-    /// The account changed. A catalog-only change keeps the current run; any other change ends
+    /// Whether runs on `kind` can be answered now.
+    pub(super) fn availability_of(&self, kind: ConnectionKind) -> &Availability {
+        match kind {
+            ConnectionKind::ChatGpt => &self.availability,
+            ConnectionKind::AnthropicKey => &self.anthropic_key,
+            ConnectionKind::ClaudeCode => &self.claude_code,
+        }
+    }
+
+    /// `kind` changed. A catalog-only change keeps the current run; any other change ends
     /// a run bound to the old connection, so it sends nothing more.
-    pub(super) fn available(&mut self, now: Availability, effects: &mut Vec<Effect>) {
-        self.availability = now;
+    pub(super) fn available(
+        &mut self,
+        kind: ConnectionKind,
+        now: Availability,
+        effects: &mut Vec<Effect>,
+    ) {
+        let entry = match kind {
+            ConnectionKind::ChatGpt => &mut self.availability,
+            ConnectionKind::AnthropicKey => &mut self.anthropic_key,
+            ConnectionKind::ClaudeCode => &mut self.claude_code,
+        };
+        *entry = now;
+        if kind != ConnectionKind::ChatGpt {
+            return;
+        }
         let Some((run, Some(connection))) = self
             .current
             .as_ref()

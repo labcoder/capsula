@@ -225,18 +225,21 @@ fn pinned_choice_survives_delayed_build_but_still_gets_the_first_catalog_check()
             build.snapshot.as_ref().unwrap().choice,
             Some(choice("captured", Effort::High))
         );
-        core.handle(Input::Engines(Availability::Ready(Ready {
-            connection: ConnectionTag(0),
-            models: if listed {
-                vec![ModelInfo {
-                    slug: ModelSlug::new("captured").unwrap(),
-                    display_name: ModelName::new("captured model").unwrap(),
-                }]
-            } else {
-                Vec::new()
-            },
-            trusted_draw: false,
-        })))
+        core.handle(Input::Engines(
+            kumochi_protocol::message::ConnectionKind::ChatGpt,
+            Availability::Ready(Ready {
+                connection: ConnectionTag(0),
+                models: if listed {
+                    vec![ModelInfo {
+                        slug: ModelSlug::new("captured").unwrap(),
+                        display_name: ModelName::new("captured model").unwrap(),
+                    }]
+                } else {
+                    Vec::new()
+                },
+                trusted_draw: false,
+            }),
+        ))
         .unwrap();
         let Input::ContextBuilt(mut done) = built(R, 1, &[T]) else {
             unreachable!()
@@ -295,10 +298,13 @@ fn cancellation_after_begin_turn_and_model_away_back_never_grant() {
             }
             2 => {
                 for connection in [ConnectionTag(2), ConnectionTag(0)] {
-                    core.handle(Input::Engines(Availability::Ready(Ready {
-                        connection,
-                        ..Ready::fixture()
-                    })))
+                    core.handle(Input::Engines(
+                        kumochi_protocol::message::ConnectionKind::ChatGpt,
+                        Availability::Ready(Ready {
+                            connection,
+                            ..Ready::fixture()
+                        }),
+                    ))
                     .unwrap();
                 }
             }
@@ -414,14 +420,17 @@ fn a_held_runs_screen_goes_with_its_request_or_fails_the_run() {
     ];
     for (screen, connection, sent) in cases {
         let mut core = fresh();
-        core.handle(Input::Engines(Availability::Ready(Ready {
-            connection: ConnectionTag(0),
-            models: vec![ModelInfo {
-                slug: ModelSlug::new("captured").unwrap(),
-                display_name: ModelName::new("captured model").unwrap(),
-            }],
-            trusted_draw: false,
-        })))
+        core.handle(Input::Engines(
+            kumochi_protocol::message::ConnectionKind::ChatGpt,
+            Availability::Ready(Ready {
+                connection: ConnectionTag(0),
+                models: vec![ModelInfo {
+                    slug: ModelSlug::new("captured").unwrap(),
+                    display_name: ModelName::new("captured model").unwrap(),
+                }],
+                trusted_draw: false,
+            }),
+        ))
         .unwrap();
         core.submit_hold(prepared(&core, Some(T)), "words".into(), screen)
             .unwrap();
@@ -774,14 +783,17 @@ fn a_held_run_that_never_starts_a_request_tells_nothing() {
 /// A coordinator whose engines are ready with `model` listed.
 fn ready_for(model: &str) -> Coordinator {
     let mut core = fresh();
-    core.handle(Input::Engines(Availability::Ready(Ready {
-        connection: ConnectionTag(0),
-        models: vec![ModelInfo {
-            slug: ModelSlug::new(model).unwrap(),
-            display_name: ModelName::new("captured model").unwrap(),
-        }],
-        trusted_draw: false,
-    })))
+    core.handle(Input::Engines(
+        kumochi_protocol::message::ConnectionKind::ChatGpt,
+        Availability::Ready(Ready {
+            connection: ConnectionTag(0),
+            models: vec![ModelInfo {
+                slug: ModelSlug::new(model).unwrap(),
+                display_name: ModelName::new("captured model").unwrap(),
+            }],
+            trusted_draw: false,
+        }),
+    ))
     .unwrap();
     core
 }

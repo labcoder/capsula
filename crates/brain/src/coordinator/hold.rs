@@ -194,8 +194,12 @@ impl Coordinator {
         key.map_or_else(Vec::new, |key| self.cancel_hold(key))
     }
 
-    pub(crate) fn hold_availability_changes(&self, now: &super::Availability) -> bool {
-        now != &self.availability
+    pub(crate) fn hold_availability_changes(
+        &self,
+        kind: kumochi_protocol::message::ConnectionKind,
+        now: &super::Availability,
+    ) -> bool {
+        now != self.availability_of(kind)
     }
 
     /// Cancels only the real run transferred from this exact hold.
@@ -240,10 +244,10 @@ impl Coordinator {
             | Input::ThreadOp(kumochi_protocol::message::ThreadOp::SetModel { thread, .. }) => {
                 *thread == run.thread
             }
-            Input::Engines(super::Availability::Ready(ready)) => {
+            Input::Engines(_, super::Availability::Ready(ready)) => {
                 ready.connection != hold.defaults.connection
             }
-            Input::Engines(super::Availability::Unavailable(_)) | Input::ShellLost => true,
+            Input::Engines(_, super::Availability::Unavailable(_)) | Input::ShellLost => true,
             _ => false,
         };
         if invalid {
