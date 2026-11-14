@@ -3,7 +3,6 @@
 mod audio;
 #[cfg(test)]
 mod reconnect_tests;
-#[cfg_attr(not(test), expect(dead_code, reason = "2c4 starts screen parts"))]
 mod screen;
 #[cfg(test)]
 mod tests;
@@ -12,9 +11,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
+use kumochi_protocol::geometry::PhysicalPoint;
 use kumochi_protocol::message::{
-    ControlToBrain, ControlToShell, HOLD_DRAIN_TIMEOUT_MS, HOLD_START_TIMEOUT_MS, HoldFailure,
-    HoldStatus, MAX_HOLD_CHUNKS, MicPcm, PartState, SettingsOp, ThreadId, ThreadOp,
+    CaptureFailure, CaptureFor, ControlToBrain, ControlToShell, HOLD_DRAIN_TIMEOUT_MS,
+    HOLD_START_TIMEOUT_MS, HoldFailure, HoldStatus, LeaseGeneration, MAX_HOLD_CHUNKS, MicPcm,
+    ModelChoice, PartState, ScreenClass, ScreenHolds, SettingsOp, ThreadId, ThreadOp,
 };
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::time::Instant;
@@ -25,7 +26,7 @@ use crate::coordinator::{HoldKey, HoldSnapshot};
 use crate::platform::ShellProcess;
 use crate::screen::HoldClient;
 use crate::voice::stt::{Decode, SttHandle, SttResult};
-use screen::ScreenPart;
+use screen::{Outcome, ScreenEvent, ScreenPart};
 
 #[derive(Debug)]
 enum FailureStage {
@@ -95,6 +96,9 @@ pub(super) struct Holds {
     receive: mpsc::Receiver<Packet>,
     /// The screen worker's client; 2c4 gives the brain one.
     screen: Option<Arc<HoldClient>>,
+    /// Where each hold's screen task sends its answers.
+    screen_events: mpsc::Sender<ScreenEvent>,
+    screen_answers: mpsc::Receiver<ScreenEvent>,
 }
 
 struct Hold {
@@ -145,6 +149,7 @@ impl std::fmt::Debug for Hold {
 impl Default for Holds {
     fn default() -> Self {
         let (send, receive) = mpsc::channel(8);
+        let (screen_events, screen_answers) = mpsc::channel(8);
         Self {
             high: 0,
             pending: None,
@@ -155,6 +160,8 @@ impl Default for Holds {
             send,
             receive,
             screen: None,
+            screen_events,
+            screen_answers,
         }
     }
 }
@@ -238,6 +245,7 @@ pub(super) enum Event {
     Overflow(u32),
     Decoded(HoldKey, SttResult),
     Deadline,
+    Screen(ScreenEvent),
 }
 
 pub(super) async fn next(holds: &mut Holds) -> Event {
@@ -249,6 +257,7 @@ pub(super) async fn next(holds: &mut Holds) -> Event {
         () = super::sleep_until(deadline) => Event::Deadline,
         () = holds.gate.wake.notified() => Event::Overflow(holds.gate.overflow.swap(0, Ordering::SeqCst)),
         Some(packet) = holds.receive.recv() => Event::Packet(packet),
+        Some(event) = holds.screen_answers.recv() => Event::Screen(event),
         result = async {
             match decode {
                 Some(decode) => decode.await.unwrap_or(SttResult::Failed(crate::speech::SpeechError::WorkerLost)),
@@ -318,6 +327,30 @@ impl Brain {
     ) -> Result<bool, Full> {
         let epoch = self.epoch;
         let key = |gesture| HoldKey { epoch, gesture };
+        // One admission for both; a screen hold then adds its part, or releases the lease.
+        if let ControlToBrain::HoldRecognized {
+            gesture,
+            thread,
+            selection,
+            pointer,
+            lease,
+            ..
+        } = message
+        {
+            let voice = ControlToBrain::VoiceHoldRecognized {
+                gesture: *gesture,
+                thread: *thread,
+                selection: *selection,
+            };
+            self.hold_control(&voice, link)?;
+            if !self.hold_screen(key(*gesture), *pointer, *lease) {
+                link.control(&ControlToShell::CaptureFailed {
+                    capture_for: CaptureFor::Gesture(*gesture),
+                    reason: CaptureFailure::Unavailable,
+                })?;
+            }
+            return Ok(true);
+        }
         match message {
             ControlToBrain::VoiceHoldRecognized {
                 gesture,
@@ -454,6 +487,7 @@ impl Brain {
                     self.hold_decode(link)?;
                 }
             }
+            ControlToBrain::ExclusionLapsed { lease } if self.holds.lease_lapsed(*lease) => {}
             ControlToBrain::Settings(SettingsOp::SetDefaultModel(_))
             | ControlToBrain::AccountOp(_)
             | ControlToBrain::Connection(_) => {
@@ -495,6 +529,14 @@ impl Brain {
             }
         }
         hold.deadline = Instant::now() + crate::speech::DEADLINES.load;
+        let choice = hold
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.defaults.choice.clone());
+        // The gate passed for the default model; the thread may pin another.
+        if !matches!(hold.screen, ScreenPart::None) && !self.screen_gate(choice.as_ref()) {
+            self.holds.close_screen_as(ScreenClass::ModelCantSee);
+        }
         self.hold_voice_changed(link)
     }
 
@@ -610,6 +652,10 @@ impl Brain {
     }
 
     pub(super) fn hold_event(&mut self, event: Event, link: &mut Link<'_, '_>) -> Result<(), Full> {
+        let event = match event {
+            Event::Screen(event) => return self.hold_screen_event(event, link),
+            event => event,
+        };
         if let Event::Decoded(key, _) = &event
             && self
                 .holds
@@ -695,6 +741,55 @@ impl Brain {
                 tracing::warn!(stage = ?FailureStage::Decode, ?reason, "held speech input failed");
                 self.hold_end(HoldStatus::Failed(HoldFailure::DecodeFailed), link)
             }
+            Event::Screen(_) => unreachable!("taken first"),
         }
+    }
+
+    /// Whether a hold on `choice` may show the model the window under the pointer now.
+    fn screen_gate(&self, choice: Option<&ModelChoice>) -> bool {
+        let gate = self.account.screen_holds(
+            choice,
+            self.holds.screen.is_some(),
+            self.config.view().screen_holds,
+        );
+        matches!(gate, ScreenHolds::On { .. })
+    }
+
+    /// Starts the pending hold `key`'s screen part when the gate is open for the default model
+    /// now, since the shell's state may lag.
+    fn hold_screen(
+        &mut self,
+        key: HoldKey,
+        pointer: PhysicalPoint,
+        lease: LeaseGeneration,
+    ) -> bool {
+        // shortcut: the gate opens on the default model, so a thread pinned to a model that can
+        // see goes voice-only while the default can't; check the thread's pin at recognition
+        // once users with mixed connections need it.
+        let choice = self.config.view().default_model.clone();
+        self.screen_gate(choice.as_ref()) && self.holds.start_screen(key, pointer, lease)
+    }
+
+    /// Takes a screen task's answer. The capture's end, either way, releases the shell's
+    /// exclusion lease for that hold on this connection.
+    fn hold_screen_event(
+        &mut self,
+        event: ScreenEvent,
+        link: &mut Link<'_, '_>,
+    ) -> Result<(), Full> {
+        let capture_for = CaptureFor::Gesture(event.key.gesture);
+        let lease = match event.outcome {
+            _ if event.key.epoch != self.epoch => None,
+            Outcome::Held => Some(ControlToShell::CaptureDone { capture_for }),
+            Outcome::Closed(_) if event.generation.is_none() => {
+                Some(ControlToShell::CaptureFailed {
+                    capture_for,
+                    reason: CaptureFailure::Unavailable,
+                })
+            }
+            Outcome::Sealed(_) | Outcome::Closed(_) => None,
+        };
+        self.holds.screen_event(event);
+        lease.map_or(Ok(()), |message| link.control(&message))
     }
 }

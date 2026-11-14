@@ -255,6 +255,29 @@ pub(crate) async fn release_next(
     rig.reply(id, &Reply::Released(owner, None)).await;
 }
 
+/// Answers the capture `request`, numbered `id`, with a frame this worker holds.
+#[cfg(test)]
+pub(crate) async fn hold_frame(
+    rig: &crate::supervise::fixture::Rig<Holds>,
+    id: u64,
+    request: Request,
+) {
+    let Request::Context { key, .. } = request else {
+        panic!("not a capture: {request:?}")
+    };
+    let meta = FrameMeta {
+        capture: key.capture,
+        display: kumochi_protocol::geometry::PhysicalRect {
+            origin: [0, 0],
+            size: [4, 3],
+        },
+        dpi: 96,
+        acquired_after_ms: 1,
+    };
+    rig.reply(id, &Reply::Acquired(key, meta)).await;
+    rig.reply(id, &Reply::Complete(key)).await;
+}
+
 /// A terminal answer that isn't the one asked for. The caller drops it, and with it anything it
 /// carries: an image is zeroed on drop.
 fn closed(reply: &Reply) -> Closed {

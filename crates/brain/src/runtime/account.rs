@@ -420,10 +420,6 @@ impl Accounts {
 
     /// Whether `choice` can be sent an image: the catalog's own model on the account's connection,
     /// listed as taking image input. Nothing else does, so the screen is skipped before capture.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "2c's hold admission asks before any capture")
-    )]
     pub(super) fn takes_images(&self, choice: &ModelChoice) -> bool {
         choice.connection == ConnectionKind::ChatGpt
             && self.catalog.models.is_some()
@@ -434,7 +430,6 @@ impl Accounts {
     /// pointer, given whether this platform has window capture and whether the user allows it.
     /// With no catalog read, or no model chosen, it isn't known yet, so it's `NotReady` rather
     /// than `ModelCantSee`; the switch comes first, so turning it off always reads as off.
-    #[cfg_attr(not(test), expect(dead_code, reason = "2c4b sends ScreenHolds"))]
     #[expect(
         clippy::fn_params_excessive_bools,
         reason = "the caller supplies the platform's capture and the user's switch"
