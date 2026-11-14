@@ -796,3 +796,172 @@ fn started(effects: &[Effect]) -> Vec<Vec<crate::context::InputItem>> {
         })
         .collect()
 }
+
+fn image() -> crate::context::Screen {
+    crate::context::Screen::Image(crate::context::Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap())
+}
+
+/// The runs whose screen `effects` mark withdrawn.
+fn withdrawals(effects: &[Effect]) -> Vec<RunId> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Store(StoreOp::WithdrawScreen { run }) => Some(*run),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn turning_screen_holds_off_before_the_first_request_records_the_turn_withdrawn() {
+    use crate::context::{Screen, ScreenClass};
+    let mut core = ready_for("captured");
+    core.submit_hold(prepared(&core, Some(T)), "words".into(), Some(image()))
+        .unwrap();
+    core.handle(Input::TurnStored { run: R }).unwrap();
+    assert_eq!(
+        withdrawals(&core.handle(Input::ScreenHoldsOff).unwrap()),
+        [R]
+    );
+    assert!(matches!(core.current_screen(), Some(Screen::Withdrawn)));
+    assert_eq!(
+        withdrawals(&core.handle(Input::ScreenHoldsOff).unwrap()),
+        [],
+        "written once"
+    );
+
+    let mut core = ready_for("captured");
+    let closed = Screen::NotIncluded(ScreenClass::Changed);
+    core.submit_hold(prepared(&core, Some(T)), "words".into(), Some(closed))
+        .unwrap();
+    core.handle(Input::TurnStored { run: R }).unwrap();
+    assert_eq!(
+        withdrawals(&core.handle(Input::ScreenHoldsOff).unwrap()),
+        []
+    );
+    assert!(matches!(
+        core.current_screen(),
+        Some(Screen::NotIncluded(ScreenClass::Changed))
+    ));
+}
+
+#[test]
+fn a_turn_still_queued_behind_an_older_run_is_stored_withdrawn() {
+    use kumochi_protocol::message::HeldScreen;
+    const NEXT: RunId = RunId(R.0 + 1);
+    let mut core = ready_for("captured");
+    core.submit_hold(prepared(&core, Some(T)), "first".into(), None)
+        .unwrap();
+    let queued = core
+        .submit_hold(prepared(&core, Some(T)), "second".into(), Some(image()))
+        .unwrap();
+    assert!(
+        !queued
+            .iter()
+            .any(|effect| matches!(effect, Effect::Store(StoreOp::BeginTurn { .. }))),
+        "{queued:?}"
+    );
+    assert_eq!(
+        withdrawals(&core.handle(Input::ScreenHoldsOff).unwrap()),
+        []
+    );
+    let effects = core.handle(Input::TurnStored { run: R }).unwrap();
+    assert!(
+        effects.contains(&Effect::Store(StoreOp::BeginTurn {
+            thread: T,
+            title: None,
+            run: NEXT,
+            text: "second".into(),
+            screen: Some(HeldScreen::Withdrawn),
+        })),
+        "{effects:?}"
+    );
+}
+
+#[test]
+fn turning_screen_holds_off_after_the_first_request_keeps_the_turn_attached() {
+    use crate::context::Screen;
+    let mut core = ready_for("captured");
+    core.submit_hold(prepared(&core, Some(T)), "words".into(), Some(image()))
+        .unwrap();
+    core.handle(Input::TurnStored { run: R }).unwrap();
+    let first = engine_key(&core, R);
+    assert_eq!(starts(&core.handle(screened(first, &[T])).unwrap()), 1);
+    assert_eq!(
+        withdrawals(&core.handle(Input::ScreenHoldsOff).unwrap()),
+        []
+    );
+    assert!(
+        matches!(core.current_screen(), Some(Screen::Withdrawn)),
+        "the image still drops"
+    );
+}
+
+#[test]
+fn a_started_requests_send_is_refused_once_screen_holds_are_off() {
+    let mut core = ready_for("captured");
+    core.submit_hold(prepared(&core, Some(T)), "words".into(), Some(image()))
+        .unwrap();
+    core.handle(Input::TurnStored { run: R }).unwrap();
+    let first = engine_key(&core, R);
+    assert_eq!(starts(&core.handle(screened(first, &[T])).unwrap()), 1);
+    let mut effects = core.handle(Input::ScreenHoldsOff).unwrap();
+    effects.extend(
+        core.handle(Input::SendReady {
+            key: SendKey::Build(first),
+            hold: None,
+        })
+        .unwrap(),
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Grant(_))),
+        "{effects:?}"
+    );
+    assert!(effects.contains(&Effect::Rebuild(SendKey::Build(first))));
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Control(ControlToShell::RunState { run: R, error: Some(error), .. })
+            if error.key() == kumochi_protocol::message::ErrorKey::ScreenUnavailable
+    )));
+    assert_eq!(
+        withdrawals(&effects),
+        [],
+        "the stored screen stays attached"
+    );
+    assert_eq!(core.current_run(), None);
+}
+
+#[test]
+fn a_run_still_ending_has_its_image_withdrawn_too() {
+    let mut core = ready_for("captured");
+    core.submit_hold(prepared(&core, Some(T)), "words".into(), Some(image()))
+        .unwrap();
+    core.handle(Input::TurnStored { run: R }).unwrap();
+    core.cancel_hold(KEY);
+    assert_eq!(core.current_run(), None);
+    assert_eq!(
+        withdrawals(&core.handle(Input::ScreenHoldsOff).unwrap()),
+        [R]
+    );
+}
+
+#[test]
+fn a_withdrawn_run_fails_with_screen_unavailable_before_any_request() {
+    let mut core = ready_for("captured");
+    core.submit_hold(prepared(&core, Some(T)), "words".into(), Some(image()))
+        .unwrap();
+    core.handle(Input::TurnStored { run: R }).unwrap();
+    let key = engine_key(&core, R);
+    let mut effects = core.handle(Input::ScreenHoldsOff).unwrap();
+    effects.extend(core.handle(screened(key, &[T])).unwrap());
+    assert_eq!(starts(&effects), 0, "{effects:?}");
+    assert_eq!(told(&effects), Vec::<&Effect>::new());
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Control(ControlToShell::RunState { run: R, error: Some(error), .. })
+            if error.key() == kumochi_protocol::message::ErrorKey::ScreenUnavailable
+    )));
+    assert_eq!(core.current_run(), None);
+}

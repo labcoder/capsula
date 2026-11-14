@@ -157,6 +157,13 @@ pub enum StoreOp {
         /// The point.
         heard: crate::voice::reply::Heard,
     },
+    /// The user withdrew a run's image before any request carried it, so its turn's screen
+    /// becomes `withdrawn`. Nothing answers it: a failed write leaves `attached`, which
+    /// over-reports.
+    WithdrawScreen {
+        /// The run.
+        run: RunId,
+    },
 }
 
 /// A summary's text. Its `Debug` shows only the length, so formatting a write never prints it.
@@ -197,7 +204,8 @@ impl StoreOp {
             | Self::SetTitle { .. }
             | Self::StoreSummary { .. }
             | Self::SetModel { .. }
-            | Self::Heard { .. } => None,
+            | Self::Heard { .. }
+            | Self::WithdrawScreen { .. } => None,
         }
     }
 
@@ -279,7 +287,7 @@ impl StoreOp {
                 choice: choice.clone(),
                 applied: false,
             },
-            Self::Heard { .. } => return None,
+            Self::Heard { .. } | Self::WithdrawScreen { .. } => return None,
         })
     }
 }

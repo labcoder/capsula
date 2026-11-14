@@ -1,9 +1,11 @@
 //! What a screen hold carried into its turn, for its history line (docs/development/store.md).
 
-use kumochi_protocol::message::{HeldScreen, ScreenClass};
+use kumochi_protocol::message::{HeldScreen, RunId, ScreenClass};
+
+use super::StoreError;
 
 /// Every value the `screen` column takes; `read` knows only these.
-const ALL: [HeldScreen; 8] = [
+const ALL: [HeldScreen; 9] = [
     HeldScreen::Attached,
     HeldScreen::NotIncluded(ScreenClass::NotReady),
     HeldScreen::NotIncluded(ScreenClass::NothingThere),
@@ -12,6 +14,7 @@ const ALL: [HeldScreen; 8] = [
     HeldScreen::NotIncluded(ScreenClass::TooLarge),
     HeldScreen::NotIncluded(ScreenClass::Changed),
     HeldScreen::NotIncluded(ScreenClass::ModelCantSee),
+    HeldScreen::Withdrawn,
 ];
 
 /// The column's text for `screen`.
@@ -25,6 +28,27 @@ pub(super) fn column(screen: HeldScreen) -> &'static str {
         HeldScreen::NotIncluded(ScreenClass::TooLarge) => "too_large",
         HeldScreen::NotIncluded(ScreenClass::Changed) => "changed",
         HeldScreen::NotIncluded(ScreenClass::ModelCantSee) => "model_cant_see",
+        HeldScreen::Withdrawn => "withdrawn",
+    }
+}
+
+impl super::Store {
+    /// Marks `run`'s screen `withdrawn` when it says `attached`: the user withdrew the image
+    /// before any request carried it.
+    ///
+    /// # Errors
+    /// When the run's id doesn't fit SQL, or the write fails.
+    pub(crate) fn withdraw_screen(&mut self, run: RunId) -> Result<(), StoreError> {
+        let run = super::sql_id(run.0, StoreError::NoRun)?;
+        self.conn.execute(
+            "UPDATE runs SET screen = ?2 WHERE id = ?1 AND screen = ?3",
+            rusqlite::params![
+                run,
+                column(HeldScreen::Withdrawn),
+                column(HeldScreen::Attached)
+            ],
+        )?;
+        Ok(())
     }
 }
 

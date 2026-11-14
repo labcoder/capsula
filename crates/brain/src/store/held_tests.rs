@@ -19,6 +19,8 @@ fn screen(store: &Store, run: RunId) -> Option<String> {
 /// value breaks the build here until it's chained in, and then fails the test until `ALL` has it.
 fn after(screen: HeldScreen) -> Option<HeldScreen> {
     Some(HeldScreen::NotIncluded(match screen {
+        HeldScreen::NotIncluded(ScreenClass::ModelCantSee) => return Some(HeldScreen::Withdrawn),
+        HeldScreen::Withdrawn => return None,
         HeldScreen::Attached => ScreenClass::NotReady,
         HeldScreen::NotIncluded(ScreenClass::NotReady) => ScreenClass::NothingThere,
         HeldScreen::NotIncluded(ScreenClass::NothingThere) => ScreenClass::CantShare,
@@ -26,7 +28,6 @@ fn after(screen: HeldScreen) -> Option<HeldScreen> {
         HeldScreen::NotIncluded(ScreenClass::Unreadable) => ScreenClass::TooLarge,
         HeldScreen::NotIncluded(ScreenClass::TooLarge) => ScreenClass::Changed,
         HeldScreen::NotIncluded(ScreenClass::Changed) => ScreenClass::ModelCantSee,
-        HeldScreen::NotIncluded(ScreenClass::ModelCantSee) => return None,
     }))
 }
 
@@ -39,7 +40,7 @@ fn every_value_reads_back_as_itself() {
         values += 1;
         next = after(screen);
     }
-    assert_eq!(values, 8);
+    assert_eq!(values, 9);
 }
 
 /// A new thread whose one run's turn carried `held`.
@@ -133,4 +134,29 @@ fn a_value_this_build_does_not_know_reads_as_a_plain_turn() {
         )
         .expect("a newer value");
     assert_eq!(kinds(&store, thread), [PageEventKind::User]);
+}
+
+#[test]
+fn a_withdrawal_marks_only_an_attached_turn() {
+    let scratch = Scratch::new("held-withdrawn");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let (thread, attached) = held_run(&mut store, Some(HeldScreen::Attached));
+    let (_, closed) = held_run(
+        &mut store,
+        Some(HeldScreen::NotIncluded(ScreenClass::NotReady)),
+    );
+    let (_, plain) = held_run(&mut store, None);
+    assert_eq!(screen(&store, attached).as_deref(), Some("attached"));
+    for run in [attached, closed, plain] {
+        store.withdraw_screen(run).expect("withdrawn");
+    }
+    assert_eq!(screen(&store, attached).as_deref(), Some("withdrawn"));
+    assert_eq!(screen(&store, closed).as_deref(), Some("not_ready"));
+    assert_eq!(screen(&store, plain), None);
+    assert_eq!(
+        kinds(&store, thread),
+        [PageEventKind::HeldTurn {
+            screen: HeldScreen::Withdrawn
+        }]
+    );
 }
