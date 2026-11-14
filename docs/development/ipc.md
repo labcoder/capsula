@@ -39,10 +39,12 @@ settings file has no key, off when it can't be read). A new struct field isn't a
 postcard, whose fields are positional; it's safe only because the build-id handshake refuses
 mixed binaries.
 
-The brain sends `ScreenHolds` for the default model once a connection opens, after the voice
-view, and again only when a saved settings change or an account event (the catalog read) moves
-it. Nothing sends `HoldScreen` or `HoldRecognized` yet, and the shell ignores `ScreenHolds` and
-`HoldScreen`. All three are payload-redacted in the pipe tap.
+The brain sends `ScreenHolds` for the default model once a connection opens, after `Welcome` and
+the voice view, and again only when a saved settings change, a catalog read or an account
+operation the shell sent (a sign-out clears the catalog at once) moves it. Nothing sends
+`HoldScreen` or `HoldRecognized` yet. In the running phase the shell ignores `ScreenHolds` and
+`HoldScreen`; before `Welcome` it rejects either one and ends the connection. All three are
+payload-redacted in the pipe tap.
 
 ## Anthropic paste metadata
 

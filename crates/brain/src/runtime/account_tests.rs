@@ -1413,11 +1413,40 @@ impl Http for HeldCatalog {
     }
 }
 
+/// A signed-in brain on `http` with a fixture screen worker and Luna, which can't see, already
+/// saved as the default model.
+fn luna_with_a_screen(
+    scratch: &Scratch,
+    store: &FakeStore,
+    http: SharedHttp,
+) -> (
+    crate::runtime::Brain,
+    crate::supervise::fixture::Rig<crate::screen::Holds>,
+) {
+    let accounts = seeded(scratch, store, http, LATER);
+    let mut brain = test_support::brain_with(scratch, "", accounts);
+    let rig = crate::supervise::fixture::start::<crate::screen::Holds>();
+    brain.attach_screen(Arc::new(crate::screen::HoldClient::new(rig.handle.clone())));
+    let pending = brain
+        .config
+        .stage(kumochi_protocol::message::SettingsOp::SetDefaultModel(
+            ModelChoice {
+                model: ModelSlug::new("gpt-6-luna").expect("valid"),
+                effort: Effort::Low,
+                connection: ConnectionKind::ChatGpt,
+            },
+        ))
+        .expect("staged");
+    pending.write().expect("written");
+    brain.config.commit(pending);
+    (brain, rig)
+}
+
 /// With the default model already saved, a catalog read that lands while a shell is connected
 /// moves the screen gate, and the shell hears the new state.
 #[tokio::test]
 async fn a_catalog_read_while_connected_sends_the_screen_gate_it_moved() {
-    use kumochi_protocol::message::{ScreenHolds, ScreenOff, SettingsOp};
+    use kumochi_protocol::message::{ScreenHolds, ScreenOff};
     let scratch = Scratch::new("account-catalog-screen-gate");
     let store = FakeStore::default();
     let (release, released) = oneshot::channel();
@@ -1425,20 +1454,7 @@ async fn a_catalog_read_while_connected_sends_the_screen_gate_it_moved() {
         Catalog(Mutex::new(VecDeque::from([listing()]))),
         Mutex::new(Some(released)),
     ));
-    let accounts = seeded(&scratch, &store, http, LATER);
-    let mut brain = test_support::brain_with(&scratch, "", accounts);
-    let rig = crate::supervise::fixture::start::<crate::screen::Holds>();
-    brain.attach_screen(Arc::new(crate::screen::HoldClient::new(rig.handle.clone())));
-    let pending = brain
-        .config
-        .stage(SettingsOp::SetDefaultModel(ModelChoice {
-            model: ModelSlug::new("gpt-6-luna").expect("valid"),
-            effort: Effort::Low,
-            connection: ConnectionKind::ChatGpt,
-        }))
-        .expect("staged");
-    pending.write().expect("written");
-    brain.config.commit(pending);
+    let (mut brain, rig) = luna_with_a_screen(&scratch, &store, http);
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
@@ -1466,6 +1482,52 @@ async fn a_catalog_read_while_connected_sends_the_screen_gate_it_moved() {
             if let Some(ControlToShell::ScreenHolds(state)) = next.expect("readable") {
                 assert_eq!(state, ScreenHolds::Off(ScreenOff::ModelCantSee));
                 break;
+            }
+        }
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
+    drop(rig);
+}
+
+/// A sign-out the shell starts clears the catalog at once, so the shell hears the gate move
+/// before the sign-out finishes.
+#[tokio::test]
+async fn a_sign_out_from_the_shell_sends_the_gate_before_the_sign_out_ends() {
+    use kumochi_protocol::message::{ScreenHolds, ScreenOff};
+    let scratch = Scratch::new("account-sign-out-screen-gate");
+    let store = FakeStore::default();
+    let (mut brain, rig) = luna_with_a_screen(&scratch, &store, Catalog::answering([listing()]));
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let cant_see = ControlToShell::ScreenHolds(ScreenHolds::Off(ScreenOff::ModelCantSee));
+    let client = async {
+        loop {
+            let next = timeout(PATIENCE, shell.next_control())
+                .await
+                .expect("in time");
+            if next.expect("readable").as_ref() == Some(&cant_see) {
+                break;
+            }
+        }
+        shell
+            .send(&ControlToBrain::AccountOp(AccountOp::SignOut))
+            .await;
+        loop {
+            let next = timeout(PATIENCE, shell.next_control())
+                .await
+                .expect("in time");
+            match next.expect("readable").expect("open") {
+                ControlToShell::ScreenHolds(state) => {
+                    assert_eq!(state, ScreenHolds::Off(ScreenOff::NotReady));
+                    break;
+                }
+                ControlToShell::Account(AccountView::SignedOut { .. }) => {
+                    panic!("the gate waited for the sign-out to end")
+                }
+                _ => {}
             }
         }
         drop(shell);
