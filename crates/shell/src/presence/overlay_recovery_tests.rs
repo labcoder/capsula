@@ -1086,7 +1086,10 @@ fn replacement_selects_the_successor_on_the_same_shown_host_without_an_old_ack(
         assert!(!this.scene_effects_at(Ok(Vec::new()), now, cx));
         assert_eq!(this.overlay.window().expect("shown successor").window, window);
         assert!(this.presenter.drawn());
-        assert_eq!(crate::presenter::tests::painted(&this.presenter.frames().borrow(), SceneId(1)), None);
+        assert_eq!(
+            crate::presenter::tests::painted(&this.presenter.frames().borrow(), SceneId(1)),
+            None
+        );
     });
     visual.update(|window, cx| window.draw(cx).clear(cx));
     assert_eq!(
@@ -1216,7 +1219,10 @@ fn an_unpainted_static_successor_sleeps_until_the_original_expiry(
         super::prepare_scene_step_at(&mut this.presenter, SceneId(2), 1,
             br#"{"step":{"id":"next","start":"now","put":[{"shape":{"id":"next","kind":"rect","box":[40,0,30,30],"enter":"none"}}]}}"#, now);
         assert!(!this.scene_effects_at(Ok(Vec::new()), now, cx));
-        assert_eq!(crate::presenter::tests::painted(&this.presenter.frames().borrow(), SceneId(2)), None);
+        assert_eq!(
+            crate::presenter::tests::painted(&this.presenter.frames().borrow(), SceneId(2)),
+            None
+        );
         assert_eq!(this.presenter.next_wake(now), None);
         assert_eq!(this.presenter.deadline(), Some(expires));
         assert_eq!(this.scene_deadline, Some(expires));

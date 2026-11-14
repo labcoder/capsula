@@ -1,7 +1,6 @@
 //! The presenter's test fixtures that tests outside its own test files share.
 
 use std::{
-    any::Any,
     sync::{Arc, atomic::Ordering, mpsc},
     time::{Duration, Instant},
 };
@@ -25,6 +24,7 @@ use super::{
     AdmitJob, Broken, Effect, Frames, PrepareJob, Presenter, RecoveryJob, Sample, SceneCache,
     Stage,
     overlay_input::{self, OverlayOwner, RegionId},
+    window::ConsumedStep,
 };
 
 pub(crate) const GENERATION: u64 = 1;
@@ -774,9 +774,14 @@ pub(crate) fn region(id: u64) -> RegionId {
     RegionId(id)
 }
 
+/// A consumed step, held so that dropping it returns its bytes.
+pub(crate) struct ChargedStep {
+    _step: ConsumedStep,
+}
+
 /// A step consumed through [`consume_ready`], charged until `step` drops.
 pub(crate) struct Consumption {
-    pub(crate) step: Box<dyn Any>,
+    pub(crate) step: ChargedStep,
     pub(crate) index: u32,
     pub(crate) effects: Result<Vec<Effect>, Broken>,
 }
@@ -795,7 +800,9 @@ pub(crate) fn consume_ready(
         .map_err(|error| format!("{error:?}"))?;
     Ok(Consumption {
         index: consumed.step.step().index,
-        step: Box::new(consumed.step),
+        step: ChargedStep {
+            _step: consumed.step,
+        },
         effects: consumed.effects,
     })
 }
