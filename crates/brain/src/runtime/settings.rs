@@ -212,11 +212,15 @@ impl Brain {
                 break;
             };
             // A queued repair is recomputed here, so it never replaces a choice written since; with
-            // nothing left to repair it changes nothing, pending holds included.
+            // nothing left to repair, or only the other connection's half, it changes nothing,
+            // pending holds included.
             if epoch == BRAIN
                 && let Change::User(SettingsOp::SetDefaultModel(choice)) = &mut change
             {
-                let Some(repaired) = self.repaired_default() else {
+                let Some(repaired) = self
+                    .repaired_default()
+                    .filter(|repaired| repaired.connection == choice.connection)
+                else {
                     continue;
                 };
                 *choice = repaired;

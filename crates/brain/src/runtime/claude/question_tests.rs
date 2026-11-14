@@ -500,6 +500,34 @@ async fn a_question_takes_only_a_listed_alias_its_effort_word_and_no_tool() {
     rig.close().await;
 }
 
+/// Test 13's own half: the row names its default, haiku at Low, though its list starts with
+/// sonnet. It replaces only an unset choice or a Claude Code alias the row doesn't list, and
+/// only while a launch would be admitted.
+#[tokio::test]
+async fn claude_codes_default_is_the_rows_own_and_moves_only_an_unset_or_unlisted_choice() {
+    let mut rig = Rig::new("question-default", &synthetic_signed_in()).await;
+    assert_eq!(policy::reviewed(V).expect("reviewed").models[0].0, "sonnet");
+    let choice = |model: &str, effort, connection| ModelChoice {
+        model: ModelSlug::new(model).expect("valid"),
+        effort,
+        connection,
+    };
+    let haiku = choice("haiku", Effort::Low, ConnectionKind::ClaudeCode);
+    assert_eq!(rig.claude.repaired_default(None), Some(haiku.clone()));
+    let unlisted = choice("claude-test", Effort::High, ConnectionKind::ClaudeCode);
+    assert_eq!(rig.claude.repaired_default(Some(&unlisted)), Some(haiku));
+    for kept in [
+        choice("opus", Effort::High, ConnectionKind::ClaudeCode),
+        choice("gpt-6-luna", Effort::Low, ConnectionKind::ChatGpt),
+    ] {
+        assert_eq!(rig.claude.repaired_default(Some(&kept)), None, "{kept:?}");
+    }
+    rig.claude.view = ClaudeCodeView::NotFound;
+    assert_eq!(rig.claude.repaired_default(None), None, "not admitted");
+    rig.claude.view = READY;
+    rig.close().await;
+}
+
 /// Test 9: a refused question fails with Claude Code's own reason while no launch would be
 /// admitted, and with none otherwise; never with `Access(None)`, which reads as a `ChatGPT`
 /// sign-in.

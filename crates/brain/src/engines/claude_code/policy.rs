@@ -22,6 +22,9 @@ pub(crate) struct Reviewed {
     /// The aliases a run may name on this version, with the names the picker shows, in the
     /// order it lists them. Only these reach `--model`.
     pub(crate) models: &'static [(&'static str, &'static str)],
+    /// The alias a profile with only Claude Code starts on, at `Low`; one of `models`, named here
+    /// so their order decides nothing.
+    pub(crate) default_model: &'static str,
 }
 
 /// Adding a version is a reviewed PR that adds a row here, from that version's probe.
@@ -54,6 +57,8 @@ pub(crate) static REVIEWED_CLAUDE_CODE: &[Reviewed] = &[Reviewed {
         ("haiku", "Haiku"),
         ("fable", "Fable"),
     ],
+    // The owner's default (OSC-742).
+    default_model: "haiku",
 }];
 
 /// The reviewed entry for `version`. Every other version is refused, with no override: D2a's

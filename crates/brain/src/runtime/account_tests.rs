@@ -2167,3 +2167,102 @@ async fn a_catalog_renewal_that_goes_unconfirmed_tells_the_shell_why() {
         accounts.close(Instant::now(), Instant::now()).await;
     }
 }
+
+/// A Claude Code connection a launch would be admitted on, on the lane's fake signed in.
+async fn ready_claude(
+    base: &crate::engines::claude_code::lane::tests::Base,
+) -> crate::runtime::claude::Claude {
+    let (host, _switches) = crate::engines::claude_code::lane::tests::host(base, "in");
+    let lane = crate::engines::claude_code::lane::Lane::start(host).expect("lane");
+    let mut claude = crate::runtime::claude::Claude::start(
+        lane,
+        crate::runtime::claude::SignInStore::FileWithDacl,
+    );
+    timeout(PATIENCE, async {
+        while claude.view() != crate::runtime::claude::tests::READY {
+            let wake = claude.next().await;
+            claude.wake(wake);
+        }
+    })
+    .await
+    .expect("ready");
+    claude
+}
+
+/// M1: Claude Code's default goes in only while `ChatGPT` has no account at all, never while a
+/// `ChatGPT` account's session has ended, and a queued repair recomputed at write time never
+/// turns into the other connection's.
+#[tokio::test]
+async fn claude_codes_default_waits_for_chatgpt_to_have_no_account() {
+    let repair = |model: &str, connection| crate::runtime::settings::Queued {
+        change: crate::runtime::settings::Change::User(
+            kumochi_protocol::message::SettingsOp::SetDefaultModel(ModelChoice {
+                model: ModelSlug::new(model).expect("valid"),
+                effort: Effort::Low,
+                connection,
+            }),
+        ),
+        epoch: crate::runtime::settings::BRAIN,
+    };
+    let base = crate::engines::claude_code::lane::tests::Base::new("default-claude-only");
+    let scratch = Scratch::new("default-claude-only");
+    let mut brain = test_support::brain(&scratch, "");
+    brain.attach_claude(ready_claude(&base).await);
+    assert_eq!(
+        brain.repaired_default(),
+        Some(ModelChoice {
+            model: ModelSlug::new("haiku").expect("valid"),
+            effort: Effort::Low,
+            connection: ConnectionKind::ClaudeCode,
+        })
+    );
+    brain
+        .settings_ops
+        .push_back(repair("gpt-6-luna", ConnectionKind::ChatGpt));
+    brain.pump_settings(None).expect("no link");
+    assert!(brain.settings_ops.is_empty(), "taken");
+    assert!(
+        brain.config_write.is_none(),
+        "ChatGPT's repair isn't written as Claude Code's"
+    );
+    brain
+        .claude_op(
+            kumochi_protocol::message::ConnectionOp::FindClaudeCode,
+            None,
+        )
+        .expect("no link");
+    assert!(
+        brain.config_write.is_some(),
+        "Claude Code's report queues its own repair"
+    );
+    brain.close().await;
+
+    let base = crate::engines::claude_code::lane::tests::Base::new("default-chatgpt-ended");
+    let scratch = Scratch::new("default-chatgpt-ended");
+    let store = FakeStore::default();
+    let timed_out: TokenAnswer = || Err(HttpError::Timeout);
+    let mut accounts = seeded(
+        &scratch,
+        &store,
+        SharedHttp::new(Renewing(timed_out)),
+        1_800_000_000,
+    );
+    timeout(PATIENCE, async {
+        while !matches!(
+            accounts.view(),
+            AccountView::SignedIn {
+                recovery: Some(AccountRecovery::SignInAgain),
+                ..
+            }
+        ) {
+            let event = accounts.next().await;
+            accounts.handle(event);
+        }
+    })
+    .await
+    .expect("the session ends in time");
+    let mut brain = test_support::brain_with(&scratch, "", accounts);
+    brain.attach_claude(ready_claude(&base).await);
+    assert_eq!(brain.repaired_default(), None);
+    brain.close().await;
+}

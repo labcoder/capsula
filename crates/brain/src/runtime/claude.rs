@@ -8,8 +8,8 @@ use std::time::Instant;
 use kumochi_protocol::constants::CLAUDE_QUESTIONS_ENV;
 use kumochi_protocol::message::{
     Action, AuditFailed, ClaudeCodeView, ClaudeVersion, ConnectionKind, ConnectionOp,
-    ConnectionsView, ControlToShell, Effort, ErrorKey, ModelInfo, ModelName, ModelSlug, ThreadId,
-    Unsupported, UserError,
+    ConnectionsView, ControlToShell, Effort, ErrorKey, ModelChoice, ModelInfo, ModelName,
+    ModelSlug, ThreadId, Unsupported, UserError,
 };
 use tokio::sync::mpsc;
 
@@ -534,6 +534,27 @@ impl Claude {
         self.take(&snapshot)
     }
 
+    /// Claude Code's half of the brain's repair of `default_model`, while a launch would be
+    /// admitted: the reviewed row's own default at `Low` when `current` is unset or a Claude Code
+    /// alias the row doesn't list. A choice on another connection is never moved.
+    pub(crate) fn repaired_default(&self, current: Option<&ModelChoice>) -> Option<ModelChoice> {
+        let (_, row) = self.admitted()?;
+        if current.is_some_and(|choice| {
+            choice.connection != ConnectionKind::ClaudeCode
+                || row
+                    .models
+                    .iter()
+                    .any(|&(slug, _)| slug == choice.model.as_str())
+        }) {
+            return None;
+        }
+        Some(ModelChoice {
+            model: ModelSlug::new(row.default_model).expect("a reviewed alias is a valid slug"),
+            effort: Effort::Low,
+            connection: ConnectionKind::ClaudeCode,
+        })
+    }
+
     /// What a run's round fails with when its question was refused: Claude Code's own reason
     /// while no launch would be admitted, else none. Never `Access(None)`, which reads as a
     /// `ChatGPT` sign-in.
@@ -897,6 +918,7 @@ impl Brain {
         self.claude.op(op);
         self.claude_reported(link.as_deref_mut())
             .map_err(|_| Full)?;
+        self.repair_default(link.as_deref_mut())?;
         match link {
             Some(link) => link.control(&self.connections_frame()),
             None => Ok(()),
@@ -911,6 +933,7 @@ impl Brain {
         let changed = self.claude.wake(wake);
         self.claude_reported(link.as_deref_mut())
             .map_err(|_| Full)?;
+        self.repair_default(link.as_deref_mut())?;
         match link {
             Some(link) if changed => link.control(&self.connections_frame()),
             _ => Ok(()),
