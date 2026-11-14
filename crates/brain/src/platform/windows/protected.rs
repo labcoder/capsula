@@ -1057,9 +1057,17 @@ mod tests {
     /// What listing a folder needs.
     const LIST: u32 = FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
 
-    /// A fresh owner-only folder holding a file and a folder. The temp folder won't do: other
-    /// accounts may change it.
-    fn scratch(name: &str) -> PathBuf {
+    /// A fresh owner-only folder holding a file and a folder, removed on drop. The temp folder
+    /// won't do: other accounts may change it.
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    fn scratch(name: &str) -> Scratch {
         let root = super::local_app_data()
             .expect("local app data")
             .join(format!(
@@ -1072,32 +1080,34 @@ mod tests {
         drop(super::owner_only_dir(&root).expect("an owner-only folder"));
         fs::write(root.join("file"), b"contents").expect("a file");
         fs::create_dir(root.join("folder")).expect("a folder");
-        root
+        Scratch(root)
     }
 
     #[test]
     fn the_check_reads_no_file_data_and_lists_only_a_folder() {
-        let root = scratch("check");
-        super::private_tree(&root).expect("a private tree");
-        assert_eq!(granted(&root), [LOOK, LIST]);
+        let scratch = scratch("check");
+        let root = &scratch.0;
+        super::private_tree(root).expect("a private tree");
+        assert_eq!(granted(root), [LOOK, LIST]);
         assert_eq!(granted(&root.join("file")), [LOOK]);
         assert_eq!(granted(&root.join("folder")), [LOOK, LIST]);
-        fs::remove_dir_all(&root).expect("cleaned up");
     }
 
     #[test]
     fn the_delete_reads_no_file_data_and_lists_only_a_folder() {
-        let root = scratch("delete");
-        super::remove_tree(&root).expect("deleted");
+        let scratch = scratch("delete");
+        let root = &scratch.0;
+        super::remove_tree(root).expect("deleted");
         assert!(!root.exists(), "the tree is gone");
-        assert_eq!(granted(&root), [LOOK | DELETE, LIST]);
+        assert_eq!(granted(root), [LOOK | DELETE, LIST]);
         assert_eq!(granted(&root.join("file")), [LOOK | DELETE]);
         assert_eq!(granted(&root.join("folder")), [LOOK | DELETE, LIST]);
     }
 
     #[test]
     fn a_folder_swapped_after_its_check_is_never_listed() {
-        let root = scratch("swap");
+        let scratch = scratch("swap");
+        let root = &scratch.0;
         let folder = root.join("folder");
         let entry = super::open(&folder, Kind::Folder, 0).expect("the folder opens");
         fs::rename(&folder, root.join("moved")).expect("moved while open for its attributes");
@@ -1111,22 +1121,19 @@ mod tests {
             Some(Untrusted::Io),
             "a file never opens to be listed"
         );
-        drop(entry);
-        fs::remove_dir_all(&root).expect("cleaned up");
     }
 
     #[test]
     fn a_file_held_without_sharing_is_still_checked() {
-        let root = scratch("held");
-        let held = File::options()
+        let scratch = scratch("held");
+        let root = &scratch.0;
+        let _held = File::options()
             .read(true)
             .write(true)
             .share_mode(0)
             .open(root.join("file"))
             .expect("held");
-        super::private_tree(&root).expect("a private tree");
-        drop(held);
-        fs::remove_dir_all(&root).expect("cleaned up");
+        super::private_tree(root).expect("a private tree");
     }
 
     #[test]
