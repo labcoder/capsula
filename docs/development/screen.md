@@ -143,7 +143,9 @@ never cross the pipe**. Only the hold's seal exports one image (below).
   frame zeroes the buffer's whole capacity with `zeroize` and frees it; the next capture
   allocates afresh.
 - **Windows.** One D3D11 device for the worker's life, created on the capture thread's first
-  capture. Per ticket: a WGC item for the window, a one-buffer free-threaded pool and a session
+  capture, after `GraphicsCaptureSession::IsSupported`. A no there refuses the capture as
+  `Unsupported`; an error asking is a fault like any other, and either way the next capture asks
+  again. Per ticket: a WGC item for the window, a one-buffer free-threaded pool and a session
   with the cursor off. Border suppression is best-effort: Windows can accept it and still draw its
   yellow border on screen. Frames and the map poll at 1 ms, and a result that is ready at or
   after expiry is released and refused, and nothing late is published. Frame, session and pool
@@ -153,7 +155,7 @@ never cross the pipe**. Only the hold's seal exports one image (below).
   (`DXGI_ERROR_DEVICE_REMOVED`, `_RESET` or `_HUNG`) retires the worker the same way, so the next
   ticket gets a fresh device. Foreign failures are HRESULT codes.
 - **macOS.** `SCScreenshotManager` with `desktopIndependentWindow`, not built yet; other platforms
-  answer `Fault` with `E_NOTIMPL`'s code.
+  refuse every capture as `Unsupported`.
 
 ```mermaid
 sequenceDiagram
@@ -430,6 +432,18 @@ actor's messages and the zeroing reply reader. The image gate takes the platform
 `WINDOW_CAPTURE` as well as the client, so off Windows it reads `Unsupported` even though the
 client starts.
 
+Whether this system can capture a window is the worker's answer, not the brain's. The worker
+asks when it opens its capturer, on a hold's first capture, and a no comes back as the
+`Unsupported` refusal. That hold ends `NotReady`, with no image and no line beyond what
+`NotReady` gives. The brain then clears its window capture flag for the session and sends the
+gate once as `Off(Unsupported)`; nothing turns the flag back on, so a settings write, a catalog
+change or a worker restart leaves it off. Until that first hold the gate reads `On` on a system
+that can't capture. The brain doesn't ask itself because its start-up runs on the process's main
+thread (a current-thread runtime under `block_on`): a WinRT call there joins that thread to the
+process's implicit MTA, and nothing in the brain process picks a COM apartment today. UI
+Automation and OCR run in the screen worker. A cold ask also costs about 27 ms in a dry run
+(debug build, not under the measuring lock), which only a screen hold pays this way.
+
 - **`context(owner, point, until)`** mints a fresh capture id and a ticket whose number is above
   every earlier one (a worker refuses a number it has already spent), minted under the fence's
   lock so tickets reach the worker in order, with `ttl_ms` set to the time left until `until`
@@ -485,7 +499,7 @@ windows; after `CaptureDone`, or for any other lease, a lapse is ignored.
 
 | Class | Worker answers |
 |---|---|
-| `NotReady` | `Expired`, `Busy`, a fault, a loss or the deadline, a lapsed lease, or still `Waiting` when the words are; `Reused` too, with a `debug_assert`, because only a brain bug sends it |
+| `NotReady` | `Expired`, `Unsupported` (which also turns screen holds off for the session, below), `Busy`, a fault, a loss or the deadline, a lapsed lease, or still `Waiting` when the words are; `Reused` too, with a `debug_assert`, because only a brain bug sends it |
 | `NothingThere` | `NoWindow` |
 | `CantShare` | `Minimized`, `Cloaked`, `Elevated`, `Protected`, `Excluded` |
 | `Unreadable` | `Unmasked`, `Ambiguous` |

@@ -31,7 +31,7 @@ pub(super) struct CaptureThread {
 
 impl CaptureThread {
     pub(super) fn open(
-        mut open: impl FnMut() -> Result<Box<dyn Capturer>, i32> + Send + 'static,
+        mut open: impl FnMut() -> Result<Box<dyn Capturer>, Failure> + Send + 'static,
         wake: Wake,
     ) -> Result<Self, i32> {
         let (jobs, requests) = mpsc::sync_channel::<Job>(1);
@@ -45,7 +45,7 @@ impl CaptureThread {
                         let result = (|| {
                             let capturer = match &mut capturer {
                                 Some(capturer) => capturer,
-                                None => capturer.insert(open().map_err(Failure::Fault)?),
+                                None => capturer.insert(open()?),
                             };
                             let target = capturer.pointer_window(job.point, job.shell)?;
                             capturer

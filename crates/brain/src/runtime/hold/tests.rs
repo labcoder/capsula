@@ -1487,6 +1487,7 @@ fn every_worker_answer_closes_a_part_with_its_class() {
         (Closed::Fault(5), NotReady),
         (Closed::Lost(WorkerLost::Lost), NotReady),
         (refused(Refusal::Expired), NotReady),
+        (refused(Refusal::Unsupported), NotReady),
         (refused(Refusal::NoWindow), NothingThere),
         (refused(Refusal::Minimized), CantShare),
         (refused(Refusal::Cloaked), CantShare),
@@ -1794,6 +1795,111 @@ async fn a_screen_worker_that_cant_start_leaves_screen_holds_unsupported() {
         ControlToShell::ScreenHolds(ScreenHolds::Off(ScreenOff::Unsupported))
     );
     brain.close().await;
+}
+
+/// Every gate message the shell was sent since the last call.
+fn gates(output: &mut mpsc::Receiver<Vec<u8>>) -> Vec<ScreenHolds> {
+    use kumochi_protocol::frame;
+    use kumochi_protocol::message::ControlToShell;
+    std::iter::from_fn(|| output.try_recv().ok())
+        .filter_map(|bytes| {
+            match frame::decode::<ControlToShell>(&bytes[frame::HEADER_LEN..]).expect("decodes") {
+                ControlToShell::ScreenHolds(state) => Some(state),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn unanswered() -> ScreenPart {
+    ScreenPart::Waiting {
+        generation: None,
+        lease: LEASE,
+        stop: Arc::default(),
+    }
+}
+
+#[tokio::test]
+async fn a_system_that_cant_capture_ends_the_hold_not_ready_and_holds_stay_unsupported() {
+    use crate::screen::{Closed, Refusal};
+    use kumochi_protocol::message::ScreenOff;
+    let scratch = Scratch::new("hold-screen-cant-capture");
+    let (mut brain, _release, _decoded, _fetch) =
+        crate::runtime::tests::holds::input(&scratch, Vec::new(), "not submitted").await;
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    let (rig, sol, _luna) = sees_on_sol(&mut brain);
+    brain.holds.window_capture = true;
+    brain.screen_holds_changed(&mut link).unwrap();
+    assert!(matches!(gates(&mut output)[..], [ScreenHolds::On { .. }]));
+    screen_hold(&mut brain, KEY, unanswered());
+    for _ in 0..2 {
+        let event = ScreenEvent {
+            key: KEY,
+            generation: None,
+            outcome: screen::ending(Closed::Refused(Refusal::Unsupported)),
+        };
+        brain.hold_screen_event(event, &mut link).unwrap();
+    }
+    assert!(matches!(
+        brain.holds.pending.as_ref().unwrap().screen,
+        ScreenPart::Closed(ScreenClass::NotReady)
+    ));
+    assert_eq!(
+        gates(&mut output),
+        [ScreenHolds::Off(ScreenOff::Unsupported)]
+    );
+    for on in [false, true] {
+        let pending = brain.config.stage(SettingsOp::SetScreenHolds(on)).unwrap();
+        pending.write().unwrap();
+        brain
+            .settings_done((0, None, None, Ok((pending, Ok(())))), Some(&mut link))
+            .unwrap();
+        brain.screen_holds_changed(&mut link).unwrap();
+    }
+    brain.attach_screen(Arc::new(HoldClient::new(rig.handle.clone())));
+    brain.screen_holds_changed(&mut link).unwrap();
+    assert_eq!(gates(&mut output), []);
+    assert_eq!(
+        brain.screen_gate(Some(&sol)),
+        ScreenHolds::Off(ScreenOff::Unsupported)
+    );
+}
+
+#[tokio::test]
+async fn a_capture_fault_ends_the_hold_not_ready_and_leaves_screen_holds_on() {
+    use crate::screen::Closed;
+    let scratch = Scratch::new("hold-screen-fault");
+    let (mut brain, _release, _decoded, _fetch) =
+        crate::runtime::tests::holds::input(&scratch, Vec::new(), "not submitted").await;
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    let (_rig, sol, _luna) = sees_on_sol(&mut brain);
+    brain.holds.window_capture = true;
+    brain.screen_holds_changed(&mut link).unwrap();
+    gates(&mut output);
+    screen_hold(&mut brain, KEY, unanswered());
+    let event = ScreenEvent {
+        key: KEY,
+        generation: None,
+        outcome: screen::ending(Closed::Fault(0x8000_4001_u32.cast_signed())),
+    };
+    brain.hold_screen_event(event, &mut link).unwrap();
+    assert!(matches!(
+        brain.holds.pending.as_ref().unwrap().screen,
+        ScreenPart::Closed(ScreenClass::NotReady)
+    ));
+    assert_eq!(gates(&mut output), []);
+    assert!(matches!(
+        brain.screen_gate(Some(&sol)),
+        ScreenHolds::On { .. }
+    ));
 }
 
 #[tokio::test]

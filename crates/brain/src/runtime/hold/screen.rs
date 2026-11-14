@@ -58,6 +58,9 @@ pub(super) enum Outcome {
     Held,
     Sealed(ScreenContext),
     Closed(ScreenClass),
+    /// The worker's system can't capture a window; the part closes `NotReady` and the brain
+    /// remembers it for the session.
+    Unsupported,
 }
 
 impl std::fmt::Debug for ScreenEvent {
@@ -66,6 +69,7 @@ impl std::fmt::Debug for ScreenEvent {
             Outcome::Held => "Held",
             Outcome::Sealed(_) => "Sealed",
             Outcome::Closed(_) => "Closed",
+            Outcome::Unsupported => "Unsupported",
         };
         f.debug_struct("ScreenEvent")
             .field("key", &self.key)
@@ -134,6 +138,7 @@ impl super::Holds {
             _ if *holder != generation => {}
             Outcome::Sealed(context) => hold.screen = ScreenPart::Ready(context),
             Outcome::Closed(class) => hold.screen = ScreenPart::Closed(class),
+            Outcome::Unsupported => hold.screen = ScreenPart::Closed(ScreenClass::NotReady),
         }
     }
 
@@ -223,7 +228,7 @@ async fn work(
     let held = match client.context(key.into(), point, until).await {
         Ok(held) => held,
         Err(closed) => {
-            if report(None, Outcome::Closed(class(closed))).await.is_err() {
+            if report(None, ending(closed)).await.is_err() {
                 tracing::debug!("a held screen answer came after its brain");
             }
             return;
@@ -234,7 +239,7 @@ async fn work(
     let mut outcome = None;
     if !ended {
         match client.walk(&held, until).await {
-            Err(closed) => outcome = Some(Outcome::Closed(class(closed))),
+            Err(closed) => outcome = Some(ending(closed)),
             Ok(_) => ended = stop.load(Ordering::SeqCst),
         }
     }
@@ -243,7 +248,7 @@ async fn work(
             Ok(context) => Outcome::Sealed(context),
             Err(closed) => {
                 release(&client, key, generation).await;
-                Outcome::Closed(class(closed))
+                ending(closed)
             }
         });
     } else {
@@ -277,6 +282,16 @@ async fn release(client: &HoldClient, key: HoldKey, holder: Option<Generation>) 
     }
 }
 
+/// How an answer that isn't the one asked for ends the part. A system that can't capture is told
+/// apart, so the brain can stop offering screen holds.
+pub(super) fn ending(closed: Closed) -> Outcome {
+    if closed == Closed::Refused(Refusal::Unsupported) {
+        Outcome::Unsupported
+    } else {
+        Outcome::Closed(class(closed))
+    }
+}
+
 /// The class of the answer that ends a part. Every refusal is named, so a new one doesn't
 /// compile until it has a class.
 pub(super) fn class(closed: Closed) -> ScreenClass {
@@ -285,7 +300,7 @@ pub(super) fn class(closed: Closed) -> ScreenClass {
         Closed::Refused(refusal) => refusal,
     };
     match refusal {
-        Refusal::Expired => ScreenClass::NotReady,
+        Refusal::Expired | Refusal::Unsupported => ScreenClass::NotReady,
         Refusal::Reused => {
             debug_assert!(false, "a hold's ticket or walk was spent twice");
             ScreenClass::NotReady
