@@ -291,7 +291,8 @@ refused with `Error(VoiceUnavailable)` and its one
 `SettingsOp::SetDefaultModel` under epoch 0, which no connection has, so a shell hears only the
 settled `SettingsView` (see [accounts](accounts.md#model-catalog)). Explicit user changes remain
 unconditional; queued epoch-0 repairs recompute against the latest committed choice and catalog
-at the write boundary, so they cannot replace an acknowledged choice on another connection.
+at the write boundary, so they cannot replace an acknowledged choice on another connection. A
+repair with nothing left to write changes nothing, pending holds included.
 The raw table reads as absent, valid or invalid intent. A table missing only `connection` means
 ChatGPT. An unknown effort keeps the connection and model, displays Medium and executes at Low,
 without rewriting the table. A malformed table that names ChatGPT or no connection, or a value

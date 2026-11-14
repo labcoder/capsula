@@ -199,7 +199,7 @@ impl Coordinator {
         if !calling && current.tools.items.is_empty() {
             return self.complete(run, effects);
         }
-        if current.connection.is_none() {
+        if current.route.is_none() {
             return self.fail(run, Failure::Engine, effects);
         }
         if calling && !current.tools.dispatched {
@@ -267,7 +267,13 @@ impl Coordinator {
                 return Ok(());
             }
         }
-        let Some(connection) = current.connection else {
+        // shortcut: a stored native body has no kind, so only a `ChatGPT` round may write one; A2
+        // adds the kind.
+        let Some(connection) = current
+            .route
+            .filter(|route| route.kind == kumochi_protocol::message::ConnectionKind::ChatGpt)
+            .map(|route| route.tag)
+        else {
             return self.fail(run, Failure::Engine, effects);
         };
         let round = current.build.as_ref().map_or(1, |build| build.key().round);

@@ -42,6 +42,7 @@ use crate::engines::{RunRequest, TurnEvent};
 use crate::store::{Failure, Interruption, RunEnd, SceneState};
 
 pub use admission::{BuildContext, BuildKey, ContextBuilt, Unbuilt};
+pub(crate) use availability::model_unavailable;
 pub use availability::{Availability, Ready};
 pub use cards::{CardRead, Cards};
 pub use hold::{HoldKey, HoldRead, HoldSnapshot};
@@ -308,8 +309,8 @@ pub enum Input {
     },
     /// The shell renamed a task or set a thread's model.
     ThreadOp(ThreadOp),
-    /// Whether runs can be answered changed.
-    Engines(Availability),
+    /// Whether runs on a connection kind can be answered changed.
+    Engines(kumochi_protocol::message::ConnectionKind, Availability),
     /// A `CommitCall` finished.
     CallCommitted {
         /// The call.
@@ -561,9 +562,11 @@ struct Run {
     untold: Option<kumochi_protocol::message::GestureId>,
     /// The round's current build; the engine starts once it's admitted.
     build: Option<admission::Build>,
-    /// The connection that was ready when the run's turn arrived; none means the run failed
-    /// then.
-    connection: Option<crate::context::ConnectionTag>,
+    /// The sign-in each kind had ready when the run's turn arrived; a kind's entry goes when that
+    /// kind changes before the first build.
+    arrived: availability::Arrived,
+    /// What the run answers on, from its first admitted build on.
+    route: Option<crate::context::Route>,
     /// The round that compacted inline since the run's last admitted build.
     compacted: Option<u32>,
     /// The draw call the engine's steps stream in, once it starts.
@@ -678,8 +681,11 @@ pub struct Coordinator {
     sends: u64,
     /// A lease failed closed: nothing is granted again until the brain restarts.
     transport_failed: bool,
-    /// Whether runs can be answered, and on which connection.
+    /// Whether `ChatGPT` runs can be answered, and on which sign-in.
     availability: Availability,
+    /// The other connections, which no engine answers yet, so they stay unavailable.
+    anthropic_key: Availability,
+    claude_code: Availability,
     /// The one background job.
     job: Option<job::Job>,
     /// The signed-in account's generation, while one can send.
@@ -740,6 +746,8 @@ impl Coordinator {
             sends: 0,
             transport_failed: false,
             availability: Availability::Unavailable(availability::sign_in_needed()),
+            anthropic_key: Availability::Unavailable(availability::model_unavailable()),
+            claude_code: Availability::Unavailable(availability::model_unavailable()),
             job: None,
             account: None,
             signed_out: None,
@@ -941,7 +949,7 @@ impl Coordinator {
                 self.provider_sources_changed(&mut effects);
             }
             Input::ThreadOp(op) => self.thread_op(op, &mut effects),
-            Input::Engines(now) => self.available(now, &mut effects),
+            Input::Engines(kind, now) => self.available(kind, now, &mut effects),
             Input::ReadFinished(done) => self.read_finished(done, &mut effects)?,
             Input::CallCommitted { key, outcome, then } => match outcome {
                 crate::dispatch::Committed::Done => {
@@ -1136,6 +1144,9 @@ impl Coordinator {
             .as_ref()
             .and(hold.as_ref())
             .map(|hold| hold.key.gesture);
+        let arrived = hold
+            .as_ref()
+            .map_or_else(|| self.arrived_now(), |hold| hold.arrived);
         self.current = Some(Run {
             control: crate::recall::control::CancelOnDrop(control),
             id: run,
@@ -1156,7 +1167,8 @@ impl Coordinator {
             hold,
             screen,
             build: None,
-            connection: self.connection(),
+            arrived,
+            route: None,
             compacted: None,
             draw: None,
             draw_calls: Vec::new(),
@@ -1190,7 +1202,9 @@ impl Coordinator {
 
     /// Fails the run `turn` just started while nothing can answer it; the turn is kept.
     fn unanswered(&mut self, run: RunId, effects: &mut Vec<Effect>) {
-        if let Availability::Unavailable(reason) = &self.availability {
+        if let Availability::Unavailable(reason) = &self.availability
+            && self.arrived_now() == availability::Arrived::default()
+        {
             let reason = reason.clone();
             self.fail_with(run, Failure::Engine, reason, effects)
                 .expect("the run is current");

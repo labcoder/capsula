@@ -1,13 +1,17 @@
-//! Whether a run may be answered, and on which connection (docs/development/runs.md,
-//! "Availability"). The runtime reports the account's state as [`Availability`]. A run is bound
-//! to the connection that was ready when its turn arrived, and it ends as soon as that
-//! connection stops being the ready one, even while its turn is still being written. The model check (S4) runs once, on the first build.
+//! Whether a run may be answered, and on which route (docs/development/runs.md, "Availability").
+//! The runtime reports each connection kind's state as [`Availability`]. A turn records the
+//! sign-in each kind had ready when it arrived, and its first build binds the route of its
+//! choice's kind under that sign-in. Before then, a change to a kind takes it out of the arrival
+//! and the run ends once none is left; after, only a change to the route's own kind ends it. The
+//! model check (S4) runs once, on the first build, against the route's catalog.
 
-use kumochi_protocol::message::{Action, ErrorKey, ModelChoice, ModelInfo, RunId, UserError};
+use kumochi_protocol::message::{
+    Action, ConnectionKind, ErrorKey, ModelChoice, ModelInfo, RunId, UserError,
+};
 
 use super::{Coordinator, Effect, SendKey, Stale};
 use crate::connections::model::error::Failure as Stream;
-use crate::context::ConnectionTag;
+use crate::context::{ConnectionTag, Route};
 use crate::engines::{EngineFailure, Finish};
 use crate::store::Failure;
 
@@ -55,13 +59,36 @@ impl Ready {
     }
 }
 
+/// The sign-in each connection kind had ready when a turn arrived. A run is bound to one of
+/// them at its first build, by its model choice's kind.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Arrived([Option<ConnectionTag>; 3]);
+
+impl Arrived {
+    pub(super) fn get(self, kind: ConnectionKind) -> Option<ConnectionTag> {
+        self.0[slot(kind)]
+    }
+
+    pub(super) fn is_empty(self) -> bool {
+        self.0.iter().all(Option::is_none)
+    }
+}
+
+const fn slot(kind: ConnectionKind) -> usize {
+    match kind {
+        ConnectionKind::ChatGpt => 0,
+        ConnectionKind::AnthropicKey => 1,
+        ConnectionKind::ClaudeCode => 2,
+    }
+}
+
 /// The reason a run can't go on without a signed-in account.
 pub(crate) fn sign_in_needed() -> UserError {
     UserError::new(ErrorKey::SignInNeeded, Vec::new(), vec![Action::SignIn])
         .expect("one action is within the limit")
 }
 
-fn model_unavailable() -> UserError {
+pub(crate) fn model_unavailable() -> UserError {
     UserError::new(
         ErrorKey::ModelUnavailable,
         Vec::new(),
@@ -71,43 +98,99 @@ fn model_unavailable() -> UserError {
 }
 
 impl Coordinator {
-    /// The account changed. A catalog-only change keeps the current run; any other change ends
-    /// a run bound to the old connection, so it sends nothing more.
-    pub(super) fn available(&mut self, now: Availability, effects: &mut Vec<Effect>) {
-        self.availability = now;
-        let Some((run, Some(connection))) = self
+    /// Whether runs on `kind` can be answered now.
+    pub(super) fn availability_of(&self, kind: ConnectionKind) -> &Availability {
+        match kind {
+            ConnectionKind::ChatGpt => &self.availability,
+            ConnectionKind::AnthropicKey => &self.anthropic_key,
+            ConnectionKind::ClaudeCode => &self.claude_code,
+        }
+    }
+
+    /// The sign-in each kind has ready now, which a new turn records.
+    pub(super) fn arrived_now(&self) -> Arrived {
+        let mut arrived = Arrived::default();
+        for kind in [
+            ConnectionKind::ChatGpt,
+            ConnectionKind::AnthropicKey,
+            ConnectionKind::ClaudeCode,
+        ] {
+            if let Availability::Ready(ready) = self.availability_of(kind) {
+                arrived.0[slot(kind)] = Some(ready.connection);
+            }
+        }
+        arrived
+    }
+
+    /// `kind` changed. A catalog-only change keeps the current run. Any other change ends a run
+    /// bound to that kind, and takes the kind out of an unbound run's arrival, which ends the run
+    /// once no kind is left; a change to another kind touches neither.
+    pub(super) fn available(
+        &mut self,
+        kind: ConnectionKind,
+        now: Availability,
+        effects: &mut Vec<Effect>,
+    ) {
+        let entry = match kind {
+            ConnectionKind::ChatGpt => &mut self.availability,
+            ConnectionKind::AnthropicKey => &mut self.anthropic_key,
+            ConnectionKind::ClaudeCode => &mut self.claude_code,
+        };
+        *entry = now;
+        let Some((run, route, arrived)) = self
             .current
             .as_ref()
-            .map(|current| (current.id, current.connection))
+            .map(|current| (current.id, current.route, current.arrived))
         else {
             return;
         };
-        if let Some(reason) = self.refusal(connection) {
+        let reason = match route {
+            Some(route) if route.kind == kind => self.refusal(route),
+            Some(_) => None,
+            None => {
+                let Some(tag) = arrived.get(kind) else {
+                    return;
+                };
+                let Some(reason) = self.refusal(Route { kind, tag }) else {
+                    return;
+                };
+                let current = self.current.as_mut().expect("the run is current");
+                current.arrived.0[slot(kind)] = None;
+                current.arrived.is_empty().then_some(reason)
+            }
+        };
+        if let Some(reason) = reason {
             self.fail_with(run, Failure::Engine, reason, effects)
                 .expect("the run is current");
         }
     }
 
-    /// The connection `run` is bound to, while it's current or ending.
-    pub(crate) fn bound(&self, run: RunId) -> Option<ConnectionTag> {
+    /// The `ChatGPT` sign-in `run` arrived under, while it's current or ending: the tag its
+    /// stored native items replay under. Never a bearer's: `sending` decides that.
+    pub(crate) fn replay_tag(&self, run: RunId) -> Option<ConnectionTag> {
         self.current
             .iter()
             .chain(&self.ending)
             .find(|found| found.id == run)
-            .and_then(|found| found.connection)
+            .and_then(|found| found.arrived.get(ConnectionKind::ChatGpt))
     }
 
-    /// The connection a send under `key` may take the bearer of: a round's run's own, only while
-    /// that run is current, and the ready one for a job.
+    /// The `ChatGPT` sign-in a send under `key` may take the bearer of: a round's, only while its
+    /// run is current and bound to `ChatGPT`, and the ready one for a job.
     pub(crate) fn sending(&self, key: SendKey) -> Option<ConnectionTag> {
         match key {
-            SendKey::Build(key) if self.current_run() == Some(key.run) => self.bound(key.run),
-            SendKey::Build(_) => None,
+            SendKey::Build(key) => self
+                .current
+                .as_ref()
+                .filter(|run| run.id == key.run)
+                .and_then(|run| run.route)
+                .filter(|route| route.kind == ConnectionKind::ChatGpt)
+                .map(|route| route.tag),
             SendKey::Job(_) => self.connection(),
         }
     }
 
-    /// The ready connection, which a new turn's run is bound to.
+    /// `ChatGPT`'s ready sign-in.
     pub(super) fn connection(&self) -> Option<ConnectionTag> {
         match &self.availability {
             Availability::Ready(ready) => Some(ready.connection),
@@ -115,20 +198,41 @@ impl Coordinator {
         }
     }
 
-    /// Why a run bound to `connection` can't go on, if it can't.
-    pub(super) fn refusal(&self, connection: ConnectionTag) -> Option<UserError> {
-        match &self.availability {
-            Availability::Ready(ready) if ready.connection == connection => None,
+    /// Why a run on `route` can't go on, if it can't: another sign-in on its kind needs a sign-in,
+    /// and an unavailable kind gives its own reason.
+    pub(super) fn refusal(&self, route: Route) -> Option<UserError> {
+        match self.availability_of(route.kind) {
+            Availability::Ready(ready) if ready.connection == route.tag => None,
             Availability::Ready(_) => Some(sign_in_needed()),
             Availability::Unavailable(reason) => Some(reason.clone()),
         }
     }
 
-    /// S4: a run's model must be in the catalog its first build ran against. The thread's
-    /// choice is never changed, and nothing goes to another model.
+    /// The route a run that arrived with `arrived` takes for `choice`: the choice's kind, else
+    /// `ChatGPT`'s, under the sign-in that kind had at arrival. A kind that wasn't ready then is
+    /// refused even when it's ready now, so a later sign-in never answers the run.
+    pub(super) fn route_for(
+        &self,
+        arrived: Arrived,
+        choice: Option<&ModelChoice>,
+    ) -> Result<Route, UserError> {
+        let kind = choice.map_or(ConnectionKind::ChatGpt, |choice| choice.connection);
+        match (arrived.get(kind), self.availability_of(kind)) {
+            (Some(tag), _) => Ok(Route { kind, tag }),
+            (None, Availability::Unavailable(reason)) => Err(reason.clone()),
+            (None, Availability::Ready(_)) => Err(sign_in_needed()),
+        }
+    }
+
+    /// S4: a run's model must be in its route's catalog, as its first build read it. The
+    /// thread's choice is never changed, and nothing goes to another model.
     /// shortcut: the catalog lists no efforts, so the effort isn't checked; 18b adds them.
-    pub(super) fn unlisted(&self, choice: Option<&ModelChoice>) -> Option<UserError> {
-        let Availability::Ready(ready) = &self.availability else {
+    pub(super) fn unlisted(
+        &self,
+        kind: ConnectionKind,
+        choice: Option<&ModelChoice>,
+    ) -> Option<UserError> {
+        let Availability::Ready(ready) = self.availability_of(kind) else {
             return Some(sign_in_needed());
         };
         let listed = choice
@@ -143,11 +247,7 @@ impl Coordinator {
 
     /// What the shell hears when a round fails: the stream's own meaning, or, when it got no
     /// bearer, the account's own reason, else why the run's connection can't send. The fixture's provider failure and an engine's interruption say nothing.
-    pub(super) fn engine_reason(
-        &self,
-        connection: Option<ConnectionTag>,
-        finish: Finish,
-    ) -> Option<UserError> {
+    pub(super) fn engine_reason(&self, route: Option<Route>, finish: Finish) -> Option<UserError> {
         match finish {
             Finish::Truncated => Some(Stream::Truncated.user_error()),
             Finish::Failed(EngineFailure::Stream(failure)) => Some(failure.user_error()),
@@ -156,8 +256,8 @@ impl Coordinator {
                 Some(error)
             }
             Finish::Failed(EngineFailure::Access(None)) => Some(
-                connection
-                    .and_then(|connection| self.refusal(connection))
+                route
+                    .and_then(|route| self.refusal(route))
                     .unwrap_or_else(sign_in_needed),
             ),
             Finish::Completed

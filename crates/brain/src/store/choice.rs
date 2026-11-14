@@ -61,7 +61,8 @@ impl StoredChoice {
         }
     }
 
-    /// `ChatGPT` remains the only executable route until route-aware admission replaces this fence.
+    /// The choice a run executes: the saved one on any connection, else `default`; admission
+    /// decides whether its connection can answer.
     pub(crate) fn execution(
         self,
         default: Option<ModelChoice>,
@@ -79,12 +80,6 @@ impl StoredChoice {
                 effort: effort.unwrap_or(Effort::Low),
             }),
         };
-        if choice
-            .as_ref()
-            .is_some_and(|choice| choice.connection != ConnectionKind::ChatGpt)
-        {
-            return Err(StoreError::Read);
-        }
         Ok(choice)
     }
 }
@@ -177,21 +172,26 @@ mod tests {
     }
 
     #[test]
-    fn displaying_a_saved_route_never_activates_it() {
+    fn a_saved_route_is_shown_and_read_as_saved() {
         for connection in ["claude_code", "anthropic_key"] {
             let stored = StoredChoice::decode(Some("same-slug"), Some("ultra"), Some(connection));
             let shown = stored.clone().display().expect("page").expect("selected");
             assert_ne!(shown.connection, ConnectionKind::ChatGpt);
             assert_eq!(shown.model.as_str(), "same-slug");
             assert_eq!(shown.effort, Effort::Medium);
-            assert!(matches!(
-                stored.execution(Some(default())),
-                Err(StoreError::Read)
-            ));
-            assert!(matches!(
-                StoredChoice::Absent.execution(Some(shown)),
-                Err(StoreError::Read)
-            ));
+            assert_eq!(
+                stored.execution(Some(default())).expect("read"),
+                Some(ModelChoice {
+                    effort: Effort::Low,
+                    ..shown.clone()
+                })
+            );
+            assert_eq!(
+                StoredChoice::Absent
+                    .execution(Some(shown.clone()))
+                    .expect("read"),
+                Some(shown)
+            );
         }
     }
 }

@@ -322,7 +322,7 @@ async fn admission_boundaries(stage: AdmissionStage) {
                 Seen::StoreOpQueued(StoreOp::BeginTurn { .. })
             ));
         }
-        brain.coordinator =
+        *brain.coordinator =
             Coordinator::ready_for_tests(ThreadId(1), ThreadId(1), RunId(0), Vec::new());
         brain.close().await;
         let store = crate::store::Store::open(&scratch.db()).unwrap();
@@ -1116,8 +1116,14 @@ async fn accepted_connection_change_away_and_back_and_late_result_cannot_revive_
     let flag = Arc::clone(&brain.holds.pending.as_ref().unwrap().cancel);
     let mut away = Ready::fixture();
     away.connection = ConnectionTag(21);
-    brain.offline(Input::Engines(Availability::Ready(away)));
-    brain.offline(Input::Engines(Availability::Ready(Ready::fixture())));
+    brain.offline(Input::Engines(
+        kumochi_protocol::message::ConnectionKind::ChatGpt,
+        Availability::Ready(away),
+    ));
+    brain.offline(Input::Engines(
+        kumochi_protocol::message::ConnectionKind::ChatGpt,
+        Availability::Ready(Ready::fixture()),
+    ));
     assert!(flag.load(Ordering::SeqCst));
     brain
         .hold_event(
@@ -1461,12 +1467,13 @@ fn closers(thread: ThreadId) -> Vec<Closer> {
             after_turns: 0,
             resend: false,
         }),
-        fence(Input::Engines(crate::coordinator::Availability::Ready(
-            crate::coordinator::Ready {
+        fence(Input::Engines(
+            kumochi_protocol::message::ConnectionKind::ChatGpt,
+            crate::coordinator::Availability::Ready(crate::coordinator::Ready {
                 connection: crate::context::ConnectionTag(77),
                 ..crate::coordinator::Ready::fixture()
-            },
-        ))),
+            }),
+        )),
         Closer::Event(Event::Deadline),
         Closer::Event(Event::Decoded(KEY, SttResult::Text("words".into()))),
         Closer::Invalidate(HoldStatus::Cancelled),
@@ -2177,6 +2184,77 @@ async fn turning_screen_holds_off_closes_the_pending_part_and_withdraws_the_runs
         ),
         "only turning it off closes a part"
     );
+    brain.holds.lost();
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn a_pending_hold_on_another_kind_ends_only_on_its_own_kinds_change() {
+    use crate::context::ConnectionTag;
+    use crate::coordinator::Ready;
+    use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
+    let scratch = Scratch::new("hold-route-fence");
+    let mut brain = test_support::brain(&scratch, "");
+    let claude = |input| Input::Engines(ConnectionKind::ClaudeCode, Availability::Ready(input));
+    let away = || Ready {
+        connection: ConnectionTag(21),
+        ..Ready::fixture()
+    };
+    brain.offline(claude(Ready::fixture()));
+    recording(&mut brain);
+    let hold = brain.holds.pending.as_mut().unwrap();
+    hold.snapshot.as_mut().unwrap().defaults.choice = Some(ModelChoice {
+        model: ModelSlug::new("fixture-model").unwrap(),
+        effort: Effort::High,
+        connection: ConnectionKind::ClaudeCode,
+    });
+    let flag = Arc::clone(&hold.cancel);
+    brain.offline(Input::Engines(
+        ConnectionKind::ChatGpt,
+        Availability::Ready(away()),
+    ));
+    brain.offline(claude(Ready::fixture()));
+    assert!(
+        !flag.load(Ordering::SeqCst),
+        "ChatGPT's change and Claude Code's equal state leave it"
+    );
+    brain.offline(claude(away()));
+    assert!(
+        flag.load(Ordering::SeqCst),
+        "its own kind's change fails it"
+    );
+    brain.holds.lost();
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn a_queued_repair_with_nothing_to_write_leaves_a_pending_hold_pending() {
+    use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug, SettingsOp};
+    let scratch = Scratch::new("hold-empty-repair");
+    let mut brain = test_support::brain(&scratch, "");
+    recording(&mut brain);
+    let flag = Arc::clone(&brain.holds.pending.as_ref().unwrap().cancel);
+    assert_eq!(
+        brain.repaired_default(),
+        None,
+        "no catalog, so nothing to repair"
+    );
+    brain
+        .settings_ops
+        .push_back(crate::runtime::settings::Queued {
+            change: crate::runtime::settings::Change::User(SettingsOp::SetDefaultModel(
+                ModelChoice {
+                    model: ModelSlug::new("fixture-model").unwrap(),
+                    effort: Effort::High,
+                    connection: ConnectionKind::ChatGpt,
+                },
+            )),
+            epoch: crate::runtime::settings::BRAIN,
+        });
+    brain.pump_settings(None).unwrap();
+    assert!(!flag.load(Ordering::SeqCst));
+    assert!(brain.settings_ops.is_empty());
+    assert!(brain.config_write.is_none(), "nothing was written");
     brain.holds.lost();
     brain.close().await;
 }

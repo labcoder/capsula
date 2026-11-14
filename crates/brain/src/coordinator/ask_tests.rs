@@ -135,8 +135,11 @@ fn an_ask_starts_a_run_in_the_scenes_thread_with_the_parts_text_and_the_shell_fo
 fn a_signed_out_ask_is_focused_before_it_fails() {
     let scratch = Scratch::new("ask-signed-out");
     let (mut core, scene) = drawn(&scratch);
-    core.handle(Input::Engines(Availability::Unavailable(sign_in_needed())))
-        .expect("never stale");
+    core.handle(Input::Engines(
+        kumochi_protocol::message::ConnectionKind::ChatGpt,
+        Availability::Unavailable(sign_in_needed()),
+    ))
+    .expect("never stale");
     let effects = core.handle(ask(scene, handle(1))).expect("not stale");
     let focus = effects.iter().position(|effect| {
         *effect
@@ -357,7 +360,10 @@ fn a_cut_at_each_stage_before_the_grant_leaves_the_ask_nothing_to_send() {
             let after = core.turns_read;
             let effects = core.handle(match cut {
                 Cut::Delete => delete(T, after),
-                Cut::SignOut => Input::Engines(Availability::Unavailable(sign_in_needed())),
+                Cut::SignOut => Input::Engines(
+                    kumochi_protocol::message::ConnectionKind::ChatGpt,
+                    Availability::Unavailable(sign_in_needed()),
+                ),
                 Cut::Replace => typed(),
             });
             assert!(!advances(&effects), "{stage:?} {cut:?}");
