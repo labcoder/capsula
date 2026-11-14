@@ -1492,48 +1492,51 @@ async fn a_catalog_read_while_connected_sends_the_screen_gate_it_moved() {
     drop(rig);
 }
 
-/// A sign-out the shell starts clears the catalog at once, so the shell hears the gate move
-/// before the sign-out finishes.
+/// A sign-out the shell sends clears the catalog at once, so its own control frame sends the
+/// gate it moved, before the credential thread or the revocation answers anything.
 #[tokio::test]
-async fn a_sign_out_from_the_shell_sends_the_gate_before_the_sign_out_ends() {
+async fn a_sign_out_from_the_shell_sends_the_gate_it_moved_at_once() {
     use kumochi_protocol::message::{ScreenHolds, ScreenOff};
     let scratch = Scratch::new("account-sign-out-screen-gate");
     let store = FakeStore::default();
     let (mut brain, rig) = luna_with_a_screen(&scratch, &store, Catalog::answering([listing()]));
-    let ((control, data), mut shell) = duplex();
+    let (out, mut output) = mpsc::channel(64);
+    let queue = std::cell::RefCell::new(crate::runtime::data::DataQueue::new(
+        crate::runtime::window(),
+    ));
+    let ready = tokio::sync::Notify::new();
     let mut tap = Tap::from_env();
-    let cant_see = ControlToShell::ScreenHolds(ScreenHolds::Off(ScreenOff::ModelCantSee));
-    let client = async {
-        loop {
-            let next = timeout(PATIENCE, shell.next_control())
-                .await
-                .expect("in time");
-            if next.expect("readable").as_ref() == Some(&cant_see) {
-                break;
-            }
-        }
-        shell
-            .send(&ControlToBrain::AccountOp(AccountOp::SignOut))
-            .await;
-        loop {
-            let next = timeout(PATIENCE, shell.next_control())
-                .await
-                .expect("in time");
-            match next.expect("readable").expect("open") {
-                ControlToShell::ScreenHolds(state) => {
-                    assert_eq!(state, ScreenHolds::Off(ScreenOff::NotReady));
-                    break;
+    let mut link = crate::runtime::Link::new(&out, &queue, &ready, &mut tap);
+    while brain.account.models().is_none() {
+        let input = timeout(PATIENCE, brain.account.next())
+            .await
+            .expect("in time");
+        brain.account_input(input, Some(&mut link)).expect("room");
+    }
+    brain.screen_holds_changed(&mut link).expect("room");
+    let gates = |output: &mut mpsc::Receiver<Vec<u8>>| {
+        std::iter::from_fn(|| output.try_recv().ok())
+            .filter_map(|bytes| {
+                match kumochi_protocol::frame::decode(&bytes[kumochi_protocol::frame::HEADER_LEN..])
+                    .expect("a control frame")
+                {
+                    ControlToShell::ScreenHolds(state) => Some(state),
+                    _ => None,
                 }
-                ControlToShell::Account(AccountView::SignedOut { .. }) => {
-                    panic!("the gate waited for the sign-out to end")
-                }
-                _ => {}
-            }
-        }
-        drop(shell);
+            })
+            .collect::<Vec<_>>()
     };
-    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
-    assert_eq!(ended, Ended::Lost);
+    assert_eq!(
+        gates(&mut output),
+        [ScreenHolds::Off(ScreenOff::ModelCantSee)]
+    );
+    let sign_out = ControlToBrain::AccountOp(AccountOp::SignOut);
+    assert!(matches!(
+        brain.control_frame(sign_out, 0, &mut link, &mut None),
+        Ok(None)
+    ));
+    assert_eq!(gates(&mut output), [ScreenHolds::Off(ScreenOff::NotReady)]);
+    drop(link);
     brain.close().await;
     drop(rig);
 }
