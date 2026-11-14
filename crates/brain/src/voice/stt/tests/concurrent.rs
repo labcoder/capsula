@@ -299,6 +299,7 @@ fn either_available_slot_loss_is_observed_before_any_sibling_success() {
                 waiting: None,
                 finished: [None, None],
                 decode_cut: None,
+                hold_after_ready: false,
                 unload_after: None,
                 idle_since: std::time::Instant::now(),
                 shutdown: false,
