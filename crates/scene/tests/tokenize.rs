@@ -186,8 +186,6 @@ fn malformed_json_is_terminal_and_never_resynchronizes() {
     let fixtures: &[(&[u8], TokenError)] = &[
         (b"{}", Malformed { at: 1 }),
         (br#"{"other":[]}"#, Malformed { at: 2 }),
-        (br#"{"records":[],"records":[]}"#, Malformed { at: 13 }),
-        (br#"{"records":[],"other":0}"#, Malformed { at: 13 }),
         (br#"{"records":[{},]}"#, Malformed { at: 15 }),
         (br#"{"records":[true]}"#, Malformed { at: 12 }),
         (br#"{"records":[{"x":}]}"#, Malformed { at: 17 }),
@@ -211,7 +209,6 @@ fn malformed_json_is_terminal_and_never_resynchronizes() {
         (b"\xef\xbb\xbf{\"records\":[]}", Malformed { at: 0 }),
         (b"{\xff\"records\":[]}", Malformed { at: 1 }),
         (b"{\"records\":[\xff]}", Malformed { at: 12 }),
-        (b"{\"records\":[]}\xff", Malformed { at: 14 }),
     ];
     for (fixture, expected) in fixtures {
         let mut tokenizer = Tokenizer::new();
@@ -239,10 +236,51 @@ fn malformed_json_is_terminal_and_never_resynchronizes() {
             "finish preserves the first error"
         );
     }
-    let valid = br#"{"records":[]}"#;
-    let mut garbage = valid.to_vec();
-    garbage.push(b'x');
-    assert_eq!(scan(&garbage, 1).err(), Some(Malformed { at: valid.len() }));
+}
+
+#[test]
+fn text_after_the_closed_records_array_is_its_own_terminal_error() {
+    let opened: &[u8] = br#"{"records":[{"begin":{}}]"#;
+    let record: &[u8] = br#"{"begin":{}}"#;
+    let empty: &[u8] = br#"{"records":[]"#;
+    let cases: [(&[u8], usize, &[u8]); 7] = [
+        (opened, 1, br#","records":[{"step":{}}]}"#),
+        (opened, 1, br#" , "end":{}}"#),
+        (opened, 1, b"x"),
+        (opened, 1, b"}}"),
+        (opened, 1, b"} \xff"),
+        (empty, 0, b"}x"),
+        (empty, 0, br#","end":{}}"#),
+    ];
+    for (records, emits, tail) in cases {
+        let expected = &[record][..emits];
+        let fixture = [records, tail].concat();
+        for delta in [1, fixture.len()] {
+            let mut tokenizer = Tokenizer::new();
+            let mut emitted = Vec::new();
+            let error = fixture
+                .chunks(delta)
+                .find_map(|chunk| consume(&mut tokenizer, chunk, &mut emitted).err());
+            assert_eq!(error, Some(TokenError::AfterRecords));
+            assert_eq!(emitted, expected);
+            assert_eq!(tokenizer.finish(), Err(TokenError::AfterRecords));
+        }
+    }
+    assert_eq!(
+        scan(br#"{"records":[{"begin":{}} , "end":{}]}"#, 1).err(),
+        Some(TokenError::Malformed { at: 27 }),
+        "inside the array the same text is still malformed"
+    );
+    assert_eq!(
+        scan(br#"{"records":[{"begin":{}}"#, 1).err(),
+        Some(TokenError::Truncated),
+        "an array that never closes is still truncated"
+    );
+    assert_eq!(
+        scan(empty, 1).err(),
+        Some(TokenError::Truncated),
+        "a closed array without the envelope's brace is still truncated"
+    );
 }
 
 #[test]
