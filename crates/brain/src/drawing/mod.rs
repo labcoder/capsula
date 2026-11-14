@@ -424,18 +424,15 @@ impl Drawing {
             &AtomicBool::new(false),
             Some(PaintWork::LIMITS),
         );
-        match laid.into_iter().collect::<Result<Vec<_>, _>>() {
-            Ok(laid) => {
-                let (states, layouts) = laid
-                    .into_iter()
-                    .map(|(state, layout)| (state, Some(layout)))
-                    .unzip();
-                (states, laid_global, layouts)
-            }
-            Err(_) => {
-                let layouts = states.iter().map(|_| None).collect();
-                (states, global, layouts)
-            }
+        if let Ok(laid) = laid.into_iter().collect::<Result<Vec<_>, _>>() {
+            let (states, layouts) = laid
+                .into_iter()
+                .map(|(state, layout)| (state, Some(layout)))
+                .unzip();
+            (states, laid_global, layouts)
+        } else {
+            let layouts = states.iter().map(|_| None).collect();
+            (states, global, layouts)
         }
     }
 

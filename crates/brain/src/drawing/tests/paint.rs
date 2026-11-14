@@ -20,9 +20,7 @@ fn circles(step: &str, from: usize, count: usize) -> String {
     format!(r#"{{"id":"{step}","put":[{}]}}"#, put.join(","))
 }
 
-fn too_much() -> Option<CallError> {
-    Some(CallError::TooMuchToPaint { cleared: false })
-}
+const TOO_MUCH: Option<CallError> = Some(CallError::TooMuchToPaint { cleared: false });
 
 /// Each held scene's charge in fill vertices, `None` for an uncounted scene.
 fn fills(drawing: &Drawing) -> Vec<Option<usize>> {
@@ -60,7 +58,7 @@ fn a_first_step_past_the_caps_writes_nothing_and_keeps_earlier_drawings() {
         call(1, "c2", args("s2", &[circles("one", 0, 13)])),
     );
     assert_eq!(trace(&out), ["lookup"]);
-    assert_eq!(out.calls[0].error, too_much());
+    assert_eq!(out.calls[0].error, TOO_MUCH);
     assert!(out.calls[0].drawn.is_empty());
     assert_eq!(store.scenes.len(), 1, "no begin was written");
     assert_eq!(fills(&drawing), [Some(30 * 48)]);
@@ -85,7 +83,7 @@ fn a_replacement_is_counted_without_its_victims_and_a_refused_one_keeps_them() {
         call(1, "c2", replacement_args("s2", &[circles("one", 0, 43)])),
     );
     assert_eq!(trace(&out), ["lookup"], "no replacement fired");
-    assert_eq!(out.calls[0].error, too_much());
+    assert_eq!(out.calls[0].error, TOO_MUCH);
     assert_eq!(fills(&drawing), [Some(30 * 48)]);
     let out = store.run(
         &mut drawing,
@@ -109,7 +107,7 @@ fn a_step_past_the_caps_in_a_held_scene_leaves_its_picture() {
         call(1, "c2", args("s1", &[circles("two", 30, 13)])),
     );
     assert_eq!(trace(&out), ["end 1 false"]);
-    assert_eq!(out.calls[0].error, too_much());
+    assert_eq!(out.calls[0].error, TOO_MUCH);
     assert_eq!(drawing.scenes[0].state.revision(), 1);
     let out = store.run(
         &mut drawing,
@@ -136,7 +134,7 @@ fn an_unshown_step_stays_charged_until_a_later_one_is_shown() {
         &mut drawing,
         call(1, "c2", args("s2", &[circles("one", 0, 15)])),
     );
-    assert_eq!(out.calls[0].error, too_much());
+    assert_eq!(out.calls[0].error, TOO_MUCH);
     let shown = Input::StepShown {
         run: RunId(1),
         scene: SceneId(1),
@@ -314,7 +312,7 @@ fn recovered_scenes_are_charged_what_their_layouts_paint() {
         &mut recovered,
         call(2, "c3", args("s1", &[circles("two", 30, 1)])),
     );
-    assert_eq!(out.calls[0].error, too_much());
+    assert_eq!(out.calls[0].error, TOO_MUCH);
 }
 
 /// A 36-box flow step and the four-scene text workload, for the Rez measurements.
@@ -345,7 +343,7 @@ fn spread(mut samples: Vec<u128>) -> String {
 
 #[test]
 #[ignore = "a measurement for a quiet Rez: cargo test -p kumochi-brain --release --lib measure_preparation -- --ignored --nocapture"]
-fn measure_preparation_its_cancellation_and_retained_layouts() {
+fn measure_preparation_and_its_cancellation() {
     use std::time::{Duration, Instant};
 
     let setup = || {
@@ -415,6 +413,11 @@ fn measure_preparation_its_cancellation_and_retained_layouts() {
         "stop_to_layout_end fixture=flow36 stop_after_us={half} cancelled={cancelled} {}",
         spread(stopped)
     );
+}
+
+#[test]
+#[ignore = "a measurement for a quiet Rez: cargo test -p kumochi-brain --release --lib measure_retained -- --ignored --nocapture"]
+fn measure_retained_layouts_at_four_maximal_scenes() {
     let mut drawing = Drawing::default();
     let mut store = Store::default();
     for scene in 1..=4_u64 {
