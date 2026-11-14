@@ -8,8 +8,8 @@ use std::time::Instant;
 use kumochi_protocol::constants::CLAUDE_QUESTIONS_ENV;
 use kumochi_protocol::message::{
     Action, AuditFailed, ClaudeCodeView, ClaudeVersion, ConnectionKind, ConnectionOp,
-    ConnectionsView, ControlToShell, Effort, ErrorKey, ModelChoice, ModelInfo, ModelName,
-    ModelSlug, ThreadId, Unsupported, UserError,
+    ConnectionsView, ControlToShell, DataToShell, Effort, ErrorKey, ModelChoice, ModelInfo,
+    ModelName, ModelSlug, ThreadId, Unsupported, UserError,
 };
 use tokio::sync::mpsc;
 
@@ -80,6 +80,10 @@ pub(crate) struct Claude {
     epoch: Option<Epoch>,
     /// The last epoch's tag.
     epochs: u64,
+    /// The models runs may name now: the reviewed row's while a launch would be admitted.
+    models: Vec<ModelInfo>,
+    /// A shell hasn't heard `models` yet.
+    unsent: bool,
 }
 
 /// Runs bound under one epoch go on through a Find; a sign-out, a Disconnect, an audit failure,
@@ -150,6 +154,8 @@ impl Claude {
             budget: Arc::new(Budget::from_var(CLAUDE_QUESTIONS_ENV)),
             epoch: None,
             epochs: 0,
+            models: Vec::new(),
+            unsent: false,
         }
     }
 
@@ -445,6 +451,7 @@ impl Claude {
     pub(crate) fn availability(&mut self) -> Availability {
         let Some((version, row)) = self.admitted() else {
             self.epoch = None;
+            self.offer(Vec::new());
             return Availability::Unavailable(self.reason());
         };
         let epoch = match self.epoch {
@@ -458,18 +465,38 @@ impl Claude {
             }
         };
         self.epoch = Some(epoch);
+        let models: Vec<ModelInfo> = row
+            .models
+            .iter()
+            .map(|&(slug, name)| ModelInfo {
+                slug: ModelSlug::new(slug).expect("a reviewed alias is a valid slug"),
+                display_name: ModelName::new(name).expect("a reviewed name is valid"),
+            })
+            .collect();
+        self.offer(models.clone());
         Availability::Ready(Ready {
             connection: ConnectionTag(epoch.tag),
-            models: row
-                .models
-                .iter()
-                .map(|&(slug, name)| ModelInfo {
-                    slug: ModelSlug::new(slug).expect("a reviewed alias is a valid slug"),
-                    display_name: ModelName::new(name).expect("a reviewed name is valid"),
-                })
-                .collect(),
+            models,
             #[cfg(any(test, debug_assertions))]
             trusted_draw: false,
+        })
+    }
+
+    /// Records the models runs may name now; a change is owed to the shell.
+    fn offer(&mut self, models: Vec<ModelInfo>) {
+        self.unsent |= self.models != models;
+        self.models = models;
+    }
+
+    /// A shell connected: it hears the models on offer, if there are any.
+    pub(super) fn connected(&mut self) {
+        self.unsent |= !self.models.is_empty();
+    }
+
+    fn models_unsent(&mut self) -> Option<DataToShell> {
+        std::mem::take(&mut self.unsent).then(|| DataToShell::Models {
+            connection: ConnectionKind::ClaudeCode,
+            models: self.models.clone(),
         })
     }
 
@@ -919,10 +946,11 @@ impl Brain {
         self.claude_reported(link.as_deref_mut())
             .map_err(|_| Full)?;
         self.repair_default(link.as_deref_mut())?;
-        match link {
-            Some(link) => link.control(&self.connections_frame()),
-            None => Ok(()),
-        }
+        let Some(link) = link else {
+            return Ok(());
+        };
+        link.control(&self.connections_frame())?;
+        self.claude_models(link)
     }
 
     pub(super) fn claude_done(
@@ -934,9 +962,20 @@ impl Brain {
         self.claude_reported(link.as_deref_mut())
             .map_err(|_| Full)?;
         self.repair_default(link.as_deref_mut())?;
-        match link {
-            Some(link) if changed => link.control(&self.connections_frame()),
-            _ => Ok(()),
+        let Some(link) = link else {
+            return Ok(());
+        };
+        if changed {
+            link.control(&self.connections_frame())?;
+        }
+        self.claude_models(link)
+    }
+
+    /// Claude Code's models, if the shell hasn't heard them.
+    pub(super) fn claude_models(&mut self, link: &mut Link<'_, '_>) -> Result<(), Full> {
+        match self.claude.models_unsent() {
+            Some(models) => link.data(&models),
+            None => Ok(()),
         }
     }
 }

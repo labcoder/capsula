@@ -403,6 +403,12 @@ refusal becomes a round that fails at once through `Unserved`: with Claude Code'
 no launch would be admitted, otherwise with none, and never `Access(None)`, which reads as a
 `ChatGPT` sign-in. Nothing warms yet, so `Claude::warm` still has no production caller.
 
+The models a choice may name reach the shell's picker as `Models` for `ClaudeCode`, from the same
+check that admits a launch: the reviewed row's, in its order (Sonnet, Opus, Haiku, Fable), while
+one would be admitted, and an empty list once it wouldn't. `Brain::claude_reported` records the
+list after every op and wake, and the shell hears it only when it changes. A shell that connects
+hears a non-empty list again, and nothing before Claude Code's first report.
+
 - **The snapshot.** A `LaunchSnapshot` fixes the thread, model, effort, Claude Code's connection
   generation, the origin (and so the frozen MCP subset of its model tools) and the version.
   Model-only history schemas do not enter the MCP listener, launch audit or seed.

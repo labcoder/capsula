@@ -963,6 +963,8 @@ impl Brain {
         if let Some(models) = self.account.connections.models_unsent() {
             link.data(&models).map_err(|Full| Ended::Lost)?;
         }
+        self.claude.connected();
+        self.claude_models(link).map_err(|Full| Ended::Lost)?;
         // A clear whose write failed while no shell was connected is retried now at the latest.
         self.retry_at = None;
         let retried = self.coordinator.retry_clears();
