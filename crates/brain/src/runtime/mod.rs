@@ -823,13 +823,17 @@ impl Brain {
                     continue;
                 }
                 written = settings::written(&mut self.config_write) => {
-                    if self.settings_done(written, Some(&mut link)).is_err() {
+                    if self.settings_done(written, Some(&mut link)).is_err()
+                        || self.screen_holds_changed(&mut link).is_err()
+                    {
                         return Ended::Lost;
                     }
                     continue;
                 }
                 input = self.account.next() => {
-                    if self.account_input(input, Some(&mut link)).is_err() {
+                    if self.account_input(input, Some(&mut link)).is_err()
+                        || self.screen_holds_changed(&mut link).is_err()
+                    {
                         return Ended::Lost;
                     }
                     continue;
@@ -953,6 +957,8 @@ impl Brain {
         link.control(&self.composed(&connected))
             .map_err(|Full| Ended::Lost)?;
         self.voice_opened(link).map_err(|Full| Ended::Lost)?;
+        self.screen_holds_changed(link)
+            .map_err(|Full| Ended::Lost)?;
         if let Some(models) = self.account.connections.models_unsent() {
             link.data(&models).map_err(|Full| Ended::Lost)?;
         }

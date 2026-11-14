@@ -1794,6 +1794,46 @@ async fn without_window_capture_the_gate_reads_unsupported_whatever_the_client()
 }
 
 #[tokio::test]
+async fn the_gate_is_sent_once_per_connection_and_again_only_when_it_changes() {
+    use kumochi_protocol::message::{ModelName, ScreenHolds, ScreenOff};
+    let scratch = Scratch::new("hold-screen-sent");
+    let (mut brain, _release, _decoded, _fetch) =
+        crate::runtime::tests::holds::input(&scratch, Vec::new(), "not submitted").await;
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    let (_rig, _sol, luna) = sees_on_sol(&mut brain);
+    let off = |why| ControlToShell::ScreenHolds(ScreenHolds::Off(why));
+    brain.screen_holds_changed(&mut link).unwrap();
+    assert_eq!(
+        control(&mut output),
+        ControlToShell::ScreenHolds(ScreenHolds::On {
+            model: ModelName::new("GPT-6 Sol").unwrap()
+        })
+    );
+    brain.screen_holds_changed(&mut link).unwrap();
+    assert!(output.is_empty(), "an unchanged gate isn't resent");
+    set(&mut brain, SettingsOp::SetScreenHolds(false));
+    brain.screen_holds_changed(&mut link).unwrap();
+    assert_eq!(control(&mut output), off(ScreenOff::TurnedOff));
+    set(&mut brain, SettingsOp::SetScreenHolds(true));
+    set(&mut brain, SettingsOp::SetDefaultModel(luna));
+    brain.screen_holds_changed(&mut link).unwrap();
+    assert_eq!(control(&mut output), off(ScreenOff::ModelCantSee));
+    brain.holds.opened();
+    brain.screen_holds_changed(&mut link).unwrap();
+    assert_eq!(
+        control(&mut output),
+        off(ScreenOff::ModelCantSee),
+        "a new connection gets the state again"
+    );
+    assert!(output.is_empty());
+    brain.close().await;
+}
+
+#[tokio::test]
 async fn a_screen_hold_repeating_a_voice_holds_gesture_adds_no_part_to_it() {
     let scratch = Scratch::new("hold-screen-repeat");
     let (mut brain, _release, _decoded, _fetch) =
