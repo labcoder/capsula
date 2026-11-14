@@ -179,11 +179,10 @@ fn prepare(check: Check) -> Result<()> {
     let mut inner = Command::new(bin.join(SHELL_EXE));
     inner.arg("live").args(check.args()).arg(INNER);
     if check == Check::Question {
-        let ran = run_bounded(inner, claude_question::RUN_LIMIT, "the live run")?;
-        let (line, done) = claude_question::verdict(ran.code());
-        println!("{line}");
-        ensure!(done, "live {name} failed ({ran})");
-        return Ok(());
+        let ran = run_bounded(inner, claude_question::RUN_LIMIT, "the live run")
+            .map(|status| status.code());
+        let live = folder.parent().context("the run folder has a parent")?;
+        return claude_question::report(ran, live, &mut io::stdout().lock());
     }
     let ran = run_bounded(inner, RUN_LIMIT, "the live run")?;
     ensure!(ran.success(), "live {name} failed ({ran})");

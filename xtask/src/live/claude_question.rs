@@ -1,5 +1,5 @@
 //! `cargo xtask live claude-question`: three Claude Code questions on the dev brain's own Claude
-//! Code sign-in, with no `ChatGPT` or Anthropic key request possible. In order: discovery alone;
+//! Code sign-in, with no `ChatGPT` or Anthropic key model request possible. In order: discovery alone;
 //! a one-line question on a new thread; the title job that question's `Done` starts; and a long
 //! question stopped after its first text. Only counts, lengths, durations, yes or no and the
 //! brain's state words are printed: never a prompt, an answer, a title, a version or a frame.
@@ -162,8 +162,9 @@ pub(super) fn preflight(running: &[platform::Entry], me: u32) -> Result<u32> {
 
 /// The line the outer xtask prints for the copied harness's exit code, and whether the run
 /// passed. A failed step counts every question up to and including its own, since its question
-/// may have gone out before it failed.
-pub(super) fn verdict(code: Option<i32>) -> (String, bool) {
+/// may have gone out before it failed. A failed question also counts the title: the brain starts
+/// the title job in the step that reports `Done`, and the question can fail after that.
+fn verdict(code: Option<i32>) -> (String, bool) {
     let all = PLAN.iter().map(|step| step.questions()).sum::<u32>();
     let Some(code) = code else {
         return (
@@ -175,14 +176,58 @@ pub(super) fn verdict(code: Option<i32>) -> (String, bool) {
         return (format!("claude question: done (questions: {all})"), true);
     }
     let line = match PLAN.iter().position(|step| i32::from(step.code()) == code) {
-        Some(at) => format!(
-            "claude question: stopped at {}, exit {code} (questions: at most {})",
-            PLAN[at].words(),
-            PLAN[..=at].iter().map(|step| step.questions()).sum::<u32>()
-        ),
+        Some(at) => {
+            let last = if PLAN[at] == Step::Question {
+                at + 1
+            } else {
+                at
+            };
+            format!(
+                "claude question: stopped at {}, exit {code} (questions: at most {})",
+                PLAN[at].words(),
+                PLAN[..=last]
+                    .iter()
+                    .map(|step| step.questions())
+                    .sum::<u32>()
+            )
+        }
         None => format!("claude question: exit {code} (questions: at most {all})"),
     };
     (line, false)
+}
+
+/// What the outer xtask prints once the copied harness ended, however it ended: the verdict, with
+/// no exit code when it timed out or couldn't be waited for, then a line when the restore file is
+/// still there. Fails unless the run passed.
+pub(super) fn report(ran: Result<Option<i32>>, live: &Path, out: &mut impl Write) -> Result<()> {
+    let (code, failure) = match ran {
+        Ok(code) => (code, None),
+        Err(error) => (None, Some(error)),
+    };
+    let (verdict, done) = verdict(code);
+    writeln!(out, "{verdict}")?;
+    let restore = live.join(RESTORE);
+    if restore.exists() {
+        match fs::read_to_string(&restore).map(|text| parse_choice(&text)) {
+            Ok(Ok(old)) => writeln!(
+                out,
+                "default: may still be claude code's haiku at low; the next run from this \
+                 checkout puts back {} first",
+                format_choice(&old).trim_end()
+            )?,
+            _ => writeln!(
+                out,
+                "default: may still be claude code's haiku at low, and {} can't be read; set \
+                 the default in Settings and delete it",
+                restore.display()
+            )?,
+        }
+    }
+    if let Some(failure) = failure {
+        return Err(failure);
+    }
+    ensure!(done, "live claude-question failed");
+    Ok(())
 }
 
 /// The step that failed, and why.
@@ -450,8 +495,17 @@ fn default(
         return Ok(None);
     }
     places.keep_default(&old)?;
-    set_default(session, &haiku)?;
-    writeln!(out, "default: claude code's haiku at low for this run")?;
+    let set = set_default(session, &haiku).and_then(|()| {
+        writeln!(
+            out,
+            "default: claude code's haiku at low for this run, replacing {}",
+            format_choice(&old).trim_end()
+        )
+        .map_err(Into::into)
+    });
+    if let Err(error) = set {
+        return Err(joined(error, put_back(session, out, &old, places)));
+    }
     Ok(Some(old))
 }
 
@@ -1016,10 +1070,10 @@ mod tests {
     use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
 
     use super::{
-        CAP, KINDS, PLAN, Step, budget, changes, claude_left, format_choice, parse_choice,
-        preflight, verdict,
+        CAP, KINDS, PLAN, RESTORE, Step, budget, changes, claude_left, format_choice, parse_choice,
+        preflight, report, verdict,
     };
-    use crate::platform;
+    use crate::{platform, scratch};
 
     #[test]
     fn the_plan_asks_its_cap_and_a_plan_over_it_is_refused_before_anything_starts() {
@@ -1067,7 +1121,7 @@ mod tests {
             (10, "starting", 0),
             (11, "finding claude code", 0),
             (12, "setting the default", 0),
-            (13, "the question", 1),
+            (13, "the question", 2),
             (14, "the title", 2),
             (15, "the stop", 3),
             (16, "cleaning up", 3),
@@ -1102,6 +1156,60 @@ mod tests {
         assert!(
             codes.iter().all(|code| *code > 1),
             "never 0 or a plain failure: {codes:?}"
+        );
+    }
+
+    #[test]
+    fn a_harness_that_timed_out_still_prints_its_verdict() {
+        let live = scratch::dir("question-timeout");
+        let mut out = Vec::new();
+        let error = report(
+            Err(anyhow::anyhow!("the live run didn't finish in 720s")),
+            &live,
+            &mut out,
+        )
+        .expect_err("timed out");
+        assert_eq!(
+            String::from_utf8(out).expect("utf-8"),
+            "claude question: no exit code (questions: at most 3)\n"
+        );
+        assert_eq!(format!("{error:#}"), "the live run didn't finish in 720s");
+        let mut out = Vec::new();
+        report(Ok(Some(0)), &live, &mut out).expect("passed");
+        assert_eq!(
+            String::from_utf8(out).expect("utf-8"),
+            "claude question: done (questions: 3)\n"
+        );
+    }
+
+    #[test]
+    fn a_restore_file_left_behind_is_named_after_the_verdict() {
+        let live = scratch::dir("question-restore");
+        std::fs::write(live.join(RESTORE), "gpt-6.1-sol low chatgpt\n").expect("planted");
+        for ran in [Ok(Some(15)), Ok(None), Err(anyhow::anyhow!("killed"))] {
+            let mut out = Vec::new();
+            report(ran, &live, &mut out).expect_err("failed");
+            let text = String::from_utf8(out).expect("utf-8");
+            assert!(
+                text.ends_with(
+                    ")\ndefault: may still be claude code's haiku at low; the next run from this \
+                     checkout puts back gpt-6.1-sol low chatgpt first\n"
+                ),
+                "{text}"
+            );
+            assert_eq!(text.lines().count(), 2, "{text}");
+        }
+        std::fs::write(live.join(RESTORE), "garbage").expect("planted");
+        let mut out = Vec::new();
+        report(Ok(Some(12)), &live, &mut out).expect_err("failed");
+        assert_eq!(
+            String::from_utf8(out).expect("utf-8"),
+            format!(
+                "claude question: stopped at setting the default, exit 12 (questions: at most \
+                 0)\ndefault: may still be claude code's haiku at low, and {} can't be read; set \
+                 the default in Settings and delete it\n",
+                live.join(RESTORE).display()
+            )
         );
     }
 

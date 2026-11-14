@@ -42,8 +42,8 @@ flowchart LR
   runs the dev shell needs `onboarded = true` in its `config.toml`, or the onboarding window
   opens, takes focus and uses up the double-tap.
 - `KUMOCHI_LIVE_BUDGET` and `KUMOCHI_CLAUDE_QUESTIONS` are set on the brain's environment only.
-  These checks set both to 0, except that `claude-question` sets the second to the questions its
-  plan asks; each budget refuses its requests once its cap is spent.
+  The client checks set both to 0, except that `claude-question` sets the second to the questions
+  its plan asks; each budget refuses its requests once its cap is spent.
 
 ## `account`
 
@@ -156,7 +156,9 @@ rest. The owner's cap counts across runs; the Captain keeps that count.
    `target\live\claude-question.restore` exists, an earlier run stopped before putting the default
    back: it puts that one back first and deletes the file. Then it writes the current default to
    the file and sets Claude Code's haiku at Low with `SettingsOp::SetDefaultModel`, the op Settings
-   uses, unless the default already is that.
+   uses, unless the default already is that. Its line names the default it replaced, so the log
+   keeps it. If setting haiku fails after the file is written, it puts the old default back before
+   the harness quits.
 3. **Request 1, question 1.** A fixed one-line question on a new thread. It passes when text
    arrives, no tool frame does (a step or a focus move), and the run ends `Done`. The launch passes
    `--effort low` and `--tools ""`, so this is the first proof that 2.1.306 takes `--effort` and that
@@ -189,7 +191,7 @@ live claude-question: running in <repo>\target\live\<time>
 claude code: ready
 discovery: <n> ms
 at the reviewed version 2.1.306: yes
-default: claude code's haiku at low for this run
+default: claude code's haiku at low for this run, replacing <model> <effort> <connection>
 question: done, text <n> characters in <n> chunks, tool frames 0, <n> ms
 claude code took --effort, and a launch with no tools passed its audit: yes
 title: set, <n> characters, <n> ms
@@ -202,8 +204,22 @@ claude question: done (questions: 3)
 ```
 
 The outer xtask prints the last line from the copied harness's exit code alone, so it counts the
-questions a run can have asked even when the run printed nothing else. A failed step counts its own
-question, since it may have gone out before the step failed.
+questions a run can have asked even when the run printed nothing else, and it prints it when the
+harness timed out too, as no exit code. A failed step counts its own question, since it may have
+gone out before the step failed. A failed request 1 also counts the title: the brain starts the
+title job in the same step that reports `Done`, and request 1 can fail after that.
+
+Then, however the harness ended, if the restore file is still there, it prints:
+
+```
+default: may still be claude code's haiku at low; the next run from this checkout puts back <model> <effort> <connection> first
+```
+
+**The restore file belongs to one checkout.** It sits in that checkout's `target\live\`, so a run
+from another clone, or one after `cargo clean`, can't put the old default back; set it in Settings
+from the logged `replacing` line. Ctrl+C ends the harness and the brain with it, so it prints
+nothing more and leaves the default as Claude Code's haiku at low until the next run from this
+checkout.
 
 | Exit | Step that failed | Questions |
 |---|---|---|
@@ -211,7 +227,7 @@ question, since it may have gone out before the step failed.
 | 10 | starting: the budget, the folders, the brain or the pipe | 0 |
 | 11 | finding Claude Code | 0 |
 | 12 | setting the default | 0 |
-| 13 | request 1 | at most 1 |
+| 13 | request 1 | at most 2 |
 | 14 | the title | at most 2 |
 | 15 | request 3 | at most 3 |
 | 16 | the cleanup, after every proof passed | 3 |
@@ -219,8 +235,17 @@ question, since it may have gone out before the step failed.
 
 **Tests.** Offline tests cover what needs no request: the plan's budget and the refusal of a plan
 over it, the refusal while a product process runs, the argument table, the exit-code table, the
-restore file, the walk that finds `claude.exe` under the brain, and the folder listing's changes.
-The drive itself runs only live.
+restore file and the line about one left behind, the verdict after a timeout, the walk that finds
+`claude.exe` under the brain, and the folder listing's changes. The drive itself runs only live,
+including the put-back after a failed default, which needs a brain that refuses it.
+
+**Known limits.**
+
+- Starting the dev brain makes the reads any launch makes on the owner's own Kumochi connections:
+  `ChatGPT`'s model list, the GitHub sign-in check, and an Anthropic key's model list when one is
+  saved. None of them is a model request.
+- A turn the brain takes but names no run for within 10 s leaves its thread in the dev profile,
+  since the check never learns its id.
 
 ## `catalog-provenance`
 
