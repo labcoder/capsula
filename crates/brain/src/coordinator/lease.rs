@@ -103,7 +103,14 @@ impl Coordinator {
             .map_or_else(
                 || Some(sign_in_needed()),
                 |connection| self.refusal(connection),
-            );
+            )
+            .or_else(|| {
+                // A request that started before the switch went off still holds its own copy.
+                self.current
+                    .as_ref()
+                    .filter(|run| matches!(run.screen, Some(crate::context::Screen::Withdrawn)))
+                    .map(|_| kumochi_protocol::message::ErrorKey::ScreenUnavailable.into())
+            });
         if let Some(reason) = refused {
             effects.push(Effect::Rebuild(SendKey::Build(key)));
             self.fail_with(key.run, Failure::Engine, reason, effects)

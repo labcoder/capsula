@@ -37,7 +37,9 @@ page carries the same value on the turn's user event as the appended
 `PageEventKind::HeldTurn { screen }` (tag 6), read from the run's stored `screen`
 ([store](store.md#tables)). It says what the turn carried, not that a request left the machine:
 the value is stored with the turn, before any request exists. The shell shows a `HeldTurn`
-exactly as a plain user turn until the history line arrives.
+exactly as a plain user turn until the history line arrives. `HeldScreen::Withdrawn` (tag 2) is
+appended for history only: a turn whose image the user withdrew by turning screen holds off
+before any request carried it. No `HoldScreen` ever carries it, because that run fails first.
 
 `SettingsOp::SetScreenHolds` is appended, and `SettingsView` gains `screen_holds` (on when a
 settings file has no key, off when it can't be read). A new struct field isn't append-only in
