@@ -13,6 +13,7 @@ fn preamble(frame: &[u8]) -> bool {
             | ControlToShell::Settings { .. }
             | ControlToShell::Account(_)
             | ControlToShell::Connections(_)
+            | ControlToShell::ScreenHolds(_)
     )
 }
 
@@ -728,7 +729,7 @@ async fn a_page_waits_for_credit_and_is_not_revoked_by_a_matching_run_id() {
         );
         queue_turn(&turns_tx, 1, "go").await;
         let mut bytes = Vec::new();
-        for _ in 0..5 {
+        for _ in 0..6 {
             bytes = timeout(PATIENCE, control.recv())
                 .await
                 .expect("state")

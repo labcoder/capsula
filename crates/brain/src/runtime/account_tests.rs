@@ -53,7 +53,10 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
                 .expect("in time")
                 .expect("readable")
                 .expect("open");
-            if !matches!(frame, ControlToShell::Connections(_)) {
+            if !matches!(
+                frame,
+                ControlToShell::Connections(_) | ControlToShell::ScreenHolds(_)
+            ) {
                 return frame;
             }
         }
@@ -1332,10 +1335,15 @@ async fn a_plan_the_catalog_refuses_shows_the_account_unavailable() {
 /// default model the read set, which is saved.
 #[tokio::test]
 async fn a_connection_hears_the_catalog_and_the_default_model_it_set() {
+    use kumochi_protocol::message::{ScreenHolds, ScreenOff};
     let scratch = Scratch::new("account-catalog-brain");
     let store = FakeStore::default();
     let accounts = seeded(&scratch, &store, Catalog::answering([listing()]), LATER);
     let mut brain = test_support::brain_with(&scratch, "", accounts);
+    let rig = crate::supervise::fixture::start::<crate::screen::Holds>();
+    brain.attach_screen(std::sync::Arc::new(crate::screen::HoldClient::new(
+        rig.handle.clone(),
+    )));
     let luna = ModelChoice {
         model: ModelSlug::new("gpt-6-luna").expect("valid"),
         effort: Effort::Low,
@@ -1362,6 +1370,19 @@ async fn a_connection_hears_the_catalog_and_the_default_model_it_set() {
                 && view.default_model.is_some()
             {
                 assert_eq!(view.default_model, Some(luna.clone()));
+                break;
+            }
+        }
+        loop {
+            let next = timeout(PATIENCE, shell.next_control())
+                .await
+                .expect("in time");
+            if let Some(ControlToShell::ScreenHolds(state)) = next.expect("readable") {
+                assert_eq!(
+                    state,
+                    ScreenHolds::Off(ScreenOff::ModelCantSee),
+                    "luna can't see"
+                );
                 break;
             }
         }
