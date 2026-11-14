@@ -148,7 +148,7 @@ impl Capture {
         ];
         let stdout = File::create_new(output.with_extension("stdout.txt"))?;
         let stderr = File::create_new(output.with_extension("stderr.txt"))?;
-        let mut command = gate_capture::presentmon_command();
+        let mut command = gate_capture::presentmon_command()?;
         command
             .args(&args)
             .arg("--output_file")

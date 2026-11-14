@@ -327,11 +327,17 @@ input phase.
 
 The complete stdout **and** stderr transcript is required evidence. In Git Bash, choose a fresh
 absolute filename outside the repository, whose name ends in `-session.txt`, then use create-new
-redirection. Do not run an unredirected session or reuse an old evidence directory:
+redirection. Set `transcript` to that user-chosen path. Set `PRESENTMON_EXE` to the absolute path
+of your existing `PresentMon-2.6.0-x64.exe`; `gate-session`, `hover-gate` and `cold-start` require
+this explicit selection, with no PATH search or default executable. The pinned filename and 2.6
+CSV validation do not authenticate the executable's contents: obtain it from a trusted source.
+Do not run an unredirected session or reuse an old evidence directory:
 
 ```bash
 set -o noclobber
-transcript='C:/dev/capsula-ws/runs/gate/approved-unique-session.txt'
+: "${transcript:?set transcript to your chosen absolute outside-repo path ending in -session.txt}"
+: "${PRESENTMON_EXE:?set PRESENTMON_EXE to your chosen absolute PresentMon-2.6.0-x64.exe path}"
+export PRESENTMON_EXE
 { git rev-parse HEAD && git status --short &&
   ./target/release/xtask.exe gate-session "$transcript"; } >"$transcript" 2>&1
 ```
@@ -339,8 +345,8 @@ transcript='C:/dev/capsula-ws/runs/gate/approved-unique-session.txt'
 Run the release driver at normal priority; `nice -n 10` is only for builds and tests, never
 the measurement command. The parent directory must already exist. The runner verifies that both actual disk output
 handles resolve to the requested file before launching anything, then atomically creates its
-adjacent `approved-unique/` directory. The transcript retains every calibration trial and every
-role's raw cycle/time row. Phase directories retain diagnostics, observer records, PresentMon
+adjacent directory named by removing `-session.txt`. The transcript retains every calibration
+trial and every role's raw cycle/time row. Phase directories retain diagnostics, observer records, PresentMon
 commands/CSVs/exit status, recipient receipts, totals, limits and failed samples. Nothing deletes
 outliers or removes these files during cleanup. Binary SHA-256 identities and before/after
 display/background-process metadata identify the measurement environment.
