@@ -3905,7 +3905,6 @@ name = "kumochi-shell"
 version = "0.1.2"
 dependencies = [
  "async-channel",
- "fluent-bundle",
  "gpui-kit",
  "gpui-pre",
  "image",
@@ -3921,7 +3920,6 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
- "unic-langid",
  "windows 0.62.2",
  "zeroize",
 ]
@@ -3931,12 +3929,16 @@ name = "kumochi-shell-core"
 version = "0.1.2"
 dependencies = [
  "async-channel",
+ "fluent-bundle",
  "keyring",
+ "kumochi-brain",
  "kumochi-protocol",
+ "kumochi-scene",
  "thiserror 2.0.21",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "unic-langid",
  "windows 0.62.2",
  "zeroize",
 ]

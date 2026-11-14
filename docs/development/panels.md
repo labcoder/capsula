@@ -94,7 +94,7 @@ revision; changing a name never retargets input. See [settings](settings.md).
 
 ## Page state
 
-`shell/threads.rs` owns plain page state. `presence/threads.rs` owns window lifetime, activation,
+`shell-core/threads.rs` owns plain page state. `presence/threads.rs` owns window lifetime, activation,
 and nonblocking requests; `presence/thread_view.rs` composes the task list with the retained
 `presence/messages.rs` conversation component:
 

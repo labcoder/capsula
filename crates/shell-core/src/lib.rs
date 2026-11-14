@@ -4,6 +4,7 @@
     missing_docs,
     missing_debug_implementations,
     clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
     reason = "these models became public by moving out of the shell; they get docs and Debug \
               when the controller's public surface is designed"
 )]
@@ -11,9 +12,13 @@
 pub mod accounts;
 pub mod claude_accounts;
 pub mod credential;
+pub mod drawing;
 pub mod escape;
 pub mod instance;
 pub mod logging;
 pub mod platform;
 pub mod presence;
+pub mod runs;
 pub mod sign_in_mark;
+pub mod strings;
+pub mod threads;

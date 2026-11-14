@@ -198,7 +198,7 @@ Finish later ([onboarding](onboarding.md)). Stop and clear leave an edit intact;
 cancelling an edit restores its saved value without sending it and doesn't dismiss its panel.
 The local effect always happens first, and nothing waits on the brain:
 
-- **Stop** fences the moving run off in `runs.rs`, keeping what's on screen, then queues `Stop`
+- **Stop** fences the moving run off in `shell-core`'s `runs.rs`, keeping what's on screen, then queues `Stop`
   on the control pipe. The fence is checked when a message is applied, so the run's frames
   already queued in the shell are dropped too.
   - A run counts as moving until both its terminal `RunState` and its `RunEnd` have been
