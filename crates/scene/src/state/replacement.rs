@@ -1,8 +1,9 @@
 //! One checked transition from a frozen victim set to a new scene.
 
-use super::{Admission, Admitted, Committed, SceneState, StaleAdmission};
+use super::{Admission, Admitted, Committed, Preparation, SceneState, StaleAdmission};
 use crate::{
-    Budget, ErrorCode, GlobalBudget, Step, StepError, budget::Usage, limits::MAX_VISIBLE_SCENES,
+    Budget, ErrorCode, GlobalBudget, Step, StepError, budget::Usage, layout::LayoutState,
+    limits::MAX_VISIBLE_SCENES,
 };
 use std::{fmt, sync::Arc};
 
@@ -82,6 +83,18 @@ impl ReplacementAdmission {
             victims: frozen,
             removed,
         })
+    }
+
+    /// The new scene's first preparation ticket, as [`SceneState::preview`], and the empty layout
+    /// it prepares against. Settles nothing.
+    /// # Panics
+    /// Panics only if the admission no longer matches the state it owns, which nothing can change.
+    pub fn preview(&self) -> (Preparation, LayoutState) {
+        let ticket = self
+            .state
+            .preview(&self.admitted)
+            .expect("checked admitted this candidate against the state it owns");
+        (ticket, LayoutState::new(&self.state))
     }
 
     /// Consumes a durable replacement's admission, validating every stamp before mutation.

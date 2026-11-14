@@ -88,6 +88,56 @@ fn cut(revision: u32, handles: Vec<Handle>) -> StopCut {
 }
 
 #[test]
+fn a_preview_is_the_ticket_its_commit_returns_and_refuses_a_stale_candidate() {
+    let mut global = GlobalBudget::default();
+    let mut old = scene("old");
+    put(&mut old, &mut global, texts(0, 1));
+    let ops = json!([{"shape":{"id":"p","kind":"polygon","points":[[0,0],[40,0],[20,30]]}}]);
+    let Admission::New(admitted) =
+        candidate(&old, &global, json!({"id":"two","put":ops})).expect("legal step")
+    else {
+        panic!("new step");
+    };
+    let Admission::New(rival) =
+        candidate(&old, &global, json!({"id":"rival","put":texts(1, 1)})).expect("legal step")
+    else {
+        panic!("new step");
+    };
+    let preview = old.preview(&admitted).expect("a current candidate");
+    let committed = old.commit(admitted, &mut global).expect("fresh candidate");
+    assert_eq!(committed.revision, 2);
+    assert_eq!(preview, committed.preparation);
+    assert_eq!(
+        old.preview(&rival).expect_err("the scene moved past it"),
+        kumochi_scene::StaleAdmission
+    );
+
+    let first = step(json!({"id":"first","put":ops}));
+    let admission =
+        kumochi_scene::ReplacementAdmission::checked(scene("next"), &first, &[&old], &global)
+            .expect("valid admission");
+    let (ticket, layout) = admission.preview();
+    assert_eq!(old.object_count(), 2, "a preview settles no victim");
+    let (_, committed) = admission
+        .settle(
+            &mut [&mut old],
+            &mut global,
+            ReplacementDisposition::Install,
+        )
+        .expect("sealed transition")
+        .expect("installed");
+    assert_eq!(ticket, committed.preparation);
+    kumochi_scene::layout::PrepareInput::new(
+        ticket,
+        layout,
+        kumochi_scene::layout::SurfaceGeometry::default(),
+        std::sync::Arc::new(kumochi_scene::theme::Theme::default()),
+    )
+    .map_err(|(error, _)| error)
+    .expect("the ticket prepares against the preview's layout");
+}
+
+#[test]
 fn replacement_at_the_cap_is_owned_atomic_and_does_not_release_twice() {
     let mut global = GlobalBudget::default();
     let mut scenes: Vec<_> = (0..4).map(|n| scene(&format!("old{n}"))).collect();

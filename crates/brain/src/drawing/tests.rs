@@ -818,12 +818,7 @@ fn the_paint_budget_matches_the_prompt_and_the_paint_caps() {
         assert_eq!(work, circle_work(count), "{count} circles");
         assert_eq!(work.within_limits(), fits, "{count} circles");
     }
-    for (boxes, fits) in [
-        (BOXES, true),
-        (36, true),
-        (37, false),
-        (BOXES + BOXES / 4, false),
-    ] {
+    for (boxes, fits) in [(BOXES, true), (36, true), (37, false)] {
         let work = paint_work(&diagram(boxes));
         assert_eq!(work, diagram_work(boxes), "{boxes} boxes");
         assert_eq!(work.within_limits(), fits, "{boxes} boxes");

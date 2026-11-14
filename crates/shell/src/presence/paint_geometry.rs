@@ -63,7 +63,7 @@ pub(super) fn paths(
             fill,
             border,
         } => {
-            let charge = fallback_corner_segments(*rect, *radius, paint_scale);
+            let charge = fallback_corner_segments(*radius, paint_scale);
             let (radius, segments) = corners(*rect, *radius, scale(transform), charge)?;
             let outer = Rounded::new(*rect, radius, segments);
             if let Some(paint) = fill {
