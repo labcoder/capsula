@@ -1,4 +1,7 @@
-use std::{sync::atomic::Ordering, time::Instant};
+use std::{
+    sync::atomic::Ordering,
+    time::{Duration, Instant},
+};
 
 use kumochi_protocol::message::{ControlToBrain, RunId, SceneFailure, SceneId};
 use kumochi_scene::{Step, limits::MAX_RESIDENT_BYTES, record::Start};
@@ -548,4 +551,57 @@ fn a_step_ends_at_its_last_entrance_when_that_outlasts_its_narration() {
         Ok(1060),
         "b draws in from 360 to 960 ms, past the 800 ms segment"
     );
+}
+
+#[test]
+fn a_wake_whose_head_is_no_longer_due_drops_its_request_and_drains() {
+    let first = step(
+        r#"{"step":{"id":"first","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10],"enter":"none"}}]}}"#,
+    );
+    let later = step(r#"{"step":{"id":"later","start":{"after":"first","ms":100}}}"#);
+    let (mut presenter, now) = prepared(&[(RUN, first), (RUN, later)]);
+    presenter
+        .advance(GENERATION, now)
+        .expect("first activation");
+    presenter.sample_at(now);
+    let due = presenter.next_wake(now).expect("the later step's wake");
+    let admission = only_admission(
+        arrive(&mut presenter, commit_frame(LIVE, 2, rect("next")), due).expect("lane"),
+    );
+    assert!(presenter.advance(GENERATION, due).expect("busy").is_empty());
+    assert_eq!(presenter.scenes[&LIVE].pending_consumption, Some(1));
+    assert!(
+        arrive(&mut presenter, commit_frame(LIVE, 3, rect("held")), due)
+            .expect("held")
+            .is_empty()
+    );
+    let painted = due + Duration::from_millis(50);
+    paint_shown(&mut presenter, painted);
+    let mut work = jobs(
+        presenter
+            .completed(admission.run(), painted)
+            .expect("admitted"),
+    );
+    let effects = presenter
+        .consumption_ready(GENERATION, LIVE, 1, painted)
+        .expect("no longer due");
+    assert_eq!(bound(&presenter), 1);
+    assert_eq!(presenter.scenes[&LIVE].pending_consumption, None);
+    let held = only_admission(effects);
+    let wake = presenter
+        .next_wake(painted)
+        .expect("the head is back on the wake");
+    assert!(wake > painted);
+    work.extend(jobs(
+        presenter.completed(held.run(), painted).expect("admitted"),
+    ));
+    while let Some(job) = work.pop() {
+        work.extend(jobs(
+            presenter
+                .completed(job.run(&mut Shaper), painted)
+                .expect("prepared"),
+        ));
+    }
+    presenter.advance(GENERATION, wake).expect("activation");
+    assert_eq!(bound(&presenter), 2);
 }

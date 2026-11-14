@@ -42,7 +42,10 @@ pub(crate) enum ConsumeError {
 /// A consumed step, charged against the prepared allowance until its owner drops it.
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "B6d's activation owner is the production caller")
+    expect(
+        dead_code,
+        reason = "activation drops the consumed step unread; only tests borrow it"
+    )
 )]
 #[derive(Debug)]
 pub(crate) struct ConsumedStep {
@@ -53,7 +56,10 @@ pub(crate) struct ConsumedStep {
 
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "B6d's activation owner is the production caller")
+    expect(
+        dead_code,
+        reason = "activation drops the consumed step unread; only tests borrow it"
+    )
 )]
 impl ConsumedStep {
     pub(crate) fn step(&self) -> &PreparedStep {

@@ -1753,7 +1753,8 @@ when a read is still alive. The brain keeps its ordinary admit/commit API.
 
 Later mutating scene frames remain FIFO behind admission, including removal and cut
 acknowledgements. The lane's frame and held frames share the 512 KiB data window, with
-credit withheld until consumption or current-session abandonment. Credit never crosses
+credit withheld until the frame is applied or the current session abandons it; the lane's
+credit returns when its candidate installs, not when the step is shown. Credit never crosses
 into a replacement connection. Admission, preparation and recovery share the same eight
 worker/answer leases, including cancelled workers and answers awaiting delivery.
 
@@ -1912,8 +1913,11 @@ Both fresh arrivals and already-held commits wait behind the pending request, ev
 the lane and held queue were empty at arrival.
 A Residency refusal instead fails without waiting for bytes; the activation caller must
 handle it explicitly, since a ready head has no watchdog or guaranteed owner-release wake.
-If that retry is refused for residency, its pending barrier remains until successful
-consumption or an explicit halt, so ignoring the refusal would also block the FIFO.
+A step that fails while its scene waits for a consumption halts the scene, which drops the
+pending request, and the frames held behind it drain in the same call, whichever path failed
+the step. A wake whose retry finds the head no longer due, or behind a successor's first paint,
+also drops the request and drains: the head goes back to ordinary activation and may meet
+Busy again.
 
 Recovery waits for a free worker slot under one unchanged two-second deadline for the batch,
 a conservative margin over the measured core recovery fixtures (below 86 ms on Rez with

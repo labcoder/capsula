@@ -1,14 +1,18 @@
 //! The admission lane: one commit at a time, its deadline, Stop and clear around it, busy
 //! consumption and the credit it withholds.
 
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, atomic::Ordering, mpsc};
 
 use kumochi_protocol::message::{
     ControlToBrain, DATA_WINDOW, DataToShell, RunId, SceneCut, SceneCuts, SceneDescriptorV1,
     SceneFailure, SceneId,
 };
 use kumochi_scene::{
-    SceneEvent, budget::Usage, deferred::Deferred, limits::MAX_GLOBAL_LIVE_OBJECTS, text::Bounded,
+    SceneEvent,
+    budget::Usage,
+    deferred::Deferred,
+    limits::{MAX_GLOBAL_LIVE_OBJECTS, MAX_RESIDENT_BYTES},
+    text::Bounded,
 };
 
 use super::super::{Cut, window::ConsumeError};
@@ -1008,5 +1012,97 @@ fn a_step_ready_at_200_admitted_at_240_and_started_at_260_is_timed_from_200() {
     assert_eq!(
         controls(&effects),
         [&failed(LIVE, 1, SceneFailure::Timeout)]
+    );
+}
+
+#[test]
+fn a_refused_consumption_drains_the_commit_held_behind_it() {
+    let (mut presenter, now) = live();
+    begin(&mut presenter, LIVE, now);
+    let first = only_job(commit(&mut presenter, LIVE, 0, rect("a"), now).expect("a step"));
+    presenter
+        .completed(first.run(&mut Shaper), now)
+        .expect("prepared");
+    let admission = only_admission(
+        arrive(&mut presenter, commit_frame(LIVE, 1, rect("b")), now).expect("admission"),
+    );
+    assert!(presenter.advance(GENERATION, now).expect("busy").is_empty());
+    assert!(
+        arrive(&mut presenter, commit_frame(LIVE, 2, rect("c")), now)
+            .expect("held commit")
+            .is_empty()
+    );
+    let prepared = only_job(presenter.completed(admission.run(), now).expect("admitted"));
+    presenter
+        .completed(prepared.run(&mut Shaper), now)
+        .expect("prepared");
+    assert_eq!(presenter.workers(), 0);
+    assert_eq!(presenter.scenes[&LIVE].pending_consumption, Some(0));
+    assert_eq!(presenter.held_bytes, FRAME);
+
+    presenter
+        .returned
+        .store(MAX_RESIDENT_BYTES, Ordering::Relaxed);
+    let mut effects = presenter
+        .consumption_ready(GENERATION, LIVE, 0, now)
+        .expect("refused for residency");
+    assert_eq!(
+        controls(&effects),
+        [&failed(LIVE, 0, SceneFailure::Residency)]
+    );
+    let position = effects
+        .iter()
+        .position(|effect| matches!(effect, Effect::Admit(_)))
+        .expect("the held commit enters the lane in the same call");
+    let Effect::Admit(admission) = effects.remove(position) else {
+        unreachable!()
+    };
+    assert!(presenter.held.is_empty());
+    assert_eq!(presenter.held_bytes, 0);
+    assert_eq!(presenter.scenes[&LIVE].pending_consumption, None);
+    let effects = presenter
+        .completed(admission.run(), now)
+        .expect("admitted after the failure");
+    assert_eq!(credit(&effects), FRAME);
+    assert!(
+        jobs(effects).is_empty(),
+        "the failed scene prepares nothing before its cut is acknowledged"
+    );
+}
+
+#[test]
+fn a_cut_acknowledgement_that_arrives_mid_lane_waits_for_the_lane() {
+    let (mut presenter, now) = live();
+    begin(&mut presenter, LIVE, now);
+    let first = only_job(commit(&mut presenter, LIVE, 0, rect("a"), now).expect("a step"));
+    presenter
+        .completed(first.run(&mut Shaper), now)
+        .expect("prepared");
+    presenter.stop(RUN, now).expect("stop");
+    assert_eq!(presenter.scenes[&LIVE].cut, Cut::Outstanding);
+    let admission = only_admission(
+        arrive(&mut presenter, commit_frame(LIVE, 1, rect("late")), now).expect("a late step"),
+    );
+    let acknowledgement = DataToShell::SceneCutApplied {
+        scene: LIVE,
+        revision: 2,
+        cut: zero_cut(),
+    };
+    assert!(
+        arrive(&mut presenter, acknowledgement, now)
+            .expect("held behind the lane")
+            .is_empty(),
+        "no credit and no cut while the lane is out"
+    );
+    assert_eq!(presenter.held_bytes, FRAME);
+    assert_eq!(presenter.scenes[&LIVE].cut, Cut::Outstanding);
+    let effects = presenter
+        .completed(admission.run(), now)
+        .expect("the lane, then the acknowledgement");
+    assert_eq!(credit(&effects), 2 * FRAME);
+    assert!(presenter.held.is_empty());
+    assert!(
+        !presenter.holds_scenes(),
+        "the acknowledged cut at nothing activated clears the scene"
     );
 }
