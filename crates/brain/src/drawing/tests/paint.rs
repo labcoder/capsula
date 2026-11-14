@@ -854,17 +854,18 @@ fn measure_the_shipped_path() {
         ("flow36", flow("one")),
         ("circles42", circles("one", 0, 42)),
     ] {
-        let (mut admitted, mut wrote, mut whole) = (Vec::new(), Vec::new(), Vec::new());
+        let mut passes = [Vec::new(), Vec::new(), Vec::new()];
         for sample in 0..220 {
-            let (admit, write, all) = shipped_call(&step);
+            let timed = shipped_call(&step);
             if sample >= 20 {
-                admitted.push(admit);
-                wrote.push(write);
-                whole.push(all);
+                passes[0].push(timed.0);
+                passes[1].push(timed.1);
+                passes[2].push(timed.2);
             }
         }
-        println!("admitting_pass fixture={name} {}", spread(admitted));
-        println!("prepared_pass fixture={name} {}", spread(wrote));
+        let [admitting, prepared, whole] = passes;
+        println!("admitting_pass fixture={name} {}", spread(admitting));
+        println!("prepared_pass fixture={name} {}", spread(prepared));
         println!("shipped_call fixture={name} {}", spread(whole));
     }
 }
