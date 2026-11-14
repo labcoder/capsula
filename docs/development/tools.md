@@ -143,7 +143,9 @@ A stopped result can end with a fixed phrase saying what follows, judged from th
 run state. After a record or envelope error, while a corrected call can still draw, it adds
 `; drawn lists what this call added, and earlier steps stay as they were; correct this and call
 draw again`: `drawn` holds only this call's new commits, so a replayed step it skipped stays
-shown. Once the run has committed its 64 steps but still takes calls, such as replays, the same
+shown. If the call drew steps, it adds `; the steps in drawn are on screen, and earlier steps
+stay as they were; correct this by drawing only what is missing, with new step and object ids,
+and call draw again` instead, so the correction doesn't redraw them under their used ids. Once the run has committed its 64 steps but still takes calls, such as replays, the same
 errors add `; no further step can be drawn in this turn`. Once the run accepts no further draw call,
 because it closed or spent its repair round, rejected records or calls, any early stop adds
 `; no further draw call will be accepted in this turn`. Until then, other stops, such as the
@@ -152,6 +154,15 @@ new scene saved nothing, so the repair call may reuse its name and header. That 
 step the brain refuses as `drawing.TooMuchToPaint` at admission, before anything is written
 (scene.md, "The brain's count"). The coordinator's
 round and tool-call budgets are not reflected.
+
+Arguments that go on after a closed records array, such as an `end` object or a second
+`records` key placed after it, are the tokenizer's `AfterRecords`. On the complete and the
+streamed path alike, the brain then ends the call as complete once every record in the array
+was accepted: the text stands in for a missing `end`, is never read, applied or echoed, and the
+result is `drawn: [...]; text after the records array was ignored`, with no stop, phrase or
+repair round. A malformed record inside the array, or an array that never closes, still stops
+the call. An empty array with text after it still fails as `scene.BeforeBegin`. A call
+interrupted before its records ran ends as interrupted, never as complete.
 
 An offered provider `draw` instead admits closed records while arguments stream. The same
 dispatcher checks the caller, offered tool and current admitted build before every handoff;

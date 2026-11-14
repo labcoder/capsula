@@ -44,6 +44,10 @@ pub enum TokenError {
     /// The stream ended before the envelope was complete.
     #[error("truncated drawing")]
     Truncated,
+    /// Something other than whitespace followed the closed records array. The records before
+    /// it were whole, and the bytes after it are never read as records.
+    #[error("text after the records array")]
+    AfterRecords,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,8 +186,14 @@ impl Tokenizer {
         Err(error)
     }
 
+    /// Only the envelope's closing brace may follow the records array, so any other byte there
+    /// is text after the records rather than a malformed drawing.
     fn malformed(&self) -> TokenError {
-        TokenError::Malformed { at: self.total - 1 }
+        if matches!(self.phase, Phase::AfterArray | Phase::Done) {
+            TokenError::AfterRecords
+        } else {
+            TokenError::Malformed { at: self.total - 1 }
+        }
     }
 
     fn byte(&mut self, byte: u8) -> Result<(), TokenError> {
