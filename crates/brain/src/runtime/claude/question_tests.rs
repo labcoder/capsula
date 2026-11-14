@@ -16,6 +16,7 @@ use tokio::time::timeout;
 
 use super::tests::READY;
 use super::*;
+use crate::context::Origin;
 use crate::coordinator::{Input, LeaseId, SendKey};
 use crate::engines::claude_code::lane::tests::{Base, V, host, soon};
 use crate::engines::claude_code::supervisor::tests::{WAIT, until};
@@ -160,7 +161,12 @@ impl Rig {
 
     fn snapshot(&self) -> LaunchSnapshot {
         self.claude
-            .snapshot(ThreadId(1), "claude-test".to_owned(), None, Origin::Kumo)
+            .snapshot(
+                ThreadId(1),
+                "claude-test".to_owned(),
+                None,
+                Offer::Mcp(Origin::Kumo),
+            )
             .expect("ready")
     }
 
@@ -229,6 +235,23 @@ impl Rig {
         fs::read_to_string(self.base.0.join("stdin.log"))
             .map(|log| log.lines().map(str::to_owned).collect())
             .unwrap_or_default()
+    }
+
+    /// The Nth question's argv, as the fake recorded it.
+    fn argv(&self, question: usize) -> String {
+        fs::read_to_string(self.base.0.join("starts.log"))
+            .expect("starts")
+            .lines()
+            .filter(|start| start.starts_with("-p "))
+            .nth(question - 1)
+            .and_then(|start| start.split('\t').next())
+            .expect("the question's start")
+            .to_owned()
+    }
+
+    /// The first text block of the Nth question's seed.
+    fn seed(&self, question: usize) -> String {
+        fs::read_to_string(self.base.0.join(format!("seed.{question}"))).expect("a seed")
     }
 
     fn markers(&self) -> Vec<String> {
@@ -368,6 +391,36 @@ async fn a_warm_launch_writes_only_its_two_control_lines() {
 
 type Change = fn(&mut LaunchSnapshot);
 
+/// A launch that offers nothing starts with no allow list, passes an audit that expects no tool
+/// before input and after the seed, and seeds an empty tool list.
+#[tokio::test]
+async fn a_launch_that_offers_nothing_has_no_tool_anywhere() {
+    let mut script = synthetic_signed_in().init(|init| init["tools"] = json!([]));
+    let mut mcp: Value = serde_json::from_str(&script.mcp_status[0]).expect("json");
+    mcp["response"]["response"]["mcpServers"][0]["tools"] = json!([]);
+    script.mcp_status[0] = mcp.to_string();
+    let mut rig = Rig::new("question-offers-nothing", &script).await;
+    let snapshot = rig
+        .claude
+        .snapshot(ThreadId(1), "claude-test".to_owned(), None, Offer::Nothing)
+        .expect("ready");
+    let question = rig.claude.take(&snapshot).expect("taken");
+    let (id, _) = rig.last();
+    let mut played = play(&question);
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    answered(&rig.drive(played.events()).await);
+    assert_eq!(rig.reported(id).await, [launch::Outcome::Clean]);
+    let argv = rig.argv(1);
+    assert!(!argv.contains("--allowedTools"), "{argv}");
+    assert!(
+        argv.contains(" --tools  --no-session-persistence "),
+        "the built-in tools stay off: {argv}"
+    );
+    assert!(rig.seed(1).ends_with("Tools:\n[]"), "{}", rig.seed(1));
+    rig.close().await;
+}
+
 /// T3.
 #[tokio::test]
 async fn any_change_to_the_snapshot_replaces_the_warm_launch() {
@@ -376,7 +429,7 @@ async fn any_change_to_the_snapshot_replaces_the_warm_launch() {
         ("model", |s| s.model = "claude-other".to_owned()),
         ("effort", |s| s.effort = Some("high".to_owned())),
         ("thread", |s| s.thread = ThreadId(2)),
-        ("origin", |s| s.origin = Origin::Task(ThreadId(1))),
+        ("offer", |s| s.offer = Offer::Mcp(Origin::Task(ThreadId(1)))),
     ];
     for (what, change) in changes {
         let snapshot = rig.snapshot();
@@ -841,7 +894,7 @@ fn a_snapshots_debug_shows_no_model_or_effort_text() {
         model: marker.to_owned(),
         effort: Some(marker.to_owned()),
         account: 3,
-        origin: Origin::Kumo,
+        offer: Offer::Mcp(Origin::Kumo),
         version: V,
     };
     let text = format!("{snapshot:?}");
@@ -850,7 +903,7 @@ fn a_snapshots_debug_shows_no_model_or_effort_text() {
     assert!(!text.contains(bytes.trim_matches(['[', ']'])), "{text}");
     assert_eq!(
         text,
-        "LaunchSnapshot { thread: ThreadId(1), model_bytes: 11, effort_bytes: Some(11), account: 3, origin: Kumo, version: ClaudeVersion { major: 2, minor: 1, patch: 306 } }"
+        "LaunchSnapshot { thread: ThreadId(1), model_bytes: 11, effort_bytes: Some(11), account: 3, offer: Mcp(Kumo), version: ClaudeVersion { major: 2, minor: 1, patch: 306 } }"
     );
 }
 

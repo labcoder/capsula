@@ -212,6 +212,11 @@ fn replay() {
             .open(base.join("stdin.log"))
             .expect("the base folder is writable");
         writeln!(log, "{ordinal} {kind}").expect("log");
+        if kind == "user"
+            && let Some(first) = value["message"]["content"][0]["text"].as_str()
+        {
+            fs::write(base.join(format!("seed.{ordinal}")), first).expect("the seed's first block");
+        }
         let header = format!("@{kind}");
         let section = script
             .lines()

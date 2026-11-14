@@ -15,12 +15,11 @@ use tokio::sync::mpsc;
 use super::{Brain, Full, Link};
 use crate::bridge::LaunchId;
 use crate::connections::model::budget::Budget;
-use crate::context::Origin;
 use crate::coordinator::StoreOp;
 use crate::engines::claude_code::install::FindError;
 use crate::engines::claude_code::lane::{Done, Failure, Lane, Outcome, Work};
 use crate::engines::claude_code::launch::{
-    self, Attempt, ClaudeQuestion, Clock, LaunchSnapshot, Note, Refresh, Report, WARM,
+    self, Attempt, ClaudeQuestion, Clock, LaunchSnapshot, Note, Offer, Refresh, Report, WARM,
 };
 use crate::engines::claude_code::policy;
 use crate::engines::claude_code::supervisor::{
@@ -427,7 +426,7 @@ impl Claude {
         thread: ThreadId,
         model: String,
         effort: Option<String>,
-        origin: Origin,
+        offer: Offer,
     ) -> Result<LaunchSnapshot, LaunchRefused> {
         let ClaudeCodeView::Ready { version, .. } = self.view else {
             return Err(LaunchRefused::NotReady);
@@ -437,7 +436,7 @@ impl Claude {
             model,
             effort,
             account: self.generation,
-            origin,
+            offer,
             version,
         })
     }
@@ -533,7 +532,7 @@ impl Claude {
             thread: snapshot.thread,
             model: snapshot.model.clone(),
             effort: snapshot.effort.clone(),
-            tools: crate::dispatch::mcp_schemas(snapshot.origin),
+            tools: snapshot.offer.schemas(),
             lifetime: MAX_LAUNCH,
         })?;
         if let Some(held) = self.launches.last_mut() {

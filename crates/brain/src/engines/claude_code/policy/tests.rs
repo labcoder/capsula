@@ -133,9 +133,16 @@ fn each_entry_point_gets_exactly_its_arguments() {
             effort: None,
         },
     );
-    assert!(
-        !strings(&bare.args).contains(&"--allowedTools"),
-        "no tools, no switch to swallow the next one"
+    let without_tools: Vec<&str> = head
+        .iter()
+        .copied()
+        .filter(|word| !["--allowedTools", "mcp__kumochi__draw", "mcp__kumochi__see"].contains(word))
+        .map(|word| if word == "sonnet" { "haiku" } else { word })
+        .collect();
+    assert_eq!(
+        strings(&bare.args),
+        without_tools,
+        "no tools, no switch to swallow the next one, and the built-in tools still off"
     );
 }
 

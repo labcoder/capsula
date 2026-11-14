@@ -23,7 +23,7 @@ use super::supervisor::{
 };
 use crate::bridge::LaunchId;
 use crate::connections::model::budget::Budget;
-use crate::context::Origin;
+use crate::context::{Origin, ToolSchema};
 use crate::engines::{
     Answer, ClaudeStreamFailure, Engine, EngineFailure, Finish, Round, RunRequest, SendGate,
     TurnEvent,
@@ -58,6 +58,29 @@ impl fmt::Debug for Clock {
     }
 }
 
+/// The tools a launch offers, frozen with it: the launch's allow list, its audit's expected set
+/// and its seed all read this one value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Offer {
+    /// No tools: a text answer.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the text question is the first caller")
+    )]
+    Nothing,
+    /// The MCP subset of the origin's model offers.
+    Mcp(Origin),
+}
+
+impl Offer {
+    pub(crate) fn schemas(self) -> Vec<ToolSchema> {
+        match self {
+            Self::Nothing => Vec::new(),
+            Self::Mcp(origin) => crate::dispatch::mcp_schemas(origin),
+        }
+    }
+}
+
 /// What a launch is fixed to at spawn; equal snapshots may share a launch. Its Debug shows the
 /// model and effort by length only.
 #[derive(Clone, PartialEq, Eq)]
@@ -67,8 +90,7 @@ pub(crate) struct LaunchSnapshot {
     pub(crate) effort: Option<String>,
     /// Claude Code's connection generation.
     pub(crate) account: u64,
-    /// The frozen tool set is the MCP subset of the origin's model offers.
-    pub(crate) origin: Origin,
+    pub(crate) offer: Offer,
     pub(crate) version: ClaudeVersion,
 }
 
@@ -79,7 +101,7 @@ impl fmt::Debug for LaunchSnapshot {
             .field("model_bytes", &self.model.len())
             .field("effort_bytes", &self.effort.as_ref().map(String::len))
             .field("account", &self.account)
-            .field("origin", &self.origin)
+            .field("offer", &self.offer)
             .field("version", &self.version)
             .finish()
     }
@@ -200,7 +222,7 @@ impl Attempt {
         report: Report,
         expires: Option<Instant>,
     ) -> Self {
-        let tools = tool_names(snapshot.origin);
+        let tools = tool_names(snapshot.offer);
         let pre = PreInputAudit::new(reviewed, tools.clone());
         let post = PostSeedAudit::new(reviewed, tools);
         let (done, ready) = oneshot::channel();
@@ -245,8 +267,9 @@ impl Attempt {
 }
 
 /// The launch's frozen `mcp__kumochi__*` names.
-fn tool_names(origin: Origin) -> BTreeSet<String> {
-    crate::dispatch::mcp_schemas(origin)
+fn tool_names(offer: Offer) -> BTreeSet<String> {
+    offer
+        .schemas()
         .iter()
         .map(|tool| format!("mcp__{MCP_SERVER_NAME}__{}", tool.name))
         .collect()
@@ -461,10 +484,7 @@ impl Question<'_> {
             report.report(Outcome::Launch);
             return Some(Finish::Failed(EngineFailure::Provider));
         }
-        let seed = seed::encode(
-            &request.request,
-            &crate::dispatch::mcp_schemas(attempt.snapshot.origin),
-        );
+        let seed = seed::encode(&request.request, &attempt.snapshot.offer.schemas());
         match writer.seed(&seed, until).await {
             Ok(()) => {}
             Err(StdinRefused::Deadline) => return Some(expired(launch, report)),
