@@ -648,7 +648,10 @@ fn measure_preparation_and_its_cancellation() {
 fn measure_retained_layouts() {
     let mut drawing = Drawing::default();
     let mut store = Store::default();
-    store.run(&mut drawing, call(1, "c1", args("s1", &[circles("one", 0, 10)])));
+    store.run(
+        &mut drawing,
+        call(1, "c1", args("s1", &[circles("one", 0, 10)])),
+    );
     let shown = Input::StepShown {
         run: RunId(1),
         scene: SceneId(1),
