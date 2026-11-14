@@ -365,10 +365,6 @@ impl<K: Kind> Handle<K> {
     ///
     /// # Errors
     /// A full queue fails fast.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "A6b's capture stream is the first caller")
-    )]
     pub(crate) fn request_stream(
         &self,
         body: K::Request,
@@ -413,10 +409,6 @@ pub(crate) struct ReplyStream<K: Kind> {
 impl<K: Kind> ReplyStream<K> {
     /// The next reply, then `None` after the terminal one or `WorkerLost`. A loss, the deadline
     /// or falling behind ends the stream with `WorkerLost`, after every reply already queued.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "A6b's capture stream is the first caller")
-    )]
     pub(crate) async fn next(&mut self) -> Option<Result<(K::Reply, Generation), WorkerLost>> {
         if self.done {
             return None;

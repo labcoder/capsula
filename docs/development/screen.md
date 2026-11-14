@@ -427,8 +427,9 @@ measured.
 
 ## The brain's hold client (dormant)
 
-`screen/client.rs` is the brain's side of the alternate loop, for one hold's frame. Nothing calls
-it yet: no hold has a screen part, and the worker's entry point still runs the legacy loop. It
+`screen/client.rs` is the brain's side of the alternate loop, for one hold's frame. Only a screen
+hold's task calls it, the shell doesn't send screen holds yet, and the brain has no client until
+the entry-point switch, while the worker's entry point still runs the legacy loop. It
 speaks to the worker through the shared supervisor as its own kind, `Holds`, with the screen
 worker's argument and caps, the actor's messages and the zeroing reply reader.
 
@@ -456,9 +457,46 @@ it (a panic, an aborted task, a dropped `context`) leaves its frame to the ticke
 `context` caps at the screen budget (`MAX_TTL`, 1.5 s). So `Unreleased` means only that the release
 wasn't shown, and callers never treat it as fatal.
 
-**The hold's screen part** (`runtime/hold/screen.rs`) is `None` for a voice hold. A screen hold
-starts at `Waiting`. Nothing starts one yet, and the brain has no client until the entry-point
-switch. Every way a hold ends reaches the part through one of two places:
+**The hold's screen part** (`runtime/hold/screen.rs`) is `None` for a voice hold. A
+`HoldRecognized` goes through the voice hold's admission first, so it's refused, or admitted as a
+hold, exactly as a voice hold would be; one that repeats a voice hold's gesture is refused and adds
+no part to that hold. Then the image gate is checked again, on the default model,
+with the brain's worker client standing in for capture: the shell's `On` may be out of date. If
+it's open, the part starts at `Waiting` and its task starts; otherwise `CaptureFailed` releases
+the shell's exclusion lease and the hold goes on as voice, with no line for the model. When the
+thread's own choice is read, the gate runs once more on it, and a closed gate closes the part with
+its own reason: `ModelCantSee` for a model that can't be sent images, `NotReady` for no catalog or
+no choice, and no line at all (`Discarded`) when the user switched screen holds off. The frame is
+retired and any image zeroed either way. The gate opens only on the default model, so a thread pinned
+to a model that can see goes voice-only while the default can't: a known limit.
+
+The task runs `context`, `walk` and `seal` within the screen budget (`MAX_TTL`). It never
+touches the part. Each answer comes back as a `ScreenEvent` keyed by the hold and the worker
+generation, on a channel the brain's hold loop selects beside audio and decoding:
+- `Held` fills in the part's generation, and sends `CaptureDone`, which releases the lease. A
+  capture that ends without a frame sends `CaptureFailed` instead.
+- `Sealed` makes a waiting part with the same generation `Ready`. `Closed` gives it the class
+  of the answer that ended it.
+- Anything for a hold that isn't pending, a part that isn't `Waiting` or another generation is
+  dropped: an image zeroes, and a `Held` is retired on the worker that holds it.
+
+Every closer sets the part's stop flag. The task checks it before `walk` and before `seal`, and
+retires its frame instead of going on. A refusal after `Held` retires before it's reported, so the
+worker never keeps a frame for a part that has ended. A lapse of the part's own lease before its
+frame is captured closes it as `NotReady`, since a later frame can't be said to exclude Kumochi's
+windows; after `CaptureDone`, or for any other lease, a lapse is ignored.
+
+| Class | Worker answers |
+|---|---|
+| `NotReady` | `Expired`, `Busy`, a fault, a loss or the deadline, a lapsed lease, or still `Waiting` when the words are; `Reused` too, with a `debug_assert`, because only a brain bug sends it |
+| `NothingThere` | `NoWindow` |
+| `CantShare` | `Minimized`, `Cloaked`, `Elevated`, `Protected`, `Excluded` |
+| `Unreadable` | `Unmasked`, `Ambiguous` |
+| `TooLarge` | `TooLarge`, and `Invalid`, which a window over 8,192 pixels on a side gets |
+| `Changed` | `WindowChanged`, `DisplayChanged`, `Stale` |
+| `ModelCantSee` | none: the thread's own model failed the gate |
+
+Every way a hold ends reaches the part through one of two places:
 - the hold's invalidation, which covers cancel and Esc, a turn, an Ask, `ShellLost`, a model or
   default change, a delete, a connection change, hold-to-talk off, a timeout and session loss;
 - taking the hold.

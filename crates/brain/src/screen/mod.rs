@@ -36,9 +36,9 @@ mod worker;
 
 pub use crate::supervise::{Generation, WorkerLost};
 pub(crate) use capture::{Acquired, Capturer, Failure, Target};
-pub(crate) use client::{HoldClient, MAX_TTL};
+pub(crate) use client::{Closed, HoldClient, MAX_TTL};
 #[cfg(test)]
-pub(crate) use client::{Holds, release_next};
+pub(crate) use client::{Holds, hold_frame, release_next};
 pub(crate) use context::ScreenContext;
 #[cfg(all(windows, any(test, feature = "test-support")))]
 pub(crate) use elements::WalkJob;

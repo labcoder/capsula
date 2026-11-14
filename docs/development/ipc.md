@@ -25,13 +25,14 @@ this platform) or the appended `TurnedOff` (the user's switch). It's for the sta
 for which hold message the shell sends: `HoldRecognized` only while it's `On`, otherwise
 `VoiceHoldRecognized`. `HoldRecognized` carries the gesture, the thread, the selection revision,
 the pointer sampled once at recognition, the exclusion lease and the recognition time. Its
-fields changed in place, not by appending (the display-relative pointer became `selection` and a
-physical `pointer`, and its smallest encoding went from 9 bytes to 8). That's safe because
-nothing sends it yet, the brain ignores it, and the build-id handshake refuses mixed binaries.
+fields changed in place, not by appending: `pointer_display`, the display that held the pointer,
+was replaced by `selection` and a physical `pointer`, and its smallest encoding went from 9 bytes
+to 8. That's safe because nothing sends it yet and the build-id handshake refuses mixed binaries.
 
 The appended `HoldScreen { gesture, outcome }` says what a screen hold's window did, once, when
-its run's first request starts: `Sent`, or `NotIncluded` with one of six fixed classes. Nothing
-in it names a window.
+its run's first request starts: `Sent`, or `NotIncluded` with one of seven fixed classes, the
+last of them, `ModelCantSee`, appended for a hold whose thread is pinned to a model that can't be
+sent images. Nothing in it names a window.
 
 `SettingsOp::SetScreenHolds` is appended, and `SettingsView` gains `screen_holds` (on when a
 settings file has no key, off when it can't be read). A new struct field isn't append-only in

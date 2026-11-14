@@ -106,13 +106,14 @@ fn a_held_screens_outcome_appends_a_redacted_control_tag() {
         ScreenClass::Unreadable,
         ScreenClass::TooLarge,
         ScreenClass::Changed,
+        ScreenClass::ModelCantSee,
     ]
     .into_iter()
     .enumerate()
     {
         assert_eq!(
             postcard::to_allocvec(&class).expect("encodes"),
-            [u8::try_from(index).expect("six classes")]
+            [u8::try_from(index).expect("seven classes")]
         );
         outcomes.push((HeldScreen::NotIncluded(class), 8));
     }
