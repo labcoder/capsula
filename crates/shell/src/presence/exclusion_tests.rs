@@ -1,10 +1,12 @@
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
+    time::{Duration, Instant},
 };
 
-use kumochi_protocol::message::GestureId;
+use kumochi_protocol::message::{GestureId, LeaseGeneration};
 
+use super::machine::{Key, LIFETIME};
 use super::*;
 
 const EXCLUDED: u32 = 17;
