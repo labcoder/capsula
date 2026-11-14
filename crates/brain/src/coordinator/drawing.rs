@@ -4,7 +4,7 @@ use kumochi_protocol::message::{DataToShell, RunId, SceneId, StepRef, ThreadId};
 
 use super::{Coordinator, Effect, Stale, StoreOp, speech};
 use crate::dispatch::{self, Dispatch, LedgerKey, ToolError, ToolOutput};
-use crate::drawing::{Drawing, Input, Output};
+use crate::drawing::{Drawing, Input, Loss, Output};
 
 const MAX_RESULTS: usize = 64;
 
@@ -291,8 +291,8 @@ impl Coordinator {
         }
     }
 
-    pub(super) fn drawing_closed(&mut self, run: RunId, effects: &mut Vec<Effect>) {
-        if let Ok(output) = self.drawing.handle(Input::RunClosed { run }) {
+    pub(super) fn drawing_closed(&mut self, run: RunId, loss: Loss, effects: &mut Vec<Effect>) {
+        if let Ok(output) = self.drawing.handle(Input::RunClosed { run, loss }) {
             self.drawing_output(output, effects);
         }
     }

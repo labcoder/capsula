@@ -1214,3 +1214,89 @@ fn committed_steps_the_shell_refused_count_as_no_drawing_unless_one_was_shown() 
         assert_eq!(not_returned(&effects), usize::from(!shown));
     }
 }
+
+/// A replacement whose first step the shell couldn't show took the thread's earlier drawing
+/// away. The user hears of it when the run fails or finishes, never after ending it themselves.
+#[test]
+fn a_lost_replacement_is_told_only_when_the_user_did_not_end_its_run() {
+    for (end, told) in [
+        ("stop", false),
+        ("replaced", false),
+        ("failed", true),
+        ("done", true),
+    ] {
+        let scratch = Scratch::new(&format!("drawing-loss-{end}"));
+        let mut store = open(&scratch);
+        let mut core = started();
+        let kept = draw_named(&mut core, "kept", "kept");
+        let mut effects = settle(&mut core, &mut store, kept);
+        let args = serde_json::to_vec(&json!({"records":[
+            {"begin":{"v":1,"scene":"new","surface":"overlay","alt":"new"}},
+            {"step":{"id":"n1","put":[{"shape":{"id":"n","kind":"rect","box":[0,0,10,10]}}]}},
+            {"end":{}}
+        ]}))
+        .expect("arguments");
+        let replacing = call(&mut core, &args);
+        effects.extend(settle(&mut core, &mut store, replacing));
+        let scene = effects
+            .iter()
+            .rev()
+            .find_map(|effect| match effect {
+                Effect::Data(DataToShell::SceneStepCommit { scene, .. }) => Some(*scene),
+                _ => None,
+            })
+            .expect("the replacement's first step");
+        let failed = core
+            .handle(Input::Drawing(drawing::Input::StepFailed {
+                run: R,
+                scene,
+                index: 0,
+                reason: kumochi_protocol::message::SceneFailure::Timeout,
+                cut: kumochi_scene::StopCut {
+                    activated: 0,
+                    revealed: kumochi_scene::text::Bounded::new(Vec::new()).expect("none"),
+                },
+            }))
+            .expect("a committed step");
+        let failed = settle(&mut core, &mut store, failed);
+        assert_eq!(
+            replacement_lost(&failed),
+            0,
+            "the run could still repair it"
+        );
+        let ended = match end {
+            "stop" => core
+                .handle(Input::Stop {
+                    run: R,
+                    revealed: vec![],
+                })
+                .expect("stop"),
+            "replaced" => core
+                .handle(Input::Turn {
+                    turn: 2,
+                    thread: Some(T),
+                    text: "next".into(),
+                })
+                .expect("a turn is never stale"),
+            "failed" => finish(
+                &mut core,
+                Finish::Failed(crate::engines::EngineFailure::Provider),
+            ),
+            _ => finish(&mut core, Finish::Completed),
+        };
+        let ended = settle(&mut core, &mut store, ended);
+        assert_eq!(replacement_lost(&ended), usize::from(told), "{end}");
+    }
+}
+
+fn replacement_lost(effects: &[Effect]) -> usize {
+    effects
+        .iter()
+        .filter(|effect| {
+            matches!(
+                effect,
+                Effect::Control(ControlToShell::DrawingReplacementFailed { thread: T, run: R })
+            )
+        })
+        .count()
+}
