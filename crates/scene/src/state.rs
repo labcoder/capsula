@@ -467,6 +467,36 @@ impl SceneState {
         })
     }
 
+    /// The preparation ticket [`Self::commit`] would return for `admitted`, built without
+    /// installing it, so a host can prepare the step and count its paint work before writing it.
+    /// # Errors
+    /// Returns `StaleAdmission` for another scene's candidate or one this scene has moved past,
+    /// checked against this scene's stamps only: unlike [`Self::commit`], not the global budget's.
+    pub fn preview(&self, admitted: &Admitted) -> Result<Preparation, StaleAdmission> {
+        let local = &admitted.local;
+        if self.cleared
+            || local.mutation != self.mutation
+            || local.revision != self.revision
+            || !Arc::ptr_eq(&local.owner, &self.identity)
+        {
+            return Err(StaleAdmission);
+        }
+        let candidate = &local.candidate;
+        Ok(Preparation {
+            owner: Arc::clone(&self.identity),
+            cut_revision: self.last_cut_revision,
+            revision: self.revision + 1,
+            step: Arc::clone(&candidate.step),
+            run: Arc::clone(&candidate.run),
+            extras: Arc::clone(&candidate.extras),
+            path_scales: candidate.path_scales.clone(),
+            canvas_size: self.header.size.map(|size| size.map(crate::Finite::get)),
+            views: candidate.views.clone(),
+            retained_bytes: candidate.preparation_bytes,
+            original_bytes: candidate.original_bytes,
+        })
+    }
+
     fn admission_matches(&self, admitted: &Admitted, global: &GlobalBudget) -> bool {
         !self.cleared
             && admitted.local.mutation == self.mutation
