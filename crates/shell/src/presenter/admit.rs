@@ -121,7 +121,8 @@ impl Presenter {
     }
 
     /// Applies held frames in arrival order until one enters the lane. A commit for a scene with
-    /// a consumption waiting stays held until that consumption is served or its scene halts.
+    /// a consumption waiting stays held until that consumption is served, its scene halts, or a
+    /// wake that can no longer serve it drops it.
     pub(super) fn drain(&mut self, now: Instant, out: &mut Out) -> Result<(), Broken> {
         while self.lane.is_none() && matches!(self.phase, Phase::Live) {
             let Some((frame, _)) = self.held.front() else {

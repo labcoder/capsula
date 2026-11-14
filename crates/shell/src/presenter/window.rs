@@ -35,14 +35,18 @@ pub(crate) enum ConsumeError {
     /// Its rest and activated view, with this owner's charge, would pass the prepared allowance.
     Residency,
     /// The scene's admission is out. The request is kept, and `Effect::ConsumptionReady` names
-    /// it once the admission is in; the scene admits nothing more until it is served or halts.
+    /// it once the admission is in; the scene admits nothing more until it is served, halts, or a
+    /// wake that can no longer serve it drops it.
     Busy,
 }
 
 /// A consumed step, charged against the prepared allowance until its owner drops it.
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "B6d's activation owner is the production caller")
+    expect(
+        dead_code,
+        reason = "activation drops the consumed step unread; only tests borrow it"
+    )
 )]
 #[derive(Debug)]
 pub(crate) struct ConsumedStep {
@@ -53,7 +57,10 @@ pub(crate) struct ConsumedStep {
 
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "B6d's activation owner is the production caller")
+    expect(
+        dead_code,
+        reason = "activation drops the consumed step unread; only tests borrow it"
+    )
 )]
 impl ConsumedStep {
     pub(crate) fn step(&self) -> &PreparedStep {
