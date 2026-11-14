@@ -1,5 +1,6 @@
 //! What the perch reads about another app's top-level window, as plain data. The Windows reads
-//! live in `windows/host.rs`; the caption rules that use them live in `presence/perch/`.
+//! live in the shell's `platform/windows/host.rs`; the caption rules that use them live in
+//! `presence/perch/`.
 
 use std::fmt;
 
@@ -56,7 +57,7 @@ pub struct HostId {
 
 /// One watch's generation, minted by Presence and never reused in the process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct WatchGen(pub u64);
+pub struct WatchGen(pub(crate) u64);
 
 /// What a watched host did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

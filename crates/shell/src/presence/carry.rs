@@ -324,27 +324,28 @@ mod tests {
     use super::{Candidates, EXTENTS, READ_INTERVAL, Sample, decide, deliver, label};
     use crate::platform::PresenceEvent;
     use crate::platform::host::{HostChange, Label, PhysicalRect, WatchGen};
-    use crate::presence::perch::target_fixtures::{HOST, OTHER, drag, host};
+    use crate::presence::perch::target_fixtures::{
+        HOST, OTHER, drag, host, placement_above, watch,
+    };
     use crate::presence::perch::{Placement, Targeting, WindowTarget};
     use crate::strings::Strings;
 
     /// The perch on `host(HOST, 0)` at `EXTENTS`: centred above the caption, with the card on
     /// the left, since on the right it would cover the caption buttons.
-    const PERCH: Placement = Placement {
-        body: PhysicalRect {
+    const PERCH: Placement = placement_above(
+        PhysicalRect {
             left: 418,
             top: 144,
             right: 474,
             bottom: 200,
         },
-        card: PhysicalRect {
+        PhysicalRect {
             left: 34,
             top: 144,
             right: 414,
             bottom: 268,
         },
-        above: true,
-    };
+    );
 
     struct Owner {
         targeting: Targeting,
@@ -420,20 +421,16 @@ mod tests {
 
     #[test]
     fn a_stale_generation_in_the_final_drain_changes_nothing() {
-        assert_eq!(
-            drop(|w| [vec![], vec![gone(WatchGen(w.0 + 1))]]),
-            (Some(PERCH), 2)
-        );
+        assert_eq!(drop(|_| [vec![], vec![gone(watch(2))]]), (Some(PERCH), 2));
     }
 
     /// The pointer, still, over `HOST`'s caption.
     const STILL: [i32; 2] = [400, 210];
 
     fn titled(id: crate::platform::host::HostId, title: &str) -> WindowTarget {
-        WindowTarget {
-            label: Label::new(&title.encode_utf16().collect::<Vec<_>>()),
-            ..host(id, 0)
-        }
+        let mut target = host(id, 0);
+        target.label = Label::new(&title.encode_utf16().collect::<Vec<_>>());
+        target
     }
 
     fn moved(w: WatchGen) -> PresenceEvent {
@@ -492,7 +489,7 @@ mod tests {
         let unread =
             |_: [i32; 2]| -> Option<WindowTarget> { panic!("no read under a still pointer") };
         assert_eq!(candidates.sample(drag(1), STILL, t0, unread), Sample::Same);
-        candidates.event(&moved(WatchGen(w.0 + 1)));
+        candidates.event(&moved(watch(2)));
         assert_eq!(
             candidates.sample(drag(1), STILL, t0, unread),
             Sample::Same,
@@ -528,7 +525,7 @@ mod tests {
         assert_eq!(candidates.targeting.watching(), None);
         let beneath = titled(OTHER, "Beneath");
         let sample = candidates.sample(drag(1), STILL, t0, |_| Some(beneath));
-        assert_eq!(sample, Sample::Arm(OTHER, WatchGen(w.0 + 1), beneath.label));
+        assert_eq!(sample, Sample::Arm(OTHER, watch(2), beneath.label));
     }
 
     #[test]

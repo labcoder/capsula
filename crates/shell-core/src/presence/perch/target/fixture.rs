@@ -1,8 +1,9 @@
 //! The hosts and drags the perch's tests and the carry's tests share.
 
-use crate::platform::host::{HostId, Label, PhysicalRect};
+use crate::platform::host::{HostId, Label, PhysicalRect, WatchGen};
 use crate::presence::drag::Generation;
 use crate::presence::perch::caption::{Caption, Exclusions, Source, WindowTarget};
+use crate::presence::perch::place::Placement;
 
 pub const HOST: HostId = HostId {
     window: 1,
@@ -44,4 +45,18 @@ pub fn host(id: HostId, dx: i32) -> WindowTarget {
 
 pub fn drag(n: u64) -> Generation {
     Generation::new(n)
+}
+
+/// A placement above the title bar, as the perch rules would publish one.
+pub const fn placement_above(body: PhysicalRect, card: PhysicalRect) -> Placement {
+    Placement {
+        body,
+        card,
+        above: true,
+    }
+}
+
+/// The watch generation numbered `n`. A fresh `Targeting` mints 1 first.
+pub const fn watch(n: u64) -> WatchGen {
+    WatchGen(n)
 }
