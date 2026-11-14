@@ -1035,6 +1035,11 @@ is charged against the released room early. Recovery lays the kept scenes out wi
 measure before intake opens. If any of them doesn't lay out, none is counted until it's
 cleared.
 
+The kept layouts are capped at `MAX_RETAINED_BYTES` (16 MiB, a guess) across scenes. A step
+that would pass it is written uncounted: its scene drops its layouts and stays uncounted, so
+the shell's guard alone checks it and may refuse it late. With no shell showing steps, up to
+that cap stays kept until the scene is cut or ends.
+
 D1's Rez admission target at the cap is p95 ≤1 ms and p99 ≤1.1 ms, with the sampled maximum
 reported separately; clear, cut and eviction retain their ≤2 ms target, global clear included.
 The diagnostic painter measurements alone do not establish full preparation or text-shaping

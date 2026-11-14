@@ -4,6 +4,7 @@
 use std::sync::atomic::Ordering;
 
 use super::*;
+use crate::drawing::prepare::{MAX_RETAINED_BYTES, Paint};
 use crate::drawing::{PrepareJob, Prepared};
 
 /// A step putting `count` filled circles, `c{from}` onwards, 48 fill vertices each: 42 fit
@@ -315,7 +316,219 @@ fn recovered_scenes_are_charged_what_their_layouts_paint() {
     assert_eq!(out.calls[0].error, TOO_MUCH);
 }
 
-/// A 36-box flow step and the four-scene text workload, for the Rez measurements.
+/// What every counted scene's layouts retain.
+fn retained(drawing: &Drawing) -> usize {
+    drawing
+        .scenes
+        .iter()
+        .filter_map(|held| held.paint.as_ref())
+        .map(Paint::resident_bytes)
+        .sum()
+}
+
+/// A text with a sixty-character label.
+fn label(id: &str, y: usize) -> String {
+    format!(
+        r#"{{"text":{{"id":"{id}","text":"A label of sixty characters for the retention fixture, pad","at":[10,{y}]}}}}"#
+    )
+}
+
+/// Step `step` of a scene that removes the label it put last and puts a new one.
+fn swap(step: usize) -> String {
+    format!(
+        r#"{{"id":"w{step}","remove":["k{}"],"put":[{}]}}"#,
+        step - 1,
+        label(&format!("k{step}"), 5)
+    )
+}
+
+/// The heaviest scene the budgets admit, shown: 4,000 table cells, three 4,000-point line
+/// charts and 50 labels, each step in its own run so no run passes its call limit.
+fn heaviest_scene(drawing: &mut Drawing, store: &mut Store) {
+    let cols = r#"["Name","Owner","State","Due","Note","Area","Risk","Size"]"#;
+    let cells = r#"["Cell text one","Cell text two","Cell text 3","Cell text 4","Cell text 5","Cell text 6","Cell text 7","Cell text 8"]"#;
+    let mut steps: Vec<String> = (0..13)
+        .map(|table| {
+            let mut put = vec![format!(
+                r#"{{"table":{{"id":"tb{table}","box":[0,0,900,600],"cols":{cols}}}}}"#
+            )];
+            put.extend((0..if table == 12 { 20 } else { 40 }).map(|row| {
+                format!(r#"{{"row":{{"id":"tb{table}r{row}","in":"tb{table}","cells":{cells}}}}}"#)
+            }));
+            format!(r#"{{"id":"g{table}","put":[{}]}}"#, put.join(","))
+        })
+        .collect();
+    let points = vec!["1"; 500].join(",");
+    steps.extend((0..3).map(|chart| {
+        let mut put = vec![format!(
+            r#"{{"chart":{{"id":"ch{chart}","kind":"line","box":[0,0,900,600]}}}}"#
+        )];
+        put.extend((0..8).map(|series| {
+            format!(
+                r#"{{"series":{{"id":"ch{chart}s{series}","in":"ch{chart}","data":[{points}]}}}}"#
+            )
+        }));
+        format!(r#"{{"id":"h{chart}","put":[{}]}}"#, put.join(","))
+    }));
+    let labels: Vec<String> = (0..49).map(|n| label(&format!("t{n}"), n * 12)).collect();
+    steps.push(format!(
+        r#"{{"id":"labels","put":[{},{}]}}"#,
+        labels.join(","),
+        label("k0", 5)
+    ));
+    for (index, step) in (0..).zip(&steps) {
+        let run = u64::from(index) + 1;
+        let out = store.run(
+            drawing,
+            call(
+                run,
+                &format!("r{run}"),
+                args("s1", std::slice::from_ref(step)),
+            ),
+        );
+        assert_eq!(out.calls[0].error, None, "run {run} draws");
+        let shown = Input::StepShown {
+            run: RunId(run),
+            scene: SceneId(1),
+            index,
+        };
+        store.run(drawing, shown);
+    }
+    let usage = drawing.global.usage();
+    assert_eq!((usage.cells, usage.marks), (4_000, 12_000));
+}
+
+/// The ceiling: the heaviest scene the budgets admit stays counted with eight unshown steps.
+#[test]
+fn the_heaviest_scene_keeps_eight_unshown_steps_under_the_retained_cap() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    heaviest_scene(&mut drawing, &mut store);
+    let swaps: Vec<String> = (1..=8).map(swap).collect();
+    let out = store.run(&mut drawing, call(18, "swaps", args("s1", &swaps)));
+    assert_eq!(out.calls[0].error, None);
+    assert!(drawing.scenes[0].paint.is_some(), "still counted");
+    let bytes = retained(&drawing);
+    assert!(bytes <= MAX_RETAINED_BYTES, "{bytes} retained");
+}
+
+/// Labels put up front and swapped one at a time, so every later layout holds them all: the
+/// scene crosses the cap, gives its layouts back and stays uncounted, while others are counted.
+#[test]
+fn a_scene_past_the_retained_cap_goes_uncounted_and_gives_its_layouts_back() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    store.run(
+        &mut drawing,
+        call(1, "c1", args("small", &[circles("one", 0, 2)])),
+    );
+    let small = retained(&drawing);
+    let put = |range: std::ops::Range<usize>, last: &str| {
+        let mut put: Vec<String> = range.map(|n| label(&format!("t{n}"), n % 900)).collect();
+        put.push(label(last, 5));
+        put.join(",")
+    };
+    let mut steps = vec![
+        format!(r#"{{"id":"w0","put":[{}]}}"#, put(0..184, "k0x")),
+        format!(
+            r#"{{"id":"w1","remove":["k0x"],"put":[{}]}}"#,
+            put(184..369, "k1")
+        ),
+    ];
+    steps.extend((2..64).map(swap));
+    let mut crossed = None;
+    for (offset, step) in (2..).zip(&steps) {
+        let input = call(
+            offset,
+            &format!("r{offset}"),
+            args("big", std::slice::from_ref(step)),
+        );
+        let out = store.run(&mut drawing, input);
+        assert_eq!(
+            out.calls[0].error, None,
+            "run {offset} is written, never refused"
+        );
+        let bytes = retained(&drawing);
+        assert!(
+            bytes <= MAX_RETAINED_BYTES,
+            "run {offset} leaves {bytes} retained"
+        );
+        if crossed.is_none() && drawing.scenes[1].paint.is_none() {
+            crossed = Some(offset);
+            assert_eq!(bytes, small, "its layouts are given back");
+        }
+    }
+    assert!(crossed.is_some_and(|run| run > 3), "crossed at {crossed:?}");
+    assert_eq!(fills(&drawing), [Some(96), None], "it stays uncounted");
+    store.run(
+        &mut drawing,
+        call(70, "c70", args("later", &[circles("one", 0, 3)])),
+    );
+    assert_eq!(fills(&drawing), [Some(96), None, Some(144)]);
+}
+
+/// A shown step, a Stop's cut and a clear each leave the scene with no unshown layout.
+#[test]
+fn retained_layouts_leave_when_shown_cut_or_cleared() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    let latest = |drawing: &Drawing| {
+        drawing.scenes[0]
+            .paint
+            .as_ref()
+            .map_or(0, |paint| paint.latest().resident_bytes())
+    };
+    store.run(
+        &mut drawing,
+        call(1, "c1", args("s1", &[circles("one", 0, 20)])),
+    );
+    let shown = |index| Input::StepShown {
+        run: RunId(1),
+        scene: SceneId(1),
+        index,
+    };
+    store.run(&mut drawing, shown(0));
+    assert_eq!(
+        retained(&drawing),
+        latest(&drawing),
+        "only the shown layout"
+    );
+    store.run(
+        &mut drawing,
+        call(1, "c2", args("s1", &[circles("two", 20, 10)])),
+    );
+    assert!(retained(&drawing) > latest(&drawing), "the unshown one too");
+    store.run(&mut drawing, shown(1));
+    assert_eq!(retained(&drawing), latest(&drawing));
+    store.run(
+        &mut drawing,
+        call(1, "c3", args("s1", &[circles("three", 30, 5)])),
+    );
+    assert!(retained(&drawing) > latest(&drawing));
+    let revealed = (0..30)
+        .map(|index| handle(&drawing, 1, &format!("c{index}")))
+        .collect();
+    let out = drawing
+        .handle(stop(1, 1, cut(2, revealed)))
+        .expect("a Stop of the drawing run");
+    store.settle(&mut drawing, out);
+    assert_eq!(
+        fills(&drawing),
+        [Some(30 * 48)],
+        "cut back to the shown steps"
+    );
+    assert_eq!(retained(&drawing), latest(&drawing));
+    store.run(
+        &mut drawing,
+        Input::Clear {
+            scenes: vec![SceneId(1)],
+        },
+    );
+    assert!(drawing.scenes.is_empty());
+    assert_eq!(retained(&drawing), 0);
+}
+
+/// A 36-box flow step, for the Rez measurements.
 fn flow(step: &str) -> String {
     let mut put = vec![r#"{"diagram":{"id":"d","dir":"down"}}"#.to_owned()];
     put.extend((0..36).map(|index| {
@@ -333,8 +546,9 @@ fn flow(step: &str) -> String {
 fn spread(mut samples: Vec<u128>) -> String {
     samples.sort_unstable();
     format!(
-        "samples={} p50_us={} p95_us={} max_us={}",
+        "samples={} min_us={} p50_us={} p95_us={} max_us={}",
         samples.len(),
+        samples[0],
         samples[samples.len() / 2],
         samples[samples.len() * 95 / 100],
         samples[samples.len() - 1]
@@ -380,8 +594,9 @@ fn measure_preparation_and_its_cancellation() {
         u64::try_from(sorted[sorted.len() / 2] / 2).expect("a short layout")
     };
     println!("prepare fixture=flow36 thread=caller {}", spread(prepared));
-    let (mut stopped, mut cancelled) = (Vec::new(), 0);
-    for _ in 0..32 {
+    let (mut stopped, mut cancelled, mut invalid) = (Vec::new(), 0, 0);
+    while stopped.len() < 32 {
+        assert!(invalid < 1_000, "no Stop landed inside a layout");
         let (mut drawing, job) = setup();
         let (answers, answer) = std::sync::mpsc::channel();
         let worker = job.clone();
@@ -389,11 +604,24 @@ fn measure_preparation_and_its_cancellation() {
             .name("drawing-prepare".to_owned())
             .spawn(move || answers.send(worker.run()).expect("the measurement listens"))
             .expect("a preparation thread");
-        std::thread::sleep(Duration::from_micros(half));
+        // The layout has started once its thread took the input.
+        while job.input.0.lock().expect("the input lock").is_some() {
+            std::hint::spin_loop();
+        }
+        let until = Instant::now() + Duration::from_micros(half);
+        while Instant::now() < until {
+            std::hint::spin_loop();
+        }
+        let unfinished = matches!(answer.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
         let start = Instant::now();
         drawing
             .handle(Input::RunClosed { run: RunId(1) })
             .expect("the run closed");
+        if !unfinished {
+            invalid += 1;
+            thread.join().expect("the preparation thread ends");
+            continue;
+        }
         let answer = answer.recv().expect("an answer");
         stopped.push(start.elapsed().as_micros());
         thread.join().expect("the preparation thread ends");
@@ -410,60 +638,46 @@ fn measure_preparation_and_its_cancellation() {
         assert!(sent(&out).is_none(), "a closed run's step is never written");
     }
     println!(
-        "stop_to_layout_end fixture=flow36 stop_after_us={half} cancelled={cancelled} {}",
+        "stop_to_layout_end fixture=flow36 stop_after_start_us={half} invalid={invalid} cancelled={cancelled} {}",
         spread(stopped)
     );
 }
 
 #[test]
-#[ignore = "a measurement for a quiet Rez: cargo test -p kumochi-brain --release --lib measure_retained -- --ignored --nocapture"]
-fn measure_retained_layouts_at_four_maximal_scenes() {
+#[ignore = "a measurement: cargo test -p kumochi-brain --lib measure_retained -- --ignored --nocapture"]
+fn measure_retained_layouts() {
     let mut drawing = Drawing::default();
     let mut store = Store::default();
-    for scene in 1..=4_u64 {
-        let steps: Vec<String> = (0..64)
-            .map(|step| {
-                let put: Vec<String> = (0..5)
-                    .map(|index| {
-                        format!(
-                            r#"{{"text":{{"id":"t{step}x{index}","text":"Scene {scene} step {step} label {index}: a sentence of sixty chars","at":[{},{}]}}}}"#,
-                            40 + index * 180,
-                            20 + step * 9
-                        )
-                    })
-                    .collect();
-                format!(r#"{{"id":"s{step}","put":[{}]}}"#, put.join(","))
-            })
-            .collect();
-        let out = store.run(
-            &mut drawing,
-            call(
-                scene,
-                &format!("c{scene}"),
-                args(&format!("s{scene}"), &steps),
-            ),
-        );
-        assert_eq!(out.calls[0].error, None);
-    }
-    let retained = |drawing: &Drawing| -> usize {
-        drawing
-            .scenes
-            .iter()
-            .filter_map(|held| held.paint.as_ref())
-            .map(super::super::prepare::Paint::resident_bytes)
-            .sum()
+    store.run(&mut drawing, call(1, "c1", args("s1", &[circles("one", 0, 10)])));
+    let shown = Input::StepShown {
+        run: RunId(1),
+        scene: SceneId(1),
+        index: 0,
     };
-    let unshown = retained(&drawing);
-    for scene in 1..=4 {
-        let shown = Input::StepShown {
-            run: RunId(scene),
-            scene: SceneId(scene),
-            index: 63,
-        };
-        store.run(&mut drawing, shown);
-    }
+    store.run(&mut drawing, shown);
+    let rest = retained(&drawing);
+    store.run(
+        &mut drawing,
+        call(1, "c2", args("s1", &[circles("two", 10, 10)])),
+    );
+    let one = retained(&drawing);
+    let out = store.run(
+        &mut drawing,
+        call(1, "c3", args("s1", &[circles("three", 20, 10)])),
+    );
+    assert_eq!(out.calls[0].error, None);
     println!(
-        "retained_layouts scenes=4 objects={} unshown_steps=256 resident_bytes={unshown} all_shown_resident_bytes={}",
+        "retained_layouts fixture=circles10x3 shown_bytes={rest} one_unshown_bytes={one} two_unshown_bytes={}",
+        retained(&drawing)
+    );
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    heaviest_scene(&mut drawing, &mut store);
+    let rest = retained(&drawing);
+    let swaps: Vec<String> = (1..=8).map(swap).collect();
+    store.run(&mut drawing, call(18, "swaps", args("s1", &swaps)));
+    println!(
+        "retained_layouts fixture=heaviest objects={} shown_bytes={rest} eight_unshown_bytes={} cap_bytes={MAX_RETAINED_BYTES}",
         drawing.global.usage().objects,
         retained(&drawing)
     );

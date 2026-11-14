@@ -22,34 +22,47 @@ pub(super) const SURFACE: SurfaceGeometry = SurfaceGeometry::Overlay {
     default_canvas: DEFAULT_CANVAS,
 };
 
-/// A scene's wide layouts, as the shell holds them: the shown one and every committed step's.
+/// The most the brain keeps of its scenes' wide layouts: a step that would take it past this is
+/// written uncounted, and its scene gives its layouts back.
+// shortcut: 16 MiB is a guess, checked against one scene at the paint budgets with eight unshown steps; size it from use.
+pub(super) const MAX_RETAINED_BYTES: usize = 16 * 1024 * 1024;
+
+/// A scene's wide layouts, as the shell holds them: the shown one and every committed step's,
+/// each with its resident bytes.
 pub(super) struct Paint {
     /// The last shown layout.
-    rest: LayoutState,
+    rest: (LayoutState, usize),
     /// Committed steps' layouts not shown yet, by lifetime index.
-    unshown: VecDeque<(u32, LayoutState)>,
+    // shortcut: a full layout per unshown step, up to MAX_RETAINED_BYTES across scenes; keep only each step's charge and lay the cut step out again if scenes go uncounted in use.
+    unshown: VecDeque<(u32, LayoutState, usize)>,
 }
 
 impl Paint {
     /// A layout the shell shows as it is.
     pub(super) fn at_rest(rest: LayoutState) -> Self {
+        let bytes = rest.resident_bytes();
         Self {
-            rest,
+            rest: (rest, bytes),
             unshown: VecDeque::new(),
         }
     }
 
     /// A new scene, shown `rest` empty, whose first step `index` isn't shown yet.
-    pub(super) fn begun(rest: LayoutState, index: u32, layout: LayoutState) -> Self {
-        Self {
-            rest,
-            unshown: VecDeque::from([(index, layout)]),
-        }
+    pub(super) fn begun(
+        rest: LayoutState,
+        index: u32,
+        (layout, bytes): (LayoutState, usize),
+    ) -> Self {
+        let mut paint = Self::at_rest(rest);
+        paint.unshown.push_back((index, layout, bytes));
+        paint
     }
 
     /// The layout after the last committed step, which the next step is prepared from.
     pub(super) fn latest(&self) -> &LayoutState {
-        self.unshown.back().map_or(&self.rest, |(_, layout)| layout)
+        self.unshown
+            .back()
+            .map_or(&self.rest.0, |(_, layout, _)| layout)
     }
 
     /// The most the shell may paint for this scene: the shown layout, or any step it may show
@@ -57,33 +70,30 @@ impl Paint {
     pub(super) fn charge(&self) -> PaintWork {
         self.unshown
             .iter()
-            .fold(self.rest.paint_work(), |charge, (_, layout)| {
+            .fold(self.rest.0.paint_work(), |charge, (_, layout, _)| {
                 charge.max(layout.paint_work())
             })
     }
 
     /// Step `index` committed with `layout`.
-    pub(super) fn committed(&mut self, index: u32, layout: LayoutState) {
-        self.unshown.push_back((index, layout));
+    pub(super) fn committed(&mut self, index: u32, (layout, bytes): (LayoutState, usize)) {
+        self.unshown.push_back((index, layout, bytes));
     }
 
     /// Step `index` was painted, so it's the rest now and the steps before it are gone.
     pub(super) fn shown(&mut self, index: u32) {
-        while self.unshown.front().is_some_and(|(at, _)| *at <= index) {
-            if let Some((_, layout)) = self.unshown.pop_front() {
-                self.rest = layout;
+        while self.unshown.front().is_some_and(|(at, _, _)| *at <= index) {
+            if let Some((_, layout, bytes)) = self.unshown.pop_front() {
+                self.rest = (layout, bytes);
             }
         }
     }
 
     /// Bytes its layouts are charged at, counting what they share once per layout.
-    #[cfg(test)]
     pub(super) fn resident_bytes(&self) -> usize {
         self.unshown
             .iter()
-            .fold(self.rest.resident_bytes(), |bytes, (_, layout)| {
-                bytes + layout.resident_bytes()
-            })
+            .fold(self.rest.1, |total, (_, _, bytes)| total + bytes)
     }
 
     /// The scene was stopped: the shell keeps the last activated step's layout, cut.
@@ -92,9 +102,9 @@ impl Paint {
         let base = self
             .unshown
             .into_iter()
-            .take_while(|(index, _)| *index < activated)
+            .take_while(|(index, _, _)| *index < activated)
             .last()
-            .map_or(self.rest, |(_, layout)| layout);
+            .map_or(self.rest.0, |(_, layout, _)| layout);
         base.cut(scene).ok().map(Self::at_rest)
     }
 }
@@ -158,7 +168,8 @@ impl Drawing {
     }
 
     /// A step was laid out: it's written if everything the shell may then paint fits, and
-    /// refused before anything is written if not. Any other failure writes it uncounted.
+    /// refused before anything is written if not. Any other failure, or a layout past
+    /// [`MAX_RETAINED_BYTES`], writes it uncounted, and its scene stays uncounted.
     pub(super) fn prepared(
         &mut self,
         serial: u64,
@@ -198,7 +209,7 @@ impl Drawing {
             return Ok(());
         }
         step.laid = match outcome {
-            Prepared::Layout(layout) => Some(Arc::unwrap_or_clone(layout.0)),
+            Prepared::Layout { layout, bytes } => Some((Arc::unwrap_or_clone(layout.0), bytes)),
             Prepared::Failed => None,
             Prepared::TooMuch => {
                 self.end(at, Some(CallError::TooMuchToPaint { cleared: false }), out);
@@ -209,11 +220,24 @@ impl Drawing {
                 return Ok(());
             }
         };
-        if let Some(after) = &step.laid
+        if let Some((after, _)) = &step.laid
             && !self.fits(&step.scene, after.paint_work())
         {
             self.end(at, Some(CallError::TooMuchToPaint { cleared: false }), out);
             return Ok(());
+        }
+        let retained: usize = self
+            .scenes
+            .iter()
+            .filter_map(|held| held.paint.as_ref())
+            .map(Paint::resident_bytes)
+            .sum();
+        if step
+            .laid
+            .as_ref()
+            .is_some_and(|(_, bytes)| retained + bytes > MAX_RETAINED_BYTES)
+        {
+            step.laid = None;
         }
         self.write(Wait::Step(step), write, out);
         Ok(())
@@ -283,7 +307,10 @@ impl PrepareJob {
     fn outcome(&self) -> Prepared {
         let input = self.input.0.lock().ok().and_then(|mut input| input.take());
         match input.map(|input| prepare(input, &mut WideMeasure, &self.cancel)) {
-            Some(Ok(step)) => Prepared::Layout(Shared(Arc::new(step.after))),
+            Some(Ok(step)) => Prepared::Layout {
+                bytes: step.after.resident_bytes(),
+                layout: Shared(Arc::new(step.after)),
+            },
             Some(Err(PrepareError::OverPaintWork)) => Prepared::TooMuch,
             Some(Err(PrepareError::Cancelled)) => Prepared::Cancelled,
             // Another copy ran it, or it failed for something other than paint work.
@@ -309,8 +336,13 @@ impl fmt::Debug for PrepareJob {
 /// How a step's preparation ended.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Prepared {
-    /// Its layout after the step.
-    Layout(Shared<LayoutState>),
+    /// Its layout after the step, and the bytes that layout retains.
+    Layout {
+        /// The layout.
+        layout: Shared<LayoutState>,
+        /// Its resident bytes, counted off the coordinator thread.
+        bytes: usize,
+    },
     /// The scene alone paints more than the shell can.
     TooMuch,
     /// The reducer cancelled it.

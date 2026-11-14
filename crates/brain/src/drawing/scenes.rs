@@ -93,8 +93,8 @@ impl Drawing {
                     .commit(admitted, &mut self.global)
                     .expect("the pending write sealed its scene and the global budget");
                 held.committers.push(Some(run));
-                held.paint = held.paint.take().zip(laid).map(|(mut paint, layout)| {
-                    paint.committed(committed.index, layout);
+                held.paint = held.paint.take().zip(laid).map(|(mut paint, laid)| {
+                    paint.committed(committed.index, laid);
                     paint
                 });
                 (scene, committed.index)
@@ -149,8 +149,8 @@ impl Drawing {
                 };
                 out.effects
                     .push(Effect::Data(DataToShell::SceneBegin { scene: id, header }));
-                let paint = laid
-                    .map(|layout| Paint::begun(LayoutState::new(&state), committed.index, layout));
+                let paint =
+                    laid.map(|laid| Paint::begun(LayoutState::new(&state), committed.index, laid));
                 self.scenes.push(Held {
                     scene: id,
                     thread,

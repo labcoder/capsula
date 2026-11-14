@@ -304,8 +304,9 @@ struct StepWait {
     fenced: bool,
     clear_requested: bool,
     interrupted: Option<CallError>,
-    /// The step's wide layout, which the scene keeps once the write commits.
-    laid: Option<LayoutState>,
+    /// The step's wide layout and its resident bytes, which the scene keeps once the write
+    /// commits; `None` writes it uncounted.
+    laid: Option<(LayoutState, usize)>,
 }
 
 /// The scene a pending step goes into.

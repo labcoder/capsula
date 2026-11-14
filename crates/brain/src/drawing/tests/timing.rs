@@ -54,8 +54,9 @@ fn measure_draw_call_to_its_end() {
         }
         samples.sort_unstable();
         println!(
-            "draw_call fixture={name} warmups=8 samples={} p50_us={} p95_us={} max_us={}",
+            "draw_call fixture={name} warmups=8 samples={} min_us={} p50_us={} p95_us={} max_us={}",
             samples.len(),
+            samples[0],
             samples[samples.len() / 2],
             samples[samples.len() * 95 / 100],
             samples[samples.len() - 1]
