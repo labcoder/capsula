@@ -344,6 +344,7 @@ error-account-refused = ChatGPT didn't accept this account for that request. Sig
 error-request-refused = That request couldn't be accepted. Trying again won't help.
 error-response-unreadable = The answer couldn't be read. Try again.
 error-sign-in-needed = Sign in to ChatGPT to get an answer.
+error-connection-needed = Connect an account in Settings to get an answer.
 error-model-unavailable = This thread's model isn't available on your account. Pick another in Settings.
 
 # Anthropic

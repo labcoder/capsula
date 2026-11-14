@@ -101,8 +101,8 @@ impl From<ModelSlug> for String {
 }
 
 /// How hard the model thinks: the documented effort vocabulary, which isn't proof that a model
-/// accepts a value, so a refusal shows at run time. A stored effort a build doesn't know reads as
-/// no choice, so adding one needs no store migration.
+/// accepts a value, so a refusal shows at run time. A stored effort a build doesn't know keeps its
+/// model, shows as Medium and runs at Low, so adding one needs no store migration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Effort {
     /// Less than usual.
