@@ -279,7 +279,8 @@ uses the thread's newest summary in place of every event through `last_event`. T
 
 **Inline (B5).** A build is `TooLarge { room }`, where `room` is what the bound leaves for the
 summary after the fixed parts and the current run, `None` when those alone don't fit. With
-`None` the run ends as `failed(budget)` and spends no request. With room, the run compacts once
+`None` the run ends as `failed(budget)` and spends no request. So does a run whose route isn't
+`ChatGPT`'s, since only `ChatGPT` compacts so far. With room, the run compacts once
 per admission episode (the round, until a build is admitted), so a delete's rebuild can't start a
 second one:
 

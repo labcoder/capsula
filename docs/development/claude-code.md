@@ -291,7 +291,8 @@ stateDiagram-v2
 with its own owner-only folder `claude-code\engine\<32 hex>\{work,tmp}` and its own bridge pipe
 (`work\mcp.json` names the brain exe and `--mcp-bridge <hex>`, no secret). A launch is a second
 kind of item in the lane's queue, so it shares the lane's lock, checks and stuck state, and runs
-one at a time. Nothing in production starts one yet; C5b's engine is the first caller.
+one at a time. A run whose choice names Claude Code starts one through `Claude::question` (see
+[A question](#a-question)).
 
 - **Admission.** `Claude::launch` admits only while the view is `Ready`, `SIGN_IN` is
   `FileWithDacl`, the lane finds and isn't cleaning, no version is quarantined, and the lifetime
@@ -394,8 +395,13 @@ retries the write. A crash before the first successful write loses it.
 ## A question
 
 `engines/claude_code/launch.rs` runs one question on one launch. `runtime/claude.rs` owns the
-attempts. Nothing in production asks a question yet: C5b-2's engine selection is the first caller of
-`Claude::warm` and `Claude::take`.
+attempts. A run whose choice names Claude Code asks one: the runtime's `StartEngine` calls
+`Claude::question`, which looks the choice's model up in the reviewed row and passes the row's own
+alias, so no other text reaches `--model`; maps its effort to the CLI's word (`low`, `medium`,
+`high`, `xhigh`, `max`); fixes the snapshot with `Offer::Nothing`; and takes a fresh attempt. A
+refusal becomes a round that fails at once through `Unserved`: with Claude Code's own reason while
+no launch would be admitted, otherwise with none, and never `Access(None)`, which reads as a
+`ChatGPT` sign-in. Nothing warms yet, so `Claude::warm` still has no production caller.
 
 - **The snapshot.** A `LaunchSnapshot` fixes the thread, model, effort, Claude Code's connection
   generation, the origin (and so the frozen MCP subset of its model tools) and the version.
