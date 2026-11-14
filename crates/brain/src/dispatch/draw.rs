@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use kumochi_scene::{StepError, Tokenizer, parse_draw_record};
+use kumochi_scene::{StepError, TokenError, Tokenizer, parse_draw_record};
 use sha2::{Digest as _, Sha256};
 
 use super::{Prepared, Tool};
@@ -64,11 +64,14 @@ pub(crate) fn validate(args: &[u8]) -> Result<DrawArgs, CallError> {
     let mut tokenizer = Tokenizer::new();
     let mut rest = args;
     let mut records = Vec::new();
-    while let Some(record) = tokenizer.next(&mut rest).map_err(CallError::Token)? {
-        let parsed = self::record(record.bytes)?;
-        records.push(parsed);
+    loop {
+        match tokenizer.next(&mut rest) {
+            Ok(Some(record)) => records.push(self::record(record.bytes)?),
+            Ok(None) => break tokenizer.finish().map_err(CallError::Token)?,
+            Err(TokenError::AfterRecords) => break,
+            Err(error) => return Err(CallError::Token(error)),
+        }
     }
-    tokenizer.finish().map_err(CallError::Token)?;
     let canonical = serde_json::to_vec(&records)
         .map_err(|_| CallError::Step(StepError::new(kumochi_scene::ErrorCode::Malformed)))?;
     let mut hash = Sha256::new();
@@ -251,8 +254,6 @@ mod tests {
             b"[]",
             b"{\"records\":[",
             b"{\"records\":null}",
-            b"{\"records\":[],\"extra\":1}",
-            b"{\"records\":[],\"records\":[]}",
         ] {
             assert!(matches!(validate(args), Err(CallError::Token(_))));
         }

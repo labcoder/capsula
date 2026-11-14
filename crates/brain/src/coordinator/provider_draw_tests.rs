@@ -246,7 +246,7 @@ fn semantic_failure_identity_is_independent_of_ready_timing_and_early_ack_keeps_
         assert_eq!(ends(&effects), [false]);
         let result = result(&effects);
         let expected = ToolOutput::Text(format!(
-            "drawn: [s1, s2]; stopped: step s3: remove[0]: scene.UnknownRef{RETRY}"
+            "drawn: [s1, s2]; stopped: step s3: remove[0]: scene.UnknownRef{DRAWN_RETRY}"
         ));
         assert_eq!(result.output, expected);
         hashes.push(result.hash);
@@ -309,6 +309,72 @@ fn semantic_failure_identity_is_independent_of_ready_timing_and_early_ack_keeps_
 }
 
 #[test]
+fn text_after_the_records_array_completes_the_call_and_draws_nothing_more() {
+    let second = r#",{"end":{}}],"records":[{"step":{"id":"s2","put":[{"shape":{"id":"b","kind":"rect","box":[20,0,10,10]}}]}},{"end":{}}]}"#;
+    for tail in [r#"] , "end":{}}"#, second, "] not json"] {
+        let bytes = format!("{PREFIX}{tail}");
+        for streamed in [true, false] {
+            let scratch = Scratch::new("draw-after-records");
+            let mut store = store(&scratch);
+            let mut core = offered(vec![T]);
+            let effects = if streamed {
+                start(&mut core, "after");
+                let mut effects = delta(&mut core, "after", &bytes);
+                effects.extend(ready(&mut core, "after", &bytes));
+                let mut effects = drain(&mut core, &mut store, effects);
+                effects.extend(send(&mut core, TurnEvent::Finished(Finish::Completed)));
+                effects
+            } else {
+                let (dispatch, effects) = call(&mut core, "after", bytes.as_bytes());
+                assert_eq!(dispatch, Dispatch::Committing);
+                drain(&mut core, &mut store, effects)
+            };
+            assert_eq!(
+                result(&effects).output,
+                ToolOutput::Text("drawn: [s1]; text after the records array was ignored".into())
+            );
+            assert_eq!(ends(&effects), [true]);
+            assert_prefix(&store, &["s1"]);
+            assert_eq!(
+                call(&mut core, "after", &args(None)),
+                (
+                    Dispatch::Answered(ToolOutput::Error(ToolError::Reused)),
+                    Vec::new()
+                ),
+                "the call keeps its canonical identity, so changed arguments are refused"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_empty_records_array_with_text_after_it_draws_nothing() {
+    let bytes = r#"{"records":[]}x"#;
+    for streamed in [true, false] {
+        let scratch = Scratch::new("draw-empty-after-records");
+        let mut store = store(&scratch);
+        let mut core = offered(vec![T]);
+        let effects = if streamed {
+            start(&mut core, "empty");
+            let mut effects = delta(&mut core, "empty", bytes);
+            effects.extend(ready(&mut core, "empty", bytes));
+            let mut effects = drain(&mut core, &mut store, effects);
+            effects.extend(send(&mut core, TurnEvent::Finished(Finish::Completed)));
+            effects
+        } else {
+            let (dispatch, effects) = call(&mut core, "empty", bytes.as_bytes());
+            assert_eq!(dispatch, Dispatch::Committing);
+            drain(&mut core, &mut store, effects)
+        };
+        assert_eq!(
+            result(&effects).output,
+            ToolOutput::Text(format!("drawn: []; stopped: $: scene.BeforeBegin{RETRY}"))
+        );
+        assert_eq!(ends(&effects), Vec::<bool>::new());
+    }
+}
+
+#[test]
 fn terminal_syntax_typed_and_truncated_tails_keep_one_prefix_and_a_fixed_refusal() {
     for (suffix, verify, stopped) in [
         (
@@ -337,7 +403,7 @@ fn terminal_syntax_typed_and_truncated_tails_keep_one_prefix_and_a_fixed_refusal
         };
         assert_eq!(ends(&failed), [false]);
         let result = result(&failed);
-        let expected = ToolOutput::Text(format!("drawn: [s1]; stopped: {stopped}{RETRY}"));
+        let expected = ToolOutput::Text(format!("drawn: [s1]; stopped: {stopped}{DRAWN_RETRY}"));
         assert_eq!(result.output, expected);
         assert_eq!(
             call(&mut core, "refused", &args(None)),
@@ -438,7 +504,7 @@ fn replacement_admission_does_not_turn_an_unverified_same_id_into_an_old_result_
             assert_eq!(
                 result.output,
                 ToolOutput::Text(format!(
-                    "drawn: [s1, s2]; stopped: step s3: remove[0]: scene.UnknownRef{RETRY}"
+                    "drawn: [s1, s2]; stopped: step s3: remove[0]: scene.UnknownRef{DRAWN_RETRY}"
                 ))
             );
         } else {
@@ -1280,13 +1346,15 @@ fn invalid_replacement_streams_join_only_noncanonical_fixed_results_before_or_af
         let result = result(&effects);
         let expected = ToolOutput::Text(match first {
             "canonical" => {
-                format!("drawn: [s1, s2]; stopped: step s3: remove[0]: scene.UnknownRef{RETRY}")
+                format!(
+                    "drawn: [s1, s2]; stopped: step s3: remove[0]: scene.UnknownRef{DRAWN_RETRY}"
+                )
             }
             "malformed" => format!(
-                "drawn: [s1]; stopped: malformed drawing at byte {}{RETRY}",
+                "drawn: [s1]; stopped: malformed drawing at byte {}{DRAWN_RETRY}",
                 PREFIX.len() + 1
             ),
-            _ => format!("drawn: [s1]; stopped: truncated drawing{RETRY}"),
+            _ => format!("drawn: [s1]; stopped: truncated drawing{DRAWN_RETRY}"),
         });
         assert_eq!(result.output, expected);
         let old = super::super::engine_key(&core, R);
