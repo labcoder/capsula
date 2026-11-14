@@ -2226,3 +2226,35 @@ async fn a_pending_hold_on_another_kind_ends_only_on_its_own_kinds_change() {
     brain.holds.lost();
     brain.close().await;
 }
+
+#[tokio::test]
+async fn a_queued_repair_with_nothing_to_write_leaves_a_pending_hold_pending() {
+    use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug, SettingsOp};
+    let scratch = Scratch::new("hold-empty-repair");
+    let mut brain = test_support::brain(&scratch, "");
+    recording(&mut brain);
+    let flag = Arc::clone(&brain.holds.pending.as_ref().unwrap().cancel);
+    assert_eq!(
+        brain.repaired_default(),
+        None,
+        "no catalog, so nothing to repair"
+    );
+    brain
+        .settings_ops
+        .push_back(crate::runtime::settings::Queued {
+            change: crate::runtime::settings::Change::User(SettingsOp::SetDefaultModel(
+                ModelChoice {
+                    model: ModelSlug::new("fixture-model").unwrap(),
+                    effort: Effort::High,
+                    connection: ConnectionKind::ChatGpt,
+                },
+            )),
+            epoch: crate::runtime::settings::BRAIN,
+        });
+    brain.pump_settings(None).unwrap();
+    assert!(!flag.load(Ordering::SeqCst));
+    assert!(brain.settings_ops.is_empty());
+    assert!(brain.config_write.is_none(), "nothing was written");
+    brain.holds.lost();
+    brain.close().await;
+}

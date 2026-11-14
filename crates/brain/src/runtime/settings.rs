@@ -208,9 +208,19 @@ impl Brain {
         mut link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
         while self.config_write.is_none() {
-            let Some(Queued { change, epoch }) = self.settings_ops.pop_front() else {
+            let Some(Queued { mut change, epoch }) = self.settings_ops.pop_front() else {
                 break;
             };
+            // A queued repair is recomputed here, so it never replaces a choice written since; with
+            // nothing left to repair it changes nothing, pending holds included.
+            if epoch == BRAIN
+                && let Change::User(SettingsOp::SetDefaultModel(choice)) = &mut change
+            {
+                let Some(repaired) = self.repaired_default() else {
+                    continue;
+                };
+                *choice = repaired;
+            }
             let model = matches!(&change, Change::User(SettingsOp::SetDefaultModel(_)));
             let disables_hold = matches!(&change, Change::User(SettingsOp::SetHoldToTalk(false)));
             if model {
@@ -274,17 +284,6 @@ impl Brain {
                     self.voice_apply(before, effects, link)?;
                     answered?;
                     continue;
-                }
-                // A queued repair is recomputed here, so it never replaces a choice written since.
-                Change::User(SettingsOp::SetDefaultModel(_)) if epoch == BRAIN => {
-                    let Some(choice) = self.repaired_default() else {
-                        continue;
-                    };
-                    (
-                        self.config.stage(SettingsOp::SetDefaultModel(choice)),
-                        None,
-                        None,
-                    )
                 }
                 Change::User(op) => (self.config.stage(op), None, None),
                 // A removal committed since the load: writing it would put the part back.
