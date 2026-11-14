@@ -4,11 +4,13 @@
 
 use std::fs;
 use std::future::Future;
+use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::constants::{CLAUDE_CODE_QUARANTINE, MCP_SERVER_NAME};
-use kumochi_protocol::message::{ErrorKey, RunId};
+use kumochi_protocol::message::{PolicyFailed, RunId};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -18,7 +20,9 @@ use super::tests::READY;
 use super::*;
 use crate::context::Origin;
 use crate::coordinator::{Input, LeaseId, SendKey};
+use crate::engines::claude_code::lane::Host;
 use crate::engines::claude_code::lane::tests::{Base, V, host, soon};
+use crate::platform::Job;
 use crate::engines::claude_code::supervisor::tests::{WAIT, until};
 use crate::engines::{
     self, Answer, Asks, Engine, EngineFailure, Finish, RunRequest, SendGate, SendLease, TurnEvent,
@@ -132,9 +136,15 @@ struct Rig {
 
 impl Rig {
     async fn new(name: &str, script: &Script) -> Self {
+        Self::with(name, script, |_| {}).await
+    }
+
+    /// As [`new`](Self::new), on a host `edit` changed first.
+    async fn with(name: &str, script: &Script, edit: impl FnOnce(&mut Host)) -> Self {
         let base = Base::new(name);
         script.write(&base, None);
-        let (host, _switches) = host(&base, "replay");
+        let (mut host, _switches) = host(&base, "replay");
+        edit(&mut host);
         let mut claude = Claude::start(Lane::start(host).expect("lane"), SIGN_IN);
         let t0 = Instant::now();
         let now = Arc::new(Mutex::new(t0));
@@ -1209,4 +1219,220 @@ async fn a_grant_ready_with_its_expired_deadline_seeds_nothing() {
     assert!(rig.stdin().iter().all(|line| !line.ends_with(" user")));
     assert!(rig.claude.budget.reserve(), "no question was spent");
     rig.close().await;
+}
+
+fn unavailable(key: ErrorKey) -> Availability {
+    Availability::Unavailable(
+        UserError::new(key, Vec::new(), vec![Action::OpenSettings]).expect("one action"),
+    )
+}
+
+fn tag(availability: &Availability) -> ConnectionTag {
+    let Availability::Ready(ready) = availability else {
+        panic!("{availability:?}");
+    };
+    ready.connection
+}
+
+const UNREVIEWED: ClaudeCodeView = ClaudeCodeView::Ready {
+    version: ClaudeVersion {
+        major: 2,
+        minor: 1,
+        patch: 307,
+    },
+    analytics_on: false,
+};
+
+/// Each view's reason, with Open Settings only. None is ConnectionNeeded, which only the
+/// coordinator's rule for a turn nothing can answer sends.
+#[test]
+fn each_view_reports_its_own_reason_with_open_settings() {
+    let cases = [
+        (ClaudeCodeView::NotFound, ErrorKey::ClaudeCodeNotFound),
+        (
+            ClaudeCodeView::SignedOut { version: V },
+            ErrorKey::ClaudeCodeSignedOut,
+        ),
+        (ClaudeCodeView::SigningIn, ErrorKey::ClaudeCodeSignedOut),
+        (
+            ClaudeCodeView::Unsupported(Unsupported::Shim),
+            ErrorKey::ClaudeCodeUnsupported,
+        ),
+        (
+            ClaudeCodeView::PolicyFailed(PolicyFailed::ManagedPolicy),
+            ErrorKey::ClaudeCodePolicy,
+        ),
+        (
+            ClaudeCodeView::AuditFailed(AuditFailed::Agents),
+            ErrorKey::ClaudeCodeAuditFailed,
+        ),
+        (
+            ClaudeCodeView::CleanupPending,
+            ErrorKey::ClaudeCodeCleanupPending,
+        ),
+        (ClaudeCodeView::Finding, ErrorKey::ModelUnavailable),
+        (ClaudeCodeView::TurnedOff, ErrorKey::ModelUnavailable),
+        (ClaudeCodeView::InUse, ErrorKey::ClaudeCodeUnsupported),
+        (ClaudeCodeView::Unavailable, ErrorKey::ClaudeCodeUnsupported),
+        // Ready with no lane: a launch would be refused, so it doesn't read ready either.
+        (READY, ErrorKey::ClaudeCodeUnsupported),
+    ];
+    for (view, key) in cases {
+        let mut claude = Claude::new(None, SIGN_IN, view);
+        assert_eq!(claude.availability(), unavailable(key), "{view:?}");
+    }
+}
+
+/// Reads unavailable, and refuses a launch for a snapshot taken now.
+fn refuses(claude: &mut Claude, what: &str) {
+    assert!(
+        matches!(claude.availability(), Availability::Unavailable(_)),
+        "{what}"
+    );
+    let snapshot = claude
+        .snapshot(
+            ThreadId(1),
+            "claude-test".to_owned(),
+            None,
+            Offer::Mcp(Origin::Kumo),
+        )
+        .expect("the view still reads Ready");
+    assert!(
+        matches!(claude.take(&snapshot), Err(LaunchRefused::NotReady)),
+        "{what}"
+    );
+}
+
+/// `availability` and `launch` ask one check: for each condition, a Ready view where only it
+/// fails reads unavailable and refuses the launch; with none failing, both say yes.
+#[tokio::test]
+async fn availability_and_launch_agree_on_every_condition() {
+    let mut rig = Rig::new("question-agree", &synthetic_signed_in()).await;
+    let Availability::Ready(ready) = rig.claude.availability() else {
+        panic!("ready");
+    };
+    assert_eq!(ready.connection, ConnectionTag(1));
+    let slugs: Vec<&str> = ready.models.iter().map(|model| model.slug.as_str()).collect();
+    assert_eq!(slugs, ["sonnet", "opus", "haiku", "fable"]);
+    assert!(!ready.trusted_draw);
+    drop(rig.claude.take(&rig.snapshot()).expect("admitted"));
+
+    let conditions: [(&str, fn(&mut Claude), fn(&mut Claude)); 5] = [
+        ("a pending Disconnect", |c| c.cleaning = true, |c| c.cleaning = false),
+        (
+            "a quarantine",
+            |c| {
+                c.quarantine = Some(Quarantine {
+                    version: V,
+                    reason: AuditFailed::Agents,
+                    durable: true,
+                });
+            },
+            |c| c.quarantine = None,
+        ),
+        ("turned off", |c| c.finds = false, |c| c.finds = true),
+        (
+            "an undecided sign-in store",
+            |c| c.sign_in = SignInStore::Undecided,
+            |c| c.sign_in = SignInStore::FileWithDacl,
+        ),
+        (
+            "an unreviewed version",
+            |c| c.view = UNREVIEWED,
+            |c| c.view = READY,
+        ),
+    ];
+    for (what, set, undo) in conditions {
+        set(&mut rig.claude);
+        refuses(&mut rig.claude, what);
+        undo(&mut rig.claude);
+        assert!(
+            matches!(rig.claude.availability(), Availability::Ready(_)),
+            "back after {what}"
+        );
+    }
+    let lane = rig.claude.lane.take();
+    refuses(&mut rig.claude, "no lane");
+    rig.claude.lane = lane;
+    rig.close().await;
+}
+
+/// A Find while ready keeps the tag, so a run bound to it goes on; a sign-out ends it and the
+/// next ready state draws a new one, as an unreviewed version in between does.
+#[tokio::test]
+async fn the_tag_survives_a_find_and_never_outlives_a_sign_out() {
+    let mut rig = Rig::new("question-epoch", &synthetic_signed_in()).await;
+    let first = tag(&rig.claude.availability());
+    rig.claude.op(ConnectionOp::FindClaudeCode);
+    assert_eq!(tag(&rig.claude.availability()), first, "while the Find runs");
+    rig.settle().await;
+    assert_eq!(rig.claude.view(), READY);
+    assert_eq!(tag(&rig.claude.availability()), first, "after it");
+
+    rig.claude.view = ClaudeCodeView::SignedOut { version: V };
+    assert_eq!(
+        rig.claude.availability(),
+        unavailable(ErrorKey::ClaudeCodeSignedOut)
+    );
+    rig.claude.view = READY;
+    let second = tag(&rig.claude.availability());
+    assert_ne!(second, first, "a later sign-in never answers a run bound before");
+
+    rig.claude.view = UNREVIEWED;
+    assert_eq!(
+        rig.claude.availability(),
+        unavailable(ErrorKey::ClaudeCodeUnsupported)
+    );
+    rig.claude.view = READY;
+    assert_ne!(tag(&rig.claude.availability()), second, "nor across a version");
+    rig.close().await;
+}
+
+/// Makes every teardown unconfirmed once set; only the test below sets it.
+static STUCK: AtomicBool = AtomicBool::new(false);
+
+fn end_unless_stuck(job: &Job) -> io::Result<()> {
+    if STUCK.load(Ordering::SeqCst) {
+        return Err(io::ErrorKind::Other.into());
+    }
+    Job::terminate(job)
+}
+
+/// A lane a teardown left stuck refuses the next launch: that question fails with Claude Code's
+/// reason, never with none, and Claude Code stops reading ready.
+#[tokio::test]
+async fn a_stuck_lane_fails_the_next_question_with_a_reason_and_stops_reading_ready() {
+    let mut rig = Rig::with("question-stuck", &synthetic_signed_in(), |host| {
+        host.terminate = end_unless_stuck;
+    })
+    .await;
+    assert!(matches!(rig.claude.availability(), Availability::Ready(_)));
+    STUCK.store(true, Ordering::SeqCst);
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let (_, control) = rig.last();
+    let mut played = play(&question);
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    answered(&rig.drive(played.events()).await);
+    drop(question);
+    until("the stuck teardown", || control.is_ended()).await;
+
+    let question = rig
+        .claude
+        .take(&rig.snapshot())
+        .expect("the core can't see the lane is stuck yet");
+    let (second, _) = rig.last();
+    let mut played = play(&question);
+    assert_eq!(
+        rig.drive(played.events()).await,
+        [claude_failed(ErrorKey::ClaudeCodeUnsupported)]
+    );
+    assert_eq!(rig.reported(second).await, [launch::Outcome::Refused]);
+    assert_eq!(rig.claude.view(), ClaudeCodeView::Unavailable);
+    assert_eq!(
+        rig.claude.availability(),
+        unavailable(ErrorKey::ClaudeCodeUnsupported)
+    );
+    // shortcut: the kept lock lives until the test process ends, leaving this scratch folder.
+    assert!(!rig.claude.close(soon()).await, "a stuck lane keeps its lock");
 }

@@ -19,6 +19,9 @@ pub(crate) struct Reviewed {
     pub(crate) version: ClaudeVersion,
     pub(crate) policy: LaunchPolicy,
     pub(crate) audit: AuditSchema,
+    /// The aliases a run may name on this version, with the names the picker shows, in the
+    /// order it lists them. Only these reach `--model`.
+    pub(crate) models: &'static [(&'static str, &'static str)],
 }
 
 /// Adding a version is a reviewed PR that adds a row here, from that version's probe.
@@ -44,6 +47,13 @@ pub(crate) static REVIEWED_CLAUDE_CODE: &[Reviewed] = &[Reviewed {
         plugins: &["cc-plugin-agents-md", "cc-plugin-plugin-authoring"],
         api_key_sources: &["none"],
     },
+    // The owner's list (OSC-742). P0's `default` alias is left out: it names no fixed model.
+    models: &[
+        ("sonnet", "Sonnet"),
+        ("opus", "Opus"),
+        ("haiku", "Haiku"),
+        ("fable", "Fable"),
+    ],
 }];
 
 /// The reviewed entry for `version`. Every other version is refused, with no override: D2a's

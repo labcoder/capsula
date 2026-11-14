@@ -15,6 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
 
 use super::audit::{self, PostSeedAudit, PreInputAudit, Progress};
+use super::lane::Failure;
 use super::policy::Reviewed;
 use super::seed;
 use super::stream::{LineFramer, Mapped, StreamMapper};
@@ -122,6 +123,8 @@ pub(crate) enum Outcome {
     Eof,
     /// The launch never ran, or was revoked under the question.
     Launch,
+    /// The lane refused it: stuck after a teardown it couldn't confirm, or closing.
+    Refused,
     /// stdout broke its rules.
     Stream(ClaudeStreamFailure),
 }
@@ -311,8 +314,10 @@ async fn audited(
     deadline: Instant,
     pre: &mut PreInputAudit,
 ) -> Result<(Pipes, StdinWriter, LineFramer, StreamMapper), Outcome> {
-    let Some(Ok(mut pipes)) = started.await else {
-        return Err(Outcome::Launch);
+    let mut pipes = match started.await {
+        Some(Ok(pipes)) => pipes,
+        Some(Err(LaunchFailed::Lane(Failure::Refused))) => return Err(Outcome::Refused),
+        _ => return Err(Outcome::Launch),
     };
     let mut writer = pipes.writer().ok_or(Outcome::Launch)?;
     for line in audit::control_requests() {
@@ -592,6 +597,8 @@ fn failed(outcome: Outcome) -> Finish {
     match outcome {
         Outcome::Audit(_) => claude(ErrorKey::ClaudeCodeAuditFailed),
         Outcome::SignedOut => claude(ErrorKey::ClaudeCodeSignedOut),
+        // The reason the view it leaves gives (Unavailable).
+        Outcome::Refused => claude(ErrorKey::ClaudeCodeUnsupported),
         Outcome::Stream(failure) => Finish::Failed(EngineFailure::ClaudeStream(failure)),
         Outcome::Eof => Finish::Truncated,
         Outcome::Clean | Outcome::Deadline | Outcome::Launch => {
