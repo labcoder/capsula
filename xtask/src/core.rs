@@ -154,7 +154,7 @@ mod tests {
         ));
         assert!(names_framework("nsh-core v0.1.0"));
         assert!(!names_framework(
-            "kumochi-shell-core v0.1.2 (C:/dev/capsula/crates/shell-core)"
+            "kumochi-shell-core v0.1.2 (/work/kumochi/crates/shell-core)"
         ));
         assert!(!names_framework("windows v0.62.2"));
         assert!(!names_framework(""));
