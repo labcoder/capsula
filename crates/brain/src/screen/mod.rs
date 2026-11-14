@@ -1,12 +1,7 @@
 //! Killable screen work, isolated from the brain's async runtime.
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "A6b2b activates the alternate worker")
-)]
 mod actor;
 mod capture;
-#[cfg_attr(not(test), expect(dead_code, reason = "holds use the client from 2c4"))]
 mod client;
 mod context;
 #[cfg_attr(
@@ -21,22 +16,18 @@ mod frame;
     expect(dead_code, reason = "A3 and A6 populate shared capture masks")
 )]
 mod mask;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "A6b2b activates the capture producer")
-)]
 mod native;
 #[cfg_attr(not(test), expect(dead_code, reason = "A6 connects regional OCR"))]
 pub(crate) mod ocr;
 mod reader;
 mod sanitize;
-mod supervisor;
 mod wire;
-mod worker;
 
 pub use crate::supervise::{Generation, WorkerLost};
+pub use actor::serve;
 pub(crate) use capture::{Acquired, Capturer, Failure, Target};
-pub(crate) use client::{Closed, HoldClient, MAX_TTL};
+pub use client::HoldClient;
+pub(crate) use client::{Closed, MAX_TTL};
 #[cfg(test)]
 pub(crate) use client::{Holds, hold_frame, release_next};
 pub(crate) use context::ScreenContext;
@@ -50,18 +41,18 @@ pub(crate) use elements::{
 };
 #[cfg(debug_assertions)]
 pub(crate) use encode::JPEG_CAP;
-pub(crate) use frame::{RawFrame, display_edges};
+pub(crate) use frame::RawFrame;
 #[cfg(all(windows, any(test, feature = "test-support")))]
 pub(crate) use mask::MaskSet;
 pub use mask::Unavailable;
 #[cfg(windows)]
 pub(crate) use ocr::PAGE_CLASS;
+#[cfg(all(test, windows))]
+pub(crate) use reader::Walk;
 #[cfg(windows)]
 pub(crate) use reader::{CONNECTION_TIMEOUT, TRANSACTION_TIMEOUT, ThreadedReader};
-pub use supervisor::{CaptureError, REQUEST_DEADLINE, ScreenHandle, ScreenSupervisor};
+#[cfg(test)]
+pub(crate) use wire::FrameMeta;
 #[cfg(debug_assertions)]
 pub use wire::WorkerFault;
-pub use wire::{
-    CaptureId, Exclusion, FrameMeta, Refusal, ReplyBody, RequestBody, ScreenError, TicketWire,
-};
-pub use worker::serve;
+pub(crate) use wire::{CaptureId, Refusal};

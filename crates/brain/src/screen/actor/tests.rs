@@ -2,6 +2,7 @@ use std::io::{self, Cursor, Read, Write};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
+use std::time::Duration;
 
 use super::*;
 use crate::screen::capture::{Acquired, Target};
@@ -12,9 +13,8 @@ use crate::screen::elements::{WalkJob, Walked};
 use crate::screen::frame::RawFrame;
 use crate::screen::mask::MaskSink;
 use crate::screen::reader::ThreadedReader;
-use crate::screen::wire::Exclusion;
 use crate::supervise::write_message;
-use kumochi_protocol::geometry::{DisplayRef, PhysicalPoint, PhysicalRect, WindowRef};
+use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect, WindowRef};
 
 mod replacement;
 
@@ -156,15 +156,6 @@ impl Capturer for Fake {
     fn capture_window(
         &mut self,
         _: &Target,
-        until: Instant,
-        frame: &mut RawFrame,
-    ) -> Result<Acquired, Failure> {
-        self.capture_into(&DisplayRef(RECT), Exclusion::KumochiWindows, until, frame)
-    }
-    fn capture_into(
-        &mut self,
-        _: &DisplayRef,
-        _: Exclusion,
         _: Instant,
         frame: &mut RawFrame,
     ) -> Result<Acquired, Failure> {
@@ -210,9 +201,6 @@ impl ElementSource for Source {
 #[derive(Clone)]
 struct Platform;
 impl ElementPlatform for Platform {
-    fn foreground(&mut self) -> Option<TopWindow> {
-        None
-    }
     fn excluded(&mut self, _: u32) -> Result<bool, SourceError> {
         Ok(false)
     }
@@ -222,9 +210,6 @@ struct Reader {
     masks: mpsc::Sender<MaskSink>,
 }
 impl ElementReader for Reader {
-    fn foreground(&mut self) -> Option<TopWindow> {
-        self.inner.foreground()
-    }
     fn set_shell_pid(&mut self, pid: u32) {
         self.inner.set_shell_pid(pid);
     }
@@ -236,9 +221,6 @@ impl ElementReader for Reader {
     }
     fn poll(&mut self) -> Option<Result<Walked, Failure>> {
         self.inner.poll()
-    }
-    fn walk(&mut self, job: WalkJob) -> Result<Walked, Failure> {
-        self.inner.walk(job)
     }
 }
 struct Setup {
@@ -859,6 +841,44 @@ fn a_poisoned_walk_cannot_acknowledge_release_while_its_provider_still_runs() {
     );
     sent.expect("provider remained held until this assertion");
     rig.scrubbed();
+    rig.finish();
+}
+
+#[test]
+fn a_walk_that_outlasts_its_deadline_and_the_uia_slack_ends_the_worker() {
+    let (gate, entered, release) = gate();
+    let rig = Rig::start(None, None, Some(gate));
+    rig.send(1, &context(1));
+    rig.acquired(1);
+    rig.send(
+        2,
+        &Request::Elements {
+            key: key(1),
+            target: ElementTarget::Window {
+                window: WindowRef(7),
+                pid: 8,
+            },
+        },
+    );
+    entered.recv_timeout(PATIENCE).unwrap();
+    let start = *rig.clock.lock().unwrap();
+    let bound = start + Duration::from_millis(120) + CONNECTION_TIMEOUT + TRANSACTION_TIMEOUT;
+    *rig.clock.lock().unwrap() = bound.checked_sub(Duration::from_millis(1)).unwrap();
+    rig.send(3, &Request::Ping);
+    assert_eq!(rig.reply(), (3, Reply::Pong));
+    rig.send(4, &Request::Ping);
+    assert_eq!(
+        rig.reply(),
+        (4, Reply::Pong),
+        "inside the slack the walk still runs"
+    );
+    *rig.clock.lock().unwrap() = bound;
+    assert_eq!(
+        rig.replies.recv_timeout(PATIENCE),
+        Err(mpsc::RecvTimeoutError::Disconnected),
+        "a walk past its slack ends the worker without answering"
+    );
+    release.send(()).unwrap();
     rig.finish();
 }
 

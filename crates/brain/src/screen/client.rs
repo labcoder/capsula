@@ -1,9 +1,9 @@
 //! The brain's side of a hold's screen work: one frame in the worker, from its capture through its
-//! walk to its image, or its release. Dormant: nothing holds a screen part until 2c4, and the
-//! worker's entry point still runs the legacy loop.
+//! walk to its image, or its release.
 
-use std::sync::Mutex;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use kumochi_protocol::geometry::PhysicalPoint;
 use tokio::sync::broadcast::error::RecvError;
@@ -12,25 +12,26 @@ use tokio::time::Instant;
 use super::actor::{Key, Owner, Reply, Request};
 use super::context::ScreenContext;
 use super::mask::Completeness;
-use super::supervisor::{REQUEST_DEADLINE, Screen};
-use super::wire::{CaptureId, FrameMeta, Refusal, TicketWire};
+use super::wire::{CaptureId, MAX_REPLY_BYTES, Refusal, TicketWire};
+use crate::platform::Job;
 use crate::supervise::{Generation, Handle, Kind, WorkerLost, Zeroed};
 
 #[cfg(test)]
 mod tests;
 
-/// The longest a ticket lets the worker hold a frame: the screen budget. With no `Retire` (a
-/// panic, an aborted task, a dropped `context`), the worker's own expiry clears the frame by then.
-pub(crate) const MAX_TTL: std::time::Duration = REQUEST_DEADLINE;
+/// The longest a ticket lets the worker hold a frame: the screen budget [guess]. With no `Retire`
+/// (a panic, an aborted task, a dropped `context`), the worker's own expiry clears the frame by then.
+pub(crate) const MAX_TTL: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// The hold protocol: the screen worker's argument and caps, the actor's messages.
 pub(crate) struct Holds;
 
 impl Kind for Holds {
-    const ARG: &'static str = Screen::ARG;
-    const NAME: &'static str = Screen::NAME;
-    const MAX_REQUEST: usize = Screen::MAX_REQUEST;
-    const MAX_REPLY: usize = Screen::MAX_REPLY;
+    const ARG: &'static str = crate::SCREEN_WORKER;
+    const NAME: &'static str = "screen";
+    /// Requests are a tag and a hold's key, ticket and point at most.
+    const MAX_REQUEST: usize = 64 * 1024;
+    const MAX_REPLY: usize = MAX_REPLY_BYTES;
     type Request = Request;
     type Reply = Reply;
     type Assembly = Zeroed;
@@ -47,7 +48,6 @@ impl Kind for Holds {
 pub(crate) struct Held {
     pub(crate) key: Key,
     pub(crate) generation: Generation,
-    pub(crate) meta: FrameMeta,
 }
 
 /// Why a hold's screen work ended without what it asked for.
@@ -70,10 +70,11 @@ pub(crate) enum Closed {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Unreleased;
 
-/// One brain's client for the hold protocol. Each capture gets a fresh capture id and a ticket
-/// number above every earlier one, since a worker refuses a number it has already spent.
+/// One brain's client for the hold protocol and its one screen worker. Each capture gets a fresh
+/// capture id and a ticket number above every earlier one, since a worker refuses a number it has
+/// already spent. Dropping the last one stops the worker.
 #[derive(Debug)]
-pub(crate) struct HoldClient {
+pub struct HoldClient {
     inner: Handle<Holds>,
     tickets: AtomicU64,
     captures: AtomicU64,
@@ -83,6 +84,14 @@ pub(crate) struct HoldClient {
 }
 
 impl HoldClient {
+    /// Starts the screen worker in the brain's job.
+    ///
+    /// # Errors
+    /// A process or thread creation failure.
+    pub fn start(exe: PathBuf, jobs: Arc<Job>) -> std::io::Result<Self> {
+        Ok(Self::new(crate::supervise::start::<Holds>(exe, jobs)?))
+    }
+
     pub(crate) fn new(inner: Handle<Holds>) -> Self {
         Self {
             inner,
@@ -90,6 +99,36 @@ impl HoldClient {
             captures: AtomicU64::new(1),
             fence: Mutex::new(None),
         }
+    }
+
+    /// Whether a worker answers by `until`. Fixtures only.
+    ///
+    /// # Errors
+    /// `Lost` for a loss, the deadline, backoff or any answer but `Pong`.
+    #[cfg(debug_assertions)]
+    pub async fn ping(&self, until: Instant) -> Result<(), WorkerLost> {
+        match self.inner.request(Request::Ping, until).await? {
+            (Reply::Pong, _) => Ok(()),
+            _ => Err(WorkerLost::Lost),
+        }
+    }
+
+    /// Makes the worker fail once, as `fault` says. Fixtures only.
+    ///
+    /// # Errors
+    /// The loss that `fault` causes, or the deadline.
+    #[cfg(debug_assertions)]
+    pub async fn fault(&self, fault: super::WorkerFault, until: Instant) -> Result<(), WorkerLost> {
+        self.inner
+            .request(Request::Fault(fault), until)
+            .await
+            .map(drop)
+    }
+
+    /// Each worker lost, by generation. Subscribe before the work whose loss it should see.
+    #[cfg(debug_assertions)]
+    pub fn lost(&self) -> tokio::sync::broadcast::Receiver<Generation> {
+        self.inner.lost()
     }
 
     /// Captures the window under `point` for `owner`, under a ticket that runs out at `until`
@@ -133,11 +172,11 @@ impl HoldClient {
                 .request_stream(Request::Context { key, ticket, point }, until)
                 .map_err(Closed::Lost)?
         };
-        let (meta, generation) = match stream.next().await {
+        let generation = match stream.next().await {
             Some(Ok((Reply::Acquired(acquired, meta), generation)))
                 if acquired == key && meta.capture == key.capture =>
             {
-                (meta, generation)
+                generation
             }
             Some(Ok((reply, _))) => return Err(closed(&reply)),
             Some(Err(lost)) => return Err(Closed::Lost(lost)),
@@ -147,11 +186,7 @@ impl HoldClient {
             Some(Ok((Reply::Complete(complete), from)))
                 if complete == key && from == generation =>
             {
-                Ok(Held {
-                    key,
-                    generation,
-                    meta,
-                })
+                Ok(Held { key, generation })
             }
             Some(Err(lost)) => Err(Closed::Lost(lost)),
             _ => Err(Closed::Lost(WorkerLost::Lost)),
@@ -265,7 +300,7 @@ pub(crate) async fn hold_frame(
     let Request::Context { key, .. } = request else {
         panic!("not a capture: {request:?}")
     };
-    let meta = FrameMeta {
+    let meta = super::wire::FrameMeta {
         capture: key.capture,
         display: kumochi_protocol::geometry::PhysicalRect {
             origin: [0, 0],

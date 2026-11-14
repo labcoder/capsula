@@ -47,7 +47,6 @@ impl std::fmt::Debug for SanitizedFrame<'_> {
 ///
 /// # Errors
 /// `Stale` when the raw frame has no committed image or the masks belong to another capture.
-#[cfg_attr(not(test), expect(dead_code, reason = "A6 sanitizes before encoding"))]
 pub(crate) fn sanitize<'a>(
     frame: &'a mut RawFrame,
     masks: &MaskSet,

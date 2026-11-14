@@ -96,7 +96,6 @@ pub(crate) struct Encoded {
     pub(crate) generation: u32,
     #[cfg_attr(not(test), expect(dead_code, reason = "A6 reports mask completeness"))]
     pub(crate) completeness: Completeness,
-    #[cfg_attr(not(test), expect(dead_code, reason = "A6 carries image transforms"))]
     pub(crate) transform: CaptureTransform,
 }
 

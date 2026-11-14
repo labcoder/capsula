@@ -3,6 +3,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use super::*;
+use crate::screen::Walk as _;
 use crate::screen::{Availability, CaptureId, Cut, Element, ElementId, ElementTree};
 
 #[test]

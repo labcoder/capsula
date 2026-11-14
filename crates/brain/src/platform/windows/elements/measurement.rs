@@ -6,6 +6,7 @@
 //! named by handle and owner pid; it never targets the foreground window. Nothing here ships.
 
 use std::sync::Mutex;
+use std::sync::mpsc::{self, Receiver, TrySendError};
 use std::time::{Duration, Instant};
 
 use super::{
@@ -13,7 +14,9 @@ use super::{
     IUIAutomationElement, Native, NodeProps, PhysicalRect, SourceError, ThreadedReader, TopWindow,
     snapshot,
 };
-use crate::screen::{Availability, CaptureId, Failure, MaskSet, WalkJob};
+use crate::screen::{
+    Availability, CONNECTION_TIMEOUT, CaptureId, Failure, MaskSet, TRANSACTION_TIMEOUT, WalkJob,
+};
 
 /// Observes provider navigation and the walk's existing deadline checks.
 pub trait WindowProbe: Send + Sync + 'static {
@@ -74,6 +77,7 @@ pub struct WindowSample {
 /// One bounded reader pinned to an explicit native window, never the foreground.
 pub struct WindowSession {
     reader: ThreadedReader<Native>,
+    wakes: Receiver<()>,
     top: TopWindow,
     dpi: u32,
     capture: u64,
@@ -106,6 +110,7 @@ impl WindowSession {
         let shell = Arc::new(AtomicU32::new(0));
         let source_shell = Arc::clone(&shell);
         let source_probe = Arc::clone(&probe);
+        let (wake, wakes) = mpsc::sync_channel(1);
         let reader = ThreadedReader::with_clock(
             move || {
                 Automation::new(Arc::clone(&source_shell))
@@ -117,10 +122,11 @@ impl WindowSession {
             },
             Native(shell),
             move || probe.now(),
-            || true,
+            move || !matches!(wake.try_send(()), Err(TrySendError::Disconnected(()))),
         )?;
         Ok(Self {
             reader,
+            wakes,
             top,
             dpi,
             capture: 0,
@@ -135,22 +141,29 @@ impl WindowSession {
         self.capture = self.capture.checked_add(1).ok_or(-1)?;
         let start = Instant::now();
         let masks = Arc::new(Mutex::new(MaskSet::new(CaptureId(self.capture))));
-        let walked = self
-            .reader
-            .walk(WalkJob {
-                target: ElementTarget::Window {
-                    window: self.top.window,
-                    pid: self.top.pid,
-                },
-                capture: CaptureId(self.capture),
-                display: self.top.rect,
-                until: start + Duration::from_millis(120),
-                masks: Arc::clone(&masks),
-            })
-            .map_err(|error| match error {
+        let until = start + Duration::from_millis(120);
+        let job = WalkJob {
+            target: ElementTarget::Window {
+                window: self.top.window,
+                pid: self.top.pid,
+            },
+            capture: CaptureId(self.capture),
+            display: self.top.rect,
+            until,
+            masks: Arc::clone(&masks),
+        };
+        let walked = if let Err(walked) = self.reader.begin(job) {
+            walked
+        } else {
+            let slack = until + CONNECTION_TIMEOUT + TRANSACTION_TIMEOUT;
+            self.wakes
+                .recv_timeout(slack.saturating_duration_since(Instant::now()))
+                .map_err(|_| -1)?;
+            self.reader.poll().ok_or(-1)?.map_err(|error| match error {
                 Failure::Fault(code) | Failure::Retire(code) => code,
                 Failure::Refused(_) => -1,
-            })?;
+            })?
+        };
         drop(serde_json::to_vec(&walked.tree).map_err(|_| -1)?);
         let ended = Instant::now();
         let masks = masks.lock().map_err(|_| -1)?.rects().len();

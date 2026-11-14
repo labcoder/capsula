@@ -16,13 +16,6 @@ fn captured_shell_identity_reaches_the_threaded_exclusion_before_text_is_read() 
         fn set_shell_pid(&mut self, pid: u32) {
             self.0.store(pid, Ordering::Relaxed);
         }
-        fn foreground(&mut self) -> Option<TopWindow> {
-            Some(TopWindow {
-                window: WindowRef(7),
-                pid: 8,
-                rect: rect([4, 3]).0,
-            })
-        }
         fn excluded(&mut self, pid: u32) -> Result<bool, SourceError> {
             Ok(pid == self.0.load(Ordering::Relaxed))
         }
@@ -33,7 +26,7 @@ fn captured_shell_identity_reaches_the_threaded_exclusion_before_text_is_read() 
         crate::screen::reader::ThreadedReader::new(
             || {
                 let mut source = crate::screen::elements::tests::FakeSource::flat(1);
-                source.nodes[0].rect = rect([4, 3]).0;
+                source.nodes[0].rect = rect([4, 3]);
                 source.nodes[0].name = "connected_shell_name_sentinel".into();
                 Ok(source)
             },
@@ -43,21 +36,17 @@ fn captured_shell_identity_reaches_the_threaded_exclusion_before_text_is_read() 
         .unwrap(),
     )));
     let now = rig.start;
-    assert_eq!(
-        rig.screen.capture(
-            &ticket(1).for_shell(8),
-            &rect([4, 3]),
-            Exclusion::KumochiWindows,
-            now,
-            &|| now,
-            (|| Err(9), |_| Err(9))
-        ),
-        Ok(meta(1, [4, 3], 0))
-    );
-    let walked = rig
-        .screen
-        .elements(CaptureId(10), ElementTarget::Foreground, &|| now)
-        .unwrap();
+    if let Some(Ok(reader)) = &mut rig.screen.reader {
+        reader.set_shell_pid(8);
+    }
+    assert_eq!(rig.take(1, [4, 3], 0), Ok(meta(1, [4, 3], 0)));
+    let walked = elements(
+        &mut rig.screen,
+        CaptureId(10),
+        ElementTarget::Foreground,
+        &|| now,
+    )
+    .unwrap();
     assert_eq!(
         walked.tree.availability,
         Availability::Unavailable(crate::screen::Unavailable::Excluded)
@@ -90,16 +79,23 @@ fn ticket_expiry_binds_even_while_the_frame_is_younger_than_250ms() {
         let mut rig = Rig::new([4, 3], 7);
         assert_eq!(rig.take(1, [4, 3], 1_900), Ok(meta(1, [4, 3], 1_900)));
         assert_eq!(
-            rig.screen
-                .elements(CaptureId(10), ElementTarget::Foreground, &|| rig.start
-                    + Duration::from_millis(elapsed))
-                .map(|walked| walked.tree),
+            elements(
+                &mut rig.screen,
+                CaptureId(10),
+                ElementTarget::Foreground,
+                &|| { rig.start + Duration::from_millis(elapsed) }
+            )
+            .map(|walked| walked.tree),
             expected
         );
         assert_eq!(
-            rig.screen
-                .elements(CaptureId(10), ElementTarget::Foreground, &|| rig.start)
-                .err(),
+            elements(
+                &mut rig.screen,
+                CaptureId(10),
+                ElementTarget::Foreground,
+                &|| rig.start
+            )
+            .err(),
             Some(Failure::Refused(Refusal::Reused))
         );
     }
@@ -111,18 +107,28 @@ fn missing_reader_and_frame_metadata_have_distinct_faults() {
     assert_eq!(rig.take(1, [4, 3], 0), Ok(meta(1, [4, 3], 0)));
     rig.screen.reader = None;
     assert_eq!(
-        rig.screen
-            .elements(CaptureId(10), ElementTarget::Foreground, &|| rig.start)
-            .err(),
+        elements(
+            &mut rig.screen,
+            CaptureId(10),
+            ElementTarget::Foreground,
+            &|| rig.start
+        )
+        .err(),
         Some(Failure::Fault(-1))
     );
-
+    rig.screen.reader = Some(crate::screen::elements::tests::open_reader(Box::new(
+        || true,
+    )));
     assert_eq!(rig.take(2, [4, 3], 0), Ok(meta(2, [4, 3], 0)));
     rig.screen.frame.invalidate();
     assert_eq!(
-        rig.screen
-            .elements(CaptureId(20), ElementTarget::Foreground, &|| rig.start)
-            .err(),
+        elements(
+            &mut rig.screen,
+            CaptureId(20),
+            ElementTarget::Foreground,
+            &|| rig.start
+        )
+        .err(),
         Some(Failure::Fault(-2))
     );
 }
@@ -131,22 +137,17 @@ fn missing_reader_and_frame_metadata_have_distinct_faults() {
 fn reader_initialization_failure_preserves_capture_and_spends_the_faulted_walk() {
     let mut rig = Rig::new([4, 3], 7);
     let now = rig.start;
-    assert_eq!(
-        rig.screen.capture(
-            &ticket(1),
-            &rect([4, 3]),
-            Exclusion::KumochiWindows,
-            now,
-            &|| now,
-            (|| Err(9), |_| Err(-7))
-        ),
-        Ok(meta(1, [4, 3], 0))
-    );
+    rig.screen.reader = Some(Err(-7));
+    assert_eq!(rig.take(1, [4, 3], 0), Ok(meta(1, [4, 3], 0)));
     assert_eq!(rig.screen.frame().meta(), Some(meta(1, [4, 3], 0)));
     assert_eq!(
-        rig.screen
-            .elements(CaptureId(10), ElementTarget::Foreground, &|| now)
-            .err(),
+        elements(
+            &mut rig.screen,
+            CaptureId(10),
+            ElementTarget::Foreground,
+            &|| now
+        )
+        .err(),
         Some(Failure::Fault(-7))
     );
     assert_eq!(
@@ -154,58 +155,25 @@ fn reader_initialization_failure_preserves_capture_and_spends_the_faulted_walk()
         crate::screen::mask::Completeness::Unknown(crate::screen::Unavailable::Busy)
     );
     assert_eq!(
-        rig.screen
-            .elements(CaptureId(10), ElementTarget::Foreground, &|| now)
-            .err(),
+        elements(
+            &mut rig.screen,
+            CaptureId(10),
+            ElementTarget::Foreground,
+            &|| now
+        )
+        .err(),
         Some(Failure::Refused(Refusal::Reused))
     );
-    assert_eq!(
-        rig.screen.capture(
-            &ticket(2),
-            &rect([4, 3]),
-            Exclusion::KumochiWindows,
-            now,
-            &|| now,
-            (
-                || Err(9),
-                |_| Ok(Box::new(Probe {
-                    current: Rc::new(Cell::new(7)),
-                    jobs: Rc::new(RefCell::new(Vec::new())),
-                }))
-            )
-        ),
-        Ok(meta(2, [4, 3], 0))
-    );
-    let walked = rig
-        .screen
-        .elements(CaptureId(20), ElementTarget::Foreground, &|| now)
-        .unwrap();
-    assert!(!walked.retire);
-    assert_eq!(walked.tree.capture, CaptureId(20));
-    assert_eq!(walked.tree.availability, Availability::Read);
-    assert_eq!(walked.tree.elements.len(), 1);
 }
 
+/// Answers each walk at once: "A" for the window captured first, "B" for any other.
 struct Probe {
-    current: Rc<Cell<u64>>,
     jobs: Rc<RefCell<Vec<WalkJob>>>,
+    answer: Option<Result<Walked, Failure>>,
 }
 
 impl ElementReader for Probe {
-    fn foreground(&mut self) -> Option<TopWindow> {
-        Some(TopWindow {
-            window: WindowRef(self.current.get()),
-            pid: 8,
-            rect: rect([4, 3]).0,
-        })
-    }
-    fn begin(&mut self, _job: WalkJob) -> Result<(), Walked> {
-        unreachable!("the serve path walks")
-    }
-    fn poll(&mut self) -> Option<Result<Walked, Failure>> {
-        unreachable!("the serve path walks")
-    }
-    fn walk(&mut self, job: WalkJob) -> Result<Walked, Failure> {
+    fn begin(&mut self, job: WalkJob) -> Result<(), Walked> {
         let name = if job.target
             == (ElementTarget::Window {
                 window: WindowRef(7),
@@ -217,7 +185,7 @@ impl ElementReader for Probe {
         };
         let tree = crate::screen::ElementTree {
             capture: job.capture,
-            window: rect([4, 3]).0,
+            window: rect([4, 3]),
             elements: vec![Element {
                 id: ElementId {
                     capture: job.capture,
@@ -228,7 +196,7 @@ impl ElementReader for Probe {
                 name_cut: false,
                 password: false,
                 control_type: 0,
-                screen: rect([4, 3]).0,
+                screen: rect([4, 3]),
                 in_window: PhysicalRect {
                     origin: [0; 2],
                     size: [4, 3],
@@ -238,30 +206,34 @@ impl ElementReader for Probe {
             availability: Availability::Read,
         };
         self.jobs.borrow_mut().push(job);
-        Ok(Walked {
+        self.answer = Some(Ok(Walked {
             tree,
             retire: false,
-        })
+        }));
+        Ok(())
+    }
+    fn poll(&mut self) -> Option<Result<Walked, Failure>> {
+        self.answer.take()
     }
 }
 
 #[test]
 fn foreground_is_pinned_and_walk_budget_is_clamped_to_frame_and_ticket() {
     let mut rig = Rig::new([4, 3], 7);
-    let current = Rc::new(Cell::new(7));
     let jobs = Rc::new(RefCell::new(Vec::new()));
     rig.screen.reader = Some(Ok(Box::new(Probe {
-        current: Rc::clone(&current),
         jobs: Rc::clone(&jobs),
+        answer: None,
     })));
     assert_eq!(rig.take(1, [4, 3], 0), Ok(meta(1, [4, 3], 0)));
-    current.set(9);
-    let walked = rig
-        .screen
-        .elements(CaptureId(10), ElementTarget::Foreground, &|| {
-            rig.start + Duration::from_millis(200)
-        })
-        .unwrap();
+    rig.knobs.window.set(9);
+    let walked = elements(
+        &mut rig.screen,
+        CaptureId(10),
+        ElementTarget::Foreground,
+        &|| rig.start + Duration::from_millis(200),
+    )
+    .unwrap();
     assert_eq!(walked.tree.elements[0].name, "A");
     assert_eq!(
         jobs.borrow()[0].until,
@@ -273,28 +245,32 @@ fn foreground_is_pinned_and_walk_budget_is_clamped_to_frame_and_ticket() {
             TopWindow {
                 window: WindowRef(7),
                 pid: 8,
-                rect: rect([4, 3]).0
+                rect: rect([4, 3])
             }
         ),
         "TopWindow(..)"
     );
     assert_eq!(rig.take(2, [4, 3], 1_900), Ok(meta(2, [4, 3], 1_900)));
-    let walked = rig
-        .screen
-        .elements(CaptureId(20), ElementTarget::Foreground, &|| {
-            rig.start + Duration::from_millis(1_950)
-        })
-        .unwrap();
+    let walked = elements(
+        &mut rig.screen,
+        CaptureId(20),
+        ElementTarget::Foreground,
+        &|| rig.start + Duration::from_millis(1_950),
+    )
+    .unwrap();
     assert_eq!(walked.tree.elements[0].name, "B");
     assert_eq!(
         jobs.borrow()[1].until,
         rig.start + Duration::from_millis(2_000)
     );
     assert_eq!(rig.take(3, [4, 3], 0), Ok(meta(3, [4, 3], 0)));
-    let walked = rig
-        .screen
-        .elements(CaptureId(30), ElementTarget::Foreground, &|| rig.start)
-        .unwrap();
+    let walked = elements(
+        &mut rig.screen,
+        CaptureId(30),
+        ElementTarget::Foreground,
+        &|| rig.start,
+    )
+    .unwrap();
     assert_eq!(walked.tree.elements.len(), 1);
     assert_eq!(
         jobs.borrow()[2].until,
@@ -328,14 +304,18 @@ fn new_capture_detaches_masks_from_a_late_walk_even_when_refused() {
             size: [1, 1]
         }]
     );
-    rig.screen.masks.lock().unwrap().push(rect([4, 3]).0);
+    rig.screen.masks.lock().unwrap().push(rect([4, 3]));
     assert_eq!(rig.take(2, [4, 3], 0), Err(Refusal::Reused.into()));
     assert_eq!(rig.screen.masks.lock().unwrap().rects(), []);
     assert_eq!(rig.screen.masks.lock().unwrap().generation(), 0);
     assert_eq!(
-        rig.screen
-            .elements(CaptureId(20), ElementTarget::Foreground, &|| rig.start)
-            .err(),
+        elements(
+            &mut rig.screen,
+            CaptureId(20),
+            ElementTarget::Foreground,
+            &|| rig.start
+        )
+        .err(),
         Some(Refusal::Stale.into())
     );
 }

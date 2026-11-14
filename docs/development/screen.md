@@ -1,7 +1,7 @@
 # Screen worker
 
 `kumochid --screen` installs its separate screen log and location-only panic hook before serving
-stdin/stdout. It answers Ping, Capture and Elements (below). Request contents and panic payloads never enter logs;
+stdin/stdout. It runs the hold protocol's loop (`screen/actor.rs`, below). Request contents and panic payloads never enter logs;
 transport failures and foreign errors are numeric codes, not foreign error strings.
 
 ```mermaid
@@ -47,7 +47,8 @@ already queued. Dropping a stream doesn't tell the
 worker yet; the screen kind sends its Drop control with the capture streams that come next.
 A hostile worker can make the brain hold up to 16 × 12 MiB of streamed replies for one deadline.
 
-Each request has one 1.5 s absolute deadline [guess], including queue time; fixtures can inject it.
+Each request carries its caller's absolute deadline, including queue time; a hold's screen work
+stays within the 1.5 s screen budget (`MAX_TTL`) [guess], and fixtures pass their own.
 A loss fails all pending operations and requests worker termination. The supervisor then waits
 off the async thread, up to 2 s [guess], for the process to exit, and broadcasts
 `Exit { generation, confirmed }` and then the loss's `Generation`: the first worker is 0 and each
@@ -59,7 +60,7 @@ replacement serves them after the loss. Outside crash backoff, a request made af
 reaches the next worker without a retry. An exit that isn't seen in 2 s is fatal. The supervisor
 marks every handle refused before it broadcasts that loss, starts no worker beside one that may
 still run, and ends; held requests and every request from then on get `ExitUnconfirmed`
-(`ScreenError::ExitUnconfirmed`, `SpeechError::ExitUnconfirmed`).
+(`WorkerLost::ExitUnconfirmed`, `SpeechError::ExitUnconfirmed`).
 The first
 two losses respawn immediately; a third within 60 s waits 0.2 s, then 1 s and 5 s for later losses
 [guess]. Requests during backoff fail fast. During an in-flight respawn, requests wait for the new
@@ -68,8 +69,8 @@ Respawns are serialized and run off the async thread, so process creation cannot
 of `WorkerLost`; only the first spawn, at startup, runs on it, before anything is served. A loss
 after the last handle has closed doesn't respawn, so shutdown can't start a worker in a closing job. Loss history expires at exactly 60 s.
 
-Debug builds accept one-request fault fixtures and `KUMOCHI_SCREEN_FAULT=hang|crash|garbage|panic`.
-The environment switch applies on the next request of every respawn; neither path exists in a
+Debug builds accept one-request fault fixtures and `KUMOCHI_SCREEN_FAULT=hang|crash|garbage|panic|exit`.
+The environment switch applies on the first request of every respawn, and `exit` before serving; neither path exists in a
 release worker. Windows UI Automation supplies the element operation; OCR is not connected.
 
 The macOS platform equivalent is `posix_spawn` file actions for stdio and a process-group kill;
@@ -118,15 +119,13 @@ by this dormant transaction. Source regressions do not establish compositor timi
 
 ## Capture under a ticket
 
-`Capture { ticket, display, exclude }` takes one frame of one physical display into the worker's
-`RawFrame` and answers `Captured(FrameMeta)` or `Refused`; **pixels never cross the pipe**.
-The worker can sanitize and encode them locally, but no operation exports them.
+A hold's `Context { key, ticket, point }` takes one frame of the window under `point` into the
+worker's `RawFrame` and answers `Acquired(FrameMeta)`, then `Complete`, or a refusal; **pixels
+never cross the pipe**. Only the hold's seal exports one image (below).
 
-- **Authority.** `TicketWire` can only be built inside the brain. Nothing in production sends
-  `Capture` yet; ticket minting and the capture flow are not connected. The hold client below
-  mints the alternate loop's tickets.
-  `Exclusion::KumochiWindows` is the caller's declaration of a live shell exclusion lease,
-  not proof of one.
+- **Authority.** `TicketWire` can only be built inside the brain; the hold client mints one per
+  capture. The shell's exclusion lease keeps Kumochi's windows out of the frame; the worker can't
+  prove that a lease is live.
 - **Local validity.** The worker starts the ticket's `ttl_ms` at receipt on its own monotonic
   clock. It refuses at exactly `ttl_ms` and accepts a millisecond before, checks again right
   before starting the capture session, stops waiting at expiry, and discards a frame that
@@ -136,16 +135,15 @@ The worker can sanitize and encode them locally, but no operation exports them.
   refused (`Reused` when equal, `Stale` when lower), and a failed or refused capture still spends
   its generation. A respawned worker starts empty; the brain's single-use tickets guard across
   workers, and a lost worker's requests are failed, never replayed.
-- **Frame validity.** Bounds are checked before anything is allocated: no empty side, no side over
-  8,192 px, no edge outside `i32`. The held image is invalidated before every attempt and becomes
-  valid only after a complete copy whose size equals the requested display, before expiry. A
-  smaller frame shrinks the logical length, so an old tail is never part of the image, while the
-  CPU buffer keeps its allocation for equal or smaller frames after warm-up. That says nothing
-  about COM or GPU allocations, which happen per capture. Releasing the frame zeroes the buffer's
-  whole capacity with `zeroize` and frees it; the next capture allocates afresh.
-- **Windows.** One D3D11 device for the worker's life, created on the first capture on the serve
-  thread. Per ticket: the monitor must have exactly the requested physical bounds
-  (per-monitor-v2 DPI awareness), then a WGC item, a one-buffer free-threaded pool and a session
+- **Frame validity.** No empty side and no side over 8,192 px. The held image is invalidated
+  before every attempt and becomes valid only after a complete copy whose size equals the captured
+  window, before expiry. A smaller frame shrinks the logical length, so an old tail is never part
+  of the image, while the CPU buffer keeps its allocation for equal or smaller frames after
+  warm-up. That says nothing about COM or GPU allocations, which happen per capture. Releasing the
+  frame zeroes the buffer's whole capacity with `zeroize` and frees it; the next capture
+  allocates afresh.
+- **Windows.** One D3D11 device for the worker's life, created on the capture thread's first
+  capture. Per ticket: a WGC item for the window, a one-buffer free-threaded pool and a session
   with the cursor off. Border suppression is best-effort: Windows can accept it and still draw its
   yellow border on screen. Frames and the map poll at 1 ms, and a result that is ready at or
   after expiry is released and refused, and nothing late is published. Frame, session and pool
@@ -154,22 +152,20 @@ The worker can sanitize and encode them locally, but no operation exports them.
   answers `Fault` and exits, so no capture can keep running. A lost device
   (`DXGI_ERROR_DEVICE_REMOVED`, `_RESET` or `_HUNG`) retires the worker the same way, so the next
   ticket gets a fresh device. Foreign failures are HRESULT codes.
-- **macOS.** `SCScreenshotManager` with Kumochi excluded from the content filter, not built yet;
-  other platforms answer `Fault` with `E_NOTIMPL`'s code.
-- The supervisor's `capture` accepts only a `Captured` for its own capture id and display, maps
-  `Refused` through, and treats any other reply as `WorkerLost`.
+- **macOS.** `SCScreenshotManager` with `desktopIndependentWindow`, not built yet; other platforms
+  answer `Fault` with `E_NOTIMPL`'s code.
 
 ```mermaid
 sequenceDiagram
   participant B as Brain
   participant W as Worker
-  participant P as Platform capturer
-  B->>W: Capture { ticket, display, exclude }
-  W->>W: spend generation, start local expiry, check bounds
-  W->>P: monitor check, session (until expiry)
+  participant P as Capture thread
+  B->>W: Context { key, ticket, point }
+  W->>W: spend generation, start local expiry
+  W->>P: window under the point, then its session (until expiry)
   P-->>W: frame, copied into RawFrame
-  W->>W: expiry and size checks, then publish
-  W-->>B: Captured(FrameMeta) or Refused
+  W->>W: expiry and size checks, then hold the frame
+  W-->>B: Acquired(FrameMeta), then Complete, or a refusal
 ```
 
 ## Masking and encoding
@@ -207,8 +203,8 @@ floating-point coordinates must be validated as finite by their first parser. Im
 output contains only dimensions, byte counts and mask generations,
 and encoding errors expose only a fixed numeric code, never pixels or foreign error text.
 
-These entry points have no production caller yet; scheduling, staged replies and generation
-checks are not connected. Nothing here exports images or captures another frame.
+Only a hold's seal calls them, and the shell doesn't send screen holds yet. Nothing here captures
+another frame.
 
 ## Regional OCR
 
@@ -274,18 +270,17 @@ binary=$(ls -t target/debug/deps/screen-*.exe | head -n 1)
 Remove the lock afterward. The strict fixture asserts 1,500–1,600 ms and prints the measured time;
 record Rez's scale with that result.
 
-## Dormant native ownership loop
+## The worker's loop
 
-`screen/actor.rs` is an alternate worker-local protocol and loop, not selected by the
-production brain or worker entry point. Those still use the original synchronous request path.
-The alternate loop creates a dedicated capture producer; that thread constructs, uses and drops
+`screen/actor.rs` is the worker's protocol and loop: `kumochid --screen` runs it, and the brain
+starts its one screen worker through the hold client. The loop creates a dedicated capture producer; that thread constructs, uses and drops
 its non-Send capturer, resolving the window under the hold's point and capturing that window
 alone. Only the sole-owned
 `RawFrame` and content-free result identity move back to the actor. Capture and UIA each reserve
 one completion slot until taken; their nonblocking wakes may coalesce in the bounded inbox.
 The actor checks the slots after every event and nearest-expiry/deadline wake.
 
-The alternate Context stream emits only acquisition metadata and completion. Worker-local Drop,
+The Context stream emits only acquisition metadata and completion. Worker-local Drop,
 Retire and expiry revoke publication before clearing the frame and mask state. A returning image
 is scrubbed/freed rather than published, and a late element tree is taken and discarded. Disposal
 acknowledgement waits for both native jobs to finish; stuck or retiring native work cannot
@@ -298,16 +293,14 @@ a hold with no thread yet still has an identity, and one Retire covers every ear
 The current allocation is zeroized before growing, releasing or dropping a RawFrame. The tests
 observe synthetic bytes immediately after scrubbing and before freeing; a plain-fill replacement
 remains observationally equivalent in that seam, so optimizer resistance relies on `zeroize`.
-This does not claim the legacy production path implements Drop or expiry disposal. The brain's
-side is the hold client below; activating the alternate route is a later change. Images, OCR and
-Supersede remain A6c.
+The brain's side is the hold client below. OCR and Supersede remain A6c.
 
 ## Window under the pointer (dormant)
 
 A screen hold captures one window, not the display. `Capturer::pointer_window` resolves the
 window a click at the hold's point would land on, and `Capturer::capture_window` takes one frame
-of that window alone, so whatever is stacked above it stays out of the image. Nothing in
-production calls either yet.
+of that window alone, so whatever is stacked above it stays out of the image. Only a hold's
+`Context` calls them, and the shell doesn't send screen holds yet.
 
 On Windows the walk reads the top-level z-order from the point. It skips windows whose
 rectangle or window region leaves out the point, before it opens any process, then Kumochi's own
@@ -351,7 +344,7 @@ cargo test -p kumochi-brain --lib native_window_probe -- --ignored --exact --noc
 
 ## Sealing a hold's image (dormant)
 
-In the alternate loop, a hold's `Context` carries the hold's point instead of a display. The
+A hold's `Context` carries the hold's point. The
 capture thread resolves the window under it and captures that window alone. A refusal or a fault
 answers that hold only: there is no screen for it, and the same capturer serves the next hold.
 Only `Retire` ends the worker.
@@ -427,11 +420,12 @@ measured.
 
 ## The brain's hold client (dormant)
 
-`screen/client.rs` is the brain's side of the alternate loop, for one hold's frame. Only a screen
-hold's task calls it, the shell doesn't send screen holds yet, and the brain has no client until
-the entry-point switch, while the worker's entry point still runs the legacy loop. It
-speaks to the worker through the shared supervisor as its own kind, `Holds`, with the screen
-worker's argument and caps, the actor's messages and the zeroing reply reader.
+`screen/client.rs` is the brain's side of the worker's loop, for one hold's frame. The brain
+starts its one screen worker with `HoldClient::start` and gives the client to screen holds. Only a
+screen hold's task calls it, and the shell doesn't send screen holds yet. It speaks to the worker through the shared supervisor as its own kind, `Holds`, with the screen
+worker's argument and caps, the actor's messages and the zeroing reply reader. The image gate
+takes the platform's `WINDOW_CAPTURE` as well as the client, so off Windows it reads `Unsupported`
+even though the client starts.
 
 - **`context(owner, point, until)`** mints a fresh capture id and a ticket whose number is above
   every earlier one (a worker refuses a number it has already spent), minted under the fence's
@@ -519,8 +513,8 @@ physical bounds and password/offscreen flags. Password and offscreen names are n
 from that cache. Root handles are checked for top-level visibility and ownership before the UIA
 lookup, and the native window owner is checked again after it. The worker and the
 connected shell are excluded by pid, with Kumochi process-image names also excluded by the
-portable policy. Other platforms return E_NOTIMPL. Nothing in production requests Elements
-yet because the brain's capture flow is not connected.
+portable policy. Other platforms return E_NOTIMPL. In production only a hold's `Walk` runs it;
+nothing sends `Elements`.
 
 One pre-order walk retains at most 512 elements, depth 16, 128 characters per name and 60,000
 bytes of element JSON (commas and the reply envelope are additional). The byte cap usually binds
@@ -571,13 +565,14 @@ owner-approved session; short unlocked dry runs do not qualify as timing measure
 
 ## Capture-scoped element operation
 
-`Elements { capture, target }` spends the held frame's walk once, including refused or unavailable
-attempts. A different capture id is Stale and spends nothing; a second attempt for the held
-capture is Reused. Each new Capture drops authority and installs a fresh mask sink before checking
-its ticket, so refused captures leave no walkable frame and late writes reach only the old sink.
+`Walk { key }` and `Elements { key, target }` spend the held frame's walk once, including refused
+or unavailable attempts. Another hold's key is Stale and spends nothing; a second attempt for the
+held capture is Reused. Each new `Context` drops authority and installs a fresh mask sink before
+checking its ticket, so refused captures leave no walkable frame and late writes reach only the
+old sink.
 
-Capture pins the foreground top-level window, pid and physical rectangle just before acquiring
-the frame. Foreground walks use that pin; explicit Window targets carry a pid too. Portable walks
+A `Context` pins the window it resolved under the pointer: its top-level window, pid and physical
+rectangle. Foreground walks use that pin; explicit Window targets carry a pid too. Portable walks
 reject a root whose pid differs from that hint as NoWindow; the source must also recheck native
 root visibility and ownership before reading. A walk must start before both ticket expiry and
 frame arrival + 250 ms [guess]; its deadline is the earliest of those two and start + 120 ms [guess].
@@ -588,25 +583,19 @@ without waiting and `poll` takes its completion. A `begin` while a job is pendin
 whose completion landed and wasn't taken, retires the reader rather than queue a second job or
 drop that completion, so the reply slot never fills. The reader opener takes a wake that the
 thread calls after each completion lands; it never blocks, and a dropped wake leaves the
-completion in its slot for `poll`. Today's serve path passes a wake nobody listens to. The foreground window is sampled on the capture side, never on this
-thread, so a stuck walk can't delay the next capture's foreground. Today's `walk` is the
-compatibility path: it discards a timed-out walk's late completion, calls `begin`, then waits
-on the reply channel until the
-cooperative deadline plus 200 ms (100 ms connection + 100 ms transaction timeouts). The first
-timeout returns Unavailable(Busy), retaining reached masks. Its Unknown(Busy) completeness is
-sticky: a late successful walk can never upgrade it to Complete or Partial. A later walk first
-drains and discards that reply, then reads only its own capture. If the source is still busy,
-the next walk replies Busy and the worker exits after writing the reply. A dead thread or poisoned
-sink also replies Busy and retires. Drop never joins the provider thread.
+completion in its slot for `poll`; the actor's loop is the listener. The window is resolved on
+the capture side, never on this thread, so a stuck walk can't delay the next capture. The actor
+waits for a walk until its cooperative deadline plus 200 ms (100 ms connection + 100 ms
+transaction timeouts), then ends the worker. A dead thread or poisoned sink replies Busy and
+retires. Drop never joins the provider thread.
 
-A reader-opener failure does not discard a successfully acquired frame. Its first Elements
-attempt publishes Unknown(Busy) and reports the numeric fault, but the worker keeps serving Ping
-and Capture. The portable capture state retries a failed reader opener, including a failed
-reader-thread spawn, on the next capture attempt. The reader thread likewise discards a failed
-source initialization and retries it for the next capture's Elements; a successfully initialized
-source stays on that thread. Neither retry replays a spent walk or renews capture authority.
+A reader-opener failure does not discard a successfully acquired frame. Its walk publishes
+Unknown(Busy) and reports the numeric fault, and the worker keeps serving holds without element
+reads until it's replaced: the actor opens its reader once. The reader thread discards a failed
+source initialization and retries it for the next walk; a successfully initialized source stays on
+that thread. Neither retry replays a spent walk or renews capture authority.
 
-The supervisor accepts only an Elements tree naming the requested capture. Refusals pass through;
-other reply kinds or capture ids become WorkerLost. There is no cancel operation yet;
+The hold client accepts only a `Walked` answer for its own hold from the worker that holds the
+frame. Refusals pass through; any other answer is a loss. There is no cancel operation yet;
 new captures replace authority and the mask sink, and worker termination tears down stuck threads.
 No live window is read by the fake-source tests; they do not verify native UIA behavior or timing.
