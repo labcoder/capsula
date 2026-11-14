@@ -98,7 +98,7 @@ fn screen_hold_states_append_a_redacted_control_tag() {
 #[test]
 fn a_held_screens_outcome_appends_a_redacted_control_tag() {
     use super::{HeldScreen, ScreenClass};
-    let mut outcomes = vec![(HeldScreen::Sent, 7)];
+    let mut outcomes = vec![(HeldScreen::Attached, 7)];
     for (index, class) in [
         ScreenClass::NotReady,
         ScreenClass::NothingThere,

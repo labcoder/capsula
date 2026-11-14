@@ -308,6 +308,7 @@ impl Coordinator {
         }
         build.admit(made.sources);
         current.compacted = None;
+        current.tell_screen(effects);
         effects.push(Effect::StartEngine {
             request: RunRequest {
                 key: SendKey::Build(key),

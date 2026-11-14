@@ -105,6 +105,12 @@ pub enum PageEventKind {
         /// The scene identified by the stored step, not a provider call id.
         scene: super::SceneId,
     },
+    /// The user's turn of a screen hold, with what the hold carried into it; not whether a request
+    /// carrying it left the machine. Appended.
+    HeldTurn {
+        /// The image, or why not.
+        screen: super::HeldScreen,
+    },
 }
 
 /// An event as the thread panel reads it.
@@ -151,6 +157,9 @@ mod tests {
             PageEventKind::TaskDeleted,
             PageEventKind::NoVisual {
                 scene: SceneId(u64::MAX),
+            },
+            PageEventKind::HeldTurn {
+                screen: crate::message::HeldScreen::Attached,
             },
         ]
         .into_iter()

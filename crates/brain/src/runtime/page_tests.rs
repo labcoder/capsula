@@ -223,6 +223,7 @@ async fn session_eof_cancels_a_page_still_waiting_at_the_store_barrier() {
         title: Some("task".into()),
         run: RunId(1),
         text: "text".into(),
+        screen: None,
     }));
     while !matches!(
         seen.recv().await,
