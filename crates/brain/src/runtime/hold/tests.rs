@@ -1225,10 +1225,14 @@ fn screen_hold(brain: &mut Brain, key: HoldKey, screen: ScreenPart) {
 fn waiting() -> ScreenPart {
     ScreenPart::Waiting {
         generation: Some(crate::screen::Generation(0)),
+        lease: LEASE,
+        stop: Arc::default(),
     }
 }
 
 const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xD9];
+const LEASE: kumochi_protocol::message::LeaseGeneration =
+    kumochi_protocol::message::LeaseGeneration(4);
 
 fn ready() -> ScreenPart {
     ScreenPart::Ready(crate::screen::ScreenContext::fixture(JPEG))
@@ -1469,4 +1473,438 @@ fn closers(thread: ThreadId) -> Vec<Closer> {
         Closer::Invalidate(HoldStatus::Failed(HoldFailure::ChoiceChanged)),
         Closer::Lost,
     ]
+}
+
+#[test]
+fn every_worker_answer_closes_a_part_with_its_class() {
+    use crate::context::ScreenClass::{
+        CantShare, Changed, NotReady, NothingThere, TooLarge, Unreadable,
+    };
+    use crate::screen::{Closed, Refusal, WorkerLost};
+    let refused = Closed::Refused;
+    let cases = [
+        (Closed::Busy, NotReady),
+        (Closed::Fault(5), NotReady),
+        (Closed::Lost(WorkerLost::Lost), NotReady),
+        (refused(Refusal::Expired), NotReady),
+        (refused(Refusal::NoWindow), NothingThere),
+        (refused(Refusal::Minimized), CantShare),
+        (refused(Refusal::Cloaked), CantShare),
+        (refused(Refusal::Elevated), CantShare),
+        (refused(Refusal::Protected), CantShare),
+        (refused(Refusal::Excluded), CantShare),
+        (refused(Refusal::Unmasked), Unreadable),
+        (refused(Refusal::Ambiguous), Unreadable),
+        (refused(Refusal::TooLarge), TooLarge),
+        (refused(Refusal::Invalid), TooLarge),
+        (refused(Refusal::WindowChanged), Changed),
+        (refused(Refusal::DisplayChanged), Changed),
+        (refused(Refusal::Stale), Changed),
+    ];
+    for (closed, class) in cases {
+        assert_eq!(screen::class(closed), class, "{closed:?}");
+    }
+}
+
+#[tokio::test]
+async fn only_a_waiting_parts_own_worker_finishes_it() {
+    use crate::context::ScreenClass;
+    use crate::screen::Generation;
+    let scratch = Scratch::new("hold-screen-events");
+    let mut brain = test_support::brain(&scratch, "");
+    let event = |generation, outcome| ScreenEvent {
+        key: KEY,
+        generation: Some(Generation(generation)),
+        outcome,
+    };
+    let sealed = || Outcome::Sealed(crate::screen::ScreenContext::fixture(JPEG));
+    screen_hold(
+        &mut brain,
+        KEY,
+        ScreenPart::Waiting {
+            generation: Some(Generation(1)),
+            lease: LEASE,
+            stop: Arc::default(),
+        },
+    );
+    brain.holds.screen_event(event(0, sealed()));
+    brain
+        .holds
+        .screen_event(event(0, Outcome::Closed(ScreenClass::Changed)));
+    assert!(matches!(
+        brain.holds.pending.as_ref().unwrap().screen,
+        ScreenPart::Waiting {
+            generation: Some(Generation(1)),
+            ..
+        }
+    ));
+    brain.holds.screen_event(event(1, sealed()));
+    assert!(matches!(
+        brain.holds.pending.as_ref().unwrap().screen,
+        ScreenPart::Ready(_)
+    ));
+    brain.holds.lost();
+    screen_hold(&mut brain, KEY, ScreenPart::Closed(ScreenClass::NotReady));
+    brain.holds.screen_event(event(0, sealed()));
+    assert!(matches!(
+        brain.holds.pending.as_ref().unwrap().screen,
+        ScreenPart::Closed(ScreenClass::NotReady)
+    ));
+    brain.holds.lost();
+    brain.holds.screen_event(event(0, sealed()));
+    assert!(brain.holds.pending.is_none());
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn a_frame_held_after_its_part_closed_is_retired_on_the_worker_that_holds_it() {
+    let scratch = Scratch::new("hold-screen-late-held");
+    let mut brain = test_support::brain(&scratch, "");
+    let mut rig = crate::supervise::fixture::start::<crate::screen::Holds>();
+    brain.holds.screen = Some(Arc::new(HoldClient::new(rig.handle.clone())));
+    screen_hold(
+        &mut brain,
+        KEY,
+        ScreenPart::Closed(crate::context::ScreenClass::NotReady),
+    );
+    brain.holds.screen_event(ScreenEvent {
+        key: KEY,
+        generation: Some(crate::screen::Generation(1)),
+        outcome: Outcome::Held,
+    });
+    // Only a retire naming worker 1 ends worker 0 when worker 0 answers it.
+    crate::screen::release_next(&mut rig, KEY).await;
+    tokio::time::timeout(Duration::from_secs(5), rig.held())
+        .await
+        .expect("the retire named the frame's worker");
+    rig.confirm.send(true).expect("fixture listens");
+    brain.holds.lost();
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn a_part_closed_during_its_capture_retires_the_frame_without_a_walk() {
+    let scratch = Scratch::new("hold-screen-stop");
+    let mut brain = test_support::brain(&scratch, "");
+    let mut rig = crate::supervise::fixture::start::<crate::screen::Holds>();
+    brain.holds.screen = Some(Arc::new(HoldClient::new(rig.handle.clone())));
+    screen_hold(&mut brain, KEY, ScreenPart::None);
+    let point = kumochi_protocol::geometry::PhysicalPoint([5, 5]);
+    assert!(brain.holds.start_screen(KEY, point, LEASE));
+    assert!(
+        !brain.holds.start_screen(KEY, point, LEASE),
+        "one part per hold"
+    );
+    let (id, capture) = rig.next().await;
+    brain.holds.lost();
+    crate::screen::release_next(&mut rig, KEY).await;
+    crate::screen::hold_frame(&rig, id, capture).await;
+    let Event::Screen(held) = super::next(&mut brain.holds).await else {
+        panic!("not the task's answer");
+    };
+    assert!(matches!(held.outcome, Outcome::Held));
+    brain.holds.screen_event(held);
+    for _ in 0..2 {
+        crate::screen::release_next(&mut rig, KEY).await;
+    }
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn a_lapse_of_the_parts_own_lease_before_its_capture_closes_it() {
+    use crate::context::ScreenClass;
+    use kumochi_protocol::message::LeaseGeneration;
+    let scratch = Scratch::new("hold-screen-lapse");
+    let mut brain = test_support::brain(&scratch, "");
+    let (out, _output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    let lapse = |lease| ControlToBrain::ExclusionLapsed { lease };
+    let part = |generation| ScreenPart::Waiting {
+        generation,
+        lease: LEASE,
+        stop: Arc::default(),
+    };
+    for (generation, lapsed, closes) in [
+        (None, LEASE, true),
+        (None, LeaseGeneration(5), false),
+        (Some(crate::screen::Generation(0)), LEASE, false),
+    ] {
+        screen_hold(&mut brain, KEY, part(generation));
+        let handled = brain.hold_control(&lapse(lapsed), &mut link).unwrap();
+        let screen = &brain.holds.pending.as_ref().unwrap().screen;
+        assert_eq!(handled, closes, "{generation:?} {lapsed:?}");
+        assert_eq!(
+            matches!(screen, ScreenPart::Closed(ScreenClass::NotReady)),
+            closes,
+            "{generation:?} {lapsed:?}"
+        );
+        brain.holds.lost();
+    }
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn a_screen_hold_shares_the_voice_admission_and_releases_its_lease_when_refused() {
+    let scratch = Scratch::new("hold-screen-admission");
+    let mut brain = test_support::brain(&scratch, "");
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    let message = ControlToBrain::HoldRecognized {
+        gesture: KEY.gesture,
+        thread: None,
+        selection: 1,
+        pointer: kumochi_protocol::geometry::PhysicalPoint([5, 5]),
+        lease: LEASE,
+        t_qpc: 1,
+    };
+    let failed = ControlToShell::CaptureFailed {
+        capture_for: kumochi_protocol::message::CaptureFor::Gesture(KEY.gesture),
+        reason: kumochi_protocol::message::CaptureFailure::Unavailable,
+    };
+    assert!(brain.hold_control(&message, &mut link).unwrap());
+    assert_eq!(
+        control(&mut output),
+        ControlToShell::VoiceHoldStatus {
+            gesture: KEY.gesture,
+            status: HoldStatus::Failed(HoldFailure::NotLoaded),
+        }
+    );
+    assert_eq!(control(&mut output), failed);
+    assert!(brain.hold_control(&message, &mut link).unwrap());
+    assert_eq!(control(&mut output), failed, "a stale gesture's lease too");
+    assert!(output.is_empty());
+    assert!(brain.holds.pending.is_none());
+    brain.close().await;
+}
+
+/// Sol takes images and is the default; Luna doesn't. A brain with a worker client and that catalog.
+fn sees_on_sol(
+    brain: &mut Brain,
+) -> (
+    crate::supervise::fixture::Rig<crate::screen::Holds>,
+    ModelChoice,
+    ModelChoice,
+) {
+    use kumochi_protocol::message::{ConnectionKind, Effort, ModelInfo, ModelName, ModelSlug};
+    let rig = crate::supervise::fixture::start::<crate::screen::Holds>();
+    brain.holds.screen = Some(Arc::new(HoldClient::new(rig.handle.clone())));
+    let choice = |slug: &str| ModelChoice {
+        model: ModelSlug::new(slug).unwrap(),
+        effort: Effort::Low,
+        connection: ConnectionKind::ChatGpt,
+    };
+    let (sol, luna) = (choice("gpt-6-sol"), choice("gpt-6-luna"));
+    let info = |choice: &ModelChoice, name: &str| ModelInfo {
+        slug: choice.model.clone(),
+        display_name: ModelName::new(name).unwrap(),
+    };
+    brain.account.read_catalog(
+        vec![info(&sol, "GPT-6 Sol"), info(&luna, "GPT-6 Luna")],
+        vec![sol.model.clone()],
+    );
+    set(brain, SettingsOp::SetDefaultModel(sol.clone()));
+    (rig, sol, luna)
+}
+
+fn set(brain: &mut Brain, op: SettingsOp) {
+    let pending = brain.config.stage(op).unwrap();
+    pending.write().unwrap();
+    brain.config.commit(pending);
+}
+
+#[tokio::test]
+async fn the_threads_choice_rechecks_the_gate_and_a_closed_gate_closes_the_part_with_its_reason() {
+    use crate::context::ScreenClass;
+    let scratch = Scratch::new("hold-screen-pinned");
+    let (mut brain, _release, _decoded, _fetch) =
+        crate::runtime::tests::holds::input(&scratch, Vec::new(), "not submitted").await;
+    let (out, _output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    link.recovery = Some(crate::runtime::Recovery::new(&[], 1024));
+    let (mut rig, sol, luna) = sees_on_sol(&mut brain);
+    // The pin, the switch, and how the part ends: open (`None`), or closed with its line, if any.
+    let cases = [
+        (Some(luna), true, Some(Some(ScreenClass::ModelCantSee))),
+        (Some(sol.clone()), true, None),
+        (None, true, Some(Some(ScreenClass::NotReady))),
+        (Some(sol), false, Some(None)),
+    ];
+    for (index, (pin, on, ends)) in cases.into_iter().enumerate() {
+        set(&mut brain, SettingsOp::SetScreenHolds(on));
+        for part in [ready(), waiting()] {
+            let waits = matches!(part, ScreenPart::Waiting { .. });
+            let before = format!("{part:?}");
+            recording(&mut brain);
+            brain.holds.debt = None;
+            let hold = brain.holds.pending.as_mut().unwrap();
+            let mut snapshot = hold.snapshot.take().unwrap();
+            snapshot.defaults.choice.clone_from(&pin);
+            hold.audio = None;
+            hold.ask = None;
+            hold.screen = part;
+            brain.hold_prepared(KEY, Ok(snapshot), &mut link).unwrap();
+            let screen = &brain.holds.pending.as_ref().unwrap().screen;
+            match ends {
+                None => assert_eq!(format!("{screen:?}"), before, "case {index}"),
+                Some(Some(class)) => assert!(
+                    matches!(screen, ScreenPart::Closed(closed) if *closed == class),
+                    "case {index}: {screen:?}"
+                ),
+                Some(None) => assert!(
+                    matches!(screen, ScreenPart::Discarded),
+                    "case {index}: {screen:?}"
+                ),
+            }
+            brain.holds.lost();
+            if waits {
+                crate::screen::release_next(&mut rig, KEY).await;
+            }
+        }
+    }
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn a_screen_hold_repeating_a_voice_holds_gesture_adds_no_part_to_it() {
+    let scratch = Scratch::new("hold-screen-repeat");
+    let (mut brain, _release, _decoded, _fetch) =
+        crate::runtime::tests::holds::input(&scratch, Vec::new(), "not submitted").await;
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    let (_rig, _sol, _luna) = sees_on_sol(&mut brain);
+    let voice = ControlToBrain::VoiceHoldRecognized {
+        gesture: KEY.gesture,
+        thread: None,
+        selection: 1,
+    };
+    brain.hold_control(&voice, &mut link).unwrap();
+    while output.try_recv().is_ok() {}
+    assert!(
+        brain
+            .holds
+            .pending
+            .as_ref()
+            .is_some_and(|hold| hold.key == KEY)
+    );
+    let screen = ControlToBrain::HoldRecognized {
+        gesture: KEY.gesture,
+        thread: None,
+        selection: 1,
+        pointer: kumochi_protocol::geometry::PhysicalPoint([5, 5]),
+        lease: LEASE,
+        t_qpc: 1,
+    };
+    assert!(brain.hold_control(&screen, &mut link).unwrap());
+    assert_eq!(
+        control(&mut output),
+        ControlToShell::CaptureFailed {
+            capture_for: kumochi_protocol::message::CaptureFor::Gesture(KEY.gesture),
+            reason: kumochi_protocol::message::CaptureFailure::Unavailable,
+        }
+    );
+    assert!(matches!(
+        brain.holds.pending.as_ref().unwrap().screen,
+        ScreenPart::None
+    ));
+    brain.holds.lost();
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn the_end_of_a_capture_releases_the_lease_on_its_own_connection() {
+    use crate::context::ScreenClass;
+    use crate::screen::Generation;
+    use kumochi_protocol::message::{CaptureFailure, CaptureFor};
+    let scratch = Scratch::new("hold-screen-lease");
+    let mut brain = test_support::brain(&scratch, "");
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    let capture_for = CaptureFor::Gesture(KEY.gesture);
+    let old = HoldKey {
+        epoch: KEY.epoch + 1,
+        ..KEY
+    };
+    let event = |key, generation, outcome| {
+        Event::Screen(ScreenEvent {
+            key,
+            generation,
+            outcome,
+        })
+    };
+    let cases = [
+        (
+            event(KEY, Some(Generation(0)), Outcome::Held),
+            Some(ControlToShell::CaptureDone { capture_for }),
+        ),
+        (
+            event(KEY, None, Outcome::Closed(ScreenClass::NothingThere)),
+            Some(ControlToShell::CaptureFailed {
+                capture_for,
+                reason: CaptureFailure::Unavailable,
+            }),
+        ),
+        (
+            event(
+                KEY,
+                Some(Generation(0)),
+                Outcome::Closed(ScreenClass::Changed),
+            ),
+            None,
+        ),
+        (
+            event(
+                KEY,
+                Some(Generation(0)),
+                Outcome::Sealed(crate::screen::ScreenContext::fixture(JPEG)),
+            ),
+            None,
+        ),
+        (event(old, Some(Generation(0)), Outcome::Held), None),
+    ];
+    for (index, (event, lease)) in cases.into_iter().enumerate() {
+        brain.hold_event(event, &mut link).unwrap();
+        assert_eq!(
+            output.try_recv().ok().map(|bytes| {
+                kumochi_protocol::frame::decode::<ControlToShell>(
+                    &bytes[kumochi_protocol::frame::HEADER_LEN..],
+                )
+                .unwrap()
+            }),
+            lease,
+            "case {index}"
+        );
+    }
+    recording(&mut brain);
+    let hold = brain.holds.pending.as_ref().unwrap();
+    hold.cancel.store(true, Ordering::SeqCst);
+    brain
+        .hold_event(event(KEY, Some(Generation(0)), Outcome::Held), &mut link)
+        .unwrap();
+    assert_eq!(
+        control(&mut output),
+        ControlToShell::CaptureDone { capture_for },
+        "a cancelled hold's lease too"
+    );
+    brain.holds.lost();
+    brain.close().await;
+}
+
+fn control(output: &mut mpsc::Receiver<Vec<u8>>) -> ControlToShell {
+    let bytes = output.try_recv().unwrap();
+    kumochi_protocol::frame::decode(&bytes[kumochi_protocol::frame::HEADER_LEN..]).unwrap()
 }

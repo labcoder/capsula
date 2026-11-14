@@ -405,6 +405,12 @@ impl ModelRequest {
         let id = match screen {
             Screen::Image(_) => "screen-snapshot",
             Screen::NotIncluded(ScreenClass::NotReady) => "screen-not-ready",
+            Screen::NotIncluded(ScreenClass::NothingThere) => "screen-nothing-there",
+            Screen::NotIncluded(ScreenClass::CantShare) => "screen-cant-share",
+            Screen::NotIncluded(ScreenClass::Unreadable) => "screen-unreadable",
+            Screen::NotIncluded(ScreenClass::TooLarge) => "screen-too-large",
+            Screen::NotIncluded(ScreenClass::Changed) => "screen-changed",
+            Screen::NotIncluded(ScreenClass::ModelCantSee) => "screen-model-cant-see",
         };
         let text = screen_line(id).ok_or(ImageRefused::Unbundled)?;
         let after = match screen {
@@ -442,12 +448,9 @@ impl ModelRequest {
     }
 }
 
-/// Why a hold's screen part closed without an image.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ScreenClass {
-    /// The part was still waiting when the hold's transcript was ready.
-    NotReady,
-}
+/// Why a hold's screen part closed without an image: the shell's class, so the line the model
+/// gets and the one the user sees can't drift.
+pub(crate) use kumochi_protocol::message::ScreenClass;
 
 /// What a hold's screen part hands its run, which every request of the run carries.
 #[derive(Clone)]

@@ -2110,3 +2110,51 @@ fn compaction_summarizes_a_note_inside_its_range_and_leaves_a_later_one() {
         "the note inside the run follows it, and the later one waits"
     );
 }
+
+#[test]
+fn every_screen_class_tells_the_model_its_own_fixed_line() {
+    let cases = [
+        (
+            ScreenClass::NotReady,
+            "The screen was not included: it wasn't ready in time.",
+        ),
+        (
+            ScreenClass::NothingThere,
+            "The screen was not included: there was no window under the pointer.",
+        ),
+        (
+            ScreenClass::CantShare,
+            "The screen was not included: the window can't be shared.",
+        ),
+        (
+            ScreenClass::Unreadable,
+            "The screen was not included: the window couldn't be read safely.",
+        ),
+        (
+            ScreenClass::TooLarge,
+            "The screen was not included: the window image was too large.",
+        ),
+        (
+            ScreenClass::Changed,
+            "The screen was not included: the window changed while it was being captured.",
+        ),
+        (
+            ScreenClass::ModelCantSee,
+            "The screen was not included: this model can't be sent images.",
+        ),
+    ];
+    for (class, line) in cases {
+        let mut request = ModelRequest {
+            choice: None,
+            instructions: String::new(),
+            input: vec![message(Role::User, "words")],
+            tools: Vec::new(),
+        };
+        assert_eq!(request.add_screen(&Screen::NotIncluded(class)), Ok(()));
+        assert_eq!(
+            request.input,
+            [message(Role::User, "words"), message(Role::Developer, line)],
+            "{class:?}"
+        );
+    }
+}

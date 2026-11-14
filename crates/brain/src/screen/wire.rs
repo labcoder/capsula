@@ -90,10 +90,6 @@ pub struct TicketWire {
 }
 
 impl TicketWire {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the hold client mints tickets once holds use it")
-    )]
     pub(crate) fn new(capture: CaptureId, generation: u64, nonce: [u8; 16], ttl_ms: u32) -> Self {
         Self {
             capture,

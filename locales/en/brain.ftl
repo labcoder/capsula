@@ -11,3 +11,9 @@ ask-about-part-alt = The drawing shows: “{ $alt }”.
 # A held turn's screen, for the model. Fixed text only, never window details.
 screen-snapshot = The image is a snapshot from when the user spoke.
 screen-not-ready = The screen was not included: it wasn't ready in time.
+screen-nothing-there = The screen was not included: there was no window under the pointer.
+screen-cant-share = The screen was not included: the window can't be shared.
+screen-unreadable = The screen was not included: the window couldn't be read safely.
+screen-too-large = The screen was not included: the window image was too large.
+screen-changed = The screen was not included: the window changed while it was being captured.
+screen-model-cant-see = The screen was not included: this model can't be sent images.
