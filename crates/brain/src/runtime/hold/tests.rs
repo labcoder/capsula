@@ -1991,3 +1991,53 @@ fn control(output: &mut mpsc::Receiver<Vec<u8>>) -> ControlToShell {
     let bytes = output.try_recv().unwrap();
     kumochi_protocol::frame::decode(&bytes[kumochi_protocol::frame::HEADER_LEN..]).unwrap()
 }
+
+#[tokio::test]
+async fn turning_screen_holds_off_closes_the_pending_part_and_withdraws_the_runs_image() {
+    use crate::context::{Jpeg, Screen};
+    let scratch = Scratch::new("hold-screen-off");
+    let (mut brain, _release, _decoded, _fetch) =
+        crate::runtime::tests::holds::input(&scratch, Vec::new(), "not submitted").await;
+    let switched = |brain: &mut Brain, on: bool| {
+        let pending = brain.config.stage(SettingsOp::SetScreenHolds(on)).unwrap();
+        pending.write().unwrap();
+        brain
+            .settings_done((0, None, None, Ok((pending, Ok(())))), None)
+            .unwrap();
+    };
+    recording(&mut brain);
+    let snapshot = brain
+        .holds
+        .pending
+        .as_ref()
+        .unwrap()
+        .snapshot
+        .clone()
+        .unwrap();
+    let image = Screen::Image(Jpeg::new(JPEG.to_vec()).unwrap());
+    brain
+        .coordinator
+        .submit_hold(snapshot, "words".into(), Some(image))
+        .unwrap();
+    brain.holds.pending.as_mut().unwrap().screen = ready();
+    switched(&mut brain, false);
+    assert!(matches!(
+        brain.holds.pending.as_ref().unwrap().screen,
+        ScreenPart::Discarded
+    ));
+    assert!(matches!(
+        brain.coordinator.current_screen(),
+        Some(Screen::Withdrawn)
+    ));
+    brain.holds.pending.as_mut().unwrap().screen = ready();
+    switched(&mut brain, false);
+    assert!(
+        matches!(
+            brain.holds.pending.as_ref().unwrap().screen,
+            ScreenPart::Ready(_)
+        ),
+        "only turning it off closes a part"
+    );
+    brain.holds.lost();
+    brain.close().await;
+}

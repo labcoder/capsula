@@ -700,6 +700,9 @@ pub enum HeldScreen {
     Attached,
     /// The line telling the model the window wasn't included, and why, was attached instead.
     NotIncluded(ScreenClass),
+    /// The image was attached, then withdrawn because the user turned screen holds off before
+    /// any request carried it. Only history carries it: no `HoldScreen` follows a withdrawal.
+    Withdrawn,
 }
 
 /// Why a screen hold's window wasn't included.
