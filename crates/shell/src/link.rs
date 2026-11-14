@@ -1638,8 +1638,12 @@ fn write_data_frame(
 }
 
 #[cfg(all(test, windows))]
+#[path = "link_fixture.rs"]
+pub(crate) mod fixture;
+
+#[cfg(all(test, windows))]
 #[path = "link_tests.rs"]
-pub(crate) mod tests;
+mod tests;
 
 #[cfg(test)]
 #[path = "link_delete_tests.rs"]
