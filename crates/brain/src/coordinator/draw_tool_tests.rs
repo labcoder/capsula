@@ -13,6 +13,7 @@ use crate::test_support::Scratch;
 mod provider_stream;
 
 const RETRY: &str = "; drawn lists what this call added, and earlier steps stay as they were; correct this and call draw again";
+const DRAWN_RETRY: &str = "; the steps in drawn are on screen, and earlier steps stay as they were; correct this by drawing only what is missing, with new step and object ids, and call draw again";
 const FULL: &str = "; no further step can be drawn in this turn";
 const SPENT: &str = "; no further draw call will be accepted in this turn";
 
@@ -941,7 +942,7 @@ fn semantic_admission_returns_only_the_durable_prefix_and_exact_error() {
     assert_eq!(
         result.output,
         ToolOutput::Text(format!(
-            "drawn: [s1, s2]; stopped: step s3: remove[0]: scene.UnknownRef{RETRY}"
+            "drawn: [s1, s2]; stopped: step s3: remove[0]: scene.UnknownRef{DRAWN_RETRY}"
         ))
     );
     assert_eq!(
