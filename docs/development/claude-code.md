@@ -407,10 +407,11 @@ The models a choice may name reach the shell's picker as `Models` for `ClaudeCod
 check that admits a launch: the reviewed row's, in its order (Sonnet, Opus, Haiku, Fable), while
 one would be admitted, and an empty list once it wouldn't. `Brain::claude_reported` records the
 list after every op and wake, and the shell hears it only when it changes. A shell that connects
-hears a non-empty list again, and nothing before Claude Code's first report.
+hears the current list if it isn't empty, and nothing before Claude Code's first report.
 
 - **The snapshot.** A `LaunchSnapshot` fixes the thread, model, effort, Claude Code's connection
-  generation, the origin (and so the frozen MCP subset of its model tools) and the version.
+  generation, the tools it offers (`Offer::Nothing`, or `Offer::Mcp` with the frozen MCP subset of
+  an origin's model tools) and the version.
   Model-only history schemas do not enter the MCP listener, launch audit or seed.
   `Claude::snapshot` makes one only while the view is `Ready`. A snapshot is current only while
   the view is `Ready` at its version and its generation is Claude Code's current one; `warm`,

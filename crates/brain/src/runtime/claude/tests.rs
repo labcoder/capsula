@@ -1046,6 +1046,35 @@ async fn a_new_shell_hears_claude_codes_models_again() {
     assert!(brain.claude.close(soon()).await);
 }
 
+/// Changes while no shell is linked: a shell that connects hears only the list on offer then, and
+/// nothing once a launch wouldn't be admitted.
+#[tokio::test]
+async fn a_shell_that_connects_hears_only_the_models_on_offer_now() {
+    let scratch = Scratch::new("claude-models-unlinked");
+    let base = Base::new("claude-models-unlinked");
+    let mut brain = finding(&scratch, &base);
+    timeout(Duration::from_secs(30), async {
+        while brain.claude.out.is_some() {
+            let wake = brain.claude.next().await;
+            brain.claude_done(wake, None).expect("no link");
+        }
+    })
+    .await
+    .expect("the lane settles");
+    assert_eq!(brain.claude.view(), READY);
+    let mut first = Pipe::new();
+    brain.open(&mut first.link()).expect("room");
+    assert_eq!(first.heard(), [row()]);
+    brain
+        .claude_op(ConnectionOp::DisconnectClaudeCode, None)
+        .expect("no link");
+    assert_eq!(brain.claude.view(), ClaudeCodeView::CleanupPending);
+    let mut second = Pipe::new();
+    brain.open(&mut second.link()).expect("room");
+    assert_eq!(second.heard(), NOTHING);
+    assert!(brain.claude.close(soon()).await);
+}
+
 /// A shell that connects before Claude Code's first report hears nothing of its models until
 /// that report.
 #[tokio::test]

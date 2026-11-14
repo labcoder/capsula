@@ -490,11 +490,9 @@ impl Claude {
         self.models = models;
     }
 
-    /// A shell connected: it hears the models on offer, if there are any.
+    /// A shell connected: it hears the models on offer, if there are any, and nothing older.
     pub(super) fn connected(&mut self) {
-        if !self.models.is_empty() {
-            self.owed = Some(self.models.clone());
-        }
+        self.owed = (!self.models.is_empty()).then(|| self.models.clone());
     }
 
     fn models_unsent(&mut self) -> Option<DataToShell> {
