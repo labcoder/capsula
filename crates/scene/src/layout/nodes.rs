@@ -497,6 +497,9 @@ pub(super) fn place(
                     offset.x = viewport.origin.x + 16.0 - scale * bounds.origin.x;
                 }
                 group.item.transform = Affine::pose(scale, 0.0, offset);
+                if scale < 1.0 {
+                    state.fits.insert(group.item.handle, scale);
+                }
             }
             if let Some((text, size)) = title {
                 let (bounds, origin) = compound::banded(contents.unwrap_or_default(), size);

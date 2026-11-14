@@ -333,6 +333,13 @@ pub fn prepare(
         Arc::make_mut(object.motion.get_or_insert_with(Arc::default)).insert(property, motion);
     }
     after.prune_extras();
+    after
+        .fits
+        .retain(|handle, _| after.handles.contains_key(handle));
+    if after.fits.is_empty() {
+        // As for `objects`: the last removal leaves a root leaf the index charge misses.
+        after.fits = BTreeMap::new();
+    }
     let (presentation_scale, mut envelopes) = validate_bounds(&after)?;
     after.presentation_scale = presentation_scale;
     after.grow_content()?;
@@ -806,15 +813,12 @@ fn update_group_bounds(state: &mut LayoutState) {
     }
 }
 
-/// The product of the shrink-to-fit scales of `object` and its ancestors that are diagrams.
+/// The shrink-to-fit scales composed into `object`'s placement: its own and its ancestors'.
 fn diagram_fit(state: &LayoutState, object: &Placed) -> f32 {
     let mut fit = 1.0_f32;
     let mut next = Some(object);
     while let Some(object) = next {
-        if matches!(&*object.source, Op::Diagram(_)) {
-            let matrix = object.item.transform.0;
-            fit *= matrix[0].hypot(matrix[1]).clamp(f32::MIN_POSITIVE, 1.0);
-        }
+        fit *= state.fits.get(&object.item.handle).copied().unwrap_or(1.0);
         next = object
             .item
             .parent

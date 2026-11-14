@@ -569,13 +569,10 @@ fn the_deepest_turned_chain_builds_its_fallback_within_its_charge() {
         let m = item.transform.0;
         let posed = (m[0] * m[3] - m[1] * m[2]).abs().sqrt();
         assert!((posed - 32.0).abs() < 1e-3, "placed at 2, posed at {posed}");
-        let [Prim::Rect { rect, radius, .. }] = prims else {
+        let [Prim::Rect { radius, .. }] = prims else {
             panic!("one rect");
         };
-        assert_eq!(
-            fallback_corner_segments(*rect, *radius, item.paint_scale),
-            11
-        );
+        assert_eq!(fallback_corner_segments(*radius, item.paint_scale), 11);
         let mut half = item.clone();
         half.draw = 0.5;
         let built = staged(&half, prims).expect("the fallback builds within its charge");

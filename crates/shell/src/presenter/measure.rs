@@ -143,6 +143,90 @@ mod tests {
         send_sync::<TextSystem>();
     }
 
+    /// The brain's wide measure bounds the shipped font: on this corpus its lines, width and height
+    /// are never below the shell's, nor its width on a run of any one printable ASCII character,
+    /// and the shell's lines are at most 1.5 em.
+    #[test]
+    fn the_brain_measure_bounds_the_shipped_font() {
+        use kumochi_scene::display::WideMeasure;
+        const CORPUS: &[&str] = &[
+            "Validate the input",
+            "WWWWWWWWWWWWWWWWWWWW",
+            "aaaaaaaaaaa bb",
+            "aaaaa-bbbbb-ccccc-ddddd-eeeee",
+            "state-of-the-art non-English well\u{2026} don\u{2019}t \u{201C}quoted\u{201D}",
+            "/api/v1/users/{id}/permissions?expand=roles&limit=20",
+            "zed-industries/zed a=1&b=2 foo?b=2 (retry) [x] 100% #tag @name",
+            "supercalifragilisticexpialidocious_and_then_some",
+            "a\n\nb\n",
+            "\u{6570}\u{636E}\u{5E93}\u{8FDE}\u{63A5}\u{6C60}\u{5DF2}\u{6EE1}\u{FF0C}\u{8BF7}\u{7A0D}\u{540E}\u{91CD}\u{8BD5}",
+            "\u{3053}\u{3093}\u{306B}\u{3061}\u{306F}\u{30AB}\u{30BF}\u{30AB}\u{30CA}",
+            "\u{D55C}\u{AD6D}\u{C5B4} \u{D14C}\u{C2A4}\u{D2B8}",
+            "\u{41F}\u{440}\u{43E}\u{432}\u{435}\u{440}\u{43A}\u{430} \u{42E}\u{43D}\u{438}\u{43A}\u{43E}\u{434}\u{430} \u{429}\u{428}\u{416}",
+            "\u{645}\u{631}\u{62D}\u{628}\u{627} \u{628}\u{627}\u{644}\u{639}\u{627}\u{644}\u{645} \u{633}\u{634}\u{635}\u{636}",
+            "\u{1F680} Launch \u{2705} Done \u{26A0}\u{FE0F} Careful \u{2764}\u{FE0F}",
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} \u{1F1EF}\u{1F1F5} \u{1F44D}\u{1F3FD}",
+            "e\u{301}t\u{e9} n\u{303}o \u{1EA0}\u{1EA1} \u{1D1}",
+            "\u{2030} \u{2031} \u{2E3A} \u{2E3B} \u{FDFD} \u{2014}\u{2014} \u{2192} \u{2190}",
+            "\ttabbed\tcolumns\t",
+            "\u{1C4}\u{1F1} \u{478} \u{2DBC} \u{A51E} \u{17D8}",
+        ];
+        let app = gpui_kit::application();
+        let mut shell = Measure::new(
+            app.text_system(),
+            gpui_kit::component::Theme::default().font_family,
+        );
+        let regular = TextStyle {
+            size: 15.0,
+            bold: false,
+        };
+        for (text, least, font) in [("\u{4E2D}", 0.9, "CJK"), ("\u{1F680}", 1.2, "emoji")] {
+            let width = shell.measure(text, regular, None).expect("shaped")[0];
+            assert!(
+                width >= least * 15.0,
+                "the {font} fallback font is missing: {width} px at 15"
+            );
+        }
+        for (size, bold) in [(15.0, true), (15.0, false), (13.0, false)] {
+            let style = TextStyle { size, bold };
+            let line = shell.measure("", style, None).expect("an empty line")[1];
+            assert!(line <= 1.5 * size, "line height {line} at {size}");
+            for text in CORPUS {
+                for width in [None, Some(180.0), Some(220.0), Some(40.0)] {
+                    let real = shell.measure(text, style, width).expect("shaped");
+                    let wide = WideMeasure.measure(text, style, width).expect("measured");
+                    let lines = [real[1] / line, wide[1] / (1.5 * size)].map(f32::round);
+                    assert!(
+                        real[0] <= wide[0] && real[1] <= wide[1] && lines[0] <= lines[1],
+                        "{text:?} at {size} bold {bold} width {width:?}: shell {real:?}, brain {wide:?}"
+                    );
+                }
+            }
+            for ch in ' '..='~' {
+                let text = ch.to_string().repeat(20);
+                let real = shell.measure(&text, style, None).expect("shaped")[0];
+                let wide = WideMeasure.measure(&text, style, None).expect("measured")[0];
+                assert!(
+                    real <= wide,
+                    "{ch:?} at {size} bold {bold}: shell {real}, brain {wide}"
+                );
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn the_conformance_font_is_the_one_drawings_measure_with(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::component::ActiveTheme as _;
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::theme::init(cx);
+            assert_eq!(
+                cx.theme().font_family,
+                gpui_kit::component::Theme::default().font_family
+            );
+        });
+    }
+
     fn measure() -> Measure {
         Measure::new(
             Arc::new(TextSystem::new(Arc::new(gpui_kit::NoopTextSystem::new()))),

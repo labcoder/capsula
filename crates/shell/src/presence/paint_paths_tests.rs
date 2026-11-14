@@ -468,7 +468,7 @@ fn a_pose_past_the_charged_scale_fails_instead_of_coarsening() {
         [32, 32, 33],
         "2.07 stays within the pieces charged at 2 and 2.08 crosses a subdivision"
     );
-    let charge = fallback_corner_segments(rect, 400.0, 2.0);
+    let charge = fallback_corner_segments(400.0, 2.0);
     let mut scratch = super::super::paint_stroke::Scratch::new();
     for (zoom, pieces, built) in [
         (2.0, Ok(32), Ok(2)),
