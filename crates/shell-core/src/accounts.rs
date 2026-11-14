@@ -79,7 +79,8 @@ impl Accounts {
             | ErrorKey::GitHubUnavailable
             | ErrorKey::DrawingReplacementFailed
             | ErrorKey::DrawingNotReturned
-            | ErrorKey::ScreenUnavailable => {}
+            | ErrorKey::ScreenUnavailable
+            | ErrorKey::ConnectionNeeded => {}
             ErrorKey::SignInTimedOut
             | ErrorKey::SignInFailed
             | ErrorKey::SignInOtherAccount
