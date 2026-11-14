@@ -56,7 +56,6 @@ fn built(key: BuildKey, sources: Vec<ThreadId>) -> Input {
             user: None,
             choice: None,
             connection: ConnectionTag(0),
-            invalid_default: false,
         }),
         result: Ok(Built {
             request: crate::context::ModelRequest {

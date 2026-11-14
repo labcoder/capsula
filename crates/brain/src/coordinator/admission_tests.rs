@@ -280,7 +280,6 @@ fn a_rebuild_reuses_the_snapshot_the_first_build_read() {
         user: None,
         choice: None,
         connection: ConnectionTag(0),
-        invalid_default: false,
     };
     let first = Input::ContextBuilt(ContextBuilt {
         key: key(1),

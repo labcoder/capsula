@@ -23,7 +23,6 @@ fn defaults() -> RunSnapshot {
         user: None,
         choice: Some(choice("captured", Effort::High)),
         connection: ConnectionTag(99),
-        invalid_default: false,
     }
 }
 

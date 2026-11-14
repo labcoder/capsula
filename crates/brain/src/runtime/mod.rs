@@ -150,8 +150,7 @@ pub(crate) enum Selected {
 #[derive(Debug)]
 pub(crate) struct Brain {
     pub(crate) crashes: crate::relaunch::Crashes,
-    /// Boxed, so a future that owns the brain stays under clippy's `large_futures` limit.
-    coordinator: Box<Coordinator>,
+    coordinator: Coordinator,
     store: Option<StoreThread>,
     engine: Box<dyn Engine>,
     /// The dev fixture was picked, so runs never wait on the account.
@@ -292,7 +291,7 @@ impl Brain {
         let (engine_tx, engine_events) = mpsc::channel(ENGINE_QUEUE);
         let mut brain = Self {
             crashes: crate::relaunch::Crashes::default(),
-            coordinator: Box::new(coordinator),
+            coordinator,
             store: Some(store),
             engine,
             #[cfg(any(test, debug_assertions))]
@@ -1068,28 +1067,25 @@ impl Brain {
     /// What a run's first build, or a job's read, takes: the names and default model now.
     fn snapshot(&self, origin: Origin) -> RunSnapshot {
         let view = self.config.view();
-        let (choice, invalid_default) = match self.config.default_choice() {
-            crate::store::choice::StoredChoice::Absent => (None, false),
-            crate::store::choice::StoredChoice::Invalid => (None, true),
+        // An invalid default runs nothing: with no choice, a run's model check refuses it.
+        let choice = match self.config.default_choice() {
+            crate::store::choice::StoredChoice::Absent
+            | crate::store::choice::StoredChoice::Invalid => None,
             crate::store::choice::StoredChoice::Valid {
                 connection,
                 model,
                 effort,
-            } => (
-                Some(kumochi_protocol::message::ModelChoice {
-                    connection,
-                    model,
-                    effort: effort.unwrap_or(kumochi_protocol::message::Effort::Low),
-                }),
-                false,
-            ),
+            } => Some(kumochi_protocol::message::ModelChoice {
+                connection,
+                model,
+                effort: effort.unwrap_or(kumochi_protocol::message::Effort::Low),
+            }),
         };
         RunSnapshot {
             origin,
             assistant: view.assistant_name.clone(),
             user: view.user_name.clone(),
             choice,
-            invalid_default,
             // shortcut: a job records no connection yet; 13b tags it with the one it used.
             connection: ConnectionTag(0),
         }

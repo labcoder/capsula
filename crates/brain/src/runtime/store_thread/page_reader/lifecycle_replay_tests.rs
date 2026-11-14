@@ -48,7 +48,6 @@ fn snapshot() -> RunSnapshot {
         user: None,
         choice: None,
         connection: ConnectionTag(0),
-        invalid_default: false,
     }
 }
 

@@ -525,7 +525,7 @@ async fn a_refused_snapshot_scene_is_durably_cleared_before_the_other_scene_is_d
         .log
         .clear();
     let (last_thread, last_run) = store.high_water().expect("high water");
-    *brain.coordinator =
+    brain.coordinator =
         crate::coordinator::Coordinator::ready_for_tests(main, last_thread, last_run, Vec::new());
     assert!(brain.coordinator.restore_drawings(Ok(recovery)).is_empty());
     drop(store);

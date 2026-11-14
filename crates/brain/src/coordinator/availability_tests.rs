@@ -99,7 +99,6 @@ fn built(choice: Option<&str>, tools: Vec<ToolSchema>) -> Input {
                 connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
             }),
             connection: ConnectionTag(7),
-            invalid_default: false,
         }),
         result: Ok(Built {
             request: ModelRequest {

@@ -49,7 +49,8 @@ pub(super) fn read_hold(
                                 None => StoredChoice::Absent,
                             };
                             // A hold's run takes this snapshot whole, so its first build reads no choice.
-                            choose(stored, &mut snapshot.defaults)?;
+                            snapshot.defaults.choice =
+                                stored.execution(snapshot.defaults.choice.take())?;
                             read.end()?;
                             Ok(())
                         })
@@ -91,18 +92,6 @@ pub(super) fn read_call(
     }
 }
 
-fn choose(
-    stored: StoredChoice,
-    snapshot: &mut crate::context::RunSnapshot,
-) -> Result<(), StoreError> {
-    if stored == StoredChoice::Absent && snapshot.invalid_default {
-        return Err(StoreError::Read);
-    }
-    snapshot.choice = stored.execution(snapshot.choice.take())?;
-    snapshot.invalid_default = false;
-    Ok(())
-}
-
 /// Builds `job` on `side`, or fails it when the store closed before its turn (`None`). A run's
 /// first build reads its model choice into its snapshot. Failures are logged by kind only.
 pub(super) fn read(
@@ -136,7 +125,9 @@ pub(super) fn read(
                     #[cfg(test)]
                     hold();
                     if first {
-                        choose(read.stored_choice(thread)?, &mut snapshot)?;
+                        snapshot.choice = read
+                            .stored_choice(thread)?
+                            .execution(snapshot.choice.take())?;
                     }
                     let local_time = read.local_time()?;
                     let turn = Turn {
@@ -273,7 +264,9 @@ pub(super) fn read_job(
                     let read = Snapshot::begin(conn)?.controlled(scope.clone());
                     #[cfg(test)]
                     hold();
-                    choose(read.stored_choice(key.thread)?, &mut snapshot)?;
+                    snapshot.choice = read
+                        .stored_choice(key.thread)?
+                        .execution(snapshot.choice.take())?;
                     let ask = match kind {
                         JobKind::Title => Ok(read.first_ask(key.thread)?.map(|ask| JobAsk {
                             generation: ask.generation,

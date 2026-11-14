@@ -154,7 +154,6 @@ fn active_on(
         user: None,
         choice: None,
         connection: ConnectionTag(0),
-        invalid_default: false,
     });
     assert!(running.thread.send(StoreOp::BuildContext(build)));
     let reply = running.ack();

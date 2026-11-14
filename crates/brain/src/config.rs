@@ -485,7 +485,11 @@ fn view_of(table: &Table, main_thread: ThreadId, in_use: bool) -> SettingsView {
             .unwrap_or_default(),
         Some(_) => invalid(MAX_FRAME_RATE).unwrap_or_default(),
     };
-    let default_model = default_choice_of(table).display().ok().flatten();
+    let default_model = match default_choice_of(table) {
+        choice @ StoredChoice::Valid { .. } => choice.display().ok().flatten(),
+        _ if table.contains_key(DEFAULT_MODEL) => invalid(DEFAULT_MODEL),
+        _ => None,
+    };
     let dock_position = table
         .get(DOCK_POSITION)
         .and_then(|value| {
@@ -570,15 +574,6 @@ fn default_choice_of(table: &Table) -> StoredChoice {
     let Some(value) = table.get(DEFAULT_MODEL) else {
         return StoredChoice::Absent;
     };
-    let Some(value) = value.as_table() else {
-        return StoredChoice::Invalid;
-    };
-    let (Some(model), Some(effort)) = (
-        value.get("model").and_then(Value::as_str),
-        value.get("effort").and_then(Value::as_str),
-    ) else {
-        return StoredChoice::Invalid;
-    };
     let connection = match value.get("connection") {
         None => "chatgpt",
         Some(Value::String(kind)) => match kind.as_str() {
@@ -589,11 +584,19 @@ fn default_choice_of(table: &Table) -> StoredChoice {
         },
         Some(_) => return StoredChoice::Invalid,
     };
-    StoredChoice::decode(
-        Some(model),
-        Some(&effort.to_ascii_lowercase()),
+    let effort = value
+        .get("effort")
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase);
+    match StoredChoice::decode(
+        value.get("model").and_then(Value::as_str),
+        effort.as_deref(),
         Some(connection),
-    )
+    ) {
+        // ChatGPT's own malformed intent reads as unset, as before, so its catalog repairs it.
+        StoredChoice::Invalid if connection == "chatgpt" => StoredChoice::Absent,
+        choice => choice,
+    }
 }
 
 fn invalid<T>(key: &str) -> Option<T> {

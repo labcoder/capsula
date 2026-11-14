@@ -440,7 +440,6 @@ fn build(thread: u64, attempt: u64, choice: Option<ModelChoice>) -> StoreOp {
             user: None,
             choice,
             connection: ConnectionTag(0),
-            invalid_default: false,
         }),
         first: true,
         drawings: crate::drawing::Digest::default(),
@@ -509,47 +508,6 @@ fn route_choice_non_chatgpt_context_and_jobs_never_build_on_chatgpt() {
         }
         running.thread.close().blocking_recv().expect("closed");
     }
-}
-
-#[test]
-fn route_default_invalid_intent_refuses_a_build_but_not_a_valid_thread_override() {
-    let scratch = Scratch::new("invalid-default-build");
-    let mut store = Store::open(&scratch.db()).expect("store");
-    store.recover().expect("recover");
-    with_thread(&mut store, 2);
-    let running = run(store, None);
-    let invalid_default = |attempt| {
-        let mut op = build(2, attempt, None);
-        let StoreOp::BuildContext(build) = &mut op else {
-            panic!("build")
-        };
-        build.snapshot.as_mut().expect("snapshot").invalid_default = true;
-        op
-    };
-    assert!(running.thread.send(invalid_default(1)));
-    assert!(matches!(
-        running.ack(),
-        Input::ContextBuilt(ContextBuilt {
-            result: Err(Unbuilt::Failed),
-            ..
-        })
-    ));
-    let picked = choice("thread-model");
-    assert!(running.thread.send(StoreOp::SetModel {
-        thread: ThreadId(2),
-        choice: picked.clone()
-    }));
-    assert_eq!(
-        running.ack(),
-        Input::ModelSet {
-            thread: ThreadId(2),
-            choice: picked.clone(),
-            applied: true
-        }
-    );
-    assert!(running.thread.send(invalid_default(2)));
-    assert_eq!(made(running.ack()).1, Some(picked));
-    running.thread.close().blocking_recv().expect("closed");
 }
 
 fn made(reply: Input) -> (Built, Option<ModelChoice>) {

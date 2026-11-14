@@ -166,7 +166,6 @@ fn snapshot(origin: Origin, user: Option<&str>) -> RunSnapshot {
             connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
         }),
         connection: ConnectionTag(7),
-        invalid_default: false,
     }
 }
 

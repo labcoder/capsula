@@ -31,7 +31,6 @@ fn prepare(core: &Coordinator, target: Option<ThreadId>) -> StoreOp {
             user: None,
             choice: Some(choice("default", Effort::Low)),
             connection: ConnectionTag(99),
-            invalid_default: false,
         },
         Arc::new(AtomicBool::new(false)),
     )
@@ -317,7 +316,7 @@ fn deletion_accepted_after_recognition_fences_snapshot_even_after_its_reply() {
 }
 
 #[test]
-fn a_hold_on_a_non_chatgpt_choice_or_an_invalid_default_is_refused_at_its_read() {
+fn a_hold_on_a_non_chatgpt_choice_is_refused_at_its_read() {
     use kumochi_protocol::message::ConnectionKind;
     let claude = ModelChoice {
         connection: ConnectionKind::ClaudeCode,
@@ -328,16 +327,16 @@ fn a_hold_on_a_non_chatgpt_choice_or_an_invalid_default_is_refused_at_its_read()
         ..choice("claude-sonnet-5-5", Effort::Low)
     };
     let chatgpt = choice("gpt-6-luna", Effort::Low);
-    // (the thread's saved choice, the default, whether the default was invalid, prepared)
+    let expected = chatgpt.clone();
+    // (the thread's saved choice, the default, prepared)
     let cases = [
-        (Some(claude.clone()), Some(chatgpt.clone()), false, false),
-        (Some(key), Some(chatgpt.clone()), false, false),
-        (None, Some(claude), false, false),
-        (None, None, true, false),
-        (Some(chatgpt.clone()), None, true, true),
-        (None, Some(chatgpt), false, true),
+        (Some(claude.clone()), Some(chatgpt.clone()), false),
+        (Some(key), Some(chatgpt.clone()), false),
+        (None, Some(claude), false),
+        (Some(chatgpt.clone()), None, true),
+        (None, Some(chatgpt), true),
     ];
-    for (saved, default, invalid_default, prepared) in cases {
+    for (saved, default, prepared) in cases {
         for target in [None, Some(TASK)] {
             if saved.is_some() && target.is_none() {
                 continue;
@@ -365,7 +364,6 @@ fn a_hold_on_a_non_chatgpt_choice_or_an_invalid_default_is_refused_at_its_read()
                         user: None,
                         choice: default.clone(),
                         connection: ConnectionTag(99),
-                        invalid_default,
                     },
                     Arc::new(AtomicBool::new(false)),
                 )
@@ -376,11 +374,7 @@ fn a_hold_on_a_non_chatgpt_choice_or_an_invalid_default_is_refused_at_its_read()
             };
             assert_eq!(result.is_ok(), prepared, "{saved:?} {default:?} {target:?}");
             if let Ok(snapshot) = result {
-                assert!(!snapshot.defaults.invalid_default);
-                assert_eq!(
-                    snapshot.defaults.choice.map(|choice| choice.connection),
-                    Some(ConnectionKind::ChatGpt)
-                );
+                assert_eq!(snapshot.defaults.choice.as_ref(), Some(&expected));
             }
             running.thread.close().blocking_recv().unwrap();
         }

@@ -241,7 +241,7 @@ than growing the window with the text. The existing Settings content region owns
 | `onboarded` | boolean | absent: `true` for a profile in use at start, else `false` |
 | `onboarding_from` | `welcome`, `your_name`, `accounts` or `shortcut` | absent or invalid: `welcome` |
 | `max_frame_rate` | 30, 60, 72, 120 or 144, or absent | absent (Automatic) |
-| `default_model` | a table: `connection`, `model` (a model slug) and `effort` (`Low` to `Max`), or absent; legacy tables omit `connection` | absent until a catalog is read |
+| `default_model` | a table: `connection` (`ChatGpt`, `ClaudeCode` or `AnthropicKey`; absent means `ChatGpt`), `model` (a model slug) and `effort` (`Low` to `Max`, any case), or absent | absent until a catalog is read |
 | `dock_position` | `top_left`, `top_center`, `top_right`, `middle_left`, `center`, `middle_right`, `bottom_left`, `bottom_center` or `bottom_right` | `top_center` |
 | `show_in_taskbar` | boolean | `false` |
 | `[voice] talk_back` | boolean | `false` |
@@ -292,11 +292,16 @@ refused with `Error(VoiceUnavailable)` and its one
 settled `SettingsView` (see [accounts](accounts.md#model-catalog)). Explicit user changes remain
 unconditional; queued epoch-0 repairs recompute against the latest committed choice and catalog
 at the write boundary, so they cannot replace an acknowledged choice on another connection.
-The raw table distinguishes absent, structurally valid and invalid intent. A legacy table missing
-only `connection` means ChatGPT. Unknown effort preserves the connection/model identity and
-displays Medium without rewriting the table. Invalid intent has no display choice but is not
-absent: catalog repair leaves it untouched, unrelated settings writes preserve it, and execution
-refuses it unless the thread has its own valid saved choice.
+The raw table reads as absent, valid or invalid intent. A table missing only `connection` means
+ChatGPT. An unknown effort keeps the connection and model, displays Medium and executes at Low,
+without rewriting the table. A malformed table that names ChatGPT or no connection, or a value
+that isn't a table, reads as absent with an `invalid setting` warning, so the next catalog read
+repairs it. A table naming another connection that doesn't decode (an unknown or mistyped
+connection, a missing or bad model or effort) is invalid intent: it has no display choice, and
+catalog repair and unrelated settings writes leave it as it is. Until the file is fixed, every run
+on a thread without its own saved choice fails with `ModelUnavailable` and Open Settings, as it
+does while `config.toml` is unreadable. An invalid `default_model` is never rewritten; remove
+the key to reset it.
 
 **Names** follow one rule, checked by `AssistantName` and `UserName` in `crates/protocol` on
 both sides: trimmed, 1–24 Unicode scalar values, one line, with no control characters and no
