@@ -15,6 +15,7 @@ pub mod credential;
 pub mod drawing;
 pub mod escape;
 pub mod instance;
+pub mod logging;
 pub mod platform;
 pub mod presence;
 pub mod runs;

@@ -393,7 +393,7 @@ fn read(
                         0
                     },
                     || token.collecting(session),
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     || {},
                 )
             }
@@ -430,12 +430,12 @@ pub(in crate::platform) fn copy_batch(
     borrowed: Option<&[u8]>,
     silence: u8,
     mut authorized: impl FnMut() -> bool,
-    #[cfg(test)] after_authorized: impl FnOnce(),
+    #[cfg(any(test, feature = "test-support"))] after_authorized: impl FnOnce(),
 ) -> usize {
     if !authorized() {
         return 0;
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     after_authorized();
     if let Some(borrowed) = borrowed {
         raw.copy_from_slice(borrowed);
