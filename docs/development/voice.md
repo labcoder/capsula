@@ -460,16 +460,16 @@ by hashing the downloaded bytes, and their sizes against the blob metadata.
 
 The native runtime and its license audit are in [voice-natives.md](voice-natives.md).
 
-## Dev machines
+## Local model and native files
 
 A developer who already has the files links them instead of downloading them again:
 
 ```text
-cargo xtask voice-assets link <models-dir> <natives-dir>
+cargo xtask voice-assets link <user-models-dir> <user-native-library-dir>
 ```
 
-On Rez that's `C:\dev\capsula-ws\models` and
-`C:\dev\capsula-ws\tools\voice\sherpa\sherpa-onnx-v2.0.1-win-x64-shared-MD-Release-lib\lib`.
+Supply your own model directory and the directory containing the native runtime DLLs described
+in [voice-natives.md](voice-natives.md).
 The task checks every source's size and SHA-256 before it links anything, then hardlinks the
 models into the dev models folder (`Kumochi Dev`) and the DLLs beside
 `target\debug\kumochid.exe` and `target\release\kumochid.exe`. Hardlinks take no space, and
