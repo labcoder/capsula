@@ -35,7 +35,8 @@ pub(crate) enum ConsumeError {
     /// Its rest and activated view, with this owner's charge, would pass the prepared allowance.
     Residency,
     /// The scene's admission is out. The request is kept, and `Effect::ConsumptionReady` names
-    /// it once the admission is in; the scene admits nothing more until it is served or halts.
+    /// it once the admission is in; the scene admits nothing more until it is served, halts, or a
+    /// wake that can no longer serve it drops it.
     Busy,
 }
 

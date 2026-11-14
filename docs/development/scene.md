@@ -1784,7 +1784,7 @@ when a read is still alive. The brain keeps its ordinary admit/commit API.
 Later mutating scene frames remain FIFO behind admission, including removal and cut
 acknowledgements. The lane's frame and held frames share the 512 KiB data window, with
 credit withheld until the frame is applied or the current session abandons it; the lane's
-credit returns when its candidate installs, not when the step is shown. Credit never crosses
+credit returns when its candidate installs or the lane expires, not when the step is shown. Credit never crosses
 into a replacement connection. Admission, preparation and recovery share the same eight
 worker/answer leases, including cancelled workers and answers awaiting delivery.
 
