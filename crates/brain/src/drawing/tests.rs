@@ -2985,6 +2985,7 @@ fn debug_and_display_never_carry_drawing_content() {
             code: ErrorCode::IdReused,
         })),
         remaining: Remaining::Steps,
+        after_records: false,
     };
     let stored = StoredScene {
         scene: SceneId(1),

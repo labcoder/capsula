@@ -2074,8 +2074,8 @@ Drain each supplied delta until `None`, then provide the next delta. At EOF call
 `finish`: a missing record close or envelope tail is `Truncated`.
 
 The outer object must contain exactly one `records` key and an array of record
-objects. Escaped spellings of that key work; repeated keys and additional keys
-fail. A leading byte-order mark (BOM) and invalid UTF-8 outside strings are rejected.
+objects. Escaped spellings of that key work; a repeated or additional key is text
+after the records, below. A leading byte-order mark (BOM) and invalid UTF-8 outside strings are rejected.
 Whitespace, nested objects/arrays, JSON number/literal syntax, split UTF-8,
 escapes and paired UTF-16 surrogate escapes are handled incrementally. Duplicate
 fields inside a record remain the typed parser's responsibility.
@@ -2087,8 +2087,10 @@ at most 16, including the envelope object and records array. One 32 KiB buffer i
 allocated at construction; scanning and record delivery allocate nothing further.
 `Malformed { at }` reports the zero-based drawing byte offset of the first invalid byte.
 Every syntax, size, depth or truncation error is terminal. There is no newline
-resynchronization, and trailing non-whitespace after the envelope fails. Earlier
-records may already have been emitted, so callers retain their committed prefix.
+resynchronization. Earlier records may already have been emitted, so callers retain
+their committed prefix. Once the records array has closed, any byte but whitespace or the
+envelope's one closing brace is `AfterRecords` rather than `Malformed`: every record before
+it was whole, and the bytes after it are never buffered or read as records.
 Tokenizer and closed-record Debug formatting never prints buffered bytes.
 
 `parse_draw_record` adds the tool's closed 2D ingress to `parse_record`: it rejects

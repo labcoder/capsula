@@ -8,8 +8,8 @@ use kumochi_protocol::message::{
     DataToShell, MAX_DRAW_STEPS_PER_RUN, RunId, SceneHeader, SceneId, ThreadId,
 };
 use kumochi_scene::{
-    Admission, Begin, Budget, CallState, ErrorCode, FieldPath, Record, SceneState, Step, StepError,
-    TokenError, Tokenizer, WireId, parse_draw_record,
+    Admission, Begin, Budget, CallState, End, ErrorCode, FieldPath, Record, SceneState, Step,
+    StepError, TokenError, Tokenizer, WireId, parse_draw_record,
 };
 use serde::Deserialize;
 
@@ -27,6 +27,10 @@ pub(super) const MAX_CALLS_PER_RUN: usize = 16;
 pub(super) const MAX_CALL_RECORDS: usize = MAX_DRAW_STEPS_PER_RUN + 2;
 /// Follows a model error while a corrected call can still draw.
 const RETRY_HINT: &str = "; drawn lists what this call added, and earlier steps stay as they were; correct this and call draw again";
+/// Follows a model error after the call drew steps, so a correction doesn't redraw them.
+const DRAWN_RETRY_HINT: &str = "; the steps in drawn are on screen, and earlier steps stay as they were; correct this by drawing only what is missing, with new step and object ids, and call draw again";
+/// Follows a complete call whose arguments went on after its records array.
+const AFTER_RECORDS_NOTE: &str = "; text after the records array was ignored";
 /// Follows a model error once the run drew its whole step budget but still takes calls.
 const FULL_HINT: &str = "; no further step can be drawn in this turn";
 /// What everything on screen together can paint, in shapes a model can plan with. The draw
@@ -98,6 +102,8 @@ pub struct CallEnd {
     pub error: Option<CallError>,
     /// What the run still accepts.
     pub remaining: Remaining,
+    /// Text after its closed records array was ignored.
+    pub after_records: bool,
 }
 
 /// What a run still accepts once one of its calls ends.
@@ -122,6 +128,9 @@ impl CallEnd {
     pub fn tool_text(&self) -> String {
         let drawn: Vec<&str> = self.drawn.iter().map(WireId::as_str).collect();
         let mut text = format!("drawn: [{}]", drawn.join(", "));
+        if self.after_records {
+            text.push_str(AFTER_RECORDS_NOTE);
+        }
         if let Some(error) = &self.error {
             text.push_str("; stopped: ");
             text.push_str(&match error {
@@ -134,7 +143,12 @@ impl CallEnd {
                     Remaining::Calls,
                     CallError::Step(_) | CallError::Token(_) | CallError::TooMuchToPaint { .. },
                 ) => FULL_HINT,
-                (Remaining::Steps, CallError::Step(_) | CallError::Token(_)) => RETRY_HINT,
+                (Remaining::Steps, CallError::Step(_) | CallError::Token(_))
+                    if self.drawn.is_empty() =>
+                {
+                    RETRY_HINT
+                }
+                (Remaining::Steps, CallError::Step(_) | CallError::Token(_)) => DRAWN_RETRY_HINT,
                 (Remaining::Steps, CallError::TooMuchToPaint { cleared: false }) => PAINT_HINT,
                 (Remaining::Steps, CallError::TooMuchToPaint { cleared: true }) => CLEARED_HINT,
                 _ => "",
@@ -245,14 +259,14 @@ impl Drawing {
         };
         match envelope(args) {
             Err(error) => self.fail(at, CallError::Token(error), out),
-            Ok(records) => {
+            Ok((records, after_records)) => {
                 for bytes in records {
                     self.intake(at, &bytes, out);
                 }
                 let job = Job::Finish {
                     run,
                     call: id,
-                    error: None,
+                    error: after_records.then_some(CallError::Token(TokenError::AfterRecords)),
                 };
                 self.enqueue(job, out);
             }
@@ -357,6 +371,7 @@ impl Drawing {
                 drawn: Vec::new(),
                 error: Some(CallError::Exhausted),
                 remaining: Remaining::Nothing,
+                after_records: false,
             });
             return Ok(None);
         }
@@ -682,7 +697,8 @@ impl Drawing {
         }
     }
 
-    /// The call's arguments ended: complete if its guard saw `end`.
+    /// The call's arguments ended: complete if its guard saw `end`. Text after its closed records
+    /// array, once every record in it was accepted, stands in for a missing `end`.
     pub(super) fn finish(
         &mut self,
         run: RunId,
@@ -693,12 +709,24 @@ impl Drawing {
         let Some(at) = self.open_call(run, id) else {
             return;
         };
+        let after_records = error == Some(CallError::Token(TokenError::AfterRecords));
         let ended = match error {
+            _ if after_records => self.calls[at]
+                .guard
+                .finish()
+                .or_else(|_| self.guard(at, &Record::End(End {})))
+                .map_err(CallError::Step),
             Some(error) => Err(error),
             None => self.calls[at].guard.finish().map_err(CallError::Step),
         };
         match ended {
-            Ok(()) => self.end(at, None, out),
+            Ok(()) => {
+                self.end(at, None, out);
+                out.calls
+                    .last_mut()
+                    .expect("end pushed this call's result")
+                    .after_records = after_records;
+            }
             Err(error) => self.fail(at, error, out),
         }
     }
@@ -763,6 +791,7 @@ impl Drawing {
             drawn: mem::take(&mut call.drawn),
             error,
             remaining,
+            after_records: false,
         });
     }
 
@@ -927,16 +956,19 @@ impl Drawing {
     }
 }
 
-/// The closed records of one whole envelope, or why it isn't one.
-fn envelope(args: &[u8]) -> Result<Vec<Vec<u8>>, TokenError> {
+/// The closed records of one whole envelope and whether text followed them, or why it isn't one.
+fn envelope(args: &[u8]) -> Result<(Vec<Vec<u8>>, bool), TokenError> {
     let mut tokenizer = Tokenizer::new();
     let mut input = args;
     let mut records = Vec::new();
-    while let Some(record) = tokenizer.next(&mut input)? {
-        records.push(record.bytes.to_vec());
+    loop {
+        match tokenizer.next(&mut input) {
+            Ok(Some(record)) => records.push(record.bytes.to_vec()),
+            Ok(None) => break tokenizer.finish().map(|()| (records, false)),
+            Err(TokenError::AfterRecords) => break Ok((records, true)),
+            Err(error) => break Err(error),
+        }
     }
-    tokenizer.finish()?;
-    Ok(records)
 }
 
 fn in_step(step: &Step, code: ErrorCode) -> StepError {
