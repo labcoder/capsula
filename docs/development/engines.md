@@ -24,7 +24,7 @@ after their build stops; background jobs keep their separate job-keyed collector
 
 | Part | Where it comes from |
 |---|---|
-| Model and effort | The run's snapshot: the thread's model choice, else the default model, read by the run's first build. The coordinator checks it against the catalog once, on that build's result, and fails the run with `ModelUnavailable` when the catalog doesn't list it (runs.md, "Availability"). The dev fixture needs none, and a real engine refuses a request without one. |
+| Model and effort | The run's snapshot: the thread's model choice, else the default model, read by the run's first build. The coordinator checks it against its route's catalog once, on that build's result, and fails the run with `ModelUnavailable` when the catalog doesn't list it (runs.md, "Availability"). The dev fixture needs none, and a real engine refuses a request without one. |
 | Instructions | `prompts/instructions.md` and the role file for the run's origin (`kumo.md` or `task.md`). The assistant's name and the user's name come from the run's snapshot, taken once when the run starts, so a rename applies from the next run. Each name comes with a line saying it is the current one, so a different name in earlier turns or a summary is out of date. An unset user name leaves its lines out. Names are filled in one pass, so a name is never read as a placeholder. |
 | Tools | Kumo: `draw`, `draft_issue`, `search_history`, `read_history`, `list_tasks`; a task: `draw`, `draft_issue`, `search_history`, `read_history`. |
 | Summary | The newest summary (PR 17), as `Summary of events 1–212:` and its text. Events it covers aren't sent raw. |
@@ -37,8 +37,9 @@ from the connection this run uses replays its rounds natively: each round's item
 then its results, and of its text only what was written after its last round, such as a Stop's
 partial answer, as one assistant message. The text before that is already in the items. A run from
 another connection replays as its text only, with no items and no results, so no call travels
-without its result. The connection is the one the run was bound to when its turn arrived, recorded
-in its snapshot. A stored item or result that doesn't decode, or a result over 64 KiB [guess],
+without its result. The connection is the `ChatGPT` sign-in the run arrived under, recorded in its
+snapshot. Native items replay only for a run on `ChatGPT`'s choice or on none; for any other
+connection's choice every run replays as its text. A stored item or result that doesn't decode, or a result over 64 KiB [guess],
 fails the build, and their bytes count toward the bound. `append_round` runs those same checks
 on every item and result before it writes, so a round the build would refuse is never stored: its
 write fails and the run ends `failed(store)`, and the thread's next run builds as usual.

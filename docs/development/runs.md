@@ -364,9 +364,11 @@ so they carry across rounds, and so do the tool loop's budgets: 8 model rounds a
 
 ## Availability
 
-Whether a run can be answered comes from the account, as `Input::Engines(Availability)`. The
-runtime sends it at start and after every account input. It's `Ready`, with the connection and
-the catalog, or `Unavailable` with what the user can do (`coordinator/availability.rs`).
+Whether a run can be answered is kept per connection kind, as `Input::Engines(kind, Availability)`.
+It's `Ready`, with the connection and the catalog, or `Unavailable` with what the user can do
+(`coordinator/availability.rs`). The runtime sends `ChatGPT`'s at start and after every account
+input. Claude Code's and the Anthropic key's start `Unavailable` with `ModelUnavailable` and Open
+Settings, and nothing in production changes them yet.
 
 - **The connection** names the sign-in that issued the account's token set. It's saved with the
   set, kept through refreshes and restarts, and new on every sign-in (random per process, with
@@ -374,17 +376,29 @@ the catalog, or `Unavailable` with what the user can do (`coordinator/availabili
 - **The account's reason is kept.** Signed out, signing in or with a sign-out accepted gives
   `SignInNeeded`; a declined plan `PlanNotEnabled`; an ended session `SessionEnded`; a plan
   the account can't use `PlanUnavailable`; a held credential lock `CredentialsUnavailable`.
-- **A turn while unavailable is stored**, so the text is kept, and its run fails
+- **A turn while no kind is ready is stored**, so the text is kept, and its run fails
   `failed(engine)` at once, telling the shell the reason. A sign-in before the turn is written
   doesn't revive it.
-- **A run is bound to the connection** that was ready when its turn arrived, and its
-  snapshot records it. The binding holds while the turn is still being written, so a sign-out
-  then fails the run at once and a later account never answers it. A catalog-only change keeps the run. Any other change, a sign-out the
-  account accepted included, cancels the engine and fails the run with the reason. A held ask
-  for that run is answered `Rebuild`, and `send_ready` checks the binding again before every
-  `Grant`.
-- **S4: the model is checked once,** when the first build's result arrives: a model missing from
-  the catalog, an empty catalog or no choice at all fails the run with `ModelUnavailable` and
+- **A run is bound to a route**: a connection kind and one of its sign-ins (`context::Route`).
+  Its turn records the sign-in each kind had ready when it arrived. Its first build binds the
+  kind of the run's choice (`ChatGPT` when there is none) under the sign-in that kind had then. A
+  kind that wasn't ready at arrival fails the run with that kind's reason, even once it's ready,
+  so a later sign-in never answers it. Before the binding, a change to a kind takes that kind out
+  of the arrival, and the run fails once no kind is left; after it, only a change to the route's
+  own kind matters. A catalog-only change keeps the run. Any other change, a sign-out the account
+  accepted included, cancels the engine and fails the run with the reason. A held ask for that run
+  is answered `Rebuild`, and `send_ready` checks the route again before every `Grant`. Only a
+  `ChatGPT` route takes a bearer.
+- **Holds and jobs.** A hold records the same arrival when it's prepared and answers on its
+  choice's route, checked when its read returns and again before each send. A change to another
+  kind leaves it, a change to its own kind ends it, and while its read is still out a change to
+  any kind ends it. A title or summary job answers only on `ChatGPT`: one for another
+  connection's choice ends unsent and frees the slot.
+- **The engine follows the connection.** A request on `ChatGPT`'s choice, or on none, starts the
+  `ChatGPT` engine; one on a connection with no engine yet starts `Unserved`, whose round fails
+  with `ModelUnavailable` (`runtime/mod.rs`, `engine_for`).
+- **S4: the model is checked once,** when the first build's result arrives, against the route's
+  own catalog: a model missing from the catalog, an empty catalog or no choice at all fails the run with `ModelUnavailable` and
   Open settings, and nothing goes to another model. A run in flight keeps its check when the
   catalog changes. shortcut: the catalog lists no efforts yet, so effort isn't checked.
 - **Draws come only from an offered tool** (D13-H2). A `draw` call opens the draw buffer only
