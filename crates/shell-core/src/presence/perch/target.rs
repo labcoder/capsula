@@ -12,14 +12,14 @@ use crate::presence::drag::Generation;
 
 /// What the first check says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Check {
+pub enum Check {
     Proceed,
     Return,
 }
 
 /// What the second check says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Drop {
+pub enum Drop {
     /// Perch at this placement, if `publish` agrees after the last drain.
     Ready(Placement, WatchGen),
     /// Back to the line; nothing is created.
@@ -49,7 +49,7 @@ struct Armed {
 
 /// The drop target of the carry under way.
 #[derive(Debug, Default)]
-pub(crate) struct Targeting {
+pub struct Targeting {
     drag: Option<Generation>,
     armed: Option<Armed>,
     /// The last generation minted. Never reset, so generations stay unique in the process.
@@ -58,19 +58,19 @@ pub(crate) struct Targeting {
 
 impl Targeting {
     /// The neck snapped in `drag`: candidates count from here.
-    pub(crate) fn begin(&mut self, drag: Generation) {
+    pub fn begin(&mut self, drag: Generation) {
         self.drag = Some(drag);
         self.armed = None;
     }
 
     /// Whether `drag` is the carry candidates count for.
-    pub(crate) fn carries(&self, drag: Generation) -> bool {
+    pub fn carries(&self, drag: Generation) -> bool {
         self.drag == Some(drag)
     }
 
     /// The window under the pointer in `drag` is `target`. Returns the window and generation
     /// to watch when it's a new candidate; the old watch, if any, is dropped either way.
-    pub(crate) fn candidate(
+    pub fn candidate(
         &mut self,
         drag: Generation,
         target: Option<&WindowTarget>,
@@ -101,14 +101,14 @@ impl Targeting {
     }
 
     /// The watch for `w` couldn't be installed.
-    pub(crate) fn watch_failed(&mut self, w: WatchGen) {
+    pub fn watch_failed(&mut self, w: WatchGen) {
         if let Some(armed) = self.armed_mut(w) {
             armed.life = Life::Ended;
         }
     }
 
     /// The host watched under `w` changed. A stale `w` is ignored.
-    pub(crate) fn host_changed(&mut self, w: WatchGen, change: HostChange) {
+    pub fn host_changed(&mut self, w: WatchGen, change: HostChange) {
         if let Some(armed) = self.armed_mut(w) {
             armed.life = match (armed.life, change) {
                 (Life::Ended, _) | (_, HostChange::Gone) => Life::Ended,
@@ -119,7 +119,7 @@ impl Targeting {
 
     /// On `Released` in `drag`: `again` is a fresh query under the release point. It proceeds
     /// only for the armed window, still live; a move before now is absorbed by this fresh query.
-    pub(crate) fn first_check(&mut self, drag: Generation, again: Option<&WindowTarget>) -> Check {
+    pub fn first_check(&mut self, drag: Generation, again: Option<&WindowTarget>) -> Check {
         let Some(armed) = self.armed.as_mut().filter(|_| self.drag == Some(drag)) else {
             return Check::Return;
         };
@@ -134,7 +134,7 @@ impl Targeting {
     /// After the first drain: `again` is queried once more and placed from `from`, the body's
     /// top-left at the drop. One move since the first check is allowed, and this placement is
     /// then the only one that can publish; a second, or anything else, returns.
-    pub(crate) fn second_check(
+    pub fn second_check(
         &mut self,
         again: Option<&WindowTarget>,
         from: [i32; 2],
@@ -160,20 +160,20 @@ impl Targeting {
 
     /// After the second drain: the placement the second check made, only while `drag` is still
     /// the carry, `w` still armed and nothing changed since. Consumes `w` either way.
-    pub(crate) fn publish(&mut self, drag: Generation, w: WatchGen) -> Option<Placement> {
+    pub fn publish(&mut self, drag: Generation, w: WatchGen) -> Option<Placement> {
         let current = self.drag == Some(drag);
         let armed = self.armed.take_if(|armed| armed.w == w)?;
         (current && armed.life == Life::Live).then_some(armed.ready)?
     }
 
     /// The carry is over: nothing counts until the next `begin`.
-    pub(crate) fn end(&mut self) {
+    pub fn end(&mut self) {
         self.drag = None;
         self.armed = None;
     }
 
     /// The generation Presence should keep a watch for.
-    pub(crate) fn watching(&self) -> Option<WatchGen> {
+    pub fn watching(&self) -> Option<WatchGen> {
         self.armed
             .filter(|armed| armed.life != Life::Ended)
             .map(|armed| armed.w)
@@ -184,56 +184,21 @@ impl Targeting {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod fixture;
+
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
+    use super::fixture::{HOST, OTHER, drag, host, rect};
     use super::{Check, Drop, Targeting};
-    use crate::platform::host::{HostChange, HostId, Label, PhysicalRect, WatchGen};
-    use crate::presence::drag::Generation;
-    use crate::presence::perch::caption::{Caption, Exclusions, Source, WindowTarget};
+    use crate::platform::host::{HostChange, PhysicalRect, WatchGen};
+    use crate::presence::perch::caption::WindowTarget;
     use crate::presence::perch::place::{Extents, Placement};
 
     const KUMO: Extents = Extents {
         body: 56,
         card: [200, 120],
     };
-    pub(crate) const HOST: HostId = HostId {
-        window: 1,
-        process: 2,
-        thread: 3,
-    };
-    pub(crate) const OTHER: HostId = HostId {
-        window: 9,
-        process: 2,
-        thread: 3,
-    };
-
-    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> PhysicalRect {
-        PhysicalRect {
-            left,
-            top,
-            right,
-            bottom,
-        }
-    }
-
-    /// An 800 × 600 host at 100 %, `dx` right of x = 100, on a 1920 × 1040 work area.
-    pub(crate) fn host(id: HostId, dx: i32) -> WindowTarget {
-        let mut exclusions = Exclusions::default();
-        exclusions.rects[0] = Some((rect(792 + dx, 200, 900 + dx, 231), Source::Inferred));
-        WindowTarget {
-            id,
-            frame: rect(100 + dx, 200, 900 + dx, 800),
-            work_area: rect(0, 0, 1920, 1040),
-            monitor_dpi: 96,
-            caption: Caption {
-                rect: rect(100 + dx, 200, 792 + dx, 231),
-                source: Source::Inferred,
-            },
-            exclusions,
-            label: Label::new(&[]),
-        }
-    }
-
     /// The perch on `host(_, 0)`: centred above the caption, the card to its right.
     const PERCH: Placement = Placement {
         body: PhysicalRect {
@@ -266,10 +231,6 @@ pub(crate) mod tests {
         },
         above: true,
     };
-
-    pub(crate) fn drag(n: u64) -> Generation {
-        Generation::new(n)
-    }
 
     /// A carry in drag 1 armed on `HOST`.
     fn armed() -> (Targeting, WatchGen) {

@@ -5,17 +5,17 @@ use kumochi_protocol::message::ThreadId;
 use crate::threads::Threads;
 
 #[derive(Default)]
-pub(super) struct Selection {
-    pub(super) selected: Option<ThreadId>,
+pub struct Selection {
+    pub selected: Option<ThreadId>,
     opened: Option<ThreadId>,
 }
 
 impl Selection {
-    pub(super) fn select(&mut self, ix: Option<usize>, state: &Threads) {
+    pub fn select(&mut self, ix: Option<usize>, state: &Threads) {
         self.selected = ix.and_then(|ix| state.rows.get(ix)).map(|row| row.id);
     }
 
-    pub(super) fn observe(&mut self, state: &Threads) -> Option<usize> {
+    pub fn observe(&mut self, state: &Threads) -> Option<usize> {
         if self.opened != state.open {
             self.opened = state.open;
             self.selected = self.opened;

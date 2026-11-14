@@ -8,10 +8,34 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+async-channel = "2"
+fluent-bundle.workspace = true
 keyring.workspace = true
 kumochi-protocol.workspace = true
+kumochi-scene.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+unic-langid.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Security_Credentials",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+] }
+
+[dev-dependencies]
+kumochi-brain = { path = "../brain", features = ["test-support"] }
+
+[features]
+# The fixtures the shell's tests share with the core's.
+test-support = []
 
 [lints]
 workspace = true

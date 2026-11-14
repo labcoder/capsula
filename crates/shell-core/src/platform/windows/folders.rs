@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use kumochi_protocol::constants;
 
 /// The local data folder, only when `%LOCALAPPDATA%` is an absolute path.
-pub(crate) fn data_dir() -> Option<PathBuf> {
+pub fn data_dir() -> Option<PathBuf> {
     data_dir_under(std::env::var_os("LOCALAPPDATA"))
 }
 

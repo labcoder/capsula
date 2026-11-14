@@ -7,9 +7,9 @@ use crate::platform::input::Button;
 
 /// Which drag an outcome belongs to. Each press that starts a drag gets the next one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Generation(u64);
+pub struct Generation(u64);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Generation {
     pub(crate) fn new(n: u64) -> Self {
         Self(n)
@@ -18,7 +18,7 @@ impl Generation {
 
 /// How a drag ended.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum End {
+pub enum End {
     /// The initiating button came up here. The only ending that may have effects.
     Released([f32; 2]),
     /// Esc.
@@ -32,7 +32,7 @@ pub(crate) enum End {
 
 /// What reaches the owner while a drag may be live.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum Event {
+pub enum Event {
     /// GPUI's `MouseMoveEvent` in logical pixels, with the button it reports held.
     Move {
         at: [f32; 2],
@@ -43,10 +43,6 @@ pub(crate) enum Event {
     /// `Escape::CancelPull`.
     Escape,
     /// The overlay input authority takes the pointer for selection.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "B3b preempts Kumo before selection capture")
-    )]
     Preempt,
     /// The native bridge's `CaptureLost`: stamped `seq` in the UI thread's input sequence when
     /// it was emitted, with the button whose release caused it, or `None` for a loss from outside.
@@ -57,7 +53,7 @@ pub(crate) enum Event {
 
 /// What an event did.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum Outcome {
+pub enum Outcome {
     /// It belongs to no live drag, or to an ended one.
     Ignored,
     Moved(Generation, [f32; 2]),
@@ -76,7 +72,7 @@ struct Live {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct DragOwner {
+pub struct DragOwner {
     last: u64,
     live: Option<Live>,
 }
@@ -84,7 +80,7 @@ pub(crate) struct DragOwner {
 impl DragOwner {
     /// Starts a drag on `button`'s press, stamped `start`. While one is live, a press starts
     /// nothing: its button's release ends the live drag as lost.
-    pub(crate) fn press(&mut self, button: Button, start: u64) -> Option<Generation> {
+    pub fn press(&mut self, button: Button, start: u64) -> Option<Generation> {
         if self.live.is_some() {
             return None;
         }
@@ -99,11 +95,11 @@ impl DragOwner {
         Some(generation)
     }
 
-    pub(crate) fn live(&self) -> Option<Generation> {
+    pub fn live(&self) -> Option<Generation> {
         self.live.map(|live| live.generation)
     }
 
-    pub(crate) fn handle(&mut self, event: Event) -> Outcome {
+    pub fn handle(&mut self, event: Event) -> Outcome {
         let Some(live) = self.live else {
             return Outcome::Ignored;
         };
@@ -136,7 +132,7 @@ impl DragOwner {
 
     /// Call at the end of the dispatch that delivered a capture loss: a voluntary loss whose
     /// release never came ends the drag as lost, so no drag outlives its capture.
-    pub(crate) fn reconcile(&mut self) -> Outcome {
+    pub fn reconcile(&mut self) -> Outcome {
         match self.live {
             Some(live) if live.loss_pending => {
                 self.live = None;

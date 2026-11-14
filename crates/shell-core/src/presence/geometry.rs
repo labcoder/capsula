@@ -2,7 +2,7 @@
 
 /// One of the nine work-area anchors, in row-major order.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum Position {
+pub enum Position {
     TopLeft,
     #[default]
     TopCenter,
@@ -16,7 +16,7 @@ pub(crate) enum Position {
 }
 
 impl Position {
-    pub(crate) const ALL: [Self; 9] = [
+    pub const ALL: [Self; 9] = [
         Self::TopLeft,
         Self::TopCenter,
         Self::TopRight,
@@ -44,13 +44,7 @@ impl Position {
 
     /// Places the dock's slot, its panel, and the overlay the dock draws in: the slot grown by
     /// `extent` on every side, inside the work area.
-    pub(crate) fn layout(
-        self,
-        area: [i32; 4],
-        dock: [i32; 2],
-        panel: [i32; 2],
-        extent: i32,
-    ) -> Layout {
+    pub fn layout(self, area: [i32; 4], dock: [i32; 2], panel: [i32; 2], extent: i32) -> Layout {
         let [left, top, width, height] = area;
         let (column, row) = self.axes();
         let dock_width = dock[0].min(width);
@@ -94,28 +88,28 @@ impl From<kumochi_protocol::message::DockPosition> for Position {
 
 /// The two surfaces share an edge, so the pointer never crosses an unowned gap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PanelVisibility {
+pub enum PanelVisibility {
     Hidden,
     Visible,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Layout {
+pub struct Layout {
     /// The resting dock's slot, which holds the line and its trigger band.
-    pub(crate) dock: [i32; 4],
-    pub(crate) panel: [i32; 4],
+    pub dock: [i32; 4],
+    pub panel: [i32; 4],
     /// The click-through dock window: the slot, plus any room something drawn from it needs.
-    pub(crate) overlay: [i32; 4],
+    pub overlay: [i32; 4],
 }
 
 impl Layout {
     /// Places another interactive surface against the dock, clamped to the work area.
-    pub(crate) fn anchored_panel(self, area: [i32; 4], panel: [i32; 2]) -> [i32; 4] {
+    pub fn anchored_panel(self, area: [i32; 4], panel: [i32; 2]) -> [i32; 4] {
         anchored_panel(self.dock, area, panel)
     }
 
     /// Whether the pointer is over the panel. Over the dock is the line's question.
-    pub(crate) fn panel_contains(self, point: [i32; 2], panel: PanelVisibility) -> bool {
+    pub fn panel_contains(self, point: [i32; 2], panel: PanelVisibility) -> bool {
         panel == PanelVisibility::Visible && contains(self.panel, point)
     }
 }

@@ -8,7 +8,7 @@ tested as plain unit tests.
 
 ## The shell's input target
 
-`crates/shell/src/runs.rs` owns `Target::{Kumo, Task(ThreadId), New}` separately from
+`crates/shell-core/src/runs.rs` owns `Target::{Kumo, Task(ThreadId), New}` separately from
 `Threads.open`, the history being viewed. Viewing doesn't change the target or selection
 revision. **Switch to this task**, **Back to Kumo** and **New task** advance the revision;
 switching to the id in `SettingsView.main_thread` normalizes to `Target::Kumo`.

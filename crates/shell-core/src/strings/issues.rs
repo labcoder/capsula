@@ -5,7 +5,7 @@ use kumochi_protocol::message::{
 use super::{FluentArgs, Strings};
 
 impl Strings {
-    pub(crate) fn issue_feedback(&self, feedback: crate::threads::IssueFeedback) -> String {
+    pub fn issue_feedback(&self, feedback: crate::threads::IssueFeedback) -> String {
         let reason = match feedback {
             crate::threads::IssueFeedback::QueueFailed => {
                 return self.get(super::Text::IssueQueueFailed);
@@ -37,7 +37,7 @@ impl Strings {
         self.format("issue-refusal", Some(&args))
     }
 
-    pub(crate) fn issue_status(&self, state: &ActionState) -> String {
+    pub fn issue_status(&self, state: &ActionState) -> String {
         let mut args = FluentArgs::new();
         let id = match state {
             ActionState::Draft => "issue-status-draft",
@@ -98,7 +98,7 @@ impl Strings {
         self.format(id, Some(&args))
     }
 
-    pub(crate) fn issue_details(&self, card: &IssueCard) -> String {
+    pub fn issue_details(&self, card: &IssueCard) -> String {
         let mut args = FluentArgs::new();
         let repo = card.repo.as_ref().map_or_else(
             || self.format("issue-repository-unbound", None),

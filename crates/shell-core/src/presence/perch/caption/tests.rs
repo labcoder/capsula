@@ -266,11 +266,11 @@ fn a_target_never_prints_its_title() {
             thread: 3,
         },
         caption: fallback([96, 96], window, window, rect(0, 0, 1920, 1040), [26, 36]),
-        label: crate::platform::host::tests::sentinel(),
+        label: crate::platform::host::fixture::sentinel(),
     };
     let target = super::target_of(&facts).expect("a fixed window has a caption");
     assert_eq!(target.label, facts.label);
     let text = format!("{target:?}");
     assert!(text.contains("label: Label(19 units)"), "{text}");
-    crate::platform::host::tests::assert_no_sentinel(&text);
+    crate::platform::host::fixture::assert_no_sentinel(&text);
 }

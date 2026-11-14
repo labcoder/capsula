@@ -11,7 +11,7 @@ const KEEP_DAYS: usize = 7;
 
 /// Why logging couldn't start.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum LoggingError {
+pub enum LoggingError {
     /// The per-user data folder isn't known.
     #[error("%LOCALAPPDATA% is not set to an absolute path")]
     NoLocalAppData,
@@ -30,7 +30,7 @@ pub(crate) enum LoggingError {
 ///
 /// # Errors
 /// Fails when the log folder can't be found or created, or logging already started.
-pub(crate) fn init(prefix: &str) -> Result<(), LoggingError> {
+pub fn init(prefix: &str) -> Result<(), LoggingError> {
     let dir = crate::platform::data_dir()
         .ok_or(LoggingError::NoLocalAppData)?
         .join("logs");

@@ -557,8 +557,9 @@ flowchart LR
   and a caught unwind in an unwind-capable profile use the existing WorkerLost/retirement path.
   Release keeps `panic = "abort"`: a brain panic is process fail-stop, with no promise of reply
   settlement, orderly owner reports or release.
-- **Idle:** running calls, including stale ones, and queued work outrank expiry. The clock resets
-  after the last running call ends, not on a policy update or notification. Physical release
+- **Idle:** running calls, including stale ones, and queued work outrank expiry. The clock starts
+  when the model becomes ready and resets after the last running call ends, not on a policy update
+  or notification. Physical release
   still requires the owned unload receipt or matching confirmed exit described below.
 
 ### Load asks

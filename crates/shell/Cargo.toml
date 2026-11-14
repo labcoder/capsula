@@ -17,7 +17,6 @@ kumochi-protocol.workspace = true
 kumochi-scene.workspace = true
 kumochi-shell-core.workspace = true
 lyon = "=1.0.19"
-fluent-bundle.workspace = true
 gpui-kit.workspace = true
 # GPUI's own image type, for Kumo's frames; the same version GPUI already builds.
 image = { version = "0.25.10", default-features = false }
@@ -27,8 +26,6 @@ smallvec.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
-tracing-subscriber.workspace = true
-unic-langid.workspace = true
 zeroize.workspace = true
 
 [target.'cfg(windows)'.dependencies]
@@ -36,9 +33,7 @@ windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Dwm",
-    "Win32_Media_Audio",
     "Win32_Security",
-    "Win32_Security_Credentials",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_System_Com",
@@ -60,6 +55,8 @@ windows = { version = "0.62", features = [
 [dev-dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.10", features = ["test-support"] }
 kumochi-brain = { path = "../brain", features = ["test-support"] }
+kumochi-shell-core = { path = "../shell-core", features = ["test-support"] }
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

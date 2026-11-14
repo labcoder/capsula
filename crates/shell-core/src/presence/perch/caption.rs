@@ -46,14 +46,14 @@ pub(crate) struct Geometry {
 
 /// A window Kumo can perch on, in physical screen pixels. Its `label` prints only its length.
 #[derive(Clone, Copy)]
-pub(crate) struct WindowTarget {
+pub struct WindowTarget {
     pub(crate) id: HostId,
     pub(crate) frame: PhysicalRect,
     pub(crate) work_area: PhysicalRect,
     pub(crate) monitor_dpi: u32,
     pub(crate) caption: Caption,
     pub(crate) exclusions: Exclusions,
-    pub(crate) label: Label,
+    pub label: Label,
 }
 
 impl std::fmt::Debug for WindowTarget {
@@ -90,7 +90,7 @@ pub(crate) fn target_of(facts: &HostFacts) -> Option<WindowTarget> {
 /// The perch target `facts` describe when `point` is a drop on it: inside its half-open
 /// caption, which already ends left of every caption-button exclusion. A frame hit alone
 /// isn't a drop.
-pub(crate) fn drop_target(facts: &HostFacts, [x, y]: [i32; 2]) -> Option<WindowTarget> {
+pub fn drop_target(facts: &HostFacts, [x, y]: [i32; 2]) -> Option<WindowTarget> {
     target_of(facts).filter(|target| {
         let caption = target.caption.rect;
         (caption.left..caption.right).contains(&x) && (caption.top..caption.bottom).contains(&y)

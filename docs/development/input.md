@@ -198,7 +198,7 @@ Finish later ([onboarding](onboarding.md)). Stop and clear leave an edit intact;
 cancelling an edit restores its saved value without sending it and doesn't dismiss its panel.
 The local effect always happens first, and nothing waits on the brain:
 
-- **Stop** fences the moving run off in `runs.rs`, keeping what's on screen, then queues `Stop`
+- **Stop** fences the moving run off in `shell-core`'s `runs.rs`, keeping what's on screen, then queues `Stop`
   on the control pipe. The fence is checked when a message is applied, so the run's frames
   already queued in the shell are dropped too.
   - A run counts as moving until both its terminal `RunState` and its `RunEnd` have been
@@ -585,4 +585,4 @@ shows, the fence drops a hold before it warms or arms anything, on every recogni
 The microphone generation remains occupied until its matching stop/join receipt or
 proof it was never started. Cancellation and startup/hold deadlines are not release
 receipts. The shared gate, source lifecycle and fixed failures are in
-`platform/microphone.rs`; device APIs stay behind its native adapter.
+`shell-core`'s `platform/microphone.rs`; device APIs stay behind its native adapter.
