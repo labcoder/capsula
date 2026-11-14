@@ -471,7 +471,7 @@ fn disconnect_removes_identity_errors_and_delivery_state_without_replaying_opera
     }
 }
 
-/// ConnectionNeeded names no one account's state, so it never sets the Accounts row's error, nor
+/// `ConnectionNeeded` names no one account's state, so it never sets the Accounts row's error, nor
 /// replaces one.
 #[test]
 fn connection_needed_leaves_the_accounts_row_alone() {
