@@ -478,8 +478,9 @@ mod tests {
     };
 
     use super::{captioned, install, metrics, teardown, unhook_all};
+    use crate::platform::host::HostChange;
     use crate::platform::host::fixture::assert_no_sentinel;
-    use crate::platform::host::{HostChange, WatchGen};
+    use kumochi_shell_core::presence::perch::target_fixtures::watch;
 
     #[test]
     fn only_the_whole_caption_style_counts_as_a_caption() {
@@ -609,7 +610,7 @@ mod tests {
         assert_no_sentinel(&format!(
             "{:?}",
             crate::platform::PresenceEvent::HostChanged {
-                w: WatchGen(1),
+                w: watch(1),
                 change: HostChange::Gone,
             }
         ));

@@ -20,10 +20,10 @@ pub struct Extents {
 /// Where the body and the card end up, in physical pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Placement {
-    pub body: PhysicalRect,
-    pub card: PhysicalRect,
+    pub(crate) body: PhysicalRect,
+    pub(crate) card: PhysicalRect,
     /// Above the title bar, rather than just below the caption.
-    pub above: bool,
+    pub(crate) above: bool,
 }
 
 /// Centred above the title bar if there's room, else just below the caption inside the frame,
