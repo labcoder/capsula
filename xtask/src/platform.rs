@@ -106,6 +106,29 @@ pub(crate) struct Entry {
 }
 
 pub(crate) fn processes() -> Result<Vec<Entry>> {
+    Ok(running()?
+        .into_iter()
+        .filter_map(|process| {
+            let shell = process.name.eq_ignore_ascii_case(SHELL_EXE);
+            (shell || process.name.eq_ignore_ascii_case(BRAIN_EXE)).then_some(Entry {
+                pid: process.pid,
+                parent: process.parent,
+                shell,
+            })
+        })
+        .collect())
+}
+
+/// A running process: its id, its parent's and its executable's file name.
+#[derive(Debug)]
+pub(crate) struct Running {
+    pub(crate) pid: u32,
+    pub(crate) parent: u32,
+    pub(crate) name: String,
+}
+
+/// Every running process, from one snapshot.
+pub(crate) fn running() -> Result<Vec<Running>> {
     // SAFETY: process snapshots require no caller-owned pointers.
     let raw = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }?;
     // SAFETY: the successful snapshot call transfers a unique, valid handle.
@@ -128,14 +151,11 @@ pub(crate) fn processes() -> Result<Vec<Entry>> {
             .iter()
             .position(|c| *c == 0)
             .unwrap_or(entry.szExeFile.len());
-        let name = String::from_utf16_lossy(&entry.szExeFile[..length]);
-        if name.eq_ignore_ascii_case(SHELL_EXE) || name.eq_ignore_ascii_case(BRAIN_EXE) {
-            entries.push(Entry {
-                pid: entry.th32ProcessID,
-                parent: entry.th32ParentProcessID,
-                shell: name.eq_ignore_ascii_case(SHELL_EXE),
-            });
-        }
+        entries.push(Running {
+            pid: entry.th32ProcessID,
+            parent: entry.th32ParentProcessID,
+            name: String::from_utf16_lossy(&entry.szExeFile[..length]),
+        });
         // SAFETY: the snapshot is live and entry remains writable with the documented size.
         next = unsafe { Process32NextW(HANDLE(snapshot.as_raw_handle()), &raw mut entry) };
     }

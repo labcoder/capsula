@@ -80,6 +80,11 @@ tasks:
                     console the owner answers; --disconnect signs it out and deletes
                     Kumochi's folder for it; only the view's state is printed; refuses
                     while any product process runs; needs the owner at the desk
+  live claude-question
+                    three Claude Code questions on the dev brain's own Claude Code sign-in,
+                    capped in code; no ChatGPT request; prints counts, lengths and yes or
+                    no only; refuses while any product process runs; run only when the
+                    Captain starts it
   live catalog-provenance
                     one model-list request with the dev account's saved session, never
                     renewing it; writes target\\live\\<time>\\catalog-provenance.json with

@@ -151,7 +151,7 @@ impl Client {
         self.shared.write_control(message)
     }
 
-    pub(super) fn data(&self, message: &DataToBrain) -> Result<Instant> {
+    pub(crate) fn data(&self, message: &DataToBrain) -> Result<Instant> {
         self.shared.write_data(message)
     }
 

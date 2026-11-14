@@ -3,8 +3,9 @@
 `cargo xtask live <check>` runs the real dev brain on the developer's own dev account and drives it
 over its real pipes with the slice 2 gate's client (see [the slice 2 gate](slice2-gate.md)). Live
 checks run on Rez, never in CI, and only with the owner present or in a session the Captain
-approved. The checks are `account`, `signin`, `claude-signin`, `catalog-provenance` and `image`.
-The last two run the brain alone, with no client (see their sections).
+approved. The checks are `account`, `signin`, `claude-signin`, `claude-question`,
+`catalog-provenance` and `image`. The last two run the brain alone, with no client (see their
+sections).
 
 ## How it runs
 
@@ -40,8 +41,9 @@ flowchart LR
 - These checks run xtask as the client, so no onboarding window shows. A scratch profile that
   runs the dev shell needs `onboarded = true` in its `config.toml`, or the onboarding window
   opens, takes focus and uses up the double-tap.
-- `KUMOCHI_LIVE_BUDGET` is set on the brain's environment only. These checks set it to 0;
-  the model request budget refuses inference once that cap is spent.
+- `KUMOCHI_LIVE_BUDGET` and `KUMOCHI_CLAUDE_QUESTIONS` are set on the brain's environment only.
+  These checks set both to 0, except that `claude-question` sets the second to the questions its
+  plan asks; each budget refuses its requests once its cap is spent.
 
 ## `account`
 
@@ -129,6 +131,96 @@ path.
 3. Answer Claude Code's sign-in in the console it opens. The run ends at `claude code: ready`.
 4. To undo it, run `cargo xtask live claude-signin --disconnect`, which ends at
    `claude code: signed out`.
+
+## `claude-question`
+
+`cargo xtask live claude-question` asks Kumochi's own Claude Code three questions. It runs only when
+the Captain starts it, after its pull request is reviewed. It uses only the sign-in
+`claude-signin` made under `%LOCALAPPDATA%\Kumochi Dev\claude-code`, never another app's, and it
+refuses to start while any `kumochi.exe` or `kumochid.exe` runs, as the other checks do.
+
+**The budget is in code.** Before it builds anything, xtask adds up the questions its plan asks and
+refuses a plan over 3 (`CAP` in `xtask/src/live/claude_question.rs`). The copied harness starts the
+brain with `KUMOCHI_CLAUDE_QUESTIONS` set to exactly what the plan asks, 3, and
+`KUMOCHI_LIVE_BUDGET=0`, so no `ChatGPT` or Anthropic key model request can go out and a fourth
+Claude Code question would be refused as `ClaudeCodeBudget`. The first step that fails stops the
+rest. The owner's cap counts across runs; the Captain keeps that count.
+
+**The steps, in order:**
+
+1. **Request 0, discovery alone.** It waits through `NotFound` and `Finding` for at most 30 s, then
+   prints Claude Code's state, the milliseconds since the brain's first view, and whether it's
+   ready at 2.1.306. Anything else stops the run with nothing asked. It then lists the Claude Code
+   folder's entries by name and size, from metadata only: no file is opened.
+2. **The default.** It refuses while talk-back is on, since it plays no speech. If
+   `target\live\claude-question.restore` exists, an earlier run stopped before putting the default
+   back: it puts that one back first and deletes the file. Then it writes the current default to
+   the file and sets Claude Code's haiku at Low with `SettingsOp::SetDefaultModel`, the op Settings
+   uses, unless the default already is that.
+3. **Request 1, question 1.** A fixed one-line question on a new thread. It passes when text
+   arrives, no tool frame does (a step or a focus move), and the run ends `Done`. The launch passes
+   `--effort low` and `--tools ""`, so this is the first proof that 2.1.306 takes `--effort` and that
+   a launch with no tools passes the real audit.
+4. **The title, question 2.** That `Done` starts the title job on the thread's connection, at Low.
+   It waits at most 150 s for `ThreadsChanged`, which the brain sends only when it commits a title,
+   and it commits one only from an answer within the job's 4 KiB cap that `clean_title` turned into
+   a line. Then it reads the thread list and prints the title's length.
+5. **Request 3, question 3.** A fixed question asking for a long answer, on the same thread. After
+   its first text it sends `Stop`, and `SpeechStopped` as a quiet shell would. It passes when the
+   run ends `Interrupted` and, within 15 s, no `claude.exe` runs under the brain at any depth and
+   `engine\` holds no launch folder. An interrupted run starts no job, and the thread already has
+   its title, so nothing asks a fourth question.
+6. **The cleanup**, after any step past the default: it deletes the run's thread, puts the default
+   back and deletes the restore file, and lists the Claude Code folder again, printing what was
+   added, changed or removed, with sizes.
+
+The prompts are fixed strings in the check, with no user data, screen or file content. Request 2 of
+the PR 3 note, a second turn answered from the first, is covered offline instead.
+
+**What it prints.** Counts, lengths, milliseconds, yes or no, and the brain's state words and
+error keys: never a prompt, an answer, a title, a version or a frame. Folder entries are printed by
+their path under the Claude Code folder, with their sizes. A step that fails from request 1 on also
+prints Claude Code's state, so a failed audit shows as `audit failed: <check>`. The brain then
+quarantines 2.1.306 in the dev profile, and removing the marker waits for the Captain's word.
+
+```
+live claude-question: building the dev brain (at most 1200s)
+live claude-question: running in <repo>\target\live\<time>
+claude code: ready
+discovery: <n> ms
+at the reviewed version 2.1.306: yes
+default: claude code's haiku at low for this run
+question: done, text <n> characters in <n> chunks, tool frames 0, <n> ms
+claude code took --effort, and a launch with no tools passed its audit: yes
+title: set, <n> characters, <n> ms
+title within the job's output cap and through clean_title: yes
+stop: interrupted after <n> characters, <n> ms; claude processes left 0, launch folders left 0
+thread: deleted
+default: put back
+claude code folder: <n> entries before, <n> after
+claude question: done (questions: 3)
+```
+
+The outer xtask prints the last line from the copied harness's exit code alone, so it counts the
+questions a run can have asked even when the run printed nothing else. A failed step counts its own
+question, since it may have gone out before the step failed.
+
+| Exit | Step that failed | Questions |
+|---|---|---|
+| 0 | none | 3 |
+| 10 | starting: the budget, the folders, the brain or the pipe | 0 |
+| 11 | finding Claude Code | 0 |
+| 12 | setting the default | 0 |
+| 13 | request 1 | at most 1 |
+| 14 | the title | at most 2 |
+| 15 | request 3 | at most 3 |
+| 16 | the cleanup, after every proof passed | 3 |
+| other, or none | the harness was killed or panicked | at most 3 |
+
+**Tests.** Offline tests cover what needs no request: the plan's budget and the refusal of a plan
+over it, the refusal while a product process runs, the argument table, the exit-code table, the
+restore file, the walk that finds `claude.exe` under the brain, and the folder listing's changes.
+The drive itself runs only live.
 
 ## `catalog-provenance`
 
@@ -299,6 +391,9 @@ for example when printing a line failed, so its count is an upper bound.
 | Claude Code's sign-in settling | 330 s from the answer, one deadline: the lane ends the login at 5 min, then reads the status | sends `Quitting`, which ends the login, and fails |
 | Claude Code's op answers | 10 s from the op, one deadline: Connect's answer is the first view unlike the one before it, so stale snapshots such as the Anthropic key's are skipped; Disconnect's is `CleanupPending`, which a pending cleanup already is | fails, naming the last view |
 | Disconnect's cleanup | 45 s from the answer [guess]: the harness's budget for the logout, the deletion and discovery again; the lane bounds root runs, not teardown or deletion | fails; the brain retries the deletion as it starts |
+| `claude-question`'s copied harness | 12 min [guess], in place of the 8 min above | it's ended, and the run counts at most 3 questions |
+| `claude-question`'s questions | 150 s each [guess]: from the turn to the run's end, from the question's `Done` to the title, and from the turn to the stopped run's first text; the brain bounds a question at 120 s from its bind | fails the step and stops the run |
+| `claude-question`'s stop | 30 s [guess] from `Stop` to `Interrupted` and `RunEnd`, then 15 s [guess] for no `claude.exe` and no launch folder | fails the step |
 | The brain exiting after `Quitting` | 15 s | it's ended |
 | The catalog capture | 180 s [guess: its 120 s request plus the vault open and trust store] | it's ended, and counted as one catalog request |
 | Each `taskkill /T /F` | 10 s, then 10 s for the process to go | names every process that may still run |
