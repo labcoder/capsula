@@ -1004,8 +1004,8 @@ async fn route_default_restart_and_catalog_preserve_explicit_intent() {
     }
 }
 
-/// Claude Code ready and listing the saved default still never starts the `ChatGPT` engine: no
-/// engine serves Claude Code yet, so the run fails with `ModelUnavailable`.
+/// Claude Code ready and listing the saved default never starts the `ChatGPT` engine: the run asks
+/// Claude Code, whose launch is refused here, so it fails with Claude Code's own reason.
 #[tokio::test]
 async fn a_ready_connection_without_an_engine_never_starts_chatgpts() {
     use kumochi_protocol::message::ConnectionKind;
@@ -1036,6 +1036,20 @@ fn model_unavailable() -> UserError {
         vec![Action::OpenSettings],
     )
     .expect("one action")
+}
+
+/// Why a run on a saved default fails when `ready` is what reads ready: Claude Code isn't
+/// installed here, so its own reason; no engine, or an invalid default, answers nothing.
+fn refused_with(ready: Option<kumochi_protocol::message::ConnectionKind>) -> UserError {
+    match ready {
+        Some(kumochi_protocol::message::ConnectionKind::ClaudeCode) => UserError::new(
+            ErrorKey::ClaudeCodeNotFound,
+            Vec::new(),
+            vec![Action::OpenSettings],
+        )
+        .expect("one action"),
+        _ => model_unavailable(),
+    }
 }
 
 /// An unreadable config.toml refuses a run as it did before saved connections: no default, so
@@ -1212,8 +1226,7 @@ async fn preserved_default_after_restart(
     let mut tap = Tap::from_env();
     let client = async {
         shell.submit("never send this through another route").await;
-        // A saved route has no engine to answer it; an invalid default leaves no model to check.
-        assert_eq!(failed_with(&mut shell).await, Some(model_unavailable()));
+        assert_eq!(failed_with(&mut shell).await, Some(refused_with(ready)));
         drop(shell);
     };
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
