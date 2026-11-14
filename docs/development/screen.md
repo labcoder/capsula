@@ -459,12 +459,15 @@ wasn't shown, and callers never treat it as fatal.
 
 **The hold's screen part** (`runtime/hold/screen.rs`) is `None` for a voice hold. A
 `HoldRecognized` goes through the voice hold's admission first, so it's refused, or admitted as a
-hold, exactly as a voice hold would be. Then the image gate is checked again, on the default model,
+hold, exactly as a voice hold would be; one that repeats a voice hold's gesture is refused and adds
+no part to that hold. Then the image gate is checked again, on the default model,
 with the brain's worker client standing in for capture: the shell's `On` may be out of date. If
 it's open, the part starts at `Waiting` and its task starts; otherwise `CaptureFailed` releases
 the shell's exclusion lease and the hold goes on as voice, with no line for the model. When the
-thread's own choice is read, the gate runs once more on it, and a part on a model that can't be
-sent images closes as `ModelCantSee`. The gate opens only on the default model, so a thread pinned
+thread's own choice is read, the gate runs once more on it, and a closed gate closes the part with
+its own reason: `ModelCantSee` for a model that can't be sent images, `NotReady` for no catalog or
+no choice, and no line at all (`Discarded`) when the user switched screen holds off. The frame is
+retired and any image zeroed either way. The gate opens only on the default model, so a thread pinned
 to a model that can see goes voice-only while the default can't: a known limit.
 
 The task runs `context`, `walk` and `seal` within the screen budget (`MAX_TTL`). It never

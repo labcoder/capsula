@@ -420,6 +420,13 @@ impl Accounts {
 
     /// Whether `choice` can be sent an image: the catalog's own model on the account's connection,
     /// listed as taking image input. Nothing else does, so the screen is skipped before capture.
+    /// A read catalog of `models`, of which `images` take image input.
+    #[cfg(test)]
+    pub(super) fn read_catalog(&mut self, models: Vec<ModelInfo>, images: Vec<ModelSlug>) {
+        self.catalog.models = Some(models);
+        self.catalog.images = images;
+    }
+
     pub(super) fn takes_images(&self, choice: &ModelChoice) -> bool {
         choice.connection == ConnectionKind::ChatGpt
             && self.catalog.models.is_some()

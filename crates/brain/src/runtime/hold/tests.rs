@@ -1683,8 +1683,43 @@ async fn a_screen_hold_shares_the_voice_admission_and_releases_its_lease_when_re
     brain.close().await;
 }
 
+/// Sol takes images and is the default; Luna doesn't. A brain with a worker client and that catalog.
+fn sees_on_sol(
+    brain: &mut Brain,
+) -> (
+    crate::supervise::fixture::Rig<crate::screen::Holds>,
+    ModelChoice,
+    ModelChoice,
+) {
+    use kumochi_protocol::message::{ConnectionKind, Effort, ModelInfo, ModelName, ModelSlug};
+    let rig = crate::supervise::fixture::start::<crate::screen::Holds>();
+    brain.holds.screen = Some(Arc::new(HoldClient::new(rig.handle.clone())));
+    let choice = |slug: &str| ModelChoice {
+        model: ModelSlug::new(slug).unwrap(),
+        effort: Effort::Low,
+        connection: ConnectionKind::ChatGpt,
+    };
+    let (sol, luna) = (choice("gpt-6-sol"), choice("gpt-6-luna"));
+    let info = |choice: &ModelChoice, name: &str| ModelInfo {
+        slug: choice.model.clone(),
+        display_name: ModelName::new(name).unwrap(),
+    };
+    brain.account.read_catalog(
+        vec![info(&sol, "GPT-6 Sol"), info(&luna, "GPT-6 Luna")],
+        vec![sol.model.clone()],
+    );
+    set(brain, SettingsOp::SetDefaultModel(sol.clone()));
+    (rig, sol, luna)
+}
+
+fn set(brain: &mut Brain, op: SettingsOp) {
+    let pending = brain.config.stage(op).unwrap();
+    pending.write().unwrap();
+    brain.config.commit(pending);
+}
+
 #[tokio::test]
-async fn a_screen_part_on_a_model_that_cant_see_closes_once_the_threads_choice_is_read() {
+async fn the_threads_choice_rechecks_the_gate_and_a_closed_gate_closes_the_part_with_its_reason() {
     use crate::context::ScreenClass;
     let scratch = Scratch::new("hold-screen-pinned");
     let (mut brain, _release, _decoded, _fetch) =
@@ -1695,21 +1730,95 @@ async fn a_screen_part_on_a_model_that_cant_see_closes_once_the_threads_choice_i
     let mut tap = Tap::from_env();
     let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
     link.recovery = Some(crate::runtime::Recovery::new(&[], 1024));
-    for part in [ready(), waiting()] {
-        recording(&mut brain);
-        brain.holds.debt = None;
-        let hold = brain.holds.pending.as_mut().unwrap();
-        let snapshot = hold.snapshot.take().unwrap();
-        hold.audio = None;
-        hold.ask = None;
-        hold.screen = part;
-        brain.hold_prepared(KEY, Ok(snapshot), &mut link).unwrap();
-        assert!(matches!(
-            brain.holds.pending.as_ref().unwrap().screen,
-            ScreenPart::Closed(ScreenClass::ModelCantSee)
-        ));
-        brain.holds.lost();
+    let (mut rig, sol, luna) = sees_on_sol(&mut brain);
+    // The pin, the switch, and how the part ends: open (`None`), or closed with its line, if any.
+    let cases = [
+        (Some(luna), true, Some(Some(ScreenClass::ModelCantSee))),
+        (Some(sol.clone()), true, None),
+        (None, true, Some(Some(ScreenClass::NotReady))),
+        (Some(sol), false, Some(None)),
+    ];
+    for (index, (pin, on, ends)) in cases.into_iter().enumerate() {
+        set(&mut brain, SettingsOp::SetScreenHolds(on));
+        for part in [ready(), waiting()] {
+            let waits = matches!(part, ScreenPart::Waiting { .. });
+            let before = format!("{part:?}");
+            recording(&mut brain);
+            brain.holds.debt = None;
+            let hold = brain.holds.pending.as_mut().unwrap();
+            let mut snapshot = hold.snapshot.take().unwrap();
+            snapshot.defaults.choice.clone_from(&pin);
+            hold.audio = None;
+            hold.ask = None;
+            hold.screen = part;
+            brain.hold_prepared(KEY, Ok(snapshot), &mut link).unwrap();
+            let screen = &brain.holds.pending.as_ref().unwrap().screen;
+            match ends {
+                None => assert_eq!(format!("{screen:?}"), before, "case {index}"),
+                Some(Some(class)) => assert!(
+                    matches!(screen, ScreenPart::Closed(closed) if *closed == class),
+                    "case {index}: {screen:?}"
+                ),
+                Some(None) => assert!(
+                    matches!(screen, ScreenPart::Discarded),
+                    "case {index}: {screen:?}"
+                ),
+            }
+            brain.holds.lost();
+            if waits {
+                crate::screen::release_next(&mut rig, KEY).await;
+            }
+        }
     }
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn a_screen_hold_repeating_a_voice_holds_gesture_adds_no_part_to_it() {
+    let scratch = Scratch::new("hold-screen-repeat");
+    let (mut brain, _release, _decoded, _fetch) =
+        crate::runtime::tests::holds::input(&scratch, Vec::new(), "not submitted").await;
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    let (_rig, _sol, _luna) = sees_on_sol(&mut brain);
+    let voice = ControlToBrain::VoiceHoldRecognized {
+        gesture: KEY.gesture,
+        thread: None,
+        selection: 1,
+    };
+    brain.hold_control(&voice, &mut link).unwrap();
+    while output.try_recv().is_ok() {}
+    assert!(
+        brain
+            .holds
+            .pending
+            .as_ref()
+            .is_some_and(|hold| hold.key == KEY)
+    );
+    let screen = ControlToBrain::HoldRecognized {
+        gesture: KEY.gesture,
+        thread: None,
+        selection: 1,
+        pointer: kumochi_protocol::geometry::PhysicalPoint([5, 5]),
+        lease: LEASE,
+        t_qpc: 1,
+    };
+    assert!(brain.hold_control(&screen, &mut link).unwrap());
+    assert_eq!(
+        control(&mut output),
+        ControlToShell::CaptureFailed {
+            capture_for: kumochi_protocol::message::CaptureFor::Gesture(KEY.gesture),
+            reason: kumochi_protocol::message::CaptureFailure::Unavailable,
+        }
+    );
+    assert!(matches!(
+        brain.holds.pending.as_ref().unwrap().screen,
+        ScreenPart::None
+    ));
+    brain.holds.lost();
     brain.close().await;
 }
 
@@ -1780,6 +1889,18 @@ async fn the_end_of_a_capture_releases_the_lease_on_its_own_connection() {
             "case {index}"
         );
     }
+    recording(&mut brain);
+    let hold = brain.holds.pending.as_ref().unwrap();
+    hold.cancel.store(true, Ordering::SeqCst);
+    brain
+        .hold_event(event(KEY, Some(Generation(0)), Outcome::Held), &mut link)
+        .unwrap();
+    assert_eq!(
+        control(&mut output),
+        ControlToShell::CaptureDone { capture_for },
+        "a cancelled hold's lease too"
+    );
+    brain.holds.lost();
     brain.close().await;
 }
 

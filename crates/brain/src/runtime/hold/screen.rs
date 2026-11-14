@@ -26,7 +26,8 @@ pub(super) enum ScreenPart {
     },
     Ready(ScreenContext),
     Closed(ScreenClass),
-    /// A ready image dropped, and so zeroed, because its hold ended without a run.
+    /// A ready image dropped, and so zeroed, because its hold ended without a run, or any part the
+    /// user's switch closed: its run gets no image and no line.
     Discarded,
 }
 
@@ -146,14 +147,14 @@ impl super::Holds {
         }
     }
 
-    /// Closes the pending hold's screen part as `class`, whatever it reached: a waiting frame is
+    /// Closes the pending hold's screen part to `closed`, whatever it reached: a waiting frame is
     /// retired, and an image dropped and zeroed.
-    pub(super) fn close_screen_as(&mut self, class: ScreenClass) {
+    pub(super) fn close_screen_as(&mut self, closed: ScreenPart) {
         self.retire_waiting();
         if let Some(hold) = &mut self.pending
             && !matches!(hold.screen, ScreenPart::None)
         {
-            hold.screen = ScreenPart::Closed(class);
+            hold.screen = closed;
         }
     }
 
