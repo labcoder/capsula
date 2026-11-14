@@ -1192,6 +1192,18 @@ impl Brain {
                         link.queue.borrow_mut().revoke(run);
                     }
                 }
+                Effect::PrepareDrawing(job) => {
+                    let unprepared = Input::Drawing(job.unprepared());
+                    let inputs = self.inputs_tx.clone();
+                    let spawned = std::thread::Builder::new()
+                        .name("drawing-prepare".to_owned())
+                        .spawn(move || inputs.send(Input::Drawing(job.run())).unwrap_or_default());
+                    if spawned.is_err() {
+                        tracing::warn!("the drawing preparation thread didn't start");
+                        let sent = self.inputs_tx.send(unprepared).is_ok();
+                        debug_assert!(sent, "the brain holds its own receiver");
+                    }
+                }
                 Effect::RevokeScenes { scenes } => {
                     if let Some(link) = link.as_deref_mut() {
                         if let Some(recovery) = &mut link.recovery {

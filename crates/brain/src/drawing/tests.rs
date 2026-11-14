@@ -21,6 +21,9 @@ use super::{
 use crate::coordinator::{Effect, Stale, StoreOp};
 use crate::engines::CallId;
 
+mod paint;
+mod timing;
+
 const THREAD: ThreadId = ThreadId(7);
 
 #[test]
@@ -1202,6 +1205,14 @@ impl Store {
             }
             if cleared {
                 merge(&mut out, drawing.clears_pending(0));
+            }
+            for effect in &fresh.effects {
+                if let Effect::PrepareDrawing(job) = effect {
+                    let more = drawing
+                        .handle(job.clone().run())
+                        .expect("the pending preparation");
+                    merge(&mut out, more);
+                }
             }
             if let Some((serial, write)) = sent(&fresh) {
                 let reply = Ok(self.answer(&write));
@@ -2680,6 +2691,7 @@ fn a_snapshot_leaves_out_a_scene_the_shell_would_refuse_and_keeps_the_rest() {
         refused_through: 0,
         gone: false,
         replacement: None,
+        paint: None,
     });
     let snapshot = drawing.snapshot();
     assert_eq!(snapshot.skipped, [SceneId(9)]);
@@ -2707,6 +2719,7 @@ fn a_snapshot_leaves_out_a_scene_the_shell_would_refuse_and_keeps_the_rest() {
             refused_through: 0,
             gone: false,
             replacement: None,
+            paint: None,
         });
     }
     let snapshot = drawing.snapshot();

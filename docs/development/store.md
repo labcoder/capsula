@@ -81,10 +81,10 @@ first, gives its complete begin header and its surviving objects as `[id, kind]`
 order, never step content, positions or labels. The pairs of every scene share one 8 KiB cap,
 a comma each. Scenes take room newest first, each from its newest object back to the first
 pair that doesn't fit, so an older scene may still list small pairs after a newer one ran out.
-A scene that lists fewer than it holds adds `"more"`, the count left out. The line goes after Local time in the
-current user item, and the empty `[]` line overrides stale references after Esc. The complete
-rendered item, including outer JSON escaping, counts against the ordinary request bound;
-the line's `Debug` shows only its length, and it is never logged.
+A scene that lists fewer than it holds adds `"more"`, the count left out. The line goes after
+Local time in the current user item, and the empty `[]` line overrides stale references after
+Esc. The complete rendered item, including outer JSON escaping, counts against the ordinary
+request bound; the line's `Debug` shows only its length, and it is never logged.
 
 Recovery reads the newest four uncleared scenes of live threads and their full ordered logs,
 then replays the survivors together against one global budget. A corrupt, oversized,

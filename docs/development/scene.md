@@ -1012,6 +1012,29 @@ brain-side preparation fails for any other reason, such as the wider layout leav
 canvas range, is not refused, carries no charge and isn't counted against the other scenes,
 so the shell's guard is the only check for that scene.
 
+The brain charges each scene what the shell may hold for it. It keeps the scene's last shown
+layout and the layout of every committed step not shown yet, and charges their field-by-field
+maximum, as the shell folds its resting layout with its ready steps; `StepShown` makes that
+step's layout the shown one. The scenes' charges add up against the global caps. Admission
+then works like this:
+
+1. The step is admitted, and its preparation ticket is built without installing it
+   (`SceneState::preview`, or `ReplacementAdmission::preview` for a new scene).
+2. A `drawing-prepare` thread lays it out from the scene's latest layout. Meanwhile the reducer
+   is sealed exactly as by a pending write, so nothing else changes a scene or the budget.
+   Closing the run, a Stop, a clear or a thread deletion cancels it, and nothing is written.
+3. If the scene's charge with the new layout, plus every other scene's, fits the caps, the
+   step is written and the scene keeps the prepared layout. A new scene's replacement victims
+   aren't counted, since they leave in the same write. If it doesn't fit, the call ends with
+   `drawing.TooMuchToPaint` and nothing is written: a refused first step writes no `begin`,
+   fires no replacement and keeps the earlier drawings.
+
+A cut changes the charge only when its `SceneCutApplied` goes out, since the shell keeps its
+stopped picture until then; the cut's own write seals the reducer meanwhile, so no other step
+is charged against the released room early. Recovery lays the kept scenes out with the wide
+measure before intake opens. If any of them doesn't lay out, none is counted until it's
+cleared.
+
 D1's Rez admission target at the cap is p95 ≤1 ms and p99 ≤1.1 ms, with the sampled maximum
 reported separately; clear, cut and eviction retain their ≤2 ms target, global clear included.
 The diagnostic painter measurements alone do not establish full preparation or text-shaping
