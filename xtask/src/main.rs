@@ -88,9 +88,9 @@ tasks:
   slice2-gate       the slice 2 gate: the real brain with fixture scripts, driven
                     over its real pipes by a scripted client; no input; refuses while
                     any product process runs
-  check-core        fail if a UI framework is in kumochi-shell-core's dependency tree, its test
-                    support in a shipped shell, or a test gate there that the shell's tests
-                    would miss; CI runs it to hold the crate boundary
+  check-core        fail if kumochi-shell-core has a dependency that is not on its list, a UI
+                    framework in its tree, its test support in a shipped binary, or a test
+                    gate the shell's tests could miss; CI runs it to hold the crate boundary
   check-vendor      fail unless every crate in vendor/ is what Cargo.lock builds;
                     CI runs it so a GPUI bump can't silently drop a vendored patch
   voice-assets link <models-dir> <natives-dir>
