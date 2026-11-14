@@ -826,18 +826,29 @@ impl Brain {
         link: &mut Link<'_, '_>,
     ) -> Result<(), Full> {
         let capture_for = CaptureFor::Gesture(event.key.gesture);
+        let unsupported = matches!(event.outcome, Outcome::Unsupported);
+        // Only ever cleared, so nothing later in the session offers screen holds again.
+        if unsupported {
+            self.holds.window_capture = false;
+        }
         let lease = match event.outcome {
             _ if event.key.epoch != self.epoch => None,
             Outcome::Held => Some(ControlToShell::CaptureDone { capture_for }),
-            Outcome::Closed(_) if event.generation.is_none() => {
+            Outcome::Closed(_) | Outcome::Unsupported if event.generation.is_none() => {
                 Some(ControlToShell::CaptureFailed {
                     capture_for,
                     reason: CaptureFailure::Unavailable,
                 })
             }
-            Outcome::Sealed(_) | Outcome::Closed(_) => None,
+            Outcome::Sealed(_) | Outcome::Closed(_) | Outcome::Unsupported => None,
         };
         self.holds.screen_event(event);
-        lease.map_or(Ok(()), |message| link.control(&message))
+        if let Some(message) = lease {
+            link.control(&message)?;
+        }
+        if unsupported {
+            self.screen_holds_changed(link)?;
+        }
+        Ok(())
     }
 }

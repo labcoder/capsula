@@ -344,7 +344,10 @@ fn a_table_label_failure_keeps_its_quad_and_frees_the_unsubmitted_line(cx: &mut 
     );
     assert_eq!(refusals.load(Ordering::Relaxed), 1);
     visual.update(|window, _| assert_eq!(window.painted_quads().len(), 1));
-    assert_eq!(frames.borrow().painted(scene_id), None);
+    assert_eq!(
+        crate::presenter::tests::painted(&frames.borrow(), scene_id),
+        None
+    );
     let handoffs: Vec<_> = events
         .iter()
         .enumerate()

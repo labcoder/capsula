@@ -744,7 +744,7 @@ pub enum ScreenOff {
     ModelCantSee,
     /// The catalog hasn't been read yet, so whether the model can see isn't known.
     NotReady,
-    /// This platform has no window capture yet.
+    /// This platform has no window capture yet, or this system can't capture a window.
     Unsupported,
     /// The user turned screen holds off.
     TurnedOff,

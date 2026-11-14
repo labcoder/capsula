@@ -145,7 +145,7 @@ pub fn serve() -> Result<(), frame::FrameError> {
 pub(super) fn serve_on(
     mut input: impl std::io::Read + Send + 'static,
     output: &mut impl std::io::Write,
-    open: impl FnMut() -> Result<Box<dyn Capturer>, i32> + Send + 'static,
+    open: impl FnMut() -> Result<Box<dyn Capturer>, Failure> + Send + 'static,
     elements: OpenElements,
     now: impl Fn() -> Instant + Send + Sync + 'static,
     unchanged: fn(&Target) -> bool,
@@ -498,18 +498,18 @@ fn trigger(
 }
 
 #[cfg(windows)]
-fn open() -> Result<Box<dyn Capturer>, i32> {
+fn open() -> Result<Box<dyn Capturer>, Failure> {
     crate::platform::screen_capturer()
 }
 
-/// No platform but Windows captures yet, so every capture is a numeric fault.
+/// No platform but Windows captures yet, so every capture is refused as `Unsupported`.
 // shortcut: macOS will open ScreenCaptureKit here.
 #[cfg(not(windows))]
-fn open() -> Result<Box<dyn Capturer>, i32> {
-    Err(NO_CAPTURER)
+fn open() -> Result<Box<dyn Capturer>, Failure> {
+    Err(Refusal::Unsupported.into())
 }
 
-/// `E_NOTIMPL`, as the Windows adapter reports an unsupported capture.
+/// `E_NOTIMPL`, for a platform with no element reader yet.
 #[cfg(not(windows))]
 const NO_CAPTURER: i32 = 0x8000_4001_u32.cast_signed();
 

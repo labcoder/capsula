@@ -45,11 +45,23 @@ pub(crate) const WINDOW_CAPTURE: bool = true;
 /// Opens the worker's capturer on its serve thread.
 ///
 /// # Errors
-/// The platform's HRESULT when capture is unsupported or the device can't be created.
-pub(crate) fn screen_capturer() -> Result<Box<dyn Capturer>, i32> {
+/// `Unsupported` when the system says it can't capture a window, else the platform's HRESULT
+/// as a fault.
+pub(crate) fn screen_capturer() -> Result<Box<dyn Capturer>, Failure> {
+    supported(GraphicsCaptureSession::IsSupported())?;
     Wgc::new()
         .map(|wgc| -> Box<dyn Capturer> { Box::new(wgc) })
-        .map_err(|error| error.code().0)
+        .map_err(|error| Failure::Fault(error.code().0))
+}
+
+/// Only the system's no reads as `Unsupported`; an error asking is a fault like any other, so no
+/// HRESULT is ever read as the answer.
+fn supported(answer: windows::core::Result<bool>) -> Result<(), Failure> {
+    match answer {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(Refusal::Unsupported.into()),
+        Err(error) => Err(Failure::Fault(error.code().0)),
+    }
 }
 
 struct Wgc {
@@ -82,9 +94,6 @@ impl Wgc {
         if let Err(error) = awareness {
             // Already set is fine; any other mismatch fails the exact geometry check later.
             tracing::debug!(code = error.code().0, "dpi awareness unchanged");
-        }
-        if !GraphicsCaptureSession::IsSupported()? {
-            return Err(E_NOTIMPL.into());
         }
         let (mut device, mut context) = (None, None);
         // SAFETY: a null adapter selects the hardware driver; both outputs are writable.
@@ -408,8 +417,27 @@ mod tests {
     use kumochi_protocol::geometry::PhysicalRect;
     use windows::Win32::Graphics::Direct3D11::D3D11_MAPPED_SUBRESOURCE;
 
-    use super::{copy_rows, fault, poll};
+    use super::{copy_rows, fault, poll, supported};
     use crate::screen::{CaptureId, Failure, FrameMeta, RawFrame, Refusal};
+
+    #[test]
+    fn only_the_systems_no_reads_as_unsupported() {
+        let not_implemented = windows::core::Error::from(windows::Win32::Foundation::E_NOTIMPL);
+        let failed = windows::core::Error::from(windows::Win32::Foundation::E_FAIL);
+        assert_eq!(supported(Ok(true)), Ok(()));
+        assert_eq!(
+            supported(Ok(false)),
+            Err(Failure::Refused(Refusal::Unsupported))
+        );
+        assert_eq!(
+            supported(Err(not_implemented)),
+            Err(Failure::Fault(0x8000_4001_u32.cast_signed()))
+        );
+        assert_eq!(
+            supported(Err(failed)),
+            Err(Failure::Fault(0x8000_4005_u32.cast_signed()))
+        );
+    }
 
     #[test]
     fn a_result_ready_at_the_deadline_is_released_and_refused() {

@@ -87,8 +87,8 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
                     .chain(empty.iter())
                     .enumerate()
                 {
-                    if mirror.scenes[&id].ready.len() == super::super::scene::WINDOW {
-                        if index == super::super::scene::WINDOW {
+                    if super::held(&mirror, id).0 == super::WINDOW {
+                        if index == super::WINDOW {
                             let effects = commit(
                                 &mut mirror,
                                 id,
@@ -98,15 +98,9 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
                             )
                             .expect("a successor held by the window");
                             assert!(super::jobs(effects).is_empty());
-                            let head = mirror.scenes[&id]
-                                .ready
-                                .front()
-                                .expect("the head")
-                                .step
-                                .index;
+                            let head = super::ready_head(&mirror, id);
                             let start = Instant::now();
-                            let consumed = mirror
-                                .consume_ready(id, head, now, 0, 0)
+                            let consumed = super::consume_ready(&mut mirror, id, head, now, 0, 0)
                                 .expect("the head fits");
                             let job = only_job(consumed.effects.expect("the successor dispatch"));
                             drop(consumed.step);
@@ -140,14 +134,11 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
                         .expect("prepared prefix");
                     assert!(controls(&effects).is_empty(), "prefix within residency");
                 }
-                assert_eq!(mirror.scenes[&id].ready.len(), super::super::scene::WINDOW);
-                assert_eq!(mirror.scenes[&id].tip().revision(), 63);
-                assert_eq!(
-                    mirror.scenes[&id].state.view().object_count(),
-                    counts[offset]
-                );
+                assert_eq!(super::held(&mirror, id).0, super::WINDOW);
+                assert_eq!(super::tip_revision(&mirror, id), 63);
+                assert_eq!(super::object_count(&mirror, id), counts[offset]);
             }
-            let usage = mirror.global.usage();
+            let usage = super::usage(&mirror);
             assert_eq!(usage.objects, counts.iter().sum::<usize>());
             assert_eq!(usage.scenes, counts.len());
             assert_eq!(usage.tracks, 256 * counts.len());
@@ -198,17 +189,14 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
                     controls(&effects).is_empty(),
                     "64 lifetime prefixes with bounded residency"
                 );
-                assert_eq!(
-                    mirror.scenes[&scene].ready.len(),
-                    super::super::scene::WINDOW
-                );
+                assert_eq!(super::held(&mirror, scene).0, super::WINDOW);
             }
-            let charged = mirror.residency();
+            let charged = super::residency(&mirror);
             let start = Instant::now();
             let effects = mirror.clear(now).expect("clear full histories");
             drop(effects);
             let cleared = start.elapsed().as_nanos();
-            assert!(mirror.scenes.is_empty());
+            assert!(super::scene_ids(&mirror).is_empty());
             if iteration >= 5 {
                 admissions.extend_from_slice(&elapsed);
                 clears.push(cleared);
@@ -266,16 +254,9 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
 }
 
 fn consume_timed(presenter: &mut super::Presenter, scene: SceneId, now: Instant) -> u128 {
-    let index = presenter.scenes[&scene]
-        .ready
-        .front()
-        .expect("a ready head")
-        .step
-        .index;
+    let index = super::ready_head(presenter, scene);
     let start = Instant::now();
-    let consumed = presenter
-        .consume_ready(scene, index, now, 0, 0)
-        .expect("the head fits");
+    let consumed = super::consume_ready(presenter, scene, index, now, 0, 0).expect("the head fits");
     let effects = consumed.effects.expect("a current scene");
     let empty = effects.is_empty();
     drop(effects);
@@ -459,11 +440,10 @@ fn native_maximal_content_is_refused_as_paint_work() {
                         refusals.extend(controls(&effects).into_iter().cloned());
                         running.extend(super::jobs(effects));
                     }
-                    if presenter.scenes[&id].ready.is_empty() {
+                    if super::held(&presenter, id).0 == 0 {
                         break;
                     }
-                    let done = presenter
-                        .consume_ready(id, consumed, now, 0, 0)
+                    let done = super::consume_ready(&mut presenter, id, consumed, now, 0, 0)
                         .expect("the ready head");
                     consumed += 1;
                     let effects = done.effects.expect("a current scene");
@@ -471,9 +451,8 @@ fn native_maximal_content_is_refused_as_paint_work() {
                     running.extend(super::jobs(effects));
                     drop(done.step);
                 }
-                let scene = &presenter.scenes[&id];
-                assert!(scene.running.is_none() && scene.queue.is_empty());
-                assert_eq!(scene.state.view().activated(), consumed);
+                assert!(super::idle(&presenter, id));
+                assert_eq!(super::activated(&presenter, id), consumed);
                 sender.send((refusals, consumed)).expect("the receiver");
             })
             .detach();
@@ -482,7 +461,7 @@ fn native_maximal_content_is_refused_as_paint_work() {
             .expect("native refusal worker");
         assert_eq!(
             consumed,
-            21 + 1 - u32::try_from(super::super::scene::WINDOW).expect("small")
+            21 + 1 - u32::try_from(super::WINDOW).expect("small")
         );
         assert!(
             matches!(

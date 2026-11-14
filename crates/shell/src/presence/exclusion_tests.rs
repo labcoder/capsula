@@ -192,9 +192,15 @@ fn hidden_drawing(owner: &gpui_kit::Entity<Presence>, cx: &mut gpui_kit::TestApp
         presenter
             .completed(job.run(&mut crate::presenter::tests::Shaper), now)
             .expect("existing prepared-frame fixture");
-        let consumed = presenter
-            .consume_ready(crate::presenter::tests::LIVE, 0, now, 0, 0)
-            .expect("activate the prepared drawing");
+        let consumed = crate::presenter::tests::consume_ready(
+            &mut presenter,
+            crate::presenter::tests::LIVE,
+            0,
+            now,
+            0,
+            0,
+        )
+        .expect("activate the prepared drawing");
         assert!(consumed.effects.expect("current drawing").is_empty());
         this.presenter = presenter;
         let overlay = super::super::overlay::Overlay::detached(
@@ -439,7 +445,7 @@ fn actual_lazy_overlay_protects_before_show_and_keeps_failed_surface_hidden(
             fixture.borrow_mut().restore_failure = 1 << Slot::Drawing as usize;
         }
         owner.update(cx, |this, cx| {
-            let (sample, effects) = this.presenter.sample(0);
+            let (sample, effects) = crate::presenter::tests::sample(&mut this.presenter, 0);
             assert!(effects.is_empty());
             assert!(sample.visible);
             let result = this.sync_overlay(sample, cx);
@@ -504,7 +510,7 @@ fn actual_shown_overlay_can_clear_or_disconnect_while_restoration_debt_blocks_sh
         }
         owner.update(cx, |this, cx| {
             assert!(!this.presenter.frames().borrow().shown);
-            let (sample, effects) = this.presenter.sample(0);
+            let (sample, effects) = crate::presenter::tests::sample(&mut this.presenter, 0);
             assert!(!sample.visible);
             assert!(effects.is_empty());
             assert!(this.exclusion.lease.as_ref().unwrap().revoked);

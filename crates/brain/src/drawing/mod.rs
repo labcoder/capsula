@@ -48,6 +48,15 @@ pub const LAYOUT_VERSION: u32 = 2;
 /// refusal and finish, and room for the shell's shown steps, cuts and stops (guess).
 const MAX_QUEUED_JOBS: usize = call::MAX_CALLS_PER_RUN * (call::MAX_CALL_RECORDS + 2) + 256;
 
+/// Whether a run's lost drawing is told when the run can't repair it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Loss {
+    /// The run failed or finished on its own.
+    Tell,
+    /// The user ended the run, so the loss was theirs.
+    Drop,
+}
+
 /// Something for the drawing system to act on.
 #[derive(Clone, PartialEq)]
 pub enum Input {
@@ -143,6 +152,8 @@ pub enum Input {
     RunClosed {
         /// The run.
         run: RunId,
+        /// Whether a drawing it lost is told.
+        loss: Loss,
     },
     /// The thread was hidden or removed: its scenes leave and their late frames are dropped.
     ThreadDeleted {
@@ -210,16 +221,11 @@ struct Held {
     refused_through: usize,
     /// Cleared or deleted: no frame of it goes out, and it leaves once no write is pending.
     gone: bool,
-    replacement: Option<ReplacementLoss>,
+    /// Its first step replaced earlier drawings and nothing of it was shown yet.
+    replaced: bool,
     /// Its wide layout and charge; `None` once a preparation failed for any reason but paint
     /// work, leaving the shell's guard as the scene's only check.
     paint: Option<Paint>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ReplacementLoss {
-    Pending,
-    Failed,
 }
 
 /// Work that waits for the store to answer.
@@ -303,6 +309,8 @@ struct StepWait {
     /// Its thread was deleted: suppress the newcomer but settle committed replacement victims.
     fenced: bool,
     clear_requested: bool,
+    /// The user ended its run first, so a replacement it begins reports no loss.
+    loss_dropped: bool,
     interrupted: Option<CallError>,
     /// The step's wide layout and its resident bytes, which the scene keeps once the write
     /// commits; `None` writes it uncounted.
@@ -389,7 +397,7 @@ impl Drawing {
                 refused_through: 0,
                 state,
                 gone: false,
-                replacement: None,
+                replaced: false,
                 paint: layout.map(Paint::at_rest),
             });
         }
@@ -487,10 +495,11 @@ impl Drawing {
             }
             Input::StepShown { run, scene, index } => {
                 if self.committed_by(run, scene, index, &mut out) {
-                    if let Some(at) = self.live(scene)
-                        && self.scenes[at].replacement == Some(ReplacementLoss::Pending)
-                    {
-                        self.scenes[at].replacement = None;
+                    if let Some(at) = self.live(scene) {
+                        self.scenes[at].replaced = false;
+                    }
+                    if let Some(ledger) = self.runs.iter_mut().find(|ledger| ledger.run == run) {
+                        ledger.loss = None;
                     }
                     self.enqueue(Job::Shown { scene, index }, &mut out);
                 }
@@ -520,7 +529,7 @@ impl Drawing {
                     self.enqueue(Job::ClearVisible, &mut out);
                 }
             }
-            Input::RunClosed { run } => self.close(run, &mut out),
+            Input::RunClosed { run, loss } => self.close(run, loss, &mut out),
             Input::ThreadDeleted { thread } => self.deleted(thread, &mut out),
             Input::Written { serial, reply } => self.written(serial, reply, &mut out)?,
             Input::Prepared { serial, outcome } => self.prepared(serial, outcome, &mut out)?,

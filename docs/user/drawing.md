@@ -14,12 +14,14 @@ replaces this conversation's earlier drawings once the new drawing's first step 
 Normally their last picture stays briefly until the new drawing starts on the same drawing
 layer. This visual hold lasts at most 250 ms while the interface is running and can end sooner
 when space is tight; it does not keep the old drawings available for further changes. If the
-replacement then fails, the screen may be left empty and its conversation gets one notice that
-the previous drawings were removed, even if the drawing call had already ended. This includes
-a rejected later drawing record or a failed save after the replacement's first step was saved;
-the error keeps its specific cause. Stopping a drawing yourself does not report a drawing failure.
-The notice appears as soon as the replacement fails. Kumochi may still correct the drawing in
-the same reply, so a new drawing can appear after the notice; the earlier drawings stay removed.
+replacement then fails before any of it was shown, the screen may be left empty and its
+conversation gets one notice that the previous drawings were removed, even if the drawing call
+had already ended. This includes a rejected later drawing record or a failed save after the
+replacement's first step was saved; the error keeps its specific cause. The notice waits until
+the reply can no longer fix the drawing: when the reply finishes or fails, or once it has drawn
+as much as one reply may. If the same reply shows a drawing first, there is no notice, even when
+that drawing is a different one; the earlier drawings stay removed. Stopping the reply with Stop
+or Esc, sending a new message or deleting the conversation reports no drawing failure.
 If Kumochi tries to draw but none of its drawing can be shown, its reply ends with the notice
 **No drawing came back**. Ask again to retry.
 Separate drawings can be kept for comparison, up to four on

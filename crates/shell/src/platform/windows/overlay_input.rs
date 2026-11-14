@@ -227,7 +227,7 @@ mod tests {
         let mut applied = None;
         let mut styles = Vec::new();
         let empty = Regions::new();
-        let registered = Regions::from([(RegionId(1), [10, 20, 4, 5])]);
+        let registered = Regions::from([(crate::presenter::tests::region(1), [10, 20, 4, 5])]);
         let mut apply = |applied: &mut _, mode, regions: &_, result: Result<(), &'static str>| {
             configure_tracked(applied, mode, regions, |changed| {
                 styles.push(changed);
