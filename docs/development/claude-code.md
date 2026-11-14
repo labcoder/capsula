@@ -272,6 +272,15 @@ stateDiagram-v2
   through that handle. Each folder stays open while its entries are listed through its handle, so its name can't be rebound
   mid-walk. A reparse point, or a folder someone else could change, stops the deletion, leaving its
   target alone and the marker down.
+- **What each open asks for.** Both walks (the check before a start and the deletion) open every
+  entry, file or folder, for read-control and read-attributes only: enough for the reparse, final
+  path and security checks, and never the read-data bit, so no handle to Claude Code's sign-in file
+  could read it. Those two rights don't count against sharing, so a file someone holds without
+  sharing is still checked. The deletion adds DELETE and nothing else. Only once an entry is known
+  to be a folder is it opened a second time, with list-directory alone, by its name with a trailing
+  separator, which opens only a folder. That handle is used only if its volume and file ID match
+  the checked handle's, so nothing put at the name between the two opens is listed. The checked
+  handle stays open while the folder is listed and, in the deletion, its entries are deleted.
   The marker's name and the folder are constants, never a path from input.
 - shortcut: a pending deletion is retried at each start and each Find, not on a timer; add one if
   locked files turn out to outlive a session.

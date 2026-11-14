@@ -35,12 +35,12 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
     FILE_DELETE_CHILD, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_FULL_DIR_INFO, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
-    FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES,
-    FILE_READ_DATA, FILE_READ_EA, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
-    FILE_WRITE_DATA, FILE_WRITE_EA, FileAttributeTagInfo, FileDispositionInfo,
-    FileFullDirectoryInfo, FileFullDirectoryRestartInfo, GetFileInformationByHandle,
-    GetFileInformationByHandleEx, GetFinalPathNameByHandleW, READ_CONTROL, SYNCHRONIZE,
-    SetFileInformationByHandle, VOLUME_NAME_DOS, WRITE_DAC, WRITE_OWNER,
+    FILE_GENERIC_WRITE, FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED,
+    FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_READ_EA, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, FileAttributeTagInfo,
+    FileDispositionInfo, FileFullDirectoryInfo, FileFullDirectoryRestartInfo, FileIdInfo,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
+    READ_CONTROL, SYNCHRONIZE, SetFileInformationByHandle, VOLUME_NAME_DOS, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::SystemServices::{
@@ -262,11 +262,10 @@ pub(crate) fn private_tree(path: &Path) -> Result<(), Untrusted> {
 }
 
 fn private_entry(path: &Path, readers: &Trusted, trusted: &Trusted) -> Result<(), Untrusted> {
-    // A file someone holds without sharing still opens for its attributes and security alone.
-    let entry = match open(path, Kind::Folder, FILE_LIST_DIRECTORY) {
-        Err(Untrusted::Io) => open(path, Kind::Folder, 0)?,
-        opened => opened?,
-    };
+    // Attributes and security only: no read-data bit, and a file held without sharing still opens.
+    let entry = open(path, Kind::Folder, 0)?;
+    #[cfg(test)]
+    opened(path, &entry);
     let (kind, counted) = if attributes(&entry)? & FILE_ATTRIBUTE_DIRECTORY != 0 {
         (Kind::Folder, Aces::Inheritable)
     } else {
@@ -280,7 +279,10 @@ fn private_entry(path: &Path, readers: &Trusted, trusted: &Trusted) -> Result<()
         return Err(Untrusted::Unsafe);
     }
     if kind == Kind::Folder {
-        for name in names(&entry)? {
+        let listing = listing(&entry, path, FILE_SHARE_READ | FILE_SHARE_WRITE)?;
+        #[cfg(test)]
+        opened(path, &listing);
+        for name in names(&listing)? {
             match private_entry(&path.join(name), readers, trusted) {
                 Ok(()) | Err(Untrusted::Missing) => {}
                 Err(error) => return Err(error),
@@ -293,7 +295,7 @@ fn private_entry(path: &Path, readers: &Trusted, trusted: &Trusted) -> Result<()
 /// Deletes `path` and everything in it, a missing one included. Each entry is opened without
 /// following a reparse point, must pass the held-folder or held-file checks through that handle,
 /// and is deleted through it. A folder stays open, so no one can rename it, while what's in it is
-/// listed through its handle and deleted. A reparse point or a folder others could change stops the deletion. Its
+/// listed through a second handle shown to be the same folder, and deleted. A reparse point or a folder others could change stops the deletion. Its
 /// parent must be held.
 pub(crate) fn remove_tree(path: &Path) -> Result<(), Untrusted> {
     match remove_entry(path, &Trusted::new()?) {
@@ -303,7 +305,9 @@ pub(crate) fn remove_tree(path: &Path) -> Result<(), Untrusted> {
 }
 
 fn remove_entry(path: &Path, trusted: &Trusted) -> Result<(), Untrusted> {
-    let entry = open(path, Kind::Folder, DELETE | FILE_LIST_DIRECTORY)?;
+    let entry = open(path, Kind::Folder, DELETE)?;
+    #[cfg(test)]
+    opened(path, &entry);
     let attributes = attributes(&entry)?;
     if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(Untrusted::Reparse);
@@ -317,7 +321,15 @@ fn remove_entry(path: &Path, trusted: &Trusted) -> Result<(), Untrusted> {
     if kind == Kind::Folder {
         #[cfg(test)]
         paused(path);
-        for name in names(&entry)? {
+        // It shares delete with `entry` alone, which shares it with no one.
+        let listing = listing(
+            &entry,
+            path,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        )?;
+        #[cfg(test)]
+        opened(path, &listing);
+        for name in names(&listing)? {
             match remove_entry(&path.join(name), trusted) {
                 Ok(()) | Err(Untrusted::Missing) => {}
                 Err(error) => return Err(error),
@@ -344,6 +356,43 @@ fn delete_on_close(entry: &File) -> Result<(), Untrusted> {
         return Err(Untrusted::Io);
     }
     Ok(())
+}
+
+/// The folder at `path`, which `entry` holds, opened again to list it. The trailing separator
+/// opens only a folder, and it must be the object `entry` holds, so nothing put at the name since
+/// is listed.
+fn listing(entry: &File, path: &Path, share: u32) -> Result<File, Untrusted> {
+    let mut folder = path.as_os_str().to_owned();
+    folder.push(r"\");
+    let listing = File::options()
+        .access_mode(FILE_LIST_DIRECTORY)
+        .share_mode(share)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(folder)
+        .map_err(|_| Untrusted::Io)?;
+    if file_id(&listing)? != file_id(entry)? {
+        return Err(Untrusted::Reparse);
+    }
+    Ok(listing)
+}
+
+/// The volume and file ID of what `opened` is open on.
+fn file_id(opened: &File) -> Result<(u64, [u8; 16]), Untrusted> {
+    let mut info = FILE_ID_INFO::default();
+    let size = u32::try_from(size_of::<FILE_ID_INFO>()).map_err(|_| Untrusted::Io)?;
+    // SAFETY: `info` is writable for `size` bytes and the handle is open for the call.
+    let read = unsafe {
+        GetFileInformationByHandleEx(
+            opened.as_raw_handle(),
+            FileIdInfo,
+            (&raw mut info).cast(),
+            size,
+        )
+    };
+    if read == 0 {
+        return Err(Untrusted::Io);
+    }
+    Ok((info.VolumeSerialNumber, info.FileId.Identifier))
 }
 
 /// The names in the folder open as `folder`, read through its handle.
@@ -432,6 +481,45 @@ pub(crate) fn paused(path: &Path) {
     if let Some(hook) = hook {
         hook();
     }
+}
+
+/// Each handle the walks opened, with the access it was granted.
+#[cfg(test)]
+static OPENED: std::sync::Mutex<Vec<(PathBuf, u32)>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn opened(path: &Path, handle: &File) {
+    use windows_sys::Wdk::Foundation::{NtQueryObject, ObjectBasicInformation};
+    use windows_sys::Win32::System::WindowsProgramming::PUBLIC_OBJECT_BASIC_INFORMATION;
+    let mut info = PUBLIC_OBJECT_BASIC_INFORMATION::default();
+    let size = u32::try_from(size_of::<PUBLIC_OBJECT_BASIC_INFORMATION>()).expect("a small struct");
+    // SAFETY: `info` is writable for `size` bytes and the handle is open for the call.
+    let status = unsafe {
+        NtQueryObject(
+            handle.as_raw_handle(),
+            ObjectBasicInformation,
+            (&raw mut info).cast(),
+            size,
+            std::ptr::null_mut(),
+        )
+    };
+    assert!(status >= 0, "the handle's access reads");
+    OPENED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((path.to_owned(), info.GrantedAccess));
+}
+
+/// The access each handle the walks opened on `path` was granted, in order.
+#[cfg(test)]
+fn granted(path: &Path) -> Vec<u32> {
+    OPENED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .filter(|(opened, _)| opened == path)
+        .map(|&(_, access)| access)
+        .collect()
 }
 
 /// Which ACEs a DACL check counts.
@@ -952,7 +1040,94 @@ fn mapped(mut mask: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Kind, Security, Trusted, Untrusted, this_user, trusted_security};
+    use std::fs::{self, File};
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use std::path::PathBuf;
+
+    use kumochi_protocol::constants::OBJECT_PREFIX;
+
+    use super::{
+        DELETE, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, Kind, READ_CONTROL,
+        SYNCHRONIZE, Security, Trusted, Untrusted, granted, this_user, trusted_security,
+    };
+
+    /// What reading an entry's attributes and security needs. Opening by name always adds
+    /// SYNCHRONIZE and read-attributes.
+    const LOOK: u32 = READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
+    /// What listing a folder needs.
+    const LIST: u32 = FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
+
+    /// A fresh owner-only folder holding a file and a folder. The temp folder won't do: other
+    /// accounts may change it.
+    fn scratch(name: &str) -> PathBuf {
+        let root = super::local_app_data()
+            .expect("local app data")
+            .join(format!(
+                "{OBJECT_PREFIX}-test-{}-protected-{name}",
+                std::process::id()
+            ));
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("old scratch folder removable");
+        }
+        drop(super::owner_only_dir(&root).expect("an owner-only folder"));
+        fs::write(root.join("file"), b"contents").expect("a file");
+        fs::create_dir(root.join("folder")).expect("a folder");
+        root
+    }
+
+    #[test]
+    fn the_check_reads_no_file_data_and_lists_only_a_folder() {
+        let root = scratch("check");
+        super::private_tree(&root).expect("a private tree");
+        assert_eq!(granted(&root), [LOOK, LIST]);
+        assert_eq!(granted(&root.join("file")), [LOOK]);
+        assert_eq!(granted(&root.join("folder")), [LOOK, LIST]);
+        fs::remove_dir_all(&root).expect("cleaned up");
+    }
+
+    #[test]
+    fn the_delete_reads_no_file_data_and_lists_only_a_folder() {
+        let root = scratch("delete");
+        super::remove_tree(&root).expect("deleted");
+        assert!(!root.exists(), "the tree is gone");
+        assert_eq!(granted(&root), [LOOK | DELETE, LIST]);
+        assert_eq!(granted(&root.join("file")), [LOOK | DELETE]);
+        assert_eq!(granted(&root.join("folder")), [LOOK | DELETE, LIST]);
+    }
+
+    #[test]
+    fn a_folder_swapped_after_its_check_is_never_listed() {
+        let root = scratch("swap");
+        let folder = root.join("folder");
+        let entry = super::open(&folder, Kind::Folder, 0).expect("the folder opens");
+        fs::rename(&folder, root.join("moved")).expect("moved while open for its attributes");
+        fs::create_dir(&folder).expect("another folder at its name");
+        let listed = |entry| super::listing(entry, &folder, FILE_SHARE_READ).err();
+        assert_eq!(listed(&entry), Some(Untrusted::Reparse));
+        fs::remove_dir(&folder).expect("that folder removed");
+        fs::write(&folder, b"contents").expect("a file at its name");
+        assert_eq!(
+            listed(&entry),
+            Some(Untrusted::Io),
+            "a file never opens to be listed"
+        );
+        drop(entry);
+        fs::remove_dir_all(&root).expect("cleaned up");
+    }
+
+    #[test]
+    fn a_file_held_without_sharing_is_still_checked() {
+        let root = scratch("held");
+        let held = File::options()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(root.join("file"))
+            .expect("held");
+        super::private_tree(&root).expect("a private tree");
+        drop(held);
+        fs::remove_dir_all(&root).expect("cleaned up");
+    }
 
     #[test]
     fn the_default_local_app_data_chain_passes_the_existing_boundary() {
