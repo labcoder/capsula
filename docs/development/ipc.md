@@ -21,8 +21,9 @@ expiry is terminal but never releases an unconfirmed device owner.
 The appended `ScreenHolds` tells the shell whether a hold also shows the model the window under
 the pointer: `On { model }` with the model's display name, or `Off` with `ModelCantSee`,
 `NotReady` (the catalog isn't read, or no model is chosen), `Unsupported` (no window capture on
-this platform) or the appended `TurnedOff` (the user's switch). It's for the standing notice and
-for which hold message the shell sends: `HoldRecognized` only while it's `On`, otherwise
+this platform, or the worker found at the session's first screen hold that this system can't
+capture) or the appended `TurnedOff` (the user's switch). It's for the standing notice and for
+which hold message the shell sends: `HoldRecognized` only while it's `On`, otherwise
 `VoiceHoldRecognized`. `HoldRecognized` carries the gesture, the thread, the selection revision,
 the pointer sampled once at recognition, the exclusion lease and the recognition time. Its
 fields changed in place, not by appending: `pointer_display`, the display that held the pointer,

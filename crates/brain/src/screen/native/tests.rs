@@ -117,7 +117,7 @@ fn a_failed_open_answers_fault_and_the_next_job_opens_again() {
         move || {
             opens += 1;
             if opens == 1 {
-                return Err(-5);
+                return Err(Failure::Fault(-5));
             }
             Ok(Box::new(Local {
                 owner: std::thread::current().id(),

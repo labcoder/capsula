@@ -111,6 +111,8 @@ pub(crate) enum Refusal {
     Unmasked,
     /// The sealed image is over the JPEG cap, so it isn't exported.
     TooLarge,
+    /// The system said it can't capture a window when the capturer opened. Appended.
+    Unsupported,
 }
 
 /// A complete, valid frame's description; the pixels stay in the worker.
