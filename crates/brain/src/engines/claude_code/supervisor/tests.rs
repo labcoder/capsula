@@ -293,6 +293,13 @@ fn failed_terminate(job: &Job) -> std::io::Result<()> {
     job.terminate()
 }
 
+/// Reports the job empty while its child may still be exiting, as Windows does for the moment
+/// between a process leaving its job and its handles closing.
+#[expect(clippy::unnecessary_wraps, reason = "it stands in for `Job::terminate`")]
+fn confirmed_early(_job: &Job) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// S13: every bound, against literals.
 #[test]
 fn the_bounds_hold() {
@@ -579,6 +586,20 @@ async fn a_pump_that_fails_to_start_stops_the_launch() {
         assert!(Listener::create(id).is_ok(), "the listener was ended");
         assert!(launch_dirs(&base).is_empty(), "the folder is gone");
     }
+}
+
+/// A child still exiting when its job reads empty still holds its working folder: the teardown
+/// waits for the child itself before deleting the folder.
+#[tokio::test]
+async fn a_child_still_exiting_when_its_job_reads_empty_has_its_folder_deleted() {
+    let base = Base::new("launch-exits-late");
+    let lane = found_with(&base, "late", |host| host.terminate = confirmed_early).await;
+    let (mut start, mut launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
+    start.hooks.spawn_fails = Some("claude-code-stdout");
+    queue(&lane, start);
+    assert_eq!(failed(&mut launch).await, LaunchFailed::Spawn);
+    assert_eq!(end(launch).await, Teardown::Done, "the folder was deleted");
+    assert!(launch_dirs(&base).is_empty(), "the folder is gone");
 }
 
 /// C-M1: a listener task the runtime can't drop within the grace leaves the launch `Stuck`, the
