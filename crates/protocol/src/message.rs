@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::Secret;
-use crate::geometry::{DisplayRef, PhysicalRect, WindowRef};
+use crate::geometry::{PhysicalPoint, PhysicalRect, WindowRef};
 
 mod account;
 mod connections;
@@ -51,8 +51,9 @@ pub use scenes::{
     SceneDataError, SceneDescriptorV1, SceneFailure, SceneHeader, SceneSnapshotChunk,
 };
 pub use settings::{
-    AssistantName, DEFAULT_HOLD_TO_TALK, DockPosition, MAX_NAME_CHARS, MaxFrameRate, NameError,
-    NotACap, OnboardingStep, SettingsOp, SettingsView, SttUnload, UserName,
+    AssistantName, DEFAULT_HOLD_TO_TALK, DEFAULT_SCREEN_HOLDS, DockPosition, MAX_NAME_CHARS,
+    MaxFrameRate, NameError, NotACap, OnboardingStep, SettingsOp, SettingsView, SttUnload,
+    UserName,
 };
 pub use threads::{
     Effort, LISTED_MODELS_CALL_TOOLS, MAX_MODEL_NAME_CHARS, MAX_MODELS, MAX_SLUG_BYTES,
@@ -331,14 +332,18 @@ pub enum ControlToBrain {
     },
     /// Something the user asked of the account; answered by one [`ControlToShell::Account`].
     AccountOp(AccountOp),
-    /// The shell recognized a hold while its exclusion lease was live.
+    /// The shell recognized a hold that also shows the model the window under the pointer, while
+    /// its exclusion lease was live. Sent only while the last [`ControlToShell::ScreenHolds`] was
+    /// `On`; otherwise a hold is [`Self::VoiceHoldRecognized`].
     HoldRecognized {
         /// The connection-local gesture.
         gesture: GestureId,
-        /// The display containing the pointer at recognition.
-        pointer_display: DisplayRef,
         /// The thread to continue, or a new thread when absent.
         thread: Option<ThreadId>,
+        /// The Shell selection revision, as in [`Self::VoiceHoldRecognized`].
+        selection: u64,
+        /// The pointer at recognition, sampled once, in desktop physical pixels.
+        pointer: PhysicalPoint,
         /// The exclusion lease protecting capture.
         lease: LeaseGeneration,
         /// When the hold was recognized, in QPC ticks.
@@ -678,6 +683,40 @@ pub enum ControlToShell {
     /// Whether a hold also shows the model the window under the pointer. Sent when the shell
     /// connects and whenever it changes.
     ScreenHolds(ScreenHolds),
+    /// What a screen hold's window did, sent once, when its run's first request starts.
+    HoldScreen {
+        /// The hold's gesture.
+        gesture: GestureId,
+        /// Sent, or why not.
+        outcome: HeldScreen,
+    },
+}
+
+/// What a screen hold's window did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HeldScreen {
+    /// The model was sent the window.
+    Sent,
+    /// The model was told the window wasn't included, and why.
+    NotIncluded(ScreenClass),
+}
+
+/// Why a screen hold's window wasn't included.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScreenClass {
+    /// The catalog wasn't read, the worker was busy, faulted or lost, or the window wasn't ready
+    /// when the words were.
+    NotReady,
+    /// No window under the pointer, or only Kumochi's own.
+    NothingThere,
+    /// The window is minimised, cloaked, elevated, protected or Kumochi's own.
+    CantShare,
+    /// The window's password masks couldn't be completed, or where a click lands couldn't be told.
+    Unreadable,
+    /// The image was over the cap.
+    TooLarge,
+    /// The window or display changed while it was being captured.
+    Changed,
 }
 
 /// The image gate's state, for the standing notice and for which hold message the shell sends.
@@ -701,6 +740,8 @@ pub enum ScreenOff {
     NotReady,
     /// This platform has no window capture yet.
     Unsupported,
+    /// The user turned screen holds off.
+    TurnedOff,
 }
 
 /// Shell to brain, on the data pipe.

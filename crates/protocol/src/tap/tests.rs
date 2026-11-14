@@ -98,6 +98,7 @@ fn view() -> ControlToShell {
             talk_back: false,
             stt_unload: crate::message::SttUnload::Kept,
             hold_to_talk: crate::message::DEFAULT_HOLD_TO_TALK,
+            screen_holds: crate::message::DEFAULT_SCREEN_HOLDS,
         },
         answer: true,
     }

@@ -5,7 +5,7 @@ use super::{
     GestureId, LeaseGeneration, Phase, RunId, RunOrigin, ScreenChoice, ThreadId,
 };
 use crate::frame::{self, HEADER_LEN, Pipe};
-use crate::geometry::{DisplayRef, PhysicalRect, WindowRef};
+use crate::geometry::{PhysicalPoint, PhysicalRect, WindowRef};
 use crate::tap::{self, Direction, Record, Tapped};
 
 const GESTURE: GestureId = GestureId(u32::MAX);
@@ -81,11 +81,49 @@ fn screen_hold_states_append_a_redacted_control_tag() {
         (super::ScreenHolds::Off(super::ScreenOff::ModelCantSee), 3),
         (super::ScreenHolds::Off(super::ScreenOff::NotReady), 3),
         (super::ScreenHolds::Off(super::ScreenOff::Unsupported), 3),
+        (super::ScreenHolds::Off(super::ScreenOff::TurnedOff), 3),
     ] {
         let message = ControlToShell::ScreenHolds(state);
         assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], 31);
         round_trip(&message, Pipe::Control, size);
         redacted(&message, Direction::ToShell, "ScreenHolds", size);
+    }
+    assert_eq!(
+        postcard::to_allocvec(&super::ScreenHolds::Off(super::ScreenOff::TurnedOff))
+            .expect("encodes"),
+        [1, 3]
+    );
+}
+
+#[test]
+fn a_held_screens_outcome_appends_a_redacted_control_tag() {
+    use super::{HeldScreen, ScreenClass};
+    let mut outcomes = vec![(HeldScreen::Sent, 7)];
+    for (index, class) in [
+        ScreenClass::NotReady,
+        ScreenClass::NothingThere,
+        ScreenClass::CantShare,
+        ScreenClass::Unreadable,
+        ScreenClass::TooLarge,
+        ScreenClass::Changed,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            postcard::to_allocvec(&class).expect("encodes"),
+            [u8::try_from(index).expect("six classes")]
+        );
+        outcomes.push((HeldScreen::NotIncluded(class), 8));
+    }
+    for (outcome, size) in outcomes {
+        let message = ControlToShell::HoldScreen {
+            gesture: GESTURE,
+            outcome,
+        };
+        assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], 32);
+        round_trip(&message, Pipe::Control, size);
+        redacted(&message, Direction::ToShell, "HoldScreen", size);
     }
 }
 
@@ -145,8 +183,9 @@ fn largest_hold_controls_round_trip_fit_the_cap_and_stay_redacted() {
         (
             ControlToBrain::HoldRecognized {
                 gesture: GESTURE,
-                pointer_display: DisplayRef(RECT),
                 thread: Some(ThreadId(u64::MAX)),
+                selection: u64::MAX,
+                pointer: PhysicalPoint([i32::MIN, i32::MAX]),
                 lease: LEASE,
                 t_qpc: u64::MAX,
             },
@@ -203,16 +242,14 @@ fn largest_hold_controls_round_trip_fit_the_cap_and_stay_redacted() {
     round_trip(
         &ControlToBrain::HoldRecognized {
             gesture: GestureId(0),
-            pointer_display: DisplayRef(PhysicalRect {
-                origin: [0; 2],
-                size: [0; 2],
-            }),
             thread: None,
+            selection: 0,
+            pointer: PhysicalPoint([0; 2]),
             lease: LeaseGeneration(0),
             t_qpc: 0,
         },
         Pipe::Control,
-        9,
+        8,
     );
 }
 

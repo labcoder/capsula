@@ -34,6 +34,7 @@ const VOICE: &str = "voice";
 const TALK_BACK: &str = "talk_back";
 const STT_UNLOAD: &str = "stt_unload";
 const HOLD_TO_TALK: &str = "hold_to_talk";
+const SCREEN_HOLDS: &str = "screen_holds";
 const INSTALLED: &str = "installed";
 const REMOVING: &str = "removing";
 
@@ -279,6 +280,9 @@ impl Config {
             SettingsOp::SetHoldToTalk(on) => {
                 voice_mut(&mut table).insert(HOLD_TO_TALK.to_owned(), Value::Boolean(on));
             }
+            SettingsOp::SetScreenHolds(on) => {
+                voice_mut(&mut table).insert(SCREEN_HOLDS.to_owned(), Value::Boolean(on));
+            }
             SettingsOp::SetSttUnload(unload) => {
                 let name = match unload {
                     SttUnload::Kept => "kept",
@@ -513,6 +517,11 @@ fn view_of(table: &Table, main_thread: ThreadId, in_use: bool) -> SettingsView {
         None => kumochi_protocol::message::DEFAULT_HOLD_TO_TALK,
         Some(_) => invalid(HOLD_TO_TALK).unwrap_or(false),
     };
+    let screen_holds = match voice.and_then(|voice| voice.get(SCREEN_HOLDS)) {
+        Some(Value::Boolean(on)) => *on,
+        None => kumochi_protocol::message::DEFAULT_SCREEN_HOLDS,
+        Some(_) => invalid(SCREEN_HOLDS).unwrap_or(false),
+    };
     SettingsView {
         assistant_name,
         user_name,
@@ -526,6 +535,7 @@ fn view_of(table: &Table, main_thread: ThreadId, in_use: bool) -> SettingsView {
         talk_back,
         stt_unload,
         hold_to_talk,
+        screen_holds,
     }
 }
 

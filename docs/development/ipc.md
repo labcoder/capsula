@@ -20,9 +20,22 @@ expiry is terminal but never releases an unconfirmed device owner.
 
 The appended `ScreenHolds` tells the shell whether a hold also shows the model the window under
 the pointer: `On { model }` with the model's display name, or `Off` with `ModelCantSee`,
-`NotReady` (the catalog isn't read, or no model is chosen) or `Unsupported` (no window capture on
-this platform). It's for the standing notice and for which hold message the shell sends. Nothing
-sends it yet, and the shell ignores it. It's payload-redacted in the pipe tap.
+`NotReady` (the catalog isn't read, or no model is chosen), `Unsupported` (no window capture on
+this platform) or the appended `TurnedOff` (the user's switch). It's for the standing notice and
+for which hold message the shell sends: `HoldRecognized` only while it's `On`, otherwise
+`VoiceHoldRecognized`. `HoldRecognized` carries the gesture, the thread, the selection revision,
+the pointer sampled once at recognition, the exclusion lease and the recognition time.
+
+The appended `HoldScreen { gesture, outcome }` says what a screen hold's window did, once, when
+its run's first request starts: `Sent`, or `NotIncluded` with one of six fixed classes. Nothing
+in it names a window.
+
+`SettingsOp::SetScreenHolds` is appended, and `SettingsView` gains `screen_holds` (on when a
+settings file has no key). A new struct field isn't append-only in postcard, whose fields are
+positional; it's safe only because the build-id handshake refuses mixed binaries.
+
+Nothing sends `ScreenHolds`, `HoldScreen` or `HoldRecognized` yet, and the shell ignores the
+first two. All three are payload-redacted in the pipe tap.
 
 ## Anthropic paste metadata
 
@@ -450,7 +463,7 @@ or above the primary display. `WindowRef(u64)` is an opaque HWND on Windows or C
 
 | Direction | Control message | Fields |
 | --- | --- | --- |
-| Shell to brain | `HoldRecognized` | `gesture`, `pointer_display`, optional `thread`, `lease`, `t_qpc` |
+| Shell to brain | `HoldRecognized` | `gesture`, optional `thread`, `selection`, `pointer`, `lease`, `t_qpc` |
 | Shell to brain | `KeyDown` | `gesture`, `t_qpc`; it only warms speech input, never starts a run |
 | Shell to brain | `KeyUp` | `gesture`, `t_qpc`, `chunks`: the `MicPcm` chunks the hold sent |
 | Shell to brain | `GestureCancel` | `gesture` |

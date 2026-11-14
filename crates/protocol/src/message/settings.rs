@@ -203,10 +203,15 @@ pub enum SettingsOp {
     /// An onboarding step was completed, so the next launch starts after it. The last step is
     /// completed only by [`Self::FinishOnboarding`]: completing it here changes nothing.
     CompleteOnboardingStep(OnboardingStep),
+    /// Let a hold also show the model the window under the pointer.
+    SetScreenHolds(bool),
 }
 
 /// The initial held-speech choice, also used by older settings files without the key.
 pub const DEFAULT_HOLD_TO_TALK: bool = true;
+
+/// The initial screen-hold choice, also used by older settings files without the key.
+pub const DEFAULT_SCREEN_HOLDS: bool = true;
 
 /// When an idle speech-input model is unloaded to free its memory.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,6 +258,8 @@ pub struct SettingsView {
     pub hold_to_talk: bool,
     /// The first onboarding step not yet completed.
     pub onboarding_from: OnboardingStep,
+    /// Whether a hold may also show the model the window under the pointer.
+    pub screen_holds: bool,
 }
 
 /// The most frames a second Kumo draws. The shell paces to the display, so the rate it runs at
@@ -329,6 +336,7 @@ mod tests {
             talk_back: false,
             stt_unload: SttUnload::Kept,
             hold_to_talk: crate::message::DEFAULT_HOLD_TO_TALK,
+            screen_holds: crate::message::DEFAULT_SCREEN_HOLDS,
         }
     }
 
@@ -347,6 +355,8 @@ mod tests {
             (11, SettingsOp::CancelVoiceInstall),
             (12, SettingsOp::SetHoldToTalk(false)),
             (12, SettingsOp::SetHoldToTalk(true)),
+            (14, SettingsOp::SetScreenHolds(false)),
+            (14, SettingsOp::SetScreenHolds(true)),
         ];
         for (tag, op) in ops {
             let bytes = postcard::to_allocvec(&op).expect("encodes");
@@ -364,6 +374,8 @@ mod tests {
         assert!(postcard::from_bytes::<SettingsOp>(&[12, 2]).is_err());
         assert!(postcard::from_bytes::<SettingsOp>(&[13, 4]).is_err());
         assert!(postcard::from_bytes::<SettingsOp>(&[14]).is_err());
+        assert!(postcard::from_bytes::<SettingsOp>(&[14, 2]).is_err());
+        assert!(postcard::from_bytes::<SettingsOp>(&[15]).is_err());
         assert!(postcard::from_bytes::<SettingsOp>(&[8, 3]).is_err());
         assert!(postcard::from_bytes::<SettingsOp>(&[9, 2]).is_err());
         assert_eq!(SttUnload::default(), SttUnload::Kept);
@@ -459,6 +471,7 @@ mod tests {
                     talk_back: false,
                     stt_unload: SttUnload::Kept,
                     hold_to_talk: crate::message::DEFAULT_HOLD_TO_TALK,
+                    screen_holds: crate::message::DEFAULT_SCREEN_HOLDS,
                 };
                 let bytes = postcard::to_allocvec(&view).expect("encodes");
                 assert_eq!(
