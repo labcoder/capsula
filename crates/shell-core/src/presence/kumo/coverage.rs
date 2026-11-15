@@ -9,22 +9,22 @@
 pub(crate) const CUTOFF: u8 = 75;
 
 /// A half-open span of columns, `[left, right)`.
-pub(crate) type Span<T> = Option<[T; 2]>;
+pub type Span<T> = Option<[T; 2]>;
 
 /// Where GPUI draws an image: its snapped device bounds. GPUI rounds each edge on its own, so
 /// a square image at a fractional origin can land a pixel wider than it is tall.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Placement {
-    pub(crate) x: i32,
-    pub(crate) y: i32,
-    pub(crate) width: i32,
-    pub(crate) height: i32,
+pub struct Placement {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
 }
 
 impl Placement {
     /// The device rows a layer's spans cover: the image's rows plus one snap row above and
     /// below. [`device_spans`]' output has one entry per row here, starting at `y - 1`.
-    pub(crate) fn rows(self) -> usize {
+    pub fn rows(self) -> usize {
         usize::try_from(self.height.max(0) + 2).unwrap_or(0)
     }
 }
@@ -32,7 +32,7 @@ impl Placement {
 /// Writes each source row's hull of texels at or above [`CUTOFF`] into `rows`, from the
 /// leftmost to the rightmost. `pixels` is straight-alpha BGRA, `size` texels wide: the body's
 /// square or the neck's rectangle.
-pub(crate) fn row_hulls(pixels: &[u8], size: u16, rows: &mut [Span<u16>]) {
+pub fn row_hulls(pixels: &[u8], size: u16, rows: &mut [Span<u16>]) {
     rows.fill(None);
     let width = usize::from(size);
     if width == 0 {
@@ -52,7 +52,7 @@ pub(crate) fn row_hulls(pixels: &[u8], size: u16, rows: &mut [Span<u16>]) {
 /// reaches half a texel further out on each side, plus one device pixel for the snap. Spans
 /// are clipped to the drawn quad and its snap pixel. The source is `width` texels wide and one
 /// texel tall per row hull. `out` gets [`Placement::rows`] entries.
-pub(crate) fn device_spans(rows: &[Span<u16>], width: u16, at: Placement, out: &mut [Span<i32>]) {
+pub fn device_spans(rows: &[Span<u16>], width: u16, at: Placement, out: &mut [Span<i32>]) {
     out.fill(None);
     let height = u16::try_from(rows.len()).unwrap_or(u16::MAX);
     if width == 0 || height == 0 || at.width <= 0 || at.height <= 0 {

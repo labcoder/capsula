@@ -10,7 +10,7 @@ use super::math::{Rgb, Vec2, hash, hex, mix, v2};
 
 /// What Kumo is doing, as far as its face shows it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Mood {
+pub enum Mood {
     Idle,
     /// Attentive while the user talks: wide eyes, a head tilt, opening further as their voice
     /// rises.
@@ -76,7 +76,7 @@ impl Mood {
 
 /// How much Kumo may move: the operating system's reduced-motion setting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Motion {
+pub enum Motion {
     Full,
     /// Nothing moves: a mood shows as its static pose, with no blink.
     Reduced,
@@ -190,7 +190,7 @@ const BREATHE_HZ: f32 = 0.28;
 /// Drives Kumo's face over time. Deterministic for a given seed and tick sequence. The owner
 /// asks for a frame only while [`Self::is_animating`] is true, and that frame is always drawn.
 #[derive(Clone, Debug)]
-pub(crate) struct Animator {
+pub struct Animator {
     mood: Mood,
     pose: Pose,
     reduced: bool,
@@ -208,7 +208,7 @@ pub(crate) struct Animator {
 }
 
 impl Animator {
-    pub(crate) fn new(mood: Mood, seed: u32) -> Self {
+    pub fn new(mood: Mood, seed: u32) -> Self {
         Self {
             mood,
             pose: mood.pose(),
@@ -224,7 +224,7 @@ impl Animator {
     }
 
     /// Eases toward `mood`; a voice mood starts its blink schedule.
-    pub(crate) fn set_mood(&mut self, mood: Mood) {
+    pub fn set_mood(&mut self, mood: Mood) {
         if mood == self.mood {
             return;
         }
@@ -239,7 +239,7 @@ impl Animator {
 
     /// Follows the operating system's reduced-motion setting: when it's reduced, Kumo shows
     /// its mood's pose and nothing moves, and a blink under way stops at once.
-    pub(crate) fn set_motion(&mut self, motion: Motion) {
+    pub fn set_motion(&mut self, motion: Motion) {
         let reduced = motion == Motion::Reduced;
         self.stale |= reduced != self.reduced;
         self.reduced = reduced;
@@ -249,20 +249,20 @@ impl Animator {
     }
 
     /// Hover, listening or speaking began: one blink, unless motion is reduced.
-    pub(crate) fn engage(&mut self) {
+    pub fn engage(&mut self) {
         if !self.reduced {
             self.blink = Some(0.0);
         }
     }
 
     /// Engagement ended: a blink under way is cut, and the next frame opens the eyes.
-    pub(crate) fn disengage(&mut self) {
+    pub fn disengage(&mut self) {
         self.stale |= self.blink.take().is_some();
     }
 
     /// Whether the owner should draw another frame: true until the frame after the last
     /// change has been drawn, and false only when every later frame would be the same.
-    pub(crate) fn is_animating(&self) -> bool {
+    pub fn is_animating(&self) -> bool {
         if self.stale || self.reduced {
             return self.stale;
         }
@@ -271,7 +271,7 @@ impl Animator {
 
     /// Advances `dt` seconds with the current voice level (0..=1) and returns the frame. A
     /// negative or non-finite step counts as no time.
-    pub(crate) fn tick(&mut self, dt: f32, level_in: f32) -> FrameState {
+    pub fn tick(&mut self, dt: f32, level_in: f32) -> FrameState {
         let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
         self.stale = false;
         let target = self.mood.pose();
