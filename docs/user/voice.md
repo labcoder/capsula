@@ -52,7 +52,28 @@ without saving the words or calling a model; it is not queued for a later retry.
 The dock/status panel shows preparing, listening, stopping, transcribing and thinking.
 The answer opens in the existing chat panel without taking focus from your app. Empty speech
 creates no message. Recognized words become ordinary deletable chat history; raw audio is not
-saved. Nothing captures or sends your screen for this gesture.
+saved.
+
+## Showing the window under your pointer
+
+While **Share the window under your pointer** is on in **Settings → Voice**, a hold to talk also
+sends your model one picture: the window your pointer is over when the hold starts, as it
+appears on screen. Whatever that window shows is in the picture, so point at another window, or
+turn the setting off, when it shows something you don't want sent. The setting starts on.
+Kumochi's own dock and panels are left out, and nothing else on your screen is captured.
+
+Point at the dock to see what a hold will do. An eye beside the status means the named model
+will get the picture. A struck-through eye means the hold is voice only, and its tooltip says
+why: the model can't take pictures, screen sharing isn't ready yet, it is switched off, or the
+task you're in uses its own model. A task with its own model is always voice only for now.
+
+During the hold the same panel says which model will see the window. If the picture couldn't be
+included it says why instead: nothing was under the pointer, the window can't be shared, it
+changed, it wasn't readable, or its picture was too large. Chat history keeps one line under
+your message saying whether the window was included. Turning the setting off while a picture
+is waiting to be sent withdraws it.
+
+Not checked yet: displays at different scales, and more than one monitor.
 
 Esc, a target/model/connection change, deletion or a new typed submission cancels pending
 voice input. Another key cancels while the shortcut is held, not arbitrary typing after release.

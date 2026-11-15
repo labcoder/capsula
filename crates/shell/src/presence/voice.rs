@@ -5,17 +5,25 @@ use std::time::Instant;
 
 use kumochi_protocol::geometry::PhysicalPoint;
 use kumochi_protocol::message::{
-    CaptureFor, ControlToBrain, GestureId, HoldFailure, HoldStatus, Phase, RunId, RunOrigin,
-    ThreadId,
+    CaptureFor, ControlToBrain, GestureId, HoldFailure, HoldStatus, ModelName, Phase, RunId,
+    RunOrigin, ThreadId,
 };
 
 use super::{Context, Presence, Session};
 use crate::input::hold::Intent;
 use crate::platform::microphone::{Generation, Mode};
 use crate::runs::{ScreenHold, ScreenNotice};
-use crate::strings::Text;
+use crate::strings::{Strings, Text};
 
 mod source;
+
+/// A screen notice or line, naming its model when it has one.
+pub(super) fn screen_text(strings: &Strings, text: Text, model: Option<&ModelName>) -> String {
+    model.map_or_else(
+        || strings.get(text),
+        |model| strings.with_model(text, model.as_str()),
+    )
+}
 
 #[derive(Debug)]
 enum FailureStage {
@@ -265,10 +273,9 @@ impl Presence {
 
     /// What a hold on the current target does with the window under the pointer. The send and
     /// the dock's icon both read this, so the icon never names a model the image won't reach.
-    pub(super) fn screen_notice(&self, cx: &gpui_kit::App) -> ScreenNotice {
+    pub(super) fn screen_notice<'a>(&'a self, cx: &'a gpui_kit::App) -> ScreenNotice<'a> {
         let settings = self.settings.read(cx);
-        // shortcut: a thread whose row was never read counts as on the default model; no shell
-        // view sets a thread's own model yet, so read the target's row when one does.
+        // shortcut: a thread whose row was never read counts as on the default model (OSC-763), upgrade before any view sends `SetModel`.
         let own = self
             .runs
             .thread()
@@ -276,6 +283,28 @@ impl Presence {
             .and_then(|row| row.choice.as_ref());
         self.runs
             .screen_notice(settings.own_model(own), settings.default_model_name())
+    }
+
+    /// Follows the standing notice and the current hold's line in the status panel. A link event
+    /// batch that changes neither costs a comparison and no allocation.
+    pub(super) fn refresh_screen(&self, cx: &mut Context<'_, Self>) {
+        let notice = self.screen_notice(cx);
+        let shown = [notice.text(), self.runs.hold_screen_text(notice)];
+        let panel = self.panel.read(cx);
+        if [&panel.screen, &panel.screen_line]
+            .into_iter()
+            .zip(shown)
+            .all(|(old, new)| old.as_ref().map(|(text, model)| (*text, model.as_ref())) == new)
+        {
+            return;
+        }
+        let [screen, screen_line] =
+            shown.map(|shown| shown.map(|(text, model)| (text, model.cloned())));
+        self.panel.update(cx, |panel, cx| {
+            panel.screen = screen;
+            panel.screen_line = screen_line;
+            cx.notify();
+        });
     }
 
     /// `pointer` is where the pointer was when the native callback recognized a hold.

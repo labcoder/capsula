@@ -1,6 +1,7 @@
 use kumochi_protocol::message::{GestureId, ScreenChoice};
 
 use super::*;
+use crate::strings::Text;
 
 fn ready() -> Runs {
     let mut runs = Runs::default();
@@ -437,4 +438,122 @@ fn the_screen_holds_state_lasts_one_connection() {
     runs.set_screen_holds(on);
     runs.connected(2);
     assert_eq!(runs.screen_holds(), None);
+}
+
+#[test]
+fn the_standing_notice_gives_way_in_order_and_names_only_the_newest_default() {
+    use kumochi_protocol::message::{ModelName, ScreenHolds, ScreenOff};
+    let luna = ModelName::new("GPT-6 Luna").expect("valid");
+    let sol = ModelName::new("GPT-6 Sol").expect("valid");
+    let on = |model: &ModelName| {
+        Some(ScreenHolds::On {
+            model: model.clone(),
+        })
+    };
+    let off = |why| Some(ScreenHolds::Off(why));
+    // (stored state, the target thread has its own model, the default's name) and the notice.
+    for (stored, own, default, notice) in [
+        (None, false, Some(&luna), ScreenNotice::NotReady),
+        (None, true, Some(&luna), ScreenNotice::OwnModel),
+        (
+            off(ScreenOff::Unsupported),
+            true,
+            Some(&luna),
+            ScreenNotice::Hidden,
+        ),
+        (
+            off(ScreenOff::TurnedOff),
+            true,
+            Some(&luna),
+            ScreenNotice::TurnedOff,
+        ),
+        (
+            off(ScreenOff::ModelCantSee),
+            true,
+            Some(&luna),
+            ScreenNotice::OwnModel,
+        ),
+        (
+            off(ScreenOff::NotReady),
+            true,
+            Some(&luna),
+            ScreenNotice::OwnModel,
+        ),
+        (on(&luna), true, Some(&luna), ScreenNotice::OwnModel),
+        (on(&luna), false, Some(&luna), ScreenNotice::On(&luna)),
+        (on(&sol), false, Some(&luna), ScreenNotice::NotReady),
+        (on(&luna), false, None, ScreenNotice::NotReady),
+        (
+            off(ScreenOff::ModelCantSee),
+            false,
+            Some(&luna),
+            ScreenNotice::ModelCantSee(&luna),
+        ),
+        (
+            off(ScreenOff::ModelCantSee),
+            false,
+            None,
+            ScreenNotice::NotReady,
+        ),
+        (
+            off(ScreenOff::NotReady),
+            false,
+            Some(&luna),
+            ScreenNotice::NotReady,
+        ),
+    ] {
+        let mut runs = ready();
+        if let Some(stored) = stored.clone() {
+            runs.set_screen_holds(stored);
+        }
+        assert_eq!(runs.screen_notice(own, default), notice, "{stored:?} {own}");
+    }
+    assert_eq!(ScreenNotice::Hidden.text(), None);
+    assert_eq!(
+        ScreenNotice::On(&luna).text(),
+        Some((Text::ScreenHoldsOn, Some(&luna)))
+    );
+    assert_eq!(
+        ScreenNotice::ModelCantSee(&luna).text(),
+        Some((Text::ScreenHoldsModelCantSee, Some(&luna)))
+    );
+    for (notice, text) in [
+        (ScreenNotice::NotReady, Text::ScreenHoldsNotReady),
+        (ScreenNotice::TurnedOff, Text::ScreenHoldsTurnedOff),
+        (ScreenNotice::OwnModel, Text::ScreenHoldsOwnModel),
+    ] {
+        assert_eq!(notice.text(), Some((text, None)));
+    }
+}
+
+#[test]
+fn a_holds_prediction_names_the_notices_model_and_goes_quiet_when_the_notice_changes() {
+    use kumochi_protocol::message::{HeldScreen, ModelName, ScreenClass};
+    let luna = ModelName::new("GPT-6 Luna").expect("valid");
+    let mut runs = ready();
+    assert_eq!(runs.hold_screen_text(ScreenNotice::On(&luna)), None);
+    runs.begin_hold(GestureId(1), Some(SCREEN)).expect("held");
+    assert_eq!(
+        runs.hold_screen_text(ScreenNotice::On(&luna)),
+        Some((Text::ScreenHoldWillSee, Some(&luna)))
+    );
+    for stale in [
+        ScreenNotice::NotReady,
+        ScreenNotice::OwnModel,
+        ScreenNotice::TurnedOff,
+        ScreenNotice::ModelCantSee(&luna),
+    ] {
+        assert_eq!(runs.hold_screen_text(stale), None);
+    }
+    assert!(runs.hold_screen(
+        GestureId(1),
+        HeldScreen::NotIncluded(ScreenClass::NothingThere)
+    ));
+    // The reason names no model, so it stands whatever the notice says now.
+    for notice in [ScreenNotice::On(&luna), ScreenNotice::NotReady] {
+        assert_eq!(
+            runs.hold_screen_text(notice),
+            Some((Text::ScreenNotIncludedNothingThere, None))
+        );
+    }
 }

@@ -118,8 +118,11 @@ is published before collection acceptance. Physical stop, successfully forwarded
 and native key-up rendezvous once before KeyUp is sent, regardless of UI delivery order.
 Committed PCM may drain after native retirement; logical input/session/choice fences still
 discard stale packets. Typed submissions remain text-only
-(`ScreenChoice::None`). The separate [local exclusion transaction](screen.md#local-shell-exclusion)
-has no production acquisition caller and never announces a lease.
+(`ScreenChoice::None`). A recognized hold whose [standing notice](ipc.md#screen-holds) is on
+takes the [exclusion lease](screen.md#local-shell-exclusion) and goes out as `HoldRecognized`
+with that lease and the pointer. The native callback samples the pointer once, when its delivery
+carries the recognition, so the hold names the window the pointer was over then, however late
+the UI thread applies the delivery. `input/hold.rs` never sees the pointer.
 
 ## The typing panel
 

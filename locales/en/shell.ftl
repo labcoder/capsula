@@ -244,6 +244,7 @@ screen-not-included-unreadable = Screen not included: the window wasn't readable
 screen-not-included-too-large = Screen not included: the window image was too large
 screen-not-included-changed = Screen not included: the window changed
 screen-not-included-turned-off = Screen not included: you turned screen sharing off
+screen-history-attached = Included the window under your pointer
 voice-restart-required = Speech input unavailable. Restart the app.
 voice-installed-failed = Installed · speech input unavailable
 voice-not-installed-failed = Not installed · speech input unavailable

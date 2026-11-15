@@ -1,7 +1,7 @@
 //! User-facing text, from `locales/en/`. English only for now.
 
 use fluent_bundle::{FluentArgs, FluentBundle, FluentResource};
-use kumochi_protocol::message::{ErrorArg, ErrorKey, ScreenClass, UserError};
+use kumochi_protocol::message::{ErrorArg, ErrorKey, HeldScreen, ScreenClass, UserError};
 use unic_langid::LanguageIdentifier;
 
 const ENGLISH: &str = include_str!("../../../locales/en/shell.ftl");
@@ -212,6 +212,7 @@ texts! {
     ScreenNotIncludedTooLarge => "screen-not-included-too-large",
     ScreenNotIncludedChanged => "screen-not-included-changed",
     ScreenNotIncludedTurnedOff => "screen-not-included-turned-off",
+    ScreenHistoryAttached => "screen-history-attached",
     VoiceRestartRequired => "voice-restart-required",
     VoiceInstalledFailed => "voice-installed-failed",
     VoiceNotInstalledFailed => "voice-not-installed-failed",
@@ -337,6 +338,15 @@ impl Text {
             ScreenClass::TooLarge => Self::ScreenNotIncludedTooLarge,
             ScreenClass::Changed => Self::ScreenNotIncludedChanged,
             ScreenClass::ModelCantSee => Self::ScreenNotIncludedModel,
+        }
+    }
+
+    /// The history line under a held turn: what its screen hold carried.
+    pub const fn held_screen(screen: HeldScreen) -> Self {
+        match screen {
+            HeldScreen::Attached => Self::ScreenHistoryAttached,
+            HeldScreen::NotIncluded(class) => Self::screen_not_included(class),
+            HeldScreen::Withdrawn => Self::ScreenNotIncludedTurnedOff,
         }
     }
 }
@@ -718,7 +728,7 @@ mod tests {
 
     #[test]
     fn each_screen_class_has_its_line_and_the_model_lines_name_the_model() {
-        use kumochi_protocol::message::ScreenClass;
+        use kumochi_protocol::message::{HeldScreen, ScreenClass};
         let strings = Strings::english();
         for (class, reason) in [
             (ScreenClass::NotReady, "the screen wasn't ready"),
@@ -749,6 +759,22 @@ mod tests {
             (Text::ScreenHoldWillSee, "GPT-5.5 will see this window"),
         ] {
             assert_eq!(strings.with_model(text, "GPT-5.5"), line);
+        }
+        for (screen, line) in [
+            (
+                HeldScreen::Attached,
+                "Included the window under your pointer",
+            ),
+            (
+                HeldScreen::NotIncluded(ScreenClass::Changed),
+                "Screen not included: the window changed",
+            ),
+            (
+                HeldScreen::Withdrawn,
+                "Screen not included: you turned screen sharing off",
+            ),
+        ] {
+            assert_eq!(strings.get(Text::held_screen(screen)), line);
         }
     }
 

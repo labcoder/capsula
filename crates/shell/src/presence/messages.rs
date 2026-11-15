@@ -56,6 +56,8 @@ struct Row {
     warning: Option<SharedString>,
     feedback: Option<SharedString>,
     cut: Option<SharedString>,
+    /// Under a held turn: what its screen hold carried.
+    screen: Option<SharedString>,
 }
 
 impl Row {
@@ -410,6 +412,10 @@ fn stored_rows(state: &Threads, cx: &App) -> Rc<[Row]> {
     rows.into()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "an issue card's row and a plain message's row share one builder"
+)]
 fn row(
     id: (&'static str, u64),
     run: Option<RunId>,
@@ -490,6 +496,7 @@ fn row(
             } else {
                 None
             },
+            screen: None,
         };
     }
     let label = match kind {
@@ -518,6 +525,12 @@ fn row(
         warning: None,
         feedback: None,
         cut: cut.map(|text| strings.get(text).into()),
+        screen: match kind {
+            PageEventKind::HeldTurn { screen } => {
+                Some(strings.get(Text::held_screen(screen)).into())
+            }
+            _ => None,
+        },
     }
 }
 
@@ -561,12 +574,18 @@ fn message(row: &Row, controls: Option<gpui_kit::AnyElement>, cx: &App) -> gpui_
                 .text_sm()
                 .child(message_text(row, "issue-details", details))
         }))
-        .children(row.cut.clone().map(|notice| {
-            div()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(notice)
-        }))
+        .children(
+            row.screen
+                .clone()
+                .into_iter()
+                .chain(row.cut.clone())
+                .map(|notice| {
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(notice)
+                }),
+        )
         .children(row.feedback.clone().map(|feedback| {
             div()
                 .text_sm()
@@ -705,7 +724,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_held_turn_renders_exactly_as_a_plain_user_turn(cx: &mut TestAppContext) {
+    fn a_held_turn_is_a_user_turn_with_one_line_saying_what_its_screen_hold_carried(
+        cx: &mut TestAppContext,
+    ) {
         use kumochi_protocol::message::{HeldScreen, ScreenClass};
         cx.update(|cx| {
             cx.set_global(Strings::english());
@@ -719,13 +740,34 @@ mod tests {
                 plain[0].label.as_deref(),
                 Some(cx.global::<Strings>().get(Text::ThreadUser).as_str())
             );
-            for screen in [
-                HeldScreen::Attached,
-                HeldScreen::NotIncluded(ScreenClass::Changed),
+            assert_eq!(plain[0].screen, None);
+            for (screen, line) in [
+                (
+                    HeldScreen::Attached,
+                    "Included the window under your pointer",
+                ),
+                (
+                    HeldScreen::NotIncluded(ScreenClass::Changed),
+                    "Screen not included: the window changed",
+                ),
+                (
+                    HeldScreen::NotIncluded(ScreenClass::ModelCantSee),
+                    "Screen not included: screen sharing isn't available with this model",
+                ),
+                (
+                    HeldScreen::Withdrawn,
+                    "Screen not included: you turned screen sharing off",
+                ),
             ] {
                 user.kind = PageEventKind::HeldTurn { screen };
                 state.events = vec![user.clone()];
-                assert!(stored_rows(&state, cx) == plain, "{screen:?}");
+                let held = stored_rows(&state, cx);
+                assert_eq!(held.len(), 1);
+                assert_eq!(held[0].screen.as_deref(), Some(line), "{screen:?}");
+                // Everything else is the plain user turn.
+                let mut same = held[0].clone();
+                same.screen = None;
+                assert!(same == plain[0], "{screen:?}");
             }
         });
     }
