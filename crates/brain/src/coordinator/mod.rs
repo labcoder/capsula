@@ -58,6 +58,9 @@ pub use page::PageKey;
 
 /// A run's whole wall-clock budget [S3's total cap].
 pub const WALL_CLOCK: Duration = Duration::from_secs(120);
+/// How long a typed turn's first build waits for Claude Code's next report while it's being found
+/// (OSC-753) [guess].
+const FINDING_WAIT: Duration = Duration::from_secs(30);
 /// The most visible text one run may stream [S3].
 pub const MAX_TEXT: usize = 1024 * 1024;
 /// The largest piece of text one `AssistantText` frame carries, well under the data pipe's cap.
@@ -567,6 +570,8 @@ struct Run {
     arrived: availability::Arrived,
     /// What the run answers on, from its first admitted build on.
     route: Option<crate::context::Route>,
+    /// A typed turn that arrived while Claude Code was being found, until it binds or is released.
+    finding: Option<availability::Finding>,
     /// The round that compacted inline since the run's last admitted build.
     compacted: Option<u32>,
     /// The draw call the engine's steps stream in, once it starts.
@@ -927,9 +932,14 @@ impl Coordinator {
                 if current.finishing && !current.tools.calling() {
                     return Err(Stale);
                 }
-                let current = self.take(run)?;
-                let over = RunEnd::Failed(Failure::Budget);
-                self.end(current, over, None, Notify::Shell, &mut effects);
+                if current.finding == Some(availability::Finding::Waiting) {
+                    let reason = model_unavailable();
+                    self.fail_with(run, Failure::Engine, reason, &mut effects)?;
+                } else {
+                    let current = self.take(run)?;
+                    let over = RunEnd::Failed(Failure::Budget);
+                    self.end(current, over, None, Notify::Shell, &mut effects);
+                }
             }
             Input::Clear { scenes } => {
                 self.drawing_clear(scenes.clone(), &mut effects);
@@ -1147,6 +1157,8 @@ impl Coordinator {
         let arrived = hold
             .as_ref()
             .map_or_else(|| self.arrived_now(), |hold| hold.arrived);
+        let finding = (hold.is_none() && self.claude_code == Availability::Finding)
+            .then_some(availability::Finding::Due);
         self.current = Some(Run {
             control: crate::recall::control::CancelOnDrop(control),
             id: run,
@@ -1169,6 +1181,7 @@ impl Coordinator {
             build: None,
             arrived,
             route: None,
+            finding,
             compacted: None,
             draw: None,
             draw_calls: Vec::new(),

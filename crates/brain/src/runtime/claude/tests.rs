@@ -163,6 +163,28 @@ async fn under_the_undecided_gate_connect_has_no_effect() {
     assert_eq!(brain.connections_frame(), before);
 }
 
+/// Claude Code is reported when it's attached, before any shell connects, so a turn never meets
+/// the coordinator's start placeholder: with no lane it reads not found at once.
+#[test]
+fn attaching_claude_code_reports_it_at_once() {
+    let scratch = Scratch::new("claude-attach");
+    let mut brain = test_support::brain(&scratch, "");
+    brain.attach_claude(Claude::default());
+    assert_eq!(
+        brain
+            .coordinator
+            .availability_of(kumochi_protocol::message::ConnectionKind::ClaudeCode),
+        &Availability::Unavailable(
+            kumochi_protocol::message::UserError::new(
+                ErrorKey::ClaudeCodeNotFound,
+                Vec::new(),
+                vec![kumochi_protocol::message::Action::OpenSettings],
+            )
+            .expect("one action")
+        )
+    );
+}
+
 struct EmptyCatalog;
 
 impl Http for EmptyCatalog {
