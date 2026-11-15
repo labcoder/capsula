@@ -8,14 +8,8 @@ use kumochi_scene::{SceneView, Step};
 use super::super::{SceneCache, paint::Sample};
 use super::{
     LIVE, Presenter, Probed, RUN, Shaper, Witness, acknowledge, begin, bound_everywhere, commit_as,
-    controls, data, drained, hold_dropper, kept, live, only_job, recovering, rect, step,
+    controls, data, drained, hold_dropper, kept, live, only_job, pair, recovering, rect,
 };
-
-fn pair() -> Step {
-    step(
-        r#"{"step":{"id":"pair","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10]}},{"shape":{"id":"b","kind":"rect","box":[0,0,10,10]}}]}}"#,
-    )
-}
 
 fn recovered(steps: Vec<(SceneId, Step)>) -> (Presenter, Instant) {
     let (mut presenter, now, job) = recovering(steps);

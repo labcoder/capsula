@@ -26,6 +26,21 @@ fn transform(presenter: &Presenter) -> Affine {
     frame.items()[0].transform
 }
 
+/// The transform and opacity of each item the shown frames paint.
+fn painted(presenter: &Presenter) -> Vec<(Affine, f32)> {
+    let mut painted = Vec::new();
+    assert!(!presenter.frames().borrow().paint(|frame, _| {
+        painted.extend(
+            frame
+                .items()
+                .iter()
+                .map(|item| (item.transform, item.opacity)),
+        );
+        Ok::<_, ()>(())
+    }));
+    painted
+}
+
 #[test]
 fn placement_is_installed_for_live_steps_and_kept_after_stop() {
     let (mut presenter, now) = live();
@@ -106,34 +121,14 @@ fn a_pending_first_paint_is_placed_and_a_stage_change_keeps_its_clock_pending() 
     assert!(presenter.sample_at(ms(now, 2000)).0.changed);
     let frames = presenter.frames();
     frames.borrow_mut().shown = true;
-    let mut painted = Vec::new();
-    assert!(!frames.borrow().paint(|frame, _| {
-        painted.extend(
-            frame
-                .items()
-                .iter()
-                .map(|item| (item.transform, item.opacity)),
-        );
-        Ok::<_, ()>(())
-    }));
     let placed = Affine::pose(1.0, 0.0, Vec2::new(44.0, 54.0));
-    assert_eq!(painted, [(placed, 0.0)]);
+    assert_eq!(painted(&presenter), [(placed, 0.0)]);
     presenter.set_stage(stage());
     assert!(presenter.sample_at(ms(now, 2000)).0.changed);
     assert!(presenter.begin_painted(ms(now, 2000)));
     presenter.sample_at(ms(now, 2400));
-    painted.clear();
-    assert!(!frames.borrow().paint(|frame, _| {
-        painted.extend(
-            frame
-                .items()
-                .iter()
-                .map(|item| (item.transform, item.opacity)),
-        );
-        Ok::<_, ()>(())
-    }));
     assert_eq!(
-        painted,
+        painted(&presenter),
         [(Affine::pose(2.0, 0.0, Vec2::new(290.0, 340.0)), 0.5)]
     );
     assert!(!presenter.begin_painted(ms(now, 2500)));
@@ -168,18 +163,8 @@ fn placement_preserves_an_empty_pending_slot_and_its_late_appearance_clamp() {
     assert!(presenter.sample_at(ms(now, 300)).0.visible);
     assert_eq!(frames.borrow().sampled_ms(LIVE), Some(200));
     frames.borrow_mut().shown = true;
-    let mut painted = Vec::new();
-    assert!(!frames.borrow().paint(|frame, _| {
-        painted.extend(
-            frame
-                .items()
-                .iter()
-                .map(|item| (item.transform, item.opacity)),
-        );
-        Ok::<_, ()>(())
-    }));
     assert_eq!(
-        painted,
+        painted(&presenter),
         [(Affine::pose(1.0, 0.0, Vec2::new(44.0, 54.0)), 0.0)]
     );
     let observation = frames.borrow().painted(LIVE).expect("painted");
@@ -189,18 +174,8 @@ fn placement_preserves_an_empty_pending_slot_and_its_late_appearance_clamp() {
     assert_eq!(frames.borrow().painted(LIVE), Some(observation));
     assert!(presenter.begin_painted(ms(now, 400)));
     presenter.sample_at(ms(now, 800));
-    painted.clear();
-    assert!(!frames.borrow().paint(|frame, _| {
-        painted.extend(
-            frame
-                .items()
-                .iter()
-                .map(|item| (item.transform, item.opacity)),
-        );
-        Ok::<_, ()>(())
-    }));
     assert_eq!(
-        painted,
+        painted(&presenter),
         [(Affine::pose(2.0, 0.0, Vec2::new(290.0, 340.0)), 0.5)]
     );
     assert!(!presenter.begin_painted(ms(now, 900)));
