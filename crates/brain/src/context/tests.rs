@@ -2204,3 +2204,86 @@ fn every_screen_class_tells_the_model_its_own_fixed_line() {
         );
     }
 }
+
+#[test]
+fn a_screen_picture_tells_the_model_what_it_is_and_where_the_line_lies() {
+    let jpeg = Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).expect("a jpeg");
+    let request = || ModelRequest {
+        choice: snapshot(Origin::Kumo, None).choice,
+        instructions: String::new(),
+        input: vec![message(Role::User, "words")],
+        tools: Vec::new(),
+    };
+    let picture =
+        "The image is a picture of the user's screen, taken when they let go of the talk keys.";
+    let ink = crate::screen::InkBounds {
+        left: 9_871,
+        top: 20,
+        right: 9_890,
+        bottom: 41,
+    };
+    let mut pointed = request();
+    assert_eq!(
+        pointed.add_screen(&Screen::Picture(jpeg.clone(), Some(ink))),
+        Ok(())
+    );
+    assert_eq!(
+        pointed.input,
+        [
+            message(Role::User, "words"),
+            InputItem::Image(jpeg.clone()),
+            message(Role::Developer, picture),
+            message(
+                Role::Developer,
+                "While speaking, the user moved the mouse pointer to show you something. The pink line on the image follows that movement. It was drawn on the image for you and is not on their screen. It lies inside the rectangle from (9871, 20) to (9890, 41), in image pixels."
+            ),
+        ]
+    );
+    let screen = format!("{:?}", Screen::Picture(jpeg.clone(), Some(ink)));
+    assert!(
+        !screen.contains("9871") && !screen.contains("9890"),
+        "{screen}"
+    );
+    let mut alone = request();
+    assert_eq!(
+        alone.add_screen(&Screen::Picture(jpeg.clone(), None)),
+        Ok(())
+    );
+    assert_eq!(
+        alone.input,
+        [
+            message(Role::User, "words"),
+            InputItem::Image(jpeg),
+            message(Role::Developer, picture),
+        ]
+    );
+    for (class, line) in [
+        (
+            ScreenClass::NotReady,
+            "The screen was not included: it wasn't ready in time.",
+        ),
+        (
+            ScreenClass::TooLarge,
+            "The screen was not included: its picture was too large.",
+        ),
+        (
+            ScreenClass::Changed,
+            "The screen was not included: the display changed while it was being captured.",
+        ),
+        (
+            ScreenClass::ModelCantSee,
+            "The screen was not included: this model can't be sent images.",
+        ),
+    ] {
+        let mut closed = request();
+        assert_eq!(
+            closed.add_screen(&Screen::PictureNotIncluded(class)),
+            Ok(())
+        );
+        assert_eq!(
+            closed.input,
+            [message(Role::User, "words"), message(Role::Developer, line)],
+            "{class:?}"
+        );
+    }
+}

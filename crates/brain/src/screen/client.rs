@@ -157,10 +157,6 @@ impl HoldClient {
     /// As for [`context`].
     ///
     /// [`context`]: Self::context
-    #[expect(
-        dead_code,
-        reason = "the screen hold's release starts it in the next change"
-    )]
     pub(crate) async fn display(
         &self,
         owner: Owner,

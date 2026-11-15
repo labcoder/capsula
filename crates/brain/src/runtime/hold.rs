@@ -26,7 +26,7 @@ use crate::coordinator::{HoldKey, HoldSnapshot};
 use crate::platform::ShellProcess;
 use crate::screen::{HoldClient, MAX_TTL};
 use crate::voice::stt::{Decode, SttHandle, SttResult};
-use screen::{LATEST_START, Outcome, ScreenEvent, ScreenPart};
+use screen::{LATEST_START, Outcome, ScreenEvent, ScreenPart, capturing};
 
 #[derive(Debug)]
 enum FailureStage {
@@ -50,11 +50,39 @@ enum Refusal {
 enum NoScreen {
     /// A repeat of a voice hold's gesture.
     Repeated,
-    Gate(#[expect(dead_code, reason = "read only by the hold-taken log line")] ScreenOff),
-    /// Recognized longer ago than `LATEST_START`.
+    Gate(ScreenOff),
+    /// Recognized, or for a screen hold released, longer ago than `LATEST_START`.
     TooLate,
     /// No worker client, or the hold isn't pending or already has a part.
     NotStarted,
+    /// A release whose path has more than `MAX_PATH_POINTS` points.
+    PathTooLong,
+    /// A release for no screen hold, or for one that isn't armed.
+    NotArmed,
+    /// A release whose exclusion stamp is earlier than its own stamp.
+    ExcludedEarly,
+    /// A release whose exclusion stamp is later than now, or can't be read.
+    ExcludedLate,
+}
+
+impl NoScreen {
+    /// What an armed part closes as when its release starts nothing.
+    fn part(&self) -> ScreenPart {
+        match self {
+            Self::Gate(ScreenOff::TurnedOff) => ScreenPart::Discarded,
+            Self::Gate(ScreenOff::ModelCantSee) => ScreenPart::Closed(ScreenClass::ModelCantSee),
+            _ => ScreenPart::Closed(ScreenClass::NotReady),
+        }
+    }
+}
+
+/// Which hold a recognition admitted: a screen hold's part follows the show-screen setting, a
+/// window hold's the screen-holds setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Voice,
+    Window,
+    Screen,
 }
 
 #[derive(Debug, Default)]
@@ -121,6 +149,7 @@ pub(super) struct Holds {
 
 struct Hold {
     key: HoldKey,
+    kind: Kind,
     thread: Option<ThreadId>,
     cancel: Arc<AtomicBool>,
     snapshot: Option<HoldSnapshot>,
@@ -131,6 +160,8 @@ struct Hold {
     decode: Option<oneshot::Receiver<SttResult>>,
     terminal: Option<HoldStatus>,
     screen: ScreenPart,
+    /// The transcript, while it waits for a screen hold's picture.
+    words: Option<String>,
 }
 
 impl std::fmt::Debug for Holds {
@@ -146,10 +177,7 @@ impl Drop for Hold {
     fn drop(&mut self) {
         debug_assert!(
             std::thread::panicking()
-                || !matches!(
-                    self.screen,
-                    ScreenPart::Waiting { .. } | ScreenPart::Ready(_)
-                ),
+                || !(capturing(&self.screen) || matches!(self.screen, ScreenPart::Ready(_))),
             "a hold ended past both of its screen part's closers"
         );
     }
@@ -377,7 +405,7 @@ impl Brain {
                 .pending
                 .as_ref()
                 .is_some_and(|hold| hold.key == held);
-            let admitted = self.admit_hold(held, *thread, *selection, link)?;
+            let admitted = self.admit_hold(held, *thread, *selection, Kind::Window, link)?;
             let screen = if repeated {
                 Err(NoScreen::Repeated)
             } else {
@@ -400,9 +428,24 @@ impl Brain {
                 thread,
                 selection,
             } => {
-                if self.admit_hold(key(*gesture), *thread, *selection, link)? {
+                if self.admit_hold(key(*gesture), *thread, *selection, Kind::Voice, link)? {
                     tracing::info!(hold = "voice", "hold taken");
                 }
+            }
+            ControlToBrain::ScreenHoldRecognized {
+                gesture,
+                thread,
+                selection,
+                ..
+            } => {
+                let held = key(*gesture);
+                if self.admit_hold(held, *thread, *selection, Kind::Screen, link)? {
+                    let screen = self.hold_arm(held);
+                    tracing::info!(hold = "screen", ?screen, "hold taken");
+                }
+            }
+            ControlToBrain::ScreenRelease { gesture, .. } => {
+                self.screen_release(key(*gesture), message, link)?;
             }
             ControlToBrain::GestureCancel { gesture } => {
                 self.holds.high = self.holds.high.max(gesture.0);
@@ -469,22 +512,6 @@ impl Brain {
                     self.hold_decode(link)?;
                 }
             }
-            // shortcut: nothing sends a screen hold yet, so both of its controls are refused; the
-            // runtime that arms the hold and captures at its release replaces these two arms.
-            ControlToBrain::ScreenHoldRecognized { gesture, .. } => {
-                if gesture.0 > self.holds.high {
-                    self.holds.high = gesture.0;
-                    let failed = HoldStatus::Failed(HoldFailure::Unavailable);
-                    Self::hold_status(key(*gesture), failed, link)?;
-                }
-            }
-            // The answer ends the shell's exclusion lease.
-            ControlToBrain::ScreenRelease { gesture, .. } => {
-                link.control(&ControlToShell::CaptureFailed {
-                    capture_for: CaptureFor::Gesture(*gesture),
-                    reason: CaptureFailure::Unavailable,
-                })?;
-            }
             ControlToBrain::ExclusionLapsed { lease } if self.holds.lease_lapsed(*lease) => {}
             ControlToBrain::Settings(SettingsOp::SetDefaultModel(_))
             | ControlToBrain::AccountOp(_)
@@ -512,6 +539,7 @@ impl Brain {
         key: HoldKey,
         thread: Option<ThreadId>,
         selection: u64,
+        kind: Kind,
         link: &mut Link<'_, '_>,
     ) -> Result<bool, Full> {
         if key.gesture.0 <= self.holds.high {
@@ -558,6 +586,7 @@ impl Brain {
         };
         self.holds.pending = Some(Hold {
             key,
+            kind,
             thread,
             cancel,
             snapshot: None,
@@ -568,6 +597,7 @@ impl Brain {
             decode: None,
             terminal: None,
             screen: ScreenPart::None,
+            words: None,
         });
         if state == PartState::Loading {
             Self::hold_status(key, HoldStatus::Loading, link)?;
@@ -602,9 +632,15 @@ impl Brain {
             .snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.defaults.choice.clone());
+        let kind = hold.kind;
         // The gate passed for the default model; the thread may pin another.
         if !matches!(hold.screen, ScreenPart::None) {
-            match self.screen_gate(choice.as_ref()) {
+            let gate = if kind == Kind::Screen {
+                self.display_gate(choice.as_ref())
+            } else {
+                self.screen_gate(choice.as_ref())
+            };
+            match gate {
                 ScreenHolds::On { .. } => {}
                 // Switched off by the user, so the hold goes on as voice with no line.
                 ScreenHolds::Off(ScreenOff::TurnedOff) => self.holds.close_screen_as(None),
@@ -625,6 +661,10 @@ impl Brain {
         };
         if hold.cancel.load(Ordering::SeqCst) {
             return self.hold_end(HoldStatus::Failed(HoldFailure::ChoiceChanged), link);
+        }
+        // Its words are in, so the voice part no longer matters; the run's admission still does.
+        if hold.words.is_some() {
+            return Ok(());
         }
         if Instant::now() >= hold.deadline {
             return self.hold_end(HoldStatus::Failed(HoldFailure::TimedOut), link);
@@ -743,6 +783,15 @@ impl Brain {
         }
         // A screen answer releases its lease whatever the hold's state, so it skips both ends.
         let screen = matches!(event, Event::Screen(_));
+        // Words that waited for a picture until its ticket's deadline go on without it.
+        if !screen
+            && let Some(hold) = self.holds.pending.as_mut().filter(|hold| {
+                !hold.cancel.load(Ordering::SeqCst) && Instant::now() >= hold.deadline
+            })
+            && let Some(text) = hold.words.take()
+        {
+            return self.hold_submit(text, link);
+        }
         if !screen
             && self
                 .holds
@@ -795,23 +844,16 @@ impl Brain {
                 if text.trim().is_empty() {
                     return self.hold_end(HoldStatus::Empty, link);
                 }
-                // shortcut: busy transfer discards the hold; retain its bounded cancellable owner until admission opens when queued voice is needed.
-                if !self.admits_turn(link) {
-                    return self.hold_end(HoldStatus::Failed(HoldFailure::Busy), link);
-                }
-                let screen = self.holds.submit_screen();
-                let Some(mut hold) = self.holds.take() else {
+                // A screen hold's words wait for the picture it's still capturing, until the
+                // ticket's deadline.
+                if let Some(hold) = self.holds.pending.as_mut()
+                    && let ScreenPart::Capturing { until, .. } = hold.screen
+                {
+                    hold.deadline = until;
+                    hold.words = Some(text);
                     return Ok(());
-                };
-                let snapshot = hold.snapshot.take().expect("decode has a pinned snapshot");
-                match self.coordinator.submit_hold(snapshot, text.into(), screen) {
-                    Ok(effects) => self.apply(effects, Some(link)).map_err(|_| Full),
-                    Err(()) => Self::hold_status(
-                        hold.key,
-                        HoldStatus::Failed(HoldFailure::ChoiceChanged),
-                        link,
-                    ),
                 }
+                self.hold_submit(text, link)
             }
             Event::Decoded(_, SttResult::NotLoaded | SttResult::Stale) => {
                 self.hold_end(HoldStatus::Failed(HoldFailure::NotLoaded), link)
@@ -824,6 +866,27 @@ impl Brain {
         }
     }
 
+    /// Hands the pending hold's transcript and screen to its run.
+    fn hold_submit(&mut self, text: String, link: &mut Link<'_, '_>) -> Result<(), Full> {
+        // shortcut: busy transfer discards the hold; retain its bounded cancellable owner until admission opens when queued voice is needed.
+        if !self.admits_turn(link) {
+            return self.hold_end(HoldStatus::Failed(HoldFailure::Busy), link);
+        }
+        let screen = self.holds.submit_screen();
+        let Some(mut hold) = self.holds.take() else {
+            return Ok(());
+        };
+        let snapshot = hold.snapshot.take().expect("decode has a pinned snapshot");
+        match self.coordinator.submit_hold(snapshot, text.into(), screen) {
+            Ok(effects) => self.apply(effects, Some(link)).map_err(|_| Full),
+            Err(()) => Self::hold_status(
+                hold.key,
+                HoldStatus::Failed(HoldFailure::ChoiceChanged),
+                link,
+            ),
+        }
+    }
+
     /// Whether a hold on `choice` may show the model the window under the pointer now, or why not.
     fn screen_gate(&self, choice: Option<&ModelChoice>) -> ScreenHolds {
         self.account.screen_holds(
@@ -833,11 +896,32 @@ impl Brain {
         )
     }
 
-    /// The user turned screen holds off: a pending hold goes on as voice with no line, and every
-    /// run's image is withdrawn.
+    /// The user turned screen holds off: a pending window hold goes on as voice with no line, and
+    /// every run's window image is withdrawn. A screen hold's picture follows its own setting.
     pub(super) fn screen_holds_off(&mut self) {
-        self.holds.close_screen_as(None);
+        if self
+            .holds
+            .pending
+            .as_ref()
+            .is_some_and(|hold| hold.kind != Kind::Screen)
+        {
+            self.holds.close_screen_as(None);
+        }
         self.offline(Input::ScreenHoldsOff);
+    }
+
+    /// The user turned showing the screen off: a pending screen hold goes on as voice with no
+    /// line, and every run's screen picture is withdrawn.
+    pub(super) fn show_screen_off(&mut self) {
+        if self
+            .holds
+            .pending
+            .as_ref()
+            .is_some_and(|hold| hold.kind == Kind::Screen)
+        {
+            self.holds.close_screen_as(None);
+        }
+        self.offline(Input::ShowScreenOff);
     }
 
     /// Sends the gate's state for the default model once per connection, then whenever it changes.
@@ -883,7 +967,7 @@ impl Brain {
     }
 
     /// Takes a screen task's answer. The capture's end, either way, releases the shell's
-    /// exclusion lease for that hold on this connection.
+    /// exclusion lease for that hold on this connection, and words waiting for its picture go on.
     fn hold_screen_event(
         &mut self,
         event: ScreenEvent,
@@ -913,6 +997,19 @@ impl Brain {
         if unsupported {
             self.screen_holds_changed(link)?;
         }
-        Ok(())
+        let waited = self
+            .holds
+            .pending
+            .as_mut()
+            .filter(|hold| !capturing(&hold.screen))
+            .and_then(|hold| {
+                let cancelled = hold.cancel.load(Ordering::SeqCst);
+                hold.words.take().map(|text| (text, cancelled))
+            });
+        match waited {
+            None => Ok(()),
+            Some((_, true)) => self.hold_end(HoldStatus::Failed(HoldFailure::ChoiceChanged), link),
+            Some((text, false)) => self.hold_submit(text, link),
+        }
     }
 }

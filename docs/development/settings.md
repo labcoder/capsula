@@ -281,7 +281,9 @@ hold is released. `SetShowScreen` saves it. It has its own key so that `screen_h
 about the window under the pointer, is never read as a choice about the whole screen: a file
 without `show_screen` reads as `DEFAULT_SHOW_SCREEN`, off, whatever `screen_holds` says. A value
 of the wrong type reads as off, and so does a file that can't be read. No interface sends the
-op and nothing reads the value yet.
+op yet. The brain checks it when a screen hold is recognized, released and run, and turning it
+off withdraws every run's screen picture, as turning `screen_holds` off withdraws every window
+image ([engines](engines.md)).
 
 `removing` names a removal that hasn't finished. At start-up, before anything is served, the
 brain deletes each listed part's folder under `%LOCALAPPDATA%\<product>\models` and then queues a

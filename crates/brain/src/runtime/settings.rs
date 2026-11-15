@@ -344,11 +344,17 @@ impl Brain {
     ) -> Result<(), Full> {
         let outcome = match written {
             Ok((pending, Ok(()))) => {
-                let screen_holds = self.config.view().screen_holds;
+                let (screen_holds, show_screen) = {
+                    let view = self.config.view();
+                    (view.screen_holds, view.show_screen)
+                };
                 self.config.commit(pending);
                 self.voice_policy();
                 if screen_holds && !self.config.view().screen_holds {
                     self.screen_holds_off();
+                }
+                if show_screen && !self.config.view().show_screen {
+                    self.show_screen_off();
                 }
                 #[cfg(test)]
                 self.observer.send(super::Seen::SettingsCommitted).ok();

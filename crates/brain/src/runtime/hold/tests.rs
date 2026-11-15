@@ -7,6 +7,8 @@ use crate::tap::Tap;
 use crate::test_support::{self, Scratch};
 use kumochi_protocol::message::GestureId;
 
+mod screen_hold;
+
 const KEY: HoldKey = HoldKey {
     epoch: 0,
     gesture: GestureId(9),
@@ -604,6 +606,7 @@ fn recording(brain: &mut Brain) {
     };
     brain.holds.pending = Some(Hold {
         key: KEY,
+        kind: Kind::Voice,
         thread: None,
         cancel,
         snapshot: Some(read.snapshot),
@@ -614,6 +617,7 @@ fn recording(brain: &mut Brain) {
         decode: None,
         terminal: None,
         screen: ScreenPart::None,
+        words: None,
     });
     brain.holds.debt = Some(KEY);
     brain
@@ -1395,6 +1399,7 @@ async fn the_transcript_hands_a_ready_image_to_its_run() {
 fn a_hold_dropped_with_a_live_screen_part_fails_in_tests() {
     drop(Hold {
         key: KEY,
+        kind: Kind::Voice,
         thread: None,
         cancel: Arc::default(),
         snapshot: None,
@@ -1405,6 +1410,7 @@ fn a_hold_dropped_with_a_live_screen_part_fails_in_tests() {
         decode: None,
         terminal: None,
         screen: waiting(),
+        words: None,
     });
 }
 
@@ -1696,61 +1702,6 @@ async fn a_screen_hold_shares_the_voice_admission_and_releases_its_lease_when_re
     assert_eq!(control(&mut output), failed);
     assert!(brain.hold_control(&message, &mut link).unwrap());
     assert_eq!(control(&mut output), failed, "a stale gesture's lease too");
-    assert!(output.is_empty());
-    assert!(brain.holds.pending.is_none());
-    brain.close().await;
-}
-
-#[tokio::test]
-async fn a_screen_hold_and_its_release_are_refused_and_the_release_ends_its_lease() {
-    use kumochi_protocol::geometry::{PhysicalPoint, PointerPath, ReleasePointer};
-    let scratch = Scratch::new("hold-screen-release-refused");
-    let mut brain = test_support::brain(&scratch, "");
-    let (out, mut output) = mpsc::channel(16);
-    let queue = RefCell::new(DataQueue::new(super::super::window()));
-    let ready_notify = Notify::new();
-    let mut tap = Tap::from_env();
-    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
-    let recognized = ControlToBrain::ScreenHoldRecognized {
-        gesture: KEY.gesture,
-        thread: None,
-        selection: 1,
-        t_qpc: 1,
-    };
-    let release = ControlToBrain::ScreenRelease {
-        gesture: KEY.gesture,
-        lease: LEASE,
-        t_qpc: 2,
-        excluded_qpc: 3,
-        pointer: ReleasePointer(PhysicalPoint([5, 5])),
-        path: PointerPath(vec![PhysicalPoint([5, 5]), PhysicalPoint([40, 5])]),
-    };
-    let failed = ControlToShell::CaptureFailed {
-        capture_for: kumochi_protocol::message::CaptureFor::Gesture(KEY.gesture),
-        reason: kumochi_protocol::message::CaptureFailure::Unavailable,
-    };
-    assert!(brain.hold_control(&recognized, &mut link).unwrap());
-    assert_eq!(
-        control(&mut output),
-        ControlToShell::VoiceHoldStatus {
-            gesture: KEY.gesture,
-            status: HoldStatus::Failed(HoldFailure::Unavailable),
-        }
-    );
-    assert!(brain.hold_control(&release, &mut link).unwrap());
-    assert_eq!(control(&mut output), failed);
-    // A refused gesture is used up: its repeat and a voice hold under its number get nothing.
-    let voice = ControlToBrain::VoiceHoldRecognized {
-        gesture: KEY.gesture,
-        thread: None,
-        selection: 1,
-    };
-    for repeat in [&recognized, &voice] {
-        assert!(brain.hold_control(repeat, &mut link).unwrap());
-        assert!(output.is_empty());
-    }
-    assert!(brain.hold_control(&release, &mut link).unwrap());
-    assert_eq!(control(&mut output), failed, "a second release's lease too");
     assert!(output.is_empty());
     assert!(brain.holds.pending.is_none());
     brain.close().await;
