@@ -1,4 +1,4 @@
-use kumochi_protocol::geometry::PhysicalPoint;
+use kumochi_protocol::geometry::{PhysicalPoint, PointerPath, ReleasePointer};
 use kumochi_protocol::message::{
     ControlToBrain, GestureId, HeldScreen, LeaseGeneration, ModelName, RunId, RunOrigin,
     ScreenClass, ScreenHolds, ScreenOff, ThreadId,
@@ -15,6 +15,18 @@ pub struct ScreenHold {
     pub pointer: PhysicalPoint,
     pub lease: LeaseGeneration,
     pub t_qpc: u64,
+}
+
+/// What the shell took when the keys of a hold that shows the screen at release came up: the
+/// pointer, its path over the hold, the exclusion lease, when the keys were released and when
+/// the lease's last window was excluded. It has no `Debug`, so neither the pointer nor the
+/// path is printed.
+pub struct HoldRelease {
+    pub pointer: PhysicalPoint,
+    pub path: PointerPath,
+    pub lease: LeaseGeneration,
+    pub t_qpc: u64,
+    pub excluded_qpc: u64,
 }
 
 /// What a screen hold's own line says.
@@ -64,6 +76,8 @@ pub(super) struct Hold {
     /// Set for a screen hold, and for one refused its lease. Never the pointer: `Runs` prints
     /// this.
     pub(super) screen: Option<ScreenLine>,
+    /// A hold that shows the screen once it's released, until its `ScreenRelease` is built.
+    pub(super) release_due: bool,
 }
 
 impl Runs {
@@ -151,12 +165,9 @@ impl Runs {
         }
     }
 
-    /// Starts a hold: a screen hold when `screen` is given, else a voice-only one.
-    pub fn begin_hold(
-        &mut self,
-        gesture: GestureId,
-        screen: Option<ScreenHold>,
-    ) -> Result<ControlToBrain, Refused> {
+    /// Admits a hold and makes it the current one: a voice-only hold until its caller says
+    /// otherwise.
+    fn admit_hold(&mut self, gesture: GestureId) -> Result<&mut Hold, Refused> {
         if gesture.0 <= self.hold_high {
             return Err(Refused::Busy);
         }
@@ -173,14 +184,25 @@ impl Runs {
         }
         self.forget_texts(|_| true);
         let thread = self.thread();
-        let selection = self.revision;
-        self.hold = Some(Hold {
+        Ok(self.hold.insert(Hold {
             gesture,
-            revision: selection,
+            revision: self.revision,
             thread,
             run: None,
-            screen: screen.map(|_| ScreenLine::WillSee),
-        });
+            screen: None,
+            release_due: false,
+        }))
+    }
+
+    /// Starts a hold: a screen hold when `screen` is given, else a voice-only one.
+    pub fn begin_hold(
+        &mut self,
+        gesture: GestureId,
+        screen: Option<ScreenHold>,
+    ) -> Result<ControlToBrain, Refused> {
+        let hold = self.admit_hold(gesture)?;
+        hold.screen = screen.map(|_| ScreenLine::WillSee);
+        let (thread, selection) = (hold.thread, hold.revision);
         Ok(match screen {
             Some(ScreenHold {
                 pointer,
@@ -199,6 +221,66 @@ impl Runs {
                 thread,
                 selection,
             },
+        })
+    }
+
+    /// Starts a hold that shows the model the screen once it's released; nothing of the screen
+    /// is taken now. The caller starts one only while the standing notice is `On`. It has no
+    /// line of its own yet.
+    pub fn begin_screen_hold(
+        &mut self,
+        gesture: GestureId,
+        t_qpc: u64,
+    ) -> Result<ControlToBrain, Refused> {
+        let hold = self.admit_hold(gesture)?;
+        hold.release_due = true;
+        Ok(ControlToBrain::ScreenHoldRecognized {
+            gesture,
+            thread: hold.thread,
+            selection: hold.revision,
+            t_qpc,
+        })
+    }
+
+    /// Whether `gesture`'s release shows the screen: it is the current hold, it began as one
+    /// that shows the screen at release, its `ScreenRelease` isn't built yet, and `notice`, the
+    /// standing notice as it is now, is still `On`. A cancelled hold is no longer current, and a
+    /// release before the hold is listening cancels it. The shell asks before it takes the lease.
+    pub fn releases_screen(&self, gesture: GestureId, notice: ScreenNotice<'_>) -> bool {
+        matches!(notice, ScreenNotice::On(_))
+            && self
+                .hold
+                .is_some_and(|hold| hold.gesture == gesture && hold.release_due)
+    }
+
+    /// Builds the one `ScreenRelease` of `gesture`'s hold, by the rule of
+    /// [`Self::releases_screen`]. None leaves the hold as it was, and the lease unused.
+    pub fn screen_release(
+        &mut self,
+        gesture: GestureId,
+        notice: ScreenNotice<'_>,
+        release: HoldRelease,
+    ) -> Option<ControlToBrain> {
+        if !self.releases_screen(gesture, notice) {
+            return None;
+        }
+        if let Some(hold) = &mut self.hold {
+            hold.release_due = false;
+        }
+        let HoldRelease {
+            pointer,
+            path,
+            lease,
+            t_qpc,
+            excluded_qpc,
+        } = release;
+        Some(ControlToBrain::ScreenRelease {
+            gesture,
+            lease,
+            t_qpc,
+            excluded_qpc,
+            pointer: ReleasePointer(pointer),
+            path,
         })
     }
 
