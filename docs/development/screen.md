@@ -352,6 +352,27 @@ desktop:
 cargo test -p kumochi-brain --lib native_window_probe -- --ignored --exact --nocapture
 ```
 
+## Display under a point (dormant)
+
+`Capturer::capture_display` takes one frame of the monitor nearest a point, with the pointer
+drawn. It reads the monitor's bounds and effective DPI, makes a capture item for that monitor,
+refuses `DisplayChanged` unless the item's size equals the bounds, and returns the bounds with
+the frame. Nothing calls it yet.
+
+Only the shell's exclusion lease keeps Kumochi's windows out of a display frame, and exclusion
+takes effect when Windows next redraws. So the capture takes `excluded`, the performance-counter
+stamp the shell reads once every exclusion setter has succeeded, and accepts only a frame drawn
+at least one compositor redraw later. A redraw is the compositor's refresh period
+(`DwmGetCompositionTimingInfo`), or 100 ms [guess] when that can't be read. The session doesn't
+start before the counter passes that time. A frame drawn earlier (its `SystemRelativeTime`, in
+100 ns on the counter's clock) is released and the next one taken, until the deadline refuses
+`Expired`. A zero stamp is refused `Expired` too.
+
+Two ignored native checks keep pixels in memory and are run by hand on Rez:
+`first_display_frame_against_its_session_start` prints each first frame's draw time minus its
+session's start, cold and warm, and is run on a still screen; `primary_display_cold_and_warm_samples`
+times the capture.
+
 ## Sealing a hold's image (dormant)
 
 A hold's `Context` carries the hold's point. The

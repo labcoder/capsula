@@ -41,8 +41,8 @@ pub(crate) struct Acquired {
     pub(crate) dpi: u32,
 }
 
-/// The window a hold points at, as the walk resolved it. Its capture and its element walk use
-/// this same window.
+/// The window a hold points at, as the z-order walk from the pointer resolved it. Its capture
+/// uses this same window.
 pub(crate) struct Target {
     /// The root window, its process and its frame: the captured surface's physical bounds.
     pub(crate) top: TopWindow,
@@ -87,6 +87,29 @@ pub(crate) trait Capturer {
         _until: Instant,
         _frame: &mut RawFrame,
     ) -> Result<Acquired, Failure> {
+        Err(Failure::Fault(NO_WINDOW_CAPTURE))
+    }
+
+    /// Fills `frame` through [`RawFrame::begin`] with one frame of the monitor nearest `point`,
+    /// pointer included, drawn at least one compositor redraw after `excluded`: the
+    /// performance-counter stamp taken once Kumochi's windows were kept out of capture. It
+    /// starts nothing at or after `until`, and returns the monitor's physical bounds.
+    ///
+    /// # Errors
+    /// `Expired` for a zero stamp or when no frame drawn late enough arrived by `until`,
+    /// `DisplayChanged` when the monitor's geometry moved, a numeric fault, or `Retire` when it
+    /// can't show its capture stopped.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the worker's display request isn't wired yet")
+    )]
+    fn capture_display(
+        &mut self,
+        _point: PhysicalPoint,
+        _excluded: u64,
+        _until: Instant,
+        _frame: &mut RawFrame,
+    ) -> Result<(Acquired, PhysicalRect), Failure> {
         Err(Failure::Fault(NO_WINDOW_CAPTURE))
     }
 }
