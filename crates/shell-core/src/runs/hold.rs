@@ -76,7 +76,8 @@ pub(super) struct Hold {
     /// Set for a screen hold, and for one refused its lease. Never the pointer: `Runs` prints
     /// this.
     pub(super) screen: Option<ScreenLine>,
-    /// A hold that shows the screen once it's released, until its `ScreenRelease` is built.
+    /// A hold that shows the screen once it's released, until its `ScreenRelease` is built or
+    /// refused.
     pub(super) release_due: bool,
 }
 
@@ -224,44 +225,79 @@ impl Runs {
         })
     }
 
-    /// Starts a hold that shows the model the screen once it's released; nothing of the screen
-    /// is taken now. The caller starts one only while the standing notice is `On`. It has no
-    /// line of its own yet.
+    /// Starts a hold that shows the model the screen once it's released, while the standing
+    /// notice is `On`; else a voice-only one. The notice is [`Self::screen_notice`]'s, read here
+    /// from the same two answers. Nothing of the screen is taken now, and the hold has no line
+    /// of its own yet.
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the settings model's answer about the target thread, carried unchanged"
+    )]
     pub fn begin_screen_hold(
         &mut self,
         gesture: GestureId,
         t_qpc: u64,
+        own_model: bool,
+        default: Option<&ModelName>,
     ) -> Result<ControlToBrain, Refused> {
+        let on = matches!(self.screen_notice(own_model, default), ScreenNotice::On(_));
         let hold = self.admit_hold(gesture)?;
-        hold.release_due = true;
-        Ok(ControlToBrain::ScreenHoldRecognized {
-            gesture,
-            thread: hold.thread,
-            selection: hold.revision,
-            t_qpc,
+        hold.release_due = on;
+        let (thread, selection) = (hold.thread, hold.revision);
+        Ok(if on {
+            ControlToBrain::ScreenHoldRecognized {
+                gesture,
+                thread,
+                selection,
+                t_qpc,
+            }
+        } else {
+            ControlToBrain::VoiceHoldRecognized {
+                gesture,
+                thread,
+                selection,
+            }
         })
     }
 
     /// Whether `gesture`'s release shows the screen: it is the current hold, it began as one
-    /// that shows the screen at release, its `ScreenRelease` isn't built yet, and `notice`, the
-    /// standing notice as it is now, is still `On`. A cancelled hold is no longer current, and a
-    /// release before the hold is listening cancels it. The shell asks before it takes the lease.
-    pub fn releases_screen(&self, gesture: GestureId, notice: ScreenNotice<'_>) -> bool {
-        matches!(notice, ScreenNotice::On(_))
-            && self
-                .hold
-                .is_some_and(|hold| hold.gesture == gesture && hold.release_due)
+    /// that shows the screen at release, no `ScreenRelease` was built or refused for it, and the
+    /// standing notice, read now as [`Self::screen_notice`] reads it, is still `On`. A no for
+    /// the current hold is final: nothing builds its release later, whatever the notice says
+    /// then. A cancelled hold is no longer current, and a release before the hold is listening
+    /// cancels it. The shell asks before it takes the lease.
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the settings model's answer about the target thread, carried unchanged"
+    )]
+    pub fn releases_screen(
+        &mut self,
+        gesture: GestureId,
+        own_model: bool,
+        default: Option<&ModelName>,
+    ) -> bool {
+        let on = matches!(self.screen_notice(own_model, default), ScreenNotice::On(_));
+        let Some(hold) = self.hold.as_mut().filter(|hold| hold.gesture == gesture) else {
+            return false;
+        };
+        hold.release_due &= on;
+        hold.release_due
     }
 
     /// Builds the one `ScreenRelease` of `gesture`'s hold, by the rule of
-    /// [`Self::releases_screen`]. None leaves the hold as it was, and the lease unused.
+    /// [`Self::releases_screen`], which it asks again. None leaves the lease unused.
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the settings model's answer about the target thread, carried unchanged"
+    )]
     pub fn screen_release(
         &mut self,
         gesture: GestureId,
-        notice: ScreenNotice<'_>,
+        own_model: bool,
+        default: Option<&ModelName>,
         release: HoldRelease,
     ) -> Option<ControlToBrain> {
-        if !self.releases_screen(gesture, notice) {
+        if !self.releases_screen(gesture, own_model, default) {
             return None;
         }
         if let Some(hold) = &mut self.hold {

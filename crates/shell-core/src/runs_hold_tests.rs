@@ -586,12 +586,27 @@ fn release() -> HoldRelease {
     }
 }
 
+/// Stores the brain's word that a hold shows the screen to the model it returns; with that
+/// model as the default and a thread on the default, the standing notice is `On`.
+fn shown_to_luna(runs: &mut Runs) -> kumochi_protocol::message::ModelName {
+    use kumochi_protocol::message::{ModelName, ScreenHolds};
+    let model = ModelName::new("GPT-6 Luna").expect("valid");
+    runs.set_screen_holds(ScreenHolds::On {
+        model: model.clone(),
+    });
+    model
+}
+
 #[test]
 fn a_hold_that_shows_the_screen_at_release_is_admitted_as_any_hold_is() {
     use kumochi_protocol::message::HeldScreen;
     let mut runs = ready();
+    let luna = shown_to_luna(&mut runs);
+    let begin = |runs: &mut Runs, gesture, t_qpc| {
+        runs.begin_screen_hold(GestureId(gesture), t_qpc, false, Some(&luna))
+    };
     assert_eq!(
-        runs.begin_screen_hold(GestureId(1), 515_151_515),
+        begin(&mut runs, 1, 515_151_515),
         Ok(ControlToBrain::ScreenHoldRecognized {
             gesture: GestureId(1),
             thread: Some(ThreadId(1)),
@@ -604,28 +619,26 @@ fn a_hold_that_shows_the_screen_at_release_is_admitted_as_any_hold_is() {
     assert!(!runs.hold_screen(GestureId(1), HeldScreen::Screen));
     assert!(!format!("{runs:?}").contains("515151515"));
     // One hold at a time, a cancel delivered before the next, and each gesture used once.
-    assert_eq!(runs.begin_screen_hold(GestureId(2), 1), Err(Refused::Busy));
+    assert_eq!(begin(&mut runs, 2, 1), Err(Refused::Busy));
     runs.cancel_hold();
-    assert_eq!(runs.begin_screen_hold(GestureId(3), 1), Err(Refused::Busy));
+    assert_eq!(begin(&mut runs, 3, 1), Err(Refused::Busy));
     assert_eq!(runs.take_hold_cancel(), cancel(1));
-    assert_eq!(runs.begin_screen_hold(GestureId(3), 1), Err(Refused::Busy));
+    assert_eq!(begin(&mut runs, 3, 1), Err(Refused::Busy));
     runs.disconnected();
-    assert_eq!(
-        runs.begin_screen_hold(GestureId(4), 1),
-        Err(Refused::Offline)
-    );
+    assert_eq!(begin(&mut runs, 4, 1), Err(Refused::Offline));
     runs.connected(2);
     runs.settings(ThreadId(1));
-    assert_eq!(runs.begin_screen_hold(GestureId(4), 1), Err(Refused::Busy));
+    shown_to_luna(&mut runs);
+    assert_eq!(begin(&mut runs, 4, 1), Err(Refused::Busy));
     // A typed turn waiting on a new thread refuses it, as it refuses a voice hold.
     assert!(runs.select_thread(None));
     assert_eq!(runs.submit("pending", |_| true), Ok(()));
-    assert_eq!(runs.begin_screen_hold(GestureId(5), 1), Err(Refused::Busy));
+    assert_eq!(begin(&mut runs, 5, 1), Err(Refused::Busy));
     runs.refused(1, None);
     // Its first Hold-origin state binds the new thread, as a voice hold's does.
     let selection = runs.revision();
     assert_eq!(
-        runs.begin_screen_hold(GestureId(6), 2),
+        begin(&mut runs, 6, 2),
         Ok(ControlToBrain::ScreenHoldRecognized {
             gesture: GestureId(6),
             thread: None,
@@ -638,48 +651,100 @@ fn a_hold_that_shows_the_screen_at_release_is_admitted_as_any_hold_is() {
 }
 
 #[test]
+fn a_hold_begun_while_the_notice_is_not_on_is_voice_only_and_never_releases_the_screen() {
+    use kumochi_protocol::message::{ModelName, ScreenHolds, ScreenOff};
+    let luna = ModelName::new("GPT-6 Luna").expect("valid");
+    let sol = ModelName::new("GPT-6 Sol").expect("valid");
+    let on = ScreenHolds::On {
+        model: luna.clone(),
+    };
+    let off = |why| Some(ScreenHolds::Off(why));
+    // (what the brain said, the target thread has its own model, the default's name)
+    for (stored, own, default) in [
+        // Nothing said yet on this connection, as after a disconnect.
+        (None, false, Some(&luna)),
+        (Some(on.clone()), true, Some(&luna)),
+        // The default just changed, so the stored `On` names the model before it.
+        (Some(on.clone()), false, Some(&sol)),
+        (Some(on.clone()), false, None),
+        (off(ScreenOff::Unsupported), false, Some(&luna)),
+        (off(ScreenOff::TurnedOff), false, Some(&luna)),
+        (off(ScreenOff::ModelCantSee), false, Some(&luna)),
+        (off(ScreenOff::NotReady), false, Some(&luna)),
+    ] {
+        let mut runs = ready();
+        if let Some(stored) = stored.clone() {
+            runs.set_screen_holds(stored);
+        }
+        assert_eq!(
+            runs.begin_screen_hold(GestureId(1), 515_151_515, own, default),
+            Ok(ControlToBrain::VoiceHoldRecognized {
+                gesture: GestureId(1),
+                thread: Some(ThreadId(1)),
+                selection: 1,
+            }),
+            "{stored:?} {own}"
+        );
+        // The notice coming on afterwards changes nothing: this hold is voice only.
+        runs.set_screen_holds(on.clone());
+        assert!(
+            !runs.releases_screen(GestureId(1), false, Some(&luna)),
+            "{stored:?} {own}"
+        );
+        assert_eq!(
+            runs.screen_release(GestureId(1), false, Some(&luna), release()),
+            None,
+            "{stored:?} {own}"
+        );
+    }
+}
+
+#[test]
 fn only_the_current_hold_of_that_kind_builds_one_screen_release_while_the_notice_is_on() {
     use kumochi_protocol::geometry::{PhysicalPoint, PointerPath, ReleasePointer};
-    use kumochi_protocol::message::{LeaseGeneration, ModelName};
-    let luna = ModelName::new("GPT-6 Luna").expect("valid");
-    let on = ScreenNotice::On(&luna);
+    use kumochi_protocol::message::LeaseGeneration;
     let mut runs = ready();
+    let luna = shown_to_luna(&mut runs);
+    let on = Some(&luna);
     // No hold, a voice hold and a window hold build none.
-    assert!(!runs.releases_screen(GestureId(1), on));
-    assert_eq!(runs.screen_release(GestureId(1), on, release()), None);
+    assert!(!runs.releases_screen(GestureId(1), false, on));
+    assert_eq!(
+        runs.screen_release(GestureId(1), false, on, release()),
+        None
+    );
     recognized(&mut runs, 1);
-    assert!(!runs.releases_screen(GestureId(1), on));
-    assert_eq!(runs.screen_release(GestureId(1), on, release()), None);
+    assert!(!runs.releases_screen(GestureId(1), false, on));
+    assert_eq!(
+        runs.screen_release(GestureId(1), false, on, release()),
+        None
+    );
     runs.cancel_hold();
     assert_eq!(runs.take_hold_cancel(), cancel(1));
     runs.begin_hold(GestureId(2), Some(SCREEN)).expect("held");
-    assert!(!runs.releases_screen(GestureId(2), on));
-    assert_eq!(runs.screen_release(GestureId(2), on, release()), None);
+    assert!(!runs.releases_screen(GestureId(2), false, on));
+    assert_eq!(
+        runs.screen_release(GestureId(2), false, on, release()),
+        None
+    );
     runs.cancel_hold();
     assert_eq!(runs.take_hold_cancel(), cancel(2));
 
-    runs.begin_screen_hold(GestureId(3), 1).expect("held");
+    runs.begin_screen_hold(GestureId(3), 1, false, on)
+        .expect("held");
+    // Another gesture's release builds none, and refuses nothing of this hold.
     for other in [2, 4] {
-        assert!(!runs.releases_screen(GestureId(other), on), "{other}");
-        assert_eq!(runs.screen_release(GestureId(other), on, release()), None);
-    }
-    // A notice that is no longer `On` builds none, and leaves the hold as it was.
-    for notice in [
-        ScreenNotice::Hidden,
-        ScreenNotice::ModelCantSee(&luna),
-        ScreenNotice::NotReady,
-        ScreenNotice::TurnedOff,
-        ScreenNotice::OwnModel,
-    ] {
-        assert!(!runs.releases_screen(GestureId(3), notice), "{notice:?}");
+        assert!(
+            !runs.releases_screen(GestureId(other), false, on),
+            "{other}"
+        );
         assert_eq!(
-            runs.screen_release(GestureId(3), notice, release()),
+            runs.screen_release(GestureId(other), false, on, release()),
             None,
-            "{notice:?}"
+            "{other}"
         );
     }
-    assert!(runs.releases_screen(GestureId(3), on));
-    let message = runs.screen_release(GestureId(3), on, release());
+    assert!(runs.releases_screen(GestureId(3), false, on));
+    let message = runs.screen_release(GestureId(3), false, on, release());
     assert_eq!(
         message,
         Some(ControlToBrain::ScreenRelease {
@@ -699,47 +764,138 @@ fn only_the_current_hold_of_that_kind_builds_one_screen_release_while_the_notice
         assert!(!model.contains(part), "{part}");
     }
     // One for each hold, and the hold itself goes on.
-    assert!(!runs.releases_screen(GestureId(3), on));
-    assert_eq!(runs.screen_release(GestureId(3), on, release()), None);
+    assert!(!runs.releases_screen(GestureId(3), false, on));
+    assert_eq!(
+        runs.screen_release(GestureId(3), false, on, release()),
+        None
+    );
     assert!(state(&mut runs, 1, 1, 3, Phase::Thinking).visible);
 }
 
 #[test]
-fn a_hold_that_ended_before_its_release_builds_no_screen_release() {
-    use kumochi_protocol::message::ModelName;
+fn a_release_the_notice_refuses_is_refused_for_good() {
+    use kumochi_protocol::message::{ModelName, ScreenHolds, ScreenOff};
     let luna = ModelName::new("GPT-6 Luna").expect("valid");
-    let on = ScreenNotice::On(&luna);
+    let sol = ModelName::new("GPT-6 Sol").expect("valid");
+    let on = ScreenHolds::On {
+        model: luna.clone(),
+    };
+    let off = |why| Some(ScreenHolds::Off(why));
+    // What changed while the keys were down: (what the brain says now, the target thread has
+    // its own model now, the default's name now).
+    for (now, own, default) in [
+        (None, true, Some(&luna)),
+        // The default just changed, so the stored `On` names the model before it.
+        (None, false, Some(&sol)),
+        (None, false, None),
+        (off(ScreenOff::Unsupported), false, Some(&luna)),
+        (off(ScreenOff::TurnedOff), false, Some(&luna)),
+        (off(ScreenOff::ModelCantSee), false, Some(&luna)),
+        (off(ScreenOff::NotReady), false, Some(&luna)),
+    ] {
+        // Refused by the question the shell asks first, or by the builder.
+        for asked in [true, false] {
+            let mut runs = ready();
+            runs.set_screen_holds(on.clone());
+            runs.begin_screen_hold(GestureId(1), 1, false, Some(&luna))
+                .expect("held");
+            if let Some(now) = now.clone() {
+                runs.set_screen_holds(now);
+            }
+            let refused = if asked {
+                !runs.releases_screen(GestureId(1), own, default)
+            } else {
+                runs.screen_release(GestureId(1), own, default, release())
+                    .is_none()
+            };
+            assert!(refused, "{now:?} {own} {asked}");
+            // On again: still nothing.
+            runs.set_screen_holds(on.clone());
+            assert!(
+                !runs.releases_screen(GestureId(1), false, Some(&luna)),
+                "{now:?} {own} {asked}"
+            );
+            assert_eq!(
+                runs.screen_release(GestureId(1), false, Some(&luna), release()),
+                None,
+                "{now:?} {own} {asked}"
+            );
+            // The hold itself goes on, as voice.
+            assert!(state(&mut runs, 1, 1, 1, Phase::Thinking).visible);
+        }
+    }
+}
+
+#[test]
+fn a_hold_that_ended_before_its_release_builds_no_screen_release() {
     let mut runs = ready();
+    let luna = shown_to_luna(&mut runs);
+    let on = Some(&luna);
     // A release before the hold is listening reaches the model as a cancel.
-    runs.begin_screen_hold(GestureId(1), 1).expect("held");
+    runs.begin_screen_hold(GestureId(1), 1, false, on)
+        .expect("held");
     runs.cancel_hold();
-    assert!(!runs.releases_screen(GestureId(1), on));
-    assert_eq!(runs.screen_release(GestureId(1), on, release()), None);
+    assert!(!runs.releases_screen(GestureId(1), false, on));
+    assert_eq!(
+        runs.screen_release(GestureId(1), false, on, release()),
+        None
+    );
     assert_eq!(runs.take_hold_cancel(), cancel(1));
-    assert_eq!(runs.screen_release(GestureId(1), on, release()), None);
+    assert_eq!(
+        runs.screen_release(GestureId(1), false, on, release()),
+        None
+    );
     // The voice hold after it inherits nothing.
     recognized(&mut runs, 2);
     for gesture in [1, 2] {
-        assert!(!runs.releases_screen(GestureId(gesture), on), "{gesture}");
-        assert_eq!(runs.screen_release(GestureId(gesture), on, release()), None);
+        assert!(
+            !runs.releases_screen(GestureId(gesture), false, on),
+            "{gesture}"
+        );
+        assert_eq!(
+            runs.screen_release(GestureId(gesture), false, on, release()),
+            None,
+            "{gesture}"
+        );
     }
     runs.cancel_hold();
     assert_eq!(runs.take_hold_cancel(), cancel(2));
-    // A changed selection cancels the hold, and so does a lost connection.
-    runs.begin_screen_hold(GestureId(3), 1).expect("held");
+    // A changed selection cancels the hold.
+    runs.begin_screen_hold(GestureId(3), 1, false, on)
+        .expect("held");
+    assert!(runs.releases_screen(GestureId(3), false, on));
     assert!(runs.select_thread(None));
-    assert_eq!(runs.screen_release(GestureId(3), on, release()), None);
+    assert_eq!(
+        runs.screen_release(GestureId(3), false, on, release()),
+        None
+    );
     assert_eq!(runs.take_hold_cancel(), cancel(3));
-    runs.begin_screen_hold(GestureId(4), 1).expect("held");
+    // A lost connection cancels it and takes the brain's word with it; the word alone,
+    // said again on the next connection, brings nothing back.
+    runs.begin_screen_hold(GestureId(4), 1, false, on)
+        .expect("held");
+    assert!(runs.releases_screen(GestureId(4), false, on));
     runs.disconnected();
-    assert_eq!(runs.screen_release(GestureId(4), on, release()), None);
+    assert_eq!(
+        runs.screen_release(GestureId(4), false, on, release()),
+        None
+    );
     runs.connected(2);
     runs.settings(ThreadId(1));
+    shown_to_luna(&mut runs);
+    assert_eq!(
+        runs.screen_release(GestureId(4), false, on, release()),
+        None
+    );
     // A hold whose run is answering is over.
-    runs.begin_screen_hold(GestureId(5), 1).expect("held");
+    runs.begin_screen_hold(GestureId(5), 1, false, on)
+        .expect("held");
     state(&mut runs, 1, 1, 5, Phase::Thinking);
-    assert!(runs.releases_screen(GestureId(5), on));
+    assert!(runs.releases_screen(GestureId(5), false, on));
     state(&mut runs, 1, 1, 5, Phase::Answering);
-    assert!(!runs.releases_screen(GestureId(5), on));
-    assert_eq!(runs.screen_release(GestureId(5), on, release()), None);
+    assert!(!runs.releases_screen(GestureId(5), false, on));
+    assert_eq!(
+        runs.screen_release(GestureId(5), false, on, release()),
+        None
+    );
 }
