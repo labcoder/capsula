@@ -100,12 +100,7 @@ impl Coordinator {
         let attempt = self.attempts;
         let exposed = self.pending_deletes();
         let current = self.current(key.run)?;
-        // shortcut: only ChatGPT compacts, so a run too long for one request on another connection
-        // fails; drop this once compaction runs on the thread's own connection.
-        let elsewhere = current
-            .route
-            .is_some_and(|route| route.kind != kumochi_protocol::message::ConnectionKind::ChatGpt);
-        if elsewhere || current.compacted == Some(key.round) {
+        if current.compacted == Some(key.round) {
             return self.fail(key.run, Failure::Budget, effects);
         }
         current.compacted = Some(key.round);
@@ -186,7 +181,8 @@ impl Coordinator {
     }
 
     /// An event of the current run's inline compaction round: its text is collected, never
-    /// shown, and a completed round writes the summary. Anything else fails the run.
+    /// shown, and a completed round writes the summary. Usage is ignored; anything else fails the
+    /// run.
     pub(super) fn compact_event(
         &mut self,
         run: kumochi_protocol::message::RunId,
@@ -215,7 +211,7 @@ impl Coordinator {
             {
                 text.push_str(&delta);
             }
-            TurnEvent::OutputItem { .. } => {}
+            TurnEvent::OutputItem { .. } | TurnEvent::Usage(_) => {}
             TurnEvent::Finished(Finish::Completed) => {
                 let Some(summary) = fit_summary(text, *allowance) else {
                     return self.fail(run, Failure::Budget, effects);

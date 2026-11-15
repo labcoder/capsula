@@ -557,8 +557,8 @@ pub(crate) fn start_job(
 }
 
 /// Takes a job's text until its round completes, and cleans it into a title or summary as its
-/// key's kind says. Anything but text and native items, more than the kind's limit, or a round
-/// that ends any other way fails it. It logs the outcome, never the text.
+/// key's kind says. Anything but text, native items and usage, more than the kind's limit, or a
+/// round that ends any other way fails it. It logs the outcome, never the text.
 async fn collect(
     key: JobKey,
     kind: JobKind,
@@ -586,7 +586,7 @@ async fn collect(
             TurnEvent::TextDelta(delta) if text.len() + delta.len() <= limit => {
                 text.push_str(&delta);
             }
-            TurnEvent::OutputItem { .. } => {}
+            TurnEvent::OutputItem { .. } | TurnEvent::Usage(_) => {}
             TurnEvent::Finished(Finish::Completed) => {
                 break match kind {
                     JobKind::Title => crate::jobs::clean_title(&text).map(JobOutput::Title),
@@ -644,7 +644,7 @@ mod tests {
 
     use super::{
         Answer, Asks, CallId, Cancel, Engine, Finish, Opaque, Refused, Round, RunRequest, SendGate,
-        SendLease, ToolName, TurnEvent, answer, start,
+        SendLease, Tokens, ToolName, TurnEvent, Usage, answer, start,
     };
     use crate::coordinator::{Input, JobKey, JobKind, JobOutput, LeaseId, SendKey};
 
@@ -836,6 +836,31 @@ mod tests {
             .await,
             None,
             "one byte over across deltas fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_jobs_usage_is_ignored_and_only_a_completed_round_titles_it() {
+        let usage = TurnEvent::Usage(Usage {
+            whole: Tokens::default(),
+            first_request: None,
+        });
+        assert_eq!(
+            job_title(
+                vec![
+                    text("Lisbon trip"),
+                    usage.clone(),
+                    TurnEvent::Finished(Finish::Completed)
+                ],
+                Then::End
+            )
+            .await,
+            Some("Lisbon trip".to_owned())
+        );
+        assert_eq!(
+            job_title(vec![text("Lisbon trip"), usage], Then::End).await,
+            None,
+            "a round that ends without completing titles nothing"
         );
     }
 

@@ -392,13 +392,14 @@ Settings, and nothing in production changes them yet.
 - **Holds and jobs.** A hold records the same arrival when it's prepared and answers on its
   choice's route, checked when its read returns and again before each send. A change to another
   kind leaves it, a change to its own kind ends it, and while its read is still out a change to
-  any kind ends it. A title or summary job answers only on `ChatGPT`: one for another
-  connection's choice ends unsent and frees the slot.
+  any kind ends it. A title or summary job answers on the route of the run that started it: one
+  whose read names another connection ends unsent and frees the slot
+  ([engines](engines.md#background-jobs)).
 - **The engine follows the connection.** A request on `ChatGPT`'s choice, or on none, starts the
   `ChatGPT` engine. One on Claude Code's choice takes a one-launch engine with no tools from
   `Claude::question` ([claude-code.md](claude-code.md#a-question)); a refusal starts `Unserved` with
   Claude Code's reason, or none. One on a connection with no engine yet starts `Unserved`, whose
-  round fails with `ModelUnavailable` (`runtime/mod.rs`, the `StartEngine` arm and `engine_for`).
+  round fails with `ModelUnavailable` (`Brain::owned_engine`, which a job's request takes too).
 - **A turn nothing can answer** fails with `ChatGPT`'s reason and its action, except that it gets
   `ConnectionNeeded` with Open Settings when `ChatGPT` needs a sign-in and Claude Code is installed
   but signed out (owner, OSC-742; `Availabilities::nothing_ready`). Every other Claude Code state,

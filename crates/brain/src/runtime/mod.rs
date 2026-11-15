@@ -1057,9 +1057,9 @@ impl Brain {
     /// Starts `job`'s request on the engine, replacing any job still running.
     fn start_job(&mut self, job: JobKey, kind: JobKind, request: engines::RunRequest) {
         let gate = SendGate::new(request.key, Arc::clone(&self.asks), self.inputs_tx.clone());
-        let unserved = engines::Unserved::model_unavailable();
+        let owned = self.owned_engine(&request);
         let cancel = engines::start_job(
-            self.engine_for(&request).unwrap_or(&unserved),
+            owned.as_deref().unwrap_or(&*self.engine),
             request,
             (job, kind),
             self.inputs_tx.clone(),
@@ -1068,19 +1068,26 @@ impl Brain {
         self.job = Some((job, cancel));
     }
 
-    /// The engine for `request`'s choice: `ChatGPT`'s for its own and for none, and [`Unserved`]
-    /// for a connection with no engine yet.
+    /// An engine of its own for `request`'s choice, for a run's round and a job alike: a Claude
+    /// Code question, or [`Unserved`] with Claude Code's refusal or for a connection with no
+    /// engine yet. `None` for `ChatGPT`'s choice and for none, which `self.engine` answers.
     ///
     /// [`Unserved`]: engines::Unserved
-    fn engine_for(&self, request: &engines::RunRequest) -> Option<&dyn Engine> {
+    fn owned_engine(&mut self, request: &engines::RunRequest) -> Option<Box<dyn Engine>> {
         match request
             .request
             .choice
             .as_ref()
             .map(|choice| choice.connection)
         {
-            None | Some(ConnectionKind::ChatGpt) => Some(&*self.engine),
-            Some(ConnectionKind::AnthropicKey | ConnectionKind::ClaudeCode) => None,
+            None | Some(ConnectionKind::ChatGpt) => None,
+            Some(ConnectionKind::ClaudeCode) => Some(match self.claude.question(request) {
+                Ok(question) => Box::new(question),
+                Err(refused) => Box::new(engines::Unserved(self.claude.refused(refused))),
+            }),
+            Some(ConnectionKind::AnthropicKey) => {
+                Some(Box::new(engines::Unserved::model_unavailable()))
+            }
         }
     }
 
@@ -1213,30 +1220,8 @@ impl Brain {
                     let run = request.run;
                     let gate =
                         SendGate::new(request.key, Arc::clone(&self.asks), self.inputs_tx.clone());
-                    let on_claude_code = request
-                        .request
-                        .choice
-                        .as_ref()
-                        .is_some_and(|choice| choice.connection == ConnectionKind::ClaudeCode);
-                    let question;
-                    let unserved;
-                    let engine: &dyn Engine = if on_claude_code {
-                        match self.claude.question(&request) {
-                            Ok(owned) => {
-                                question = owned;
-                                &question
-                            }
-                            Err(refused) => {
-                                unserved = engines::Unserved(self.claude.refused(refused));
-                                &unserved
-                            }
-                        }
-                    } else if let Some(engine) = self.engine_for(&request) {
-                        engine
-                    } else {
-                        unserved = engines::Unserved::model_unavailable();
-                        &unserved
-                    };
+                    let owned = self.owned_engine(&request);
+                    let engine = owned.as_deref().unwrap_or(&*self.engine);
                     let cancel = engines::start(engine, request, self.engine_tx.clone(), gate);
                     self.round = Some((run, cancel));
                 }

@@ -148,6 +148,13 @@ impl Coordinator {
             ConnectionKind::ClaudeCode => &mut self.claude_code,
         };
         *entry = now;
+        // A `ChatGPT` job follows the account's sign-in and sign-out instead.
+        let job = self.job.as_ref().map(|job| job.route);
+        if kind != ConnectionKind::ChatGpt
+            && job.is_some_and(|route| route.kind == kind && self.refusal(route).is_some())
+        {
+            self.cancel_job(effects);
+        }
         let Some((run, route, arrived)) = self
             .current
             .as_ref()
@@ -187,7 +194,8 @@ impl Coordinator {
     }
 
     /// The `ChatGPT` sign-in a send under `key` may take the bearer of: a round's, only while its
-    /// run is current and bound to `ChatGPT`, and the ready one for a job.
+    /// run is current and bound to `ChatGPT`, and the ready one for a job, unless the job in the
+    /// slot answers on another connection.
     pub(crate) fn sending(&self, key: SendKey) -> Option<ConnectionTag> {
         match key {
             SendKey::Build(key) => self
@@ -197,7 +205,12 @@ impl Coordinator {
                 .and_then(|run| run.route)
                 .filter(|route| route.kind == ConnectionKind::ChatGpt)
                 .map(|route| route.tag),
-            SendKey::Job(_) => self.connection(),
+            SendKey::Job(key) => self
+                .job
+                .as_ref()
+                .is_none_or(|job| job.key != key || job.route.kind == ConnectionKind::ChatGpt)
+                .then(|| self.connection())
+                .flatten(),
         }
     }
 

@@ -198,17 +198,18 @@ job for the same thread (see [Compaction](#compaction)); Kumo's run starts compa
 ```mermaid
 stateDiagram-v2
     [*] --> Idle
-    Idle --> Reading: a run ends Done while an account is signed in
+    Idle --> Reading: a run ends Done while its route can answer
     Reading --> Sending: the read finds work and no delete reached what it read
     Sending --> Writing: the round completes with a title or summary
     Writing --> Idle: TitleSet or SummaryStored for this job
     Idle --> Reading: a title job wrote its title or had nothing to do, so compaction follows
-    Reading --> Idle: a new run, a delete, sign-out, nothing to do, failure
-    Sending --> Idle: a new run, a delete, sign-out, a lease deadline, failure
+    Reading --> Idle: a new run, a delete, its connection's fence, nothing to do, failure
+    Sending --> Idle: a new run, a delete, its connection's fence, a lease deadline, failure
 ```
 
-- **When.** Every stored `Done` of a run in a task, never Kumo's, starts a title job while an
-  account is signed in, no run is current and sends haven't failed closed. The read finds nothing
+- **When.** Every stored `Done` of a run in a task, never Kumo's, starts a title job while the
+  run's route can answer (for `ChatGPT`, while an account is signed in), no run is current and
+  sends haven't failed closed. The read finds nothing
   once the title isn't first words (a user's rename or an earlier model title), so the trigger
   keeps no state of its own: a failed job, or a first run that didn't end `Done`, tries again at
   the next `Done`. A job never retries on its own, and a job whose request went out but wrote
@@ -216,6 +217,13 @@ stateDiagram-v2
   usage-limit answer no further automatic request goes out until the next `Done`.
 - **Key.** `JobKey { thread, serial }`, the serial from the build attempts' counter, so no key
   repeats. An input for any other key is stale.
+- **Route.** A job answers on the route of the run whose `Done` started it, and the compaction
+  that follows a title keeps it. Its read must name the same connection: a read whose choice names
+  another, because the thread's choice changed since the run, ends the job unsent. Its grant checks
+  the route as `send_ready` does, and `sending` gives a `ChatGPT` bearer only to a `ChatGPT` job.
+  The runtime starts its request through `Brain::owned_engine`, as it does a round's, so a Claude
+  Code job is one `Claude::question` on the row's alias with no tools
+  ([claude-code](claude-code.md#a-question)).
 - **Read.** `StoreOp::ReadJob` runs on the page reader after every op sent before it, in one read
   transaction: the task's first user message, its deletion generation and its model choice. Like a
   build, the job keeps the threads a delete pending at its start, or accepted since, reached, so a
@@ -228,7 +236,7 @@ stateDiagram-v2
 - **Answer.** The round's text, at most 4 KiB [guess], taken only when the round completes: its
   first line that isn't blank, without control characters, trimmed and cut to 80 characters. An
   empty title, more text, a tool call or a round that ends any other way fails the job, and the
-  first words stay.
+  first words stay. A usage report is ignored.
 - **Write.** `SetTitle { source: Model(generation), job }`, which the store applies only over first
   words and in the generation the read found, so a rename or a delete during the job wins. The
   store answers every `SetTitle` with `TitleSet { job, applied }`. A committed title, the user's
@@ -239,8 +247,10 @@ stateDiagram-v2
   the job and fails closed, as a round's does.
 - **Sign-out.** The runtime reports `SignedIn { generation }` and `SignedOut { generation }` when
   the account starts or stops being able to send, the generation being the catalog's epoch, before
-  anything else that account input does. Sign-out cancels the job, so nothing is written and no
-  request starts until an account signs in again. A grant and a write each need the job's own
+  anything else that account input does. Sign-out cancels a `ChatGPT` job, so nothing is written
+  and no `ChatGPT` request starts until an account signs in again. A Claude Code job instead ends
+  when Claude Code becomes unavailable or draws another sign-in, as a run bound to it does;
+  `ChatGPT`'s sign-in and sign-out leave it. A grant and a write each need the job's own
   account generation, and an older generation's `SignedOut` changes nothing.
 - **Logs** carry the job's key and kind and whether it produced anything, never the title,
   summary, ask or prompt.
@@ -279,8 +289,8 @@ uses the thread's newest summary in place of every event through `last_event`. T
 
 **Inline (B5).** A build is `TooLarge { room }`, where `room` is what the bound leaves for the
 summary after the fixed parts and the current run, `None` when those alone don't fit. With
-`None` the run ends as `failed(budget)` and spends no request. So does a run whose route isn't
-`ChatGPT`'s, since only `ChatGPT` compacts so far. With room, the run compacts once
+`None` the run ends as `failed(budget)` and spends no request. With room, the run compacts on its
+own route, Claude Code included, once
 per admission episode (the round, until a build is admitted), so a delete's rebuild can't start a
 second one:
 

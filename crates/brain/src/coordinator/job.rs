@@ -6,8 +6,10 @@
 //! after every op sent before it, with its own exposure to deletes, so a delete of what it read
 //! voids it. It asks to send under its own [`SendKey::Job`], so a delete of what it read is held
 //! while its body goes out, and its write is conditional on the deletion generation it read. It
-//! runs only while an account is signed in, and a sign-out cancels it before anything else. A
-//! job is never resumed or retried on its own: the next trigger starts a new one.
+//! answers on the route of the run that started it: a `ChatGPT` job only while an account is
+//! signed in, which a sign-out cancels before anything else, and another connection's only while
+//! that connection is ready under the run's sign-in. A job is never resumed or retried on its
+//! own: the next trigger starts a new one.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -18,7 +20,7 @@ use kumochi_protocol::message::{ConnectionKind, EventId, RunId, ThreadId, Thread
 use super::admission::origin;
 use super::{Coordinator, Effect, SendKey, Stale, StoreOp, SummaryText, Unbuilt};
 use crate::context::compact::COMPACT_AT;
-use crate::context::{Built, Origin, RunSnapshot};
+use crate::context::{Built, Origin, Route, RunSnapshot};
 use crate::engines::RunRequest;
 use crate::store::{Generation, TitleSource};
 
@@ -107,10 +109,12 @@ impl fmt::Debug for JobOutput {
 #[derive(Debug)]
 pub(super) struct Job {
     _control: crate::recall::control::CancelOnDrop,
-    key: JobKey,
+    pub(super) key: JobKey,
     kind: JobKind,
     /// The run whose end started it.
     run: RunId,
+    /// That run's route, which the job answers on.
+    pub(super) route: Route,
     /// Threads whose delete was pending when it began or was accepted since.
     exposed: BTreeSet<ThreadId>,
     stage: Stage,
@@ -135,26 +139,43 @@ impl Job {
 }
 
 impl Coordinator {
-    /// `run` in `thread` ended `Done`: a task's title job starts, or Kumo's compaction.
-    pub(super) fn after_run(&mut self, thread: ThreadId, run: RunId, effects: &mut Vec<Effect>) {
+    /// `run` in `thread` ended `Done` on `route`: a task's title job starts, or Kumo's compaction.
+    pub(super) fn after_run(
+        &mut self,
+        thread: ThreadId,
+        run: RunId,
+        route: Option<Route>,
+        effects: &mut Vec<Effect>,
+    ) {
+        let Some(route) = route else {
+            return;
+        };
         let kind = if thread == self.main_thread {
             JobKind::Compact
         } else {
             JobKind::Title
         };
-        self.start_job(kind, thread, run, effects);
+        self.start_job(kind, thread, run, route, effects);
     }
 
-    /// Starts `kind` for `thread` in the slot, unless a run is current, no account is signed in
-    /// or sends failed closed. Its read stops it when there's nothing to do.
+    /// Starts `kind` for `thread` on `route` in the slot, unless a run is current, the route can't
+    /// answer (for `ChatGPT`, no account is signed in) or sends failed closed. Its read stops it
+    /// when there's nothing to do.
     fn start_job(
         &mut self,
         kind: JobKind,
         thread: ThreadId,
         run: RunId,
+        route: Route,
         effects: &mut Vec<Effect>,
     ) {
-        if self.account.is_none() || self.current.is_some() || self.transport_failed {
+        let ready = match route.kind {
+            ConnectionKind::ChatGpt => self.account.is_some(),
+            ConnectionKind::AnthropicKey | ConnectionKind::ClaudeCode => {
+                self.refusal(route).is_none()
+            }
+        };
+        if !ready || self.current.is_some() || self.transport_failed {
             return;
         }
         self.cancel_job(effects);
@@ -170,6 +191,7 @@ impl Coordinator {
             key,
             kind,
             run,
+            route,
             exposed: self.pending_deletes(),
             stage: Stage::Reading,
         });
@@ -190,7 +212,13 @@ impl Coordinator {
             return;
         };
         if job.kind == JobKind::Title && !job.exposed.contains(&job.key.thread) {
-            self.start_job(JobKind::Compact, job.key.thread, job.run, effects);
+            self.start_job(
+                JobKind::Compact,
+                job.key.thread,
+                job.run,
+                job.route,
+                effects,
+            );
         }
     }
 
@@ -198,6 +226,13 @@ impl Coordinator {
     pub(super) fn cancel_job(&mut self, effects: &mut Vec<Effect>) {
         if let Some(job) = self.job.take() {
             effects.push(Effect::CancelJob(job.key));
+        }
+    }
+
+    /// Empties the slot if its job answers on `kind`.
+    pub(super) fn cancel_job_on(&mut self, kind: ConnectionKind, effects: &mut Vec<Effect>) {
+        if self.job.as_ref().is_some_and(|job| job.route.kind == kind) {
+            self.cancel_job(effects);
         }
     }
 
@@ -216,7 +251,8 @@ impl Coordinator {
     }
 
     /// The job's read finished: its request starts, unless there's nothing to do, the read
-    /// failed or a delete reached what it read.
+    /// failed, the read's choice names another connection than the job's route or a delete
+    /// reached what it read.
     pub(super) fn job_built(
         &mut self,
         done: JobBuilt,
@@ -231,13 +267,13 @@ impl Coordinator {
             self.job_ended(effects);
             return Ok(());
         };
-        // shortcut: a job answers only on `ChatGPT` until jobs get a route of their own.
         let elsewhere = ask
             .built
             .request
             .choice
             .as_ref()
-            .is_some_and(|choice| choice.connection != ConnectionKind::ChatGpt);
+            .map_or(ConnectionKind::ChatGpt, |choice| choice.connection)
+            != job.route.kind;
         if elsewhere || job.voided(&ask.built.sources) {
             self.job_ended(effects);
             return Ok(());
@@ -270,8 +306,8 @@ impl Coordinator {
     }
 
     /// The job's request is about to send. It's granted only for the job in the slot, with
-    /// nothing it read touched by a delete; otherwise its body is dropped unsent and the job ends.
-    /// A job in the slot always runs under the signed-in account: an account change empties it.
+    /// nothing it read touched by a delete and its route still able to answer, as a run's send is;
+    /// otherwise its body is dropped unsent and the job ends.
     pub(super) fn job_ready(
         &mut self,
         key: JobKey,
@@ -282,6 +318,7 @@ impl Coordinator {
             .job
             .as_ref()
             .filter(|job| job.key == key)
+            .filter(|job| self.refusal(job.route).is_none())
             .and_then(|job| match &job.stage {
                 Stage::Sending { sources, .. } if !job.voided(sources) => Some(sources.clone()),
                 _ => None,
@@ -364,7 +401,7 @@ impl Coordinator {
     }
 
     /// An account is signed in as `generation`; one at or under a sign-out already accepted
-    /// changes nothing. Another account's job ends.
+    /// changes nothing. Another account's `ChatGPT` job ends.
     pub(super) fn signed_in(
         &mut self,
         generation: u64,
@@ -374,14 +411,15 @@ impl Coordinator {
             return Err(Stale);
         }
         if self.account != Some(generation) {
-            self.cancel_job(effects);
+            self.cancel_job_on(ConnectionKind::ChatGpt, effects);
         }
         self.account = Some(generation);
         Ok(())
     }
 
-    /// The account signed in as `generation` signed out: no job runs or writes from here, and
-    /// none starts until an account signs in. An older generation's sign-out changes nothing.
+    /// The account signed in as `generation` signed out: no `ChatGPT` job runs or writes from
+    /// here, and none starts until an account signs in. An older generation's sign-out changes
+    /// nothing.
     pub(super) fn signed_out(
         &mut self,
         generation: u64,
@@ -392,7 +430,7 @@ impl Coordinator {
         }
         self.signed_out = Some(generation);
         self.account = None;
-        self.cancel_job(effects);
+        self.cancel_job_on(ConnectionKind::ChatGpt, effects);
         Ok(())
     }
 }
