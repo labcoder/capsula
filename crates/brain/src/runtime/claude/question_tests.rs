@@ -1728,6 +1728,53 @@ async fn a_stuck_lane_fails_the_next_question_with_a_reason_and_stops_reading_re
     );
 }
 
+/// OSC-767: a question refused while the queue is full fails Busy with Retry. Once the lane takes
+/// a job off the queue the core finds again by itself, so the Retry is admitted and answered.
+#[tokio::test]
+async fn a_full_queue_clears_itself_once_it_drains_and_the_retry_is_answered() {
+    let mut rig = Rig::new("question-busy", &offering_nothing().held_at_user("go")).await;
+    let request = choosing("haiku", Effort::Low, ConnectionKind::ClaudeCode);
+    let question = rig.claude.question(&request).expect("admitted");
+    let (first, _) = rig.last();
+    let mut played = play_with(&question, request.clone());
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    until("seeded", || rig.stdin().len() == 3).await;
+    let lane = rig.claude.lane.as_ref().expect("a lane");
+    for _ in 0..crate::engines::claude_code::lane::LANE_QUEUE {
+        assert!(lane.submit(0, Work::Version), "an old job fills a slot");
+    }
+    rig.claude.op(ConnectionOp::FindClaudeCode);
+    assert_eq!(rig.claude.view(), ClaudeCodeView::Busy);
+    let refused = rig
+        .claude
+        .question(&request)
+        .expect_err("refused while full");
+    assert_eq!(
+        rig.claude.refused(refused),
+        EngineFailure::Claude(
+            UserError::new(ErrorKey::ClaudeCodeBusy, Vec::new(), vec![Action::Retry])
+                .expect("one action")
+        )
+    );
+    rig.go("go");
+    rig.drive(played.events()).await;
+    drop(question);
+    rig.reported(first).await;
+    timeout(Duration::from_secs(30), async {
+        while rig.claude.view() != READY {
+            let wake = rig.claude.next().await;
+            rig.wake(wake);
+        }
+    })
+    .await
+    .expect("found again once the queue drained");
+    let (events, outcomes) = answer(&mut rig, request).await;
+    answered(&events);
+    assert_eq!(outcomes, [launch::Outcome::Clean]);
+    rig.close().await;
+}
+
 /// What woke a test brain's core: one of its inputs, or Claude Code's.
 enum Next {
     Input(Input),

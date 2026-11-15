@@ -56,7 +56,8 @@ impl ClaudeAccounts {
                     | ClaudeCodeView::Unsupported(_)
                     | ClaudeCodeView::AuditFailed(_)
                     | ClaudeCodeView::PolicyFailed(_)
-                    | ClaudeCodeView::InUse,
+                    | ClaudeCodeView::InUse
+                    | ClaudeCodeView::Busy,
                 ),
                 ConnectionOp::FindClaudeCode,
             ) => true,
@@ -147,6 +148,7 @@ mod tests {
             ),
             (ClaudeCodeView::TurnedOff, vec![]),
             (ClaudeCodeView::Unavailable, vec![]),
+            (ClaudeCodeView::Busy, vec![ConnectionOp::FindClaudeCode]),
             (ClaudeCodeView::InUse, vec![ConnectionOp::FindClaudeCode]),
             (
                 ClaudeCodeView::Unsupported(Unsupported::Shim),
