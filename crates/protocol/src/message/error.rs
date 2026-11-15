@@ -108,6 +108,10 @@ pub enum ErrorKey {
     ScreenUnavailable,
     /// No connection that can answer is set up, so nothing can answer until one is connected.
     ConnectionNeeded,
+    /// Claude Code is stuck after a shutdown Kumochi couldn't confirm, until Kumochi restarts.
+    ClaudeCodeUnavailable,
+    /// Claude Code is still finishing an earlier question.
+    ClaudeCodeBusy,
 }
 
 macro_rules! catalog {
@@ -162,6 +166,8 @@ impl ErrorKey {
         ClaudeCodeInputUnsupported,
         ClaudeCodeBudget,
         ClaudeCodeCleanupPending,
+        ClaudeCodeUnavailable,
+        ClaudeCodeBusy,
 
         // Voice
         VoiceNoSpace,

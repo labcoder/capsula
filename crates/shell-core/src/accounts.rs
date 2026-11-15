@@ -68,6 +68,8 @@ impl Accounts {
             | ErrorKey::ClaudeCodeInputUnsupported
             | ErrorKey::ClaudeCodeBudget
             | ErrorKey::ClaudeCodeCleanupPending
+            | ErrorKey::ClaudeCodeUnavailable
+            | ErrorKey::ClaudeCodeBusy
             // shortcut: voice errors have no Settings row until the voice settings show them.
             | ErrorKey::VoiceNoSpace
             | ErrorKey::VoiceDownload

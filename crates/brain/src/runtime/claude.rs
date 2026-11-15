@@ -48,6 +48,10 @@ pub(crate) const SIGN_IN: SignInStore = SignInStore::FileWithDacl;
 
 /// The connection's state; the lane does the work.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent flags: the switch, a queued find, a deletion to finish and a full queue"
+)]
 pub(crate) struct Claude {
     lane: Option<Lane>,
     sign_in: SignInStore,
@@ -84,6 +88,8 @@ pub(crate) struct Claude {
     models: Vec<ModelInfo>,
     /// The list a shell hasn't heard yet.
     owed: Option<Vec<ModelInfo>>,
+    /// The last job the lane couldn't take: `Unavailable` is then a full queue, not a stuck lane.
+    full: bool,
 }
 
 /// Runs bound under one epoch go on through a Find; a sign-out, a Disconnect, an audit failure,
@@ -156,6 +162,7 @@ impl Claude {
             epochs: 0,
             models: Vec::new(),
             owed: None,
+            full: false,
         }
     }
 
@@ -199,6 +206,7 @@ impl Claude {
             .as_ref()
             .is_some_and(|lane| lane.submit(self.generation, work));
         self.out = admitted.then_some(work);
+        self.full = !admitted;
         if !admitted {
             self.view = ClaudeCodeView::Unavailable;
             self.revoke_all();
@@ -507,7 +515,8 @@ impl Claude {
     }
 
     /// Why runs on Claude Code can't be answered now, with Open Settings: the view's own key, or
-    /// `ModelUnavailable` while it's being found or is turned off.
+    /// `ModelUnavailable` while it's being found or is turned off; a full queue is Busy, with
+    /// Retry.
     fn reason(&self) -> UserError {
         let key = match self.view {
             ClaudeCodeView::NotFound => ErrorKey::ClaudeCodeNotFound,
@@ -517,10 +526,11 @@ impl Claude {
             ClaudeCodeView::PolicyFailed(_) => ErrorKey::ClaudeCodePolicy,
             ClaudeCodeView::AuditFailed(_) => ErrorKey::ClaudeCodeAuditFailed,
             ClaudeCodeView::CleanupPending => ErrorKey::ClaudeCodeCleanupPending,
+            ClaudeCodeView::Unavailable if self.full => return busy(),
+            ClaudeCodeView::Unavailable => ErrorKey::ClaudeCodeUnavailable,
             ClaudeCodeView::Finding | ClaudeCodeView::TurnedOff => return model_unavailable(),
             ClaudeCodeView::Unsupported(_)
             | ClaudeCodeView::InUse
-            | ClaudeCodeView::Unavailable
             | ClaudeCodeView::Ready { .. } => ErrorKey::ClaudeCodeUnsupported,
         };
         UserError::new(key, Vec::new(), vec![Action::OpenSettings])
@@ -589,18 +599,16 @@ impl Claude {
     }
 
     /// What a run's round fails with when its question was refused: Claude Code's own reason
-    /// while no launch would be admitted, else none. Never `Access(None)`, which reads as a
-    /// `ChatGPT` sign-in.
+    /// while no launch would be admitted, else the refusal's. Never `Access(None)`, which reads
+    /// as a `ChatGPT` sign-in.
     pub(crate) fn refused(&self, refused: LaunchRefused) -> EngineFailure {
-        match refused {
-            LaunchRefused::NotReady if self.admitted().is_none() => {
-                EngineFailure::Claude(self.reason())
-            }
-            LaunchRefused::NotReady
-            | LaunchRefused::Busy
-            | LaunchRefused::Identity
-            | LaunchRefused::Lifetime => EngineFailure::Provider,
-        }
+        EngineFailure::Claude(match refused {
+            LaunchRefused::NotReady if self.admitted().is_none() => self.reason(),
+            // Admitted, so the row doesn't list the choice's alias.
+            LaunchRefused::NotReady => model_unavailable(),
+            LaunchRefused::Busy => busy(),
+            LaunchRefused::Identity | LaunchRefused::Lifetime => ErrorKey::RequestRefused.into(),
+        })
     }
 
     /// What a launch for `thread` would be fixed to now.
@@ -896,6 +904,12 @@ impl Claude {
             None => true,
         }
     }
+}
+
+/// Why a full lane queue refused something: it drains by itself, so Retry.
+fn busy() -> UserError {
+    UserError::new(ErrorKey::ClaudeCodeBusy, Vec::new(), vec![Action::Retry])
+        .expect("one action is within the limit")
 }
 
 /// The view a failure leaves.

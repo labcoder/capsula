@@ -526,6 +526,8 @@ const fn error_id(key: ErrorKey) -> &'static str {
         ErrorKey::ClaudeCodeInputUnsupported => "error-claude-code-input-unsupported",
         ErrorKey::ClaudeCodeBudget => "error-claude-code-budget",
         ErrorKey::ClaudeCodeCleanupPending => "error-claude-code-cleanup-pending",
+        ErrorKey::ClaudeCodeUnavailable => "error-claude-code-unavailable",
+        ErrorKey::ClaudeCodeBusy => "error-claude-code-busy",
 
         // Voice
         ErrorKey::VoiceNoSpace => "error-voice-no-space",

@@ -549,35 +549,33 @@ async fn claude_codes_default_is_the_rows_own_and_moves_only_an_unset_or_unliste
     rig.close().await;
 }
 
-/// Test 9: a refused question fails with Claude Code's own reason while no launch would be
-/// admitted, and with none otherwise; never with `Access(None)`, which reads as a `ChatGPT`
-/// sign-in.
+/// Test 9 and OSC-754: a refused question fails with Claude Code's own reason while no launch
+/// would be admitted, and with the refusal's own otherwise; never with none, and never with
+/// `Access(None)`, which reads as a `ChatGPT` sign-in.
 #[tokio::test]
-async fn a_refused_question_fails_with_claude_codes_reason_or_with_none() {
+async fn a_refused_question_fails_with_claude_codes_reason_or_the_refusals_own() {
     let mut rig = Rig::new("question-refused", &synthetic_signed_in()).await;
-    for refused in [
-        LaunchRefused::NotReady,
-        LaunchRefused::Busy,
-        LaunchRefused::Identity,
-        LaunchRefused::Lifetime,
-    ] {
+    let cases = [
+        (LaunchRefused::NotReady, open(ErrorKey::ModelUnavailable)),
+        (
+            LaunchRefused::Busy,
+            UserError::new(ErrorKey::ClaudeCodeBusy, Vec::new(), vec![Action::Retry])
+                .expect("one action"),
+        ),
+        (LaunchRefused::Identity, ErrorKey::RequestRefused.into()),
+        (LaunchRefused::Lifetime, ErrorKey::RequestRefused.into()),
+    ];
+    for (refused, reason) in cases {
         assert_eq!(
             rig.claude.refused(refused),
-            EngineFailure::Provider,
+            EngineFailure::Claude(reason),
             "{refused:?}"
         );
     }
     rig.claude.view = ClaudeCodeView::NotFound;
     assert_eq!(
         rig.claude.refused(LaunchRefused::NotReady),
-        EngineFailure::Claude(
-            UserError::new(
-                ErrorKey::ClaudeCodeNotFound,
-                Vec::new(),
-                vec![Action::OpenSettings]
-            )
-            .expect("one action")
-        )
+        EngineFailure::Claude(open(ErrorKey::ClaudeCodeNotFound))
     );
     rig.claude.view = READY;
     rig.close().await;
@@ -1486,10 +1484,12 @@ async fn a_grant_ready_with_its_expired_deadline_seeds_nothing() {
     rig.close().await;
 }
 
+fn open(key: ErrorKey) -> UserError {
+    UserError::new(key, Vec::new(), vec![Action::OpenSettings]).expect("one action")
+}
+
 fn unavailable(key: ErrorKey) -> Availability {
-    Availability::Unavailable(
-        UserError::new(key, Vec::new(), vec![Action::OpenSettings]).expect("one action"),
-    )
+    Availability::Unavailable(open(key))
 }
 
 fn tag(availability: &Availability) -> ConnectionTag {
@@ -1537,7 +1537,7 @@ fn each_view_reports_its_own_reason_with_open_settings() {
         ),
         (ClaudeCodeView::TurnedOff, ErrorKey::ModelUnavailable),
         (ClaudeCodeView::InUse, ErrorKey::ClaudeCodeUnsupported),
-        (ClaudeCodeView::Unavailable, ErrorKey::ClaudeCodeUnsupported),
+        (ClaudeCodeView::Unavailable, ErrorKey::ClaudeCodeUnavailable),
         // Ready with no lane: a launch would be refused, so it doesn't read ready either.
         (READY, ErrorKey::ClaudeCodeUnsupported),
     ];
@@ -1711,13 +1711,15 @@ async fn a_stuck_lane_fails_the_next_question_with_a_reason_and_stops_reading_re
     let mut played = play(&question);
     assert_eq!(
         rig.drive(played.events()).await,
-        [claude_failed(ErrorKey::ClaudeCodeUnsupported)]
+        [TurnEvent::Finished(Finish::Failed(EngineFailure::Claude(
+            open(ErrorKey::ClaudeCodeUnavailable)
+        )))]
     );
     assert_eq!(rig.reported(second).await, [launch::Outcome::Refused]);
     assert_eq!(rig.claude.view(), ClaudeCodeView::Unavailable);
     assert_eq!(
         rig.claude.availability(),
-        unavailable(ErrorKey::ClaudeCodeUnsupported)
+        unavailable(ErrorKey::ClaudeCodeUnavailable)
     );
     // shortcut: the kept lock lives until the test process ends, leaving this scratch folder.
     assert!(
