@@ -15,6 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
 
 use super::audit::{self, PostSeedAudit, PreInputAudit, Progress};
+use super::lane::Failure;
 use super::policy::Reviewed;
 use super::seed;
 use super::stream::{LineFramer, Mapped, StreamMapper};
@@ -23,7 +24,7 @@ use super::supervisor::{
 };
 use crate::bridge::LaunchId;
 use crate::connections::model::budget::Budget;
-use crate::context::Origin;
+use crate::context::{Origin, ToolSchema};
 use crate::engines::{
     Answer, ClaudeStreamFailure, Engine, EngineFailure, Finish, Round, RunRequest, SendGate,
     TurnEvent,
@@ -33,6 +34,9 @@ use crate::engines::{
 pub(crate) const WARM: Duration = Duration::from_secs(30);
 /// How long the audit before input may take once the control lines are queued (C3).
 pub(crate) const AUDIT: Duration = Duration::from_secs(3);
+/// How long the audit waits to ask `mcp_status` again while Kumochi's server is `pending`. At most
+/// 30 asks fit in [`AUDIT`]: with the first two lines, about 3 KiB, under `MAX_CONTROL`'s 4 KiB.
+pub(crate) const ASK_AGAIN: Duration = Duration::from_millis(100);
 /// How long a question may take from its bind.
 pub(crate) const QUESTION: Duration = Duration::from_secs(120);
 
@@ -58,6 +62,25 @@ impl fmt::Debug for Clock {
     }
 }
 
+/// The tools a launch offers, frozen with it: the launch's allow list, its audit's expected set
+/// and its seed all read this one value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Offer {
+    /// No tools: a text answer.
+    Nothing,
+    /// The MCP subset of the origin's model offers.
+    Mcp(Origin),
+}
+
+impl Offer {
+    pub(crate) fn schemas(self) -> Vec<ToolSchema> {
+        match self {
+            Self::Nothing => Vec::new(),
+            Self::Mcp(origin) => crate::dispatch::mcp_schemas(origin),
+        }
+    }
+}
+
 /// What a launch is fixed to at spawn; equal snapshots may share a launch. Its Debug shows the
 /// model and effort by length only.
 #[derive(Clone, PartialEq, Eq)]
@@ -67,8 +90,7 @@ pub(crate) struct LaunchSnapshot {
     pub(crate) effort: Option<String>,
     /// Claude Code's connection generation.
     pub(crate) account: u64,
-    /// The frozen tool set is the MCP subset of the origin's model offers.
-    pub(crate) origin: Origin,
+    pub(crate) offer: Offer,
     pub(crate) version: ClaudeVersion,
 }
 
@@ -79,7 +101,7 @@ impl fmt::Debug for LaunchSnapshot {
             .field("model_bytes", &self.model.len())
             .field("effort_bytes", &self.effort.as_ref().map(String::len))
             .field("account", &self.account)
-            .field("origin", &self.origin)
+            .field("offer", &self.offer)
             .field("version", &self.version)
             .finish()
     }
@@ -100,6 +122,8 @@ pub(crate) enum Outcome {
     Eof,
     /// The launch never ran, or was revoked under the question.
     Launch,
+    /// The lane refused it: stuck after a teardown it couldn't confirm, or closing.
+    Refused,
     /// stdout broke its rules.
     Stream(ClaudeStreamFailure),
 }
@@ -200,7 +224,7 @@ impl Attempt {
         report: Report,
         expires: Option<Instant>,
     ) -> Self {
-        let tools = tool_names(snapshot.origin);
+        let tools = tool_names(snapshot.offer);
         let pre = PreInputAudit::new(reviewed, tools.clone());
         let post = PostSeedAudit::new(reviewed, tools);
         let (done, ready) = oneshot::channel();
@@ -245,8 +269,9 @@ impl Attempt {
 }
 
 /// The launch's frozen `mcp__kumochi__*` names.
-fn tool_names(origin: Origin) -> BTreeSet<String> {
-    crate::dispatch::mcp_schemas(origin)
+fn tool_names(offer: Offer) -> BTreeSet<String> {
+    offer
+        .schemas()
         .iter()
         .map(|tool| format!("mcp__{MCP_SERVER_NAME}__{}", tool.name))
         .collect()
@@ -276,6 +301,11 @@ async fn warm_up(
             done.send(Ok(warmed)).ok();
         }
         Err(outcome) => {
+            let audit = match outcome {
+                Outcome::Deadline => Outcome::Audit(AuditFailed::Deadline),
+                other => other,
+            };
+            logged(audit, "before stdin");
             report.report(outcome);
             done.send(Err(outcome)).ok();
         }
@@ -288,8 +318,10 @@ async fn audited(
     deadline: Instant,
     pre: &mut PreInputAudit,
 ) -> Result<(Pipes, StdinWriter, LineFramer, StreamMapper), Outcome> {
-    let Some(Ok(mut pipes)) = started.await else {
-        return Err(Outcome::Launch);
+    let mut pipes = match started.await {
+        Some(Ok(pipes)) => pipes,
+        Some(Err(LaunchFailed::Lane(Failure::Refused))) => return Err(Outcome::Refused),
+        _ => return Err(Outcome::Launch),
     };
     let mut writer = pipes.writer().ok_or(Outcome::Launch)?;
     for line in audit::control_requests() {
@@ -308,6 +340,13 @@ async fn audited(
                     Mapped::Ignored => {}
                     Mapped::Control(response) => match pre.control(&response) {
                         Ok(Progress::Waiting) => {}
+                        Ok(Progress::Pending) => {
+                            tokio::time::sleep(ASK_AGAIN).await;
+                            writer
+                                .control(&pre.ask_again(), deadline)
+                                .await
+                                .map_err(|_| Outcome::Launch)?;
+                        }
                         Ok(Progress::Ready) => return Ok(()),
                         Ok(Progress::SignedOut) => return Err(Outcome::SignedOut),
                         Err(reason) => return Err(Outcome::Audit(reason)),
@@ -461,10 +500,7 @@ impl Question<'_> {
             report.report(Outcome::Launch);
             return Some(Finish::Failed(EngineFailure::Provider));
         }
-        let seed = seed::encode(
-            &request.request,
-            &crate::dispatch::mcp_schemas(attempt.snapshot.origin),
-        );
+        let seed = seed::encode(&request.request, &attempt.snapshot.offer.schemas());
         match writer.seed(&seed, until).await {
             Ok(()) => {}
             Err(StdinRefused::Deadline) => return Some(expired(launch, report)),
@@ -493,6 +529,7 @@ impl Question<'_> {
                 Some(finish)
             }
             Err(outcome) => {
+                logged(outcome, "after the seed");
                 launch.lease().revoke();
                 report.report(outcome);
                 Some(failed(outcome))
@@ -555,6 +592,15 @@ struct Reading<'a> {
     analytics: Option<bool>,
 }
 
+/// Logs an audit failure's closed check and its phase, and nothing Claude Code sent. Before stdin a
+/// deadline is the audit's own, such as a server still `pending` at [`AUDIT`], so it's logged as
+/// the `Deadline` check; the outcome stays `Deadline`, with no quarantine.
+fn logged(outcome: Outcome, phase: &'static str) {
+    if let Outcome::Audit(check) = outcome {
+        tracing::warn!(?check, phase, "claude code's audit failed");
+    }
+}
+
 fn claude(key: ErrorKey) -> Finish {
     Finish::Failed(EngineFailure::Claude(key.into()))
 }
@@ -572,6 +618,8 @@ fn failed(outcome: Outcome) -> Finish {
     match outcome {
         Outcome::Audit(_) => claude(ErrorKey::ClaudeCodeAuditFailed),
         Outcome::SignedOut => claude(ErrorKey::ClaudeCodeSignedOut),
+        // The reason the view it leaves gives (Unavailable).
+        Outcome::Refused => claude(ErrorKey::ClaudeCodeUnsupported),
         Outcome::Stream(failure) => Finish::Failed(EngineFailure::ClaudeStream(failure)),
         Outcome::Eof => Finish::Truncated,
         Outcome::Clean | Outcome::Deadline | Outcome::Launch => {

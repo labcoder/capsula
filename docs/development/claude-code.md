@@ -125,7 +125,10 @@ version: its launch policy and the facts its audit expects. Any other version is
   `APPDATA`, `LOCALAPPDATA`, `TEMP`, `TMP` and `CLAUDE_CODE_TMPDIR` point at Kumochi's own
   folders. Six documented switches are `1`: `DISABLE_AUTOUPDATER`, `DISABLE_TELEMETRY`,
   `DISABLE_ERROR_REPORTING`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`,
-  `CLAUDE_CODE_SKIP_PROMPT_HISTORY` and `CLAUDE_CODE_DISABLE_AUTO_MEMORY`. `SystemRoot`,
+  `CLAUDE_CODE_SKIP_PROMPT_HISTORY` and `CLAUDE_CODE_DISABLE_AUTO_MEMORY`, and
+  `ENABLE_CLAUDEAI_MCP_SERVERS` is `false`, so a claude.ai sign-in's connectors are never fetched
+  and Kumochi's server is the only one offered, whatever `--strict-mcp-config` does; the audit
+  still refuses any other server. `SystemRoot`,
   `SystemDrive` and `PATH` come from the OS (`platform::system_env`): `PATH` is the system folder
   then the Windows folder, never the brain's own `PATH`, and there's no `PATHEXT`. `auth login`
   gets the same environment, and Kumochi sets no `BROWSER`. Claude Code's opener runs as a child
@@ -291,7 +294,8 @@ stateDiagram-v2
 with its own owner-only folder `claude-code\engine\<32 hex>\{work,tmp}` and its own bridge pipe
 (`work\mcp.json` names the brain exe and `--mcp-bridge <hex>`, no secret). A launch is a second
 kind of item in the lane's queue, so it shares the lane's lock, checks and stuck state, and runs
-one at a time. Nothing in production starts one yet; C5b's engine is the first caller.
+one at a time. A run whose choice names Claude Code starts one through `Claude::question` (see
+[A question](#a-question)).
 
 - **Admission.** `Claude::launch` admits only while the view is `Ready`, `SIGN_IN` is
   `FileWithDacl`, the lane finds and isn't cleaning, no version is quarantined, and the lifetime
@@ -360,6 +364,15 @@ the account lock first on every call, then pins the chain to `engine\` with `hol
 deletes each leftover with `remove_tree`, so a second lane or brain never sweeps a live launch,
 and a reparse point anywhere on the way is refused rather than followed. A leftover that won't
 delete doesn't fail the call.
+
+The same sweep empties two folders Claude Code fills on each launch inside Kumochi's folder:
+`config\sessions\`, where it writes a `<pid>.json` record that only a clean exit removes, so a
+Stop or a deadline leaves one behind; and `local\claude-cli-nodejs\Cache\`, where its MCP logs
+record each session's id, its working folder, the tools it called and their timings. Only those
+two folders' children go, through the same `hold_chain` and `remove_tree`: nothing at the root of
+`config\` (the sign-in file is there), nothing else under `local\`, and not `config\backups\`.
+Nothing is opened for reading, and no name, size or content is logged. A failed delete is left for
+the next sweep, as `engine\` leftovers are.
 - shortcut: a locked leftover is retried only before each lane call and at brain start, not on a
   timer, so it can stay for an idle session; add a timer if that turns out to matter.
 
@@ -385,8 +398,13 @@ retries the write. A crash before the first successful write loses it.
 ## A question
 
 `engines/claude_code/launch.rs` runs one question on one launch. `runtime/claude.rs` owns the
-attempts. Nothing in production asks a question yet: C5b-2's engine selection is the first caller of
-`Claude::warm` and `Claude::take`.
+attempts. A run whose choice names Claude Code asks one: the runtime's `StartEngine` calls
+`Claude::question`, which looks the choice's model up in the reviewed row and passes the row's own
+alias, so no other text reaches `--model`; maps its effort to the CLI's word (`low`, `medium`,
+`high`, `xhigh`, `max`); fixes the snapshot with `Offer::Nothing`; and takes a fresh attempt. A
+refusal becomes a round that fails at once through `Unserved`: with Claude Code's own reason while
+no launch would be admitted, otherwise with none, and never `Access(None)`, which reads as a
+`ChatGPT` sign-in. Nothing warms yet, so `Claude::warm` still has no production caller.
 
 - **The snapshot.** A `LaunchSnapshot` fixes the thread, model, effort, Claude Code's connection
   generation, the origin (and so the frozen MCP subset of its model tools) and the version.
@@ -487,6 +505,12 @@ sequenceDiagram
   Then
   exactly one server, `kumochi`, `connected`, whose tools are exactly the launch's frozen set. An
   error response, an unknown or repeated id, or a body of the wrong shape is `Malformed`.
+  2.1.306 starts connecting the server at start-up and answers `pending`, with no tools, until it
+  has. While the one `kumochi` server reads `pending`, the audit task asks `mcp_status` again
+  every `ASK_AGAIN` (100 ms), each time with a fresh id (`k-mcp-status-1`, `-2`, …), and only
+  the latest ask's answer counts. Any other status fails at once, and a server still `pending` at
+  `AUDIT` ends the launch like a late answer: `Deadline`, unseeded, no quarantine. Nothing but
+  `mcp_status` reaches stdin before the audit passes.
 - **After the seed:** `system:init` must show the version, exactly the frozen tool set, the one
   server, exactly the reviewed plugins each at `builtin`, no skills or slash commands, the reviewed
   agents and an `apiKeySource` of `none`. A later init must equal the first. `analytics_disabled`
@@ -496,6 +520,9 @@ sequenceDiagram
   already admitted isn't undone; a call still waiting for admission is refused.
 - **The stated limit:** the seed can reach the chosen model before init is checked, but no tool
   runs before the check.
+- **The log:** a failure is logged as a warning with its closed check and its phase, before stdin
+  or after the seed, and nothing Claude Code sent. The audit's own deadline before stdin is logged
+  as the `Deadline` check, though the launch ends as `Deadline` with no quarantine.
 
 The brain's side of the pipe, and the launch that writes `mcp.json`, come with C4b and C5a.
 On macOS the pipe would be a Unix socket in the owned folder (unverified).

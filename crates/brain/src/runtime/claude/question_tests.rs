@@ -4,11 +4,13 @@
 
 use std::fs;
 use std::future::Future;
+use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::constants::{CLAUDE_CODE_QUARANTINE, MCP_SERVER_NAME};
-use kumochi_protocol::message::{ErrorKey, RunId};
+use kumochi_protocol::constants::{CLAUDE_CODE_QUARANTINE, ENGINE_DIR, MCP_SERVER_NAME};
+use kumochi_protocol::message::{ModelChoice, PolicyFailed, RunId};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -16,12 +18,16 @@ use tokio::time::timeout;
 
 use super::tests::READY;
 use super::*;
+use crate::context::Origin;
 use crate::coordinator::{Input, LeaseId, SendKey};
+use crate::engines::claude_code::lane::Host;
 use crate::engines::claude_code::lane::tests::{Base, V, host, soon};
 use crate::engines::claude_code::supervisor::tests::{WAIT, until};
 use crate::engines::{
     self, Answer, Asks, Engine, EngineFailure, Finish, RunRequest, SendGate, SendLease, TurnEvent,
 };
+use crate::platform::Job;
+use crate::test_support::{Captured, SENTINEL};
 
 const FACTS: &str = include_str!("../../../fixtures/claude-code/facts.jsonl");
 const TEXT: &str = include_str!("../../../fixtures/claude-code/text.jsonl");
@@ -38,6 +44,8 @@ fn lines(text: &str) -> Vec<Value> {
 struct Script {
     initialize: Vec<String>,
     mcp_status: Vec<String>,
+    /// The answers to the asks after the first, one each, the last repeating.
+    mcp_again: Vec<String>,
     user: Vec<Value>,
 }
 
@@ -59,11 +67,24 @@ fn synthetic_signed_in() -> Script {
     Script {
         initialize: vec![initialize.to_string()],
         mcp_status: vec![mcp.to_string()],
+        mcp_again: Vec::new(),
         user,
     }
 }
 
 impl Script {
+    /// The first `mcp_status` answer reads `pending` with no tools, as 2.1.306's does while
+    /// Kumochi's server connects; `again` holds the answers to the asks after it.
+    fn pending_first(mut self, again: Vec<String>) -> Self {
+        let mut line: Value = serde_json::from_str(&self.mcp_status[0]).expect("json");
+        let server = &mut line["response"]["response"]["mcpServers"][0];
+        server["status"] = json!("pending");
+        server.as_object_mut().expect("object").remove("tools");
+        self.mcp_status[0] = line.to_string();
+        self.mcp_again = again;
+        self
+    }
+
     /// The control answers wait until the base holds `name`.
     fn held_until(mut self, name: &str) -> Self {
         self.mcp_status.insert(0, format!("!wait {name}"));
@@ -98,8 +119,14 @@ impl Script {
                     .map_or_else(|| line.to_string(), str::to_owned)
             })
             .collect();
+        let again = self
+            .mcp_again
+            .iter()
+            .map(|line| format!("@mcp_status\n{line}\n"))
+            .collect::<Vec<_>>()
+            .concat();
         let text = format!(
-            "@initialize\n{}\n@mcp_status\n{}\n@user\n{}\n",
+            "@initialize\n{}\n@mcp_status\n{}\n{again}@user\n{}\n",
             self.initialize.join("\n"),
             self.mcp_status.join("\n"),
             user.join("\n")
@@ -131,9 +158,15 @@ struct Rig {
 
 impl Rig {
     async fn new(name: &str, script: &Script) -> Self {
+        Self::with(name, script, |_| {}).await
+    }
+
+    /// As [`new`](Self::new), on a host `edit` changed first.
+    async fn with(name: &str, script: &Script, edit: impl FnOnce(&mut Host)) -> Self {
         let base = Base::new(name);
         script.write(&base, None);
-        let (host, _switches) = host(&base, "replay");
+        let (mut host, _switches) = host(&base, "replay");
+        edit(&mut host);
         let mut claude = Claude::start(Lane::start(host).expect("lane"), SIGN_IN);
         let t0 = Instant::now();
         let now = Arc::new(Mutex::new(t0));
@@ -160,7 +193,12 @@ impl Rig {
 
     fn snapshot(&self) -> LaunchSnapshot {
         self.claude
-            .snapshot(ThreadId(1), "claude-test".to_owned(), None, Origin::Kumo)
+            .snapshot(
+                ThreadId(1),
+                "claude-test".to_owned(),
+                None,
+                Offer::Mcp(Origin::Kumo),
+            )
             .expect("ready")
     }
 
@@ -231,6 +269,23 @@ impl Rig {
             .unwrap_or_default()
     }
 
+    /// The Nth question's argv, as the fake recorded it.
+    fn argv(&self, question: usize) -> String {
+        fs::read_to_string(self.base.0.join("starts.log"))
+            .expect("starts")
+            .lines()
+            .filter(|start| start.starts_with("-p "))
+            .nth(question - 1)
+            .and_then(|start| start.split('\t').next())
+            .expect("the question's start")
+            .to_owned()
+    }
+
+    /// The first text block of the Nth question's seed.
+    fn seed(&self, question: usize) -> String {
+        fs::read_to_string(self.base.0.join(format!("seed.{question}"))).expect("a seed")
+    }
+
     fn markers(&self) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(&self.base.0)
             .expect("the base")
@@ -262,7 +317,13 @@ struct Played {
 }
 
 fn play(question: &ClaudeQuestion) -> Played {
-    let request = RunRequest::for_tests(RunId(1), ThreadId(1), "Be brief.");
+    play_with(
+        question,
+        RunRequest::for_tests(RunId(1), ThreadId(1), "Be brief."),
+    )
+}
+
+fn play_with(question: &ClaudeQuestion, request: RunRequest) -> Played {
     let key = request.key;
     let asks = Asks::default();
     let (inputs_tx, inputs) = mpsc::unbounded_channel();
@@ -368,6 +429,253 @@ async fn a_warm_launch_writes_only_its_two_control_lines() {
 
 type Change = fn(&mut LaunchSnapshot);
 
+/// [`synthetic_signed_in`] with no tool on the server or in init.
+fn offering_nothing() -> Script {
+    let mut script = synthetic_signed_in().init(|init| init["tools"] = json!([]));
+    let mut mcp: Value = serde_json::from_str(&script.mcp_status[0]).expect("json");
+    mcp["response"]["response"]["mcpServers"][0]["tools"] = json!([]);
+    script.mcp_status[0] = mcp.to_string();
+    script
+}
+
+/// A run's request whose choice is `model` at `effort` on `connection`.
+fn choosing(model: &str, effort: Effort, connection: ConnectionKind) -> RunRequest {
+    let mut request = RunRequest::for_tests(RunId(1), ThreadId(1), "Be brief.");
+    request.request.choice = Some(ModelChoice {
+        model: ModelSlug::new(model).expect("valid"),
+        effort,
+        connection,
+    });
+    request
+}
+
+/// Plays `request`'s question to its end: the round's events, and the launch's reports.
+async fn answer(rig: &mut Rig, request: RunRequest) -> (Vec<TurnEvent>, Vec<launch::Outcome>) {
+    let question = rig.claude.question(&request).expect("admitted");
+    let (id, _) = rig.last();
+    let mut played = play_with(&question, request);
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    let events = rig.drive(played.events()).await;
+    (events, rig.reported(id).await)
+}
+
+/// Tests 5 and 6, and L1: a Claude Code choice is answered on the row's own alias with its
+/// effort's CLI word and no tool, and the whole command line is exactly that. A model the row
+/// doesn't list, another connection's choice or none starts nothing.
+#[tokio::test]
+async fn a_question_takes_only_a_listed_alias_its_effort_word_and_no_tool() {
+    let mut rig = Rig::new("question-choice", &offering_nothing()).await;
+    let words = [
+        (Effort::Low, "low"),
+        (Effort::Medium, "medium"),
+        (Effort::High, "high"),
+        (Effort::XHigh, "xhigh"),
+        (Effort::Max, "max"),
+    ];
+    for (n, (effort, word)) in words.into_iter().enumerate() {
+        let (events, reports) = answer(
+            &mut rig,
+            choosing("haiku", effort, ConnectionKind::ClaudeCode),
+        )
+        .await;
+        answered(&events);
+        assert_eq!(reports, [launch::Outcome::Clean]);
+        let argv = rig.argv(n + 1);
+        let (head, rest) = argv.split_once(" --mcp-config ").expect("an MCP config");
+        let (path, tail) = rest.split_once(' ').expect("more after it");
+        let launches = rig.base.owned().join(ENGINE_DIR);
+        assert!(
+            path.starts_with(launches.to_str().expect("utf-8"))
+                && path.ends_with(r"\work\mcp.json"),
+            "{path}"
+        );
+        assert_eq!(
+            format!("{head} {tail}"),
+            format!(
+                "-p --restricted --strict-mcp-config --disable-slash-commands --tools  \
+                 --no-session-persistence --input-format stream-json --output-format stream-json \
+                 --verbose --include-partial-messages --max-turns 8 \
+                 --exclude-dynamic-system-prompt-sections --model haiku --effort {word}"
+            ),
+            "{effort:?}"
+        );
+        assert!(
+            rig.seed(n + 1).ends_with("Tools:\n[]"),
+            "{}",
+            rig.seed(n + 1)
+        );
+    }
+    let launches = rig.claude.launches.len();
+    for request in [
+        choosing("claude-test", Effort::Low, ConnectionKind::ClaudeCode),
+        choosing("haiku", Effort::Low, ConnectionKind::ChatGpt),
+        RunRequest::for_tests(RunId(1), ThreadId(1), "Be brief."),
+    ] {
+        assert!(
+            matches!(rig.claude.question(&request), Err(LaunchRefused::NotReady)),
+            "{request:?}"
+        );
+    }
+    assert_eq!(rig.claude.launches.len(), launches, "nothing started");
+    rig.close().await;
+}
+
+/// Test 13's own half: the row names its default, haiku at Low, though its list starts with
+/// sonnet. It replaces only an unset choice or a Claude Code alias the row doesn't list, and
+/// only while a launch would be admitted.
+#[tokio::test]
+async fn claude_codes_default_is_the_rows_own_and_moves_only_an_unset_or_unlisted_choice() {
+    let mut rig = Rig::new("question-default", &synthetic_signed_in()).await;
+    assert_eq!(policy::reviewed(V).expect("reviewed").models[0].0, "sonnet");
+    let choice = |model: &str, effort, connection| ModelChoice {
+        model: ModelSlug::new(model).expect("valid"),
+        effort,
+        connection,
+    };
+    let haiku = choice("haiku", Effort::Low, ConnectionKind::ClaudeCode);
+    assert_eq!(rig.claude.repaired_default(None), Some(haiku.clone()));
+    let unlisted = choice("claude-test", Effort::High, ConnectionKind::ClaudeCode);
+    assert_eq!(rig.claude.repaired_default(Some(&unlisted)), Some(haiku));
+    for kept in [
+        choice("opus", Effort::High, ConnectionKind::ClaudeCode),
+        choice("gpt-6-luna", Effort::Low, ConnectionKind::ChatGpt),
+    ] {
+        assert_eq!(rig.claude.repaired_default(Some(&kept)), None, "{kept:?}");
+    }
+    rig.claude.view = ClaudeCodeView::NotFound;
+    assert_eq!(rig.claude.repaired_default(None), None, "not admitted");
+    rig.claude.view = READY;
+    rig.close().await;
+}
+
+/// Test 9: a refused question fails with Claude Code's own reason while no launch would be
+/// admitted, and with none otherwise; never with `Access(None)`, which reads as a `ChatGPT`
+/// sign-in.
+#[tokio::test]
+async fn a_refused_question_fails_with_claude_codes_reason_or_with_none() {
+    let mut rig = Rig::new("question-refused", &synthetic_signed_in()).await;
+    for refused in [
+        LaunchRefused::NotReady,
+        LaunchRefused::Busy,
+        LaunchRefused::Identity,
+        LaunchRefused::Lifetime,
+    ] {
+        assert_eq!(
+            rig.claude.refused(refused),
+            EngineFailure::Provider,
+            "{refused:?}"
+        );
+    }
+    rig.claude.view = ClaudeCodeView::NotFound;
+    assert_eq!(
+        rig.claude.refused(LaunchRefused::NotReady),
+        EngineFailure::Claude(
+            UserError::new(
+                ErrorKey::ClaudeCodeNotFound,
+                Vec::new(),
+                vec![Action::OpenSettings]
+            )
+            .expect("one action")
+        )
+    );
+    rig.claude.view = READY;
+    rig.close().await;
+}
+
+/// Test 8: Stop mid-answer drops the round, and the launch's teardown confirms its job empty
+/// and deletes its folder.
+#[tokio::test]
+async fn a_question_stopped_mid_answer_leaves_no_process_and_no_folder() {
+    let mut rig = Rig::new("question-stopped", &offering_nothing().held_at_user("go")).await;
+    let request = choosing("haiku", Effort::Low, ConnectionKind::ClaudeCode);
+    let question = rig.claude.question(&request).expect("admitted");
+    let (id, control) = rig.last();
+    let mut played = play_with(&question, request);
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    until("seeded", || rig.stdin().len() == 3).await;
+    played.round.abort();
+    drop(played);
+    drop(question);
+    assert_eq!(rig.reported(id).await, [launch::Outcome::Clean]);
+    until("the teardown confirmed", || control.is_ended()).await;
+    let launches = rig.base.owned().join(ENGINE_DIR);
+    until("the launch folder deleted", || {
+        fs::read_dir(&launches).expect("the engine folder").count() == 0
+    })
+    .await;
+    rig.close().await;
+}
+
+/// A marker in the prompt and in the answer reaches no log line on the round's thread and no
+/// Debug of the question, its request or its reports, as text or as bytes.
+#[tokio::test]
+async fn a_question_logs_and_debugs_no_prompt_or_answer_text() {
+    let captured = Captured::default();
+    let _capturing = captured.install();
+    let mut script = offering_nothing();
+    for line in &mut script.user {
+        if let Some(text) = line["event"]["delta"]["text"].as_str() {
+            let marked = format!("{text}{SENTINEL}");
+            line["event"]["delta"]["text"] = json!(marked);
+        }
+    }
+    let mut rig = Rig::new("question-sentinel", &script).await;
+    let mut request = choosing("haiku", Effort::Low, ConnectionKind::ClaudeCode);
+    request.request.instructions = format!("Be brief. {SENTINEL}");
+    let question = rig.claude.question(&request).expect("admitted");
+    let (id, _) = rig.last();
+    let debugs = [format!("{question:?}"), format!("{request:?}")];
+    let mut played = play_with(&question, request);
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    let events = rig.drive(played.events()).await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, TurnEvent::TextDelta(text) if text.contains(SENTINEL))),
+        "the marked answer came through"
+    );
+    let reports = format!("{:?}", rig.reported(id).await);
+    let bytes = format!("{:?}", SENTINEL.as_bytes());
+    let bytes = bytes.trim_start_matches('[').trim_end_matches(']');
+    for text in debugs.iter().chain([&reports, &captured.text()]) {
+        assert!(!text.contains(SENTINEL), "{text}");
+        assert!(!text.contains(bytes), "{text}");
+    }
+    rig.close().await;
+}
+
+/// A condition that alone stops admission: its name, how to set it and how to clear it.
+type Condition = (&'static str, fn(&mut Claude), fn(&mut Claude));
+
+/// A launch that offers nothing starts with no allow list, passes an audit that expects no tool
+/// before input and after the seed, and seeds an empty tool list.
+#[tokio::test]
+async fn a_launch_that_offers_nothing_has_no_tool_anywhere() {
+    let mut rig = Rig::new("question-offers-nothing", &offering_nothing()).await;
+    let snapshot = rig
+        .claude
+        .snapshot(ThreadId(1), "claude-test".to_owned(), None, Offer::Nothing)
+        .expect("ready");
+    let question = rig.claude.take(&snapshot).expect("taken");
+    let (id, _) = rig.last();
+    let mut played = play(&question);
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    answered(&rig.drive(played.events()).await);
+    assert_eq!(rig.reported(id).await, [launch::Outcome::Clean]);
+    let argv = rig.argv(1);
+    assert!(!argv.contains("--allowedTools"), "{argv}");
+    assert!(
+        argv.contains(" --tools  --no-session-persistence "),
+        "the built-in tools stay off: {argv}"
+    );
+    assert!(rig.seed(1).ends_with("Tools:\n[]"), "{}", rig.seed(1));
+    rig.close().await;
+}
+
 /// T3.
 #[tokio::test]
 async fn any_change_to_the_snapshot_replaces_the_warm_launch() {
@@ -376,7 +684,7 @@ async fn any_change_to_the_snapshot_replaces_the_warm_launch() {
         ("model", |s| s.model = "claude-other".to_owned()),
         ("effort", |s| s.effort = Some("high".to_owned())),
         ("thread", |s| s.thread = ThreadId(2)),
-        ("origin", |s| s.origin = Origin::Task(ThreadId(1))),
+        ("offer", |s| s.offer = Offer::Mcp(Origin::Task(ThreadId(1)))),
     ];
     for (what, change) in changes {
         let snapshot = rig.snapshot();
@@ -841,7 +1149,7 @@ fn a_snapshots_debug_shows_no_model_or_effort_text() {
         model: marker.to_owned(),
         effort: Some(marker.to_owned()),
         account: 3,
-        origin: Origin::Kumo,
+        offer: Offer::Mcp(Origin::Kumo),
         version: V,
     };
     let text = format!("{snapshot:?}");
@@ -850,7 +1158,7 @@ fn a_snapshots_debug_shows_no_model_or_effort_text() {
     assert!(!text.contains(bytes.trim_matches(['[', ']'])), "{text}");
     assert_eq!(
         text,
-        "LaunchSnapshot { thread: ThreadId(1), model_bytes: 11, effort_bytes: Some(11), account: 3, origin: Kumo, version: ClaudeVersion { major: 2, minor: 1, patch: 306 } }"
+        "LaunchSnapshot { thread: ThreadId(1), model_bytes: 11, effort_bytes: Some(11), account: 3, offer: Mcp(Kumo), version: ClaudeVersion { major: 2, minor: 1, patch: 306 } }"
     );
 }
 
@@ -1155,5 +1463,301 @@ async fn a_grant_ready_with_its_expired_deadline_seeds_nothing() {
     assert_eq!(rig.reported(id).await, [launch::Outcome::Deadline]);
     assert!(rig.stdin().iter().all(|line| !line.ends_with(" user")));
     assert!(rig.claude.budget.reserve(), "no question was spent");
+    rig.close().await;
+}
+
+fn unavailable(key: ErrorKey) -> Availability {
+    Availability::Unavailable(
+        UserError::new(key, Vec::new(), vec![Action::OpenSettings]).expect("one action"),
+    )
+}
+
+fn tag(availability: &Availability) -> ConnectionTag {
+    let Availability::Ready(ready) = availability else {
+        panic!("{availability:?}");
+    };
+    ready.connection
+}
+
+const UNREVIEWED: ClaudeCodeView = ClaudeCodeView::Ready {
+    version: ClaudeVersion {
+        major: 2,
+        minor: 1,
+        patch: 307,
+    },
+    analytics_on: false,
+};
+
+/// Each view's reason, with Open Settings only. None is `ConnectionNeeded`, which only the
+/// coordinator's rule for a turn nothing can answer sends.
+#[test]
+fn each_view_reports_its_own_reason_with_open_settings() {
+    let cases = [
+        (ClaudeCodeView::NotFound, ErrorKey::ClaudeCodeNotFound),
+        (
+            ClaudeCodeView::SignedOut { version: V },
+            ErrorKey::ClaudeCodeSignedOut,
+        ),
+        (ClaudeCodeView::SigningIn, ErrorKey::ClaudeCodeSignedOut),
+        (
+            ClaudeCodeView::Unsupported(Unsupported::Shim),
+            ErrorKey::ClaudeCodeUnsupported,
+        ),
+        (
+            ClaudeCodeView::PolicyFailed(PolicyFailed::ManagedPolicy),
+            ErrorKey::ClaudeCodePolicy,
+        ),
+        (
+            ClaudeCodeView::AuditFailed(AuditFailed::Agents),
+            ErrorKey::ClaudeCodeAuditFailed,
+        ),
+        (
+            ClaudeCodeView::CleanupPending,
+            ErrorKey::ClaudeCodeCleanupPending,
+        ),
+        (ClaudeCodeView::Finding, ErrorKey::ModelUnavailable),
+        (ClaudeCodeView::TurnedOff, ErrorKey::ModelUnavailable),
+        (ClaudeCodeView::InUse, ErrorKey::ClaudeCodeUnsupported),
+        (ClaudeCodeView::Unavailable, ErrorKey::ClaudeCodeUnsupported),
+        // Ready with no lane: a launch would be refused, so it doesn't read ready either.
+        (READY, ErrorKey::ClaudeCodeUnsupported),
+    ];
+    for (view, key) in cases {
+        let mut claude = Claude::new(None, SIGN_IN, view);
+        assert_eq!(claude.availability(), unavailable(key), "{view:?}");
+    }
+}
+
+/// Reads unavailable, and refuses a launch for a snapshot taken now.
+fn refuses(claude: &mut Claude, what: &str) {
+    assert!(
+        matches!(claude.availability(), Availability::Unavailable(_)),
+        "{what}"
+    );
+    let snapshot = claude
+        .snapshot(
+            ThreadId(1),
+            "claude-test".to_owned(),
+            None,
+            Offer::Mcp(Origin::Kumo),
+        )
+        .expect("the view still reads Ready");
+    assert!(
+        matches!(claude.take(&snapshot), Err(LaunchRefused::NotReady)),
+        "{what}"
+    );
+}
+
+/// `availability` and `launch` ask one check: for each condition, a Ready view where only it
+/// fails reads unavailable and refuses the launch; with none failing, both say yes.
+#[tokio::test]
+async fn availability_and_launch_agree_on_every_condition() {
+    let mut rig = Rig::new("question-agree", &synthetic_signed_in()).await;
+    let Availability::Ready(ready) = rig.claude.availability() else {
+        panic!("ready");
+    };
+    assert_eq!(ready.connection, ConnectionTag(1));
+    let slugs: Vec<&str> = ready
+        .models
+        .iter()
+        .map(|model| model.slug.as_str())
+        .collect();
+    assert_eq!(slugs, ["sonnet", "opus", "haiku", "fable"]);
+    assert!(!ready.trusted_draw);
+    drop(rig.claude.take(&rig.snapshot()).expect("admitted"));
+
+    let conditions: [Condition; 5] = [
+        (
+            "a pending Disconnect",
+            |c| c.cleaning = true,
+            |c| c.cleaning = false,
+        ),
+        (
+            "a quarantine",
+            |c| {
+                c.quarantine = Some(Quarantine {
+                    version: V,
+                    reason: AuditFailed::Agents,
+                    durable: true,
+                });
+            },
+            |c| c.quarantine = None,
+        ),
+        ("turned off", |c| c.finds = false, |c| c.finds = true),
+        (
+            "an undecided sign-in store",
+            |c| c.sign_in = SignInStore::Undecided,
+            |c| c.sign_in = SignInStore::FileWithDacl,
+        ),
+        (
+            "an unreviewed version",
+            |c| c.view = UNREVIEWED,
+            |c| c.view = READY,
+        ),
+    ];
+    for (what, set, undo) in conditions {
+        set(&mut rig.claude);
+        refuses(&mut rig.claude, what);
+        undo(&mut rig.claude);
+        assert!(
+            matches!(rig.claude.availability(), Availability::Ready(_)),
+            "back after {what}"
+        );
+    }
+    let lane = rig.claude.lane.take();
+    refuses(&mut rig.claude, "no lane");
+    rig.claude.lane = lane;
+    rig.close().await;
+}
+
+/// A Find while ready keeps the tag, so a run bound to it goes on; a sign-out ends it and the
+/// next ready state draws a new one, as an unreviewed version in between does.
+#[tokio::test]
+async fn the_tag_survives_a_find_and_never_outlives_a_sign_out() {
+    let mut rig = Rig::new("question-epoch", &synthetic_signed_in()).await;
+    let first = tag(&rig.claude.availability());
+    rig.claude.op(ConnectionOp::FindClaudeCode);
+    assert_eq!(
+        tag(&rig.claude.availability()),
+        first,
+        "while the Find runs"
+    );
+    rig.settle().await;
+    assert_eq!(rig.claude.view(), READY);
+    assert_eq!(tag(&rig.claude.availability()), first, "after it");
+
+    rig.claude.view = ClaudeCodeView::SignedOut { version: V };
+    assert_eq!(
+        rig.claude.availability(),
+        unavailable(ErrorKey::ClaudeCodeSignedOut)
+    );
+    rig.claude.view = READY;
+    let second = tag(&rig.claude.availability());
+    assert_ne!(
+        second, first,
+        "a later sign-in never answers a run bound before"
+    );
+
+    rig.claude.view = UNREVIEWED;
+    assert_eq!(
+        rig.claude.availability(),
+        unavailable(ErrorKey::ClaudeCodeUnsupported)
+    );
+    rig.claude.view = READY;
+    assert_ne!(
+        tag(&rig.claude.availability()),
+        second,
+        "nor across a version"
+    );
+    rig.close().await;
+}
+
+/// Makes every teardown unconfirmed once set; only the test below sets it.
+static STUCK: AtomicBool = AtomicBool::new(false);
+
+fn end_unless_stuck(job: &Job) -> io::Result<()> {
+    if STUCK.load(Ordering::SeqCst) {
+        return Err(io::ErrorKind::Other.into());
+    }
+    Job::terminate(job)
+}
+
+/// A lane a teardown left stuck refuses the next launch: that question fails with Claude Code's
+/// reason, never with none, and Claude Code stops reading ready.
+#[tokio::test]
+async fn a_stuck_lane_fails_the_next_question_with_a_reason_and_stops_reading_ready() {
+    let mut rig = Rig::with("question-stuck", &synthetic_signed_in(), |host| {
+        host.terminate = end_unless_stuck;
+    })
+    .await;
+    assert!(matches!(rig.claude.availability(), Availability::Ready(_)));
+    STUCK.store(true, Ordering::SeqCst);
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let (_, control) = rig.last();
+    let mut played = play(&question);
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    answered(&rig.drive(played.events()).await);
+    drop(question);
+    until("the stuck teardown", || control.is_ended()).await;
+
+    let question = rig
+        .claude
+        .take(&rig.snapshot())
+        .expect("the core can't see the lane is stuck yet");
+    let (second, _) = rig.last();
+    let mut played = play(&question);
+    assert_eq!(
+        rig.drive(played.events()).await,
+        [claude_failed(ErrorKey::ClaudeCodeUnsupported)]
+    );
+    assert_eq!(rig.reported(second).await, [launch::Outcome::Refused]);
+    assert_eq!(rig.claude.view(), ClaudeCodeView::Unavailable);
+    assert_eq!(
+        rig.claude.availability(),
+        unavailable(ErrorKey::ClaudeCodeUnsupported)
+    );
+    // shortcut: the kept lock lives until the test process ends, leaving this scratch folder.
+    assert!(
+        !rig.claude.close(soon()).await,
+        "a stuck lane keeps its lock"
+    );
+}
+
+/// The probe on Rez (2026-11-15): 2.1.306 answers `mcp_status` with `pending` until Kumochi's
+/// server has connected, so the audit asks again and the question goes on once it reads connected.
+#[tokio::test]
+async fn a_server_still_connecting_is_asked_again_and_the_question_is_answered() {
+    let script = synthetic_signed_in();
+    let connected = script.mcp_status[0].clone();
+    let script = script.pending_first(vec![connected]);
+    let mut rig = Rig::new("question-pending", &script).await;
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let (id, _) = rig.last();
+    let mut played = play(&question);
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    answered(&rig.drive(played.events()).await);
+    assert_eq!(
+        rig.stdin(),
+        ["1 initialize", "1 mcp_status", "1 mcp_status", "1 user"]
+    );
+    assert_eq!(rig.reported(id).await, [launch::Outcome::Clean]);
+    assert_eq!(rig.claude.view(), READY);
+    rig.close().await;
+}
+
+/// A server that stays `pending` ends the launch at `AUDIT`, as a late answer does: no seed, no
+/// quarantine, and the asks stay within `MAX_CONTROL`. The log names the `Deadline` check before
+/// stdin.
+#[tokio::test]
+async fn a_server_pending_until_the_audit_deadline_ends_the_launch_unseeded() {
+    let captured = crate::test_support::Captured::default();
+    let _capturing = captured.install();
+    let script = synthetic_signed_in().pending_first(Vec::new());
+    let mut rig = Rig::new("question-pending-deadline", &script).await;
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let (id, _) = rig.last();
+    let mut played = play(&question);
+    assert_eq!(
+        rig.drive(played.events()).await,
+        [TurnEvent::Finished(Finish::Failed(EngineFailure::Provider))]
+    );
+    assert_eq!(rig.reported(id).await, [launch::Outcome::Deadline]);
+    let stdin = rig.stdin();
+    let asks = stdin.iter().filter(|line| *line == "1 mcp_status").count();
+    assert_eq!(stdin[0], "1 initialize");
+    assert!(
+        !stdin.iter().any(|line| line == "1 user"),
+        "nothing but mcp_status after initialize: {stdin:?}"
+    );
+    assert!((2..=31).contains(&asks), "{asks} asks in AUDIT");
+    assert_eq!(rig.markers(), Vec::<String>::new());
+    assert_eq!(rig.claude.view(), READY);
+    let logs = captured.text();
+    assert!(
+        logs.contains(r#"claude code's audit failed check=Deadline phase="before stdin""#),
+        "{logs}"
+    );
     rig.close().await;
 }

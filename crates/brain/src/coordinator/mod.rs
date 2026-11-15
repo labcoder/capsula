@@ -679,7 +679,7 @@ pub struct Coordinator {
     leases: Vec<lease::Lease>,
     /// Grants made, so each lease has its own serial.
     sends: u64,
-    /// A lease failed closed: nothing is granted again until the brain restarts.
+    /// A lease that wasn't held failed closed: nothing is granted again until the brain restarts.
     transport_failed: bool,
     /// Whether `ChatGPT` runs can be answered, and on which sign-in.
     availability: Availability,
@@ -1205,7 +1205,7 @@ impl Coordinator {
         if let Availability::Unavailable(reason) = &self.availability
             && self.arrived_now() == availability::Arrived::default()
         {
-            let reason = reason.clone();
+            let reason = self.nothing_ready(reason);
             self.fail_with(run, Failure::Engine, reason, effects)
                 .expect("the run is current");
         }

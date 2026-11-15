@@ -46,11 +46,22 @@ pub(crate) fn control_requests() -> [&'static [u8]; 2] {
     ]
 }
 
+/// The `mcp_status` request asked again while the server is `pending`; the `n`th repeat's id is
+/// [`MCP_STATUS_ID`] with `-n` after it, so a late answer to an earlier ask can't pass for it.
+fn mcp_status_again(n: u32) -> Vec<u8> {
+    format!(
+        "{{\"type\":\"control_request\",\"request_id\":\"{MCP_STATUS_ID}-{n}\",\"request\":{{\"subtype\":\"mcp_status\"}}}}\n"
+    )
+    .into_bytes()
+}
+
 /// Where the audit before input stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Progress {
     /// An answer is still due.
     Waiting,
+    /// Kumochi's server is still connecting: ask `mcp_status` again with [`mcp_status_again`].
+    Pending,
     /// Both passed: the launch may be bound and seeded, but no tool may run yet.
     Ready,
     /// Claude Code isn't signed in: tear down before stdin and show `ClaudeCodeSignedOut`.
@@ -64,6 +75,8 @@ pub(crate) struct PreInputAudit {
     tools: BTreeSet<String>,
     initialize: bool,
     mcp: bool,
+    /// How many times `mcp_status` was asked again; the answer due is to the latest.
+    asked_again: u32,
     /// initialize's `analytics_disabled`, once initialize passed.
     analytics: Option<bool>,
     /// `SignedOut` or a failure, once given.
@@ -78,9 +91,16 @@ impl PreInputAudit {
             tools,
             initialize: false,
             mcp: false,
+            asked_again: 0,
             analytics: None,
             refused: None,
         }
+    }
+
+    /// The line that asks `mcp_status` again, after a `Pending`.
+    pub(crate) fn ask_again(&mut self) -> Vec<u8> {
+        self.asked_again += 1;
+        mcp_status_again(self.asked_again)
     }
 
     /// initialize's `analytics_disabled` once initialize passed: shown, never judged. `None`
@@ -99,7 +119,10 @@ impl PreInputAudit {
             return refusal;
         }
         let verdict = self.judge(response);
-        if !matches!(verdict, Ok(Progress::Waiting | Progress::Ready)) {
+        if !matches!(
+            verdict,
+            Ok(Progress::Waiting | Progress::Pending | Progress::Ready)
+        ) {
             self.refused = Some(verdict);
         }
         verdict
@@ -110,6 +133,10 @@ impl PreInputAudit {
         if response.subtype != "success" {
             return Err(AuditFailed::Malformed);
         }
+        let mcp_id = match self.asked_again {
+            0 => MCP_STATUS_ID.to_owned(),
+            n => format!("{MCP_STATUS_ID}-{n}"),
+        };
         match response.request_id.as_str() {
             INITIALIZE_ID if !self.initialize => {
                 if !self.initialize_passes(&response.response)? {
@@ -118,8 +145,10 @@ impl PreInputAudit {
                 self.initialize = true;
                 self.analytics = response.response.rest["analytics_disabled"].as_bool();
             }
-            MCP_STATUS_ID if !self.mcp => {
-                self.mcp_passes(&response.response.rest)?;
+            id if id == mcp_id && !self.mcp => {
+                if !self.mcp_passes(&response.response.rest)? {
+                    return Ok(Progress::Pending);
+                }
                 self.mcp = true;
             }
             _ => return Err(AuditFailed::Malformed),
@@ -173,17 +202,24 @@ impl PreInputAudit {
         }
     }
 
-    fn mcp_passes(&self, body: &Value) -> Result<(), AuditFailed> {
+    /// `Ok(false)` while Kumochi's one server is still `pending`, which Claude Code reports until
+    /// the server has connected (2.1.306 starts connecting it at start-up).
+    fn mcp_passes(&self, body: &Value) -> Result<bool, AuditFailed> {
         let body = McpStatus::deserialize(body).map_err(|_| AuditFailed::Malformed)?;
         let [server] = body.servers.as_slice() else {
             return Err(AuditFailed::McpServer);
         };
-        if server.name != MCP_SERVER_NAME || server.status != "connected" {
+        if server.name != MCP_SERVER_NAME {
             return Err(AuditFailed::McpServer);
         }
+        match server.status.as_str() {
+            "connected" => {}
+            "pending" => return Ok(false),
+            _ => return Err(AuditFailed::McpServer),
+        }
+        let tools = server.tools.as_ref().ok_or(AuditFailed::Malformed)?;
         let prefix = format!("mcp__{MCP_SERVER_NAME}__");
-        let names: Vec<String> = server
-            .tools
+        let names: Vec<String> = tools
             .iter()
             .map(|tool| format!("{prefix}{}", tool.name))
             .collect();
@@ -193,7 +229,7 @@ impl PreInputAudit {
         ) {
             return Err(AuditFailed::Tools);
         }
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -301,7 +337,8 @@ struct McpStatus {
 struct StatusServer {
     name: String,
     status: String,
-    tools: Vec<Named>,
+    /// Absent while the server is `pending`.
+    tools: Option<Vec<Named>>,
 }
 
 #[derive(Deserialize)]

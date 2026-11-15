@@ -7,25 +7,27 @@ use std::time::Instant;
 
 use kumochi_protocol::constants::CLAUDE_QUESTIONS_ENV;
 use kumochi_protocol::message::{
-    AuditFailed, ClaudeCodeView, ClaudeVersion, ConnectionOp, ConnectionsView, ControlToShell,
-    ThreadId, Unsupported,
+    Action, AuditFailed, ClaudeCodeView, ClaudeVersion, ConnectionKind, ConnectionOp,
+    ConnectionsView, ControlToShell, Effort, ErrorKey, ModelChoice, ModelInfo, ModelName,
+    ModelSlug, ThreadId, Unsupported, UserError,
 };
 use tokio::sync::mpsc;
 
-use super::{Brain, Full, Link};
+use super::{Brain, Ended, Full, Link};
 use crate::bridge::LaunchId;
 use crate::connections::model::budget::Budget;
-use crate::context::Origin;
-use crate::coordinator::StoreOp;
+use crate::context::ConnectionTag;
+use crate::coordinator::{Availability, Input, Ready, StoreOp, model_unavailable};
 use crate::engines::claude_code::install::FindError;
 use crate::engines::claude_code::lane::{Done, Failure, Lane, Outcome, Work};
 use crate::engines::claude_code::launch::{
-    self, Attempt, ClaudeQuestion, Clock, LaunchSnapshot, Note, Refresh, Report, WARM,
+    self, Attempt, ClaudeQuestion, Clock, LaunchSnapshot, Note, Offer, Refresh, Report, WARM,
 };
-use crate::engines::claude_code::policy;
+use crate::engines::claude_code::policy::{self, Reviewed};
 use crate::engines::claude_code::supervisor::{
     self, Control, Launch, LaunchRefused, MAX_LAUNCH, Question,
 };
+use crate::engines::{EngineFailure, RunRequest};
 
 /// Where Claude Code's sign-in may be kept, which owner call 1 decided.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +76,18 @@ pub(crate) struct Claude {
     clock: Clock,
     /// The questions seeds may still take.
     budget: Arc<Budget>,
+    /// The tag runs on Claude Code are bound to, while a launch would be admitted.
+    epoch: Option<Epoch>,
+    /// The last epoch's tag.
+    epochs: u64,
+}
+
+/// Runs bound under one epoch go on through a Find; a sign-out, a Disconnect, an audit failure,
+/// a stuck lane or another version ends it, and the next admitted state draws a new one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Epoch {
+    tag: u64,
+    version: ClaudeVersion,
 }
 
 /// One admitted launch, as the core tracks it.
@@ -134,6 +148,8 @@ impl Claude {
             notes: mpsc::unbounded_channel(),
             clock: Clock::default(),
             budget: Arc::new(Budget::from_var(CLAUDE_QUESTIONS_ENV)),
+            epoch: None,
+            epochs: 0,
         }
     }
 
@@ -375,24 +391,13 @@ impl Claude {
     /// Queues a question launch behind whatever the lane is doing. Its deadline is fixed now.
     ///
     /// # Errors
-    /// [`LaunchRefused::NotReady`] unless Claude Code is Ready under the decided sign-in store,
-    /// on, no Disconnect is pending and no version's audit failed; [`LaunchRefused::Lifetime`]
+    /// [`LaunchRefused::NotReady`] unless [`admitted`](Self::admitted); [`LaunchRefused::Lifetime`]
     /// over [`MAX_LAUNCH`]; [`LaunchRefused::Identity`] when no launch id can be drawn;
     /// [`LaunchRefused::Busy`] when the lane's queue is full. Nothing is queued then.
     pub(crate) fn launch(&mut self, question: Question) -> Result<Launch, LaunchRefused> {
         self.prune();
-        let ClaudeCodeView::Ready { version, .. } = self.view else {
-            return Err(LaunchRefused::NotReady);
-        };
-        let ready = self.sign_in == SignInStore::FileWithDacl
-            && self.finds
-            && !self.cleaning
-            && self.quarantine.is_none();
-        let lane = self
-            .lane
-            .as_ref()
-            .filter(|_| ready)
-            .ok_or(LaunchRefused::NotReady)?;
+        let (version, _) = self.admitted().ok_or(LaunchRefused::NotReady)?;
+        let lane = self.lane.as_ref().ok_or(LaunchRefused::NotReady)?;
         if question.lifetime > MAX_LAUNCH {
             return Err(LaunchRefused::Lifetime);
         }
@@ -414,20 +419,167 @@ impl Claude {
         Ok(launch)
     }
 
+    /// The version and its reviewed row while a question launch would be admitted: Ready under
+    /// the decided sign-in store, on, no Disconnect pending, no version quarantined, a lane, and
+    /// a reviewed version. [`launch`](Self::launch) and [`availability`](Self::availability)
+    /// both ask this, so a run is never bound to Claude Code while a launch would be refused.
+    fn admitted(&self) -> Option<(ClaudeVersion, &'static Reviewed)> {
+        let ClaudeCodeView::Ready { version, .. } = self.view else {
+            return None;
+        };
+        let ready = self.sign_in == SignInStore::FileWithDacl
+            && self.finds
+            && !self.cleaning
+            && self.quarantine.is_none()
+            && self.lane.is_some();
+        ready
+            .then(|| policy::reviewed(version).ok())
+            .flatten()
+            .map(|row| (version, row))
+    }
+
+    /// Whether runs on Claude Code can be answered now: Ready under its epoch with the reviewed
+    /// version's models exactly when a launch would be admitted, else the view's reason. The
+    /// runtime asks after every op and wake, the only ways the view changes, so an epoch is
+    /// never kept across a state that wasn't admitted.
+    pub(crate) fn availability(&mut self) -> Availability {
+        let Some((version, row)) = self.admitted() else {
+            self.epoch = None;
+            return Availability::Unavailable(self.reason());
+        };
+        let epoch = match self.epoch {
+            Some(epoch) if epoch.version == version => epoch,
+            _ => {
+                self.epochs += 1;
+                Epoch {
+                    tag: self.epochs,
+                    version,
+                }
+            }
+        };
+        self.epoch = Some(epoch);
+        Availability::Ready(Ready {
+            connection: ConnectionTag(epoch.tag),
+            models: row
+                .models
+                .iter()
+                .map(|&(slug, name)| ModelInfo {
+                    slug: ModelSlug::new(slug).expect("a reviewed alias is a valid slug"),
+                    display_name: ModelName::new(name).expect("a reviewed name is valid"),
+                })
+                .collect(),
+            #[cfg(any(test, debug_assertions))]
+            trusted_draw: false,
+        })
+    }
+
+    /// Why runs on Claude Code can't be answered now, with Open Settings: the view's own key, or
+    /// `ModelUnavailable` while it's still being found or is turned off.
+    fn reason(&self) -> UserError {
+        let key = match self.view {
+            ClaudeCodeView::NotFound => ErrorKey::ClaudeCodeNotFound,
+            ClaudeCodeView::SignedOut { .. } | ClaudeCodeView::SigningIn => {
+                ErrorKey::ClaudeCodeSignedOut
+            }
+            ClaudeCodeView::PolicyFailed(_) => ErrorKey::ClaudeCodePolicy,
+            ClaudeCodeView::AuditFailed(_) => ErrorKey::ClaudeCodeAuditFailed,
+            ClaudeCodeView::CleanupPending => ErrorKey::ClaudeCodeCleanupPending,
+            ClaudeCodeView::Finding | ClaudeCodeView::TurnedOff => return model_unavailable(),
+            ClaudeCodeView::Unsupported(_)
+            | ClaudeCodeView::InUse
+            | ClaudeCodeView::Unavailable
+            | ClaudeCodeView::Ready { .. } => ErrorKey::ClaudeCodeUnsupported,
+        };
+        UserError::new(key, Vec::new(), vec![Action::OpenSettings])
+            .expect("one action is within the limit")
+    }
+
+    /// The engine for one question on `request`'s Claude Code choice, offering no tools. The
+    /// model is the reviewed row's own alias, so only a listed one reaches the command line
+    /// whatever the request names, and the effort goes by a table to the CLI's word.
+    ///
+    /// # Errors
+    /// [`LaunchRefused::NotReady`] unless a launch would be admitted and the choice is a Claude
+    /// Code one whose model the row lists; otherwise as [`take`](Self::take).
+    pub(crate) fn question(
+        &mut self,
+        request: &RunRequest,
+    ) -> Result<ClaudeQuestion, LaunchRefused> {
+        let (_, row) = self.admitted().ok_or(LaunchRefused::NotReady)?;
+        let choice = request
+            .request
+            .choice
+            .as_ref()
+            .filter(|choice| choice.connection == ConnectionKind::ClaudeCode)
+            .ok_or(LaunchRefused::NotReady)?;
+        let model = row
+            .models
+            .iter()
+            .map(|&(slug, _)| slug)
+            .find(|&slug| slug == choice.model.as_str())
+            .ok_or(LaunchRefused::NotReady)?;
+        let effort = match choice.effort {
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+            Effort::XHigh => "xhigh",
+            Effort::Max => "max",
+        };
+        let snapshot = self.snapshot(
+            request.thread,
+            model.to_owned(),
+            Some(effort.to_owned()),
+            Offer::Nothing,
+        )?;
+        self.take(&snapshot)
+    }
+
+    /// Claude Code's half of the brain's repair of `default_model`, while a launch would be
+    /// admitted: the reviewed row's own default at `Low` when `current` is unset or a Claude Code
+    /// alias the row doesn't list. A choice on another connection is never moved.
+    pub(crate) fn repaired_default(&self, current: Option<&ModelChoice>) -> Option<ModelChoice> {
+        let (_, row) = self.admitted()?;
+        if current.is_some_and(|choice| {
+            choice.connection != ConnectionKind::ClaudeCode
+                || row
+                    .models
+                    .iter()
+                    .any(|&(slug, _)| slug == choice.model.as_str())
+        }) {
+            return None;
+        }
+        Some(ModelChoice {
+            model: ModelSlug::new(row.default_model).expect("a reviewed alias is a valid slug"),
+            effort: Effort::Low,
+            connection: ConnectionKind::ClaudeCode,
+        })
+    }
+
+    /// What a run's round fails with when its question was refused: Claude Code's own reason
+    /// while no launch would be admitted, else none. Never `Access(None)`, which reads as a
+    /// `ChatGPT` sign-in.
+    pub(crate) fn refused(&self, refused: LaunchRefused) -> EngineFailure {
+        match refused {
+            LaunchRefused::NotReady if self.admitted().is_none() => {
+                EngineFailure::Claude(self.reason())
+            }
+            LaunchRefused::NotReady
+            | LaunchRefused::Busy
+            | LaunchRefused::Identity
+            | LaunchRefused::Lifetime => EngineFailure::Provider,
+        }
+    }
+
     /// What a launch for `thread` would be fixed to now.
     ///
     /// # Errors
     /// [`LaunchRefused::NotReady`] unless Claude Code is Ready.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "C5b-2's engine selection is the first caller")
-    )]
     pub(crate) fn snapshot(
         &self,
         thread: ThreadId,
         model: String,
         effort: Option<String>,
-        origin: Origin,
+        offer: Offer,
     ) -> Result<LaunchSnapshot, LaunchRefused> {
         let ClaudeCodeView::Ready { version, .. } = self.view else {
             return Err(LaunchRefused::NotReady);
@@ -437,7 +589,7 @@ impl Claude {
             model,
             effort,
             account: self.generation,
-            origin,
+            offer,
             version,
         })
     }
@@ -473,10 +625,6 @@ impl Claude {
     ///
     /// # Errors
     /// As [`warm`](Self::warm).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "C5b-2's engine selection is the first caller")
-    )]
     pub(crate) fn take(
         &mut self,
         snapshot: &LaunchSnapshot,
@@ -533,7 +681,7 @@ impl Claude {
             thread: snapshot.thread,
             model: snapshot.model.clone(),
             effort: snapshot.effort.clone(),
-            tools: crate::dispatch::mcp_schemas(snapshot.origin),
+            tools: snapshot.offer.schemas(),
             lifetime: MAX_LAUNCH,
         })?;
         if let Some(held) = self.launches.last_mut() {
@@ -601,6 +749,12 @@ impl Claude {
             // An audit failure is evidence about the version, whatever generation it ran under.
             launch::Outcome::Audit(reason) => {
                 self.audit_failed(version, reason);
+                true
+            }
+            // A lane that refuses a launch is stuck or closing, whatever generation admitted it.
+            launch::Outcome::Refused if matches!(self.view, ClaudeCodeView::Ready { .. }) => {
+                self.view = ClaudeCodeView::Unavailable;
+                self.revoke_all();
                 true
             }
             launch::Outcome::SignedOut
@@ -744,12 +898,27 @@ impl Brain {
         }
     }
 
+    /// Tells the coordinator whether runs on Claude Code can be answered, after every op and wake
+    /// whether or not the view changed, so it's never left a state behind.
+    fn claude_reported(&mut self, link: Option<&mut Link<'_, '_>>) -> Result<(), Ended> {
+        let input = Input::Engines(ConnectionKind::ClaudeCode, self.claude.availability());
+        self.hold_fence(&input);
+        let effects = self
+            .coordinator
+            .handle(input)
+            .expect("availability is never stale");
+        self.apply(effects, link)
+    }
+
     pub(super) fn claude_op(
         &mut self,
         op: ConnectionOp,
-        link: Option<&mut Link<'_, '_>>,
+        mut link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
         self.claude.op(op);
+        self.claude_reported(link.as_deref_mut())
+            .map_err(|_| Full)?;
+        self.repair_default(link.as_deref_mut())?;
         match link {
             Some(link) => link.control(&self.connections_frame()),
             None => Ok(()),
@@ -759,9 +928,12 @@ impl Brain {
     pub(super) fn claude_done(
         &mut self,
         wake: Wake,
-        link: Option<&mut Link<'_, '_>>,
+        mut link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
         let changed = self.claude.wake(wake);
+        self.claude_reported(link.as_deref_mut())
+            .map_err(|_| Full)?;
+        self.repair_default(link.as_deref_mut())?;
         match link {
             Some(link) if changed => link.control(&self.connections_frame()),
             _ => Ok(()),

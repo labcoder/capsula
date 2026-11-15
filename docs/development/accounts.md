@@ -657,6 +657,14 @@ intent is never repaired from this catalog. Repairs recompute at the serialized 
 boundary rather than applying the choice captured when the catalog arrived
 (see [settings](settings.md#config-keys)).
 
+Claude Code has a half of its own. While `ChatGPT` has no account at all (`AccountView::SignedOut`)
+and a Claude Code launch would be admitted, an unset `default_model`, or a Claude Code one the
+reviewed row doesn't list, becomes the row's own default, `haiku` at `Low`; it's queued after
+every Claude Code report. A `ChatGPT` account whose session ended, or that is signing in or out,
+keeps `ChatGPT`'s half, so a session that lapses for a while never moves anyone to Claude Code. A
+queued repair whose recompute at the write would land on the other connection's half writes
+nothing.
+
 ## Credential storage
 
 Store access must be serialized: Rez's clean-store reproduction with two and four concurrent

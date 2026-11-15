@@ -1055,8 +1055,9 @@ impl Brain {
     /// Starts `job`'s request on the engine, replacing any job still running.
     fn start_job(&mut self, job: JobKey, kind: JobKind, request: engines::RunRequest) {
         let gate = SendGate::new(request.key, Arc::clone(&self.asks), self.inputs_tx.clone());
+        let unserved = engines::Unserved::model_unavailable();
         let cancel = engines::start_job(
-            self.engine_for(&request),
+            self.engine_for(&request).unwrap_or(&unserved),
             request,
             (job, kind),
             self.inputs_tx.clone(),
@@ -1069,15 +1070,15 @@ impl Brain {
     /// for a connection with no engine yet.
     ///
     /// [`Unserved`]: engines::Unserved
-    fn engine_for(&self, request: &engines::RunRequest) -> &dyn Engine {
+    fn engine_for(&self, request: &engines::RunRequest) -> Option<&dyn Engine> {
         match request
             .request
             .choice
             .as_ref()
             .map(|choice| choice.connection)
         {
-            None | Some(ConnectionKind::ChatGpt) => &*self.engine,
-            Some(ConnectionKind::AnthropicKey | ConnectionKind::ClaudeCode) => &engines::Unserved,
+            None | Some(ConnectionKind::ChatGpt) => Some(&*self.engine),
+            Some(ConnectionKind::AnthropicKey | ConnectionKind::ClaudeCode) => None,
         }
     }
 
@@ -1210,12 +1211,31 @@ impl Brain {
                     let run = request.run;
                     let gate =
                         SendGate::new(request.key, Arc::clone(&self.asks), self.inputs_tx.clone());
-                    let cancel = engines::start(
-                        self.engine_for(&request),
-                        request,
-                        self.engine_tx.clone(),
-                        gate,
-                    );
+                    let on_claude_code = request
+                        .request
+                        .choice
+                        .as_ref()
+                        .is_some_and(|choice| choice.connection == ConnectionKind::ClaudeCode);
+                    let question;
+                    let unserved;
+                    let engine: &dyn Engine = if on_claude_code {
+                        match self.claude.question(&request) {
+                            Ok(owned) => {
+                                question = owned;
+                                &question
+                            }
+                            Err(refused) => {
+                                unserved = engines::Unserved(self.claude.refused(refused));
+                                &unserved
+                            }
+                        }
+                    } else if let Some(engine) = self.engine_for(&request) {
+                        engine
+                    } else {
+                        unserved = engines::Unserved::model_unavailable();
+                        &unserved
+                    };
+                    let cancel = engines::start(engine, request, self.engine_tx.clone(), gate);
                     self.round = Some((run, cancel));
                 }
                 Effect::StartJob { job, kind, request } => self.start_job(job, kind, request),

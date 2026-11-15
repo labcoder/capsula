@@ -395,8 +395,14 @@ Settings, and nothing in production changes them yet.
   any kind ends it. A title or summary job answers only on `ChatGPT`: one for another
   connection's choice ends unsent and frees the slot.
 - **The engine follows the connection.** A request on `ChatGPT`'s choice, or on none, starts the
-  `ChatGPT` engine; one on a connection with no engine yet starts `Unserved`, whose round fails
-  with `ModelUnavailable` (`runtime/mod.rs`, `engine_for`).
+  `ChatGPT` engine. One on Claude Code's choice takes a one-launch engine with no tools from
+  `Claude::question` ([claude-code.md](claude-code.md#a-question)); a refusal starts `Unserved` with
+  Claude Code's reason, or none. One on a connection with no engine yet starts `Unserved`, whose
+  round fails with `ModelUnavailable` (`runtime/mod.rs`, the `StartEngine` arm and `engine_for`).
+- **A turn nothing can answer** fails with `ChatGPT`'s reason and its action, except that it gets
+  `ConnectionNeeded` with Open Settings when `ChatGPT` needs a sign-in and Claude Code is installed
+  but signed out (owner, OSC-742; `Availabilities::nothing_ready`). Every other Claude Code state,
+  the one before its first report included, keeps `ChatGPT`'s notice and its Sign in.
 - **S4: the model is checked once,** when the first build's result arrives, against the route's
   own catalog: a model missing from the catalog, an empty catalog or no choice at all fails the run with `ModelUnavailable` and
   Open settings, and nothing goes to another model. A run in flight keeps its check when the

@@ -5,7 +5,8 @@
 //! records a lease with the build's sources; a delete of one of them is then held, with no
 //! writer op, until every lease carrying it settles. A lease that doesn't settle by its deadline
 //! fails closed: its held deletes are refused, its run fails, and nothing is granted again until
-//! the brain restarts. Leases belong to send attempts, not runs, so they outlive Stop. A run's
+//! the brain restarts, unless it was a held send: a Claude Code process on its own pipes, not the
+//! shared transport. Leases belong to send attempts, not runs, so they outlive Stop. A run's
 //! round and a background job (`job`) ask the same way, each under its own key.
 
 use std::collections::BTreeSet;
@@ -48,6 +49,8 @@ pub(super) struct Lease {
     id: LeaseId,
     sources: Vec<ThreadId>,
     failed: bool,
+    /// Asked with a hold, so its deadline leaves the shared transport granting.
+    held_send: bool,
 }
 
 impl Coordinator {
@@ -149,6 +152,7 @@ impl Coordinator {
             id,
             sources,
             failed: false,
+            held_send: hold.is_some(),
         });
         effects.push(Effect::Grant(id));
         effects.push(Effect::ArmSendDeadline {
@@ -178,7 +182,7 @@ impl Coordinator {
     }
 
     /// A lease ran past its deadline. A delete is never released because time ran out, so the
-    /// lease fails closed instead.
+    /// lease fails closed instead. Only a lease that wasn't held stops every later grant.
     pub(super) fn send_deadline(
         &mut self,
         lease: LeaseId,
@@ -191,7 +195,7 @@ impl Coordinator {
             .ok_or(Stale)?;
         held.failed = true;
         let sources = held.sources.clone();
-        self.transport_failed = true;
+        self.transport_failed |= !held.held_send;
         match lease.key {
             SendKey::Build(key) if self.current_run() == Some(key.run) => {
                 self.fail(key.run, Failure::Engine, effects)?;

@@ -643,6 +643,9 @@ impl Brain {
         frames.iter().try_for_each(|frame| link.control(frame))
     }
 
+    /// The brain's own repair of `default_model`, for one connection's half: Claude Code's only
+    /// while `ChatGPT` has no account at all, else `ChatGPT`'s, so a session that ends for a while
+    /// never moves anyone to Claude Code. An invalid default is never touched.
     pub(super) fn repaired_default(&self) -> Option<kumochi_protocol::message::ModelChoice> {
         if matches!(
             self.config.default_choice(),
@@ -650,9 +653,27 @@ impl Brain {
         ) {
             return None;
         }
+        let current = &self.config.view().default_model;
+        if matches!(self.account.view(), AccountView::SignedOut { .. }) {
+            return self.claude.repaired_default(current.as_ref());
+        }
         self.account
             .models()
-            .and_then(|models| default_model(self.config.view().default_model.as_ref(), models))
+            .and_then(|models| default_model(current.as_ref(), models))
+    }
+
+    /// Queues the brain's own change to `default_model` when [`repaired_default`] calls for one.
+    ///
+    /// [`repaired_default`]: Self::repaired_default
+    pub(super) fn repair_default(&mut self, link: Option<&mut Link<'_, '_>>) -> Result<(), Full> {
+        let Some(choice) = self.repaired_default() else {
+            return Ok(());
+        };
+        self.settings_ops.push_back(settings::Queued {
+            change: settings::Change::User(SettingsOp::SetDefaultModel(choice)),
+            epoch: settings::BRAIN,
+        });
+        self.pump_settings(link)
     }
 
     /// Applies an account input and tells the connected shell, if any, what changed. A catalog
@@ -679,12 +700,8 @@ impl Brain {
         }
         self.availability_changed(link.as_deref_mut())
             .map_err(|_| Full)?;
-        if read && let Some(choice) = self.repaired_default() {
-            self.settings_ops.push_back(settings::Queued {
-                change: settings::Change::User(SettingsOp::SetDefaultModel(choice)),
-                epoch: settings::BRAIN,
-            });
-            self.pump_settings(link.as_deref_mut())?;
+        if read {
+            self.repair_default(link.as_deref_mut())?;
         }
         let Some(link) = link else {
             return Ok(());

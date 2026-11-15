@@ -475,20 +475,27 @@ impl Worker {
         platform::unmark(marker).map_err(|_| Failure::Cleanup)
     }
 
-    /// Deletes every launch folder: only this lane runs launches, one at a time and never during
-    /// a call, so each one here is left over. A missing or untrusted engine folder is left alone,
-    /// and one that won't go yet stays for the next call.
+    /// Deletes what launches leave: every launch folder, and the session records and MCP logs
+    /// Claude Code writes under its own config and cache. Only this lane runs launches, one at a
+    /// time and never during a call, so each one here is left over. A missing or untrusted folder
+    /// is left alone, and an entry that won't go yet stays for the next call.
     fn sweep(&self) {
-        let engine = self.host.base.join(CLAUDE_CODE_DIR).join(ENGINE_DIR);
-        let Ok(_chain) = platform::hold_chain(&engine) else {
-            return;
-        };
-        let Ok(entries) = std::fs::read_dir(&engine) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            if platform::remove_tree(&entry.path()).is_err() {
-                tracing::debug!("a launch folder stays for the next sweep");
+        let root = self.host.base.join(CLAUDE_CODE_DIR);
+        for folder in [
+            root.join(ENGINE_DIR),
+            root.join("config").join("sessions"),
+            root.join("local").join("claude-cli-nodejs").join("Cache"),
+        ] {
+            let Ok(_chain) = platform::hold_chain(&folder) else {
+                continue;
+            };
+            let Ok(entries) = std::fs::read_dir(&folder) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                if platform::remove_tree(&entry.path()).is_err() {
+                    tracing::debug!("a launch's leftover stays for the next sweep");
+                }
             }
         }
     }

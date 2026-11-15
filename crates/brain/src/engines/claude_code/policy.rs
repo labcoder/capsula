@@ -19,6 +19,12 @@ pub(crate) struct Reviewed {
     pub(crate) version: ClaudeVersion,
     pub(crate) policy: LaunchPolicy,
     pub(crate) audit: AuditSchema,
+    /// The aliases a run may name on this version, with the names the picker shows, in the
+    /// order it lists them. Only these reach `--model`.
+    pub(crate) models: &'static [(&'static str, &'static str)],
+    /// The alias a profile with only Claude Code starts on, at `Low`; one of `models`, named here
+    /// so their order decides nothing.
+    pub(crate) default_model: &'static str,
 }
 
 /// Adding a version is a reviewed PR that adds a row here, from that version's probe.
@@ -44,6 +50,15 @@ pub(crate) static REVIEWED_CLAUDE_CODE: &[Reviewed] = &[Reviewed {
         plugins: &["cc-plugin-agents-md", "cc-plugin-plugin-authoring"],
         api_key_sources: &["none"],
     },
+    // The owner's list (OSC-742). P0's `default` alias is left out: it names no fixed model.
+    models: &[
+        ("sonnet", "Sonnet"),
+        ("opus", "Opus"),
+        ("haiku", "Haiku"),
+        ("fable", "Fable"),
+    ],
+    // The owner's default (OSC-742).
+    default_model: "haiku",
 }];
 
 /// The reviewed entry for `version`. Every other version is refused, with no override: D2a's
@@ -135,14 +150,16 @@ impl fmt::Debug for LaunchData {
     }
 }
 
-/// The documented switches every entry point gets, each set to `1`.
-const SWITCHES: [&str; 6] = [
-    "DISABLE_AUTOUPDATER",
-    "DISABLE_TELEMETRY",
-    "DISABLE_ERROR_REPORTING",
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
-    "CLAUDE_CODE_SKIP_PROMPT_HISTORY",
-    "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+/// The documented switches every entry point gets, with their values. Kumochi's server is the only
+/// one Claude Code may offer, so a claude.ai sign-in's connectors are never fetched.
+const SWITCHES: [(&str, &str); 7] = [
+    ("DISABLE_AUTOUPDATER", "1"),
+    ("DISABLE_TELEMETRY", "1"),
+    ("DISABLE_ERROR_REPORTING", "1"),
+    ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+    ("CLAUDE_CODE_SKIP_PROMPT_HISTORY", "1"),
+    ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
+    ("ENABLE_CLAUDEAI_MCP_SERVERS", "false"),
 ];
 
 /// The arguments and environment for `entry`. `system` is `platform::system_env()`: the only
@@ -211,7 +228,11 @@ pub(crate) fn launch_data(
     let env = owned
         .into_iter()
         .map(|(name, path)| (name.into(), path.into()))
-        .chain(SWITCHES.into_iter().map(|name| (name.into(), "1".into())))
+        .chain(
+            SWITCHES
+                .into_iter()
+                .map(|(name, value)| (name.into(), value.into())),
+        )
         .chain(system.iter().cloned())
         .collect();
     LaunchData { args, env }
