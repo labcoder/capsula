@@ -1515,7 +1515,6 @@ fn each_view_reports_its_own_reason_with_open_settings() {
             ClaudeCodeView::CleanupPending,
             ErrorKey::ClaudeCodeCleanupPending,
         ),
-        (ClaudeCodeView::Finding, ErrorKey::ModelUnavailable),
         (ClaudeCodeView::TurnedOff, ErrorKey::ModelUnavailable),
         (ClaudeCodeView::InUse, ErrorKey::ClaudeCodeUnsupported),
         (ClaudeCodeView::Unavailable, ErrorKey::ClaudeCodeUnsupported),
@@ -1526,6 +1525,9 @@ fn each_view_reports_its_own_reason_with_open_settings() {
         let mut claude = Claude::new(None, SIGN_IN, view);
         assert_eq!(claude.availability(), unavailable(key), "{view:?}");
     }
+    // Being found is its own state, so a typed turn waits for the next report (OSC-753).
+    let mut claude = Claude::new(None, SIGN_IN, ClaudeCodeView::Finding);
+    assert_eq!(claude.availability(), Availability::Finding);
 }
 
 /// Reads unavailable, and refuses a launch for a snapshot taken now.
