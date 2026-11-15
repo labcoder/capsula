@@ -9,25 +9,25 @@ use crate::platform::input::Button;
 
 /// Logical pixels from the work area's origin, at the work area and scale fixed at the grab.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct PullSpace {
+pub struct PullSpace {
     /// The work area, `[x, y, width, height]` in physical screen pixels. All of it is compared:
     /// a taskbar that moves an edge changes the clamp bounds even when the origin stays.
-    pub(crate) area: [i32; 4],
+    pub area: [i32; 4],
     /// Physical pixels per logical pixel.
-    pub(crate) scale: f32,
+    pub scale: f32,
 }
 
 impl PullSpace {
     /// `at`, logical pixels in a window whose client area starts at `window` in physical screen
     /// pixels.
-    pub(crate) fn point(self, window: [i32; 2], at: [f32; 2]) -> Vec2 {
+    pub fn point(self, window: [i32; 2], at: [f32; 2]) -> Vec2 {
         let x = f64::from(window[0] - self.area[0]) + f64::from(at[0]) * f64::from(self.scale);
         let y = f64::from(window[1] - self.area[1]) + f64::from(at[1]) * f64::from(self.scale);
         self.physical([x, y])
     }
 
     /// `p`, in pull space, in physical screen pixels.
-    pub(crate) fn screen(self, p: Vec2) -> [f64; 2] {
+    pub fn screen(self, p: Vec2) -> [f64; 2] {
         let scale = f64::from(self.scale);
         [
             f64::from(self.area[0]) + f64::from(p.x) * scale,
@@ -56,7 +56,7 @@ impl PullSpace {
 
 /// Where a grab happens, in pull space.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Grab {
+pub struct Grab {
     pub(crate) space: PullSpace,
     /// The line's centre.
     pub(crate) dock: Vec2,
@@ -74,7 +74,7 @@ impl Grab {
     /// rectangles, of the body centred at `home` in pull space. The free body stays in the pull
     /// area: the slot grown on every side by `SNAP_LEN` and the carry width, within the work
     /// area.
-    pub(crate) fn new(
+    pub fn new(
         space: PullSpace,
         line: [i32; 4],
         slot: [i32; 4],
@@ -111,7 +111,7 @@ impl Grab {
 
 /// Which lifetime is current.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Phase {
+pub enum Phase {
     /// No pull: the body is in the peek.
     Idle,
     /// The drag: Esc cancels it and the peek stays open.
@@ -122,14 +122,14 @@ pub(crate) enum Phase {
 }
 
 #[derive(Default)]
-pub(crate) struct Pulling {
+pub struct Pulling {
     owner: DragOwner,
     /// With the space it was grabbed in, from the press until the resting picture is accepted.
     pull: Option<(Pull, PullSpace)>,
 }
 
 impl Pulling {
-    pub(crate) fn phase(&self) -> Phase {
+    pub fn phase(&self) -> Phase {
         match (self.owner.live(), &self.pull) {
             (Some(generation), _) => Phase::Live(generation),
             (None, Some(_)) => Phase::Returning,
@@ -139,7 +139,7 @@ impl Pulling {
 
     /// Grabs the body on `button`'s press, stamped `seq`, at `at` in the peek whose client
     /// area starts at `window`. A press while a pull exists starts nothing.
-    pub(crate) fn press(
+    pub fn press(
         &mut self,
         button: Button,
         seq: u64,
@@ -166,7 +166,7 @@ impl Pulling {
 
     /// One event for the drag, with its points in logical pixels in the peek whose client area
     /// starts at `window`.
-    pub(crate) fn handle(&mut self, event: Event, window: [i32; 2]) -> Outcome {
+    pub fn handle(&mut self, event: Event, window: [i32; 2]) -> Outcome {
         let outcome = self.owner.handle(event);
         self.apply(outcome, window);
         outcome
@@ -174,7 +174,7 @@ impl Pulling {
 
     /// See [`DragOwner::reconcile`]: only once the forwarding of the Up that took capture has
     /// returned.
-    pub(crate) fn reconcile(&mut self) -> Outcome {
+    pub fn reconcile(&mut self) -> Outcome {
         let outcome = self.owner.reconcile();
         self.apply(outcome, [0, 0]);
         outcome
@@ -182,7 +182,7 @@ impl Pulling {
 
     /// The work area or the scale is now `space`. Any change during the drag, an edge of the
     /// work area included, loses it, since its points and clamp bounds no longer hold.
-    pub(crate) fn rescale(&mut self, space: PullSpace) -> Outcome {
+    pub fn rescale(&mut self, space: PullSpace) -> Outcome {
         match &self.pull {
             Some((_, grabbed)) if *grabbed != space => self.handle(Event::SourceClosed, [0, 0]),
             _ => Outcome::Ignored,
@@ -190,20 +190,20 @@ impl Pulling {
     }
 
     /// Steps the pull `dt` seconds, if there is one.
-    pub(crate) fn step(&mut self, dt: f32) -> Option<&Pull> {
+    pub fn step(&mut self, dt: f32) -> Option<&Pull> {
         let (pull, _) = self.pull.as_mut()?;
         pull.update(dt);
         Some(pull)
     }
 
     /// The pull, with the space it was grabbed in, from the press until it has rested.
-    pub(crate) fn pull(&self) -> Option<(&Pull, PullSpace)> {
+    pub fn pull(&self) -> Option<(&Pull, PullSpace)> {
         self.pull.as_ref().map(|(pull, space)| (pull, *space))
     }
 
     /// The picture just accepted shows the body at rest at home: the pull is over. Physics
     /// alone never ends it. Returns whether it did.
-    pub(crate) fn rested(&mut self) -> bool {
+    pub fn rested(&mut self) -> bool {
         let done = self.phase() == Phase::Returning
             && self.pull.as_ref().is_some_and(|(pull, _)| pull.settled());
         if done {
@@ -463,8 +463,10 @@ mod tests {
     fn a_grab_from_the_default_peek_holds_its_neck_until_the_pointer_moves() {
         use crate::presence::geometry::Position;
         use crate::presence::kumo::SNAP_LEN;
-        use crate::presence::kumo_view::SIZE;
-        use crate::presence::line;
+        use crate::presence::line::machine as line;
+
+        /// The peek's Kumo square, `kumo_view::SIZE` in the shell.
+        const SIZE: f32 = 64.0;
 
         // The default dock at 100% on a 2560 by 1400 work area, under it the 380 by 124 peek
         // with Kumo inside its 12 px padding, as Presence lays them out.
