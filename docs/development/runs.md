@@ -384,12 +384,12 @@ Settings, and nothing in production changes them yet.
   kind of the run's choice (`ChatGPT` when there is none) under the sign-in that kind had then. A
   kind that wasn't ready at arrival fails the run with that kind's reason, even once it's ready,
   so a later sign-in never answers it: `SignInNeeded` for `ChatGPT`, and `ModelUnavailable` with
-  Open Settings for another kind, since a notice's Sign in starts `ChatGPT`'s. Before the binding, a change to a kind takes that kind out
-  of the arrival, and the run fails once no kind is left; after it, only a change to the route's
-  own kind matters. A catalog-only change keeps the run. Any other change, a sign-out the account
-  accepted included, cancels the engine and fails the run with the reason. A held ask for that run
-  is answered `Rebuild`, and `send_ready` checks the route again before every `Grant`. Only a
-  `ChatGPT` route takes a bearer.
+  Open Settings for another kind, since a notice's Sign in starts `ChatGPT`'s. Before the
+  binding, a change to a kind takes that kind out of the arrival, and the run fails once no kind
+  is left; after it, only a change to the route's own kind matters. A catalog-only change keeps
+  the run. Any other change, a sign-out the account accepted included, cancels the engine and
+  fails the run with the reason. A held ask for that run is answered `Rebuild`, and `send_ready`
+  checks the route again before every `Grant`. Only a `ChatGPT` route takes a bearer.
 - **Holds and jobs.** A hold records the same arrival when it's prepared and answers on its
   choice's route, checked when its read returns and again before each send. A change to another
   kind leaves it, a change to its own kind ends it, and while its read is still out a change to
