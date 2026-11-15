@@ -889,3 +889,203 @@ async fn a_cancel_whose_version_fails_removes_claude_codes_folder() {
     assert_eq!(claude.view(), ClaudeCodeView::SignedOut { version: V });
     assert!(!partial(&base).exists());
 }
+
+/// The pipe a test shell reads: control frames go unread, data frames wait in the queue.
+struct Pipe {
+    out: tokio::sync::mpsc::Sender<Vec<u8>>,
+    _control: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    queue: std::cell::RefCell<crate::runtime::data::DataQueue>,
+    ready: tokio::sync::Notify,
+    tap: crate::tap::Tap,
+}
+
+impl Pipe {
+    fn new() -> Self {
+        let (out, control) = tokio::sync::mpsc::channel(256);
+        Self {
+            out,
+            _control: control,
+            queue: std::cell::RefCell::new(crate::runtime::data::DataQueue::new(
+                crate::runtime::window(),
+            )),
+            ready: tokio::sync::Notify::new(),
+            tap: crate::tap::Tap::from_env(),
+        }
+    }
+
+    fn link(&mut self) -> Link<'_, '_> {
+        Link::new(&self.out, &self.queue, &self.ready, &mut self.tap)
+    }
+
+    /// Claude Code's model lists the shell heard since the last look, oldest first.
+    fn heard(&self) -> Vec<Vec<ModelInfo>> {
+        let mut queue = self.queue.borrow_mut();
+        queue.grant(u32::MAX);
+        std::iter::from_fn(|| queue.pop(Instant::now()))
+            .filter_map(|bytes| {
+                match kumochi_protocol::frame::decode(&bytes[kumochi_protocol::frame::HEADER_LEN..])
+                    .expect("a data frame")
+                {
+                    DataToShell::Models {
+                        connection: ConnectionKind::ClaudeCode,
+                        models,
+                    } => Some(models),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+}
+
+/// The reviewed row's models, in its order, as the picker shows them.
+fn row() -> Vec<ModelInfo> {
+    [
+        ("sonnet", "Sonnet"),
+        ("opus", "Opus"),
+        ("haiku", "Haiku"),
+        ("fable", "Fable"),
+    ]
+    .into_iter()
+    .map(|(slug, name)| ModelInfo {
+        slug: ModelSlug::new(slug).expect("valid"),
+        display_name: ModelName::new(name).expect("valid"),
+    })
+    .collect()
+}
+
+const NOTHING: [Vec<ModelInfo>; 0] = [];
+
+/// A brain whose Claude Code is finding the lane's fake, signed in; nothing is reported yet.
+fn finding(scratch: &Scratch, base: &Base) -> Brain {
+    let mut brain = test_support::brain(scratch, "");
+    let (host, _switches) = host(base, "in");
+    brain.attach_claude(Claude::start(
+        Lane::start(host).expect("lane"),
+        SignInStore::FileWithDacl,
+    ));
+    brain
+}
+
+/// Runs the lane's results through the brain with a shell connected, as the runtime does.
+async fn reported(brain: &mut Brain, pipe: &mut Pipe) {
+    timeout(Duration::from_secs(30), async {
+        while brain.claude.out.is_some() {
+            let wake = brain.claude.next().await;
+            brain
+                .claude_done(wake, Some(&mut pipe.link()))
+                .expect("room");
+        }
+    })
+    .await
+    .expect("the lane settles");
+}
+
+/// The picker's catalog: the reviewed row's models go out, in its order, once Claude Code can
+/// answer, and not while it's still being found.
+#[tokio::test]
+async fn claude_codes_models_go_out_in_the_reviewed_rows_order_once_it_can_answer() {
+    let scratch = Scratch::new("claude-models-ready");
+    let base = Base::new("claude-models-ready");
+    let mut brain = finding(&scratch, &base);
+    let mut pipe = Pipe::new();
+    reported(&mut brain, &mut pipe).await;
+    assert_eq!(brain.claude.view(), READY);
+    assert_eq!(pipe.heard(), [row()]);
+    assert!(brain.claude.close(soon()).await);
+}
+
+/// A report that leaves the list as it was sends nothing.
+#[tokio::test]
+async fn a_report_that_changes_nothing_sends_claude_codes_models_no_more() {
+    let scratch = Scratch::new("claude-models-repeat");
+    let base = Base::new("claude-models-repeat");
+    let mut brain = finding(&scratch, &base);
+    let mut pipe = Pipe::new();
+    reported(&mut brain, &mut pipe).await;
+    assert_eq!(pipe.heard(), [row()]);
+    brain
+        .claude_op(ConnectionOp::FindClaudeCode, Some(&mut pipe.link()))
+        .expect("room");
+    reported(&mut brain, &mut pipe).await;
+    assert_eq!(base.calls(), [FOUND[0], FOUND[1], FOUND[0], FOUND[1]]);
+    assert_eq!(brain.claude.view(), READY);
+    assert_eq!(pipe.heard(), NOTHING);
+    assert!(brain.claude.close(soon()).await);
+}
+
+/// Once a launch wouldn't be admitted, the shell hears an empty list, which takes Claude Code off
+/// the picker.
+#[tokio::test]
+async fn a_disconnect_sends_claude_codes_models_empty() {
+    let scratch = Scratch::new("claude-models-disconnect");
+    let base = Base::new("claude-models-disconnect");
+    let mut brain = finding(&scratch, &base);
+    let mut pipe = Pipe::new();
+    reported(&mut brain, &mut pipe).await;
+    assert_eq!(pipe.heard(), [row()]);
+    brain
+        .claude_op(ConnectionOp::DisconnectClaudeCode, Some(&mut pipe.link()))
+        .expect("room");
+    assert_eq!(brain.claude.view(), ClaudeCodeView::CleanupPending);
+    assert_eq!(pipe.heard(), [Vec::new()]);
+    assert!(brain.claude.close(soon()).await);
+}
+
+/// A shell that connects hears the models on offer, whatever an earlier shell heard.
+#[tokio::test]
+async fn a_new_shell_hears_claude_codes_models_again() {
+    let scratch = Scratch::new("claude-models-reconnect");
+    let base = Base::new("claude-models-reconnect");
+    let mut brain = finding(&scratch, &base);
+    let mut pipe = Pipe::new();
+    reported(&mut brain, &mut pipe).await;
+    assert_eq!(pipe.heard(), [row()]);
+    let mut next = Pipe::new();
+    brain.open(&mut next.link()).expect("room");
+    assert_eq!(next.heard(), [row()]);
+    assert!(brain.claude.close(soon()).await);
+}
+
+/// Changes while no shell is linked: a shell that connects hears only the list on offer then, and
+/// nothing once a launch wouldn't be admitted.
+#[tokio::test]
+async fn a_shell_that_connects_hears_only_the_models_on_offer_now() {
+    let scratch = Scratch::new("claude-models-unlinked");
+    let base = Base::new("claude-models-unlinked");
+    let mut brain = finding(&scratch, &base);
+    timeout(Duration::from_secs(30), async {
+        while brain.claude.out.is_some() {
+            let wake = brain.claude.next().await;
+            brain.claude_done(wake, None).expect("no link");
+        }
+    })
+    .await
+    .expect("the lane settles");
+    assert_eq!(brain.claude.view(), READY);
+    let mut first = Pipe::new();
+    brain.open(&mut first.link()).expect("room");
+    assert_eq!(first.heard(), [row()]);
+    brain
+        .claude_op(ConnectionOp::DisconnectClaudeCode, None)
+        .expect("no link");
+    assert_eq!(brain.claude.view(), ClaudeCodeView::CleanupPending);
+    let mut second = Pipe::new();
+    brain.open(&mut second.link()).expect("room");
+    assert_eq!(second.heard(), NOTHING);
+    assert!(brain.claude.close(soon()).await);
+}
+
+/// A shell that connects before Claude Code's first report hears nothing of its models until
+/// that report.
+#[tokio::test]
+async fn a_shell_hears_nothing_of_claude_codes_models_before_its_first_report() {
+    let scratch = Scratch::new("claude-models-early");
+    let base = Base::new("claude-models-early");
+    let mut brain = finding(&scratch, &base);
+    let mut pipe = Pipe::new();
+    brain.open(&mut pipe.link()).expect("room");
+    assert_eq!(pipe.heard(), NOTHING);
+    reported(&mut brain, &mut pipe).await;
+    assert_eq!(pipe.heard(), [row()]);
+    assert!(brain.claude.close(soon()).await);
+}

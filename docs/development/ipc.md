@@ -261,8 +261,8 @@ flowchart LR
   email: one line, 1–254 bytes, checked on decode, and its `Debug` prints only its length.
 - `AccountOp` is on the tap's content-free list. `Account` isn't, because it carries the email.
 - `Models` goes out after a connection's account view, and again whenever the list changes; an
-  empty one means the account no longer has one. Nothing revokes it. shortcut: the shell drops it
-  until PR 18b's picker shows it.
+  empty one means the account no longer has one. Claude Code's is its reviewed row's while a
+  launch would be admitted ([claude-code](claude-code.md#a-question)). Nothing revokes it.
 - The view is authoritative: every op is answered by one `Account`, a refused one included, and
   the shell never moves the account on its own. See [accounts](accounts.md).
 - The shell retains the current connection's Account view for Settings → Accounts. Views and
