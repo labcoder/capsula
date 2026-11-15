@@ -64,6 +64,10 @@ Measured on Rez (release, best of 5 bakes and 20 frames, 2026-11-03):
 So a bake is too slow for GPUI's paint at high display scales: it runs before the image is
 first shown, or on a background executor. A frame is shaded only when the expression changes.
 
+`measure_kumo_tick_and_shade`, an ignored test in the shell (`presence/kumo_measure_tests.rs`),
+times the animator's tick and one animated frame at the peek's and the carry's size, called from
+the shell.
+
 A squashed, lifted or stretched frame samples the bake between texels. So at bake time, each empty texel beside the body takes the lit surface of its most covered neighbour, with coverage kept at 0. Its colour and rim then carry into the soft edge instead of black. A test squashes a frame and compares every soft-edge pixel against the matching still pixel, asserting that more than 50 of each kind were compared. Where the still pixel is covered, the black pulled in used to put them 108/255 apart, and now they're at most 8 apart. Where it's clear, it carries a covered neighbour's colour from `bleed_clear`. That's the outermost fringe, where empty texels weigh most: those pixels used to be up to 251 apart, and now they're at most 12. A 4 × 4 fixture checks the rule itself: an empty texel takes its most covered neighbour's surface with coverage kept at 0, a texel with no covered neighbour is left alone, and a sample halfway between a covered texel and a bled one keeps the covered colour at half coverage.
 
 ## Hit mask

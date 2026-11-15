@@ -16,6 +16,8 @@ mod escape;
 mod exclusion;
 mod gesture;
 mod issue_review;
+#[cfg(test)]
+mod kumo_measure_tests;
 mod kumo_view;
 mod launch;
 pub(crate) mod line;
