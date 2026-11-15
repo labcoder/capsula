@@ -70,6 +70,67 @@ fn the_recorded_facts_pass_in_either_order() {
     assert_eq!(second.control(&control(0, signed_in)), Ok(Progress::Ready));
 }
 
+/// 2.1.306's answer while Kumochi's server is still connecting, as the pre-input probe on Rez saw
+/// it on 2026-11-15: `pending` with no tools. A repeat ask's id ends in `-n`.
+fn pending(n: u32, line: &mut Value) {
+    if n > 0 {
+        line["response"]["request_id"] = json!(format!("{MCP_STATUS_ID}-{n}"));
+    }
+    let server = &mut line["response"]["response"]["mcpServers"][0];
+    server["status"] = json!("pending");
+    server.as_object_mut().expect("object").remove("tools");
+}
+
+#[test]
+fn a_pending_server_is_asked_again_and_passes_once_connected() {
+    let mut audit = audit();
+    assert_eq!(audit.control(&control(0, signed_in)), Ok(Progress::Waiting));
+    assert_eq!(
+        audit.control(&control(1, |line| pending(0, line))),
+        Ok(Progress::Pending)
+    );
+    let again: Value = serde_json::from_slice(&audit.ask_again()).expect("json");
+    assert_eq!(
+        again,
+        json!({"type": "control_request", "request_id": "k-mcp-status-1", "request": {"subtype": "mcp_status"}})
+    );
+    assert_eq!(
+        audit.control(&control(1, |line| pending(1, line))),
+        Ok(Progress::Pending)
+    );
+    audit.ask_again();
+    let connected = control(1, |line| {
+        line["response"]["request_id"] = json!("k-mcp-status-2");
+    });
+    assert_eq!(audit.control(&connected), Ok(Progress::Ready));
+}
+
+#[test]
+fn a_pending_server_that_then_fails_fails_at_once_and_a_late_answer_is_malformed() {
+    let mut failing = audit();
+    assert_eq!(
+        failing.control(&control(1, |line| pending(0, line))),
+        Ok(Progress::Pending)
+    );
+    failing.ask_again();
+    let failed = control(1, |line| {
+        line["response"]["request_id"] = json!("k-mcp-status-1");
+        line["response"]["response"]["mcpServers"][0]["status"] = json!("failed");
+    });
+    assert_eq!(failing.control(&failed), Err(AuditFailed::McpServer));
+    let mut late = audit();
+    assert_eq!(
+        late.control(&control(1, |line| pending(0, line))),
+        Ok(Progress::Pending)
+    );
+    late.ask_again();
+    assert_eq!(
+        late.control(&control(1, |_| {})),
+        Err(AuditFailed::Malformed),
+        "an answer to the first ask, after the second"
+    );
+}
+
 #[test]
 fn a_signed_out_launch_is_signed_out_not_an_audit_failure() {
     assert_eq!(
@@ -352,6 +413,28 @@ const MCP_STATUS_CASES: &[Case] = &[
     (
         "failed",
         |servers| servers[0]["status"] = json!("failed"),
+        AuditFailed::McpServer,
+    ),
+    (
+        "needs-auth",
+        |servers| servers[0]["status"] = json!("needs-auth"),
+        AuditFailed::McpServer,
+    ),
+    (
+        "pending under another name",
+        |servers| {
+            servers[0]["name"] = json!("other");
+            servers[0]["status"] = json!("pending");
+        },
+        AuditFailed::McpServer,
+    ),
+    (
+        "pending beside a second server",
+        |servers| {
+            let second = servers[0].clone();
+            servers[0]["status"] = json!("pending");
+            servers.as_array_mut().expect("array").push(second);
+        },
         AuditFailed::McpServer,
     ),
     (
