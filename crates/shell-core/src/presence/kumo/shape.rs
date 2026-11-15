@@ -13,7 +13,7 @@ pub(crate) struct Lobe {
 
 /// The body in cloud units: x right, y up, the view looking down -z. The base sits on the floor.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Silhouette {
+pub struct Silhouette {
     /// The rounded base slab: its centre, half extents and rounding.
     pub(crate) base_center: Vec2,
     pub(crate) base_half: Vec3,
@@ -33,7 +33,7 @@ pub(crate) struct Silhouette {
 impl Silhouette {
     /// The emoji-like cloud: a wide base melted into an off-centre crown and two shoulders, with
     /// fillets broad enough that it reads as one mass rather than circles on a slab.
-    pub(crate) fn emoji() -> Self {
+    pub fn emoji() -> Self {
         let lobe = |x, y, radius| Lobe {
             center: v2(x, y),
             radius,

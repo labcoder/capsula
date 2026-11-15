@@ -22,7 +22,7 @@ pub(crate) struct Eye {
 
 /// Everything about one frame that isn't baked.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct FrameState {
+pub struct FrameState {
     /// Body scale about the bottom centre (squash and stretch), and lift off the floor.
     pub(crate) body_scale: Vec2,
     pub(crate) body_lift: f32,
@@ -40,7 +40,7 @@ pub(crate) struct FrameState {
 
 impl FrameState {
     /// The idle mood, eyes open and nothing moving: what a resting Kumo shows.
-    pub(crate) const IDLE: Self = Self {
+    pub const IDLE: Self = Self {
         body_scale: v2(1.0, 1.0),
         body_lift: 0.0,
         eyes: [Self::idle_eye(-1.0), Self::idle_eye(1.0)],

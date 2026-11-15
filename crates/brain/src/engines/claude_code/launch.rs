@@ -34,6 +34,9 @@ use crate::engines::{
 pub(crate) const WARM: Duration = Duration::from_secs(30);
 /// How long the audit before input may take once the control lines are queued (C3).
 pub(crate) const AUDIT: Duration = Duration::from_secs(3);
+/// How long the audit waits to ask `mcp_status` again while Kumochi's server is `pending`. At most
+/// 30 asks fit in [`AUDIT`]: with the first two lines, about 3 KiB, under `MAX_CONTROL`'s 4 KiB.
+pub(crate) const ASK_AGAIN: Duration = Duration::from_millis(100);
 /// How long a question may take from its bind.
 pub(crate) const QUESTION: Duration = Duration::from_secs(120);
 
@@ -298,6 +301,7 @@ async fn warm_up(
             done.send(Ok(warmed)).ok();
         }
         Err(outcome) => {
+            logged(outcome, "before stdin");
             report.report(outcome);
             done.send(Err(outcome)).ok();
         }
@@ -332,6 +336,13 @@ async fn audited(
                     Mapped::Ignored => {}
                     Mapped::Control(response) => match pre.control(&response) {
                         Ok(Progress::Waiting) => {}
+                        Ok(Progress::Pending) => {
+                            tokio::time::sleep(ASK_AGAIN).await;
+                            writer
+                                .control(&pre.ask_again(), deadline)
+                                .await
+                                .map_err(|_| Outcome::Launch)?;
+                        }
                         Ok(Progress::Ready) => return Ok(()),
                         Ok(Progress::SignedOut) => return Err(Outcome::SignedOut),
                         Err(reason) => return Err(Outcome::Audit(reason)),
@@ -514,6 +525,7 @@ impl Question<'_> {
                 Some(finish)
             }
             Err(outcome) => {
+                logged(outcome, "after the seed");
                 launch.lease().revoke();
                 report.report(outcome);
                 Some(failed(outcome))
@@ -574,6 +586,13 @@ struct Reading<'a> {
     post: &'a mut PostSeedAudit,
     launch: &'a Launch,
     analytics: Option<bool>,
+}
+
+/// Logs an audit failure's closed check and its phase, and nothing Claude Code sent.
+fn logged(outcome: Outcome, phase: &'static str) {
+    if let Outcome::Audit(check) = outcome {
+        tracing::warn!(?check, phase, "claude code's audit failed");
+    }
 }
 
 fn claude(key: ErrorKey) -> Finish {
