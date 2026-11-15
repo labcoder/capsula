@@ -77,13 +77,16 @@ impl Shared {
 }
 
 impl LinkHandle {
-    #[cfg(test)]
-    pub(crate) fn accept_recorded_microphone_stop(&self, generation: u64, gesture: GestureId) {
-        assert!(self.control_recording.is_some());
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn accept_recorded_microphone_stop(&self, generation: u64, gesture: GestureId) {
+        assert!(
+            self.control_recording.is_some(),
+            "only a recording link accepts a recorded stop"
+        );
         self.shared.accept_microphone_stop(generation, gesture);
     }
 
-    pub(crate) fn voice_stop_pending(&self) -> bool {
+    pub fn voice_stop_pending(&self) -> bool {
         self.shared
             .microphone_stop
             .lock()
@@ -118,7 +121,7 @@ impl LinkHandle {
                 sent_on: None,
             };
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(recording) = &self.control_recording {
             return Some(stop.queue(recording, self.link_generation()));
         }

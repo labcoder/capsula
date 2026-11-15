@@ -1767,7 +1767,7 @@ It follows the exclusive-lock release timing method above, not a real-font/frame
 
 ## Shell mirror and preparation
 
-The shell's `presenter` owns one canonical budget and revalidates each durable typed step
+`shell-core`'s `presenter` owns one canonical budget and revalidates each durable typed step
 at its exact lifetime index. Live suffixes wait behind the complete recovery batch; fenced
 steps still enter the semantic mirror but never prepare. The snapshot assembler checks
 membership, ordinals, full log and retained counts, and every received frame byte including

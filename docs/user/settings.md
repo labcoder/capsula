@@ -31,6 +31,12 @@ suits your display; a higher cap is smoother and uses more power. Kumochi draws 
 display's refresh divides evenly, so motion stays steady, and Settings shows that rate. On a
 75–119 Hz display that's about half the refresh; choose 120 or 144 there for smoother motion.
 
+**Model** lists the models your connected accounts offer, ChatGPT's today, and picking one
+makes it the default. It says **Saving…** until the background process answers; a refused save
+returns the saved model and explains why at the top of the page. Kumo and every task without a
+model of its own use the new default from their next message; a reply already under way finishes
+on its model, and a hold to talk in progress is cancelled.
+
 **Dock position** offers the same nine anchors as the tray. Choosing one here moves the dock
 without closing Settings; the panel follows its new anchor. The choice is saved for the next
 launch. If a save is refused, the last saved position returns unless a newer choice is pending.

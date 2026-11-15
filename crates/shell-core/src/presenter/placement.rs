@@ -16,7 +16,7 @@ pub(super) fn resting_view(rest: &LayoutState, activated: u32, stage: Option<Rec
 }
 
 impl Presenter {
-    pub(crate) fn placement_due(&self, now: std::time::Instant) -> bool {
+    pub fn placement_due(&self, now: std::time::Instant) -> bool {
         self.scenes.values().any(|scene| {
             scene.cut == super::Cut::Open
                 && !scene.skipping
@@ -31,7 +31,7 @@ impl Presenter {
         })
     }
 
-    pub(crate) fn set_stage(&mut self, stage: Rect) -> bool {
+    pub fn set_stage(&mut self, stage: Rect) -> bool {
         if !matches!(self.surface, SurfaceGeometry::Overlay { .. })
             || self.drawing_stage == Some(stage)
         {
