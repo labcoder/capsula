@@ -1200,17 +1200,6 @@ impl Coordinator {
         run
     }
 
-    /// Fails the run `turn` just started while nothing can answer it; the turn is kept.
-    fn unanswered(&mut self, run: RunId, effects: &mut Vec<Effect>) {
-        if let Availability::Unavailable(reason) = &self.availability
-            && self.arrived_now() == availability::Arrived::default()
-        {
-            let reason = self.nothing_ready(reason);
-            self.fail_with(run, Failure::Engine, reason, effects)
-                .expect("the run is current");
-        }
-    }
-
     /// Queues held turns whose older runs all have their outcomes queued, so the store keeps a
     /// thread's events in run order and a replacement's engine starts only after its predecessor
     /// is stored.

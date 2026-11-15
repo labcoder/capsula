@@ -164,19 +164,24 @@ fn started(effects: &[Effect]) -> bool {
         .any(|effect| matches!(effect, Effect::StartEngine { .. }))
 }
 
-/// What a turn typed after `inputs` does once it's written and announced, with nothing ready.
+/// What the first build of a turn typed after `inputs`, on no saved choice, does with nothing
+/// ready.
 fn arrived_after(inputs: Vec<Input>) -> Vec<Effect> {
     let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), Vec::new());
     for input in inputs {
         assert_eq!(core.handle(input), Ok(Vec::new()));
     }
-    core.handle(Input::Turn {
-        turn: 1,
-        thread: None,
-        text: "hi".into(),
-    })
-    .expect("a turn is never stale")
-    .split_off(3)
+    let arrived = core
+        .handle(Input::Turn {
+            turn: 1,
+            thread: None,
+            text: "hi".into(),
+        })
+        .expect("a turn is never stale")
+        .split_off(3);
+    assert_eq!(arrived, Vec::new(), "nothing fails at arrival");
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    core.handle(built(None, Vec::new())).expect("current")
 }
 
 /// The owner's rule for a turn nothing can answer (OSC-742): `ConnectionNeeded`, with Open
@@ -240,7 +245,7 @@ fn connection_needed_goes_out_only_when_claude_code_is_installed_but_signed_out(
             }));
             assert_eq!(
                 arrived_after(inputs),
-                told(Some(expected)),
+                failed(Some(expected)),
                 "{:?} with {:?}",
                 chatgpt.key(),
                 claude.as_ref().map(UserError::key)
@@ -269,10 +274,14 @@ fn connection_needed_offers_only_open_settings_and_the_claude_kinds_start_unavai
 }
 
 #[test]
-fn a_signed_out_turn_is_kept_and_fails_before_any_build() {
+fn a_signed_out_turn_is_kept_and_fails_at_its_first_build() {
     let (mut core, effects) = typed_with(None);
-    assert_eq!(effects, told(Some(sign_in())));
-    assert_eq!(core.handle(Input::TurnStored { run: R }), Ok(written()));
+    assert_eq!(effects, Vec::new());
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    assert_eq!(
+        core.handle(built(None, Vec::new())),
+        Ok(failed(Some(sign_in())))
+    );
 }
 
 #[test]
@@ -282,8 +291,9 @@ fn the_accounts_own_reason_reaches_the_shell() {
         kumochi_protocol::message::ConnectionKind::ChatGpt,
         Availability::Unavailable(plan.clone()),
     )));
-    assert_eq!(effects, told(Some(plan)));
-    assert_eq!(core.handle(Input::TurnStored { run: R }), Ok(written()));
+    assert_eq!(effects, Vec::new());
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    assert_eq!(core.handle(built(None, Vec::new())), Ok(failed(Some(plan))));
 }
 
 /// M143-1: a sign-out accepted while the turn is still being written ends its run at once, and
@@ -306,9 +316,13 @@ fn a_sign_out_before_the_turn_is_stored_ends_the_run_and_a_new_account_never_ans
 #[test]
 fn a_turn_sent_signed_out_stays_refused_after_a_sign_in_beats_its_write() {
     let (mut core, effects) = typed_with(None);
-    assert_eq!(effects, told(Some(sign_in())));
+    assert_eq!(effects, Vec::new());
     assert_eq!(core.handle(ready(7, &["m"])), Ok(Vec::new()));
-    assert_eq!(core.handle(Input::TurnStored { run: R }), Ok(written()));
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    assert_eq!(
+        core.handle(built(Some("m"), Vec::new())),
+        Ok(failed(Some(sign_in())))
+    );
 }
 
 #[test]
@@ -565,4 +579,64 @@ fn an_access_failure_keeps_the_accounts_own_reason() {
             "{key:?}"
         );
     }
+}
+
+/// A turn's first build on a snapshot naming `slug` over `kind`.
+fn built_on(kind: kumochi_protocol::message::ConnectionKind, slug: &str) -> Input {
+    let Input::ContextBuilt(mut built) = built(Some(slug), Vec::new()) else {
+        unreachable!("built builds a context");
+    };
+    if let Some(choice) = built
+        .snapshot
+        .as_mut()
+        .and_then(|snapshot| snapshot.choice.as_mut())
+    {
+        choice.connection = kind;
+    }
+    Input::ContextBuilt(built)
+}
+
+/// A turn typed on a Claude Code choice while nothing was ready: with `ChatGPT` signed out and
+/// Claude Code still being found, after `between` arrives before its first build.
+fn claude_turn_after(between: Vec<Input>) -> Vec<Effect> {
+    let claude = kumochi_protocol::message::ConnectionKind::ClaudeCode;
+    let (mut core, effects) = typed_with(Some(Input::Engines(
+        kumochi_protocol::message::ConnectionKind::ChatGpt,
+        Availability::Unavailable(sign_in()),
+    )));
+    assert_eq!(effects, Vec::new(), "nothing fails at arrival");
+    for input in between {
+        assert_eq!(core.handle(input), Ok(Vec::new()));
+    }
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    core.handle(built_on(claude, "haiku")).expect("current")
+}
+
+/// A Claude-only user who types while Claude Code is still being found is told Claude Code's
+/// reason, with Open Settings, at the first build, never `ChatGPT`'s Sign in.
+#[test]
+fn a_turn_on_claude_code_while_it_is_being_found_fails_with_its_reason() {
+    assert_eq!(
+        claude_turn_after(Vec::new()),
+        failed(Some(model_unavailable()))
+    );
+}
+
+/// Medium A: Claude Code turns Ready between the turn's arrival and its first build. The run
+/// arrived before it, so it isn't answered, and it's told to open Settings, not to sign in to
+/// `ChatGPT`.
+#[test]
+fn a_claude_code_ready_only_after_arrival_refuses_the_run_with_open_settings() {
+    let ready = Input::Engines(
+        kumochi_protocol::message::ConnectionKind::ClaudeCode,
+        Availability::Ready(Ready {
+            connection: ConnectionTag(5),
+            models: vec![info("haiku")],
+            trusted_draw: false,
+        }),
+    );
+    assert_eq!(
+        claude_turn_after(vec![ready]),
+        failed(Some(model_unavailable()))
+    );
 }
