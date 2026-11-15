@@ -199,9 +199,10 @@ impl Coordinator {
     }
 
     /// A Claude Code report to an unbound run held by [`Finding`]: `Finding` forgets any sign-in
-    /// found before and keeps it, Ready records the newest sign-in, and any report but `Finding`
-    /// releases a waiting run into a new first build. False when no run is held, and for any other
-    /// report before the first build, which takes the arrival rule below.
+    /// found before and keeps it, Ready records the newest sign-in, any other report before the
+    /// first build forgets both, so that build ends the run with its own choice's reason, and any
+    /// report but `Finding` releases a waiting run into a new first build. False when no run is
+    /// held.
     fn claude_code_reported(&mut self, effects: &mut Vec<Effect>) -> bool {
         let Some(current) = self
             .current
@@ -214,11 +215,13 @@ impl Coordinator {
         match &self.claude_code {
             Availability::Finding => *found = None,
             Availability::Ready(ready) => *found = Some(ready.connection),
-            Availability::Unavailable(_) if current.finding == Some(Finding::Due) => {
-                current.finding = None;
-                return false;
+            Availability::Unavailable(_) => {
+                *found = None;
+                if current.finding == Some(Finding::Due) {
+                    current.finding = None;
+                    return true;
+                }
             }
-            Availability::Unavailable(_) => {}
         }
         if current.finding == Some(Finding::Waiting)
             && !matches!(self.claude_code, Availability::Finding)

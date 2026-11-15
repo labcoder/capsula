@@ -912,7 +912,10 @@ fn only_a_claude_code_being_found_makes_a_turn_wait() {
     assert_eq!(effects, failed(Some(model_unavailable())), "signed out");
 
     let turned_off = claude(Availability::Unavailable(model_unavailable()));
-    let (_, effects) = claude_turn(vec![chatgpt_signed_out(), turned_off], Vec::new());
+    let (_, effects) = claude_turn(
+        vec![chatgpt_signed_out(), turned_off],
+        vec![claude_ready(5)],
+    );
     assert_eq!(effects, failed(Some(model_unavailable())), "turned off");
 }
 
@@ -944,12 +947,27 @@ fn before_the_first_build_the_newest_claude_code_report_wins() {
     ));
     assert_eq!(route(&core), on(CLAUDE, 6));
 
-    let mut core = turn_after(finding());
-    assert_eq!(core.handle(claude_ready(5)), Ok(Vec::new()));
     let signed_out = open(ErrorKey::ClaudeCodeSignedOut);
+    let (_, effects) = claude_turn(
+        finding(),
+        vec![
+            claude_ready(5),
+            claude(Availability::Unavailable(signed_out.clone())),
+        ],
+    );
+    assert_eq!(effects, failed(Some(signed_out.clone())), "on Claude Code");
+
+    // With no saved choice the first build ends it with the owner's rule (OSC-742), as on main.
+    let mut core = turn_after(finding());
+    for report in [
+        claude_ready(5),
+        claude(Availability::Unavailable(signed_out)),
+    ] {
+        assert_eq!(core.handle(report), Ok(Vec::new()));
+    }
     assert_eq!(
-        core.handle(claude(Availability::Unavailable(signed_out.clone()))),
-        Ok(failed(Some(signed_out)))
+        core.handle(built(None, Vec::new())),
+        Ok(failed(Some(connection_needed())))
     );
 }
 
@@ -1024,6 +1042,17 @@ fn a_model_claude_code_doesnt_offer_is_refused_at_the_release_build() {
         core.handle(keyed(built_on(CLAUDE, "opus"), R, 2)),
         Ok(failed(Some(model_unavailable())))
     );
+}
+
+/// A waiting run has no build, so a second result for the build it waited at is stale.
+#[test]
+fn a_second_result_for_the_waiting_build_is_stale() {
+    let mut core = waiting();
+    assert_eq!(
+        core.handle(built_on(CLAUDE, "haiku")),
+        Err(crate::coordinator::Stale)
+    );
+    released(&core.handle(claude_ready(5)).expect("current"), R);
 }
 
 /// A waiting run has no build, so a delete accepted and answered meanwhile builds nothing.
