@@ -49,7 +49,8 @@ fn within(size: [u32; 2], a: [f64; 2], b: [f64; 2], radius: f64) -> Vec<[u32; 2]
         .into_iter()
         .filter(|&[x, y]| {
             let p = [f64::from(x) + 0.5, f64::from(y) + 0.5];
-            let t = (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+            let t =
+                (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
             (p[0] - a[0] - t * dx).powi(2) + (p[1] - a[1] - t * dy).powi(2) <= radius * radius
         })
         .collect()

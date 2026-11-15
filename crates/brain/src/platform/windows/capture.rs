@@ -709,7 +709,11 @@ mod tests {
             drawn_after(Some(100), 'd', |_| Err(Failure::Fault(-3)), &mut release),
             Err(Failure::Fault(-3))
         );
-        assert_eq!(released, ['a', 'd'], "a frame whose draw time can't be read is released");
+        assert_eq!(
+            released,
+            ['a', 'd'],
+            "a frame whose draw time can't be read is released"
+        );
         assert_eq!(
             drawn_after(Some(100), 'e', |_| Ok(1), |_| Err(Failure::Retire(-4))),
             Err(Failure::Retire(-4))
@@ -821,7 +825,10 @@ mod tests {
             not_before(u64::MAX - 20, u64::MAX / 2 + 1),
             Err(Failure::Refused(Refusal::Expired))
         );
-        assert_eq!(not_before(1_000, 10), Ok(qpc_hns_up(1_020).expect("counter")));
+        assert_eq!(
+            not_before(1_000, 10),
+            Ok(qpc_hns_up(1_020).expect("counter"))
+        );
     }
 
     #[test]
