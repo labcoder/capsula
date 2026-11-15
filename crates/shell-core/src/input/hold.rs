@@ -432,4 +432,38 @@ mod tests {
         assert!(matches!(intents(&paused)[..], [Intent::Warm(GestureId(2))]));
         assert_eq!(gate.latest(), 0);
     }
+
+    #[test]
+    fn a_hold_reaches_the_owner_only_as_resting_and_a_double_tap_still_opens_typing() {
+        let mut fence = Fence::new(CollectionGate::default());
+        let mut state = Gesture::default();
+        let at = Instant::now();
+        let hold = whole_hold(&mut fence, &mut state, Event::Deadline, at, [false; 3]);
+        let effects: Vec<_> = hold.iter().map(|delivery| delivery.effects).collect();
+        assert_eq!(
+            effects,
+            [
+                [None; 3],
+                [None; 3],
+                [None; 3],
+                [None, None, Some(Effect::Resting)],
+                [None; 3],
+            ]
+        );
+        let tap = at + Duration::from_secs(2);
+        let mut last = [None; 3];
+        for (key, edge, after) in [
+            (Key::LeftControl, Edge::Down, 0),
+            (Key::LeftAlt, Edge::Down, 0),
+            (Key::LeftAlt, Edge::Up, 0),
+            (Key::LeftAlt, Edge::Down, 1),
+            (Key::LeftAlt, Edge::Up, 2),
+        ] {
+            let at = tap + Duration::from_millis(after);
+            last = fence
+                .reduce(&mut state, Event::Key { key, edge }, at, &Cell::new(false))
+                .effects;
+        }
+        assert_eq!(last, [Some(Effect::Resting), Some(Effect::OpenInput), None]);
+    }
 }

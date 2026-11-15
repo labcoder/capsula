@@ -10,10 +10,9 @@ use std::sync::Arc;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::{
     App, Context, IntoElement, ObjectFit, ParentElement as _, Render, RenderImage, SharedString,
-    Styled as _, StyledImage as _, WeakEntity, Window, canvas, div, img, px,
+    Styled as _, StyledImage as _, WeakEntity, Window, div, img, px,
 };
 
-use super::diagnostics::{self, PendingPaint};
 use super::kumo_view::PullSite;
 use super::observer::{self, Drawn, Surface};
 use super::paint::Stamp;
@@ -197,8 +196,6 @@ impl Presence {
 
 /// The dock window's view: the accepted line, drawn where Windows accepted its mask.
 pub(super) struct Dock {
-    /// Used only with `--input-diagnostics`; the next render takes it into a paint-phase marker.
-    pub(super) pending_paint: PendingPaint,
     /// The accepted line's device pixels, or none before the first accepted upload.
     pub(super) paint: Option<[i32; 4]>,
     /// The dock window's top-left on screen, in physical pixels.
@@ -223,7 +220,6 @@ pub(super) struct Dock {
 impl Dock {
     pub(super) fn new() -> Self {
         Self {
-            pending_paint: PendingPaint::default(),
             paint: None,
             origin: [0; 2],
             drawn: Drawn::default(),
@@ -240,18 +236,6 @@ impl Dock {
 
 impl Render for Dock {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        // Recorded in GPUI's paint phase, not at present: PresentMon must join it to the screen.
-        let marker = self.pending_paint.take().map(|at| {
-            canvas(
-                |_, _, _| (),
-                move |_, (), _, cx| {
-                    let painted_us = at.elapsed().as_micros();
-                    diagnostics::record(cx, format_args!("listening painted_us={painted_us}"));
-                },
-            )
-            .absolute()
-            .size_full()
-        });
         for image in self.aged.drain(..) {
             if let Err(error) = window.drop_image(image) {
                 tracing::debug!(%error, "can't drop a pulled frame");
@@ -321,8 +305,6 @@ impl Render for Dock {
             .children(line)
             .children(pulled)
             .children(label)
-            // After the frame's stamp, so the paint qpc it logs falls inside that frame.
-            .children(marker)
     }
 }
 

@@ -236,8 +236,8 @@ creates no file.
 - `--input-diagnostics=<file>` writes one line per input milestone, flushed as it happens, as
   `qpc=<QueryPerformanceCounter> <event> key=value…`. Durations are in microseconds since the
   native callback's entry. Lines carry no keys and no text:
-  - Legacy Listening and capture effects are inactive. The adapter retains gesture `Instant`
-    and callback QPC for voice controls, but does not log a listening-paint timing join.
+  - Legacy Listening and capture effects are inactive. The adapter keeps the callback QPC for
+    voice controls, and logs no listening-paint timing join.
   - `input opened focused=true|false` and `input dismissed`
   - `input draft nonempty=true|false preserved=true|false`, after an `input opened` that follows
     a dismiss: whether the draft held at that dismiss was nonempty, and whether the input still
