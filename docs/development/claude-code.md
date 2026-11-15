@@ -125,7 +125,10 @@ version: its launch policy and the facts its audit expects. Any other version is
   `APPDATA`, `LOCALAPPDATA`, `TEMP`, `TMP` and `CLAUDE_CODE_TMPDIR` point at Kumochi's own
   folders. Six documented switches are `1`: `DISABLE_AUTOUPDATER`, `DISABLE_TELEMETRY`,
   `DISABLE_ERROR_REPORTING`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`,
-  `CLAUDE_CODE_SKIP_PROMPT_HISTORY` and `CLAUDE_CODE_DISABLE_AUTO_MEMORY`. `SystemRoot`,
+  `CLAUDE_CODE_SKIP_PROMPT_HISTORY` and `CLAUDE_CODE_DISABLE_AUTO_MEMORY`, and
+  `ENABLE_CLAUDEAI_MCP_SERVERS` is `false`, so a claude.ai sign-in's connectors are never fetched
+  and Kumochi's server is the only one offered, whatever `--strict-mcp-config` does; the audit
+  still refuses any other server. `SystemRoot`,
   `SystemDrive` and `PATH` come from the OS (`platform::system_env`): `PATH` is the system folder
   then the Windows folder, never the brain's own `PATH`, and there's no `PATHEXT`. `auth login`
   gets the same environment, and Kumochi sets no `BROWSER`. Claude Code's opener runs as a child

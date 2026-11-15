@@ -165,6 +165,7 @@ fn every_entry_point_gets_the_same_exact_environment() {
         ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
         ("CLAUDE_CODE_SKIP_PROMPT_HISTORY", "1"),
         ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
+        ("ENABLE_CLAUDEAI_MCP_SERVERS", "false"),
         ("SystemRoot", r"C:\Windows"),
         ("SystemDrive", "C:"),
         ("PATH", r"C:\Windows\System32;C:\Windows"),
@@ -317,6 +318,6 @@ fn launch_data_debug_prints_counts_only() {
     let printed = format!("{data:?}");
     assert_eq!(
         printed,
-        format!("LaunchData {{ args: {}, env: 17 }}", data.args.len())
+        format!("LaunchData {{ args: {}, env: 18 }}", data.args.len())
     );
 }
