@@ -1728,9 +1728,12 @@ async fn a_server_still_connecting_is_asked_again_and_the_question_is_answered()
 }
 
 /// A server that stays `pending` ends the launch at `AUDIT`, as a late answer does: no seed, no
-/// quarantine, and the asks stay within `MAX_CONTROL`.
+/// quarantine, and the asks stay within `MAX_CONTROL`. The log names the `Deadline` check before
+/// stdin.
 #[tokio::test]
 async fn a_server_pending_until_the_audit_deadline_ends_the_launch_unseeded() {
+    let captured = crate::test_support::Captured::default();
+    let _capturing = captured.install();
     let script = synthetic_signed_in().pending_first(Vec::new());
     let mut rig = Rig::new("question-pending-deadline", &script).await;
     let question = rig.claude.take(&rig.snapshot()).expect("taken");
@@ -1751,5 +1754,10 @@ async fn a_server_pending_until_the_audit_deadline_ends_the_launch_unseeded() {
     assert!((2..=31).contains(&asks), "{asks} asks in AUDIT");
     assert_eq!(rig.markers(), Vec::<String>::new());
     assert_eq!(rig.claude.view(), READY);
+    let logs = captured.text();
+    assert!(
+        logs.contains(r#"claude code's audit failed check=Deadline phase="before stdin""#),
+        "{logs}"
+    );
     rig.close().await;
 }
