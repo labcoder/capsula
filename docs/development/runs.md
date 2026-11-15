@@ -368,7 +368,9 @@ Whether a run can be answered is kept per connection kind, as `Input::Engines(ki
 It's `Ready`, with the connection and the catalog, or `Unavailable` with what the user can do
 (`coordinator/availability.rs`). The runtime sends `ChatGPT`'s at start and after every account
 input. Claude Code's and the Anthropic key's start `Unavailable` with `ModelUnavailable` and Open
-Settings, and nothing in production changes them yet.
+Settings. The runtime reports Claude Code's when it's attached, before any shell connects, and
+after every op and wake; while it's being found that's `Finding`, which reads as
+`ModelUnavailable` everywhere except the wait below.
 
 - **The connection** names the sign-in that issued the account's token set. It's saved with the
   set, kept through refreshes and restarts, and new on every sign-in (random per process, with
@@ -390,6 +392,21 @@ Settings, and nothing in production changes them yet.
   the run. Any other change, a sign-out the account accepted included, cancels the engine and
   fails the run with the reason. A held ask for that run is answered `Rebuild`, and `send_ready`
   checks the route again before every `Grant`. Only a `ChatGPT` route takes a bearer.
+- **A typed turn while Claude Code is being found waits** (OSC-753). A turn that arrives while
+  Claude Code reports `Finding` records that. Until its first build the newest Claude Code
+  report wins: `Finding` keeps it (forgetting a sign-in found before), Ready records that
+  sign-in in its arrival, and any other report drops it and that sign-in, so its first build
+  ends it with its own choice's reason. If its first build finds a Claude Code choice and no
+  sign-in for it, the run waits, up to 30 s after the turn is
+  read, with no build and no snapshot, while the shell keeps showing Thinking and Esc, a delete,
+  a new turn or a lost shell end it as they end any run before its first build. The next report
+  that isn't `Finding` releases it into a new first build (120 s again, the choice read again):
+  Ready answers it, anything else refuses it with that report's reason. The 30 s fails it with
+  `ModelUnavailable` and Open Settings, without reading the choice. The 30 s uses the run's own
+  deadline slot: the runtime holds one deadline, every `ArmDeadline` replaces it, and the loop
+  pass that delivers a deadline clears it, so a superseded deadline is never delivered; a change
+  that queues deadlines must add a generation. The run's store reads keep the end set at arrival (arrival + 120 s). Turns
+  from a capture hold don't wait.
 - **Holds and jobs.** A hold records the same arrival when it's prepared and answers on its
   choice's route, checked when its read returns and again before each send. A change to another
   kind leaves it, a change to its own kind ends it, and while its read is still out a change to

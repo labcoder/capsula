@@ -280,7 +280,10 @@ impl Coordinator {
             Input::Engines(kind, super::Availability::Ready(ready)) => {
                 *kind == hold.kind() && hold.arrived.get(*kind) != Some(ready.connection)
             }
-            Input::Engines(kind, super::Availability::Unavailable(_)) => *kind == hold.kind(),
+            Input::Engines(
+                kind,
+                super::Availability::Unavailable(_) | super::Availability::Finding,
+            ) => *kind == hold.kind(),
             Input::ShellLost => true,
             _ => false,
         };

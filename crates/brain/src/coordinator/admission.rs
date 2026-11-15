@@ -268,6 +268,9 @@ impl Coordinator {
         let (route, arrived) = (current.route, current.arrived);
         let route = match route.map_or_else(|| self.route_for(arrived, choice.as_ref()), Ok) {
             Ok(route) => route,
+            Err(_) if self.waits_for_claude_code(key.run, choice.as_ref(), effects) => {
+                return Ok(());
+            }
             Err(reason) => return self.fail_with(key.run, Failure::Engine, reason, effects),
         };
         let refused = self.refusal(route).or_else(|| {
@@ -278,7 +281,9 @@ impl Coordinator {
         if let Some(reason) = refused {
             return self.fail_with(key.run, Failure::Engine, reason, effects);
         }
-        self.current(key.run)?.route = Some(route);
+        let current = self.current(key.run)?;
+        current.route = Some(route);
+        current.finding = None;
         let made = match made {
             Ok(made) => made,
             Err(room) => return self.compact_inline(key, room, effects),
