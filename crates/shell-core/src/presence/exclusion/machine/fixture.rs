@@ -6,31 +6,31 @@ use kumochi_protocol::message::{CaptureFor, GestureId};
 
 use super::{Error, Exclusion, Key, Slot, Surfaces};
 
-pub(crate) const EXCLUDED: u32 = 17;
-pub(crate) const PRIOR: [u32; 8] = [0, 1, EXCLUDED, 4, 8, 16, 32, 64];
+pub const EXCLUDED: u32 = 17;
+pub const PRIOR: [u32; 8] = [0, 1, EXCLUDED, 4, 8, 16, 32, 64];
 
-pub(crate) struct Surface {
+pub struct Surface {
     pub(crate) number: u32,
     pub(crate) destroyed: Rc<Cell<bool>>,
-    pub(crate) affinity: u32,
+    pub affinity: u32,
 }
 
-pub(crate) struct Prior {
+pub struct Prior {
     number: u32,
     destroyed: Rc<Cell<bool>>,
     affinity: u32,
 }
 
-pub(crate) struct Fake {
-    pub(crate) surfaces: [Option<Surface>; 8],
+pub struct Fake {
+    pub surfaces: [Option<Surface>; 8],
     pub(crate) get_failure: Option<usize>,
-    pub(crate) set_failure: Option<usize>,
-    pub(crate) restore_failure: u8,
-    pub(crate) controls: Option<async_channel::Receiver<kumochi_protocol::message::ControlToBrain>>,
+    pub set_failure: Option<usize>,
+    pub restore_failure: u8,
+    pub controls: Option<async_channel::Receiver<kumochi_protocol::message::ControlToBrain>>,
 }
 
 impl Fake {
-    pub(crate) fn assert_excluded(&self, slot: Slot) {
+    pub fn assert_excluded(&self, slot: Slot) {
         assert_eq!(
             self.surfaces[slot as usize].as_ref().unwrap().affinity,
             EXCLUDED,
@@ -38,7 +38,7 @@ impl Fake {
         );
     }
 
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             surfaces: std::array::from_fn(|index| {
                 Some(Surface {
@@ -54,10 +54,14 @@ impl Fake {
         }
     }
 
-    pub(crate) fn affinities(&self) -> [u32; 8] {
+    pub fn affinities(&self) -> [u32; 8] {
         std::array::from_fn(|index| self.surfaces[index].as_ref().unwrap().affinity)
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only this crate's tests call it")
+    )]
     pub(crate) fn replace(&mut self, slot: Slot, affinity: u32) {
         let old = self.surfaces[slot as usize].as_ref().unwrap();
         old.destroyed.set(true);
@@ -129,6 +133,10 @@ impl Surfaces for Fake {
     }
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "only this crate's tests call it")
+)]
 pub(crate) fn acquire(owner: &mut Exclusion<Prior>, fake: &mut Fake, at: Instant) -> Key {
     owner
         .acquire(9, CaptureFor::Gesture(GestureId(7)), at, fake)

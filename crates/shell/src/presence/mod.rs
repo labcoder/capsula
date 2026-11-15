@@ -42,7 +42,6 @@ mod panels;
 mod position;
 mod pull_dock;
 mod pull_picture;
-mod pulling;
 mod settings;
 mod sign_ins;
 mod stage;
@@ -76,7 +75,7 @@ use gpui_kit::{
     WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point, px, size,
 };
 use kumochi_protocol::constants;
-use kumochi_shell_core::presence::{frame_rate, geometry, kumo, perch, thread_selection};
+use kumochi_shell_core::presence::{frame_rate, geometry, kumo, perch, pulling, thread_selection};
 
 use crate::escape::{Activity, Escape, EscapeHold, Panel as EscapePanel};
 use crate::input::{Effect, Gesture};

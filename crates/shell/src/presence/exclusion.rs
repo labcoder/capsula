@@ -1,6 +1,6 @@
 //! Never-published local exclusion; this owner cannot authorize a capture job.
 
-mod machine;
+use kumochi_shell_core::presence::exclusion::machine;
 
 use gpui_kit::AnyWindowHandle;
 use kumochi_protocol::message::CaptureFor;
