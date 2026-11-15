@@ -93,6 +93,12 @@ pub fn rect(id: &str) -> Step {
     ))
 }
 
+pub fn pair() -> Step {
+    step(
+        r#"{"step":{"id":"pair","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10]}},{"shape":{"id":"b","kind":"rect","box":[0,0,10,10]}}]}}"#,
+    )
+}
+
 pub fn presenter() -> Presenter {
     kumochi_scene::deferred::start().expect("the dropper starts");
     let surface = SurfaceGeometry::Overlay {

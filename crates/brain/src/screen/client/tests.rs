@@ -242,6 +242,13 @@ async fn a_ticket_runs_out_at_a_sooner_deadline() {
         "{}",
         ticket.ttl_ms()
     );
+    #[cfg(windows)]
+    assert!(
+        crate::platform::qpc_left(ticket.deadline_qpc())
+            .is_some_and(|left| left > Duration::from_millis(900) && left <= Duration::from_secs(1))
+    );
+    #[cfg(not(windows))]
+    assert_eq!(ticket.deadline_qpc(), 0);
 }
 
 #[tokio::test]

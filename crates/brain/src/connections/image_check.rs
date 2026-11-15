@@ -1,5 +1,6 @@
 //! Debug builds only: `kumochid --image-check`, the bounded image check behind
-//! `cargo xtask live image`. It sends at most three Responses requests on the stored session,
+//! `cargo xtask live image`. It sends at most three Responses requests (two in the diagnostic) on
+//! the stored session,
 //! never renewing it, each carrying one synthetic JPEG built here through the product's own
 //! request path, and prints one line of counts per request. No screen, file or log is touched.
 
@@ -32,7 +33,7 @@ use crate::platform::credential::NativeCredentialStore;
 use crate::screen::JPEG_CAP;
 
 /// The hard cap on model requests this process may send, retries and renewals included; the
-/// owner's terms allow five, and the plan uses three.
+/// owner's terms allow five, the check uses three and the diagnostic two.
 const BUDGET: u32 = 5;
 const _: () = assert!(BUDGET <= 5, "the owner's terms allow five image requests");
 /// Exit code when an image or a body couldn't be built; nothing was sent.
@@ -54,10 +55,20 @@ const TOP: u32 = 4096;
 /// Room left in the near-ceiling body for everything but the image.
 const SLACK: usize = 16 * 1024;
 
-/// Runs the check and returns its exit code: 0 when all three requests completed, 10–17 as the
+/// Which images a run sends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Set {
+    /// Three: the small flat image, then noisy ones at the JPEG cap and near the body ceiling.
+    Check,
+    /// Two, to tell "too small" from "too flat": the small image with the large ones' noise, and
+    /// the flat halves at 1024×1024.
+    Diagnostic,
+}
+
+/// Runs `set` and returns its exit code: 0 when all its requests completed, 10–17 as the
 /// catalog capture's preflight (nothing sent), 18 when nothing could be built (nothing sent), and
 /// 20 once a request didn't complete or the session went stale (later ones unspent).
-pub fn run() -> u8 {
+pub fn run(set: Set) -> u8 {
     let located = std::env::current_exe()
         .ok()
         .and_then(|exe| output_path(&exe))
@@ -65,7 +76,7 @@ pub fn run() -> u8 {
     if !dev_names(CREDENTIAL_SERVICE, DATA_DIR) || !located {
         return Outcome::Preflight.code();
     }
-    let Some(requests) = requests() else {
+    let Some(requests) = requests(set) else {
         return UNBUILT;
     };
     let vault = match Vault::open(NativeCredentialStore) {
@@ -97,6 +108,7 @@ pub fn run() -> u8 {
                 Err(_) => return STOPPED,
             };
             let mut answer = Zeroizing::new(String::new());
+            let mut input_tokens = None;
             let start = Instant::now();
             let result = stream(
                 &client,
@@ -104,10 +116,10 @@ pub fn run() -> u8 {
                 &bearer,
                 std::future::ready(Some(())),
                 &budget,
-                |event: &SseEvent| keep(&mut answer, event),
+                |event: &SseEvent| keep(&mut answer, &mut input_tokens, event),
             )
             .await
-            .map(|()| matches(&answer));
+            .map(|()| (matches(&answer), input_tokens));
             let line = report(
                 number + 1,
                 kind,
@@ -130,45 +142,62 @@ pub fn run() -> u8 {
 /// One request, built before anything is sent: kind, image size, JPEG bytes, body and body bytes.
 type Prepared = (&'static str, [u32; 2], usize, ResponsesBody, usize);
 
-/// The three requests; nothing when an image misses its size or a body is refused.
-fn requests() -> Option<Vec<Prepared>> {
-    let model = ModelSlug::new(DEFAULT_SLUG).ok()?;
-    let near_ceiling = (BODY_CEILING - SLACK) / 4 * 3;
-    let (cap, cap_height) = sized(WIDTH, TOP, JPEG_CAP)?;
-    let (ceiling, ceiling_height) = sized(WIDTH, TOP, near_ceiling)?;
-    [
-        ("small", [256, 256], halves(256, 256, 0)?),
-        ("cap", [WIDTH, cap_height], cap),
-        ("ceiling", [WIDTH, ceiling_height], ceiling),
-    ]
-    .into_iter()
-    .map(|(kind, size, jpeg)| {
-        let jpeg_bytes = jpeg.len();
-        let mut request = ModelRequest {
-            choice: Some(ModelChoice {
-                model: model.clone(),
-                effort: Effort::Low,
-                connection: ConnectionKind::ChatGpt,
-            }),
-            instructions: INSTRUCTIONS.to_owned(),
-            input: vec![InputItem::Message {
-                role: Role::User,
-                text: PROMPT.to_owned(),
-            }],
-            tools: Vec::new(),
-        };
-        request.attach(Jpeg::new(jpeg)?).ok()?;
-        let value = body(&request).ok()?;
-        let body_bytes = value.to_string().len();
-        Some((
-            kind,
-            size,
-            jpeg_bytes,
-            ResponsesBody::new(&value).ok()?,
-            body_bytes,
-        ))
+/// One image to send: kind, size and JPEG.
+type Image = (&'static str, [u32; 2], Vec<u8>);
+
+/// `set`'s images, in the order they're sent: kind, size and JPEG; nothing when one misses its
+/// size.
+fn images(set: Set) -> Option<Vec<Image>> {
+    Some(match set {
+        Set::Check => {
+            let near_ceiling = (BODY_CEILING - SLACK) / 4 * 3;
+            let (cap, cap_height) = sized(WIDTH, TOP, JPEG_CAP)?;
+            let (ceiling, ceiling_height) = sized(WIDTH, TOP, near_ceiling)?;
+            vec![
+                ("small", [256, 256], halves(256, 256, 0)?),
+                ("cap", [WIDTH, cap_height], cap),
+                ("ceiling", [WIDTH, ceiling_height], ceiling),
+            ]
+        }
+        Set::Diagnostic => vec![
+            ("small-noisy", [256, 256], halves(256, 256, NOISE)?),
+            ("flat-large", [1024, 1024], halves(1024, 1024, 0)?),
+        ],
     })
-    .collect()
+}
+
+/// `set`'s requests; nothing when an image misses its size or a body is refused.
+fn requests(set: Set) -> Option<Vec<Prepared>> {
+    let model = ModelSlug::new(DEFAULT_SLUG).ok()?;
+    images(set)?
+        .into_iter()
+        .map(|(kind, size, jpeg)| {
+            let jpeg_bytes = jpeg.len();
+            let mut request = ModelRequest {
+                choice: Some(ModelChoice {
+                    model: model.clone(),
+                    effort: Effort::Low,
+                    connection: ConnectionKind::ChatGpt,
+                }),
+                instructions: INSTRUCTIONS.to_owned(),
+                input: vec![InputItem::Message {
+                    role: Role::User,
+                    text: PROMPT.to_owned(),
+                }],
+                tools: Vec::new(),
+            };
+            request.attach(Jpeg::new(jpeg)?).ok()?;
+            let value = body(&request).ok()?;
+            let body_bytes = value.to_string().len();
+            Some((
+                kind,
+                size,
+                jpeg_bytes,
+                ResponsesBody::new(&value).ok()?,
+                body_bytes,
+            ))
+        })
+        .collect()
 }
 
 /// The tallest noisy two-colour JPEG `width` wide and at most `top` high with at most `cap`
@@ -221,15 +250,21 @@ fn jitter(x: u32, y: u32) -> u8 {
     hash.to_le_bytes()[0]
 }
 
-/// Keeps the answer's text, up to [`ANSWER_BYTES`].
-fn keep(answer: &mut String, event: &SseEvent) {
-    if event.kind() != "response.output_text.delta" {
-        return;
-    }
-    if let Some(delta) = event.value()["delta"].as_str()
-        && answer.len() + delta.len() <= ANSWER_BYTES
-    {
-        answer.push_str(delta);
+/// Keeps the answer's text, up to [`ANSWER_BYTES`], and the completed response's input token
+/// count, so a line can show whether the image was counted.
+fn keep(answer: &mut String, input_tokens: &mut Option<u64>, event: &SseEvent) {
+    match event.kind() {
+        "response.output_text.delta" => {
+            if let Some(delta) = event.value()["delta"].as_str()
+                && answer.len() + delta.len() <= ANSWER_BYTES
+            {
+                answer.push_str(delta);
+            }
+        }
+        "response.completed" => {
+            *input_tokens = event.value()["response"]["usage"]["input_tokens"].as_u64();
+        }
+        _ => {}
     }
 }
 
@@ -251,15 +286,16 @@ fn report(
     jpeg_bytes: usize,
     body_bytes: usize,
     ms: u128,
-    result: Result<bool, Failure>,
+    result: Result<(bool, Option<u64>), Failure>,
 ) -> String {
     let none = || "-".to_owned();
-    let (status, code, param, outcome, matched) = match result {
-        Ok(matched) => (
+    let (status, code, param, outcome, tokens, matched) = match result {
+        Ok((matched, tokens)) => (
             "2xx".to_owned(),
             none(),
             none(),
             "completed",
+            tokens.map_or_else(none, |tokens| tokens.to_string()),
             matched.to_string(),
         ),
         Err(Failure::Provider(error)) => (
@@ -268,13 +304,14 @@ fn report(
             error.param.map_or_else(none, |param| format!("{param:?}")),
             "refused",
             none(),
+            none(),
         ),
-        Err(failure) => (none(), none(), none(), kind_of(failure), none()),
+        Err(failure) => (none(), none(), none(), kind_of(failure), none(), none()),
     };
     format!(
         "request={number} image={kind} size={width}x{height} jpeg_bytes={jpeg_bytes} \
          body_bytes={body_bytes} status={status} code={code} param={param} result={outcome} \
-         ms={ms} content_match={matched}"
+         input_tokens={tokens} ms={ms} content_match={matched}"
     )
 }
 

@@ -2,7 +2,7 @@
 //! image, or its release.
 
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use kumochi_protocol::frame;
 use kumochi_protocol::geometry::PhysicalPoint;
@@ -139,6 +139,7 @@ pub fn serve() -> Result<(), frame::FrameError> {
         open_elements,
         Instant::now,
         crate::platform::window_unchanged,
+        crate::platform::qpc_left,
     )
 }
 
@@ -149,6 +150,7 @@ pub(super) fn serve_on(
     elements: OpenElements,
     now: impl Fn() -> Instant + Send + Sync + 'static,
     unchanged: fn(&Target) -> bool,
+    left_until: fn(u64) -> Option<Duration>,
 ) -> Result<(), frame::FrameError> {
     #[cfg(debug_assertions)]
     let mut fault = std::env::var(kumochi_protocol::constants::SCREEN_FAULT_ENV)
@@ -170,6 +172,7 @@ pub(super) fn serve_on(
         .map_err(|_| std::io::Error::other("capture thread"))?;
     let mut screen = Screen::default();
     screen.unchanged = unchanged;
+    screen.left_until = left_until;
     screen.reader = Some(elements(wake(inbox.clone())));
     let now = std::sync::Arc::new(now);
     let clock = std::sync::Arc::clone(&now);

@@ -24,9 +24,9 @@ use zeroize::Zeroize as _;
 use super::{Brain, Effect, Full, Input, Link, Origin};
 use crate::coordinator::{HoldKey, HoldSnapshot};
 use crate::platform::ShellProcess;
-use crate::screen::HoldClient;
+use crate::screen::{HoldClient, MAX_TTL};
 use crate::voice::stt::{Decode, SttHandle, SttResult};
-use screen::{Outcome, ScreenEvent, ScreenPart};
+use screen::{LATEST_START, Outcome, ScreenEvent, ScreenPart};
 
 #[derive(Debug)]
 enum FailureStage {
@@ -100,6 +100,8 @@ pub(super) struct Holds {
     window_capture: bool,
     /// The gate's state last sent on this connection.
     screen_sent: Option<ScreenHolds>,
+    /// How long ago a shell's input stamp was taken; tests replace the clock.
+    recognized_age: fn(u64) -> Option<Duration>,
     /// Where each hold's screen task sends its answers.
     screen_events: mpsc::Sender<ScreenEvent>,
     screen_answers: mpsc::Receiver<ScreenEvent>,
@@ -166,6 +168,7 @@ impl Default for Holds {
             screen: None,
             window_capture: crate::platform::WINDOW_CAPTURE,
             screen_sent: None,
+            recognized_age: crate::platform::qpc_age,
             screen_events,
             screen_answers,
         }
@@ -352,7 +355,7 @@ impl Brain {
             selection,
             pointer,
             lease,
-            ..
+            t_qpc,
         } = message
         {
             let voice = ControlToBrain::VoiceHoldRecognized {
@@ -368,7 +371,7 @@ impl Brain {
                 .as_ref()
                 .is_some_and(|hold| hold.key == held);
             self.hold_control(&voice, link)?;
-            if repeated || !self.hold_screen(held, *pointer, *lease) {
+            if repeated || !self.hold_screen(held, *pointer, *lease, *t_qpc) {
                 link.control(&ControlToShell::CaptureFailed {
                     capture_for: CaptureFor::Gesture(*gesture),
                     reason: CaptureFailure::Unavailable,
@@ -809,19 +812,30 @@ impl Brain {
     }
 
     /// Starts the pending hold `key`'s screen part when the gate is open for the default model
-    /// now, since the shell's state may lag.
+    /// now, since the shell's state may lag, and the worker's ticket would end within the shell's
+    /// lease: a part started more than `LATEST_START` after `t_qpc`, the recognition, closes
+    /// `NotReady` instead.
     fn hold_screen(
         &mut self,
         key: HoldKey,
         pointer: PhysicalPoint,
         lease: LeaseGeneration,
+        t_qpc: u64,
     ) -> bool {
         // shortcut: the gate opens on the default model, so a thread pinned to a model that can
         // see goes voice-only while the default can't; check the thread's pin at recognition
         // once a thread's pin differs from the default in image input.
         let choice = self.config.view().default_model.clone();
-        matches!(self.screen_gate(choice.as_ref()), ScreenHolds::On { .. })
-            && self.holds.start_screen(key, pointer, lease)
+        if !matches!(self.screen_gate(choice.as_ref()), ScreenHolds::On { .. }) {
+            return false;
+        }
+        // Read before the age, so the ticket can only end sooner than the check allows.
+        let until = Instant::now() + MAX_TTL;
+        if (self.holds.recognized_age)(t_qpc).is_none_or(|age| age > LATEST_START) {
+            self.holds.refuse_screen(key);
+            return false;
+        }
+        self.holds.start_screen(key, pointer, lease, until)
     }
 
     /// Takes a screen task's answer. The capture's end, either way, releases the shell's

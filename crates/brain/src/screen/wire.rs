@@ -34,16 +34,25 @@ pub(crate) struct TicketWire {
     generation: u64,
     nonce: [u8; 16],
     ttl_ms: u32,
+    /// The brain's deadline as a performance-counter stamp, which the worker's expiry never passes.
+    deadline_qpc: u64,
     shell_pid: u32,
 }
 
 impl TicketWire {
-    pub(crate) fn new(capture: CaptureId, generation: u64, nonce: [u8; 16], ttl_ms: u32) -> Self {
+    pub(crate) fn new(
+        capture: CaptureId,
+        generation: u64,
+        nonce: [u8; 16],
+        ttl_ms: u32,
+        deadline_qpc: u64,
+    ) -> Self {
         Self {
             capture,
             generation,
             nonce,
             ttl_ms,
+            deadline_qpc,
             shell_pid: 0,
         }
     }
@@ -66,6 +75,10 @@ impl TicketWire {
 
     pub(super) fn ttl_ms(&self) -> u32 {
         self.ttl_ms
+    }
+
+    pub(super) fn deadline_qpc(&self) -> u64 {
+        self.deadline_qpc
     }
 }
 

@@ -95,7 +95,9 @@ pub(crate) use windows::{
     unmark, validate_model_path,
 };
 #[cfg(windows)]
-pub(crate) use windows::{WINDOW_CAPTURE, screen_capturer, screen_elements, window_unchanged};
+pub(crate) use windows::{
+    WINDOW_CAPTURE, qpc_age, qpc_at, qpc_left, screen_capturer, screen_elements, window_unchanged,
+};
 #[cfg(windows)]
 pub use windows::{managed_presence, system_env};
 
@@ -103,6 +105,28 @@ pub use windows::{managed_presence, system_env};
 // shortcut: macOS will capture with ScreenCaptureKit; true once that adapter lands.
 #[cfg(not(windows))]
 pub(crate) const WINDOW_CAPTURE: bool = false;
+
+/// How long ago a shell's input stamp was taken. Only Windows stamps input with a clock the brain
+/// reads, so elsewhere no age is known.
+// shortcut: off Windows a screen hold always goes voice only; read macOS's clock here once its
+// shell sends screen holds.
+#[cfg(not(windows))]
+pub(crate) fn qpc_age(_t_qpc: u64) -> Option<std::time::Duration> {
+    None
+}
+
+/// A capture deadline's stamp for the screen worker, on the clock `qpc_age` reads, so none here.
+// shortcut: off Windows the worker refuses every ticket; stamp with macOS's clock once it captures.
+#[cfg(not(windows))]
+pub(crate) fn qpc_at(_until: std::time::Instant) -> Option<u64> {
+    None
+}
+
+/// How long until a deadline stamp from `qpc_at`, so never known here.
+#[cfg(not(windows))]
+pub(crate) fn qpc_left(_stamp: u64) -> Option<std::time::Duration> {
+    None
+}
 
 /// Whether a captured window is still the one its capture resolved. No platform but Windows
 /// captures windows yet, so none is ever unchanged.

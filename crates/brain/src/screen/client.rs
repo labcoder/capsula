@@ -132,7 +132,7 @@ impl HoldClient {
     }
 
     /// Captures the window under `point` for `owner`, under a ticket that runs out at `until`
-    /// or after [`MAX_TTL`], whichever is sooner.
+    /// or [`MAX_TTL`] after the worker receives it, whichever is sooner.
     ///
     /// # Errors
     /// `Refused(Stale)` for a retired hold, without asking the worker; otherwise the worker's
@@ -152,6 +152,8 @@ impl HoldClient {
             .map_err(|error| Closed::Fault(error.raw_os_error().unwrap_or(-1)))?;
         let ttl = until.saturating_duration_since(Instant::now()).min(MAX_TTL);
         let ttl_ms = u32::try_from(ttl.as_millis()).unwrap_or(u32::MAX);
+        // 0, which no worker reads as later than now, when the counter can't be read.
+        let deadline_qpc = crate::platform::qpc_at(until.into_std()).unwrap_or(0);
         let mut stream = {
             let fence = self
                 .fence
@@ -166,6 +168,7 @@ impl HoldClient {
                 self.tickets.fetch_add(1, Ordering::Relaxed),
                 nonce,
                 ttl_ms,
+                deadline_qpc,
             )
             .for_shell(crate::platform::connected_shell_pid());
             self.inner

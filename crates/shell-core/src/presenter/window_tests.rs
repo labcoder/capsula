@@ -587,10 +587,7 @@ fn a_kept_cut_checks_its_replacement_view_at_the_cap() {
                 + kumochi_scene::Frame::new().resident_bytes()
                 + FRAME_CACHE_METADATA_BYTES
                 + NEXT_CACHE;
-            let pair = super::step(
-                r#"{"step":{"id":"pair","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10]}},{"shape":{"id":"b","kind":"rect","box":[0,0,10,10]}}]}}"#,
-            );
-            let (mut presenter, now, job) = recovering(vec![(LIVE, pair)]);
+            let (mut presenter, now, job) = recovering(vec![(LIVE, super::pair())]);
             presenter.stage = Box::new(Seeded {
                 cache: CACHE,
                 fixed,
@@ -1032,7 +1029,6 @@ fn consumption_forwards_distinct_scene_time_and_narration_segment() {
     }
 }
 
-const PAIR: &str = r#"{"step":{"id":"pair","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10]}},{"shape":{"id":"b","kind":"rect","box":[0,0,10,10]}}]}}"#;
 const TRIPLE: &str = r#"{"step":{"id":"triple","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10]}},{"shape":{"id":"b","kind":"rect","box":[0,0,10,10]}},{"shape":{"id":"c","kind":"rect","box":[0,0,10,10]}}]}}"#;
 /// Recovered scenes in id order, each larger than the next.
 const RECOVERED: [SceneId; 3] = [SceneId(10), SceneId(11), SceneId(12)];
@@ -1117,7 +1113,7 @@ fn stopped_pair(cache: usize, next: usize) -> (Presenter, Instant, usize) {
         + Frame::new().resident_bytes()
         + FRAME_CACHE_METADATA_BYTES
         + next;
-    let (mut presenter, now, job) = recovering(vec![(LIVE, super::step(PAIR))]);
+    let (mut presenter, now, job) = recovering(vec![(LIVE, super::pair())]);
     presenter.stage = Box::new(Charged(cache));
     presenter
         .completed(job.run(&mut Shaper), now)
@@ -1130,7 +1126,7 @@ fn stopped_pair(cache: usize, next: usize) -> (Presenter, Instant, usize) {
 /// Three recovered scenes, each larger than the next by id, their caches charging [`CACHE`];
 /// with each one's picture, read from the answer before adoption.
 fn recovered_three() -> (Presenter, Instant, Completion, [usize; 3]) {
-    let steps = [super::step(TRIPLE), super::step(PAIR), rect("r")];
+    let steps = [super::step(TRIPLE), super::pair(), rect("r")];
     let (mut presenter, now, job) = recovering(RECOVERED.into_iter().zip(steps).collect());
     presenter.stage = Box::new(Charged(CACHE));
     let done = job.run(&mut Shaper);

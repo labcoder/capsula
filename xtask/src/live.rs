@@ -27,7 +27,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use kumochi_protocol::constants::{
-    BRAIN_EXE, CLAUDE_QUESTIONS_ENV, LIVE_BUDGET_ENV, ProductIdentity, SHELL_EXE,
+    BRAIN_EXE, CLAUDE_QUESTIONS_ENV, IMAGE_CHECK_ARG, IMAGE_DIAGNOSTIC_ARG, LIVE_BUDGET_ENV,
+    ProductIdentity, SHELL_EXE,
 };
 
 use self::claude_signin::Ask;
@@ -53,7 +54,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         Entry::Inner(Check::SignIn) => signin::inner(),
         Entry::Inner(Check::Claude(ask)) => claude_signin::inner(ask),
         Entry::Inner(Check::Question) => std::process::exit(claude_question::inner()),
-        Entry::Inner(Check::Catalog | Check::Image) => {
+        Entry::Inner(Check::Catalog | Check::Image | Check::ImageDiagnostic) => {
             unreachable!("entry refuses --inner for the brain-only checks")
         }
     }
@@ -74,10 +75,11 @@ enum Check {
     Question,
     Catalog,
     Image,
+    ImageDiagnostic,
 }
 
 impl Check {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Account,
         Self::SignIn,
         Self::Claude(Ask::SignIn),
@@ -85,6 +87,7 @@ impl Check {
         Self::Question,
         Self::Catalog,
         Self::Image,
+        Self::ImageDiagnostic,
     ];
 
     /// The arguments after `live` that name it.
@@ -97,6 +100,7 @@ impl Check {
             Self::Question => &["claude-question"],
             Self::Catalog => &["catalog-provenance"],
             Self::Image => &["image"],
+            Self::ImageDiagnostic => &["image", "--diagnostic"],
         }
     }
 }
@@ -121,9 +125,15 @@ fn entry(identity: ProductIdentity, args: &[String]) -> Result<Entry> {
                 .map(String::as_str)
                 .eq(check.args().iter().copied())
         })
-        .filter(|check| !(inner && matches!(check, Check::Catalog | Check::Image)))
+        .filter(|check| {
+            !(inner
+                && matches!(
+                    check,
+                    Check::Catalog | Check::Image | Check::ImageDiagnostic
+                ))
+        })
         .context(
-            "usage: cargo xtask live account | signin | claude-signin [--disconnect] | claude-question | catalog-provenance | image",
+            "usage: cargo xtask live account | signin | claude-signin [--disconnect] | claude-question | catalog-provenance | image [--diagnostic]",
         )?;
     Ok(if inner {
         Entry::Inner(check)
@@ -172,8 +182,10 @@ fn prepare(check: Check) -> Result<()> {
     if check == Check::Catalog {
         return catalog::run(&folder);
     }
-    if check == Check::Image {
-        return image::run(&folder);
+    match check {
+        Check::Image => return image::run(&folder, IMAGE_CHECK_ARG),
+        Check::ImageDiagnostic => return image::run(&folder, IMAGE_DIAGNOSTIC_ARG),
+        _ => {}
     }
     fs::copy(&me, bin.join(SHELL_EXE)).context("copying the client")?;
     let mut inner = Command::new(bin.join(SHELL_EXE));
@@ -563,6 +575,10 @@ mod tests {
             ),
             (&["catalog-provenance"], Entry::Prepare(Check::Catalog)),
             (&["image"], Entry::Prepare(Check::Image)),
+            (
+                &["image", "--diagnostic"],
+                Entry::Prepare(Check::ImageDiagnostic),
+            ),
         ] {
             assert_eq!(
                 entry(ProductIdentity::DEV, &args(list)).expect("debug"),
@@ -583,6 +599,8 @@ mod tests {
             &["catalog-provenance", "C:/elsewhere"],
             &["image", "--inner"],
             &["image", "C:/elsewhere"],
+            &["image", "--diagnostic", "--inner"],
+            &["--diagnostic"],
             &["claude-question", "--disconnect"],
             &["claude-question", "3"],
             &["claude-question", "--inner", "--inner"],
@@ -590,7 +608,7 @@ mod tests {
             let error = entry(ProductIdentity::DEV, &args(list)).expect_err("refused");
             assert_eq!(
                 format!("{error:#}"),
-                "usage: cargo xtask live account | signin | claude-signin [--disconnect] | claude-question | catalog-provenance | image"
+                "usage: cargo xtask live account | signin | claude-signin [--disconnect] | claude-question | catalog-provenance | image [--diagnostic]"
             );
         }
     }

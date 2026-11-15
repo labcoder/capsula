@@ -62,8 +62,6 @@ fn unaware_host_at_200_percent_scales_the_standard_frame() {
     assert_eq!(geometry.caption.rect, rect(1014, 200, 2370, 262));
     assert_eq!(geometry.caption.source, Source::Inferred);
     assert_exclusions(&geometry, &[(rect(2370, 200, 2586, 262), Source::Inferred)]);
-    assert_ne!(geometry.caption.rect, rect(1014, 200, 2478, 231));
-    assert!(!exclusions(&geometry).contains(&(rect(2478, 200, 2586, 231), Source::Inferred)));
 }
 
 #[test]
@@ -220,11 +218,6 @@ fn borderless_guess_at_unequal_dpis_starts_at_the_frame() {
     assert_eq!(geometry.caption.rect, rect(0, 310, 1038, 357));
     assert_eq!(geometry.caption.source, Source::Inferred);
     assert_exclusions(&geometry, &[(rect(1038, 310, 1200, 357), Source::Inferred)]);
-    assert_ne!(
-        geometry.caption.rect,
-        rect(0, 310, 1038, 347),
-        "not bounds' top"
-    );
 }
 
 #[test]
