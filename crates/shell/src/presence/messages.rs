@@ -770,11 +770,10 @@ mod tests {
                 assert!(same == plain[0], "{screen:?}");
             }
             // A turn that carried the screen's picture has no line of its own yet.
-            user.kind = PageEventKind::HeldTurn {
-                screen: HeldScreen::Screen,
-            };
+            let screen = HeldScreen::Screen;
+            user.kind = PageEventKind::HeldTurn { screen };
             state.events = vec![user];
-            assert!(stored_rows(&state, cx)[0] == plain[0]);
+            assert!(stored_rows(&state, cx)[0] == plain[0], "{screen:?}");
         });
     }
 
