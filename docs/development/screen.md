@@ -364,11 +364,12 @@ the frame. The worker's `Display { key, ticket, point, excluded, ink }` request 
 Only the shell's exclusion lease keeps Kumochi's windows out of a display frame, and exclusion
 takes effect when Windows next redraws. So the capture takes `excluded`, the performance-counter
 stamp the shell reads once every exclusion setter has succeeded, and accepts only a frame drawn
-at least two compositor redraws later, rounded up. A frame's draw time is when it's presented,
-0.4 to 3 ms before it arrives on Rez [measured], so a frame stamped a single redraw later can come
-from a composition that began at about the exclusion stamp; the second redraw costs 7 ms at
-144 Hz. A redraw is the compositor's refresh period (`DwmGetCompositionTimingInfo`), or 100 ms
-[guess] when that can't be read. The session doesn't start before the counter passes that time. A frame drawn earlier (its `SystemRelativeTime`, in
+at least two compositor redraws later, rounded up. A frame's draw time is when it's presented:
+on Rez a frame arrives 0.4 to 3 ms before its stamped draw time [measured], so a frame stamped a
+single redraw later can come from a composition that began at about the exclusion stamp. The
+second redraw costs 7 ms at 144 Hz. A redraw is the compositor's refresh period
+(`DwmGetCompositionTimingInfo`), or 100 ms [guess] when that can't be read. The session doesn't
+start before the counter passes that time. A frame drawn earlier (its `SystemRelativeTime`, in
 100 ns on the counter's clock) is released and the next one taken, until the deadline refuses
 `Expired`. A zero stamp is refused `Expired` too.
 
