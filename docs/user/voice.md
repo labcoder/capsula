@@ -70,7 +70,8 @@ task you're in uses its own model. A task with its own model is always voice onl
 
 During the hold the same panel says which model will see the window. If the picture couldn't be
 included it says why instead: nothing was under the pointer, the window can't be shared, it
-changed, it wasn't readable, or its picture was too large. Chat history keeps one line under
+changed, something was drawn over it so Kumochi couldn't tell which window you meant, or its
+picture was too large. Chat history keeps one line under
 your message saying whether the window was included. Turning the setting off while a picture
 is waiting to be sent withdraws it.
 

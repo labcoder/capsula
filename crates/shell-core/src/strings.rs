@@ -736,7 +736,10 @@ mod tests {
             (ScreenClass::NotReady, "the screen wasn't ready"),
             (ScreenClass::NothingThere, "nothing under the pointer"),
             (ScreenClass::CantShare, "that window can't be shared"),
-            (ScreenClass::Unreadable, "the window wasn't readable"),
+            (
+                ScreenClass::Unreadable,
+                "something is drawn over the window under your pointer, so I couldn't tell which one you meant",
+            ),
             (ScreenClass::TooLarge, "the window image was too large"),
             (ScreenClass::Changed, "the window changed"),
             (
