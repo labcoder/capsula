@@ -242,8 +242,8 @@ still counts at most 2.
 over it, the refusal while a product process runs, the argument table, the exit-code table, the
 restore file and the line about one left behind, the verdict after a timeout, the walk that finds
 `claude.exe` under the brain, the folder listing's changes, and when a failed audit waits for its
-view. The drive itself runs only live,
-including the put-back after a failed default, which needs a brain that refuses it.
+view. The drive itself runs only live, including the put-back after a failed default, which needs
+a brain that refuses it.
 
 **Known limits.**
 
