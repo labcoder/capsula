@@ -735,6 +735,60 @@ fn on(kind: kumochi_protocol::message::ConnectionKind, tag: u64) -> Route {
     }
 }
 
+/// Another kind's Ready on `tag`, offering haiku.
+fn kind_ready(kind: kumochi_protocol::message::ConnectionKind, tag: u64) -> Input {
+    Input::Engines(
+        kind,
+        Availability::Ready(Ready {
+            connection: ConnectionTag(tag),
+            models: vec![info("haiku")],
+            trusted_draw: false,
+        }),
+    )
+}
+
+/// OSC-760: a new Claude Code sign-in while an unbound run's first build is out fails the run
+/// with Open Settings, never `ChatGPT`'s Sign in, and the late build is stale.
+#[test]
+fn a_new_claude_code_tag_before_the_bind_fails_the_run_with_open_settings() {
+    let mut core = turn_after(vec![chatgpt_signed_out(), claude_ready(5)]);
+    assert_eq!(
+        core.handle(claude_ready(6)),
+        Ok(failed(Some(model_unavailable())))
+    );
+    assert_eq!(core.handle(built_on(CLAUDE, "haiku")), Err(super::Stale));
+}
+
+/// OSC-760: a run bound to Claude Code or the Anthropic key ends with Open Settings when its kind
+/// reports a new sign-in; `ChatGPT`'s own case keeps its Sign in
+/// (`a_catalog_change_keeps_the_run_and_another_connection_ends_it_before_any_grant`).
+#[test]
+fn a_new_tag_on_a_bound_non_chatgpt_run_ends_it_with_open_settings() {
+    for kind in [
+        CLAUDE,
+        kumochi_protocol::message::ConnectionKind::AnthropicKey,
+    ] {
+        let (mut core, effects) = turn_on(kind, vec![chatgpt_signed_out(), kind_ready(kind, 5)]);
+        assert!(started(&effects), "{kind:?}");
+        assert_eq!(route(&core), on(kind, 5));
+        assert_eq!(
+            core.handle(kind_ready(kind, 6)),
+            Ok(failed(Some(model_unavailable()))),
+            "{kind:?}"
+        );
+    }
+}
+
+/// A turn typed on haiku over `kind` after `before`, and what its first build did.
+fn turn_on(
+    kind: kumochi_protocol::message::ConnectionKind,
+    before: Vec<Input>,
+) -> (Coordinator, Vec<Effect>) {
+    let mut core = turn_after(before);
+    let effects = core.handle(built_on(kind, "haiku")).expect("current");
+    (core, effects)
+}
+
 /// OSC-753: a Claude-only user who types while Claude Code is still being found isn't failed at
 /// the first build; it waits for the next report, and Ready answers it on that sign-in.
 #[test]
