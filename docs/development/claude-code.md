@@ -521,7 +521,8 @@ sequenceDiagram
 - **The stated limit:** the seed can reach the chosen model before init is checked, but no tool
   runs before the check.
 - **The log:** a failure is logged as a warning with its closed check and its phase, before stdin
-  or after the seed, and nothing Claude Code sent.
+  or after the seed, and nothing Claude Code sent. The audit's own deadline before stdin is logged
+  as the `Deadline` check, though the launch ends as `Deadline` with no quarantine.
 
 The brain's side of the pipe, and the launch that writes `mcp.json`, come with C4b and C5a.
 On macOS the pipe would be a Unix socket in the owned folder (unverified).
