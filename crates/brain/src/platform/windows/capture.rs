@@ -15,7 +15,7 @@ use windows::Graphics::Capture::{
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Graphics::SizeInt32;
-use windows::Win32::Foundation::{E_NOTIMPL, HMODULE, HWND, POINT};
+use windows::Win32::Foundation::{E_NOTIMPL, HMODULE, HWND, POINT, RECT};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_FLAG_DO_NOT_WAIT,
@@ -28,7 +28,8 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_WAS_STILL_DRAWING, IDXGIDevice,
 };
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
+    GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL, MONITORINFO,
+    MonitorFromPoint, MonitorFromRect,
 };
 use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
@@ -334,6 +335,48 @@ fn poll<T>(
     }
 }
 
+/// The bounds and effective DPI of the monitor that exactly covers `bounds` now, if any.
+pub(crate) fn display_at(bounds: PhysicalRect) -> Option<(PhysicalRect, u32)> {
+    let [left, top] = bounds.origin;
+    let [width, height] = bounds.size.map(|side| i32::try_from(side).ok());
+    let rect = RECT {
+        left,
+        top,
+        right: left.checked_add(width?)?,
+        bottom: top.checked_add(height?)?,
+    };
+    // SAFETY: `rect` is a readable rectangle; asks which monitor holds it.
+    let monitor = unsafe { MonitorFromRect(&raw const rect, MONITOR_DEFAULTTONULL) };
+    geometry(monitor)
+}
+
+/// A monitor's physical bounds and effective DPI, or none for no monitor.
+fn geometry(monitor: HMONITOR) -> Option<(PhysicalRect, u32)> {
+    if monitor.is_invalid() {
+        return None;
+    }
+    let mut info = MONITORINFO {
+        cbSize: u32::try_from(size_of::<MONITORINFO>()).ok()?,
+        ..MONITORINFO::default()
+    };
+    // SAFETY: `info` is writable and its size is set.
+    if !unsafe { GetMonitorInfoW(monitor, &raw mut info) }.as_bool() {
+        return None;
+    }
+    let edges = info.rcMonitor;
+    let bounds = PhysicalRect {
+        origin: [edges.left, edges.top],
+        size: [
+            u32::try_from(edges.right - edges.left).ok()?,
+            u32::try_from(edges.bottom - edges.top).ok()?,
+        ],
+    };
+    let (mut dpi, mut unused) = (0, 0);
+    // SAFETY: both outputs are writable.
+    unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &raw mut dpi, &raw mut unused) }.ok()?;
+    Some((bounds, dpi))
+}
+
 /// Calls `start` once `now` reaches `not_before`, and never at or after `until`.
 fn start_after(
     not_before: Option<u64>,
@@ -529,31 +572,7 @@ impl Wgc {
         let [x, y] = point.0;
         // SAFETY: asks which monitor is nearest a point; no pointers.
         let monitor = unsafe { MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST) };
-        if monitor.is_invalid() {
-            return Err(Refusal::DisplayChanged.into());
-        }
-        let mut info = MONITORINFO {
-            cbSize: u32::try_from(size_of::<MONITORINFO>()).map_err(|_| Failure::Fault(0))?,
-            ..MONITORINFO::default()
-        };
-        // SAFETY: `info` is writable and its size is set.
-        if !unsafe { GetMonitorInfoW(monitor, &raw mut info) }.as_bool() {
-            return Err(Refusal::DisplayChanged.into());
-        }
-        let edges = info.rcMonitor;
-        let span =
-            |from: i32, to: i32| u32::try_from(to - from).map_err(|_| Refusal::DisplayChanged);
-        let bounds = PhysicalRect {
-            origin: [edges.left, edges.top],
-            size: [
-                span(edges.left, edges.right)?,
-                span(edges.top, edges.bottom)?,
-            ],
-        };
-        let (mut dpi, mut unused) = (0, 0);
-        // SAFETY: both outputs are writable.
-        unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &raw mut dpi, &raw mut unused) }
-            .map_err(|e| fault(&e))?;
+        let (bounds, dpi) = geometry(monitor).ok_or(Refusal::DisplayChanged)?;
         let interop: IGraphicsCaptureItemInterop =
             factory::<GraphicsCaptureItem, _>().map_err(|e| fault(&e))?;
         // SAFETY: `monitor` came from MonitorFromPoint just now.

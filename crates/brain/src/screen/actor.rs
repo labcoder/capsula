@@ -5,15 +5,15 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::frame;
-use kumochi_protocol::geometry::PhysicalPoint;
+use kumochi_protocol::geometry::{PhysicalPoint, PointerPath};
 use serde::{Deserialize, Serialize};
 
-use super::capture::{Capturer, Failure, Screen, Target};
+use super::capture::{Capturer, Failure, Screen, Shown, Target};
 use super::client::Holds as Kind;
 use super::context::ScreenContext;
 use super::elements::{ElementTree, OpenElements, Wake};
 use super::encode::JPEG_CAP;
-use super::native::{CaptureThread, Job};
+use super::native::{Aim, CaptureThread, Job};
 use super::reader::{CONNECTION_TIMEOUT, TRANSACTION_TIMEOUT};
 #[cfg(debug_assertions)]
 use super::wire::WorkerFault;
@@ -61,6 +61,15 @@ pub(crate) enum Request {
     Elements {
         key: Key,
         target: ElementTarget,
+    },
+    /// One frame of the display nearest `point`, the pointer where the hold was let go, drawn
+    /// after `excluded`, the shell's exclusion stamp, with `ink` to paint when it's sealed.
+    Display {
+        key: Key,
+        ticket: TicketWire,
+        point: PhysicalPoint,
+        excluded: u64,
+        ink: PointerPath,
     },
     /// The held frame's one image, as captured; the frame is released whatever the answer.
     Seal(Key),
@@ -117,6 +126,7 @@ struct Capture {
     ticket: TicketWire,
     received: Instant,
     expires: Instant,
+    ink: Vec<PhysicalPoint>,
 }
 
 /// Serves stdin/stdout after the caller initializes content-free logging. Replies go to an
@@ -239,7 +249,23 @@ fn run(
                         send(id, Reply::Pong)?;
                         None
                     }
-                    Request::Context { key, ticket, point } => {
+                    request @ (Request::Context { .. } | Request::Display { .. }) => {
+                        let (key, ticket, point, aim, ink) = match request {
+                            Request::Context { key, ticket, point } => {
+                                let aim = Aim::Window {
+                                    shell: ticket.shell_pid(),
+                                };
+                                (key, ticket, point, aim, None)
+                            }
+                            Request::Display {
+                                key,
+                                ticket,
+                                point,
+                                excluded,
+                                ink,
+                            } => (key, ticket, point, Aim::Display { excluded }, Some(ink)),
+                            _ => unreachable!(),
+                        };
                         if current.is_some_and(|held: Key| held.owner != key.owner) {
                             screen.clear();
                         }
@@ -251,6 +277,8 @@ fn run(
                         let result =
                             if retired || key.capture != ticket.capture() || capturing.is_some() {
                                 Err(Failure::Refused(Refusal::Stale))
+                            } else if ink.as_ref().is_some_and(|ink| ink.check().is_err()) {
+                                Err(Failure::Refused(Refusal::Invalid))
                             } else {
                                 admitted
                             };
@@ -263,7 +291,7 @@ fn run(
                                     key,
                                     frame: std::mem::take(&mut screen.frame),
                                     point,
-                                    shell: ticket.shell_pid(),
+                                    aim,
                                     until,
                                 };
                                 match native.begin(job) {
@@ -276,6 +304,7 @@ fn run(
                                             ticket,
                                             received,
                                             expires: until,
+                                            ink: ink.map(|ink| ink.0).unwrap_or_default(),
                                         });
                                     }
                                     Some(mut job) => {
@@ -388,7 +417,7 @@ fn run(
         match native.poll() {
             Ok(Some((key, frame, result))) => {
                 screen.frame = frame;
-                let pending = capturing.take().expect("one capture owns the result");
+                let mut pending = capturing.take().expect("one capture owns the result");
                 if matches!(result, Err(Failure::Retire(_))) {
                     return Ok(());
                 }
@@ -396,16 +425,20 @@ fn run(
                     screen.clear();
                     send(pending.id, Reply::Refused(Refusal::Stale))?;
                 } else {
-                    let result = result.and_then(|(acquired, target)| {
+                    let result = result.and_then(|(acquired, shown)| {
+                        let (surface, foreground) = match &shown {
+                            Shown::Window(target) => (target.top.rect, Some(target.top.clone())),
+                            Shown::Display { bounds, .. } => (*bounds, None),
+                        };
                         let meta = screen.acquired(
                             &pending.ticket,
-                            target.top.rect,
+                            surface,
                             pending.received,
                             pending.expires,
                             now(),
-                            (acquired, Some(target.top.clone())),
+                            (acquired, foreground),
                         )?;
-                        screen.pin(target);
+                        screen.pin(shown, std::mem::take(&mut pending.ink));
                         Ok(meta)
                     });
                     match result {

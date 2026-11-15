@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use kumochi_protocol::geometry::PhysicalPoint;
+use kumochi_protocol::geometry::{PhysicalPoint, PointerPath};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time::Instant;
 
@@ -142,6 +142,49 @@ impl HoldClient {
         point: PhysicalPoint,
         until: Instant,
     ) -> Result<Held, Closed> {
+        self.capture(owner, until, |key, ticket| Request::Context {
+            key,
+            ticket,
+            point,
+        })
+        .await
+    }
+
+    /// Captures the display nearest `point` for `owner`, drawn after `excluded`, the shell's
+    /// exclusion stamp, with `ink` to paint when it's sealed, under a ticket as for [`context`].
+    ///
+    /// # Errors
+    /// As for [`context`].
+    ///
+    /// [`context`]: Self::context
+    #[expect(
+        dead_code,
+        reason = "the screen hold's release starts it in the next change"
+    )]
+    pub(crate) async fn display(
+        &self,
+        owner: Owner,
+        point: PhysicalPoint,
+        excluded: u64,
+        ink: PointerPath,
+        until: Instant,
+    ) -> Result<Held, Closed> {
+        self.capture(owner, until, |key, ticket| Request::Display {
+            key,
+            ticket,
+            point,
+            excluded,
+            ink,
+        })
+        .await
+    }
+
+    async fn capture(
+        &self,
+        owner: Owner,
+        until: Instant,
+        request: impl FnOnce(Key, TicketWire) -> Request,
+    ) -> Result<Held, Closed> {
         let key = Key {
             owner,
             capture: CaptureId(self.captures.fetch_add(1, Ordering::Relaxed)),
@@ -171,7 +214,7 @@ impl HoldClient {
             )
             .for_shell(crate::platform::connected_shell_pid());
             self.inner
-                .request_stream(Request::Context { key, ticket, point }, until)
+                .request_stream(request(key, ticket), until)
                 .map_err(Closed::Lost)?
         };
         let generation = match stream.next().await {

@@ -9,7 +9,7 @@ use super::context::ScreenContext;
 use super::elements::{
     ElementReader, ElementTree, MaskSink, TopWindow, WalkJob, Walked, intersects,
 };
-use super::encode::overview_within;
+use super::encode::overview_inked;
 use super::frame::RawFrame;
 use super::mask::MaskSet;
 use super::sanitize::sanitize;
@@ -99,10 +99,6 @@ pub(crate) trait Capturer {
     /// `Expired` for a zero stamp or when no frame drawn late enough arrived by `until`,
     /// `DisplayChanged` when the monitor's geometry moved, a numeric fault, or `Retire` when it
     /// can't show its capture stopped.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the worker's display request isn't wired yet")
-    )]
     fn capture_display(
         &mut self,
         _point: PhysicalPoint,
@@ -142,14 +138,24 @@ const NO_WINDOW_CAPTURE: i32 = 0x8000_4001_u32.cast_signed();
 const MISSING_ELEMENT_READER: i32 = -1;
 const MISSING_FRAME_META: i32 = -2;
 
+/// What a held frame shows, which its seal checks again.
+#[derive(Debug)]
+pub(super) enum Shown {
+    /// The window as its capture resolved it.
+    Window(Target),
+    /// The monitor's physical bounds and effective DPI when it was captured.
+    Display { bounds: PhysicalRect, dpi: u32 },
+}
+
 struct Held {
     capture: CaptureId,
     expires: Instant,
     walk_by: Instant,
     foreground: Option<TopWindow>,
     spent: bool,
-    /// The captured window as its capture resolved it, which a seal checks again.
-    target: Option<Target>,
+    shown: Option<Shown>,
+    /// The pointer's path to paint on the image, in physical pixels.
+    ink: Vec<PhysicalPoint>,
 }
 
 /// The capture state one worker owns on its serve thread.
@@ -162,6 +168,9 @@ pub(super) struct Screen {
     /// Whether a window is still the one its capture resolved: the platform's check, a fake in
     /// tests.
     pub(super) unchanged: fn(&Target) -> bool,
+    /// The bounds and DPI of the monitor at a display's bounds now: the platform's read, a fake
+    /// in tests.
+    pub(super) display_at: fn(PhysicalRect) -> Option<(PhysicalRect, u32)>,
     /// How long until a ticket's deadline stamp: the platform's counter, a fake in tests.
     pub(super) left_until: fn(u64) -> Option<Duration>,
 }
@@ -175,6 +184,7 @@ impl Default for Screen {
             masks: Arc::new(Mutex::new(MaskSet::new(CaptureId(0)))),
             reader: None,
             unchanged: crate::platform::window_unchanged,
+            display_at: crate::platform::display_at,
             left_until: crate::platform::qpc_left,
         }
     }
@@ -238,15 +248,17 @@ impl Screen {
             walk_by: acquired.arrived + WALK_WINDOW,
             foreground,
             spent: false,
-            target: None,
+            shown: None,
+            ink: Vec::new(),
         });
         Ok(meta)
     }
 
-    /// Keeps the captured window's identity for the seal's check.
-    pub(super) fn pin(&mut self, target: Target) {
+    /// Keeps what the frame shows for the seal's check, and the path the seal paints.
+    pub(super) fn pin(&mut self, shown: Shown, ink: Vec<PhysicalPoint>) {
         if let Some(held) = &mut self.held {
-            held.target = Some(target);
+            held.shown = Some(shown);
+            held.ink = ink;
         }
     }
 
@@ -256,9 +268,10 @@ impl Screen {
         self.masks = Arc::new(Mutex::new(MaskSet::new(CaptureId(0))));
     }
 
-    /// Hands out the held frame's one image as captured, with no mask, encoded under `cap` JPEG
-    /// bytes, and releases the frame whatever the outcome. It seals only while the captured
-    /// window is still the one captured.
+    /// Hands out the held frame's one image as captured, with no mask and its path painted,
+    /// encoded under `cap` JPEG bytes, and releases the frame whatever the outcome. It seals only
+    /// while the captured window is still the one captured, or the captured display still has the
+    /// same bounds and DPI.
     pub(super) fn seal(
         &mut self,
         capture: CaptureId,
@@ -270,16 +283,23 @@ impl Screen {
     }
 
     fn sealed(&mut self, capture: CaptureId, cap: usize) -> Result<ScreenContext, Failure> {
+        let (unchanged, display_at) = (self.unchanged, self.display_at);
         let held = self
             .held
-            .as_ref()
+            .as_mut()
             .filter(|held| held.capture == capture)
             .ok_or(Refusal::Stale)?;
-        if !held.target.as_ref().is_some_and(self.unchanged) {
-            return Err(Refusal::WindowChanged.into());
+        match &held.shown {
+            Some(Shown::Window(target)) if unchanged(target) => {}
+            Some(Shown::Display { bounds, dpi })
+                if display_at(*bounds) == Some((*bounds, *dpi)) => {}
+            Some(Shown::Display { .. }) => return Err(Refusal::DisplayChanged.into()),
+            _ => return Err(Refusal::WindowChanged.into()),
         }
+        let ink = std::mem::take(&mut held.ink);
         let clean = sanitize(&mut self.frame, &MaskSet::new(capture))?;
-        overview_within(&clean, cap).map(ScreenContext::new)
+        let (encoded, inked) = overview_inked(&clean, cap, &ink)?;
+        Ok(ScreenContext::new(encoded).with_ink(inked))
     }
 
     pub(super) fn walk_job(

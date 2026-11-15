@@ -33,6 +33,7 @@ struct Listed {
     jpeg: Vec<u8>,
     size: [u32; 2],
     transform: CaptureTransform,
+    ink: Option<crate::screen::ink::InkBounds>,
 }
 
 #[test]
@@ -46,6 +47,7 @@ fn a_context_keeps_the_wire_bytes_of_a_list_of_bytes() {
             jpeg,
             size: [4, 3],
             transform: TRANSFORM,
+            ink: None,
         };
         assert_eq!(
             sent,
