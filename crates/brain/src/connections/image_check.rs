@@ -142,9 +142,12 @@ pub fn run(set: Set) -> u8 {
 /// One request, built before anything is sent: kind, image size, JPEG bytes, body and body bytes.
 type Prepared = (&'static str, [u32; 2], usize, ResponsesBody, usize);
 
+/// One image to send: kind, size and JPEG.
+type Image = (&'static str, [u32; 2], Vec<u8>);
+
 /// `set`'s images, in the order they're sent: kind, size and JPEG; nothing when one misses its
 /// size.
-fn images(set: Set) -> Option<Vec<(&'static str, [u32; 2], Vec<u8>)>> {
+fn images(set: Set) -> Option<Vec<Image>> {
     Some(match set {
         Set::Check => {
             let near_ceiling = (BODY_CEILING - SLACK) / 4 * 3;
