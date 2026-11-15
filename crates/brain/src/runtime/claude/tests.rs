@@ -171,9 +171,7 @@ fn attaching_claude_code_reports_it_at_once() {
     let mut brain = test_support::brain(&scratch, "");
     brain.attach_claude(Claude::default());
     assert_eq!(
-        brain
-            .coordinator
-            .availability_of(kumochi_protocol::message::ConnectionKind::ClaudeCode),
+        brain.coordinator.claude_code(),
         &Availability::Unavailable(
             kumochi_protocol::message::UserError::new(
                 ErrorKey::ClaudeCodeNotFound,

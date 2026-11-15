@@ -2202,6 +2202,38 @@ async fn ready_claude(
     claude
 }
 
+/// OSC-754: a wake that makes Claude Code ready writes the row's default, haiku at Low, with no op
+/// from the shell.
+#[tokio::test]
+async fn a_wake_that_makes_claude_code_ready_writes_its_default() {
+    let base = crate::engines::claude_code::lane::tests::Base::new("default-on-wake");
+    let scratch = Scratch::new("default-on-wake");
+    let mut brain = test_support::brain(&scratch, "");
+    let (host, _switches) = crate::engines::claude_code::lane::tests::host(&base, "in");
+    brain.attach_claude(crate::runtime::claude::Claude::start(
+        crate::engines::claude_code::lane::Lane::start(host).expect("lane"),
+        crate::runtime::claude::SignInStore::FileWithDacl,
+    ));
+    timeout(PATIENCE, async {
+        while brain.claude.view() != crate::runtime::claude::tests::READY {
+            let wake = brain.claude.next().await;
+            brain.claude_done(wake, None).expect("no link");
+        }
+    })
+    .await
+    .expect("ready");
+    brain.drain_settings().await;
+    assert_eq!(
+        scratch.config().view().default_model,
+        Some(ModelChoice {
+            model: ModelSlug::new("haiku").expect("valid"),
+            effort: Effort::Low,
+            connection: ConnectionKind::ClaudeCode,
+        })
+    );
+    brain.close().await;
+}
+
 /// M1: Claude Code's default goes in only while `ChatGPT` has no account at all, never while a
 /// `ChatGPT` account's session has ended, and a queued repair recomputed at write time never
 /// turns into the other connection's.

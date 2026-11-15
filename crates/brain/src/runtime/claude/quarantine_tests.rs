@@ -106,6 +106,47 @@ fn markers(base: &Base) -> Vec<String> {
     names
 }
 
+/// OSC-754: a find that reports another version while Ready ends Ready: Claude Code reads
+/// unsupported, the shell is owed an empty model list, and the version found again gets a new tag.
+#[tokio::test]
+async fn a_find_that_reports_another_version_drops_the_tag_and_the_models() {
+    let base = Base::new("quarantine-other-version");
+    let mut found = Found::start(&base, "in");
+    assert_eq!(found.settle().await, READY);
+    let Availability::Ready(first) = found.claude.availability() else {
+        panic!("ready");
+    };
+    assert!(found.claude.models_unsent().is_some(), "the row's models");
+    assert_eq!(
+        found.find("other").await,
+        ClaudeCodeView::Unsupported(Unsupported::Unreviewed(OTHER))
+    );
+    assert_eq!(
+        found.claude.availability(),
+        Availability::Unavailable(
+            UserError::new(
+                ErrorKey::ClaudeCodeUnsupported,
+                Vec::new(),
+                vec![Action::OpenSettings]
+            )
+            .expect("one action")
+        )
+    );
+    assert_eq!(
+        found.claude.models_unsent(),
+        Some(DataToShell::Models {
+            connection: ConnectionKind::ClaudeCode,
+            models: Vec::new(),
+        })
+    );
+    assert_eq!(found.find("in").await, READY);
+    let Availability::Ready(again) = found.claude.availability() else {
+        panic!("ready again");
+    };
+    assert_ne!(again.connection, first.connection);
+    found.close().await;
+}
+
 /// Q1 and Q2: a failure writes the version's marker beside Kumochi's folder, so Disconnect's
 /// deletion leaves it and the version stays refused.
 #[tokio::test]

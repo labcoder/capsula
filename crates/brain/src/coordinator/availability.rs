@@ -121,8 +121,14 @@ pub(crate) fn model_unavailable() -> UserError {
 }
 
 impl Coordinator {
+    /// Whether runs on Claude Code can be answered now.
+    #[cfg(test)]
+    pub(crate) fn claude_code(&self) -> &Availability {
+        &self.claude_code
+    }
+
     /// Whether runs on `kind` can be answered now.
-    pub(crate) fn availability_of(&self, kind: ConnectionKind) -> &Availability {
+    pub(super) fn availability_of(&self, kind: ConnectionKind) -> &Availability {
         match kind {
             ConnectionKind::ChatGpt => &self.availability,
             ConnectionKind::AnthropicKey => &self.anthropic_key,
@@ -318,12 +324,16 @@ impl Coordinator {
         }
     }
 
-    /// Why a run on `route` can't go on, if it can't: another sign-in on its kind needs a sign-in,
-    /// and an unavailable kind gives its own reason.
+    /// Why a run on `route` can't go on, if it can't: another sign-in on its kind needs a sign-in
+    /// on `ChatGPT` and offers Open Settings on another kind, since a notice's Sign in starts
+    /// `ChatGPT`'s; an unavailable kind gives its own reason.
     pub(super) fn refusal(&self, route: Route) -> Option<UserError> {
         match self.availability_of(route.kind) {
             Availability::Ready(ready) if ready.connection == route.tag => None,
-            Availability::Ready(_) => Some(sign_in_needed()),
+            Availability::Ready(_) if route.kind == ConnectionKind::ChatGpt => {
+                Some(sign_in_needed())
+            }
+            Availability::Ready(_) => Some(model_unavailable()),
             Availability::Unavailable(reason) => Some(reason.clone()),
             Availability::Finding => Some(model_unavailable()),
         }

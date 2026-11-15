@@ -10,7 +10,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::constants::MCP_SERVER_NAME;
-use kumochi_protocol::message::{AuditFailed, ClaudeVersion, ErrorKey, ThreadId};
+use kumochi_protocol::message::{
+    Action, AuditFailed, ClaudeVersion, ErrorKey, ThreadId, UserError,
+};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
 
@@ -619,7 +621,14 @@ fn failed(outcome: Outcome) -> Finish {
         Outcome::Audit(_) => claude(ErrorKey::ClaudeCodeAuditFailed),
         Outcome::SignedOut => claude(ErrorKey::ClaudeCodeSignedOut),
         // The reason the view it leaves gives (Unavailable).
-        Outcome::Refused => claude(ErrorKey::ClaudeCodeUnsupported),
+        Outcome::Refused => Finish::Failed(EngineFailure::Claude(
+            UserError::new(
+                ErrorKey::ClaudeCodeUnavailable,
+                Vec::new(),
+                vec![Action::OpenSettings],
+            )
+            .expect("one action is within the limit"),
+        )),
         Outcome::Stream(failure) => Finish::Failed(EngineFailure::ClaudeStream(failure)),
         Outcome::Eof => Finish::Truncated,
         Outcome::Clean | Outcome::Deadline | Outcome::Launch => {

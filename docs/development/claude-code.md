@@ -191,7 +191,8 @@ sequenceDiagram
   missing field is `Malformed`. Signed out, neither field is judged.
 - **One job per process,** nested in the brain job. A call ends only when its root has exited, its
   job is terminated and confirmed empty, and both pipes have ended. If the job can't be confirmed
-  empty the lane is stuck: it refuses everything, never lets the lock go, and shows `Unavailable`.
+  empty the lane is stuck: it refuses everything, never lets the lock go, and shows `Unavailable`,
+  whose reason, and a question's refused by it, is `ClaudeCodeUnavailable` with Open Settings.
 - **Bounds.** The queue holds 4 jobs and refuses more without waiting. A job it refuses leaves
   nothing out and shows `Unavailable` until a later op is taken. stdout is capped at 4 KiB for
   Version and 64 KiB for Status, stderr at 64 KiB (read and dropped); one byte more fails the call.
@@ -403,8 +404,10 @@ runtime's `Brain::owned_engine` calls `Claude::question` for both, which looks t
 alias, so no other text reaches `--model`; maps its effort to the CLI's word (`low`, `medium`,
 `high`, `xhigh`, `max`); fixes the snapshot with `Offer::Nothing`; and takes a fresh attempt. A
 refusal becomes a round that fails at once through `Unserved`: with Claude Code's own reason while
-no launch would be admitted, otherwise with none, and never `Access(None)`, which reads as a
-`ChatGPT` sign-in. Nothing warms yet, so `Claude::warm` still has no production caller.
+no launch would be admitted, and otherwise with the refusal's: `ModelUnavailable` with Open
+Settings for an alias the row doesn't list, `ClaudeCodeBusy` with Retry while the lane's queue is
+full, and `RequestRefused` for a launch id that couldn't be drawn or a lifetime past the bound.
+Never `Access(None)`, which reads as a `ChatGPT` sign-in. Nothing warms yet, so `Claude::warm` still has no production caller.
 
 The models a choice may name reach the shell's picker as `Models` for `ClaudeCode`, from the same
 check that admits a launch: the reviewed row's, in its order (Sonnet, Opus, Haiku, Fable), while

@@ -390,7 +390,8 @@ after every op and wake; while it's being found that's `Finding`, which reads as
   binding, a change to a kind takes that kind out of the arrival, and the run fails once no kind
   is left; after it, only a change to the route's own kind matters. A catalog-only change keeps
   the run. Any other change, a sign-out the account accepted included, cancels the engine and
-  fails the run with the reason. A held ask for that run is answered `Rebuild`, and `send_ready`
+  fails the run with the reason. Another sign-in on the kind is `SignInNeeded` for `ChatGPT` and
+  `ModelUnavailable` with Open Settings for another kind (`Coordinator::refusal`). A held ask for that run is answered `Rebuild`, and `send_ready`
   checks the route again before every `Grant`. Only a `ChatGPT` route takes a bearer.
 - **A typed turn while Claude Code is being found waits** (OSC-753). A turn that arrives while
   Claude Code reports `Finding` records that. Until its first build the newest Claude Code
@@ -416,7 +417,7 @@ after every op and wake; while it's being found that's `Finding`, which reads as
 - **The engine follows the connection.** A request on `ChatGPT`'s choice, or on none, starts the
   `ChatGPT` engine. One on Claude Code's choice takes a one-launch engine with no tools from
   `Claude::question` ([claude-code.md](claude-code.md#a-question)); a refusal starts `Unserved` with
-  Claude Code's reason, or none. One on a connection with no engine yet starts `Unserved`, whose
+  Claude Code's reason, or the refusal's own. One on a connection with no engine yet starts `Unserved`, whose
   round fails with `ModelUnavailable` (`Brain::owned_engine`, which a job's request takes too).
 - **A turn nothing can answer** fails at its first build with the reason of its choice's own
   kind (`Coordinator::route_for`). On `ChatGPT`'s choice, or none, that's `ChatGPT`'s reason and

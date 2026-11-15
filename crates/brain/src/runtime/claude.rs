@@ -517,10 +517,10 @@ impl Claude {
             ClaudeCodeView::PolicyFailed(_) => ErrorKey::ClaudeCodePolicy,
             ClaudeCodeView::AuditFailed(_) => ErrorKey::ClaudeCodeAuditFailed,
             ClaudeCodeView::CleanupPending => ErrorKey::ClaudeCodeCleanupPending,
+            ClaudeCodeView::Unavailable => ErrorKey::ClaudeCodeUnavailable,
             ClaudeCodeView::Finding | ClaudeCodeView::TurnedOff => return model_unavailable(),
             ClaudeCodeView::Unsupported(_)
             | ClaudeCodeView::InUse
-            | ClaudeCodeView::Unavailable
             | ClaudeCodeView::Ready { .. } => ErrorKey::ClaudeCodeUnsupported,
         };
         UserError::new(key, Vec::new(), vec![Action::OpenSettings])
@@ -589,18 +589,19 @@ impl Claude {
     }
 
     /// What a run's round fails with when its question was refused: Claude Code's own reason
-    /// while no launch would be admitted, else none. Never `Access(None)`, which reads as a
-    /// `ChatGPT` sign-in.
+    /// while no launch would be admitted, else the refusal's. Never `Access(None)`, which reads
+    /// as a `ChatGPT` sign-in.
     pub(crate) fn refused(&self, refused: LaunchRefused) -> EngineFailure {
-        match refused {
-            LaunchRefused::NotReady if self.admitted().is_none() => {
-                EngineFailure::Claude(self.reason())
+        EngineFailure::Claude(match refused {
+            LaunchRefused::NotReady if self.admitted().is_none() => self.reason(),
+            // Admitted, so the row doesn't list the choice's alias.
+            LaunchRefused::NotReady => model_unavailable(),
+            LaunchRefused::Busy => {
+                UserError::new(ErrorKey::ClaudeCodeBusy, Vec::new(), vec![Action::Retry])
+                    .expect("one action is within the limit")
             }
-            LaunchRefused::NotReady
-            | LaunchRefused::Busy
-            | LaunchRefused::Identity
-            | LaunchRefused::Lifetime => EngineFailure::Provider,
-        }
+            LaunchRefused::Identity | LaunchRefused::Lifetime => ErrorKey::RequestRefused.into(),
+        })
     }
 
     /// What a launch for `thread` would be fixed to now.
