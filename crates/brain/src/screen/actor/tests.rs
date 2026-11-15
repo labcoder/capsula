@@ -348,8 +348,13 @@ impl Rig {
                         *time.lock().unwrap()
                     }
                 },
-                unchanged,
-                MILLIS_LEFT,
+                {
+                    let mut screen = Screen::default();
+                    screen.unchanged = unchanged;
+                    screen.display_at = |bounds| (bounds == DISPLAY).then_some((DISPLAY, 120));
+                    screen.left_until = MILLIS_LEFT;
+                    screen
+                },
             )
         });
         Self {

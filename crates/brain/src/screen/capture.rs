@@ -139,12 +139,23 @@ const MISSING_ELEMENT_READER: i32 = -1;
 const MISSING_FRAME_META: i32 = -2;
 
 /// What a held frame shows, which its seal checks again.
-#[derive(Debug)]
 pub(super) enum Shown {
     /// The window as its capture resolved it.
     Window(Target),
     /// The monitor's physical bounds and effective DPI when it was captured.
     Display { bounds: PhysicalRect, dpi: u32 },
+}
+
+impl std::fmt::Debug for Shown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Window(target) => f.debug_tuple("Window").field(target).finish(),
+            Self::Display { dpi, .. } => f
+                .debug_struct("Display")
+                .field("dpi", dpi)
+                .finish_non_exhaustive(),
+        }
+    }
 }
 
 struct Held {

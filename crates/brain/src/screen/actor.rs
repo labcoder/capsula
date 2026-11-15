@@ -2,13 +2,13 @@
 //! image, or its release.
 
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use kumochi_protocol::frame;
 use kumochi_protocol::geometry::{PhysicalPoint, PointerPath};
 use serde::{Deserialize, Serialize};
 
-use super::capture::{Capturer, Failure, Screen, Shown, Target};
+use super::capture::{Capturer, Failure, Screen, Shown};
 use super::client::Holds as Kind;
 use super::context::ScreenContext;
 use super::elements::{ElementTree, OpenElements, Wake};
@@ -141,8 +141,7 @@ pub fn serve() -> Result<(), frame::FrameError> {
         open,
         open_elements,
         Instant::now,
-        crate::platform::window_unchanged,
-        crate::platform::qpc_left,
+        Screen::default(),
     )
 }
 
@@ -152,8 +151,7 @@ pub(super) fn serve_on(
     open: impl FnMut() -> Result<Box<dyn Capturer>, Failure> + Send + 'static,
     elements: OpenElements,
     now: impl Fn() -> Instant + Send + Sync + 'static,
-    unchanged: fn(&Target) -> bool,
-    left_until: fn(u64) -> Option<Duration>,
+    mut screen: Screen,
 ) -> Result<(), frame::FrameError> {
     #[cfg(debug_assertions)]
     let mut fault = std::env::var(kumochi_protocol::constants::SCREEN_FAULT_ENV)
@@ -173,9 +171,6 @@ pub(super) fn serve_on(
     let (inbox, events) = mpsc::sync_channel(QUEUE);
     let capture = CaptureThread::open(open, wake(inbox.clone()))
         .map_err(|_| std::io::Error::other("capture thread"))?;
-    let mut screen = Screen::default();
-    screen.unchanged = unchanged;
-    screen.left_until = left_until;
     screen.reader = Some(elements(wake(inbox.clone())));
     let now = std::sync::Arc::new(now);
     let clock = std::sync::Arc::clone(&now);

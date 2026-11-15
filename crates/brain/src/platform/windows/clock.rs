@@ -49,6 +49,12 @@ pub(crate) fn qpc_hns(stamp: u64) -> Option<u64> {
     hns(stamp, frequency)
 }
 
+/// [`qpc_hns`] rounded up, for a draw time a frame must reach.
+pub(crate) fn qpc_hns_up(stamp: u64) -> Option<u64> {
+    let (_, frequency) = counter()?;
+    hns_up(stamp, frequency)
+}
+
 fn counter() -> Option<(u64, u64)> {
     let (mut now, mut frequency) = (0_i64, 0_i64);
     // SAFETY: `now` is writable for the call.
@@ -90,6 +96,10 @@ fn ticks(span: Duration, frequency: u64) -> Option<u64> {
 /// Rounds down, as Windows does for a frame's draw time.
 fn hns(stamp: u64, frequency: u64) -> Option<u64> {
     u64::try_from(u128::from(stamp) * 10_000_000 / u128::from(frequency)).ok()
+}
+
+fn hns_up(stamp: u64, frequency: u64) -> Option<u64> {
+    u64::try_from((u128::from(stamp) * 10_000_000).div_ceil(u128::from(frequency))).ok()
 }
 
 /// Rounds down, so time left is never overstated.
@@ -151,5 +161,13 @@ mod tests {
         assert_eq!(hns(1, 3), Some(3_333_333));
         assert_eq!(hns(3, 3), Some(10_000_000));
         assert_eq!(hns(u64::MAX, 1), None);
+    }
+
+    #[test]
+    fn a_draw_time_a_frame_must_reach_rounds_up() {
+        assert_eq!(hns_up(1, 3), Some(3_333_334));
+        assert_eq!(hns_up(3, 3), Some(10_000_000));
+        assert_eq!(hns_up(25_000_000, 10_000_000), Some(25_000_000));
+        assert_eq!(hns_up(u64::MAX, 1), None);
     }
 }

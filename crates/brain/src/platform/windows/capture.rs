@@ -41,7 +41,7 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::core::{Interface, factory};
 
-use super::clock::{qpc_hns, qpc_now, qpc_ticks};
+use super::clock::{qpc_hns, qpc_hns_up, qpc_now, qpc_ticks};
 use crate::screen::{Acquired, Capturer, Failure, RawFrame, Refusal, Target};
 
 const POLL: Duration = Duration::from_millis(1);
@@ -408,7 +408,14 @@ fn drawn_after<T>(
     let Some(not_before) = not_before else {
         return Ok(Some(frame));
     };
-    if drawn(&frame)? >= not_before {
+    let time = match drawn(&frame) {
+        Ok(time) => time,
+        Err(failure) => {
+            release(frame)?;
+            return Err(failure);
+        }
+    };
+    if time >= not_before {
         return Ok(Some(frame));
     }
     release(frame)?;
@@ -426,14 +433,19 @@ fn now_hns() -> Result<u64, Failure> {
     qpc_now().and_then(qpc_hns).ok_or(Failure::Fault(0))
 }
 
-/// The earliest draw time a display frame may have: one redraw after `excluded`, the counter
-/// stamp taken once Kumochi's windows were kept out of capture. A zero stamp is no stamp.
+/// The earliest draw time a display frame may have: two redraws after `excluded`, the counter
+/// stamp taken once Kumochi's windows were kept out of capture, rounded up. A frame's draw time
+/// is when it's presented, so one drawn a single redraw later may come from a composition that
+/// began at about `excluded`. A zero stamp is no stamp.
 fn not_before(excluded: u64, redraw: u64) -> Result<u64, Failure> {
     if excluded == 0 {
         return Err(Refusal::Expired.into());
     }
-    let ticks = excluded.checked_add(redraw).ok_or(Refusal::Expired)?;
-    qpc_hns(ticks).ok_or(Failure::Fault(0))
+    let ticks = redraw
+        .checked_mul(2)
+        .and_then(|wait| excluded.checked_add(wait))
+        .ok_or(Refusal::Expired)?;
+    qpc_hns_up(ticks).ok_or(Failure::Fault(0))
 }
 
 /// One compositor redraw in counter ticks, or [`UNREAD_REDRAW`] when its timing can't be read.
@@ -612,7 +624,7 @@ mod tests {
         Wgc, copy_rows, drawn, drawn_after, fault, not_before, now_hns, poll, start_after,
         supported,
     };
-    use crate::platform::windows::clock::{qpc_hns, qpc_now};
+    use crate::platform::windows::clock::{qpc_hns_up, qpc_now};
     use crate::screen::{CaptureId, Capturer, Failure, FrameMeta, RawFrame, Refusal};
 
     #[test]
@@ -693,11 +705,11 @@ mod tests {
             drawn_after(None, 'c', |_| Ok(0), &mut release),
             Ok(Some('c'))
         );
-        assert_eq!(released, ['a']);
         assert_eq!(
-            drawn_after(Some(100), 'd', |_| Err(Failure::Fault(-3)), |_| Ok(())),
+            drawn_after(Some(100), 'd', |_| Err(Failure::Fault(-3)), &mut release),
             Err(Failure::Fault(-3))
         );
+        assert_eq!(released, ['a', 'd'], "a frame whose draw time can't be read is released");
         assert_eq!(
             drawn_after(Some(100), 'e', |_| Ok(1), |_| Err(Failure::Retire(-4))),
             Err(Failure::Retire(-4))
@@ -805,7 +817,11 @@ mod tests {
             not_before(u64::MAX, 1),
             Err(Failure::Refused(Refusal::Expired))
         );
-        assert_eq!(not_before(1_000, 10), Ok(qpc_hns(1_010).expect("counter")));
+        assert_eq!(
+            not_before(u64::MAX - 20, u64::MAX / 2 + 1),
+            Err(Failure::Refused(Refusal::Expired))
+        );
+        assert_eq!(not_before(1_000, 10), Ok(qpc_hns_up(1_020).expect("counter")));
     }
 
     #[test]

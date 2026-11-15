@@ -88,8 +88,21 @@ fn neither_the_context_nor_its_bounds_print_where_the_user_pointed() {
     let mut rig = held([40, 30], path);
     rig.screen.display_at = |bounds| Some((bounds, 144));
     let context = seal(&mut rig).expect("sealed");
-    let text = format!("{context:?} {:?}", context.ink());
-    for number in ["-2550", "-2540", "23", "13"] {
-        assert!(!text.contains(number), "{text}");
-    }
+    assert!(context.ink().is_some());
+    assert_eq!(
+        format!("{context:?}"),
+        format!(
+            "ScreenContext {{ bytes: {}, size: [40, 30], .. }}",
+            context.jpeg().len()
+        )
+    );
+    assert_eq!(format!("{:?}", context.ink()), "Some(InkBounds(***))");
+    let shown = Shown::Display {
+        bounds: PhysicalRect {
+            origin: [-2551, 17],
+            size: [2560, 1440],
+        },
+        dpi: 144,
+    };
+    assert_eq!(format!("{shown:?}"), "Display { dpi: 144, .. }");
 }

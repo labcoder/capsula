@@ -69,7 +69,8 @@ pub(crate) fn paint(
                     continue;
                 };
                 for x in left..=right {
-                    if distance_squared([f64::from(x) + 0.5, row], a, b) > radius * radius {
+                    let distance = distance_squared([f64::from(x) + 0.5, row], a, b);
+                    if distance.is_nan() || distance > radius * radius {
                         continue;
                     }
                     let at =
