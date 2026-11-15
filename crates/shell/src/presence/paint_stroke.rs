@@ -4,8 +4,8 @@ use kumochi_scene::{
     geom::{Affine, Vec2},
 };
 use lyon::tessellation::{
-    GeometryBuilder, GeometryBuilderError, StrokeGeometryBuilder, StrokeOptions, StrokeTessellator,
-    StrokeVertex, VertexId,
+    GeometryBuilder, GeometryBuilderError, LineCap, LineJoin, StrokeGeometryBuilder, StrokeOptions,
+    StrokeTessellator, StrokeVertex, VertexId,
 };
 
 use super::paint_paths::{BuildError, bound, length, narrow, pixel, vertex};
@@ -43,6 +43,35 @@ impl Scratch {
         width: f32,
         transform: Affine,
     ) -> Result<Option<Path<Pixels>>, BuildError> {
+        let options = StrokeOptions::default().with_line_width(width);
+        self.tessellate(points, contour, draw, flow, &options, transform)
+    }
+
+    /// A whole open polyline with round joins and ends: the outline of one capsule per segment,
+    /// which is how the brain paints a hold's pointer path on its picture. A round join takes
+    /// more vertices than a stroke's charge counts, so a line the scratch can't hold is refused.
+    pub(super) fn capsules(
+        &mut self,
+        points: &[Vec2],
+        width: f32,
+        transform: Affine,
+    ) -> Result<Option<Path<Pixels>>, BuildError> {
+        let options = StrokeOptions::default()
+            .with_line_width(width)
+            .with_line_join(LineJoin::Round)
+            .with_line_cap(LineCap::Round);
+        self.tessellate(points, Contour::Open, 1.0, None, &options, transform)
+    }
+
+    fn tessellate(
+        &mut self,
+        points: &[Vec2],
+        contour: Contour,
+        draw: f32,
+        flow: Option<f32>,
+        options: &StrokeOptions,
+        transform: Affine,
+    ) -> Result<Option<Path<Pixels>>, BuildError> {
         let pass = |scratch: &mut Self, path: Option<&mut Path<Pixels>>| {
             let mut walk = Runs::new(points, contour, draw, flow);
             let mut next = walk.next(&mut scratch.run)?;
@@ -54,10 +83,9 @@ impl Scratch {
                 mark: 0,
                 overflow: false,
             };
-            let options = StrokeOptions::default().with_line_width(width);
             let mut tessellator = StrokeTessellator::new();
             while next.is_some() {
-                let mut builder = tessellator.builder(&options, &mut output);
+                let mut builder = tessellator.builder(options, &mut output);
                 let mut charged = 0;
                 while let Some(contour) = next {
                     let cost = scratch.run.len() * 4 + 4;

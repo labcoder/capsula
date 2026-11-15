@@ -15,6 +15,7 @@ mod escape;
 )]
 mod exclusion;
 mod gesture;
+mod ink;
 mod issue_review;
 #[cfg(test)]
 mod kumo_measure_tests;

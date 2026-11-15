@@ -503,3 +503,85 @@ fn actual_presence_keeps_hold_and_listening_off_even_after_ready_and_deferred_ef
             .expect("dock update");
     });
 }
+
+fn acquire_stamped(
+    owner: &gpui_kit::Entity<Presence>,
+    read: impl FnOnce() -> i64,
+    cx: &mut gpui_kit::TestAppContext,
+) -> Result<(kumochi_protocol::message::LeaseGeneration, u64), Error> {
+    owner.update(cx, |this, cx| {
+        let session = this.session.clone().unwrap();
+        this.acquire_stamped(&session, CaptureFor::Gesture(GestureId(7)), read, cx)
+    })
+}
+
+#[gpui::test]
+fn a_stamped_lease_reads_the_counter_after_every_surface_is_excluded(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    let (owner, fixture) = presence_fixture(cx);
+    let seen = Rc::clone(&fixture);
+    let read = move || {
+        assert_eq!(
+            seen.borrow().affinities(),
+            [EXCLUDED, EXCLUDED, EXCLUDED, EXCLUDED, 8, 16, 32, 64],
+            "the counter is read after the last surface is excluded"
+        );
+        4_242
+    };
+    let stamped = acquire_stamped(&owner, read, cx);
+    let key = owner.read_with(cx, |this, _| this.exclusion.lease().unwrap().key());
+    assert_eq!(key.input(), CaptureFor::Gesture(GestureId(7)));
+    assert_eq!(stamped, Ok((key.generation(), 4_242)));
+}
+
+#[gpui::test]
+fn a_counter_with_no_positive_reading_gives_the_lease_back_without_a_lapse(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    use kumochi_protocol::message::LeaseGeneration;
+    let (owner, fixture) = presence_fixture(cx);
+    for reading in [0, -1, i64::MIN] {
+        assert_eq!(
+            acquire_stamped(&owner, move || reading, cx),
+            Err(Error::Exhausted),
+            "a reading of {reading}"
+        );
+        assert!(owner.read_with(cx, |this, _| this.exclusion.lease().is_none()));
+        assert_eq!(fixture.borrow().affinities(), PRIOR);
+    }
+    assert!(
+        fixture
+            .borrow()
+            .controls
+            .as_ref()
+            .unwrap()
+            .try_recv()
+            .is_err(),
+        "the brain never saw those leases, so none lapsed"
+    );
+    // Each refusal used its generation up; the least positive reading stamps the fourth.
+    assert_eq!(
+        acquire_stamped(&owner, || 1, cx),
+        Ok((LeaseGeneration(4), 1))
+    );
+}
+
+#[gpui::test]
+fn a_refused_lease_reads_no_counter(cx: &mut gpui_kit::TestAppContext) {
+    let (owner, _fixture) = presence_fixture(cx);
+    let first = acquire_presence(&owner, CaptureFor::Turn(7), cx);
+    assert_eq!(
+        acquire_stamped(
+            &owner,
+            || -> i64 { panic!("a refused lease has nothing to stamp") },
+            cx
+        ),
+        Err(Error::Busy)
+    );
+    assert_eq!(
+        owner.read_with(cx, |this, _| this.exclusion.lease().unwrap().key()),
+        first,
+        "the lease in force is untouched"
+    );
+}

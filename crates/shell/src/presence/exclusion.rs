@@ -256,6 +256,30 @@ impl Presence {
         Ok(key.generation())
     }
 
+    /// Covers every presence surface for `input`'s capture, then reads the performance counter
+    /// with `read`. Every surface was excluded before that reading, so the brain's capture takes
+    /// no frame drawn before it. A reading that isn't a positive number gives the lease back
+    /// and refuses as `Exhausted`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "a screen hold's release is the first caller")
+    )]
+    pub(super) fn acquire_stamped(
+        &mut self,
+        session: &crate::link::Session,
+        input: CaptureFor,
+        read: impl FnOnce() -> i64,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(LeaseGeneration, u64), Error> {
+        let lease = self.acquire_exclusion(session, input, cx)?;
+        if let Some(stamp) = u64::try_from(read()).ok().filter(|stamp| *stamp > 0) {
+            return Ok((lease, stamp));
+        }
+        // The brain never saw this lease, so releasing it is no lapse.
+        self.revoke_exclusion(cx);
+        Err(Error::Exhausted)
+    }
+
     pub(super) fn protect_surface(
         &mut self,
         slot: Slot,
