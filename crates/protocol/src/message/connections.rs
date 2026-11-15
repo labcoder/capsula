@@ -476,6 +476,18 @@ mod tests {
     }
 
     #[test]
+    fn claude_codes_last_views_keep_their_wire_tags() {
+        for (view, tag) in [
+            (ClaudeCodeView::Unavailable, 10),
+            (ClaudeCodeView::Finding, 11),
+            (ClaudeCodeView::Busy, 12),
+        ] {
+            assert_eq!(postcard::to_stdvec(&view).expect("encode"), [tag], "{view:?}");
+        }
+        assert!(postcard::from_bytes::<ClaudeCodeView>(&[13]).is_err());
+    }
+
+    #[test]
     fn versions_are_three_numbers_of_sixteen_bits() {
         let ok = |text: &str| text.parse::<ClaudeVersion>();
         assert_eq!(

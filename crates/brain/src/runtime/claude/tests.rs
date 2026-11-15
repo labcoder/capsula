@@ -623,6 +623,41 @@ async fn a_full_queue_reads_busy_only_until_the_lane_takes_a_job() {
     assert!(!claude.close(soon()).await, "a stuck lane keeps its lock");
 }
 
+/// L2: an op the drained queue takes that isn't a Version find reads `Finding` until it settles,
+/// never the stuck lane's `Unavailable`.
+#[tokio::test]
+async fn an_op_the_drained_queue_takes_reads_finding_not_unavailable() {
+    let base = Base::new("drained-cleanup");
+    let (mut host, _switches) = host(&base, "loginhang");
+    host.terminate = end_once_let_go;
+    let mut claude = Claude::start(Lane::start(host).expect("lane"), SignInStore::FileWithDacl);
+    settle(&mut claude).await;
+    claude.op(ConnectionOp::ConnectClaudeCode);
+    started(&base, "auth login").await;
+    {
+        let _ending = ENDING.lock().unwrap_or_else(PoisonError::into_inner);
+        let lane = claude.lane.as_ref().expect("a lane");
+        for _ in 0..LANE_QUEUE {
+            assert!(lane.submit(0, Work::Version), "an old job fills a slot");
+        }
+        claude.op(ConnectionOp::DisconnectClaudeCode);
+        assert_eq!(claude.view(), ClaudeCodeView::Busy);
+        claude.finds = false;
+    }
+    timeout(Duration::from_secs(10), async {
+        while claude.out.is_none() {
+            let wake = claude.next().await;
+            claude.wake(wake);
+        }
+    })
+    .await
+    .expect("taken once the queue drains");
+    assert_eq!(claude.out, Some(Work::Cleanup));
+    assert_eq!(claude.view(), ClaudeCodeView::Finding);
+    settle(&mut claude).await;
+    assert!(claude.close(soon()).await);
+}
+
 /// Makes every call's processes unconfirmed once set; only the test below sets it.
 static UNCONFIRMED: AtomicBool = AtomicBool::new(false);
 

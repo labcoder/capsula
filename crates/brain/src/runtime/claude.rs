@@ -122,6 +122,8 @@ pub(crate) enum Wake {
     Note(Note),
     /// The warm attempt's window may have closed.
     Expired,
+    /// The lane took a job off its queue, so work a full queue refused may fit now.
+    Room,
 }
 
 /// A version this brain saw fail its audit.
@@ -208,8 +210,12 @@ impl Claude {
             .lane
             .as_ref()
             .is_some_and(|lane| lane.submit(self.generation, work));
+        let drained = admitted && self.full && self.view == ClaudeCodeView::Unavailable;
         self.out = admitted.then_some(work);
         self.full = !admitted;
+        if drained {
+            self.view = ClaudeCodeView::Finding;
+        }
         if !admitted {
             self.view = ClaudeCodeView::Unavailable;
             self.revoke_all();
@@ -868,6 +874,13 @@ impl Claude {
         // deadline, so it ends at its expiry.
         let expiry = self.warm.as_ref().and_then(Attempt::expires);
         let left = expiry.map(|expiry| expiry.saturating_duration_since(self.clock.now()));
+        let room = self.full.then(|| self.lane.as_ref().map(Lane::room)).flatten();
+        let room = async {
+            match room {
+                Some(room) => room.notified().await,
+                None => std::future::pending().await,
+            }
+        };
         let Self { lane, notes, .. } = self;
         let lane = async {
             match lane {
@@ -878,6 +891,7 @@ impl Claude {
         tokio::select! {
             done = lane => Wake::Lane(done),
             Some(note) = notes.1.recv() => Wake::Note(note),
+            () = room => Wake::Room,
             () = tokio::time::sleep(left.unwrap_or_default()), if left.is_some() => Wake::Expired,
         }
     }
@@ -897,6 +911,11 @@ impl Claude {
                 }
                 false
             }
+            Wake::Room if self.full => {
+                self.find();
+                true
+            }
+            Wake::Room => false,
         }
     }
 
