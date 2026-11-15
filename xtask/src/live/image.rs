@@ -7,7 +7,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, ensure};
-use kumochi_protocol::constants::{BRAIN_EXE, IMAGE_CHECK_ARG};
+use kumochi_protocol::constants::BRAIN_EXE;
 
 use super::{bounded, refuse_running};
 use crate::platform;
@@ -16,14 +16,15 @@ use crate::platform;
 /// 60 s idle bounds, plus building a 3 MB image a few times].
 const LIMIT: Duration = Duration::from_mins(6);
 
-/// Runs the brain in `folder`'s `bin` and reports it. Any exit but 0 fails the command.
-pub(super) fn run(folder: &Path) -> Result<()> {
+/// Runs the brain in `folder`'s `bin` with `flag`, the check's or the diagnostic's, and reports
+/// it. Any exit but 0 fails the command.
+pub(super) fn run(folder: &Path, flag: &str) -> Result<()> {
     platform::Job::kill_on_close()
         .and_then(platform::Job::hold_self)
         .context("putting the run in a job")?;
     refuse_running(&platform::processes()?, std::process::id())?;
     let mut child = Command::new(folder.join("bin").join(BRAIN_EXE))
-        .arg(IMAGE_CHECK_ARG)
+        .arg(flag)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
