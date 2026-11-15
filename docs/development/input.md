@@ -598,7 +598,9 @@ desktop pixels. Its distances are logical pixels multiplied by the display's sca
 that is under 100% or not a number counts as 100%.
 
 - Nothing is kept until a sample is 24 logical pixels, in a straight line, from where the
-  pointer was at recognition. The first sample that far is the path's first point.
+  pointer was at recognition, so a resting hand draws nothing. The first sample that far starts
+  the path with two points: where the pointer was at recognition, if that place is on the
+  display, and then the sample. The line starts where the hand did.
 - After that a sample is kept when it is at least 2 logical pixels from the last kept point.
 - A path holds at most `MAX_PATH_POINTS` (2,048). The sample that would be the 2,049th is added
   and then every second point is dropped, which keeps the first and the newest, and the spacing

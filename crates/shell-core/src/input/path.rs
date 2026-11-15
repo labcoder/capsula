@@ -4,7 +4,8 @@
 use kumochi_protocol::geometry::{MAX_PATH_POINTS, PhysicalPoint, PhysicalRect, PointerPath};
 
 /// How far the pointer must go from where it was at recognition before anything is recorded,
-/// in logical pixels: a hand resting on the mouse draws nothing.
+/// in logical pixels: a hand resting on the mouse draws nothing. Once it has gone that far the
+/// path starts from where it was.
 const DEAD_ZONE: f64 = 24.0;
 /// The least distance between two kept points, in logical pixels, until the path first fills.
 const SPACING: f64 = 2.0;
@@ -49,6 +50,10 @@ impl PathRecorder {
         };
         if distance_squared(from, point) < least * least {
             return false;
+        }
+        // The line starts where the pointer was, when the display shows that place.
+        if self.points.is_empty() && on(self.display, self.origin) {
+            self.points.push(self.origin);
         }
         self.points.push(point);
         if self.points.len() > MAX_PATH_POINTS {
@@ -121,7 +126,7 @@ mod tests {
                 assert!(path.points().is_empty(), "{scale} {x} {y}");
                 let first = at(x * edge, y * edge);
                 assert!(path.sample(first), "{scale} {x} {y}");
-                assert_eq!(path.points(), [first], "{scale} {x} {y}");
+                assert_eq!(path.points(), [ORIGIN, first], "{scale} {x} {y}");
             }
         }
         // The distance is the straight one: 20 by 13 is under 24, and 17 by 17 is over.
@@ -144,7 +149,7 @@ mod tests {
             assert!(path.sample(ORIGIN), "{scale}");
             assert_eq!(
                 path.points(),
-                [at(edge, 0), at(edge + step, 0), ORIGIN],
+                [ORIGIN, at(edge, 0), at(edge + step, 0), ORIGIN],
                 "{scale}"
             );
         }
@@ -152,26 +157,27 @@ mod tests {
 
     #[test]
     fn a_full_path_halves_and_keeps_its_first_and_newest_points() {
-        let x = |index: usize| 24 + 2 * i32::try_from(index).expect("small");
+        // The path in order: where the pointer was, then a sample every two pixels.
+        let point = |index: usize| match i32::try_from(index).expect("small") {
+            0 => ORIGIN,
+            index => at(22 + 2 * index, 0),
+        };
         let mut path = recorder(1.0);
-        for index in 0..MAX_PATH_POINTS {
-            assert!(path.sample(at(x(index), 0)), "{index}");
+        for index in 1..MAX_PATH_POINTS {
+            assert!(path.sample(point(index)), "{index}");
         }
         assert_eq!(path.points().len(), MAX_PATH_POINTS);
-        assert_eq!(path.points().last(), Some(&at(x(MAX_PATH_POINTS - 1), 0)));
-        assert!(path.sample(at(x(MAX_PATH_POINTS), 0)));
-        let kept: Vec<_> = (0..=MAX_PATH_POINTS)
-            .step_by(2)
-            .map(|index| at(x(index), 0))
-            .collect();
+        assert_eq!(path.points().last(), Some(&point(MAX_PATH_POINTS - 1)));
+        assert!(path.sample(point(MAX_PATH_POINTS)));
+        let kept: Vec<_> = (0..=MAX_PATH_POINTS).step_by(2).map(point).collect();
         assert_eq!(kept.len(), 1_025);
-        assert_eq!(path.points().first(), Some(&at(24, 0)));
-        assert_eq!(path.points().last(), Some(&at(x(MAX_PATH_POINTS), 0)));
+        assert_eq!(path.points().first(), Some(&ORIGIN));
+        assert_eq!(path.points().last(), Some(&point(MAX_PATH_POINTS)));
         assert!(path.points() == kept, "every second point went");
         // The spacing doubled with it.
-        let last = x(MAX_PATH_POINTS);
-        assert!(!path.sample(at(last + 3, 0)));
-        assert!(path.sample(at(last + 4, 0)));
+        let PhysicalPoint([last, _]) = point(MAX_PATH_POINTS);
+        assert!(!path.sample(PhysicalPoint([last + 3, 0])));
+        assert!(path.sample(PhysicalPoint([last + 4, 0])));
         assert_eq!(path.points().len(), 1_026);
     }
 
@@ -184,7 +190,7 @@ mod tests {
         }
         assert!(path.spacing >= 4.0, "the path filled at least once");
         assert!(path.points().len() > MAX_PATH_POINTS / 2);
-        assert_eq!(path.points().first(), Some(&at(24, 0)));
+        assert_eq!(path.points().first(), Some(&ORIGIN));
         assert_eq!(path.finish().check(), Ok(()));
     }
 
@@ -210,7 +216,21 @@ mod tests {
         }
         // A point off the display leaves a started line as it was.
         assert!(!path.sample(PhysicalPoint([right + 100, bottom + 100])));
-        assert_eq!(path.finish(), PointerPath(corners.to_vec()));
+        assert_eq!(
+            path.finish(),
+            PointerPath(vec![ORIGIN, corners[0], corners[1]])
+        );
+    }
+
+    #[test]
+    fn a_path_starts_where_the_pointer_was_only_when_the_display_shows_that_place() {
+        let [left, _] = DISPLAY.origin;
+        let mut path = PathRecorder::new(PhysicalPoint([left - 10, 0]), 1.0, DISPLAY);
+        // On the display, but 13 pixels from the start: still resting.
+        assert!(!path.sample(PhysicalPoint([left + 3, 0])));
+        let first = PhysicalPoint([left + 14, 0]);
+        assert!(path.sample(first));
+        assert_eq!(path.points(), [first]);
     }
 
     #[test]
