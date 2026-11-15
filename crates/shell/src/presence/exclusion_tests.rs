@@ -119,7 +119,7 @@ fn actual_presence_terminals_match_nonempty_owner_session_input_and_duplicates(
         &owner,
         LinkEvent::CaptureDone {
             generation: 9,
-            capture_for: key.input,
+            capture_for: key.input(),
         },
         cx,
     );
@@ -129,7 +129,7 @@ fn actual_presence_terminals_match_nonempty_owner_session_input_and_duplicates(
         &owner,
         LinkEvent::CaptureFailed {
             generation: 9,
-            capture_for: key.input,
+            capture_for: key.input(),
             reason: CaptureFailure::Unavailable,
         },
         cx,
@@ -287,7 +287,7 @@ fn actual_replacement_and_state_keep_old_debt_without_matching_new_sessions(
             &owner,
             LinkEvent::CaptureDone {
                 generation,
-                capture_for: key.input,
+                capture_for: key.input(),
             },
             cx,
         );
