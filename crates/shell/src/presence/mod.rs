@@ -717,7 +717,12 @@ impl Render for Panel {
                     gpui_kit::assets::IconName::EyeOff
                 })
                 .tooltip(move |window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                    // The longest notice is wider than the peek, so it wraps inside it.
+                    let tip = tip.clone();
+                    gpui_kit::component::tooltip::Tooltip::element(move |_, _| {
+                        div().max_w(px(304.0)).child(tip.clone())
+                    })
+                    .build(window, cx)
                 })
         });
         let line = self
