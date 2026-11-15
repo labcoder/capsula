@@ -559,6 +559,69 @@ async fn a_disconnect_the_lane_cant_take_marks_nothing_and_can_be_asked_again() 
     assert!(!base.marker().exists());
 }
 
+/// Leaves every teardown unconfirmed once set; only the test below sets it.
+static STUCK_AFTER_FULL: AtomicBool = AtomicBool::new(false);
+
+fn end_once_let_go_unless_stuck(job: &Job) -> io::Result<()> {
+    drop(ENDING.lock().unwrap_or_else(PoisonError::into_inner));
+    if STUCK_AFTER_FULL.load(Ordering::SeqCst) {
+        return Err(io::ErrorKind::Other.into());
+    }
+    Job::terminate(job)
+}
+
+/// L3: a full queue reads Busy only until the lane takes a job, so a lane that's stuck after it
+/// says to restart.
+#[tokio::test]
+async fn a_full_queue_reads_busy_only_until_the_lane_takes_a_job() {
+    let base = Base::new("full-then-stuck");
+    let (mut host, _switches) = host(&base, "loginhang");
+    host.terminate = end_once_let_go_unless_stuck;
+    let mut claude = Claude::start(Lane::start(host).expect("lane"), SignInStore::FileWithDacl);
+    settle(&mut claude).await;
+    claude.op(ConnectionOp::ConnectClaudeCode);
+    started(&base, "auth login").await;
+    let reason = |key, action| {
+        kumochi_protocol::message::UserError::new(key, Vec::new(), vec![action])
+            .expect("one action")
+    };
+    {
+        let _ending = ENDING.lock().unwrap_or_else(PoisonError::into_inner);
+        let lane = claude.lane.as_ref().expect("a lane");
+        for _ in 0..LANE_QUEUE {
+            assert!(lane.submit(0, Work::Version), "an old job fills a slot");
+        }
+        claude.op(ConnectionOp::DisconnectClaudeCode);
+        assert_eq!(
+            claude.availability(),
+            Availability::Unavailable(reason(
+                ErrorKey::ClaudeCodeBusy,
+                kumochi_protocol::message::Action::Retry
+            ))
+        );
+        STUCK_AFTER_FULL.store(true, Ordering::SeqCst);
+    }
+    timeout(Duration::from_secs(10), async {
+        while !claude.cleaning {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            claude.op(ConnectionOp::DisconnectClaudeCode);
+        }
+    })
+    .await
+    .expect("taken once the old jobs are gone");
+    settle(&mut claude).await;
+    assert_eq!(claude.view(), ClaudeCodeView::Unavailable);
+    assert_eq!(
+        claude.availability(),
+        Availability::Unavailable(reason(
+            ErrorKey::ClaudeCodeUnavailable,
+            kumochi_protocol::message::Action::OpenSettings
+        ))
+    );
+    // shortcut: the kept lock lives until the test process ends, leaving this scratch folder.
+    assert!(!claude.close(soon()).await, "a stuck lane keeps its lock");
+}
+
 /// Makes every call's processes unconfirmed once set; only the test below sets it.
 static UNCONFIRMED: AtomicBool = AtomicBool::new(false);
 
