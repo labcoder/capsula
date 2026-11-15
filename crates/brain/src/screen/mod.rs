@@ -13,11 +13,14 @@ mod encode;
 mod frame;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "A3 and A6 populate shared capture masks")
+    expect(dead_code, reason = "masks wait for the study after P3 (OSC-775)")
 )]
 mod mask;
 mod native;
-#[cfg_attr(not(test), expect(dead_code, reason = "A6 connects regional OCR"))]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "OCR waits for the study after P3 (OSC-775)")
+)]
 pub(crate) mod ocr;
 mod reader;
 mod sanitize;

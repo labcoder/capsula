@@ -1237,6 +1237,10 @@ fn waiting() -> ScreenPart {
 }
 
 const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xD9];
+
+fn changed() -> crate::screen::Closed {
+    crate::screen::Closed::Refused(crate::screen::Refusal::WindowChanged)
+}
 const LEASE: kumochi_protocol::message::LeaseGeneration =
     kumochi_protocol::message::LeaseGeneration(4);
 
@@ -1538,7 +1542,7 @@ async fn only_a_waiting_parts_own_worker_finishes_it() {
     brain.holds.screen_event(event(0, sealed()));
     brain
         .holds
-        .screen_event(event(0, Outcome::Closed(ScreenClass::Changed)));
+        .screen_event(event(0, Outcome::Closed(changed())));
     assert!(matches!(
         brain.holds.pending.as_ref().unwrap().screen,
         ScreenPart::Waiting {
@@ -1692,6 +1696,61 @@ async fn a_screen_hold_shares_the_voice_admission_and_releases_its_lease_when_re
     assert_eq!(control(&mut output), failed);
     assert!(brain.hold_control(&message, &mut link).unwrap());
     assert_eq!(control(&mut output), failed, "a stale gesture's lease too");
+    assert!(output.is_empty());
+    assert!(brain.holds.pending.is_none());
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn a_screen_hold_and_its_release_are_refused_and_the_release_ends_its_lease() {
+    use kumochi_protocol::geometry::{PhysicalPoint, PointerPath, ReleasePointer};
+    let scratch = Scratch::new("hold-screen-release-refused");
+    let mut brain = test_support::brain(&scratch, "");
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    let recognized = ControlToBrain::ScreenHoldRecognized {
+        gesture: KEY.gesture,
+        thread: None,
+        selection: 1,
+        t_qpc: 1,
+    };
+    let release = ControlToBrain::ScreenRelease {
+        gesture: KEY.gesture,
+        lease: LEASE,
+        t_qpc: 2,
+        excluded_qpc: 3,
+        pointer: ReleasePointer(PhysicalPoint([5, 5])),
+        path: PointerPath(vec![PhysicalPoint([5, 5]), PhysicalPoint([40, 5])]),
+    };
+    let failed = ControlToShell::CaptureFailed {
+        capture_for: kumochi_protocol::message::CaptureFor::Gesture(KEY.gesture),
+        reason: kumochi_protocol::message::CaptureFailure::Unavailable,
+    };
+    assert!(brain.hold_control(&recognized, &mut link).unwrap());
+    assert_eq!(
+        control(&mut output),
+        ControlToShell::VoiceHoldStatus {
+            gesture: KEY.gesture,
+            status: HoldStatus::Failed(HoldFailure::Unavailable),
+        }
+    );
+    assert!(brain.hold_control(&release, &mut link).unwrap());
+    assert_eq!(control(&mut output), failed);
+    // A refused gesture is used up: its repeat and a voice hold under its number get nothing.
+    let voice = ControlToBrain::VoiceHoldRecognized {
+        gesture: KEY.gesture,
+        thread: None,
+        selection: 1,
+    };
+    for repeat in [&recognized, &voice] {
+        assert!(brain.hold_control(repeat, &mut link).unwrap());
+        assert!(output.is_empty());
+    }
+    assert!(brain.hold_control(&release, &mut link).unwrap());
+    assert_eq!(control(&mut output), failed, "a second release's lease too");
     assert!(output.is_empty());
     assert!(brain.holds.pending.is_none());
     brain.close().await;
@@ -1975,6 +2034,57 @@ async fn a_system_that_cant_capture_ends_the_hold_not_ready_and_holds_stay_unsup
 }
 
 #[tokio::test]
+async fn each_part_logs_one_line_with_the_cause_that_closed_it() {
+    use crate::screen::{Closed, Generation, Refusal};
+    let captured = test_support::Captured::default();
+    let _capturing = captured.install();
+    let scratch = Scratch::new("hold-screen-one-line");
+    let mut brain = test_support::brain(&scratch, "");
+    let event = |generation, outcome| ScreenEvent {
+        key: KEY,
+        generation,
+        outcome,
+    };
+    screen_hold(
+        &mut brain,
+        KEY,
+        ScreenPart::Waiting {
+            generation: None,
+            lease: LEASE,
+            stop: Arc::default(),
+        },
+    );
+    assert!(brain.holds.lease_lapsed(LEASE));
+    brain
+        .holds
+        .screen_event(event(None, screen::ending(Closed::Refused(Refusal::Stale))));
+    let lapsed = captured.text();
+    assert_eq!(
+        lapsed.matches("hold screen part closed").count(),
+        1,
+        "{lapsed}"
+    );
+    assert!(lapsed.contains("still waiting"), "{lapsed}");
+    assert!(!lapsed.contains("Stale"), "{lapsed}");
+    brain.holds.lost();
+    screen_hold(&mut brain, KEY, waiting());
+    let refused = screen::ending(Closed::Refused(Refusal::Ambiguous));
+    brain
+        .holds
+        .screen_event(event(Some(Generation(0)), refused));
+    brain.holds.lost();
+    screen_hold(&mut brain, KEY, waiting());
+    let sealed = Outcome::Sealed(crate::screen::ScreenContext::fixture(JPEG));
+    brain.holds.screen_event(event(Some(Generation(0)), sealed));
+    let text = captured.text();
+    assert_eq!(text.matches("hold screen part closed").count(), 2, "{text}");
+    assert_eq!(text.matches("Refused(Ambiguous)").count(), 1, "{text}");
+    assert_eq!(text.matches("hold screen part sealed").count(), 1, "{text}");
+    brain.holds.lost();
+    brain.close().await;
+}
+
+#[tokio::test]
 async fn a_capture_the_system_refuses_comes_back_from_the_task_as_unsupported() {
     use crate::screen::Refusal;
     type Reply = <crate::screen::Holds as crate::supervise::Kind>::Reply;
@@ -1997,6 +2107,51 @@ async fn a_capture_the_system_refuses_comes_back_from_the_task_as_unsupported() 
     assert!(matches!(answer.outcome, Outcome::Unsupported));
     assert_eq!(answer.generation, None);
     brain.holds.screen_event(answer);
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn a_hold_asks_for_its_picture_without_a_walk_that_could_be_cut_short() {
+    type Kind = crate::screen::Holds;
+    type Request = <Kind as crate::supervise::Kind>::Request;
+    type Reply = <Kind as crate::supervise::Kind>::Reply;
+    let scratch = Scratch::new("hold-screen-no-walk");
+    let mut brain = test_support::brain(&scratch, "");
+    let mut rig = crate::supervise::fixture::start::<Kind>();
+    brain.holds.screen = Some(Arc::new(HoldClient::new(rig.handle.clone())));
+    screen_hold(&mut brain, KEY, ScreenPart::None);
+    let point = kumochi_protocol::geometry::PhysicalPoint([5, 5]);
+    assert!(
+        brain
+            .holds
+            .start_screen(KEY, point, LEASE, Instant::now() + MAX_TTL)
+    );
+    let (id, capture) = rig.next().await;
+    crate::screen::hold_frame(&rig, id, capture).await;
+    let Event::Screen(held) = super::next(&mut brain.holds).await else {
+        panic!("not the task's answer");
+    };
+    assert!(matches!(held.outcome, Outcome::Held));
+    brain.holds.screen_event(held);
+    let (id, request) = rig.next().await;
+    let Request::Seal(key) = request else {
+        panic!("the hold asked for something before its picture");
+    };
+    rig.reply(
+        id,
+        &Reply::Sealed(key, crate::screen::ScreenContext::fixture(JPEG)),
+    )
+    .await;
+    let Event::Screen(sealed) = super::next(&mut brain.holds).await else {
+        panic!("not the task's answer");
+    };
+    assert!(matches!(sealed.outcome, Outcome::Sealed(_)));
+    brain.holds.screen_event(sealed);
+    assert!(matches!(
+        brain.holds.pending.as_ref().unwrap().screen,
+        ScreenPart::Ready(_)
+    ));
+    brain.holds.lost();
     brain.close().await;
 }
 
@@ -2144,7 +2299,6 @@ async fn a_screen_hold_repeating_a_voice_holds_gesture_adds_no_part_to_it() {
 
 #[tokio::test]
 async fn the_end_of_a_capture_releases_the_lease_on_its_own_connection() {
-    use crate::context::ScreenClass;
     use crate::screen::Generation;
     use kumochi_protocol::message::{CaptureFailure, CaptureFor};
     let scratch = Scratch::new("hold-screen-lease");
@@ -2172,18 +2326,20 @@ async fn the_end_of_a_capture_releases_the_lease_on_its_own_connection() {
             Some(ControlToShell::CaptureDone { capture_for }),
         ),
         (
-            event(KEY, None, Outcome::Closed(ScreenClass::NothingThere)),
+            event(
+                KEY,
+                None,
+                Outcome::Closed(crate::screen::Closed::Refused(
+                    crate::screen::Refusal::NoWindow,
+                )),
+            ),
             Some(ControlToShell::CaptureFailed {
                 capture_for,
                 reason: CaptureFailure::Unavailable,
             }),
         ),
         (
-            event(
-                KEY,
-                Some(Generation(0)),
-                Outcome::Closed(ScreenClass::Changed),
-            ),
+            event(KEY, Some(Generation(0)), Outcome::Closed(changed())),
             None,
         ),
         (

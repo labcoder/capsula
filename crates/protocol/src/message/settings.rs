@@ -205,6 +205,8 @@ pub enum SettingsOp {
     CompleteOnboardingStep(OnboardingStep),
     /// Let a hold also show the model the window under the pointer.
     SetScreenHolds(bool),
+    /// Let a hold also show the model a picture of the screen, taken when it's released.
+    SetShowScreen(bool),
 }
 
 /// The initial held-speech choice, also used by older settings files without the key.
@@ -212,6 +214,10 @@ pub const DEFAULT_HOLD_TO_TALK: bool = true;
 
 /// The initial screen-hold choice, also used by older settings files without the key.
 pub const DEFAULT_SCREEN_HOLDS: bool = true;
+
+/// The initial show-screen choice, also used by settings files without the key. A stored
+/// screen-hold choice never stands in for it.
+pub const DEFAULT_SHOW_SCREEN: bool = false;
 
 /// When an idle speech-input model is unloaded to free its memory.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,6 +266,8 @@ pub struct SettingsView {
     pub onboarding_from: OnboardingStep,
     /// Whether a hold may also show the model the window under the pointer.
     pub screen_holds: bool,
+    /// Whether a hold may also show the model a picture of the screen, taken when it's released.
+    pub show_screen: bool,
 }
 
 /// The most frames a second Kumo draws. The shell paces to the display, so the rate it runs at
@@ -337,6 +345,7 @@ mod tests {
             stt_unload: SttUnload::Kept,
             hold_to_talk: crate::message::DEFAULT_HOLD_TO_TALK,
             screen_holds: crate::message::DEFAULT_SCREEN_HOLDS,
+            show_screen: crate::message::DEFAULT_SHOW_SCREEN,
         }
     }
 
@@ -357,6 +366,8 @@ mod tests {
             (12, SettingsOp::SetHoldToTalk(true)),
             (14, SettingsOp::SetScreenHolds(false)),
             (14, SettingsOp::SetScreenHolds(true)),
+            (15, SettingsOp::SetShowScreen(false)),
+            (15, SettingsOp::SetShowScreen(true)),
         ];
         for (tag, op) in ops {
             let bytes = postcard::to_allocvec(&op).expect("encodes");
@@ -472,6 +483,7 @@ mod tests {
                     stt_unload: SttUnload::Kept,
                     hold_to_talk: crate::message::DEFAULT_HOLD_TO_TALK,
                     screen_holds: crate::message::DEFAULT_SCREEN_HOLDS,
+                    show_screen: crate::message::DEFAULT_SHOW_SCREEN,
                 };
                 let bytes = postcard::to_allocvec(&view).expect("encodes");
                 assert_eq!(

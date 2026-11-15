@@ -45,6 +45,18 @@ enum Refusal {
     ReadOrCancellation,
 }
 
+/// Why a screen hold's part didn't start.
+#[derive(Debug)]
+enum NoScreen {
+    /// A repeat of a voice hold's gesture.
+    Repeated,
+    Gate(#[expect(dead_code, reason = "read only by the hold-taken log line")] ScreenOff),
+    /// Recognized longer ago than `LATEST_START`.
+    TooLate,
+    /// No worker client, or the hold isn't pending or already has a part.
+    NotStarted,
+}
+
 #[derive(Debug, Default)]
 struct Gate {
     active: AtomicU32,
@@ -358,11 +370,6 @@ impl Brain {
             t_qpc,
         } = message
         {
-            let voice = ControlToBrain::VoiceHoldRecognized {
-                gesture: *gesture,
-                thread: *thread,
-                selection: *selection,
-            };
             let held = key(*gesture);
             // A repeat of a voice hold's gesture is refused, so it can't add a part to that hold.
             let repeated = self
@@ -370,8 +377,16 @@ impl Brain {
                 .pending
                 .as_ref()
                 .is_some_and(|hold| hold.key == held);
-            self.hold_control(&voice, link)?;
-            if repeated || !self.hold_screen(held, *pointer, *lease, *t_qpc) {
+            let admitted = self.admit_hold(held, *thread, *selection, link)?;
+            let screen = if repeated {
+                Err(NoScreen::Repeated)
+            } else {
+                self.hold_screen(held, *pointer, *lease, *t_qpc)
+            };
+            if admitted {
+                tracing::info!(hold = "screen", ?screen, "hold taken");
+            }
+            if screen.is_err() {
                 link.control(&ControlToShell::CaptureFailed {
                     capture_for: CaptureFor::Gesture(*gesture),
                     reason: CaptureFailure::Unavailable,
@@ -385,70 +400,9 @@ impl Brain {
                 thread,
                 selection,
             } => {
-                let key = key(*gesture);
-                if gesture.0 <= self.holds.high {
-                    tracing::debug!(stage = ?FailureStage::Admission, reason = ?Refusal::StaleGesture, "held speech input refused");
-                    return Ok(true);
+                if self.admit_hold(key(*gesture), *thread, *selection, link)? {
+                    tracing::info!(hold = "voice", "hold taken");
                 }
-                self.holds.high = gesture.0;
-                if !self.hold_to_talk_enabled() {
-                    Self::hold_status(key, HoldStatus::Failed(HoldFailure::NotLoaded), link)?;
-                    return Ok(true);
-                }
-                self.holds.retire_exited_peer();
-                if self.holds.debt.is_some_and(|debt| debt.epoch != self.epoch) {
-                    tracing::warn!(stage = ?FailureStage::ReleaseDebt, reason = ?HoldFailure::Unavailable, "held speech input failed");
-                    Self::hold_status(key, HoldStatus::Failed(HoldFailure::Unavailable), link)?;
-                    return Ok(true);
-                }
-                if self.holds.pending.is_some()
-                    || self.holds.debt.is_some()
-                    || self.changing_model()
-                {
-                    Self::hold_status(key, HoldStatus::Failed(HoldFailure::Busy), link)?;
-                    return Ok(true);
-                }
-                let (state, _) = self.hold_voice();
-                if !matches!(state, PartState::Ready | PartState::Loading) {
-                    tracing::warn!(stage = ?FailureStage::VoiceAvailability, reason = ?state, "held speech input failed");
-                    let failure = if state == PartState::Unavailable {
-                        HoldFailure::Unavailable
-                    } else {
-                        HoldFailure::NotLoaded
-                    };
-                    Self::hold_status(key, HoldStatus::Failed(failure), link)?;
-                    return Ok(true);
-                }
-                let cancel = Arc::new(AtomicBool::new(false));
-                let prepared = self.coordinator.prepare_hold(
-                    key,
-                    *thread,
-                    *selection,
-                    self.snapshot(Origin::Kumo),
-                    Arc::clone(&cancel),
-                );
-                let Ok(op) = prepared else {
-                    Self::hold_status(key, HoldStatus::Failed(HoldFailure::ChoiceChanged), link)?;
-                    return Ok(true);
-                };
-                self.holds.pending = Some(Hold {
-                    key,
-                    thread: *thread,
-                    cancel,
-                    snapshot: None,
-                    audio: None,
-                    ask: None,
-                    released: false,
-                    deadline: Instant::now() + crate::recall::control::READ_TIME,
-                    decode: None,
-                    terminal: None,
-                    screen: ScreenPart::None,
-                });
-                if state == PartState::Loading {
-                    Self::hold_status(key, HoldStatus::Loading, link)?;
-                }
-                self.apply(vec![Effect::Store(op)], Some(link))
-                    .map_err(|_| Full)?;
             }
             ControlToBrain::GestureCancel { gesture } => {
                 self.holds.high = self.holds.high.max(gesture.0);
@@ -515,6 +469,22 @@ impl Brain {
                     self.hold_decode(link)?;
                 }
             }
+            // shortcut: nothing sends a screen hold yet, so both of its controls are refused; the
+            // runtime that arms the hold and captures at its release replaces these two arms.
+            ControlToBrain::ScreenHoldRecognized { gesture, .. } => {
+                if gesture.0 > self.holds.high {
+                    self.holds.high = gesture.0;
+                    let failed = HoldStatus::Failed(HoldFailure::Unavailable);
+                    Self::hold_status(key(*gesture), failed, link)?;
+                }
+            }
+            // The answer ends the shell's exclusion lease.
+            ControlToBrain::ScreenRelease { gesture, .. } => {
+                link.control(&ControlToShell::CaptureFailed {
+                    capture_for: CaptureFor::Gesture(*gesture),
+                    reason: CaptureFailure::Unavailable,
+                })?;
+            }
             ControlToBrain::ExclusionLapsed { lease } if self.holds.lease_lapsed(*lease) => {}
             ControlToBrain::Settings(SettingsOp::SetDefaultModel(_))
             | ControlToBrain::AccountOp(_)
@@ -533,6 +503,77 @@ impl Brain {
             }
             _ => return Ok(false),
         }
+        Ok(true)
+    }
+
+    /// Admits the hold `key` as the pending one, or answers why not. True when it's admitted.
+    fn admit_hold(
+        &mut self,
+        key: HoldKey,
+        thread: Option<ThreadId>,
+        selection: u64,
+        link: &mut Link<'_, '_>,
+    ) -> Result<bool, Full> {
+        if key.gesture.0 <= self.holds.high {
+            tracing::debug!(stage = ?FailureStage::Admission, reason = ?Refusal::StaleGesture, "held speech input refused");
+            return Ok(false);
+        }
+        self.holds.high = key.gesture.0;
+        if !self.hold_to_talk_enabled() {
+            Self::hold_status(key, HoldStatus::Failed(HoldFailure::NotLoaded), link)?;
+            return Ok(false);
+        }
+        self.holds.retire_exited_peer();
+        if self.holds.debt.is_some_and(|debt| debt.epoch != self.epoch) {
+            tracing::warn!(stage = ?FailureStage::ReleaseDebt, reason = ?HoldFailure::Unavailable, "held speech input failed");
+            Self::hold_status(key, HoldStatus::Failed(HoldFailure::Unavailable), link)?;
+            return Ok(false);
+        }
+        if self.holds.pending.is_some() || self.holds.debt.is_some() || self.changing_model() {
+            Self::hold_status(key, HoldStatus::Failed(HoldFailure::Busy), link)?;
+            return Ok(false);
+        }
+        let (state, _) = self.hold_voice();
+        if !matches!(state, PartState::Ready | PartState::Loading) {
+            tracing::warn!(stage = ?FailureStage::VoiceAvailability, reason = ?state, "held speech input failed");
+            let failure = if state == PartState::Unavailable {
+                HoldFailure::Unavailable
+            } else {
+                HoldFailure::NotLoaded
+            };
+            Self::hold_status(key, HoldStatus::Failed(failure), link)?;
+            return Ok(false);
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        let prepared = self.coordinator.prepare_hold(
+            key,
+            thread,
+            selection,
+            self.snapshot(Origin::Kumo),
+            Arc::clone(&cancel),
+        );
+        let Ok(op) = prepared else {
+            Self::hold_status(key, HoldStatus::Failed(HoldFailure::ChoiceChanged), link)?;
+            return Ok(false);
+        };
+        self.holds.pending = Some(Hold {
+            key,
+            thread,
+            cancel,
+            snapshot: None,
+            audio: None,
+            ask: None,
+            released: false,
+            deadline: Instant::now() + crate::recall::control::READ_TIME,
+            decode: None,
+            terminal: None,
+            screen: ScreenPart::None,
+        });
+        if state == PartState::Loading {
+            Self::hold_status(key, HoldStatus::Loading, link)?;
+        }
+        self.apply(vec![Effect::Store(op)], Some(link))
+            .map_err(|_| Full)?;
         Ok(true)
     }
 
@@ -821,21 +862,24 @@ impl Brain {
         pointer: PhysicalPoint,
         lease: LeaseGeneration,
         t_qpc: u64,
-    ) -> bool {
+    ) -> Result<(), NoScreen> {
         // shortcut: the gate opens on the default model, so a thread pinned to a model that can
         // see goes voice-only while the default can't; check the thread's pin at recognition
         // once a thread's pin differs from the default in image input.
         let choice = self.config.view().default_model.clone();
-        if !matches!(self.screen_gate(choice.as_ref()), ScreenHolds::On { .. }) {
-            return false;
+        if let ScreenHolds::Off(off) = self.screen_gate(choice.as_ref()) {
+            return Err(NoScreen::Gate(off));
         }
         // Read before the age, so the ticket can only end sooner than the check allows.
         let until = Instant::now() + MAX_TTL;
         if (self.holds.recognized_age)(t_qpc).is_none_or(|age| age > LATEST_START) {
             self.holds.refuse_screen(key);
-            return false;
+            return Err(NoScreen::TooLate);
         }
-        self.holds.start_screen(key, pointer, lease, until)
+        if !self.holds.start_screen(key, pointer, lease, until) {
+            return Err(NoScreen::NotStarted);
+        }
+        Ok(())
     }
 
     /// Takes a screen task's answer. The capture's end, either way, releases the shell's

@@ -71,6 +71,8 @@ impl Tapped for ControlToBrain {
             Self::Issue { .. } => "Issue",
             Self::VoiceHoldRecognized { .. } => "VoiceHoldRecognized",
             Self::VoiceHoldStopped { .. } => "VoiceHoldStopped",
+            Self::ScreenHoldRecognized { .. } => "ScreenHoldRecognized",
+            Self::ScreenRelease { .. } => "ScreenRelease",
         }
     }
 

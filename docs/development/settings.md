@@ -253,6 +253,7 @@ than growing the window with the text. The existing Settings content region owns
 | `[voice] talk_back` | boolean | `false` |
 | `[voice] stt_unload` | `kept`, `15m` or `1h` | `kept` |
 | `[voice] hold_to_talk` | boolean | `true` |
+| `[voice] show_screen` | boolean | `false` |
 
 **Onboarding** is owed while `onboarded` reads `false`. With no `onboarded` key, a profile
 already in use counts as onboarded: at start the account's first load is a signed-in ChatGPT
@@ -274,6 +275,13 @@ installed part, and an install adds its part to `installed` under epoch 0 once i
 
 Missing `hold_to_talk` uses the named on-by-default choice; a present value of the wrong type
 fails closed to off without rewriting the file. Its setter changes no other voice preference.
+
+`show_screen` is whether a hold may also show the model a picture of the screen, taken when the
+hold is released. `SetShowScreen` saves it. It has its own key so that `screen_holds`, a choice
+about the window under the pointer, is never read as a choice about the whole screen: a file
+without `show_screen` reads as `DEFAULT_SHOW_SCREEN`, off, whatever `screen_holds` says. A value
+of the wrong type reads as off, and so does a file that can't be read. No interface sends the
+op and nothing reads the value yet.
 
 `removing` names a removal that hasn't finished. At start-up, before anything is served, the
 brain deletes each listed part's folder under `%LOCALAPPDATA%\<product>\models` and then queues a

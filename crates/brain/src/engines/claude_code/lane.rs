@@ -16,7 +16,7 @@ use kumochi_protocol::constants::{
     CLAUDE_CODE_DELETING, CLAUDE_CODE_DIR, CLAUDE_CODE_LOCK, CLAUDE_CODE_QUARANTINE, ENGINE_DIR,
 };
 use kumochi_protocol::message::{ClaudeVersion, PolicyFailed, Unsupported};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 
 use super::auth::{self, StatusFailure};
 use super::install::{self, FindError};
@@ -168,6 +168,8 @@ pub(crate) struct Lane {
     current: Arc<AtomicU64>,
     closing: Arc<AtomicBool>,
     done: mpsc::UnboundedReceiver<Done>,
+    /// Woken each time the worker takes a job off the queue, which frees a slot.
+    room: Arc<Notify>,
     ended: Option<oneshot::Receiver<bool>>,
 }
 
@@ -183,6 +185,8 @@ impl Lane {
         let current = Arc::new(AtomicU64::new(0));
         let closing = Arc::new(AtomicBool::new(false));
         let base = host.base.clone();
+        let room = Arc::new(Notify::new());
+        let taken = Arc::clone(&room);
         let mut worker = Worker {
             host,
             guard: None,
@@ -196,6 +200,7 @@ impl Lane {
             .spawn(move || {
                 let mut left = None;
                 for item in &queued {
+                    taken.notify_one();
                     if worker.closing.load(Ordering::Acquire) {
                         left = Some(item);
                         break;
@@ -242,6 +247,7 @@ impl Lane {
             current,
             closing,
             done,
+            room,
             ended: Some(ended),
         })
     }
@@ -249,6 +255,11 @@ impl Lane {
     /// Where quarantine markers go.
     pub(crate) fn base(&self) -> &Path {
         &self.base
+    }
+
+    /// What wakes once the worker takes a job, so a caller the full queue refused can try again.
+    pub(crate) fn room(&self) -> Arc<Notify> {
+        Arc::clone(&self.room)
     }
 
     /// Makes `generation` the only one whose queued jobs still run.

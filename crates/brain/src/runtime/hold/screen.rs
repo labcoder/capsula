@@ -68,7 +68,8 @@ pub(in crate::runtime) struct ScreenEvent {
 pub(super) enum Outcome {
     Held,
     Sealed(ScreenContext),
-    Closed(ScreenClass),
+    /// The worker's answer, or the loss, that ended the task.
+    Closed(Closed),
     /// The worker's system can't capture a window; the part closes `NotReady` and the brain
     /// remembers it until it restarts, across shell reconnects.
     Unsupported,
@@ -129,6 +130,7 @@ impl super::Holds {
         if let Some(hold) = self.pending.as_mut().filter(|hold| hold.key == key)
             && matches!(hold.screen, ScreenPart::None)
         {
+            tracing::info!(closed = "recognized too late", "hold screen part closed");
             hold.screen = ScreenPart::Closed(ScreenClass::NotReady);
         }
     }
@@ -159,9 +161,19 @@ impl super::Holds {
             Outcome::Held if holder.is_none() => *holder = generation,
             Outcome::Held => retire(self.screen.as_ref(), key, generation),
             _ if *holder != generation => {}
-            Outcome::Sealed(context) => hold.screen = ScreenPart::Ready(context),
-            Outcome::Closed(class) => hold.screen = ScreenPart::Closed(class),
-            Outcome::Unsupported => hold.screen = ScreenPart::Closed(ScreenClass::NotReady),
+            Outcome::Sealed(context) => {
+                tracing::info!("hold screen part sealed");
+                hold.screen = ScreenPart::Ready(context);
+            }
+            Outcome::Closed(closed) => {
+                tracing::info!(?closed, "hold screen part closed");
+                hold.screen = ScreenPart::Closed(class(closed));
+            }
+            Outcome::Unsupported => {
+                let closed = Closed::Refused(Refusal::Unsupported);
+                tracing::info!(?closed, "hold screen part closed");
+                hold.screen = ScreenPart::Closed(ScreenClass::NotReady);
+            }
         }
     }
 
@@ -171,6 +183,7 @@ impl super::Holds {
         if let Some(hold) = &mut self.pending
             && matches!(hold.screen, ScreenPart::Ready(_))
         {
+            tracing::info!(closed = "hold ended", "hold screen part closed");
             hold.screen = ScreenPart::Discarded;
         }
     }
@@ -182,6 +195,9 @@ impl super::Holds {
         if let Some(hold) = &mut self.pending
             && !matches!(hold.screen, ScreenPart::None)
         {
+            if matches!(hold.screen, ScreenPart::Ready(_)) {
+                tracing::info!(closed = ?class, "hold screen part closed");
+            }
             hold.screen = class.map_or(ScreenPart::Discarded, ScreenPart::Closed);
         }
     }
@@ -226,12 +242,13 @@ impl super::Holds {
         };
         stop.store(true, Ordering::SeqCst);
         let generation = *generation;
+        tracing::info!(closed = "still waiting", "hold screen part closed");
         hold.screen = ScreenPart::Closed(ScreenClass::NotReady);
         retire(self.screen.as_ref(), hold.key, generation);
     }
 }
 
-/// The hold's screen work by `until`: capture, walk, then seal. Each answer goes
+/// The hold's screen work by `until`: capture, then seal. Each answer goes
 /// back as an event, and a frame the task can't hand on is retired with the worker that holds it.
 async fn work(
     client: Arc<HoldClient>,
@@ -258,25 +275,19 @@ async fn work(
         }
     };
     let generation = Some(held.generation);
-    let mut ended = report(generation, Outcome::Held).await.is_err() || stop.load(Ordering::SeqCst);
-    let mut outcome = None;
-    if !ended {
-        match client.walk(&held, until).await {
-            Err(closed) => outcome = Some(ending(closed)),
-            Ok(_) => ended = stop.load(Ordering::SeqCst),
-        }
-    }
-    if !ended && outcome.is_none() {
-        outcome = Some(match client.seal(held, until).await {
+    let ended = report(generation, Outcome::Held).await.is_err() || stop.load(Ordering::SeqCst);
+    let outcome = if ended {
+        release(&client, key, generation).await;
+        None
+    } else {
+        Some(match client.seal(held, until).await {
             Ok(context) => Outcome::Sealed(context),
             Err(closed) => {
                 release(&client, key, generation).await;
                 ending(closed)
             }
-        });
-    } else {
-        release(&client, key, generation).await;
-    }
+        })
+    };
     if let Some(outcome) = outcome
         && report(generation, outcome).await.is_err()
     {
@@ -311,7 +322,7 @@ pub(super) fn ending(closed: Closed) -> Outcome {
     if closed == Closed::Refused(Refusal::Unsupported) {
         Outcome::Unsupported
     } else {
-        Outcome::Closed(class(closed))
+        Outcome::Closed(closed)
     }
 }
 

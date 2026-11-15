@@ -122,6 +122,8 @@ pub(crate) enum Wake {
     Note(Note),
     /// The warm attempt's window may have closed.
     Expired,
+    /// The lane took a job off its queue, so work a full queue refused may fit now.
+    Room,
 }
 
 /// A version this brain saw fail its audit.
@@ -183,6 +185,9 @@ impl Claude {
     }
 
     pub(crate) fn view(&self) -> ClaudeCodeView {
+        if self.full && self.view == ClaudeCodeView::Unavailable {
+            return ClaudeCodeView::Busy;
+        }
         self.view
     }
 
@@ -205,8 +210,12 @@ impl Claude {
             .lane
             .as_ref()
             .is_some_and(|lane| lane.submit(self.generation, work));
+        let drained = admitted && self.full && self.view == ClaudeCodeView::Unavailable;
         self.out = admitted.then_some(work);
         self.full = !admitted;
+        if drained {
+            self.view = ClaudeCodeView::Finding;
+        }
         if !admitted {
             self.view = ClaudeCodeView::Unavailable;
             self.revoke_all();
@@ -518,7 +527,7 @@ impl Claude {
     /// `ModelUnavailable` while it's being found or is turned off; a full queue is Busy, with
     /// Retry.
     fn reason(&self) -> UserError {
-        let key = match self.view {
+        let key = match self.view() {
             ClaudeCodeView::NotFound => ErrorKey::ClaudeCodeNotFound,
             ClaudeCodeView::SignedOut { .. } | ClaudeCodeView::SigningIn => {
                 ErrorKey::ClaudeCodeSignedOut
@@ -526,7 +535,7 @@ impl Claude {
             ClaudeCodeView::PolicyFailed(_) => ErrorKey::ClaudeCodePolicy,
             ClaudeCodeView::AuditFailed(_) => ErrorKey::ClaudeCodeAuditFailed,
             ClaudeCodeView::CleanupPending => ErrorKey::ClaudeCodeCleanupPending,
-            ClaudeCodeView::Unavailable if self.full => return busy(),
+            ClaudeCodeView::Busy => return busy(),
             ClaudeCodeView::Unavailable => ErrorKey::ClaudeCodeUnavailable,
             ClaudeCodeView::Finding | ClaudeCodeView::TurnedOff => return model_unavailable(),
             ClaudeCodeView::Unsupported(_)
@@ -865,6 +874,13 @@ impl Claude {
         // deadline, so it ends at its expiry.
         let expiry = self.warm.as_ref().and_then(Attempt::expires);
         let left = expiry.map(|expiry| expiry.saturating_duration_since(self.clock.now()));
+        let room = self.lane.as_ref().filter(|_| self.full).map(Lane::room);
+        let room = async {
+            match room {
+                Some(room) => room.notified().await,
+                None => std::future::pending().await,
+            }
+        };
         let Self { lane, notes, .. } = self;
         let lane = async {
             match lane {
@@ -875,6 +891,7 @@ impl Claude {
         tokio::select! {
             done = lane => Wake::Lane(done),
             Some(note) = notes.1.recv() => Wake::Note(note),
+            () = room => Wake::Room,
             () = tokio::time::sleep(left.unwrap_or_default()), if left.is_some() => Wake::Expired,
         }
     }
@@ -894,6 +911,11 @@ impl Claude {
                 }
                 false
             }
+            Wake::Room if self.full => {
+                self.find();
+                true
+            }
+            Wake::Room => false,
         }
     }
 

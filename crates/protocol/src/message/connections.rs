@@ -198,10 +198,12 @@ pub enum ClaudeCodeView {
     /// was started.
     InUse,
     /// Claude Code can't take work: a call's processes weren't confirmed ended, so nothing starts
-    /// until Kumochi restarts, or a call couldn't be queued.
+    /// until Kumochi restarts.
     Unavailable,
     /// An admitted discovery round is checking the install and sign-in.
     Finding,
+    /// The lane's queue was too full to take the last call; it drains by itself.
+    Busy,
 }
 
 /// Why a found Claude Code isn't used.
@@ -471,6 +473,22 @@ mod tests {
         ] {
             assert_eq!(validate_anthropic_key(text), Err(reason));
         }
+    }
+
+    #[test]
+    fn claude_codes_last_views_keep_their_wire_tags() {
+        for (view, tag) in [
+            (ClaudeCodeView::Unavailable, 10),
+            (ClaudeCodeView::Finding, 11),
+            (ClaudeCodeView::Busy, 12),
+        ] {
+            assert_eq!(
+                postcard::to_stdvec(&view).expect("encode"),
+                [tag],
+                "{view:?}"
+            );
+        }
+        assert!(postcard::from_bytes::<ClaudeCodeView>(&[13]).is_err());
     }
 
     #[test]

@@ -13,7 +13,6 @@ use super::client::Holds as Kind;
 use super::context::ScreenContext;
 use super::elements::{ElementTree, OpenElements, Wake};
 use super::encode::JPEG_CAP;
-use super::mask::Completeness;
 use super::native::{CaptureThread, Job};
 use super::reader::{CONNECTION_TIMEOUT, TRANSACTION_TIMEOUT};
 #[cfg(debug_assertions)]
@@ -63,12 +62,7 @@ pub(crate) enum Request {
         key: Key,
         target: ElementTarget,
     },
-    /// The hold's one walk of the captured window, kept in the worker for the seal's masks; only
-    /// how complete they are comes back.
-    Walk {
-        key: Key,
-    },
-    /// The held frame's one image, after its walk; the frame is released whatever the answer.
+    /// The held frame's one image, as captured; the frame is released whatever the answer.
     Seal(Key),
     Drop(Key),
     Retire(Owner),
@@ -83,7 +77,6 @@ pub(crate) enum Reply {
     Acquired(Key, FrameMeta),
     Complete(Key),
     Elements(Key, ElementTree),
-    Walked(Key, Completeness),
     Sealed(Key, ScreenContext),
     Released(Owner, Option<CaptureId>),
     Refused(Refusal),
@@ -210,12 +203,12 @@ fn run(
     let mut live = false;
     let mut expires = None;
     let mut capturing: Option<Capture> = None;
-    let mut walking: Option<(u64, Key, Instant, Answer)> = None;
+    let mut walking: Option<(u64, Key, Instant)> = None;
     let mut releasing = Vec::new();
     loop {
         let deadline = expires
             .into_iter()
-            .chain(walking.map(|(_, _, until, _)| until))
+            .chain(walking.map(|(_, _, until)| until))
             .min();
         let event = match deadline {
             Some(until) => events
@@ -298,8 +291,7 @@ fn run(
                         }
                         None
                     }
-                    Request::Elements { key, target } => Some((key, target, Answer::Tree)),
-                    Request::Walk { key } => Some((key, ElementTarget::Foreground, Answer::Masks)),
+                    Request::Elements { key, target } => Some((key, target)),
                     #[cfg(debug_assertions)]
                     Request::Fault(_) => None,
                     Request::Seal(key) => {
@@ -346,7 +338,7 @@ fn run(
                         None
                     }
                 };
-                if let Some((key, target, summary)) = walk {
+                if let Some((key, target)) = walk {
                     if !live || current != Some(key) || capturing.is_some() || walking.is_some() {
                         send(id, Reply::Refused(Refusal::Stale))?;
                     } else {
@@ -361,9 +353,9 @@ fn run(
                                     .expect("validated reader")
                                     .begin(job)
                                 {
-                                    Ok(()) => walking = Some((id, key, until, summary)),
+                                    Ok(()) => walking = Some((id, key, until)),
                                     Err(walked) => {
-                                        send(id, answer(summary, key, walked.tree, &screen))?;
+                                        send(id, Reply::Elements(key, walked.tree))?;
                                         if walked.retire {
                                             return Ok(());
                                         }
@@ -371,7 +363,7 @@ fn run(
                                 }
                             }
                             Ok(Err(walked)) => {
-                                send(id, answer(summary, key, walked.tree, &screen))?;
+                                send(id, Reply::Elements(key, walked.tree))?;
                                 if walked.retire {
                                     return Ok(());
                                 }
@@ -432,7 +424,7 @@ fn run(
             Err(()) => return Ok(()),
             Ok(None) => {}
         }
-        if let Some((id, key, _, summary)) = walking {
+        if let Some((id, key, _)) = walking {
             if let Some(result) = screen
                 .reader
                 .as_mut()
@@ -444,11 +436,11 @@ fn run(
                     Err(Failure::Retire(_)) => return Ok(()),
                     Ok(walked) if walked.retire => return Ok(()),
                     Ok(walked) if live && current == Some(key) => {
-                        send(id, answer(summary, key, walked.tree, &screen))?;
+                        send(id, Reply::Elements(key, walked.tree))?;
                     }
                     _ => send(id, Reply::Refused(Refusal::Stale))?,
                 }
-            } else if walking.is_some_and(|(_, _, until, _)| now() >= until) {
+            } else if walking.is_some_and(|(_, _, until)| now() >= until) {
                 return Ok(());
             }
         }
@@ -457,21 +449,6 @@ fn run(
                 send(id, Reply::Released(owner, capture))?;
             }
         }
-    }
-}
-
-/// What a walk answers: its tree for `Elements`; for `Walk`, only how complete its masks are, so
-/// no window text leaves the worker.
-#[derive(Clone, Copy)]
-enum Answer {
-    Tree,
-    Masks,
-}
-
-fn answer(summary: Answer, key: Key, tree: ElementTree, screen: &Screen) -> Reply {
-    match summary {
-        Answer::Masks => Reply::Walked(key, screen.completeness()),
-        Answer::Tree => Reply::Elements(key, tree),
     }
 }
 

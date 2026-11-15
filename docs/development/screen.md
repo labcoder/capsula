@@ -198,8 +198,10 @@ sequenceDiagram
 The portable pixel path borrows a committed `RawFrame` through `sanitize`. It clips every
 `MaskSet` rectangle to the physical display and writes opaque black in place, then lends a
 `SanitizedFrame` stamped with the mask generation. An uncommitted frame is refused as stale.
-Pixel consumers accept only this sanitized type. Adding a password rectangle bumps the mask
-generation; sanitizing again applies all masks idempotently before another encode.
+Pixel consumers accept only this sanitized type. Adding a rectangle bumps the mask generation;
+sanitizing again applies all masks idempotently before another encode. A hold's seal passes an
+empty mask set, so nothing is painted. The walk, mask and OCR code has no production caller and
+waits for the study after P3 (OSC-775).
 
 Masks belong to one capture: another capture's mask set is refused as stale. Every sanitized
 frame and encoded image carries the capture's mask completeness (`Pending`, `Complete`,
@@ -228,12 +230,13 @@ floating-point coordinates must be validated as finite by their first parser. Im
 output contains only dimensions, byte counts and mask generations,
 and encoding errors expose only a fixed numeric code, never pixels or foreign error text.
 
-Only a hold's seal calls them, and the shell doesn't send screen holds yet. Nothing here captures
-another frame.
+Only a hold's seal calls them, with an empty mask set, and the shell doesn't send screen holds
+yet. Nothing here captures another frame.
 
 ## Regional OCR
 
-`screen/ocr.rs` accepts only `SanitizedFrame`. Sanitizing records the exact clipped physical
+Nothing in production calls OCR; like the walk and masks, it waits for the study after P3
+(OSC-775). `screen/ocr.rs` accepts only `SanitizedFrame`. Sanitizing records the exact clipped physical
 rectangles it painted at that generation; these, not a later independent mask list, filter OCR
 words. `OcrRegion` comes from the focus crop's `CaptureTransform` or a readable completed
 `ElementTree` window belonging to that capture. Regions clip to the captured display; empty
@@ -374,18 +377,16 @@ capture thread resolves the window under it and captures that window alone. A re
 answers that hold only: there is no screen for it, and the same capturer serves the next hold.
 Only `Retire` ends the worker.
 
-A hold walks with `Walk { key }`: the same walk as `Elements` on the captured window, but the
-tree stays in the worker for the seal's masks, and only `Walked(key, Completeness)` comes back,
-so no window text reaches the brain.
+A hold's picture is sent as captured. The hold doesn't walk the window's elements, and nothing
+in its picture is looked for, painted over or refused for what it shows: Kumochi doesn't hide
+passwords or other sensitive content in it.
 
-After the element walk, `Seal` hands out the hold's one image as a `ScreenContext`: the frame
-masked and encoded as an overview JPEG, with its `CaptureTransform`. It seals only when the
-hold's one walk read the captured window itself (its window and process) and found every
-password mask, and refuses with `Unmasked` otherwise. Then, before masking, it checks on the
-serve thread that the window is still the one captured: the same process and creating thread,
-frame and DPI, and not minimised, cloaked or capture-protected. Anything else refuses with
-`WindowChanged`. A closed window fails that check at once. The frame is scrubbed and freed
-whatever the answer, so a second `Seal` is `Stale`.
+`Seal` hands out the hold's one image as a `ScreenContext`: the frame encoded as an overview
+JPEG, with its `CaptureTransform`. Before encoding, it checks on the serve thread that the window
+is still the one captured: the same process and creating thread, frame and DPI, and not
+minimised, cloaked or capture-protected. Anything else refuses with `WindowChanged`. A closed
+window fails that check at once. The frame is scrubbed and freed whatever the answer, so a
+second `Seal` is `Stale`.
 
 The check's limit: a window destroyed and replaced between the capture and `Seal` by another
 with the same handle value, process, creating thread, frame and DPI would pass. Handle values are
@@ -393,8 +394,8 @@ said to carry a reuse counter, which isn't documented. Off Windows, no window is
 
 The JPEG is capped at 2 MiB (`JPEG_CAP`), a guess until real windows are measured. The encoder
 writes into one buffer allocated at the cap, so growth never copies it, and an image over the cap
-refuses with `TooLarge`; it is never downscaled further. `TooLarge`, `Unmasked` and
-`Ambiguous` are ordinary refusals.
+refuses with `TooLarge`; it is never downscaled further. `TooLarge` and `Ambiguous` are
+ordinary refusals. No seal sends `Unmasked` now.
 
 The JPEG's bytes are user content. `ScreenContext` zeroes them on drop and its Debug prints only
 the byte count and size. The encoder's buffers (the resampled RGB and the JPEG) are zeroed on
@@ -436,12 +437,12 @@ and 4 MiB assembly buffer aren't excluded while they hold it, which lasts until 
 The registration is in-process only. When Windows refuses it, capture carries on, and that
 buffer's contents can appear in an error report written while it holds them.
 
-Chromium's control view can miss a rendered page's fields. Every `Chrome_RenderWidgetHostHWND`
+Chromium's control view can miss a rendered page's fields, which matters to the dormant element
+walk below. Every `Chrome_RenderWidgetHostHWND`
 element the walk passes through starts a page, and each page needs 20 named elements of its own
-among those the walk stored; otherwise the masks are `Partial` and the hold doesn't seal. A page
-first reached after the walk's element or byte cut has none stored, so it's `Partial` too, and a
-large page the walk cuts short refuses for now. The threshold is a guess until a real page is
-measured.
+among those the walk stored; otherwise the masks are `Partial`. A page first reached after the
+walk's element or byte cut has none stored, so it's `Partial` too. The threshold is a guess until
+a real page is measured.
 
 ## The brain's hold client
 
@@ -475,8 +476,7 @@ hold pays this way.
   when the counter can't be read), a random nonce and the connected shell's pid. It streams
   `Acquired`, then `Complete`, and returns the `Held` frame with the worker generation that
   holds it.
-- **`walk(held)`** and **`seal(held)`** answer only when that same generation replies, for that
-  same key. Anything else is `Lost`: a replacement holds nothing. A `Sealed` for another key is
+- **`seal(held)`** answers only when that same generation replies, for that same key. Anything else is `Lost`: a replacement holds nothing. A `Sealed` for another key is
   dropped, which zeroes it.
 - **Fences across respawn.** The worker's retirement fence ends with its process, so the client
   keeps its own: `retire(owner)` raises it first, and a `context` for a hold at or below it is
@@ -512,7 +512,7 @@ no choice, and no line at all (`Discarded`) when the user switched screen holds 
 retired and any image zeroed either way. The gate opens only on the default model, so a thread pinned
 to a model that can see goes voice-only while the default can't: a known limit.
 
-The task runs `context`, `walk` and `seal` by the deadline that check set. It never
+The task runs `context` and `seal` by the deadline that check set. It never
 touches the part. Each answer comes back as a `ScreenEvent` keyed by the hold and the worker
 generation, on a channel the brain's hold loop selects beside audio and decoding:
 - `Held` fills in the part's generation, and sends `CaptureDone`, which releases the lease. A
@@ -522,7 +522,7 @@ generation, on a channel the brain's hold loop selects beside audio and decoding
 - Anything for a hold that isn't pending, a part that isn't `Waiting` or another generation is
   dropped: an image zeroes, and a `Held` is retired on the worker that holds it.
 
-Every closer sets the part's stop flag. The task checks it before `walk` and before `seal`, and
+Every closer sets the part's stop flag. The task checks it before `seal`, and
 retires its frame instead of going on. A refusal after `Held` retires before it's reported, so the
 worker never keeps a frame for a part that has ended. A lapse of the part's own lease before its
 frame is captured closes it as `NotReady`, since a later frame can't be said to exclude Kumochi's
@@ -533,10 +533,24 @@ windows; after `CaptureDone`, or for any other lease, a lapse is ignored.
 | `NotReady` | `Expired`, `Unsupported` (which also turns screen holds off until the brain restarts, below), `Busy`, a fault, a loss or the deadline, a lapsed lease, a recognition too old for its lease, or still `Waiting` when the words are; `Reused` too, with a `debug_assert`, because only a brain bug sends it |
 | `NothingThere` | `NoWindow` |
 | `CantShare` | `Minimized`, `Cloaked`, `Elevated`, `Protected`, `Excluded` |
-| `Unreadable` | `Unmasked`, `Ambiguous` |
+| `Unreadable` | `Ambiguous`, and `Unmasked`, which no worker sends now |
 | `TooLarge` | `TooLarge`, and `Invalid`, which a window over 8,192 pixels on a side gets |
 | `Changed` | `WindowChanged`, `DisplayChanged`, `Stale` |
 | `ModelCantSee` | none: the thread's own model failed the gate |
+
+When the brain takes a hold it logs `hold taken` at info, once, with `hold = "voice"` or
+`"screen"`; a screen hold's line adds whether its part started (`Ok(())`) or why not: `Gate` with
+the gate's `ScreenOff` reason, `TooLate`, `NotStarted` (no worker), or `Repeated`.
+
+Each part then logs once how it ended. A worker answer the part accepts logs `hold screen part
+sealed`, or `hold screen part closed` with its `Closed` value: the refusal, `Busy`, the numeric
+fault or the loss, never anything from the window. The line names which refusal a class came
+from, such as `Ambiguous` for `Unreadable`. The brain's own closures log the same closed line:
+`recognized too late` for a recognition older than `LATEST_START`; `still waiting` for a part closed while waiting, because its lease lapsed,
+its hold ended or its words were ready first; `hold ended` for a ready image dropped without a
+run; and the thread gate's class (`None` when screen holds were switched off) for a ready image
+the gate withdrew. A part the worker already closed isn't logged again when the gate re-closes it,
+and an answer that arrives after the part closed is dropped without a line.
 
 Every way a hold ends reaches the part through one of two places:
 - the hold's invalidation, which covers cancel and Esc, a turn, an Ask, `ShellLost`, a model or
@@ -561,8 +575,8 @@ physical bounds and password/offscreen flags. Password and offscreen names are n
 from that cache. Root handles are checked for top-level visibility and ownership before the UIA
 lookup, and the native window owner is checked again after it. The worker and the
 connected shell are excluded by pid, with Kumochi process-image names also excluded by the
-portable policy. Other platforms return E_NOTIMPL. In production only a hold's `Walk` runs it;
-nothing sends `Elements`.
+portable policy. Other platforms return E_NOTIMPL. Nothing in production runs it: holds don't
+walk, nothing sends `Elements`, and it waits for the study after P3 (OSC-775).
 
 One pre-order walk retains at most 512 elements, depth 16, 128 characters per name and 60,000
 bytes of element JSON (commas and the reply envelope are additional). The byte cap usually binds
@@ -613,7 +627,7 @@ owner-approved session; short unlocked dry runs do not qualify as timing measure
 
 ## Capture-scoped element operation
 
-`Walk { key }` and `Elements { key, target }` spend the held frame's walk once, including refused
+`Elements { key, target }` spends the held frame's walk once, including refused
 or unavailable attempts. Another hold's key is Stale and spends nothing; a second attempt for the
 held capture is Reused. Each new `Context` drops authority and installs a fresh mask sink before
 checking its ticket, so refused captures leave no walkable frame and late writes reach only the
@@ -643,7 +657,6 @@ reads until it's replaced: the actor opens its reader once. The reader thread di
 source initialization and retries it for the next walk; a successfully initialized source stays on
 that thread. Neither retry replays a spent walk or renews capture authority.
 
-The hold client accepts only a `Walked` answer for its own hold from the worker that holds the
-frame. Refusals pass through; any other answer is a loss. There is no cancel operation yet;
+The hold client sends no `Elements`: a hold seals without a walk. There is no cancel operation yet;
 new captures replace authority and the mask sink, and worker termination tears down stuck threads.
 No live window is read by the fake-source tests; they do not verify native UIA behavior or timing.

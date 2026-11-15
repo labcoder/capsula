@@ -517,7 +517,7 @@ async fn a_disconnect_the_lane_cant_take_marks_nothing_and_can_be_asked_again() 
             assert!(lane.submit(0, Work::Version), "an old job fills a slot");
         }
         claude.op(ConnectionOp::DisconnectClaudeCode);
-        assert_eq!(claude.view(), ClaudeCodeView::Unavailable);
+        assert_eq!(claude.view(), ClaudeCodeView::Busy);
         assert!(!claude.cleaning, "nothing to finish");
         assert_eq!(claude.out, None);
         // M1: a full queue drains by itself, so it's Busy with Retry, never the stuck lane's
@@ -592,6 +592,7 @@ async fn a_full_queue_reads_busy_only_until_the_lane_takes_a_job() {
             assert!(lane.submit(0, Work::Version), "an old job fills a slot");
         }
         claude.op(ConnectionOp::DisconnectClaudeCode);
+        assert_eq!(claude.view(), ClaudeCodeView::Busy);
         assert_eq!(
             claude.availability(),
             Availability::Unavailable(reason(
@@ -620,6 +621,41 @@ async fn a_full_queue_reads_busy_only_until_the_lane_takes_a_job() {
     );
     // shortcut: the kept lock lives until the test process ends, leaving this scratch folder.
     assert!(!claude.close(soon()).await, "a stuck lane keeps its lock");
+}
+
+/// L2: an op the drained queue takes that isn't a Version find reads `Finding` until it settles,
+/// never the stuck lane's `Unavailable`.
+#[tokio::test]
+async fn an_op_the_drained_queue_takes_reads_finding_not_unavailable() {
+    let base = Base::new("drained-cleanup");
+    let (mut host, _switches) = host(&base, "loginhang");
+    host.terminate = end_once_let_go;
+    let mut claude = Claude::start(Lane::start(host).expect("lane"), SignInStore::FileWithDacl);
+    settle(&mut claude).await;
+    claude.op(ConnectionOp::ConnectClaudeCode);
+    started(&base, "auth login").await;
+    {
+        let _ending = ENDING.lock().unwrap_or_else(PoisonError::into_inner);
+        let lane = claude.lane.as_ref().expect("a lane");
+        for _ in 0..LANE_QUEUE {
+            assert!(lane.submit(0, Work::Version), "an old job fills a slot");
+        }
+        claude.op(ConnectionOp::DisconnectClaudeCode);
+        assert_eq!(claude.view(), ClaudeCodeView::Busy);
+        claude.finds = false;
+    }
+    timeout(Duration::from_secs(10), async {
+        while claude.out.is_none() {
+            let wake = claude.next().await;
+            claude.wake(wake);
+        }
+    })
+    .await
+    .expect("taken once the queue drains");
+    assert_eq!(claude.out, Some(Work::Cleanup));
+    assert_eq!(claude.view(), ClaudeCodeView::Finding);
+    settle(&mut claude).await;
+    assert!(claude.close(soon()).await);
 }
 
 /// Makes every call's processes unconfirmed once set; only the test below sets it.

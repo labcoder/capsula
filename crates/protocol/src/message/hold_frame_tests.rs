@@ -5,7 +5,9 @@ use super::{
     GestureId, LeaseGeneration, Phase, RunId, RunOrigin, ScreenChoice, ThreadId,
 };
 use crate::frame::{self, HEADER_LEN, Pipe};
-use crate::geometry::{PhysicalPoint, PhysicalRect, WindowRef};
+use crate::geometry::{
+    PathTooLong, PhysicalPoint, PhysicalRect, PointerPath, ReleasePointer, WindowRef,
+};
 use crate::tap::{self, Direction, Record, Tapped};
 
 const GESTURE: GestureId = GestureId(u32::MAX);
@@ -335,4 +337,126 @@ fn run_origins_screen_choices_and_refusals_round_trip() {
             size,
         );
     }
+}
+
+#[test]
+fn a_screen_holds_controls_append_redacted_tags_and_fit_the_control_cap() {
+    let recognized = ControlToBrain::ScreenHoldRecognized {
+        gesture: GESTURE,
+        thread: Some(ThreadId(u64::MAX)),
+        selection: u64::MAX,
+        t_qpc: u64::MAX,
+    };
+    let corner = PhysicalPoint([i32::MIN, i32::MAX]);
+    let release = ControlToBrain::ScreenRelease {
+        gesture: GESTURE,
+        lease: LEASE,
+        t_qpc: u64::MAX,
+        excluded_qpc: u64::MAX,
+        pointer: ReleasePointer(corner),
+        path: PointerPath(vec![corner; 2_048]),
+    };
+    for (message, tag, size, op) in [
+        (recognized, 29, 37, "ScreenHoldRecognized"),
+        (release, 30, 20_523, "ScreenRelease"),
+    ] {
+        assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], tag);
+        round_trip(&message, Pipe::Control, size);
+        redacted(&message, Direction::ToBrain, op, size);
+    }
+    let recognized = ControlToBrain::ScreenHoldRecognized {
+        gesture: GestureId(1),
+        thread: None,
+        selection: 2,
+        t_qpc: 3,
+    };
+    assert_eq!(
+        postcard::to_allocvec(&recognized).expect("encodes"),
+        [29, 1, 0, 2, 3]
+    );
+    let release = |path| ControlToBrain::ScreenRelease {
+        gesture: GestureId(1),
+        lease: LeaseGeneration(2),
+        t_qpc: 3,
+        excluded_qpc: 4,
+        pointer: ReleasePointer(PhysicalPoint([5, -6])),
+        path: PointerPath(path),
+    };
+    for (path, bytes) in [
+        (Vec::new(), &[30, 1, 2, 3, 4, 10, 11, 0][..]),
+        (
+            vec![PhysicalPoint([7, 8]), PhysicalPoint([-1, 0])],
+            &[30, 1, 2, 3, 4, 10, 11, 2, 14, 16, 1, 0][..],
+        ),
+    ] {
+        let message = release(path);
+        assert_eq!(postcard::to_allocvec(&message).expect("encodes"), bytes);
+        round_trip(&message, Pipe::Control, bytes.len());
+    }
+}
+
+#[test]
+fn a_pointer_path_holds_at_most_2048_points() {
+    let path = |points| PointerPath(vec![PhysicalPoint([1, 2]); points]);
+    assert_eq!(path(0).check(), Ok(()));
+    assert_eq!(path(2_048).check(), Ok(()));
+    assert_eq!(path(2_049).check(), Err(PathTooLong));
+}
+
+#[test]
+fn where_the_user_pointed_is_absent_from_debug_and_from_the_tap() {
+    const IN_PATH: i32 = 1_357_924_680;
+    const AT_RELEASE: i32 = -1_246_813_579;
+    let message = ControlToBrain::ScreenRelease {
+        gesture: GestureId(1),
+        lease: LeaseGeneration(2),
+        t_qpc: 3,
+        excluded_qpc: 4,
+        pointer: ReleasePointer(PhysicalPoint([AT_RELEASE, AT_RELEASE])),
+        path: PointerPath(vec![PhysicalPoint([IN_PATH, IN_PATH])]),
+    };
+    assert_eq!(
+        format!("{message:?}"),
+        "ScreenRelease { gesture: GestureId(1), lease: LeaseGeneration(2), t_qpc: 3, \
+         excluded_qpc: 4, pointer: ReleasePointer { .. }, path: PointerPath(1) }"
+    );
+    let payload = postcard::to_allocvec(&message).expect("encodes");
+    let record =
+        Record::of(Pipe::Control, Direction::ToBrain, &message, payload.len()).expect("records");
+    let mut recording = Vec::new();
+    tap::write(&mut recording, &record).expect("writes");
+    let texts = [
+        format!("{message:?}"),
+        format!("{record:?}"),
+        record.describe(),
+    ];
+    let within = |bytes: &[u8], part: &[u8]| bytes.windows(part.len()).any(|at| at == part);
+    for sentinel in [IN_PATH, AT_RELEASE] {
+        let wire = postcard::to_allocvec(&sentinel).expect("encodes");
+        assert!(within(&payload, &wire), "the frame itself carries it");
+        let listed = format!("{wire:?}");
+        for text in &texts {
+            assert!(!text.contains(&sentinel.unsigned_abs().to_string()));
+            assert!(!text.contains(listed.trim_matches(['[', ']'])));
+        }
+        for bytes in [&wire[..], &sentinel.to_le_bytes(), &sentinel.to_be_bytes()] {
+            assert!(!within(&recording, bytes));
+        }
+    }
+}
+
+#[test]
+fn a_screen_picture_appends_a_held_screen_value() {
+    use super::HeldScreen;
+    assert_eq!(
+        postcard::to_allocvec(&HeldScreen::Screen).expect("encodes"),
+        [3]
+    );
+    let message = ControlToShell::HoldScreen {
+        gesture: GESTURE,
+        outcome: HeldScreen::Screen,
+    };
+    assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], 32);
+    round_trip(&message, Pipe::Control, 7);
+    redacted(&message, Direction::ToShell, "HoldScreen", 7);
 }

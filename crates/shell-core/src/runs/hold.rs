@@ -137,7 +137,7 @@ impl Runs {
         hold.screen = match outcome {
             HeldScreen::NotIncluded(class) => Some(ScreenLine::NotIncluded(class)),
             // History carries these.
-            HeldScreen::Attached | HeldScreen::Withdrawn => None,
+            HeldScreen::Attached | HeldScreen::Withdrawn | HeldScreen::Screen => None,
         };
         true
     }

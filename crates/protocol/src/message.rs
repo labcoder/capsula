@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::Secret;
-use crate::geometry::{PhysicalPoint, PhysicalRect, WindowRef};
+use crate::geometry::{PhysicalPoint, PhysicalRect, PointerPath, ReleasePointer, WindowRef};
 
 mod account;
 mod connections;
@@ -51,9 +51,9 @@ pub use scenes::{
     SceneDataError, SceneDescriptorV1, SceneFailure, SceneHeader, SceneSnapshotChunk,
 };
 pub use settings::{
-    AssistantName, DEFAULT_HOLD_TO_TALK, DEFAULT_SCREEN_HOLDS, DockPosition, MAX_NAME_CHARS,
-    MaxFrameRate, NameError, NotACap, OnboardingStep, SettingsOp, SettingsView, SttUnload,
-    UserName,
+    AssistantName, DEFAULT_HOLD_TO_TALK, DEFAULT_SCREEN_HOLDS, DEFAULT_SHOW_SCREEN, DockPosition,
+    MAX_NAME_CHARS, MaxFrameRate, NameError, NotACap, OnboardingStep, SettingsOp, SettingsView,
+    SttUnload, UserName,
 };
 pub use threads::{
     Effort, LISTED_MODELS_CALL_TOOLS, MAX_MODEL_NAME_CHARS, MAX_MODELS, MAX_SLUG_BYTES,
@@ -456,6 +456,36 @@ pub enum ControlToBrain {
         /// The generation whose stop completed.
         gesture: GestureId,
     },
+    /// The shell recognized a hold that shows the model the screen once it's released. It carries
+    /// no lease and no pointer: nothing of the screen is taken while the keys are down.
+    ScreenHoldRecognized {
+        /// The connection-local gesture.
+        gesture: GestureId,
+        /// The thread to continue, or a new thread when absent.
+        thread: Option<ThreadId>,
+        /// The Shell selection revision, as in [`Self::VoiceHoldRecognized`].
+        selection: u64,
+        /// When the hold was recognized, in QPC ticks.
+        t_qpc: u64,
+    },
+    /// A screen hold's keys were released: the shell took an exclusion lease and asks for one
+    /// picture of the display under the pointer. Answered by one [`ControlToShell::CaptureDone`]
+    /// or [`ControlToShell::CaptureFailed`], which ends the lease.
+    ScreenRelease {
+        /// The released gesture.
+        gesture: GestureId,
+        /// The exclusion lease protecting capture.
+        lease: LeaseGeneration,
+        /// When the keys were released, in QPC ticks.
+        t_qpc: u64,
+        /// When the lease's last window was excluded from capture, in QPC ticks. A frame drawn
+        /// before it may still show the shell.
+        excluded_qpc: u64,
+        /// The pointer at release, which picks the display.
+        pointer: ReleasePointer,
+        /// The pointer's path over the hold; empty when it never moved.
+        path: PointerPath,
+    },
 }
 
 /// What a thread's delete came to.
@@ -703,6 +733,8 @@ pub enum HeldScreen {
     /// The image was attached, then withdrawn because the user turned screen holds off before
     /// any request carried it. Only history carries it: no `HoldScreen` follows a withdrawal.
     Withdrawn,
+    /// The screen's picture, taken when the hold was released, was attached to the turn. Appended.
+    Screen,
 }
 
 /// Why a screen hold's window wasn't included.
@@ -715,7 +747,7 @@ pub enum ScreenClass {
     NothingThere,
     /// The window is minimised, cloaked, elevated, protected or Kumochi's own.
     CantShare,
-    /// The window's password masks couldn't be completed, or where a click lands couldn't be told.
+    /// The window under the pointer couldn't be told apart from one drawn over it.
     Unreadable,
     /// The window or its image was over the size cap.
     TooLarge,

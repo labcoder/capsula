@@ -256,6 +256,7 @@ pub(super) fn state(view: ClaudeCodeView) -> String {
         ClaudeCodeView::CleanupPending => "cleanup pending".to_owned(),
         ClaudeCodeView::InUse => "in use".to_owned(),
         ClaudeCodeView::Unavailable => "unavailable".to_owned(),
+        ClaudeCodeView::Busy => "busy".to_owned(),
     }
 }
 
