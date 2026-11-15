@@ -230,8 +230,7 @@ floating-point coordinates must be validated as finite by their first parser. Im
 output contains only dimensions, byte counts and mask generations,
 and encoding errors expose only a fixed numeric code, never pixels or foreign error text.
 
-Only a hold's seal calls them, with an empty mask set, and the shell doesn't send screen holds
-yet. Nothing here captures another frame.
+Only a hold's seal calls them, with an empty mask set. Nothing here captures another frame.
 
 ## Regional OCR
 
