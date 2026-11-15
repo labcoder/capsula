@@ -20,7 +20,7 @@ use crate::presenter::{Effect, Presenter};
 
 #[gpui::test]
 fn exhausted_page_ids_close_the_actual_link_not_only_the_view_models(cx: &mut TestAppContext) {
-    use crate::link::tests::{attended, connected, next, patient};
+    use crate::link::fixture::{attended, connected, next, patient};
     let link = attended("page-exhaustion");
     let events = patient(link.events);
     let session = connected(next(&events));

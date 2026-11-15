@@ -27,13 +27,13 @@ use super::{
     window::ConsumedStep,
 };
 
-pub(crate) const GENERATION: u64 = 1;
-pub(crate) const RUN: RunId = RunId(5);
-pub(crate) const LIVE: SceneId = SceneId(20);
-pub(crate) const FRAME: u32 = 40;
+pub const GENERATION: u64 = 1;
+pub const RUN: RunId = RunId(5);
+pub const LIVE: SceneId = SceneId(20);
+pub const FRAME: u32 = 40;
 
 /// Stages caches that hold nothing and charge the given bytes, for tests that never paint one.
-pub(crate) struct Charged(pub(crate) usize);
+pub struct Charged(pub usize);
 
 impl Stage for Charged {
     fn fixed_bytes(&self) -> usize {
@@ -52,7 +52,7 @@ impl SceneCache for Charged {
 }
 
 /// Every text measures 8 by 10, except one that can't be shaped.
-pub(crate) struct Shaper;
+pub struct Shaper;
 
 impl TextMeasure for Shaper {
     fn measure(
@@ -69,7 +69,7 @@ impl TextMeasure for Shaper {
     }
 }
 
-pub(crate) fn header() -> SceneHeader {
+pub fn header() -> SceneHeader {
     let source = br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":"diagram"}}"#;
     let Ok(Record::Begin(begin)) = parse_record(source) else {
         panic!("a begin record");
@@ -80,20 +80,20 @@ pub(crate) fn header() -> SceneHeader {
     }
 }
 
-pub(crate) fn step(source: &str) -> Step {
+pub fn step(source: &str) -> Step {
     let Ok(Record::Step(step)) = parse_record(source.as_bytes()) else {
         panic!("a step record");
     };
     step
 }
 
-pub(crate) fn rect(id: &str) -> Step {
+pub fn rect(id: &str) -> Step {
     step(&format!(
         r#"{{"step":{{"id":"{id}","put":[{{"shape":{{"id":"{id}","kind":"rect","box":[0,0,10,10]}}}}]}}}}"#
     ))
 }
 
-pub(crate) fn presenter() -> Presenter {
+pub fn presenter() -> Presenter {
     kumochi_scene::deferred::start().expect("the dropper starts");
     let surface = SurfaceGeometry::Overlay {
         default_canvas: [1920.0, 1080.0],
@@ -104,7 +104,7 @@ pub(crate) fn presenter() -> Presenter {
 }
 
 /// A connection whose brain described no v1 scene, so live frames apply at once.
-pub(crate) fn live() -> (Presenter, Instant) {
+pub fn live() -> (Presenter, Instant) {
     let mut presenter = presenter();
     let now = Instant::now();
     let effects = presenter
@@ -115,7 +115,7 @@ pub(crate) fn live() -> (Presenter, Instant) {
 }
 
 /// A frame as it arrives, admissions left to the caller.
-pub(crate) fn arrive(
+pub fn arrive(
     presenter: &mut Presenter,
     frame: DataToShell,
     now: Instant,
@@ -124,7 +124,7 @@ pub(crate) fn arrive(
 }
 
 /// A frame whose admissions run and answer at once, as a commit applied before the lane.
-pub(crate) fn data(
+pub fn data(
     presenter: &mut Presenter,
     frame: DataToShell,
     now: Instant,
@@ -138,7 +138,7 @@ pub(crate) fn data(
     clippy::panic_in_result_fn,
     reason = "a second admission lane is a test failure, not a stream error"
 )]
-pub(crate) fn settle(
+pub fn settle(
     presenter: &mut Presenter,
     mut effects: Vec<Effect>,
     now: Instant,
@@ -162,7 +162,7 @@ pub(crate) fn settle(
     }
 }
 
-pub(crate) fn commit_frame(scene: SceneId, index: u32, step: Step) -> DataToShell {
+pub fn commit_frame(scene: SceneId, index: u32, step: Step) -> DataToShell {
     DataToShell::SceneStepCommit {
         run: RUN,
         scene,
@@ -171,7 +171,7 @@ pub(crate) fn commit_frame(scene: SceneId, index: u32, step: Step) -> DataToShel
     }
 }
 
-pub(crate) fn begin(presenter: &mut Presenter, scene: SceneId, now: Instant) -> Vec<Effect> {
+pub fn begin(presenter: &mut Presenter, scene: SceneId, now: Instant) -> Vec<Effect> {
     let frame = DataToShell::SceneBegin {
         scene,
         header: header(),
@@ -179,7 +179,7 @@ pub(crate) fn begin(presenter: &mut Presenter, scene: SceneId, now: Instant) -> 
     data(presenter, frame, now).expect("a new scene")
 }
 
-pub(crate) fn commit(
+pub fn commit(
     presenter: &mut Presenter,
     scene: SceneId,
     index: u32,
@@ -189,7 +189,7 @@ pub(crate) fn commit(
     commit_as(presenter, RUN, scene, index, step, now)
 }
 
-pub(crate) fn commit_as(
+pub fn commit_as(
     presenter: &mut Presenter,
     run: RunId,
     scene: SceneId,
@@ -206,7 +206,7 @@ pub(crate) fn commit_as(
     data(presenter, frame, now)
 }
 
-pub(crate) fn acknowledge(
+pub fn acknowledge(
     presenter: &mut Presenter,
     scene: SceneId,
     revision: u32,
@@ -221,7 +221,7 @@ pub(crate) fn acknowledge(
     data(presenter, frame, now)
 }
 
-pub(crate) fn credit(effects: &[Effect]) -> u32 {
+pub fn credit(effects: &[Effect]) -> u32 {
     effects
         .iter()
         .map(|effect| match effect {
@@ -231,7 +231,7 @@ pub(crate) fn credit(effects: &[Effect]) -> u32 {
         .sum()
 }
 
-pub(crate) fn controls(effects: &[Effect]) -> Vec<&ControlToBrain> {
+pub fn controls(effects: &[Effect]) -> Vec<&ControlToBrain> {
     effects
         .iter()
         .filter_map(|effect| match effect {
@@ -241,7 +241,7 @@ pub(crate) fn controls(effects: &[Effect]) -> Vec<&ControlToBrain> {
         .collect()
 }
 
-pub(crate) fn jobs(effects: Vec<Effect>) -> Vec<PrepareJob> {
+pub fn jobs(effects: Vec<Effect>) -> Vec<PrepareJob> {
     effects
         .into_iter()
         .filter_map(|effect| match effect {
@@ -251,7 +251,7 @@ pub(crate) fn jobs(effects: Vec<Effect>) -> Vec<PrepareJob> {
         .collect()
 }
 
-pub(crate) fn recovery(effects: Vec<Effect>) -> RecoveryJob {
+pub fn recovery(effects: Vec<Effect>) -> RecoveryJob {
     let mut found = effects.into_iter().filter_map(|effect| match effect {
         Effect::Recover(job) => Some(job),
         _ => None,
@@ -261,13 +261,13 @@ pub(crate) fn recovery(effects: Vec<Effect>) -> RecoveryJob {
     job
 }
 
-pub(crate) fn only_job(effects: Vec<Effect>) -> PrepareJob {
+pub fn only_job(effects: Vec<Effect>) -> PrepareJob {
     let mut jobs = jobs(effects);
     assert_eq!(jobs.len(), 1);
     jobs.remove(0)
 }
 
-pub(crate) fn admissions(effects: Vec<Effect>) -> Vec<AdmitJob> {
+pub fn admissions(effects: Vec<Effect>) -> Vec<AdmitJob> {
     effects
         .into_iter()
         .filter_map(|effect| match effect {
@@ -277,20 +277,20 @@ pub(crate) fn admissions(effects: Vec<Effect>) -> Vec<AdmitJob> {
         .collect()
 }
 
-pub(crate) fn only_admission(effects: Vec<Effect>) -> AdmitJob {
+pub fn only_admission(effects: Vec<Effect>) -> AdmitJob {
     let mut admissions = admissions(effects);
     assert_eq!(admissions.len(), 1);
     admissions.remove(0)
 }
 
-pub(crate) fn zero_cut() -> StopCut {
+pub fn zero_cut() -> StopCut {
     StopCut {
         activated: 0,
         revealed: Bounded::default(),
     }
 }
 
-pub(crate) fn failed(scene: SceneId, index: u32, reason: SceneFailure) -> ControlToBrain {
+pub fn failed(scene: SceneId, index: u32, reason: SceneFailure) -> ControlToBrain {
     ControlToBrain::StepFailed {
         run: RUN,
         scene,
@@ -301,14 +301,11 @@ pub(crate) fn failed(scene: SceneId, index: u32, reason: SceneFailure) -> Contro
 }
 
 /// A live scene whose first step is preparing.
-pub(crate) fn preparing() -> (Presenter, Instant, PrepareJob) {
+pub fn preparing() -> (Presenter, Instant, PrepareJob) {
     preparing_for(GENERATION, Box::new(Charged(0)))
 }
 
-pub(crate) fn preparing_for(
-    generation: u64,
-    stage: Box<dyn Stage>,
-) -> (Presenter, Instant, PrepareJob) {
+pub fn preparing_for(generation: u64, stage: Box<dyn Stage>) -> (Presenter, Instant, PrepareJob) {
     let mut presenter = Presenter::new(
         SurfaceGeometry::Overlay {
             default_canvas: [1920.0, 1080.0],
@@ -352,11 +349,7 @@ pub(crate) fn preparing_for(
     (presenter, now, job)
 }
 
-pub(crate) fn described(
-    presenter: &mut Presenter,
-    scenes: &[SceneId],
-    now: Instant,
-) -> Vec<Effect> {
+pub fn described(presenter: &mut Presenter, scenes: &[SceneId], now: Instant) -> Vec<Effect> {
     let descriptors: Vec<_> = scenes
         .iter()
         .map(|scene| SceneDescriptorV1::new(*scene, 1, 1, 1).expect("counts"))
@@ -368,7 +361,7 @@ pub(crate) fn described(
         .expect("membership")
 }
 
-pub(crate) fn snapshot(scene: SceneId, step: Step) -> DataToShell {
+pub fn snapshot(scene: SceneId, step: Step) -> DataToShell {
     let events = vec![SceneEvent::Step {
         revision: 1,
         step: Arc::new(step),
@@ -386,7 +379,7 @@ pub(crate) fn snapshot(scene: SceneId, step: Step) -> DataToShell {
 }
 
 /// A connection recovering `scenes`, each with one step; the last snapshot starts the job.
-pub(crate) fn recovering(steps: Vec<(SceneId, Step)>) -> (Presenter, Instant, RecoveryJob) {
+pub fn recovering(steps: Vec<(SceneId, Step)>) -> (Presenter, Instant, RecoveryJob) {
     let mut presenter = presenter();
     let now = Instant::now();
     let ids: Vec<_> = steps.iter().map(|(scene, _)| *scene).collect();
@@ -402,14 +395,14 @@ pub(crate) fn recovering(steps: Vec<(SceneId, Step)>) -> (Presenter, Instant, Re
     (presenter, now, recovery(effects))
 }
 
-pub(crate) fn painter_fixture(stage: Box<dyn Stage>) -> (Presenter, SceneId) {
+pub fn painter_fixture(stage: Box<dyn Stage>) -> (Presenter, SceneId) {
     let drawing = step(
         r#"{"step":{"id":"draw","put":[{"shape":{"id":"triangle","kind":"polygon","points":[[0,0],[20,0],[0,20]],"fill":"blue"}},{"line":{"id":"edge","from":[30,0],"via":[[40,20]],"to":[50,0],"width":2,"dash":true}}]}}"#,
     );
     recovered_painter_fixture(stage, drawing)
 }
 
-pub(crate) fn table_painter_fixture(stage: Box<dyn Stage>) -> (Presenter, SceneId) {
+pub fn table_painter_fixture(stage: Box<dyn Stage>) -> (Presenter, SceneId) {
     use kumochi_scene::display::Prim;
 
     let (presenter, scene) = recovered_painter_fixture(
@@ -461,7 +454,7 @@ fn recovered_painter_fixture(stage: Box<dyn Stage>, drawing: Step) -> (Presenter
 
 /// Blocks the dropper until the returned sender drops, so whatever is discarded meanwhile stays
 /// alive in its queue instead of being destroyed where it was discarded.
-pub(crate) fn hold_dropper() -> mpsc::Sender<()> {
+pub fn hold_dropper() -> mpsc::Sender<()> {
     struct Gate(mpsc::Receiver<()>);
     impl Drop for Gate {
         fn drop(&mut self) {
@@ -475,7 +468,7 @@ pub(crate) fn hold_dropper() -> mpsc::Sender<()> {
 }
 
 /// Whether the dropper brings `probe` down to `owners` references within a few seconds.
-pub(crate) fn drained<T>(probe: &Arc<T>, owners: usize) -> bool {
+pub fn drained<T>(probe: &Arc<T>, owners: usize) -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Arc::strong_count(probe) > owners {
         if Instant::now() >= deadline {
@@ -490,7 +483,7 @@ pub(crate) fn drained<T>(probe: &Arc<T>, owners: usize) -> bool {
     clippy::fn_params_excessive_bools,
     reason = "whether the first host survives, as the recovery episode decides"
 )]
-pub(crate) fn host_recovery_fixture(stage: Box<dyn Stage>, survivor: bool) -> Presenter {
+pub fn host_recovery_fixture(stage: Box<dyn Stage>, survivor: bool) -> Presenter {
     let mut presenter = Presenter::new(
         SurfaceGeometry::Overlay {
             default_canvas: [1920.0, 1080.0],
@@ -536,22 +529,22 @@ pub(crate) fn host_recovery_fixture(stage: Box<dyn Stage>, survivor: bool) -> Pr
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct HostCharges {
-    pub(crate) semantic: usize,
-    pub(crate) rest: usize,
-    pub(crate) view: usize,
-    pub(crate) frame: usize,
-    pub(crate) cache: usize,
-    pub(crate) activation: usize,
+pub struct HostCharges {
+    pub semantic: usize,
+    pub rest: usize,
+    pub view: usize,
+    pub frame: usize,
+    pub cache: usize,
+    pub activation: usize,
 }
 
 impl HostCharges {
-    pub(crate) fn prepared(self) -> usize {
+    pub fn prepared(self) -> usize {
         self.rest + self.view + self.frame + self.cache
     }
 }
 
-pub(crate) fn host_ledger(
+pub fn host_ledger(
     presenter: &Presenter,
     ids: &[SceneId],
     generation: Option<u64>,
@@ -641,7 +634,7 @@ pub(crate) fn host_ledger(
     clippy::fn_params_excessive_bools,
     reason = "whether the episode's link is still connected"
 )]
-pub(crate) fn host_stale_begin(presenter: &mut Presenter, connected: bool) {
+pub fn host_stale_begin(presenter: &mut Presenter, connected: bool) {
     let effects = presenter
         .data(
             GENERATION,
@@ -663,21 +656,21 @@ pub(crate) fn host_stale_begin(presenter: &mut Presenter, connected: bool) {
 }
 
 /// Read-ahead positions per scene: prepared results not yet consumed, plus the running one.
-pub(crate) const WINDOW: usize = super::scene::WINDOW;
+pub const WINDOW: usize = super::scene::WINDOW;
 
 /// The scenes the presenter holds.
-pub(crate) fn scene_ids(presenter: &Presenter) -> Vec<SceneId> {
+pub fn scene_ids(presenter: &Presenter) -> Vec<SceneId> {
     presenter.scenes.keys().copied().collect()
 }
 
 /// How many prepared steps `scene` holds, and how many tickets wait behind them.
-pub(crate) fn held(presenter: &Presenter, scene: SceneId) -> (usize, usize) {
+pub fn held(presenter: &Presenter, scene: SceneId) -> (usize, usize) {
     let scene = &presenter.scenes[&scene];
     (scene.ready.len(), scene.queue.len())
 }
 
 /// The index of `scene`'s oldest prepared step.
-pub(crate) fn ready_head(presenter: &Presenter, scene: SceneId) -> u32 {
+pub fn ready_head(presenter: &Presenter, scene: SceneId) -> u32 {
     presenter.scenes[&scene]
         .ready
         .front()
@@ -687,28 +680,28 @@ pub(crate) fn ready_head(presenter: &Presenter, scene: SceneId) -> u32 {
 }
 
 /// Whether `scene` has nothing running and nothing waiting.
-pub(crate) fn idle(presenter: &Presenter, scene: SceneId) -> bool {
+pub fn idle(presenter: &Presenter, scene: SceneId) -> bool {
     let scene = &presenter.scenes[&scene];
     scene.running.is_none() && scene.queue.is_empty()
 }
 
 /// The revision of the layout `scene`'s next step prepares on.
-pub(crate) fn tip_revision(presenter: &Presenter, scene: SceneId) -> u32 {
+pub fn tip_revision(presenter: &Presenter, scene: SceneId) -> u32 {
     presenter.scenes[&scene].tip().revision()
 }
 
 /// The objects in `scene`'s committed view.
-pub(crate) fn object_count(presenter: &Presenter, scene: SceneId) -> usize {
+pub fn object_count(presenter: &Presenter, scene: SceneId) -> usize {
     presenter.scenes[&scene].state.view().object_count()
 }
 
 /// The steps `scene`'s committed view has activated.
-pub(crate) fn activated(presenter: &Presenter, scene: SceneId) -> u32 {
+pub fn activated(presenter: &Presenter, scene: SceneId) -> u32 {
     presenter.scenes[&scene].state.view().activated()
 }
 
 /// The source of the first step `scene` logged for recovery.
-pub(crate) fn first_logged_step(presenter: &Presenter, scene: SceneId) -> Arc<Step> {
+pub fn first_logged_step(presenter: &Presenter, scene: SceneId) -> Arc<Step> {
     let SceneEvent::Step { step, .. } = &presenter.scenes[&scene].state.view().recovery_log()[0]
     else {
         panic!("the committed source");
@@ -717,17 +710,17 @@ pub(crate) fn first_logged_step(presenter: &Presenter, scene: SceneId) -> Arc<St
 }
 
 /// What the scenes use of the one shell budget.
-pub(crate) fn usage(presenter: &Presenter) -> Usage {
+pub fn usage(presenter: &Presenter) -> Usage {
     presenter.global.usage()
 }
 
 /// The worker slots answers still hold.
-pub(crate) fn workers(presenter: &Presenter) -> usize {
+pub fn workers(presenter: &Presenter) -> usize {
     presenter.workers()
 }
 
 /// Shows `scene` at its rest with a fresh cache, as consumption will once it installs views.
-pub(crate) fn show_rest(presenter: &mut Presenter, scene: SceneId) {
+pub fn show_rest(presenter: &mut Presenter, scene: SceneId) {
     presenter
         .frames
         .borrow_mut()
@@ -738,56 +731,56 @@ pub(crate) fn show_rest(presenter: &mut Presenter, scene: SceneId) {
 }
 
 /// What the presenter charges against the prepared allowance.
-pub(crate) fn residency(presenter: &Presenter) -> usize {
+pub fn residency(presenter: &Presenter) -> usize {
     presenter.residency()
 }
 
 /// The paint work the presenter's scenes and retired frames hold.
-pub(crate) fn paint_work(presenter: &Presenter) -> PaintWork {
+pub fn paint_work(presenter: &Presenter) -> PaintWork {
     presenter.paint_work()
 }
 
 /// The charge consumed steps their owners still hold.
-pub(crate) fn returned(presenter: &Presenter) -> usize {
+pub fn returned(presenter: &Presenter) -> usize {
     presenter.returned.load(Ordering::Relaxed)
 }
 
 /// Samples every scene's view at `now_ms`.
-pub(crate) fn sample(presenter: &mut Presenter, now_ms: u64) -> (Sample, Vec<Effect>) {
+pub fn sample(presenter: &mut Presenter, now_ms: u64) -> (Sample, Vec<Effect>) {
     presenter.sample(now_ms)
 }
 
 /// The epoch and bound a shown overlay painted for `scene`.
-pub(crate) fn painted(frames: &Frames, scene: SceneId) -> Option<(u64, u32)> {
+pub fn painted(frames: &Frames, scene: SceneId) -> Option<(u64, u32)> {
     frames
         .painted(scene)
         .map(|painted| (painted.epoch, painted.bound))
 }
 
 /// Starts the selection for `gesture`.
-pub(crate) fn select(owner: &mut OverlayOwner, gesture: GestureId) -> Vec<overlay_input::Effect> {
+pub fn select(owner: &mut OverlayOwner, gesture: GestureId) -> Vec<overlay_input::Effect> {
     owner.select(gesture)
 }
 
 /// The region `id` names.
-pub(crate) fn region(id: u64) -> RegionId {
+pub fn region(id: u64) -> RegionId {
     RegionId(id)
 }
 
 /// A consumed step, held so that dropping it returns its bytes.
-pub(crate) struct ChargedStep {
+pub struct ChargedStep {
     _step: ConsumedStep,
 }
 
 /// A step consumed through [`consume_ready`], charged until `step` drops.
-pub(crate) struct Consumption {
-    pub(crate) step: ChargedStep,
-    pub(crate) index: u32,
-    pub(crate) effects: Result<Vec<Effect>, Broken>,
+pub struct Consumption {
+    pub step: ChargedStep,
+    pub index: u32,
+    pub effects: Result<Vec<Effect>, Broken>,
 }
 
 /// Activates `scene`'s oldest prepared step, which must be `index`, as the activation owner will.
-pub(crate) fn consume_ready(
+pub fn consume_ready(
     presenter: &mut Presenter,
     scene: SceneId,
     index: u32,

@@ -59,7 +59,7 @@ const READ_BUFFER: usize = 64 * 1024;
 
 /// What the UI shows about the brain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum LinkState {
+pub enum LinkState {
     Connecting,
     Connected,
     Reconnecting,
@@ -68,7 +68,7 @@ pub(crate) enum LinkState {
 
 /// What the link tells the UI thread, in the order it happened. Nothing from the brain comes
 /// before `Connected`, and none of a connection's messages after its next state.
-pub(crate) enum LinkEvent {
+pub enum LinkEvent {
     DrawingNotice {
         generation: u64,
         key: ErrorKey,
@@ -209,7 +209,7 @@ impl fmt::Debug for LinkEvent {
 /// rather than one UI update per frame.
 const EVENT_BATCH: usize = 256;
 
-pub(crate) enum Batch {
+pub enum Batch {
     Plain(Vec<LinkEvent>),
     Scene(Deferred<Vec<LinkEvent>>),
 }
@@ -243,7 +243,7 @@ impl std::ops::DerefMut for Batch {
 }
 
 impl Batch {
-    pub(crate) fn attribute(&mut self, bytes: usize) {
+    pub fn attribute(&mut self, bytes: usize) {
         if let Self::Scene(events) = self {
             events.attribute(bytes);
         }
@@ -251,7 +251,7 @@ impl Batch {
 }
 
 /// Protects scene batches through lost delivery; ordinary batches free in place.
-pub(crate) fn batch(first: LinkEvent, rest: &Receiver<LinkEvent>) -> Batch {
+pub fn batch(first: LinkEvent, rest: &Receiver<LinkEvent>) -> Batch {
     let mut events = vec![first];
     while events.len() < EVENT_BATCH
         && let Ok(event) = rest.try_recv()
@@ -281,7 +281,7 @@ pub(crate) fn batch(first: LinkEvent, rest: &Receiver<LinkEvent>) -> Batch {
 /// session of a connection that has ended do nothing, so nothing meant for one connection
 /// reaches the next.
 #[derive(Clone, Debug)]
-pub(crate) struct Session {
+pub struct Session {
     alive: Arc<AtomicBool>,
     /// Counts connections in this shell; the brain's incarnation can't, since the same brain may
     /// be reconnected to.
@@ -292,25 +292,25 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    pub(crate) fn alive(&self) -> Arc<AtomicBool> {
+    pub fn alive(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.alive)
     }
 
-    pub(crate) fn generation(&self) -> u64 {
+    pub fn generation(&self) -> u64 {
         self.generation
     }
 
-    pub(crate) fn incarnation(&self) -> Incarnation {
+    pub fn incarnation(&self) -> Incarnation {
         self.issue_origin.incarnation
     }
 
-    pub(crate) fn issue_session(&self) -> IssueSession {
+    pub fn issue_session(&self) -> IssueSession {
         self.issue_origin
     }
 
     /// Grants this connection's brain `bytes` more of data frames, once the UI has taken a frame
     /// that size. Grants add up until the data writer sends them. Never blocks or locks.
-    pub(crate) fn grant(&self, bytes: u32) {
+    pub fn grant(&self, bytes: u32) {
         // The writer sends whatever has added up after each message, so only the first grant
         // since the last send needs to wake it; a full queue wakes it anyway.
         if self.credit.bytes.fetch_add(bytes, Ordering::SeqCst) == 0
@@ -507,45 +507,45 @@ impl Shared {
 
 /// The UI's handle on the link.
 #[derive(Clone, Debug)]
-pub(crate) struct LinkHandle {
+pub struct LinkHandle {
     shared: Arc<Shared>,
     retry: Sender<()>,
     /// Closes when the link thread ends.
     done: Receiver<()>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     recording: Option<Sender<DataToBrain>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     control_recording: Option<Sender<ControlToBrain>>,
 }
 
 impl LinkHandle {
-    pub(crate) fn microphone_gate(&self) -> CollectionGate {
+    pub fn microphone_gate(&self) -> CollectionGate {
         self.shared.microphone.clone()
     }
-    pub(crate) fn choice_revision(&self) -> u64 {
+    pub fn choice_revision(&self) -> u64 {
         self.shared.choice.load(Ordering::Acquire)
     }
-    pub(crate) fn link_generation(&self) -> u64 {
+    pub fn link_generation(&self) -> u64 {
         self.shared.generations.load(Ordering::Acquire)
     }
-    pub(crate) fn track_input(&self, gesture: GestureId) {
+    pub fn track_input(&self, gesture: GestureId) {
         self.shared.input.store(gesture.0, Ordering::Release);
     }
-    pub(crate) fn input_is(&self, gesture: GestureId) -> bool {
+    pub fn input_is(&self, gesture: GestureId) -> bool {
         gesture.0 != 0 && self.shared.input.load(Ordering::Acquire) == gesture.0
     }
-    pub(crate) fn clear_input(&self, gesture: GestureId) {
+    pub fn clear_input(&self, gesture: GestureId) {
         let input = &self.shared.input;
         let _changed = input.compare_exchange(gesture.0, 0, Ordering::AcqRel, Ordering::Acquire);
     }
-    pub(crate) fn cancel_input(&self) -> bool {
+    pub fn cancel_input(&self) -> bool {
         self.cancel_input_gesture().is_some()
     }
-    pub(crate) fn cancel_input_gesture(&self) -> Option<GestureId> {
+    pub fn cancel_input_gesture(&self) -> Option<GestureId> {
         let shared = &self.shared;
         let gesture = shared.revoke_input()?;
         let cancel = ControlToBrain::GestureCancel { gesture };
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(recording) = &self.control_recording {
             let _queued = recording.try_send(cancel);
             return Some(gesture);
@@ -561,7 +561,7 @@ impl LinkHandle {
 
     /// Marks Quit, so the link starts no brain from here on. Cheap enough for the UI thread.
     /// Returns false when Quit was already under way.
-    pub(crate) fn begin_quit(&self) -> bool {
+    pub fn begin_quit(&self) -> bool {
         self.cancel_input();
         let first = !self.shared.quitting.swap(true, Ordering::SeqCst);
         // Wakes a link waiting for Retry, so it sees Quit and ends.
@@ -575,7 +575,7 @@ impl LinkHandle {
     /// a full control queue is tried again. Blocks for up to [`CONNECT_TIMEOUT`] plus
     /// [`QUIT_TIMEOUT`], so call it off the UI thread; if the brain never takes them, the
     /// deletes and Quit aren't sent.
-    pub(crate) fn finish_quit(&self) {
+    pub fn finish_quit(&self) {
         let deadline = Instant::now() + CONNECT_TIMEOUT + QUIT_TIMEOUT;
         let mut told = false;
         // shortcut: polls for the link's end; a joinable handle would avoid it, once Quit
@@ -606,7 +606,7 @@ impl LinkHandle {
 
     /// Holds a delete the user confirmed until [`LinkHandle::settle_delete`]; it's sent by
     /// [`LinkHandle::send_deletes`], and by Quit.
-    pub(crate) fn delete(&self, thread: ThreadId) {
+    pub fn delete(&self, thread: ThreadId) {
         self.cancel_input();
         self.shared.deletes().push(Held {
             thread,
@@ -617,7 +617,7 @@ impl LinkHandle {
 
     /// Queues the held deletes `session`'s connection hasn't been sent. False when some
     /// couldn't be: that connection has ended or its control queue is full. Never blocks.
-    pub(crate) fn send_deletes(&self, session: &Session) -> bool {
+    pub fn send_deletes(&self, session: &Session) -> bool {
         self.shared
             .outbox(session, |outbox| {
                 queue_deletes(outbox, &mut self.shared.deletes())
@@ -626,12 +626,12 @@ impl LinkHandle {
     }
 
     /// The brain answered `thread`'s delete, so it's no longer sent.
-    pub(crate) fn settle_delete(&self, thread: ThreadId) {
+    pub fn settle_delete(&self, thread: ThreadId) {
         self.shared.deletes().retain(|held| held.thread != thread);
     }
 
     /// Tries to reach the brain again after `Failed`.
-    pub(crate) fn retry(&self) {
+    pub fn retry(&self) {
         if self.retry.try_send(()).is_err() {
             tracing::debug!("a retry is already pending");
         }
@@ -639,7 +639,7 @@ impl LinkHandle {
 
     /// Queues a control message for `session`'s brain. False once that connection has ended, or
     /// when the brain has stopped reading. Never blocks.
-    pub(crate) fn send_control(&self, session: &Session, message: ControlToBrain) -> bool {
+    pub fn send_control(&self, session: &Session, message: ControlToBrain) -> bool {
         if let ControlToBrain::VoiceHoldStopped { gesture } = &message
             && let Some(retained) = self.retain_microphone_stop(*gesture)
         {
@@ -678,7 +678,7 @@ impl LinkHandle {
             }
             shared.queue_voice_control(out, message)
         };
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(recording) = &self.control_recording {
             let queued = send(recording);
             if !queued && mutation {
@@ -700,8 +700,8 @@ impl LinkHandle {
 
     /// Ends `session`'s connection, as a malformed frame does, so the link reconnects. Nothing
     /// happens once that connection has ended. Never blocks.
-    pub(crate) fn end(&self, session: &Session) {
-        #[cfg(test)]
+    pub fn end(&self, session: &Session) {
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(recording) = &self.control_recording
             && recording.capacity().is_some()
         {
@@ -714,12 +714,12 @@ impl LinkHandle {
     /// Queues a typed turn or a page request for `session`'s brain, like
     /// [`LinkHandle::send_control`]. A turn is counted once queued; one past the count ends the
     /// connection instead.
-    pub(crate) fn send_data(&self, session: &Session, message: DataToBrain) -> bool {
+    pub fn send_data(&self, session: &Session, message: DataToBrain) -> bool {
         let out = DataOut::Submit(message);
         if !session.alive.load(Ordering::Acquire) {
             return false;
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(recording) = &self.recording {
             let mut out = out;
             let DataOut::Submit(message) = &mut out else {
@@ -751,10 +751,10 @@ impl LinkHandle {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl LinkHandle {
     /// A handle with no link thread, pipe or outbox, so every send reports the connection gone.
-    pub(crate) fn detached() -> Self {
+    pub fn detached() -> Self {
         let (retry, _retries) = async_channel::bounded(1);
         let (_alive, done) = async_channel::bounded(1);
         Self {
@@ -766,7 +766,7 @@ impl LinkHandle {
         }
     }
 
-    pub(crate) fn recording() -> (Self, Receiver<DataToBrain>) {
+    pub fn recording() -> (Self, Receiver<DataToBrain>) {
         let (recording, requests) = async_channel::unbounded();
         let mut link = Self::detached();
         link.recording = Some(recording);
@@ -774,23 +774,23 @@ impl LinkHandle {
         (link, requests)
     }
 
-    pub(crate) fn record_controls(&mut self) -> Receiver<ControlToBrain> {
+    pub fn record_controls(&mut self) -> Receiver<ControlToBrain> {
         let (sender, receiver) = async_channel::unbounded();
         self.control_recording = Some(sender);
         receiver
     }
 
-    pub(crate) fn record_controls_bounded(&mut self) -> Receiver<ControlToBrain> {
+    pub fn record_controls_bounded(&mut self) -> Receiver<ControlToBrain> {
         let (sender, receiver) = async_channel::bounded(CONTROL_QUEUE);
         self.control_recording = Some(sender);
         receiver
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Session {
     /// A session with no connection behind it: its grants only add up here.
-    pub(crate) fn detached(generation: u64, incarnation: Incarnation) -> Self {
+    pub fn detached(generation: u64, incarnation: Incarnation) -> Self {
         let (wake, _sleeping) = async_channel::bounded::<DataOut>(1);
         Self {
             alive: Arc::new(AtomicBool::new(true)),
@@ -807,7 +807,7 @@ impl Session {
     }
 
     /// The credit granted and not yet sent.
-    pub(crate) fn granted(&self) -> u32 {
+    pub fn granted(&self) -> u32 {
         self.credit.bytes.load(Ordering::SeqCst)
     }
 }
@@ -823,7 +823,7 @@ struct Link {
 /// A link that hasn't started connecting, so the UI can arm the keyboard first. Dropping it
 /// unstarted ends the link, and Quit then waits for nothing.
 #[derive(Debug)]
-pub(crate) struct LinkStart {
+pub struct LinkStart {
     link: Link,
     events: Sender<LinkEvent>,
     retries: Receiver<()>,
@@ -835,7 +835,7 @@ pub(crate) struct LinkStart {
 ///
 /// # Errors
 /// Fails when the shell can't find its own path or session.
-pub(crate) fn prepare(events: Sender<LinkEvent>) -> std::io::Result<(LinkHandle, LinkStart)> {
+pub fn prepare(events: Sender<LinkEvent>) -> std::io::Result<(LinkHandle, LinkStart)> {
     let link = Link {
         brain: std::env::current_exe()?.with_file_name(BRAIN_EXE),
         session: platform::session_id()?,
@@ -851,9 +851,9 @@ fn start(link: Link, events: Sender<LinkEvent>) -> (LinkHandle, LinkStart) {
         shared: Arc::clone(&link.shared),
         retry,
         done,
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         recording: None,
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         control_recording: None,
     };
     let start = LinkStart {
@@ -870,7 +870,7 @@ impl LinkStart {
     ///
     /// # Errors
     /// Fails when the thread can't start.
-    pub(crate) fn spawn(self) -> std::io::Result<()> {
+    pub fn spawn(self) -> std::io::Result<()> {
         let Self {
             link,
             events,
@@ -1637,9 +1637,14 @@ fn write_data_frame(
     result
 }
 
+#[cfg(windows)]
+#[cfg(any(test, feature = "test-support"))]
+#[path = "link_fixture.rs"]
+pub mod fixture;
+
 #[cfg(all(test, windows))]
 #[path = "link_tests.rs"]
-pub(crate) mod tests;
+mod tests;
 
 #[cfg(test)]
 #[path = "link_delete_tests.rs"]

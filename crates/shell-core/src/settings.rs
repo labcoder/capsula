@@ -4,13 +4,14 @@ use std::collections::VecDeque;
 use std::fmt;
 
 use kumochi_protocol::message::{
-    AssistantName, DockPosition, ErrorKey, MaxFrameRate, NameError, OnboardingStep, PartState,
-    SettingsOp, SettingsView, SttUnload, UserError, UserName,
+    AssistantName, ConnectionKind, DockPosition, ErrorKey, MaxFrameRate, ModelChoice, ModelInfo,
+    NameError, OnboardingStep, PartState, SettingsOp, SettingsView, SttUnload, UserError, UserName,
 };
 
 use crate::strings::Text;
 
 mod dock;
+mod model;
 mod voice;
 pub use voice::{SpeechInputAction, SpeechInputIntent};
 
@@ -94,6 +95,8 @@ enum Slot {
     SttUnload(SttUnload),
     HoldToTalk(bool),
     SpeechInput(SpeechInputAction),
+    /// The default model; the choice itself is `Settings::model_queued`.
+    Model,
     /// `FinishOnboarding`: no field and no draft.
     Onboarding,
     /// `CompleteOnboardingStep`: no field, and never counted as the finish.
@@ -110,6 +113,7 @@ impl Slot {
             | (Self::SttUnload(_), Self::SttUnload(_))
             | (Self::HoldToTalk(_), Self::HoldToTalk(_))
             | (Self::SpeechInput(_), Self::SpeechInput(_))
+            | (Self::Model, Self::Model)
             | (Self::Onboarding, Self::Onboarding)
             | (Self::OnboardingStep, Self::OnboardingStep) => true,
             _ => false,
@@ -125,6 +129,7 @@ impl Slot {
             | Self::SttUnload(_)
             | Self::HoldToTalk(_)
             | Self::SpeechInput(_)
+            | Self::Model
             | Self::Onboarding
             | Self::OnboardingStep => None,
         }
@@ -171,6 +176,10 @@ pub struct Settings {
     speech_send_failed: bool,
     stt_error: Option<UserError>,
     stt_send_failed: bool,
+    /// Each catalog on offer, in arrival order.
+    models: Vec<(ConnectionKind, Vec<ModelInfo>)>,
+    /// The newest default model sent and not yet answered.
+    model_queued: Option<ModelChoice>,
 }
 
 impl fmt::Debug for Settings {
@@ -233,6 +242,10 @@ impl Settings {
         }
         if !pending.failed && matches!(pending.slot, Slot::SpeechInput(_)) {
             self.speech_error = None;
+        }
+        if pending.slot == Slot::Model && !self.pending.iter().any(|left| left.slot == Slot::Model)
+        {
+            self.model_queued = None;
         }
         if !pending.failed
             && self
@@ -396,6 +409,7 @@ impl Settings {
                 | Slot::SttUnload(_)
                 | Slot::HoldToTalk(_)
                 | Slot::SpeechInput(_)
+                | Slot::Model
                 | Slot::Onboarding
                 | Slot::OnboardingStep => None,
             });
@@ -596,6 +610,8 @@ impl Settings {
         self.speech_send_failed = false;
         self.stt_send_failed = false;
         self.pending.clear();
+        self.models.clear();
+        self.model_queued = None;
         self.assistant.saving = false;
         self.user.saving = false;
     }
@@ -622,6 +638,9 @@ mod followup_tests;
 
 #[cfg(test)]
 mod onboarding_tests;
+
+#[cfg(test)]
+mod model_tests;
 
 #[cfg(test)]
 mod tests;
