@@ -360,3 +360,111 @@ fn a_compaction_read_never_answers_a_normal_build_or_the_reverse() {
     assert_eq!(core.handle(too_large(2, Some(ROOM))), Err(Stale));
     assert_eq!(core.handle(compact_built(1, &[T])), Err(Stale));
 }
+
+/// A run on Claude Code too large with its summary, whose compaction round is granted on its own
+/// route.
+fn claude_code_compacting() -> Coordinator {
+    use kumochi_protocol::message::{
+        AssistantName, ConnectionKind, Effort, ModelChoice, ModelInfo, ModelName, ModelSlug, RunId,
+    };
+
+    use crate::context::{ConnectionTag, RunSnapshot};
+    use crate::coordinator::{Availability, Ready};
+
+    let snapshot = RunSnapshot {
+        origin: Origin::Task(T),
+        assistant: AssistantName::new("Kumo").expect("name"),
+        user: None,
+        choice: Some(ModelChoice {
+            connection: ConnectionKind::ClaudeCode,
+            model: ModelSlug::new("haiku").expect("slug"),
+            effort: Effort::Low,
+        }),
+        connection: ConnectionTag(7),
+    };
+    let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), Vec::new());
+    core.handle(Input::Engines(
+        ConnectionKind::ClaudeCode,
+        Availability::Ready(Ready {
+            connection: ConnectionTag(3),
+            models: vec![ModelInfo {
+                slug: ModelSlug::new("haiku").expect("slug"),
+                display_name: ModelName::new("Haiku").expect("name"),
+            }],
+            trusted_draw: false,
+        }),
+    ))
+    .expect("never stale");
+    core.handle(Input::Turn {
+        turn: 1,
+        thread: None,
+        text: "hi".into(),
+    })
+    .expect("a turn is never stale");
+    assert_eq!(
+        core.handle(Input::TurnStored { run: R }),
+        Ok(vec![build_context(R, T, 1)])
+    );
+    let Effect::Store(StoreOp::CompactContext(mut read)) = compact_context(2) else {
+        unreachable!("compact_context reads");
+    };
+    read.snapshot = Some(snapshot.clone());
+    assert_eq!(
+        core.handle(Input::ContextBuilt(ContextBuilt {
+            key: key(1),
+            snapshot: Some(snapshot),
+            result: Err(Unbuilt::TooLarge { room: Some(ROOM) }),
+        })),
+        Ok(vec![Effect::Store(StoreOp::CompactContext(read))])
+    );
+    assert_eq!(core.handle(compact_built(2, &[T])), Ok(vec![start(2)]));
+    assert_eq!(core.handle(ready(2)), Ok(granted(2)));
+    core
+}
+
+/// Test 6: a run on Claude Code too large with its summary compacts inline on its own route, once,
+/// and the round's usage fails nothing.
+#[test]
+fn a_claude_code_run_compacts_inline_and_its_usage_fails_nothing() {
+    use crate::engines::{Tokens, Usage};
+
+    let mut core = claude_code_compacting();
+    for event in [
+        TurnEvent::TextDelta(" Short".to_owned()),
+        TurnEvent::Usage(Usage {
+            whole: Tokens::default(),
+            first_request: None,
+        }),
+    ] {
+        assert_eq!(
+            core.handle(engine(super::engine_key(&core, R), event)),
+            Ok(Vec::new())
+        );
+    }
+    assert_eq!(
+        core.handle(engine(
+            super::engine_key(&core, R),
+            TurnEvent::Finished(Finish::Completed)
+        )),
+        Ok(vec![store_summary(2, "Short")])
+    );
+}
+
+/// A compaction question Claude Code refuses fails the run, and writes no summary.
+#[test]
+fn a_refused_claude_code_compaction_fails_the_run() {
+    use kumochi_protocol::message::ErrorKey;
+
+    use crate::engines::EngineFailure;
+
+    let mut core = claude_code_compacting();
+    assert_eq!(
+        core.handle(engine(
+            super::engine_key(&core, R),
+            TurnEvent::Finished(Finish::Failed(EngineFailure::Claude(
+                ErrorKey::ClaudeCodeBudget.into()
+            ))),
+        )),
+        Ok(ends_failed(Failure::Engine))
+    );
+}

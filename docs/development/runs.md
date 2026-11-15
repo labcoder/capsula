@@ -377,32 +377,37 @@ Settings, and nothing in production changes them yet.
   `SignInNeeded`; a declined plan `PlanNotEnabled`; an ended session `SessionEnded`; a plan
   the account can't use `PlanUnavailable`; a held credential lock `CredentialsUnavailable`.
 - **A turn while no kind is ready is stored**, so the text is kept, and its run fails
-  `failed(engine)` at once, telling the shell the reason. A sign-in before the turn is written
-  doesn't revive it.
+  `failed(engine)` at its first build, where its choice is known, telling the shell the reason. A
+  sign-in before then doesn't revive it.
 - **A run is bound to a route**: a connection kind and one of its sign-ins (`context::Route`).
   Its turn records the sign-in each kind had ready when it arrived. Its first build binds the
   kind of the run's choice (`ChatGPT` when there is none) under the sign-in that kind had then. A
   kind that wasn't ready at arrival fails the run with that kind's reason, even once it's ready,
-  so a later sign-in never answers it. Before the binding, a change to a kind takes that kind out
-  of the arrival, and the run fails once no kind is left; after it, only a change to the route's
-  own kind matters. A catalog-only change keeps the run. Any other change, a sign-out the account
-  accepted included, cancels the engine and fails the run with the reason. A held ask for that run
-  is answered `Rebuild`, and `send_ready` checks the route again before every `Grant`. Only a
-  `ChatGPT` route takes a bearer.
+  so a later sign-in never answers it: `SignInNeeded` for `ChatGPT`, and `ModelUnavailable` with
+  Open Settings for another kind, since a notice's Sign in starts `ChatGPT`'s. Before the
+  binding, a change to a kind takes that kind out of the arrival, and the run fails once no kind
+  is left; after it, only a change to the route's own kind matters. A catalog-only change keeps
+  the run. Any other change, a sign-out the account accepted included, cancels the engine and
+  fails the run with the reason. A held ask for that run is answered `Rebuild`, and `send_ready`
+  checks the route again before every `Grant`. Only a `ChatGPT` route takes a bearer.
 - **Holds and jobs.** A hold records the same arrival when it's prepared and answers on its
   choice's route, checked when its read returns and again before each send. A change to another
   kind leaves it, a change to its own kind ends it, and while its read is still out a change to
-  any kind ends it. A title or summary job answers only on `ChatGPT`: one for another
-  connection's choice ends unsent and frees the slot.
+  any kind ends it. A title or summary job answers on the route of the run that started it: one
+  whose read names another connection ends unsent and frees the slot
+  ([engines](engines.md#background-jobs)).
 - **The engine follows the connection.** A request on `ChatGPT`'s choice, or on none, starts the
   `ChatGPT` engine. One on Claude Code's choice takes a one-launch engine with no tools from
   `Claude::question` ([claude-code.md](claude-code.md#a-question)); a refusal starts `Unserved` with
   Claude Code's reason, or none. One on a connection with no engine yet starts `Unserved`, whose
-  round fails with `ModelUnavailable` (`runtime/mod.rs`, the `StartEngine` arm and `engine_for`).
-- **A turn nothing can answer** fails with `ChatGPT`'s reason and its action, except that it gets
-  `ConnectionNeeded` with Open Settings when `ChatGPT` needs a sign-in and Claude Code is installed
-  but signed out (owner, OSC-742; `Availabilities::nothing_ready`). Every other Claude Code state,
-  the one before its first report included, keeps `ChatGPT`'s notice and its Sign in.
+  round fails with `ModelUnavailable` (`Brain::owned_engine`, which a job's request takes too).
+- **A turn nothing can answer** fails at its first build with the reason of its choice's own
+  kind (`Coordinator::route_for`). On `ChatGPT`'s choice, or none, that's `ChatGPT`'s reason and
+  its action, except that it gets `ConnectionNeeded` with Open Settings when `ChatGPT` needs a
+  sign-in and Claude Code is installed but signed out (owner, OSC-742;
+  `Coordinator::nothing_ready`). Every other Claude Code state, the one before its first report
+  included, keeps `ChatGPT`'s notice and its Sign in. On Claude Code's choice it's Claude Code's
+  own reason, with Open Settings.
 - **S4: the model is checked once,** when the first build's result arrives, against the route's
   own catalog: a model missing from the catalog, an empty catalog or no choice at all fails the run with `ModelUnavailable` and
   Open settings, and nothing goes to another model. A run in flight keeps its check when the

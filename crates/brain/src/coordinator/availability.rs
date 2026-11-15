@@ -148,6 +148,13 @@ impl Coordinator {
             ConnectionKind::ClaudeCode => &mut self.claude_code,
         };
         *entry = now;
+        // A `ChatGPT` job follows the account's sign-in and sign-out instead.
+        let job = self.job.as_ref().map(|job| job.route);
+        if kind != ConnectionKind::ChatGpt
+            && job.is_some_and(|route| route.kind == kind && self.refusal(route).is_some())
+        {
+            self.cancel_job(effects);
+        }
         let Some((run, route, arrived)) = self
             .current
             .as_ref()
@@ -187,7 +194,8 @@ impl Coordinator {
     }
 
     /// The `ChatGPT` sign-in a send under `key` may take the bearer of: a round's, only while its
-    /// run is current and bound to `ChatGPT`, and the ready one for a job.
+    /// run is current and bound to `ChatGPT`, and the ready one for a job, unless the job in the
+    /// slot answers on another connection.
     pub(crate) fn sending(&self, key: SendKey) -> Option<ConnectionTag> {
         match key {
             SendKey::Build(key) => self
@@ -197,15 +205,20 @@ impl Coordinator {
                 .and_then(|run| run.route)
                 .filter(|route| route.kind == ConnectionKind::ChatGpt)
                 .map(|route| route.tag),
-            SendKey::Job(_) => self.connection(),
+            SendKey::Job(key) => self
+                .job
+                .as_ref()
+                .is_none_or(|job| job.key != key || job.route.kind == ConnectionKind::ChatGpt)
+                .then(|| self.connection())
+                .flatten(),
         }
     }
 
-    /// Why a turn that arrived with nothing ready can't be answered: `ChatGPT`'s reason, except
-    /// that `ConnectionNeeded` takes the `ChatGPT` sign-in's place while Claude Code is installed but
-    /// signed out (owner, OSC-742). A positive match, so a Claude Code that isn't found, isn't
-    /// reported yet, is off or is broken leaves `ChatGPT`'s notice and its Sign in.
-    pub(super) fn nothing_ready(&self, chatgpt: &UserError) -> UserError {
+    /// Why a run on `ChatGPT` can't be answered while `ChatGPT` is unavailable: `ChatGPT`'s reason,
+    /// except that `ConnectionNeeded` takes the `ChatGPT` sign-in's place while Claude Code is
+    /// installed but signed out (owner, OSC-742). A positive match, so a Claude Code that isn't
+    /// found, isn't reported yet, is off or is broken leaves `ChatGPT`'s notice and its Sign in.
+    fn nothing_ready(&self, chatgpt: &UserError) -> UserError {
         let signed_out = matches!(
             &self.claude_code,
             Availability::Unavailable(reason) if reason.key() == ErrorKey::ClaudeCodeSignedOut
@@ -237,7 +250,9 @@ impl Coordinator {
 
     /// The route a run that arrived with `arrived` takes for `choice`: the choice's kind, else
     /// `ChatGPT`'s, under the sign-in that kind had at arrival. A kind that wasn't ready then is
-    /// refused even when it's ready now, so a later sign-in never answers the run.
+    /// refused with its own reason even when it's ready now, so a later sign-in never answers the
+    /// run: `ChatGPT` asks for a sign-in, and another kind offers Open Settings only, since a
+    /// notice's Sign in starts `ChatGPT`'s.
     pub(super) fn route_for(
         &self,
         arrived: Arrived,
@@ -246,8 +261,14 @@ impl Coordinator {
         let kind = choice.map_or(ConnectionKind::ChatGpt, |choice| choice.connection);
         match (arrived.get(kind), self.availability_of(kind)) {
             (Some(tag), _) => Ok(Route { kind, tag }),
+            (None, Availability::Unavailable(reason)) if kind == ConnectionKind::ChatGpt => {
+                Err(self.nothing_ready(reason))
+            }
             (None, Availability::Unavailable(reason)) => Err(reason.clone()),
-            (None, Availability::Ready(_)) => Err(sign_in_needed()),
+            (None, Availability::Ready(_)) if kind == ConnectionKind::ChatGpt => {
+                Err(sign_in_needed())
+            }
+            (None, Availability::Ready(_)) => Err(model_unavailable()),
         }
     }
 

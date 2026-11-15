@@ -11,6 +11,7 @@ use kumochi_protocol::message::{
 
 use super::{BuildKey, ContextBuilt, Coordinator, Effect, Input, R, SendKey, Stale, T};
 use crate::context::{Built, ConnectionTag, ModelRequest, Origin, RunSnapshot};
+use crate::coordinator::availability::model_unavailable;
 use crate::coordinator::{Availability, HoldKey, HoldSnapshot, Ready, StoreOp};
 use crate::store::Generation;
 
@@ -189,9 +190,14 @@ fn another_kinds_change_keeps_an_unbound_run_and_takes_out_only_its_own_entry() 
         let refused = core
             .handle(built(Some(choice(changed, "m"))))
             .expect("current");
+        let expected = if changed == CHATGPT {
+            sign_in()
+        } else {
+            model_unavailable()
+        };
         assert_eq!(
             failure(&refused),
-            Some(sign_in()),
+            Some(expected),
             "{changed:?} came back, but the run arrived before"
         );
     }

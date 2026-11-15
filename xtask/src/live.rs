@@ -1,7 +1,8 @@
 //! `cargo xtask live <check>`: the real dev brain, on the developer's own dev account, driven over
 //! its real pipes by slice 2's gate client. `account` only reads the non-secret account view;
-//! `signin` and `claude-signin` perform their respective sign-in flows, and
-//! `catalog-provenance` and `image` run only the copied brain, each in its own mode.
+//! `signin` and `claude-signin` perform their respective sign-in flows, `claude-question` asks
+//! Claude Code three questions, and `catalog-provenance` and `image` run only the copied brain,
+//! each in its own mode.
 //!
 //! The brain serves only the `kumochi.exe` beside it, so, as in the slice 2 gate, an outer xtask
 //! builds the brain, copies it and itself (as `kumochi.exe`) into `target/live/<time>/bin`, and
@@ -12,6 +13,7 @@
 )]
 
 mod catalog;
+mod claude_question;
 mod claude_signin;
 mod image;
 mod signin;
@@ -24,7 +26,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
-use kumochi_protocol::constants::{BRAIN_EXE, LIVE_BUDGET_ENV, ProductIdentity, SHELL_EXE};
+use kumochi_protocol::constants::{
+    BRAIN_EXE, CLAUDE_QUESTIONS_ENV, LIVE_BUDGET_ENV, ProductIdentity, SHELL_EXE,
+};
 
 use self::claude_signin::Ask;
 use crate::platform;
@@ -48,6 +52,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         Entry::Inner(Check::Account) => signin::harness(signin::inspect),
         Entry::Inner(Check::SignIn) => signin::inner(),
         Entry::Inner(Check::Claude(ask)) => claude_signin::inner(ask),
+        Entry::Inner(Check::Question) => std::process::exit(claude_question::inner()),
         Entry::Inner(Check::Catalog | Check::Image) => {
             unreachable!("entry refuses --inner for the brain-only checks")
         }
@@ -66,16 +71,18 @@ enum Check {
     Account,
     SignIn,
     Claude(Ask),
+    Question,
     Catalog,
     Image,
 }
 
 impl Check {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Account,
         Self::SignIn,
         Self::Claude(Ask::SignIn),
         Self::Claude(Ask::Disconnect),
+        Self::Question,
         Self::Catalog,
         Self::Image,
     ];
@@ -87,6 +94,7 @@ impl Check {
             Self::SignIn => &["signin"],
             Self::Claude(Ask::SignIn) => &["claude-signin"],
             Self::Claude(Ask::Disconnect) => &["claude-signin", "--disconnect"],
+            Self::Question => &["claude-question"],
             Self::Catalog => &["catalog-provenance"],
             Self::Image => &["image"],
         }
@@ -115,7 +123,7 @@ fn entry(identity: ProductIdentity, args: &[String]) -> Result<Entry> {
         })
         .filter(|check| !(inner && matches!(check, Check::Catalog | Check::Image)))
         .context(
-            "usage: cargo xtask live account | signin | claude-signin [--disconnect] | catalog-provenance | image",
+            "usage: cargo xtask live account | signin | claude-signin [--disconnect] | claude-question | catalog-provenance | image",
         )?;
     Ok(if inner {
         Entry::Inner(check)
@@ -144,6 +152,9 @@ pub(crate) fn refuse_running(running: &[platform::Entry], me: u32) -> Result<()>
 fn prepare(check: Check) -> Result<()> {
     let name = check.args().join(" ");
     refuse_running(&platform::processes()?, std::process::id())?;
+    if check == Check::Question {
+        claude_question::preflight(&platform::processes()?, std::process::id())?;
+    }
     println!("live {name}: building the dev brain (at most {BUILD_LIMIT:?})");
     build_brain()?;
     let me = std::env::current_exe()?;
@@ -167,6 +178,12 @@ fn prepare(check: Check) -> Result<()> {
     fs::copy(&me, bin.join(SHELL_EXE)).context("copying the client")?;
     let mut inner = Command::new(bin.join(SHELL_EXE));
     inner.arg("live").args(check.args()).arg(INNER);
+    if check == Check::Question {
+        let ran = run_bounded(inner, claude_question::RUN_LIMIT, "the live run")
+            .map(|status| status.code());
+        let live = folder.parent().context("the run folder has a parent")?;
+        return claude_question::report(ran, live, &mut io::stdout().lock());
+    }
     let ran = run_bounded(inner, RUN_LIMIT, "the live run")?;
     ensure!(ran.success(), "live {name} failed ({ran})");
     Ok(())
@@ -299,10 +316,10 @@ struct Brain {
 }
 
 impl Brain {
-    /// Starts the brain beside this executable, with its model-request budget and no console
-    /// output, inside a kill-on-close job this process holds, so the brain can't outlive it.
-    /// Refuses while another product process runs.
-    fn start(budget: u32) -> Result<Self> {
+    /// Starts the brain beside this executable, with its model-request budget, its Claude Code
+    /// question budget and no console output, inside a kill-on-close job this process holds, so
+    /// the brain can't outlive it. Refuses while another product process runs.
+    fn start(budget: u32, questions: u32) -> Result<Self> {
         let me = std::env::current_exe()?;
         let bin = me.parent().context("the harness has a folder")?;
         platform::Job::kill_on_close()
@@ -311,6 +328,7 @@ impl Brain {
         refuse_running(&platform::processes()?, std::process::id())?;
         let child = Command::new(bin.join(BRAIN_EXE))
             .env(LIVE_BUDGET_ENV, budget.to_string())
+            .env(CLAUDE_QUESTIONS_ENV, questions.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -510,6 +528,8 @@ mod tests {
             &["signin"][..],
             &["signin", "--inner"],
             &["claude-signin", "--disconnect", "--inner"],
+            &["claude-question"],
+            &["claude-question", "--inner"],
             &["catalog-provenance"],
         ] {
             for identity in [ProductIdentity::RELEASE, ProductIdentity::GATE] {
@@ -536,6 +556,11 @@ mod tests {
                 &["claude-signin", "--disconnect", "--inner"],
                 Entry::Inner(claude(Ask::Disconnect)),
             ),
+            (&["claude-question"], Entry::Prepare(Check::Question)),
+            (
+                &["claude-question", "--inner"],
+                Entry::Inner(Check::Question),
+            ),
             (&["catalog-provenance"], Entry::Prepare(Check::Catalog)),
             (&["image"], Entry::Prepare(Check::Image)),
         ] {
@@ -558,11 +583,14 @@ mod tests {
             &["catalog-provenance", "C:/elsewhere"],
             &["image", "--inner"],
             &["image", "C:/elsewhere"],
+            &["claude-question", "--disconnect"],
+            &["claude-question", "3"],
+            &["claude-question", "--inner", "--inner"],
         ] {
             let error = entry(ProductIdentity::DEV, &args(list)).expect_err("refused");
             assert_eq!(
                 format!("{error:#}"),
-                "usage: cargo xtask live account | signin | claude-signin [--disconnect] | catalog-provenance | image"
+                "usage: cargo xtask live account | signin | claude-signin [--disconnect] | claude-question | catalog-provenance | image"
             );
         }
     }

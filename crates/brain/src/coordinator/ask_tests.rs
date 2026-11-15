@@ -141,26 +141,33 @@ fn a_signed_out_ask_is_focused_before_it_fails() {
     ))
     .expect("never stale");
     let effects = core.handle(ask(scene, handle(1))).expect("not stale");
-    let focus = effects.iter().position(|effect| {
-        *effect
-            == Effect::Control(ControlToShell::Focus {
-                run: ASKED,
-                thread: T,
-            })
-    });
-    let failed = effects.iter().position(|effect| {
-        matches!(
-            effect,
-            Effect::Control(ControlToShell::RunState {
-                run: ASKED,
-                phase: Phase::Failed,
-                ..
-            })
-        )
-    });
     assert!(
-        matches!((focus, failed), (Some(focus), Some(failed)) if focus < failed),
+        effects.contains(&Effect::Control(ControlToShell::Focus {
+            run: ASKED,
+            thread: T,
+        })),
         "{effects:?}"
+    );
+    let stored = core
+        .handle(Input::TurnStored { run: ASKED })
+        .expect("current");
+    let attempt = stored
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Store(StoreOp::BuildContext(build)) => Some(build.key.attempt),
+            _ => None,
+        })
+        .expect("a build starts");
+    let failed = core.handle(built(ASKED, attempt, &[T])).expect("current");
+    assert!(
+        failed.contains(&Effect::Control(ControlToShell::RunState {
+            run: ASKED,
+            thread: T,
+            phase: Phase::Failed,
+            error: Some(sign_in_needed()),
+            origin: None,
+        })),
+        "it fails at its first build: {failed:?}"
     );
 }
 

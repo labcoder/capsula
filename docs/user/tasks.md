@@ -27,7 +27,10 @@ text shows an error beside the field. Task titles must be one line, 1–80 chara
 trimming, with no control characters. The displayed title changes only after the saved title
 is read back. A new task starts with the first words of its first message as its title. After
 one of its runs finishes, Kumochi may ask the task's model for a short title to replace those
-words; if that fails, the first words stay, and a name you set yourself is never replaced. Renaming Kumo
+words; if that fails, the first words stay, and a name you set yourself is never replaced.
+The title is asked at the lowest effort. When a task gets long, Kumochi also asks the task's
+model, at the task's own effort, to summarize its oldest messages; on Claude Code each of these is
+one more question on your plan. Renaming Kumo
 changes the assistant's name instead: it has the same rules with a 1–24-character limit, and
 the displayed name waits for confirmation from the background
 process. A name update keeps your draft and doesn't switch tasks or move keyboard focus.

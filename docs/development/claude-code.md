@@ -398,8 +398,8 @@ retries the write. A crash before the first successful write loses it.
 ## A question
 
 `engines/claude_code/launch.rs` runs one question on one launch. `runtime/claude.rs` owns the
-attempts. A run whose choice names Claude Code asks one: the runtime's `StartEngine` calls
-`Claude::question`, which looks the choice's model up in the reviewed row and passes the row's own
+attempts. A run's round, or a title or summary job, whose choice names Claude Code asks one: the
+runtime's `Brain::owned_engine` calls `Claude::question` for both, which looks the choice's model up in the reviewed row and passes the row's own
 alias, so no other text reaches `--model`; maps its effort to the CLI's word (`low`, `medium`,
 `high`, `xhigh`, `max`); fixes the snapshot with `Offer::Nothing`; and takes a fresh attempt. A
 refusal becomes a round that fails at once through `Unserved`: with Claude Code's own reason while

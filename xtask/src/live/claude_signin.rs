@@ -21,7 +21,7 @@ use crate::slice2::client::Frame;
 
 /// The harness's whole budget for discovery [guess]. It isn't derived: the lane bounds each
 /// call's root run at 10 s, but its teardown and the folder checks come on top.
-const FIND: Duration = Duration::from_secs(30);
+pub(super) const FIND: Duration = Duration::from_secs(30);
 /// How long the sign-in may take to settle: the lane ends `claude`'s login at 5 minutes, then
 /// reads the status under 10 s. One deadline, however many views arrive.
 const SIGNIN: Duration = Duration::from_secs(330);
@@ -220,7 +220,7 @@ fn send(wire: &mut impl Wire, op: ConnectionOp) -> Result<()> {
 }
 
 /// The view's state in words, from its enums only: a version is never formatted.
-fn state(view: ClaudeCodeView) -> String {
+pub(super) fn state(view: ClaudeCodeView) -> String {
     match view {
         ClaudeCodeView::TurnedOff => "turned off".to_owned(),
         ClaudeCodeView::Finding => "finding".to_owned(),
