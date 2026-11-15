@@ -419,8 +419,8 @@ for example when printing a line failed, so its count is an upper bound.
 
 No run sends a text-only request, so read `input_tokens` by comparing a run's lines with each
 other. Every request carries the same text, so counts that barely differ between the small image
-and the large ones mean the images weren't counted. A counted 256×256 image should add a few
-hundred tokens and a large one more [guess].
+and the large ones mean the images weren't counted. In one diagnostic run, the whole small noisy
+request came to 115 input tokens and the flat 1024×1024 one to 1,267.
 
 ## Bounds
 
