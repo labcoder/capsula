@@ -7,14 +7,14 @@ use super::{Edge, Effect, Event, Gesture, Key};
 use crate::platform::microphone::{CollectionGate, Generation, MicError};
 
 #[derive(Debug)]
-pub(crate) enum InputStage {
+pub enum InputStage {
     Native,
     Gesture,
     Delivery,
 }
 
 #[derive(Debug)]
-pub(crate) enum InputReason {
+pub enum InputReason {
     Armed,
     AlreadyArmed,
     RawInputRegistration,
@@ -48,7 +48,7 @@ enum Recognition {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum Intent {
+pub enum Intent {
     Warm(GestureId),
     Recognized {
         gesture: GestureId,
@@ -62,12 +62,12 @@ pub(crate) enum Intent {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct Delivery {
-    pub(crate) effects: [Option<Effect>; 3],
-    pub(crate) intents: [Option<Intent>; 3],
+pub struct Delivery {
+    pub effects: [Option<Effect>; 3],
+    pub intents: [Option<Intent>; 3],
 }
 
-pub(crate) struct Fence {
+pub struct Fence {
     gate: CollectionGate,
     last: u32,
     current: Option<GestureId>,
@@ -76,7 +76,7 @@ pub(crate) struct Fence {
 }
 
 impl Fence {
-    pub(crate) fn new(gate: CollectionGate) -> Self {
+    pub fn new(gate: CollectionGate) -> Self {
         Self {
             gate,
             last: 0,
@@ -87,7 +87,7 @@ impl Fence {
 
     /// While `paused` (the onboarding window shows), a hold is dropped before recognition: no
     /// warm-up, no armed collection and no intent, so nothing reaches the owner.
-    pub(crate) fn reduce(
+    pub fn reduce(
         &mut self,
         state: &mut Gesture,
         event: Event,

@@ -1,17 +1,17 @@
 use std::path::PathBuf;
-use std::sync::{Arc, mpsc};
-use std::thread::{self, JoinHandle};
+use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 
-use async_channel::Receiver;
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
     ControlToBrain, ControlToShell, DataToBrain, DataToShell, Deleted, ErrorKey, Incarnation,
     IssueSession, Phase, RunId, RunOrigin, ThreadId, UserError,
 };
 
+use super::fixture::*;
 use super::{Connection, Link, LinkEvent, LinkHandle, Session, Shared, start, welcome};
-use crate::platform::{PipeClient, test_pair};
+use crate::platform::PipeClient;
 use crate::runs::{Refused, Runs, Shown};
 use crate::threads::Threads;
 use kumochi_protocol::message::{
@@ -510,31 +510,6 @@ fn page_frames_decode_on_their_session_and_earn_exact_credit_when_applied_or_dro
 
 /// Bytes of text each data sample streams.
 const TOTAL: usize = 960_000;
-/// How long a test waits for anything before it fails.
-const PATIENCE: Duration = Duration::from_secs(5);
-
-fn pair(label: &str) -> (PipeClient, PipeClient) {
-    let name = format!(
-        r"\\.\pipe\{}-test-{}-{label}",
-        kumochi_protocol::constants::OBJECT_PREFIX,
-        std::process::id()
-    );
-    test_pair(&name).expect("a test pipe")
-}
-
-/// A connection the link attends on its own thread, and the brain's ends of its pipes.
-pub(crate) struct Attended {
-    pub(crate) handle: LinkHandle,
-    pub(crate) events: Receiver<LinkEvent>,
-    control: PipeClient,
-    data: Arc<PipeClient>,
-    /// Returns whether the UI was still there when the connection ended.
-    pub(crate) link: JoinHandle<bool>,
-}
-
-pub(crate) fn attended(label: &str) -> Attended {
-    attended_from(label, 0)
-}
 
 #[test]
 fn ending_a_session_closes_its_real_pipes_and_retires_control_admission() {
@@ -545,47 +520,6 @@ fn ending_a_session_closes_its_real_pipes_and_retires_control_admission() {
     assert!(link.link.join().expect("the aborted session joins"));
     assert!(!link.handle.send_control(&session, ControlToBrain::Pong));
     assert!(link.handle.shared.outbox.lock().unwrap().is_none());
-}
-
-fn attended_from(label: &str, previous_generation: u64) -> Attended {
-    attended_shared(
-        label,
-        Arc::new(Shared {
-            generations: std::sync::atomic::AtomicU64::new(previous_generation),
-            ..Shared::default()
-        }),
-        Incarnation(1),
-    )
-}
-
-fn attended_shared(label: &str, shared: Arc<Shared>, incarnation: Incarnation) -> Attended {
-    let (control, shell_control) = pair(&format!("{label}-control"));
-    let (data, shell_data) = pair(&format!("{label}-data"));
-    control.set_timeout(Some(PATIENCE));
-    data.set_timeout(Some(PATIENCE));
-    let (sender, events) = async_channel::unbounded();
-    let link = Link {
-        brain: PathBuf::new(),
-        session: 0,
-        shared,
-    };
-    let (handle, start) = start(link, sender);
-    let connection = Connection {
-        control: Arc::new(shell_control),
-        data: Arc::new(shell_data),
-        issue_origin: IssueSession {
-            incarnation,
-            epoch: 91,
-        },
-    };
-    let link = thread::spawn(move || start.link.attend(connection, &start.events));
-    Attended {
-        handle,
-        events,
-        control,
-        data: Arc::new(data),
-        link,
-    }
 }
 
 #[test]
@@ -844,30 +778,6 @@ fn a_full_batch_leaves_the_next_event_queued() {
     assert_eq!(run, RunId(256));
     assert_eq!(delta, "");
     assert_eq!(receiver.len(), 0);
-}
-
-/// The link's events with a timeout on each.
-pub(crate) fn patient(events: Receiver<LinkEvent>) -> mpsc::Receiver<LinkEvent> {
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        while let Ok(event) = events.recv_blocking() {
-            if sender.send(event).is_err() {
-                return;
-            }
-        }
-    });
-    receiver
-}
-
-pub(crate) fn next(events: &mpsc::Receiver<LinkEvent>) -> LinkEvent {
-    events.recv_timeout(PATIENCE).expect("an event in time")
-}
-
-pub(crate) fn connected(event: LinkEvent) -> Session {
-    let LinkEvent::Connected(session) = event else {
-        panic!("Connected first, got {event:?}");
-    };
-    session
 }
 
 fn text(run: u64, delta: &str) -> DataToShell {

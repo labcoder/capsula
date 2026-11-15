@@ -9,12 +9,12 @@
 
 use std::time::{Duration, Instant};
 
-pub(crate) mod hold;
+pub mod hold;
 
 const WINDOW: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Key {
+pub enum Key {
     LeftControl,
     LeftAlt,
     /// Native make code: low eight bits, E0 in bit eight and E1 in bit nine.
@@ -22,13 +22,13 @@ pub(crate) enum Key {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Edge {
+pub enum Edge {
     Down,
     Up,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Event {
+pub enum Event {
     Key {
         key: Key,
         edge: Edge,
@@ -42,7 +42,7 @@ pub(crate) enum Event {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Effect {
+pub enum Effect {
     Listening,
     Resting,
     HoldStarted,
@@ -62,7 +62,7 @@ enum Phase {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct Gesture {
+pub struct Gesture {
     down: [bool; 2],
     other: [u64; 16],
     phase: Phase,
@@ -71,24 +71,28 @@ pub(crate) struct Gesture {
 }
 
 impl Gesture {
-    #[cfg(test)]
-    pub(crate) fn legacy_hold_fixture() -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn legacy_hold_fixture() -> Self {
         Self {
             legacy_hold: true,
             ..Self::default()
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only this crate's tests read it")
+    )]
     pub(crate) fn holding(&self) -> bool {
         self.legacy_hold && matches!(self.phase, Phase::Active { holding: true, .. })
     }
 
-    pub(crate) fn listening(&self) -> bool {
+    pub fn listening(&self) -> bool {
         self.legacy_hold && matches!(self.phase, Phase::Active { .. })
     }
 
-    pub(crate) fn deadline(&self) -> Option<Instant> {
+    pub fn deadline(&self) -> Option<Instant> {
         let hold = match self.phase {
             Phase::Active {
                 started,
@@ -102,8 +106,8 @@ impl Gesture {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn handle(&mut self, event: Event, now: Instant) -> [Option<Effect>; 3] {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn handle(&mut self, event: Event, now: Instant) -> [Option<Effect>; 3] {
         let effects = self.recognize(event, now);
         if self.legacy_hold {
             effects
