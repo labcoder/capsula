@@ -36,6 +36,7 @@ const TALK_BACK: &str = "talk_back";
 const STT_UNLOAD: &str = "stt_unload";
 const HOLD_TO_TALK: &str = "hold_to_talk";
 const SCREEN_HOLDS: &str = "screen_holds";
+const SHOW_SCREEN: &str = "show_screen";
 const INSTALLED: &str = "installed";
 const REMOVING: &str = "removing";
 
@@ -147,8 +148,10 @@ impl Config {
 
     fn refusing(path: Option<PathBuf>, refusal: Refusal, main_thread: ThreadId) -> Self {
         let mut view = view_of(&Table::new(), main_thread, true);
-        // A file that can't be read may have turned screen holds off.
+        // A file that can't be read may have turned screen holds off, or never turned the
+        // screen's picture on.
         view.screen_holds = false;
+        view.show_screen = false;
         Self {
             path,
             table: Err(refusal),
@@ -292,6 +295,9 @@ impl Config {
             }
             SettingsOp::SetScreenHolds(on) => {
                 voice_mut(&mut table).insert(SCREEN_HOLDS.to_owned(), Value::Boolean(on));
+            }
+            SettingsOp::SetShowScreen(on) => {
+                voice_mut(&mut table).insert(SHOW_SCREEN.to_owned(), Value::Boolean(on));
             }
             SettingsOp::SetSttUnload(unload) => {
                 let name = match unload {
@@ -534,6 +540,12 @@ fn view_of(table: &Table, main_thread: ThreadId, in_use: bool) -> SettingsView {
         None => kumochi_protocol::message::DEFAULT_SCREEN_HOLDS,
         Some(_) => invalid(SCREEN_HOLDS).unwrap_or(false),
     };
+    // Its own key: a stored choice about one window is never read as one about the screen.
+    let show_screen = match voice.and_then(|voice| voice.get(SHOW_SCREEN)) {
+        Some(Value::Boolean(on)) => *on,
+        None => kumochi_protocol::message::DEFAULT_SHOW_SCREEN,
+        Some(_) => invalid(SHOW_SCREEN).unwrap_or(false),
+    };
     SettingsView {
         assistant_name,
         user_name,
@@ -548,6 +560,7 @@ fn view_of(table: &Table, main_thread: ThreadId, in_use: bool) -> SettingsView {
         stt_unload,
         hold_to_talk,
         screen_holds,
+        show_screen,
     }
 }
 

@@ -861,6 +861,7 @@ fn settings_retry_rechecks_its_captured_field_and_waits_for_the_matching_answer(
         stt_unload: kumochi_protocol::message::SttUnload::Kept,
         hold_to_talk: kumochi_protocol::message::DEFAULT_HOLD_TO_TALK,
         screen_holds: kumochi_protocol::message::DEFAULT_SCREEN_HOLDS,
+        show_screen: kumochi_protocol::message::DEFAULT_SHOW_SCREEN,
     };
     owner.update(cx, |owner, cx| {
         owner.settings.update(cx, |state, _| {

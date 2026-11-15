@@ -433,8 +433,9 @@ fn read<T: DeserializeOwned>(pipe: &PipeClient, which: Pipe) -> Result<Option<(T
 #[cfg(test)]
 mod tests {
     use kumochi_protocol::message::{
-        AssistantName, ControlToShell, DEFAULT_HOLD_TO_TALK, DEFAULT_SCREEN_HOLDS, DockPosition,
-        MaxFrameRate, OnboardingStep, SettingsView, SttUnload, ThreadId,
+        AssistantName, ControlToShell, DEFAULT_HOLD_TO_TALK, DEFAULT_SCREEN_HOLDS,
+        DEFAULT_SHOW_SCREEN, DockPosition, MaxFrameRate, OnboardingStep, SettingsView, SttUnload,
+        ThreadId,
     };
 
     use super::{Frame, frame_of};
@@ -455,6 +456,7 @@ mod tests {
             stt_unload: SttUnload::Kept,
             hold_to_talk: DEFAULT_HOLD_TO_TALK,
             screen_holds: DEFAULT_SCREEN_HOLDS,
+            show_screen: DEFAULT_SHOW_SCREEN,
         };
         let sent = [
             ControlToShell::Settings {

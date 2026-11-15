@@ -515,6 +515,22 @@ impl Brain {
                     self.hold_decode(link)?;
                 }
             }
+            // shortcut: nothing sends a screen hold yet, so both of its controls are refused; the
+            // runtime that arms the hold and captures at its release replaces these two arms.
+            ControlToBrain::ScreenHoldRecognized { gesture, .. } => {
+                if gesture.0 > self.holds.high {
+                    self.holds.high = gesture.0;
+                    let failed = HoldStatus::Failed(HoldFailure::Unavailable);
+                    Self::hold_status(key(*gesture), failed, link)?;
+                }
+            }
+            // The answer ends the shell's exclusion lease.
+            ControlToBrain::ScreenRelease { gesture, .. } => {
+                link.control(&ControlToShell::CaptureFailed {
+                    capture_for: CaptureFor::Gesture(*gesture),
+                    reason: CaptureFailure::Unavailable,
+                })?;
+            }
             ControlToBrain::ExclusionLapsed { lease } if self.holds.lease_lapsed(*lease) => {}
             ControlToBrain::Settings(SettingsOp::SetDefaultModel(_))
             | ControlToBrain::AccountOp(_)

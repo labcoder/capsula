@@ -1698,6 +1698,61 @@ async fn a_screen_hold_shares_the_voice_admission_and_releases_its_lease_when_re
 }
 
 #[tokio::test]
+async fn a_screen_hold_and_its_release_are_refused_and_the_release_ends_its_lease() {
+    use kumochi_protocol::geometry::{PhysicalPoint, PointerPath, ReleasePointer};
+    let scratch = Scratch::new("hold-screen-release-refused");
+    let mut brain = test_support::brain(&scratch, "");
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    let recognized = ControlToBrain::ScreenHoldRecognized {
+        gesture: KEY.gesture,
+        thread: None,
+        selection: 1,
+        t_qpc: 1,
+    };
+    let release = ControlToBrain::ScreenRelease {
+        gesture: KEY.gesture,
+        lease: LEASE,
+        t_qpc: 2,
+        excluded_qpc: 3,
+        pointer: ReleasePointer(PhysicalPoint([5, 5])),
+        path: PointerPath(vec![PhysicalPoint([5, 5]), PhysicalPoint([40, 5])]),
+    };
+    let failed = ControlToShell::CaptureFailed {
+        capture_for: kumochi_protocol::message::CaptureFor::Gesture(KEY.gesture),
+        reason: kumochi_protocol::message::CaptureFailure::Unavailable,
+    };
+    assert!(brain.hold_control(&recognized, &mut link).unwrap());
+    assert_eq!(
+        control(&mut output),
+        ControlToShell::VoiceHoldStatus {
+            gesture: KEY.gesture,
+            status: HoldStatus::Failed(HoldFailure::Unavailable),
+        }
+    );
+    assert!(brain.hold_control(&release, &mut link).unwrap());
+    assert_eq!(control(&mut output), failed);
+    // A refused gesture is used up: its repeat and a voice hold under its number get nothing.
+    let voice = ControlToBrain::VoiceHoldRecognized {
+        gesture: KEY.gesture,
+        thread: None,
+        selection: 1,
+    };
+    for repeat in [&recognized, &voice] {
+        assert!(brain.hold_control(repeat, &mut link).unwrap());
+        assert!(output.is_empty());
+    }
+    assert!(brain.hold_control(&release, &mut link).unwrap());
+    assert_eq!(control(&mut output), failed, "a second release's lease too");
+    assert!(output.is_empty());
+    assert!(brain.holds.pending.is_none());
+    brain.close().await;
+}
+
+#[tokio::test]
 async fn a_screen_part_starts_only_while_its_ticket_ends_within_the_lease() {
     use crate::context::ScreenClass;
     use kumochi_protocol::message::{CaptureFailure, CaptureFor};

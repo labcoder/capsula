@@ -5,7 +5,7 @@ use kumochi_protocol::message::{HeldScreen, RunId, ScreenClass};
 use super::StoreError;
 
 /// Every value the `screen` column takes; `read` knows only these.
-const ALL: [HeldScreen; 9] = [
+const ALL: [HeldScreen; 10] = [
     HeldScreen::Attached,
     HeldScreen::NotIncluded(ScreenClass::NotReady),
     HeldScreen::NotIncluded(ScreenClass::NothingThere),
@@ -15,6 +15,7 @@ const ALL: [HeldScreen; 9] = [
     HeldScreen::NotIncluded(ScreenClass::Changed),
     HeldScreen::NotIncluded(ScreenClass::ModelCantSee),
     HeldScreen::Withdrawn,
+    HeldScreen::Screen,
 ];
 
 /// The column's text for `screen`.
@@ -29,6 +30,7 @@ pub(super) fn column(screen: HeldScreen) -> &'static str {
         HeldScreen::NotIncluded(ScreenClass::Changed) => "changed",
         HeldScreen::NotIncluded(ScreenClass::ModelCantSee) => "model_cant_see",
         HeldScreen::Withdrawn => "withdrawn",
+        HeldScreen::Screen => "screen",
     }
 }
 

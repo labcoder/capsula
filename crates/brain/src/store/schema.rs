@@ -169,7 +169,7 @@ INSERT INTO approval_mark (id, last) VALUES (1, 0);
 ";
 
 /// What a screen hold carried into its run's turn (docs/development/store.md): `attached` for the
-/// window's image, or the class saying why it wasn't included. Written with the turn, before any
+/// window's image, `screen` for the screen's picture, or the class saying why it wasn't included. Written with the turn, before any
 /// request exists, so it never says the image left the machine. NULL for every other run and every
 /// older one. Never image bytes. No `CHECK`, so a later class needs no table rebuild; a value a
 /// build doesn't know reads as none.
