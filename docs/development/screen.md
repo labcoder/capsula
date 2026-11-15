@@ -356,18 +356,16 @@ capture thread resolves the window under it and captures that window alone. A re
 answers that hold only: there is no screen for it, and the same capturer serves the next hold.
 Only `Retire` ends the worker.
 
-A hold walks with `Walk { key }`: the same walk as `Elements` on the captured window, but the
-tree stays in the worker for the seal's masks, and only `Walked(key, Completeness)` comes back,
-so no window text reaches the brain.
+A hold's picture is sent as captured. The hold doesn't walk the window's elements, and nothing
+in its picture is looked for, painted over or refused for what it shows: Kumochi doesn't hide
+passwords or other sensitive content in it.
 
-After the element walk, `Seal` hands out the hold's one image as a `ScreenContext`: the frame
-masked and encoded as an overview JPEG, with its `CaptureTransform`. It seals only when the
-hold's one walk read the captured window itself (its window and process) and found every
-password mask, and refuses with `Unmasked` otherwise. Then, before masking, it checks on the
-serve thread that the window is still the one captured: the same process and creating thread,
-frame and DPI, and not minimised, cloaked or capture-protected. Anything else refuses with
-`WindowChanged`. A closed window fails that check at once. The frame is scrubbed and freed
-whatever the answer, so a second `Seal` is `Stale`.
+`Seal` hands out the hold's one image as a `ScreenContext`: the frame encoded as an overview
+JPEG, with its `CaptureTransform`. Before encoding, it checks on the serve thread that the window
+is still the one captured: the same process and creating thread, frame and DPI, and not
+minimised, cloaked or capture-protected. Anything else refuses with `WindowChanged`. A closed
+window fails that check at once. The frame is scrubbed and freed whatever the answer, so a
+second `Seal` is `Stale`.
 
 The check's limit: a window destroyed and replaced between the capture and `Seal` by another
 with the same handle value, process, creating thread, frame and DPI would pass. Handle values are
@@ -375,8 +373,8 @@ said to carry a reuse counter, which isn't documented. Off Windows, no window is
 
 The JPEG is capped at 2 MiB (`JPEG_CAP`), a guess until real windows are measured. The encoder
 writes into one buffer allocated at the cap, so growth never copies it, and an image over the cap
-refuses with `TooLarge`; it is never downscaled further. `TooLarge`, `Unmasked` and
-`Ambiguous` are ordinary refusals.
+refuses with `TooLarge`; it is never downscaled further. `TooLarge` and `Ambiguous` are
+ordinary refusals. No seal sends `Unmasked` now.
 
 The JPEG's bytes are user content. `ScreenContext` zeroes them on drop and its Debug prints only
 the byte count and size. The encoder's buffers (the resampled RGB and the JPEG) are zeroed on
@@ -420,10 +418,9 @@ buffer's contents can appear in an error report written while it holds them.
 
 Chromium's control view can miss a rendered page's fields. Every `Chrome_RenderWidgetHostHWND`
 element the walk passes through starts a page, and each page needs 20 named elements of its own
-among those the walk stored; otherwise the masks are `Partial` and the hold doesn't seal. A page
-first reached after the walk's element or byte cut has none stored, so it's `Partial` too, and a
-large page the walk cuts short refuses for now. The threshold is a guess until a real page is
-measured.
+among those the walk stored; otherwise the masks are `Partial`. A page first reached after the
+walk's element or byte cut has none stored, so it's `Partial` too. The threshold is a guess until
+a real page is measured.
 
 ## The brain's hold client (dormant)
 
@@ -457,8 +454,7 @@ hold pays this way.
   when the counter can't be read), a random nonce and the connected shell's pid. It streams
   `Acquired`, then `Complete`, and returns the `Held` frame with the worker generation that
   holds it.
-- **`walk(held)`** and **`seal(held)`** answer only when that same generation replies, for that
-  same key. Anything else is `Lost`: a replacement holds nothing. A `Sealed` for another key is
+- **`seal(held)`** answers only when that same generation replies, for that same key. Anything else is `Lost`: a replacement holds nothing. A `Sealed` for another key is
   dropped, which zeroes it.
 - **Fences across respawn.** The worker's retirement fence ends with its process, so the client
   keeps its own: `retire(owner)` raises it first, and a `context` for a hold at or below it is
@@ -494,7 +490,7 @@ no choice, and no line at all (`Discarded`) when the user switched screen holds 
 retired and any image zeroed either way. The gate opens only on the default model, so a thread pinned
 to a model that can see goes voice-only while the default can't: a known limit.
 
-The task runs `context`, `walk` and `seal` by the deadline that check set. It never
+The task runs `context` and `seal` by the deadline that check set. It never
 touches the part. Each answer comes back as a `ScreenEvent` keyed by the hold and the worker
 generation, on a channel the brain's hold loop selects beside audio and decoding:
 - `Held` fills in the part's generation, and sends `CaptureDone`, which releases the lease. A
@@ -504,7 +500,7 @@ generation, on a channel the brain's hold loop selects beside audio and decoding
 - Anything for a hold that isn't pending, a part that isn't `Waiting` or another generation is
   dropped: an image zeroes, and a `Held` is retired on the worker that holds it.
 
-Every closer sets the part's stop flag. The task checks it before `walk` and before `seal`, and
+Every closer sets the part's stop flag. The task checks it before `seal`, and
 retires its frame instead of going on. A refusal after `Held` retires before it's reported, so the
 worker never keeps a frame for a part that has ended. A lapse of the part's own lease before its
 frame is captured closes it as `NotReady`, since a later frame can't be said to exclude Kumochi's
@@ -515,7 +511,7 @@ windows; after `CaptureDone`, or for any other lease, a lapse is ignored.
 | `NotReady` | `Expired`, `Unsupported` (which also turns screen holds off until the brain restarts, below), `Busy`, a fault, a loss or the deadline, a lapsed lease, a recognition too old for its lease, or still `Waiting` when the words are; `Reused` too, with a `debug_assert`, because only a brain bug sends it |
 | `NothingThere` | `NoWindow` |
 | `CantShare` | `Minimized`, `Cloaked`, `Elevated`, `Protected`, `Excluded` |
-| `Unreadable` | `Unmasked`, `Ambiguous` |
+| `Unreadable` | `Ambiguous`, and `Unmasked`, which no worker sends now |
 | `TooLarge` | `TooLarge`, and `Invalid`, which a window over 8,192 pixels on a side gets |
 | `Changed` | `WindowChanged`, `DisplayChanged`, `Stale` |
 | `ModelCantSee` | none: the thread's own model failed the gate |

@@ -5,6 +5,7 @@ use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect};
 
 use super::*;
 use crate::screen::encode::{CaptureTransform, Encoded};
+use crate::screen::mask::Completeness;
 use crate::screen::wire::FrameMeta;
 use crate::supervise::fixture::{self, Rig};
 
@@ -138,15 +139,14 @@ async fn a_retired_hold_never_reaches_the_worker_again_and_a_later_one_does() {
 async fn an_answer_from_another_worker_or_for_another_frame_is_lost() {
     let mut rig = fixture::start_at::<Holds>(Generation(1));
     let client = client(&rig);
-    let walking = tokio::spawn({
+    let sealing = tokio::spawn({
         let client = Arc::clone(&client);
-        async move { client.walk(&held(1), until()).await }
+        async move { client.seal(held(1), until()).await.map(drop) }
     });
     let (id, _) = rig.next().await;
-    rig.reply(id, &Reply::Walked(held(1).key, Completeness::Complete))
-        .await;
+    rig.reply(id, &Reply::Sealed(held(1).key, context())).await;
     assert_eq!(
-        walking.await.expect("joins"),
+        sealing.await.expect("joins"),
         Err(Closed::Lost(WorkerLost::Lost)),
         "a replacement's answer"
     );
@@ -194,11 +194,11 @@ async fn a_busy_worker_is_ended_and_only_its_seen_exit_releases_the_hold() {
 async fn a_retire_the_full_queue_refuses_ends_the_holder_and_its_exit_releases_the_hold() {
     let mut rig = fixture::start::<Holds>();
     let client = client(&rig);
-    let mut walks = Vec::new();
+    let mut seals = Vec::new();
     for _ in 0..16 {
-        walks.push(tokio::spawn({
+        seals.push(tokio::spawn({
             let client = Arc::clone(&client);
-            async move { client.walk(&held(1), until()).await }
+            async move { client.seal(held(1), until()).await.map(drop) }
         }));
         rig.next().await;
     }
@@ -209,9 +209,9 @@ async fn a_retire_the_full_queue_refuses_ends_the_holder_and_its_exit_releases_t
     rig.held().await;
     rig.confirm.send(true).expect("fixture listens");
     assert_eq!(retiring.await.expect("joins"), Ok(()));
-    for walk in walks {
+    for seal in seals {
         assert_eq!(
-            walk.await.expect("joins"),
+            seal.await.expect("joins"),
             Err(Closed::Lost(WorkerLost::Lost))
         );
     }

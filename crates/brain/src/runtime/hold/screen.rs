@@ -231,7 +231,7 @@ impl super::Holds {
     }
 }
 
-/// The hold's screen work by `until`: capture, walk, then seal. Each answer goes
+/// The hold's screen work by `until`: capture, then seal. Each answer goes
 /// back as an event, and a frame the task can't hand on is retired with the worker that holds it.
 async fn work(
     client: Arc<HoldClient>,
@@ -258,15 +258,9 @@ async fn work(
         }
     };
     let generation = Some(held.generation);
-    let mut ended = report(generation, Outcome::Held).await.is_err() || stop.load(Ordering::SeqCst);
+    let ended = report(generation, Outcome::Held).await.is_err() || stop.load(Ordering::SeqCst);
     let mut outcome = None;
     if !ended {
-        match client.walk(&held, until).await {
-            Err(closed) => outcome = Some(ending(closed)),
-            Ok(_) => ended = stop.load(Ordering::SeqCst),
-        }
-    }
-    if !ended && outcome.is_none() {
         outcome = Some(match client.seal(held, until).await {
             Ok(context) => Outcome::Sealed(context),
             Err(closed) => {
