@@ -233,10 +233,16 @@ checkout.
 | 16 | the cleanup, after every proof passed | 3 |
 | other, or none | the harness was killed or panicked | at most 3 |
 
+When request 1 fails Claude Code's audit, the harness waits up to 10 s for the `AuditFailed` view,
+which the brain sends after the run's failure, so the failure line names the failed check. The
+view doesn't carry the phase, before stdin or after the seed; the brain's log does, so exit 13
+still counts at most 2.
+
 **Tests.** Offline tests cover what needs no request: the plan's budget and the refusal of a plan
 over it, the refusal while a product process runs, the argument table, the exit-code table, the
 restore file and the line about one left behind, the verdict after a timeout, the walk that finds
-`claude.exe` under the brain, and the folder listing's changes. The drive itself runs only live,
+`claude.exe` under the brain, the folder listing's changes, and when a failed audit waits for its
+view. The drive itself runs only live,
 including the put-back after a failed default, which needs a brain that refuses it.
 
 **Known limits.**

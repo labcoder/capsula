@@ -558,10 +558,23 @@ fn question(
         answer.tools,
         start.elapsed().as_millis()
     )?;
+    let audit = answer.error == Some(ErrorKey::ClaudeCodeAuditFailed);
+    if audit_view_due(&answer, session.claude) {
+        session.next(VIEW, |frame| {
+            matches!(frame, Frame::Control(ControlToShell::Connections(view))
+                if matches!(view.claude_code, ClaudeCodeView::AuditFailed(_)))
+            .then_some(())
+        })?;
+    }
     ensure!(
         answer.phase == Some(Phase::Done),
-        "the question ended {}",
-        ended(&answer)
+        "the question ended {}{}",
+        ended(&answer),
+        if audit {
+            ", its phase in the brain's log"
+        } else {
+            ""
+        }
     );
     ensure!(answer.chars > 0, "the question ended done with no text");
     ensure!(answer.tools == 0, "the question sent tool frames");
@@ -570,6 +583,13 @@ fn question(
         "claude code took --effort, and a launch with no tools passed its audit: yes"
     )?;
     Ok(made)
+}
+
+/// Whether the `AuditFailed` view that names the failed check is still due: the brain sends it
+/// after the run's failure, so a failure line built at once would show the view before it.
+fn audit_view_due(answer: &Answer, claude: Option<ClaudeCodeView>) -> bool {
+    answer.error == Some(ErrorKey::ClaudeCodeAuditFailed)
+        && !matches!(claude, Some(ClaudeCodeView::AuditFailed(_)))
 }
 
 /// The title job request 1's `Done` started. It passes when the brain commits a title, which it
@@ -1071,16 +1091,41 @@ mod tests {
     use std::time::Instant;
 
     use kumochi_protocol::message::{
-        ConnectionKind, ControlToShell, DataToShell, Effort, ModelChoice, ModelSlug, Phase, RunId,
-        RunOrigin, ThreadId,
+        AuditFailed, ClaudeCodeView, ConnectionKind, ControlToShell, DataToShell, Effort, ErrorKey,
+        ModelChoice, ModelSlug, Phase, RunId, RunOrigin, ThreadId,
     };
 
     use super::{
-        CAP, KINDS, PLAN, RESTORE, Step, budget, changes, claude_left, count, format_choice,
-        parse_choice, preflight, report, taken, verdict,
+        Answer, CAP, KINDS, PLAN, RESTORE, REVIEWED, Step, audit_view_due, budget, changes,
+        claude_left, count, format_choice, parse_choice, preflight, report, taken, verdict,
     };
     use crate::slice2::client::{Frame, Seen};
     use crate::{platform, scratch};
+
+    #[test]
+    fn a_question_the_audit_failed_waits_for_the_view_that_names_the_check() {
+        let failed = |error| Answer {
+            phase: Some(Phase::Failed),
+            error: Some(error),
+            ..Answer::default()
+        };
+        let ready = ClaudeCodeView::Ready {
+            version: REVIEWED,
+            analytics_on: false,
+        };
+        let audit = failed(ErrorKey::ClaudeCodeAuditFailed);
+        assert!(audit_view_due(&audit, Some(ready)));
+        assert!(audit_view_due(&audit, None));
+        assert!(!audit_view_due(
+            &audit,
+            Some(ClaudeCodeView::AuditFailed(AuditFailed::McpServer))
+        ));
+        assert!(!audit_view_due(
+            &failed(ErrorKey::ClaudeCodeSignedOut),
+            Some(ready)
+        ));
+        assert!(!audit_view_due(&Answer::default(), Some(ready)));
+    }
 
     #[test]
     fn text_that_comes_before_the_runs_name_counts_toward_its_answer() {
