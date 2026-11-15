@@ -1,4 +1,5 @@
-//! The only entrance to pixel consumers: mask the held full-resolution frame in place.
+//! The only entrance to pixel consumers: paint a capture's mask set over the held frame in place.
+//! A hold's seal passes an empty set, so nothing is painted.
 
 use kumochi_protocol::geometry::PhysicalRect;
 
@@ -6,7 +7,7 @@ use super::frame::RawFrame;
 use super::mask::{Completeness, MaskSet};
 use super::wire::{FrameMeta, Refusal};
 
-/// A borrowed image with every known password rectangle blacked out.
+/// A borrowed image with its mask set's rectangles painted black.
 pub(crate) struct SanitizedFrame<'a> {
     bgra: &'a [u8],
     meta: FrameMeta,

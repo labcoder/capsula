@@ -1,6 +1,6 @@
-//! Password rectangles one capture must never show: the element walk adds them as it reads,
-//! and sanitizing blacks them out before any pixel consumer. No production path fills masks
-//! now: a hold's picture goes through `sanitize` with an empty set.
+//! Rectangles to paint over one capture: the element walk adds password rectangles as it reads,
+//! and sanitizing paints them black. No production path fills masks: a hold's seal passes an
+//! empty set, and the walk, mask and OCR code waits for the study after P3 (OSC-775).
 
 use std::sync::{Arc, Mutex};
 

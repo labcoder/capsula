@@ -180,9 +180,10 @@ sequenceDiagram
 The portable pixel path borrows a committed `RawFrame` through `sanitize`. It clips every
 `MaskSet` rectangle to the physical display and writes opaque black in place, then lends a
 `SanitizedFrame` stamped with the mask generation. An uncommitted frame is refused as stale.
-Pixel consumers accept only this sanitized type. Adding a password rectangle bumps the mask
-generation; sanitizing again applies all masks idempotently before another encode. No
-production path fills masks now: a hold's picture goes through `sanitize` with an empty set.
+Pixel consumers accept only this sanitized type. Adding a rectangle bumps the mask generation;
+sanitizing again applies all masks idempotently before another encode. A hold's seal passes an
+empty mask set, so nothing is painted. The walk, mask and OCR code has no production caller and
+waits for the study after P3 (OSC-775).
 
 Masks belong to one capture: another capture's mask set is refused as stale. Every sanitized
 frame and encoded image carries the capture's mask completeness (`Pending`, `Complete`,
@@ -211,12 +212,13 @@ floating-point coordinates must be validated as finite by their first parser. Im
 output contains only dimensions, byte counts and mask generations,
 and encoding errors expose only a fixed numeric code, never pixels or foreign error text.
 
-Only a hold's seal calls them, and the shell doesn't send screen holds yet. Nothing here captures
-another frame.
+Only a hold's seal calls them, with an empty mask set, and the shell doesn't send screen holds
+yet. Nothing here captures another frame.
 
 ## Regional OCR
 
-`screen/ocr.rs` accepts only `SanitizedFrame`. Sanitizing records the exact clipped physical
+Nothing in production calls OCR; like the walk and masks, it waits for the study after P3
+(OSC-775). `screen/ocr.rs` accepts only `SanitizedFrame`. Sanitizing records the exact clipped physical
 rectangles it painted at that generation; these, not a later independent mask list, filter OCR
 words. `OcrRegion` comes from the focus crop's `CaptureTransform` or a readable completed
 `ElementTree` window belonging to that capture. Regions clip to the captured display; empty
@@ -417,7 +419,8 @@ and 4 MiB assembly buffer aren't excluded while they hold it, which lasts until 
 The registration is in-process only. When Windows refuses it, capture carries on, and that
 buffer's contents can appear in an error report written while it holds them.
 
-Chromium's control view can miss a rendered page's fields. Every `Chrome_RenderWidgetHostHWND`
+Chromium's control view can miss a rendered page's fields, which matters to the dormant element
+walk below. Every `Chrome_RenderWidgetHostHWND`
 element the walk passes through starts a page, and each page needs 20 named elements of its own
 among those the walk stored; otherwise the masks are `Partial`. A page first reached after the
 walk's element or byte cut has none stored, so it's `Partial` too. The threshold is a guess until
@@ -541,7 +544,7 @@ from that cache. Root handles are checked for top-level visibility and ownership
 lookup, and the native window owner is checked again after it. The worker and the
 connected shell are excluded by pid, with Kumochi process-image names also excluded by the
 portable policy. Other platforms return E_NOTIMPL. Nothing in production runs it: holds don't
-walk, and nothing sends `Elements`.
+walk, nothing sends `Elements`, and it waits for the study after P3 (OSC-775).
 
 One pre-order walk retains at most 512 elements, depth 16, 128 characters per name and 60,000
 bytes of element JSON (commas and the reply envelope are additional). The byte cap usually binds
@@ -592,7 +595,7 @@ owner-approved session; short unlocked dry runs do not qualify as timing measure
 
 ## Capture-scoped element operation
 
-`Walk { key }` and `Elements { key, target }` spend the held frame's walk once, including refused
+`Elements { key, target }` spends the held frame's walk once, including refused
 or unavailable attempts. Another hold's key is Stale and spends nothing; a second attempt for the
 held capture is Reused. Each new `Context` drops authority and installs a fresh mask sink before
 checking its ticket, so refused captures leave no walkable frame and late writes reach only the
@@ -622,7 +625,6 @@ reads until it's replaced: the actor opens its reader once. The reader thread di
 source initialization and retries it for the next walk; a successfully initialized source stays on
 that thread. Neither retry replays a spent walk or renews capture authority.
 
-The hold client accepts only a `Walked` answer for its own hold from the worker that holds the
-frame. Refusals pass through; any other answer is a loss. There is no cancel operation yet;
+The hold client sends no `Elements`: a hold seals without a walk. There is no cancel operation yet;
 new captures replace authority and the mask sink, and worker termination tears down stuck threads.
 No live window is read by the fake-source tests; they do not verify native UIA behavior or timing.

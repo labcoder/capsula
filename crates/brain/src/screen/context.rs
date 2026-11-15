@@ -1,4 +1,4 @@
-//! The one image a hold hands out: the masked window's JPEG and how to map it back.
+//! The one image a hold hands out: the captured window's JPEG and how to map it back.
 
 use std::fmt;
 
