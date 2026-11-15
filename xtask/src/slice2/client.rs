@@ -236,6 +236,9 @@ impl Client {
                 Frame::Control(ControlToShell::RunState { run, phase, .. }) => {
                     format!("RunState({}, {phase:?})", run.0)
                 }
+                Frame::Control(ControlToShell::Settings { answer, .. }) => {
+                    format!("Settings(answer {answer})")
+                }
                 Frame::Control(other) => format!("{other:?}"),
                 Frame::Data(DataToShell::AssistantText { run, .. }, bytes) => {
                     format!("AssistantText({}, {bytes} B)", run.0)
@@ -362,16 +365,11 @@ fn control_reader(shared: Arc<Shared>, frames: Sender<Seen>) -> impl FnOnce() + 
     move || {
         loop {
             let frame = match read::<ControlToShell>(&shared.control, Pipe::Control) {
-                Ok(Some((ControlToShell::Ping, _))) => {
-                    if shared.write_control(&ControlToBrain::Pong).is_err() {
-                        Frame::Closed
-                    } else {
-                        continue;
-                    }
-                }
-                // The slice 2 gate checks runs and deletes, not settings.
-                Ok(Some((ControlToShell::Settings { .. }, _))) => continue,
-                Ok(Some((message, _))) => Frame::Control(message),
+                Ok(Some((message, _))) => match frame_of(message) {
+                    Some(frame) => frame,
+                    None if shared.write_control(&ControlToBrain::Pong).is_ok() => continue,
+                    None => Frame::Closed,
+                },
                 Ok(None) | Err(_) => Frame::Closed,
             };
             let closed = matches!(frame, Frame::Closed);
@@ -383,6 +381,14 @@ fn control_reader(shared: Arc<Shared>, frames: Sender<Seen>) -> impl FnOnce() + 
                 return;
             }
         }
+    }
+}
+
+/// The frame a control message becomes; `None` for a `Ping`, which the reader answers itself.
+fn frame_of(message: ControlToShell) -> Option<Frame> {
+    match message {
+        ControlToShell::Ping => None,
+        message => Some(Frame::Control(message)),
     }
 }
 
@@ -422,4 +428,51 @@ fn read<T: DeserializeOwned>(pipe: &PipeClient, which: Pipe) -> Result<Option<(T
         frame::decode(&payload)?,
         u32::try_from(HEADER_LEN + len)?,
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use kumochi_protocol::message::{
+        AssistantName, ControlToShell, DEFAULT_HOLD_TO_TALK, DEFAULT_SCREEN_HOLDS, DockPosition,
+        MaxFrameRate, OnboardingStep, SettingsView, SttUnload, ThreadId,
+    };
+
+    use super::{Frame, frame_of};
+
+    #[test]
+    fn the_connections_first_settings_reaches_the_client_before_its_scenes() {
+        let view = SettingsView {
+            assistant_name: AssistantName::new("Kumo").expect("a valid name"),
+            user_name: None,
+            onboarded: true,
+            onboarding_from: OnboardingStep::Welcome,
+            main_thread: ThreadId(1),
+            max_frame_rate: MaxFrameRate::default(),
+            default_model: None,
+            dock_position: DockPosition::TopCenter,
+            show_in_taskbar: false,
+            talk_back: false,
+            stt_unload: SttUnload::Kept,
+            hold_to_talk: DEFAULT_HOLD_TO_TALK,
+            screen_holds: DEFAULT_SCREEN_HOLDS,
+        };
+        let sent = [
+            ControlToShell::Settings {
+                view,
+                answer: false,
+            },
+            ControlToShell::Ping,
+            ControlToShell::Scenes { scenes: Vec::new() },
+        ];
+        let taken: Vec<&str> = sent
+            .into_iter()
+            .filter_map(frame_of)
+            .map(|frame| match frame {
+                Frame::Control(ControlToShell::Settings { answer: false, .. }) => "settings",
+                Frame::Control(ControlToShell::Scenes { .. }) => "scenes",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(taken, ["settings", "scenes"]);
+    }
 }
