@@ -379,12 +379,12 @@ the next sweep, as `engine\` leftovers are.
 What the sweep leaves, and why it stays small (seen on Rez by name and size only):
 
 - `local\Kumochi Dev\logs\kumochi-bridge.<date>.log`: the bridge's own log, which rotates daily
-  and keeps seven files (`logging::init`), with no content in it;
-- `config.lock\`, `config\.oauth_refresh.lock\` and `config\.claude.json.lock\`: at most one empty
-  folder each, which Claude Code clears on its next start after an unclean exit;
+  and keeps seven files (`logging::init`), each seen empty;
+- `config.lock\`, `config\.oauth_refresh.lock\` and `config\.claude.json.lock\`: Claude Code's lock
+  folders, at most one each, seen empty or absent;
 - `config\.claude.json` and `config\backups\.claude.json.backup.<ms>`: Claude Code's config and its
-  own safety copies of it, four backups (about 3 KB) after nine days of use. They aren't proven
-  bounded, and they stay: removing them could turn a damaged `.claude.json` into a reset.
+  backups, four files after nine days of use; Claude Code's own, not proven bounded. They stay:
+  removing them could turn a damaged `.claude.json` into a reset.
 
 ### Quarantined versions
 
