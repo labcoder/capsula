@@ -527,7 +527,7 @@ fn row(
         cut: cut.map(|text| strings.get(text).into()),
         screen: match kind {
             PageEventKind::HeldTurn { screen } => {
-                Some(strings.get(Text::held_screen(screen)).into())
+                Text::held_screen(screen).map(|text| strings.get(text).into())
             }
             _ => None,
         },
@@ -769,6 +769,12 @@ mod tests {
                 same.screen = None;
                 assert!(same == plain[0], "{screen:?}");
             }
+            // A turn that carried the screen's picture has no line of its own yet.
+            user.kind = PageEventKind::HeldTurn {
+                screen: HeldScreen::Screen,
+            };
+            state.events = vec![user];
+            assert!(stored_rows(&state, cx)[0] == plain[0]);
         });
     }
 

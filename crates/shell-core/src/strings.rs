@@ -342,12 +342,16 @@ impl Text {
     }
 
     /// The history line under a held turn: what its screen hold carried.
-    pub const fn held_screen(screen: HeldScreen) -> Self {
-        match screen {
+    pub const fn held_screen(screen: HeldScreen) -> Option<Self> {
+        Some(match screen {
             HeldScreen::Attached => Self::ScreenHistoryAttached,
             HeldScreen::NotIncluded(class) => Self::screen_not_included(class),
             HeldScreen::Withdrawn => Self::ScreenNotIncludedTurnedOff,
-        }
+            // shortcut: a turn that carried the screen's picture shows no line, so it never
+            // reads as the window's; it gets its own string when the shell sends the screen at
+            // release.
+            HeldScreen::Screen => return None,
+        })
     }
 }
 
@@ -768,18 +772,20 @@ mod tests {
         for (screen, line) in [
             (
                 HeldScreen::Attached,
-                "Included the window under your pointer",
+                Some("Included the window under your pointer"),
             ),
             (
                 HeldScreen::NotIncluded(ScreenClass::Changed),
-                "Screen not included: the window changed",
+                Some("Screen not included: the window changed"),
             ),
             (
                 HeldScreen::Withdrawn,
-                "Screen not included: you turned screen sharing off",
+                Some("Screen not included: you turned screen sharing off"),
             ),
+            (HeldScreen::Screen, None),
         ] {
-            assert_eq!(strings.get(Text::held_screen(screen)), line);
+            let shown = Text::held_screen(screen).map(|text| strings.get(text));
+            assert_eq!(shown.as_deref(), line);
         }
     }
 
