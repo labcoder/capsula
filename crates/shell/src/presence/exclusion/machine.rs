@@ -5,6 +5,9 @@ use std::time::{Duration, Instant};
 
 use kumochi_protocol::message::{CaptureFor, LeaseGeneration};
 
+#[cfg(test)]
+pub(crate) mod fixture;
+
 pub(super) const LIFETIME: Duration = Duration::from_secs(3);
 const SLOTS: [Slot; 8] = [
     Slot::Dock,
@@ -192,3 +195,35 @@ impl<R> Exclusion<R> {
             .is_some_and(|lease| lease.key.session == session && lease.key.input == input)
     }
 }
+
+#[cfg(test)]
+impl Key {
+    pub(crate) fn input(self) -> CaptureFor {
+        self.input
+    }
+
+    pub(crate) fn generation(self) -> LeaseGeneration {
+        self.generation
+    }
+}
+
+#[cfg(test)]
+impl<R> ExclusionLease<R> {
+    pub(crate) fn key(&self) -> Key {
+        self.key
+    }
+
+    pub(crate) fn holds(&self, slot: Slot) -> bool {
+        self.receipts[slot as usize].is_some()
+    }
+}
+
+#[cfg(test)]
+impl<R> Exclusion<R> {
+    pub(crate) fn generation(&self) -> u32 {
+        self.generation
+    }
+}
+
+#[cfg(test)]
+mod tests;
