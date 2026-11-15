@@ -37,7 +37,7 @@ fn acquire_presence(
         let session = this.session.clone().unwrap();
         this.acquire_exclusion(&session, input, cx)
             .expect("actual Presence acquisition through the injected affinity adapter");
-        this.exclusion.lease.as_ref().unwrap().key()
+        this.exclusion.lease().unwrap().key()
     })
 }
 
@@ -111,7 +111,7 @@ fn actual_presence_terminals_match_nonempty_owner_session_input_and_duplicates(
             cx,
         );
         assert_eq!(
-            owner.read_with(cx, |this, _| this.exclusion.lease.as_ref().unwrap().key()),
+            owner.read_with(cx, |this, _| this.exclusion.lease().unwrap().key()),
             key
         );
     }
@@ -123,7 +123,7 @@ fn actual_presence_terminals_match_nonempty_owner_session_input_and_duplicates(
         },
         cx,
     );
-    assert!(owner.read_with(cx, |this, _| this.exclusion.lease.is_none()));
+    assert!(owner.read_with(cx, |this, _| this.exclusion.lease().is_none()));
     assert_eq!(fixture.borrow().affinities(), PRIOR);
     receive(
         &owner,
@@ -134,7 +134,7 @@ fn actual_presence_terminals_match_nonempty_owner_session_input_and_duplicates(
         },
         cx,
     );
-    assert!(owner.read_with(cx, |this, _| this.exclusion.lease.is_none()));
+    assert!(owner.read_with(cx, |this, _| this.exclusion.lease().is_none()));
     assert_eq!(fixture.borrow().affinities(), PRIOR);
     acquire_presence(&owner, CaptureFor::Turn(8), cx);
     receive(
@@ -146,7 +146,7 @@ fn actual_presence_terminals_match_nonempty_owner_session_input_and_duplicates(
         },
         cx,
     );
-    assert!(owner.read_with(cx, |this, _| this.exclusion.lease.is_none()));
+    assert!(owner.read_with(cx, |this, _| this.exclusion.lease().is_none()));
     assert_eq!(fixture.borrow().affinities(), PRIOR);
     assert!(fixture.borrow().controls.as_ref().unwrap().is_empty());
 }
@@ -167,7 +167,7 @@ fn detached_native_affinity_is_not_the_positive_presence_adapter(
             this.acquire_exclusion(&session, CaptureFor::Turn(7), cx),
             Err(Error::Surface)
         );
-        assert!(this.exclusion.lease.is_none());
+        assert!(this.exclusion.lease().is_none());
         assert!(this.exclusion_timer.is_none());
     });
 }
@@ -201,7 +201,7 @@ fn actual_timer_uses_original_deadline_and_cannot_retire_a_successor(
         .advance(Duration::from_secs(2));
     cx.run_until_parked();
     assert_eq!(
-        owner.read_with(cx, |this, _| this.exclusion.lease.as_ref().unwrap().key()),
+        owner.read_with(cx, |this, _| this.exclusion.lease().unwrap().key()),
         next
     );
     assert_eq!(
@@ -214,7 +214,7 @@ fn actual_timer_uses_original_deadline_and_cannot_retire_a_successor(
         .advance(Duration::from_secs(1) - Duration::from_nanos(1));
     cx.run_until_parked();
     assert_eq!(
-        owner.read_with(cx, |this, _| this.exclusion.lease.as_ref().unwrap().key()),
+        owner.read_with(cx, |this, _| this.exclusion.lease().unwrap().key()),
         next
     );
     cx.dispatcher
@@ -222,7 +222,7 @@ fn actual_timer_uses_original_deadline_and_cannot_retire_a_successor(
         .clock()
         .advance(Duration::from_nanos(1));
     cx.run_until_parked();
-    assert!(owner.read_with(cx, |this, _| this.exclusion.lease.is_none()));
+    assert!(owner.read_with(cx, |this, _| this.exclusion.lease().is_none()));
     assert_eq!(fixture.borrow().affinities(), PRIOR);
     drop(old_timer);
 }
@@ -244,13 +244,13 @@ fn actual_timer_retains_restoration_failure_at_its_original_deadline(
         .clock()
         .advance(Duration::from_secs(2) - Duration::from_nanos(1));
     cx.run_until_parked();
-    assert!(!owner.read_with(cx, |this, _| this.exclusion.lease.as_ref().unwrap().revoked));
+    assert!(!owner.read_with(cx, |this, _| this.exclusion.lease().unwrap().revoked()));
     cx.dispatcher
         .scheduler()
         .clock()
         .advance(Duration::from_nanos(1));
     cx.run_until_parked();
-    assert!(owner.read_with(cx, |this, _| this.exclusion.lease.as_ref().unwrap().revoked));
+    assert!(owner.read_with(cx, |this, _| this.exclusion.lease().unwrap().revoked()));
     assert_eq!(
         fixture.borrow().affinities(),
         [0, EXCLUDED, EXCLUDED, 4, 8, 16, 32, 64]
@@ -273,8 +273,8 @@ fn actual_replacement_and_state_keep_old_debt_without_matching_new_sessions(
     );
     owner.update(cx, |this, cx| {
         assert_eq!(this.session.as_ref().unwrap().generation(), 10);
-        assert_eq!(this.exclusion.lease.as_ref().unwrap().key(), key);
-        assert!(this.exclusion.lease.as_ref().unwrap().revoked);
+        assert_eq!(this.exclusion.lease().unwrap().key(), key);
+        assert!(this.exclusion.lease().unwrap().revoked());
         let session = this.session.clone().unwrap();
         assert_eq!(
             this.acquire_exclusion(&session, CaptureFor::Turn(8), cx),
@@ -298,7 +298,7 @@ fn actual_replacement_and_state_keep_old_debt_without_matching_new_sessions(
     }
     receive(&owner, LinkEvent::State(LinkState::Reconnecting), cx);
     assert!(owner.read_with(cx, |this, _| this.session.is_none()
-        && this.exclusion.lease.is_none()));
+        && this.exclusion.lease().is_none()));
     assert_eq!(fixture.borrow().affinities(), PRIOR);
 }
 
@@ -326,12 +326,12 @@ fn actual_lazy_overlay_protects_before_show_and_keeps_failed_surface_hidden(
                 ));
                 assert!(!this.presenter.frames().borrow().shown);
                 assert!(this.overlay.window().is_some());
-                assert!(this.exclusion.lease.as_ref().unwrap().revoked);
-                assert!(this.exclusion.lease.as_ref().unwrap().holds(Slot::Drawing));
+                assert!(this.exclusion.lease().unwrap().revoked());
+                assert!(this.exclusion.lease().unwrap().holds(Slot::Drawing));
             } else {
                 result.expect("actual overlay show");
                 assert!(this.presenter.frames().borrow().shown);
-                assert!(!this.exclusion.lease.as_ref().unwrap().revoked);
+                assert!(!this.exclusion.lease().unwrap().revoked());
             }
             assert_eq!(
                 fixture.borrow().surfaces[Slot::Drawing as usize]
@@ -357,7 +357,7 @@ fn actual_shown_overlay_can_clear_or_disconnect_while_restoration_debt_blocks_sh
         acquire_presence(&owner, CaptureFor::Turn(7), cx);
         fixture.borrow_mut().restore_failure = 1 << Slot::Proxy as usize;
         owner.update(cx, super::super::Presence::revoke_exclusion);
-        assert!(owner.read_with(cx, |this, _| this.exclusion.lease.as_ref().unwrap().revoked));
+        assert!(owner.read_with(cx, |this, _| this.exclusion.lease().unwrap().revoked()));
         owner.update(cx, |this, cx| {
             let (sample, effects) = this.presenter.sample_at(std::time::Instant::now());
             assert!(sample.visible);
@@ -380,7 +380,7 @@ fn actual_shown_overlay_can_clear_or_disconnect_while_restoration_debt_blocks_sh
             let (sample, effects) = crate::presenter::tests::sample(&mut this.presenter, 0);
             assert!(!sample.visible);
             assert!(effects.is_empty());
-            assert!(this.exclusion.lease.as_ref().unwrap().revoked);
+            assert!(this.exclusion.lease().unwrap().revoked());
             assert_eq!(
                 fixture.borrow().affinities(),
                 [0, EXCLUDED, EXCLUDED, 4, 8, 16, 32, 64]
@@ -414,13 +414,13 @@ fn actual_quit_cleans_a_nonempty_owner_and_does_not_forgive_failed_restoration(
         owner.update(cx, |this, cx| {
             this.quit(cx);
             if fail {
-                assert!(this.exclusion.lease.as_ref().unwrap().revoked);
+                assert!(this.exclusion.lease().unwrap().revoked());
                 assert_eq!(
                     fixture.borrow().affinities(),
                     [0, EXCLUDED, EXCLUDED, 4, 8, 16, 32, 64]
                 );
             } else {
-                assert!(this.exclusion.lease.is_none());
+                assert!(this.exclusion.lease().is_none());
                 assert_eq!(fixture.borrow().affinities(), PRIOR);
             }
         });
@@ -487,7 +487,7 @@ fn actual_presence_keeps_hold_and_listening_off_even_after_ready_and_deferred_ef
                     .expect("ready status");
                     this.refresh_dock(cx);
                     assert!(!this.dock.read(cx).listening);
-                    assert!(this.exclusion.lease.is_none());
+                    assert!(this.exclusion.lease().is_none());
                     assert_eq!(this.exclusion.generation(), 0);
                     assert!(this.exclusion_timer.is_none());
                     assert!(controls.is_empty());
@@ -518,7 +518,7 @@ fn actual_presence_keeps_hold_and_listening_off_even_after_ready_and_deferred_ef
                     )
                     .expect("direct replacement");
                     assert_eq!(this.session.as_ref().unwrap().generation(), 10);
-                    assert!(this.exclusion.lease.is_none());
+                    assert!(this.exclusion.lease().is_none());
                     assert!(!this.dock.read(cx).listening);
                     assert!(controls.is_empty());
                     assert!(requests.is_empty());
