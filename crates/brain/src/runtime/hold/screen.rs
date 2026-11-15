@@ -129,6 +129,7 @@ impl super::Holds {
         if let Some(hold) = self.pending.as_mut().filter(|hold| hold.key == key)
             && matches!(hold.screen, ScreenPart::None)
         {
+            tracing::info!(closed = "recognized too late", "hold screen part closed");
             hold.screen = ScreenPart::Closed(ScreenClass::NotReady);
         }
     }
@@ -171,6 +172,7 @@ impl super::Holds {
         if let Some(hold) = &mut self.pending
             && matches!(hold.screen, ScreenPart::Ready(_))
         {
+            tracing::info!(closed = "hold ended", "hold screen part closed");
             hold.screen = ScreenPart::Discarded;
         }
     }
@@ -182,6 +184,9 @@ impl super::Holds {
         if let Some(hold) = &mut self.pending
             && !matches!(hold.screen, ScreenPart::None)
         {
+            if matches!(hold.screen, ScreenPart::Ready(_)) {
+                tracing::info!(closed = ?class, "hold screen part closed");
+            }
             hold.screen = class.map_or(ScreenPart::Discarded, ScreenPart::Closed);
         }
     }
@@ -226,6 +231,7 @@ impl super::Holds {
         };
         stop.store(true, Ordering::SeqCst);
         let generation = *generation;
+        tracing::info!(closed = "still waiting", "hold screen part closed");
         hold.screen = ScreenPart::Closed(ScreenClass::NotReady);
         retire(self.screen.as_ref(), hold.key, generation);
     }

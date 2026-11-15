@@ -523,6 +523,12 @@ windows; after `CaptureDone`, or for any other lease, a lapse is ignored.
 Each worker answer that ends a part is logged at info as `hold screen part closed` with its
 `Closed` value: the refusal, `Busy`, the numeric fault or the loss, never anything from the window.
 The line names which refusal a class came from, such as `Unmasked` or `Ambiguous` for `Unreadable`.
+The brain's own closures log the same line once: `recognized too late` for a recognition older
+than `LATEST_START`; `still waiting` for a part closed while waiting, because its lease lapsed,
+its hold ended or its words were ready first; `hold ended` for a ready image dropped without a
+run; and the thread gate's class (`None` when screen holds were switched off) for a ready image
+the gate withdrew. A part the worker already closed isn't logged again when the gate re-closes it,
+but a worker answer that arrives after the brain closed the part still logs its own line.
 
 Every way a hold ends reaches the part through one of two places:
 - the hold's invalidation, which covers cancel and Esc, a turn, an Ask, `ShellLost`, a model or
