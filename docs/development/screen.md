@@ -83,6 +83,11 @@ its cleanup rules are in `crates/shell-core/src/presence/exclusion/machine.rs`, 
 Its one production caller is a recognized screen hold (`presence/voice.rs`): the lease is taken
 after every refusal has passed, and its generation goes to the brain in `HoldRecognized`. It
 sends no Include, ticket or capture request.
+The native callback's delivery (`presence/gesture.rs`) applies its effects inside the dock
+window's update and runs its intents when that update has ended. GPUI takes a window out of its
+table while updating it, so an acquisition made inside the dock's update can't reach the dock
+and is refused. A hold refused its lease goes on voice only, and its line says "Screen not
+included: the screen wasn't ready".
 The acquisition path snapshots exact native affinity before changing the dock,
 hit proxy, status panel, typing panel, threads panel, settings panel and drawing overlay.
 Absent lazy panels have no pixels; their create/re-show hooks exclude them after the existing
@@ -125,7 +130,10 @@ Known limits. Restoration isn't tied to native source drain or worker exit: the 
 at three seconds whatever the worker is doing, and only the lapse keeps a later frame out of a
 turn. A lapse is a queued message, so it bounds what the brain keeps, not when Windows stops
 compositing a restored surface. An already accepted frame keeps its normal capture lifetime, and
-no replacement lease is allowed over restoration debt. Source regressions do not establish
+no replacement lease is allowed over restoration debt. A revoke that runs inside a covered
+window's own update, such as a drawing frame on the dock or a button in a panel, can't restore
+that window; its receipt stays as debt until the timer's cleanup, at most three seconds later.
+Source regressions do not establish
 compositor timing or pixel privacy; the dock, bubble and proxy cases are checked in a capture
 session on Rez.
 

@@ -4,7 +4,9 @@
 //! owner through `update_window`, which only tries to borrow the app. If GPUI is already
 //! borrowed, because a nested message loop dispatched this callback, effects wait in order
 //! with their original times and are retried until they apply or the owner is gone, instead of
-//! panicking or being lost.
+//! panicking or being lost. Intents run when the dock's update has ended, inside the same call:
+//! GPUI takes a window out of its table while updating it, and a recognized hold's capture
+//! lease must reach every presence window, the dock included.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -260,7 +262,7 @@ fn apply(
     pending: &Pending,
 ) -> Applied {
     let result = cx.update_window(dock, |_, window, app| {
-        owner
+        let applied = owner
             .update(app, |this, cx| {
                 let mut effects = pending.delivery.effects;
                 if effects.contains(&Some(crate::input::Effect::OpenInput)) {
@@ -275,14 +277,26 @@ fn apply(
                     }
                 }
                 this.apply_effects(effects, window, cx);
-                for intent in pending.delivery.intents.iter().flatten().cloned() {
-                    this.voice_intent(intent, pending.stamp, pending.qpc, pending.pointer, cx);
-                }
-                if pending.escape && this.native_escape(pending.cancelled, cx).is_err() {
-                    tracing::error!("can't apply native Escape");
-                }
             })
-            .is_ok()
+            .is_ok();
+        if applied && (pending.escape || pending.delivery.intents.iter().any(Option::is_some)) {
+            let (owner, intents) = (owner.clone(), pending.delivery.intents.clone());
+            let (stamp, qpc, pointer) = (pending.stamp, pending.qpc, pending.pointer);
+            let (escape, cancelled) = (pending.escape, pending.cancelled);
+            let intents = move |app: &mut App| {
+                let _gone = owner.update(app, |this, cx| {
+                    for intent in intents.into_iter().flatten() {
+                        this.voice_intent(intent, stamp, qpc, pointer, cx);
+                    }
+                    if escape && this.native_escape(cancelled, cx).is_err() {
+                        tracing::error!("can't apply native Escape");
+                    }
+                });
+            };
+            // Deferred to the end of this update, where the dock is back in GPUI's window table.
+            app.defer(intents);
+        }
+        applied
     });
     match result {
         Ok(true) => Applied::Yes,
@@ -290,4 +304,30 @@ fn apply(
         Err(_) if owner.upgrade().is_none() => Applied::Gone,
         Err(_) => Applied::Busy,
     }
+}
+
+/// Delivers one intent the way the native callback does, and says whether it applied.
+#[cfg(test)]
+pub(super) fn deliver_intent(
+    cx: &mut AsyncApp,
+    dock: AnyWindowHandle,
+    owner: &WeakEntity<Presence>,
+    intent: Intent,
+    stamp: Stamp,
+    qpc: u64,
+    pointer: Option<PhysicalPoint>,
+) -> bool {
+    let pending = Pending {
+        delivery: Delivery {
+            effects: [None, None, None],
+            intents: [Some(intent), None, None],
+        },
+        stamp,
+        qpc,
+        pointer,
+        cancelled: None,
+        escape: false,
+        collection: 0,
+    };
+    matches!(apply(cx, dock, owner, &pending), Applied::Yes)
 }

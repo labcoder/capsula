@@ -61,7 +61,8 @@ pub(super) struct Hold {
     pub(super) revision: u64,
     pub(super) thread: Option<ThreadId>,
     pub(super) run: Option<RunId>,
-    /// Set only for a screen hold. Never the pointer: `Runs` prints this.
+    /// Set for a screen hold, and for one refused its lease. Never the pointer: `Runs` prints
+    /// this.
     pub(super) screen: Option<ScreenLine>,
 }
 
@@ -139,6 +140,15 @@ impl Runs {
             HeldScreen::Attached | HeldScreen::Withdrawn => None,
         };
         true
+    }
+
+    /// The current hold was to be a screen hold and was refused its capture lease, so it went
+    /// on voice only: its line says the screen wasn't ready, as a lease that lapses before its
+    /// frame does.
+    pub fn hold_screen_refused(&mut self) {
+        if let Some(hold) = &mut self.hold {
+            hold.screen = Some(ScreenLine::NotIncluded(ScreenClass::NotReady));
+        }
     }
 
     /// Starts a hold: a screen hold when `screen` is given, else a voice-only one.

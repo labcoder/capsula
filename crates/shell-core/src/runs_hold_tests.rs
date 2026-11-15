@@ -381,6 +381,23 @@ fn a_hold_is_a_screen_hold_only_when_it_is_given_a_screen() {
 }
 
 #[test]
+fn a_hold_refused_its_lease_says_the_screen_wasnt_ready_until_it_ends() {
+    use kumochi_protocol::message::{HeldScreen, ScreenClass};
+    let mut runs = ready();
+    runs.hold_screen_refused();
+    assert_eq!(runs.hold_screen_line(), None);
+    recognized(&mut runs, 1);
+    runs.hold_screen_refused();
+    let line = Some(ScreenLine::NotIncluded(ScreenClass::NotReady));
+    assert_eq!(runs.hold_screen_line(), line);
+    // The brain was sent a voice-only hold, so no screen outcome is this hold's to show.
+    assert!(!runs.hold_screen(GestureId(1), HeldScreen::Attached));
+    assert_eq!(runs.hold_screen_line(), line);
+    runs.cancel_hold();
+    assert_eq!(runs.hold_screen_line(), None);
+}
+
+#[test]
 fn a_screen_outcome_replaces_the_prediction_only_for_the_current_hold() {
     use kumochi_protocol::message::{HeldScreen, ScreenClass};
     let changed = HeldScreen::NotIncluded(ScreenClass::Changed);

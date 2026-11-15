@@ -104,10 +104,11 @@ fn screen_ready(state: Option<ScreenHolds>, cx: &mut TestAppContext) -> Ready {
     }
 }
 
-/// Recognizes a hold whose pointer was sampled at POINTER.
+/// Recognizes a hold whose pointer was sampled at POINTER, delivered as the native callback
+/// delivers it: through the dock window's update.
 fn recognize(owner: &Entity<Presence>, id: u32, cx: &mut TestAppContext) {
-    owner.update(cx, |owner, cx| {
-        let gesture = GestureId(id);
+    let gesture = GestureId(id);
+    let (dock, token, stamp) = owner.update(cx, |owner, _| {
         let token = owner
             .link
             .microphone_gate()
@@ -119,17 +120,20 @@ fn recognize(owner: &Entity<Presence>, id: u32, cx: &mut TestAppContext) {
             session: 1,
             choice: owner.link.choice_revision(),
         };
-        owner.voice_intent(
-            Intent::Recognized {
-                gesture,
-                generation: Ok(token),
-            },
-            stamp,
-            QPC,
-            Some(POINTER),
-            cx,
-        );
+        (owner.dock_window, token, stamp)
     });
+    assert!(super::gesture::deliver_intent(
+        &mut cx.to_async(),
+        dock,
+        &owner.downgrade(),
+        Intent::Recognized {
+            gesture,
+            generation: Ok(token),
+        },
+        stamp,
+        QPC,
+        Some(POINTER),
+    ));
 }
 
 fn voice_only(id: u32) -> ControlToBrain {
@@ -300,7 +304,10 @@ fn a_refused_lease_leaves_the_hold_voice_only_and_tells_no_lapse(cx: &mut TestAp
     ready.fixture.borrow_mut().set_failure = Some(Slot::Dock as usize);
     recognize(&ready.owner, 1, cx);
     assert_eq!(sent(&ready), [voice_only(1)]);
-    assert_eq!(line(&ready, cx), None);
+    assert_eq!(
+        line(&ready, cx),
+        Some((Text::ScreenNotIncludedNotReady, None))
+    );
     ready.owner.read_with(cx, |owner, _| {
         assert_eq!(owner.exclusion.generation(), 1);
         assert!(owner.exclusion.lease().is_none());

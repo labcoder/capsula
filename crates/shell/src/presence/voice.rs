@@ -463,10 +463,12 @@ impl Presence {
         }
         // A screen hold only while the notice says so, and only under a lease taken here, after
         // every refusal above; without one the hold is voice only.
+        let mut unleased = false;
         let screen = match pointer {
             Some(pointer) if matches!(self.screen_notice(cx), ScreenNotice::On(_)) => self
                 .acquire_exclusion(&session, CaptureFor::Gesture(gesture), cx)
                 .inspect_err(|reason| {
+                    unleased = true;
                     tracing::debug!(stage = ?FailureStage::Admission, ?reason, "screen hold refused; voice only");
                 })
                 .ok()
@@ -503,6 +505,9 @@ impl Presence {
         if sent {
             if let Some(screen) = screen {
                 self.screen_lease = Some(screen.lease);
+            } else if unleased {
+                // The eye said this hold would show the window, so its line says it didn't.
+                self.runs.hold_screen_refused();
             }
             self.voice.pending = Some(Hold {
                 token,
