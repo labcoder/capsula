@@ -1051,8 +1051,8 @@ fn a_claude_code_runs_done_titles_it_on_claude_code_with_no_chatgpt_account() {
     assert_eq!(core.handle(ready(key(2))), Ok(granted(lease(key(2), 1))));
 }
 
-/// Test 2: a `ChatGPT` run's `Done` starts no job while `ChatGPT` is signed out, though
-/// `ChatGPT` reads ready and Claude Code is ready too.
+/// Test 2: a `ChatGPT` run's `Done` starts no job while no `ChatGPT` account is signed in, even
+/// with the fixture's `ChatGPT` availability ready and Claude Code ready too.
 #[test]
 fn a_chatgpt_runs_done_starts_no_job_signed_out_while_claude_code_is_ready() {
     let mut core = fresh();
