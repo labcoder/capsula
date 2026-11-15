@@ -76,4 +76,7 @@ jobs:
       - run: cargo check -p kumochi-shell-core --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+        env:
+          # The tests mostly wait on processes, pipes and deadlines, so 4 threads keep 2 vCPUs busy.
+          RUST_TEST_THREADS: 4
       - run: cargo test -p gpui-pre-windows --locked --lib vsync

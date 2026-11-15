@@ -82,6 +82,20 @@ debug-assertions = false
 [profile.release.package.lyon_tessellation]
 debug-assertions = false
 
+# The dependencies the brain's tests spend their CPU in, optimised in dev and test builds. Only
+# these: `"*"` made a cold build 3.5 times slower and every CI run rebuilds the vendored crates.
+[profile.dev.package]
+image = { opt-level = 2 }
+zune-jpeg = { opt-level = 2 }
+libsqlite3-sys = { opt-level = 2 }
+rusqlite = { opt-level = 2 }
+serde_json = { opt-level = 2 }
+sha2 = { opt-level = 2 }
+ring = { opt-level = 2 }
+memchr = { opt-level = 2 }
+postcard = { opt-level = 2 }
+base64 = { opt-level = 2 }
+
 # The gpui-kit revision S1 built and measured, over registry gpui-pre 0.3.10. Upgrading it is a
 # deliberate change that reruns P1's window tests.
 [patch.crates-io]
