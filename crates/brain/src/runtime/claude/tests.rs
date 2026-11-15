@@ -520,6 +520,22 @@ async fn a_disconnect_the_lane_cant_take_marks_nothing_and_can_be_asked_again() 
         assert_eq!(claude.view(), ClaudeCodeView::Unavailable);
         assert!(!claude.cleaning, "nothing to finish");
         assert_eq!(claude.out, None);
+        // M1: a full queue drains by itself, so it's Busy with Retry, never the stuck lane's
+        // restart, for the view and for a question refused meanwhile.
+        let busy = kumochi_protocol::message::UserError::new(
+            ErrorKey::ClaudeCodeBusy,
+            Vec::new(),
+            vec![kumochi_protocol::message::Action::Retry],
+        )
+        .expect("one action");
+        assert_eq!(
+            claude.availability(),
+            Availability::Unavailable(busy.clone())
+        );
+        assert_eq!(
+            claude.refused(LaunchRefused::NotReady),
+            crate::engines::EngineFailure::Claude(busy)
+        );
     }
     assert!(!base.marker().exists(), "nothing was marked");
     timeout(Duration::from_secs(10), async {

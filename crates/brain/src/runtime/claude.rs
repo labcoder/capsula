@@ -84,6 +84,8 @@ pub(crate) struct Claude {
     models: Vec<ModelInfo>,
     /// The list a shell hasn't heard yet.
     owed: Option<Vec<ModelInfo>>,
+    /// The last job the lane couldn't take: `Unavailable` is then a full queue, not a stuck lane.
+    full: bool,
 }
 
 /// Runs bound under one epoch go on through a Find; a sign-out, a Disconnect, an audit failure,
@@ -156,6 +158,7 @@ impl Claude {
             epochs: 0,
             models: Vec::new(),
             owed: None,
+            full: false,
         }
     }
 
@@ -199,6 +202,7 @@ impl Claude {
             .as_ref()
             .is_some_and(|lane| lane.submit(self.generation, work));
         self.out = admitted.then_some(work);
+        self.full = !admitted;
         if !admitted {
             self.view = ClaudeCodeView::Unavailable;
             self.revoke_all();
@@ -507,7 +511,8 @@ impl Claude {
     }
 
     /// Why runs on Claude Code can't be answered now, with Open Settings: the view's own key, or
-    /// `ModelUnavailable` while it's being found or is turned off.
+    /// `ModelUnavailable` while it's being found or is turned off; a full queue is Busy, with
+    /// Retry.
     fn reason(&self) -> UserError {
         let key = match self.view {
             ClaudeCodeView::NotFound => ErrorKey::ClaudeCodeNotFound,
@@ -517,6 +522,7 @@ impl Claude {
             ClaudeCodeView::PolicyFailed(_) => ErrorKey::ClaudeCodePolicy,
             ClaudeCodeView::AuditFailed(_) => ErrorKey::ClaudeCodeAuditFailed,
             ClaudeCodeView::CleanupPending => ErrorKey::ClaudeCodeCleanupPending,
+            ClaudeCodeView::Unavailable if self.full => return busy(),
             ClaudeCodeView::Unavailable => ErrorKey::ClaudeCodeUnavailable,
             ClaudeCodeView::Finding | ClaudeCodeView::TurnedOff => return model_unavailable(),
             ClaudeCodeView::Unsupported(_)
@@ -596,10 +602,7 @@ impl Claude {
             LaunchRefused::NotReady if self.admitted().is_none() => self.reason(),
             // Admitted, so the row doesn't list the choice's alias.
             LaunchRefused::NotReady => model_unavailable(),
-            LaunchRefused::Busy => {
-                UserError::new(ErrorKey::ClaudeCodeBusy, Vec::new(), vec![Action::Retry])
-                    .expect("one action is within the limit")
-            }
+            LaunchRefused::Busy => busy(),
             LaunchRefused::Identity | LaunchRefused::Lifetime => ErrorKey::RequestRefused.into(),
         })
     }
@@ -889,6 +892,12 @@ impl Claude {
             None => true,
         }
     }
+}
+
+/// Why a full lane queue refused something: it drains by itself, so Retry.
+fn busy() -> UserError {
+    UserError::new(ErrorKey::ClaudeCodeBusy, Vec::new(), vec![Action::Retry])
+        .expect("one action is within the limit")
 }
 
 /// The view a failure leaves.

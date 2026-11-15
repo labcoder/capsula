@@ -620,7 +620,7 @@ fn failed(outcome: Outcome) -> Finish {
     match outcome {
         Outcome::Audit(_) => claude(ErrorKey::ClaudeCodeAuditFailed),
         Outcome::SignedOut => claude(ErrorKey::ClaudeCodeSignedOut),
-        // The reason the view it leaves gives (Unavailable).
+        // A stuck or closing lane: the reason the stuck view gives (Unavailable).
         Outcome::Refused => Finish::Failed(EngineFailure::Claude(
             UserError::new(
                 ErrorKey::ClaudeCodeUnavailable,

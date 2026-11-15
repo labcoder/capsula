@@ -391,7 +391,8 @@ after every op and wake; while it's being found that's `Finding`, which reads as
   is left; after it, only a change to the route's own kind matters. A catalog-only change keeps
   the run. Any other change, a sign-out the account accepted included, cancels the engine and
   fails the run with the reason. Another sign-in on the kind is `SignInNeeded` for `ChatGPT` and
-  `ModelUnavailable` with Open Settings for another kind (`Coordinator::refusal`). A held ask for that run is answered `Rebuild`, and `send_ready`
+  `ModelUnavailable` with Open Settings for another kind (`Coordinator::refusal`). A held ask for
+  that run is answered `Rebuild`, and `send_ready`
   checks the route again before every `Grant`. Only a `ChatGPT` route takes a bearer.
 - **A typed turn while Claude Code is being found waits** (OSC-753). A turn that arrives while
   Claude Code reports `Finding` records that. Until its first build the newest Claude Code
