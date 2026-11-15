@@ -30,7 +30,7 @@ use super::claude_signin::{FIND, state};
 use super::signin::VIEW;
 use super::{Brain, joined, refuse_running, with_cleanup};
 use crate::platform;
-use crate::slice2::client::{Client, Frame};
+use crate::slice2::client::{Client, Frame, Seen};
 
 /// The most Claude Code questions one run may ask. The owner's cap counts across runs and the
 /// Captain keeps that count; this is one run's share.
@@ -696,31 +696,31 @@ fn submit(
         },
         "the turn",
     )?;
+    let start = session.client.log.len();
     let named = session.expect(VIEW, "run for the turn", |frame| match frame {
         Frame::Control(ControlToShell::RunState {
             run,
             thread,
-            phase,
-            error,
             origin: Some(RunOrigin::Typed { turn: named }),
-        }) if *named == turn => Some(Some((
-            *run,
-            *thread,
-            *phase,
-            error.as_ref().map(UserError::key),
-        ))),
+            ..
+        }) if *named == turn => Some(Some((*run, *thread))),
         Frame::Control(ControlToShell::TurnRefused { turn: refused, .. }) if *refused == turn => {
             Some(None)
         }
         _ => None,
     })?;
-    let (run, thread, phase, error) = named.context("the brain refused the turn")?;
-    let answer = Answer {
-        phase: terminal(phase).then_some(phase),
-        error,
-        ..Answer::default()
-    };
-    Ok((run, thread, answer))
+    let (run, thread) = named.context("the brain refused the turn")?;
+    Ok((run, thread, taken(run, &session.client.log, start)))
+}
+
+/// What the wait for the run's name took of the run, from `start` in the log: the pipes aren't
+/// ordered with each other, so its text and `RunEnd` can come before the `RunState` naming it.
+fn taken(run: RunId, log: &[Seen], start: usize) -> Answer {
+    let mut answer = Answer::default();
+    for seen in &log[start..] {
+        count(&mut answer, run, &seen.frame);
+    }
+    answer
 }
 
 /// What came back for one run; the text is counted, never kept.
@@ -769,38 +769,7 @@ fn collect(
             return Ok(());
         }
         let left = deadline.saturating_duration_since(Instant::now());
-        let seen = session.next(left, |frame| {
-            match frame {
-                Frame::Data(DataToShell::AssistantText { run: of, delta }, _) if *of == run => {
-                    answer.chunks += 1;
-                    answer.chars += delta.as_str().chars().count();
-                }
-                Frame::Data(DataToShell::RunEnd { run: of }, _) if *of == run => {
-                    answer.data_ended = true;
-                }
-                Frame::Data(
-                    DataToShell::StepCommit { run: of, .. }
-                    | DataToShell::SceneStepCommit { run: of, .. },
-                    _,
-                )
-                | Frame::Control(ControlToShell::Focus { run: of, .. })
-                    if *of == run =>
-                {
-                    answer.tools += 1;
-                }
-                Frame::Control(ControlToShell::RunState {
-                    run: of,
-                    phase,
-                    error,
-                    ..
-                }) if *of == run && terminal(*phase) => {
-                    answer.phase = Some(*phase);
-                    answer.error = error.as_ref().map(UserError::key);
-                }
-                _ => return None,
-            }
-            Some(())
-        })?;
+        let seen = session.next(left, |frame| count(answer, run, frame).then_some(()))?;
         if seen.is_none() {
             bail!(
                 "the run didn't {} in {limit:?}",
@@ -811,6 +780,39 @@ fn collect(
             );
         }
     }
+}
+
+/// Adds `frame` to `answer` when it's one of `run`'s; says whether it was.
+fn count(answer: &mut Answer, run: RunId, frame: &Frame) -> bool {
+    match frame {
+        Frame::Data(DataToShell::AssistantText { run: of, delta }, _) if *of == run => {
+            answer.chunks += 1;
+            answer.chars += delta.as_str().chars().count();
+        }
+        Frame::Data(DataToShell::RunEnd { run: of }, _) if *of == run => {
+            answer.data_ended = true;
+        }
+        Frame::Data(
+            DataToShell::StepCommit { run: of, .. } | DataToShell::SceneStepCommit { run: of, .. },
+            _,
+        )
+        | Frame::Control(ControlToShell::Focus { run: of, .. })
+            if *of == run =>
+        {
+            answer.tools += 1;
+        }
+        Frame::Control(ControlToShell::RunState {
+            run: of,
+            phase,
+            error,
+            ..
+        }) if *of == run && terminal(*phase) => {
+            answer.phase = Some(*phase);
+            answer.error = error.as_ref().map(UserError::key);
+        }
+        _ => return false,
+    }
+    true
 }
 
 /// The run's end in words: its phase, and the brain's reason when it failed with one.
@@ -1066,14 +1068,67 @@ fn parse_choice(text: &str) -> Result<ModelChoice> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::time::Instant;
 
-    use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
+    use kumochi_protocol::message::{
+        ConnectionKind, ControlToShell, DataToShell, Effort, ModelChoice, ModelSlug, Phase, RunId,
+        RunOrigin, ThreadId,
+    };
 
     use super::{
-        CAP, KINDS, PLAN, RESTORE, Step, budget, changes, claude_left, format_choice, parse_choice,
-        preflight, report, verdict,
+        CAP, KINDS, PLAN, RESTORE, Step, budget, changes, claude_left, count, format_choice,
+        parse_choice, preflight, report, taken, verdict,
     };
+    use crate::slice2::client::{Frame, Seen};
     use crate::{platform, scratch};
+
+    #[test]
+    fn text_that_comes_before_the_runs_name_counts_toward_its_answer() {
+        let run = RunId(7);
+        let state = |phase| {
+            Frame::Control(ControlToShell::RunState {
+                run,
+                thread: ThreadId(3),
+                phase,
+                error: None,
+                origin: Some(RunOrigin::Typed { turn: 2 }),
+            })
+        };
+        let text = |run, delta: &str| {
+            Frame::Data(
+                DataToShell::AssistantText {
+                    run,
+                    delta: delta.to_owned().into(),
+                },
+                40,
+            )
+        };
+        let log: Vec<Seen> = [
+            text(RunId(6), "older"),
+            text(run, "hello"),
+            state(Phase::Thinking),
+        ]
+        .into_iter()
+        .map(|frame| Seen {
+            at: Instant::now(),
+            frame,
+        })
+        .collect();
+        let mut answer = taken(run, &log, 1);
+        assert!(count(&mut answer, run, &state(Phase::Done)));
+        assert!(count(
+            &mut answer,
+            run,
+            &Frame::Data(DataToShell::RunEnd { run }, 20)
+        ));
+        assert_eq!(
+            (answer.chunks, answer.chars, answer.tools),
+            (1, 5, 0),
+            "the text before the name is counted"
+        );
+        assert_eq!(answer.phase, Some(Phase::Done));
+        assert!(answer.data_ended);
+    }
 
     #[test]
     fn the_plan_asks_its_cap_and_a_plan_over_it_is_refused_before_anything_starts() {

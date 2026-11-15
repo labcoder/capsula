@@ -36,7 +36,7 @@ pub(crate) enum Frame {
 /// A frame and when its reader took it.
 #[derive(Debug)]
 pub(crate) struct Seen {
-    pub(super) at: Instant,
+    pub(crate) at: Instant,
     pub(crate) frame: Frame,
 }
 
@@ -119,7 +119,7 @@ pub(crate) struct Client {
     frames: Receiver<Seen>,
     readers: Vec<JoinHandle<()>>,
     /// Every frame taken so far, in the order the client took them.
-    pub(super) log: Vec<Seen>,
+    pub(crate) log: Vec<Seen>,
 }
 
 impl Client {
