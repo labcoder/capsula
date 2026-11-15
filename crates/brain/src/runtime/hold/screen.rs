@@ -259,18 +259,18 @@ async fn work(
     };
     let generation = Some(held.generation);
     let ended = report(generation, Outcome::Held).await.is_err() || stop.load(Ordering::SeqCst);
-    let mut outcome = None;
-    if !ended {
-        outcome = Some(match client.seal(held, until).await {
+    let outcome = if ended {
+        release(&client, key, generation).await;
+        None
+    } else {
+        Some(match client.seal(held, until).await {
             Ok(context) => Outcome::Sealed(context),
             Err(closed) => {
                 release(&client, key, generation).await;
                 ending(closed)
             }
-        });
-    } else {
-        release(&client, key, generation).await;
-    }
+        })
+    };
     if let Some(outcome) = outcome
         && report(generation, outcome).await.is_err()
     {
