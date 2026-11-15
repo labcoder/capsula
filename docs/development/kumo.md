@@ -1,7 +1,7 @@
 # Kumo
 
 Kumo is the presence's character: a soft 3D cloud with eyes, shaded live on the CPU and drawn by
-GPUI as straight-alpha images. It lives in `crates/shell/src/presence/kumo/`: plain Rust,
+GPUI as straight-alpha images. It lives in `crates/shell-core/src/presence/kumo/`: plain Rust,
 with no GPUI, no platform code and no dependencies, so it runs the same on Windows and macOS.
 
 ```mermaid
