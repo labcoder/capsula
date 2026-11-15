@@ -239,12 +239,12 @@ impl Presenter {
         }
     }
 
-    pub(crate) fn discard_replacement(&mut self) {
+    pub fn discard_replacement(&mut self) {
         self.frames.borrow_mut().discard_retirement();
     }
 
     /// A refused host clears current scenes as failures, not as an explicit user clear.
-    pub(crate) fn refuse_all(&mut self, now: Instant) -> Result<Vec<Effect>, Broken> {
+    pub fn refuse_all(&mut self, now: Instant) -> Result<Vec<Effect>, Broken> {
         let mut out = Out::default();
         for effect in self.clear(now)? {
             if let Effect::Control(ControlToBrain::ClearDrawing { scene_ids }) = effect {

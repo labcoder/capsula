@@ -216,7 +216,7 @@ fn process_image(pid: u32) -> io::Result<PathBuf> {
 ///
 /// # Errors
 /// Fails when the pipe can't be created or opened.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn test_pair(name: &str) -> io::Result<(PipeClient, PipeClient)> {
     use windows::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
     use windows::Win32::System::Pipes::{
@@ -254,7 +254,7 @@ pub(crate) fn test_pair(name: &str) -> io::Result<(PipeClient, PipeClient)> {
 ///
 /// # Errors
 /// Fails when the OS can't report it.
-pub(crate) fn session_id() -> io::Result<u32> {
+pub fn session_id() -> io::Result<u32> {
     let mut session = 0;
     // SAFETY: plain call; `session` is a writable u32.
     unsafe { ProcessIdToSessionId(std::process::id(), &raw mut session) }?;
