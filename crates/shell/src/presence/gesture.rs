@@ -18,13 +18,16 @@ use crate::input::{
     hold::{Delivery, Fence, InputReason, InputStage, Intent},
 };
 use crate::link::LinkHandle;
-use crate::platform::{Deliver, EventTime, performance_counter};
+use crate::platform::{Deliver, EventTime, cursor_position, performance_counter};
+use kumochi_protocol::geometry::PhysicalPoint;
 use kumochi_protocol::message::{GestureId, ThreadId};
 
 struct Pending {
     delivery: Delivery,
     stamp: Stamp,
     qpc: u64,
+    /// Where the pointer was when this delivery recognized a hold.
+    pointer: Option<PhysicalPoint>,
     cancelled: Option<GestureId>,
     escape: bool,
     collection: u64,
@@ -148,9 +151,28 @@ pub(super) fn deliver(
         {
             return state.deadline();
         }
+        // Sampled once, here in the callback, so a screen hold names the window the pointer was
+        // over at recognition, however late the owner applies the delivery.
+        let pointer = delivery
+            .intents
+            .iter()
+            .flatten()
+            .any(|intent| {
+                matches!(
+                    intent,
+                    Intent::Recognized {
+                        generation: Ok(_),
+                        ..
+                    }
+                )
+            })
+            .then(cursor_position)
+            .and_then(Result::ok)
+            .map(PhysicalPoint);
         let pending = Pending {
             delivery,
             qpc,
+            pointer,
             cancelled,
             escape,
             collection: link.microphone_gate().latest(),
@@ -254,7 +276,7 @@ fn apply(
                 }
                 this.apply_effects(effects, window, cx);
                 for intent in pending.delivery.intents.iter().flatten().cloned() {
-                    this.voice_intent(intent, pending.stamp, pending.qpc, cx);
+                    this.voice_intent(intent, pending.stamp, pending.qpc, pending.pointer, cx);
                 }
                 if pending.escape && this.native_escape(pending.cancelled, cx).is_err() {
                     tracing::error!("can't apply native Escape");

@@ -114,6 +114,8 @@ struct Presence {
     _display_watch: Option<gpui_kit::Subscription>,
     exclusion: exclusion::Exclusion<exclusion::Receipt>,
     exclusion_timer: Option<Task<()>>,
+    /// The lease a sent screen hold named, until the brain says its capture ended.
+    screen_lease: Option<kumochi_protocol::message::LeaseGeneration>,
     #[cfg(test)]
     exclusion_fixture: Option<Rc<std::cell::RefCell<exclusion::Fixture>>>,
     input_windows: platform::OverlayWindows,
@@ -974,6 +976,7 @@ pub(crate) fn open(
             _display_watch: Some(stage::watch_displays(cx.weak_entity(), cx)),
             exclusion: exclusion::Exclusion::default(),
             exclusion_timer: None,
+            screen_lease: None,
             #[cfg(test)]
             exclusion_fixture: None,
             input_windows,

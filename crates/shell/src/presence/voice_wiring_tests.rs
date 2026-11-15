@@ -85,6 +85,7 @@ pub(super) fn hold(
             },
             stamp,
             0,
+            None,
             cx,
         );
         assert_eq!(owner.voice.status, Some(Text::HoldPreparing));
@@ -219,6 +220,7 @@ fn a_captured_target_or_session_cannot_be_rebound_at_delivery(cx: &mut TestAppCo
                     choice: owner.link.choice_revision(),
                 },
                 0,
+                None,
                 cx,
             );
             assert!(owner.voice.pending.is_none());
@@ -252,6 +254,7 @@ fn late_status_and_release_cannot_cancel_a_newer_held_input(cx: &mut TestAppCont
             },
             old_stamp,
             0,
+            None,
             cx,
         );
     });

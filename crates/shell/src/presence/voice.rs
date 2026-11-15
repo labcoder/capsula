@@ -3,13 +3,16 @@ use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+use kumochi_protocol::geometry::PhysicalPoint;
 use kumochi_protocol::message::{
-    ControlToBrain, GestureId, HoldFailure, HoldStatus, Phase, RunId, RunOrigin, ThreadId,
+    CaptureFor, ControlToBrain, GestureId, HoldFailure, HoldStatus, Phase, RunId, RunOrigin,
+    ThreadId,
 };
 
 use super::{Context, Presence, Session};
 use crate::input::hold::Intent;
 use crate::platform::microphone::{Generation, Mode};
+use crate::runs::{ScreenHold, ScreenNotice};
 use crate::strings::Text;
 
 mod source;
@@ -260,11 +263,28 @@ impl Presence {
         pending
     }
 
+    /// What a hold on the current target does with the window under the pointer. The send and
+    /// the dock's icon both read this, so the icon never names a model the image won't reach.
+    pub(super) fn screen_notice(&self, cx: &gpui_kit::App) -> ScreenNotice {
+        let settings = self.settings.read(cx);
+        // shortcut: a thread whose row was never read counts as on the default model; no shell
+        // view sets a thread's own model yet, so read the target's row when one does.
+        let own = self
+            .runs
+            .thread()
+            .and_then(|thread| self.threads.read(cx).row(thread))
+            .and_then(|row| row.choice.as_ref());
+        self.runs
+            .screen_notice(settings.own_model(own), settings.default_model_name())
+    }
+
+    /// `pointer` is where the pointer was when the native callback recognized a hold.
     pub(super) fn voice_intent(
         &mut self,
         intent: Intent,
         stamp: Stamp,
         qpc: u64,
+        pointer: Option<PhysicalPoint>,
         cx: &mut Context<'_, Self>,
     ) {
         match intent {
@@ -300,7 +320,7 @@ impl Presence {
                 gesture,
                 generation,
             } => {
-                self.recognize_voice(gesture, generation, stamp, cx);
+                self.recognize_voice(gesture, generation, stamp, qpc, pointer, cx);
             }
             Intent::End { gesture, cancelled } => {
                 let Some(hold) = self
@@ -336,6 +356,8 @@ impl Presence {
         gesture: GestureId,
         generation: Result<Generation, crate::platform::microphone::MicError>,
         stamp: Stamp,
+        qpc: u64,
+        pointer: Option<PhysicalPoint>,
         cx: &mut Context<'_, Self>,
     ) {
         let Ok(token) = generation else {
@@ -410,7 +432,23 @@ impl Presence {
             self.voice_notice(Text::HoldFailed, cx);
             return;
         }
-        let request = self.runs.begin_hold(gesture, None);
+        // A screen hold only while the notice says so, and only under a lease taken here, after
+        // every refusal above; without one the hold is voice only.
+        let screen = match pointer {
+            Some(pointer) if matches!(self.screen_notice(cx), ScreenNotice::On(_)) => self
+                .acquire_exclusion(&session, CaptureFor::Gesture(gesture), cx)
+                .inspect_err(|reason| {
+                    tracing::debug!(stage = ?FailureStage::Admission, ?reason, "screen hold refused; voice only");
+                })
+                .ok()
+                .map(|lease| ScreenHold {
+                    pointer,
+                    lease,
+                    t_qpc: qpc,
+                }),
+            _ => None,
+        };
+        let request = self.runs.begin_hold(gesture, screen);
         let notice = if matches!(request, Err(crate::runs::Refused::Busy)) {
             Text::TurnBusy
         } else {
@@ -434,6 +472,9 @@ impl Presence {
             }
         };
         if sent {
+            if let Some(screen) = screen {
+                self.screen_lease = Some(screen.lease);
+            }
             self.voice.pending = Some(Hold {
                 token,
                 stamp,
@@ -448,6 +489,10 @@ impl Presence {
             self.refusal = None;
             self.voice_notice(Text::HoldPreparing, cx);
         } else {
+            if screen.is_some() {
+                // The brain never saw this lease, so releasing it is no lapse.
+                self.revoke_exclusion(cx);
+            }
             self.unused_voice(&token, &session);
             self.link.clear_input(gesture);
             self.runs.cancel_hold();

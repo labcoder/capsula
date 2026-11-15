@@ -1,7 +1,7 @@
 use kumochi_protocol::geometry::PhysicalPoint;
 use kumochi_protocol::message::{
-    ControlToBrain, GestureId, HeldScreen, LeaseGeneration, RunId, RunOrigin, ScreenClass,
-    ScreenHolds, ThreadId,
+    ControlToBrain, GestureId, HeldScreen, LeaseGeneration, ModelName, RunId, RunOrigin,
+    ScreenClass, ScreenHolds, ScreenOff, ThreadId,
 };
 
 use super::{Applied, Refused, Runs, Target};
@@ -24,6 +24,22 @@ pub enum ScreenLine {
     NotIncluded(ScreenClass),
 }
 
+/// The standing notice: what a hold on the current target does with the window under the
+/// pointer, and the only model it may name. A hold is a screen hold only while this is `On`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScreenNotice {
+    /// Nothing shows: this system can't capture a window.
+    Hidden,
+    /// A hold shows this model the window.
+    On(ModelName),
+    /// The default model, named here, can't be sent images.
+    ModelCantSee(ModelName),
+    NotReady,
+    TurnedOff,
+    /// The target thread runs on its own model, which no `ScreenHolds` state speaks for.
+    OwnModel,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Hold {
     pub(super) gesture: GestureId,
@@ -43,6 +59,28 @@ impl Runs {
     /// This connection's last `ScreenHolds`: none before it arrives, and none once it ends.
     pub fn screen_holds(&self) -> Option<&ScreenHolds> {
         self.screen_holds.as_ref()
+    }
+
+    /// The notice for a hold on the current target. `own_model` says the target thread runs on
+    /// a model other than the default; `default` is the newest default model's name in the
+    /// shell's own catalog. A stored `On` naming any other model is out of date, because the
+    /// default just changed, and reads as not ready.
+    pub fn screen_notice(&self, own_model: bool, default: Option<&ModelName>) -> ScreenNotice {
+        match &self.screen_holds {
+            Some(ScreenHolds::Off(ScreenOff::Unsupported)) => ScreenNotice::Hidden,
+            Some(ScreenHolds::Off(ScreenOff::TurnedOff)) => ScreenNotice::TurnedOff,
+            _ if own_model => ScreenNotice::OwnModel,
+            Some(ScreenHolds::On { model }) if Some(model) == default => {
+                ScreenNotice::On(model.clone())
+            }
+            Some(ScreenHolds::Off(ScreenOff::ModelCantSee)) => default
+                .map_or(ScreenNotice::NotReady, |model| {
+                    ScreenNotice::ModelCantSee(model.clone())
+                }),
+            Some(ScreenHolds::On { .. } | ScreenHolds::Off(ScreenOff::NotReady)) | None => {
+                ScreenNotice::NotReady
+            }
+        }
     }
 
     /// The current hold's line about the screen; it goes when the hold does.

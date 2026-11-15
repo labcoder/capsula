@@ -12,7 +12,7 @@ use std::fmt;
 
 mod hold;
 use hold::Hold;
-pub use hold::{ScreenHold, ScreenLine};
+pub use hold::{ScreenHold, ScreenLine, ScreenNotice};
 
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{

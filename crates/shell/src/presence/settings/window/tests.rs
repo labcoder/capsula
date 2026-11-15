@@ -443,6 +443,7 @@ fn rejected_speech_input_keeps_the_settings_panel_open(cx: &mut TestAppContext) 
             },
             stamp,
             0,
+            None,
             cx,
         );
         assert!(owner.settings_open());
@@ -913,6 +914,7 @@ fn a_hold_that_closes_settings_cancels_its_sign_in(cx: &mut TestAppContext) {
             },
             stamp,
             0,
+            None,
             cx,
         );
         assert!(!owner.settings_open());

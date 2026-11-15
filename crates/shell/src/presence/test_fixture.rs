@@ -60,6 +60,7 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             _display_watch: None,
             exclusion: super::exclusion::Exclusion::default(),
             exclusion_timer: None,
+            screen_lease: None,
             exclusion_fixture: None,
             input_windows: platform::OverlayWindows::default(),
             native,
