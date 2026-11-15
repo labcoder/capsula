@@ -5,6 +5,15 @@ use std::time::{Duration, Instant};
 
 use kumochi_protocol::message::{CaptureFor, LeaseGeneration};
 
+#[cfg(any(test, feature = "test-support"))]
+#[expect(
+    clippy::missing_assert_message,
+    clippy::new_without_default,
+    clippy::unwrap_used,
+    reason = "the fixture's asserts and unwraps are test assertions, built outside cfg(test) for the shell's tests"
+)]
+pub mod fixture;
+
 pub(super) const LIFETIME: Duration = Duration::from_secs(3);
 const SLOTS: [Slot; 8] = [
     Slot::Dock,
@@ -18,7 +27,7 @@ const SLOTS: [Slot; 8] = [
 ];
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum Slot {
+pub enum Slot {
     Dock,
     Proxy,
     Status,
@@ -30,14 +39,14 @@ pub(crate) enum Slot {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Key {
+pub struct Key {
     pub(super) session: u64,
     pub(super) input: CaptureFor,
     pub(super) generation: LeaseGeneration,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub(crate) enum Error {
+pub enum Error {
     #[error("exclusion is busy or has restoration debt")]
     Busy,
     #[error("exclusion generation or deadline exhausted")]
@@ -46,7 +55,7 @@ pub(crate) enum Error {
     Surface,
 }
 
-pub(super) trait Surfaces {
+pub trait Surfaces {
     type Receipt;
     fn snapshot(&mut self, slot: Slot) -> Result<Option<Self::Receipt>, Error>;
     fn exclude(&mut self, slot: Slot, receipt: &Self::Receipt) -> Result<(), Error>;
@@ -55,16 +64,16 @@ pub(super) trait Surfaces {
     fn same(&self, slot: Slot, receipt: &Self::Receipt) -> bool;
 }
 
-pub(super) struct ExclusionLease<R> {
+pub struct ExclusionLease<R> {
     pub(super) key: Key,
-    pub(super) deadline: Instant,
-    pub(super) revoked: bool,
+    pub deadline: Instant,
+    pub revoked: bool,
     pub(super) receipts: [Option<R>; 8],
 }
 
-pub(crate) struct Exclusion<R> {
+pub struct Exclusion<R> {
     pub(super) generation: u32,
-    pub(super) lease: Option<ExclusionLease<R>>,
+    pub lease: Option<ExclusionLease<R>>,
 }
 
 impl<R> Default for Exclusion<R> {
@@ -77,7 +86,7 @@ impl<R> Default for Exclusion<R> {
 }
 
 impl<R> Exclusion<R> {
-    pub(super) fn acquire(
+    pub fn acquire(
         &mut self,
         session: u64,
         input: CaptureFor,
@@ -116,7 +125,7 @@ impl<R> Exclusion<R> {
         Ok(key)
     }
 
-    pub(super) fn attach<S: Surfaces<Receipt = R>>(
+    pub fn attach<S: Surfaces<Receipt = R>>(
         &mut self,
         slot: Slot,
         surfaces: &mut S,
@@ -146,10 +155,7 @@ impl<R> Exclusion<R> {
         result
     }
 
-    pub(super) fn cleanup(
-        &mut self,
-        surfaces: &mut impl Surfaces<Receipt = R>,
-    ) -> Result<(), Error> {
+    pub fn cleanup(&mut self, surfaces: &mut impl Surfaces<Receipt = R>) -> Result<(), Error> {
         let Some(lease) = &mut self.lease else {
             return Ok(());
         };
@@ -169,7 +175,7 @@ impl<R> Exclusion<R> {
         Ok(())
     }
 
-    pub(super) fn expire(
+    pub fn expire(
         &mut self,
         key: Key,
         now: Instant,
@@ -186,9 +192,41 @@ impl<R> Exclusion<R> {
         }
     }
 
-    pub(super) fn matches(&self, session: u64, input: CaptureFor) -> bool {
+    pub fn matches(&self, session: u64, input: CaptureFor) -> bool {
         self.lease
             .as_ref()
             .is_some_and(|lease| lease.key.session == session && lease.key.input == input)
     }
 }
+
+#[cfg(any(test, feature = "test-support"))]
+impl Key {
+    pub fn input(self) -> CaptureFor {
+        self.input
+    }
+
+    pub fn generation(self) -> LeaseGeneration {
+        self.generation
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl<R> ExclusionLease<R> {
+    pub fn key(&self) -> Key {
+        self.key
+    }
+
+    pub fn holds(&self, slot: Slot) -> bool {
+        self.receipts[slot as usize].is_some()
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl<R> Exclusion<R> {
+    pub fn generation(&self) -> u32 {
+        self.generation
+    }
+}
+
+#[cfg(test)]
+mod tests;

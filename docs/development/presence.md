@@ -177,10 +177,11 @@ flowchart LR
   `WS_EX_TRANSPARENT` or a region. Its bitmap is allocated once, sized to the dock's slot, and
   the proxy sits exactly on the band. Raw Input, the tray, the Esc hotkey and capture exclusion
   stay on this same window.
-- **Acceptance.** `Line`, in `presence/line/machine.rs` with no GPUI, keeps the accepted
-  placement, the requested one, and what Windows holds: the proxy's mask, the overlay's position
-  and whether the proxy is shown. A request becomes current only when all three hold it, in that
-  order: the mask upload, the overlay move, then showing the proxy and checking its tray entry.
+- **Acceptance.** `Line`, in `crates/shell-core/src/presence/line/machine.rs` with no GPUI,
+  keeps the accepted placement, the requested one, and what Windows holds: the proxy's mask,
+  the overlay's position and whether the proxy is shown. A request becomes current only when all
+  three hold it, in that order: the mask upload, the overlay move, then showing the proxy and
+  checking its tray entry.
   Only then are the layout, the overlay's origin and the line published. A refused upload moves
   nothing. A refused overlay move puts the accepted mask back first; if that's refused too, the
   surfaces are apart, and the next attempt finishes the move under the mask Windows already
