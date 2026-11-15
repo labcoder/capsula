@@ -66,14 +66,14 @@ pub trait Surfaces {
 
 pub struct ExclusionLease<R> {
     pub(super) key: Key,
-    pub deadline: Instant,
-    pub revoked: bool,
+    deadline: Instant,
+    revoked: bool,
     pub(super) receipts: [Option<R>; 8],
 }
 
 pub struct Exclusion<R> {
     pub(super) generation: u32,
-    pub lease: Option<ExclusionLease<R>>,
+    lease: Option<ExclusionLease<R>>,
 }
 
 impl<R> Default for Exclusion<R> {
@@ -197,6 +197,11 @@ impl<R> Exclusion<R> {
             .as_ref()
             .is_some_and(|lease| lease.key.session == session && lease.key.input == input)
     }
+
+    /// When the lease in force ends, for its owner's timer.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.lease.as_ref().map(|lease| lease.deadline)
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -216,6 +221,10 @@ impl<R> ExclusionLease<R> {
         self.key
     }
 
+    pub fn revoked(&self) -> bool {
+        self.revoked
+    }
+
     pub fn holds(&self, slot: Slot) -> bool {
         self.receipts[slot as usize].is_some()
     }
@@ -225,6 +234,10 @@ impl<R> ExclusionLease<R> {
 impl<R> Exclusion<R> {
     pub fn generation(&self) -> u32 {
         self.generation
+    }
+
+    pub fn lease(&self) -> Option<&ExclusionLease<R>> {
+        self.lease.as_ref()
     }
 }
 

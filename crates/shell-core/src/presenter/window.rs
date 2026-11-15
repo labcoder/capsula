@@ -1,4 +1,4 @@
-//! Activation of a scene's oldest prepared step, for the activation owner B6d adds.
+//! Activation of a scene's oldest prepared step, for the activation owner in `activation.rs`.
 //!
 //! One call stages the head against the scene's view, and its paint cache, checks the whole
 //! post-transition charge, then retires the semantic step and installs the rest, the view, its

@@ -7,6 +7,10 @@ use super::drag::{DragOwner, Event, Generation, Outcome};
 use super::kumo::{CARRY_WIDTH, Motion, Pull, Rect, SNAP_LEN, Vec2, v2};
 use crate::platform::input::Button;
 
+/// The peek's Kumo square in this file's pull test. A shell test holds it to `kumo_view::SIZE`.
+#[cfg(any(test, feature = "test-support"))]
+pub const PEEK_SQUARE: f32 = 64.0;
+
 /// Logical pixels from the work area's origin, at the work area and scale fixed at the grab.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PullSpace {
@@ -226,7 +230,7 @@ impl Pulling {
 
 #[cfg(test)]
 mod tests {
-    use super::{Grab, Phase, PullSpace, Pulling};
+    use super::{Grab, PEEK_SQUARE, Phase, PullSpace, Pulling};
     use crate::platform::input::Button;
     use crate::presence::drag::{End, Event, Generation, Outcome};
     use crate::presence::kumo::{Motion, Rect, Vec2, v2};
@@ -465,9 +469,6 @@ mod tests {
         use crate::presence::kumo::SNAP_LEN;
         use crate::presence::line::machine as line;
 
-        /// The peek's Kumo square, `kumo_view::SIZE` in the shell.
-        const SIZE: f32 = 64.0;
-
         // The default dock at 100% on a 2560 by 1400 work area, under it the 380 by 124 peek
         // with Kumo inside its 12 px padding, as Presence lays them out.
         let space = PullSpace {
@@ -476,7 +477,7 @@ mod tests {
         };
         let layout = Position::default().layout(space.area, line::slot(1.0), [380, 124], 0);
         let paint = line::LineFrame::in_slot(layout.dock, 1.0).paint;
-        let pad = 12.0 + SIZE * 0.5;
+        let pad = 12.0 + PEEK_SQUARE * 0.5;
         let home = space.point([layout.panel[0], layout.panel[1]], [pad, pad]);
         let grab = Grab::new(space, paint, layout.dock, home, Motion::Full);
         assert!(

@@ -19,8 +19,8 @@
 //! - Only the oldest prepared step is consumed. One transaction stages its activated view against
 //!   the current one, checks the whole post-transition charge, then retires it semantically and
 //!   installs its layout as the rest with that view in a new frame epoch; a refusal changes
-//!   nothing. Until B6d nothing consumes in production, so a cut or failure names the activated
-//!   bound: the recovered resting layout, or zero.
+//!   nothing. A cut or failure names the activated bound: the recovered resting layout, zero, or
+//!   the last consumed step's.
 //! - A scene with a cut outstanding prepares nothing until the brain acknowledges the cut, and a
 //!   scene gets at most one cut between commits.
 //! - Scene frames, jobs, answers and scenes are held in [`Deferred`] from the moment the
