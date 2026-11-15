@@ -1,5 +1,6 @@
 //! Password rectangles one capture must never show: the element walk adds them as it reads,
-//! and sanitizing blacks them out before any pixel consumer.
+//! and sanitizing blacks them out before any pixel consumer. No production path fills masks
+//! now: a hold's picture goes through `sanitize` with an empty set.
 
 use std::sync::{Arc, Mutex};
 

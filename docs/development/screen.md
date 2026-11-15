@@ -181,7 +181,8 @@ The portable pixel path borrows a committed `RawFrame` through `sanitize`. It cl
 `MaskSet` rectangle to the physical display and writes opaque black in place, then lends a
 `SanitizedFrame` stamped with the mask generation. An uncommitted frame is refused as stale.
 Pixel consumers accept only this sanitized type. Adding a password rectangle bumps the mask
-generation; sanitizing again applies all masks idempotently before another encode.
+generation; sanitizing again applies all masks idempotently before another encode. No
+production path fills masks now: a hold's picture goes through `sanitize` with an empty set.
 
 Masks belong to one capture: another capture's mask set is refused as stale. Every sanitized
 frame and encoded image carries the capture's mask completeness (`Pending`, `Complete`,
@@ -539,8 +540,8 @@ physical bounds and password/offscreen flags. Password and offscreen names are n
 from that cache. Root handles are checked for top-level visibility and ownership before the UIA
 lookup, and the native window owner is checked again after it. The worker and the
 connected shell are excluded by pid, with Kumochi process-image names also excluded by the
-portable policy. Other platforms return E_NOTIMPL. In production only a hold's `Walk` runs it;
-nothing sends `Elements`.
+portable policy. Other platforms return E_NOTIMPL. Nothing in production runs it: holds don't
+walk, and nothing sends `Elements`.
 
 One pre-order walk retains at most 512 elements, depth 16, 128 characters per name and 60,000
 bytes of element JSON (commas and the reply envelope are additional). The byte cap usually binds
