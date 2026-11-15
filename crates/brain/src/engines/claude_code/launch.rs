@@ -301,7 +301,11 @@ async fn warm_up(
             done.send(Ok(warmed)).ok();
         }
         Err(outcome) => {
-            logged(outcome, "before stdin");
+            let audit = match outcome {
+                Outcome::Deadline => Outcome::Audit(AuditFailed::Deadline),
+                other => other,
+            };
+            logged(audit, "before stdin");
             report.report(outcome);
             done.send(Err(outcome)).ok();
         }
@@ -588,7 +592,9 @@ struct Reading<'a> {
     analytics: Option<bool>,
 }
 
-/// Logs an audit failure's closed check and its phase, and nothing Claude Code sent.
+/// Logs an audit failure's closed check and its phase, and nothing Claude Code sent. Before stdin a
+/// deadline is the audit's own, such as a server still `pending` at [`AUDIT`], so it's logged as
+/// the `Deadline` check; the outcome stays `Deadline`, with no quarantine.
 fn logged(outcome: Outcome, phase: &'static str) {
     if let Outcome::Audit(check) = outcome {
         tracing::warn!(?check, phase, "claude code's audit failed");

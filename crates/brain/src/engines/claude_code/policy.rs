@@ -150,14 +150,16 @@ impl fmt::Debug for LaunchData {
     }
 }
 
-/// The documented switches every entry point gets, each set to `1`.
-const SWITCHES: [&str; 6] = [
-    "DISABLE_AUTOUPDATER",
-    "DISABLE_TELEMETRY",
-    "DISABLE_ERROR_REPORTING",
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
-    "CLAUDE_CODE_SKIP_PROMPT_HISTORY",
-    "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+/// The documented switches every entry point gets, with their values. Kumochi's server is the only
+/// one Claude Code may offer, so a claude.ai sign-in's connectors are never fetched.
+const SWITCHES: [(&str, &str); 7] = [
+    ("DISABLE_AUTOUPDATER", "1"),
+    ("DISABLE_TELEMETRY", "1"),
+    ("DISABLE_ERROR_REPORTING", "1"),
+    ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+    ("CLAUDE_CODE_SKIP_PROMPT_HISTORY", "1"),
+    ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
+    ("ENABLE_CLAUDEAI_MCP_SERVERS", "false"),
 ];
 
 /// The arguments and environment for `entry`. `system` is `platform::system_env()`: the only
@@ -226,7 +228,11 @@ pub(crate) fn launch_data(
     let env = owned
         .into_iter()
         .map(|(name, path)| (name.into(), path.into()))
-        .chain(SWITCHES.into_iter().map(|name| (name.into(), "1".into())))
+        .chain(
+            SWITCHES
+                .into_iter()
+                .map(|(name, value)| (name.into(), value.into())),
+        )
         .chain(system.iter().cloned())
         .collect();
     LaunchData { args, env }
