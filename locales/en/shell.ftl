@@ -229,7 +229,7 @@ hold-microphone-unavailable = Microphone unavailable. Check microphone access an
 hold-failed = Speech input failed. Try again.
 # { $model } is the model's name as the picker shows it.
 screen-holds = Share the window under your pointer
-screen-holds-help = While you hold to talk, the model also gets a picture of the window under your pointer, as it appears on screen.
+screen-holds-help = While you hold to talk, the model also gets a picture of the whole window under your pointer, including any part covered by other windows.
 screen-holds-on = Hold to talk also shows { $model } the window under your pointer
 screen-holds-model-cant-see = Screen sharing isn't available with { $model }, so hold to talk is voice only
 screen-holds-not-ready = Screen sharing isn't ready yet

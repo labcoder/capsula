@@ -57,9 +57,10 @@ saved.
 ## Showing the window under your pointer
 
 While **Share the window under your pointer** is on in **Settings → Voice**, a hold to talk also
-sends your model one picture: the window your pointer is over when the hold starts, as it
-appears on screen. Whatever that window shows is in the picture, so point at another window, or
-turn the setting off, when it shows something you don't want sent. The setting starts on.
+sends your model one picture: the whole window your pointer is over when the hold starts,
+including any part of it that other windows cover. Whatever that window holds is in the picture,
+even where another window hides it from you, so point at another window, or turn the setting
+off, when it holds something you don't want sent. The setting starts on.
 Kumochi's own dock and panels are left out, and nothing else on your screen is captured.
 
 Point at the dock to see what a hold will do. An eye beside the status means the named model
