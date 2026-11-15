@@ -333,9 +333,8 @@ impl Coordinator {
             Availability::Ready(_) if route.kind == ConnectionKind::ChatGpt => {
                 Some(sign_in_needed())
             }
-            Availability::Ready(_) => Some(model_unavailable()),
             Availability::Unavailable(reason) => Some(reason.clone()),
-            Availability::Finding => Some(model_unavailable()),
+            Availability::Ready(_) | Availability::Finding => Some(model_unavailable()),
         }
     }
 

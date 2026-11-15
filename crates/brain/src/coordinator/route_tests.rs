@@ -147,7 +147,12 @@ fn equal_tags_on_two_kinds_are_different_routes() {
         );
         assert_eq!(core.handle(ready(other, 8, &["m"])), Ok(Vec::new()));
         let ended = core.handle(ready(bound, 8, &["m"])).expect("current");
-        assert_eq!(failure(&ended), Some(sign_in()), "{bound:?}");
+        let new_sign_in = if bound == CHATGPT {
+            sign_in()
+        } else {
+            model_unavailable()
+        };
+        assert_eq!(failure(&ended), Some(new_sign_in), "{bound:?}");
 
         let mut core = typed(vec![ready(CHATGPT, 7, &["m"]), ready(CLAUDE, 7, &["m"])]);
         core.handle(built(Some(choice(bound, "m"))))
@@ -409,7 +414,7 @@ fn a_hold_on_another_kind_lives_through_chatgpts_changes_and_ends_on_its_own() {
             assert!(!granted(&mut core));
         } else {
             let ended = core.handle(ready(CLAUDE, 6, &["m"])).expect("current");
-            assert_eq!(failure(&ended), Some(sign_in()));
+            assert_eq!(failure(&ended), Some(model_unavailable()));
             assert!(cancel.load(Ordering::SeqCst), "the hold is cancelled too");
         }
         assert_eq!(core.current_run(), None, "{at_the_send}");
