@@ -874,7 +874,7 @@ impl Claude {
         // deadline, so it ends at its expiry.
         let expiry = self.warm.as_ref().and_then(Attempt::expires);
         let left = expiry.map(|expiry| expiry.saturating_duration_since(self.clock.now()));
-        let room = self.full.then(|| self.lane.as_ref().map(Lane::room)).flatten();
+        let room = self.lane.as_ref().filter(|_| self.full).map(Lane::room);
         let room = async {
             match room {
                 Some(room) => room.notified().await,

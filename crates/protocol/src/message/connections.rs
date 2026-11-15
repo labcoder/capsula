@@ -482,7 +482,11 @@ mod tests {
             (ClaudeCodeView::Finding, 11),
             (ClaudeCodeView::Busy, 12),
         ] {
-            assert_eq!(postcard::to_stdvec(&view).expect("encode"), [tag], "{view:?}");
+            assert_eq!(
+                postcard::to_stdvec(&view).expect("encode"),
+                [tag],
+                "{view:?}"
+            );
         }
         assert!(postcard::from_bytes::<ClaudeCodeView>(&[13]).is_err());
     }
