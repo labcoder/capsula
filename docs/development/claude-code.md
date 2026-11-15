@@ -125,7 +125,10 @@ version: its launch policy and the facts its audit expects. Any other version is
   `APPDATA`, `LOCALAPPDATA`, `TEMP`, `TMP` and `CLAUDE_CODE_TMPDIR` point at Kumochi's own
   folders. Six documented switches are `1`: `DISABLE_AUTOUPDATER`, `DISABLE_TELEMETRY`,
   `DISABLE_ERROR_REPORTING`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`,
-  `CLAUDE_CODE_SKIP_PROMPT_HISTORY` and `CLAUDE_CODE_DISABLE_AUTO_MEMORY`. `SystemRoot`,
+  `CLAUDE_CODE_SKIP_PROMPT_HISTORY` and `CLAUDE_CODE_DISABLE_AUTO_MEMORY`, and
+  `ENABLE_CLAUDEAI_MCP_SERVERS` is `false`, so a claude.ai sign-in's connectors are never fetched
+  and Kumochi's server is the only one offered, whatever `--strict-mcp-config` does; the audit
+  still refuses any other server. `SystemRoot`,
   `SystemDrive` and `PATH` come from the OS (`platform::system_env`): `PATH` is the system folder
   then the Windows folder, never the brain's own `PATH`, and there's no `PATHEXT`. `auth login`
   gets the same environment, and Kumochi sets no `BROWSER`. Claude Code's opener runs as a child
@@ -525,7 +528,8 @@ sequenceDiagram
 - **The stated limit:** the seed can reach the chosen model before init is checked, but no tool
   runs before the check.
 - **The log:** a failure is logged as a warning with its closed check and its phase, before stdin
-  or after the seed, and nothing Claude Code sent.
+  or after the seed, and nothing Claude Code sent. The audit's own deadline before stdin is logged
+  as the `Deadline` check, though the launch ends as `Deadline` with no quarantine.
 
 The brain's side of the pipe, and the launch that writes `mcp.json`, come with C4b and C5a.
 On macOS the pipe would be a Unix socket in the owned folder (unverified).
