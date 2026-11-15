@@ -23,7 +23,6 @@ use kumochi_protocol::message::{GestureId, ThreadId};
 
 struct Pending {
     delivery: Delivery,
-    at: EventTime,
     stamp: Stamp,
     qpc: u64,
     cancelled: Option<GestureId>,
@@ -151,7 +150,6 @@ pub(super) fn deliver(
         }
         let pending = Pending {
             delivery,
-            at,
             qpc,
             cancelled,
             escape,
@@ -254,7 +252,7 @@ fn apply(
                         });
                     }
                 }
-                this.apply_effects(effects, pending.at, window, cx);
+                this.apply_effects(effects, window, cx);
                 for intent in pending.delivery.intents.iter().flatten().cloned() {
                     this.voice_intent(intent, pending.stamp, pending.qpc, cx);
                 }

@@ -570,7 +570,7 @@ fn a_failed_open_leaves_nothing_open_and_isnt_retried_this_run(cx: &mut TestAppC
 /// A double tap's effects, from timed key events through the recogniser.
 fn double_tap() -> [Option<Effect>; 3] {
     let start = Instant::now();
-    let mut gesture = Gesture::legacy_hold_fixture();
+    let mut gesture = Gesture::default();
     let mut effects = [None; 3];
     for (key, edge, at) in [
         (Key::LeftControl, Edge::Down, 0),
@@ -595,14 +595,7 @@ fn guarded(owner: &Entity<Presence>, cx: &mut TestAppContext) -> [bool; 2] {
     cx.update(|cx| {
         dock.update(cx, |_, window, cx| {
             owner.update(cx, |owner, cx| {
-                owner.apply_effects(
-                    double_tap(),
-                    EventTime {
-                        instant: Instant::now(),
-                    },
-                    window,
-                    cx,
-                );
+                owner.apply_effects(double_tap(), window, cx);
                 let typing = owner.text_open();
                 owner.dismiss_text(cx).expect("hide typing");
                 for event in [
@@ -630,7 +623,7 @@ fn native(owner: &Entity<Presence>, cx: &mut TestAppContext) -> Deliver {
     let weak = owner.downgrade();
     owner.update(cx, |owner, cx| {
         crate::presence::gesture::deliver(
-            Rc::clone(&owner.gesture),
+            Rc::default(),
             owner.dock_window,
             weak,
             owner.link.clone(),
@@ -1073,14 +1066,7 @@ fn tap(owner: &Entity<Presence>, cx: &mut TestAppContext) {
     cx.update(|cx| {
         dock.update(cx, |_, window, cx| {
             owner.update(cx, |owner, cx| {
-                owner.apply_effects(
-                    double_tap(),
-                    EventTime {
-                        instant: Instant::now(),
-                    },
-                    window,
-                    cx,
-                );
+                owner.apply_effects(double_tap(), window, cx);
             });
         })
         .expect("the dock window");
