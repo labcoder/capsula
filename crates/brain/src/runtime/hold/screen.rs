@@ -308,6 +308,7 @@ async fn release(client: &HoldClient, key: HoldKey, holder: Option<Generation>) 
 /// How an answer that isn't the one asked for ends the part. A system that can't capture is told
 /// apart, so the brain can stop offering screen holds.
 pub(super) fn ending(closed: Closed) -> Outcome {
+    tracing::info!(?closed, "hold screen part closed");
     if closed == Closed::Refused(Refusal::Unsupported) {
         Outcome::Unsupported
     } else {

@@ -520,6 +520,10 @@ windows; after `CaptureDone`, or for any other lease, a lapse is ignored.
 | `Changed` | `WindowChanged`, `DisplayChanged`, `Stale` |
 | `ModelCantSee` | none: the thread's own model failed the gate |
 
+Each worker answer that ends a part is logged at info as `hold screen part closed` with its
+`Closed` value: the refusal, `Busy`, the numeric fault or the loss, never anything from the window.
+The line names which refusal a class came from, such as `Unmasked` or `Ambiguous` for `Unreadable`.
+
 Every way a hold ends reaches the part through one of two places:
 - the hold's invalidation, which covers cancel and Esc, a turn, an Ask, `ShellLost`, a model or
   default change, a delete, a connection change, hold-to-talk off, a timeout and session loss;
