@@ -839,6 +839,10 @@ fn renewal_general() -> LinkEvent {
 }
 
 #[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one settings retry, from the refusal to the captured field's resend"
+)]
 fn settings_retry_rechecks_its_captured_field_and_waits_for_the_matching_answer(
     cx: &mut TestAppContext,
 ) {
