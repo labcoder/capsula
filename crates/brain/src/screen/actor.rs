@@ -208,7 +208,7 @@ fn run(
     loop {
         let deadline = expires
             .into_iter()
-            .chain(walking.map(|(_, _, until, _)| until))
+            .chain(walking.map(|(_, _, until)| until))
             .min();
         let event = match deadline {
             Some(until) => events
@@ -440,7 +440,7 @@ fn run(
                     }
                     _ => send(id, Reply::Refused(Refusal::Stale))?,
                 }
-            } else if walking.is_some_and(|(_, _, until, _)| now() >= until) {
+            } else if walking.is_some_and(|(_, _, until)| now() >= until) {
                 return Ok(());
             }
         }
