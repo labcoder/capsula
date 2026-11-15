@@ -24,6 +24,13 @@ use super::policy::{self, EntryPoint, LaunchPolicy, OwnedFolders};
 use super::supervisor::{self, Ready, Start, Teardown};
 use crate::platform::{self, Job, Launch, ManagedPresence, Presence, SessionLock, Stdio};
 
+/// Writes `version`'s quarantine marker in `base`, durably; one already there is kept.
+pub(crate) fn mark_quarantined(base: &Path, version: ClaudeVersion) -> Result<(), Failure> {
+    let _base = platform::hold_chain(base).map_err(|_| Failure::Quarantine)?;
+    platform::mark(&base.join(format!("{CLAUDE_CODE_QUARANTINE}{version}")))
+        .map_err(|_| Failure::Quarantine)
+}
+
 /// Jobs the lane holds before it refuses more; the core keeps one discovery out at a time.
 pub(crate) const LANE_QUEUE: usize = 4;
 /// `--version`'s output cap.
@@ -155,6 +162,8 @@ enum Queued {
 
 /// The lane's handle on the core loop.
 pub(crate) struct Lane {
+    /// The host's base, where quarantine markers go.
+    base: PathBuf,
     jobs: Option<std_mpsc::SyncSender<Queued>>,
     current: Arc<AtomicU64>,
     closing: Arc<AtomicBool>,
@@ -173,6 +182,7 @@ impl Lane {
         let (ended_tx, ended) = oneshot::channel();
         let current = Arc::new(AtomicU64::new(0));
         let closing = Arc::new(AtomicBool::new(false));
+        let base = host.base.clone();
         let mut worker = Worker {
             host,
             guard: None,
@@ -227,12 +237,18 @@ impl Lane {
                 ended_tx.send(emptied).ok();
             })?;
         Ok(Self {
+            base,
             jobs: Some(jobs),
             current,
             closing,
             done,
             ended: Some(ended),
         })
+    }
+
+    /// Where quarantine markers go.
+    pub(crate) fn base(&self) -> &Path {
+        &self.base
     }
 
     /// Makes `generation` the only one whose queued jobs still run.
@@ -316,13 +332,7 @@ impl Worker {
                 let _base =
                     platform::hold_chain(&self.host.base).map_err(|_| Failure::Quarantine)?;
                 self.hold()?;
-                platform::mark(
-                    &self
-                        .host
-                        .base
-                        .join(format!("{CLAUDE_CODE_QUARANTINE}{version}")),
-                )
-                .map_err(|_| Failure::Quarantine)?;
+                mark_quarantined(&self.host.base, version)?;
                 self.run(generation, Work::Version)
             }
             Work::Version => {

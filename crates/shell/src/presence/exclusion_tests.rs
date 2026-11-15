@@ -1,8 +1,4 @@
-use std::{
-    cell::RefCell,
-    rc::Rc,
-    time::{Duration, Instant},
-};
+use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use kumochi_protocol::message::GestureId;
 
@@ -432,9 +428,8 @@ fn actual_quit_cleans_a_nonempty_owner_and_does_not_forgive_failed_restoration(
 fn actual_presence_keeps_hold_and_listening_off_even_after_ready_and_deferred_effects(
     cx: &mut gpui_kit::TestAppContext,
 ) {
-    use crate::input::{Edge, Effect, Event, Gesture, Key as InputKey};
+    use crate::input::Effect;
     use crate::link::{Batch, LinkEvent, Session};
-    use crate::platform::EventTime;
     use kumochi_protocol::message::{Incarnation, PartState};
 
     let owner = super::super::test_fixture::presence(cx);
@@ -449,31 +444,12 @@ fn actual_presence_keeps_hold_and_listening_off_even_after_ready_and_deferred_ef
         window
             .update(cx, |_, window, cx| {
                 owner.update(cx, |this, cx| {
-                    let now = Instant::now();
-                    let mut gesture = Gesture::legacy_hold_fixture();
-                    gesture.handle(
-                        Event::Key {
-                            key: InputKey::LeftControl,
-                            edge: Edge::Down,
-                        },
-                        now,
-                    );
-                    gesture.handle(
-                        Event::Key {
-                            key: InputKey::LeftAlt,
-                            edge: Edge::Down,
-                        },
-                        now,
-                    );
-                    this.gesture.set(gesture);
-                    assert!(this.gesture.get().listening());
                     this.apply_effects(
                         [
                             Some(Effect::Listening),
                             Some(Effect::HoldStarted),
                             Some(Effect::HoldEnded),
                         ],
-                        EventTime { instant: now },
                         window,
                         cx,
                     );

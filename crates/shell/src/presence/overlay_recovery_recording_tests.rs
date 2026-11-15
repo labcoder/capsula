@@ -372,6 +372,8 @@ impl Drop for Recorder {
 
 #[cfg(test)]
 mod tests {
+    // TODO: delete these six self-checks once the bounded recovery-allocation evidence is retired;
+    // they check its recorder, and nothing runs them (each needs its own `--ignored` process).
     use super::*;
 
     fn install(ui: PreparedRequests) -> LocalRequests {

@@ -82,8 +82,7 @@ use crate::input::{Effect, Gesture};
 use crate::link::{LinkEvent, LinkHandle, LinkState, Session};
 use crate::platform::input::{Input, input};
 use crate::platform::{
-    self, EscapeHotkey, EventTime, Foreground, PresenceEvent, PresenceLabels, PresenceNative,
-    PresenceSurface,
+    self, EscapeHotkey, Foreground, PresenceEvent, PresenceLabels, PresenceNative, PresenceSurface,
 };
 use crate::runs::Runs;
 use crate::settings::Settings;
@@ -153,8 +152,6 @@ struct Presence {
     issue_request: u64,
     issue_review: Option<issue_review::Route>,
     state: LinkState,
-    /// The canonical gesture; the Raw Input callback reduces it before GPUI sees anything.
-    gesture: Rc<Cell<Gesture>>,
     voice: voice::Voice,
     /// What `runs` and the typing panel last made Esc see.
     activity: Activity,
@@ -334,11 +331,10 @@ impl Presence {
         });
     }
 
-    /// Applies gesture effects in order. `at` is the native callback's time.
+    /// Applies gesture effects in order.
     fn apply_effects(
         &mut self,
         effects: [Option<Effect>; 3],
-        at: EventTime,
         _dock: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
@@ -348,7 +344,7 @@ impl Presence {
                     self.refresh_dock(cx);
                     diagnostics::record(cx, format_args!("resting"));
                 }
-                Effect::Listening | Effect::HoldStarted | Effect::HoldEnded => continue,
+                Effect::Listening | Effect::HoldStarted | Effect::HoldEnded => {}
                 Effect::OpenInput => {
                     if self.onboarding.is_some() {
                         if let Err(error) = self.onboarding_double_tap(cx) {
@@ -358,12 +354,6 @@ impl Presence {
                         tracing::error!(%error, "can't open the typing panel");
                     }
                 }
-            }
-            if cx.has_global::<Diagnostics>() {
-                let gesture = self.gesture.get();
-                self.dock.update(cx, |dock, _| {
-                    dock.pending_paint.follow(effect, &gesture, at.instant);
-                });
             }
         }
     }
@@ -1013,7 +1003,6 @@ pub(crate) fn open(
             issue_request: 0,
             issue_review: None,
             state: LinkState::Connecting,
-            gesture: Rc::clone(&gesture),
             voice: voice::Voice::default(),
             activity: Activity::default(),
             runs: Runs::default(),

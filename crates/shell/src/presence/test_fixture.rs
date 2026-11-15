@@ -2,7 +2,6 @@
 //! no OS-visible window, tray icon, keyboard hook, hotkey or taskbar button, and a link that
 //! never connects, so every send it's asked for is refused.
 
-use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -11,9 +10,9 @@ use kumochi_scene::layout::SurfaceGeometry;
 use kumochi_scene::theme::Theme;
 
 use super::{
-    Activity, Context, Dock, Drawn, EscapeHold, FrameLoop, Gesture, KumoView, Layout, Line,
-    LinkHandle, LinkState, Panel, PanelVisibility, Presence, PresenceNative, Runs, Settings,
-    Strings, TextPanel, Threads, Window, platform, presence_labels, pull_dock,
+    Activity, Context, Dock, Drawn, EscapeHold, FrameLoop, KumoView, Layout, Line, LinkHandle,
+    LinkState, Panel, PanelVisibility, Presence, PresenceNative, Runs, Settings, Strings,
+    TextPanel, Threads, Window, platform, presence_labels, pull_dock,
 };
 use crate::presenter::Presenter;
 
@@ -89,7 +88,6 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             issue_request: 0,
             issue_review: None,
             state: LinkState::Connecting,
-            gesture: Rc::new(Cell::new(Gesture::default())),
             voice: super::voice::Voice::default(),
             activity: Activity::default(),
             runs: Runs::default(),
