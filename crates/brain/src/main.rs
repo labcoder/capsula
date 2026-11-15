@@ -39,9 +39,16 @@ fn main() -> ExitCode {
         }
         return ExitCode::SUCCESS;
     }
-    if worker.as_deref() == Some(constants::IMAGE_CHECK_ARG) {
+    let diagnostic = worker.as_deref() == Some(constants::IMAGE_DIAGNOSTIC_ARG);
+    if diagnostic || worker.as_deref() == Some(constants::IMAGE_CHECK_ARG) {
         #[cfg(debug_assertions)]
-        return ExitCode::from(kumochi_brain::connections::image_check::run());
+        return ExitCode::from(kumochi_brain::connections::image_check::run(
+            if diagnostic {
+                kumochi_brain::connections::image_check::Set::Diagnostic
+            } else {
+                kumochi_brain::connections::image_check::Set::Check
+            },
+        ));
         // Without the mode the flag still never reaches a normal start, which could refresh.
         #[cfg(not(debug_assertions))]
         return ExitCode::from(10);

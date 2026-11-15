@@ -364,10 +364,12 @@ lists of the approved keys, words and placeholder forms rather than importing th
 ## `image`
 
 `cargo xtask live image` checks that the account's model accepts an image the way the product sends
-it, and reads it. Run it only in a live turn the Captain assigned, from the reviewed head.
+it, and reads it. `cargo xtask live image --diagnostic` sends two other images instead, to tell
+why one wasn't read (below). Run either only in a live turn the Captain assigned, from the
+reviewed head.
 
 - xtask copies only `kumochid.exe` into `target\live\<time>\bin` and runs
-  `kumochid.exe --image-check` itself, in its kill-on-close job, with stdin and stderr null and
+  `kumochid.exe --image-check` (`--image-diagnostic` for the diagnostic) itself, in its kill-on-close job, with stdin and stderr null and
   stdout piped, for at most 6 minutes. No log, store, pipe, tap or scene thread starts.
 - The mode is built into debug brains only. A brain without it still recognizes the flag and exits
   10 before logging. Its preflight is the catalog capture's: the dev names, the
@@ -383,21 +385,27 @@ it, and reads it. Run it only in a live turn the Captain assigned, from the revi
   to 4096, so they stay between square and 3:2 rather than becoming strips. If either comes out
   more than 2% under its target, the brain exits 18 before the vault opens. No screen, file or
   other app is read.
+- The diagnostic builds two requests the same way: the 256×256 halves with the same noise as the
+  large images (`small-noisy`), then the flat halves at 1024×1024 (`flat-large`). The small flat
+  image came back unmatched in two runs while the large noisy ones matched; these separate "too
+  small" from "too flat".
 - The requests go out in that order. The first one that doesn't complete, or a session that's no
   longer fresh, stops the run with the rest unspent.
 
 **Requests.** The mode's `Budget` is fixed at five, so within one run a sixth send can't happen,
-retries and renewals included; it never retries or renews, so a run sends at most three. Nothing
-counts across runs: a run happens only in a live turn the Captain assigned, and that assignment
-states how many image requests earlier runs have sent. The brain prints one line per request,
-from counts and fixed words only: the image's kind, width and height, JPEG and body bytes, the
-status (`2xx` on success), the provider's error code and the request part it names when it gave
-known ones, the result, the milliseconds and `content_match`, which is true when the answer's words are exactly `red` then
-`blue`. The answer itself is kept only in memory for that match and zeroed. xtask prints only the
-brain's lines that start with `request=`, then one line from the exit code:
+retries and renewals included; it never retries or renews, so a check sends at most three and a
+diagnostic at most two. Nothing counts across runs: a run happens only in a live turn the Captain
+assigned, and that assignment states how many image requests earlier runs have sent. The brain
+prints one line per request, from counts and fixed words only: the image's kind, width and height,
+JPEG and body bytes, the status (`2xx` on success), the provider's error code and the request part
+it names when it gave known ones, the result, the completed response's input token count
+(`input_tokens`, `-` when there's none), the milliseconds and `content_match`, which is true when
+the answer's words are exactly `red` then `blue`. The answer itself is kept only in memory for
+that match and zeroed. xtask prints only the brain's lines that start with `request=`, then one
+line from the exit code:
 
 ```
-request=1 image=small size=256x256 jpeg_bytes=<n> body_bytes=<n> status=2xx code=- param=- result=completed ms=<n> content_match=true
+request=1 image=small size=256x256 jpeg_bytes=<n> body_bytes=<n> status=2xx code=- param=- result=completed input_tokens=<n> ms=<n> content_match=true
 image check: done (requests: 3)
 image check: nothing sent, exit 16 (requests: 0)
 image check: stopped, exit 20 (requests: at most 3)
@@ -408,6 +416,11 @@ Exits 10–17 mean the same as the catalog capture's and send nothing; 18 means 
 couldn't be built, so nothing was sent; 20 means a request didn't complete or the session went
 stale. A run that stopped or has no exit code may have sent one more request than it printed,
 for example when printing a line failed, so its count is an upper bound.
+
+No run sends a text-only request, so read `input_tokens` by comparing a run's lines with each
+other. Every request carries the same text, so counts that barely differ between the small image
+and the large ones mean the images weren't counted. In one diagnostic run, the whole small noisy
+request came to 115 input tokens and the flat 1024×1024 one to 1,267.
 
 ## Bounds
 
