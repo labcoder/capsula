@@ -48,6 +48,10 @@ pub(crate) const SIGN_IN: SignInStore = SignInStore::FileWithDacl;
 
 /// The connection's state; the lane does the work.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent flags: the switch, a queued find, a deletion to finish and a full queue"
+)]
 pub(crate) struct Claude {
     lane: Option<Lane>,
     sign_in: SignInStore,
