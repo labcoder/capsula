@@ -3,14 +3,18 @@
 
 use crate::presence::geometry::Layout;
 
-#[cfg(test)]
-pub(crate) mod fixture;
+#[cfg(any(test, feature = "test-support"))]
+#[expect(
+    clippy::missing_assert_message,
+    reason = "the fixture's asserts are test assertions, built outside cfg(test) for the shell's tests"
+)]
+pub mod fixture;
 
 /// The most owned `[left, right)` column spans one hit-mask row holds: two shapes, each with
 /// its current and previous snapshot.
-pub(crate) const ROW_SPANS: usize = 4;
+pub const ROW_SPANS: usize = 4;
 /// One screen row's owned columns.
-pub(crate) type RowSpans = [Option<[i32; 2]>; ROW_SPANS];
+pub type RowSpans = [Option<[i32; 2]>; ROW_SPANS];
 
 /// The line's size, in logical pixels.
 const LINE: [f32; 2] = [56.0, 3.0];
@@ -22,19 +26,19 @@ const MAX_FAILED_UPLOADS: u8 = 3;
 
 /// The dock's slot, in physical pixels: the line and its trigger band with a pixel to spare on
 /// every side for rounding.
-pub(crate) fn slot(scale: f32) -> [i32; 2] {
+pub fn slot(scale: f32) -> [i32; 2] {
     [LINE[0], LINE[1] + 2.0 * TRIGGER].map(|value| whole(f64::from(value * scale).ceil()) + 2)
 }
 
 /// One placement of the line. Both halves come from the same slot and publish together.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct LineFrame {
+pub struct LineFrame {
     /// The line's device pixels, `[x, y, width, height]`: each edge rounded half toward zero,
     /// as GPUI snaps the bounds it draws. Only these pixels are drawn.
-    pub(crate) paint: [i32; 4],
+    pub paint: [i32; 4],
     /// `paint` with its snapped edges grown by the trigger band above and below, rounded outward. Only these pixels
     /// are owned; every row holds the same span.
-    pub(crate) hit: [i32; 4],
+    pub hit: [i32; 4],
 }
 
 impl LineFrame {
@@ -53,7 +57,7 @@ impl LineFrame {
     }
 
     /// The line centred in the dock's `slot`, `[x, y, width, height]`.
-    pub(crate) fn in_slot([x, y, width, height]: [i32; 4], scale: f32) -> Self {
+    pub fn in_slot([x, y, width, height]: [i32; 4], scale: f32) -> Self {
         let [line_width, line_height] = LINE.map(|value| f64::from(value * scale));
         Self::at(
             [
@@ -65,7 +69,7 @@ impl LineFrame {
     }
 
     /// Row `y`'s owned pixels, as the hit mask takes them.
-    pub(crate) fn row_spans(&self, y: i32) -> RowSpans {
+    pub fn row_spans(&self, y: i32) -> RowSpans {
         let [left, top, width, height] = self.hit;
         let mut spans = [None; ROW_SPANS];
         spans[0] = (top..top + height)
@@ -82,15 +86,15 @@ impl LineFrame {
 
 /// One placement of the dock: its layout, the line in its slot and the tray's position entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Placement {
-    pub(crate) layout: Layout,
-    pub(crate) frame: LineFrame,
-    pub(crate) index: usize,
+pub struct Placement {
+    pub layout: Layout,
+    pub frame: LineFrame,
+    pub index: usize,
 }
 
 /// The native surfaces a placement must bring into line: the hit proxy's mask, the overlay
 /// window and the proxy's visibility. Each call either does its whole change or none of it.
-pub(crate) trait Surfaces {
+pub trait Surfaces {
     type Error: std::fmt::Display;
     /// Gives the proxy `frame`'s band.
     fn upload(&mut self, frame: &LineFrame) -> Result<(), Self::Error>;
@@ -122,7 +126,7 @@ struct Held {
 
 /// What one attempt at the requested placement did.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Attempt<E> {
+pub enum Attempt<E> {
     /// Nothing is requested, or its attempts ran out.
     Idle,
     /// The mask, the overlay and the proxy all hold it; it's current now.
@@ -143,7 +147,7 @@ pub(crate) enum Attempt<E> {
 /// The dock's placement as Windows accepted it, the one asked for since, and what Windows
 /// holds in between.
 #[derive(Debug, Default)]
-pub(crate) struct Line {
+pub struct Line {
     /// Held by the mask, the overlay and the proxy, and drawn.
     accepted: Option<Placement>,
     /// Asked for and not yet accepted.
@@ -157,32 +161,32 @@ pub(crate) struct Line {
 }
 
 impl Line {
-    pub(crate) fn position_index(&self) -> Option<usize> {
+    pub fn position_index(&self) -> Option<usize> {
         self.requested
             .or(self.accepted)
             .map(|placement| placement.index)
     }
 
     /// The line Windows last accepted.
-    pub(crate) fn accepted_frame(&self) -> Option<LineFrame> {
+    pub fn accepted_frame(&self) -> Option<LineFrame> {
         self.accepted.map(|placement| placement.frame)
     }
 
     /// A grab was accepted: from now until the pull hands the dock back, it's drawn in this
     /// line's coordinates, so the line takes no attempt.
-    pub(crate) fn pull_started(&mut self) {
+    pub fn pull_started(&mut self) {
         self.pulled = true;
     }
 
     /// A pull moved the overlay: the next attempt moves it back to the line's.
-    pub(crate) fn pull_overlay(&mut self) {
+    pub fn pull_overlay(&mut self) {
         self.held.overlay = None;
         self.pulled = true;
     }
 
     /// Windows accepted a pull's mask over `area`: the next attempt gives the line its band
     /// back, and failing closed empties the pull's area.
-    pub(crate) fn pull_mask(&mut self, area: [i32; 4]) {
+    pub fn pull_mask(&mut self, area: [i32; 4]) {
         self.held.mask = None;
         self.held.proxy = Some(area);
         self.pulled = true;
@@ -191,20 +195,20 @@ impl Line {
     /// The pull is done with the mask and the overlay, and the dock draws no picture of it:
     /// ask for the line again, the pending placement if there is one, with a fresh run of
     /// attempts.
-    pub(crate) fn reclaim(&mut self) {
+    pub fn reclaim(&mut self) {
         self.pulled = false;
         self.requested = self.requested.or(self.accepted);
         self.failed = 0;
     }
 
     /// What the mask owns now: the pixels that take the pointer.
-    pub(crate) fn contains(&self, point: [i32; 2]) -> bool {
+    pub fn contains(&self, point: [i32; 2]) -> bool {
         self.accepted
             .is_some_and(|placement| placement.frame.contains(point))
     }
 
     /// A new choice replaces any pending one and gets a fresh run of attempts.
-    pub(crate) fn request(&mut self, placement: Placement) {
+    pub fn request(&mut self, placement: Placement) {
         self.requested = Some(placement);
         self.failed = 0;
     }
@@ -213,7 +217,7 @@ impl Line {
     /// attempt left them. It's current only once all three hold it. When the last attempt
     /// fails with the surfaces apart, the dock is hidden rather than left showing a line it
     /// doesn't own or owning a band it doesn't show.
-    pub(crate) fn attempt<S: Surfaces>(&mut self, surfaces: &mut S) -> Attempt<S::Error> {
+    pub fn attempt<S: Surfaces>(&mut self, surfaces: &mut S) -> Attempt<S::Error> {
         let Some(target) = self
             .requested
             .filter(|_| !self.pulled && self.failed < MAX_FAILED_UPLOADS)

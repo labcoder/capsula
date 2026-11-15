@@ -3,7 +3,7 @@
 //! finds it without the line growing. A placement becomes current only once Windows accepts its
 //! mask, so the line never shows where the mask isn't.
 
-pub(crate) mod machine;
+pub(crate) use kumochi_shell_core::presence::line::machine;
 
 use std::sync::Arc;
 
