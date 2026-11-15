@@ -44,7 +44,7 @@ fn context_for(id: u64, owner: Owner) -> Request {
             owner,
             capture: CaptureId(id),
         },
-        ticket: TicketWire::new(CaptureId(id), id, [91; 16], 30_000),
+        ticket: TicketWire::new(CaptureId(id), id, [91; 16], 30_000, FAR),
         point: PhysicalPoint([1, 1]),
     }
 }
@@ -55,6 +55,12 @@ const CHANGES: PhysicalPoint = PhysicalPoint([1, 2]);
 fn unchanged(target: &Target) -> bool {
     target.instance == 9
 }
+
+/// A deadline stamp the fake counter reads as a minute away, past every ticket's own length.
+const FAR: u64 = 60_000;
+
+/// The fake counter: a deadline stamp is the milliseconds left until it.
+const MILLIS_LEFT: fn(u64) -> Option<Duration> = |stamp| Some(Duration::from_millis(stamp));
 
 struct Input {
     receive: mpsc::Receiver<Vec<u8>>,
@@ -321,6 +327,7 @@ impl Rig {
                     }
                 },
                 unchanged,
+                MILLIS_LEFT,
             )
         });
         Self {
@@ -700,7 +707,7 @@ fn expiry_disposes_an_acquired_frame_without_any_followup_request() {
     let rig = Rig::create(None, None, None, Clock::Realtime, None);
     let mut request = context(1);
     if let Request::Context { ticket, .. } = &mut request {
-        *ticket = TicketWire::new(CaptureId(1), 1, [91; 16], 2_000);
+        *ticket = TicketWire::new(CaptureId(1), 1, [91; 16], 2_000, FAR);
     }
     rig.send(1, &request);
     rig.acquired(1);

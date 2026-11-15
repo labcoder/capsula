@@ -8,6 +8,8 @@ use super::*;
 use crate::screen::wire::CaptureId;
 
 const TTL: u32 = 2_000;
+/// A deadline stamp the fake counter reads as a minute away, past every ticket's own length.
+const FAR: u64 = 60_000;
 
 /// What the fake platform does, shared with the test that steers it.
 struct Knobs {
@@ -53,6 +55,8 @@ struct Rig {
     fake: Fake,
     knobs: Rc<Knobs>,
     start: Instant,
+    /// The next ticket's deadline stamp.
+    deadline: u64,
 }
 
 impl Rig {
@@ -71,6 +75,7 @@ impl Rig {
             reader: Some(crate::screen::elements::tests::open_reader(Box::new(
                 || true,
             ))),
+            left_until: |stamp| Some(Duration::from_millis(stamp)),
             ..Screen::default()
         };
         Self {
@@ -78,6 +83,7 @@ impl Rig {
             fake: Fake(Rc::clone(&knobs)),
             knobs,
             start,
+            deadline: FAR,
         }
     }
 
@@ -87,7 +93,7 @@ impl Rig {
         self.knobs.clock.set(self.start + Duration::from_millis(at));
         let knobs = Rc::clone(&self.knobs);
         let now = move || knobs.clock.get();
-        let ticket = ticket(generation);
+        let ticket = ticket(generation, self.deadline);
         let expires = self.screen.admit(&ticket, self.start, &now)?;
         let target = Target {
             top: TopWindow {
@@ -147,8 +153,14 @@ fn elements(
     }
 }
 
-fn ticket(generation: u64) -> TicketWire {
-    TicketWire::new(CaptureId(generation * 10), generation, [0xAB; 16], TTL)
+fn ticket(generation: u64, deadline: u64) -> TicketWire {
+    TicketWire::new(
+        CaptureId(generation * 10),
+        generation,
+        [0xAB; 16],
+        TTL,
+        deadline,
+    )
 }
 
 fn rect(size: [u32; 2]) -> PhysicalRect {
@@ -178,6 +190,29 @@ fn local_validity_ends_at_exactly_ttl_and_drops_the_previous_image() {
     assert_eq!(rig.take(2, [4, 3], 2_000), Err(Refusal::Expired.into()));
     assert_eq!(rig.knobs.calls.get(), 1);
     assert_eq!(rig.screen.frame().image(), None);
+}
+
+#[test]
+fn a_ticket_read_late_ends_at_the_brains_deadline_before_its_own_length() {
+    let mut rig = Rig::new([4, 3], 7);
+    rig.deadline = 500;
+    rig.knobs.takes.set(Duration::from_millis(500));
+    assert_eq!(rig.take(1, [4, 3], 0), Err(Refusal::Expired.into()));
+    assert_eq!(rig.screen.frame().image(), None);
+    rig.knobs.takes.set(Duration::from_millis(499));
+    assert_eq!(rig.take(2, [4, 3], 0), Ok(meta(2, [4, 3], 0)));
+    assert_eq!(rig.knobs.calls.get(), 2);
+}
+
+#[test]
+fn a_ticket_whose_deadline_cant_be_read_is_refused_and_spent() {
+    let mut rig = Rig::new([4, 3], 7);
+    rig.screen.left_until = |_| None;
+    assert_eq!(rig.take(1, [4, 3], 0), Err(Refusal::Expired.into()));
+    rig.screen.left_until = |stamp| Some(Duration::from_millis(stamp));
+    assert_eq!(rig.take(1, [4, 3], 0), Err(Refusal::Reused.into()));
+    assert_eq!(rig.knobs.calls.get(), 0);
+    assert_eq!(rig.take(2, [4, 3], 0), Ok(meta(2, [4, 3], 0)));
 }
 
 #[test]
@@ -253,7 +288,7 @@ fn a_frame_of_another_size_is_refused_as_a_changed_display() {
 
 #[test]
 fn no_carrier_prints_the_nonce_or_the_pixels() {
-    let ticket = ticket(1);
+    let ticket = ticket(1, FAR);
     let mut frame = RawFrame::default();
     frame.begin(4, 3).expect("small frame").fill(0xAB);
     for text in [

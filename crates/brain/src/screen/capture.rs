@@ -141,6 +141,8 @@ pub(super) struct Screen {
     /// Whether a window is still the one its capture resolved: the platform's check, a fake in
     /// tests.
     pub(super) unchanged: fn(&Target) -> bool,
+    /// How long until a ticket's deadline stamp: the platform's counter, a fake in tests.
+    pub(super) left_until: fn(u64) -> Option<Duration>,
 }
 
 impl Default for Screen {
@@ -152,6 +154,7 @@ impl Default for Screen {
             masks: Arc::new(Mutex::new(MaskSet::new(CaptureId(0)))),
             reader: None,
             unchanged: crate::platform::window_unchanged,
+            left_until: crate::platform::qpc_left,
         }
     }
 }
@@ -168,6 +171,12 @@ impl Screen {
         self.masks = Arc::new(Mutex::new(MaskSet::new(ticket.capture())));
         self.book.spend(ticket.generation())?;
         let expires = received + Duration::from_millis(ticket.ttl_ms().into());
+        // Now is read before the counter, so the brain's deadline can only come sooner here.
+        let at = now();
+        let left = (self.left_until)(ticket.deadline_qpc()).ok_or(Refusal::Expired)?;
+        let expires = at
+            .checked_add(left)
+            .map_or(expires, |deadline| deadline.min(expires));
         if now() >= expires {
             return Err(Refusal::Expired.into());
         }

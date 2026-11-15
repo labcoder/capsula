@@ -143,7 +143,9 @@ impl Replacement {
             )
             .unwrap();
             let receive = RefCell::new(Some(receive));
-            run(&events, &mut output, native, Screen::default(), &|| {
+            let mut screen = Screen::default();
+            screen.left_until = MILLIS_LEFT;
+            run(&events, &mut output, native, screen, &|| {
                 let now = *time.lock().unwrap();
                 if armed.swap(false, Ordering::SeqCst) {
                     receive.borrow_mut().take().unwrap().wait();
@@ -196,7 +198,7 @@ impl Replacement {
             key.capture.0,
             Request::Context {
                 key,
-                ticket: TicketWire::new(key.capture, key.capture.0, [91; 16], 30_000),
+                ticket: TicketWire::new(key.capture, key.capture.0, [91; 16], 30_000, FAR),
                 point: PhysicalPoint(display.size.map(|side| i32::try_from(side).unwrap())),
             },
         );
