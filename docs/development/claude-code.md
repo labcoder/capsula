@@ -402,12 +402,12 @@ marker. Each `Version` find lists the markers under the account lock before it t
 - a name with the prefix that isn't exactly a version's marker, or a listing that fails, refuses
   every version (`AuditFailed(Malformed)`), clears nothing and shows nothing of the name.
 
-The attempt's `Report` writes the same marker itself (`lane::mark_quarantined`) before its audit
-failure goes to the core, so a brain that quits straight after the failure, before the core has
-heard it or the lane has run its write, still keeps the version refused; the lane's write then
-finds the marker there and keeps it. A replaced attempt's own audit failure is marked too, though
-its report changes nothing in memory: it judged that version's real output, and the next find
-refuses it.
+The core also writes that marker itself (`lane::mark_quarantined`) as it takes an audit failure
+it counts, before anything else it does with the report, so a brain that quits straight after,
+before the lane has run its queued write, still keeps the version refused; the lane's write then
+finds the marker there and keeps it. A replaced attempt's report writes nothing, so its audit
+failure leaves no marker. Only a quit between the attempt sending the report and the core taking
+it, or a failure of both writes, still loses the marker.
 
 Until the marker write succeeds, the refusal held in memory covers every version, and each find
 retries the write. Only a crash between the audit's verdict and the report's write, or a failure

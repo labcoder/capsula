@@ -729,14 +729,8 @@ async fn a_replaced_warm_attempts_late_failure_changes_nothing() {
         ..rig.snapshot()
     };
     rig.claude.warm(other).expect("replaced");
-    rig.claude
-        .notes
-        .0
-        .send(Note::Ended {
-            id: first,
-            outcome: launch::Outcome::Audit(AuditFailed::Tools),
-        })
-        .expect("open");
+    Report::new(first, rig.claude.notes.0.clone())
+        .report(launch::Outcome::Audit(AuditFailed::Tools));
     let wake = timeout(WAIT, rig.claude.next()).await.expect("the note");
     rig.wake(wake);
     assert_eq!(rig.claude.view(), READY);
@@ -777,16 +771,17 @@ async fn a_failure_while_a_taken_attempt_audits_quarantines_and_fails_the_run() 
     rig.close().await;
 }
 
-/// OSC-756: an audit failure is marked before it's reported, so a brain that quits straight
-/// after, before the core has heard the report or queued the lane's write, keeps the marker.
+/// OSC-756: the core marks an audit failure as it takes the report, so a brain that quits
+/// straight after, before the lane has run its write, keeps the marker.
 #[tokio::test]
-async fn an_audit_failure_is_marked_before_it_is_reported() {
+async fn an_audit_failure_is_marked_before_the_brain_can_quit() {
     let mut script = synthetic_signed_in().held_until("go");
     let mut mcp: Value = serde_json::from_str(&script.mcp_status[1]).expect("json");
     mcp["response"]["response"]["mcpServers"][0]["tools"] = json!([{"name": "ping"}]);
     script.mcp_status[1] = mcp.to_string();
     let mut rig = Rig::new("question-quits-after-failure", &script).await;
     let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let (id, _) = rig.last();
     let mut played = play(&question);
     until("auditing", || rig.stdin().len() == 2).await;
     rig.go("go");
@@ -794,7 +789,10 @@ async fn an_audit_failure_is_marked_before_it_is_reported() {
         timeout(WAIT, played.events()).await.expect("ended"),
         [claude_failed(ErrorKey::ClaudeCodeAuditFailed)]
     );
-    assert_eq!(rig.claude.view(), READY, "the core hasn't heard the report");
+    assert_eq!(
+        rig.reported(id).await,
+        [launch::Outcome::Audit(AuditFailed::Tools)]
+    );
     assert!(rig.claude.close(soon()).await, "the brain quits");
     assert_eq!(rig.markers(), ["claude-code.quarantine-2.1.306"]);
 }

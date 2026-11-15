@@ -19,7 +19,7 @@ use crate::connections::model::budget::Budget;
 use crate::context::ConnectionTag;
 use crate::coordinator::{Availability, Input, Ready, StoreOp, model_unavailable};
 use crate::engines::claude_code::install::FindError;
-use crate::engines::claude_code::lane::{Done, Failure, Lane, Outcome, Work};
+use crate::engines::claude_code::lane::{self, Done, Failure, Lane, Outcome, Work};
 use crate::engines::claude_code::launch::{
     self, Attempt, ClaudeQuestion, Clock, LaunchSnapshot, Note, Offer, Refresh, Report, WARM,
 };
@@ -710,11 +710,6 @@ impl Claude {
             return Err(LaunchRefused::NotReady);
         }
         let reviewed = policy::reviewed(snapshot.version).map_err(|_| LaunchRefused::NotReady)?;
-        let base = self
-            .lane
-            .as_ref()
-            .map(|lane| lane.base().to_owned())
-            .ok_or(LaunchRefused::NotReady)?;
         let launch = self.launch(Question {
             thread: snapshot.thread,
             model: snapshot.model.clone(),
@@ -725,7 +720,7 @@ impl Claude {
         if let Some(held) = self.launches.last_mut() {
             held.due = true;
         }
-        let report = Report::new(launch.id(), self.notes.0.clone(), (base, snapshot.version));
+        let report = Report::new(launch.id(), self.notes.0.clone());
         Ok(Attempt::new(snapshot, launch, reviewed, report, expires))
     }
 
@@ -786,6 +781,14 @@ impl Claude {
         match outcome {
             // An audit failure is evidence about the version, whatever generation it ran under.
             launch::Outcome::Audit(reason) => {
+                // Marked before anything else, so a brain that quits next keeps it (OSC-756).
+                // shortcut: one small durable write on the core, on an audit failure only; move it
+                // to a blocking task if it's ever seen to stall the core.
+                if let Some(lane) = &self.lane
+                    && lane::mark_quarantined(lane.base(), version).is_err()
+                {
+                    tracing::debug!("the audit failure's marker is left to the lane");
+                }
                 self.audit_failed(version, reason);
                 true
             }
