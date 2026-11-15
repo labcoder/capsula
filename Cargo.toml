@@ -82,8 +82,9 @@ debug-assertions = false
 [profile.release.package.lyon_tessellation]
 debug-assertions = false
 
-# The dependencies the brain's tests spend their CPU in, optimised in dev and test builds. Only
-# these: `"*"` made a cold build 3.5 times slower and every CI run rebuilds the vendored crates.
+# Every version of these crates in the graph builds at opt-level 2 in dev and test; the brain's
+# tests spend their CPU in them. Not `"*"`: that made a cold build 3.5 times slower and every CI
+# run rebuilds the vendored crates.
 [profile.dev.package]
 image = { opt-level = 2 }
 zune-jpeg = { opt-level = 2 }

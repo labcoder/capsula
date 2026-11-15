@@ -62,6 +62,8 @@ jobs:
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
+          # rust-cache doesn't hash a virtual workspace's root manifest, where the profiles live.
+          key: ${{ hashFiles('Cargo.toml') }}
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
