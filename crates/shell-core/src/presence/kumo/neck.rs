@@ -20,7 +20,7 @@ use super::shape::{Framing, Silhouette};
 /// Capsules along a piece of the neck's curve.
 const NECK: usize = 10;
 /// How far, dock to attachment, the neck stretches before it breaks, whatever the body's size.
-pub(crate) const SNAP_LEN: f32 = 144.0;
+pub const SNAP_LEN: f32 = 144.0;
 /// The largest step the spring takes at once, so a stall can't fling the neck.
 const MAX_STEP: f32 = 0.1;
 /// Seconds from the break until the drip has gone back into the line and the body is round.
@@ -43,13 +43,13 @@ const BODY_REACH: f32 = 0.5 + FILLET;
 /// Goo tiles, pixels: a tile no capsule, fillet or body can reach is cleared without shading.
 const TILE: usize = 8;
 /// The largest scale the goo is shaded at; above it GPUI scales the image up.
-pub(crate) const MAX_SCALE: f32 = 1.0;
+pub const MAX_SCALE: f32 = 1.0;
 
 /// A rectangle in logical pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Rect {
-    pub(crate) origin: Vec2,
-    pub(crate) size: Vec2,
+pub struct Rect {
+    pub origin: Vec2,
+    pub size: Vec2,
 }
 
 /// A tapered capsule: from, to, and its radius at each end.
@@ -57,7 +57,7 @@ type Segment = (Vec2, Vec2, f32, f32);
 
 /// The goo is shaded as separate pieces, each into its own image.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Piece {
+pub enum Piece {
     /// The attached neck, from the dock to the body.
     Neck,
     /// After the break, the dock's part: it hangs from the line and retracts into it.
@@ -90,7 +90,7 @@ enum State {
 
 /// One pull, from the dock line to wherever the body is dragged.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Neck {
+pub struct Neck {
     /// The centre of the dock line.
     dock: Vec2,
     /// The dragged body's square, logical pixels.
@@ -127,7 +127,7 @@ impl Neck {
         }
     }
 
-    pub(crate) fn broken(&self) -> bool {
+    pub fn broken(&self) -> bool {
         self.state != State::Attached
     }
 
@@ -222,7 +222,7 @@ impl Neck {
 
     /// How the dragged body is scaled about its bottom centre: drawn out toward the dock while
     /// attached, springing back to round after the break.
-    pub(crate) fn body_scale(&self) -> Vec2 {
+    pub fn body_scale(&self) -> Vec2 {
         let pull = match (self.motion, self.state) {
             (Motion::Reduced, _) | (_, State::Gone) => 0.0,
             (Motion::Full, State::Attached) => self.stretch(self.curve()),
@@ -294,7 +294,7 @@ impl Neck {
     }
 
     /// The region `piece`'s image must cover, or `None` when there's nothing to draw.
-    pub(crate) fn bounds(&self, piece: Piece) -> Option<Rect> {
+    pub fn bounds(&self, piece: Piece) -> Option<Rect> {
         let (segs, root) = self.piece(piece)?;
         let pad = Self::pad(piece, self.body_size);
         let ends = segs
@@ -398,7 +398,7 @@ fn scaled(v: Vec2, s: f32) -> Vec2 {
 #[error(
     "the goo image is {width}x{height} with {got} bytes; this shader holds at most {max}x{max}"
 )]
-pub(crate) struct GooMismatch {
+pub struct GooMismatch {
     width: usize,
     height: usize,
     got: usize,
@@ -408,7 +408,7 @@ pub(crate) struct GooMismatch {
 /// Shades pieces of the goo. Its scratch is sized once, from the largest region its pieces can
 /// need for a body this size at [`MAX_SCALE`], so shading a frame allocates nothing.
 #[derive(Debug)]
-pub(crate) struct GooShader {
+pub struct GooShader {
     max: usize,
     tiles: Vec<(bool, u16)>,
     above: Vec<f32>,
@@ -417,12 +417,12 @@ pub(crate) struct GooShader {
 
 impl GooShader {
     /// Scratch for the attached neck and the drip, which never coexist.
-    pub(crate) fn neck(body_size: f32) -> Self {
+    pub fn neck(body_size: f32) -> Self {
         Self::sized(Neck::cap(Piece::Neck, body_size).max(Neck::cap(Piece::Drip, body_size)))
     }
 
     /// Scratch for the stub.
-    pub(crate) fn stub(body_size: f32) -> Self {
+    pub fn stub(body_size: f32) -> Self {
         Self::sized(Neck::cap(Piece::Stub, body_size))
     }
 
@@ -438,12 +438,12 @@ impl GooShader {
     }
 
     /// The largest image side, pixels, this shader can shade.
-    pub(crate) fn capacity(&self) -> usize {
+    pub fn capacity(&self) -> usize {
         self.max
     }
 
     /// The image size, pixels, of region `r` at `scale`.
-    pub(crate) fn size(r: Rect, scale: f32) -> (usize, usize) {
+    pub fn size(r: Rect, scale: f32) -> (usize, usize) {
         (pixels(r.size.x, scale), pixels(r.size.y, scale))
     }
 
@@ -462,7 +462,7 @@ impl GooShader {
         clippy::too_many_lines,
         reason = "one pass over the pixels, ported whole from the approved spike"
     )]
-    pub(crate) fn render(
+    pub fn render(
         &mut self,
         neck: &Neck,
         piece: Piece,

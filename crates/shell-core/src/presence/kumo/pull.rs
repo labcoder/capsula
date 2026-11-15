@@ -11,7 +11,7 @@ use super::neck::{Neck, Rect, SNAP_LEN};
 /// The body's width in the peek, logical pixels.
 pub(crate) const PEEK_WIDTH: f32 = 64.0;
 /// The body's width once it's pulled out, logical pixels.
-pub(crate) const CARRY_WIDTH: f32 = 84.0;
+pub const CARRY_WIDTH: f32 = 84.0;
 /// The spring's natural frequency, per second: the body catches up with the pointer, or gets
 /// home, in about a fifth of a second, with no overshoot.
 const SPRING: f32 = 28.0;
@@ -23,7 +23,7 @@ const SUBSTEPS: u8 = 24;
 /// body must be to land exactly home.
 const SETTLED: f32 = 0.05;
 
-pub(crate) struct Pull {
+pub struct Pull {
     neck: Neck,
     home: Vec2,
     /// The pointer's offset from the body's centre at the press, kept so the body doesn't jump.
@@ -43,7 +43,7 @@ impl Pull {
     /// A pull grabbed at `press` on the body at `home`, under the line's centre `dock`.
     /// The body starts at `start` and is held there until the pointer moves, so a home
     /// farther from the line than the snap length doesn't break the neck at rest.
-    pub(crate) fn grab(
+    pub fn grab(
         dock: Vec2,
         home: Vec2,
         start: Vec2,
@@ -68,21 +68,21 @@ impl Pull {
 
     /// Follows the pointer at `pointer`. After the release the body is going home, so this
     /// does nothing.
-    pub(crate) fn aim(&mut self, pointer: Vec2) {
+    pub fn aim(&mut self, pointer: Vec2) {
         if !self.released {
             self.target = pointer - self.grip;
         }
     }
 
     /// Ends the drag, whatever ended it: the body goes home.
-    pub(crate) fn release(&mut self) {
+    pub fn release(&mut self) {
         self.released = true;
         self.target = self.home;
     }
 
     /// Steps the body `dt` seconds toward its target, then the neck. A negative or
     /// non-finite step counts as none, and a long one as [`MAX_STEP`].
-    pub(crate) fn update(&mut self, dt: f32) {
+    pub fn update(&mut self, dt: f32) {
         let dt = if dt.is_finite() {
             dt.clamp(0.0, MAX_STEP)
         } else {
@@ -132,27 +132,27 @@ impl Pull {
         }
     }
 
-    pub(crate) fn body(&self) -> Vec2 {
+    pub fn body(&self) -> Vec2 {
         self.home + self.offset
     }
 
     /// The body's width: the peek's at home, the carry width from [`SNAP_LEN`] away.
-    pub(crate) fn width(&self) -> f32 {
+    pub fn width(&self) -> f32 {
         let out = smoothstep(0.0, SNAP_LEN, self.offset.len());
         mix(PEEK_WIDTH, CARRY_WIDTH, out)
     }
 
     /// The pull area, which the free body stays inside.
-    pub(crate) fn bounds(&self) -> Rect {
+    pub fn bounds(&self) -> Rect {
         self.bounds
     }
 
-    pub(crate) fn neck(&self) -> &Neck {
+    pub fn neck(&self) -> &Neck {
         &self.neck
     }
 
     /// Whether the released body is exactly home and still, so the pull can end.
-    pub(crate) fn settled(&self) -> bool {
+    pub fn settled(&self) -> bool {
         self.released && self.offset == v2(0.0, 0.0) && self.velocity == v2(0.0, 0.0)
     }
 }

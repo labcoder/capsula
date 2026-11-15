@@ -4,9 +4,9 @@ use std::ops::{Add, Mul, Sub};
 
 /// A point or offset in the plane, in cloud units or pixels.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct Vec2 {
-    pub(crate) x: f32,
-    pub(crate) y: f32,
+pub struct Vec2 {
+    pub x: f32,
+    pub y: f32,
 }
 
 /// A point or direction in cloud space: x right, y up, z toward the viewer.
@@ -17,7 +17,7 @@ pub(crate) struct Vec3 {
     pub(crate) z: f32,
 }
 
-pub(crate) const fn v2(x: f32, y: f32) -> Vec2 {
+pub const fn v2(x: f32, y: f32) -> Vec2 {
     Vec2 { x, y }
 }
 
@@ -68,7 +68,7 @@ impl Rgb {
 }
 
 impl Vec2 {
-    pub(crate) fn len(self) -> f32 {
+    pub fn len(self) -> f32 {
         self.x.hypot(self.y)
     }
 

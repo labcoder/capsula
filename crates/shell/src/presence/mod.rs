@@ -14,10 +14,10 @@ mod escape;
     reason = "eight fixed semantic slot discriminants index the fixed receipt array"
 )]
 mod exclusion;
-mod frame_rate;
 mod gesture;
 mod issue_review;
-mod kumo;
+#[cfg(test)]
+mod kumo_measure_tests;
 mod kumo_view;
 mod launch;
 pub(crate) mod line;
@@ -76,7 +76,7 @@ use gpui_kit::{
     WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point, px, size,
 };
 use kumochi_protocol::constants;
-use kumochi_shell_core::presence::{geometry, perch, thread_selection};
+use kumochi_shell_core::presence::{frame_rate, geometry, kumo, perch, thread_selection};
 
 use crate::escape::{Activity, Escape, EscapeHold, Panel as EscapePanel};
 use crate::input::{Effect, Gesture};
