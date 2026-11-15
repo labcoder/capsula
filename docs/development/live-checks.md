@@ -394,16 +394,15 @@ reviewed head.
 
 **Requests.** The mode's `Budget` is fixed at five, so within one run a sixth send can't happen,
 retries and renewals included; it never retries or renews, so a check sends at most three and a
-diagnostic at most two. Nothing
-counts across runs: a run happens only in a live turn the Captain assigned, and that assignment
-states how many image requests earlier runs have sent. The brain prints one line per request,
-from counts and fixed words only: the image's kind, width and height, JPEG and body bytes, the
-status (`2xx` on success), the provider's error code and the request part it names when it gave
-known ones, the result, the completed response's input token count (`input_tokens`, `-` when
-there's none: a count close to a text-only request's means the image wasn't counted), the
-milliseconds and `content_match`, which is true when the answer's words are exactly `red` then
-`blue`. The answer itself is kept only in memory for that match and zeroed. xtask prints only the
-brain's lines that start with `request=`, then one line from the exit code:
+diagnostic at most two. Nothing counts across runs: a run happens only in a live turn the Captain
+assigned, and that assignment states how many image requests earlier runs have sent. The brain
+prints one line per request, from counts and fixed words only: the image's kind, width and height,
+JPEG and body bytes, the status (`2xx` on success), the provider's error code and the request part
+it names when it gave known ones, the result, the completed response's input token count
+(`input_tokens`, `-` when there's none), the milliseconds and `content_match`, which is true when
+the answer's words are exactly `red` then `blue`. The answer itself is kept only in memory for
+that match and zeroed. xtask prints only the brain's lines that start with `request=`, then one
+line from the exit code:
 
 ```
 request=1 image=small size=256x256 jpeg_bytes=<n> body_bytes=<n> status=2xx code=- param=- result=completed input_tokens=<n> ms=<n> content_match=true
@@ -417,6 +416,11 @@ Exits 10–17 mean the same as the catalog capture's and send nothing; 18 means 
 couldn't be built, so nothing was sent; 20 means a request didn't complete or the session went
 stale. A run that stopped or has no exit code may have sent one more request than it printed,
 for example when printing a line failed, so its count is an upper bound.
+
+No run sends a text-only request, so read `input_tokens` by comparing a run's lines with each
+other. Every request carries the same text, so counts that barely differ between the small image
+and the large ones mean the images weren't counted. A counted 256×256 image should add a few
+hundred tokens and a large one more [guess].
 
 ## Bounds
 
