@@ -1,7 +1,7 @@
 //! `cargo xtask live claude-question`: three Claude Code questions on the dev brain's own Claude
-//! Code sign-in, with no `ChatGPT` or Anthropic key model request possible. In order: discovery alone;
-//! a one-line question on a new thread; the title job that question's `Done` starts; and a long
-//! question stopped after its first text. Only counts, lengths, durations, yes or no and the
+//! Code sign-in, with no `ChatGPT` or Anthropic key model request possible. In order: discovery
+//! alone; a one-line question on a new thread; the title job that question's `Done` starts; and a
+//! long question stopped after its first text. Only counts, lengths, durations, yes or no and the
 //! brain's state words are printed: never a prompt, an answer, a title, a version or a frame.
 //!
 //! The run's share of the owner's cap is fixed here and enforced twice: [`budget`] refuses a plan
@@ -1130,7 +1130,8 @@ mod tests {
                 verdict(Some(code)),
                 (
                     format!(
-                        "claude question: stopped at {step}, exit {code} (questions: at most {most})"
+                        "claude question: stopped at {step}, exit {code} (questions: at most \
+                         {most})"
                     ),
                     false
                 )

@@ -83,8 +83,8 @@ tasks:
   live claude-question
                     three Claude Code questions on the dev brain's own Claude Code sign-in,
                     capped in code; no ChatGPT or Anthropic key model request; prints
-                    counts, lengths and yes or no only; refuses while any product process runs; run only when the
-                    Captain starts it
+                    counts, lengths and yes or no only; refuses while any product
+                    process runs; run only when the Captain starts it
   live catalog-provenance
                     one model-list request with the dev account's saved session, never
                     renewing it; writes target\\live\\<time>\\catalog-provenance.json with
