@@ -2174,7 +2174,7 @@ fn every_screen_class_tells_the_model_its_own_fixed_line() {
         ),
         (
             ScreenClass::Unreadable,
-            "The screen was not included: the window couldn't be read safely.",
+            "The screen was not included: the window under the pointer couldn't be told apart from one drawn over it, so no picture was sent.",
         ),
         (
             ScreenClass::TooLarge,

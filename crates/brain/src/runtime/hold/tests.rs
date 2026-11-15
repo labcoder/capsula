@@ -2001,6 +2001,51 @@ async fn a_capture_the_system_refuses_comes_back_from_the_task_as_unsupported() 
 }
 
 #[tokio::test]
+async fn a_hold_asks_for_its_picture_without_a_walk_that_could_be_cut_short() {
+    type Kind = crate::screen::Holds;
+    type Request = <Kind as crate::supervise::Kind>::Request;
+    type Reply = <Kind as crate::supervise::Kind>::Reply;
+    let scratch = Scratch::new("hold-screen-no-walk");
+    let mut brain = test_support::brain(&scratch, "");
+    let mut rig = crate::supervise::fixture::start::<Kind>();
+    brain.holds.screen = Some(Arc::new(HoldClient::new(rig.handle.clone())));
+    screen_hold(&mut brain, KEY, ScreenPart::None);
+    let point = kumochi_protocol::geometry::PhysicalPoint([5, 5]);
+    assert!(
+        brain
+            .holds
+            .start_screen(KEY, point, LEASE, Instant::now() + MAX_TTL)
+    );
+    let (id, capture) = rig.next().await;
+    crate::screen::hold_frame(&rig, id, capture).await;
+    let Event::Screen(held) = super::next(&mut brain.holds).await else {
+        panic!("not the task's answer");
+    };
+    assert!(matches!(held.outcome, Outcome::Held));
+    brain.holds.screen_event(held);
+    let (id, request) = rig.next().await;
+    let Request::Seal(key) = request else {
+        panic!("the hold asked for something before its picture");
+    };
+    rig.reply(
+        id,
+        &Reply::Sealed(key, crate::screen::ScreenContext::fixture(JPEG)),
+    )
+    .await;
+    let Event::Screen(sealed) = super::next(&mut brain.holds).await else {
+        panic!("not the task's answer");
+    };
+    assert!(matches!(sealed.outcome, Outcome::Sealed(_)));
+    brain.holds.screen_event(sealed);
+    assert!(matches!(
+        brain.holds.pending.as_ref().unwrap().screen,
+        ScreenPart::Ready(_)
+    ));
+    brain.holds.lost();
+    brain.close().await;
+}
+
+#[tokio::test]
 async fn a_capture_fault_ends_the_hold_not_ready_and_leaves_screen_holds_on() {
     use crate::screen::Closed;
     let scratch = Scratch::new("hold-screen-fault");

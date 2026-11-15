@@ -120,7 +120,8 @@ pub(crate) enum Refusal {
     WindowChanged,
     /// A drawn layered window is under the pointer and where a click lands can't be told.
     Ambiguous,
-    /// The window's password masks aren't known to be complete, so its image isn't exported.
+    /// Not sent since a hold's picture stopped being masked; kept so later refusals keep their
+    /// place on the wire.
     Unmasked,
     /// The sealed image is over the JPEG cap, so it isn't exported.
     TooLarge,

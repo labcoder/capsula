@@ -978,52 +978,19 @@ fn a_walked_hold_seals_one_masked_jpeg_and_releases_its_frame() {
 }
 
 #[test]
-fn a_complete_walk_of_another_window_never_seals_the_captured_one() {
-    let rig = Rig::start(None, None, None);
-    rig.send(1, &context(1));
-    rig.acquired(1);
-    let other = ElementTarget::Window {
-        window: WindowRef(9),
-        pid: 8,
-    };
-    rig.send(
-        2,
-        &Request::Elements {
-            key: key(1),
-            target: other,
-        },
-    );
-    let (id, reply) = rig.reply();
-    assert!(
-        id == 2 && matches!(reply, Reply::Elements(walked, _) if walked == key(1)),
-        "{reply:?}"
-    );
-    rig.send(3, &Request::Seal(key(1)));
-    assert_eq!(rig.reply(), (3, Reply::Refused(Refusal::Unmasked)));
-    rig.scrubbed();
-    rig.send(
-        4,
-        &Request::Elements {
-            key: key(1),
-            target: ElementTarget::Window {
-                window: WindowRef(7),
-                pid: 8,
-            },
-        },
-    );
-    assert_eq!(rig.reply(), (4, Reply::Refused(Refusal::Stale)));
-    rig.send(5, &Request::Seal(key(1)));
-    assert_eq!(rig.reply(), (5, Reply::Refused(Refusal::Stale)));
-    rig.finish();
-}
-
-#[test]
-fn sealing_before_the_walk_refuses_releases_the_frame_and_stays_refused() {
+fn a_hold_seals_its_frame_as_captured_with_no_walk_and_only_once() {
     let rig = Rig::start(None, None, None);
     rig.send(1, &context(1));
     rig.acquired(1);
     rig.send(2, &Request::Seal(key(1)));
-    assert_eq!(rig.reply(), (2, Reply::Refused(Refusal::Unmasked)));
+    let (id, reply) = rig.reply();
+    let Reply::Sealed(sealed, context) = reply else {
+        panic!("not sealed: {reply:?}")
+    };
+    assert_eq!((id, sealed), (2, key(1)));
+    let image = image::load_from_memory_with_format(context.jpeg(), image::ImageFormat::Jpeg)
+        .expect("a JPEG");
+    assert_eq!((image.width(), image.height()), (4, 3));
     rig.scrubbed();
     rig.send(
         3,
@@ -1037,26 +1004,6 @@ fn sealing_before_the_walk_refuses_releases_the_frame_and_stays_refused() {
     assert_eq!(rig.reply(), (4, Reply::Refused(Refusal::Stale)));
     rig.finish();
 }
-#[test]
-fn a_walk_answers_only_how_complete_its_masks_are_and_the_hold_seals() {
-    let rig = Rig::start(None, None, None);
-    rig.send(1, &context(1));
-    rig.acquired(1);
-    rig.send(2, &Request::Walk { key: key(1) });
-    assert_eq!(
-        rig.reply(),
-        (2, Reply::Walked(key(1), Completeness::Complete))
-    );
-    rig.send(3, &Request::Seal(key(1)));
-    let (id, reply) = rig.reply();
-    assert!(
-        id == 3 && matches!(reply, Reply::Sealed(sealed, _) if sealed == key(1)),
-        "{reply:?}"
-    );
-    rig.scrubbed();
-    rig.finish();
-}
-
 #[test]
 fn a_window_changed_since_its_capture_refuses_the_seal_and_releases_the_frame() {
     let rig = Rig::start(None, None, None);
@@ -1072,8 +1019,6 @@ fn a_window_changed_since_its_capture_refuses_the_seal_and_releases_the_frame() 
         },
     );
     rig.acquired(1);
-    rig.send(2, &Request::Walk { key });
-    assert_eq!(rig.reply(), (2, Reply::Walked(key, Completeness::Complete)));
     rig.send(3, &Request::Seal(key));
     assert_eq!(rig.reply(), (3, Reply::Refused(Refusal::WindowChanged)));
     rig.scrubbed();

@@ -715,7 +715,7 @@ pub enum ScreenClass {
     NothingThere,
     /// The window is minimised, cloaked, elevated, protected or Kumochi's own.
     CantShare,
-    /// The window's password masks couldn't be completed, or where a click lands couldn't be told.
+    /// The window under the pointer couldn't be told apart from one drawn over it.
     Unreadable,
     /// The window or its image was over the size cap.
     TooLarge,

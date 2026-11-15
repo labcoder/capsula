@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect, WindowRef};
+use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect};
 
 use super::context::ScreenContext;
 use super::elements::{
@@ -11,7 +11,7 @@ use super::elements::{
 };
 use super::encode::overview_within;
 use super::frame::RawFrame;
-use super::mask::{Completeness, MaskSet};
+use super::mask::MaskSet;
 use super::sanitize::sanitize;
 use super::wire::{CaptureId, ElementTarget, FrameMeta, Refusal, TicketWire};
 
@@ -125,8 +125,6 @@ struct Held {
     walk_by: Instant,
     foreground: Option<TopWindow>,
     spent: bool,
-    /// The window its one walk read, which a seal requires to be the captured one.
-    walked: Option<(WindowRef, u32)>,
     /// The captured window as its capture resolved it, which a seal checks again.
     target: Option<Target>,
 }
@@ -217,7 +215,6 @@ impl Screen {
             walk_by: acquired.arrived + WALK_WINDOW,
             foreground,
             spent: false,
-            walked: None,
             target: None,
         });
         Ok(meta)
@@ -230,23 +227,15 @@ impl Screen {
         }
     }
 
-    /// How far the held capture's masks are known to cover its window.
-    pub(super) fn completeness(&self) -> Completeness {
-        self.masks.lock().map_or(
-            Completeness::Unknown(super::mask::Unavailable::Busy),
-            |masks| masks.completeness(),
-        )
-    }
-
     pub(super) fn clear(&mut self) {
         self.held = None;
         self.frame.release();
         self.masks = Arc::new(Mutex::new(MaskSet::new(CaptureId(0))));
     }
 
-    /// Hands out the held frame's one image, masked and encoded under `cap` JPEG bytes, and
-    /// releases the frame whatever the outcome. Only a walk of the captured window that found
-    /// every password mask seals, and only while that window is still the one captured.
+    /// Hands out the held frame's one image as captured, with no mask, encoded under `cap` JPEG
+    /// bytes, and releases the frame whatever the outcome. It seals only while the captured
+    /// window is still the one captured.
     pub(super) fn seal(
         &mut self,
         capture: CaptureId,
@@ -263,19 +252,10 @@ impl Screen {
             .as_ref()
             .filter(|held| held.capture == capture)
             .ok_or(Refusal::Stale)?;
-        let captured = held.foreground.as_ref().map(|top| (top.window, top.pid));
-        if captured.is_none() || held.walked != captured {
-            return Err(Refusal::Unmasked.into());
-        }
-        let sink = Arc::clone(&self.masks);
-        let masks = sink.lock().map_err(|_| Refusal::Unmasked)?;
-        if masks.completeness() != Completeness::Complete {
-            return Err(Refusal::Unmasked.into());
-        }
         if !held.target.as_ref().is_some_and(self.unchanged) {
             return Err(Refusal::WindowChanged.into());
         }
-        let clean = sanitize(&mut self.frame, &masks)?;
+        let clean = sanitize(&mut self.frame, &MaskSet::new(capture))?;
         overview_within(&clean, cap).map(ScreenContext::new)
     }
 
@@ -336,9 +316,6 @@ impl Screen {
                 }),
             window @ ElementTarget::Window { .. } => Some(window),
         };
-        if let Some(ElementTarget::Window { window, pid }) = target {
-            held.walked = Some((window, pid));
-        }
         let Some(target) = target else {
             let mut tree =
                 ElementTree::unavailable(capture, super::elements::Unavailable::NoWindow);

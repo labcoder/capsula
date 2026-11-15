@@ -11,7 +11,6 @@ use tokio::time::Instant;
 
 use super::actor::{Key, Owner, Reply, Request};
 use super::context::ScreenContext;
-use super::mask::Completeness;
 use super::wire::{CaptureId, MAX_REPLY_BYTES, Refusal, TicketWire};
 use crate::platform::Job;
 use crate::supervise::{Generation, Handle, Kind, WorkerLost, Zeroed};
@@ -196,25 +195,10 @@ impl HoldClient {
         }
     }
 
-    /// The hold's one walk of the captured window; only how complete its masks are comes back.
+    /// The held frame's one image, as captured. The worker releases the frame whatever it answers.
     ///
     /// # Errors
-    /// The worker's refusal or fault, or `Lost`.
-    pub(crate) async fn walk(&self, held: &Held, until: Instant) -> Result<Completeness, Closed> {
-        match self
-            .answer(held, Request::Walk { key: held.key }, until)
-            .await?
-        {
-            Reply::Walked(key, completeness) if key == held.key => Ok(completeness),
-            reply => Err(closed(&reply)),
-        }
-    }
-
-    /// The held frame's one image. The worker releases the frame whatever it answers.
-    ///
-    /// # Errors
-    /// `Unmasked`, `TooLarge`, `WindowChanged`, `Stale` or another refusal, a fault, or
-    /// `Lost`.
+    /// `TooLarge`, `WindowChanged`, `Stale` or another refusal, a fault, or `Lost`.
     pub(crate) async fn seal(&self, held: Held, until: Instant) -> Result<ScreenContext, Closed> {
         match self.answer(&held, Request::Seal(held.key), until).await? {
             Reply::Sealed(key, context) if key == held.key => Ok(context),
