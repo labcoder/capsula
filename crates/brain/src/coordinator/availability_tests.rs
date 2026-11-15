@@ -7,7 +7,7 @@ use kumochi_protocol::message::{
 };
 
 use super::{BuildKey, ContextBuilt, Coordinator, Effect, Input, R, StoreOp, T, delta, draw_call};
-use crate::context::{Built, ConnectionTag, ModelRequest, Origin, RunSnapshot, ToolSchema};
+use crate::context::{Built, ConnectionTag, ModelRequest, Origin, Route, RunSnapshot, ToolSchema};
 use crate::coordinator::availability::{connection_needed, model_unavailable};
 use crate::coordinator::{Availability, JobKey, Ready, RoundItems, SendKey};
 use crate::engines::{EngineFailure, Finish, TurnEvent};
@@ -596,47 +596,452 @@ fn built_on(kind: kumochi_protocol::message::ConnectionKind, slug: &str) -> Inpu
     Input::ContextBuilt(built)
 }
 
-/// A turn typed on a Claude Code choice while nothing was ready: with `ChatGPT` signed out and
-/// Claude Code still being found, after `between` arrives before its first build.
-fn claude_turn_after(between: Vec<Input>) -> Vec<Effect> {
-    let claude = kumochi_protocol::message::ConnectionKind::ClaudeCode;
-    let (mut core, effects) = typed_with(Some(Input::Engines(
+const CLAUDE: kumochi_protocol::message::ConnectionKind =
+    kumochi_protocol::message::ConnectionKind::ClaudeCode;
+const R2: RunId = RunId(11);
+/// How long a typed turn waits at its first build for Claude Code's next report.
+const FINDING_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn claude(now: Availability) -> Input {
+    Input::Engines(CLAUDE, now)
+}
+
+/// Claude Code ready under sign-in `tag`, offering haiku.
+fn claude_ready(tag: u64) -> Input {
+    claude(Availability::Ready(Ready {
+        connection: ConnectionTag(tag),
+        models: vec![info("haiku")],
+        trusted_draw: false,
+    }))
+}
+
+fn chatgpt_signed_out() -> Input {
+    Input::Engines(
         kumochi_protocol::message::ConnectionKind::ChatGpt,
         Availability::Unavailable(sign_in()),
-    )));
-    assert_eq!(effects, Vec::new(), "nothing fails at arrival");
+    )
+}
+
+fn open(key: ErrorKey) -> UserError {
+    reason(key, Action::OpenSettings)
+}
+
+/// Run 10 typed in a new thread after `before`, its turn written and its first build out.
+fn turn_after(before: Vec<Input>) -> Coordinator {
+    let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), Vec::new());
+    for input in before {
+        assert_eq!(core.handle(input), Ok(Vec::new()));
+    }
+    let arrived = core
+        .handle(Input::Turn {
+            turn: 1,
+            thread: None,
+            text: "hi".into(),
+        })
+        .expect("a turn is never stale")
+        .split_off(3);
+    assert_eq!(arrived, Vec::new(), "nothing fails at arrival");
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    core
+}
+
+/// A turn typed on haiku over Claude Code after `before`, with `between` heard before its first
+/// build, and what that build did.
+fn claude_turn(before: Vec<Input>, between: Vec<Input>) -> (Coordinator, Vec<Effect>) {
+    let mut core = turn_after(before);
     for input in between {
         assert_eq!(core.handle(input), Ok(Vec::new()));
     }
-    core.handle(Input::TurnStored { run: R }).expect("current");
-    core.handle(built_on(claude, "haiku")).expect("current")
+    let effects = core.handle(built_on(CLAUDE, "haiku")).expect("current");
+    (core, effects)
 }
 
-/// A Claude-only user who types while Claude Code is still being found is told Claude Code's
-/// reason, with Open Settings, at the first build, never `ChatGPT`'s Sign in.
-#[test]
-fn a_turn_on_claude_code_while_it_is_being_found_fails_with_its_reason() {
+/// A Claude Code turn typed after `before` while Claude Code was being found, waiting at its
+/// first build.
+fn waiting_after(before: Vec<Input>) -> Coordinator {
+    let before = before
+        .into_iter()
+        .chain([claude(Availability::Finding)])
+        .collect();
+    let (core, effects) = claude_turn(before, Vec::new());
     assert_eq!(
-        claude_turn_after(Vec::new()),
-        failed(Some(model_unavailable()))
+        effects,
+        vec![Effect::ArmDeadline {
+            run: R,
+            after: FINDING_WAIT,
+        }],
+        "the first build waits"
+    );
+    core
+}
+
+/// The usual waiting turn: `ChatGPT` signed out, so only Claude Code could answer it.
+fn waiting() -> Coordinator {
+    waiting_after(vec![chatgpt_signed_out()])
+}
+
+/// `input`, a build result, as `run`'s first-round attempt `attempt`.
+fn keyed(input: Input, run: RunId, attempt: u64) -> Input {
+    let Input::ContextBuilt(mut built) = input else {
+        unreachable!("a build result");
+    };
+    built.key = BuildKey {
+        run,
+        round: 1,
+        attempt,
+    };
+    Input::ContextBuilt(built)
+}
+
+/// `effects` give `run` the wall clock again and start its first build afresh, and do nothing
+/// else.
+fn released(effects: &[Effect], run: RunId) {
+    let [
+        Effect::ArmDeadline {
+            run: armed,
+            after: crate::coordinator::WALL_CLOCK,
+        },
+        Effect::Store(StoreOp::BuildContext(build)),
+    ] = effects
+    else {
+        panic!("not a release: {effects:?}");
+    };
+    assert_eq!((*armed, build.key.run), (run, run));
+    assert!(build.first && build.snapshot.is_none(), "a first build");
+}
+
+/// How `run` ended in `effects`, if it did.
+fn end_of(effects: &[Effect], run: RunId) -> Option<RunEnd> {
+    effects.iter().find_map(|effect| match effect {
+        Effect::Store(StoreOp::EndRun { run: ended, end, .. }) if *ended == run => Some(*end),
+        _ => None,
+    })
+}
+
+fn route(core: &Coordinator) -> Option<Route> {
+    core.current.as_ref().and_then(|run| run.route)
+}
+
+fn on(kind: kumochi_protocol::message::ConnectionKind, tag: u64) -> Option<Route> {
+    Some(Route {
+        kind,
+        tag: ConnectionTag(tag),
+    })
+}
+
+/// OSC-753: a Claude-only user who types while Claude Code is still being found isn't failed at
+/// the first build; it waits for the next report, and Ready answers it on that sign-in.
+#[test]
+fn a_turn_on_claude_code_while_it_is_being_found_waits_for_its_report() {
+    let mut core = waiting();
+    released(&core.handle(claude_ready(5)).expect("current"), R);
+    assert!(started(
+        &core
+            .handle(keyed(built_on(CLAUDE, "haiku"), R, 2))
+            .expect("current")
+    ));
+    assert_eq!(route(&core), on(CLAUDE, 5));
+}
+
+/// Claude Code turns Ready between the arrival, during Finding, and the first build: the build
+/// binds that sign-in and answers.
+#[test]
+fn a_claude_code_found_ready_after_arrival_answers_the_run() {
+    let (core, effects) = claude_turn(
+        vec![chatgpt_signed_out(), claude(Availability::Finding)],
+        vec![claude_ready(5)],
+    );
+    assert!(started(&effects));
+    assert_eq!(route(&core), on(CLAUDE, 5));
+}
+
+/// A report that isn't Ready ends the wait with its own reason, and the failure stays.
+#[test]
+fn a_report_that_claude_code_is_not_found_refuses_the_waiting_turn_with_its_reason() {
+    let mut core = waiting();
+    let not_found = open(ErrorKey::ClaudeCodeNotFound);
+    let report = claude(Availability::Unavailable(not_found.clone()));
+    released(&core.handle(report).expect("current"), R);
+    assert_eq!(
+        core.handle(keyed(built_on(CLAUDE, "haiku"), R, 2)),
+        Ok(failed(Some(not_found)))
+    );
+    assert_eq!(core.handle(claude_ready(5)), Ok(Vec::new()), "failed stays");
+}
+
+/// The runtime reports after every op and wake, so `Finding` repeats; only a report that isn't
+/// `Finding` ends the wait.
+#[test]
+fn a_repeated_finding_report_leaves_the_wait_as_it_is() {
+    let mut core = waiting();
+    assert_eq!(core.handle(claude(Availability::Finding)), Ok(Vec::new()));
+    released(&core.handle(claude_ready(5)).expect("current"), R);
+}
+
+#[test]
+fn thirty_seconds_without_a_report_fail_the_waiting_turn_with_open_settings() {
+    let mut core = waiting();
+    assert_eq!(
+        core.handle(Input::Deadline { run: R }),
+        Ok(failed(Some(model_unavailable())))
+    );
+    assert_eq!(core.handle(claude_ready(5)), Ok(Vec::new()), "failed stays");
+}
+
+/// Once released, the run's deadline is its wall clock again.
+#[test]
+fn a_deadline_after_the_release_is_the_wall_clock() {
+    let mut core = waiting();
+    core.handle(claude_ready(5)).expect("current");
+    let effects = core.handle(Input::Deadline { run: R }).expect("current");
+    assert_eq!(end_of(&effects, R), Some(RunEnd::Failed(Failure::Budget)));
+}
+
+#[test]
+fn esc_while_waiting_ends_the_turn_and_a_later_report_finds_nothing() {
+    let mut core = waiting();
+    let effects = core
+        .handle(Input::Stop {
+            run: R,
+            revealed: Vec::new(),
+        })
+        .expect("current");
+    assert_eq!(
+        end_of(&effects, R),
+        Some(RunEnd::Interrupted(crate::store::Interruption::Stop))
+    );
+    assert_eq!(core.handle(claude_ready(5)), Ok(Vec::new()));
+    assert_eq!(
+        core.handle(Input::Deadline { run: R }),
+        Err(crate::coordinator::Stale)
     );
 }
 
-/// Medium A: Claude Code turns Ready between the turn's arrival and its first build. The run
-/// arrived before it, so it isn't answered, and it's told to open Settings, not to sign in to
-/// `ChatGPT`.
 #[test]
-fn a_claude_code_ready_only_after_arrival_refuses_the_run_with_open_settings() {
-    let ready = Input::Engines(
-        kumochi_protocol::message::ConnectionKind::ClaudeCode,
+fn deleting_the_thread_of_a_waiting_turn_ends_it_and_a_later_report_finds_nothing() {
+    let mut core = waiting();
+    let effects = core
+        .handle(Input::Delete {
+            thread: T,
+            after_turns: 1,
+            resend: false,
+        })
+        .expect("accepted");
+    assert_eq!(
+        end_of(&effects, R),
+        Some(RunEnd::Interrupted(crate::store::Interruption::Deleted))
+    );
+    assert_eq!(core.handle(claude_ready(5)), Ok(Vec::new()));
+}
+
+#[test]
+fn losing_the_shell_while_waiting_ends_the_turn_and_a_later_report_finds_nothing() {
+    let mut core = waiting();
+    let effects = core.handle(Input::ShellLost).expect("never stale");
+    assert_eq!(
+        end_of(&effects, R),
+        Some(RunEnd::Interrupted(crate::store::Interruption::ShellLost))
+    );
+    assert_eq!(core.handle(claude_ready(5)), Ok(Vec::new()));
+}
+
+/// A second turn replaces the waiting one, as any turn replaces the current run; only the newer
+/// waits, and Ready releases only it.
+#[test]
+fn of_two_turns_typed_while_claude_code_is_found_only_the_newer_waits_and_is_released() {
+    let mut core = waiting();
+    let effects = core
+        .handle(Input::Turn {
+            turn: 2,
+            thread: Some(T),
+            text: "again".into(),
+        })
+        .expect("a turn is never stale");
+    assert_eq!(
+        end_of(&effects, R),
+        Some(RunEnd::Interrupted(crate::store::Interruption::Replaced))
+    );
+    core.handle(Input::TurnStored { run: R2 }).expect("current");
+    assert_eq!(
+        core.handle(keyed(built_on(CLAUDE, "haiku"), R2, 2)),
+        Ok(vec![Effect::ArmDeadline {
+            run: R2,
+            after: FINDING_WAIT,
+        }])
+    );
+    released(&core.handle(claude_ready(5)).expect("current"), R2);
+}
+
+/// Guard: a turn on another kind's choice is answered at its first build as before.
+#[test]
+fn a_turn_on_chatgpt_while_claude_code_is_found_is_answered_at_its_first_build() {
+    let mut core = turn_after(vec![ready(7, &["m"]), claude(Availability::Finding)]);
+    assert!(started(
+        &core.handle(built(Some("m"), Vec::new())).expect("current")
+    ));
+}
+
+/// Only a Claude Code choice waits: a turn on `ChatGPT`, signed out, fails at its first build
+/// while Claude Code is being found.
+#[test]
+fn a_refused_turn_on_another_kind_fails_at_once_while_claude_code_is_found() {
+    let mut core = turn_after(vec![chatgpt_signed_out(), claude(Availability::Finding)]);
+    assert_eq!(
+        core.handle(built(None, Vec::new())),
+        Ok(failed(Some(sign_in())))
+    );
+}
+
+/// Guard (#376): only `Finding` waits. Claude Code signed out at arrival and Ready before the first
+/// build still refuses the run with Open Settings, and turned off refuses it without waiting.
+#[test]
+fn only_a_claude_code_being_found_makes_a_turn_wait() {
+    let signed_out = claude(Availability::Unavailable(open(ErrorKey::ClaudeCodeSignedOut)));
+    let (_, effects) = claude_turn(
+        vec![chatgpt_signed_out(), signed_out],
+        vec![claude_ready(5)],
+    );
+    assert_eq!(effects, failed(Some(model_unavailable())), "signed out");
+
+    let turned_off = claude(Availability::Unavailable(model_unavailable()));
+    let (_, effects) = claude_turn(vec![chatgpt_signed_out(), turned_off], Vec::new());
+    assert_eq!(effects, failed(Some(model_unavailable())), "turned off");
+}
+
+/// Before the first build the newest report wins: a second sign-in replaces the first, `Finding`
+/// again sends it back to waiting, and any other report refuses the run with its reason.
+#[test]
+fn before_the_first_build_the_newest_claude_code_report_wins() {
+    let finding = || vec![chatgpt_signed_out(), claude(Availability::Finding)];
+    let (core, effects) = claude_turn(finding(), vec![claude_ready(5), claude_ready(6)]);
+    assert!(started(&effects));
+    assert_eq!(route(&core), on(CLAUDE, 6));
+
+    let (mut core, effects) = claude_turn(
+        finding(),
+        vec![claude_ready(5), claude(Availability::Finding)],
+    );
+    assert_eq!(
+        effects,
+        vec![Effect::ArmDeadline {
+            run: R,
+            after: FINDING_WAIT,
+        }]
+    );
+    released(&core.handle(claude_ready(6)).expect("current"), R);
+    assert!(started(
+        &core
+            .handle(keyed(built_on(CLAUDE, "haiku"), R, 2))
+            .expect("current")
+    ));
+    assert_eq!(route(&core), on(CLAUDE, 6));
+
+    let mut core = turn_after(finding());
+    assert_eq!(core.handle(claude_ready(5)), Ok(Vec::new()));
+    let signed_out = open(ErrorKey::ClaudeCodeSignedOut);
+    assert_eq!(
+        core.handle(claude(Availability::Unavailable(signed_out.clone()))),
+        Ok(failed(Some(signed_out)))
+    );
+}
+
+/// The release build reads the choice again: a choice changed to a kind that was ready at
+/// arrival is answered there, and one changed to a kind that turned ready later is refused.
+#[test]
+fn a_choice_changed_during_the_wait_routes_as_the_new_choice() {
+    let mut core = waiting_after(vec![ready(7, &["m"])]);
+    released(&core.handle(claude_ready(5)).expect("current"), R);
+    assert!(started(
+        &core
+            .handle(keyed(built(Some("m"), Vec::new()), R, 2))
+            .expect("current")
+    ));
+    assert_eq!(
+        route(&core),
+        on(kumochi_protocol::message::ConnectionKind::ChatGpt, 7)
+    );
+
+    let key = kumochi_protocol::message::ConnectionKind::AnthropicKey;
+    let mut core = waiting();
+    let later = Input::Engines(
+        key,
         Availability::Ready(Ready {
-            connection: ConnectionTag(5),
+            connection: ConnectionTag(8),
             models: vec![info("haiku")],
             trusted_draw: false,
         }),
     );
+    assert_eq!(core.handle(later), Ok(Vec::new()));
+    released(&core.handle(claude_ready(5)).expect("current"), R);
     assert_eq!(
-        claude_turn_after(vec![ready]),
-        failed(Some(model_unavailable()))
+        core.handle(keyed(built_on(key, "haiku"), R, 2)),
+        Ok(failed(Some(model_unavailable())))
     );
+}
+
+/// Once bound, found ready before its first build or released, the run follows today's rule for a
+/// bound run: its kind being found again ends it.
+#[test]
+fn a_run_bound_to_claude_code_ends_when_it_is_found_again() {
+    let (mut core, effects) = claude_turn(
+        vec![chatgpt_signed_out(), claude(Availability::Finding)],
+        vec![claude_ready(5)],
+    );
+    assert!(started(&effects));
+    assert_eq!(
+        core.handle(claude(Availability::Finding)),
+        Ok(failed(Some(model_unavailable()))),
+        "found before the first build"
+    );
+
+    let mut core = waiting();
+    released(&core.handle(claude_ready(5)).expect("current"), R);
+    assert!(started(
+        &core
+            .handle(keyed(built_on(CLAUDE, "haiku"), R, 2))
+            .expect("current")
+    ));
+    assert_eq!(
+        core.handle(claude(Availability::Finding)),
+        Ok(failed(Some(model_unavailable())))
+    );
+}
+
+/// The release build is a first build, so the model check (S4) runs on the released route.
+#[test]
+fn a_model_claude_code_doesnt_offer_is_refused_at_the_release_build() {
+    let mut core = waiting();
+    released(&core.handle(claude_ready(5)).expect("current"), R);
+    assert_eq!(
+        core.handle(keyed(built_on(CLAUDE, "opus"), R, 2)),
+        Ok(failed(Some(model_unavailable())))
+    );
+}
+
+/// A waiting run has no build, so a delete accepted and answered meanwhile builds nothing.
+#[test]
+fn a_delete_answered_during_the_wait_builds_nothing() {
+    let mut core = waiting();
+    let other = ThreadId(8);
+    let delete = Input::Delete {
+        thread: other,
+        after_turns: 0,
+        resend: false,
+    };
+    let answered = Input::Deleted {
+        thread: other,
+        outcome: kumochi_protocol::message::Deleted::Removed,
+        last_run: None,
+    };
+    for input in [delete, answered] {
+        let effects = core.handle(input).expect("accepted");
+        assert!(
+            !effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Store(StoreOp::BuildContext(_)) | Effect::ArmDeadline { .. }
+            )),
+            "{effects:?}"
+        );
+    }
+    released(&core.handle(claude_ready(5)).expect("current"), R);
 }

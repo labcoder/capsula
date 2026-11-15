@@ -22,6 +22,18 @@ pub enum Availability {
     Ready(Ready),
     /// Nothing can answer; the reason is what the user can do about it.
     Unavailable(UserError),
+    /// Claude Code is still being found: unavailable with `ModelUnavailable`, except that a typed
+    /// turn on it waits for the next report (docs/development/runs.md, "Availability").
+    Finding,
+}
+
+/// Where a typed turn that arrived while Claude Code was being found stands (OSC-753).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Finding {
+    /// Before its first build: `Finding` reports keep it, and Ready records the newest sign-in.
+    Due,
+    /// Its first build found no sign-in for its Claude Code choice; the next report releases it.
+    Waiting,
 }
 
 /// A usable connection and its catalog.
@@ -110,7 +122,7 @@ pub(crate) fn model_unavailable() -> UserError {
 
 impl Coordinator {
     /// Whether runs on `kind` can be answered now.
-    pub(super) fn availability_of(&self, kind: ConnectionKind) -> &Availability {
+    pub(crate) fn availability_of(&self, kind: ConnectionKind) -> &Availability {
         match kind {
             ConnectionKind::ChatGpt => &self.availability,
             ConnectionKind::AnthropicKey => &self.anthropic_key,
@@ -155,6 +167,9 @@ impl Coordinator {
         {
             self.cancel_job(effects);
         }
+        if kind == ConnectionKind::ClaudeCode && self.claude_code_reported(effects) {
+            return;
+        }
         let Some((run, route, arrived)) = self
             .current
             .as_ref()
@@ -181,6 +196,68 @@ impl Coordinator {
             self.fail_with(run, Failure::Engine, reason, effects)
                 .expect("the run is current");
         }
+    }
+
+    /// A Claude Code report to an unbound run held by [`Finding`]: `Finding` forgets any sign-in
+    /// found before and keeps it, Ready records the newest sign-in, and any report but `Finding`
+    /// releases a waiting run into a new first build. False when no run is held, and for any other
+    /// report before the first build, which takes the arrival rule below.
+    fn claude_code_reported(&mut self, effects: &mut Vec<Effect>) -> bool {
+        let Some(current) = self
+            .current
+            .as_mut()
+            .filter(|run| run.route.is_none() && run.finding.is_some())
+        else {
+            return false;
+        };
+        let found = &mut current.arrived.0[slot(ConnectionKind::ClaudeCode)];
+        match &self.claude_code {
+            Availability::Finding => *found = None,
+            Availability::Ready(ready) => *found = Some(ready.connection),
+            Availability::Unavailable(_) if current.finding == Some(Finding::Due) => {
+                current.finding = None;
+                return false;
+            }
+            Availability::Unavailable(_) => {}
+        }
+        if current.finding == Some(Finding::Waiting)
+            && !matches!(self.claude_code, Availability::Finding)
+        {
+            current.finding = None;
+            let run = current.id;
+            effects.push(Effect::ArmDeadline {
+                run,
+                after: super::WALL_CLOCK,
+            });
+            self.build(run, 1, effects);
+        }
+        true
+    }
+
+    /// A typed turn on Claude Code that arrived while it was being found and has no sign-in for it
+    /// waits up to [`super::FINDING_WAIT`] for the next report, with no build or snapshot, so its
+    /// release is a first build that reads the choice again.
+    pub(super) fn waits_for_claude_code(
+        &mut self,
+        run: RunId,
+        choice: Option<&ModelChoice>,
+        effects: &mut Vec<Effect>,
+    ) -> bool {
+        let claude = choice.is_some_and(|choice| choice.connection == ConnectionKind::ClaudeCode);
+        let Ok(current) = self.current(run) else {
+            return false;
+        };
+        if !claude || current.finding != Some(Finding::Due) {
+            return false;
+        }
+        current.finding = Some(Finding::Waiting);
+        current.build = None;
+        current.snapshot = None;
+        effects.push(Effect::ArmDeadline {
+            run,
+            after: super::FINDING_WAIT,
+        });
+        true
     }
 
     /// The `ChatGPT` sign-in `run` arrived under, while it's current or ending: the tag its
@@ -234,7 +311,7 @@ impl Coordinator {
     pub(super) fn connection(&self) -> Option<ConnectionTag> {
         match &self.availability {
             Availability::Ready(ready) => Some(ready.connection),
-            Availability::Unavailable(_) => None,
+            Availability::Unavailable(_) | Availability::Finding => None,
         }
     }
 
@@ -245,6 +322,7 @@ impl Coordinator {
             Availability::Ready(ready) if ready.connection == route.tag => None,
             Availability::Ready(_) => Some(sign_in_needed()),
             Availability::Unavailable(reason) => Some(reason.clone()),
+            Availability::Finding => Some(model_unavailable()),
         }
     }
 
@@ -268,7 +346,7 @@ impl Coordinator {
             (None, Availability::Ready(_)) if kind == ConnectionKind::ChatGpt => {
                 Err(sign_in_needed())
             }
-            (None, Availability::Ready(_)) => Err(model_unavailable()),
+            (None, Availability::Ready(_) | Availability::Finding) => Err(model_unavailable()),
         }
     }
 

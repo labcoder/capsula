@@ -445,13 +445,17 @@ impl Claude {
     }
 
     /// Whether runs on Claude Code can be answered now: Ready under its epoch with the reviewed
-    /// version's models exactly when a launch would be admitted, else the view's reason. The
+    /// version's models exactly when a launch would be admitted, else `Finding` while it's being
+    /// found (a typed turn waits for the next report), else the view's reason. The
     /// runtime asks after every op and wake, the only ways the view changes, so an epoch is
     /// never kept across a state that wasn't admitted.
     pub(crate) fn availability(&mut self) -> Availability {
         let Some((version, row)) = self.admitted() else {
             self.epoch = None;
             self.offer(Vec::new());
+            if self.view == ClaudeCodeView::Finding {
+                return Availability::Finding;
+            }
             return Availability::Unavailable(self.reason());
         };
         let epoch = match self.epoch {
@@ -503,7 +507,7 @@ impl Claude {
     }
 
     /// Why runs on Claude Code can't be answered now, with Open Settings: the view's own key, or
-    /// `ModelUnavailable` while it's still being found or is turned off.
+    /// `ModelUnavailable` while it's being found or is turned off.
     fn reason(&self) -> UserError {
         let key = match self.view {
             ClaudeCodeView::NotFound => ErrorKey::ClaudeCodeNotFound,
@@ -929,7 +933,7 @@ impl Brain {
 
     /// Tells the coordinator whether runs on Claude Code can be answered, after every op and wake
     /// whether or not the view changed, so it's never left a state behind.
-    fn claude_reported(&mut self, link: Option<&mut Link<'_, '_>>) -> Result<(), Ended> {
+    pub(super) fn claude_reported(&mut self, link: Option<&mut Link<'_, '_>>) -> Result<(), Ended> {
         let input = Input::Engines(ConnectionKind::ClaudeCode, self.claude.availability());
         self.hold_fence(&input);
         let effects = self
