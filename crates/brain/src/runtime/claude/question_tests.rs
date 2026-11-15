@@ -44,6 +44,8 @@ fn lines(text: &str) -> Vec<Value> {
 struct Script {
     initialize: Vec<String>,
     mcp_status: Vec<String>,
+    /// The answers to the asks after the first, one each, the last repeating.
+    mcp_again: Vec<String>,
     user: Vec<Value>,
 }
 
@@ -65,11 +67,24 @@ fn synthetic_signed_in() -> Script {
     Script {
         initialize: vec![initialize.to_string()],
         mcp_status: vec![mcp.to_string()],
+        mcp_again: Vec::new(),
         user,
     }
 }
 
 impl Script {
+    /// The first `mcp_status` answer reads `pending` with no tools, as 2.1.306's does while
+    /// Kumochi's server connects; `again` holds the answers to the asks after it.
+    fn pending_first(mut self, again: Vec<String>) -> Self {
+        let mut line: Value = serde_json::from_str(&self.mcp_status[0]).expect("json");
+        let server = &mut line["response"]["response"]["mcpServers"][0];
+        server["status"] = json!("pending");
+        server.as_object_mut().expect("object").remove("tools");
+        self.mcp_status[0] = line.to_string();
+        self.mcp_again = again;
+        self
+    }
+
     /// The control answers wait until the base holds `name`.
     fn held_until(mut self, name: &str) -> Self {
         self.mcp_status.insert(0, format!("!wait {name}"));
@@ -104,8 +119,14 @@ impl Script {
                     .map_or_else(|| line.to_string(), str::to_owned)
             })
             .collect();
+        let again = self
+            .mcp_again
+            .iter()
+            .map(|line| format!("@mcp_status\n{line}\n"))
+            .collect::<Vec<_>>()
+            .concat();
         let text = format!(
-            "@initialize\n{}\n@mcp_status\n{}\n@user\n{}\n",
+            "@initialize\n{}\n@mcp_status\n{}\n{again}@user\n{}\n",
             self.initialize.join("\n"),
             self.mcp_status.join("\n"),
             user.join("\n")
@@ -1681,4 +1702,54 @@ async fn a_stuck_lane_fails_the_next_question_with_a_reason_and_stops_reading_re
         !rig.claude.close(soon()).await,
         "a stuck lane keeps its lock"
     );
+}
+
+/// The probe on Rez (2026-11-15): 2.1.306 answers `mcp_status` with `pending` until Kumochi's
+/// server has connected, so the audit asks again and the question goes on once it reads connected.
+#[tokio::test]
+async fn a_server_still_connecting_is_asked_again_and_the_question_is_answered() {
+    let script = synthetic_signed_in();
+    let connected = script.mcp_status[0].clone();
+    let script = script.pending_first(vec![connected]);
+    let mut rig = Rig::new("question-pending", &script).await;
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let (id, _) = rig.last();
+    let mut played = play(&question);
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    answered(&rig.drive(played.events()).await);
+    assert_eq!(
+        rig.stdin(),
+        ["1 initialize", "1 mcp_status", "1 mcp_status", "1 user"]
+    );
+    assert_eq!(rig.reported(id).await, [launch::Outcome::Clean]);
+    assert_eq!(rig.claude.view(), READY);
+    rig.close().await;
+}
+
+/// A server that stays `pending` ends the launch at `AUDIT`, as a late answer does: no seed, no
+/// quarantine, and the asks stay within `MAX_CONTROL`.
+#[tokio::test]
+async fn a_server_pending_until_the_audit_deadline_ends_the_launch_unseeded() {
+    let script = synthetic_signed_in().pending_first(Vec::new());
+    let mut rig = Rig::new("question-pending-deadline", &script).await;
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let (id, _) = rig.last();
+    let mut played = play(&question);
+    assert_eq!(
+        rig.drive(played.events()).await,
+        [TurnEvent::Finished(Finish::Failed(EngineFailure::Provider))]
+    );
+    assert_eq!(rig.reported(id).await, [launch::Outcome::Deadline]);
+    let stdin = rig.stdin();
+    let asks = stdin.iter().filter(|line| *line == "1 mcp_status").count();
+    assert_eq!(stdin[0], "1 initialize");
+    assert!(
+        !stdin.iter().any(|line| line == "1 user"),
+        "nothing but mcp_status after initialize: {stdin:?}"
+    );
+    assert!((2..=31).contains(&asks), "{asks} asks in AUDIT");
+    assert_eq!(rig.markers(), Vec::<String>::new());
+    assert_eq!(rig.claude.view(), READY);
+    rig.close().await;
 }

@@ -186,9 +186,10 @@ fn question(kind: &str) -> i32 {
 
 /// Answers each stdin line from a script, after logging `N kind` to `stdin.log`, where N counts
 /// this question among the base's questions from 1 and the kind is `initialize`, `mcp_status` or
-/// `user`. The script is the base's `replay.N`, else its `replay`. Its section for a kind starts
-/// at `@<kind>`; in it, `!wait NAME` waits until the base holds NAME, and every other line goes
-/// to stdout. It exits at stdin's end.
+/// `user`. The script is the base's `replay.N`, else its `replay`. A section for a kind starts
+/// at `@<kind>`: the kind's first line gets its first section, the next its second, and so on, the
+/// last repeating. In it, `!wait NAME` waits until the base holds NAME, and every other line goes
+/// to stdout, a control answer with the request's id. It exits at stdin's end.
 fn replay() {
     let base = base_dir();
     let ordinal = fs::read_to_string(base.join("starts.log"))
@@ -200,6 +201,7 @@ fn replay() {
         .or_else(|_| fs::read_to_string(base.join("replay")))
         .expect("a script");
     let mut stdout = std::io::stdout();
+    let mut seen = std::collections::BTreeMap::<String, usize>::new();
     for line in std::io::stdin().lines() {
         let Ok(line) = line else {
             return;
@@ -222,11 +224,24 @@ fn replay() {
             fs::write(base.join(format!("seed.{ordinal}")), first).expect("the seed's first block");
         }
         let header = format!("@{kind}");
-        let section = script
-            .lines()
-            .skip_while(|line| *line != header)
-            .skip(1)
-            .take_while(|line| !line.starts_with('@'));
+        let mut sections: Vec<Vec<&str>> = Vec::new();
+        let mut current: Option<Vec<&str>> = None;
+        for line in script.lines() {
+            if line.starts_with('@') {
+                sections.extend(current.take());
+                current = (line == header).then(Vec::new);
+            } else if let Some(section) = current.as_mut() {
+                section.push(line);
+            }
+        }
+        sections.extend(current);
+        let nth = seen.entry(kind.clone()).or_default();
+        let section = sections
+            .get(*nth)
+            .or(sections.last())
+            .cloned()
+            .unwrap_or_default();
+        *nth += 1;
         for out in section {
             if let Some(name) = out.strip_prefix("!wait ") {
                 while !base.join(name).exists() {
@@ -234,8 +249,15 @@ fn replay() {
                 }
                 continue;
             }
+            let answer = match serde_json::from_str::<serde_json::Value>(out) {
+                Ok(mut answer) if answer["type"] == "control_response" => {
+                    answer["response"]["request_id"] = value["request_id"].clone();
+                    answer.to_string()
+                }
+                _ => out.to_owned(),
+            };
             let written = stdout
-                .write_all(out.as_bytes())
+                .write_all(answer.as_bytes())
                 .and_then(|()| stdout.write_all(b"\n"))
                 .and_then(|()| stdout.flush());
             if written.is_err() {
