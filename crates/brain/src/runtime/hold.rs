@@ -50,7 +50,7 @@ enum Refusal {
 enum NoScreen {
     /// A repeat of a voice hold's gesture.
     Repeated,
-    Gate(ScreenOff),
+    Gate(#[expect(dead_code, reason = "read only by the hold-taken log line")] ScreenOff),
     /// Recognized longer ago than `LATEST_START`.
     TooLate,
     /// No worker client, or the hold isn't pending or already has a part.

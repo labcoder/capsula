@@ -2199,7 +2199,6 @@ async fn a_screen_hold_repeating_a_voice_holds_gesture_adds_no_part_to_it() {
 
 #[tokio::test]
 async fn the_end_of_a_capture_releases_the_lease_on_its_own_connection() {
-    use crate::context::ScreenClass;
     use crate::screen::Generation;
     use kumochi_protocol::message::{CaptureFailure, CaptureFor};
     let scratch = Scratch::new("hold-screen-lease");
