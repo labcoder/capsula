@@ -62,7 +62,7 @@ impl Theme {
 
 /// The material and colours together, and whether a contact shadow sits under the body.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Look {
+pub struct Look {
     pub(crate) material: Material,
     pub(crate) theme: Theme,
     pub(crate) shadow: bool,

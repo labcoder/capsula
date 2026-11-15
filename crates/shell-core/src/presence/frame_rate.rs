@@ -14,7 +14,7 @@ const MAX_STEP_FRAMES: f64 = 2.0;
 /// The rate frames are drawn at: the display's refresh divided by the smallest whole number
 /// that brings it to the cap or under. Automatic takes whichever of 60 and 72 comes out
 /// higher, which is the one the refresh divides more evenly. With no known refresh, the cap.
-pub(crate) fn effective(cap: MaxFrameRate, refresh: Option<Duration>) -> f64 {
+pub fn effective(cap: MaxFrameRate, refresh: Option<Duration>) -> f64 {
     let Some(hz) = hertz(refresh) else {
         return f64::from(cap.fps().unwrap_or(AUTOMATIC[0]));
     };
@@ -45,14 +45,14 @@ fn hertz(refresh: Option<Duration>) -> Option<f64> {
 /// Presence's one source of animation frames: the pacer, and whether a frame callback is armed.
 /// Clients ask for frames; nothing else sets a timer.
 #[derive(Debug, Default)]
-pub(crate) struct FrameLoop {
+pub struct FrameLoop {
     pacer: Pacer,
     armed: bool,
 }
 
 impl FrameLoop {
     /// Whether a callback must be armed now. An idle loop starts its pacer at `now`.
-    pub(crate) fn want(&mut self, now: Instant) -> bool {
+    pub fn want(&mut self, now: Instant) -> bool {
         if self.armed {
             return false;
         }
@@ -62,7 +62,7 @@ impl FrameLoop {
     }
 
     /// The seconds the callback at `now` steps, or `None` when it's too soon to draw.
-    pub(crate) fn frame(
+    pub fn frame(
         &mut self,
         now: Instant,
         cap: MaxFrameRate,
@@ -72,7 +72,7 @@ impl FrameLoop {
     }
 
     /// No client wants frames: the next want arms a callback again.
-    pub(crate) fn idle(&mut self) {
+    pub fn idle(&mut self) {
         self.armed = false;
     }
 }

@@ -21,7 +21,7 @@ const FRAMING: Framing = Framing::CARD;
 /// The output buffer didn't match the renderer's size.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 #[error("the image buffer holds {got} bytes, not the {want} its size needs")]
-pub(crate) struct SizeMismatch {
+pub struct SizeMismatch {
     got: usize,
     want: usize,
 }
@@ -29,7 +29,7 @@ pub(crate) struct SizeMismatch {
 /// A baked body lit with one look, ready to shade frames at one square pixel size. The geometry
 /// and the static lighting are baked; a frame adds only what moves.
 #[derive(Clone, Debug)]
-pub(crate) struct Renderer {
+pub struct Renderer {
     look: Look,
     size: u16,
     lit: Vec<Lit>,
@@ -39,7 +39,7 @@ pub(crate) struct Renderer {
 impl Renderer {
     /// Bakes the body at `size` pixels. This is the expensive step (see [`GBuffer::bake`]): run
     /// it when the size, scale or look changes, never in paint.
-    pub(crate) fn new(shape: &Silhouette, size: u16, look: Look) -> Self {
+    pub fn new(shape: &Silhouette, size: u16, look: Look) -> Self {
         let bake = GBuffer::bake(shape, size, FRAMING);
         let mut lit = Vec::with_capacity(bake.texels.len());
         for j in 0..size {
@@ -66,13 +66,13 @@ impl Renderer {
     }
 
     /// The bytes one frame needs: four per pixel.
-    pub(crate) fn image_len(&self) -> usize {
+    pub fn image_len(&self) -> usize {
         usize::from(self.size) * usize::from(self.size) * 4
     }
 
     /// Writes one frame as straight-alpha BGRA into `out`, which must hold exactly
     /// [`Self::image_len`] bytes. Allocates nothing.
-    pub(crate) fn render(&self, f: &FrameState, out: &mut [u8]) -> Result<(), SizeMismatch> {
+    pub fn render(&self, f: &FrameState, out: &mut [u8]) -> Result<(), SizeMismatch> {
         if out.len() != self.image_len() {
             return Err(SizeMismatch {
                 got: out.len(),
