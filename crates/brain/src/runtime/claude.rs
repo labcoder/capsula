@@ -710,6 +710,11 @@ impl Claude {
             return Err(LaunchRefused::NotReady);
         }
         let reviewed = policy::reviewed(snapshot.version).map_err(|_| LaunchRefused::NotReady)?;
+        let base = self
+            .lane
+            .as_ref()
+            .map(|lane| lane.base().to_owned())
+            .ok_or(LaunchRefused::NotReady)?;
         let launch = self.launch(Question {
             thread: snapshot.thread,
             model: snapshot.model.clone(),
@@ -720,7 +725,7 @@ impl Claude {
         if let Some(held) = self.launches.last_mut() {
             held.due = true;
         }
-        let report = Report::new(launch.id(), self.notes.0.clone());
+        let report = Report::new(launch.id(), self.notes.0.clone(), (base, snapshot.version));
         Ok(Attempt::new(snapshot, launch, reviewed, report, expires))
     }
 

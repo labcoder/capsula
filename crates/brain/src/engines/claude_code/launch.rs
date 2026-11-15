@@ -6,6 +6,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -15,7 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
 
 use super::audit::{self, PostSeedAudit, PreInputAudit, Progress};
-use super::lane::Failure;
+use super::lane::{self, Failure};
 use super::policy::Reviewed;
 use super::seed;
 use super::stream::{LineFramer, Mapped, StreamMapper};
@@ -150,11 +151,23 @@ pub(crate) struct Refresh {
 /// The attempt's one terminal report: [`report`](Self::report) consumes it, and its drop
 /// sends [`Outcome::Clean`].
 #[derive(Debug)]
-pub(crate) struct Report(Option<(LaunchId, mpsc::UnboundedSender<Note>)>);
+pub(crate) struct Report {
+    sent: Option<(LaunchId, mpsc::UnboundedSender<Note>)>,
+    /// The base and version an audit failure's quarantine marker is written for, before the
+    /// report goes, so a brain that quits straight after keeps it (OSC-756).
+    quarantine: (PathBuf, ClaudeVersion),
+}
 
 impl Report {
-    pub(crate) fn new(id: LaunchId, notes: mpsc::UnboundedSender<Note>) -> Self {
-        Self(Some((id, notes)))
+    pub(crate) fn new(
+        id: LaunchId,
+        notes: mpsc::UnboundedSender<Note>,
+        quarantine: (PathBuf, ClaudeVersion),
+    ) -> Self {
+        Self {
+            sent: Some((id, notes)),
+            quarantine,
+        }
     }
 
     pub(crate) fn report(mut self, outcome: Outcome) {
@@ -162,9 +175,17 @@ impl Report {
     }
 
     fn send(&mut self, outcome: Outcome) {
-        if let Some((id, notes)) = self.0.take() {
-            notes.send(Note::Ended { id, outcome }).ok();
+        let Some((id, notes)) = self.sent.take() else {
+            return;
+        };
+        // shortcut: one small durable write on the audit task, on an audit failure only; move it
+        // to a blocking task if it's ever seen to stall a round.
+        if matches!(outcome, Outcome::Audit(_))
+            && lane::mark_quarantined(&self.quarantine.0, self.quarantine.1).is_err()
+        {
+            tracing::debug!("the audit failure's marker is left to the lane");
         }
+        notes.send(Note::Ended { id, outcome }).ok();
     }
 }
 

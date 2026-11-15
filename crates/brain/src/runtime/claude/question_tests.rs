@@ -777,6 +777,28 @@ async fn a_failure_while_a_taken_attempt_audits_quarantines_and_fails_the_run() 
     rig.close().await;
 }
 
+/// OSC-756: an audit failure is marked before it's reported, so a brain that quits straight
+/// after, before the core has heard the report or queued the lane's write, keeps the marker.
+#[tokio::test]
+async fn an_audit_failure_is_marked_before_it_is_reported() {
+    let mut script = synthetic_signed_in().held_until("go");
+    let mut mcp: Value = serde_json::from_str(&script.mcp_status[1]).expect("json");
+    mcp["response"]["response"]["mcpServers"][0]["tools"] = json!([{"name": "ping"}]);
+    script.mcp_status[1] = mcp.to_string();
+    let mut rig = Rig::new("question-quits-after-failure", &script).await;
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let mut played = play(&question);
+    until("auditing", || rig.stdin().len() == 2).await;
+    rig.go("go");
+    assert_eq!(
+        timeout(WAIT, played.events()).await.expect("ended"),
+        [claude_failed(ErrorKey::ClaudeCodeAuditFailed)]
+    );
+    assert_eq!(rig.claude.view(), READY, "the core hasn't heard the report");
+    assert!(rig.claude.close(soon()).await, "the brain quits");
+    assert_eq!(rig.markers(), ["claude-code.quarantine-2.1.306"]);
+}
+
 /// T8 and T4b's sign-out: nothing is seeded, the run fails signed out and so does the view.
 #[tokio::test]
 async fn a_signed_out_launch_fails_the_run_signed_out_before_any_user_line() {

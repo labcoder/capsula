@@ -376,6 +376,16 @@ the next sweep, as `engine\` leftovers are.
 - shortcut: a locked leftover is retried only before each lane call and at brain start, not on a
   timer, so it can stay for an idle session; add a timer if that turns out to matter.
 
+What the sweep leaves, and why it stays small (seen on Rez by name and size only):
+
+- `local\Kumochi Dev\logs\kumochi-bridge.<date>.log`: the bridge's own log, which rotates daily
+  and keeps seven files (`logging::init`), with no content in it;
+- `config.lock\`, `config\.oauth_refresh.lock\` and `config\.claude.json.lock\`: at most one empty
+  folder each, which Claude Code clears on its next start after an unclean exit;
+- `config\.claude.json` and `config\backups\.claude.json.backup.<ms>`: Claude Code's config and its
+  own safety copies of it, four backups (about 3 KB) after nine days of use. They aren't proven
+  bounded, and they stay: removing them could turn a damaged `.claude.json` into a reset.
+
 ### Quarantined versions
 
 A version whose audit failed is never seeded again. `Claude::audit_failed(version, reason)`
@@ -392,8 +402,16 @@ marker. Each `Version` find lists the markers under the account lock before it t
 - a name with the prefix that isn't exactly a version's marker, or a listing that fails, refuses
   every version (`AuditFailed(Malformed)`), clears nothing and shows nothing of the name.
 
+The attempt's `Report` writes the same marker itself (`lane::mark_quarantined`) before its audit
+failure goes to the core, so a brain that quits straight after the failure, before the core has
+heard it or the lane has run its write, still keeps the version refused; the lane's write then
+finds the marker there and keeps it. A replaced attempt's own audit failure is marked too, though
+its report changes nothing in memory: it judged that version's real output, and the next find
+refuses it.
+
 Until the marker write succeeds, the refusal held in memory covers every version, and each find
-retries the write. A crash before the first successful write loses it.
+retries the write. Only a crash between the audit's verdict and the report's write, or a failure
+of both writes, loses it.
 
 ## A question
 
