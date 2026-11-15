@@ -91,6 +91,15 @@ once for the whole command, so the `kumochi.exe` it writes carries the core's te
 That has to fail safe, so test support only ever takes something away: a device becomes a
 stub that reports itself unavailable, never the other way round.
 
+Dev and test builds compile ten dependencies at opt-level 2: image, zune-jpeg, libsqlite3-sys,
+rusqlite, serde_json, sha2, ring, memchr, postcard and base64, every version of each
+(`[profile.dev.package]` in the root `Cargo.toml`). The brain's tests spend most of their CPU in
+them. The workspace crates and every other dependency stay at 0, and release builds are
+unchanged. CI alone runs the tests four at a time (`RUST_TEST_THREADS: 4`), because they mostly
+wait on processes, pipes and deadlines; elsewhere libtest uses one thread per core. A dev or test
+measurement pair whose two commits sit on either side of the commit that added that table
+compares two different builds of those crates, so build both sides with the same table.
+
 ## The brain is a game loop
 
 The brain has a small **core loop**: a coordinator that takes events and returns effects, with no I/O of its own. Everything else is a **system** that does I/O and reports back as events.
