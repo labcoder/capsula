@@ -713,20 +713,26 @@ fn released(effects: &[Effect], run: RunId) {
 /// How `run` ended in `effects`, if it did.
 fn end_of(effects: &[Effect], run: RunId) -> Option<RunEnd> {
     effects.iter().find_map(|effect| match effect {
-        Effect::Store(StoreOp::EndRun { run: ended, end, .. }) if *ended == run => Some(*end),
+        Effect::Store(StoreOp::EndRun {
+            run: ended, end, ..
+        }) if *ended == run => Some(*end),
         _ => None,
     })
 }
 
-fn route(core: &Coordinator) -> Option<Route> {
-    core.current.as_ref().and_then(|run| run.route)
+/// The current run's route; it must be bound.
+fn route(core: &Coordinator) -> Route {
+    core.current
+        .as_ref()
+        .and_then(|run| run.route)
+        .expect("a bound current run")
 }
 
-fn on(kind: kumochi_protocol::message::ConnectionKind, tag: u64) -> Option<Route> {
-    Some(Route {
+fn on(kind: kumochi_protocol::message::ConnectionKind, tag: u64) -> Route {
+    Route {
         kind,
         tag: ConnectionTag(tag),
-    })
+    }
 }
 
 /// OSC-753: a Claude-only user who types while Claude Code is still being found isn't failed at
@@ -896,7 +902,9 @@ fn a_refused_turn_on_another_kind_fails_at_once_while_claude_code_is_found() {
 /// build still refuses the run with Open Settings, and turned off refuses it without waiting.
 #[test]
 fn only_a_claude_code_being_found_makes_a_turn_wait() {
-    let signed_out = claude(Availability::Unavailable(open(ErrorKey::ClaudeCodeSignedOut)));
+    let signed_out = claude(Availability::Unavailable(open(
+        ErrorKey::ClaudeCodeSignedOut,
+    )));
     let (_, effects) = claude_turn(
         vec![chatgpt_signed_out(), signed_out],
         vec![claude_ready(5)],
