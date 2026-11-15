@@ -502,6 +502,12 @@ sequenceDiagram
   Then
   exactly one server, `kumochi`, `connected`, whose tools are exactly the launch's frozen set. An
   error response, an unknown or repeated id, or a body of the wrong shape is `Malformed`.
+  2.1.306 starts connecting the server at start-up and answers `pending`, with no tools, until it
+  has. While the one `kumochi` server reads `pending`, the audit task asks `mcp_status` again
+  every `ASK_AGAIN` (100 ms), each time with a fresh id (`k-mcp-status-1`, `-2`, …), and only
+  the latest ask's answer counts. Any other status fails at once, and a server still `pending` at
+  `AUDIT` ends the launch like a late answer: `Deadline`, unseeded, no quarantine. Nothing but
+  `mcp_status` reaches stdin before the audit passes.
 - **After the seed:** `system:init` must show the version, exactly the frozen tool set, the one
   server, exactly the reviewed plugins each at `builtin`, no skills or slash commands, the reviewed
   agents and an `apiKeySource` of `none`. A later init must equal the first. `analytics_disabled`
@@ -511,6 +517,8 @@ sequenceDiagram
   already admitted isn't undone; a call still waiting for admission is refused.
 - **The stated limit:** the seed can reach the chosen model before init is checked, but no tool
   runs before the check.
+- **The log:** a failure is logged as a warning with its closed check and its phase, before stdin
+  or after the seed, and nothing Claude Code sent.
 
 The brain's side of the pipe, and the launch that writes `mcp.json`, come with C4b and C5a.
 On macOS the pipe would be a Unix socket in the owned folder (unverified).
