@@ -479,7 +479,7 @@ with the brain's worker client standing in for capture: the shell's `On` may be 
 it's open, the part starts at `Waiting` and its task starts; otherwise `CaptureFailed` releases
 the shell's exclusion lease and the hold goes on as voice, with no line for the model. An open
 gate still closes the part `NotReady`, with `CaptureFailed`, when the recognition's `t_qpc` is more
-than 1.5 s old: the shell took its 3 s lease (`EXCLUSION_LEASE`) no earlier than the recognition,
+than 1.5 s old (`LATEST_START`): the shell took its 3 s lease no earlier than the recognition,
 and the worker's ticket ends `MAX_TTL` (1.5 s) after this check, so only a younger recognition's
 ticket ends within the lease. A stamp the brain can't age (one later than now, or any stamp off
 Windows) counts as too old. When the

@@ -26,7 +26,7 @@ use crate::coordinator::{HoldKey, HoldSnapshot};
 use crate::platform::ShellProcess;
 use crate::screen::{HoldClient, MAX_TTL};
 use crate::voice::stt::{Decode, SttHandle, SttResult};
-use screen::{EXCLUSION_LEASE, Outcome, ScreenEvent, ScreenPart};
+use screen::{LATEST_START, Outcome, ScreenEvent, ScreenPart};
 
 #[derive(Debug)]
 enum FailureStage {
@@ -813,8 +813,8 @@ impl Brain {
 
     /// Starts the pending hold `key`'s screen part when the gate is open for the default model
     /// now, since the shell's state may lag, and the worker's ticket would end within the shell's
-    /// lease. The lease was taken no earlier than `t_qpc`, the recognition, so a part started more
-    /// than `EXCLUSION_LEASE - MAX_TTL` after it closes `NotReady` instead.
+    /// lease: a part started more than `LATEST_START` after `t_qpc`, the recognition, closes
+    /// `NotReady` instead.
     fn hold_screen(
         &mut self,
         key: HoldKey,
@@ -831,7 +831,7 @@ impl Brain {
         }
         // Read before the age, so the ticket can only end sooner than the check allows.
         let until = Instant::now() + MAX_TTL;
-        if (self.holds.recognized_age)(t_qpc).is_none_or(|age| age > EXCLUSION_LEASE - MAX_TTL) {
+        if (self.holds.recognized_age)(t_qpc).is_none_or(|age| age > LATEST_START) {
             self.holds.refuse_screen(key);
             return false;
         }

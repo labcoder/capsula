@@ -17,7 +17,11 @@ use crate::screen::{Closed, Generation, HoldClient, MAX_TTL, Refusal, ScreenCont
 /// How long the shell's exclusion lease keeps Kumochi's windows out of a capture.
 // shortcut: a copy of shell-core's `exclusion::machine::LIFETIME`; move both to the protocol when
 // either changes.
-pub(super) const EXCLUSION_LEASE: Duration = Duration::from_secs(3);
+const EXCLUSION_LEASE: Duration = Duration::from_secs(3);
+
+/// The oldest a recognition can be when its screen part starts: the worker's ticket, `MAX_TTL`
+/// from the start, then ends within the lease, which was taken no earlier than the recognition.
+pub(super) const LATEST_START: Duration = EXCLUSION_LEASE.saturating_sub(MAX_TTL);
 
 /// `None` is a voice hold. A screen hold starts at `Waiting`; its run takes what it ends with,
 /// and every other closer leaves `Closed` or `Discarded`.
