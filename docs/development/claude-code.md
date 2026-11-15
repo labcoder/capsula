@@ -405,13 +405,11 @@ marker. Each `Version` find lists the markers under the account lock before it t
 The core also writes that marker itself (`lane::mark_quarantined`) as it takes an audit failure
 it counts, before anything else it does with the report, so a brain that quits straight after,
 before the lane has run its queued write, still keeps the version refused; the lane's write then
-finds the marker there and keeps it. A replaced attempt's report writes nothing, so its audit
-failure leaves no marker. Only a quit between the attempt sending the report and the core taking
-it, or a failure of both writes, still loses the marker.
+finds the marker there and keeps it. The core writes nothing for a replaced attempt's failure.
 
 Until the marker write succeeds, the refusal held in memory covers every version, and each find
-retries the write. Only a crash between the audit's verdict and the report's write, or a failure
-of both writes, loses it.
+retries the write. Only a quit between the attempt sending its report and the core taking it, or a
+failure of both writes, loses the marker.
 
 ## A question
 
