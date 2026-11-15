@@ -25,7 +25,7 @@ mod spawn;
 mod window;
 
 pub(crate) use capture::{WINDOW_CAPTURE, screen_capturer};
-pub(crate) use clock::qpc_age;
+pub(crate) use clock::{qpc_age, qpc_at, qpc_left};
 pub(crate) use credential::WindowsCredentialStore;
 pub(crate) use dump::DumpExclusion;
 pub(crate) use elements::screen_elements;

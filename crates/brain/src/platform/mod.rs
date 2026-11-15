@@ -96,7 +96,7 @@ pub(crate) use windows::{
 };
 #[cfg(windows)]
 pub(crate) use windows::{
-    WINDOW_CAPTURE, qpc_age, screen_capturer, screen_elements, window_unchanged,
+    WINDOW_CAPTURE, qpc_age, qpc_at, qpc_left, screen_capturer, screen_elements, window_unchanged,
 };
 #[cfg(windows)]
 pub use windows::{managed_presence, system_env};
@@ -112,6 +112,19 @@ pub(crate) const WINDOW_CAPTURE: bool = false;
 // shell sends screen holds.
 #[cfg(not(windows))]
 pub(crate) fn qpc_age(_t_qpc: u64) -> Option<std::time::Duration> {
+    None
+}
+
+/// A capture deadline's stamp for the screen worker, on the clock `qpc_age` reads, so none here.
+// shortcut: off Windows the worker refuses every ticket; stamp with macOS's clock once it captures.
+#[cfg(not(windows))]
+pub(crate) fn qpc_at(_until: std::time::Instant) -> Option<u64> {
+    None
+}
+
+/// How long until a deadline stamp from `qpc_at`, so never known here.
+#[cfg(not(windows))]
+pub(crate) fn qpc_left(_stamp: u64) -> Option<std::time::Duration> {
     None
 }
 

@@ -129,7 +129,10 @@ never cross the pipe**. Only the hold's seal exports one image (below).
   capture. The shell's exclusion lease keeps Kumochi's windows out of the frame; the worker can't
   prove that a lease is live.
 - **Local validity.** The worker starts the ticket's `ttl_ms` at receipt on its own monotonic
-  clock. It refuses at exactly `ttl_ms` and accepts a millisecond before, checks again right
+  clock, and ends it no later than `deadline_qpc`, the brain's deadline as a performance-counter
+  stamp, so a ticket held up in the brain's writer, the pipe or the worker's queue gets no extra
+  time. A stamp the worker can't read, or one that isn't later than now, is refused `Expired`. It
+  refuses at exactly `ttl_ms` and accepts a millisecond before, checks again right
   before starting the capture session, stops waiting at expiry, and discards a frame that
   completes at or after it. This is a local bound, never a renewed grant: the brain keeps its
   ticket's original deadline and drops a late reply.
@@ -165,7 +168,7 @@ sequenceDiagram
   participant W as Worker
   participant P as Capture thread
   B->>W: Context { key, ticket, point }
-  W->>W: spend generation, start local expiry
+  W->>W: spend generation, start local expiry, capped at the ticket's deadline
   W->>P: window under the point, then its session (until expiry)
   P-->>W: frame, copied into RawFrame
   W->>W: expiry and size checks, then hold the frame
@@ -450,7 +453,8 @@ hold pays this way.
 - **`context(owner, point, until)`** mints a fresh capture id and a ticket whose number is above
   every earlier one (a worker refuses a number it has already spent), minted under the fence's
   lock so tickets reach the worker in order, with `ttl_ms` set to the time left until `until`
-  but never over `MAX_TTL`, a random nonce and the connected shell's pid. It streams
+  but never over `MAX_TTL`, `until` itself as a performance-counter stamp (`deadline_qpc`, 0
+  when the counter can't be read), a random nonce and the connected shell's pid. It streams
   `Acquired`, then `Complete`, and returns the `Held` frame with the worker generation that
   holds it.
 - **`walk(held)`** and **`seal(held)`** answer only when that same generation replies, for that
@@ -480,8 +484,9 @@ it's open, the part starts at `Waiting` and its task starts; otherwise `CaptureF
 the shell's exclusion lease and the hold goes on as voice, with no line for the model. An open
 gate still closes the part `NotReady`, with `CaptureFailed`, when the recognition's `t_qpc` is more
 than 1.5 s old (`LATEST_START`): the shell took its 3 s lease no earlier than the recognition,
-and the worker's ticket ends `MAX_TTL` (1.5 s) after this check, so only a younger recognition's
-ticket ends within the lease. A stamp the brain can't age (one later than now, or any stamp off
+and the worker's ticket ends no later than `MAX_TTL` (1.5 s) after this check, the deadline its
+stamp carries however late the worker reads it, so only a younger recognition's ticket ends
+within the lease. A stamp the brain can't age (one later than now, or any stamp off
 Windows) counts as too old. When the
 thread's own choice is read, the gate runs once more on it, and a closed gate closes the part with
 its own reason: `ModelCantSee` for a model that can't be sent images, `NotReady` for no catalog or

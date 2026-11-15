@@ -1721,11 +1721,25 @@ async fn a_screen_part_starts_only_while_its_ticket_ends_within_the_lease() {
         lease: LEASE,
         t_qpc,
     };
-    let (late, in_time) = (GestureId(9), GestureId(10));
+    let (unaged, late, in_time) = (GestureId(8), GestureId(9), GestureId(10));
     let failed = |gesture| ControlToShell::CaptureFailed {
         capture_for: CaptureFor::Gesture(gesture),
         reason: CaptureFailure::Unavailable,
     };
+
+    brain.holds.recognized_age = |_| None;
+    assert!(
+        brain
+            .hold_control(&recognized(unaged, 0), &mut link)
+            .unwrap()
+    );
+    assert!(controls(&mut output).contains(&failed(unaged)));
+    assert!(matches!(
+        brain.holds.pending.as_ref().unwrap().screen,
+        ScreenPart::Closed(ScreenClass::NotReady)
+    ));
+    brain.holds.lost();
+    brain.holds.recognized_age = |t_qpc| Some(Duration::from_millis(t_qpc));
 
     assert!(
         brain
@@ -1753,7 +1767,7 @@ async fn a_screen_part_starts_only_while_its_ticket_ends_within_the_lease() {
             ..
         }
     ));
-    // Its capture is the worker's first request: the late part asked for none.
+    // Its capture is the worker's first request: the refused parts asked for none.
     let (_id, _capture) = rig.next().await;
     brain.holds.lost();
     let in_time = HoldKey {

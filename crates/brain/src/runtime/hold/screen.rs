@@ -19,8 +19,9 @@ use crate::screen::{Closed, Generation, HoldClient, MAX_TTL, Refusal, ScreenCont
 // either changes.
 const EXCLUSION_LEASE: Duration = Duration::from_secs(3);
 
-/// The oldest a recognition can be when its screen part starts: the worker's ticket, `MAX_TTL`
-/// from the start, then ends within the lease, which was taken no earlier than the recognition.
+/// The oldest a recognition can be when its screen part starts: the worker's ticket ends no later
+/// than the deadline it carries, `MAX_TTL` from the start, so within the lease, which was taken no
+/// earlier than the recognition.
 pub(super) const LATEST_START: Duration = EXCLUSION_LEASE.saturating_sub(MAX_TTL);
 
 /// `None` is a voice hold. A screen hold starts at `Waiting`; its run takes what it ends with,
