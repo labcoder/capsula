@@ -51,7 +51,7 @@ the shortcut admits voice-only input; it grants no screen capture authority.
 sequenceDiagram
     participant W as Windows (Raw Input)
     participant P as Proxy window procedure (UI thread)
-    participant G as Gesture (input.rs)
+    participant G as Gesture (shell-core, input.rs)
     participant O as Presence owner (GPUI)
     W->>P: WM_INPUT (RIDEV_INPUTSINK)
     P->>P: stamp Instant, read make code and E0/E1
