@@ -417,7 +417,7 @@ sequenceDiagram
 
 ## The shell's side
 
-`crates/shell/src/link.rs` connects and reads control on the link thread, because pipe reads
+`crates/shell-core/src/link.rs` connects and reads control on the link thread, because pipe reads
 block. Once connected, each pipe gets a writer thread and data gets a reader thread. The UI
 thread sends on bounded channels and never waits: with no connection or a full channel the send
 fails at once, so a typed turn shows it wasn't sent, and `Stop` or `ClearDrawing` is logged as

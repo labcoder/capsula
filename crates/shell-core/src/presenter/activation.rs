@@ -22,11 +22,11 @@ pub(super) struct Installed {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Shown {
-    pub(crate) generation: u64,
-    pub(crate) run: RunId,
-    pub(crate) scene: SceneId,
-    pub(crate) index: u32,
+pub struct Shown {
+    pub generation: u64,
+    pub run: RunId,
+    pub scene: SceneId,
+    pub index: u32,
 }
 
 impl Activation {
@@ -116,7 +116,7 @@ impl Activation {
 }
 
 impl Presenter {
-    pub(crate) fn advance(&mut self, generation: u64, now: Instant) -> Result<Vec<Effect>, Broken> {
+    pub fn advance(&mut self, generation: u64, now: Instant) -> Result<Vec<Effect>, Broken> {
         if self.generation != Some(generation) {
             return Ok(Vec::new());
         }
@@ -133,7 +133,7 @@ impl Presenter {
         Ok(out.finish())
     }
 
-    pub(crate) fn consumption_ready(
+    pub fn consumption_ready(
         &mut self,
         generation: u64,
         id: SceneId,
@@ -240,7 +240,7 @@ impl Presenter {
     /// Begins each open scene's activation whose kept first sample a shown overlay has painted,
     /// observed at `now`: what its step put starts that much later, so its entrance runs from
     /// the paint. Whether any began.
-    pub(crate) fn begin_painted(&mut self, now: Instant) -> bool {
+    pub fn begin_painted(&mut self, now: Instant) -> bool {
         let mut began = false;
         for (id, scene) in &mut self.scenes {
             let Some(kept) = self.frames.borrow_mut().begin(*id) else {
@@ -259,7 +259,7 @@ impl Presenter {
     }
 
     /// Takes only fixed numeric observations, outside paint; delivery belongs to the caller.
-    pub(crate) fn take_shown(&mut self, generation: u64) -> [Option<Shown>; MAX_VISIBLE_SCENES] {
+    pub fn take_shown(&mut self, generation: u64) -> [Option<Shown>; MAX_VISIBLE_SCENES] {
         let mut shown = [None; MAX_VISIBLE_SCENES];
         if self.generation != Some(generation) {
             return shown;
@@ -295,7 +295,7 @@ impl Presenter {
         shown
     }
 
-    pub(crate) fn animating(&self, now: Instant) -> bool {
+    pub fn animating(&self, now: Instant) -> bool {
         self.scenes.values().any(|scene| {
             scene.cut == Cut::Open
                 && !scene.skipping
@@ -303,7 +303,7 @@ impl Presenter {
         })
     }
 
-    pub(crate) fn next_wake(&self, now: Instant) -> Option<Instant> {
+    pub fn next_wake(&self, now: Instant) -> Option<Instant> {
         let frames = self.frames.borrow();
         self.scenes
             .iter()
@@ -335,7 +335,7 @@ impl Presenter {
             .min()
     }
 
-    pub(crate) fn stoppable_run(&self) -> Option<RunId> {
+    pub fn stoppable_run(&self) -> Option<RunId> {
         let scenes = self
             .scenes
             .values()
@@ -363,7 +363,7 @@ impl Presenter {
             .max()
     }
 
-    pub(crate) fn live_work(&self, now: Instant) -> bool {
+    pub fn live_work(&self, now: Instant) -> bool {
         if self.frames.borrow().retirement.is_some() {
             return true;
         }

@@ -857,7 +857,7 @@ impl Runs {
             | DataToShell::SegmentQueued { .. }
             | DataToShell::SpeechPcm(_) => {
                 // shortcut: Presence consumes v1 frames through Presenter first; B3 removes placeholder routing.
-                // shortcut: the catalog is credited and dropped until PR 18b's picker shows it.
+                // Presence hands the catalog to Settings, so it never reaches here.
                 // shortcut: voice frames are credited and dropped until slice 7's PR 6 plays them.
             }
         }

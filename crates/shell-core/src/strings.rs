@@ -202,6 +202,8 @@ pub enum Text {
     TaskbarRemoveFailed,
     MaxFrameRate,
     FrameRateAutomatic,
+    DefaultModel,
+    ModelsNotListed,
 
     // Onboarding
     OnboardingClose,
@@ -481,6 +483,8 @@ impl Text {
         TaskbarRemoveFailed,
         MaxFrameRate,
         FrameRateAutomatic,
+        DefaultModel,
+        ModelsNotListed,
 
         // Onboarding
         OnboardingClose,
@@ -762,6 +766,8 @@ impl Text {
             Self::TaskbarRemoveFailed => "taskbar-remove-failed",
             Self::MaxFrameRate => "settings-max-frame-rate",
             Self::FrameRateAutomatic => "settings-frame-rate-automatic",
+            Self::DefaultModel => "settings-default-model",
+            Self::ModelsNotListed => "settings-models-not-listed",
 
             // Onboarding
             Self::OnboardingClose => "onboarding-close",
