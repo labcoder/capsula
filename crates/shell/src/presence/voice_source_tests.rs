@@ -1527,7 +1527,7 @@ fn esc_after_a_busy_or_offline_refusal_clears_the_drawing_on_screen(cx: &mut Tes
         let deliver = native(&owner, cx);
         owner.update(cx, |owner, cx| {
             if busy {
-                owner.runs.begin_hold(GestureId(1)).unwrap();
+                owner.runs.begin_hold(GestureId(1), None).unwrap();
                 owner.runs.cancel_hold();
                 owner.runs.take_hold_cancel().unwrap();
             } else {

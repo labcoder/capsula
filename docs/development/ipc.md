@@ -51,9 +51,11 @@ The brain sends `ScreenHolds` for the default model once a connection opens, aft
 the voice view, and again only when a saved settings change, a catalog read or an account
 operation the shell sent (a sign-out clears the catalog at once) moves it. Nothing sends
 `HoldRecognized` yet, so no run carries a screen, and no `HoldScreen` or `HeldTurn` is ever
-produced. In the running phase the shell ignores `ScreenHolds` and
-`HoldScreen`; before `Welcome` it rejects either one and ends the connection. All three are
-payload-redacted in the pipe tap.
+produced. In the running phase the shell keeps a connection's last `ScreenHolds` until that
+connection ends, and a `HoldScreen` for the current hold replaces that hold's predicted line;
+either one from an older connection is dropped. Nothing reads or shows them yet. Before
+`Welcome` the shell rejects either one and ends the connection. All three are payload-redacted
+in the pipe tap.
 
 ## Anthropic paste metadata
 

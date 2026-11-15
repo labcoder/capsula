@@ -410,7 +410,7 @@ impl Presence {
             self.voice_notice(Text::HoldFailed, cx);
             return;
         }
-        let request = self.runs.begin_hold(gesture);
+        let request = self.runs.begin_hold(gesture, None);
         let notice = if matches!(request, Err(crate::runs::Refused::Busy)) {
             Text::TurnBusy
         } else {

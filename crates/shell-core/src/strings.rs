@@ -1,7 +1,7 @@
 //! User-facing text, from `locales/en/`. English only for now.
 
 use fluent_bundle::{FluentArgs, FluentBundle, FluentResource};
-use kumochi_protocol::message::{ErrorArg, ErrorKey, UserError};
+use kumochi_protocol::message::{ErrorArg, ErrorKey, ScreenClass, UserError};
 use unic_langid::LanguageIdentifier;
 
 const ENGLISH: &str = include_str!("../../../locales/en/shell.ftl");
@@ -196,6 +196,22 @@ texts! {
     HoldUnavailable => "hold-unavailable",
     HoldMicrophoneUnavailable => "hold-microphone-unavailable",
     HoldFailed => "hold-failed",
+    ScreenHolds => "screen-holds",
+    ScreenHoldsHelp => "screen-holds-help",
+    ScreenHoldsOn => "screen-holds-on",
+    ScreenHoldsModelCantSee => "screen-holds-model-cant-see",
+    ScreenHoldsNotReady => "screen-holds-not-ready",
+    ScreenHoldsTurnedOff => "screen-holds-turned-off",
+    ScreenHoldsOwnModel => "screen-holds-own-model",
+    ScreenHoldWillSee => "screen-hold-will-see",
+    ScreenNotIncludedModel => "screen-not-included-model",
+    ScreenNotIncludedNotReady => "screen-not-included-not-ready",
+    ScreenNotIncludedNothingThere => "screen-not-included-nothing-there",
+    ScreenNotIncludedCantShare => "screen-not-included-cant-share",
+    ScreenNotIncludedUnreadable => "screen-not-included-unreadable",
+    ScreenNotIncludedTooLarge => "screen-not-included-too-large",
+    ScreenNotIncludedChanged => "screen-not-included-changed",
+    ScreenNotIncludedTurnedOff => "screen-not-included-turned-off",
     VoiceRestartRequired => "voice-restart-required",
     VoiceInstalledFailed => "voice-installed-failed",
     VoiceNotInstalledFailed => "voice-not-installed-failed",
@@ -310,6 +326,19 @@ impl Text {
         Self::BottomCenter,
         Self::BottomRight,
     ];
+
+    /// The line saying why a screen hold's window wasn't included.
+    pub const fn screen_not_included(class: ScreenClass) -> Self {
+        match class {
+            ScreenClass::NotReady => Self::ScreenNotIncludedNotReady,
+            ScreenClass::NothingThere => Self::ScreenNotIncludedNothingThere,
+            ScreenClass::CantShare => Self::ScreenNotIncludedCantShare,
+            ScreenClass::Unreadable => Self::ScreenNotIncludedUnreadable,
+            ScreenClass::TooLarge => Self::ScreenNotIncludedTooLarge,
+            ScreenClass::Changed => Self::ScreenNotIncludedChanged,
+            ScreenClass::ModelCantSee => Self::ScreenNotIncludedModel,
+        }
+    }
 }
 
 /// The loaded catalog, kept as a GPUI global on the UI thread.
@@ -426,6 +455,13 @@ impl Strings {
         let mut args = FluentArgs::new();
         args.set("assistant", assistant);
         self.format(Text::BackToKumo.id(), Some(&args))
+    }
+
+    /// A screen-hold line that names the model the window goes to, as the picker shows it.
+    pub fn with_model(&self, text: Text, model: &str) -> String {
+        let mut args = FluentArgs::new();
+        args.set("model", model);
+        self.format(text.id(), Some(&args))
     }
 
     pub fn frame_rate(&self, fps: f64) -> String {
@@ -678,6 +714,42 @@ mod tests {
         )
         .expect("within the limits");
         assert_eq!(strings.error(&error), "Wait 30 s for 3 more");
+    }
+
+    #[test]
+    fn each_screen_class_has_its_line_and_the_model_lines_name_the_model() {
+        use kumochi_protocol::message::ScreenClass;
+        let strings = Strings::english();
+        for (class, reason) in [
+            (ScreenClass::NotReady, "the screen wasn't ready"),
+            (ScreenClass::NothingThere, "nothing under the pointer"),
+            (ScreenClass::CantShare, "that window can't be shared"),
+            (ScreenClass::Unreadable, "the window wasn't readable"),
+            (ScreenClass::TooLarge, "the window image was too large"),
+            (ScreenClass::Changed, "the window changed"),
+            (
+                ScreenClass::ModelCantSee,
+                "screen sharing isn't available with this model",
+            ),
+        ] {
+            assert_eq!(
+                strings.get(Text::screen_not_included(class)),
+                format!("Screen not included: {reason}"),
+            );
+        }
+        for (text, line) in [
+            (
+                Text::ScreenHoldsOn,
+                "Hold to talk also shows GPT-5.5 the window under your pointer",
+            ),
+            (
+                Text::ScreenHoldsModelCantSee,
+                "Screen sharing isn't available with GPT-5.5, so hold to talk is voice only",
+            ),
+            (Text::ScreenHoldWillSee, "GPT-5.5 will see this window"),
+        ] {
+            assert_eq!(strings.with_model(text, "GPT-5.5"), line);
+        }
     }
 
     #[test]

@@ -96,6 +96,49 @@ impl Settings {
         true
     }
 
+    /// Whether a hold may also show the model a window: the choice in flight, else the saved one.
+    pub fn screen_holds_choice(&self) -> Option<bool> {
+        let saved = self.view.as_ref()?.screen_holds;
+        self.pending
+            .iter()
+            .find_map(|pending| match (pending.slot, pending.failed) {
+                (Slot::ScreenHolds(on), false) => Some(on),
+                _ => None,
+            })
+            .or(Some(saved))
+    }
+
+    pub fn screen_holds_pending(&self) -> bool {
+        self.pending
+            .iter()
+            .any(|pending| matches!(pending.slot, Slot::ScreenHolds(_)))
+    }
+
+    pub fn screen_holds_error(&self) -> Option<&UserError> {
+        self.notice_slot
+            .filter(|slot| matches!(slot, Slot::ScreenHolds(_)))
+            .and(self.notice.as_ref())
+    }
+
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the checkbox and wire setter carry this boolean unchanged"
+    )]
+    pub fn send_screen_holds(&mut self, on: bool, send: impl FnOnce(SettingsOp) -> bool) -> bool {
+        if self.screen_holds_pending()
+            || self.screen_holds_choice().is_none_or(|old| old == on)
+            || !send(SettingsOp::SetScreenHolds(on))
+        {
+            return false;
+        }
+        self.pending.push_back(Pending {
+            slot: Slot::ScreenHolds(on),
+            failed: false,
+            reset_draft: false,
+        });
+        true
+    }
+
     pub fn receive_speech_input(
         &mut self,
         current: Option<u64>,
