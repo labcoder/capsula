@@ -1754,7 +1754,7 @@ async fn a_screen_part_starts_only_while_its_ticket_ends_within_the_lease() {
         }
     ));
     // Its capture is the worker's first request: the late part asked for none.
-    drop(rig.next().await);
+    let (_id, _capture) = rig.next().await;
     brain.holds.lost();
     let in_time = HoldKey {
         gesture: in_time,
