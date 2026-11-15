@@ -9,9 +9,14 @@ pub mod microphone;
 #[cfg(windows)]
 #[expect(
     unsafe_code,
-    reason = "Win32 calls; the core's only unsafe code lives here"
+    reason = "Win32 calls; the core's only shipped unsafe code lives here"
 )]
 mod windows;
 
 #[cfg(windows)]
-pub use windows::data_dir;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use windows::pipe::test_pair;
+#[cfg(windows)]
+pub(crate) use windows::{PipeClient, launch_detached};
+#[cfg(windows)]
+pub use windows::{data_dir, session_id};

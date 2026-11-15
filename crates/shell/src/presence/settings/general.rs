@@ -14,7 +14,7 @@ use gpui_kit::{
 };
 use kumochi_protocol::{
     BUILD_ID,
-    message::{DockPosition, MaxFrameRate},
+    message::{ConnectionKind, DockPosition, MaxFrameRate, ModelSlug},
 };
 
 use super::super::{PresenceEvent, frame_rate, send};
@@ -60,6 +60,7 @@ impl SettingsView {
             }))
             .child(self.field(Field::Assistant, cx))
             .child(self.field(Field::User, cx))
+            .child(self.default_model(cx))
             .child(self.frame_rate(window, cx))
             .child(self.dock_positions(cx))
             .child(self.taskbar(cx))
@@ -219,6 +220,76 @@ impl SettingsView {
             }))
             .children(saving.map(|saving| div().text_xs().child(saving)))
             .children(error.map(|error| div().text_sm().text_color(cx.theme().danger).child(error)))
+    }
+
+    /// One radio per model on offer; a saved default no catalog lists comes first, by its slug.
+    fn default_model(&self, cx: &Context<'_, Self>) -> impl IntoElement {
+        let strings = cx.global::<Strings>();
+        let state = self.model.read(cx);
+        let current = state.default_model_choice();
+        let is = |connection: ConnectionKind, slug: &ModelSlug| {
+            current
+                .is_some_and(|current| current.connection == connection && current.model == *slug)
+        };
+        let mut choices: Vec<(ConnectionKind, ModelSlug, String)> = state
+            .model_choices()
+            .map(|(connection, model)| {
+                let name = model.display_name.as_str().to_owned();
+                (connection, model.slug.clone(), name)
+            })
+            .collect();
+        if let Some(current) = current
+            && !choices
+                .iter()
+                .any(|(connection, slug, _)| is(*connection, slug))
+        {
+            let name = current.model.as_str().to_owned();
+            choices.insert(0, (current.connection, current.model.clone(), name));
+        }
+        let selected = choices
+            .iter()
+            .position(|(connection, slug, _)| is(*connection, slug));
+        let radios: Vec<_> = choices
+            .iter()
+            .enumerate()
+            .map(|(ix, (_, _, name))| Radio::new(("default-model", ix)).label(name.clone()))
+            .collect();
+        let picks: Vec<_> = choices
+            .into_iter()
+            .map(|(connection, slug, _)| (connection, slug))
+            .collect();
+        let owner = self.owner.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(div().text_sm().child(strings.get(Text::DefaultModel)))
+            .children(radios.is_empty().then(|| {
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(strings.get(Text::ModelsNotListed))
+            }))
+            .when(!radios.is_empty(), |row| {
+                row.child(
+                    RadioGroup::vertical("default-model")
+                        .children(radios)
+                        .selected_index(selected)
+                        .disabled(state.view().is_none())
+                        .on_click(move |&ix, _, cx| {
+                            if let Some((connection, slug)) = picks.get(ix).cloned() {
+                                let _gone = owner.update(cx, |owner, cx| {
+                                    owner.save_default_model(connection, slug, cx);
+                                });
+                            }
+                        }),
+                )
+            })
+            .children(
+                state
+                    .model_saving()
+                    .then(|| div().text_xs().child(strings.get(Text::SettingsSaving))),
+            )
     }
 
     /// Automatic, then each cap, with the rate a paced animation draws at now.
