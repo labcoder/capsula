@@ -17,6 +17,7 @@ impl Strings {
             Some(ClaudeCodeView::CleanupPending) => "claude-status-cleanup",
             Some(ClaudeCodeView::InUse) => "claude-status-in-use",
             Some(ClaudeCodeView::Unavailable) => "claude-status-unavailable",
+            Some(ClaudeCodeView::Busy) => "error-claude-code-busy",
             Some(
                 view @ (ClaudeCodeView::SignedOut { version }
                 | ClaudeCodeView::Ready { version, .. }),
@@ -139,6 +140,10 @@ mod tests {
             (
                 Some(ClaudeCodeView::Unavailable),
                 "Claude Code is unavailable. Restart Kumochi before trying again.",
+            ),
+            (
+                Some(ClaudeCodeView::Busy),
+                "Claude Code is still finishing an earlier question. Try again in a moment.",
             ),
             (
                 Some(ClaudeCodeView::Unsupported(Unsupported::Shim)),

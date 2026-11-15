@@ -517,7 +517,7 @@ async fn a_disconnect_the_lane_cant_take_marks_nothing_and_can_be_asked_again() 
             assert!(lane.submit(0, Work::Version), "an old job fills a slot");
         }
         claude.op(ConnectionOp::DisconnectClaudeCode);
-        assert_eq!(claude.view(), ClaudeCodeView::Unavailable);
+        assert_eq!(claude.view(), ClaudeCodeView::Busy);
         assert!(!claude.cleaning, "nothing to finish");
         assert_eq!(claude.out, None);
         // M1: a full queue drains by itself, so it's Busy with Retry, never the stuck lane's
@@ -592,6 +592,7 @@ async fn a_full_queue_reads_busy_only_until_the_lane_takes_a_job() {
             assert!(lane.submit(0, Work::Version), "an old job fills a slot");
         }
         claude.op(ConnectionOp::DisconnectClaudeCode);
+        assert_eq!(claude.view(), ClaudeCodeView::Busy);
         assert_eq!(
             claude.availability(),
             Availability::Unavailable(reason(

@@ -198,10 +198,12 @@ pub enum ClaudeCodeView {
     /// was started.
     InUse,
     /// Claude Code can't take work: a call's processes weren't confirmed ended, so nothing starts
-    /// until Kumochi restarts, or a call couldn't be queued.
+    /// until Kumochi restarts.
     Unavailable,
     /// An admitted discovery round is checking the install and sign-in.
     Finding,
+    /// The lane's queue was too full to take the last call; it drains by itself.
+    Busy,
 }
 
 /// Why a found Claude Code isn't used.

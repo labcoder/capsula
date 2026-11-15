@@ -183,6 +183,9 @@ impl Claude {
     }
 
     pub(crate) fn view(&self) -> ClaudeCodeView {
+        if self.full && self.view == ClaudeCodeView::Unavailable {
+            return ClaudeCodeView::Busy;
+        }
         self.view
     }
 
@@ -518,7 +521,7 @@ impl Claude {
     /// `ModelUnavailable` while it's being found or is turned off; a full queue is Busy, with
     /// Retry.
     fn reason(&self) -> UserError {
-        let key = match self.view {
+        let key = match self.view() {
             ClaudeCodeView::NotFound => ErrorKey::ClaudeCodeNotFound,
             ClaudeCodeView::SignedOut { .. } | ClaudeCodeView::SigningIn => {
                 ErrorKey::ClaudeCodeSignedOut
@@ -526,7 +529,7 @@ impl Claude {
             ClaudeCodeView::PolicyFailed(_) => ErrorKey::ClaudeCodePolicy,
             ClaudeCodeView::AuditFailed(_) => ErrorKey::ClaudeCodeAuditFailed,
             ClaudeCodeView::CleanupPending => ErrorKey::ClaudeCodeCleanupPending,
-            ClaudeCodeView::Unavailable if self.full => return busy(),
+            ClaudeCodeView::Busy => return busy(),
             ClaudeCodeView::Unavailable => ErrorKey::ClaudeCodeUnavailable,
             ClaudeCodeView::Finding | ClaudeCodeView::TurnedOff => return model_unavailable(),
             ClaudeCodeView::Unsupported(_)

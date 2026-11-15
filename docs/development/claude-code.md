@@ -195,8 +195,9 @@ sequenceDiagram
   whose reason is `ClaudeCodeUnavailable` with Open Settings. A question a stuck or closing lane
   refuses fails with that reason too.
 - **Bounds.** The queue holds 4 jobs and refuses more without waiting. A job it refuses leaves
-  nothing out and shows `Unavailable` until a later op is taken, but its reason is `ClaudeCodeBusy`
-  with Retry, since the queue drains by itself. stdout is capped at 4 KiB for
+  nothing out and shows `Busy` until a later op is taken: Settings says "Claude Code is still
+  finishing an earlier question. Try again in a moment." and its reason is `ClaudeCodeBusy` with
+  Retry, since the queue drains by itself. stdout is capped at 4 KiB for
   Version and 64 KiB for Status, stderr at 64 KiB (read and dropped); one byte more fails the call.
   A read that fails before a pipe's end fails the call, whatever it read first; an interrupted
   read is retried.
