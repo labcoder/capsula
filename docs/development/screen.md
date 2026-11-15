@@ -522,7 +522,7 @@ windows; after `CaptureDone`, or for any other lease, a lapse is ignored.
 
 Each worker answer that ends a part is logged at info as `hold screen part closed` with its
 `Closed` value: the refusal, `Busy`, the numeric fault or the loss, never anything from the window.
-The line names which refusal a class came from, such as `Unmasked` or `Ambiguous` for `Unreadable`.
+The line names which refusal a class came from, such as `Ambiguous` for `Unreadable`.
 The brain's own closures log the same line once: `recognized too late` for a recognition older
 than `LATEST_START`; `still waiting` for a part closed while waiting, because its lease lapsed,
 its hold ended or its words were ready first; `hold ended` for a ready image dropped without a
