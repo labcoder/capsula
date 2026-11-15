@@ -90,7 +90,9 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
         | ControlToBrain::KeyUp { .. }
         | ControlToBrain::GestureCancel { .. }
         | ControlToBrain::FocusHint { .. }
-        | ControlToBrain::ExclusionLapsed { .. }) => {
+        | ControlToBrain::ExclusionLapsed { .. }
+        | ControlToBrain::ScreenHoldRecognized { .. }
+        | ControlToBrain::ScreenRelease { .. }) => {
             tracing::debug!(op = message.op(), "hold control ignored");
             None
         }

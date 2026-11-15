@@ -46,6 +46,7 @@ pub(super) fn ready(
                     stt_unload: kumochi_protocol::message::SttUnload::Kept,
                     hold_to_talk: true,
                     screen_holds: kumochi_protocol::message::DEFAULT_SCREEN_HOLDS,
+                    show_screen: kumochi_protocol::message::DEFAULT_SHOW_SCREEN,
                 },
                 crate::settings::Update::Unsolicited,
             );

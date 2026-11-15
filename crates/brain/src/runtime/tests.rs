@@ -90,6 +90,31 @@ fn staged_hold_controls_do_not_admit_or_change_a_run() {
     }
 }
 
+#[test]
+fn a_screen_holds_controls_never_become_coordinator_input() {
+    use kumochi_protocol::geometry::{PhysicalPoint, PointerPath, ReleasePointer};
+    use kumochi_protocol::message::{GestureId, LeaseGeneration};
+    let gesture = GestureId(9);
+    for message in [
+        ControlToBrain::ScreenHoldRecognized {
+            gesture,
+            thread: Some(ThreadId(1)),
+            selection: 5,
+            t_qpc: 1,
+        },
+        ControlToBrain::ScreenRelease {
+            gesture,
+            lease: LeaseGeneration(4),
+            t_qpc: 2,
+            excluded_qpc: 3,
+            pointer: ReleasePointer(PhysicalPoint([-1, 2])),
+            path: PointerPath(vec![PhysicalPoint([-1, 2])]),
+        },
+    ] {
+        assert_eq!(super::controls::control_input(message), Ok(None));
+    }
+}
+
 #[tokio::test]
 async fn offline_staging_controls_drop_admission_and_never_queue_credential_work() {
     use kumochi_protocol::message::{ConnectionOp, KeyStageFailure, KeyStageId, KeyStagePlan};

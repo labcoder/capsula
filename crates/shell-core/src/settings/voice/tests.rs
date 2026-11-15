@@ -20,6 +20,7 @@ fn saved(policy: SttUnload) -> SettingsView {
         stt_unload: policy,
         hold_to_talk: kumochi_protocol::message::DEFAULT_HOLD_TO_TALK,
         screen_holds: kumochi_protocol::message::DEFAULT_SCREEN_HOLDS,
+        show_screen: kumochi_protocol::message::DEFAULT_SHOW_SCREEN,
     }
 }
 

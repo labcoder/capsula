@@ -348,6 +348,61 @@ fn screen_holds_read_as_off_when_the_file_cant_be_read() {
 }
 
 #[test]
+fn show_screen_defaults_off_whatever_screen_holds_says_persists_and_a_bad_value_reads_as_off() {
+    let scratch = Scratch::new("config-show-screen");
+    let dir = dir(&scratch);
+    assert!(
+        !Config::load(Some(dir.clone()), ThreadId(1))
+            .view()
+            .show_screen
+    );
+    // A stored On for the window under the pointer is not a choice about the whole screen.
+    std::fs::write(dir.join(CONFIG_FILE), "[voice]\nscreen_holds = true\n").unwrap();
+    let mut config = Config::load(Some(dir.clone()), ThreadId(1));
+    assert!(config.view().screen_holds);
+    assert!(!config.view().show_screen);
+    for on in [true, false] {
+        let op: SettingsOp = kumochi_protocol::frame::decode(&[15, u8::from(on)]).unwrap();
+        apply(&mut config, op);
+        let voice = &saved(&dir.join(CONFIG_FILE))["voice"];
+        assert_eq!(voice["show_screen"].as_bool(), Some(on));
+        assert_eq!(voice["screen_holds"].as_bool(), Some(true));
+        apply(&mut config, SettingsOp::SetHoldToTalk(true));
+        let reloaded = Config::load(Some(dir.clone()), ThreadId(1));
+        assert_eq!(reloaded.view().show_screen, on);
+        assert!(reloaded.view().screen_holds);
+    }
+    for value in ["\"true\"", "1", "[]"] {
+        let seeded = format!("[voice]\nshow_screen = {value}\n");
+        std::fs::write(dir.join(CONFIG_FILE), &seeded).unwrap();
+        assert!(
+            !Config::load(Some(dir.clone()), ThreadId(1))
+                .view()
+                .show_screen
+        );
+    }
+}
+
+#[test]
+fn show_screen_reads_as_off_when_the_file_cant_be_read() {
+    let scratch = Scratch::new("config-show-screen-unread");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    std::fs::write(&path, "[voice]\nshow_screen = true\nnot toml [").expect("seeded");
+    let unparseable = Config::load(Some(dir.clone()), ThreadId(1));
+    std::fs::remove_file(&path).expect("removed broken fixture");
+    std::fs::create_dir(&path).expect("a folder where the file goes");
+    let unreadable = Config::load(Some(dir), ThreadId(1));
+    for (cause, config) in [
+        ("unparseable", unparseable),
+        ("unreadable", unreadable),
+        ("no home", Config::load(None, ThreadId(1))),
+    ] {
+        assert!(!config.view().show_screen, "{cause}");
+    }
+}
+
+#[test]
 fn talk_back_and_the_unload_policy_default_off_and_kept_and_are_saved_in_the_voice_table() {
     let scratch = Scratch::new("config-voice");
     let dir = dir(&scratch);

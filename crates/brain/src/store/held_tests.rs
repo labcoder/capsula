@@ -20,7 +20,8 @@ fn screen(store: &Store, run: RunId) -> Option<String> {
 fn after(screen: HeldScreen) -> Option<HeldScreen> {
     Some(HeldScreen::NotIncluded(match screen {
         HeldScreen::NotIncluded(ScreenClass::ModelCantSee) => return Some(HeldScreen::Withdrawn),
-        HeldScreen::Withdrawn => return None,
+        HeldScreen::Withdrawn => return Some(HeldScreen::Screen),
+        HeldScreen::Screen => return None,
         HeldScreen::Attached => ScreenClass::NotReady,
         HeldScreen::NotIncluded(ScreenClass::NotReady) => ScreenClass::NothingThere,
         HeldScreen::NotIncluded(ScreenClass::NothingThere) => ScreenClass::CantShare,
@@ -40,7 +41,7 @@ fn every_value_reads_back_as_itself() {
         values += 1;
         next = after(screen);
     }
-    assert_eq!(values, 9);
+    assert_eq!(values, 10);
 }
 
 /// A new thread whose one run's turn carried `held`.
@@ -157,6 +158,34 @@ fn a_withdrawal_marks_only_an_attached_turn() {
         kinds(&store, thread),
         [PageEventKind::HeldTurn {
             screen: HeldScreen::Withdrawn
+        }]
+    );
+}
+
+#[test]
+fn a_screen_picture_is_stored_as_screen_and_an_attached_row_still_reads_as_the_window() {
+    let scratch = Scratch::new("held-screen");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let (thread, run) = held_run(&mut store, Some(HeldScreen::Screen));
+    assert_eq!(screen(&store, run).as_deref(), Some("screen"));
+    assert_eq!(
+        kinds(&store, thread),
+        [PageEventKind::HeldTurn {
+            screen: HeldScreen::Screen
+        }]
+    );
+    let (older_thread, older) = held_run(&mut store, None);
+    store
+        .conn
+        .execute(
+            "UPDATE runs SET screen = 'attached' WHERE id = ?1",
+            [i64::try_from(older.0).expect("small id")],
+        )
+        .expect("a row an earlier build wrote");
+    assert_eq!(
+        kinds(&store, older_thread),
+        [PageEventKind::HeldTurn {
+            screen: HeldScreen::Attached
         }]
     );
 }

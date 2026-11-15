@@ -57,6 +57,41 @@ either one from an older connection is dropped. Nothing reads or shows them yet.
 `Welcome` the shell rejects either one and ends the connection. All three are payload-redacted
 in the pipe tap.
 
+## Screen release
+
+These are staged for a hold that shows the model one picture of the screen, taken when the keys
+are released. Nothing sends or produces any of them yet, and the hold above is unchanged.
+
+The appended `ScreenHoldRecognized { gesture, thread, selection, t_qpc }` (tag 29) is a
+recognized hold of that kind. It carries no lease and no pointer, because nothing of the screen
+is taken while the keys are down. The appended
+`ScreenRelease { gesture, lease, t_qpc, excluded_qpc, pointer, path }` (tag 30) is its release:
+the exclusion lease the shell took at release, the release time, the time the lease's last window
+was excluded from capture (a frame drawn before it may still show the shell), the pointer, which
+picks the display, and the pointer's path over the hold.
+
+- `PointerPath` holds at most 2,048 `PhysicalPoint`s (`MAX_PATH_POINTS`), oldest first, and is
+  empty when the pointer never moved. `PointerPath::check` refuses a longer one, and whoever
+  receives a path calls it before using the points.
+- A point is two varints of up to five bytes each, so the largest `ScreenRelease` is 20,523
+  payload bytes. It's the largest control, and inside the 64 KiB control cap.
+- Where the user pointed is theirs. `PointerPath`'s `Debug` prints only its count and
+  `ReleasePointer`'s prints no numbers. Neither message is on the tap's content-free list, so a
+  recording holds only their op and length.
+- The brain refuses both for now. A `ScreenHoldRecognized` with a new gesture is answered
+  `VoiceHoldStatus` with `Failed(Unavailable)` and uses that gesture up; a stale one is dropped.
+  Every `ScreenRelease` is answered `CaptureFailed` with `Unavailable`, which ends its lease.
+
+`HeldScreen::Screen` (tag 3) is appended for a turn that carried the screen's picture. The store
+writes it as `screen` ([store](store.md#tables)), so a turn stored as `attached` still reads as
+the window.
+
+`SettingsOp::SetShowScreen` (tag 15) is appended and `SettingsView` gains `show_screen`, under
+the same handshake rule as `screen_holds`. It's a separate choice: `DEFAULT_SHOW_SCREEN` is off,
+a settings file without the key reads as that default whatever its `screen_holds` says, and it
+reads as off when the file can't be read ([settings](settings.md)). No interface sends the op
+and nothing reads the field yet.
+
 ## Anthropic paste metadata
 
 The build-id handshake rejects mixed binaries before decoding connection work.
@@ -497,7 +532,7 @@ These controls are staged: the brain ignores hold controls and logs only their o
 names until B2a supplies admission and capture tickets; the shell ignores capture results
 until it owns exclusion leases. The tap records only these controls' operation and payload
 length, never coordinates or native window references, even when dumping a forged payload.
-The largest hold control is 52 payload bytes, below the 64 KiB control cap. `t_qpc` is the
+The largest of these is 52 payload bytes, below the 64 KiB control cap. `t_qpc` is the
 shell's performance-counter reading when the key moved, for latency checks only.
 
 Each `TextSubmit` now carries `turn: u32`, counted from one per connection, and
