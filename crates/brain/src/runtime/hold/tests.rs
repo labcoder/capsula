@@ -1237,6 +1237,10 @@ fn waiting() -> ScreenPart {
 }
 
 const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xD9];
+
+fn changed() -> crate::screen::Closed {
+    crate::screen::Closed::Refused(crate::screen::Refusal::WindowChanged)
+}
 const LEASE: kumochi_protocol::message::LeaseGeneration =
     kumochi_protocol::message::LeaseGeneration(4);
 
@@ -1538,7 +1542,7 @@ async fn only_a_waiting_parts_own_worker_finishes_it() {
     brain.holds.screen_event(event(0, sealed()));
     brain
         .holds
-        .screen_event(event(0, Outcome::Closed(ScreenClass::Changed)));
+        .screen_event(event(0, Outcome::Closed(changed())));
     assert!(matches!(
         brain.holds.pending.as_ref().unwrap().screen,
         ScreenPart::Waiting {
@@ -1975,6 +1979,57 @@ async fn a_system_that_cant_capture_ends_the_hold_not_ready_and_holds_stay_unsup
 }
 
 #[tokio::test]
+async fn each_part_logs_one_line_with_the_cause_that_closed_it() {
+    use crate::screen::{Closed, Generation, Refusal};
+    let captured = test_support::Captured::default();
+    let _capturing = captured.install();
+    let scratch = Scratch::new("hold-screen-one-line");
+    let mut brain = test_support::brain(&scratch, "");
+    let event = |generation, outcome| ScreenEvent {
+        key: KEY,
+        generation,
+        outcome,
+    };
+    screen_hold(
+        &mut brain,
+        KEY,
+        ScreenPart::Waiting {
+            generation: None,
+            lease: LEASE,
+            stop: Arc::default(),
+        },
+    );
+    assert!(brain.holds.lease_lapsed(LEASE));
+    brain
+        .holds
+        .screen_event(event(None, screen::ending(Closed::Refused(Refusal::Stale))));
+    let lapsed = captured.text();
+    assert_eq!(
+        lapsed.matches("hold screen part closed").count(),
+        1,
+        "{lapsed}"
+    );
+    assert!(lapsed.contains("still waiting"), "{lapsed}");
+    assert!(!lapsed.contains("Stale"), "{lapsed}");
+    brain.holds.lost();
+    screen_hold(&mut brain, KEY, waiting());
+    let refused = screen::ending(Closed::Refused(Refusal::Ambiguous));
+    brain
+        .holds
+        .screen_event(event(Some(Generation(0)), refused));
+    brain.holds.lost();
+    screen_hold(&mut brain, KEY, waiting());
+    let sealed = Outcome::Sealed(crate::screen::ScreenContext::fixture(JPEG));
+    brain.holds.screen_event(event(Some(Generation(0)), sealed));
+    let text = captured.text();
+    assert_eq!(text.matches("hold screen part closed").count(), 2, "{text}");
+    assert_eq!(text.matches("Refused(Ambiguous)").count(), 1, "{text}");
+    assert_eq!(text.matches("hold screen part sealed").count(), 1, "{text}");
+    brain.holds.lost();
+    brain.close().await;
+}
+
+#[tokio::test]
 async fn a_capture_the_system_refuses_comes_back_from_the_task_as_unsupported() {
     use crate::screen::Refusal;
     type Reply = <crate::screen::Holds as crate::supervise::Kind>::Reply;
@@ -2172,18 +2227,20 @@ async fn the_end_of_a_capture_releases_the_lease_on_its_own_connection() {
             Some(ControlToShell::CaptureDone { capture_for }),
         ),
         (
-            event(KEY, None, Outcome::Closed(ScreenClass::NothingThere)),
+            event(
+                KEY,
+                None,
+                Outcome::Closed(crate::screen::Closed::Refused(
+                    crate::screen::Refusal::NoWindow,
+                )),
+            ),
             Some(ControlToShell::CaptureFailed {
                 capture_for,
                 reason: CaptureFailure::Unavailable,
             }),
         ),
         (
-            event(
-                KEY,
-                Some(Generation(0)),
-                Outcome::Closed(ScreenClass::Changed),
-            ),
+            event(KEY, Some(Generation(0)), Outcome::Closed(changed())),
             None,
         ),
         (

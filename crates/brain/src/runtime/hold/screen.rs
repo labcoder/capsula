@@ -68,7 +68,8 @@ pub(in crate::runtime) struct ScreenEvent {
 pub(super) enum Outcome {
     Held,
     Sealed(ScreenContext),
-    Closed(ScreenClass),
+    /// The worker's answer, or the loss, that ended the task.
+    Closed(Closed),
     /// The worker's system can't capture a window; the part closes `NotReady` and the brain
     /// remembers it until it restarts, across shell reconnects.
     Unsupported,
@@ -160,9 +161,19 @@ impl super::Holds {
             Outcome::Held if holder.is_none() => *holder = generation,
             Outcome::Held => retire(self.screen.as_ref(), key, generation),
             _ if *holder != generation => {}
-            Outcome::Sealed(context) => hold.screen = ScreenPart::Ready(context),
-            Outcome::Closed(class) => hold.screen = ScreenPart::Closed(class),
-            Outcome::Unsupported => hold.screen = ScreenPart::Closed(ScreenClass::NotReady),
+            Outcome::Sealed(context) => {
+                tracing::info!("hold screen part sealed");
+                hold.screen = ScreenPart::Ready(context);
+            }
+            Outcome::Closed(closed) => {
+                tracing::info!(?closed, "hold screen part closed");
+                hold.screen = ScreenPart::Closed(class(closed));
+            }
+            Outcome::Unsupported => {
+                let closed = Closed::Refused(Refusal::Unsupported);
+                tracing::info!(?closed, "hold screen part closed");
+                hold.screen = ScreenPart::Closed(ScreenClass::NotReady);
+            }
         }
     }
 
@@ -314,11 +325,10 @@ async fn release(client: &HoldClient, key: HoldKey, holder: Option<Generation>) 
 /// How an answer that isn't the one asked for ends the part. A system that can't capture is told
 /// apart, so the brain can stop offering screen holds.
 pub(super) fn ending(closed: Closed) -> Outcome {
-    tracing::info!(?closed, "hold screen part closed");
     if closed == Closed::Refused(Refusal::Unsupported) {
         Outcome::Unsupported
     } else {
-        Outcome::Closed(class(closed))
+        Outcome::Closed(closed)
     }
 }
 
