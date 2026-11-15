@@ -418,3 +418,40 @@ fn model_refusals_follow_the_shared_fifo_and_survive_unrelated_answers() {
         );
     }
 }
+
+#[test]
+fn screen_holds_waits_for_its_own_answer_and_a_refusal_restores_the_saved_choice() {
+    let mut saved = saved(SttUnload::Kept);
+    saved.screen_holds = true;
+    let mut state = Settings::default();
+    assert_eq!(state.screen_holds_choice(), None);
+    assert!(!state.send_screen_holds(false, |_| panic!("nothing saved to change")));
+    state.set_view(saved.clone(), Update::Unsolicited);
+    assert_eq!(state.screen_holds_choice(), Some(true));
+    assert!(!state.send_screen_holds(true, |_| panic!("already on")));
+    assert!(!state.send_screen_holds(false, |_| false));
+    assert!(!state.screen_holds_pending());
+    assert_eq!(state.screen_holds_choice(), Some(true));
+
+    assert!(state.send_screen_holds(false, |op| op == SettingsOp::SetScreenHolds(false)));
+    assert!(state.screen_holds_pending());
+    assert_eq!(state.screen_holds_choice(), Some(false));
+    assert!(!state.send_screen_holds(true, |_| panic!("one save remains in flight")));
+    state.error(ErrorKey::SettingsRefused.into());
+    state.set_view(saved.clone(), Update::Answer);
+    assert!(!state.screen_holds_pending());
+    assert_eq!(state.screen_holds_choice(), Some(true));
+    assert_eq!(
+        state.screen_holds_error().map(UserError::key),
+        Some(ErrorKey::SettingsRefused)
+    );
+    assert_eq!(state.hold_to_talk_error(), None);
+
+    assert!(state.send_screen_holds(false, |_| true));
+    saved.screen_holds = false;
+    state.set_view(saved, Update::Answer);
+    assert!(!state.screen_holds_pending());
+    assert_eq!(state.screen_holds_choice(), Some(false));
+    assert_eq!(state.screen_holds_error(), None);
+    assert_eq!(state.hold_to_talk_choice(), Some(true));
+}

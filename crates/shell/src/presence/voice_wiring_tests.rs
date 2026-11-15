@@ -127,7 +127,7 @@ fn a_pre_run_failure_clears_only_its_matching_hold(cx: &mut TestAppContext) {
         assert!(token.retired());
         assert_eq!(owner.runs.take_hold_cancel(), None);
         assert_eq!(
-            owner.runs.begin_hold(GestureId(2)),
+            owner.runs.begin_hold(GestureId(2), None),
             Ok(ControlToBrain::VoiceHoldRecognized {
                 gesture: GestureId(2),
                 thread: Some(ThreadId(1)),
@@ -328,5 +328,82 @@ fn escape_consumes_the_native_input_marker_without_dismissing_typing(cx: &mut Te
             .native_escape(Some(GestureId(1)), cx)
             .expect("consume a deferred native marker");
         assert!(owner.text_open());
+    });
+}
+
+#[gpui::test]
+fn screen_hold_events_are_stored_from_this_connection_only_and_change_no_hold(
+    cx: &mut TestAppContext,
+) {
+    use crate::runs::{ScreenHold, ScreenLine};
+    use kumochi_protocol::message::{HeldScreen, ModelName, ScreenClass, ScreenHolds};
+    let (owner, _data, controls) = ready(cx);
+    let on = ScreenHolds::On {
+        model: ModelName::new("GPT-5.5").unwrap(),
+    };
+    let apply = |event, cx: &mut TestAppContext| {
+        owner.update(cx, |owner, cx| {
+            owner
+                .link_events(Batch::Plain(vec![event]), cx)
+                .expect("screen hold batch");
+        });
+    };
+    let state = |generation, cx: &mut TestAppContext| {
+        apply(
+            LinkEvent::ScreenHolds {
+                generation,
+                state: on.clone(),
+            },
+            cx,
+        );
+    };
+    state(2, cx);
+    owner.read_with(cx, |owner, _| assert_eq!(owner.runs.screen_holds(), None));
+    state(1, cx);
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.runs.screen_holds(), Some(&on));
+    });
+
+    // The state is stored and nothing reads it yet: a hold is still the voice-only message.
+    let (_token, _) = hold(&owner, 1, cx);
+    assert_eq!(
+        controls.try_recv().unwrap(),
+        ControlToBrain::VoiceHoldRecognized {
+            gesture: GestureId(1),
+            thread: Some(ThreadId(1)),
+            selection: 1,
+        }
+    );
+    assert!(controls.is_empty());
+    status(&owner, 1, 1, HoldStatus::Failed(HoldFailure::Busy), cx);
+
+    let outcome = |generation, cx: &mut TestAppContext| {
+        apply(
+            LinkEvent::HoldScreen {
+                generation,
+                gesture: GestureId(2),
+                outcome: HeldScreen::NotIncluded(ScreenClass::Changed),
+            },
+            cx,
+        );
+    };
+    owner.update(cx, |owner, _| {
+        let screen = ScreenHold {
+            pointer: kumochi_protocol::geometry::PhysicalPoint([3, 4]),
+            lease: kumochi_protocol::message::LeaseGeneration(1),
+            t_qpc: 5,
+        };
+        owner.runs.begin_hold(GestureId(2), Some(screen)).unwrap();
+    });
+    outcome(2, cx);
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.runs.hold_screen_line(), Some(ScreenLine::WillSee));
+    });
+    outcome(1, cx);
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(
+            owner.runs.hold_screen_line(),
+            Some(ScreenLine::NotIncluded(ScreenClass::Changed))
+        );
     });
 }

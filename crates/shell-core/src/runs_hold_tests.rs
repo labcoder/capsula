@@ -14,7 +14,7 @@ fn recognized(runs: &mut Runs, gesture: u32) {
     let thread = runs.thread();
     let selection = runs.revision();
     assert_eq!(
-        runs.begin_hold(GestureId(gesture)),
+        runs.begin_hold(GestureId(gesture), None),
         Ok(ControlToBrain::VoiceHoldRecognized {
             gesture: GestureId(gesture),
             thread,
@@ -279,20 +279,23 @@ fn busy_new_typed_target_and_gesture_high_water_are_preserved() {
     let mut runs = ready();
     assert!(runs.select_thread(None));
     assert_eq!(runs.submit("pending", |_| true), Ok(()));
-    assert_eq!(runs.begin_hold(GestureId(1)), Err(Refused::Busy));
+    assert_eq!(runs.begin_hold(GestureId(1), None), Err(Refused::Busy));
     runs.refused(1, None);
-    assert_eq!(runs.begin_hold(GestureId(1)), Err(Refused::Busy));
+    assert_eq!(runs.begin_hold(GestureId(1), None), Err(Refused::Busy));
     recognized(&mut runs, 2);
-    assert_eq!(runs.begin_hold(GestureId(3)), Err(Refused::Busy));
+    assert_eq!(runs.begin_hold(GestureId(3), None), Err(Refused::Busy));
     runs.cancel_hold();
-    assert_eq!(runs.begin_hold(GestureId(3)), Err(Refused::Busy));
+    assert_eq!(runs.begin_hold(GestureId(3), None), Err(Refused::Busy));
     assert_eq!(runs.take_hold_cancel(), cancel(2));
-    assert_eq!(runs.begin_hold(GestureId(1)), Err(Refused::Busy));
+    assert_eq!(runs.begin_hold(GestureId(1), None), Err(Refused::Busy));
     recognized(&mut runs, u32::MAX);
     runs.cancel_hold();
     assert_eq!(runs.take_hold_cancel(), cancel(u32::MAX));
-    assert_eq!(runs.begin_hold(GestureId(0)), Err(Refused::Busy));
-    assert_eq!(runs.begin_hold(GestureId(u32::MAX)), Err(Refused::Busy));
+    assert_eq!(runs.begin_hold(GestureId(0), None), Err(Refused::Busy));
+    assert_eq!(
+        runs.begin_hold(GestureId(u32::MAX), None),
+        Err(Refused::Busy)
+    );
 }
 
 #[test]
@@ -330,13 +333,108 @@ fn disconnected_holds_cannot_revive_and_outer_debug_has_no_content() {
     assert!(!debug.contains("PRIVATE_HOLD_SENTINEL"));
     assert!(!debug.contains(&format!("{:?}", b"PRIVATE_HOLD_SENTINEL")));
     runs.disconnected();
-    assert_eq!(runs.begin_hold(GestureId(2)), Err(Refused::Offline));
+    assert_eq!(runs.begin_hold(GestureId(2), None), Err(Refused::Offline));
     runs.connected(2);
     runs.settings(ThreadId(1));
-    assert_eq!(runs.begin_hold(GestureId(1)), Err(Refused::Busy));
+    assert_eq!(runs.begin_hold(GestureId(1), None), Err(Refused::Busy));
     assert_eq!(state(&mut runs, 1, 1, 1, Phase::Thinking).stop, stop(1));
-    assert_eq!(runs.begin_hold(GestureId(2)), Err(Refused::Busy));
+    assert_eq!(runs.begin_hold(GestureId(2), None), Err(Refused::Busy));
     recognized(&mut runs, 3);
     assert_eq!(runs.turns_sent, 0);
     assert_eq!(runs.take_hold_cancel(), None);
+}
+
+const SCREEN: ScreenHold = ScreenHold {
+    pointer: kumochi_protocol::geometry::PhysicalPoint([-1_234_567, 7_654_321]),
+    lease: kumochi_protocol::message::LeaseGeneration(424_242),
+    t_qpc: 515_151_515,
+};
+
+#[test]
+fn a_hold_is_a_screen_hold_only_when_it_is_given_a_screen() {
+    use kumochi_protocol::message::{HeldScreen, ScreenClass};
+    let mut runs = ready();
+    recognized(&mut runs, 1);
+    assert_eq!(runs.hold_screen_line(), None);
+    let outcome = HeldScreen::NotIncluded(ScreenClass::Changed);
+    assert!(!runs.hold_screen(GestureId(1), outcome));
+    assert_eq!(runs.hold_screen_line(), None);
+    runs.cancel_hold();
+    assert_eq!(runs.take_hold_cancel(), cancel(1));
+    assert_eq!(
+        runs.begin_hold(GestureId(2), Some(SCREEN)),
+        Ok(ControlToBrain::HoldRecognized {
+            gesture: GestureId(2),
+            thread: Some(ThreadId(1)),
+            selection: 1,
+            pointer: kumochi_protocol::geometry::PhysicalPoint([-1_234_567, 7_654_321]),
+            lease: kumochi_protocol::message::LeaseGeneration(424_242),
+            t_qpc: 515_151_515,
+        })
+    );
+    assert_eq!(runs.hold_screen_line(), Some(ScreenLine::WillSee));
+    let debug = format!("{runs:?}");
+    for part in ["1234567", "7654321", "424242", "515151515"] {
+        assert!(!debug.contains(part), "{part}");
+    }
+}
+
+#[test]
+fn a_screen_outcome_replaces_the_prediction_only_for_the_current_hold() {
+    use kumochi_protocol::message::{HeldScreen, ScreenClass};
+    let changed = HeldScreen::NotIncluded(ScreenClass::Changed);
+    let mut runs = ready();
+    runs.begin_hold(GestureId(1), Some(SCREEN)).expect("held");
+    assert!(!runs.hold_screen(GestureId(2), changed));
+    assert_eq!(runs.hold_screen_line(), Some(ScreenLine::WillSee));
+    state(&mut runs, 1, 1, 1, Phase::Thinking);
+    assert_eq!(runs.hold_screen_line(), Some(ScreenLine::WillSee));
+    assert!(runs.hold_screen(
+        GestureId(1),
+        HeldScreen::NotIncluded(ScreenClass::NothingThere)
+    ));
+    let line = Some(ScreenLine::NotIncluded(ScreenClass::NothingThere));
+    assert_eq!(runs.hold_screen_line(), line);
+    assert!(!runs.hold_screen(GestureId(1), changed));
+    assert_eq!(runs.hold_screen_line(), line);
+    state(&mut runs, 1, 1, 1, Phase::Answering);
+    assert_eq!(runs.hold_screen_line(), None);
+    assert!(!runs.hold_screen(GestureId(1), changed));
+    assert_eq!(runs.hold_screen_line(), None);
+
+    for (gesture, outcome) in [(2, HeldScreen::Attached), (3, HeldScreen::Withdrawn)] {
+        runs.begin_hold(GestureId(gesture), Some(SCREEN))
+            .expect("held");
+        assert!(runs.hold_screen(GestureId(gesture), outcome));
+        assert_eq!(runs.hold_screen_line(), None);
+        assert!(!runs.hold_screen(GestureId(gesture), changed));
+        runs.cancel_hold();
+        assert_eq!(runs.take_hold_cancel(), cancel(gesture));
+    }
+    runs.begin_hold(GestureId(4), Some(SCREEN)).expect("held");
+    runs.cancel_hold();
+    assert_eq!(runs.hold_screen_line(), None);
+}
+
+#[test]
+fn the_screen_holds_state_lasts_one_connection() {
+    use kumochi_protocol::message::{ModelName, ScreenHolds, ScreenOff};
+    let on = ScreenHolds::On {
+        model: ModelName::new("GPT-5.5").expect("valid"),
+    };
+    let mut runs = ready();
+    assert_eq!(runs.screen_holds(), None);
+    runs.set_screen_holds(on.clone());
+    assert_eq!(runs.screen_holds(), Some(&on));
+    runs.set_screen_holds(ScreenHolds::Off(ScreenOff::TurnedOff));
+    assert_eq!(
+        runs.screen_holds(),
+        Some(&ScreenHolds::Off(ScreenOff::TurnedOff))
+    );
+    runs.set_screen_holds(on.clone());
+    runs.disconnected();
+    assert_eq!(runs.screen_holds(), None);
+    runs.set_screen_holds(on);
+    runs.connected(2);
+    assert_eq!(runs.screen_holds(), None);
 }

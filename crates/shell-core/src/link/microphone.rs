@@ -34,7 +34,9 @@ impl Shared {
         out: &Sender<ControlToBrain>,
         message: ControlToBrain,
     ) -> bool {
-        let ControlToBrain::VoiceHoldRecognized { gesture, .. } = &message else {
+        let (ControlToBrain::VoiceHoldRecognized { gesture, .. }
+        | ControlToBrain::HoldRecognized { gesture, .. }) = &message
+        else {
             return out.try_send(message).is_ok();
         };
         let gesture = *gesture;
@@ -161,6 +163,28 @@ mod tests {
             *shared.microphone_stop.lock().unwrap(),
             Some(Stop::Awaiting(GestureId(7)))
         ));
+    }
+
+    #[test]
+    fn a_screen_hold_reserves_the_microphone_stop_as_a_voice_hold_does() {
+        let shared = Shared::default();
+        let (out, queue) = async_channel::bounded(2);
+        let recognized = ControlToBrain::HoldRecognized {
+            gesture: GestureId(7),
+            thread: None,
+            selection: 0,
+            pointer: kumochi_protocol::geometry::PhysicalPoint([0; 2]),
+            lease: kumochi_protocol::message::LeaseGeneration(1),
+            t_qpc: 0,
+        };
+        assert!(shared.queue_voice_control(&out, recognized.clone()));
+        assert_eq!(queue.try_recv(), Ok(recognized.clone()));
+        assert!(matches!(
+            *shared.microphone_stop.lock().unwrap(),
+            Some(Stop::Awaiting(GestureId(7)))
+        ));
+        assert!(!shared.queue_voice_control(&out, recognized));
+        assert_eq!(queue.try_recv(), Err(async_channel::TryRecvError::Empty));
     }
 
     #[test]

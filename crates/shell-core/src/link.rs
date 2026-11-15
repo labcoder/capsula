@@ -89,6 +89,17 @@ pub enum LinkEvent {
         capture_for: kumochi_protocol::message::CaptureFor,
         reason: kumochi_protocol::message::CaptureFailure,
     },
+    /// Whether a hold also shows the model a window, from the control pipe.
+    ScreenHolds {
+        generation: u64,
+        state: kumochi_protocol::message::ScreenHolds,
+    },
+    /// What a screen hold carried into its turn, from the control pipe.
+    HoldScreen {
+        generation: u64,
+        gesture: GestureId,
+        outcome: kumochi_protocol::message::HeldScreen,
+    },
     KeyStage {
         generation: u64,
         reply: ControlToShell,
@@ -1498,14 +1509,31 @@ fn watch(
                     return;
                 }
             }
-            // Slice 7's PR 6 stops playback on SpeechRevoked; nothing plays yet. The screen notice
-            // and the per-hold line arrive with the switch that sends HoldRecognized.
+            Ok(Some(ControlToShell::ScreenHolds(state))) => {
+                if events
+                    .send_blocking(LinkEvent::ScreenHolds { generation, state })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Ok(Some(ControlToShell::HoldScreen { gesture, outcome })) => {
+                if events
+                    .send_blocking(LinkEvent::HoldScreen {
+                        generation,
+                        gesture,
+                        outcome,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            // Slice 7's PR 6 stops playback on SpeechRevoked; nothing plays yet.
             Ok(Some(
                 ControlToShell::SpeechRevoked { .. }
                 | ControlToShell::ThreadModelSet { .. }
-                | ControlToShell::NoVisual { .. }
-                | ControlToShell::ScreenHolds(_)
-                | ControlToShell::HoldScreen { .. },
+                | ControlToShell::NoVisual { .. },
             )) => {}
             Ok(Some(ControlToShell::Welcome { .. } | ControlToShell::BuildMismatch { .. })) => {
                 tracing::warn!("the brain repeated its handshake; ending the connection");

@@ -33,6 +33,8 @@ impl Presence {
             | LinkEvent::TurnRefused { generation, .. }
             | LinkEvent::VoiceHold { generation, .. }
             | LinkEvent::CaptureDone { generation, .. }
+            | LinkEvent::ScreenHolds { generation, .. }
+            | LinkEvent::HoldScreen { generation, .. }
             | LinkEvent::DrawingNotice { generation, .. }
             | LinkEvent::CaptureFailed { generation, .. } = &event
                 && self
@@ -108,6 +110,13 @@ impl Presence {
                     reason: _reason,
                 } => {
                     self.capture_finished(generation, capture_for, cx);
+                }
+                // Stored only: nothing reads either until the shell sends a screen hold.
+                LinkEvent::ScreenHolds { state, .. } => self.runs.set_screen_holds(state),
+                LinkEvent::HoldScreen {
+                    gesture, outcome, ..
+                } => {
+                    self.runs.hold_screen(gesture, outcome);
                 }
                 LinkEvent::RunState {
                     run,

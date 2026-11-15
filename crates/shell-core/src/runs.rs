@@ -12,6 +12,7 @@ use std::fmt;
 
 mod hold;
 use hold::Hold;
+pub use hold::{ScreenHold, ScreenLine};
 
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{
@@ -151,6 +152,8 @@ pub struct Runs {
     hold: Option<Hold>,
     hold_high: u32,
     hold_cancel: Option<GestureId>,
+    /// What the brain last said of screen holds on this connection.
+    screen_holds: Option<kumochi_protocol::message::ScreenHolds>,
     turns_sent: u32,
     /// The newest named run while its output may still arrive.
     live: Option<Live>,
@@ -627,6 +630,7 @@ impl Runs {
     /// The link connected, as connection `generation`.
     pub fn connected(&mut self, generation: u64) {
         self.connected = true;
+        self.screen_holds = None;
         self.turns_sent = 0;
         self.drawing.connected(generation);
     }
@@ -637,6 +641,7 @@ impl Runs {
         self.cancel_hold();
         self.hold_cancel = None;
         self.connected = false;
+        self.screen_holds = None;
         if let Some(shown) = &mut self.shown {
             shown.thread = None;
             shown.done = false;

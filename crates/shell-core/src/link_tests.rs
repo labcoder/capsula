@@ -189,6 +189,65 @@ fn capture_terminals_cross_the_real_control_pipe_with_reader_generation() {
 }
 
 #[test]
+fn screen_hold_messages_cross_the_real_control_pipe_with_reader_generation() {
+    use kumochi_protocol::message::{
+        GestureId, HeldScreen, ModelName, ScreenClass, ScreenHolds, ScreenOff,
+    };
+    let link = attended("screen-holds");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    for state in [
+        ScreenHolds::On {
+            model: ModelName::new("GPT-5.5").expect("valid"),
+        },
+        ScreenHolds::Off(ScreenOff::TurnedOff),
+    ] {
+        frame::write(
+            &mut &link.control,
+            &ControlToShell::ScreenHolds(state.clone()),
+            Pipe::Control,
+        )
+        .expect("state written");
+        let LinkEvent::ScreenHolds {
+            generation,
+            state: received,
+        } = next(&events)
+        else {
+            panic!("screen holds");
+        };
+        assert_eq!(generation, session.generation());
+        assert_eq!(received, state);
+    }
+    for outcome in [
+        HeldScreen::Attached,
+        HeldScreen::NotIncluded(ScreenClass::Changed),
+    ] {
+        frame::write(
+            &mut &link.control,
+            &ControlToShell::HoldScreen {
+                gesture: GestureId(7),
+                outcome,
+            },
+            Pipe::Control,
+        )
+        .expect("outcome written");
+        let LinkEvent::HoldScreen {
+            generation,
+            gesture,
+            outcome: received,
+        } = next(&events)
+        else {
+            panic!("hold screen");
+        };
+        assert_eq!(generation, session.generation());
+        assert_eq!(gesture, GestureId(7));
+        assert_eq!(received, outcome);
+    }
+    drop(link.control);
+    assert!(link.link.join().expect("joined"));
+}
+
+#[test]
 fn lapse_notification_is_only_session_fenced_bounded_queue_acceptance() {
     use kumochi_protocol::message::LeaseGeneration;
     let (_brain, pipe) = pair("lapse-outbox");
