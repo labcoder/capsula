@@ -1,6 +1,6 @@
 //! Never-published local exclusion; this owner cannot authorize a capture job.
 
-mod machine;
+use kumochi_shell_core::presence::exclusion::machine;
 
 use gpui_kit::AnyWindowHandle;
 use kumochi_protocol::message::CaptureFor;
@@ -15,11 +15,14 @@ pub(super) enum Receipt {
         affinity: platform::Affinity,
     },
     #[cfg(test)]
-    Fixture(tests::Prior),
+    Fixture {
+        window: Option<AnyWindowHandle>,
+        prior: machine::fixture::Prior,
+    },
 }
 
 #[cfg(test)]
-pub(super) use tests::Fake as Fixture;
+pub(super) use machine::fixture::Fake as Fixture;
 
 pub(super) struct Windows<'a> {
     pub(super) native: &'a platform::PresenceNative,
@@ -81,12 +84,7 @@ impl Surfaces for Windows<'_> {
         if self.fixture.is_some() {
             return self
                 .with_fixture(window, |fixture| fixture.snapshot(slot))
-                .map(|prior| {
-                    prior.map(|mut prior| {
-                        prior.window = window;
-                        Receipt::Fixture(prior)
-                    })
-                });
+                .map(|prior| prior.map(|prior| Receipt::Fixture { window, prior }));
         }
         let affinity = match window {
             None => self.native.affinity(),
@@ -112,8 +110,8 @@ impl Surfaces for Windows<'_> {
             }
             .map_err(|_| Error::Surface),
             #[cfg(test)]
-            Receipt::Fixture(prior) => {
-                self.with_fixture(prior.window, |fixture| fixture.exclude(slot, prior))
+            Receipt::Fixture { window, prior } => {
+                self.with_fixture(*window, |fixture| fixture.exclude(slot, prior))
             }
         }
     }
@@ -135,8 +133,8 @@ impl Surfaces for Windows<'_> {
             }
             .map_err(|_| Error::Surface),
             #[cfg(test)]
-            Receipt::Fixture(prior) => {
-                self.with_fixture(prior.window, |fixture| fixture.restore(slot, prior))
+            Receipt::Fixture { window, prior } => {
+                self.with_fixture(*window, |fixture| fixture.restore(slot, prior))
             }
         }
     }
@@ -145,7 +143,7 @@ impl Surfaces for Windows<'_> {
         match receipt {
             Receipt::Windows { affinity, .. } => affinity.gone(),
             #[cfg(test)]
-            Receipt::Fixture(prior) => Fixture::gone(prior),
+            Receipt::Fixture { prior, .. } => Fixture::gone(prior),
         }
     }
 
@@ -153,8 +151,8 @@ impl Surfaces for Windows<'_> {
         match receipt {
             Receipt::Windows { window, .. } => self.handles[slot as usize] == *window,
             #[cfg(test)]
-            Receipt::Fixture(prior) => {
-                self.handles[slot as usize] == prior.window
+            Receipt::Fixture { window, prior } => {
+                self.handles[slot as usize] == *window
                     && self
                         .fixture
                         .as_ref()
