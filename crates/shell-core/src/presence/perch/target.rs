@@ -3,7 +3,7 @@
 //! `Released` runs the first check, a drain, the second check, a second drain and the publish,
 //! each a plain call. Every ending of a watch generation is final for it: nothing revives a
 //! window that went away, a watch that failed or a drop that was refused. How it fits:
-//! handoffs/CAPS-94/c2b-design.md, "M1".
+//! docs/development/kumo.md, "The carry".
 
 use super::caption::WindowTarget;
 use super::place::{Extents, Placement, place};

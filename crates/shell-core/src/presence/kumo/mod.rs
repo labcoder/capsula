@@ -1,12 +1,5 @@
 //! Kumo's body, shaded live on the CPU into straight-alpha images that GPUI draws. Plain Rust:
 //! no GPUI, no platform code. How it works: docs/development/kumo.md.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the peek draws the body; the pull and the goo arrive with OSC-179's C2"
-    )
-)]
 
 mod coverage;
 mod expression;

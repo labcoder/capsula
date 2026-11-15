@@ -47,8 +47,8 @@ impl Windows<'_> {
     ) -> Result<(), Error> {
         owner.attach(slot, self)?;
         #[cfg(test)]
-        if let (Some(lease), Some(fixture)) = (&owner.lease, &self.fixture) {
-            assert!(!lease.revoked, "a revoked owner cannot reach placement");
+        if let (Some(lease), Some(fixture)) = (owner.lease(), &self.fixture) {
+            assert!(!lease.revoked(), "a revoked owner cannot reach placement");
             fixture.borrow().assert_excluded(slot);
         }
         Ok(())
@@ -218,12 +218,7 @@ impl Presence {
         let key = self.with_exclusion(cx, |owner, surfaces| {
             owner.acquire(session.generation(), input, now, surfaces)
         })?;
-        let deadline = self
-            .exclusion
-            .lease
-            .as_ref()
-            .expect("acquired above")
-            .deadline;
+        let deadline = self.exclusion.deadline().expect("acquired above");
         self.exclusion_timer = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(deadline.saturating_duration_since(cx.background_executor().now()))
