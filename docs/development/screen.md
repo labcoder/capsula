@@ -477,14 +477,19 @@ hold, exactly as a voice hold would be; one that repeats a voice hold's gesture 
 no part to that hold. Then the image gate is checked again, on the default model,
 with the brain's worker client standing in for capture: the shell's `On` may be out of date. If
 it's open, the part starts at `Waiting` and its task starts; otherwise `CaptureFailed` releases
-the shell's exclusion lease and the hold goes on as voice, with no line for the model. When the
+the shell's exclusion lease and the hold goes on as voice, with no line for the model. An open
+gate still closes the part `NotReady`, with `CaptureFailed`, when the recognition's `t_qpc` is more
+than 1.5 s old: the shell took its 3 s lease (`EXCLUSION_LEASE`) no earlier than the recognition,
+and the worker's ticket ends `MAX_TTL` (1.5 s) after this check, so only a younger recognition's
+ticket ends within the lease. A stamp the brain can't age (one later than now, or any stamp off
+Windows) counts as too old. When the
 thread's own choice is read, the gate runs once more on it, and a closed gate closes the part with
 its own reason: `ModelCantSee` for a model that can't be sent images, `NotReady` for no catalog or
 no choice, and no line at all (`Discarded`) when the user switched screen holds off. The frame is
 retired and any image zeroed either way. The gate opens only on the default model, so a thread pinned
 to a model that can see goes voice-only while the default can't: a known limit.
 
-The task runs `context`, `walk` and `seal` within the screen budget (`MAX_TTL`). It never
+The task runs `context`, `walk` and `seal` by the deadline that check set. It never
 touches the part. Each answer comes back as a `ScreenEvent` keyed by the hold and the worker
 generation, on a channel the brain's hold loop selects beside audio and decoding:
 - `Held` fills in the part's generation, and sends `CaptureDone`, which releases the lease. A
@@ -502,7 +507,7 @@ windows; after `CaptureDone`, or for any other lease, a lapse is ignored.
 
 | Class | Worker answers |
 |---|---|
-| `NotReady` | `Expired`, `Unsupported` (which also turns screen holds off until the brain restarts, below), `Busy`, a fault, a loss or the deadline, a lapsed lease, or still `Waiting` when the words are; `Reused` too, with a `debug_assert`, because only a brain bug sends it |
+| `NotReady` | `Expired`, `Unsupported` (which also turns screen holds off until the brain restarts, below), `Busy`, a fault, a loss or the deadline, a lapsed lease, a recognition too old for its lease, or still `Waiting` when the words are; `Reused` too, with a `debug_assert`, because only a brain bug sends it |
 | `NothingThere` | `NoWindow` |
 | `CantShare` | `Minimized`, `Cloaked`, `Elevated`, `Protected`, `Excluded` |
 | `Unreadable` | `Unmasked`, `Ambiguous` |

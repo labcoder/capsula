@@ -1598,9 +1598,15 @@ async fn a_part_closed_during_its_capture_retires_the_frame_without_a_walk() {
     brain.holds.screen = Some(Arc::new(HoldClient::new(rig.handle.clone())));
     screen_hold(&mut brain, KEY, ScreenPart::None);
     let point = kumochi_protocol::geometry::PhysicalPoint([5, 5]);
-    assert!(brain.holds.start_screen(KEY, point, LEASE));
     assert!(
-        !brain.holds.start_screen(KEY, point, LEASE),
+        brain
+            .holds
+            .start_screen(KEY, point, LEASE, Instant::now() + MAX_TTL)
+    );
+    assert!(
+        !brain
+            .holds
+            .start_screen(KEY, point, LEASE, Instant::now() + MAX_TTL),
         "one part per hold"
     );
     let (id, capture) = rig.next().await;
@@ -1688,6 +1694,73 @@ async fn a_screen_hold_shares_the_voice_admission_and_releases_its_lease_when_re
     assert_eq!(control(&mut output), failed, "a stale gesture's lease too");
     assert!(output.is_empty());
     assert!(brain.holds.pending.is_none());
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn a_screen_part_starts_only_while_its_ticket_ends_within_the_lease() {
+    use crate::context::ScreenClass;
+    use kumochi_protocol::message::{CaptureFailure, CaptureFor};
+    let scratch = Scratch::new("hold-screen-late");
+    let (mut brain, _release, _decoded, _fetch) =
+        crate::runtime::tests::holds::input(&scratch, Vec::new(), "not submitted").await;
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    let (mut rig, _sol, _luna) = sees_on_sol(&mut brain);
+    brain.holds.window_capture = true;
+    // A stamp is its own age in milliseconds; the lease's 3 s less the ticket's 1.5 s is the limit.
+    brain.holds.recognized_age = |t_qpc| Some(Duration::from_millis(t_qpc));
+    let recognized = |gesture, t_qpc| ControlToBrain::HoldRecognized {
+        gesture,
+        thread: None,
+        selection: 1,
+        pointer: kumochi_protocol::geometry::PhysicalPoint([5, 5]),
+        lease: LEASE,
+        t_qpc,
+    };
+    let (late, in_time) = (GestureId(9), GestureId(10));
+    let failed = |gesture| ControlToShell::CaptureFailed {
+        capture_for: CaptureFor::Gesture(gesture),
+        reason: CaptureFailure::Unavailable,
+    };
+
+    assert!(
+        brain
+            .hold_control(&recognized(late, 1_501), &mut link)
+            .unwrap()
+    );
+    assert!(controls(&mut output).contains(&failed(late)));
+    assert!(matches!(
+        brain.holds.pending.as_ref().unwrap().screen,
+        ScreenPart::Closed(ScreenClass::NotReady)
+    ));
+    brain.holds.lost();
+
+    assert!(
+        brain
+            .hold_control(&recognized(in_time, 1_500), &mut link)
+            .unwrap()
+    );
+    assert!(!controls(&mut output).contains(&failed(in_time)));
+    assert!(matches!(
+        brain.holds.pending.as_ref().unwrap().screen,
+        ScreenPart::Waiting {
+            generation: None,
+            lease: LEASE,
+            ..
+        }
+    ));
+    // Its capture is the worker's first request: the late part asked for none.
+    drop(rig.next().await);
+    brain.holds.lost();
+    let in_time = HoldKey {
+        gesture: in_time,
+        ..KEY
+    };
+    crate::screen::release_next(&mut rig, in_time).await;
     brain.close().await;
 }
 
@@ -1897,7 +1970,11 @@ async fn a_capture_the_system_refuses_comes_back_from_the_task_as_unsupported() 
     brain.holds.screen = Some(Arc::new(HoldClient::new(rig.handle.clone())));
     screen_hold(&mut brain, KEY, ScreenPart::None);
     let point = kumochi_protocol::geometry::PhysicalPoint([5, 5]);
-    assert!(brain.holds.start_screen(KEY, point, LEASE));
+    assert!(
+        brain
+            .holds
+            .start_screen(KEY, point, LEASE, Instant::now() + MAX_TTL)
+    );
     let (id, _capture) = rig.next().await;
     rig.reply(id, &Reply::Refused(Refusal::Unsupported)).await;
     let Event::Screen(answer) = super::next(&mut brain.holds).await else {

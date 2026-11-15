@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use kumochi_protocol::geometry::PhysicalPoint;
 use kumochi_protocol::message::LeaseGeneration;
@@ -12,6 +13,11 @@ use tokio::time::Instant;
 use crate::context::{Screen, ScreenClass};
 use crate::coordinator::HoldKey;
 use crate::screen::{Closed, Generation, HoldClient, MAX_TTL, Refusal, ScreenContext};
+
+/// How long the shell's exclusion lease keeps Kumochi's windows out of a capture.
+// shortcut: a copy of shell-core's `exclusion::machine::LIFETIME`; move both to the protocol when
+// either changes.
+pub(super) const EXCLUSION_LEASE: Duration = Duration::from_secs(3);
 
 /// `None` is a voice hold. A screen hold starts at `Waiting`; its run takes what it ends with,
 /// and every other closer leaves `Closed` or `Discarded`.
@@ -87,6 +93,7 @@ impl super::Holds {
         key: HoldKey,
         point: PhysicalPoint,
         lease: LeaseGeneration,
+        until: Instant,
     ) -> bool {
         let (Some(client), Some(hold)) = (&self.screen, &mut self.pending) else {
             return false;
@@ -104,10 +111,21 @@ impl super::Holds {
             Arc::clone(client),
             key,
             point,
+            until,
             stop,
             self.screen_events.clone(),
         )));
         true
+    }
+
+    /// Closes the pending hold `key`'s unstarted part as `NotReady`: it was recognized too long
+    /// ago for its capture to end within the shell's lease.
+    pub(super) fn refuse_screen(&mut self, key: HoldKey) {
+        if let Some(hold) = self.pending.as_mut().filter(|hold| hold.key == key)
+            && matches!(hold.screen, ScreenPart::None)
+        {
+            hold.screen = ScreenPart::Closed(ScreenClass::NotReady);
+        }
     }
 
     /// Takes a task's answer into the waiting part it belongs to and drops any other: a dropped
@@ -208,16 +226,16 @@ impl super::Holds {
     }
 }
 
-/// The hold's screen work within the screen budget: capture, walk, then seal. Each answer goes
+/// The hold's screen work by `until`: capture, walk, then seal. Each answer goes
 /// back as an event, and a frame the task can't hand on is retired with the worker that holds it.
 async fn work(
     client: Arc<HoldClient>,
     key: HoldKey,
     point: PhysicalPoint,
+    until: Instant,
     stop: Arc<AtomicBool>,
     events: mpsc::Sender<ScreenEvent>,
 ) {
-    let until = Instant::now() + MAX_TTL;
     let report = |generation, outcome| {
         events.send(ScreenEvent {
             key,

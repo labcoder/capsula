@@ -1,6 +1,7 @@
 //! Win32 implementations of the brain's platform functions.
 
 mod capture;
+mod clock;
 mod credential;
 mod dump;
 mod elements;
@@ -24,6 +25,7 @@ mod spawn;
 mod window;
 
 pub(crate) use capture::{WINDOW_CAPTURE, screen_capturer};
+pub(crate) use clock::qpc_age;
 pub(crate) use credential::WindowsCredentialStore;
 pub(crate) use dump::DumpExclusion;
 pub(crate) use elements::screen_elements;
