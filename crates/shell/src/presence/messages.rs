@@ -197,11 +197,7 @@ impl Messages {
             && state.open.is_some()
             && let Some(before) = state.before
         {
-            let first = self
-                .rows
-                .iter()
-                .find(|row| row.visible(self.live_row))
-                .map(|row| row.id.1);
+            let first = first_message(&self.rows, self.live_row);
             self.reveal_older = Some((state.history_revision(), before, first));
             older(&self.model, &self.owner, cx);
         }
@@ -273,11 +269,8 @@ impl Messages {
                 self.reveal_older = None;
             } else if !state.reading() && state.before != Some(before) {
                 self.reveal_older = None;
-                let earlier = self
-                    .rows
-                    .iter()
-                    .find(|row| row.visible(live))
-                    .is_some_and(|row| first.is_none_or(|first| row.id.1 < first));
+                let earlier = first_message(&self.rows, live)
+                    .is_some_and(|id| first.is_none_or(|first| id < first));
                 if !earlier && let Some(before) = state.before {
                     self.reveal_older = Some((revision, before, first));
                     older(&self.model, &self.owner, cx);
@@ -294,6 +287,14 @@ impl Messages {
         self.live_row = live;
         cx.notify();
     }
+}
+
+/// The first shown message's event id, which paging up measures against. The screen note isn't
+/// a message: its number is the event it followed, or 0.
+fn first_message(rows: &[Row], live: Option<RunId>) -> Option<u64> {
+    rows.iter()
+        .find(|row| row.id.0 != "note" && row.visible(live))
+        .map(|row| row.id.1)
 }
 
 pub(super) fn older(model: &Entity<Threads>, owner: &WeakEntity<Presence>, cx: &mut App) {
@@ -413,6 +414,31 @@ fn stored_rows(state: &Threads, cx: &App) -> Rc<[Row]> {
             ));
         }
         current_group = group;
+    }
+    if let Some(note) = state
+        .screen_note
+        .as_ref()
+        .filter(|note| Some(note.thread) == state.open)
+    {
+        let after = note.after.map_or(0, |after| after.0);
+        let at = rows
+            .iter()
+            .rposition(|row| row.id.1 <= after)
+            .map_or(0, |ix| ix + 1);
+        let mut line = row(
+            ("note", after),
+            None,
+            PageEventKind::TaskDeleted,
+            "",
+            None,
+            state,
+            cx,
+        );
+        line.text = cx
+            .global::<Strings>()
+            .with_model(note.text, note.model.as_str())
+            .into();
+        rows.insert(at, line);
     }
     rows.into()
 }
@@ -555,6 +581,21 @@ fn message_text(row: &Row, field: &'static str, value: SharedString) -> gpui_kit
 fn message(row: &Row, controls: Option<gpui_kit::AnyElement>, cx: &App) -> gpui_kit::AnyElement {
     use gpui_kit::StatefulInteractiveElement as _;
     let id = row.id;
+    if id.0 == "note" {
+        // A quiet line that isn't a message: centred and muted, with the picture's icon.
+        return div()
+            .w_full()
+            .p_2()
+            .flex()
+            .justify_center()
+            .items_center()
+            .gap_1()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(gpui_kit::svg().path(PICTURED.path()).size_4().flex_none())
+            .child(row.text.clone())
+            .into_any_element();
+    }
     div()
         .id(id)
         .debug_selector(move || format!("message-{}-{}", id.0, id.1))
@@ -828,6 +869,110 @@ mod tests {
                 same.pictured = None;
                 assert!(same == plain[0], "{screen:?}");
             }
+        });
+    }
+
+    #[gpui::test]
+    fn a_screen_note_is_a_line_after_the_message_it_followed_in_its_own_conversation_only(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::threads::ScreenNote;
+        use kumochi_protocol::message::ModelName;
+        cx.update(|cx| {
+            cx.set_global(Strings::english());
+            let mut state = Threads::chat_for_tests();
+            state.open = Some(ThreadId(3));
+            let (mut older, mut newer) = (event(5), event(7));
+            older.kind = PageEventKind::User;
+            newer.kind = PageEventKind::User;
+            state.events = vec![newer, older];
+            let note = |after, text| ScreenNote {
+                thread: ThreadId(3),
+                after,
+                text,
+                model: ModelName::new("GPT-6 Sol").unwrap(),
+            };
+            let ids = |rows: &[Row]| rows.iter().map(|row| row.id).collect::<Vec<_>>();
+            assert_eq!(ids(&stored_rows(&state, cx)), [("event", 5), ("event", 7)]);
+            state.screen_note = Some(note(Some(EventId(5)), Text::ScreenNoteCant));
+            let rows = stored_rows(&state, cx);
+            assert_eq!(ids(&rows), [("event", 5), ("note", 5), ("event", 7)]);
+            assert_eq!(
+                rows[1].text.as_ref(),
+                "GPT-6 Sol doesn't support screenshots, so messages will go without one."
+            );
+            assert_eq!(rows[1].label, None);
+            // Said in an empty conversation, it stays above what came later.
+            state.screen_note = Some(note(None, Text::ScreenNoteCan));
+            let rows = stored_rows(&state, cx);
+            assert_eq!(ids(&rows), [("note", 0), ("event", 5), ("event", 7)]);
+            assert_eq!(
+                rows[0].text.as_ref(),
+                "GPT-6 Sol supports screenshots, so holding to talk will send one along."
+            );
+            // Another conversation is open: the line stays with its own.
+            state.open = Some(ThreadId(4));
+            assert_eq!(ids(&stored_rows(&state, cx)), [("event", 5), ("event", 7)]);
+        });
+    }
+
+    #[gpui::test]
+    fn paging_up_measures_against_the_first_message_not_a_screen_note_above_it(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::threads::ScreenNote;
+        use kumochi_protocol::message::{DataToShell, ModelName};
+
+        let (model, view, _) = open_with_events(cx, Vec::new());
+        model.update(cx, |state, cx| {
+            state.connected();
+            state.show();
+            assert_eq!(state.requests().len(), 2);
+            state.apply_for_tests(DataToShell::ThreadList {
+                request: 1,
+                threads: Vec::new(),
+                next: None,
+            });
+            state.apply_for_tests(DataToShell::Page {
+                request: 2,
+                thread: ThreadId(1),
+                events: (11..=30).rev().map(event).collect(),
+                before: Some(EventId(11)),
+            });
+            // A note that followed a message older than this page sits above all of it.
+            state.screen_note = Some(ScreenNote {
+                thread: ThreadId(1),
+                after: Some(EventId(4)),
+                text: Text::ScreenNoteCant,
+                model: ModelName::new("GPT-6 Sol").unwrap(),
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, cx| {
+            assert_eq!(view.rows[0].id, ("note", 4));
+            view.older(cx);
+            assert_eq!(
+                view.reveal_older,
+                Some((model.read(cx).history_revision(), EventId(11), Some(11)))
+            );
+        });
+        model.update(cx, |state, cx| {
+            state.older_events();
+            assert_eq!(state.requests().len(), 1);
+            state.apply_for_tests(DataToShell::Page {
+                request: 3,
+                thread: ThreadId(1),
+                events: (5..=10).rev().map(event).collect(),
+                before: Some(EventId(5)),
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        // That page put older messages above the first one, so it is shown and paging stops.
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.reveal_older, None);
+            assert_eq!(view.list.logical_scroll_top().item_ix, 0);
         });
     }
 

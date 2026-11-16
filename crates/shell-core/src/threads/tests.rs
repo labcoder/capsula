@@ -2150,3 +2150,80 @@ fn an_offpage_rename_shows_its_committed_title_whichever_side_of_the_stale_reply
         );
     }
 }
+
+#[test]
+fn a_screen_note_is_left_once_in_the_open_conversation_when_the_models_answer_changes() {
+    let luna = ModelName::new("GPT-6 Luna").expect("valid");
+    let sol = ModelName::new("GPT-6 Sol").expect("valid");
+    let mut threads = Threads::chat();
+    threads.open = Some(ThreadId(3));
+    threads.loaded = true;
+    threads.events = vec![PageEvent {
+        id: EventId(9),
+        run: None,
+        kind: PageEventKind::User,
+        text: "hi".into(),
+        cut: false,
+    }];
+    // The first answer is no change, and neither is the same answer for another model.
+    assert!(!threads.screen_sees(Some(ThreadId(3)), Text::ScreenNoteCan, &luna));
+    assert!(!threads.screen_sees(Some(ThreadId(3)), Text::ScreenNoteCan, &sol));
+    assert_eq!(threads.screen_note, None);
+    // A model that can't: one note, after the newest stored event, naming it.
+    assert!(threads.screen_sees(Some(ThreadId(3)), Text::ScreenNoteCant, &sol));
+    let cant = ScreenNote {
+        thread: ThreadId(3),
+        after: Some(EventId(9)),
+        text: Text::ScreenNoteCant,
+        model: sol.clone(),
+    };
+    assert_eq!(threads.screen_note, Some(cant.clone()));
+    assert!(!threads.screen_sees(Some(ThreadId(3)), Text::ScreenNoteCant, &sol));
+    assert_eq!(threads.screen_note, Some(cant));
+    // Back to one that can, in a conversation with nothing stored.
+    threads.events.clear();
+    assert!(threads.screen_sees(Some(ThreadId(3)), Text::ScreenNoteCan, &luna));
+    assert_eq!(
+        threads.screen_note,
+        Some(ScreenNote {
+            thread: ThreadId(3),
+            after: None,
+            text: Text::ScreenNoteCan,
+            model: luna.clone(),
+        })
+    );
+    // A change while another conversation, or none, is the target leaves no line and drops
+    // the old one.
+    assert!(!threads.screen_sees(Some(ThreadId(4)), Text::ScreenNoteCant, &sol));
+    assert_eq!(threads.screen_note, None);
+    assert!(!threads.screen_sees(None, Text::ScreenNoteCan, &luna));
+    assert_eq!(threads.screen_note, None);
+}
+
+#[test]
+fn a_screen_note_waits_for_the_open_conversations_first_page() {
+    let luna = ModelName::new("GPT-6 Luna").expect("valid");
+    let sol = ModelName::new("GPT-6 Sol").expect("valid");
+    let mut threads = Threads::chat();
+    threads.open = Some(ThreadId(3));
+    assert!(!threads.screen_sees(Some(ThreadId(3)), Text::ScreenNoteCan, &luna));
+    // No page has landed: the change is remembered, and no line is placed above messages
+    // that aren't known yet.
+    assert!(!threads.screen_sees(Some(ThreadId(3)), Text::ScreenNoteCant, &sol));
+    assert_eq!(threads.screen_note, None);
+    assert_eq!(threads.sees, Some(Text::ScreenNoteCant));
+    // Once it has, the same answer is still no change, and the next change is said.
+    threads.loaded = true;
+    assert!(!threads.screen_sees(Some(ThreadId(3)), Text::ScreenNoteCant, &sol));
+    assert_eq!(threads.screen_note, None);
+    assert!(threads.screen_sees(Some(ThreadId(3)), Text::ScreenNoteCan, &luna));
+    assert_eq!(
+        threads.screen_note,
+        Some(ScreenNote {
+            thread: ThreadId(3),
+            after: None,
+            text: Text::ScreenNoteCan,
+            model: luna,
+        })
+    );
+}

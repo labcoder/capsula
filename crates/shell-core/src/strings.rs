@@ -213,6 +213,8 @@ texts! {
     ShowScreenChanged => "show-screen-changed",
     ScreenNotIncludedPictureTooLarge => "screen-not-included-picture-too-large",
     ScreenHistoryChanged => "screen-history-changed",
+    ScreenNoteCant => "screen-note-cant",
+    ScreenNoteCan => "screen-note-can",
     VoiceRestartRequired => "voice-restart-required",
     VoiceInstalledFailed => "voice-installed-failed",
     VoiceNotInstalledFailed => "voice-not-installed-failed",
@@ -787,10 +789,19 @@ mod tests {
                 format!("Screen not included: {reason}"),
             );
         }
-        assert_eq!(
-            strings.with_model(Text::ScreenHoldWillSee, "GPT-5.5"),
-            "GPT-5.5 will see this window"
-        );
+        for (text, line) in [
+            (
+                Text::ScreenNoteCant,
+                "GPT-5.5 doesn't support screenshots, so messages will go without one.",
+            ),
+            (
+                Text::ScreenNoteCan,
+                "GPT-5.5 supports screenshots, so holding to talk will send one along.",
+            ),
+            (Text::ScreenHoldWillSee, "GPT-5.5 will see this window"),
+        ] {
+            assert_eq!(strings.with_model(text, "GPT-5.5"), line);
+        }
         // A hold that sends the screen at release: its own word for a display that changed, and
         // the Privacy tab's row.
         assert_eq!(
