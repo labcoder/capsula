@@ -1258,6 +1258,87 @@ fn a_run_admitted_but_never_granted_a_send_stores_no_picture_and_tells_nothing()
     }
 }
 
+/// An inline compaction's request holds only text, so its grant leaves the image untold: a Stop
+/// then clears the stored picture, sharing turned off records it withdrawn, and the image's own
+/// grant afterwards tells once.
+#[test]
+fn an_inline_compaction_s_grant_leaves_a_held_image_untold() {
+    use kumochi_protocol::message::{EventId, HeldScreen};
+
+    use crate::coordinator::{CompactBuilt, JobAsk, Unbuilt};
+    for after in ["a stop", "sharing off", "the image's send"] {
+        let mut core = ready_for("captured");
+        core.submit_hold(prepared(&core, Some(T)), "words".into(), Some(image()))
+            .unwrap();
+        core.handle(Input::TurnStored { run: R }).unwrap();
+        let first = engine_key(&core, R);
+        core.handle(Input::ContextBuilt(ContextBuilt {
+            key: first,
+            snapshot: None,
+            result: Err(Unbuilt::TooLarge { room: Some(500) }),
+        }))
+        .unwrap();
+        let compaction = engine_key(&core, R);
+        let started = core
+            .handle(Input::CompactBuilt(CompactBuilt {
+                key: compaction,
+                result: Ok(Some((
+                    JobAsk {
+                        generation: Generation(5),
+                        built: crate::context::Built {
+                            request: request(),
+                            sources: vec![T],
+                        },
+                        covers: Some((EventId(20), EventId(31))),
+                    },
+                    100,
+                ))),
+            }))
+            .unwrap();
+        assert_eq!(starts(&started), 1, "{after}");
+        let granted = sending(&mut core);
+        assert!(
+            granted
+                .iter()
+                .any(|effect| matches!(effect, Effect::Grant(_))),
+            "{after}"
+        );
+        assert_eq!(told(&granted), Vec::<&Effect>::new(), "{after}");
+        match after {
+            "a stop" => {
+                let effects = ended(&mut core, 1);
+                assert_eq!(forgotten(&effects), [R]);
+                assert_eq!(told(&effects), Vec::<&Effect>::new());
+            }
+            "sharing off" => assert_eq!(
+                withdrawals(&core.handle(Input::ScreenHoldsOff).unwrap()),
+                [R]
+            ),
+            _ => {
+                core.handle(engine(compaction, TurnEvent::TextDelta("Short".to_owned())))
+                    .unwrap();
+                core.handle(engine(compaction, TurnEvent::Finished(Finish::Completed)))
+                    .unwrap();
+                core.handle(Input::SummaryStored {
+                    owner: SendKey::Build(compaction),
+                    applied: true,
+                })
+                .unwrap();
+                let built = engine_key(&core, R);
+                assert_ne!(built, compaction);
+                assert_eq!(starts(&core.handle(screened(built, &[T])).unwrap()), 1);
+                assert_eq!(
+                    told(&sending(&mut core)),
+                    [&Effect::Control(ControlToShell::HoldScreen {
+                        gesture: KEY.gesture,
+                        outcome: HeldScreen::Attached,
+                    })]
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn turning_screen_holds_off_before_any_send_is_granted_records_the_turn_withdrawn() {
     let mut core = ready_for("captured");

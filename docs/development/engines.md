@@ -340,7 +340,8 @@ movement and where it lies, in image pixels. Its changed display and too-large p
 own class lines. The lines live in `locales/en/brain.ftl` and carry no window details. If the image can't go (another route, or no user message left), the run fails with
 `ScreenUnavailable` rather than sending without it. What the hold carried goes in the run's row
 with its turn (store.md, `runs.screen`), and the shell hears it once as `HoldScreen`: an image
-when the first send carrying it is granted, anything else when the run's first request starts. The row is written first on purpose: the first build starts only
+when the first send carrying it is granted, anything else when the run's first request starts.
+An inline compaction's send carries only text, so its grant doesn't count. The row is written first on purpose: the first build starts only
 after `TurnStored`, so history can over-report a screen but never miss one that left the
 machine, and a failed turn write fails the run before anything is built. Turning screen holds off
 withdraws every run's window image, and turning show-screen off every run's screen picture,
