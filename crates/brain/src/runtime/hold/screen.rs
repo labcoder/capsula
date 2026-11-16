@@ -308,8 +308,8 @@ impl super::Holds {
         let picture = hold.kind == super::Kind::Screen;
         match std::mem::replace(&mut hold.screen, ScreenPart::None) {
             ScreenPart::Ready(context) if picture => {
-                let ink = context.ink();
-                Some(Screen::Picture(context.into_jpeg(), ink))
+                let (ink, geometry) = (context.ink(), context.geometry());
+                Some(Screen::Picture(context.into_jpeg(), ink, geometry))
             }
             ScreenPart::Ready(context) => Some(Screen::Image(context.into_jpeg())),
             ScreenPart::Closed(class) if picture => Some(Screen::PictureNotIncluded(class)),

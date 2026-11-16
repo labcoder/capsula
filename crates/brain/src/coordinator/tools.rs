@@ -249,6 +249,7 @@ impl Coordinator {
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
         let pending = self.pending_deletes();
+        let screen = matches!(self.canvas(), Some(Ok(_)));
         let current = self.current(run)?;
         if (current.tools.calling() && !current.tools.dispatched)
             || current.tools.open.iter().any(|open| open.output.is_none())
@@ -294,7 +295,16 @@ impl Coordinator {
             round,
             connection,
             text: unstored(current),
-            items: items.into_iter().map(|(_, item)| item).collect(),
+            items: items
+                .into_iter()
+                .map(|(_, item)| {
+                    if screen {
+                        crate::drawing::stored_item(item)
+                    } else {
+                        item
+                    }
+                })
+                .collect(),
             calls,
         })));
         Ok(())

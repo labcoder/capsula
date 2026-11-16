@@ -647,6 +647,8 @@ impl Run {
 pub struct Coordinator {
     drawing: crate::drawing::Drawing,
     drawing_held: Vec<(ThreadId, DataToShell)>,
+    /// Whether `draw` may mark the user's screen: [`crate::drawing::SCREEN_MARKS`].
+    screen_marks: crate::drawing::ScreenMarks,
     /// Never deleted or renamed.
     main_thread: ThreadId,
     last_thread: ThreadId,
@@ -732,6 +734,7 @@ impl Coordinator {
         Self {
             drawing: crate::drawing::Drawing::default(),
             drawing_held: Vec::new(),
+            screen_marks: crate::drawing::SCREEN_MARKS,
             main_thread,
             last_thread,
             last_run,

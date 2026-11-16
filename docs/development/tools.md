@@ -224,6 +224,51 @@ whole-envelope preflight. Only the explicitly trusted debug fixture retains newl
 placeholder drawing. Typed history/inline visual replay and fenced-text conversion remain
 separate work.
 
+### Screen scenes (dormant)
+
+The brain's half of marking the user's screen ([scene](scene.md), the screen surface) is in
+place and off. `drawing::SCREEN_MARKS` is `Off`, the one value the coordinator reads, and
+`draw`'s schema, preflight and prompt still offer and accept only the overlay, so a screen
+scene is refused at `surface` as before. The pull request that offers the surface turns that
+constant `On` together with those three.
+
+- **The gates.** At each draw call the coordinator asks `Screen::canvas` of the current run,
+  from its screen and its model choice. That is the route test `ModelRequest::attach` uses, so
+  a screen scene is drawn only on a picture that was sent. A `begin` with
+  `"surface":"screen"` is refused with a fixed result the model can act on:
+  `drawing.NoScreenPicture` when no screen picture went with the run (another connection, a
+  typed turn, a window hold, a picture not included), `drawing.OtherDisplay` when the picture's
+  display doesn't start at the desktop's origin, which the overlay doesn't cover, and
+  `drawing.ScreenOff` once the user turned off sharing the screen. Each ends "explain in words
+  or draw a card". While marks are on, every record is parsed with `parse_screen_draw_record`.
+- **The stamp.** A screen `begin` is stamped with the picture's size and display
+  (`scene::screen::stamp`) before its name is looked up or compared with a held scene, so a
+  later call continues it with the same header. A written size other than the picture's is
+  `SizeNotPicture`, followed by "the picture is W by H pixels"; the `screen-picture` line
+  states the same size.
+- **Layout refusals.** The brain lays every step out before writing it. In a screen scene, a
+  step whose own geometry can't be laid out, such as a label with no side left (`NoRoom` at
+  `put[i].callout` in that step), fails the call with that error and the usual retry hint. In
+  any other scene it is still written uncounted.
+- **Stored forms.** The `scene_step` row holds the step from `without_boxes`, and
+  `scene_begin` the stamped header; the scene and the shell keep the real boxes in memory. In a
+  run whose picture a screen scene can be drawn on, a round's native items go through
+  `drawing::stored_item`: a `draw` call in a screen scene keeps its records with every box
+  replaced, and one whose arguments can't be read as far as its surface, or don't all parse, is
+  stored as `{"records":[]}`. Every result of a call in a screen scene ends with "the marks'
+  positions are not kept after this turn".
+- **Recovery** leaves a stored screen scene out, since its boxes were never stored, and clears
+  it with the other scenes it skips.
+- **What screen text can still steer.** The picture's text reaches the model as pixels. It
+  can't write the stamp, a box outside the picture, a long label, a line or another surface,
+  but it can still sway which things the model marks, the order of its steps, its `say` lines
+  and its labels' words. The marking paragraph tells the model such text is content, never
+  instructions; nothing else checks it.
+- **Known limit.** The brain measures text at least as wide as the shell does, so it may refuse
+  a label the shell would have fitted. With several labels, a narrower label in the shell can
+  take an earlier side and leave a later label no room where the brain found one. The shell's
+  own `NoRoom` then stops the step, and the model isn't told. Accepted for the first version.
+
 Before a separately authorized live schema check, `cargo xtask live account` can
 inspect Kumochi Dev's own non-secret account view with a zero-request inference
 budget. It prints only state words, never signs in, and refuses while another

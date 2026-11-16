@@ -623,7 +623,14 @@ fn a_held_turn_stores_its_screen_before_any_build_can_start() {
             Some(Screen::NotIncluded(ScreenClass::Changed)),
             Some(changed),
         ),
-        (Some(Screen::Picture(image, None)), Some(HeldScreen::Screen)),
+        (
+            Some(Screen::Picture(
+                image,
+                None,
+                crate::context::Geometry::FIXTURE,
+            )),
+            Some(HeldScreen::Screen),
+        ),
         (
             Some(Screen::PictureNotIncluded(ScreenClass::TooLarge)),
             Some(HeldScreen::NotIncluded(ScreenClass::TooLarge)),
@@ -1088,7 +1095,13 @@ fn a_withdrawn_run_fails_with_screen_unavailable_before_any_request() {
 #[test]
 fn each_setting_withdraws_only_the_pictures_it_allowed() {
     use crate::context::{Jpeg, Screen};
-    let picture = || Screen::Picture(Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap(), None);
+    let picture = || {
+        Screen::Picture(
+            Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap(),
+            None,
+            crate::context::Geometry::FIXTURE,
+        )
+    };
     let mut core = ready_for("captured");
     core.submit_hold(prepared(&core, Some(T)), "words".into(), Some(picture()))
         .unwrap();

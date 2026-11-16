@@ -1156,3 +1156,81 @@ fn an_inline_begin_is_refused_before_scene_writes_on_model_and_mcp_routes() {
         assert_eq!(store.drawing_scenes().expect("one scene").scenes.len(), 1);
     }
 }
+
+/// The run's hold sent a picture of the screen on a `ChatGPT` model.
+fn sent_picture(core: &mut Coordinator) {
+    let current = core.current.as_mut().expect("run");
+    current.screen = Some(crate::context::Screen::Picture(
+        crate::context::Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).expect("a JPEG"),
+        None,
+        crate::context::Geometry::FIXTURE,
+    ));
+    current.snapshot.as_mut().expect("snapshot").choice =
+        Some(kumochi_protocol::message::ModelChoice {
+            model: kumochi_protocol::message::ModelSlug::new("gpt-fixture").expect("slug"),
+            effort: kumochi_protocol::message::Effort::Low,
+            connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+        });
+}
+
+#[test]
+fn a_screen_scene_s_canvas_is_asked_of_the_current_run_only_while_marks_are_on() {
+    let mut core = offered(vec![T]);
+    assert_eq!(core.canvas(), None);
+    core.screen_marks = crate::drawing::ScreenMarks::On;
+    assert_eq!(
+        core.canvas(),
+        Some(Err(crate::context::NoCanvas::NoPicture))
+    );
+    sent_picture(&mut core);
+    assert_eq!(core.canvas(), Some(Ok(crate::context::Geometry::FIXTURE)));
+    core.screen_marks = crate::drawing::ScreenMarks::Off;
+    assert_eq!(core.canvas(), None);
+}
+
+#[test]
+fn a_screen_call_s_native_item_is_stored_without_its_box_only_while_marks_are_on() {
+    let args = r#"{"records":[{"begin":{"scene":"marks","surface":"screen","alt":"marks"}},{"step":{"id":"s1","put":[{"highlight":{"id":"d","target":{"box":[186,598,450,78]},"style":"box"}}]}},{"end":{}}]}"#;
+    let native =
+        json!({"type":"function_call","id":"fc1","call_id":"model","name":"draw","arguments":args});
+    let item =
+        crate::engines::Opaque::new(serde_json::to_vec(&native).expect("item")).expect("small");
+    for (marks, target) in [
+        (
+            crate::drawing::ScreenMarks::On,
+            json!({"box":[0.0, 0.0, 1.0, 1.0]}),
+        ),
+        (
+            crate::drawing::ScreenMarks::Off,
+            json!({"box":[186, 598, 450, 78]}),
+        ),
+    ] {
+        let mut core = offered(vec![T]);
+        core.screen_marks = marks;
+        sent_picture(&mut core);
+        let key = super::engine_key(&core, R);
+        let mut event = |event| {
+            core.handle(Input::Engine { key, event })
+                .expect("engine event")
+        };
+        event(TurnEvent::OutputItem {
+            index: 0,
+            item: item.clone(),
+        });
+        let round = event(TurnEvent::Finished(Finish::Completed))
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::Store(StoreOp::RoundItems(round)) => Some(round),
+                _ => None,
+            })
+            .expect("the round");
+        let stored: Value = serde_json::from_slice(round.items[0].bytes()).expect("item");
+        let records: Value =
+            serde_json::from_str(stored["arguments"].as_str().expect("arguments")).expect("JSON");
+        assert_eq!(
+            records["records"][1]["step"]["put"][0]["highlight"]["target"], target,
+            "{marks:?}"
+        );
+        assert_eq!(stored["call_id"], "model");
+    }
+}

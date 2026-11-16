@@ -13,6 +13,7 @@ mod digest;
 pub mod io;
 mod prepare;
 mod scenes;
+mod screen;
 mod snapshot;
 #[cfg(test)]
 mod tests;
@@ -35,6 +36,7 @@ pub use call::{CallEnd, CallError, Remaining};
 pub(crate) use digest::Digest;
 pub use io::{Reply, StoredScene, Target, Write};
 pub use prepare::{PrepareJob, Prepared, Shared};
+pub(crate) use screen::{SCREEN_MARKS, ScreenMarks, stored_item};
 pub(crate) use snapshot::CHUNK_TARGET;
 pub use snapshot::Snapshot;
 
@@ -349,7 +351,9 @@ impl Drawing {
         stored.sort_by_key(|scene| scene.scene);
         let mut skipped = Vec::new();
         stored.retain(|scene| {
-            let known = scene.header.layout_version == LAYOUT_VERSION;
+            // A screen scene's boxes were never stored, so it can't be drawn again.
+            let known = scene.header.layout_version == LAYOUT_VERSION
+                && scene.header.begin.surface != kumochi_scene::record::Surface::Screen;
             if !known {
                 skipped.push(scene.scene);
             }

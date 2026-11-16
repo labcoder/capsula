@@ -9,9 +9,12 @@ use kumochi_protocol::message::{
 };
 use kumochi_scene::{
     Admission, Begin, Budget, CallState, End, ErrorCode, FieldPath, Record, SceneState, Step,
-    StepError, TokenError, Tokenizer, WireId, parse_draw_record,
+    StepError, TokenError, Tokenizer, WireId, parse_draw_record, parse_screen_draw_record,
 };
 use serde::Deserialize;
+
+use kumochi_scene::record::Surface;
+use kumochi_scene::screen::without_boxes;
 
 use super::io::{Target, Write};
 use super::{Drawing, Job, LAYOUT_VERSION, Output, Pend, StepWait, Wait};
@@ -57,6 +60,14 @@ const CLEARED_HINT: &str = concat!(
 );
 /// Follows any early stop once the run accepts no further draw call.
 const SPENT_HINT: &str = "; no further draw call will be accepted in this turn";
+/// Follows each refusal of a screen scene, which no correction of the call can draw.
+const NO_PICTURE_NOTE: &str = "; no picture of the user's screen was sent in this turn, so the screen can't be marked; explain in words or draw a card";
+const OTHER_DISPLAY_NOTE: &str =
+    "; the picture shows a display that can't be marked; explain in words or draw a card";
+const SCREEN_OFF_NOTE: &str =
+    "; the user turned off sharing the screen; explain in words or draw a card";
+/// Ends every result of a call in a screen scene, whose boxes are never stored.
+const NOT_KEPT_NOTE: &str = "; the marks' positions are not kept after this turn";
 
 /// Why a call ended incomplete. `Display` carries no drawing content or model id.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -85,6 +96,15 @@ pub enum CallError {
         /// Nothing of the scene was shown, so it was removed.
         cleared: bool,
     },
+    /// A screen scene, but no picture of the user's screen went with the run.
+    #[error("drawing.NoScreenPicture")]
+    NoScreenPicture,
+    /// A screen scene, but the run's picture shows a display the overlay doesn't cover.
+    #[error("drawing.OtherDisplay")]
+    OtherDisplay,
+    /// A screen scene, but the user turned off sharing the screen.
+    #[error("drawing.ScreenOff")]
+    ScreenOff,
 }
 
 /// A call that ended: the steps it drew and, unless it completed, why the rest didn't.
@@ -104,6 +124,8 @@ pub struct CallEnd {
     pub remaining: Remaining,
     /// Text after its closed records array was ignored.
     pub after_records: bool,
+    /// The picture's size, when the call began a screen scene on it.
+    pub picture: Option<[u32; 2]>,
 }
 
 /// What a run still accepts once one of its calls ends.
@@ -135,10 +157,27 @@ impl CallEnd {
             let cleared =
                 matches!(error, CallError::Step(step) if step.code == ErrorCode::SceneCleared);
             text.push_str("; stopped: ");
+            if matches!(
+                error,
+                CallError::NoScreenPicture | CallError::OtherDisplay | CallError::ScreenOff
+            ) {
+                text.push_str("surface: ");
+            }
             text.push_str(&match error {
                 CallError::Step(error) => error.tool_text(),
                 error => error.to_string(),
             });
+            text.push_str(match error {
+                CallError::NoScreenPicture => NO_PICTURE_NOTE,
+                CallError::OtherDisplay => OTHER_DISPLAY_NOTE,
+                CallError::ScreenOff => SCREEN_OFF_NOTE,
+                _ => "",
+            });
+            if let (Some([width, height]), CallError::Step(step)) = (self.picture, error)
+                && step.code == ErrorCode::SizeNotPicture
+            {
+                text = format!("{text}; the picture is {width} by {height} pixels");
+            }
             text.push_str(match (self.remaining, error) {
                 (Remaining::Nothing, _) => SPENT_HINT,
                 (
@@ -155,6 +194,9 @@ impl CallEnd {
                 (Remaining::Steps, CallError::TooMuchToPaint { cleared: true }) => CLEARED_HINT,
                 _ => "",
             });
+        }
+        if self.picture.is_some() {
+            text.push_str(NOT_KEPT_NOTE);
         }
         text
     }
@@ -176,6 +218,8 @@ pub(super) struct Call {
     refused: bool,
     /// It ended; kept so a repeat of it changes nothing.
     pub(super) done: bool,
+    /// The picture's size once its `begin` was a screen scene's: its scene is a screen scene.
+    pub(super) picture: Option<[u32; 2]>,
 }
 
 /// The scene a call draws in.
@@ -202,6 +246,8 @@ pub(super) struct RunLedger {
     /// A replacement it drew failed before anything of it was shown, so this thread's earlier
     /// drawings are gone; told once the run can't repair it, and dropped when the user ended it.
     pub(super) loss: Option<ThreadId>,
+    /// What its screen scenes may be drawn on; `None` while `draw` can't mark the screen.
+    pub(super) canvas: Option<Result<crate::context::Geometry, crate::context::NoCanvas>>,
 }
 
 impl RunLedger {
@@ -377,6 +423,7 @@ impl Drawing {
                 error: Some(CallError::Exhausted),
                 remaining: Remaining::Nothing,
                 after_records: false,
+                picture: None,
             });
             return Ok(None);
         }
@@ -391,6 +438,7 @@ impl Drawing {
             repair,
             refused: false,
             done: false,
+            picture: None,
         });
         let at = self.calls.len() - 1;
         if exhausted {
@@ -412,6 +460,11 @@ impl Drawing {
 
     /// Parses a record and queues it behind any pending write.
     fn intake(&mut self, at: usize, bytes: &[u8], out: &mut Output) {
+        let run = self.calls[at].run;
+        let screen = self
+            .runs
+            .iter()
+            .any(|ledger| ledger.run == run && ledger.canvas.is_some());
         let call = &mut self.calls[at];
         call.records += 1;
         if call.refused {
@@ -428,7 +481,12 @@ impl Drawing {
             self.enqueue(job, out);
             return;
         }
-        let job = match parse_draw_record(bytes) {
+        let parsed = if screen {
+            parse_screen_draw_record(bytes)
+        } else {
+            parse_draw_record(bytes)
+        };
+        let job = match parsed {
             Ok(record) => Job::Record {
                 run,
                 call: id,
@@ -464,6 +522,15 @@ impl Drawing {
             self.end(at, Some(CallError::Exhausted), out);
             return;
         }
+        let record = match record {
+            Record::Begin(begin) if begin.surface == Surface::Screen => {
+                match self.stamped(at, begin) {
+                    Ok(begin) => Record::Begin(begin),
+                    Err(error) => return self.fail(at, error, out),
+                }
+            }
+            record => record,
+        };
         if let Err(error) = self.apply(at, record, out) {
             self.fail(at, CallError::Step(error), out);
         }
@@ -634,6 +701,11 @@ impl Drawing {
             )
         };
         let step = Arc::new(step);
+        let stored = if self.calls[at].picture.is_some() {
+            Arc::new(without_boxes(&step))
+        } else {
+            Arc::clone(&step)
+        };
         let write = Write::Step {
             thread,
             run,
@@ -641,7 +713,7 @@ impl Drawing {
             clear,
             revision,
             layout_version,
-            step: Arc::clone(&step),
+            step: stored,
         };
         let wait = StepWait {
             run,
@@ -800,6 +872,7 @@ impl Drawing {
             error,
             remaining,
             after_records: false,
+            picture: call.picture,
         });
     }
 
@@ -986,6 +1059,7 @@ impl Drawing {
                     failed: false,
                     exhausted: false,
                     loss: None,
+                    canvas: None,
                 });
                 self.runs.len() - 1
             });

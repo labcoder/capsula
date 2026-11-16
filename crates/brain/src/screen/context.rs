@@ -102,6 +102,19 @@ impl ScreenContext {
         })
     }
 
+    /// Where the picture was taken, for marks drawn on it: the display's rectangle and DPI from
+    /// the capture, and the picture's size.
+    pub(crate) fn geometry(&self) -> crate::context::Geometry {
+        crate::context::Geometry {
+            display: kumochi_scene::record::ScreenDisplay {
+                origin: self.transform.display.origin,
+                size: self.transform.display.size,
+                dpi: self.transform.dpi,
+            },
+            picture: self.size,
+        }
+    }
+
     /// The image for the run that takes it: its buffer and dump registration move, with no copy.
     pub(crate) fn into_jpeg(mut self) -> crate::context::Jpeg {
         crate::context::Jpeg::sealed(

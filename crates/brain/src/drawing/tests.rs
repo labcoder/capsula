@@ -22,6 +22,7 @@ use crate::coordinator::{Effect, Stale, StoreOp};
 use crate::engines::CallId;
 
 mod paint;
+mod screen;
 mod timing;
 
 const THREAD: ThreadId = ThreadId(7);
@@ -585,6 +586,7 @@ fn a_stop_for_a_cleared_scene_never_says_its_drawn_steps_are_on_screen() {
         error: Some(CallError::Step(StepError::new(ErrorCode::SceneCleared))),
         remaining: Remaining::Steps,
         after_records: false,
+        picture: None,
     };
     assert_eq!(
         end.tool_text(),
@@ -3320,6 +3322,7 @@ fn debug_and_display_never_carry_drawing_content() {
         })),
         remaining: Remaining::Steps,
         after_records: false,
+        picture: None,
     };
     let stored = StoredScene {
         scene: SceneId(1),
