@@ -164,7 +164,8 @@ pull request that activates it.
   parsers. `screen::stamp` sets `size` to the picture's and refuses a written size that
   differs (`SizeNotPicture`). `SceneState::begin` refuses a screen header without a usable
   stamp and any other header with one. `Begin::continues` compares the stamp, so a
-  continuation is stamped before it is compared.
+  continuation is stamped before it is compared. The drawings digest the model reads leaves
+  `display` out.
 - **What it admits** (`screen::admit`, at admission): `highlight` and `callout` with a box or
   `ref` target, and `line` or `arrow` whose two ends are refs, with no `via`. Everything
   else, a point target, a callout `at`, `in` and `set` are `Unsupported`. A box outside the
