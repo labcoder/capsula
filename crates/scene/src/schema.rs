@@ -22,12 +22,20 @@ struct Envelope {
     records: Bounded<Record, { MAX_STEPS + 2 }>,
 }
 
+fn envelope_schema() -> serde_json::Value {
+    let mut schema = schemars::schema_for!(Envelope).to_value();
+    if let Some(required) = schema["$defs"]["Begin"]["required"].as_array_mut() {
+        required.retain(|field| field != "v" && field != "surface");
+    }
+    schema
+}
+
 /// JSON Schema for a complete 2D draw envelope, using scene's JSON field forms.
 /// A begin's version and surface are optional because the draw tool supplies its only values.
 /// The screen surface and box targets are left out until `draw` offers them.
 #[must_use]
 pub fn draw_schema() -> serde_json::Value {
-    let mut schema = screen_draw_schema();
+    let mut schema = envelope_schema();
     let defs = &mut schema["$defs"];
     if let Some(surfaces) = defs["Surface"]["oneOf"].as_array_mut() {
         surfaces.retain(|surface| surface["const"] != "screen");
@@ -38,12 +46,13 @@ pub fn draw_schema() -> serde_json::Value {
     schema
 }
 
-/// [`draw_schema`] with the screen surface and box targets offered.
+/// [`draw_schema`] with the screen surface and box targets offered, and lines and arrows not,
+/// since the screen surface refuses them.
 #[must_use]
 pub fn screen_draw_schema() -> serde_json::Value {
-    let mut schema = schemars::schema_for!(Envelope).to_value();
-    if let Some(required) = schema["$defs"]["Begin"]["required"].as_array_mut() {
-        required.retain(|field| field != "v" && field != "surface");
+    let mut schema = envelope_schema();
+    if let Some(ops) = schema["$defs"]["Op"]["oneOf"].as_array_mut() {
+        ops.retain(|op| op["properties"]["line"].is_null() && op["properties"]["arrow"].is_null());
     }
     schema
 }

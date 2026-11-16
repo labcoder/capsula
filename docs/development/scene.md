@@ -165,10 +165,12 @@ pull request that activates it.
   differs (`SizeNotPicture`). `SceneState::begin` refuses a screen header without a usable
   stamp and any other header with one. `Begin::continues` compares the stamp, so a
   continuation is stamped before it is compared. The drawings digest the model reads leaves
-  `display` out.
+  `display` out. A header's JSON has no `display` key when it has no stamp, so every other
+  surface's stored header keeps its form; the binary frames always carry the field.
 - **What it admits** (`screen::admit`, at admission): `highlight` and `callout` with a box or
-  `ref` target, and `line` or `arrow` whose two ends are refs, with no `via`. Everything
-  else, a point target, a callout `at`, `in` and `set` are `Unsupported`. A box outside the
+  `ref` target. Everything else, `line` and `arrow` included, a point target, a callout `at`,
+  `in` and `set` are `Unsupported`, and `screen_draw_schema` doesn't offer lines or arrows: a
+  line between two marks would end at their centres, over both targets. A box outside the
   picture is `OutOfRange`. A label is one line of at most `MAX_SCREEN_LABEL_CHARS` (24);
   longer text is `LabelTooLong`, whose message states the cap, never cut. So a box target is
   the only position a screen scene holds.

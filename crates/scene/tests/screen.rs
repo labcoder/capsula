@@ -55,6 +55,15 @@ fn a_screen_header_carries_the_brains_stamp_and_only_a_screen_header_may() {
     let Ok(Record::Begin(mut overlay)) = record(&json!({"begin":{"scene":"o","alt":""}})) else {
         panic!("overlay header");
     };
+    let json = serde_json::to_string(&overlay).expect("overlay JSON");
+    assert_eq!(
+        json,
+        r#"{"v":1,"scene":"o","surface":"overlay","size":null,"title":null,"alt":"","others":"clear"}"#
+    );
+    assert_eq!(
+        serde_json::from_str::<Begin>(&json).ok(),
+        Some(overlay.clone())
+    );
     overlay.display = Some(DISPLAY);
     let misplaced = SceneState::begin(overlay).expect_err("stamp on an overlay");
     assert_eq!(
@@ -67,6 +76,12 @@ fn a_screen_header_carries_the_brains_stamp_and_only_a_screen_header_may() {
         Some([1280.0, 720.0])
     );
     assert_eq!(stamped.display, Some(DISPLAY));
+    let json = serde_json::to_string(&stamped).expect("stamped JSON");
+    assert!(json.contains(r#""display":{"#), "{json}");
+    assert_eq!(
+        serde_json::from_str::<Begin>(&json).ok(),
+        Some(stamped.clone())
+    );
     SceneState::begin(stamped).expect("a stamped screen scene");
 }
 
@@ -134,21 +149,27 @@ fn draw_still_refuses_the_screen_surface_and_box_targets_and_does_not_offer_them
         let targets = schema["$defs"]["Target"]["anyOf"]
             .as_array()
             .expect("targets");
+        let ops = schema["$defs"]["Op"]["oneOf"].as_array().expect("ops");
         (
             schema["$defs"]["Surface"].to_string().contains("screen"),
             targets
                 .iter()
                 .any(|target| !target["properties"]["box"].is_null()),
             schema.to_string().contains("display"),
+            ops.iter()
+                .filter(|op| {
+                    !op["properties"]["line"].is_null() || !op["properties"]["arrow"].is_null()
+                })
+                .count(),
         )
     };
     assert_eq!(
         offered(&kumochi_scene::draw_schema()),
-        (false, false, false)
+        (false, false, false, 2)
     );
     assert_eq!(
         offered(&kumochi_scene::screen_draw_schema()),
-        (true, true, false)
+        (true, true, false, 0)
     );
 }
 
@@ -183,16 +204,12 @@ fn the_screen_surface_admits_only_marks_that_never_cover_their_target() {
             "put[0].target",
         ),
         (
-            json!([{"arrow":{"id":"a","from":[0,0],"to":{"ref":"h"}}}]),
-            "put[0].from",
+            json!([{"line":{"id":"l","from":{"ref":"a"},"to":{"ref":"b"}}}]),
+            "put[0]",
         ),
         (
-            json!([{"line":{"id":"l","from":{"ref":"h"},"to":[0,0]}}]),
-            "put[0].to",
-        ),
-        (
-            json!([{"line":{"id":"l","from":{"ref":"a"},"to":{"ref":"b"},"via":[[1,1]]}}]),
-            "put[0].via",
+            json!([{"arrow":{"id":"a","from":{"ref":"a"},"to":{"ref":"b"}}}]),
+            "put[0]",
         ),
     ] {
         assert_eq!(

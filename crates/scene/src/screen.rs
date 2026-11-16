@@ -11,8 +11,8 @@ use crate::{
 pub const PLACEHOLDER_BOX: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 
 /// Checks a step of a screen scene: only marks that never cover their target are admitted. A
-/// highlight or callout targets a box or a mark, a line or arrow joins two marks, and a label is
-/// one short line. Nothing else holds a position, so a box target is the only one.
+/// highlight or callout targets a box or a mark, and a label is one short line. Nothing else
+/// holds a position, so a box target is the only one.
 /// # Errors
 /// Returns `Unsupported` at the first other kind or field, `OutOfRange` for a box outside the
 /// canvas of `size`, and `LabelTooLong` for a long label.
@@ -52,15 +52,7 @@ pub fn admit(step: &Step, size: [f32; 2]) -> Result<(), StepError> {
                 }
                 None
             }
-            Op::Line(line) | Op::Arrow(line) if line.parent.is_some() => Some(at("in")),
-            Op::Line(line) | Op::Arrow(line) if !matches!(line.from, Anchor::Ref(_)) => {
-                Some(at("from"))
-            }
-            Op::Line(line) | Op::Arrow(line) if !matches!(line.to, Anchor::Ref(_)) => {
-                Some(at("to"))
-            }
-            Op::Line(line) | Op::Arrow(line) if !line.via.is_empty() => Some(at("via")),
-            Op::Highlight(_) | Op::Line(_) | Op::Arrow(_) => None,
+            Op::Highlight(_) => None,
             _ => Some(FieldPath::default().field("put").index(index)),
         };
         if let Some(path) = refused {
