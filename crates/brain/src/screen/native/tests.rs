@@ -69,7 +69,7 @@ fn job() -> Job {
         },
         frame: RawFrame::default(),
         point: PhysicalPoint([1, 1]),
-        shell: 0,
+        aim: Aim::Window { shell: 0 },
         until: Instant::now() + PATIENCE,
     }
 }

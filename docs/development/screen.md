@@ -369,6 +369,48 @@ desktop:
 cargo test -p kumochi-brain --lib native_window_probe -- --ignored --exact --nocapture
 ```
 
+## Display under a point (dormant)
+
+`Capturer::capture_display` takes one frame of the monitor nearest a point, with the pointer
+drawn. It reads the monitor's bounds and effective DPI, makes a capture item for that monitor,
+refuses `DisplayChanged` unless the item's size equals the bounds, and returns the bounds with
+the frame. The worker's `Display { key, ticket, point, excluded, ink }` request runs it, beside
+`Context`, under the same ticket rules: an expired, reused or stale ticket refuses as it does for
+`Context`. The hold client's `display` sends it, and nothing calls that yet.
+
+Only the shell's exclusion lease keeps Kumochi's windows out of a display frame, and exclusion
+takes effect when Windows next redraws. So the capture takes `excluded`, the performance-counter
+stamp the shell reads once every exclusion setter has succeeded, and accepts only a frame drawn
+at least two compositor redraws later, rounded up. A frame's draw time is when it's presented:
+on Rez a frame arrives 0.4 to 3 ms before its stamped draw time [measured], so a frame stamped a
+single redraw later can come from a composition that began at about the exclusion stamp. The
+second redraw costs 7 ms at 144 Hz. A redraw is the compositor's refresh period
+(`DwmGetCompositionTimingInfo`), or 100 ms [guess] when that can't be read. The session doesn't
+start before the counter passes that time. A frame drawn earlier (its `SystemRelativeTime`, in
+100 ns on the counter's clock) is released and the next one taken, until the deadline refuses
+`Expired`. A zero stamp is refused `Expired` too.
+
+The held frame remembers what it shows: a window, as `Context` resolved it, or a display with
+its bounds and DPI. `Seal` checks a window as before. For a display it reads the monitor that
+covers those bounds now (`MonitorFromRect`) and requires the same bounds and DPI; a moved,
+rescaled or vanished monitor refuses `DisplayChanged`. A display has no later identity to lose,
+so that is the whole check.
+
+`ink` is the pointer's path over the hold, at most 2,048 points in physical desktop pixels; a
+longer one refuses `Invalid` and still spends the ticket. It's held with the frame, and the seal
+paints it (`screen/ink.rs`) on the scaled RGB image before the JPEG encode, so the line is the
+same width on any monitor. Each segment maps both ends per axis without refusing points off the
+image, in 64-bit floats, and colours only pixels inside it, so a segment that leaves the image
+is painted up to the edge. The line is 3 pixels of pink with a 1-pixel white edge on each side
+[guess]. A path of fewer than two points paints nothing. `ScreenContext` carries the painted
+pixels' bounding rectangle in image pixels, left out of its `Debug`, as `InkBounds`, whose
+`Debug` prints no numbers.
+
+Two ignored native checks keep pixels in memory and are run by hand on Rez:
+`first_display_frame_against_its_session_start` prints each first frame's draw time minus its
+session's start, cold and warm, and is run on a still screen; `primary_display_cold_and_warm_samples`
+times the capture.
+
 ## Sealing a hold's image
 
 A hold's `Context` carries the hold's point. The

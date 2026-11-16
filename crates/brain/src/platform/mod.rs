@@ -96,7 +96,8 @@ pub(crate) use windows::{
 };
 #[cfg(windows)]
 pub(crate) use windows::{
-    WINDOW_CAPTURE, qpc_age, qpc_at, qpc_left, screen_capturer, screen_elements, window_unchanged,
+    WINDOW_CAPTURE, display_at, qpc_age, qpc_at, qpc_left, screen_capturer, screen_elements,
+    window_unchanged,
 };
 #[cfg(windows)]
 pub use windows::{managed_presence, system_env};
@@ -134,6 +135,16 @@ pub(crate) fn qpc_left(_stamp: u64) -> Option<std::time::Duration> {
 #[cfg(not(windows))]
 pub(crate) fn window_unchanged(_target: &crate::screen::Target) -> bool {
     false
+}
+
+/// The monitor that covers a captured display's bounds now. No platform but Windows captures a
+/// display yet, so there's none.
+// shortcut: macOS will read its display here.
+#[cfg(not(windows))]
+pub(crate) fn display_at(
+    _bounds: kumochi_protocol::geometry::PhysicalRect,
+) -> Option<(kumochi_protocol::geometry::PhysicalRect, u32)> {
+    None
 }
 
 /// Whether one managed-policy source exists, by existence only. Only a proven-missing source is

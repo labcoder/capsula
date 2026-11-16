@@ -16,11 +16,17 @@ use crate::screen::reader::ThreadedReader;
 use crate::supervise::write_message;
 use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect, WindowRef};
 
+mod display;
 mod replacement;
 
 const PATIENCE: Duration = Duration::from_secs(5);
 const RECT: PhysicalRect = PhysicalRect {
     origin: [0, 0],
+    size: [4, 3],
+};
+/// The fake's monitor, apart from its window.
+const DISPLAY: PhysicalRect = PhysicalRect {
+    origin: [-4, 0],
     size: [4, 3],
 };
 
@@ -178,6 +184,22 @@ impl Capturer for Fake {
             dpi: 96,
         })
     }
+    /// One frame of the fake's monitor; a point left of it reads as a changed display.
+    fn capture_display(
+        &mut self,
+        point: PhysicalPoint,
+        _: u64,
+        _: Instant,
+        frame: &mut RawFrame,
+    ) -> Result<(Acquired, PhysicalRect), Failure> {
+        frame.audit(self.audit.clone());
+        frame.begin(4, 3)?.fill(91);
+        if point.0[0] < 0 {
+            return Err(Refusal::DisplayChanged.into());
+        }
+        let arrived = *self.clock.lock().unwrap();
+        Ok((Acquired { arrived, dpi: 120 }, DISPLAY))
+    }
 }
 
 struct Source(Option<Gate>);
@@ -326,8 +348,13 @@ impl Rig {
                         *time.lock().unwrap()
                     }
                 },
-                unchanged,
-                MILLIS_LEFT,
+                {
+                    let mut screen = Screen::default();
+                    screen.unchanged = unchanged;
+                    screen.display_at = |bounds| (bounds == DISPLAY).then_some((DISPLAY, 120));
+                    screen.left_until = MILLIS_LEFT;
+                    screen
+                },
             )
         });
         Self {

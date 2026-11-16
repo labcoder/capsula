@@ -11,6 +11,7 @@ mod context;
 mod elements;
 mod encode;
 mod frame;
+mod ink;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "masks wait for the study after P3 (OSC-775)")

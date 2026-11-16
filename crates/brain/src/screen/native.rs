@@ -6,22 +6,30 @@ use std::time::Instant;
 use kumochi_protocol::geometry::PhysicalPoint;
 
 use super::actor::Key;
-use super::capture::{Acquired, Capturer, Failure, Target};
+use super::capture::{Acquired, Capturer, Failure, Shown};
 use super::elements::Wake;
 use super::frame::RawFrame;
 
-/// One hold's capture: the window under `point`, then one frame of it alone.
+/// What a job captures at its point.
+pub(super) enum Aim {
+    /// The window under it, then one frame of it alone. `shell` is the connected shell's process,
+    /// which the walk counts as Kumochi's.
+    Window { shell: u32 },
+    /// One frame of the monitor nearest it, drawn after `excluded`, the shell's exclusion stamp.
+    Display { excluded: u64 },
+}
+
+/// One hold's capture.
 pub(super) struct Job {
     pub(super) key: Key,
     pub(super) frame: RawFrame,
     pub(super) point: PhysicalPoint,
-    /// The connected shell's process, which the walk counts as Kumochi's.
-    pub(super) shell: u32,
+    pub(super) aim: Aim,
     pub(super) until: Instant,
 }
 
-/// The frame comes back on every outcome; a success names the window it shows.
-pub(super) type Completion = (Key, RawFrame, Result<(Acquired, Target), Failure>);
+/// The frame comes back on every outcome; a success names what it shows.
+pub(super) type Completion = (Key, RawFrame, Result<(Acquired, Shown), Failure>);
 
 pub(super) struct CaptureThread {
     jobs: SyncSender<Job>,
@@ -47,10 +55,20 @@ impl CaptureThread {
                                 Some(capturer) => capturer,
                                 None => capturer.insert(open()?),
                             };
-                            let target = capturer.pointer_window(job.point, job.shell)?;
-                            capturer
-                                .capture_window(&target, job.until, &mut job.frame)
-                                .map(|acquired| (acquired, target))
+                            match job.aim {
+                                Aim::Window { shell } => {
+                                    let target = capturer.pointer_window(job.point, shell)?;
+                                    capturer
+                                        .capture_window(&target, job.until, &mut job.frame)
+                                        .map(|acquired| (acquired, Shown::Window(target)))
+                                }
+                                Aim::Display { excluded } => capturer
+                                    .capture_display(job.point, excluded, job.until, &mut job.frame)
+                                    .map(|(acquired, bounds)| {
+                                        let dpi = acquired.dpi;
+                                        (acquired, Shown::Display { bounds, dpi })
+                                    }),
+                            }
                         })();
                         if answers.try_send((job.key, job.frame, result)).is_err() || !wake() {
                             drop(requests);
