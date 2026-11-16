@@ -199,8 +199,8 @@ pull request that activates it.
   `MAX_SCREEN_SCALE` (4).
 - **Stored form.** `screen::without_boxes` returns a step with every box target replaced by
   `PLACEHOLDER_BOX` (`[0,0,1,1]`), keeping ids, labels and styles. No `Debug` prints a box
-  or the stamp. The step's uses in the brain come with the pull request that admits screen
-  scenes.
+  or the stamp. The brain stores both forms of a screen call through it
+  ([tools](tools.md), screen scenes).
 
 ### 3D records
 

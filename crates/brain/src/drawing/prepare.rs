@@ -210,7 +210,11 @@ impl Drawing {
         }
         step.laid = match outcome {
             Prepared::Layout { layout, bytes } => Some((Arc::unwrap_or_clone(layout.0), bytes)),
-            Prepared::Failed => None,
+            Prepared::Refused(error) if self.calls[at].picture.is_some() => {
+                self.fail(at, CallError::Step(error), out);
+                return Ok(());
+            }
+            Prepared::Failed | Prepared::Refused(_) => None,
             Prepared::TooMuch => {
                 self.end(at, Some(CallError::TooMuchToPaint { cleared: false }), out);
                 return Ok(());
@@ -318,6 +322,7 @@ impl PrepareJob {
             },
             Some(Err(PrepareError::OverPaintWork)) => Prepared::TooMuch,
             Some(Err(PrepareError::Cancelled)) => Prepared::Cancelled,
+            Some(Err(PrepareError::Layout(error))) => Prepared::Refused(error),
             // Another copy ran it, or it failed for something other than paint work.
             None | Some(Err(_)) => Prepared::Failed,
         }
@@ -352,6 +357,9 @@ pub enum Prepared {
     TooMuch,
     /// The reducer cancelled it.
     Cancelled,
+    /// The step's own geometry can't be laid out: refused in a screen scene, whose model can
+    /// correct it, and written uncounted in any other, as a failure is.
+    Refused(StepError),
     /// Any other failure: the scene's work is no longer counted, and the shell's guard checks it.
     Failed,
 }

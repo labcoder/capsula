@@ -334,7 +334,7 @@ class saying why there's none. Every build of that run adds it through `ModelReq
 after the newest user message: the image followed by the fixed developer line "The image is a
 snapshot from when the user spoke.", or one fixed line naming the class ("The screen was not
 included: it wasn't ready in time."). A screen hold's picture has its own lines: one saying it's
-a picture of the user's screen taken at release, with their pointer where it was then, and, when
+a picture of the user's screen, its width and height in pixels, taken at release, with their pointer where it was then, and, when
 the pointer's path was painted inside the image, one saying the pink line follows the pointer's
 movement and where it lies, in image pixels. Its changed display and too-large picture have their
 own class lines. The lines live in `locales/en/brain.ftl` and carry no window details. If the image can't go (another route, or no user message left), the run fails with

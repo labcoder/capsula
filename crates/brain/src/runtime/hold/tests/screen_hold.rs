@@ -335,13 +335,24 @@ async fn words_go_on_at_once_with_an_armed_part_and_wait_for_a_capturing_one() {
         bottom: 2,
     };
     let sealed = ScreenContext::fixture(JPEG).with_ink(Some(bounds));
+    let sealed_geometry = sealed.geometry();
+    assert_eq!(
+        (
+            sealed_geometry.display.origin,
+            sealed_geometry.display.size,
+            sealed_geometry.display.dpi,
+            sealed_geometry.picture
+        ),
+        ([0, 0], [4, 3], 96, [4, 3])
+    );
     brain
         .hold_event(answer(generation, Outcome::Sealed(sealed)), &mut link)
         .unwrap();
     assert!(brain.holds.pending.is_none());
     assert!(matches!(
         brain.coordinator.current_screen(),
-        Some(Screen::Picture(image, Some(painted))) if *image == jpeg && *painted == bounds
+        Some(Screen::Picture(image, Some(painted), geometry))
+            if *image == jpeg && *painted == bounds && *geometry == sealed_geometry
     ));
 
     // A closing answer ends the wait with its class.

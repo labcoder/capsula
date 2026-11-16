@@ -397,11 +397,7 @@ impl ModelRequest {
     /// so any other refuses here and no adapter ever has one to drop. The body's ceiling is
     /// checked when it's serialised.
     pub(crate) fn attach(&mut self, image: Jpeg) -> Result<(), ImageRefused> {
-        if self
-            .choice
-            .as_ref()
-            .is_none_or(|choice| choice.connection != ConnectionKind::ChatGpt)
-        {
+        if !takes_images(self.choice.as_ref()) {
             return Err(ImageRefused::Route);
         }
         let at = self.turn()?;
@@ -435,8 +431,17 @@ impl ModelRequest {
             | Screen::PictureNotIncluded(ScreenClass::ModelCantSee) => "screen-model-cant-see",
             Screen::Withdrawn => return Err(ImageRefused::Withdrawn),
         };
-        let mut lines = vec![screen_line(id, None).ok_or(ImageRefused::Unbundled)?];
-        if let Screen::Picture(_, Some(ink)) = screen {
+        let size = match screen {
+            Screen::Picture(_, _, geometry) => {
+                let mut args = fluent_bundle::FluentArgs::new();
+                args.set("width", geometry.picture[0]);
+                args.set("height", geometry.picture[1]);
+                Some(args)
+            }
+            _ => None,
+        };
+        let mut lines = vec![screen_line(id, size.as_ref()).ok_or(ImageRefused::Unbundled)?];
+        if let Screen::Picture(_, Some(ink), _) = screen {
             let mut args = fluent_bundle::FluentArgs::new();
             for (name, value) in [
                 ("left", ink.left),
@@ -449,7 +454,7 @@ impl ModelRequest {
             lines.push(screen_line("screen-pointed", Some(&args)).ok_or(ImageRefused::Unbundled)?);
         }
         let after = match screen {
-            Screen::Image(image) | Screen::Picture(image, _) => {
+            Screen::Image(image) | Screen::Picture(image, ..) => {
                 self.attach(image.clone())?;
                 2
             }
@@ -489,12 +494,59 @@ impl ModelRequest {
 /// gets and the one the user sees can't drift.
 pub(crate) use kumochi_protocol::message::ScreenClass;
 
+/// Whether a request on `choice` carries images: only the Responses route does.
+fn takes_images(choice: Option<&ModelChoice>) -> bool {
+    choice.is_some_and(|choice| choice.connection == ConnectionKind::ChatGpt)
+}
+
+/// Where a screen hold's picture was taken: the display's place and size on the desktop in
+/// physical pixels, its DPI, and the picture's size. Numbers about the monitor and nothing on
+/// it; its `Debug` shows none of them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Geometry {
+    pub(crate) display: kumochi_scene::record::ScreenDisplay,
+    pub(crate) picture: [u32; 2],
+}
+
+#[cfg(test)]
+impl Geometry {
+    /// A 1280 by 720 picture of a 2560 by 1440 display at the desktop's origin, at 100%.
+    pub(crate) const FIXTURE: Self = Self {
+        display: kumochi_scene::record::ScreenDisplay {
+            origin: [0, 0],
+            size: [2560, 1440],
+            dpi: 96,
+        },
+        picture: [1280, 720],
+    };
+}
+
+impl fmt::Debug for Geometry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Geometry(..)")
+    }
+}
+
+/// Why a run's `draw` can't mark the screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NoCanvas {
+    /// No picture of the screen went with the run: another connection, a typed turn, a window
+    /// hold, or a screen hold whose picture wasn't included.
+    NoPicture,
+    /// The picture shows a display that doesn't start at the desktop's origin, which the
+    /// overlay doesn't cover.
+    OtherDisplay,
+    /// The user turned off the setting that allowed the picture.
+    Off,
+}
+
 /// What a hold's screen part hands its run, which every request of the run carries.
 #[derive(Clone)]
 pub(crate) enum Screen {
     Image(Jpeg),
-    /// A screen hold's picture, and where its pointer's path was painted on it.
-    Picture(Jpeg, Option<crate::screen::InkBounds>),
+    /// A screen hold's picture, where its pointer's path was painted on it, and where it was
+    /// taken.
+    Picture(Jpeg, Option<crate::screen::InkBounds>, Geometry),
     NotIncluded(ScreenClass),
     /// Why a screen hold's picture isn't there.
     PictureNotIncluded(ScreenClass),
@@ -514,13 +566,41 @@ impl Screen {
             Self::Withdrawn => kumochi_protocol::message::HeldScreen::Withdrawn,
         }
     }
+
+    /// The picture a screen scene of the run is drawn on: a screen hold's, sent on the route
+    /// [`ModelRequest::attach`] takes images on, of the display at the desktop's origin. The
+    /// same route test decides both, so a scene is never drawn on a picture that didn't go.
+    /// # Errors
+    /// [`NoCanvas`] says why not.
+    pub(crate) fn canvas(
+        screen: Option<&Self>,
+        choice: Option<&ModelChoice>,
+    ) -> Result<Geometry, NoCanvas> {
+        let geometry = match screen {
+            Some(Self::Picture(_, _, geometry)) => *geometry,
+            Some(Self::Withdrawn) => return Err(NoCanvas::Off),
+            _ => return Err(NoCanvas::NoPicture),
+        };
+        if !takes_images(choice) {
+            return Err(NoCanvas::NoPicture);
+        }
+        if geometry.display.origin != [0, 0] {
+            return Err(NoCanvas::OtherDisplay);
+        }
+        Ok(geometry)
+    }
 }
 
 impl fmt::Debug for Screen {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Image(image) => f.debug_tuple("Image").field(image).finish(),
-            Self::Picture(image, ink) => f.debug_tuple("Picture").field(image).field(ink).finish(),
+            Self::Picture(image, ink, geometry) => f
+                .debug_tuple("Picture")
+                .field(image)
+                .field(ink)
+                .field(geometry)
+                .finish(),
             Self::NotIncluded(class) => f.debug_tuple("NotIncluded").field(class).finish(),
             Self::PictureNotIncluded(class) => {
                 f.debug_tuple("PictureNotIncluded").field(class).finish()

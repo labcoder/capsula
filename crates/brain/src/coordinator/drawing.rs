@@ -3,8 +3,9 @@
 use kumochi_protocol::message::{DataToShell, RunId, SceneId, StepRef, ThreadId};
 
 use super::{Coordinator, Effect, Stale, StoreOp, speech};
+use crate::context::{Geometry, NoCanvas, Screen};
 use crate::dispatch::{self, Dispatch, LedgerKey, ToolError, ToolOutput};
-use crate::drawing::{Drawing, Input, Loss, Output};
+use crate::drawing::{Drawing, Input, Loss, Output, ScreenMarks};
 
 const MAX_RESULTS: usize = 64;
 
@@ -81,10 +82,25 @@ impl Coordinator {
                 error,
             },
         };
+        if let Some(canvas) = self.canvas() {
+            self.drawing.canvas(key.run, canvas);
+        }
         if self.drawing_input(input, effects).is_err() {
             self.drawn(key, ToolOutput::Error(ToolError::Ended), effects);
         }
         Dispatch::Committing
+    }
+
+    /// What a screen scene of the current run may be drawn on, asked as the request that sent
+    /// its picture was; `None` while `draw` can't mark the screen.
+    pub(super) fn canvas(&self) -> Option<Result<Geometry, NoCanvas>> {
+        let current = self.current.as_ref()?;
+        let choice = current
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.choice.as_ref());
+        (self.screen_marks == ScreenMarks::On)
+            .then(|| Screen::canvas(current.screen.as_ref(), choice))
     }
 
     pub(crate) fn drawing_described(&mut self) {

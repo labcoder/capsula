@@ -1,8 +1,10 @@
 //! Images in a request: what's accepted, where one goes, and nothing of it in `Debug`.
 
-use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
+use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug, ScreenClass};
 
-use crate::context::{ImageRefused, InputItem, Jpeg, ModelRequest, Role};
+use crate::context::{
+    Geometry, ImageRefused, InputItem, Jpeg, ModelRequest, NoCanvas, Role, Screen,
+};
 use crate::test_support::SENTINEL;
 
 const SOI: [u8; 3] = [0xFF, 0xD8, 0xFF];
@@ -128,4 +130,62 @@ fn debug_shows_an_images_length_and_never_its_bytes() {
         shown.contains(&format!("Image(Jpeg({}))", bytes.len())),
         "{shown}"
     );
+}
+
+#[test]
+fn a_screen_scene_is_drawn_only_on_the_picture_the_request_attaches() {
+    let picture = Screen::Picture(jpeg(&SOI), None, Geometry::FIXTURE);
+    for connection in [
+        None,
+        Some(ConnectionKind::ChatGpt),
+        Some(ConnectionKind::AnthropicKey),
+        Some(ConnectionKind::ClaudeCode),
+    ] {
+        let mut request = request(connection, vec![message(Role::User, "look")]);
+        let sent = request.add_screen(&picture).is_ok();
+        assert_eq!(
+            sent,
+            connection == Some(ConnectionKind::ChatGpt),
+            "{connection:?}"
+        );
+        let expected = if sent {
+            Ok(Geometry::FIXTURE)
+        } else {
+            Err(NoCanvas::NoPicture)
+        };
+        assert_eq!(
+            Screen::canvas(Some(&picture), request.choice.as_ref()),
+            expected
+        );
+    }
+}
+
+#[test]
+fn a_run_without_a_sent_picture_of_the_first_display_has_no_canvas() {
+    let choice = request(Some(ConnectionKind::ChatGpt), Vec::new()).choice;
+    let mut beside = Geometry::FIXTURE;
+    beside.display.origin = [-1920, 0];
+    for (screen, expected) in [
+        (None, NoCanvas::NoPicture),
+        (Some(Screen::Image(jpeg(&SOI))), NoCanvas::NoPicture),
+        (
+            Some(Screen::NotIncluded(ScreenClass::NotReady)),
+            NoCanvas::NoPicture,
+        ),
+        (
+            Some(Screen::PictureNotIncluded(ScreenClass::NotReady)),
+            NoCanvas::NoPicture,
+        ),
+        (Some(Screen::Withdrawn), NoCanvas::Off),
+        (
+            Some(Screen::Picture(jpeg(&SOI), None, beside)),
+            NoCanvas::OtherDisplay,
+        ),
+    ] {
+        assert_eq!(
+            Screen::canvas(screen.as_ref(), choice.as_ref()),
+            Err(expected),
+            "{screen:?}"
+        );
+    }
 }
