@@ -112,3 +112,67 @@ fn the_picker_offers_served_catalogs_and_a_refusal_returns_the_saved_default() {
         [ConnectionKind::ClaudeCode]
     );
 }
+
+/// The name a notice shows is the newest default's, queued before saved, and a thread's own
+/// model is any other model or connection; the effort never makes one.
+#[test]
+fn the_newest_default_gives_the_notice_its_name_and_marks_a_threads_own_model() {
+    let saved_default = choice("m-0", Effort::High, ConnectionKind::ChatGpt);
+    let mut state = Settings::default();
+    assert_eq!(state.default_model_name(), None);
+    assert!(!state.own_model(None));
+    // With no default known, a stored choice can't be shown to be the default.
+    assert!(state.own_model(Some(&saved_default)));
+
+    state.set_view(saved(saved_default.clone()), Update::Unsolicited);
+    // No catalog lists the default yet.
+    assert_eq!(state.default_model_name(), None);
+    state.set_models(
+        ConnectionKind::ChatGpt,
+        vec![
+            ModelInfo {
+                slug: ModelSlug::new("m-0").expect("slug"),
+                display_name: ModelName::new("Model Zero").expect("name"),
+            },
+            ModelInfo {
+                slug: ModelSlug::new("m-1").expect("slug"),
+                display_name: ModelName::new("Model One").expect("name"),
+            },
+        ],
+    );
+    assert_eq!(
+        state.default_model_name().map(ModelName::as_str),
+        Some("Model Zero")
+    );
+    for (stored, own) in [
+        (None, false),
+        (Some(saved_default.clone()), false),
+        (
+            Some(choice("m-0", Effort::Low, ConnectionKind::ChatGpt)),
+            false,
+        ),
+        (
+            Some(choice("m-1", Effort::High, ConnectionKind::ChatGpt)),
+            true,
+        ),
+        (
+            Some(choice("m-0", Effort::High, ConnectionKind::ClaudeCode)),
+            true,
+        ),
+    ] {
+        assert_eq!(state.own_model(stored.as_ref()), own, "{stored:?}");
+    }
+
+    // A pick the brain hasn't answered is already the newest default.
+    assert!(state.send_default_model(
+        ConnectionKind::ChatGpt,
+        ModelSlug::new("m-1").expect("slug"),
+        |_| true
+    ));
+    assert_eq!(
+        state.default_model_name().map(ModelName::as_str),
+        Some("Model One")
+    );
+    assert!(state.own_model(Some(&saved_default)));
+    assert!(!state.own_model(Some(&choice("m-1", Effort::Low, ConnectionKind::ChatGpt))));
+}

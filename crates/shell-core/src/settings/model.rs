@@ -1,6 +1,8 @@
 //! The default model: the models the brain's catalogs offer, and the newest one picked.
 
-use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelInfo, ModelSlug};
+use kumochi_protocol::message::{
+    ConnectionKind, Effort, ModelChoice, ModelInfo, ModelName, ModelSlug,
+};
 
 use super::{Pending, Settings, SettingsOp, Slot};
 
@@ -30,6 +32,26 @@ impl Settings {
         self.model_queued
             .as_ref()
             .or_else(|| self.view.as_ref()?.default_model.as_ref())
+    }
+
+    /// The newest default model's name as its catalog lists it; none while no catalog does.
+    pub fn default_model_name(&self) -> Option<&ModelName> {
+        let choice = self.default_model_choice()?;
+        self.model_choices()
+            .find(|(connection, model)| {
+                *connection == choice.connection && model.slug == choice.model
+            })
+            .map(|(_, model)| &model.display_name)
+    }
+
+    /// Whether `choice`, a thread's own, is another model than the newest default. The effort
+    /// isn't compared: it doesn't change which model a turn reaches.
+    pub fn own_model(&self, choice: Option<&ModelChoice>) -> bool {
+        choice.is_some_and(|choice| {
+            self.default_model_choice().is_none_or(|default| {
+                default.connection != choice.connection || default.model != choice.model
+            })
+        })
     }
 
     /// Whether a default model change waits for the brain's answer.

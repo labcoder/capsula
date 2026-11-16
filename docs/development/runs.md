@@ -614,3 +614,16 @@ attempted a voice hold, unrequested or cancelled first Hold states are stopped,
 never displayed or allowed to retarget. Before that, the existing unowned-run
 display behavior is unchanged. Disconnect
 clears connection-local cancellation but retains the lifetime gesture high-water.
+
+A hold that shows the screen when it's released begins with `begin_screen_hold`, under the same
+admission. It reads the standing notice itself, from the two answers `screen_notice` takes:
+while the notice is `On` it sends `ScreenHoldRecognized`, which carries no lease and no pointer,
+and otherwise the hold is a voice hold. `screen_release` builds that hold's one `ScreenRelease`
+from what the shell took at release, and only while the hold is still the current one and the
+notice, read again, is still `On`. A voice hold, a window hold, another gesture, a second
+release and a hold that was cancelled each build none. So does a notice that changed during the
+hold, and that refusal is final: nothing builds the hold's release later, even if the notice is
+`On` again. `releases_screen` asks the same question, with the same finality, without building
+anything, so the shell can ask before it takes the lease. The model is never told that a hold
+is listening: the shell cancels a hold released before then, and a cancelled hold is no longer
+the current one. Nothing in the shell calls these yet.

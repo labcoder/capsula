@@ -3,16 +3,27 @@ use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+use kumochi_protocol::geometry::PhysicalPoint;
 use kumochi_protocol::message::{
-    ControlToBrain, GestureId, HoldFailure, HoldStatus, Phase, RunId, RunOrigin, ThreadId,
+    CaptureFor, ControlToBrain, GestureId, HoldFailure, HoldStatus, ModelName, Phase, RunId,
+    RunOrigin, ThreadId,
 };
 
 use super::{Context, Presence, Session};
 use crate::input::hold::Intent;
 use crate::platform::microphone::{Generation, Mode};
-use crate::strings::Text;
+use crate::runs::{ScreenHold, ScreenNotice};
+use crate::strings::{Strings, Text};
 
 mod source;
+
+/// A screen notice or line, naming its model when it has one.
+pub(super) fn screen_text(strings: &Strings, text: Text, model: Option<&ModelName>) -> String {
+    model.map_or_else(
+        || strings.get(text),
+        |model| strings.with_model(text, model.as_str()),
+    )
+}
 
 #[derive(Debug)]
 enum FailureStage {
@@ -260,11 +271,49 @@ impl Presence {
         pending
     }
 
+    /// What a hold on the current target does with the window under the pointer. The send and
+    /// the dock's icon both read this, so the icon never names a model the image won't reach.
+    pub(super) fn screen_notice<'a>(&'a self, cx: &'a gpui_kit::App) -> ScreenNotice<'a> {
+        let settings = self.settings.read(cx);
+        // shortcut: a thread whose row was never read counts as on the default model (OSC-763), upgrade before any view sends `SetModel`.
+        let own = self
+            .runs
+            .thread()
+            .and_then(|thread| self.threads.read(cx).row(thread))
+            .and_then(|row| row.choice.as_ref());
+        self.runs
+            .screen_notice(settings.own_model(own), settings.default_model_name())
+    }
+
+    /// Follows the standing notice and the current hold's line in the status panel. A link event
+    /// batch that changes neither costs a comparison and no allocation.
+    pub(super) fn refresh_screen(&self, cx: &mut Context<'_, Self>) {
+        let notice = self.screen_notice(cx);
+        let shown = [notice.text(), self.runs.hold_screen_text(notice)];
+        let panel = self.panel.read(cx);
+        if [&panel.screen, &panel.screen_line]
+            .into_iter()
+            .zip(shown)
+            .all(|(old, new)| old.as_ref().map(|(text, model)| (*text, model.as_ref())) == new)
+        {
+            return;
+        }
+        let [screen, screen_line] =
+            shown.map(|shown| shown.map(|(text, model)| (text, model.cloned())));
+        self.panel.update(cx, |panel, cx| {
+            panel.screen = screen;
+            panel.screen_line = screen_line;
+            cx.notify();
+        });
+    }
+
+    /// `pointer` is where the pointer was when the native callback recognized a hold.
     pub(super) fn voice_intent(
         &mut self,
         intent: Intent,
         stamp: Stamp,
         qpc: u64,
+        pointer: Option<PhysicalPoint>,
         cx: &mut Context<'_, Self>,
     ) {
         match intent {
@@ -300,7 +349,7 @@ impl Presence {
                 gesture,
                 generation,
             } => {
-                self.recognize_voice(gesture, generation, stamp, cx);
+                self.recognize_voice(gesture, generation, stamp, qpc, pointer, cx);
             }
             Intent::End { gesture, cancelled } => {
                 let Some(hold) = self
@@ -336,6 +385,8 @@ impl Presence {
         gesture: GestureId,
         generation: Result<Generation, crate::platform::microphone::MicError>,
         stamp: Stamp,
+        qpc: u64,
+        pointer: Option<PhysicalPoint>,
         cx: &mut Context<'_, Self>,
     ) {
         let Ok(token) = generation else {
@@ -410,7 +461,25 @@ impl Presence {
             self.voice_notice(Text::HoldFailed, cx);
             return;
         }
-        let request = self.runs.begin_hold(gesture, None);
+        // A screen hold only while the notice says so, and only under a lease taken here, after
+        // every refusal above; without one the hold is voice only.
+        let mut unleased = false;
+        let screen = match pointer {
+            Some(pointer) if matches!(self.screen_notice(cx), ScreenNotice::On(_)) => self
+                .acquire_exclusion(&session, CaptureFor::Gesture(gesture), cx)
+                .inspect_err(|reason| {
+                    unleased = true;
+                    tracing::debug!(stage = ?FailureStage::Admission, ?reason, "screen hold refused; voice only");
+                })
+                .ok()
+                .map(|lease| ScreenHold {
+                    pointer,
+                    lease,
+                    t_qpc: qpc,
+                }),
+            _ => None,
+        };
+        let request = self.runs.begin_hold(gesture, screen);
         let notice = if matches!(request, Err(crate::runs::Refused::Busy)) {
             Text::TurnBusy
         } else {
@@ -434,6 +503,12 @@ impl Presence {
             }
         };
         if sent {
+            if let Some(screen) = screen {
+                self.screen_lease = Some(screen.lease);
+            } else if unleased {
+                // The eye said this hold would show the window, so its line says it didn't.
+                self.runs.hold_screen_refused();
+            }
             self.voice.pending = Some(Hold {
                 token,
                 stamp,
@@ -448,6 +523,10 @@ impl Presence {
             self.refusal = None;
             self.voice_notice(Text::HoldPreparing, cx);
         } else {
+            if screen.is_some() {
+                // The brain never saw this lease, so releasing it is no lapse.
+                self.revoke_exclusion(cx);
+            }
             self.unused_voice(&token, &session);
             self.link.clear_input(gesture);
             self.runs.cancel_hold();

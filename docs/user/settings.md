@@ -20,6 +20,8 @@ and Space to choose a focused radio.
 waits for the background process to save it. If saving is refused, the saved choice returns
 and the error stays beside the control until a successful retry. Offline controls are disabled;
 reconnecting reads the saved preference instead of assuming an interrupted save succeeded.
+**Hold to talk** and **Share the window under your pointer** are the two checkboxes above it;
+[voice](voice.md#showing-the-window-under-your-pointer) says what the second one sends.
 
 The preference can be chosen before speech input is installed. It doesn't install models,
 start recording, reload an unloaded model or change spoken replies. **Installed · unloaded**

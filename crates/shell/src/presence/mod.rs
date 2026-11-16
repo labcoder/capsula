@@ -42,6 +42,8 @@ mod panels;
 mod position;
 mod pull_dock;
 mod pull_picture;
+#[cfg(test)]
+mod screen_hold_tests;
 mod settings;
 mod sign_ins;
 mod stage;
@@ -114,6 +116,8 @@ struct Presence {
     _display_watch: Option<gpui_kit::Subscription>,
     exclusion: exclusion::Exclusion<exclusion::Receipt>,
     exclusion_timer: Option<Task<()>>,
+    /// The lease a sent screen hold named, until the brain says its capture ended.
+    screen_lease: Option<kumochi_protocol::message::LeaseGeneration>,
     #[cfg(test)]
     exclusion_fixture: Option<Rc<std::cell::RefCell<exclusion::Fixture>>>,
     input_windows: platform::OverlayWindows,
@@ -329,6 +333,7 @@ impl Presence {
                 cx.notify();
             }
         });
+        self.refresh_screen(cx);
     }
 
     /// Applies gesture effects in order.
@@ -644,12 +649,18 @@ fn scaled(value: f32, scale: f32) -> i32 {
     (value * scale).round() as i32
 }
 
+type ScreenText = (Text, Option<kumochi_protocol::message::ModelName>);
+
 struct Panel {
     kumo: Entity<KumoView>,
     state: LinkState,
     voice: Option<Text>,
     /// A settings notice the dock line can't show.
     notice: Option<Text>,
+    /// The standing screen notice's tooltip and the model it names; none hides the icon.
+    screen: Option<ScreenText>,
+    /// The current screen hold's line, shown in place of the settings notice.
+    screen_line: Option<ScreenText>,
     /// Shown only when Esc is wanted globally but Windows refused it.
     stop: bool,
     events: Sender<PresenceEvent>,
@@ -687,6 +698,38 @@ impl Render for Panel {
                 .debug_selector(|| "presence-stop".into());
             Target(button.into_element())
         });
+        // The icon is the standing notice: an open eye only while a hold shows the named model
+        // the window, struck through with the reason otherwise.
+        let screen = self.screen.as_ref().map(|(text, model)| {
+            let tip = SharedString::from(voice::screen_text(strings, *text, model.as_ref()));
+            let on = *text == Text::ScreenHoldsOn;
+            div()
+                .id("screen-holds")
+                .role(gpui_kit::Role::Image)
+                .aria_label(tip.clone())
+                .debug_selector({
+                    let tip = tip.clone();
+                    move || format!("screen-holds on={on} {tip}")
+                })
+                .child(if on {
+                    gpui_kit::assets::IconName::Eye
+                } else {
+                    gpui_kit::assets::IconName::EyeOff
+                })
+                .tooltip(move |window, cx| {
+                    // The longest notice is wider than the peek, so it wraps inside it.
+                    let tip = tip.clone();
+                    gpui_kit::component::tooltip::Tooltip::element(move |_, _| {
+                        div().max_w(px(304.0)).child(tip.clone())
+                    })
+                    .build(window, cx)
+                })
+        });
+        let line = self
+            .screen_line
+            .as_ref()
+            .map(|(text, model)| voice::screen_text(strings, *text, model.as_ref()))
+            .or_else(|| self.notice.map(|notice| strings.get(notice)));
         let stamped = cx.has_global::<Observer>() || cx.has_global::<Diagnostics>();
         // Kumo, the name and the status read as one identity; size and weight carry the
         // hierarchy, since muted text fails AA contrast over the glass.
@@ -708,16 +751,28 @@ impl Render for Panel {
                     )
                     .child(
                         div()
-                            .id("presence-status")
-                            .role(gpui_kit::Role::Status)
-                            .aria_label(status.clone())
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
                             .text_sm()
-                            .child(status),
+                            .child(
+                                div()
+                                    .id("presence-status")
+                                    .role(gpui_kit::Role::Status)
+                                    .aria_label(status.clone())
+                                    .child(status),
+                            )
+                            .children(screen),
                     )
-                    .children(
-                        self.notice
-                            .map(|notice| div().text_sm().child(strings.get(notice))),
-                    ),
+                    .children(line.map(|line| {
+                        div()
+                            .text_sm()
+                            .debug_selector({
+                                let line = line.clone();
+                                move || format!("peek-line {line}")
+                            })
+                            .child(line)
+                    })),
             );
         // Chat leads; Tasks and Settings stay quiet. Quit lives in the tray.
         let actions = div()
@@ -898,6 +953,8 @@ fn status_window(
             state: LinkState::Connecting,
             voice: None,
             notice: None,
+            screen: None,
+            screen_line: None,
             stop: false,
             events: panel_events,
             threads: None,
@@ -974,6 +1031,7 @@ pub(crate) fn open(
             _display_watch: Some(stage::watch_displays(cx.weak_entity(), cx)),
             exclusion: exclusion::Exclusion::default(),
             exclusion_timer: None,
+            screen_lease: None,
             #[cfg(test)]
             exclusion_fixture: None,
             input_windows,

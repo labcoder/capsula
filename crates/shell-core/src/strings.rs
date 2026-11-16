@@ -1,7 +1,7 @@
 //! User-facing text, from `locales/en/`. English only for now.
 
 use fluent_bundle::{FluentArgs, FluentBundle, FluentResource};
-use kumochi_protocol::message::{ErrorArg, ErrorKey, ScreenClass, UserError};
+use kumochi_protocol::message::{ErrorArg, ErrorKey, HeldScreen, ScreenClass, UserError};
 use unic_langid::LanguageIdentifier;
 
 const ENGLISH: &str = include_str!("../../../locales/en/shell.ftl");
@@ -212,6 +212,7 @@ texts! {
     ScreenNotIncludedTooLarge => "screen-not-included-too-large",
     ScreenNotIncludedChanged => "screen-not-included-changed",
     ScreenNotIncludedTurnedOff => "screen-not-included-turned-off",
+    ScreenHistoryAttached => "screen-history-attached",
     VoiceRestartRequired => "voice-restart-required",
     VoiceInstalledFailed => "voice-installed-failed",
     VoiceNotInstalledFailed => "voice-not-installed-failed",
@@ -338,6 +339,19 @@ impl Text {
             ScreenClass::Changed => Self::ScreenNotIncludedChanged,
             ScreenClass::ModelCantSee => Self::ScreenNotIncludedModel,
         }
+    }
+
+    /// The history line under a held turn: what its screen hold carried.
+    pub const fn held_screen(screen: HeldScreen) -> Option<Self> {
+        Some(match screen {
+            HeldScreen::Attached => Self::ScreenHistoryAttached,
+            HeldScreen::NotIncluded(class) => Self::screen_not_included(class),
+            HeldScreen::Withdrawn => Self::ScreenNotIncludedTurnedOff,
+            // shortcut: a turn that carried the screen's picture shows no line, so it never
+            // reads as the window's; it gets its own string when the shell sends the screen at
+            // release.
+            HeldScreen::Screen => return None,
+        })
     }
 }
 
@@ -720,13 +734,16 @@ mod tests {
 
     #[test]
     fn each_screen_class_has_its_line_and_the_model_lines_name_the_model() {
-        use kumochi_protocol::message::ScreenClass;
+        use kumochi_protocol::message::{HeldScreen, ScreenClass};
         let strings = Strings::english();
         for (class, reason) in [
             (ScreenClass::NotReady, "the screen wasn't ready"),
             (ScreenClass::NothingThere, "nothing under the pointer"),
             (ScreenClass::CantShare, "that window can't be shared"),
-            (ScreenClass::Unreadable, "the window wasn't readable"),
+            (
+                ScreenClass::Unreadable,
+                "something is drawn over the window under your pointer, so I couldn't tell which one you meant",
+            ),
             (ScreenClass::TooLarge, "the window image was too large"),
             (ScreenClass::Changed, "the window changed"),
             (
@@ -751,6 +768,24 @@ mod tests {
             (Text::ScreenHoldWillSee, "GPT-5.5 will see this window"),
         ] {
             assert_eq!(strings.with_model(text, "GPT-5.5"), line);
+        }
+        for (screen, line) in [
+            (
+                HeldScreen::Attached,
+                Some("Included the window under your pointer"),
+            ),
+            (
+                HeldScreen::NotIncluded(ScreenClass::Changed),
+                Some("Screen not included: the window changed"),
+            ),
+            (
+                HeldScreen::Withdrawn,
+                Some("Screen not included: you turned screen sharing off"),
+            ),
+            (HeldScreen::Screen, None),
+        ] {
+            let shown = Text::held_screen(screen).map(|text| strings.get(text));
+            assert_eq!(shown.as_deref(), line);
         }
     }
 
