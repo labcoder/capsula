@@ -378,9 +378,9 @@ impl Strings {
         self.format(Text::SettingsTaskbar.id(), Some(&args))
     }
 
-    /// What the icon under a held turn says: which picture was taken to go with the turn. None
-    /// for a turn with no picture. It says taken, not sent, because the turn is stored before
-    /// its run's first request.
+    /// What the icon under a held turn says: which picture was sent with the turn. None for a
+    /// turn with no picture. The turn is stored before its run's first request, so this
+    /// over-reports for a run that failed before it. The catalog may name the app.
     pub fn pictured(&self, screen: HeldScreen) -> Option<String> {
         let text = match screen {
             HeldScreen::Attached => Text::ScreenHistoryAttached,
@@ -819,16 +819,12 @@ mod tests {
             (
                 HeldScreen::Attached,
                 None,
-                Some(format!(
-                    "{app} took a picture of the window under your pointer to send with this message to the model you were using. It didn't keep a copy."
-                )),
+                Some("A snapshot of the window under your pointer was sent in this message. No copy is kept.".to_owned()),
             ),
             (
                 HeldScreen::Screen,
                 None,
-                Some(format!(
-                    "{app} took a picture of your screen to send with this message to the model you were using. It didn't keep a copy."
-                )),
+                Some("A snapshot of your screen was sent in this message. No copy is kept.".to_owned()),
             ),
             // A stored turn doesn't say which flow it came from, so these two read true of both.
             (
