@@ -55,6 +55,7 @@ pub fn prepare(
         measure,
         cancel,
         scales: &ticket.path_scales,
+        screen: ticket.screen,
     };
     build.check_cancel()?;
     let mut after = before.clone();

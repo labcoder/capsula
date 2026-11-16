@@ -44,6 +44,8 @@ pub(super) struct Build<'a> {
     pub measure: &'a mut dyn TextMeasure,
     pub cancel: &'a AtomicBool,
     pub scales: &'a BTreeMap<Handle, f32>,
+    /// Canvas units per logical pixel on the screen surface, which sizes its chrome.
+    pub screen: Option<f32>,
 }
 pub(super) struct Geometry {
     pub bounds: Rect,
@@ -108,7 +110,7 @@ impl Build<'_> {
             Op::Shape(value) => self.shape(value, state, parent, cached)?,
             Op::Highlight(value) => self.highlight(value, state, parent, cached)?,
             Op::Callout(value) => {
-                if let Some(unit) = state.screen {
+                if let Some(unit) = self.screen {
                     return super::screen::callout(
                         self, source, value, handle, state, cached, unit,
                     );
@@ -430,7 +432,7 @@ impl Build<'_> {
         parent: Option<Handle>,
         cached: Option<&Placed>,
     ) -> Result<Geometry, PrepareError> {
-        if let Some(unit) = state.screen {
+        if let Some(unit) = self.screen {
             return super::screen::highlight(self, highlight, state, parent, cached, unit);
         }
         let anchors;

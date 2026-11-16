@@ -155,6 +155,16 @@ pub fn without_boxes(step: &Step) -> Step {
     }
 }
 
+/// Canvas units per logical pixel of a stamped screen scene, which sizes its chrome; `None` for
+/// any other scene.
+pub(crate) fn unit(header: &Begin) -> Option<f32> {
+    let display = header
+        .display
+        .filter(|_| header.surface == Surface::Screen)?;
+    let [x, y] = logical_per_unit(display, header.size?.map(Finite::get))?;
+    Some(1.0 / x.min(y))
+}
+
 /// Puts a screen canvas of `size` picture pixels on an overlay covering `overlay`, in the
 /// overlay's logical pixels: `None` unless it is the display the picture was taken of.
 #[must_use]
